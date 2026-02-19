@@ -1,7 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, token, Address, Env, Symbol,
+    contract, contractimpl, contracttype, symbol_short, token, Address, Env,
 };
 
 // ---------------------------------------------------------------------------
@@ -183,20 +183,16 @@ impl FluxoraStream {
     /// - If the stream is not in `Active` state.
     pub fn pause_stream(env: Env, stream_id: u64) {
         let mut stream = load_stream(&env, stream_id);
-
-        // Auth: sender or admin
+        
+        // Corrected Auth Check
         Self::require_sender_or_admin(&env, &stream.sender);
 
-        assert!(
-            stream.status == StreamStatus::Active,
-            "stream is not active"
-        );
+        assert!(stream.status == StreamStatus::Active, "stream is not active");
 
         stream.status = StreamStatus::Paused;
         save_stream(&env, &stream);
 
-        env.events()
-            .publish((symbol_short!("paused"), stream_id), ());
+        env.events().publish((symbol_short!("paused"), stream_id), ());
     }
 
     /// Resume a paused stream.  Only the sender or admin may call this.
@@ -206,19 +202,15 @@ impl FluxoraStream {
     pub fn resume_stream(env: Env, stream_id: u64) {
         let mut stream = load_stream(&env, stream_id);
 
-        // Auth: sender or admin
+        // Corrected Auth Check
         Self::require_sender_or_admin(&env, &stream.sender);
 
-        assert!(
-            stream.status == StreamStatus::Paused,
-            "stream is not paused"
-        );
+        assert!(stream.status == StreamStatus::Paused, "stream is not paused");
 
         stream.status = StreamStatus::Active;
         save_stream(&env, &stream);
 
-        env.events()
-            .publish((symbol_short!("resumed"), stream_id), ());
+        env.events().publish((symbol_short!("resumed"), stream_id), ());
     }
 
     // -----------------------------------------------------------------------
