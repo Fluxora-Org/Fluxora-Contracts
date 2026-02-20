@@ -365,6 +365,19 @@ fn test_create_stream_transfer_failure_no_state_change() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn test_calculate_accrued_exactly_at_end_time() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream(); // end time is 1000
+    ctx.env.ledger().set_timestamp(1000); // Exactly at end_time
+
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(
+        accrued, 1000,
+        "accrued exactly at end_time must be exactly the capped amount (1000)"
+    );
+}
+
+#[test]
 fn test_calculate_accrued_at_start() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
@@ -402,6 +415,19 @@ fn test_calculate_accrued_before_cliff_returns_zero() {
 
     let accrued = ctx.client().calculate_accrued(&stream_id);
     assert_eq!(accrued, 0, "nothing accrued before cliff");
+}
+
+#[test]
+fn test_calculate_accrued_exactly_at_cliff() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_cliff_stream();
+    ctx.env.ledger().set_timestamp(500); // exactly at cliff at 500
+
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(
+        accrued, 500,
+        "500s × 1/s = 500 (starts accruing since start_time once cliff is reached)"
+    );
 }
 
 #[test]
