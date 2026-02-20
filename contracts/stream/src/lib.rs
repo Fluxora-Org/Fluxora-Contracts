@@ -317,6 +317,15 @@ impl FluxoraStream {
     }
 
     /// Calculate the total amount accrued to the recipient so far.
+    ///
+    /// ## Accrual Rules
+    /// 1. **Before Cliff**: Returns `0` if the current time is before the stream's `cliff_time`.
+    /// 2. **After Cliff**: Calculates the linear accrual based on `rate_per_second` and the
+    ///    elapsed time since `start_time`.
+    /// 3. **End Time Cap**: The elapsed time strictly stops accruing once `end_time` is reached.
+    /// 4. **Deposit Cap**: The total accrued amount will strictly never exceed `deposit_amount`.
+    ///
+    /// Returns the exact amount of tokens accrued.
     pub fn calculate_accrued(env: Env, stream_id: u64) -> i128 {
         let stream = load_stream(&env, stream_id);
         let now = env.ledger().timestamp();
