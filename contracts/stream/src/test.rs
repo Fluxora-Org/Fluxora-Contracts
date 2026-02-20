@@ -427,6 +427,75 @@ fn test_withdraw_before_cliff_panics() {
     ctx.client().withdraw(&stream_id);
 }
 
+#[test]
+fn test_withdraw_full_completes_stream() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000); // end of stream
+
+    let amount = ctx.client().withdraw(&stream_id);
+    assert_eq!(amount, 1000);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+    assert_eq!(state.withdrawn_amount, 1000);
+}
+
+#[test]
+fn test_withdraw_from_paused_stream_completes_if_full() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().pause_stream(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Paused);
+
+    let amount = ctx.client().withdraw(&stream_id);
+    assert_eq!(amount, 1000);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed, "paused stream should be completed if fully withdrawn");
+}
+
+#[test]
+#[should_panic(expected = "nothing to withdraw")]
+fn test_withdraw_nothing_panics() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().withdraw(&stream_id);
+}
+
+#[test]
+#[should_panic(expected = "stream already completed")]
+fn test_withdraw_already_completed_panics() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    // Try to withdraw again
+    ctx.client().withdraw(&stream_id);
+}
+
+#[test]
+fn test_withdraw_partial_stays_active() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().withdraw(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Active);
+    assert_eq!(state.withdrawn_amount, 500);
+}
+
 // ---------------------------------------------------------------------------
 // Tests — stream count / multiple streams
 // ---------------------------------------------------------------------------
