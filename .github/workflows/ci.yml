@@ -82,7 +82,7 @@ jobs:
 
       - name: Install Stellar CLI
         run: |
-          curl -sSL https://github.com/stellar/stellar-cli/releases/latest/download/stellar-cli-installer.sh | sh
+          curl -sSfL https://raw.githubusercontent.com/stellar/stellar-cli/main/install.sh | sh
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Optimize WASM
@@ -200,7 +200,7 @@ jobs:
 
       - name: Install Stellar CLI
         run: |
-          curl -sSL https://github.com/stellar/stellar-cli/releases/latest/download/stellar-cli-installer.sh | sh
+          curl -sSfL https://raw.githubusercontent.com/stellar/stellar-cli/main/install.sh | sh
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Configure testnet identity
@@ -256,7 +256,7 @@ jobs:
 
       - name: Install Stellar CLI
         run: |
-          curl -sSL https://github.com/stellar/stellar-cli/releases/latest/download/stellar-cli-installer.sh | sh
+          curl -sSfL https://raw.githubusercontent.com/stellar/stellar-cli/main/install.sh | sh
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Configure mainnet identity
