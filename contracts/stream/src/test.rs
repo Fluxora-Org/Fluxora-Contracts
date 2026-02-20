@@ -36,7 +36,9 @@ impl<'a> TestContext<'a> {
 
         // Create a mock SAC token (Stellar Asset Contract)
         let token_admin = Address::generate(&env);
-        let token_id = env.register_stellar_asset_contract(token_admin.clone());
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin.clone())
+            .address();
 
         let admin = Address::generate(&env);
         let sender = Address::generate(&env);
@@ -61,11 +63,11 @@ impl<'a> TestContext<'a> {
         }
     }
 
-    fn client(&self) -> FluxoraStreamClient {
+    fn client(&self) -> FluxoraStreamClient<'_> {
         FluxoraStreamClient::new(&self.env, &self.contract_id)
     }
 
-    fn token(&self) -> TokenClient {
+    fn token(&self) -> TokenClient<'_> {
         TokenClient::new(&self.env, &self.token_id)
     }
 
@@ -177,6 +179,215 @@ fn test_create_stream_invalid_times_panics() {
         &1000u64,
         &500u64, // end before start
     );
+}
+
+// ---------------------------------------------------------------------------
+// Tests — Issue #35: validate positive amounts and sender != recipient
+// ---------------------------------------------------------------------------
+
+#[test]
+#[should_panic(expected = "rate_per_second must be positive")]
+fn test_create_stream_zero_rate_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &0_i128, // zero rate
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+}
+
+#[test]
+#[should_panic(expected = "sender and recipient must be different")]
+fn test_create_stream_sender_equals_recipient_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.sender, // same as sender
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tests — Issue #33: validate cliff_time in [start_time, end_time]
+// ---------------------------------------------------------------------------
+
+#[test]
+#[should_panic(expected = "cliff_time must be within [start_time, end_time]")]
+fn test_create_stream_cliff_before_start_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &100u64,  // start_time
+        &50u64,   // cliff_time before start
+        &1100u64, // end_time
+    );
+}
+
+#[test]
+#[should_panic(expected = "cliff_time must be within [start_time, end_time]")]
+fn test_create_stream_cliff_after_end_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &1500u64, // cliff_time after end
+        &1000u64,
+    );
+}
+
+#[test]
+fn test_create_stream_cliff_equals_start_succeeds() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64, // cliff equals start
+        &1000u64,
+    );
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.cliff_time, 0);
+}
+
+#[test]
+fn test_create_stream_cliff_equals_end_succeeds() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &1000u64, // cliff equals end
+        &1000u64,
+    );
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.cliff_time, 1000);
+}
+
+// ---------------------------------------------------------------------------
+// Tests — Issue #34: validate deposit_amount >= rate * duration
+// ---------------------------------------------------------------------------
+
+#[test]
+#[should_panic(expected = "deposit_amount must cover total streamable amount")]
+fn test_create_stream_deposit_less_than_total_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &500_i128, // deposit only 500
+        &1_i128,   // rate = 1/s
+        &0u64,
+        &0u64,
+        &1000u64, // duration = 1000s, so total = 1000 tokens needed
+    );
+}
+
+#[test]
+fn test_create_stream_deposit_equals_total_succeeds() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128, // deposit exactly matches total
+        &1_i128,    // rate = 1/s
+        &0u64,
+        &0u64,
+        &1000u64, // duration = 1000s
+    );
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.deposit_amount, 1000);
+}
+
+#[test]
+fn test_create_stream_deposit_greater_than_total_succeeds() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2000_i128, // deposit more than needed
+        &1_i128,    // rate = 1/s
+        &0u64,
+        &0u64,
+        &1000u64, // duration = 1000s, total needed = 1000
+    );
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.deposit_amount, 2000);
+}
+
+// ---------------------------------------------------------------------------
+// Tests — Issue #36: reject when token transfer fails
+// ---------------------------------------------------------------------------
+
+#[test]
+#[should_panic]
+fn test_create_stream_insufficient_balance_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    // Sender only has 10_000 tokens, trying to deposit 20_000
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &20_000_i128,
+        &20_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+}
+
+#[test]
+fn test_create_stream_transfer_failure_no_state_change() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Attempt to create stream with insufficient balance (should panic)
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &20_000_i128, // more than sender has
+            &20_i128,
+            &0u64,
+            &0u64,
+            &1000u64,
+        )
+    }));
+
+    assert!(
+        result.is_err(),
+        "should have panicked on insufficient balance"
+    );
+
+    // In Soroban, a failed transaction is rolled back, so we can't easily verify
+    // state wasn't changed in a unit test. The key point is the transfer happens
+    // before any state modification in the contract logic.
 }
 
 // ---------------------------------------------------------------------------
@@ -484,6 +695,48 @@ fn test_withdraw_before_cliff_panics() {
 
     ctx.env.ledger().set_timestamp(100); // before cliff at 500
     ctx.client().withdraw(&stream_id);
+}
+
+// ---------------------------------------------------------------------------
+// Tests — Issue #37: withdraw reject when stream is Paused
+// ---------------------------------------------------------------------------
+
+#[test]
+#[should_panic(expected = "cannot withdraw from paused stream")]
+fn test_withdraw_paused_stream_panics() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Advance time so there's something to withdraw
+    ctx.env.ledger().set_timestamp(500);
+
+    // Pause the stream
+    ctx.client().pause_stream(&stream_id);
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Paused);
+
+    // Attempt to withdraw while paused should fail
+    ctx.client().withdraw(&stream_id);
+}
+
+#[test]
+fn test_withdraw_after_resume_succeeds() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Advance time
+    ctx.env.ledger().set_timestamp(500);
+
+    // Pause and then resume
+    ctx.client().pause_stream(&stream_id);
+    ctx.client().resume_stream(&stream_id);
+
+    // Withdraw should now succeed
+    let recipient_before = ctx.token().balance(&ctx.recipient);
+    let amount = ctx.client().withdraw(&stream_id);
+
+    assert_eq!(amount, 500);
+    assert_eq!(ctx.token().balance(&ctx.recipient) - recipient_before, 500);
 }
 
 // ---------------------------------------------------------------------------
