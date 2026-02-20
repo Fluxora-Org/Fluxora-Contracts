@@ -303,7 +303,7 @@ impl FluxoraStream {
             None => stream.deposit_amount,
         };
 
-        accrued.min(stream.deposit_amount).max(0)
+        accrued.min(stream.deposit_amount).max(0) // ensures result >= 0
     }
 
     /// Fetches the global configuration.
