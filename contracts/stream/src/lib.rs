@@ -1,8 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, token, Address, Env,
-};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env};
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -38,6 +36,14 @@ pub struct Stream {
     pub end_time: u64,
     pub withdrawn_amount: i128,
     pub status: StreamStatus,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WithdrawalEvent {
+    pub stream_id: u64,
+    pub recipient: Address,
+    pub amount: i128,
 }
 
 /// Namespace for all contract storage keys.
@@ -88,7 +94,7 @@ fn load_stream(env: &Env, stream_id: u64) -> Stream {
 fn save_stream(env: &Env, stream: &Stream) {
     let key = DataKey::Stream(stream.stream_id);
     env.storage().persistent().set(&key, stream);
-    
+
     // Requirement from Issue #1: extend TTL on stream save to ensure persistence
     env.storage().persistent().extend_ttl(&key, 17280, 120960);
 }
@@ -102,7 +108,6 @@ pub struct FluxoraStream;
 
 #[contractimpl]
 impl FluxoraStream {
-    
     /// Initialise the contract with the streaming token and admin address.
     /// Can only be called once. Sets up global Config and ID counter.
     pub fn init(env: Env, token: Address, admin: Address) {
@@ -112,7 +117,7 @@ impl FluxoraStream {
         let config = Config { token, admin };
         env.storage().instance().set(&DataKey::Config, &config);
         env.storage().instance().set(&DataKey::NextStreamId, &0u64);
-        
+
         // Ensure instance storage (Config/ID) doesn't expire quickly
         env.storage().instance().extend_ttl(17280, 120960);
     }
@@ -166,7 +171,7 @@ impl FluxoraStream {
             withdrawn_amount: 0,
             status: StreamStatus::Active,
         };
-        
+
         save_stream(&env, &stream);
 
         env.events()
@@ -182,12 +187,16 @@ impl FluxoraStream {
         let mut stream = load_stream(&env, stream_id);
         Self::require_sender_or_admin(&env, &stream.sender);
 
-        assert!(stream.status == StreamStatus::Active, "stream is not active");
+        assert!(
+            stream.status == StreamStatus::Active,
+            "stream is not active"
+        );
 
         stream.status = StreamStatus::Paused;
         save_stream(&env, &stream);
 
-        env.events().publish((symbol_short!("paused"), stream_id), ());
+        env.events()
+            .publish((symbol_short!("paused"), stream_id), ());
     }
 
     /// Resume a paused stream. Only the sender or admin may call this.
@@ -197,12 +206,16 @@ impl FluxoraStream {
         let mut stream = load_stream(&env, stream_id);
         Self::require_sender_or_admin(&env, &stream.sender);
 
-        assert!(stream.status == StreamStatus::Paused, "stream is not paused");
+        assert!(
+            stream.status == StreamStatus::Paused,
+            "stream is not paused"
+        );
 
         stream.status = StreamStatus::Active;
         save_stream(&env, &stream);
 
-        env.events().publish((symbol_short!("resumed"), stream_id), ());
+        env.events()
+            .publish((symbol_short!("resumed"), stream_id), ());
     }
 
     /// Cancel a stream and refund unstreamed funds to the sender.
@@ -224,7 +237,7 @@ impl FluxoraStream {
 
         let accrued = Self::calculate_accrued(env.clone(), stream_id);
         let unstreamed = stream.deposit_amount - accrued;
-        
+
         if unstreamed > 0 {
             let token_client = token::Client::new(&env, &get_token(&env));
             token_client.transfer(&env.current_contract_address(), &stream.sender, &unstreamed);
@@ -233,7 +246,8 @@ impl FluxoraStream {
         stream.status = StreamStatus::Cancelled;
         save_stream(&env, &stream);
 
-        env.events().publish((symbol_short!("cancelled"), stream_id), unstreamed);
+        env.events()
+            .publish((symbol_short!("cancelled"), stream_id), unstreamed);
     }
 
     /// Withdraw accrued-but-not-yet-withdrawn tokens to the recipient.
@@ -242,25 +256,40 @@ impl FluxoraStream {
         let mut stream = load_stream(&env, stream_id);
         stream.recipient.require_auth();
 
-        assert!(stream.status != StreamStatus::Completed, "stream already completed");
+        assert!(
+            stream.status != StreamStatus::Completed,
+            "stream already completed"
+        );
 
         let accrued = Self::calculate_accrued(env.clone(), stream_id);
         let withdrawable = accrued - stream.withdrawn_amount;
         assert!(withdrawable > 0, "nothing to withdraw");
 
         let token_client = token::Client::new(&env, &get_token(&env));
-        token_client.transfer(&env.current_contract_address(), &stream.recipient, &withdrawable);
+        token_client.transfer(
+            &env.current_contract_address(),
+            &stream.recipient,
+            &withdrawable,
+        );
 
         stream.withdrawn_amount += withdrawable;
 
-        if stream.status == StreamStatus::Active 
-            && env.ledger().timestamp() >= stream.end_time 
-            && stream.withdrawn_amount == stream.deposit_amount {
+        if stream.status == StreamStatus::Active
+            && env.ledger().timestamp() >= stream.end_time
+            && stream.withdrawn_amount == stream.deposit_amount
+        {
             stream.status = StreamStatus::Completed;
         }
 
         save_stream(&env, &stream);
-        env.events().publish((symbol_short!("withdrew"), stream_id), withdrawable);
+        env.events().publish(
+            (symbol_short!("withdraw"), stream_id),
+            WithdrawalEvent {
+                stream_id,
+                recipient: stream.recipient.clone(),
+                amount: withdrawable,
+            },
+        );
         withdrawable
     }
 
@@ -269,8 +298,10 @@ impl FluxoraStream {
         let stream = load_stream(&env, stream_id);
         let now = env.ledger().timestamp();
 
-        if now < stream.cliff_time { return 0; }
-        
+        if now < stream.cliff_time {
+            return 0;
+        }
+
         let elapsed = (now.min(stream.end_time)).saturating_sub(stream.start_time) as i128;
         let accrued = elapsed * stream.rate_per_second;
 
@@ -288,13 +319,13 @@ impl FluxoraStream {
     }
 
     /// Internal helper to check authorization for sender or admin.
-   fn require_sender_or_admin(env: &Env, sender: &Address) {
+    fn require_sender_or_admin(env: &Env, sender: &Address) {
         let admin = get_admin(env);
 
         // If the admin is the one calling, they must authorize.
         // Otherwise, the sender must authorize.
         if sender != &admin {
-            // This allows the admin to bypass the sender's auth 
+            // This allows the admin to bypass the sender's auth
             // if we use a separate admin entrypoint, or we can
             // rely on the transaction signatures.
             sender.require_auth();
