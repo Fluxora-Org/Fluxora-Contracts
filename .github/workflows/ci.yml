@@ -1,0 +1,291 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+    inputs:
+      deploy_target:
+        description: 'Deployment target'
+        required: true
+        default: 'testnet'
+        type: choice
+        options:
+          - testnet
+          - mainnet
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-lint-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-build-
+
+      - name: Build release (native)
+        run: cargo build --release -p fluxora_stream
+
+      - name: Build WASM
+        run: cargo build --release -p fluxora_stream --target wasm32-unknown-unknown
+
+      - name: Install Stellar CLI
+        run: |
+          curl -sSL https://github.com/stellar/stellar-cli/releases/latest/download/stellar-cli-installer.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Optimize WASM
+        run: |
+          stellar contract optimize --wasm target/wasm32-unknown-unknown/release/fluxora_stream.wasm
+        continue-on-error: true
+
+      - name: Upload WASM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fluxora_stream-wasm
+          path: |
+            target/wasm32-unknown-unknown/release/fluxora_stream.wasm
+            target/wasm32-unknown-unknown/release/fluxora_stream.optimized.wasm
+          retention-days: 30
+          if-no-files-found: warn
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-
+
+      - name: Run tests
+        run: cargo test -p fluxora_stream --features testutils -- --nocapture
+
+      - name: Run tests (all)
+        run: cargo test --all --features testutils
+
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-coverage-
+
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin
+
+      - name: Generate coverage report
+        run: |
+          cargo tarpaulin \
+            --features testutils \
+            --out Xml \
+            --out Html \
+            --output-dir coverage \
+            --ignore-tests \
+            --skip-clean \
+            -p fluxora_stream \
+            || true
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage/cobertura.xml
+          fail_ci_if_error: false
+          verbose: true
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  deploy-testnet:
+    name: Deploy to Testnet
+    runs-on: ubuntu-latest
+    needs: [build, test]
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_target == 'testnet')
+    environment: testnet
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download WASM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: fluxora_stream-wasm
+          path: ./artifacts
+
+      - name: Install Stellar CLI
+        run: |
+          curl -sSL https://github.com/stellar/stellar-cli/releases/latest/download/stellar-cli-installer.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Configure testnet identity
+        env:
+          STELLAR_SECRET_KEY: ${{ secrets.STELLAR_TESTNET_SECRET_KEY }}
+        run: |
+          if [ -n "$STELLAR_SECRET_KEY" ]; then
+            stellar keys add deployer --secret-key
+            echo "$STELLAR_SECRET_KEY" | stellar keys add deployer --secret-key
+          else
+            echo "::warning::No STELLAR_TESTNET_SECRET_KEY secret configured. Skipping deployment."
+            exit 0
+          fi
+
+      - name: Deploy to testnet
+        env:
+          STELLAR_SECRET_KEY: ${{ secrets.STELLAR_TESTNET_SECRET_KEY }}
+        run: |
+          if [ -z "$STELLAR_SECRET_KEY" ]; then
+            echo "::warning::Skipping deployment - no secret key configured"
+            exit 0
+          fi
+          
+          WASM_FILE="./artifacts/fluxora_stream.optimized.wasm"
+          if [ ! -f "$WASM_FILE" ]; then
+            WASM_FILE="./artifacts/fluxora_stream.wasm"
+          fi
+          
+          echo "Deploying WASM: $WASM_FILE"
+          stellar contract deploy \
+            --wasm "$WASM_FILE" \
+            --source deployer \
+            --network testnet \
+            || echo "::warning::Deployment failed or skipped"
+
+  deploy-mainnet:
+    name: Deploy to Mainnet
+    runs-on: ubuntu-latest
+    needs: [build, test]
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_target == 'mainnet'
+    environment: 
+      name: mainnet
+      url: https://stellar.expert
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download WASM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: fluxora_stream-wasm
+          path: ./artifacts
+
+      - name: Install Stellar CLI
+        run: |
+          curl -sSL https://github.com/stellar/stellar-cli/releases/latest/download/stellar-cli-installer.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Configure mainnet identity
+        env:
+          STELLAR_SECRET_KEY: ${{ secrets.STELLAR_MAINNET_SECRET_KEY }}
+        run: |
+          if [ -n "$STELLAR_SECRET_KEY" ]; then
+            echo "$STELLAR_SECRET_KEY" | stellar keys add deployer --secret-key
+          else
+            echo "::error::No STELLAR_MAINNET_SECRET_KEY secret configured."
+            exit 1
+          fi
+
+      - name: Deploy to mainnet
+        env:
+          STELLAR_SECRET_KEY: ${{ secrets.STELLAR_MAINNET_SECRET_KEY }}
+        run: |
+          WASM_FILE="./artifacts/fluxora_stream.optimized.wasm"
+          if [ ! -f "$WASM_FILE" ]; then
+            WASM_FILE="./artifacts/fluxora_stream.wasm"
+          fi
+          
+          echo "Deploying WASM to mainnet: $WASM_FILE"
+          stellar contract deploy \
+            --wasm "$WASM_FILE" \
+            --source deployer \
+            --network mainnet
+
+      - name: Output deployment info
+        run: |
+          echo "## Mainnet Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "Contract deployed to Stellar mainnet" >> $GITHUB_STEP_SUMMARY
