@@ -2,12 +2,12 @@
 extern crate std;
 
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
+    testutils::{Address as _, Events, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
     Address, Env,
 };
 
-use crate::{FluxoraStream, FluxoraStreamClient, StreamStatus};
+use crate::{FluxoraStream, FluxoraStreamClient, StreamCreated, StreamStatus};
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -114,6 +114,38 @@ fn test_create_stream_initial_state() {
     assert_eq!(ctx.token().balance(&ctx.contract_id), 1000);
     // Sender balance reduced by deposit
     assert_eq!(ctx.token().balance(&ctx.sender), 9000);
+}
+
+#[test]
+fn test_create_stream_emits_event() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    let events = ctx.env.events().all();
+    // The last event should be the StreamCreated event
+    let event = events.last().expect("should have emitted events");
+
+    // Topic should be (symbol_short!("created"), stream_id)
+    // Data should be StreamCreated struct
+
+    use soroban_sdk::{symbol_short, IntoVal};
+    let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
+        (symbol_short!("created"), stream_id).into_val(&ctx.env);
+    assert_eq!(event.1, expected_topics);
+
+    let event_data: StreamCreated = event.2.into_val(&ctx.env);
+    let expected_data = StreamCreated {
+        stream_id,
+        sender: ctx.sender.clone(),
+        recipient: ctx.recipient.clone(),
+        deposit_amount: 1000,
+        rate_per_second: 1,
+        start_time: 0,
+        cliff_time: 0,
+        end_time: 1000,
+    };
+
+    assert_eq!(event_data, expected_data);
 }
 
 #[test]
