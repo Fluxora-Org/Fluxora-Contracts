@@ -2,12 +2,13 @@
 extern crate std;
 
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
+    symbol_short,
+    testutils::{Address as _, Events as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env,
+    Address, Env, IntoVal,
 };
 
-use crate::{FluxoraStream, FluxoraStreamClient, StreamStatus};
+use crate::{FluxoraStream, FluxoraStreamClient, StreamStatus, WithdrawalEvent};
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -466,4 +467,34 @@ fn test_multiple_streams_independent() {
 
     assert_eq!(s0.status, StreamStatus::Cancelled);
     assert_eq!(s1.status, StreamStatus::Active);
+}
+
+#[test]
+fn test_withdraw_event() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Advance time by 500s to accrue 500 tokens
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().withdraw(&stream_id);
+
+    let withdrawal_event = WithdrawalEvent {
+        stream_id,
+        recipient: ctx.recipient.clone(),
+        amount: 500,
+    };
+
+    // Events are stored as (contract_id, topics, data)
+    let last_event = ctx.env.events().all().last().unwrap();
+    assert_eq!(last_event.0, ctx.contract_id);
+
+    let expected_topics = soroban_sdk::vec![
+        &ctx.env,
+        symbol_short!("withdraw").into_val(&ctx.env),
+        stream_id.into_val(&ctx.env)
+    ];
+    assert_eq!(last_event.1, expected_topics);
+
+    let data: WithdrawalEvent = last_event.2.into_val(&ctx.env);
+    assert_eq!(data, withdrawal_event);
 }
