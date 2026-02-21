@@ -130,7 +130,7 @@ fn test_init_twice_panics() {
 
     let client = FluxoraStreamClient::new(&env, &contract_id);
     client.init(&token_id, &admin);
-    
+
     // Second init should panic
     let token_id2 = Address::generate(&env);
     let admin2 = Address::generate(&env);
@@ -152,29 +152,25 @@ fn test_init_sets_stream_counter_to_zero() {
     // Create a stream to verify counter starts at 0
     let sender = Address::generate(&env);
     let recipient = Address::generate(&env);
-    
+
     // Mint tokens to sender
     let token_admin = Address::generate(&env);
-    let sac_token_id = env.register_stellar_asset_contract_v2(token_admin.clone()).address();
+    let sac_token_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
     let sac = StellarAssetClient::new(&env, &sac_token_id);
     sac.mint(&sender, &10_000_i128);
-    
+
     // Re-init with the SAC token
     let contract_id2 = env.register_contract(None, FluxoraStream);
     let client2 = FluxoraStreamClient::new(&env, &contract_id2);
     client2.init(&sac_token_id, &admin);
-    
+
     env.ledger().set_timestamp(0);
     let stream_id = client2.create_stream(
-        &sender,
-        &recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
+        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64,
     );
-    
+
     assert_eq!(stream_id, 0, "first stream should have id 0");
 }
 
