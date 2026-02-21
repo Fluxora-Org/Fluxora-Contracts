@@ -24,6 +24,14 @@ pub enum StreamStatus {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StreamEvent {
+    Paused(u64),
+    Resumed(u64),
+    Cancelled(u64),
+}
+
+#[contracttype]
 #[derive(Clone, Debug)]
 pub struct Stream {
     pub stream_id: u64,
@@ -214,8 +222,10 @@ impl FluxoraStream {
         stream.status = StreamStatus::Paused;
         save_stream(&env, &stream);
 
-        env.events()
-            .publish((symbol_short!("paused"), stream_id), ());
+        env.events().publish(
+            (symbol_short!("paused"), stream_id),
+            StreamEvent::Paused(stream_id),
+        );
     }
 
     /// Resume a paused stream. Only the sender or admin may call this.
@@ -233,8 +243,10 @@ impl FluxoraStream {
         stream.status = StreamStatus::Active;
         save_stream(&env, &stream);
 
-        env.events()
-            .publish((symbol_short!("resumed"), stream_id), ());
+        env.events().publish(
+            (symbol_short!("resumed"), stream_id),
+            StreamEvent::Resumed(stream_id),
+        );
     }
 
     /// Cancel a stream and refund unstreamed funds to the sender.
@@ -265,8 +277,10 @@ impl FluxoraStream {
         stream.status = StreamStatus::Cancelled;
         save_stream(&env, &stream);
 
-        env.events()
-            .publish((symbol_short!("cancelled"), stream_id), unstreamed);
+        env.events().publish(
+            (symbol_short!("cancelled"), stream_id),
+            StreamEvent::Cancelled(stream_id),
+        );
     }
 
     /// Withdraw accrued-but-not-yet-withdrawn tokens to the recipient.
@@ -385,8 +399,31 @@ impl FluxoraStream {
 impl FluxoraStream {
     /// Cancel a stream as the contract admin. Identical logic to cancel_stream.
     pub fn cancel_stream_as_admin(env: Env, stream_id: u64) {
-        get_admin(&env).require_auth();
-        Self::cancel_stream(env, stream_id);
+        let admin = get_admin(&env);
+        admin.require_auth();
+
+        let mut stream = load_stream(&env, stream_id);
+
+        assert!(
+            stream.status == StreamStatus::Active || stream.status == StreamStatus::Paused,
+            "stream must be active or paused to cancel"
+        );
+
+        let accrued = Self::calculate_accrued(env.clone(), stream_id);
+        let unstreamed = stream.deposit_amount - accrued;
+
+        if unstreamed > 0 {
+            let token_client = token::Client::new(&env, &get_token(&env));
+            token_client.transfer(&env.current_contract_address(), &stream.sender, &unstreamed);
+        }
+
+        stream.status = StreamStatus::Cancelled;
+        save_stream(&env, &stream);
+
+        env.events().publish(
+            (symbol_short!("cancelled"), stream_id),
+            StreamEvent::Cancelled(stream_id),
+        );
     }
 }
 
