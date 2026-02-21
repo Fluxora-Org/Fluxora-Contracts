@@ -101,7 +101,26 @@ pub struct FluxoraStream;
 #[contractimpl]
 impl FluxoraStream {
     /// Initialise the contract with the streaming token and admin address.
-    /// Can only be called once. Sets up global Config and ID counter.
+    ///
+    /// This function must be called exactly once before any other contract operations.
+    /// It persists the token address (used for all stream transfers) and admin address
+    /// (authorized for administrative operations) in instance storage.
+    ///
+    /// # Parameters
+    /// - `token`: Address of the token contract used for all payment streams
+    /// - `admin`: Address authorized to perform administrative operations (pause, cancel, etc.)
+    ///
+    /// # Storage
+    /// - Stores `Config { token, admin }` in instance storage under `DataKey::Config`
+    /// - Initializes `NextStreamId` counter to 0 for stream ID generation
+    /// - Extends TTL to prevent premature expiration (17280 ledgers threshold, 120960 max)
+    ///
+    /// # Panics
+    /// - If called more than once (contract already initialized)
+    ///
+    /// # Security
+    /// - Re-initialization is prevented to ensure immutable token and admin configuration
+    /// - No authorization required for initial setup (deployer calls this once)
     pub fn init(env: Env, token: Address, admin: Address) {
         if env.storage().instance().has(&DataKey::Config) {
             panic!("already initialised");
