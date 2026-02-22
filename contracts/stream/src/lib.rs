@@ -434,6 +434,28 @@ impl FluxoraStream {
             StreamEvent::Cancelled(stream_id),
         );
     }
+
+    /// Pause a stream as the contract admin. Identical logic to `pause_stream` but
+    /// authorises via the admin address instead of the sender.
+    pub fn pause_stream_as_admin(env: Env, stream_id: u64) {
+        let admin = get_admin(&env);
+        admin.require_auth();
+
+        let mut stream = load_stream(&env, stream_id);
+
+        assert!(
+            stream.status == StreamStatus::Active,
+            "stream is not active"
+        );
+
+        stream.status = StreamStatus::Paused;
+        save_stream(&env, &stream);
+
+        env.events().publish(
+            (symbol_short!("paused"), stream_id),
+            StreamEvent::Paused(stream_id),
+        );
+    }
 }
 
 #[cfg(test)]
