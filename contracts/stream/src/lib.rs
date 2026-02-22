@@ -278,31 +278,36 @@ impl FluxoraStream {
     /// 3. **Accrual** — computes `accrued = min((now − start_time) × rate, deposit_amount)`.
     /// 4. **Refund** — transfers `deposit_amount − accrued` back to the sender immediately.
     /// 5. **Persistence** — the portion `accrued − withdrawn_amount` remains for the recipient.
-    pub fn cancel_stream(env: Env, stream_id: u64) {
-        let mut stream = load_stream(&env, stream_id);
-        Self::require_sender_or_admin(&env, &stream.sender);
+   pub fn cancel_stream(env: Env, stream_id: u64) {
+    let mut stream = load_stream(&env, stream_id);
+    Self::require_sender_or_admin(&env, &stream.sender);
 
-        assert!(
-            stream.status == StreamStatus::Active || stream.status == StreamStatus::Paused,
-            "stream must be active or paused to cancel"
-        );
+    assert!(
+        stream.status == StreamStatus::Active || stream.status == StreamStatus::Paused,
+        "stream must be active or paused to cancel"
+    );
 
-        let accrued = Self::calculate_accrued(env.clone(), stream_id);
-        let unstreamed = stream.deposit_amount - accrued;
+    let accrued = Self::calculate_accrued(env.clone(), stream_id);
+    let unstreamed = stream.deposit_amount - accrued;
 
-        if unstreamed > 0 {
-            let token_client = token::Client::new(&env, &get_token(&env));
-            token_client.transfer(&env.current_contract_address(), &stream.sender, &unstreamed);
-        }
+    // REENTRANCY PROTECTION: state is updated and persisted before the token
+    // transfer executes. Soroban's execution model prevents true reentrancy,
+    // but we follow the checks-effects-interactions pattern as best practice.
+    // Assumption: the token contract does not reenter this contract.
+    stream.status = StreamStatus::Cancelled;
+    save_stream(&env, &stream);
 
-        stream.status = StreamStatus::Cancelled;
-        save_stream(&env, &stream);
-
-        env.events().publish(
-            (symbol_short!("cancelled"), stream_id),
-            StreamEvent::Cancelled(stream_id),
-        );
+    // Transfer after state is saved
+    if unstreamed > 0 {
+        let token_client = token::Client::new(&env, &get_token(&env));
+        token_client.transfer(&env.current_contract_address(), &stream.sender, &unstreamed);
     }
+
+    env.events().publish(
+        (symbol_short!("cancelled"), stream_id),
+        StreamEvent::Cancelled(stream_id),
+    );
+}
 
     /// Withdraw accrued-but-not-yet-withdrawn tokens to the recipient.
     /// Returns the amount transferred.
@@ -311,56 +316,50 @@ impl FluxoraStream {
     /// - If the stream is `Completed` (nothing left to withdraw).
     /// - If the stream is `Paused` (withdrawals not allowed while paused).
     /// - If there is nothing to withdraw (accrued == withdrawn).
-    pub fn withdraw(env: Env, stream_id: u64) -> i128 {
-        let mut stream = load_stream(&env, stream_id);
+  pub fn withdraw(env: Env, stream_id: u64) -> i128 {
+    let mut stream = load_stream(&env, stream_id);
 
-        // Enforce recipient-only authorization: only the stream's recipient can withdraw
-        // This is equivalent to checking env.invoker() == stream.recipient
-        // require_auth() ensures only the recipient can authorize this call,
-        // preventing anyone from withdrawing on behalf of the recipient
-        stream.recipient.require_auth();
+    // Enforce recipient-only authorization
+    stream.recipient.require_auth();
 
-        assert!(
-            stream.status != StreamStatus::Completed,
-            "stream already completed"
-        );
+    assert!(
+        stream.status != StreamStatus::Completed,
+        "stream already completed"
+    );
 
-        assert!(
-            stream.status != StreamStatus::Paused,
-            "cannot withdraw from paused stream"
-        );
+    assert!(
+        stream.status != StreamStatus::Paused,
+        "cannot withdraw from paused stream"
+    );
 
-        let accrued = Self::calculate_accrued(env.clone(), stream_id);
-        let withdrawable = accrued - stream.withdrawn_amount;
-        assert!(withdrawable > 0, "nothing to withdraw");
+    let accrued = Self::calculate_accrued(env.clone(), stream_id);
+    let withdrawable = accrued - stream.withdrawn_amount;
+    assert!(withdrawable > 0, "nothing to withdraw");
 
-        let token_client = token::Client::new(&env, &get_token(&env));
-        token_client.transfer(
-            &env.current_contract_address(),
-            &stream.recipient,
-            &withdrawable,
-        );
+    // REENTRANCY PROTECTION: state is updated and persisted before the token
+    // transfer executes. Soroban's execution model prevents true reentrancy,
+    // but we follow the checks-effects-interactions pattern as best practice.
+    // Assumption: the token contract does not reenter this contract.
+    stream.withdrawn_amount += withdrawable;
 
-        stream.withdrawn_amount += withdrawable;
-
-        // // If the full deposit has been streamed and withdrawn, mark completed
-        // let now = env.ledger().timestamp();
-        // if stream.status == StreamStatus::Active
-        //     && now >= stream.end_time
-        //     && stream.withdrawn_amount == stream.deposit_amount
-        // {
-        //     stream.status = StreamStatus::Completed;
-        // }
-
-        if stream.withdrawn_amount >= stream.deposit_amount {
-            stream.status = StreamStatus::Completed;
-        }
-
-        save_stream(&env, &stream);
-        env.events()
-            .publish((symbol_short!("withdrew"), stream_id), withdrawable);
-        withdrawable
+    if stream.withdrawn_amount >= stream.deposit_amount {
+        stream.status = StreamStatus::Completed;
     }
+
+    save_stream(&env, &stream);
+
+    // Transfer after state is saved
+    let token_client = token::Client::new(&env, &get_token(&env));
+    token_client.transfer(
+        &env.current_contract_address(),
+        &stream.recipient,
+        &withdrawable,
+    );
+
+    env.events()
+        .publish((symbol_short!("withdrew"), stream_id), withdrawable);
+    withdrawable
+}
 
     /// Calculate the total amount accrued to the recipient so far.
     pub fn calculate_accrued(env: Env, stream_id: u64) -> i128 {
@@ -408,32 +407,37 @@ impl FluxoraStream {
 impl FluxoraStream {
     /// Cancel a stream as the contract admin. Identical logic to cancel_stream.
     pub fn cancel_stream_as_admin(env: Env, stream_id: u64) {
-        let admin = get_admin(&env);
-        admin.require_auth();
+    let admin = get_admin(&env);
+    admin.require_auth();
 
-        let mut stream = load_stream(&env, stream_id);
+    let mut stream = load_stream(&env, stream_id);
 
-        assert!(
-            stream.status == StreamStatus::Active || stream.status == StreamStatus::Paused,
-            "stream must be active or paused to cancel"
-        );
+    assert!(
+        stream.status == StreamStatus::Active || stream.status == StreamStatus::Paused,
+        "stream must be active or paused to cancel"
+    );
 
-        let accrued = Self::calculate_accrued(env.clone(), stream_id);
-        let unstreamed = stream.deposit_amount - accrued;
+    let accrued = Self::calculate_accrued(env.clone(), stream_id);
+    let unstreamed = stream.deposit_amount - accrued;
 
-        if unstreamed > 0 {
-            let token_client = token::Client::new(&env, &get_token(&env));
-            token_client.transfer(&env.current_contract_address(), &stream.sender, &unstreamed);
-        }
+    // REENTRANCY PROTECTION: state is updated and persisted before the token
+    // transfer executes. Soroban's execution model prevents true reentrancy,
+    // but we follow the checks-effects-interactions pattern as best practice.
+    // Assumption: the token contract does not reenter this contract.
+    stream.status = StreamStatus::Cancelled;
+    save_stream(&env, &stream);
 
-        stream.status = StreamStatus::Cancelled;
-        save_stream(&env, &stream);
-
-        env.events().publish(
-            (symbol_short!("cancelled"), stream_id),
-            StreamEvent::Cancelled(stream_id),
-        );
+    // Transfer after state is saved
+    if unstreamed > 0 {
+        let token_client = token::Client::new(&env, &get_token(&env));
+        token_client.transfer(&env.current_contract_address(), &stream.sender, &unstreamed);
     }
+
+    env.events().publish(
+        (symbol_short!("cancelled"), stream_id),
+        StreamEvent::Cancelled(stream_id),
+    );
+}
 }
 
 #[cfg(test)]
