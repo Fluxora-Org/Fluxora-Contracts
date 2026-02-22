@@ -202,6 +202,8 @@ impl FluxoraStream {
     /// - If the stream is not in `Active` state.
     pub fn pause_stream(env: Env, stream_id: u64) {
         let mut stream = load_stream(&env, stream_id);
+
+        // Corrected Auth Check
         Self::require_sender_or_admin(&env, &stream.sender);
 
         assert!(
@@ -276,15 +278,18 @@ impl FluxoraStream {
     /// - If there is nothing to withdraw (accrued == withdrawn).
     pub fn withdraw(env: Env, stream_id: u64) -> i128 {
         let mut stream = load_stream(&env, stream_id);
+
+        // Enforce recipient-only authorization: only the stream's recipient can withdraw
+        // This is equivalent to checking env.invoker() == stream.recipient
+        // require_auth() ensures only the recipient can authorize this call,
+        // preventing anyone from withdrawing on behalf of the recipient
         stream.recipient.require_auth();
 
-        // Reject if stream is completed (#37)
         assert!(
             stream.status != StreamStatus::Completed,
             "stream already completed"
         );
 
-        // Reject if stream is paused - no withdrawals allowed while paused (#37)
         assert!(
             stream.status != StreamStatus::Paused,
             "cannot withdraw from paused stream"
@@ -303,10 +308,16 @@ impl FluxoraStream {
 
         stream.withdrawn_amount += withdrawable;
 
-        if stream.status == StreamStatus::Active
-            && env.ledger().timestamp() >= stream.end_time
-            && stream.withdrawn_amount == stream.deposit_amount
-        {
+        // // If the full deposit has been streamed and withdrawn, mark completed
+        // let now = env.ledger().timestamp();
+        // if stream.status == StreamStatus::Active
+        //     && now >= stream.end_time
+        //     && stream.withdrawn_amount == stream.deposit_amount
+        // {
+        //     stream.status = StreamStatus::Completed;
+        // }
+
+        if stream.withdrawn_amount >= stream.deposit_amount {
             stream.status = StreamStatus::Completed;
         }
 
@@ -334,10 +345,22 @@ impl FluxoraStream {
             return 0;
         }
 
-        let elapsed = (now.min(stream.end_time)).saturating_sub(stream.start_time) as i128;
-        let accrued = elapsed * stream.rate_per_second;
+        if stream.start_time >= stream.end_time || stream.rate_per_second < 0 {
+            return 0;
+        }
 
-        accrued.min(stream.deposit_amount)
+        let elapsed_now = now.min(stream.end_time);
+        let elapsed = match elapsed_now.checked_sub(stream.start_time) {
+            Some(elapsed) => elapsed as i128,
+            None => return 0,
+        };
+
+        let accrued = match elapsed.checked_mul(stream.rate_per_second) {
+            Some(accrued) => accrued,
+            None => stream.deposit_amount,
+        };
+
+        accrued.min(stream.deposit_amount).max(0) // ensures result >= 0
     }
 
     /// Fetches the global configuration.

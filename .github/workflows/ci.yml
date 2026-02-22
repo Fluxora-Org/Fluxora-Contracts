@@ -29,7 +29,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
@@ -59,7 +59,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
 
@@ -82,7 +82,7 @@ jobs:
 
       - name: Install Stellar CLI
         run: |
-          curl -sSL https://github.com/stellar/stellar-cli/releases/latest/download/stellar-cli-installer.sh | sh
+          curl -sSfL https://raw.githubusercontent.com/stellar/stellar-cli/main/install.sh | sh
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Optimize WASM
@@ -109,7 +109,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -137,7 +137,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -200,7 +200,7 @@ jobs:
 
       - name: Install Stellar CLI
         run: |
-          curl -sSL https://github.com/stellar/stellar-cli/releases/latest/download/stellar-cli-installer.sh | sh
+          curl -sSfL https://raw.githubusercontent.com/stellar/stellar-cli/main/install.sh | sh
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Configure testnet identity
@@ -256,7 +256,7 @@ jobs:
 
       - name: Install Stellar CLI
         run: |
-          curl -sSL https://github.com/stellar/stellar-cli/releases/latest/download/stellar-cli-installer.sh | sh
+          curl -sSfL https://raw.githubusercontent.com/stellar/stellar-cli/main/install.sh | sh
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Configure mainnet identity
