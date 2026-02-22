@@ -524,13 +524,96 @@ fn test_calculate_accrued_overflow_protection() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_pause_and_resume() {
-    let ctx = TestContext::setup();
+fn test_pause_stream_sender_success() {
+    let ctx = TestContext::setup_strict();
     let stream_id = ctx.create_default_stream();
+
+    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "pause_stream",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
 
     ctx.client().pause_stream(&stream_id);
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
+}
+
+#[test]
+fn test_pause_stream_admin_success() {
+    let ctx = TestContext::setup_strict();
+    let stream_id = ctx.create_default_stream();
+
+    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.admin,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "pause_stream",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    ctx.client().pause_stream(&stream_id);
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Paused);
+}
+
+#[test]
+#[should_panic]
+fn test_pause_stream_unauthorized_panics() {
+    let ctx = TestContext::setup_strict();
+    let stream_id = ctx.create_default_stream();
+    let attacker = Address::generate(&ctx.env);
+
+    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+    ctx.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "pause_stream",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    ctx.client().pause_stream(&stream_id);
+}
+
+#[test]
+fn test_resume_stream_sender_success() {
+    let ctx = TestContext::setup_strict();
+    let stream_id = ctx.create_default_stream();
+
+    // Setup for pause
+    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "pause_stream",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+    ctx.client().pause_stream(&stream_id);
+
+    // Setup for resume
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "resume_stream",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
 
     ctx.client().resume_stream(&stream_id);
     let state = ctx.client().get_stream_state(&stream_id);
@@ -538,13 +621,34 @@ fn test_pause_and_resume() {
 }
 
 #[test]
-fn test_admin_can_resume_stream() {
-    let ctx = TestContext::setup();
+fn test_resume_stream_admin_success() {
+    let ctx = TestContext::setup_strict();
     let stream_id = ctx.create_default_stream();
 
+    // Pause as sender
+    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "pause_stream",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
     ctx.client().pause_stream(&stream_id);
 
-    // Auth override test for resume
+    // Resume as admin
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.admin,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "resume_stream",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
     ctx.client().resume_stream(&stream_id);
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Active);
@@ -556,7 +660,7 @@ fn test_pause_already_paused_panics() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
     ctx.client().pause_stream(&stream_id);
-    ctx.client().pause_stream(&stream_id); // second pause should panic
+    ctx.client().pause_stream(&stream_id);
 }
 
 #[test]
@@ -564,7 +668,7 @@ fn test_pause_already_paused_panics() {
 fn test_resume_active_stream_panics() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
-    ctx.client().resume_stream(&stream_id); // not paused, should panic
+    ctx.client().resume_stream(&stream_id);
 }
 
 // ---------------------------------------------------------------------------

@@ -382,15 +382,14 @@ impl FluxoraStream {
     fn require_sender_or_admin(env: &Env, sender: &Address) {
         let admin = get_admin(env);
 
-        // If the admin is the one calling, they must authorize.
-        // Otherwise, the sender must authorize.
-        if sender != &admin {
-            // This allows the admin to bypass the sender's auth
-            // if we use a separate admin entrypoint, or we can
-            // rely on the transaction signatures.
-            sender.require_auth();
-        } else {
+        // Check if the admin authorized this call by inspecting the authorizations list.
+        // This allows either the admin or the sender to authorize the action.
+        let is_admin = env.auths().iter().any(|a| a.address == admin);
+
+        if is_admin {
             admin.require_auth();
+        } else {
+            sender.require_auth();
         }
     }
 }
