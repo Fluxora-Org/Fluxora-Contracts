@@ -1,5 +1,7 @@
 #![no_std]
 
+mod accrual;
+
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env};
 
 // ---------------------------------------------------------------------------
@@ -109,7 +111,26 @@ pub struct FluxoraStream;
 #[contractimpl]
 impl FluxoraStream {
     /// Initialise the contract with the streaming token and admin address.
-    /// Can only be called once. Sets up global Config and ID counter.
+    ///
+    /// This function must be called exactly once before any other contract operations.
+    /// It persists the token address (used for all stream transfers) and admin address
+    /// (authorized for administrative operations) in instance storage.
+    ///
+    /// # Parameters
+    /// - `token`: Address of the token contract used for all payment streams
+    /// - `admin`: Address authorized to perform administrative operations (pause, cancel, etc.)
+    ///
+    /// # Storage
+    /// - Stores `Config { token, admin }` in instance storage under `DataKey::Config`
+    /// - Initializes `NextStreamId` counter to 0 for stream ID generation
+    /// - Extends TTL to prevent premature expiration (17280 ledgers threshold, 120960 max)
+    ///
+    /// # Panics
+    /// - If called more than once (contract already initialized)
+    ///
+    /// # Security
+    /// - Re-initialization is prevented to ensure immutable token and admin configuration
+    /// - No authorization required for initial setup (deployer calls this once)
     pub fn init(env: Env, token: Address, admin: Address) {
         if env.storage().instance().has(&DataKey::Config) {
             panic!("already initialised");
@@ -346,26 +367,14 @@ impl FluxoraStream {
         let stream = load_stream(&env, stream_id);
         let now = env.ledger().timestamp();
 
-        if now < stream.cliff_time {
-            return 0;
-        }
-
-        if stream.start_time >= stream.end_time || stream.rate_per_second < 0 {
-            return 0;
-        }
-
-        let elapsed_now = now.min(stream.end_time);
-        let elapsed = match elapsed_now.checked_sub(stream.start_time) {
-            Some(elapsed) => elapsed as i128,
-            None => return 0,
-        };
-
-        let accrued = match elapsed.checked_mul(stream.rate_per_second) {
-            Some(accrued) => accrued,
-            None => stream.deposit_amount,
-        };
-
-        accrued.min(stream.deposit_amount).max(0) // ensures result >= 0
+        accrual::calculate_accrued_amount(
+            stream.start_time,
+            stream.cliff_time,
+            stream.end_time,
+            stream.rate_per_second,
+            stream.deposit_amount,
+            now,
+        )
     }
 
     /// Fetches the global configuration.
