@@ -1219,7 +1219,7 @@
                 "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
               },
               {
-                "symbol": "resume_stream"
+                "symbol": "withdraw"
               }
             ],
             "data": {
@@ -1245,7 +1245,7 @@
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'stream is active, not paused' from contract function 'Symbol(obj#287)'"
+                  "string": "caught panic 'nothing to withdraw' from contract function 'Symbol(withdraw)'"
                 },
                 {
                   "u64": 0
@@ -1305,7 +1305,7 @@
                   "string": "contract call failed"
                 },
                 {
-                  "symbol": "resume_stream"
+                  "symbol": "withdraw"
                 },
                 {
                   "vec": [
