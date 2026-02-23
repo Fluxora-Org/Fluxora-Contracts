@@ -80,6 +80,106 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod invariants {
+    use super::calculate_accrued_amount;
+
+    /// A small collection of valid streams chosen to exercise boundary
+    /// conditions: zero-rate, high-rate (cap at deposit), short and long
+    /// durations, and deposits smaller than rate*duration.
+    fn sample_streams() -> &'static [(u64, u64, u64, i128, i128)] {
+        &[
+            // start, cliff, end, rate_per_second, deposit
+            (0, 0, 1_000, 1, 1_000),         // simple 1/s stream
+            (1_000, 1_000, 2_000, 1, 1_000), // standard stream used elsewhere
+            (0, 500, 1_000, 2, 1_500),       // cliff > start, mid-rate
+            (0, 0, 1_000, 10, 5_000),        // high rate, deposit binds
+            (0, 0, 10_000, 0, 0),            // zero rate & zero deposit
+            (0, 0, 1_000, 3, 500),           // deposit smaller than rate*duration
+        ]
+    }
+
+    #[test]
+    fn accrued_non_negative_and_bounded_by_deposit() {
+        for &(start, cliff, end, rate, deposit) in sample_streams() {
+            // pick times around relevant boundaries
+            let times = [
+                0,
+                start.saturating_sub(1),
+                start,
+                cliff,
+                (start + cliff) / 2,
+                if end > 0 { end.saturating_sub(1) } else { 0 },
+                end,
+                end.saturating_add(1),
+            ];
+
+            for &t in &times {
+                let accrued = calculate_accrued_amount(start, cliff, end, rate, deposit, t);
+                assert!(
+                    accrued >= 0,
+                    "accrued negative for stream {:?} at t={}",
+                    (start, cliff, end, rate, deposit),
+                    t
+                );
+                assert!(
+                    accrued <= deposit,
+                    "accrued greater than deposit for stream {:?} at t={}",
+                    (start, cliff, end, rate, deposit),
+                    t
+                );
+            }
+
+        }
+    }
+
+    #[test]
+    fn accrued_is_monotonic_in_time_after_cliff() {
+        for &(start, cliff, end, rate, deposit) in sample_streams() {
+            // If cliff >= end, there is no time window starting at-or-after
+            // cliff and <= end to check monotonicity (function returns 0
+            // before cliff), so skip such degenerate streams.
+            if cliff >= end {
+                continue;
+            }
+
+            // Build a small increasing sequence of times from max(start,cliff)
+            // up to end. These sample points should exercise monotonicity.
+            let t0 = if cliff > start { cliff } else { start };
+            let span = end.saturating_sub(t0);
+            // fixed buffer of up to 5 entries
+            let mut times_buf = [t0, t0, t0, t0, end];
+            let mut len: usize = 1;
+            if span > 1 {
+                times_buf[len] = t0.saturating_add(span / 3);
+                len += 1;
+                times_buf[len] = t0.saturating_add(span / 2);
+                len += 1;
+                times_buf[len] = end.saturating_sub(1);
+                len += 1;
+            }
+            times_buf[len] = end;
+            len += 1;
+
+            // Verify non-decreasing accrued values across the time sequence.
+            let mut prev = calculate_accrued_amount(start, cliff, end, rate, deposit, times_buf[0]);
+            for i in 1..len {
+                let t = times_buf[i];
+                let now = calculate_accrued_amount(start, cliff, end, rate, deposit, t);
+                assert!(
+                    now >= prev,
+                    "accrued not monotonic for stream {:?}: at t={} got {}, previous {}",
+                    (start, cliff, end, rate, deposit),
+                    t,
+                    now,
+                    prev
+                );
+                prev = now;
+            }
+        }
+    }
+}
+
 /// Tests for Issue #47: calculate_accrued is capped after end_time
 ///
 /// These tests verify that accrual stops at end_time regardless of how much
