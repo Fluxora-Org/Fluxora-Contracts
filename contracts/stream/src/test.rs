@@ -716,7 +716,8 @@ fn test_result_capping_with_overflow() {
     
     let rate = i128::MAX / 100000;
     let duration = 1u64;
-    let deposit = rate + 1000; // Slightly more than rate * 1
+    // Use checked arithmetic to avoid overflow in test setup
+    let deposit = rate.checked_add(1000).unwrap_or(rate);
     
     ctx.sac.mint(&ctx.sender, &deposit);
     ctx.env.ledger().set_timestamp(0);
@@ -746,7 +747,10 @@ fn test_no_panic_on_extreme_inputs() {
     
     let rate = i128::MAX / 100000;
     let duration = 10u64;
-    let deposit = (rate * duration as i128) + 1000; // Ensure deposit covers rate * duration
+    // Use checked arithmetic to avoid overflow in test setup
+    let deposit = rate.checked_mul(duration as i128)
+        .and_then(|v| v.checked_add(1000))
+        .unwrap_or(i128::MAX / 10);
     
     ctx.sac.mint(&ctx.sender, &deposit);
     ctx.env.ledger().set_timestamp(0);
@@ -834,7 +838,10 @@ fn test_rate_times_duration_overflow_caps() {
     // Choose values that will definitely overflow when multiplied
     let rate = i128::MAX / 100000;
     let duration = 10u64;
-    let deposit = (rate * duration as i128) + 1000;
+    // Use checked arithmetic to avoid overflow in test setup
+    let deposit = rate.checked_mul(duration as i128)
+        .and_then(|v| v.checked_add(1000))
+        .unwrap_or(i128::MAX / 10);
     
     ctx.sac.mint(&ctx.sender, &deposit);
     ctx.env.ledger().set_timestamp(0);
