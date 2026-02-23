@@ -1297,7 +1297,16 @@
                 "u64": 0
               }
             ],
-            "data": "void"
+            "data": {
+              "vec": [
+                {
+                  "symbol": "Paused"
+                },
+                {
+                  "u64": 0
+                }
+              ]
+            }
           }
         }
       },
@@ -1365,7 +1374,7 @@
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'stream is not active' from contract function 'Symbol(obj#347)'"
+                  "string": "caught panic 'stream is not active' from contract function 'Symbol(obj#349)'"
                 },
                 {
                   "u64": 0
