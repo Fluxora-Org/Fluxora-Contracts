@@ -1471,6 +1471,70 @@ fn test_calculate_accrued_overflow_protection() {
     let accrued = ctx.client().calculate_accrued(&stream_id);
     assert_eq!(accrued, 42535295865117307932921825928971026400_i128);
 }
+/// Completed stream: calculate_accrued must return deposit_amount regardless
+/// of the current timestamp, providing a deterministic informational value.
+#[test]
+fn test_calculate_accrued_completed_stream_returns_deposit() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream(); // 1000 tokens, 0–1000s
+
+    // Fully withdraw to transition the stream to Completed
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+
+    // Querying at the exact end time
+    let accrued_at_end = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(
+        accrued_at_end, 1000,
+        "Completed stream must return deposit_amount at end time"
+    );
+
+    // Querying far in the future must return the same value
+    ctx.env.ledger().set_timestamp(99_999);
+    let accrued_far_future = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(
+        accrued_far_future, 1000,
+        "Completed stream must return deposit_amount regardless of current timestamp"
+    );
+}
+
+/// Cancelled stream: calculate_accrued must return the final accrued value at
+/// cancellation time and must not continue growing with wall-clock time.
+#[test]
+fn test_calculate_accrued_cancelled_stream_time_based() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream(); // 1000 tokens, 0–1000s, rate 1/s
+
+    // Cancel at t=400 — contract refunds 600 to sender, holds 400 for recipient
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().cancel_stream(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+
+    // At the same timestamp, accrued must equal the amount held in the contract
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(
+        accrued, 400,
+        "Cancelled stream must return time-based accrued amount"
+    );
+    assert_eq!(
+        accrued - state.withdrawn_amount,
+        400,
+        "withdrawable must equal what the contract holds"
+    );
+
+    // Far in the future, value must stay frozen at cancellation accrual
+    ctx.env.ledger().set_timestamp(9_999);
+    let accrued_frozen = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(
+        accrued_frozen, 400,
+        "Cancelled stream accrued must remain frozen at cancellation accrual"
+    );
+}
 
 // ---------------------------------------------------------------------------
 // Tests — calculate_accrued overflow and edge cases
@@ -4754,6 +4818,9 @@ fn test_withdraw_after_cancel_then_completed() {
     assert_eq!(state.withdrawn_amount, 600);
     // Status remains Cancelled (not Completed) because stream was terminated early
     assert_eq!(state.status, StreamStatus::Cancelled);
+
+    // Advance time substantially; cancelled accrual must remain frozen.
+    ctx.env.ledger().set_timestamp(9_999);
 
     // Try to withdraw again - should panic with "nothing to withdraw"
     // because accrued (600) - withdrawn (600) = 0

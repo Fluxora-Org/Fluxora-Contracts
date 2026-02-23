@@ -71,6 +71,8 @@ return min(accrued, deposit_amount).max(0)
 - **No cliff:** Set `cliff_time = start_time` for immediate vesting
 - **After end_time:** Capped at `deposit_amount`
 - **Overflow:** Multiplication overflow yields `deposit_amount` (safe upper bound)
+- **Completed:** `calculate_accrued` returns `deposit_amount` (deterministic final value)
+- **Cancelled:** `calculate_accrued` is frozen at `cancelled_at` (no post-cancel growth)
 
 ### Withdrawable Amount
 
