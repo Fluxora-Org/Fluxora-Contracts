@@ -2,6 +2,10 @@
 
 Soroban smart contracts for the Fluxora treasury streaming protocol on Stellar. Stream USDC from a treasury to recipients over time with configurable rate, duration, and cliff.
 
+## Documentation
+
+- **[Stream contract docs](docs/streaming.md)** — Lifecycle, accrual formula, cliff/end_time, access control, events, and error codes.
+
 ## What's in this repo
 
 - **Stream contract** (`contracts/stream`) — Lock USDC, accrue per second, withdraw on demand.
