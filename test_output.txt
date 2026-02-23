@@ -1,0 +1,116 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.11s
+     Running unittests src/lib.rs (target/debug/deps/fluxora_stream-70f6211382a0a323)
+
+running 3 tests
+Writing test snapshot file for test "test::test_withdraw_as_recipient_succeeds" to "test_snapshots/test/test_withdraw_as_recipient_succeeds.1.json".
+test test::test_withdraw_as_recipient_succeeds ... ok
+
+thread 'test::test_withdraw_as_admin_fails' (328706) panicked at /home/mesoma/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-env-host-21.2.1/src/host.rs:768:9:
+HostError: Error(Auth, InvalidAction)
+
+Event log (newest first):
+   0: [Diagnostic Event] topics:[error, Error(Auth, InvalidAction)], data:"escalating error to panic"
+   1: [Diagnostic Event] topics:[error, Error(Auth, InvalidAction)], data:["contract call failed", withdraw, [0]]
+   2: [Failed Diagnostic Event (not emitted)] contract:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, topics:[error, Error(Auth, InvalidAction)], data:"caught error from function"
+   3: [Failed Diagnostic Event (not emitted)] contract:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, topics:[error, Error(Auth, InvalidAction)], data:"escalating error to panic"
+   4: [Failed Diagnostic Event (not emitted)] contract:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, topics:[error, Error(Auth, InvalidAction)], data:["Unauthorized function call for address", CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4]
+   5: [Diagnostic Event] topics:[fn_call, Bytes(0000000000000000000000000000000000000000000000000000000000000001), withdraw], data:0
+   6: [Diagnostic Event] contract:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, topics:[fn_return, create_stream], data:0
+   7: [Contract Event] contract:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, topics:[created, 0], data:1000
+   8: [Diagnostic Event] contract:CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF, topics:[fn_return, transfer], data:Void
+   9: [Contract Event] contract:CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF, topics:[transfer, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, "aaa:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGO6V"], data:1000
+   10: [Diagnostic Event] contract:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, topics:[fn_call, Bytes(692c360a04a982db02db346a106cbf008ad9e058c384bdaaf77bc0c48799b3a4), transfer], data:[CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, 1000]
+   11: [Diagnostic Event] topics:[fn_call, Bytes(0000000000000000000000000000000000000000000000000000000000000001), create_stream], data:[CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4, 1000, 1, 0, 0, 1000]
+   12: [Diagnostic Event] contract:CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF, topics:[fn_return, mint], data:Void
+   13: [Contract Event] contract:CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF, topics:[mint, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM, "aaa:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGO6V"], data:10000
+   14: [Diagnostic Event] topics:[fn_call, Bytes(692c360a04a982db02db346a106cbf008ad9e058c384bdaaf77bc0c48799b3a4), mint], data:[CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM, 10000]
+   15: [Diagnostic Event] contract:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, topics:[fn_return, init], data:Void
+   16: [Diagnostic Event] topics:[fn_call, Bytes(0000000000000000000000000000000000000000000000000000000000000001), init], data:[CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4]
+   17: [Diagnostic Event] contract:CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF, topics:[fn_return, set_admin], data:Void
+   18: [Contract Event] contract:CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF, topics:[set_admin, GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGO6V, "aaa:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGO6V"], data:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4
+   19: [Diagnostic Event] topics:[fn_call, Bytes(692c360a04a982db02db346a106cbf008ad9e058c384bdaaf77bc0c48799b3a4), set_admin], data:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4
+   20: [Diagnostic Event] contract:CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF, topics:[fn_return, init_asset], data:Void
+   21: [Diagnostic Event] topics:[fn_call, Bytes(692c360a04a982db02db346a106cbf008ad9e058c384bdaaf77bc0c48799b3a4), init_asset], data:Bytes(0000000161616100000000000000000000000000000000000000000000000000000000000000000000000003)
+
+Backtrace (newest first):
+   0: <soroban_env_host::host::Host as soroban_env_common::env::EnvBase>::escalate_error_to_panic
+             at /home/mesoma/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-env-host-21.2.1/src/host.rs:767:31
+   1: soroban_sdk::env::internal::reject_err::{{closure}}
+             at /home/mesoma/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-sdk-21.7.7/src/env.rs:52:27
+   2: core::result::Result<T,E>::map_err
+             at /home/mesoma/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:961:27
+   3: soroban_sdk::env::internal::reject_err
+             at /home/mesoma/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-sdk-21.7.7/src/env.rs:52:11
+   4: <soroban_sdk::env::Env as soroban_env_common::env::Env>::call
+             at /home/mesoma/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-sdk-21.7.7/src/env.rs:1667:13
+   5: soroban_sdk::env::Env::invoke_contract
+             at /home/mesoma/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-sdk-21.7.7/src/env.rs:379:18
+   6: fluxora_stream::FluxoraStreamClient::withdraw
+             at src/lib.rs:101:1
+   7: fluxora_stream::test::test_withdraw_as_admin_fails
+             at src/test.rs:1398:12
+   8: fluxora_stream::test::test_withdraw_as_admin_fails::{{closure}}
+             at src/test.rs:1370:34
+   9: core::ops::function::FnOnce::call_once
+             at /home/mesoma/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+Writing test snapshot file for test "test::test_withdraw_as_admin_fails" to "test_snapshots/test/test_withdraw_as_admin_fails.1.json".
+
+thread 'test::test_withdraw_as_sender_fails' (328708) panicked at /home/mesoma/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-env-host-21.2.1/src/host.rs:768:9:
+HostError: Error(Auth, InvalidAction)
+
+Event log (newest first):
+   0: [Diagnostic Event] topics:[error, Error(Auth, InvalidAction)], data:"escalating error to panic"
+   1: [Diagnostic Event] topics:[error, Error(Auth, InvalidAction)], data:["contract call failed", withdraw, [0]]
+   2: [Failed Diagnostic Event (not emitted)] contract:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, topics:[error, Error(Auth, InvalidAction)], data:"caught error from function"
+   3: [Failed Diagnostic Event (not emitted)] contract:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, topics:[error, Error(Auth, InvalidAction)], data:"escalating error to panic"
+   4: [Failed Diagnostic Event (not emitted)] contract:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, topics:[error, Error(Auth, InvalidAction)], data:["Unauthorized function call for address", CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4]
+   5: [Diagnostic Event] topics:[fn_call, Bytes(0000000000000000000000000000000000000000000000000000000000000001), withdraw], data:0
+   6: [Diagnostic Event] contract:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, topics:[fn_return, create_stream], data:0
+   7: [Contract Event] contract:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, topics:[created, 0], data:1000
+   8: [Diagnostic Event] contract:CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF, topics:[fn_return, transfer], data:Void
+   9: [Contract Event] contract:CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF, topics:[transfer, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, "aaa:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGO6V"], data:1000
+   10: [Diagnostic Event] contract:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, topics:[fn_call, Bytes(692c360a04a982db02db346a106cbf008ad9e058c384bdaaf77bc0c48799b3a4), transfer], data:[CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, 1000]
+   11: [Diagnostic Event] topics:[fn_call, Bytes(0000000000000000000000000000000000000000000000000000000000000001), create_stream], data:[CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4, 1000, 1, 0, 0, 1000]
+   12: [Diagnostic Event] contract:CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF, topics:[fn_return, mint], data:Void
+   13: [Contract Event] contract:CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF, topics:[mint, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM, "aaa:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGO6V"], data:10000
+   14: [Diagnostic Event] topics:[fn_call, Bytes(692c360a04a982db02db346a106cbf008ad9e058c384bdaaf77bc0c48799b3a4), mint], data:[CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM, 10000]
+   15: [Diagnostic Event] contract:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, topics:[fn_return, init], data:Void
+   16: [Diagnostic Event] topics:[fn_call, Bytes(0000000000000000000000000000000000000000000000000000000000000001), init], data:[CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4]
+   17: [Diagnostic Event] contract:CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF, topics:[fn_return, set_admin], data:Void
+   18: [Contract Event] contract:CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF, topics:[set_admin, GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGO6V, "aaa:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGO6V"], data:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4
+   19: [Diagnostic Event] topics:[fn_call, Bytes(692c360a04a982db02db346a106cbf008ad9e058c384bdaaf77bc0c48799b3a4), set_admin], data:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4
+   20: [Diagnostic Event] contract:CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF, topics:[fn_return, init_asset], data:Void
+   21: [Diagnostic Event] topics:[fn_call, Bytes(692c360a04a982db02db346a106cbf008ad9e058c384bdaaf77bc0c48799b3a4), init_asset], data:Bytes(0000000161616100000000000000000000000000000000000000000000000000000000000000000000000003)
+
+Backtrace (newest first):
+   0: <soroban_env_host::host::Host as soroban_env_common::env::EnvBase>::escalate_error_to_panic
+             at /home/mesoma/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-env-host-21.2.1/src/host.rs:767:31
+   1: soroban_sdk::env::internal::reject_err::{{closure}}
+             at /home/mesoma/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-sdk-21.7.7/src/env.rs:52:27
+   2: core::result::Result<T,E>::map_err
+             at /home/mesoma/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:961:27
+   3: soroban_sdk::env::internal::reject_err
+             at /home/mesoma/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-sdk-21.7.7/src/env.rs:52:11
+   4: <soroban_sdk::env::Env as soroban_env_common::env::Env>::call
+             at /home/mesoma/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-sdk-21.7.7/src/env.rs:1667:13
+   5: soroban_sdk::env::Env::invoke_contract
+             at /home/mesoma/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-sdk-21.7.7/src/env.rs:379:18
+   6: fluxora_stream::FluxoraStreamClient::withdraw
+             at src/lib.rs:101:1
+   7: fluxora_stream::test::test_withdraw_as_sender_fails
+             at src/test.rs:1362:12
+   8: fluxora_stream::test::test_withdraw_as_sender_fails::{{closure}}
+             at src/test.rs:1334:35
+   9: core::ops::function::FnOnce::call_once
+             at /home/mesoma/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+
+
+Writing test snapshot file for test "test::test_withdraw_as_sender_fails" to "test_snapshots/test/test_withdraw_as_sender_fails.1.json".
+test test::test_withdraw_as_admin_fails - should panic ... ok
+test test::test_withdraw_as_sender_fails - should panic ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 65 filtered out; finished in 1.81s
+

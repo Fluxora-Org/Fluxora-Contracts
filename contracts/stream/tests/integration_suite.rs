@@ -320,4 +320,140 @@ fn withdraw_from_paused_stream_panics() {
     ctx.env.ledger().set_timestamp(500);
     ctx.client().pause_stream(&stream_id);
     ctx.client().withdraw(&stream_id);
+/// End-to-end integration test: create stream, advance time in steps,
+/// withdraw multiple times, verify amounts and final Completed status.
+///
+/// This test covers:
+/// - Stream creation and initial state
+/// - Multiple partial withdrawals at different time points
+/// - Balance verification after each withdrawal
+/// - Final withdrawal that completes the stream
+/// - Status transition to Completed
+/// - Correct final balances for all parties
+#[test]
+fn integration_full_flow_multiple_withdraws_to_completed() {
+    let ctx = TestContext::setup();
+
+    // Initial balances
+    let sender_initial = ctx.token.balance(&ctx.sender);
+    assert_eq!(sender_initial, 10_000);
+    assert_eq!(ctx.token.balance(&ctx.recipient), 0);
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 0);
+
+    // Create stream: 5000 tokens over 5000 seconds (1 token/sec), no cliff
+    ctx.env.ledger().set_timestamp(1000);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &5000_i128,
+        &1_i128,
+        &1000u64,
+        &1000u64,
+        &6000u64,
+    );
+
+    // Verify stream created and deposit transferred
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.stream_id, stream_id);
+    assert_eq!(state.sender, ctx.sender);
+    assert_eq!(state.recipient, ctx.recipient);
+    assert_eq!(state.deposit_amount, 5000);
+    assert_eq!(state.rate_per_second, 1);
+    assert_eq!(state.start_time, 1000);
+    assert_eq!(state.end_time, 6000);
+    assert_eq!(state.withdrawn_amount, 0);
+    assert_eq!(state.status, StreamStatus::Active);
+
+    assert_eq!(ctx.token.balance(&ctx.sender), 5_000);
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 5_000);
+
+    // First withdrawal at 20% progress (1000 seconds elapsed)
+    ctx.env.ledger().set_timestamp(2000);
+    let withdrawn_1 = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn_1, 1000);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 1000);
+    assert_eq!(state.status, StreamStatus::Active);
+    assert_eq!(ctx.token.balance(&ctx.recipient), 1000);
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 4000);
+
+    // Second withdrawal at 50% progress (1500 more seconds)
+    ctx.env.ledger().set_timestamp(3500);
+    let withdrawn_2 = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn_2, 1500);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 2500);
+    assert_eq!(state.status, StreamStatus::Active);
+    assert_eq!(ctx.token.balance(&ctx.recipient), 2500);
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 2500);
+
+    // Third withdrawal at 80% progress (1000 more seconds)
+    ctx.env.ledger().set_timestamp(4500);
+    let withdrawn_3 = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn_3, 1000);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 3500);
+    assert_eq!(state.status, StreamStatus::Active);
+    assert_eq!(ctx.token.balance(&ctx.recipient), 3500);
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 1500);
+
+    // Final withdrawal at 100% (end_time reached)
+    ctx.env.ledger().set_timestamp(6000);
+    let withdrawn_4 = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn_4, 1500);
+
+    // Verify stream is now Completed
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 5000);
+    assert_eq!(state.status, StreamStatus::Completed);
+
+    // Verify final balances
+    assert_eq!(ctx.token.balance(&ctx.recipient), 5000);
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 0);
+    assert_eq!(ctx.token.balance(&ctx.sender), 5000);
+
+    // Verify total withdrawn equals deposit
+    assert_eq!(withdrawn_1 + withdrawn_2 + withdrawn_3 + withdrawn_4, 5000);
+}
+
+/// Integration test: multiple withdrawals with time advancement beyond end_time.
+/// Verifies that accrual caps at deposit_amount and status transitions correctly.
+#[test]
+fn integration_withdraw_beyond_end_time() {
+    let ctx = TestContext::setup();
+
+    // Create stream: 2000 tokens over 1000 seconds (2 tokens/sec)
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2000_i128,
+        &2_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    // Withdraw at 25%
+    ctx.env.ledger().set_timestamp(250);
+    let w1 = ctx.client().withdraw(&stream_id);
+    assert_eq!(w1, 500);
+
+    // Withdraw at 75%
+    ctx.env.ledger().set_timestamp(750);
+    let w2 = ctx.client().withdraw(&stream_id);
+    assert_eq!(w2, 1000);
+
+    // Advance time well beyond end_time
+    ctx.env.ledger().set_timestamp(5000);
+    let w3 = ctx.client().withdraw(&stream_id);
+    assert_eq!(w3, 500); // Only remaining 500, not more
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+    assert_eq!(state.withdrawn_amount, 2000);
+    assert_eq!(ctx.token.balance(&ctx.recipient), 2000);
 }
