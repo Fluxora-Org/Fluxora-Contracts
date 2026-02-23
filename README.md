@@ -44,7 +44,17 @@ WASM output is under `target/wasm32-unknown-unknown/release/fluxora_stream.wasm`
 cargo test -p fluxora_stream
 ```
 
-(Add unit tests with `soroban-sdk` feature `testutils` when needed; see Stellar Soroban docs.)
+This runs both:
+- Unit tests in `contracts/stream/src/test.rs`
+- Integration tests in `contracts/stream/tests/integration_suite.rs`
+
+The integration suite invokes the contract with Soroban `testutils` and covers:
+- `init`
+- `create_stream`
+- `withdraw`
+- `get_stream_state`
+- A full stream lifecycle from create to completed withdrawal
+- Key edge cases (`init` twice, pre-cliff withdrawal, unknown stream id, underfunded deposit)
 
 ### Deploy (after Stellar CLI setup)
 
@@ -67,6 +77,8 @@ fluxora-contracts/
       src/
         lib.rs            # contract types and impl
         test.rs           # unit tests
+      tests/
+        integration_suite.rs  # integration tests (Soroban testutils)
 ```
 
 ## Accrual formula (reference)

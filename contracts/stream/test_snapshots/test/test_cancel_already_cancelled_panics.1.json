@@ -1390,10 +1390,14 @@
               }
             ],
             "data": {
-              "i128": {
-                "hi": 0,
-                "lo": 1000
-              }
+              "vec": [
+                {
+                  "symbol": "Cancelled"
+                },
+                {
+                  "u64": 0
+                }
+              ]
             }
           }
         }
@@ -1462,7 +1466,7 @@
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'stream must be active or paused to cancel' from contract function 'Symbol(obj#439)'"
+                  "string": "caught panic 'stream must be active or paused to cancel' from contract function 'Symbol(obj#441)'"
                 },
                 {
                   "u64": 0
