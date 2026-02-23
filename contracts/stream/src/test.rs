@@ -2432,6 +2432,445 @@ fn test_cancel_stream_as_admin_works() {
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Cancelled);
 }
+
+// ---------------------------------------------------------------------------
+// Tests — Issue #52: cancel_stream refund and status verification
+// ---------------------------------------------------------------------------
+
+/// Test cancel at stream start (0% accrual) - full refund to sender
+#[test]
+fn test_cancel_at_start_full_refund_and_status() {
+    let ctx = TestContext::setup();
+
+    // Record initial balances
+    let sender_initial = ctx.token().balance(&ctx.sender);
+    let recipient_initial = ctx.token().balance(&ctx.recipient);
+    let contract_initial = ctx.token().balance(&ctx.contract_id);
+
+    // Create stream: 2000 tokens over 2000 seconds
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &2000u64,
+    );
+
+    // Verify deposit transferred
+    assert_eq!(ctx.token().balance(&ctx.sender), sender_initial - 2000);
+    assert_eq!(
+        ctx.token().balance(&ctx.contract_id),
+        contract_initial + 2000
+    );
+
+    // Cancel immediately (no time elapsed, 0% accrual)
+    ctx.env.ledger().set_timestamp(0);
+    let sender_before_cancel = ctx.token().balance(&ctx.sender);
+    ctx.client().cancel_stream(&stream_id);
+
+    // Verify status is Cancelled
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+
+    // Verify full refund to sender (unstreamed = 2000 - 0 = 2000)
+    let sender_after_cancel = ctx.token().balance(&ctx.sender);
+    let refund = sender_after_cancel - sender_before_cancel;
+    assert_eq!(refund, 2000, "sender should receive full refund");
+    assert_eq!(
+        sender_after_cancel, sender_initial,
+        "sender balance restored"
+    );
+
+    // Verify contract balance is 0 (all refunded)
+    assert_eq!(ctx.token().balance(&ctx.contract_id), contract_initial);
+
+    // Verify recipient balance unchanged (no accrual)
+    assert_eq!(ctx.token().balance(&ctx.recipient), recipient_initial);
+}
+
+/// Test cancel at 25% completion - partial refund, recipient can withdraw accrued
+#[test]
+fn test_cancel_at_25_percent_partial_refund_recipient_withdraws() {
+    let ctx = TestContext::setup();
+
+    // Create stream: 4000 tokens over 4000 seconds (1 token/sec)
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &4000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &4000u64,
+    );
+
+    let sender_initial = ctx.token().balance(&ctx.sender);
+    let recipient_initial = ctx.token().balance(&ctx.recipient);
+    let contract_after_create = ctx.token().balance(&ctx.contract_id);
+
+    // Advance to 25% completion (1000 seconds)
+    ctx.env.ledger().set_timestamp(1000);
+
+    // Verify accrued amount
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued, 1000, "25% of 4000 = 1000 tokens accrued");
+
+    // Cancel stream
+    ctx.client().cancel_stream(&stream_id);
+
+    // Verify status is Cancelled
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+
+    // Verify partial refund to sender (unstreamed = 4000 - 1000 = 3000)
+    let sender_after_cancel = ctx.token().balance(&ctx.sender);
+    let refund = sender_after_cancel - sender_initial;
+    assert_eq!(refund, 3000, "sender should receive 75% refund");
+
+    // Verify contract balance (accrued amount remains)
+    assert_eq!(
+        ctx.token().balance(&ctx.contract_id),
+        contract_after_create - 3000,
+        "contract should hold accrued amount"
+    );
+    assert_eq!(ctx.token().balance(&ctx.contract_id), 1000);
+
+    // Verify recipient can withdraw accrued amount
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn, 1000, "recipient should withdraw accrued amount");
+
+    // Verify final balances
+    assert_eq!(
+        ctx.token().balance(&ctx.recipient),
+        recipient_initial + 1000,
+        "recipient receives accrued tokens"
+    );
+    assert_eq!(
+        ctx.token().balance(&ctx.contract_id),
+        0,
+        "contract balance should be 0 after withdrawal"
+    );
+}
+
+/// Test cancel at 50% completion - verify exact refund calculation
+#[test]
+fn test_cancel_at_50_percent_exact_refund_calculation() {
+    let ctx = TestContext::setup();
+
+    // Create stream: 6000 tokens over 3000 seconds (2 tokens/sec)
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &6000_i128,
+        &2_i128,
+        &0u64,
+        &0u64,
+        &3000u64,
+    );
+
+    let sender_before_cancel = ctx.token().balance(&ctx.sender);
+    let contract_before_cancel = ctx.token().balance(&ctx.contract_id);
+
+    // Advance to 50% completion (1500 seconds)
+    ctx.env.ledger().set_timestamp(1500);
+
+    // Verify accrued: 1500 seconds × 2 tokens/sec = 3000 tokens
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued, 3000);
+
+    // Cancel stream
+    ctx.client().cancel_stream(&stream_id);
+
+    // Verify status
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+
+    // Verify refund: unstreamed = 6000 - 3000 = 3000
+    let sender_after_cancel = ctx.token().balance(&ctx.sender);
+    assert_eq!(sender_after_cancel - sender_before_cancel, 3000);
+
+    // Verify contract balance: accrued amount remains
+    assert_eq!(ctx.token().balance(&ctx.contract_id), 3000);
+    assert_eq!(
+        contract_before_cancel - ctx.token().balance(&ctx.contract_id),
+        3000
+    );
+}
+
+/// Test cancel at 75% completion - verify recipient withdrawal after cancel
+#[test]
+fn test_cancel_at_75_percent_recipient_can_withdraw_accrued() {
+    let ctx = TestContext::setup();
+
+    // Create stream: 8000 tokens over 4000 seconds (2 tokens/sec)
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &8000_i128,
+        &2_i128,
+        &0u64,
+        &0u64,
+        &4000u64,
+    );
+
+    // Advance to 75% completion (3000 seconds)
+    ctx.env.ledger().set_timestamp(3000);
+
+    // Accrued: 3000 × 2 = 6000 tokens
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued, 6000);
+
+    // Cancel stream
+    ctx.client().cancel_stream(&stream_id);
+
+    // Verify status
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+    assert_eq!(state.withdrawn_amount, 0);
+
+    // Verify recipient can withdraw full accrued amount
+    let recipient_before = ctx.token().balance(&ctx.recipient);
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn, 6000);
+
+    let recipient_after = ctx.token().balance(&ctx.recipient);
+    assert_eq!(recipient_after - recipient_before, 6000);
+
+    // Verify contract is empty after withdrawal
+    assert_eq!(ctx.token().balance(&ctx.contract_id), 0);
+}
+
+/// Test cancel after partial withdrawal - verify correct refund calculation
+#[test]
+fn test_cancel_after_partial_withdrawal_correct_refund() {
+    let ctx = TestContext::setup();
+
+    // Create stream: 5000 tokens over 5000 seconds
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &5000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &5000u64,
+    );
+
+    // Advance to 40% and withdraw
+    ctx.env.ledger().set_timestamp(2000);
+    let withdrawn_1 = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn_1, 2000);
+
+    // Advance to 60% and cancel
+    ctx.env.ledger().set_timestamp(3000);
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued, 3000);
+
+    let sender_before_cancel = ctx.token().balance(&ctx.sender);
+    ctx.client().cancel_stream(&stream_id);
+
+    // Verify status
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+    assert_eq!(state.withdrawn_amount, 2000);
+
+    // Verify refund: unstreamed = 5000 - 3000 = 2000
+    let sender_after_cancel = ctx.token().balance(&ctx.sender);
+    assert_eq!(sender_after_cancel - sender_before_cancel, 2000);
+
+    // Verify recipient can withdraw remaining accrued (3000 - 2000 = 1000)
+    let withdrawn_2 = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn_2, 1000);
+
+    // Verify total withdrawn equals accrued
+    assert_eq!(withdrawn_1 + withdrawn_2, 3000);
+}
+
+/// Test cancel with cliff - before cliff time (no accrual, full refund)
+#[test]
+fn test_cancel_before_cliff_full_refund() {
+    let ctx = TestContext::setup();
+
+    // Create stream with cliff: 3000 tokens, cliff at 1500 seconds
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &3000_i128,
+        &1_i128,
+        &0u64,
+        &1500u64, // cliff at 50%
+        &3000u64,
+    );
+
+    let sender_before_cancel = ctx.token().balance(&ctx.sender);
+
+    // Advance to before cliff (1000 seconds, before 1500 cliff)
+    ctx.env.ledger().set_timestamp(1000);
+
+    // Verify no accrual before cliff
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued, 0);
+
+    // Cancel stream
+    ctx.client().cancel_stream(&stream_id);
+
+    // Verify status
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+
+    // Verify full refund (no accrual)
+    let sender_after_cancel = ctx.token().balance(&ctx.sender);
+    assert_eq!(sender_after_cancel - sender_before_cancel, 3000);
+
+    // Verify contract is empty
+    assert_eq!(ctx.token().balance(&ctx.contract_id), 0);
+}
+
+/// Test cancel with cliff - after cliff time (partial accrual, partial refund)
+#[test]
+fn test_cancel_after_cliff_partial_refund() {
+    let ctx = TestContext::setup();
+
+    // Create stream with cliff: 4000 tokens, cliff at 2000 seconds
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &4000_i128,
+        &1_i128,
+        &0u64,
+        &2000u64, // cliff at 50%
+        &4000u64,
+    );
+
+    let sender_before_cancel = ctx.token().balance(&ctx.sender);
+
+    // Advance to after cliff (2500 seconds, past 2000 cliff)
+    ctx.env.ledger().set_timestamp(2500);
+
+    // Verify accrual after cliff (calculated from start_time)
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued, 2500);
+
+    // Cancel stream
+    ctx.client().cancel_stream(&stream_id);
+
+    // Verify status
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+
+    // Verify partial refund: unstreamed = 4000 - 2500 = 1500
+    let sender_after_cancel = ctx.token().balance(&ctx.sender);
+    assert_eq!(sender_after_cancel - sender_before_cancel, 1500);
+
+    // Verify contract holds accrued amount
+    assert_eq!(ctx.token().balance(&ctx.contract_id), 2500);
+
+    // Verify recipient can withdraw accrued
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn, 2500);
+}
+
+/// Test cancel of paused stream - verify accrual continues during pause
+#[test]
+fn test_cancel_paused_stream_accrual_continues() {
+    let ctx = TestContext::setup();
+
+    // Create stream: 3000 tokens over 3000 seconds
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &3000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &3000u64,
+    );
+
+    // Advance to 30% and pause
+    ctx.env.ledger().set_timestamp(900);
+    ctx.client().pause_stream(&stream_id);
+
+    // Advance time further (accrual continues even when paused)
+    ctx.env.ledger().set_timestamp(1500);
+
+    // Verify accrual at 50% (not stopped at pause time)
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued, 1500);
+
+    let sender_before_cancel = ctx.token().balance(&ctx.sender);
+
+    // Cancel paused stream
+    ctx.client().cancel_stream(&stream_id);
+
+    // Verify status
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+
+    // Verify refund based on current accrual: 3000 - 1500 = 1500
+    let sender_after_cancel = ctx.token().balance(&ctx.sender);
+    assert_eq!(sender_after_cancel - sender_before_cancel, 1500);
+
+    // Verify contract holds accrued amount
+    assert_eq!(ctx.token().balance(&ctx.contract_id), 1500);
+}
+
+/// Test balance consistency - verify total tokens are conserved
+#[test]
+fn test_cancel_balance_consistency() {
+    let ctx = TestContext::setup();
+
+    let total_supply_initial = ctx.token().balance(&ctx.sender)
+        + ctx.token().balance(&ctx.recipient)
+        + ctx.token().balance(&ctx.contract_id);
+
+    // Create stream: 7000 tokens over 7000 seconds
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &7000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &7000u64,
+    );
+
+    // Verify total supply unchanged after creation
+    let total_after_create = ctx.token().balance(&ctx.sender)
+        + ctx.token().balance(&ctx.recipient)
+        + ctx.token().balance(&ctx.contract_id);
+    assert_eq!(total_after_create, total_supply_initial);
+
+    // Advance to 40% and cancel
+    ctx.env.ledger().set_timestamp(2800);
+    ctx.client().cancel_stream(&stream_id);
+
+    // Verify total supply unchanged after cancel
+    let total_after_cancel = ctx.token().balance(&ctx.sender)
+        + ctx.token().balance(&ctx.recipient)
+        + ctx.token().balance(&ctx.contract_id);
+    assert_eq!(total_after_cancel, total_supply_initial);
+
+    // Recipient withdraws accrued amount
+    ctx.client().withdraw(&stream_id);
+
+    // Verify total supply still unchanged after withdrawal
+    let total_after_withdraw = ctx.token().balance(&ctx.sender)
+        + ctx.token().balance(&ctx.recipient)
+        + ctx.token().balance(&ctx.contract_id);
+    assert_eq!(total_after_withdraw, total_supply_initial);
+}
+
 // ---------------------------------------------------------------------------
 // Tests — get_stream_state
 // ---------------------------------------------------------------------------
