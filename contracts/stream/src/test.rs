@@ -642,7 +642,7 @@ fn test_create_stream_cliff_one_before_start_panics() {
         &1000_i128,
         &1_i128,
         &100u64,
-        &99u64,   // cliff = start - 1
+        &99u64, // cliff = start - 1
         &1100u64,
     );
 }
@@ -676,7 +676,7 @@ fn test_create_stream_cliff_far_before_start_panics() {
         &1000_i128,
         &1_i128,
         &500u64,
-        &0u64,    // cliff far before start
+        &0u64, // cliff far before start
         &1500u64,
     );
 }
@@ -927,7 +927,7 @@ fn test_create_stream_deposit_far_below_required_panics() {
     ctx.client().create_stream(
         &ctx.sender,
         &ctx.recipient,
-        &100_i128,  // way under
+        &100_i128, // way under
         &10_i128,
         &0u64,
         &0u64,
