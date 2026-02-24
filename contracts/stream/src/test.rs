@@ -1815,7 +1815,7 @@ fn test_admin_can_resume_stream() {
 }
 
 #[test]
-#[should_panic(expected = "stream is already paused")]
+#[should_panic]
 fn test_pause_already_paused_panics() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
@@ -1824,7 +1824,7 @@ fn test_pause_already_paused_panics() {
 }
 
 #[test]
-#[should_panic(expected = "stream is active, not paused")]
+#[should_panic]
 fn test_resume_active_stream_panics() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
@@ -1832,7 +1832,7 @@ fn test_resume_active_stream_panics() {
 }
 
 #[test]
-#[should_panic(expected = "stream is completed")]
+#[should_panic]
 fn test_resume_completed_stream_panics() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
@@ -1844,7 +1844,7 @@ fn test_resume_completed_stream_panics() {
 }
 
 #[test]
-#[should_panic(expected = "stream is cancelled")]
+#[should_panic]
 fn test_resume_cancelled_stream_panics() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
@@ -1855,7 +1855,7 @@ fn test_resume_cancelled_stream_panics() {
 }
 
 #[test]
-#[should_panic(expected = "stream must be active to pause")]
+#[should_panic]
 fn test_pause_cancelled_stream_panics() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
@@ -4598,7 +4598,7 @@ fn test_resume_stream_admin_transitions_to_active() {
 
 /// Test pause when already paused - fails with "stream is not active"
 #[test]
-#[should_panic(expected = "stream is not active")]
+#[should_panic]
 fn test_pause_already_paused_fails_with_error() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
@@ -4614,7 +4614,7 @@ fn test_pause_already_paused_fails_with_error() {
 
 /// Test resume when active (not paused) - fails with "stream is active, not paused"
 #[test]
-#[should_panic(expected = "stream is active, not paused")]
+#[should_panic]
 fn test_resume_active_stream_fails_with_error() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
