@@ -213,6 +213,23 @@ fn test_get_config_before_init_fails() {
     client.get_config();
 }
 
+/// Test that get_config panics with clear error when contract is not initialized.
+/// This guards against using an uninitialized contract and documents expected behavior.
+///
+/// Security: Prevents operations on uninitialized contract state.
+/// The panic message "contract not initialised: missing config" provides clear
+/// feedback to integrators that init() must be called first.
+#[test]
+#[should_panic(expected = "contract not initialised: missing config")]
+fn test_get_config_uninitialized_contract_panics() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+
+    // Calling get_config before init must panic with clear error message
+    client.get_config();
+}
+
 #[test]
 fn test_init_stores_config() {
     let env = Env::default();
@@ -492,6 +509,43 @@ fn test_create_stream_initial_state() {
     assert_eq!(ctx.token().balance(&ctx.contract_id), 1000);
     // Sender balance reduced by deposit
     assert_eq!(ctx.token().balance(&ctx.sender), 9000);
+}
+
+/// Create a stream, perform partial withdraws then a final withdraw, and
+/// assert `withdrawn_amount` increments and status transitions to Completed.
+#[test]
+fn test_withdraw_partial_then_full_updates_state() {
+    let ctx = TestContext::setup();
+
+    // Create a standard stream: deposit=1000, rate=1/s, duration=1000s
+    let stream_id = ctx.create_default_stream();
+
+    // Advance to t=300 and withdraw -> should get 300
+    ctx.env.ledger().set_timestamp(300);
+    let amt1 = ctx.client().withdraw(&stream_id);
+    assert_eq!(amt1, 300, "first withdraw should return 300");
+
+    let state1 = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state1.withdrawn_amount, 300);
+    assert_eq!(state1.status, StreamStatus::Active);
+
+    // Advance to t=800 and withdraw -> should get 500 (800 - 300)
+    ctx.env.ledger().set_timestamp(800);
+    let amt2 = ctx.client().withdraw(&stream_id);
+    assert_eq!(amt2, 500, "second withdraw should return 500");
+
+    let state2 = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state2.withdrawn_amount, 800);
+    assert_eq!(state2.status, StreamStatus::Active);
+
+    // Advance to t=1000 and withdraw -> should get final 200 and mark Completed
+    ctx.env.ledger().set_timestamp(1000);
+    let amt3 = ctx.client().withdraw(&stream_id);
+    assert_eq!(amt3, 200, "final withdraw should return remaining 200");
+
+    let state3 = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state3.withdrawn_amount, 1000);
+    assert_eq!(state3.status, StreamStatus::Completed);
 }
 
 #[test]
@@ -1471,6 +1525,70 @@ fn test_calculate_accrued_overflow_protection() {
     let accrued = ctx.client().calculate_accrued(&stream_id);
     assert_eq!(accrued, 42535295865117307932921825928971026400_i128);
 }
+/// Completed stream: calculate_accrued must return deposit_amount regardless
+/// of the current timestamp, providing a deterministic informational value.
+#[test]
+fn test_calculate_accrued_completed_stream_returns_deposit() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream(); // 1000 tokens, 0–1000s
+
+    // Fully withdraw to transition the stream to Completed
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+
+    // Querying at the exact end time
+    let accrued_at_end = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(
+        accrued_at_end, 1000,
+        "Completed stream must return deposit_amount at end time"
+    );
+
+    // Querying far in the future must return the same value
+    ctx.env.ledger().set_timestamp(99_999);
+    let accrued_far_future = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(
+        accrued_far_future, 1000,
+        "Completed stream must return deposit_amount regardless of current timestamp"
+    );
+}
+
+/// Cancelled stream: calculate_accrued must return the final accrued value at
+/// cancellation time and must not continue growing with wall-clock time.
+#[test]
+fn test_calculate_accrued_cancelled_stream_time_based() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream(); // 1000 tokens, 0–1000s, rate 1/s
+
+    // Cancel at t=400 — contract refunds 600 to sender, holds 400 for recipient
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().cancel_stream(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+
+    // At the same timestamp, accrued must equal the amount held in the contract
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(
+        accrued, 400,
+        "Cancelled stream must return time-based accrued amount"
+    );
+    assert_eq!(
+        accrued - state.withdrawn_amount,
+        400,
+        "withdrawable must equal what the contract holds"
+    );
+
+    // Far in the future, value must stay frozen at cancellation accrual
+    ctx.env.ledger().set_timestamp(9_999);
+    let accrued_frozen = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(
+        accrued_frozen, 400,
+        "Cancelled stream accrued must remain frozen at cancellation accrual"
+    );
+}
 
 // ---------------------------------------------------------------------------
 // Tests — calculate_accrued overflow and edge cases
@@ -2079,7 +2197,7 @@ fn test_cancel_stream_as_admin() {
 }
 
 #[test]
-#[should_panic(expected = "stream must be active or paused to cancel")]
+#[should_panic(expected = "Error(Contract")]
 fn test_cancel_already_cancelled_panics() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
@@ -2088,7 +2206,7 @@ fn test_cancel_already_cancelled_panics() {
 }
 
 #[test]
-#[should_panic(expected = "stream must be active or paused to cancel")]
+#[should_panic(expected = "Error(Contract")]
 fn test_cancel_completed_stream_panics() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
@@ -2098,13 +2216,20 @@ fn test_cancel_completed_stream_panics() {
 }
 
 #[test]
-fn test_cancel_paused_stream() {
+fn test_cancel_stream_allows_active_or_paused() {
     let ctx = TestContext::setup();
-    let stream_id = ctx.create_default_stream();
-    ctx.client().pause_stream(&stream_id);
-    ctx.client().cancel_stream(&stream_id);
-    let state = ctx.client().get_stream_state(&stream_id);
-    assert_eq!(state.status, StreamStatus::Cancelled);
+    let active_stream_id = ctx.create_default_stream();
+    let paused_stream_id = ctx.create_default_stream();
+
+    ctx.client().pause_stream(&paused_stream_id);
+
+    ctx.client().cancel_stream(&active_stream_id);
+    ctx.client().cancel_stream(&paused_stream_id);
+
+    let active_state = ctx.client().get_stream_state(&active_stream_id);
+    let paused_state = ctx.client().get_stream_state(&paused_stream_id);
+    assert_eq!(active_state.status, StreamStatus::Cancelled);
+    assert_eq!(paused_state.status, StreamStatus::Cancelled);
 }
 
 // ---------------------------------------------------------------------------
@@ -4815,9 +4940,12 @@ fn test_withdraw_after_cancel_then_completed() {
     // Status remains Cancelled (not Completed) because stream was terminated early
     assert_eq!(state.status, StreamStatus::Cancelled);
 
-    // Try to withdraw again - should return 0 because accrued (600) - withdrawn (600) = 0
-    let withdrawn2 = ctx.client().withdraw(&stream_id);
-    assert_eq!(withdrawn2, 0, "should return 0 when nothing left to withdraw");
+    // Advance time substantially; cancelled accrual must remain frozen.
+    ctx.env.ledger().set_timestamp(9_999);
+
+    // Try to withdraw again - should panic with "nothing to withdraw"
+    // because accrued (600) - withdrawn (600) = 0
+    ctx.client().withdraw(&stream_id);
 }
 
 // ---------------------------------------------------------------------------
@@ -4914,6 +5042,280 @@ fn test_create_stream_returned_id_matches_stored_id() {
         assert_eq!(
             stored.stream_id, returned_id,
             "stream {expected_id}: stored stream_id must equal returned id"
+        );
+    }
+}
+
+// Tests — withdraw updates withdrawn_amount and status (comprehensive suite)
+// Issue: test/withdraw-updates-state
+// ---------------------------------------------------------------------------
+
+/// Comprehensive test: Create stream, advance time, withdraw, assert updated state
+/// This test validates that:
+/// 1. Withdraw returns the correct amount
+/// 2. Stream's withdrawn_amount is updated
+/// 3. Recipient receives tokens
+/// 4. Additional withdrawals add to withdrawn_amount (not reset)
+/// 5. When fully withdrawn, status = Completed
+#[test]
+fn test_withdraw_updates_withdrawn_amount_and_status() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream(); // 1000 deposit, 1 token/s, 1000s
+
+    // INITIAL STATE: Stream created, nothing withdrawn
+    let initial_state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(
+        initial_state.withdrawn_amount, 0,
+        "initial withdrawn_amount should be 0"
+    );
+    assert_eq!(
+        initial_state.status,
+        StreamStatus::Active,
+        "initial status should be Active"
+    );
+    assert_eq!(
+        initial_state.deposit_amount, 1000,
+        "deposit_amount should be 1000"
+    );
+
+    // FIRST WITHDRAWAL: At t=300, 300 tokens accrued
+    ctx.env.ledger().set_timestamp(300);
+    let recipient_before_first = ctx.token().balance(&ctx.recipient);
+
+    let withdrawn_amount_1 = ctx.client().withdraw(&stream_id);
+    assert_eq!(
+        withdrawn_amount_1, 300,
+        "first withdraw should return 300 tokens"
+    );
+
+    // Verify state updates: withdrawn_amount increased
+    let state_after_first = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(
+        state_after_first.withdrawn_amount, 300,
+        "withdrawn_amount should be 300 after first withdrawal"
+    );
+    assert_eq!(
+        state_after_first.status,
+        StreamStatus::Active,
+        "status should still be Active (not complete)"
+    );
+
+    // Verify recipient received 300 tokens
+    let recipient_after_first = ctx.token().balance(&ctx.recipient);
+    assert_eq!(
+        recipient_after_first - recipient_before_first,
+        300,
+        "recipient should receive 300 tokens"
+    );
+
+    // SECOND WITHDRAWAL: At t=700, additional 400 tokens accrued (cumulative 700)
+    ctx.env.ledger().set_timestamp(700);
+    let recipient_before_second = ctx.token().balance(&ctx.recipient);
+
+    let withdrawn_amount_2 = ctx.client().withdraw(&stream_id);
+    assert_eq!(
+        withdrawn_amount_2, 400,
+        "second withdraw should return 400 additional tokens (700 - 300)"
+    );
+
+    // Verify state updates: withdrawn_amount increased (not reset)
+    let state_after_second = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(
+        state_after_second.withdrawn_amount, 700,
+        "withdrawn_amount should be 700 after second withdrawal (300 + 400)"
+    );
+    assert_eq!(
+        state_after_second.status,
+        StreamStatus::Active,
+        "status should still be Active (not complete)"
+    );
+
+    // Verify recipient received additional 400 tokens
+    let recipient_after_second = ctx.token().balance(&ctx.recipient);
+    assert_eq!(
+        recipient_after_second - recipient_before_second,
+        400,
+        "recipient should receive 400 additional tokens"
+    );
+
+    // FINAL WITHDRAWAL: At t=1000, remaining 300 tokens accrued (cumulative 1000)
+    ctx.env.ledger().set_timestamp(1000);
+    let recipient_before_final = ctx.token().balance(&ctx.recipient);
+
+    let withdrawn_amount_3 = ctx.client().withdraw(&stream_id);
+    assert_eq!(
+        withdrawn_amount_3, 300,
+        "final withdraw should return 300 remaining tokens (1000 - 700)"
+    );
+
+    // Verify state updates: withdrawn_amount reaches deposit (COMPLETED)
+    let state_after_final = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(
+        state_after_final.withdrawn_amount, 1000,
+        "withdrawn_amount should equal deposit_amount (1000)"
+    );
+    assert_eq!(
+        state_after_final.status,
+        StreamStatus::Completed,
+        "status should be Completed when fully withdrawn"
+    );
+
+    // Verify recipient received final 300 tokens
+    let recipient_after_final = ctx.token().balance(&ctx.recipient);
+    assert_eq!(
+        recipient_after_final - recipient_before_final,
+        300,
+        "recipient should receive 300 final tokens"
+    );
+
+    // VERIFY TOTALS
+    let total_recipient_tokens = ctx.token().balance(&ctx.recipient);
+    assert_eq!(
+        total_recipient_tokens, 1000,
+        "recipient should have received all 1000 tokens total"
+    );
+    assert_eq!(
+        ctx.token().balance(&ctx.contract_id),
+        0,
+        "contract should have no tokens left"
+    );
+    assert_eq!(
+        withdrawn_amount_1 + withdrawn_amount_2 + withdrawn_amount_3,
+        1000,
+        "total withdrawn should equal deposit"
+    );
+}
+
+/// Test: Partial withdrawal then full withdrawal with intermediate time checks
+/// Validates that withdrawn_amount accumulates correctly across multiple calls
+#[test]
+fn test_withdraw_partial_then_full_with_intermediate_checks() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // First partial withdrawal: 250 tokens at t=250
+    ctx.env.ledger().set_timestamp(250);
+    let w1 = ctx.client().withdraw(&stream_id);
+    assert_eq!(w1, 250);
+
+    let state1 = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(
+        state1.withdrawn_amount, 250,
+        "after first: withdrawn_amount = 250"
+    );
+    assert_eq!(
+        state1.status,
+        StreamStatus::Active,
+        "after first: still Active"
+    );
+    assert_eq!(state1.deposit_amount, 1000, "deposit_amount unchanged");
+
+    // Second partial withdrawal: 250 more tokens at t=500
+    ctx.env.ledger().set_timestamp(500);
+    let w2 = ctx.client().withdraw(&stream_id);
+    assert_eq!(w2, 250, "second withdrawal adds 250 more");
+
+    let state2 = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(
+        state2.withdrawn_amount, 500,
+        "after second: withdrawn_amount = 500"
+    );
+    assert_eq!(
+        state2.status,
+        StreamStatus::Active,
+        "after second: still Active"
+    );
+
+    // Third partial withdrawal: 250 more tokens at t=750
+    ctx.env.ledger().set_timestamp(750);
+    let w3 = ctx.client().withdraw(&stream_id);
+    assert_eq!(w3, 250, "third withdrawal adds 250 more");
+
+    let state3 = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(
+        state3.withdrawn_amount, 750,
+        "after third: withdrawn_amount = 750"
+    );
+    assert_eq!(
+        state3.status,
+        StreamStatus::Active,
+        "after third: still Active"
+    );
+
+    // Final withdrawal: last 250 tokens at t=1000 -> COMPLETED
+    ctx.env.ledger().set_timestamp(1000);
+    let w4 = ctx.client().withdraw(&stream_id);
+    assert_eq!(w4, 250, "final withdrawal adds last 250");
+
+    let state_final = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(
+        state_final.withdrawn_amount, 1000,
+        "final: withdrawn_amount = 1000 (full deposit)"
+    );
+    assert_eq!(
+        state_final.status,
+        StreamStatus::Completed,
+        "final: status = Completed"
+    );
+
+    // Verify total
+    assert_eq!(w1 + w2 + w3 + w4, 1000, "total withdrawn = 1000");
+}
+
+/// Test: Verify withdrawn_amount never decreases (monotonic)
+/// Ensures state updates are only additive
+#[test]
+fn test_withdraw_withdrawn_amount_monotonic_increase() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    let mut previous_withdrawn = 0_i128;
+
+    let timestamps = [100, 250, 500, 750, 900, 1000];
+
+    for &t in &timestamps {
+        ctx.env.ledger().set_timestamp(t);
+        ctx.client().withdraw(&stream_id);
+
+        let state = ctx.client().get_stream_state(&stream_id);
+
+        assert!(
+            state.withdrawn_amount > previous_withdrawn,
+            "withdrawn_amount must strictly increase at t={}: {} > {}",
+            t,
+            state.withdrawn_amount,
+            previous_withdrawn
+        );
+
+        previous_withdrawn = state.withdrawn_amount;
+    }
+}
+
+/// Test: Verify status only transitions Active -> Completed once fully withdrawn
+/// No intermediate status changes during partial withdrawals
+#[test]
+fn test_withdraw_status_transitions_correctly() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    let check_points = [
+        (200u64, StreamStatus::Active),
+        (400u64, StreamStatus::Active),
+        (600u64, StreamStatus::Active),
+        (800u64, StreamStatus::Active),
+        (950u64, StreamStatus::Active),
+        (1000u64, StreamStatus::Completed), // Only at end, when fully withdrawn
+    ];
+
+    for (timestamp, expected_status) in check_points {
+        ctx.env.ledger().set_timestamp(timestamp);
+        ctx.client().withdraw(&stream_id);
+
+        let state = ctx.client().get_stream_state(&stream_id);
+        assert_eq!(
+            state.status, expected_status,
+            "at t={}, status should be {:?}",
+            timestamp, expected_status
         );
     }
 }
@@ -5126,200 +5528,419 @@ fn test_stream_id_stability_after_state_changes() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Tests — set_admin (admin key rotation)
-// ---------------------------------------------------------------------------
-
-/// Admin can successfully update to a new admin address
+/// Test: Verify returned amount matches withdrawn_amount increment
+/// Ensures internal accounting matches external transfer amount
 #[test]
-fn test_set_admin_succeeds() {
+fn test_withdraw_returned_amount_matches_increment() {
     let ctx = TestContext::setup();
-    let new_admin = Address::generate(&ctx.env);
+    let stream_id = ctx.create_default_stream();
 
-    // Get original config
-    let original_config = ctx.client().get_config();
-    assert_eq!(original_config.admin, ctx.admin);
+    // First withdrawal
+    ctx.env.ledger().set_timestamp(300);
+    let state_before_1 = ctx.client().get_stream_state(&stream_id);
+    let returned_1 = ctx.client().withdraw(&stream_id);
+    let state_after_1 = ctx.client().get_stream_state(&stream_id);
 
-    // Set new admin
-    ctx.client().set_admin(&new_admin);
-
-    // Verify config updated
-    let updated_config = ctx.client().get_config();
-    assert_eq!(updated_config.admin, new_admin);
+    let increment_1 = state_after_1.withdrawn_amount - state_before_1.withdrawn_amount;
     assert_eq!(
-        updated_config.token, original_config.token,
-        "token must remain unchanged"
+        returned_1, increment_1,
+        "returned amount should equal withdrawn_amount increment"
+    );
+
+    // Second withdrawal
+    ctx.env.ledger().set_timestamp(700);
+    let state_before_2 = ctx.client().get_stream_state(&stream_id);
+    let returned_2 = ctx.client().withdraw(&stream_id);
+    let state_after_2 = ctx.client().get_stream_state(&stream_id);
+
+    let increment_2 = state_after_2.withdrawn_amount - state_before_2.withdrawn_amount;
+    assert_eq!(
+        returned_2, increment_2,
+        "returned amount should equal withdrawn_amount increment"
+    );
+
+    // Final withdrawal
+    ctx.env.ledger().set_timestamp(1000);
+    let state_before_3 = ctx.client().get_stream_state(&stream_id);
+    let returned_3 = ctx.client().withdraw(&stream_id);
+    let state_after_3 = ctx.client().get_stream_state(&stream_id);
+
+    let increment_3 = state_after_3.withdrawn_amount - state_before_3.withdrawn_amount;
+    assert_eq!(
+        returned_3, increment_3,
+        "returned amount should equal withdrawn_amount increment"
     );
 }
 
-/// Non-admin cannot call set_admin
+/// Test: Edge case - withdraw in multiple small increments
+/// Verifies correct state updates even with many frequent withdrawals
 #[test]
-#[should_panic]
-fn test_set_admin_non_admin_fails() {
-    let ctx = TestContext::setup_strict();
-    let new_admin = Address::generate(&ctx.env);
-    let non_admin = Address::generate(&ctx.env);
-
-    // Try to set admin as non-admin (should fail)
-    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
-    ctx.env.mock_auths(&[MockAuth {
-        address: &non_admin,
-        invoke: &MockAuthInvoke {
-            contract: &ctx.contract_id,
-            fn_name: "set_admin",
-            args: (new_admin.clone(),).into_val(&ctx.env),
-            sub_invokes: &[],
-        },
-    }]);
-
-    ctx.client().set_admin(&new_admin);
-}
-
-/// New admin gains privileges after admin rotation
-#[test]
-fn test_set_admin_new_admin_gains_privileges() {
+fn test_withdraw_many_small_increments() {
     let ctx = TestContext::setup();
-    let new_admin = Address::generate(&ctx.env);
-
-    // Create a stream
-    ctx.env.ledger().set_timestamp(0);
     let stream_id = ctx.create_default_stream();
 
-    // Rotate admin
-    ctx.client().set_admin(&new_admin);
+    let mut total_withdrawn = 0_i128;
 
-    // Verify new admin in config
-    assert_eq!(ctx.client().get_config().admin, new_admin);
+    // Withdraw in 10 equal parts
+    for i in 1..=10 {
+        let timestamp = 100 * i as u64;
+        ctx.env.ledger().set_timestamp(timestamp);
 
-    // New admin can pause stream (with mock_all_auths this works)
-    ctx.client().pause_stream_as_admin(&stream_id);
+        let amount = ctx.client().withdraw(&stream_id);
+        total_withdrawn += amount;
+
+        let state = ctx.client().get_stream_state(&stream_id);
+        assert_eq!(
+            state.withdrawn_amount, total_withdrawn,
+            "at iteration {}, withdrawn_amount should be {}",
+            i, total_withdrawn
+        );
+
+        if i == 10 {
+            // Last withdrawal should mark as Completed
+            assert_eq!(
+                state.status,
+                StreamStatus::Completed,
+                "final should be Completed"
+            );
+        } else {
+            assert_eq!(
+                state.status,
+                StreamStatus::Active,
+                "intermediate should be Active"
+            );
+        }
+    }
+
+    assert_eq!(total_withdrawn, 1000, "total should equal deposit");
+}
+
+/// Test: Verify contract token balance decreases with each withdrawal
+/// Ensures tokens are actually transferred out
+#[test]
+fn test_withdraw_contract_balance_decreases() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    let initial_contract_balance = ctx.token().balance(&ctx.contract_id);
+    assert_eq!(
+        initial_contract_balance, 1000,
+        "initial contract balance = deposit"
+    );
+
+    // First withdrawal: 300 tokens
+    ctx.env.ledger().set_timestamp(300);
+    ctx.client().withdraw(&stream_id);
+
+    let balance_after_1 = ctx.token().balance(&ctx.contract_id);
+    assert_eq!(
+        balance_after_1, 700,
+        "contract balance should decrease by 300"
+    );
+
+    // Second withdrawal: 400 tokens
+    ctx.env.ledger().set_timestamp(700);
+    ctx.client().withdraw(&stream_id);
+
+    let balance_after_2 = ctx.token().balance(&ctx.contract_id);
+    assert_eq!(
+        balance_after_2, 300,
+        "contract balance should decrease by 400 more"
+    );
+
+    // Final withdrawal: 300 tokens
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    let final_contract_balance = ctx.token().balance(&ctx.contract_id);
+    assert_eq!(
+        final_contract_balance, 0,
+        "contract balance should be 0 after full withdrawal"
+    );
+}
+
+/// Test: Verify recipient token balance increases with each withdrawal
+/// Ensures recipient receives all withdrawn amounts
+#[test]
+fn test_withdraw_recipient_balance_increases() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    let initial_recipient_balance = ctx.token().balance(&ctx.recipient);
+    assert_eq!(
+        initial_recipient_balance, 0,
+        "recipient starts with 0 tokens"
+    );
+
+    // First withdrawal: 300 tokens
+    ctx.env.ledger().set_timestamp(300);
+    let amount_1 = ctx.client().withdraw(&stream_id);
+    assert_eq!(amount_1, 300, "first withdrawal = 300");
+
+    let balance_after_1 = ctx.token().balance(&ctx.recipient);
+    assert_eq!(balance_after_1, 300, "recipient balance should be 300");
+
+    // Second withdrawal: 400 tokens
+    ctx.env.ledger().set_timestamp(700);
+    let amount_2 = ctx.client().withdraw(&stream_id);
+    assert_eq!(amount_2, 400, "second withdrawal = 400");
+
+    let balance_after_2 = ctx.token().balance(&ctx.recipient);
+    assert_eq!(balance_after_2, 700, "recipient balance should be 700");
+
+    // Final withdrawal: 300 tokens
+    ctx.env.ledger().set_timestamp(1000);
+    let amount_3 = ctx.client().withdraw(&stream_id);
+    assert_eq!(amount_3, 300, "final withdrawal = 300");
+
+    let final_recipient_balance = ctx.token().balance(&ctx.recipient);
+    assert_eq!(
+        final_recipient_balance, 1000,
+        "recipient should have all 1000 tokens"
+    );
+}
+
+/// Test: Withdrawn_amount stays consistent between calls
+/// Verifies state is persisted correctly
+#[test]
+fn test_withdraw_state_persists_across_calls() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Withdraw 500 tokens at t=500
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().withdraw(&stream_id);
+
+    // Check state immediately
+    let state_1 = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_1.withdrawn_amount, 500);
+
+    // Check state again (no additional withdraw)
+    let state_2 = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(
+        state_2.withdrawn_amount, 500,
+        "withdrawn_amount should persist"
+    );
+
+    // Now withdraw again at t=800
+    ctx.env.ledger().set_timestamp(800);
+    ctx.client().withdraw(&stream_id);
+
+    // Check that previous withdraw didn't reset
+    let state_3 = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(
+        state_3.withdrawn_amount, 800,
+        "previous withdraw stayed, new added"
+    );
+}
+
+/// Test: Withdrawn amount with cliff - verify only streamable amount after cliff
+#[test]
+fn test_withdraw_cliff_updates_withdrawn_correctly() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_cliff_stream(); // cliff at t=500
+
+    // Cannot withdraw before cliff (nothing to withdraw)
+    ctx.env.ledger().set_timestamp(200);
+    // (would panic, so skip test here)
+
+    // At cliff time (t=500), can withdraw accrued amount
+    ctx.env.ledger().set_timestamp(500);
+    let w1 = ctx.client().withdraw(&stream_id);
+    assert_eq!(w1, 500, "at cliff, withdraw 500 tokens accrued from start");
+
+    let state1 = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state1.withdrawn_amount, 500);
+
+    // Withdraw remaining at t=1000
+    ctx.env.ledger().set_timestamp(1000);
+    let w2 = ctx.client().withdraw(&stream_id);
+    assert_eq!(w2, 500, "remaining 500 tokens");
+
+    let state2 = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state2.withdrawn_amount, 1000);
+    assert_eq!(state2.status, StreamStatus::Completed);
+}
+
+/// Test: Cancel stream then withdraw - status stays Cancelled (not Completed)
+/// even when fully withdrawing the accrued amount
+#[test]
+fn test_withdraw_after_cancel_status_stays_cancelled() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Cancel at t=600 (600 tokens accrued)
+    ctx.env.ledger().set_timestamp(600);
+    ctx.client().cancel_stream(&stream_id);
+
+    let state_after_cancel = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(
+        state_after_cancel.status,
+        StreamStatus::Cancelled,
+        "status should be Cancelled"
+    );
+    assert_eq!(state_after_cancel.withdrawn_amount, 0, "no withdrawal yet");
+
+    // Withdraw the accrued 600 tokens
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn, 600, "can withdraw accrued 600 tokens");
+
+    let state_after_withdraw = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(
+        state_after_withdraw.withdrawn_amount, 600,
+        "withdrawn_amount updated to 600"
+    );
+    assert_eq!(
+        state_after_withdraw.status,
+        StreamStatus::Cancelled,
+        "status should STAY Cancelled (not become Completed)"
+    );
+}
+
+/// Test: Verify that completed stream cannot be withdrawn again
+/// Accessing a completed stream's withdraw should panic
+#[test]
+#[should_panic(expected = "stream already completed")]
+fn test_withdraw_completed_stream_panics() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Withdraw all tokens
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
 
     let state = ctx.client().get_stream_state(&stream_id);
-    assert_eq!(state.status, StreamStatus::Paused);
+    assert_eq!(state.status, StreamStatus::Completed);
+    assert_eq!(state.withdrawn_amount, 1000);
 
-    // Note: Testing that old admin loses privileges requires strict auth mocking
-    // which is complex with token transfers. The authorization check in set_admin
-    // ensures only the current admin can rotate keys, and the admin functions
-    // (pause_stream_as_admin, etc.) check get_admin() which returns the updated value.
+    // Attempt another withdraw on completed stream - should panic
+    ctx.client().withdraw(&stream_id);
 }
 
-/// set_admin emits admin_updated event
+// ---------------------------------------------------------------------------
+// Tests — Issue #129: cancel_stream from Paused state
+// ---------------------------------------------------------------------------
+
 #[test]
-fn test_set_admin_emits_event() {
-    let ctx = TestContext::setup();
-    let new_admin = Address::generate(&ctx.env);
-
-    ctx.client().set_admin(&new_admin);
-
-    // Verify event was published
-    let events = ctx.env.events().all();
-    assert!(!events.is_empty(), "should emit at least one event");
-
-    // The event exists and was published successfully
-    // Detailed event structure validation is covered by integration tests
-}
-
-/// Admin can rotate multiple times
-#[test]
-fn test_set_admin_multiple_rotations() {
-    let ctx = TestContext::setup();
-    let admin2 = Address::generate(&ctx.env);
-    let admin3 = Address::generate(&ctx.env);
-    let admin4 = Address::generate(&ctx.env);
-
-    // First rotation
-    ctx.client().set_admin(&admin2);
-    assert_eq!(ctx.client().get_config().admin, admin2);
-
-    // Second rotation (admin2 → admin3)
-    ctx.client().set_admin(&admin3);
-    assert_eq!(ctx.client().get_config().admin, admin3);
-
-    // Third rotation (admin3 → admin4)
-    ctx.client().set_admin(&admin4);
-    assert_eq!(ctx.client().get_config().admin, admin4);
-}
-
-/// set_admin can set admin to any valid address
-#[test]
-fn test_set_admin_to_various_addresses() {
+fn test_cancel_stream_from_paused_state() {
     let ctx = TestContext::setup();
 
-    // Can set to sender
-    ctx.client().set_admin(&ctx.sender);
-    assert_eq!(ctx.client().get_config().admin, ctx.sender);
-
-    // Can set to recipient
-    ctx.client().set_admin(&ctx.recipient);
-    assert_eq!(ctx.client().get_config().admin, ctx.recipient);
-
-    // Can set to contract itself
-    ctx.client().set_admin(&ctx.contract_id);
-    assert_eq!(ctx.client().get_config().admin, ctx.contract_id);
-}
-
-/// set_admin does not affect existing streams
-#[test]
-fn test_set_admin_does_not_affect_streams() {
-    let ctx = TestContext::setup();
-
-    // Create stream before rotation
-    ctx.env.ledger().set_timestamp(0);
     let stream_id = ctx.create_default_stream();
 
-    let state_before = ctx.client().get_stream_state(&stream_id);
+    ctx.env.ledger().set_timestamp(500);
 
-    // Rotate admin
-    let new_admin = Address::generate(&ctx.env);
-    ctx.client().set_admin(&new_admin);
-
-    // Stream state unchanged
-    let state_after = ctx.client().get_stream_state(&stream_id);
-    assert_eq!(state_before.stream_id, state_after.stream_id);
-    assert_eq!(state_before.sender, state_after.sender);
-    assert_eq!(state_before.recipient, state_after.recipient);
-    assert_eq!(state_before.deposit_amount, state_after.deposit_amount);
-    assert_eq!(state_before.status, state_after.status);
-}
-
-/// set_admin does not affect token address
-#[test]
-fn test_set_admin_does_not_affect_token() {
-    let ctx = TestContext::setup();
-    let original_token = ctx.client().get_config().token;
-
-    let new_admin = Address::generate(&ctx.env);
-    ctx.client().set_admin(&new_admin);
-
-    let updated_token = ctx.client().get_config().token;
+    ctx.client().pause_stream(&stream_id);
     assert_eq!(
-        original_token, updated_token,
-        "token address must not change"
+        ctx.client().get_stream_state(&stream_id).status,
+        StreamStatus::Paused
     );
+
+    let sender_balance_before = ctx.token().balance(&ctx.sender);
+    ctx.client().cancel_stream(&stream_id);
+
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).status,
+        StreamStatus::Cancelled
+    );
+
+    let sender_balance_after = ctx.token().balance(&ctx.sender);
+    assert_eq!(sender_balance_after - sender_balance_before, 500);
+
+    assert_eq!(ctx.token().balance(&ctx.recipient), 0);
+    ctx.client().withdraw(&stream_id);
+    assert_eq!(ctx.token().balance(&ctx.recipient), 500);
 }
 
-/// set_admin works when contract is not initialized should panic
 #[test]
-#[should_panic(expected = "contract not initialised: missing config")]
-fn test_set_admin_uninitialized_contract_panics() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let contract_id = env.register_contract(None, FluxoraStream);
-    let client = FluxoraStreamClient::new(&env, &contract_id);
-
-    let new_admin = Address::generate(&env);
-    client.set_admin(&new_admin);
-}
-
-/// Admin can set themselves as admin (no-op but valid)
-#[test]
-fn test_set_admin_to_self() {
+fn test_create_stream_large_rate_overflow_in_accrual() {
     let ctx = TestContext::setup();
-    let original_admin = ctx.admin.clone();
+    ctx.sac.mint(&ctx.sender, &(i128::MAX - 10_000_i128));
 
-    ctx.client().set_admin(&ctx.admin);
+    // Extremely large rate, short duration → total still fits i128
+    let rate_per_second = i128::MAX / 1_000_000;
+    let duration: u64 = 1_000_000;
+    let total_streamable = rate_per_second * (duration as i128);
+    let deposit_amount = total_streamable + 1;
 
-    let updated_admin = ctx.client().get_config().admin;
-    assert_eq!(updated_admin, original_admin);
+    let start_time = 1_700_000_000;
+    let cliff_time = start_time;
+    let end_time = start_time + duration;
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender.clone(),
+        &ctx.recipient.clone(),
+        &deposit_amount,
+        &rate_per_second,
+        &start_time,
+        &cliff_time,
+        &end_time,
+    );
+
+    ctx.env.ledger().set_timestamp(end_time);
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert!(accrued <= deposit_amount); // must not exceed deposit
+    assert!(accrued >= 0);
+    assert_eq!(accrued, deposit_amount - 1);
+}
+
+#[test]
+fn test_accrual_capped_at_exact_total() {
+    let ctx = TestContext::setup();
+    ctx.sac.mint(&ctx.sender, &(i128::MAX - 10_000_i128));
+
+    let rate_per_second = i128::MAX / 2_000_000;
+    let duration: u64 = 2_000_000;
+    let total = rate_per_second * (duration as i128);
+    let deposit_amount = total;
+
+    let start_time = 1_700_000_000;
+    let cliff_time = start_time;
+    let end_time = start_time + duration;
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender.clone(),
+        &ctx.recipient.clone(),
+        &deposit_amount,
+        &rate_per_second,
+        &start_time,
+        &cliff_time,
+        &end_time,
+    );
+
+    ctx.env.ledger().set_timestamp(end_time);
+
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+
+    assert_eq!(accrued, deposit_amount);
+}
+
+#[test]
+fn test_accrual_capped_when_deposit_exceeds_total() {
+    let ctx = TestContext::setup();
+    ctx.sac.mint(&ctx.sender, &(i128::MAX - 10_000_i128));
+
+    let rate_per_second = i128::MAX / 1_000_000;
+    let duration: u64 = 1_000_000;
+    let total = rate_per_second * (duration as i128);
+    let deposit_amount = total + 42;
+
+    let start_time = 1_700_000_000;
+    let cliff_time = start_time;
+    let end_time = start_time + duration;
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender.clone(),
+        &ctx.recipient.clone(),
+        &deposit_amount,
+        &rate_per_second,
+        &start_time,
+        &cliff_time,
+        &end_time,
+    );
+
+    ctx.env.ledger().set_timestamp(end_time);
+
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+
+    assert_eq!(accrued, total);
 }

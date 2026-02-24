@@ -2,7 +2,9 @@
 
 mod accrual;
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, panic_with_error, symbol_short, token, Address, Env,
+};
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -30,6 +32,7 @@ pub enum StreamStatus {
 #[repr(u32)]
 pub enum ContractError {
     StreamNotFound = 1,
+    InvalidState = 2,
 }
 
 #[contracttype]
@@ -53,6 +56,7 @@ pub struct Stream {
     pub end_time: u64,
     pub withdrawn_amount: i128,
     pub status: StreamStatus,
+    pub cancelled_at: Option<u64>,
 }
 
 /// Namespace for all contract storage keys.
@@ -284,6 +288,7 @@ impl FluxoraStream {
             end_time,
             withdrawn_amount: 0,
             status: StreamStatus::Active,
+            cancelled_at: None,
         };
 
         save_stream(&env, &stream);
@@ -440,11 +445,7 @@ impl FluxoraStream {
     pub fn cancel_stream(env: Env, stream_id: u64) -> Result<(), ContractError> {
         let mut stream = load_stream(&env, stream_id)?;
         Self::require_sender_or_admin(&env, &stream.sender);
-
-        assert!(
-            stream.status == StreamStatus::Active || stream.status == StreamStatus::Paused,
-            "stream must be active or paused to cancel"
-        );
+        Self::require_cancellable_status(&env, stream.status);
 
         let accrued = Self::calculate_accrued(env.clone(), stream_id)?;
         let unstreamed = stream.deposit_amount - accrued;
@@ -457,6 +458,10 @@ impl FluxoraStream {
             let token_client = token::Client::new(&env, &get_token(&env));
             token_client.transfer(&env.current_contract_address(), &stream.sender, &unstreamed);
         }
+
+        stream.status = StreamStatus::Cancelled;
+        stream.cancelled_at = Some(env.ledger().timestamp());
+        save_stream(&env, &stream);
 
         env.events().publish(
             (symbol_short!("cancelled"), stream_id),
@@ -569,15 +574,20 @@ impl FluxoraStream {
 
     /// Calculate the total amount accrued to the recipient at the current time.
     ///
-    /// Computes how many tokens have been earned by the recipient based on time elapsed
-    /// since the stream started. This is a read-only view function that does not modify
-    /// state or require authorization.
+    /// # Behaviour by status
     ///
-    /// # Parameters
-    /// - `stream_id`: Unique identifier of the stream to query
+    /// | Status      | Return value                                         |
+    /// |-------------|------------------------------------------------------|
+    /// | `Active`    | `min((now - start) × rate, deposit_amount)`          |
+    /// | `Paused`    | Same time-based formula (accrual is not paused)      |
+    /// | `Completed` | `deposit_amount` — all tokens were accrued/withdrawn |
+    /// | `Cancelled` | Final accrued at cancellation timestamp (frozen value) |
     ///
-    /// # Returns
-    /// - `i128`: Total accrued amount in tokens (not the withdrawable amount)
+    /// ## Rationale for `Cancelled`
+    /// On cancellation, unstreamed tokens are refunded immediately to the sender.
+    /// The recipient can claim only what was already accrued at cancellation time.
+    /// Returning a frozen final accrued value keeps `calculate_accrued` consistent
+    /// with contract balances and prevents post-cancel time growth.
     ///
     /// # Calculation
     /// - Before `cliff_time`: returns 0 (no accrual before cliff)
@@ -592,7 +602,7 @@ impl FluxoraStream {
     /// - No authorization required (public information)
     /// - Returns total accrued, not withdrawable amount
     /// - To get withdrawable amount: `calculate_accrued() - stream.withdrawn_amount`
-    /// - Accrual is time-based and unaffected by stream status (Active, Paused, etc.)
+    /// - Active/Paused streams accrue by current time; Completed/Cancelled are deterministic
     /// - Useful for UIs to show real-time accrual without transactions
     ///
     /// # Examples
@@ -601,9 +611,24 @@ impl FluxoraStream {
     /// - At t=500: returns 500 (at cliff, accrual from start_time)
     /// - At t=800: returns 800
     /// - At t=1500: returns 1000 (capped at deposit_amount)
+    /// ## Rationale for `Completed`
+    /// When a stream reaches `Completed`, `withdrawn_amount == deposit_amount`.
+    /// There is no further accrual possible. Returning `deposit_amount` is the
+    /// deterministic, timestamp-independent answer for any UI or downstream caller.
     pub fn calculate_accrued(env: Env, stream_id: u64) -> Result<i128, ContractError> {
         let stream = load_stream(&env, stream_id)?;
-        let now = env.ledger().timestamp();
+
+        if stream.status == StreamStatus::Completed {
+            return Ok(stream.deposit_amount);
+        }
+
+        let now = if stream.status == StreamStatus::Cancelled {
+            stream
+                .cancelled_at
+                .expect("cancelled stream missing cancelled_at timestamp")
+        } else {
+            env.ledger().timestamp()
+        };
 
         Ok(accrual::calculate_accrued_amount(
             stream.start_time,
@@ -731,6 +756,12 @@ impl FluxoraStream {
         // Only the sender can manage their own stream via these paths.
         // Admin overrides are handled by the 'as_admin' specific functions.
         sender.require_auth();
+    }
+
+    fn require_cancellable_status(env: &Env, status: StreamStatus) {
+        if status != StreamStatus::Active && status != StreamStatus::Paused {
+            panic_with_error!(env, ContractError::InvalidState);
+        }
     }
 }
 
