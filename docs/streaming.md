@@ -48,6 +48,77 @@ stateDiagram-v2
     Completed --> [*]
 ```
 
+### Sequence Diagram
+
+The following diagram shows the full create → withdraw flow, including optional pause/resume and cancel paths.
+
+```mermaid
+sequenceDiagram
+    participant Sender
+    participant Contract as FluxoraStream
+    participant Token as USDC Token
+    participant Recipient
+
+    Note over Sender, Recipient: 1. Stream Creation
+
+    Sender ->> Contract: create_stream(sender, recipient, deposit_amount, rate_per_second, start_time, cliff_time, end_time)
+    Contract ->> Contract: require_auth(sender)<br/>validate params
+    Contract ->> Token: transfer(sender → contract, deposit_amount)
+    Token -->> Contract: OK
+    Contract -->> Sender: stream_id
+    Note right of Contract: Event: ("created", stream_id) → deposit_amount
+
+    Note over Sender, Recipient: 2. Cliff Period (no withdrawals)
+
+    Recipient ->> Contract: withdraw(stream_id)
+    Contract --x Recipient: panic: "nothing to withdraw"
+
+    Note over Sender, Recipient: 3. After Cliff — Partial Withdrawal
+
+    Recipient ->> Contract: withdraw(stream_id)
+    Contract ->> Contract: require_auth(recipient)<br/>calculate_accrued() − withdrawn_amount
+    Contract ->> Token: transfer(contract → recipient, withdrawable)
+    Token -->> Contract: OK
+    Contract -->> Recipient: withdrawable
+    Note right of Contract: Event: ("withdrew", stream_id) → withdrawable
+
+    Note over Sender, Recipient: 4. Optional — Pause / Resume
+
+    Sender ->> Contract: pause_stream(stream_id)
+    Contract ->> Contract: require_auth(sender)<br/>status = Paused
+    Contract -->> Sender: OK
+    Note right of Contract: Event: ("paused", stream_id)
+
+    Recipient ->> Contract: withdraw(stream_id)
+    Contract --x Recipient: panic: "cannot withdraw from paused stream"
+
+    Sender ->> Contract: resume_stream(stream_id)
+    Contract ->> Contract: require_auth(sender)<br/>status = Active
+    Contract -->> Sender: OK
+    Note right of Contract: Event: ("resumed", stream_id)
+
+    Note over Sender, Recipient: 5a. Happy Path — Complete Withdrawal
+
+    Recipient ->> Contract: withdraw(stream_id)
+    Contract ->> Contract: require_auth(recipient)<br/>withdrawable = deposit_amount − withdrawn_amount
+    Contract ->> Token: transfer(contract → recipient, withdrawable)
+    Token -->> Contract: OK
+    Contract ->> Contract: status = Completed
+    Contract -->> Recipient: withdrawable
+    Note right of Contract: Event: ("withdrew", stream_id) → withdrawable
+
+    Note over Sender, Recipient: 5b. Alternative — Cancellation
+
+    Sender ->> Contract: cancel_stream(stream_id)
+    Contract ->> Contract: require_auth(sender)<br/>calculate unstreamed refund
+    Contract ->> Contract: status = Cancelled
+    Contract ->> Token: transfer(contract → sender, unstreamed)
+    Token -->> Contract: OK
+    Contract -->> Sender: OK
+    Note right of Contract: Event: ("cancelled", stream_id)
+    Note over Recipient: Recipient can still withdraw<br/>accrued amount before cancellation
+```
+
 ---
 
 ## 2. Accrual Formula
