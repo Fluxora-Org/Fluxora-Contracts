@@ -6180,3 +6180,76 @@ fn test_create_streams_batch_strict_auth() {
     let stream_ids = ctx.client().create_streams(&ctx.sender, &streams);
     assert_eq!(stream_ids.len(), 2);
 }
+
+// ---------------------------------------------------------------------------
+// Tests — set_admin (Issue #133)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_set_admin_emits_event() {
+    let ctx = TestContext::setup();
+    let new_admin = Address::generate(&ctx.env);
+
+    ctx.client().set_admin(&new_admin);
+
+    let events = ctx.env.events().all();
+    let last_event = events.last().expect("expected at least one event");
+
+    // Check event topic: (Symbol::new(&env, "AdminUpdated"),)
+    assert_eq!(
+        last_event.0,
+        ctx.contract_id
+    );
+    assert_eq!(
+        last_event.1.get(0).unwrap(),
+        Symbol::new(&ctx.env, "AdminUpdated").into_val(&ctx.env)
+    );
+
+    // Check event data: (old_admin, new_admin)
+    let data: (Address, Address) = last_event.2.into_val(&ctx.env);
+    assert_eq!(data.0, ctx.admin);
+    assert_eq!(data.1, new_admin);
+
+    // Verify config is updated
+    let config = ctx.client().get_config();
+    assert_eq!(config.admin, new_admin);
+}
+
+#[test]
+#[should_panic] // Only current admin can update admin
+fn test_set_admin_unauthorized_fails() {
+    let ctx = TestContext::setup_strict();
+    let non_admin = Address::generate(&ctx.env);
+    let new_admin = Address::generate(&ctx.env);
+
+    // Mock non_admin auth
+    ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &non_admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "set_admin",
+            args: (new_admin,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    ctx.client().set_admin(&new_admin);
+}
+
+#[test]
+fn test_new_admin_can_perform_admin_ops() {
+    let ctx = TestContext::setup();
+    let new_admin = Address::generate(&ctx.env);
+
+    // Switch admin
+    ctx.client().set_admin(&new_admin);
+
+    // Create a stream to test admin ops (pause)
+    let stream_id = ctx.create_default_stream();
+
+    // New admin should be able to pause as admin
+    ctx.client().pause_stream_as_admin(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Paused);
+}
