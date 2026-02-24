@@ -5826,6 +5826,7 @@ fn test_withdraw_completed_stream_panics() {
 fn test_cancel_stream_from_paused_state() {
     let ctx = TestContext::setup();
 
+    // 1. Create a 1000 token / 1000 second stream
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(500);
@@ -5839,11 +5840,13 @@ fn test_cancel_stream_from_paused_state() {
     let sender_balance_before = ctx.token().balance(&ctx.sender);
     ctx.client().cancel_stream(&stream_id);
 
+    // Verify it changed to Cancelled
     assert_eq!(
         ctx.client().get_stream_state(&stream_id).status,
         StreamStatus::Cancelled
     );
 
+    // 5. Verify refund (Unstreamed = 500)
     let sender_balance_after = ctx.token().balance(&ctx.sender);
     assert_eq!(sender_balance_after - sender_balance_before, 500);
 
