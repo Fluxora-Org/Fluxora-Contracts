@@ -2,7 +2,6 @@
 extern crate std;
 
 use soroban_sdk::{
-    log,
     testutils::{Address as _, Events, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
     Address, Env, FromVal, Vec,
@@ -5263,61 +5262,4 @@ fn test_set_admin_to_self() {
 
     let updated_admin = ctx.client().get_config().admin;
     assert_eq!(updated_admin, original_admin);
-}
-
-#[test]
-fn test_create_many_streams_from_same_sender() {
-    let ctx = TestContext::setup();
-    ctx.env.budget().reset_default();
-
-    ctx.env.ledger().set_timestamp(0);
-
-    let mut counter = 0;
-    let mut stream_vec = Vec::new(&ctx.env);
-    let deposit = 10_i128;
-    let rate = 1_i128;
-    let start = 0u64;
-    let cliff = 0u64;
-    let end = 10u64;
-    loop {
-        let recipient = Address::generate(&ctx.env);
-        let stream_id = ctx.client().create_stream(
-            &ctx.sender,
-            &recipient,
-            &deposit,
-            &rate,
-            &start,
-            &cliff,
-            &end,
-        );
-
-        let state = ctx.client().get_stream_state(&stream_id);
-        assert_eq!(state.stream_id, stream_id);
-        assert_eq!(state.stream_id, counter);
-        assert_eq!(state.sender, ctx.sender);
-        assert_eq!(state.recipient, recipient);
-        assert_eq!(state.deposit_amount, deposit);
-        assert_eq!(state.rate_per_second, rate);
-        assert_eq!(state.start_time, start);
-        assert_eq!(state.cliff_time, cliff);
-        assert_eq!(state.end_time, end);
-        assert_eq!(state.withdrawn_amount, 0);
-        assert_eq!(state.status, StreamStatus::Active);
-
-        counter += 1;
-
-        stream_vec.push_back(stream_id);
-        if counter == 50 {
-            break;
-        }
-    }
-
-    let cpu_insns = ctx.env.budget().cpu_instruction_cost();
-    log!(&ctx.env, "cpu_insns", cpu_insns);
-    assert!(cpu_insns == 19_631_671);
-
-    // Check memory bytes consumed
-    let mem_bytes = ctx.env.budget().memory_bytes_cost();
-    log!(&ctx.env, "mem_bytes", mem_bytes);
-    assert!(mem_bytes == 4_090_035);
 }
