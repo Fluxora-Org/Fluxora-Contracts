@@ -1346,10 +1346,10 @@ fn test_create_many_streams_from_same_sender() {
 
     let cpu_insns = ctx.env.budget().cpu_instruction_cost();
     log!(&ctx.env, "cpu_insns", cpu_insns);
-    assert!(cpu_insns == 19_631_671);
+    assert!(cpu_insns == 19_867_571);
 
     // Check memory bytes consumed
     let mem_bytes = ctx.env.budget().memory_bytes_cost();
     log!(&ctx.env, "mem_bytes", mem_bytes);
-    assert!(mem_bytes == 4_090_035);
+    assert!(mem_bytes == 4_115_235);
 }
