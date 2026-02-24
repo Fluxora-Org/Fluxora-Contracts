@@ -205,14 +205,20 @@ fn withdraw_accrued_amount_updates_balances_and_state() {
     assert_eq!(ctx.token.balance(&ctx.contract_id), 750);
 }
 
+/// Test withdraw before cliff returns 0 (idempotent behavior).
+/// Verifies no transfer, no state change when withdrawable is zero.
 #[test]
-#[should_panic(expected = "nothing to withdraw")]
-fn withdraw_before_cliff_panics() {
+fn withdraw_before_cliff_returns_zero() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_stream_with_cliff(500);
 
     ctx.env.ledger().set_timestamp(100);
-    ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn, 0, "should return 0 before cliff");
+
+    // Verify no state change
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 0);
 }
 
 #[test]
