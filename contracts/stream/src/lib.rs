@@ -328,6 +328,89 @@ impl FluxoraStream {
 }
 
 // ---------------------------------------------------------------------------
+// Internal Helpers
+// ---------------------------------------------------------------------------
+
+impl FluxoraStream {
+    fn validate_stream_params(
+        env: &Env,
+        sender: &Address,
+        recipient: &Address,
+        deposit_amount: i128,
+        rate_per_second: i128,
+        start_time: u64,
+        cliff_time: u64,
+        end_time: u64,
+    ) {
+        // Validate positive amounts (#35)
+        assert!(deposit_amount > 0, "deposit_amount must be positive");
+        assert!(rate_per_second > 0, "rate_per_second must be positive");
+
+        // Validate sender != recipient (#35)
+        assert!(
+            sender != recipient,
+            "sender and recipient must be different"
+        );
+
+        // Validate time constraints
+        assert!(start_time < end_time, "start_time must be before end_time");
+        assert!(
+            start_time >= env.ledger().timestamp(),
+            "start_time must not be in the past"
+        );
+        assert!(
+            cliff_time >= start_time && cliff_time <= end_time,
+            "cliff_time must be within [start_time, end_time]"
+        );
+
+        // Validate deposit covers total streamable amount (#34)
+        let duration = (end_time - start_time) as i128;
+        let total_streamable = rate_per_second
+            .checked_mul(duration)
+            .expect("overflow calculating total streamable amount");
+        assert!(
+            deposit_amount >= total_streamable,
+            "deposit_amount must cover total streamable amount (rate * duration)"
+        );
+    }
+
+    fn persist_new_stream(
+        env: &Env,
+        sender: Address,
+        recipient: Address,
+        deposit_amount: i128,
+        rate_per_second: i128,
+        start_time: u64,
+        cliff_time: u64,
+        end_time: u64,
+    ) -> u64 {
+        let stream_id = get_stream_count(env);
+        set_stream_count(env, stream_id + 1);
+
+        let stream = Stream {
+            stream_id,
+            sender,
+            recipient,
+            deposit_amount,
+            rate_per_second,
+            start_time,
+            cliff_time,
+            end_time,
+            withdrawn_amount: 0,
+            status: StreamStatus::Active,
+            cancelled_at: None,
+        };
+
+        save_stream(env, &stream);
+
+        env.events()
+            .publish((symbol_short!("created"), stream_id), deposit_amount);
+
+        stream_id
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Contract Implementation
 // ---------------------------------------------------------------------------
 

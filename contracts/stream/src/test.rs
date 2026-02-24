@@ -7,7 +7,7 @@ use soroban_sdk::{
     Address, Env, FromVal, IntoVal, Symbol, TryFromVal, Vec,
 };
 
-use crate::{FluxoraStream, FluxoraStreamClient, StreamEvent, StreamStatus};
+use crate::{CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamEvent, StreamStatus};
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -7007,4 +7007,192 @@ fn test_create_stream_past_start_no_token_transfer() {
         sender_balance_before,
         "sender balance must not change on validation failure"
     );
+}
+
+// Tests — Batch create_streams
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_create_streams_batch_success() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Initial balances
+    let initial_sender_balance = ctx.token().balance(&ctx.sender);
+    let initial_contract_balance = ctx.token().balance(&ctx.contract_id);
+
+    // Create 3 streams in one batch
+    let params1 = CreateStreamParams {
+        recipient: Address::generate(&ctx.env),
+        deposit_amount: 1000,
+        rate_per_second: 1,
+        start_time: 0,
+        cliff_time: 0,
+        end_time: 1000,
+    };
+
+    let params2 = CreateStreamParams {
+        recipient: Address::generate(&ctx.env),
+        deposit_amount: 2000,
+        rate_per_second: 2,
+        start_time: 100,
+        cliff_time: 200,
+        end_time: 1100,
+    };
+
+    let params3 = CreateStreamParams {
+        recipient: Address::generate(&ctx.env),
+        deposit_amount: 3000,
+        rate_per_second: 3,
+        start_time: 500,
+        cliff_time: 500,
+        end_time: 1500,
+    };
+
+    let streams = soroban_sdk::vec![&ctx.env, params1.clone(), params2.clone(), params3.clone()];
+    let stream_ids = ctx.client().create_streams(&ctx.sender, &streams);
+
+    // Check returned IDs
+    assert_eq!(stream_ids.len(), 3);
+    assert_eq!(stream_ids.get(0).unwrap(), 0);
+    assert_eq!(stream_ids.get(1).unwrap(), 1);
+    assert_eq!(stream_ids.get(2).unwrap(), 2);
+
+    // Verify balances (6000 total tokens transferred)
+    assert_eq!(
+        ctx.token().balance(&ctx.sender),
+        initial_sender_balance - 6000
+    );
+    assert_eq!(
+        ctx.token().balance(&ctx.contract_id),
+        initial_contract_balance + 6000
+    );
+
+    // Verify stored states
+    let state1 = ctx.client().get_stream_state(&0);
+    assert_eq!(state1.deposit_amount, 1000);
+    assert_eq!(state1.recipient, params1.recipient);
+
+    let state2 = ctx.client().get_stream_state(&1);
+    assert_eq!(state2.deposit_amount, 2000);
+    assert_eq!(state2.rate_per_second, 2);
+
+    let state3 = ctx.client().get_stream_state(&2);
+    assert_eq!(state3.deposit_amount, 3000);
+    assert_eq!(state3.end_time, 1500);
+}
+
+#[test]
+#[should_panic(expected = "deposit_amount must cover total streamable amount")]
+fn test_create_streams_batch_atomic_failure() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // One valid stream, one invalid stream
+    let valid_params = CreateStreamParams {
+        recipient: Address::generate(&ctx.env),
+        deposit_amount: 1000,
+        rate_per_second: 1,
+        start_time: 0,
+        cliff_time: 0,
+        end_time: 1000,
+    };
+
+    let invalid_params = CreateStreamParams {
+        recipient: Address::generate(&ctx.env),
+        deposit_amount: 500, // Insufficient deposit (1 * 1000 = 1000 needed)
+        rate_per_second: 1,
+        start_time: 0,
+        cliff_time: 0,
+        end_time: 1000,
+    };
+
+    let streams = soroban_sdk::vec![&ctx.env, valid_params, invalid_params];
+
+    // This should panic due to the invalid parameter in the second stream.
+    // Because Soroban state changes revert on panic, the first stream won't be saved.
+    ctx.client().create_streams(&ctx.sender, &streams);
+}
+
+#[test]
+#[should_panic(expected = "sender and recipient must be different")]
+fn test_create_streams_batch_sender_recipient_panic() {
+    let ctx = TestContext::setup();
+
+    let params = CreateStreamParams {
+        recipient: ctx.sender.clone(), // Invalid: recipient == sender
+        deposit_amount: 1000,
+        rate_per_second: 1,
+        start_time: 0,
+        cliff_time: 0,
+        end_time: 1000,
+    };
+
+    let streams = soroban_sdk::vec![&ctx.env, params];
+    ctx.client().create_streams(&ctx.sender, &streams);
+}
+
+#[test]
+fn test_create_streams_batch_empty() {
+    let ctx = TestContext::setup();
+    let streams = Vec::new(&ctx.env);
+
+    let initial_balance = ctx.token().balance(&ctx.sender);
+
+    let ids = ctx.client().create_streams(&ctx.sender, &streams);
+
+    // Should return empty vec, charge no tokens, and not advance ID counter
+    assert_eq!(ids.len(), 0);
+    assert_eq!(ctx.token().balance(&ctx.sender), initial_balance);
+
+    // Next standard create_stream should get ID 0
+    let next_id = ctx.create_default_stream();
+    assert_eq!(next_id, 0);
+}
+
+#[test]
+fn test_create_streams_batch_strict_auth() {
+    let ctx = TestContext::setup_strict();
+
+    let params1 = CreateStreamParams {
+        recipient: Address::generate(&ctx.env),
+        deposit_amount: 1000,
+        rate_per_second: 1,
+        start_time: 0,
+        cliff_time: 0,
+        end_time: 1000,
+    };
+
+    let params2 = CreateStreamParams {
+        recipient: Address::generate(&ctx.env),
+        deposit_amount: 2000,
+        rate_per_second: 1,
+        start_time: 0,
+        cliff_time: 0,
+        end_time: 2000,
+    };
+
+    let streams = soroban_sdk::vec![&ctx.env, params1.clone(), params2.clone()];
+
+    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+
+    // Mock the sender's auth EXACTLY ONCE for the bulk operation
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "create_streams",
+            args: (&ctx.sender, streams.clone()).into_val(&ctx.env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &ctx.token_id,
+                fn_name: "transfer",
+                // Total deposit = 1000 + 2000 = 3000
+                args: (&ctx.sender, &ctx.contract_id, 3000_i128).into_val(&ctx.env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+
+    let stream_ids = ctx.client().create_streams(&ctx.sender, &streams);
+    assert_eq!(stream_ids.len(), 2);
 }
