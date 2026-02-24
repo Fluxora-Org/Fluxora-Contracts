@@ -1007,7 +1007,10 @@ fn integration_pause_resume_withdraw_lifecycle() {
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
-    assert_eq!(state.withdrawn_amount, 0, "no withdrawals should occur during pause");
+    assert_eq!(
+        state.withdrawn_amount, 0,
+        "no withdrawals should occur during pause"
+    );
 
     // -----------------------------------------------------------------------
     // Phase 3: Advance to t=700 while paused, verify accrual continues
@@ -1016,15 +1019,26 @@ fn integration_pause_resume_withdraw_lifecycle() {
 
     // Verify accrual continues during pause (time-based, not status-based)
     let accrued_at_700 = ctx.client().calculate_accrued(&stream_id);
-    assert_eq!(accrued_at_700, 700, "accrual must continue during pause period");
+    assert_eq!(
+        accrued_at_700, 700,
+        "accrual must continue during pause period"
+    );
 
     // Attempt to withdraw while paused — should fail
     let withdrawal_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         ctx.client().withdraw(&stream_id);
     }));
+    let err = withdrawal_result.expect_err("withdrawal should panic while stream is paused");
+    // Ensure the panic reason matches the expected paused-stream invariant
+    let panic_msg = err
+        .downcast_ref::<&str>()
+        .map(|s| *s)
+        .or_else(|| err.downcast_ref::<String>().map(|s| s.as_str()))
+        .unwrap_or("<non-string panic payload>");
     assert!(
-        withdrawal_result.is_err(),
-        "withdrawal should fail while stream is paused"
+        panic_msg.contains("cannot withdraw from paused stream"),
+        "unexpected panic message when withdrawing from paused stream: {}",
+        panic_msg
     );
 
     // Verify stream still paused and no tokens transferred
@@ -1135,7 +1149,10 @@ fn integration_multiple_pause_resume_cycles() {
 
     ctx.env.ledger().set_timestamp(1800);
     let accrued_at_1800 = ctx.client().calculate_accrued(&stream_id);
-    assert_eq!(accrued_at_1800, 1800, "accrual continues through multiple pauses");
+    assert_eq!(
+        accrued_at_1800, 1800,
+        "accrual continues through multiple pauses"
+    );
 
     ctx.client().resume_stream(&stream_id);
     let state = ctx.client().get_stream_state(&stream_id);
@@ -1448,7 +1465,11 @@ fn integration_same_sender_multiple_streams() {
     let state_2 = ctx.client().get_stream_state(&stream_id_2);
     assert_eq!(state_2.withdrawn_amount, 500);
     assert_eq!(state_2.status, StreamStatus::Completed);
-    assert_eq!(ctx.token.balance(&ctx.recipient), 800, "recipient gets 300 + 500");
+    assert_eq!(
+        ctx.token.balance(&ctx.recipient),
+        800,
+        "recipient gets 300 + 500"
+    );
 
     // Verify streams 0 and 1 are still active
     let state_0 = ctx.client().get_stream_state(&stream_id_0);
@@ -1460,16 +1481,26 @@ fn integration_same_sender_multiple_streams() {
     // === Complete stream 0 at t=1000
     ctx.env.ledger().set_timestamp(1000);
     let withdrawn_0_at_1000 = ctx.client().withdraw(&stream_id_0);
-    assert_eq!(withdrawn_0_at_1000, 700, "700 tokens remaining (1000 - 300)");
+    assert_eq!(
+        withdrawn_0_at_1000, 700,
+        "700 tokens remaining (1000 - 300)"
+    );
 
     let state_0 = ctx.client().get_stream_state(&stream_id_0);
     assert_eq!(state_0.withdrawn_amount, 1000);
     assert_eq!(state_0.status, StreamStatus::Completed);
-    assert_eq!(ctx.token.balance(&ctx.recipient), 1500, "recipient gets 800 + 700");
+    assert_eq!(
+        ctx.token.balance(&ctx.recipient),
+        1500,
+        "recipient gets 800 + 700"
+    );
 
     // === Complete stream 1 at t=1000
     let withdrawn_1_at_1000 = ctx.client().withdraw(&stream_id_1);
-    assert_eq!(withdrawn_1_at_1000, 1500, "1500 tokens remaining (2000 - 500)");
+    assert_eq!(
+        withdrawn_1_at_1000, 1500,
+        "1500 tokens remaining (2000 - 500)"
+    );
 
     let state_1 = ctx.client().get_stream_state(&stream_id_1);
     assert_eq!(state_1.withdrawn_amount, 2000);
@@ -1477,9 +1508,21 @@ fn integration_same_sender_multiple_streams() {
     assert_eq!(ctx.token.balance(&recipient2), 2000);
 
     // === Final balance verification
-    assert_eq!(ctx.token.balance(&ctx.sender), 6_500, "sender balance unchanged");
-    assert_eq!(ctx.token.balance(&ctx.recipient), 1500, "recipient total: 300+500+700");
-    assert_eq!(ctx.token.balance(&recipient2), 2000, "recipient2 total: 500+1500");
+    assert_eq!(
+        ctx.token.balance(&ctx.sender),
+        6_500,
+        "sender balance unchanged"
+    );
+    assert_eq!(
+        ctx.token.balance(&ctx.recipient),
+        1500,
+        "recipient total: 300+500+700"
+    );
+    assert_eq!(
+        ctx.token.balance(&recipient2),
+        2000,
+        "recipient2 total: 500+1500"
+    );
     assert_eq!(
         ctx.token.balance(&ctx.contract_id),
         0,
@@ -1552,7 +1595,10 @@ fn integration_same_sender_same_recipient_multiple_streams() {
         &0u64,
         &1000u64,
     );
-    assert_eq!(stream_id_1, 1, "second stream to same recipient should have id=1");
+    assert_eq!(
+        stream_id_1, 1,
+        "second stream to same recipient should have id=1"
+    );
 
     // Stream 2: 500 tokens, 1 token/sec, 0-500s (same recipient, shorter duration)
     // Rate * duration = 1 * 500 = 500 tokens (matches deposit)
@@ -1566,12 +1612,24 @@ fn integration_same_sender_same_recipient_multiple_streams() {
         &0u64,
         &500u64,
     );
-    assert_eq!(stream_id_2, 2, "third stream to same recipient should have id=2");
+    assert_eq!(
+        stream_id_2, 2,
+        "third stream to same recipient should have id=2"
+    );
 
     // === Verify distinct stream IDs
-    assert_ne!(stream_id_0, stream_id_1, "streams to same recipient must have different IDs");
-    assert_ne!(stream_id_1, stream_id_2, "streams to same recipient must have different IDs");
-    assert_ne!(stream_id_0, stream_id_2, "streams to same recipient must have different IDs");
+    assert_ne!(
+        stream_id_0, stream_id_1,
+        "streams to same recipient must have different IDs"
+    );
+    assert_ne!(
+        stream_id_1, stream_id_2,
+        "streams to same recipient must have different IDs"
+    );
+    assert_ne!(
+        stream_id_0, stream_id_2,
+        "streams to same recipient must have different IDs"
+    );
 
     // === Verify balances
     // Total deposit: 1000 + 1000 + 500 = 2500, all to same recipient
@@ -1597,35 +1655,56 @@ fn integration_same_sender_same_recipient_multiple_streams() {
 
     let state_1 = ctx.client().get_stream_state(&stream_id_1);
     assert_eq!(state_1.stream_id, 1, "stream 1 id must be 1");
-    assert_eq!(state_1.recipient, ctx.recipient, "stream 1 has same recipient");
+    assert_eq!(
+        state_1.recipient, ctx.recipient,
+        "stream 1 has same recipient"
+    );
     assert_eq!(state_1.deposit_amount, 1000);
     assert_eq!(state_1.end_time, 1000, "stream 1 ends at 1000s");
     assert_eq!(state_1.withdrawn_amount, 0);
 
     let state_2 = ctx.client().get_stream_state(&stream_id_2);
     assert_eq!(state_2.stream_id, 2, "stream 2 id must be 2");
-    assert_eq!(state_2.recipient, ctx.recipient, "stream 2 has same recipient");
+    assert_eq!(
+        state_2.recipient, ctx.recipient,
+        "stream 2 has same recipient"
+    );
     assert_eq!(state_2.deposit_amount, 500, "stream 2 deposit is 500");
-    assert_eq!(state_2.end_time, 500, "stream 2 ends at 500s (shorter duration)");
+    assert_eq!(
+        state_2.end_time, 500,
+        "stream 2 ends at 500s (shorter duration)"
+    );
     assert_eq!(state_2.withdrawn_amount, 0);
 
     // === Independent withdrawal from stream 1 at t=200
     ctx.env.ledger().set_timestamp(200);
     let withdrawn_1_at_200 = ctx.client().withdraw(&stream_id_1);
-    assert_eq!(withdrawn_1_at_200, 200, "stream 1 accrues 200 tokens by t=200");
+    assert_eq!(
+        withdrawn_1_at_200, 200,
+        "stream 1 accrues 200 tokens by t=200"
+    );
 
     // Verify stream 1 state after withdrawal
     let state_1 = ctx.client().get_stream_state(&stream_id_1);
-    assert_eq!(state_1.withdrawn_amount, 200, "stream 1 withdrawn_amount = 200");
+    assert_eq!(
+        state_1.withdrawn_amount, 200,
+        "stream 1 withdrawn_amount = 200"
+    );
     assert_eq!(state_1.status, StreamStatus::Active);
 
     // Verify streams 0 and 2 are unaffected by stream 1 withdrawal
     let state_0 = ctx.client().get_stream_state(&stream_id_0);
-    assert_eq!(state_0.withdrawn_amount, 0, "stream 0 unaffected by stream 1 withdrawal");
+    assert_eq!(
+        state_0.withdrawn_amount, 0,
+        "stream 0 unaffected by stream 1 withdrawal"
+    );
     assert_eq!(state_0.status, StreamStatus::Active);
 
     let state_2 = ctx.client().get_stream_state(&stream_id_2);
-    assert_eq!(state_2.withdrawn_amount, 0, "stream 2 unaffected by stream 1 withdrawal");
+    assert_eq!(
+        state_2.withdrawn_amount, 0,
+        "stream 2 unaffected by stream 1 withdrawal"
+    );
     assert_eq!(state_2.status, StreamStatus::Active);
 
     // Recipient receives 200 from stream 1
@@ -1643,11 +1722,17 @@ fn integration_same_sender_same_recipient_multiple_streams() {
 
     // Verify streams 0 and 1 are still Active and independent
     let state_0 = ctx.client().get_stream_state(&stream_id_0);
-    assert_eq!(state_0.withdrawn_amount, 0, "stream 0 still has 0 withdrawn");
+    assert_eq!(
+        state_0.withdrawn_amount, 0,
+        "stream 0 still has 0 withdrawn"
+    );
     assert_eq!(state_0.status, StreamStatus::Active);
 
     let state_1 = ctx.client().get_stream_state(&stream_id_1);
-    assert_eq!(state_1.withdrawn_amount, 200, "stream 1 still has 200 withdrawn");
+    assert_eq!(
+        state_1.withdrawn_amount, 200,
+        "stream 1 still has 200 withdrawn"
+    );
     assert_eq!(state_1.status, StreamStatus::Active);
 
     // Recipient now has 200 + 500 = 700
@@ -1668,7 +1753,10 @@ fn integration_same_sender_same_recipient_multiple_streams() {
     // === Complete stream 1 at t=1000
     ctx.env.ledger().set_timestamp(1000);
     let withdrawn_1_at_1000 = ctx.client().withdraw(&stream_id_1);
-    assert_eq!(withdrawn_1_at_1000, 800, "stream 1 has 800 remaining (1000-200)");
+    assert_eq!(
+        withdrawn_1_at_1000, 800,
+        "stream 1 has 800 remaining (1000-200)"
+    );
 
     let state_1 = ctx.client().get_stream_state(&stream_id_1);
     assert_eq!(state_1.withdrawn_amount, 1000);
@@ -1679,18 +1767,29 @@ fn integration_same_sender_same_recipient_multiple_streams() {
 
     // === Complete stream 0 at t=1000
     let withdrawn_0_at_1000 = ctx.client().withdraw(&stream_id_0);
-    assert_eq!(withdrawn_0_at_1000, 400, "stream 0 has 400 remaining (1000-600)");
+    assert_eq!(
+        withdrawn_0_at_1000, 400,
+        "stream 0 has 400 remaining (1000-600)"
+    );
 
     let state_0 = ctx.client().get_stream_state(&stream_id_0);
     assert_eq!(state_0.withdrawn_amount, 1000);
     assert_eq!(state_0.status, StreamStatus::Completed);
 
     // Recipient now has 2100 + 400 = 2500
-    assert_eq!(ctx.token.balance(&ctx.recipient), 2500, "recipient total from all streams");
+    assert_eq!(
+        ctx.token.balance(&ctx.recipient),
+        2500,
+        "recipient total from all streams"
+    );
 
     // === Final balance verification
     assert_eq!(ctx.token.balance(&ctx.sender), 7_500, "sender unchanged");
-    assert_eq!(ctx.token.balance(&ctx.recipient), 2500, "recipient: 200+500+600+1000=2500");
+    assert_eq!(
+        ctx.token.balance(&ctx.recipient),
+        2500,
+        "recipient: 200+500+600+1000=2500"
+    );
     assert_eq!(ctx.token.balance(&ctx.contract_id), 0, "contract empty");
 
     // Verify total tokens conserved
@@ -1699,4 +1798,3 @@ fn integration_same_sender_same_recipient_multiple_streams() {
         + ctx.token.balance(&ctx.contract_id);
     assert_eq!(total, 10_000, "total tokens conserved");
 }
-

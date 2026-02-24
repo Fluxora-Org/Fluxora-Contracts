@@ -4291,12 +4291,11 @@ fn test_accrual_continues_during_pause() {
     assert_eq!(accrued_after_resume, 700);
 }
 
-
 /// Test pause stream with different sender/admin authorization
 #[test]
 fn test_pause_stream_sender_and_admin_can_pause() {
     let ctx = TestContext::setup();
-    
+
     // Create first stream for sender test
     let stream_id_1 = ctx.create_default_stream();
 
@@ -4313,7 +4312,6 @@ fn test_pause_stream_sender_and_admin_can_pause() {
     let state = ctx.client().get_stream_state(&stream_id_2);
     assert_eq!(state.status, StreamStatus::Paused);
 }
-
 
 /// Test resume stream with different sender/admin authorization
 #[test]
@@ -4538,6 +4536,9 @@ fn test_pause_resume_preserves_withdrawal_state() {
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.withdrawn_amount, 700);
+}
+
+// ---------------------------------------------------------------------------
 // Tests — stream_id generation and uniqueness
 // ---------------------------------------------------------------------------
 
