@@ -5790,3 +5790,97 @@ fn test_cancel_stream_from_paused_state() {
     ctx.client().withdraw(&stream_id);
     assert_eq!(ctx.token().balance(&ctx.recipient), 500);
 }
+
+#[test]
+fn test_create_stream_large_rate_overflow_in_accrual() {
+    let ctx = TestContext::setup();
+    ctx.sac.mint(&ctx.sender, &(i128::MAX - 10_000_i128));
+
+    // Extremely large rate, short duration → total still fits i128
+    let rate_per_second = i128::MAX / 1_000_000;
+    let duration: u64 = 1_000_000;
+    let total_streamable = rate_per_second * (duration as i128);
+    let deposit_amount = total_streamable + 1;
+
+    let start_time = 1_700_000_000;
+    let cliff_time = start_time;
+    let end_time = start_time + duration;
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender.clone(),
+        &ctx.recipient.clone(),
+        &deposit_amount,
+        &rate_per_second,
+        &start_time,
+        &cliff_time,
+        &end_time,
+    );
+
+    ctx.env.ledger().set_timestamp(end_time);
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert!(accrued <= deposit_amount); // must not exceed deposit
+    assert!(accrued >= 0);
+    assert_eq!(accrued, deposit_amount - 1);
+}
+
+#[test]
+fn test_accrual_capped_at_exact_total() {
+    let ctx = TestContext::setup();
+    ctx.sac.mint(&ctx.sender, &(i128::MAX - 10_000_i128));
+
+    let rate_per_second = i128::MAX / 2_000_000;
+    let duration: u64 = 2_000_000;
+    let total = rate_per_second * (duration as i128);
+    let deposit_amount = total;
+
+    let start_time = 1_700_000_000;
+    let cliff_time = start_time;
+    let end_time = start_time + duration;
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender.clone(),
+        &ctx.recipient.clone(),
+        &deposit_amount,
+        &rate_per_second,
+        &start_time,
+        &cliff_time,
+        &end_time,
+    );
+
+    ctx.env.ledger().set_timestamp(end_time);
+
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+
+    assert_eq!(accrued, deposit_amount);
+}
+
+#[test]
+fn test_accrual_capped_when_deposit_exceeds_total() {
+    let ctx = TestContext::setup();
+    ctx.sac.mint(&ctx.sender, &(i128::MAX - 10_000_i128));
+
+    let rate_per_second = i128::MAX / 1_000_000;
+    let duration: u64 = 1_000_000;
+    let total = rate_per_second * (duration as i128);
+    let deposit_amount = total + 42;
+
+    let start_time = 1_700_000_000;
+    let cliff_time = start_time;
+    let end_time = start_time + duration;
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender.clone(),
+        &ctx.recipient.clone(),
+        &deposit_amount,
+        &rate_per_second,
+        &start_time,
+        &cliff_time,
+        &end_time,
+    );
+
+    ctx.env.ledger().set_timestamp(end_time);
+
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+
+    assert_eq!(accrued, total);
+}
