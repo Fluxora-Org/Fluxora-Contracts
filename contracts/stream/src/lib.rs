@@ -163,7 +163,7 @@ impl FluxoraStream {
     /// # Parameters
     /// - `sender`: Address funding the stream (must authorize the transaction)
     /// - `recipient`: Address receiving the streamed tokens
-    /// - `deposit_amount`: Total tokens to deposit (must be > 0)
+    /// - `deposit_amount`: Total tokens to deposit (must be > 0 and <= i128::MAX)
     /// - `rate_per_second`: Streaming rate in tokens per second (must be > 0)
     /// - `start_time`: When streaming begins (ledger timestamp)
     /// - `cliff_time`: When tokens first become available (vesting cliff, must be in [start_time, end_time])
@@ -209,14 +209,14 @@ impl FluxoraStream {
     /// - Deposit can exceed minimum required (excess remains in contract)
     /// - Sender must have sufficient token balance and approve contract
     /// ## Stream Limits Policy
-    /// No hard upper bounds are enforced on `deposit_amount` or stream duration.
+    /// No hard upper bounds (e.g. "max 1 million tokens") are enforced on `deposit_amount`
+    /// beyond the technical limit of `i128::MAX` and the underlying token's supply.
     /// Rationale:
-    /// - Overflow in accrual math is already prevented via `checked_mul` and clamping.
-    /// - A fixed cap would require a contract upgrade to change and conflicts with
+    /// - Overflow in accrual math is already prevented via `checked_mul` and clamping (Issue #6).
+    /// - A fixed arbitrary cap would require a contract upgrade to change and conflicts with
     ///   the overflow test suite, which exercises values up to `i128::MAX`.
-    /// - Protocol-specific limits (e.g. "max 10 M USDC per stream") belong at the
-    ///   application layer (UI or an admin-gated factory contract), where business
-    ///   context is available.
+    /// - Protocol-specific or business-driven limits belong at the application layer.
+    /// - This contract remains "defense in depth" by ensuring math safety at all scales.
     ///
     /// Senders are responsible for the correctness of the values they supply.
     /// The validations above (`deposit > 0`, `rate > 0`, `deposit >= rate × duration`,
