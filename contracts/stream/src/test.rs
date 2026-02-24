@@ -6196,10 +6196,7 @@ fn test_set_admin_emits_event() {
     let last_event = events.last().expect("expected at least one event");
 
     // Check event topic: (Symbol::new(&env, "AdminUpdated"),)
-    assert_eq!(
-        last_event.0,
-        ctx.contract_id
-    );
+    assert_eq!(last_event.0, ctx.contract_id);
     assert_eq!(
         Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
         Symbol::new(&ctx.env, "AdminUpdated")

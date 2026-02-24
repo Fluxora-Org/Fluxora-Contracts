@@ -915,10 +915,8 @@ impl FluxoraStream {
         bump_instance_ttl(&env);
 
         // Emit event with old and new admin addresses
-        env.events().publish(
-            (Symbol::new(&env, "AdminUpdated"),),
-            (old_admin, new_admin),
-        );
+        env.events()
+            .publish((Symbol::new(&env, "AdminUpdated"),), (old_admin, new_admin));
     }
 
     /// Retrieve the complete state of a payment stream.
