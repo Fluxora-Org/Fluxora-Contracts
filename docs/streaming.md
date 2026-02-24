@@ -167,5 +167,5 @@ All failures use `panic!` / `assert!`. No custom error enum.
 | `"contract not initialised: missing config"` | Functions requiring config | Config missing |
 
 ## Error Reference
-For a full list of contract errors and their descriptions, see [error.md](docs/error.md).
+For a full list of contract errors and their descriptions, see [error.md](/error.md).
 
