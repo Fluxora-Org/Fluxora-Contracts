@@ -4,6 +4,7 @@ mod accrual;
 
 use soroban_sdk::{
     contract, contractimpl, contracttype, panic_with_error, symbol_short, token, Address, Env,
+    Symbol,
 };
 
 // ---------------------------------------------------------------------------
