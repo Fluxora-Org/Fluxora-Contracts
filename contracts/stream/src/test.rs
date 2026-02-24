@@ -6228,7 +6228,7 @@ fn test_set_admin_unauthorized_fails() {
         invoke: &soroban_sdk::testutils::MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "set_admin",
-            args: (new_admin,).into_val(&ctx.env),
+            args: (new_admin.clone(),).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
