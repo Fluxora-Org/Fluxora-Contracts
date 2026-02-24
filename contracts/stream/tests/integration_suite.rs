@@ -248,10 +248,10 @@ fn full_lifecycle_create_withdraw_to_completion() {
 }
 
 #[test]
-#[should_panic(expected = "stream not found")]
 fn get_stream_state_unknown_id_panics() {
     let ctx = TestContext::setup();
-    ctx.client().get_stream_state(&99);
+    let result = ctx.client().try_get_stream_state(&99);
+    assert!(result.is_err());
 }
 
 #[test]
@@ -942,4 +942,355 @@ fn integration_cancel_paused_stream() {
 
     // Verify accrued amount remains in contract
     assert_eq!(ctx.token.balance(&ctx.contract_id), 2_000);
+}
+
+/// Integration test: create stream, pause, advance time, resume, advance time, withdraw.
+/// Asserts accrual and withdrawals reflect paused period (accrual continues, withdrawals blocked).
+///
+/// Test flow:
+/// 1. Create a 1000-token stream over 1000 seconds (1 token/sec), starting at t=0
+/// 2. Advance to t=300, verify 300 tokens accrued, pause the stream
+/// 3. Advance to t=700 (400 more seconds), verify accrual continues during pause (700 total)
+/// 4. Attempt withdrawal while paused (should fail)
+/// 5. Resume stream at t=700
+/// 6. Withdraw 700 tokens accrued
+/// 7. Advance to t=1000 (end of stream)
+/// 8. Withdraw remaining 300 tokens
+/// 9. Verify stream completes and final balances are correct
+///
+/// Key assertions:
+/// - Accrual is time-based and unaffected by pause state
+/// - Withdrawals are blocked while stream is paused
+/// - After resume, withdrawals work with all accrued amounts
+/// - Total withdrawn equals deposit amount
+/// - Status transitions through Active -> Paused -> Active -> Completed
+#[test]
+fn integration_pause_resume_withdraw_lifecycle() {
+    let ctx = TestContext::setup();
+
+    // -----------------------------------------------------------------------
+    // Phase 1: Create stream (t=0)
+    // -----------------------------------------------------------------------
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Active);
+    assert_eq!(state.deposit_amount, 1000);
+    assert_eq!(state.rate_per_second, 1);
+    assert_eq!(state.withdrawn_amount, 0);
+
+    // Verify deposit transferred to contract
+    assert_eq!(ctx.token.balance(&ctx.sender), 9_000);
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 1_000);
+    assert_eq!(ctx.token.balance(&ctx.recipient), 0);
+
+    // -----------------------------------------------------------------------
+    // Phase 2: Advance to t=300 and pause
+    // -----------------------------------------------------------------------
+    ctx.env.ledger().set_timestamp(300);
+
+    // Verify 300 tokens accrued
+    let accrued_at_300 = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued_at_300, 300);
+
+    // Pause stream (sender authorization required)
+    ctx.client().pause_stream(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Paused);
+    assert_eq!(
+        state.withdrawn_amount, 0,
+        "no withdrawals should occur during pause"
+    );
+
+    // -----------------------------------------------------------------------
+    // Phase 3: Advance to t=700 while paused, verify accrual continues
+    // -----------------------------------------------------------------------
+    ctx.env.ledger().set_timestamp(700);
+
+    // Verify accrual continues during pause (time-based, not status-based)
+    let accrued_at_700 = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(
+        accrued_at_700, 700,
+        "accrual must continue during pause period"
+    );
+
+    // Attempt to withdraw while paused — should fail
+    let withdrawal_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().withdraw(&stream_id);
+    }));
+    let err = withdrawal_result.expect_err("withdrawal should panic while stream is paused");
+    // Ensure the panic reason matches the expected paused-stream invariant
+    let panic_msg = err
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| err.downcast_ref::<String>().map(|s| s.as_str()))
+        .unwrap_or("<non-string panic payload>");
+    assert!(
+        panic_msg.contains("cannot withdraw from paused stream"),
+        "unexpected panic message when withdrawing from paused stream: {}",
+        panic_msg
+    );
+
+    // Verify stream still paused and no tokens transferred
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Paused);
+    assert_eq!(state.withdrawn_amount, 0);
+    assert_eq!(ctx.token.balance(&ctx.recipient), 0);
+
+    // -----------------------------------------------------------------------
+    // Phase 4: Resume stream at t=700
+    // -----------------------------------------------------------------------
+    ctx.client().resume_stream(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Active);
+    assert_eq!(state.withdrawn_amount, 0);
+
+    // -----------------------------------------------------------------------
+    // Phase 5: Withdraw all accrued amount (700 tokens) at t=700
+    // -----------------------------------------------------------------------
+    let withdrawn_1 = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn_1, 700, "should withdraw all 700 accrued tokens");
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Active);
+    assert_eq!(state.withdrawn_amount, 700);
+
+    // Verify balances after withdrawal
+    assert_eq!(ctx.token.balance(&ctx.recipient), 700);
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 300);
+
+    // -----------------------------------------------------------------------
+    // Phase 6: Advance to t=1000 (end of stream) and withdraw remaining
+    // -----------------------------------------------------------------------
+    ctx.env.ledger().set_timestamp(1000);
+
+    // Verify 1000 tokens accrued at end
+    let accrued_at_1000 = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued_at_1000, 1000);
+
+    // Withdraw final 300 tokens (1000 - 700 already withdrawn)
+    let withdrawn_2 = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn_2, 300, "should withdraw remaining 300 tokens");
+
+    // Verify stream is now Completed
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+    assert_eq!(state.withdrawn_amount, 1000);
+
+    // Verify final balances
+    assert_eq!(ctx.token.balance(&ctx.sender), 9_000);
+    assert_eq!(ctx.token.balance(&ctx.recipient), 1000);
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 0);
+
+    // Verify total withdrawn equals deposit
+    assert_eq!(withdrawn_1 + withdrawn_2, 1000);
+}
+
+/// Integration test: multiple pause/resume cycles with time advancement.
+/// Verifies that accrual is unaffected by repeated pause/resume operations.
+///
+/// Test flow:
+/// 1. Create 2000-token stream over 2000 seconds
+/// 2. Advance to t=500, pause
+/// 3. Advance to t=1000, resume
+/// 4. Advance to t=1500, pause
+/// 5. Advance to t=1800, resume
+/// 6. Withdraw at t=1800 (1800 tokens should be accrued)
+/// 7. Advance to t=2000 (end)
+/// 8. Withdraw final 200 tokens
+///
+/// Verifies accrual accumulates correctly through multiple pause/resume cycles.
+#[test]
+fn integration_multiple_pause_resume_cycles() {
+    let ctx = TestContext::setup();
+
+    // Create stream: 2000 tokens over 2000 seconds (1 token/sec)
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &2000u64,
+    );
+
+    // First pause/resume cycle
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().pause_stream(&stream_id);
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Paused);
+
+    ctx.env.ledger().set_timestamp(1000);
+    let accrued_at_1000 = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued_at_1000, 1000, "accrual continues during pause");
+
+    ctx.client().resume_stream(&stream_id);
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Active);
+
+    // Second pause/resume cycle
+    ctx.env.ledger().set_timestamp(1500);
+    ctx.client().pause_stream(&stream_id);
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Paused);
+
+    ctx.env.ledger().set_timestamp(1800);
+    let accrued_at_1800 = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(
+        accrued_at_1800, 1800,
+        "accrual continues through multiple pauses"
+    );
+
+    ctx.client().resume_stream(&stream_id);
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Active);
+
+    // Withdraw at t=1800
+    let withdrawn_1 = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn_1, 1800);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 1800);
+    assert_eq!(state.status, StreamStatus::Active);
+    assert_eq!(ctx.token.balance(&ctx.recipient), 1800);
+
+    // Final withdrawal at end
+    ctx.env.ledger().set_timestamp(2000);
+    let withdrawn_2 = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn_2, 200);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+    assert_eq!(state.withdrawn_amount, 2000);
+    assert_eq!(ctx.token.balance(&ctx.recipient), 2000);
+}
+
+/// Integration test: pause, advance past end_time, resume, verify capped accrual.
+/// Ensures accrual remains capped at deposit_amount even with pause during stream.
+///
+/// Test flow:
+/// 1. Create 1000-token stream over 1000 seconds
+/// 2. Advance to t=300, pause
+/// 3. Advance to t=2000 (well past end_time)
+/// 4. Resume stream
+/// 5. Verify accrual is capped at 1000 (not 2000)
+/// 6. Withdraw all 1000 tokens
+/// 7. Stream completes
+#[test]
+fn integration_pause_resume_past_end_time_accrual_capped() {
+    let ctx = TestContext::setup();
+
+    // Create stream: 1000 tokens over 1000 seconds
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    // Pause at t=300
+    ctx.env.ledger().set_timestamp(300);
+    ctx.client().pause_stream(&stream_id);
+
+    // Advance far past end_time (t=2000)
+    ctx.env.ledger().set_timestamp(2000);
+
+    // Verify accrual is still capped at deposit_amount
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(
+        accrued, 1000,
+        "accrual must be capped at deposit_amount even past end_time"
+    );
+
+    // Resume and withdraw
+    ctx.client().resume_stream(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn, 1000);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+    assert_eq!(state.withdrawn_amount, 1000);
+}
+
+/// Integration test: pause stream, then cancel while paused.
+/// Verifies that accrual reflects time elapsed even during pause,
+/// and sender receives correct refund for unstreamed amount.
+///
+/// Test flow:
+/// 1. Create 3000-token stream over 1000 seconds (3 tokens/sec)
+/// 2. Advance to t=300, pause
+/// 3. Advance to t=600 (paused, 1800 tokens accrued but blocked from withdrawal)
+/// 4. Cancel stream as sender
+/// 5. Verify sender receives refund for unstreamed amount (1200 tokens)
+/// 6. Verify recipient can still withdraw accrued 1800 tokens
+#[test]
+fn integration_pause_then_cancel_preserves_accrual() {
+    let ctx = TestContext::setup();
+
+    // Create stream: 3000 tokens over 1000 seconds (3 tokens/sec)
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &3000_i128,
+        &3_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    assert_eq!(ctx.token.balance(&ctx.sender), 7_000);
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 3_000);
+
+    // Pause at t=300 (900 tokens accrued)
+    ctx.env.ledger().set_timestamp(300);
+    ctx.client().pause_stream(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Paused);
+
+    // Advance to t=600 while paused (1800 tokens accrued, recipient cannot withdraw)
+    ctx.env.ledger().set_timestamp(600);
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued, 1800, "accrual continues during pause");
+
+    // Cancel paused stream
+    let sender_before_cancel = ctx.token.balance(&ctx.sender);
+    ctx.client().cancel_stream(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+
+    // Verify sender receives refund of unstreamed amount (3000 - 1800 = 1200)
+    let sender_after_cancel = ctx.token.balance(&ctx.sender);
+    let refund = sender_after_cancel - sender_before_cancel;
+    assert_eq!(refund, 1200, "refund should be deposit - accrued");
+    assert_eq!(sender_after_cancel, 8_200);
+
+    // Verify accrued amount (1800) remains in contract for recipient
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 1800);
+
+    // Recipient can still withdraw accrued amount from cancelled stream
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn, 1800);
+
+    assert_eq!(ctx.token.balance(&ctx.recipient), 1800);
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 0);
 }

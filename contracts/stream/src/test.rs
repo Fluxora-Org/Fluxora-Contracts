@@ -173,6 +173,47 @@ impl<'a> TestContext<'a> {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn test_init_stores_token_and_admin() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+
+    let token = Address::generate(&env);
+    let admin = Address::generate(&env);
+
+    client.init(&token, &admin);
+
+    let config = client.get_config();
+    assert_eq!(config.token, token);
+    assert_eq!(config.admin, admin);
+}
+
+#[test]
+#[should_panic(expected = "already initialised")]
+fn test_init_second_call_fails() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+
+    let token = Address::generate(&env);
+    let admin = Address::generate(&env);
+
+    client.init(&token, &admin);
+
+    client.init(&Address::generate(&env), &Address::generate(&env));
+}
+
+#[test]
+#[should_panic(expected = "contract not initialised: missing config")]
+fn test_get_config_before_init_fails() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+
+    client.get_config();
+}
+
+#[test]
 fn test_init_stores_config() {
     let env = Env::default();
     env.mock_all_auths();
@@ -348,7 +389,20 @@ fn test_config_unchanged_after_failed_reinit() {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         client.init(&token_id2, &admin2);
     }));
-    assert!(result.is_err(), "re-init should have panicked");
+    let err = result.expect_err("re-init should have panicked");
+    let panic_msg = err
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| {
+            err.downcast_ref::<std::string::String>()
+                .map(|s| s.as_str())
+        })
+        .unwrap_or("no message");
+    assert!(
+        panic_msg.contains("already initialised"),
+        "panic message should contain 'already initialised', but was '{}'",
+        panic_msg
+    );
 
     // Config must be identical to the original
     let config_after = client.get_config();
@@ -390,7 +444,20 @@ fn test_operations_work_after_failed_reinit() {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         client.init(&token_id, &admin2);
     }));
-    assert!(result.is_err(), "re-init should have panicked");
+    let err = result.expect_err("re-init should have panicked");
+    let panic_msg = err
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| {
+            err.downcast_ref::<std::string::String>()
+                .map(|s| s.as_str())
+        })
+        .unwrap_or("no message");
+    assert!(
+        panic_msg.contains("already initialised"),
+        "panic message should contain 'already initialised', but was '{}'",
+        panic_msg
+    );
 
     // Contract must still accept streams
     env.ledger().set_timestamp(0);
@@ -569,6 +636,497 @@ fn test_create_stream_multiple_loop() {
             break;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — Issue #123: no hard cap on deposit or duration (policy test)
+// ---------------------------------------------------------------------------
+
+/// The contract must accept a very large deposit_amount (no artificial ceiling).
+/// This verifies the "no hard cap" policy documented in create_stream.
+/// Overflow in accrual math is handled separately by checked_mul + clamping.
+#[test]
+fn test_create_stream_large_deposit_accepted() {
+    let ctx = TestContext::setup();
+
+    // Use a value well above any "reasonable" protocol limit — 10^18 tokens.
+    // The sender must have enough balance; mint it first.
+    let large_deposit: i128 = 1_000_000_000_000_000_000_i128; // 10^18
+    let rate: i128 = 1_000_000_000_i128; // 10^9 / s
+    let duration: u64 = 1_000_000_000; // 10^9 s
+
+    // Confirm deposit exactly covers rate × duration (no excess needed).
+    assert_eq!(large_deposit, rate * duration as i128);
+
+    ctx.sac.mint(&ctx.sender, &large_deposit);
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &large_deposit,
+        &rate,
+        &0u64,
+        &0u64,
+        &duration,
+    );
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.deposit_amount, large_deposit);
+    assert_eq!(state.rate_per_second, rate);
+    assert_eq!(state.end_time - state.start_time, duration);
+    assert_eq!(state.status, StreamStatus::Active);
+}
+
+/// The contract must accept a very long stream duration (no artificial ceiling).
+/// This verifies the "no hard cap" policy documented in create_stream.
+#[test]
+fn test_create_stream_long_duration_accepted() {
+    let ctx = TestContext::setup();
+
+    // 100 years in seconds — deliberately beyond any "reasonable" UX limit.
+    let duration: u64 = 3_153_600_000;
+    let rate: i128 = 1;
+    let deposit: i128 = rate * duration as i128; // exactly covers duration
+
+    ctx.sac.mint(&ctx.sender, &deposit);
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &deposit,
+        &rate,
+        &0u64,
+        &0u64,
+        &duration,
+    );
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.end_time - state.start_time, duration);
+    assert_eq!(state.deposit_amount, deposit);
+    assert_eq!(state.status, StreamStatus::Active);
+}
+
+// ---------------------------------------------------------------------------
+// Tests — Issue #44: create_stream validation (invalid params) — full suite
+// ---------------------------------------------------------------------------
+
+// --- Group 1: end_time <= start_time ---
+
+/// end_time exactly equal to start_time must panic
+#[test]
+#[should_panic(expected = "start_time must be before end_time")]
+fn test_create_stream_end_equals_start_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &500u64,
+        &500u64,
+        &500u64, // end == start
+    );
+}
+
+/// end_time strictly less than start_time must panic
+#[test]
+#[should_panic(expected = "start_time must be before end_time")]
+fn test_create_stream_end_before_start_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &1000u64,
+        &1000u64,
+        &999u64, // end < start
+    );
+}
+
+/// end_time exactly one second before start_time (boundary)
+#[test]
+#[should_panic(expected = "start_time must be before end_time")]
+fn test_create_stream_end_one_less_than_start_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &100u64,
+        &100u64,
+        &99u64, // end = start - 1
+    );
+}
+
+// --- Group 2: cliff_time outside [start_time, end_time] ---
+
+/// cliff_time one second before start_time (lower boundary violation)
+#[test]
+#[should_panic(expected = "cliff_time must be within [start_time, end_time]")]
+fn test_create_stream_cliff_one_before_start_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &100u64,
+        &99u64, // cliff = start - 1
+        &1100u64,
+    );
+}
+
+/// cliff_time one second after end_time (upper boundary violation)
+#[test]
+#[should_panic(expected = "cliff_time must be within [start_time, end_time]")]
+fn test_create_stream_cliff_one_after_end_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &1001u64, // cliff = end + 1
+        &1000u64,
+    );
+}
+
+/// cliff_time far before start_time
+#[test]
+#[should_panic(expected = "cliff_time must be within [start_time, end_time]")]
+fn test_create_stream_cliff_far_before_start_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &500u64,
+        &0u64, // cliff far before start
+        &1500u64,
+    );
+}
+
+/// cliff_time far after end_time
+#[test]
+#[should_panic(expected = "cliff_time must be within [start_time, end_time]")]
+fn test_create_stream_cliff_far_after_end_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &9999u64, // cliff far after end
+        &1000u64,
+    );
+}
+
+/// cliff_time at start_time is valid (inclusive lower bound)
+#[test]
+fn test_create_stream_cliff_at_start_valid() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &100u64,
+        &100u64, // cliff == start
+        &1100u64,
+    );
+    let state = ctx.client().get_stream_state(&id);
+    assert_eq!(state.cliff_time, 100);
+    assert_eq!(state.start_time, 100);
+}
+
+/// cliff_time at end_time is valid (inclusive upper bound)
+#[test]
+fn test_create_stream_cliff_at_end_valid() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &1000u64, // cliff == end
+        &1000u64,
+    );
+    let state = ctx.client().get_stream_state(&id);
+    assert_eq!(state.cliff_time, 1000);
+    assert_eq!(state.end_time, 1000);
+}
+
+// --- Group 3: deposit_amount <= 0 ---
+
+/// deposit_amount of zero must panic
+#[test]
+#[should_panic(expected = "deposit_amount must be positive")]
+fn test_create_stream_deposit_zero_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &0_i128, // zero
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+}
+
+/// deposit_amount of -1 must panic
+#[test]
+#[should_panic(expected = "deposit_amount must be positive")]
+fn test_create_stream_deposit_minus_one_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &-1_i128, // -1 boundary
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+}
+
+/// deposit_amount of i128::MIN must panic
+#[test]
+#[should_panic(expected = "deposit_amount must be positive")]
+fn test_create_stream_deposit_i128_min_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &i128::MIN,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+}
+
+/// deposit_amount of 1 is valid (minimum positive)
+#[test]
+fn test_create_stream_deposit_one_valid() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1_i128, // minimum valid
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1u64, // 1 second, so rate * duration = 1 == deposit
+    );
+    let state = ctx.client().get_stream_state(&id);
+    assert_eq!(state.deposit_amount, 1);
+}
+
+// --- Group 4: rate_per_second <= 0 ---
+
+/// rate_per_second of zero must panic
+#[test]
+#[should_panic(expected = "rate_per_second must be positive")]
+fn test_create_stream_rate_zero_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &0_i128, // zero rate
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+}
+
+/// rate_per_second of -1 must panic
+#[test]
+#[should_panic(expected = "rate_per_second must be positive")]
+fn test_create_stream_rate_minus_one_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &-1_i128, // -1 boundary
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+}
+
+/// rate_per_second of i128::MIN must panic
+#[test]
+#[should_panic(expected = "rate_per_second must be positive")]
+fn test_create_stream_rate_i128_min_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &i128::MIN,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+}
+
+/// rate_per_second of 1 is valid (minimum positive)
+#[test]
+fn test_create_stream_rate_one_valid() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128, // minimum valid rate
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+    let state = ctx.client().get_stream_state(&id);
+    assert_eq!(state.rate_per_second, 1);
+}
+
+// --- Group 5: deposit < rate * duration ---
+
+/// deposit one less than required (rate * duration - 1) must panic
+#[test]
+#[should_panic(expected = "deposit_amount must cover total streamable amount")]
+fn test_create_stream_deposit_one_less_than_required_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    // rate=2, duration=500 → required=1000; deposit=999
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &999_i128, // one under boundary
+        &2_i128,
+        &0u64,
+        &0u64,
+        &500u64,
+    );
+}
+
+/// deposit exactly equal to rate * duration is valid (boundary pass)
+#[test]
+fn test_create_stream_deposit_exactly_required_valid() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    // rate=2, duration=500 → required=1000; deposit=1000
+    let id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128, // exactly at boundary
+        &2_i128,
+        &0u64,
+        &0u64,
+        &500u64,
+    );
+    let state = ctx.client().get_stream_state(&id);
+    assert_eq!(state.deposit_amount, 1000);
+}
+
+/// deposit much less than rate * duration must panic
+#[test]
+#[should_panic(expected = "deposit_amount must cover total streamable amount")]
+fn test_create_stream_deposit_far_below_required_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    // rate=10, duration=1000 → required=10000; deposit=100
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &100_i128, // way under
+        &10_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+}
+
+/// deposit greater than required is valid (excess stays in contract)
+#[test]
+fn test_create_stream_deposit_above_required_valid() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &5000_i128, // more than rate(1) * duration(1000) = 1000
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+    let state = ctx.client().get_stream_state(&id);
+    assert_eq!(state.deposit_amount, 5000);
+    assert_eq!(state.status, StreamStatus::Active);
+}
+
+// --- Group 6: sender == recipient ---
+
+/// sender and recipient are the same address must panic
+#[test]
+#[should_panic(expected = "sender and recipient must be different")]
+fn test_create_stream_sender_is_recipient_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.sender, // same address
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+}
+
+/// different sender and recipient is valid (sanity check)
+#[test]
+fn test_create_stream_different_sender_recipient_valid() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let another = Address::generate(&ctx.env);
+    let id = ctx.client().create_stream(
+        &ctx.sender,
+        &another,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+    let state = ctx.client().get_stream_state(&id);
+    assert_ne!(state.sender, state.recipient);
 }
 
 // ---------------------------------------------------------------------------
@@ -853,6 +1411,37 @@ fn test_calculate_accrued_after_cliff() {
         accrued, 600,
         "600s × 1/s = 600 (uses start_time, not cliff)"
     );
+}
+
+#[test]
+fn test_accrued_after_cliff_before_end() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &10000_i128,
+        &10_i128,
+        &0u64,
+        &500u64,
+        &1000u64,
+    );
+
+    ctx.env.ledger().set_timestamp(500);
+    assert_eq!(ctx.client().calculate_accrued(&stream_id), 5000);
+
+    ctx.env.ledger().set_timestamp(750);
+    assert_eq!(ctx.client().calculate_accrued(&stream_id), 7500);
+
+    ctx.env.ledger().set_timestamp(999);
+    assert_eq!(ctx.client().calculate_accrued(&stream_id), 9990);
+
+    ctx.env.ledger().set_timestamp(1000);
+    assert_eq!(ctx.client().calculate_accrued(&stream_id), 10000);
+
+    ctx.env.ledger().set_timestamp(1500);
+    assert_eq!(ctx.client().calculate_accrued(&stream_id), 10000);
 }
 
 #[test]
@@ -1394,7 +1983,7 @@ fn test_admin_can_resume_stream() {
 }
 
 #[test]
-#[should_panic(expected = "stream is not active")]
+#[should_panic(expected = "stream is already paused")]
 fn test_pause_already_paused_panics() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
@@ -1431,6 +2020,15 @@ fn test_resume_cancelled_stream_panics() {
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Cancelled);
     ctx.client().resume_stream(&stream_id);
+}
+
+#[test]
+#[should_panic(expected = "stream must be active to pause")]
+fn test_pause_cancelled_stream_panics() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    ctx.client().cancel_stream(&stream_id);
+    ctx.client().pause_stream(&stream_id); // Cancelled — must panic with general message
 }
 
 // ---------------------------------------------------------------------------
@@ -2853,10 +3451,10 @@ fn test_create_stream_self_stream_panics() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[should_panic(expected = "stream not found")]
 fn test_get_stream_state_non_existent() {
     let ctx = TestContext::setup();
-    ctx.client().get_stream_state(&999);
+    let result = ctx.client().try_get_stream_state(&999);
+    assert!(result.is_err());
 }
 
 #[test]
@@ -3643,11 +4241,71 @@ fn test_get_stream_state_pause_resume_stream_cancel() {
 }
 
 #[test]
-#[should_panic(expected = "stream not found")]
 fn test_get_stream_state_non_existence_stream() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
-    let _ = ctx.client().get_stream_state(&1);
+    let result = ctx.client().try_get_stream_state(&1);
+    assert!(result.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Tests — Error API (StreamNotFound)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_pause_stream_not_found() {
+    let ctx = TestContext::setup();
+    let result = ctx.client().try_pause_stream(&999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_resume_stream_not_found() {
+    let ctx = TestContext::setup();
+    let result = ctx.client().try_resume_stream(&999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_cancel_stream_not_found() {
+    let ctx = TestContext::setup();
+    let result = ctx.client().try_cancel_stream(&999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_withdraw_stream_not_found() {
+    let ctx = TestContext::setup();
+    let result = ctx.client().try_withdraw(&999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_calculate_accrued_stream_not_found() {
+    let ctx = TestContext::setup();
+    let result = ctx.client().try_calculate_accrued(&999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_cancel_stream_as_admin_not_found() {
+    let ctx = TestContext::setup();
+    let result = ctx.client().try_cancel_stream_as_admin(&999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_pause_stream_as_admin_not_found() {
+    let ctx = TestContext::setup();
+    let result = ctx.client().try_pause_stream_as_admin(&999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_resume_stream_as_admin_not_found() {
+    let ctx = TestContext::setup();
+    let result = ctx.client().try_resume_stream_as_admin(&999);
+    assert!(result.is_err());
 }
 
 // ---------------------------------------------------------------------------
@@ -3716,6 +4374,43 @@ fn test_withdraw_zero_no_time_elapsed() {
 
     // Try to withdraw again at same timestamp - should panic
     ctx.client().withdraw(&stream_id);
+}
+
+/// Issue #128 — withdraw when accrued equals withdrawn (zero withdrawable)
+/// Expected: second withdraw panics with "nothing to withdraw"
+/// and no token transfer occurs (recipient balance unchanged).
+#[test]
+#[should_panic(expected = "nothing to withdraw")]
+fn test_withdraw_when_accrued_equals_withdrawn_zero_withdrawable() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Advance time to t=600: accrued = 600, withdrawn = 0
+    ctx.env.ledger().set_timestamp(600);
+
+    // First withdraw: drains the full accrued amount
+    let first_withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(first_withdrawn, 600, "first withdraw should return 600");
+
+    // Verify state: withdrawn_amount now equals accrued (both 600)
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 600);
+    assert_eq!(state.status, StreamStatus::Active); // still active, stream not done
+
+    // Verify no second transfer occurred by recording recipient balance
+    let recipient_balance_after_first = ctx.token().balance(&ctx.recipient);
+    assert_eq!(recipient_balance_after_first, 600);
+
+    // Second withdraw at same timestamp: accrued (600) - withdrawn (600) = 0
+    // Must panic with "nothing to withdraw" and must NOT transfer any tokens
+    ctx.client().withdraw(&stream_id);
+
+    // If we somehow reach here (we shouldn't), verify no extra tokens moved
+    let recipient_balance_after_second = ctx.token().balance(&ctx.recipient);
+    assert_eq!(
+        recipient_balance_after_second, recipient_balance_after_first,
+        "no tokens should transfer on zero-withdrawable call"
+    );
 }
 
 /// Test withdraw when cancelled with zero accrued
@@ -4231,7 +4926,20 @@ fn test_failed_create_stream_does_not_advance_counter() {
             &100u64,
         );
     }));
-    assert!(result.is_err(), "underfunded create_stream must panic");
+    let err = result.expect_err("underfunded create_stream must panic");
+    let panic_msg = err
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| {
+            err.downcast_ref::<std::string::String>()
+                .map(|s| s.as_str())
+        })
+        .unwrap_or("no message");
+    assert!(
+        panic_msg.contains("deposit_amount must cover total streamable amount"),
+        "panic message should contain 'deposit_amount must cover total streamable amount', but was '{}'",
+        panic_msg
+    );
 
     // Next successful stream must still be id = 1, not 2
     let id1 = ctx.client().create_stream(
