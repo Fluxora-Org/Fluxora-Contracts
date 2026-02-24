@@ -6201,8 +6201,8 @@ fn test_set_admin_emits_event() {
         ctx.contract_id
     );
     assert_eq!(
-        last_event.1.get(0).unwrap(),
-        Symbol::new(&ctx.env, "AdminUpdated").into_val(&ctx.env)
+        Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
+        Symbol::new(&ctx.env, "AdminUpdated")
     );
 
     // Check event data: (old_admin, new_admin)
