@@ -888,7 +888,7 @@ impl FluxoraStream {
     /// - Token address remains unchanged
     ///
     /// # Events
-    /// - Publishes `admin_updated(old_admin, new_admin)` event on success
+    /// - Publishes `AdminUpdated(old_admin, new_admin)` event on success
     ///
     /// # Usage Notes
     /// - This is a security-critical function for admin key rotation
@@ -916,7 +916,7 @@ impl FluxoraStream {
 
         // Emit event with old and new admin addresses
         env.events().publish(
-            (symbol_short!("admin"), symbol_short!("updated")),
+            (Symbol::new(&env, "AdminUpdated"),),
             (old_admin, new_admin),
         );
     }
