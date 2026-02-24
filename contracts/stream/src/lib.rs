@@ -238,11 +238,11 @@ fn push_token(env: &Env, to: &Address, amount: i128) {
 
 impl FluxoraStream {
     fn validate_stream_params(
-        env: &Env,
         sender: &Address,
         recipient: &Address,
         deposit_amount: i128,
         rate_per_second: i128,
+        current_ledger_timestamp: u64,
         start_time: u64,
         cliff_time: u64,
         end_time: u64,
@@ -260,7 +260,7 @@ impl FluxoraStream {
         // Validate time constraints
         assert!(start_time < end_time, "start_time must be before end_time");
         assert!(
-            start_time >= env.ledger().timestamp(),
+            start_time >= current_ledger_timestamp,
             "start_time must not be in the past"
         );
         assert!(
@@ -458,11 +458,11 @@ impl FluxoraStream {
         sender.require_auth();
 
         Self::validate_stream_params(
-            &env,
             &sender,
             &recipient,
             deposit_amount,
             rate_per_second,
+            env.ledger().timestamp(),
             start_time,
             cliff_time,
             end_time,
@@ -512,11 +512,11 @@ impl FluxoraStream {
         // First pass: validate all streams and calculate total deposit required
         for params in streams.iter() {
             Self::validate_stream_params(
-                &env,
                 &sender,
                 &params.recipient,
                 params.deposit_amount,
                 params.rate_per_second,
+                env.ledger().timestamp(),
                 params.start_time,
                 params.cliff_time,
                 params.end_time,
