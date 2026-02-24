@@ -352,7 +352,10 @@ fn test_config_unchanged_after_failed_reinit() {
     let panic_msg = err
         .downcast_ref::<&str>()
         .copied()
-        .or_else(|| err.downcast_ref::<std::string::String>().map(|s| s.as_str()))
+        .or_else(|| {
+            err.downcast_ref::<std::string::String>()
+                .map(|s| s.as_str())
+        })
         .unwrap_or("no message");
     assert!(
         panic_msg.contains("already initialised"),
@@ -404,7 +407,10 @@ fn test_operations_work_after_failed_reinit() {
     let panic_msg = err
         .downcast_ref::<&str>()
         .copied()
-        .or_else(|| err.downcast_ref::<std::string::String>().map(|s| s.as_str()))
+        .or_else(|| {
+            err.downcast_ref::<std::string::String>()
+                .map(|s| s.as_str())
+        })
         .unwrap_or("no message");
     assert!(
         panic_msg.contains("already initialised"),
@@ -4685,7 +4691,10 @@ fn test_failed_create_stream_does_not_advance_counter() {
     let panic_msg = err
         .downcast_ref::<&str>()
         .copied()
-        .or_else(|| err.downcast_ref::<std::string::String>().map(|s| s.as_str()))
+        .or_else(|| {
+            err.downcast_ref::<std::string::String>()
+                .map(|s| s.as_str())
+        })
         .unwrap_or("no message");
     assert!(
         panic_msg.contains("deposit_amount must cover total streamable amount"),
