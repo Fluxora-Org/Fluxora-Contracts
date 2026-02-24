@@ -5937,6 +5937,7 @@ mod cliff_equals_end {
         token_id: Address,
         sender: Address,
         recipient: Address,
+        #[allow(dead_code)]
         sac: StellarAssetClient<'a>,
     }
 
