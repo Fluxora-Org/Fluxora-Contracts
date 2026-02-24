@@ -6830,3 +6830,181 @@ fn test_new_admin_can_perform_admin_ops() {
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
 }
+
+// ---------------------------------------------------------------------------
+// Tests — Issue #108: start_time must not be in the past
+// ---------------------------------------------------------------------------
+
+/// start_time strictly before current ledger time must panic.
+#[test]
+#[should_panic(expected = "start_time must not be in the past")]
+fn test_create_stream_start_time_in_past_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &999u64, // start_time < now (1000)
+        &999u64,
+        &1999u64,
+    );
+}
+
+/// start_time one second before now is rejected (boundary).
+#[test]
+#[should_panic(expected = "start_time must not be in the past")]
+fn test_create_stream_start_time_one_second_before_now_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &499u64, // start = now - 1
+        &499u64,
+        &1499u64,
+    );
+}
+
+/// start_time far in the past is rejected.
+#[test]
+#[should_panic(expected = "start_time must not be in the past")]
+fn test_create_stream_start_time_far_in_past_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(10_000);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64, // start far in the past
+        &0u64,
+        &1000u64,
+    );
+}
+
+/// start_time == current ledger timestamp is valid ("start now").
+#[test]
+fn test_create_stream_start_time_equals_now_succeeds() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(500);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &500u64, // start == now
+        &500u64,
+        &1500u64,
+    );
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.start_time, 500);
+    assert_eq!(state.status, StreamStatus::Active);
+}
+
+/// start_time one second in the future is valid.
+#[test]
+fn test_create_stream_start_time_one_second_in_future_succeeds() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(500);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &501u64, // start = now + 1
+        &501u64,
+        &1501u64,
+    );
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.start_time, 501);
+    assert_eq!(state.status, StreamStatus::Active);
+}
+
+/// start_time well in the future is valid.
+#[test]
+fn test_create_stream_start_time_future_succeeds() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(100);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &5000u64, // start far in the future
+        &5000u64,
+        &6000u64,
+    );
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.start_time, 5000);
+    assert_eq!(state.status, StreamStatus::Active);
+    // Nothing accrued yet — stream hasn't started
+    assert_eq!(ctx.client().calculate_accrued(&stream_id), 0);
+}
+
+/// Ledger timestamp == 0 and start_time == 0 is valid (genesis edge case).
+#[test]
+fn test_create_stream_start_time_zero_at_genesis_succeeds() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.start_time, 0);
+    assert_eq!(state.status, StreamStatus::Active);
+}
+
+/// Past-start rejection must fire BEFORE the token transfer.
+/// If the validation runs after transfer, the sender would lose tokens
+/// on a failed call. Verify sender balance is unchanged after the panic.
+#[test]
+fn test_create_stream_past_start_no_token_transfer() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(1000);
+
+    let sender_balance_before = ctx.token().balance(&ctx.sender);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &1000_i128,
+            &1_i128,
+            &500u64, // past
+            &500u64,
+            &1500u64,
+        );
+    }));
+
+    assert!(result.is_err(), "should have panicked");
+    let err = result.unwrap_err();
+    let msg = err
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| {
+            err.downcast_ref::<std::string::String>()
+                .map(|s| s.as_str())
+        })
+        .unwrap_or("");
+    assert!(
+        msg.contains("start_time must not be in the past"),
+        "wrong panic: {msg}"
+    );
+
+    // Sender balance must be unchanged — no token was transferred
+    assert_eq!(
+        ctx.token().balance(&ctx.sender),
+        sender_balance_before,
+        "sender balance must not change on validation failure"
+    );
+}

@@ -18,14 +18,14 @@ When changing the contract:
 
 ### Phases
 
-| Phase | Action | Notes |
-|-------|--------|-------|
-| **Creation** | `create_stream` | Sender deposits tokens; stream starts as `Active` |
-| **Pause** | `pause_stream` / `pause_stream_as_admin` | Stops withdrawals; accrual continues by time |
-| **Resume** | `resume_stream` / `resume_stream_as_admin` | Restores withdrawals |
+| Phase            | Action                                     | Notes                                                                   |
+| ---------------- | ------------------------------------------ | ----------------------------------------------------------------------- |
+| **Creation**     | `create_stream`                            | Sender deposits tokens; stream starts as `Active`                       |
+| **Pause**        | `pause_stream` / `pause_stream_as_admin`   | Stops withdrawals; accrual continues by time                            |
+| **Resume**       | `resume_stream` / `resume_stream_as_admin` | Restores withdrawals                                                    |
 | **Cancellation** | `cancel_stream` / `cancel_stream_as_admin` | Refunds unstreamed amount to sender; accrued amount stays for recipient |
-| **Withdrawal** | `withdraw` | Recipient pulls accrued tokens |
-| **Completion** | Automatic | When `withdrawn_amount == deposit_amount`, status becomes `Completed` |
+| **Withdrawal**   | `withdraw`                                 | Recipient pulls accrued tokens                                          |
+| **Completion**   | Automatic                                  | When `withdrawn_amount == deposit_amount`, status becomes `Completed`   |
 
 ### State Transitions
 
@@ -177,25 +177,39 @@ At creation:
 deposit_amount >= rate_per_second * (end_time - start_time)
 ```
 
+### start_time Policy
+
+`start_time` must be **≥ the current ledger timestamp** at the time `create_stream`
+is called. Past start times are rejected with the panic message
+`"start_time must not be in the past"`.
+
+**Why backdating is rejected:**
+A past `start_time` would cause tokens to be immediately accrued (and withdrawable)
+at the moment of stream creation, bypassing the intent of the vesting schedule.
+If "start immediately" is required, pass `start_time = env.ledger().timestamp()`.
+
+Backdating is not supported at the contract level. Any backdating requirement
+must be handled at the application layer with explicit audit tracking.
+
 ---
 
 ## 4. Access Control
 
-| Function | Authorized Caller | Auth Check |
-|----------|-------------------|------------|
-| `init` | Deployer (once) | None |
-| `create_stream` | Sender | `sender.require_auth()` |
-| `pause_stream` | Sender | `sender.require_auth()` |
-| `resume_stream` | Sender | `sender.require_auth()` |
-| `cancel_stream` | Sender | `sender.require_auth()` |
-| `withdraw` | Recipient | `recipient.require_auth()` |
-| `calculate_accrued` | Anyone | None (view) |
-| `get_stream_count` | Anyone | None (view) |
-| `get_config` | Anyone | None (view) |
-| `get_stream_state` | Anyone | None (view) |
-| `pause_stream_as_admin` | Admin | `admin.require_auth()` |
-| `resume_stream_as_admin` | Admin | `admin.require_auth()` |
-| `cancel_stream_as_admin` | Admin | `admin.require_auth()` |
+| Function                 | Authorized Caller | Auth Check                 |
+| ------------------------ | ----------------- | -------------------------- |
+| `init`                   | Deployer (once)   | None                       |
+| `create_stream`          | Sender            | `sender.require_auth()`    |
+| `pause_stream`           | Sender            | `sender.require_auth()`    |
+| `resume_stream`          | Sender            | `sender.require_auth()`    |
+| `cancel_stream`          | Sender            | `sender.require_auth()`    |
+| `withdraw`               | Recipient         | `recipient.require_auth()` |
+| `calculate_accrued`      | Anyone            | None (view)                |
+| `get_stream_count`       | Anyone            | None (view)                |
+| `get_config`             | Anyone            | None (view)                |
+| `get_stream_state`       | Anyone            | None (view)                |
+| `pause_stream_as_admin`  | Admin             | `admin.require_auth()`     |
+| `resume_stream_as_admin` | Admin             | `admin.require_auth()`     |
+| `cancel_stream_as_admin` | Admin             | `admin.require_auth()`     |
 
 **Note:** Sender-managed functions (`pause_stream`, `resume_stream`, `cancel_stream`) require sender auth. Admin uses separate `_as_admin` entry points.
 
@@ -246,29 +260,30 @@ Emitted when a recipient successfully withdraws tokens via `withdraw`.
 
 All failures use `panic!` / `assert!`. No custom error enum.
 
-| Message | Function | Trigger |
-|---------|----------|---------|
-| `"already initialised"` | `init` | Re-init attempt |
-| `"deposit_amount must be positive"` | `create_stream` | deposit_amount <= 0 |
-| `"rate_per_second must be positive"` | `create_stream` | rate_per_second <= 0 |
-| `"sender and recipient must be different"` | `create_stream` | sender == recipient |
-| `"start_time must be before end_time"` | `create_stream` | start_time >= end_time |
-| `"cliff_time must be within [start_time, end_time]"` | `create_stream` | cliff out of range |
-| `"deposit_amount must cover total streamable amount (rate * duration)"` | `create_stream` | underfunded |
-| `"overflow calculating total streamable amount"` | `create_stream` | overflow in rate * duration |
-| `"stream not found"` | Various | Invalid stream_id |
-| `"stream is already paused"` | `pause_stream` | Double pause |
-| `"stream must be active to pause"` | `pause_stream` | Pause non-active stream |
-| `"stream is active, not paused"` | `resume_stream` | Resume active stream |
-| `"stream is completed"` | `resume_stream` | Resume completed |
-| `"stream is cancelled"` | `resume_stream` | Resume cancelled |
-| `"stream must be active or paused to cancel"` | `cancel_stream` / `cancel_stream_as_admin` | Cancel completed/cancelled |
-| `"stream already completed"` | `withdraw` | Withdraw from completed |
-| `"cannot withdraw from paused stream"` | `withdraw` | Withdraw while paused |
-| `"nothing to withdraw"` | `withdraw` | accrued == withdrawn_amount |
-| `"stream is not active"` | `pause_stream_as_admin` | Admin pause non-active |
-| `"stream is not paused"` | `resume_stream_as_admin` | Admin resume non-paused |
-| `"contract not initialised: missing config"` | Functions requiring config | Config missing |
+| Message                                                                 | Function                                   | Trigger                       |
+| ----------------------------------------------------------------------- | ------------------------------------------ | ----------------------------- |
+| `"already initialised"`                                                 | `init`                                     | Re-init attempt               |
+| `"deposit_amount must be positive"`                                     | `create_stream`                            | deposit_amount <= 0           |
+| `"rate_per_second must be positive"`                                    | `create_stream`                            | rate_per_second <= 0          |
+| `"sender and recipient must be different"`                              | `create_stream`                            | sender == recipient           |
+| `"start_time must be before end_time"`                                  | `create_stream`                            | start_time >= end_time        |
+| `"start_time must not be in the past"`                                  | `create_stream`                            | start_time < ledger timestamp |
+| `"cliff_time must be within [start_time, end_time]"`                    | `create_stream`                            | cliff out of range            |
+| `"deposit_amount must cover total streamable amount (rate * duration)"` | `create_stream`                            | underfunded                   |
+| `"overflow calculating total streamable amount"`                        | `create_stream`                            | overflow in rate \* duration  |
+| `"stream not found"`                                                    | Various                                    | Invalid stream_id             |
+| `"stream is already paused"`                                            | `pause_stream`                             | Double pause                  |
+| `"stream must be active to pause"`                                      | `pause_stream`                             | Pause non-active stream       |
+| `"stream is active, not paused"`                                        | `resume_stream`                            | Resume active stream          |
+| `"stream is completed"`                                                 | `resume_stream`                            | Resume completed              |
+| `"stream is cancelled"`                                                 | `resume_stream`                            | Resume cancelled              |
+| `"stream must be active or paused to cancel"`                           | `cancel_stream` / `cancel_stream_as_admin` | Cancel completed/cancelled    |
+| `"stream already completed"`                                            | `withdraw`                                 | Withdraw from completed       |
+| `"cannot withdraw from paused stream"`                                  | `withdraw`                                 | Withdraw while paused         |
+| `"nothing to withdraw"`                                                 | `withdraw`                                 | accrued == withdrawn_amount   |
+| `"stream is not active"`                                                | `pause_stream_as_admin`                    | Admin pause non-active        |
+| `"stream is not paused"`                                                | `resume_stream_as_admin`                   | Admin resume non-paused       |
+| `"contract not initialised: missing config"`                            | Functions requiring config                 | Config missing                |
 
 ## Error Reference
 For a full list of contract errors, see [error.md](./error.md).

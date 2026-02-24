@@ -55,6 +55,7 @@ pub enum StreamStatus {
 pub enum ContractError {
     StreamNotFound = 1,
     InvalidState = 2,
+    InvalidParams = 3,
 }
 
 #[contracttype]
@@ -237,6 +238,7 @@ fn push_token(env: &Env, to: &Address, amount: i128) {
 
 impl FluxoraStream {
     fn validate_stream_params(
+        env: &Env,
         sender: &Address,
         recipient: &Address,
         deposit_amount: i128,
@@ -257,6 +259,10 @@ impl FluxoraStream {
 
         // Validate time constraints
         assert!(start_time < end_time, "start_time must be before end_time");
+        assert!(
+            start_time >= env.ledger().timestamp(),
+            "start_time must not be in the past"
+        );
         assert!(
             cliff_time >= start_time && cliff_time <= end_time,
             "cliff_time must be within [start_time, end_time]"
@@ -389,10 +395,12 @@ impl FluxoraStream {
     /// - `deposit_amount > 0` and `rate_per_second > 0`
     /// - `sender != recipient` (cannot stream to yourself)
     /// - `start_time < end_time` (valid time range)
+    /// - `start_time >= ledger timestamp` (start_time must not be in the past)
     /// - `cliff_time` in `[start_time, end_time]` (cliff within stream duration)
     /// - `deposit_amount >= rate_per_second × (end_time - start_time)` (sufficient deposit)
     ///
     /// # Panics
+    /// - If `start_time` is before the current ledger timestamp (past start time)
     /// - If `deposit_amount` or `rate_per_second` is not positive
     /// - If `sender` and `recipient` are the same address
     /// - If `start_time >= end_time` (invalid time range)
@@ -450,6 +458,7 @@ impl FluxoraStream {
         sender.require_auth();
 
         Self::validate_stream_params(
+            &env,
             &sender,
             &recipient,
             deposit_amount,
@@ -503,6 +512,7 @@ impl FluxoraStream {
         // First pass: validate all streams and calculate total deposit required
         for params in streams.iter() {
             Self::validate_stream_params(
+                &env,
                 &sender,
                 &params.recipient,
                 params.deposit_amount,
