@@ -1407,12 +1407,8 @@ fn pause_partial_withdraw_resume_full_withdraw() {
     // -----------------------------------------------------------------------
     ctx.env.ledger().set_timestamp(400);
 
-    // // Verify 300 tokens accrued
-    // let accrued_at_200 = ctx.client().calculate_accrued(&stream_id);
-    // assert_eq!(accrued_at_200, 400);
-
     // Attempt to withdraw while paused — should fail
-    let withdrawal_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         ctx.client().withdraw(&stream_id);
     }));
 
@@ -1424,7 +1420,7 @@ fn pause_partial_withdraw_resume_full_withdraw() {
     );
 
     // -----------------------------------------------------------------------
-    // Phase 4: Resume and Advance to t=1000
+    // Phase 4: Resume and Advance to t=800
     // -----------------------------------------------------------------------
     ctx.env.ledger().set_timestamp(800);
 
@@ -1446,7 +1442,7 @@ fn pause_partial_withdraw_resume_full_withdraw() {
     assert_eq!(ctx.token.balance(&ctx.contract_id), 400);
 
     // -----------------------------------------------------------------------
-    // Phase 6: Advance to t=1000 (end of stream) and withdraw remaining
+    // Phase 6: Advance to t=1000 (end of stream) and withdraw rest
     // -----------------------------------------------------------------------
     ctx.env.ledger().set_timestamp(1000);
 
