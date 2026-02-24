@@ -1032,7 +1032,7 @@ fn integration_pause_resume_withdraw_lifecycle() {
     // Ensure the panic reason matches the expected paused-stream invariant
     let panic_msg = err
         .downcast_ref::<&str>()
-        .map(|s| *s)
+        .copied()
         .or_else(|| err.downcast_ref::<String>().map(|s| s.as_str()))
         .unwrap_or("<non-string panic payload>");
     assert!(
