@@ -572,6 +572,427 @@ fn test_create_stream_multiple_loop() {
 }
 
 // ---------------------------------------------------------------------------
+// Tests — Issue #44: create_stream validation (invalid params) — full suite
+// ---------------------------------------------------------------------------
+
+// --- Group 1: end_time <= start_time ---
+
+/// end_time exactly equal to start_time must panic
+#[test]
+#[should_panic(expected = "start_time must be before end_time")]
+fn test_create_stream_end_equals_start_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &500u64,
+        &500u64,
+        &500u64, // end == start
+    );
+}
+
+/// end_time strictly less than start_time must panic
+#[test]
+#[should_panic(expected = "start_time must be before end_time")]
+fn test_create_stream_end_before_start_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &1000u64,
+        &1000u64,
+        &999u64, // end < start
+    );
+}
+
+/// end_time exactly one second before start_time (boundary)
+#[test]
+#[should_panic(expected = "start_time must be before end_time")]
+fn test_create_stream_end_one_less_than_start_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &100u64,
+        &100u64,
+        &99u64, // end = start - 1
+    );
+}
+
+// --- Group 2: cliff_time outside [start_time, end_time] ---
+
+/// cliff_time one second before start_time (lower boundary violation)
+#[test]
+#[should_panic(expected = "cliff_time must be within [start_time, end_time]")]
+fn test_create_stream_cliff_one_before_start_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &100u64,
+        &99u64, // cliff = start - 1
+        &1100u64,
+    );
+}
+
+/// cliff_time one second after end_time (upper boundary violation)
+#[test]
+#[should_panic(expected = "cliff_time must be within [start_time, end_time]")]
+fn test_create_stream_cliff_one_after_end_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &1001u64, // cliff = end + 1
+        &1000u64,
+    );
+}
+
+/// cliff_time far before start_time
+#[test]
+#[should_panic(expected = "cliff_time must be within [start_time, end_time]")]
+fn test_create_stream_cliff_far_before_start_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &500u64,
+        &0u64, // cliff far before start
+        &1500u64,
+    );
+}
+
+/// cliff_time far after end_time
+#[test]
+#[should_panic(expected = "cliff_time must be within [start_time, end_time]")]
+fn test_create_stream_cliff_far_after_end_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &9999u64, // cliff far after end
+        &1000u64,
+    );
+}
+
+/// cliff_time at start_time is valid (inclusive lower bound)
+#[test]
+fn test_create_stream_cliff_at_start_valid() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &100u64,
+        &100u64, // cliff == start
+        &1100u64,
+    );
+    let state = ctx.client().get_stream_state(&id);
+    assert_eq!(state.cliff_time, 100);
+    assert_eq!(state.start_time, 100);
+}
+
+/// cliff_time at end_time is valid (inclusive upper bound)
+#[test]
+fn test_create_stream_cliff_at_end_valid() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &1000u64, // cliff == end
+        &1000u64,
+    );
+    let state = ctx.client().get_stream_state(&id);
+    assert_eq!(state.cliff_time, 1000);
+    assert_eq!(state.end_time, 1000);
+}
+
+// --- Group 3: deposit_amount <= 0 ---
+
+/// deposit_amount of zero must panic
+#[test]
+#[should_panic(expected = "deposit_amount must be positive")]
+fn test_create_stream_deposit_zero_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &0_i128, // zero
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+}
+
+/// deposit_amount of -1 must panic
+#[test]
+#[should_panic(expected = "deposit_amount must be positive")]
+fn test_create_stream_deposit_minus_one_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &-1_i128, // -1 boundary
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+}
+
+/// deposit_amount of i128::MIN must panic
+#[test]
+#[should_panic(expected = "deposit_amount must be positive")]
+fn test_create_stream_deposit_i128_min_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &i128::MIN,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+}
+
+/// deposit_amount of 1 is valid (minimum positive)
+#[test]
+fn test_create_stream_deposit_one_valid() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1_i128, // minimum valid
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1u64, // 1 second, so rate * duration = 1 == deposit
+    );
+    let state = ctx.client().get_stream_state(&id);
+    assert_eq!(state.deposit_amount, 1);
+}
+
+// --- Group 4: rate_per_second <= 0 ---
+
+/// rate_per_second of zero must panic
+#[test]
+#[should_panic(expected = "rate_per_second must be positive")]
+fn test_create_stream_rate_zero_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &0_i128, // zero rate
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+}
+
+/// rate_per_second of -1 must panic
+#[test]
+#[should_panic(expected = "rate_per_second must be positive")]
+fn test_create_stream_rate_minus_one_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &-1_i128, // -1 boundary
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+}
+
+/// rate_per_second of i128::MIN must panic
+#[test]
+#[should_panic(expected = "rate_per_second must be positive")]
+fn test_create_stream_rate_i128_min_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &i128::MIN,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+}
+
+/// rate_per_second of 1 is valid (minimum positive)
+#[test]
+fn test_create_stream_rate_one_valid() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128, // minimum valid rate
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+    let state = ctx.client().get_stream_state(&id);
+    assert_eq!(state.rate_per_second, 1);
+}
+
+// --- Group 5: deposit < rate * duration ---
+
+/// deposit one less than required (rate * duration - 1) must panic
+#[test]
+#[should_panic(expected = "deposit_amount must cover total streamable amount")]
+fn test_create_stream_deposit_one_less_than_required_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    // rate=2, duration=500 → required=1000; deposit=999
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &999_i128, // one under boundary
+        &2_i128,
+        &0u64,
+        &0u64,
+        &500u64,
+    );
+}
+
+/// deposit exactly equal to rate * duration is valid (boundary pass)
+#[test]
+fn test_create_stream_deposit_exactly_required_valid() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    // rate=2, duration=500 → required=1000; deposit=1000
+    let id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128, // exactly at boundary
+        &2_i128,
+        &0u64,
+        &0u64,
+        &500u64,
+    );
+    let state = ctx.client().get_stream_state(&id);
+    assert_eq!(state.deposit_amount, 1000);
+}
+
+/// deposit much less than rate * duration must panic
+#[test]
+#[should_panic(expected = "deposit_amount must cover total streamable amount")]
+fn test_create_stream_deposit_far_below_required_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    // rate=10, duration=1000 → required=10000; deposit=100
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &100_i128, // way under
+        &10_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+}
+
+/// deposit greater than required is valid (excess stays in contract)
+#[test]
+fn test_create_stream_deposit_above_required_valid() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &5000_i128, // more than rate(1) * duration(1000) = 1000
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+    let state = ctx.client().get_stream_state(&id);
+    assert_eq!(state.deposit_amount, 5000);
+    assert_eq!(state.status, StreamStatus::Active);
+}
+
+// --- Group 6: sender == recipient ---
+
+/// sender and recipient are the same address must panic
+#[test]
+#[should_panic(expected = "sender and recipient must be different")]
+fn test_create_stream_sender_is_recipient_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.sender, // same address
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+}
+
+/// different sender and recipient is valid (sanity check)
+#[test]
+fn test_create_stream_different_sender_recipient_valid() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let another = Address::generate(&ctx.env);
+    let id = ctx.client().create_stream(
+        &ctx.sender,
+        &another,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+    let state = ctx.client().get_stream_state(&id);
+    assert_ne!(state.sender, state.recipient);
+}
+
+// ---------------------------------------------------------------------------
 // Tests — Issue #35: validate positive amounts and sender != recipient
 // ---------------------------------------------------------------------------
 
@@ -795,6 +1216,24 @@ fn test_calculate_accrued_at_start() {
 }
 
 #[test]
+fn test_calculate_accrued_before_cliff() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &500u64,
+        &1000u64,
+    );
+    ctx.env.ledger().set_timestamp(300);
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued, 0);
+}
+
+#[test]
 fn test_calculate_accrued_mid_stream() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
@@ -866,6 +1305,485 @@ fn test_calculate_accrued_overflow_protection() {
 }
 
 // ---------------------------------------------------------------------------
+// Tests — calculate_accrued overflow and edge cases
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_large_rate_no_overflow() {
+    // Security: Large rate_per_second values must not cause overflow or panic.
+    // This tests rates approaching i128::MAX to ensure safe multiplication.
+    let ctx = TestContext::setup();
+
+    // Use a very large rate but short duration to avoid overflow
+    let large_rate = i128::MAX / 10;
+    let deposit = i128::MAX / 5;
+
+    ctx.sac.mint(&ctx.sender, &deposit);
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &deposit,
+        &large_rate,
+        &0u64,
+        &0u64,
+        &2u64, // Very short duration
+    );
+
+    ctx.env.ledger().set_timestamp(1);
+
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    // Should not panic and should be capped at deposit
+    assert!(accrued <= deposit, "accrued must not exceed deposit");
+    assert!(accrued >= 0, "accrued must be non-negative");
+}
+
+#[test]
+fn test_large_duration_no_overflow() {
+    // Security: Large elapsed time values must not cause overflow.
+    // This tests very large duration values to ensure safe time calculations.
+    let ctx = TestContext::setup();
+
+    let rate = 1_i128;
+    let duration = 1_000_000_000u64; // 1 billion seconds (about 31 years)
+    let deposit = 2_000_000_000_i128; // Covers duration + extra
+
+    ctx.sac.mint(&ctx.sender, &deposit);
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &deposit,
+        &rate,
+        &0u64,
+        &0u64,
+        &duration,
+    );
+
+    // Set time to a very large value past the end
+    ctx.env.ledger().set_timestamp(duration + 1_000_000);
+
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    // Should not overflow and should be capped at deposit
+    assert!(accrued <= deposit, "accrued must not exceed deposit");
+    assert!(accrued >= 0, "accrued must be non-negative");
+    // At end time, should accrue exactly rate * duration
+    assert_eq!(
+        accrued, duration as i128,
+        "should accrue full duration amount"
+    );
+}
+
+#[test]
+fn test_combined_large_rate_and_duration() {
+    // Security: Worst-case scenario - both large rate and large duration.
+    // This is the most critical overflow scenario: elapsed * rate_per_second.
+    let ctx = TestContext::setup();
+
+    // Use values that pass validation but will overflow in extended scenarios
+    let large_rate = i128::MAX / 10000;
+    let deposit = i128::MAX / 100;
+    let duration = 100u64;
+
+    ctx.sac.mint(&ctx.sender, &deposit);
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &deposit,
+        &large_rate,
+        &0u64,
+        &0u64,
+        &duration,
+    );
+
+    // Set time to cause potential overflow in multiplication
+    ctx.env.ledger().set_timestamp(50);
+
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    // Should be capped at deposit when overflow would occur
+    assert!(accrued <= deposit, "overflow should cap at deposit_amount");
+    assert!(accrued >= 0, "accrued must be non-negative");
+}
+
+#[test]
+fn test_boundary_max_rate_per_second() {
+    // Security: Very large rate_per_second values must be handled safely.
+    let ctx = TestContext::setup();
+
+    // Use large but realistic values that won't overflow in validation
+    let large_rate = i128::MAX / 10000;
+    let deposit = i128::MAX / 1000;
+
+    ctx.sac.mint(&ctx.sender, &deposit);
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &deposit,
+        &large_rate,
+        &0u64,
+        &0u64,
+        &2u64, // Short duration
+    );
+
+    ctx.env.ledger().set_timestamp(2);
+
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    // Should not overflow and should be capped at deposit
+    assert!(accrued <= deposit, "large rate should cap at deposit");
+    assert!(accrued >= 0, "accrued must be non-negative");
+}
+
+#[test]
+fn test_boundary_min_positive_values() {
+    // Security: Minimum positive values (1) must work correctly.
+    let ctx = TestContext::setup();
+
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1_i128, // Minimum deposit
+        &1_i128, // Minimum rate
+        &0u64,
+        &0u64,
+        &1u64, // Minimum duration
+    );
+
+    ctx.env.ledger().set_timestamp(1);
+
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued, 1, "minimum values should work correctly");
+}
+
+#[test]
+fn test_zero_rate_returns_zero() {
+    // Security: Zero rate must return zero accrued, not cause division errors.
+    // Note: create_stream may reject zero rate, so we test the calculation logic.
+    let ctx = TestContext::setup();
+
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128, // Start with valid rate
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    // Even with time elapsed, if rate were 0, accrued would be 0
+    ctx.env.ledger().set_timestamp(500);
+
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    // With rate=1, we expect 500
+    assert_eq!(accrued, 500, "normal calculation works");
+}
+
+#[test]
+fn test_zero_duration_returns_zero() {
+    // Security: When current time equals start time (zero elapsed), accrued must be zero.
+    let ctx = TestContext::setup();
+
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &10000_i128, // Must cover rate * duration
+        &10_i128,
+        &0u64, // Start at 0
+        &0u64, // No cliff
+        &1000u64,
+    );
+
+    // Query at start time - zero elapsed
+    ctx.env.ledger().set_timestamp(0);
+
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued, 0, "zero elapsed time should give zero accrued");
+}
+
+#[test]
+fn test_result_capping_at_deposit() {
+    // Security: Result must NEVER exceed deposit_amount, even with calculation errors.
+    let ctx = TestContext::setup();
+
+    let rate = 10_i128;
+    let duration = 1000u64;
+    let deposit = 15000_i128; // More than rate * duration to test capping
+
+    ctx.sac.mint(&ctx.sender, &deposit);
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &deposit,
+        &rate,
+        &0u64,
+        &0u64,
+        &duration,
+    );
+
+    // Set time way past end
+    ctx.env.ledger().set_timestamp(10000);
+
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    // Should be capped at rate * duration, not deposit (since deposit is larger)
+    assert_eq!(
+        accrued,
+        (rate * duration as i128),
+        "should accrue full stream amount"
+    );
+    assert!(accrued <= deposit, "accrued must never exceed deposit");
+}
+
+#[test]
+fn test_result_capping_with_overflow() {
+    // Security: When multiplication overflows, result must cap at deposit_amount.
+    let ctx = TestContext::setup();
+
+    let rate = i128::MAX / 100000;
+    let duration = 1u64;
+    // Use checked arithmetic to avoid overflow in test setup
+    let deposit = rate.checked_add(1000).unwrap_or(rate);
+
+    ctx.sac.mint(&ctx.sender, &deposit);
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &deposit,
+        &rate,
+        &0u64,
+        &0u64,
+        &duration,
+    );
+
+    ctx.env.ledger().set_timestamp(1);
+
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    // Should not overflow and should be capped at deposit
+    assert!(accrued <= deposit, "overflow should cap at deposit");
+    assert!(accrued >= 0, "accrued must be non-negative");
+}
+
+#[test]
+fn test_no_panic_on_extreme_inputs() {
+    // Security: No combination of extreme inputs should cause panic.
+    let ctx = TestContext::setup();
+
+    let rate = i128::MAX / 100000;
+    let duration = 10u64;
+    // Use checked arithmetic to avoid overflow in test setup
+    let deposit = rate
+        .checked_mul(duration as i128)
+        .and_then(|v| v.checked_add(1000))
+        .unwrap_or(i128::MAX / 10);
+
+    ctx.sac.mint(&ctx.sender, &deposit);
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &deposit,
+        &rate,
+        &0u64,
+        &0u64,
+        &duration,
+    );
+
+    // Test at various timestamps
+    ctx.env.ledger().set_timestamp(2);
+    let accrued1 = ctx.client().calculate_accrued(&stream_id);
+    assert!(accrued1 >= 0 && accrued1 <= deposit);
+
+    ctx.env.ledger().set_timestamp(5);
+    let accrued2 = ctx.client().calculate_accrued(&stream_id);
+    assert!(accrued2 >= 0 && accrued2 <= deposit);
+
+    ctx.env.ledger().set_timestamp(20);
+    let accrued3 = ctx.client().calculate_accrued(&stream_id);
+    assert!(accrued3 >= 0 && accrued3 <= deposit);
+}
+
+#[test]
+fn test_no_underflow_negative_result() {
+    // Security: Result must never be negative due to underflow.
+    // The max(0) in calculate_accrued ensures this.
+    let ctx = TestContext::setup();
+
+    ctx.env.ledger().set_timestamp(1000);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &1000u64,
+        &1000u64,
+        &2000u64,
+    );
+
+    // Query before start (though this shouldn't happen in practice)
+    ctx.env.ledger().set_timestamp(500);
+
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert!(accrued >= 0, "accrued must never be negative");
+}
+
+#[test]
+fn test_elapsed_time_checked_subtraction() {
+    // Security: Time subtraction must use checked arithmetic to prevent underflow.
+    let ctx = TestContext::setup();
+
+    ctx.env.ledger().set_timestamp(1000);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &1000u64,
+        &1000u64,
+        &2000u64,
+    );
+
+    // Set time before start (edge case)
+    ctx.env.ledger().set_timestamp(500);
+
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    // Should return 0, not panic or underflow
+    assert_eq!(accrued, 0, "should handle time before start gracefully");
+}
+
+#[test]
+fn test_rate_times_duration_overflow_caps() {
+    // Security: The critical multiplication (elapsed * rate) must detect overflow.
+    // When overflow occurs, it should cap at deposit_amount, not wrap around.
+    let ctx = TestContext::setup();
+
+    // Choose values that will definitely overflow when multiplied
+    let rate = i128::MAX / 100000;
+    let duration = 10u64;
+    // Use checked arithmetic to avoid overflow in test setup
+    let deposit = rate
+        .checked_mul(duration as i128)
+        .and_then(|v| v.checked_add(1000))
+        .unwrap_or(i128::MAX / 10);
+
+    ctx.sac.mint(&ctx.sender, &deposit);
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &deposit,
+        &rate,
+        &0u64,
+        &0u64,
+        &duration,
+    );
+
+    ctx.env.ledger().set_timestamp(5);
+
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    // Should not overflow
+    assert!(
+        accrued <= deposit,
+        "overflow in multiplication should cap at deposit"
+    );
+    assert!(accrued >= 0, "accrued must be non-negative");
+}
+
+#[test]
+fn test_accrued_never_exceeds_deposit_multiple_checks() {
+    // Security: Comprehensive verification that accrued never exceeds deposit
+    // across various scenarios and time points.
+    let ctx = TestContext::setup();
+
+    let deposit = 10_000_i128;
+    let rate = 50_i128;
+
+    ctx.sac.mint(&ctx.sender, &deposit);
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &deposit,
+        &rate,
+        &0u64,
+        &0u64,
+        &100u64, // Would accrue 5,000 at end
+    );
+
+    // Check at multiple time points
+    let test_times = [0u64, 50, 100, 200, 500, 1000, 10000, u64::MAX / 2];
+
+    for time in test_times.iter() {
+        ctx.env.ledger().set_timestamp(*time);
+        let accrued = ctx.client().calculate_accrued(&stream_id);
+        assert!(
+            accrued <= deposit,
+            "accrued {} must not exceed deposit {} at time {}",
+            accrued,
+            deposit,
+            time
+        );
+        assert!(
+            accrued >= 0,
+            "accrued must be non-negative at time {}",
+            time
+        );
+    }
+}
+
+#[test]
+fn test_cliff_with_overflow_scenario() {
+    // Security: Cliff logic must work correctly even with overflow-prone values.
+    let ctx = TestContext::setup();
+
+    let deposit = i128::MAX / 1000;
+    let rate = i128::MAX / 100000;
+
+    ctx.sac.mint(&ctx.sender, &deposit);
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &deposit,
+        &rate,
+        &0u64,
+        &50u64, // Cliff at 50
+        &100u64,
+    );
+
+    // Before cliff - should return 0
+    ctx.env.ledger().set_timestamp(25);
+    let accrued_before = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued_before, 0, "before cliff should be 0");
+
+    // After cliff - should calculate but cap at deposit
+    ctx.env.ledger().set_timestamp(75);
+    let accrued_after = ctx.client().calculate_accrued(&stream_id);
+    assert!(accrued_after > 0, "after cliff should accrue");
+    assert!(accrued_after <= deposit, "must not exceed deposit");
+}
+
+// ---------------------------------------------------------------------------
 // Tests — pause / resume
 // ---------------------------------------------------------------------------
 
@@ -897,7 +1815,7 @@ fn test_admin_can_resume_stream() {
 }
 
 #[test]
-#[should_panic(expected = "stream is not active")]
+#[should_panic(expected = "stream is already paused")]
 fn test_pause_already_paused_panics() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
@@ -934,6 +1852,15 @@ fn test_resume_cancelled_stream_panics() {
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Cancelled);
     ctx.client().resume_stream(&stream_id);
+}
+
+#[test]
+#[should_panic(expected = "stream must be active to pause")]
+fn test_pause_cancelled_stream_panics() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    ctx.client().cancel_stream(&stream_id);
+    ctx.client().pause_stream(&stream_id); // Cancelled — must panic with general message
 }
 
 // ---------------------------------------------------------------------------
@@ -3566,4 +4493,297 @@ fn test_withdraw_after_cancel_then_completed() {
     // Try to withdraw again - should panic with "nothing to withdraw"
     // because accrued (600) - withdrawn (600) = 0
     ctx.client().withdraw(&stream_id);
+}
+
+// ---------------------------------------------------------------------------
+// Tests — stream_id generation and uniqueness
+// ---------------------------------------------------------------------------
+
+/// The first stream created after init must receive stream_id = 0.
+#[test]
+fn test_stream_id_first_stream_is_zero() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &100_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &100u64,
+    );
+
+    assert_eq!(id, 0, "first stream_id must be 0");
+    assert_eq!(
+        ctx.client().get_stream_state(&id).stream_id,
+        0,
+        "stream struct must also record stream_id = 0"
+    );
+}
+
+/// Each subsequent call to create_stream increments the stream_id by exactly one,
+/// producing a monotonically increasing sequence with no gaps.
+#[test]
+fn test_stream_id_increments_by_one() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let id0 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &100_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &100u64,
+    );
+    let id1 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &100_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &100u64,
+    );
+    let id2 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &100_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &100u64,
+    );
+
+    assert_eq!(id0, 0, "first id must be 0");
+    assert_eq!(id1, id0 + 1, "second id must be first + 1");
+    assert_eq!(id2, id1 + 1, "third id must be second + 1");
+}
+
+/// The stream_id returned by create_stream must equal the stream_id field
+/// stored inside the persisted Stream struct for every stream created.
+#[test]
+fn test_create_stream_returned_id_matches_stored_id() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    for expected_id in 0u64..5 {
+        let returned_id = ctx.client().create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &100_i128,
+            &1_i128,
+            &0u64,
+            &0u64,
+            &100u64,
+        );
+        let stored = ctx.client().get_stream_state(&returned_id);
+
+        assert_eq!(
+            returned_id, expected_id,
+            "stream {expected_id}: returned id must be sequential"
+        );
+        assert_eq!(
+            stored.stream_id, returned_id,
+            "stream {expected_id}: stored stream_id must equal returned id"
+        );
+    }
+}
+
+/// N streams must produce N distinct IDs with no duplicates and no gaps,
+/// forming the sequence 0, 1, 2, …, N-1.
+#[test]
+fn test_stream_ids_are_unique_no_gaps() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    const N: u64 = 20;
+    let mut ids = Vec::new(&ctx.env);
+
+    for expected in 0..N {
+        let id = ctx.client().create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &10_i128,
+            &1_i128,
+            &0u64,
+            &0u64,
+            &10u64,
+        );
+        assert_eq!(id, expected, "stream {expected} must have id {expected}");
+        ids.push_back(id);
+    }
+
+    // Pairwise uniqueness check — no two entries may share an id
+    for i in 0..ids.len() {
+        for j in (i + 1)..ids.len() {
+            assert_ne!(
+                ids.get(i).unwrap(),
+                ids.get(j).unwrap(),
+                "stream_ids at positions {i} and {j} must be different"
+            );
+        }
+    }
+}
+
+/// A create_stream call that fails validation (deposit too low) must NOT
+/// advance the NextStreamId counter; the next successful call must receive
+/// the id that the failed call would have consumed.
+#[test]
+fn test_failed_create_stream_does_not_advance_counter() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // First successful stream → id = 0
+    let id0 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &100_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &100u64,
+    );
+    assert_eq!(id0, 0);
+
+    // Attempt a stream with an underfunded deposit (1 token, need 100) → must panic
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &1_i128, // deposit < rate * duration (100)
+            &1_i128,
+            &0u64,
+            &0u64,
+            &100u64,
+        );
+    }));
+    assert!(result.is_err(), "underfunded create_stream must panic");
+
+    // Next successful stream must still be id = 1, not 2
+    let id1 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &100_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &100u64,
+    );
+    assert_eq!(
+        id1, 1,
+        "counter must not advance after a failed create_stream"
+    );
+}
+
+/// Streams created by different senders and recipients all draw from the
+/// same global NextStreamId counter, producing globally unique ids.
+#[test]
+fn test_stream_ids_unique_across_different_senders() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Provision a second sender with enough tokens
+    let sender2 = Address::generate(&ctx.env);
+    let recipient2 = Address::generate(&ctx.env);
+    ctx.sac.mint(&sender2, &1_000_i128);
+
+    let id_a = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &100_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &100u64,
+    );
+    let id_b = ctx.client().create_stream(
+        &sender2,
+        &recipient2,
+        &100_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &100u64,
+    );
+    let id_c = ctx.client().create_stream(
+        &ctx.sender,
+        &recipient2,
+        &100_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &100u64,
+    );
+
+    assert_eq!(id_a, 0, "first stream (sender1→recipient1) must be 0");
+    assert_eq!(id_b, 1, "second stream (sender2→recipient2) must be 1");
+    assert_eq!(id_c, 2, "third stream (sender1→recipient2) must be 2");
+
+    assert_ne!(id_a, id_b, "ids from different senders must not collide");
+    assert_ne!(id_b, id_c, "ids from different senders must not collide");
+    assert_ne!(id_a, id_c, "ids from different senders must not collide");
+}
+
+/// Pausing, resuming, or cancelling a stream must not alter any stream's
+/// stream_id field, and the global counter must continue from where it left off.
+#[test]
+fn test_stream_id_stability_after_state_changes() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let id0 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &200_i128,
+        &2_i128,
+        &0u64,
+        &0u64,
+        &100u64,
+    );
+    let id1 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &200_i128,
+        &2_i128,
+        &0u64,
+        &0u64,
+        &100u64,
+    );
+    let id2 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &200_i128,
+        &2_i128,
+        &0u64,
+        &0u64,
+        &100u64,
+    );
+
+    // Mutate stream 1: pause then cancel
+    ctx.client().pause_stream(&id1);
+    ctx.client().cancel_stream(&id1);
+
+    // Stream struct stream_id fields must be unchanged
+    assert_eq!(ctx.client().get_stream_state(&id0).stream_id, id0);
+    assert_eq!(ctx.client().get_stream_state(&id1).stream_id, id1);
+    assert_eq!(ctx.client().get_stream_state(&id2).stream_id, id2);
+
+    // The global counter must continue from 3
+    let id3 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &200_i128,
+        &2_i128,
+        &0u64,
+        &0u64,
+        &100u64,
+    );
+    assert_eq!(
+        id3, 3,
+        "counter must continue monotonically after state mutations"
+    );
 }

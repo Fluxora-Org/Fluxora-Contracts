@@ -774,6 +774,120 @@ fn integration_cancel_after_cliff_partial_refund() {
     assert_eq!(ctx.token.balance(&ctx.contract_id), 0);
 }
 
+// ---------------------------------------------------------------------------
+// Integration tests — stream_id generation and uniqueness
+// ---------------------------------------------------------------------------
+
+/// Creating N streams must produce IDs 0, 1, 2, …, N-1 with no gaps or duplicates.
+///
+/// Verifies:
+/// - Counter starts at 0 after init
+/// - Each create_stream call advances the counter by exactly 1
+/// - The returned stream_id matches the value stored in the Stream struct
+/// - No two streams share the same id
+#[test]
+fn integration_stream_ids_are_unique_and_sequential() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    const N: u64 = 10;
+    let mut collected: std::vec::Vec<u64> = std::vec::Vec::new();
+
+    for expected in 0..N {
+        let id = ctx.client().create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &100_i128,
+            &1_i128,
+            &0u64,
+            &0u64,
+            &100u64,
+        );
+
+        // Returned id must be sequential
+        assert_eq!(
+            id, expected,
+            "stream {expected}: id must equal counter value"
+        );
+
+        // Id stored inside the struct must match the returned id
+        let state = ctx.client().get_stream_state(&id);
+        assert_eq!(
+            state.stream_id, id,
+            "stream {expected}: stored stream_id must equal returned id"
+        );
+
+        collected.push(id);
+    }
+
+    // Pairwise uniqueness — no duplicate ids
+    for i in 0..collected.len() {
+        for j in (i + 1)..collected.len() {
+            assert_ne!(
+                collected[i], collected[j],
+                "stream_ids at positions {i} and {j} must be unique"
+            );
+        }
+    }
+}
+
+/// A create_stream call that fails validation must NOT advance NextStreamId;
+/// the following successful call must receive the id that would have been next.
+///
+/// Verifies:
+/// - Validation failures (underfunded deposit) leave the counter unchanged
+/// - Subsequent successful calls receive the correct sequential id
+#[test]
+fn integration_failed_creation_does_not_advance_counter() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // First successful stream → id = 0
+    let id0 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+    assert_eq!(id0, 0, "first stream must be id 0");
+
+    // Attempt a stream with an underfunded deposit → must panic
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &1_i128, // deposit < rate * duration
+            &1_i128,
+            &0u64,
+            &0u64,
+            &1000u64,
+        );
+    }));
+    assert!(result.is_err(), "underfunded create_stream must panic");
+
+    // Next successful stream must be id = 1, not 2
+    let id1 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+    assert_eq!(
+        id1, 1,
+        "counter must not advance after a failed create_stream"
+    );
+
+    // Verify both streams are independently retrievable
+    assert_eq!(ctx.client().get_stream_state(&id0).stream_id, 0);
+    assert_eq!(ctx.client().get_stream_state(&id1).stream_id, 1);
+}
+
 /// Integration test: create stream → pause → cancel → correct refund.
 ///
 /// This test covers:

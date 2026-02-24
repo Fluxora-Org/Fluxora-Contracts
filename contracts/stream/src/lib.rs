@@ -274,41 +274,30 @@ impl FluxoraStream {
         stream_id
     }
 
-    /// Pause an active payment stream.
+    /// Pause an active stream. Only the sender or admin may call this.
     ///
-    /// Temporarily halts withdrawals from the stream while preserving accrual calculations.
-    /// The stream can be resumed later by the sender or admin. Accrual continues based on
-    /// time elapsed, but the recipient cannot withdraw while paused.
+    /// ## Errors / Panics
+    /// - Panics with `"stream is already paused"` if the stream is already in
+    ///   `Paused` state. This is a clear, distinct error to aid frontend/backend
+    ///   consumers in diagnosing double-pause scenarios.
+    /// - Panics with `"stream must be active to pause"` if the stream is in any
+    ///   other non-`Active` state (`Completed` or `Cancelled`).
     ///
-    /// # Parameters
-    /// - `stream_id`: Unique identifier of the stream to pause
-    ///
-    /// # Authorization
-    /// - Requires authorization from the stream's sender (original creator)
-    /// - Admin can use `pause_stream_as_admin` for administrative override
-    ///
-    /// # Panics
-    /// - If the stream is not in `Active` state (already paused, completed, or cancelled)
-    /// - If the stream does not exist (`stream_id` is invalid)
-    /// - If caller is not authorized (not the sender)
-    ///
-    /// # Events
-    /// - Publishes `Paused(stream_id)` event on success
-    ///
-    /// # Usage Notes
-    /// - Pausing does not affect accrual calculations (time-based)
-    /// - Recipient cannot withdraw while stream is paused
-    /// - Stream can be cancelled while paused
-    /// - Use `resume_stream` to reactivate withdrawals
+    /// ## Consistency with `resume_stream`
+    /// `resume_stream` mirrors this behaviour: it panics with
+    /// `"stream is not paused"` when called on a non-`Paused` stream.
     pub fn pause_stream(env: Env, stream_id: u64) {
         let mut stream = load_stream(&env, stream_id);
 
-        // Corrected Auth Check
         Self::require_sender_or_admin(&env, &stream.sender);
+
+        if stream.status == StreamStatus::Paused {
+            panic!("stream is already paused");
+        }
 
         assert!(
             stream.status == StreamStatus::Active,
-            "stream is not active"
+            "stream must be active to pause"
         );
 
         stream.status = StreamStatus::Paused;
