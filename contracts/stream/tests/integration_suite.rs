@@ -1402,7 +1402,7 @@ fn pause_partial_withdraw_resume_full_withdraw() {
         "no withdrawals should occur during pause"
     );
 
-     // -----------------------------------------------------------------------
+    // -----------------------------------------------------------------------
     // Phase 3: Advance to t=400 and withdraw
     // -----------------------------------------------------------------------
     ctx.env.ledger().set_timestamp(400);
@@ -1411,7 +1411,7 @@ fn pause_partial_withdraw_resume_full_withdraw() {
     // let accrued_at_200 = ctx.client().calculate_accrued(&stream_id);
     // assert_eq!(accrued_at_200, 400);
 
-     // Attempt to withdraw while paused — should fail
+    // Attempt to withdraw while paused — should fail
     let withdrawal_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         ctx.client().withdraw(&stream_id);
     }));
@@ -1423,8 +1423,8 @@ fn pause_partial_withdraw_resume_full_withdraw() {
         "no withdrawals should occur during pause"
     );
 
-     // -----------------------------------------------------------------------
-    // Phase 4: Resume and Advance to t=800
+    // -----------------------------------------------------------------------
+    // Phase 4: Resume and Advance to t=1000
     // -----------------------------------------------------------------------
     ctx.env.ledger().set_timestamp(800);
 
@@ -1445,29 +1445,29 @@ fn pause_partial_withdraw_resume_full_withdraw() {
     assert_eq!(ctx.token.balance(&ctx.recipient), 1600);
     assert_eq!(ctx.token.balance(&ctx.contract_id), 400);
 
-    // // -----------------------------------------------------------------------
-    // // Phase 6: Advance to t=1000 (end of stream) and withdraw remaining
-    // // -----------------------------------------------------------------------
-    // ctx.env.ledger().set_timestamp(1000);
+    // -----------------------------------------------------------------------
+    // Phase 6: Advance to t=1000 (end of stream) and withdraw remaining
+    // -----------------------------------------------------------------------
+    ctx.env.ledger().set_timestamp(1000);
 
-    // // Verify 1000 tokens accrued at end
-    // let accrued_at_1000 = ctx.client().calculate_accrued(&stream_id);
-    // assert_eq!(accrued_at_1000, 1000);
+    // Verify 1000 tokens accrued at end
+    let accrued_at_1000 = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued_at_1000, 2000);
 
-    // // Withdraw final 300 tokens (1000 - 700 already withdrawn)
-    // let withdrawn_2 = ctx.client().withdraw(&stream_id);
-    // assert_eq!(withdrawn_2, 300, "should withdraw remaining 300 tokens");
+    // Withdraw final 400 tokens (2000 - 1600 already withdrawn)
+    let withdrawn_2 = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn_2, 400, "should withdraw remaining 300 tokens");
 
-    // // Verify stream is now Completed
-    // let state = ctx.client().get_stream_state(&stream_id);
-    // assert_eq!(state.status, StreamStatus::Completed);
-    // assert_eq!(state.withdrawn_amount, 1000);
+    // Verify stream is now Completed
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+    assert_eq!(state.withdrawn_amount, 2000);
 
-    // // Verify final balances
-    // assert_eq!(ctx.token.balance(&ctx.sender), 9_000);
-    // assert_eq!(ctx.token.balance(&ctx.recipient), 1000);
-    // assert_eq!(ctx.token.balance(&ctx.contract_id), 0);
+    // Verify final balances
+    assert_eq!(ctx.token.balance(&ctx.sender), 8_000);
+    assert_eq!(ctx.token.balance(&ctx.recipient), 2000);
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 0);
 
-    // // Verify total withdrawn equals deposit
-    // assert_eq!(withdrawn_1 + withdrawn_2, 1000);
+    // Verify total withdrawn equals deposit
+    assert_eq!(withdrawn_1 + withdrawn_2, 2000);
 }
