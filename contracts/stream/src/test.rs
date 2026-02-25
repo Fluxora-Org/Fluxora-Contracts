@@ -2794,7 +2794,24 @@ fn test_cancel_event() {
     // Check cancel event
     assert_eq!(
         Option::<StreamEvent>::from_val(&ctx.env, &last_event.2).unwrap(),
-        StreamEvent::Cancelled(stream_id)
+        StreamEvent::StreamCancelled(stream_id)
+    );
+}
+
+#[test]
+fn test_completed_event() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+
+    assert_eq!(
+        Option::<StreamEvent>::from_val(&ctx.env, &last_event.2).unwrap(),
+        StreamEvent::StreamCompleted(stream_id)
     );
 }
 
