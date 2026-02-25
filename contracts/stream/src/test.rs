@@ -7,7 +7,7 @@ use soroban_sdk::{
     Address, Env, FromVal, IntoVal, Symbol, TryFromVal, Vec,
 };
 
-use crate::{FluxoraStream, FluxoraStreamClient, StreamEvent, StreamStatus};
+use crate::{CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamEvent, StreamStatus};
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -4668,7 +4668,9 @@ fn test_withdraw_zero_no_time_elapsed() {
     assert_eq!(state.withdrawn_amount, 500);
 }
 
-/// Expected: second withdraw returns 0 (idempotent)
+/// Issue #128 — withdraw when accrued equals withdrawn (zero withdrawable)
+/// Expected: second withdraw returns 0
+/// and no token transfer occurs (recipient balance unchanged).
 #[test]
 fn test_withdraw_when_accrued_equals_withdrawn_zero_withdrawable() {
     let ctx = TestContext::setup();
@@ -4690,12 +4692,12 @@ fn test_withdraw_when_accrued_equals_withdrawn_zero_withdrawable() {
     let recipient_balance_after_first = ctx.token().balance(&ctx.recipient);
     assert_eq!(recipient_balance_after_first, 600);
 
-    // Second withdraw at same timestamp: accrued (600) - withdrawn (600) = 0
-    // Should return 0 and must NOT transfer any tokens
+    // Second withdraw at same timestamp: accrued (600) - withdrawn (600) = 0.
+    // Must return 0 and must NOT transfer any additional tokens.
     let second_withdrawn = ctx.client().withdraw(&stream_id);
-    assert_eq!(second_withdrawn, 0);
+    assert_eq!(second_withdrawn, 0, "zero withdrawable should return 0");
 
-    // Verify no extra tokens moved
+    // Verify no extra tokens moved.
     let recipient_balance_after_second = ctx.token().balance(&ctx.recipient);
     assert_eq!(
         recipient_balance_after_second, recipient_balance_after_first,
@@ -4703,7 +4705,8 @@ fn test_withdraw_when_accrued_equals_withdrawn_zero_withdrawable() {
     );
 }
 
-/// Test withdraw when cancelled with zero accrued
+/// Test withdraw when cancelled with zero accrued.
+/// Should return 0 without transfer or state change (idempotent).
 #[test]
 fn test_withdraw_zero_after_immediate_cancel() {
     let ctx = TestContext::setup();
@@ -5093,10 +5096,12 @@ fn test_withdraw_after_cancel_then_completed() {
     // Advance time substantially; cancelled accrual must remain frozen.
     ctx.env.ledger().set_timestamp(9_999);
 
-    // Try to withdraw again - should return 0 (frozen)
-    // because accrued (600) - withdrawn (600) = 0
-    let second_withdrawn = ctx.client().withdraw(&stream_id);
-    assert_eq!(second_withdrawn, 0);
+    // Try to withdraw again - should return 0 because accrued (600) - withdrawn (600) = 0
+    let withdrawn2 = ctx.client().withdraw(&stream_id);
+    assert_eq!(
+        withdrawn2, 0,
+        "should return 0 when nothing left to withdraw"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -6576,7 +6581,6 @@ fn test_accrual_capped_when_deposit_exceeds_total() {
 // Tests — Batch create_streams
 // ---------------------------------------------------------------------------
 
-use crate::CreateStreamParams;
 use soroban_sdk::vec;
 
 #[test]
@@ -6832,4 +6836,182 @@ fn test_new_admin_can_perform_admin_ops() {
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
+}
+
+// ---------------------------------------------------------------------------
+// Tests — Issue #108: start_time must not be in the past
+// ---------------------------------------------------------------------------
+
+/// start_time strictly before current ledger time must panic.
+#[test]
+#[should_panic(expected = "start_time must not be in the past")]
+fn test_create_stream_start_time_in_past_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &999u64, // start_time < now (1000)
+        &999u64,
+        &1999u64,
+    );
+}
+
+/// start_time one second before now is rejected (boundary).
+#[test]
+#[should_panic(expected = "start_time must not be in the past")]
+fn test_create_stream_start_time_one_second_before_now_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &499u64, // start = now - 1
+        &499u64,
+        &1499u64,
+    );
+}
+
+/// start_time far in the past is rejected.
+#[test]
+#[should_panic(expected = "start_time must not be in the past")]
+fn test_create_stream_start_time_far_in_past_panics() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(10_000);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64, // start far in the past
+        &0u64,
+        &1000u64,
+    );
+}
+
+/// start_time == current ledger timestamp is valid ("start now").
+#[test]
+fn test_create_stream_start_time_equals_now_succeeds() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(500);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &500u64, // start == now
+        &500u64,
+        &1500u64,
+    );
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.start_time, 500);
+    assert_eq!(state.status, StreamStatus::Active);
+}
+
+/// start_time one second in the future is valid.
+#[test]
+fn test_create_stream_start_time_one_second_in_future_succeeds() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(500);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &501u64, // start = now + 1
+        &501u64,
+        &1501u64,
+    );
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.start_time, 501);
+    assert_eq!(state.status, StreamStatus::Active);
+}
+
+/// start_time well in the future is valid.
+#[test]
+fn test_create_stream_start_time_future_succeeds() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(100);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &5000u64, // start far in the future
+        &5000u64,
+        &6000u64,
+    );
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.start_time, 5000);
+    assert_eq!(state.status, StreamStatus::Active);
+    // Nothing accrued yet — stream hasn't started
+    assert_eq!(ctx.client().calculate_accrued(&stream_id), 0);
+}
+
+/// Ledger timestamp == 0 and start_time == 0 is valid (genesis edge case).
+#[test]
+fn test_create_stream_start_time_zero_at_genesis_succeeds() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.start_time, 0);
+    assert_eq!(state.status, StreamStatus::Active);
+}
+
+/// Past-start rejection must fire BEFORE the token transfer.
+/// If the validation runs after transfer, the sender would lose tokens
+/// on a failed call. Verify sender balance is unchanged after the panic.
+#[test]
+fn test_create_stream_past_start_no_token_transfer() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(1000);
+
+    let sender_balance_before = ctx.token().balance(&ctx.sender);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &1000_i128,
+            &1_i128,
+            &500u64, // past
+            &500u64,
+            &1500u64,
+        );
+    }));
+
+    assert!(result.is_err(), "should have panicked");
+    let err = result.unwrap_err();
+    let msg = err
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| {
+            err.downcast_ref::<std::string::String>()
+                .map(|s| s.as_str())
+        })
+        .unwrap_or("");
+    assert!(
+        msg.contains("start_time must not be in the past"),
+        "wrong panic: {msg}"
+    );
+
+    // Sender balance must be unchanged — no token was transferred
+    assert_eq!(
+        ctx.token().balance(&ctx.sender),
+        sender_balance_before,
+        "sender balance must not change on validation failure"
+    );
 }

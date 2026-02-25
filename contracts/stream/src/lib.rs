@@ -55,6 +55,7 @@ pub enum StreamStatus {
 pub enum ContractError {
     StreamNotFound = 1,
     InvalidState = 2,
+    InvalidParams = 3,
 }
 
 #[contracttype]
@@ -236,11 +237,13 @@ fn push_token(env: &Env, to: &Address, amount: i128) {
 // ---------------------------------------------------------------------------
 
 impl FluxoraStream {
+    #[allow(clippy::too_many_arguments)]
     fn validate_stream_params(
         sender: &Address,
         recipient: &Address,
         deposit_amount: i128,
         rate_per_second: i128,
+        current_ledger_timestamp: u64,
         start_time: u64,
         cliff_time: u64,
         end_time: u64,
@@ -257,6 +260,10 @@ impl FluxoraStream {
 
         // Validate time constraints
         assert!(start_time < end_time, "start_time must be before end_time");
+        assert!(
+            start_time >= current_ledger_timestamp,
+            "start_time must not be in the past"
+        );
         assert!(
             cliff_time >= start_time && cliff_time <= end_time,
             "cliff_time must be within [start_time, end_time]"
@@ -389,10 +396,12 @@ impl FluxoraStream {
     /// - `deposit_amount > 0` and `rate_per_second > 0`
     /// - `sender != recipient` (cannot stream to yourself)
     /// - `start_time < end_time` (valid time range)
+    /// - `start_time >= ledger timestamp` (start_time must not be in the past)
     /// - `cliff_time` in `[start_time, end_time]` (cliff within stream duration)
     /// - `deposit_amount >= rate_per_second × (end_time - start_time)` (sufficient deposit)
     ///
     /// # Panics
+    /// - If `start_time` is before the current ledger timestamp (past start time)
     /// - If `deposit_amount` or `rate_per_second` is not positive
     /// - If `sender` and `recipient` are the same address
     /// - If `start_time >= end_time` (invalid time range)
@@ -454,6 +463,7 @@ impl FluxoraStream {
             &recipient,
             deposit_amount,
             rate_per_second,
+            env.ledger().timestamp(),
             start_time,
             cliff_time,
             end_time,
@@ -507,6 +517,7 @@ impl FluxoraStream {
                 &params.recipient,
                 params.deposit_amount,
                 params.rate_per_second,
+                env.ledger().timestamp(),
                 params.start_time,
                 params.cliff_time,
                 params.end_time,
