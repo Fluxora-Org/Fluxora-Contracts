@@ -4,6 +4,7 @@ mod accrual;
 
 use soroban_sdk::{
     contract, contractimpl, contracttype, panic_with_error, symbol_short, token, Address, Env,
+    Symbol,
 };
 
 // ---------------------------------------------------------------------------
@@ -887,7 +888,7 @@ impl FluxoraStream {
     /// - Token address remains unchanged
     ///
     /// # Events
-    /// - Publishes `admin_updated(old_admin, new_admin)` event on success
+    /// - Publishes `AdminUpdated(old_admin, new_admin)` event on success
     ///
     /// # Usage Notes
     /// - This is a security-critical function for admin key rotation
@@ -914,10 +915,8 @@ impl FluxoraStream {
         bump_instance_ttl(&env);
 
         // Emit event with old and new admin addresses
-        env.events().publish(
-            (symbol_short!("admin"), symbol_short!("updated")),
-            (old_admin, new_admin),
-        );
+        env.events()
+            .publish((Symbol::new(&env, "AdminUpdated"),), (old_admin, new_admin));
     }
 
     /// Retrieve the complete state of a payment stream.
