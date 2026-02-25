@@ -140,7 +140,7 @@ return min(accrued, deposit_amount).max(0)
 - **Before cliff:** Returns 0 (no withdrawals allowed)
 - **After cliff:** Accrual computed from `start_time`, not from cliff
 - **No cliff:** Set `cliff_time = start_time` for immediate vesting
-- **After end_time:** Capped at `deposit_amount`
+- **After end_time:** Elapsed time is capped at `end_time` (no post-end accrual)
 - **Overflow:** Multiplication overflow yields `deposit_amount` (safe upper bound)
 - **Completed:** `calculate_accrued` returns `deposit_amount` (deterministic final value)
 - **Cancelled:** `calculate_accrued` is frozen at `cancelled_at` (no post-cancel growth)
@@ -165,7 +165,7 @@ withdrawable = accrued - withdrawn_amount
 
 - Must satisfy `start_time < end_time`
 - Accrual uses `min(current_time, end_time)` as the upper bound
-- After `end_time`, accrued stays at `deposit_amount`
+- After `end_time`, accrued stays at `min((end_time - start_time) * rate_per_second, deposit_amount)`
 - No extra accrual beyond `end_time`
 
 ### Deposit Validation
@@ -241,4 +241,3 @@ All failures use `panic!` / `assert!`. No custom error enum.
 
 ## Error Reference
 For a full list of contract errors, see [error.md](./error.md).
-

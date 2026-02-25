@@ -1071,6 +1071,103 @@ fn test_withdraw_completed() {
 
 /// Status is Complete when Recipient fully withdraws in batches
 #[test]
+fn test_calculate_accrued_formula_before_cliff_returns_zero() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(100);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &100u64,
+        &200u64,
+        &600u64,
+    );
+
+    ctx.env.ledger().set_timestamp(199);
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued, 0, "accrued must be zero before cliff_time");
+}
+
+#[test]
+fn test_calculate_accrued_formula_after_cliff_uses_start_time_elapsed() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(100);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &100u64,
+        &200u64,
+        &600u64,
+    );
+
+    ctx.env.ledger().set_timestamp(250);
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(
+        accrued, 150,
+        "after cliff, accrual must use (current_time - start_time)"
+    );
+}
+
+#[test]
+fn test_calculate_accrued_formula_after_end_time_caps_elapsed() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(100);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &100u64,
+        &200u64,
+        &600u64,
+    );
+
+    ctx.env.ledger().set_timestamp(900);
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(
+        accrued, 500,
+        "after end_time, elapsed must be capped at end_time (600 - 100)"
+    );
+}
+
+#[test]
+fn test_accrued_after_cliff_before_end() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &10000_i128,
+        &10_i128,
+        &0u64,
+        &500u64,
+        &1000u64,
+    );
+
+    ctx.env.ledger().set_timestamp(500);
+    assert_eq!(ctx.client().calculate_accrued(&stream_id), 5000);
+
+    ctx.env.ledger().set_timestamp(750);
+    assert_eq!(ctx.client().calculate_accrued(&stream_id), 7500);
+
+    ctx.env.ledger().set_timestamp(999);
+    assert_eq!(ctx.client().calculate_accrued(&stream_id), 9990);
+
+    ctx.env.ledger().set_timestamp(1000);
+    assert_eq!(ctx.client().calculate_accrued(&stream_id), 10000);
+
+    ctx.env.ledger().set_timestamp(1500);
+    assert_eq!(ctx.client().calculate_accrued(&stream_id), 10000);
+}
+
+#[test]
 fn test_withdraw_completed_in_batch() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();

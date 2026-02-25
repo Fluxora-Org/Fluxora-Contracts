@@ -142,9 +142,10 @@ fluxora-contracts/
 
 ## Accrual formula (reference)
 
-- **Accrued** = `min((current_time - start_time) * rate_per_second, deposit_amount)`
+- **Accrued** = `0` when `current_time < cliff_time`
+- Otherwise: `min((min(current_time, end_time) - start_time) * rate_per_second, deposit_amount)`
 - **Withdrawable** = `Accrued - withdrawn_amount`
-- Before `cliff_time`: withdrawable = 0.
+- No accrual after `end_time` (elapsed time is capped at `end_time`).
 
 ## Related repos
 

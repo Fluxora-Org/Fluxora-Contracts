@@ -617,16 +617,13 @@ impl FluxoraStream {
 
         // CEI: update state before external token transfer to reduce reentrancy risk.
         stream.status = StreamStatus::Cancelled;
+        stream.cancelled_at = Some(env.ledger().timestamp());
         save_stream(&env, &stream);
 
         if unstreamed > 0 {
             let token_client = token::Client::new(&env, &get_token(&env));
             token_client.transfer(&env.current_contract_address(), &stream.sender, &unstreamed);
         }
-
-        stream.status = StreamStatus::Cancelled;
-        stream.cancelled_at = Some(env.ledger().timestamp());
-        save_stream(&env, &stream);
 
         env.events().publish(
             (symbol_short!("cancelled"), stream_id),
@@ -740,7 +737,7 @@ impl FluxoraStream {
     ///
     /// | Status      | Return value                                         |
     /// |-------------|------------------------------------------------------|
-    /// | `Active`    | `min((now - start) × rate, deposit_amount)`          |
+    /// | `Active`    | `min((min(now,end)-start) × rate, deposit_amount)`   |
     /// | `Paused`    | Same time-based formula (accrual is not paused)      |
     /// | `Completed` | `deposit_amount` — all tokens were accrued/withdrawn |
     /// | `Cancelled` | Final accrued at cancellation timestamp (frozen value) |
@@ -754,7 +751,7 @@ impl FluxoraStream {
     /// # Calculation
     /// - Before `cliff_time`: returns 0 (no accrual before cliff)
     /// - After `cliff_time`: `min((now - start_time) × rate_per_second, deposit_amount)`
-    /// - After `end_time`: capped at `deposit_amount` (no accrual beyond end)
+    /// - After `end_time`: elapsed time is capped at `end_time` (no accrual beyond end)
     ///
     /// # Panics
     /// - If the stream does not exist (`stream_id` is invalid)
@@ -772,7 +769,7 @@ impl FluxoraStream {
     /// - At t=300: returns 0 (before cliff)
     /// - At t=500: returns 500 (at cliff, accrual from start_time)
     /// - At t=800: returns 800
-    /// - At t=1500: returns 1000 (capped at deposit_amount)
+    /// - At t=1500: returns 1000 (elapsed time capped at end_time)
     /// ## Rationale for `Completed`
     /// When a stream reaches `Completed`, `withdrawn_amount == deposit_amount`.
     /// There is no further accrual possible. Returning `deposit_amount` is the
@@ -785,9 +782,7 @@ impl FluxoraStream {
         }
 
         let now = if stream.status == StreamStatus::Cancelled {
-            stream
-                .cancelled_at
-                .expect("cancelled stream missing cancelled_at timestamp")
+            stream.cancelled_at.ok_or(ContractError::InvalidState)?
         } else {
             env.ledger().timestamp()
         };
@@ -1000,6 +995,7 @@ impl FluxoraStream {
 
         // CEI: update state before external token transfer to reduce reentrancy risk.
         stream.status = StreamStatus::Cancelled;
+        stream.cancelled_at = Some(env.ledger().timestamp());
         save_stream(&env, &stream);
 
         if unstreamed > 0 {
