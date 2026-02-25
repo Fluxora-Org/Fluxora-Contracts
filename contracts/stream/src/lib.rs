@@ -2,7 +2,9 @@
 
 mod accrual;
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, panic_with_error, symbol_short, token, Address, Env,
+};
 
 // ---------------------------------------------------------------------------
 // TTL constants
@@ -531,9 +533,13 @@ impl FluxoraStream {
 
         Self::require_sender_or_admin(&env, &stream.sender);
 
+        if stream.status == StreamStatus::Paused {
+            panic!("stream is already paused");
+        }
+
         assert!(
             stream.status == StreamStatus::Active,
-            "stream is not active"
+            "stream must be active to pause"
         );
 
         stream.status = StreamStatus::Paused;
@@ -740,9 +746,12 @@ impl FluxoraStream {
         let accrued = Self::calculate_accrued(env.clone(), stream_id)?;
         let withdrawable = accrued - stream.withdrawn_amount;
 
-        // Handle zero withdrawable: panic if nothing to withdraw
+        // Handle zero withdrawable: return 0 without transfer or state change (idempotent).
         // This occurs before cliff or when all accrued funds have been withdrawn.
-        assert!(withdrawable > 0, "nothing to withdraw");
+        // Frontends can safely call withdraw without checking balance first.
+        if withdrawable == 0 {
+            return Ok(0);
+        }
 
         // CEI: update state before external token transfer to reduce reentrancy risk.
         stream.withdrawn_amount += withdrawable;
@@ -974,9 +983,9 @@ impl FluxoraStream {
         sender.require_auth();
     }
 
-    fn require_cancellable_status(_env: &Env, status: StreamStatus) {
+    fn require_cancellable_status(env: &Env, status: StreamStatus) {
         if status != StreamStatus::Active && status != StreamStatus::Paused {
-            panic!("stream must be active or paused to cancel");
+            panic_with_error!(env, ContractError::InvalidState);
         }
     }
 }
