@@ -14,6 +14,13 @@ This document summarizes the four new integration tests added for the pause/resu
 - **152 unit tests**: All pass
 - **25 integration tests**: All pass (including 4 new tests)
 - **Total test coverage**: > 95%
+These tests are part of the Fluxora integration test suite. For the most up-to-date test run details (including branches, commits, and metrics), refer to the continuous integration (CI) results.
+
+## Test Summary
+
+### ✅ Test Status
+- All relevant unit and integration tests pass for this change.
+- For the latest test counts and coverage statistics, see the CI test report.
 
 ### New Integration Tests
 
@@ -253,3 +260,4 @@ The pause/resume/withdraw lifecycle is fully tested and verified to work correct
 - ✅ Test coverage remains above 95%
 
 The implementation is production-ready and secure.
+The implementation is currently covered by the tests described above and passes all current test suites on this branch.

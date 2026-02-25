@@ -2,9 +2,10 @@ extern crate std;
 
 use fluxora_stream::{FluxoraStream, FluxoraStreamClient, StreamStatus};
 use soroban_sdk::{
+    log,
     testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env,
+    Address, Env, Vec,
 };
 
 struct TestContext<'a> {
@@ -204,14 +205,22 @@ fn withdraw_accrued_amount_updates_balances_and_state() {
     assert_eq!(ctx.token.balance(&ctx.contract_id), 750);
 }
 
+/// Test withdraw before cliff returns 0 (idempotent behavior).
+/// Verifies no transfer, no state change when withdrawable is zero.
 #[test]
 #[should_panic]
 fn withdraw_before_cliff_panics() {
+fn withdraw_before_cliff_returns_zero() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_stream_with_cliff(500);
 
     ctx.env.ledger().set_timestamp(100);
-    ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn, 0, "should return 0 before cliff");
+
+    // Verify no state change
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 0);
 }
 
 #[test]
@@ -251,7 +260,8 @@ fn full_lifecycle_create_withdraw_to_completion() {
 #[should_panic]
 fn get_stream_state_unknown_id_panics() {
     let ctx = TestContext::setup();
-    ctx.client().get_stream_state(&99);
+    let result = ctx.client().try_get_stream_state(&99);
+    assert!(result.is_err());
 }
 
 #[test]
@@ -1797,4 +1807,60 @@ fn integration_same_sender_same_recipient_multiple_streams() {
         + ctx.token.balance(&ctx.recipient)
         + ctx.token.balance(&ctx.contract_id);
     assert_eq!(total, 10_000, "total tokens conserved");
+#[test]
+fn test_create_many_streams_from_same_sender() {
+    let ctx = TestContext::setup();
+    ctx.env.budget().reset_default();
+
+    ctx.env.ledger().set_timestamp(0);
+
+    let counter_stop = 50;
+    let mut counter = 0;
+    let mut stream_vec = Vec::new(&ctx.env);
+    let deposit = 10_i128;
+    let rate = 1_i128;
+    let start = 0u64;
+    let cliff = 0u64;
+    let end = 10u64;
+    loop {
+        let recipient = Address::generate(&ctx.env);
+        let stream_id = ctx.client().create_stream(
+            &ctx.sender,
+            &recipient,
+            &deposit,
+            &rate,
+            &start,
+            &cliff,
+            &end,
+        );
+
+        let state = ctx.client().get_stream_state(&stream_id);
+        assert_eq!(state.stream_id, stream_id);
+        assert_eq!(state.stream_id, counter);
+        assert_eq!(state.sender, ctx.sender);
+        assert_eq!(state.recipient, recipient);
+        assert_eq!(state.deposit_amount, deposit);
+        assert_eq!(state.rate_per_second, rate);
+        assert_eq!(state.start_time, start);
+        assert_eq!(state.cliff_time, cliff);
+        assert_eq!(state.end_time, end);
+        assert_eq!(state.withdrawn_amount, 0);
+        assert_eq!(state.status, StreamStatus::Active);
+
+        counter += 1;
+
+        stream_vec.push_back(stream_id);
+        if counter == counter_stop {
+            break;
+        }
+    }
+
+    let cpu_insns = ctx.env.budget().cpu_instruction_cost();
+    log!(&ctx.env, "cpu_insns", cpu_insns);
+    assert!(cpu_insns <= 20_000_000);
+
+    // Check memory bytes consumed
+    let mem_bytes = ctx.env.budget().memory_bytes_cost();
+    log!(&ctx.env, "mem_bytes", mem_bytes);
+    assert!(mem_bytes <= 4_200_000);
 }
