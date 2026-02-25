@@ -1298,12 +1298,12 @@ fn integration_pause_then_cancel_preserves_accrual() {
 #[test]
 fn test_create_many_streams_from_same_sender() {
     let ctx = TestContext::setup();
-    
+
     // Reset budget to track clean for this test
-    ctx.env.budget().reset_unlimited(); 
+    ctx.env.budget().reset_unlimited();
 
     let sac = StellarAssetClient::new(&ctx.env, &ctx.token_id);
-    sac.mint(&ctx.sender, &200_000_i128); 
+    sac.mint(&ctx.sender, &200_000_i128);
 
     for _ in 0..100 {
         ctx.create_default_stream();
@@ -1312,10 +1312,10 @@ fn test_create_many_streams_from_same_sender() {
     // Get the actual cost from the budget tracker
     let cpu_insns = ctx.env.budget().cpu_instruction_cost();
 
-    std::println!("Actual CPU Instructions: {}", cpu_insns);    
-    
+    std::println!("Actual CPU Instructions: {}", cpu_insns);
+
     assert_ne!(cpu_insns, 0, "CPU instructions should not be zero.");
-    
+
     // Update this number to match whatever prints in your 'Actual' output
     assert_eq!(cpu_insns, 43_154_275);
 }
