@@ -189,6 +189,7 @@ deposit_amount >= rate_per_second * (end_time - start_time)
 | `cancel_stream` | Sender | `sender.require_auth()` |
 | `withdraw` | Recipient | `recipient.require_auth()` |
 | `calculate_accrued` | Anyone | None (view) |
+| `get_stream_count` | Anyone | None (view) |
 | `get_config` | Anyone | None (view) |
 | `get_stream_state` | Anyone | None (view) |
 | `pause_stream_as_admin` | Admin | `admin.require_auth()` |
