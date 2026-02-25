@@ -1468,21 +1468,16 @@
           "v0": {
             "topics": [
               {
-                "symbol": "error"
-              },
-              {
-                "error": {
-                  "contract": 2
-                }
+                "symbol": "log"
               }
             ],
             "data": {
               "vec": [
                 {
-                  "string": "failing with contract error"
+                  "string": "caught panic 'stream must be active or paused to cancel' from contract function 'Symbol(obj#465)'"
                 },
                 {
-                  "u32": 2
+                  "u64": 0
                 }
               ]
             }
@@ -1504,32 +1499,7 @@
               },
               {
                 "error": {
-                  "contract": 2
-                }
-              }
-            ],
-            "data": {
-              "string": "escalating error to panic"
-            }
-          }
-        }
-      },
-      "failed_call": true
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "error"
-              },
-              {
-                "error": {
-                  "contract": 2
+                  "wasm_vm": "invalid_action"
                 }
               }
             ],
@@ -1554,7 +1524,7 @@
               },
               {
                 "error": {
-                  "contract": 2
+                  "wasm_vm": "invalid_action"
                 }
               }
             ],
@@ -1593,7 +1563,7 @@
               },
               {
                 "error": {
-                  "contract": 2
+                  "wasm_vm": "invalid_action"
                 }
               }
             ],
