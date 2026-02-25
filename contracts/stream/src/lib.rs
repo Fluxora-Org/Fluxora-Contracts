@@ -569,7 +569,7 @@ impl FluxoraStream {
     pub fn pause_stream(env: Env, stream_id: u64) -> Result<(), ContractError> {
         let mut stream = load_stream(&env, stream_id)?;
 
-        Self::require_sender_or_admin(&env, &stream.sender);
+        Self::require_stream_sender(&stream.sender);
 
         if stream.status == StreamStatus::Paused {
             panic!("stream is already paused");
@@ -619,7 +619,7 @@ impl FluxoraStream {
     /// - After resume, recipient can immediately withdraw accrued funds
     pub fn resume_stream(env: Env, stream_id: u64) -> Result<(), ContractError> {
         let mut stream = load_stream(&env, stream_id)?;
-        Self::require_sender_or_admin(&env, &stream.sender);
+        Self::require_stream_sender(&stream.sender);
 
         match stream.status {
             StreamStatus::Active => panic!("stream is active, not paused"),
@@ -685,7 +685,7 @@ impl FluxoraStream {
     /// - Cancel before cliff → sender gets 100% refund (no accrual before cliff)
     pub fn cancel_stream(env: Env, stream_id: u64) -> Result<(), ContractError> {
         let mut stream = load_stream(&env, stream_id)?;
-        Self::require_sender_or_admin(&env, &stream.sender);
+        Self::require_stream_sender(&stream.sender);
         Self::require_cancellable_status(&env, stream.status);
 
         let accrued = Self::calculate_accrued(env.clone(), stream_id)?;
@@ -1014,10 +1014,10 @@ impl FluxoraStream {
         CONTRACT_VERSION
     }
 
-    /// Internal helper to check authorization for sender or admin.
-    fn require_sender_or_admin(_env: &Env, sender: &Address) {
-        // Only the sender can manage their own stream via these paths.
-        // Admin overrides are handled by the 'as_admin' specific functions.
+    /// Internal helper to require authorization from the stream sender.
+    ///
+    /// Admin override paths are handled by dedicated `*_as_admin` entrypoints.
+    fn require_stream_sender(sender: &Address) {
         sender.require_auth();
     }
 

@@ -2745,7 +2745,7 @@ fn test_multiple_streams_independent() {
 }
 
 // ---------------------------------------------------------------------------
-// Tests — Issue #16: Auth Enforcement (Sender or Admin only)
+// Tests — Issue #16: Auth Enforcement
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -2777,7 +2777,7 @@ fn test_admin_can_pause_stream() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
 
-    ctx.client().pause_stream(&stream_id);
+    ctx.client().pause_stream_as_admin(&stream_id);
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
@@ -3060,6 +3060,64 @@ fn test_pause_stream_admin_success() {
     ctx.client().pause_stream_as_admin(&stream_id);
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
+}
+
+#[test]
+#[should_panic]
+fn test_pause_stream_as_admin_non_admin_unauthorized() {
+    let ctx = TestContext::setup_strict();
+
+    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+
+    // Create stream by sender
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "create_stream",
+            args: (
+                &ctx.sender,
+                &ctx.recipient,
+                1000_i128,
+                1_i128,
+                0u64,
+                0u64,
+                1000u64,
+            )
+                .into_val(&ctx.env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &ctx.token_id,
+                fn_name: "transfer",
+                args: (&ctx.sender, &ctx.contract_id, 1000_i128).into_val(&ctx.env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    // A non-admin cannot use the admin override entrypoint.
+    let non_admin = Address::generate(&ctx.env);
+    ctx.env.mock_auths(&[MockAuth {
+        address: &non_admin,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "pause_stream_as_admin",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    ctx.client().pause_stream_as_admin(&stream_id);
 }
 
 // Cancel authorization tests
