@@ -267,6 +267,12 @@
                   "map": [
                     {
                       "key": {
+                        "symbol": "cancelled_at"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "cliff_time"
                       },
                       "val": {
@@ -1431,6 +1437,12 @@
               "map": [
                 {
                   "key": {
+                    "symbol": "cancelled_at"
+                  },
+                  "val": "void"
+                },
+                {
+                  "key": {
                     "symbol": "cliff_time"
                   },
                   "val": {
@@ -1645,6 +1657,12 @@
             ],
             "data": {
               "map": [
+                {
+                  "key": {
+                    "symbol": "cancelled_at"
+                  },
+                  "val": "void"
+                },
                 {
                   "key": {
                     "symbol": "cliff_time"
