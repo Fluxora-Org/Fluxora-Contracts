@@ -691,6 +691,14 @@ impl FluxoraStream {
     /// - Accrual is time-based, not affected by pause state
     /// - Can be called on paused streams
     ///
+    /// # Handling of already-accrued amount
+    /// - The accrued portion of the stream (based on time, up to `deposit_amount`)
+    ///   is **never** refunded to the sender.
+    /// - It remains locked in the contract and can only be claimed by the recipient
+    ///   via `withdraw()`.
+    /// - The contract does **not** auto-transfer accrued funds to the recipient when
+    ///   cancelling; the recipient must explicitly withdraw.
+    ///
     /// # Examples
     /// - Cancel at 30% completion → sender gets 70% refund, recipient can withdraw 30%
     /// - Cancel at 100% completion → sender gets 0% refund, recipient can withdraw 100%
@@ -1084,6 +1092,11 @@ impl FluxoraStream {
     /// - Use for emergency situations or dispute resolution
     /// - Sender still receives refund of unstreamed tokens
     /// - Recipient can still withdraw accrued amount
+    ///
+    /// # Handling of already-accrued amount
+    /// - Mirrors `cancel_stream`: accrued value is never refunded to the sender.
+    /// - Accrued funds stay in the contract until the recipient calls `withdraw()`.
+    /// - No auto-transfer of accrued funds to the recipient occurs on admin cancel.
     pub fn cancel_stream_as_admin(env: Env, stream_id: u64) -> Result<(), ContractError> {
         let admin = get_admin(&env);
         admin.require_auth();
