@@ -10,6 +10,11 @@ crate-type = ["cdylib", "rlib"]
 [features]
 testutils = ["soroban-sdk/testutils"]
 
+# Soroban SDK version pinned for reproducible builds.
+# soroban-sdk 21.7.7 is compatible with Stellar Soroban networks as of Feb 2026.
+# See rust-toolchain.toml for Rust version pin.
+# To upgrade, verify compatibility with latest Stellar/Soroban network and run full test suite.
+
 [dependencies]
 soroban-sdk = "21.7.7"
 
