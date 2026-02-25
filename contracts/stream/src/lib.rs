@@ -193,6 +193,44 @@ fn save_stream(env: &Env, stream: &Stream) {
 }
 
 // ---------------------------------------------------------------------------
+// Token transfer helpers
+// ---------------------------------------------------------------------------
+
+/// Pull tokens from an external address to the contract.
+///
+/// Centralizes all token transfers INTO the contract for security review.
+/// Used when creating streams to pull deposit from sender.
+///
+/// # Parameters
+/// - `env`: Contract environment
+/// - `from`: Address to transfer tokens from (must have approved contract)
+/// - `amount`: Amount of tokens to transfer
+///
+/// # Panics
+/// - If token transfer fails (insufficient balance or allowance)
+fn pull_token(env: &Env, from: &Address, amount: i128) {
+    let token_client = token::Client::new(env, &get_token(env));
+    token_client.transfer(from, &env.current_contract_address(), &amount);
+}
+
+/// Push tokens from the contract to an external address.
+///
+/// Centralizes all token transfers OUT OF the contract for security review.
+/// Used for withdrawals (to recipient) and refunds (to sender on cancel).
+///
+/// # Parameters
+/// - `env`: Contract environment
+/// - `to`: Address to transfer tokens to
+/// - `amount`: Amount of tokens to transfer
+///
+/// # Panics
+/// - If token transfer fails (insufficient contract balance, should not happen)
+fn push_token(env: &Env, to: &Address, amount: i128) {
+    let token_client = token::Client::new(env, &get_token(env));
+    token_client.transfer(&env.current_contract_address(), to, &amount);
+}
+
+// ---------------------------------------------------------------------------
 // Internal Helpers
 // ---------------------------------------------------------------------------
 
@@ -423,8 +461,7 @@ impl FluxoraStream {
         // Transfer tokens from sender to this contract (#36)
         // If transfer fails (insufficient balance/allowance), this will panic
         // and no state will be persisted (atomic transaction)
-        let token_client = token::Client::new(&env, &get_token(&env));
-        token_client.transfer(&sender, &env.current_contract_address(), &deposit_amount);
+        pull_token(&env, &sender, deposit_amount);
 
         // Only allocate stream id and persist state AFTER successful transfer
         Self::persist_new_stream(
@@ -660,8 +697,7 @@ impl FluxoraStream {
         save_stream(&env, &stream);
 
         if unstreamed > 0 {
-            let token_client = token::Client::new(&env, &get_token(&env));
-            token_client.transfer(&env.current_contract_address(), &stream.sender, &unstreamed);
+            push_token(&env, &stream.sender, unstreamed);
         }
 
         env.events().publish(
@@ -761,12 +797,7 @@ impl FluxoraStream {
         }
         save_stream(&env, &stream);
 
-        let token_client = token::Client::new(&env, &get_token(&env));
-        token_client.transfer(
-            &env.current_contract_address(),
-            &stream.recipient,
-            &withdrawable,
-        );
+        push_token(&env, &stream.recipient, withdrawable);
 
         env.events().publish(
             (symbol_short!("withdrew"), stream_id),
@@ -1045,8 +1076,7 @@ impl FluxoraStream {
         save_stream(&env, &stream);
 
         if unstreamed > 0 {
-            let token_client = token::Client::new(&env, &get_token(&env));
-            token_client.transfer(&env.current_contract_address(), &stream.sender, &unstreamed);
+            push_token(&env, &stream.sender, unstreamed);
         }
 
         env.events().publish(
