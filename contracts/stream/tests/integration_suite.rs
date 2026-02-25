@@ -100,6 +100,28 @@ fn init_twice_panics() {
     ctx.client().init(&ctx.token_id, &ctx.admin);
 }
 
+#[test]
+fn get_stream_count_reports_next_stream_id() {
+    let ctx = TestContext::setup();
+    assert_eq!(ctx.client().get_stream_count(), 0);
+
+    let id0 = ctx.create_default_stream();
+    assert_eq!(id0, 0);
+    assert_eq!(ctx.client().get_stream_count(), 1);
+
+    let id1 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+    assert_eq!(id1, 1);
+    assert_eq!(ctx.client().get_stream_count(), 2);
+}
+
 // ---------------------------------------------------------------------------
 // Tests — Issue #62: config immutability after re-init attempt
 // ---------------------------------------------------------------------------

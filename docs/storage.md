@@ -126,6 +126,7 @@ env.storage().persistent().extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, PERSI
 ### Read Operations (View Functions)
 
 - `get_config()` → reads `Config` from instance storage, **bumps instance TTL**
+- `get_stream_count()` → reads `NextStreamId` from instance storage, **bumps instance TTL**
 - `get_stream_state(stream_id)` → reads `Stream(stream_id)` from persistent storage, **bumps stream TTL**
 - `calculate_accrued(stream_id)` → reads `Stream(stream_id)` from persistent storage, **bumps stream TTL**
 

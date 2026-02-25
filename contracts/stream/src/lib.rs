@@ -149,7 +149,7 @@ fn get_admin(env: &Env) -> Address {
     get_config(env).admin
 }
 
-fn get_stream_count(env: &Env) -> u64 {
+fn read_stream_count(env: &Env) -> u64 {
     bump_instance_ttl(env);
     env.storage()
         .instance()
@@ -283,7 +283,7 @@ impl FluxoraStream {
         cliff_time: u64,
         end_time: u64,
     ) -> u64 {
-        let stream_id = get_stream_count(env);
+        let stream_id = read_stream_count(env);
         set_stream_count(env, stream_id + 1);
 
         let stream = Stream {
@@ -986,6 +986,14 @@ impl FluxoraStream {
     ///   - `Cancelled`: Terminated early, unstreamed tokens refunded, terminal state
     pub fn get_stream_state(env: Env, stream_id: u64) -> Stream {
         load_stream(&env, stream_id).expect("stream not found")
+    }
+
+    /// Return the total number of streams created so far.
+    ///
+    /// This value is backed by `NextStreamId`, which is incremented exactly once for
+    /// each successful stream creation.
+    pub fn get_stream_count(env: Env) -> u64 {
+        read_stream_count(&env)
     }
 
     /// Return the contract version number.

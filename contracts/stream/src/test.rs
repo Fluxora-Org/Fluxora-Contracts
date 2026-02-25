@@ -304,6 +304,38 @@ fn test_init_sets_stream_counter_to_zero() {
 }
 
 #[test]
+fn test_get_stream_count_returns_zero_after_init() {
+    let ctx = TestContext::setup();
+    assert_eq!(
+        ctx.client().get_stream_count(),
+        0,
+        "stream count should be zero before first create_stream"
+    );
+}
+
+#[test]
+fn test_get_stream_count_tracks_successful_creates() {
+    let ctx = TestContext::setup();
+    assert_eq!(ctx.client().get_stream_count(), 0);
+
+    let id0 = ctx.create_default_stream();
+    assert_eq!(id0, 0);
+    assert_eq!(ctx.client().get_stream_count(), 1);
+
+    let id1 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2_000_i128,
+        &2_i128,
+        &0u64,
+        &0u64,
+        &1_000u64,
+    );
+    assert_eq!(id1, 1);
+    assert_eq!(ctx.client().get_stream_count(), 2);
+}
+
+#[test]
 fn test_init_with_different_addresses() {
     let env = Env::default();
     env.mock_all_auths();
