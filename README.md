@@ -153,3 +153,7 @@ fluxora-contracts/
 - **fluxora-frontend** — Dashboard and recipient UI
 
 Each is a separate Git repository.
+
+## Contributing
+
+We welcome contributions from the community! Please read our [Contributing Guidelines](CONTRIBUTING.md) for details on our development workflow, branch naming, and testing requirements (including our 95% test coverage standard).
