@@ -237,6 +237,7 @@ fn push_token(env: &Env, to: &Address, amount: i128) {
 // ---------------------------------------------------------------------------
 
 impl FluxoraStream {
+    #[allow(clippy::too_many_arguments)]
     fn validate_stream_params(
         sender: &Address,
         recipient: &Address,

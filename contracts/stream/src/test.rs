@@ -4721,7 +4721,10 @@ fn test_withdraw_zero_after_immediate_cancel() {
 
     // Try to withdraw - should return 0 because accrued = 0
     let withdrawn = ctx.client().withdraw(&stream_id);
-    assert_eq!(withdrawn, 0, "should return 0 when cancelled with no accrual");
+    assert_eq!(
+        withdrawn, 0,
+        "should return 0 when cancelled with no accrual"
+    );
 
     // Verify no state change
     let state = ctx.client().get_stream_state(&stream_id);
@@ -5095,7 +5098,10 @@ fn test_withdraw_after_cancel_then_completed() {
 
     // Try to withdraw again - should return 0 because accrued (600) - withdrawn (600) = 0
     let withdrawn2 = ctx.client().withdraw(&stream_id);
-    assert_eq!(withdrawn2, 0, "should return 0 when nothing left to withdraw");
+    assert_eq!(
+        withdrawn2, 0,
+        "should return 0 when nothing left to withdraw"
+    );
 }
 
 // ---------------------------------------------------------------------------
