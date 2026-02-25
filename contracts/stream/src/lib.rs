@@ -4,6 +4,7 @@ mod accrual;
 
 use soroban_sdk::{
     contract, contractimpl, contracttype, panic_with_error, symbol_short, token, Address, Env,
+    Symbol,
 };
 
 // ---------------------------------------------------------------------------
@@ -61,7 +62,8 @@ pub enum ContractError {
 pub enum StreamEvent {
     Paused(u64),
     Resumed(u64),
-    Cancelled(u64),
+    StreamCancelled(u64),
+    StreamCompleted(u64),
 }
 
 #[contracttype]
@@ -148,7 +150,7 @@ fn get_admin(env: &Env) -> Address {
     get_config(env).admin
 }
 
-fn get_stream_count(env: &Env) -> u64 {
+fn read_stream_count(env: &Env) -> u64 {
     bump_instance_ttl(env);
     env.storage()
         .instance()
@@ -189,6 +191,44 @@ fn save_stream(env: &Env, stream: &Stream) {
         PERSISTENT_LIFETIME_THRESHOLD,
         PERSISTENT_BUMP_AMOUNT,
     );
+}
+
+// ---------------------------------------------------------------------------
+// Token transfer helpers
+// ---------------------------------------------------------------------------
+
+/// Pull tokens from an external address to the contract.
+///
+/// Centralizes all token transfers INTO the contract for security review.
+/// Used when creating streams to pull deposit from sender.
+///
+/// # Parameters
+/// - `env`: Contract environment
+/// - `from`: Address to transfer tokens from (must have approved contract)
+/// - `amount`: Amount of tokens to transfer
+///
+/// # Panics
+/// - If token transfer fails (insufficient balance or allowance)
+fn pull_token(env: &Env, from: &Address, amount: i128) {
+    let token_client = token::Client::new(env, &get_token(env));
+    token_client.transfer(from, &env.current_contract_address(), &amount);
+}
+
+/// Push tokens from the contract to an external address.
+///
+/// Centralizes all token transfers OUT OF the contract for security review.
+/// Used for withdrawals (to recipient) and refunds (to sender on cancel).
+///
+/// # Parameters
+/// - `env`: Contract environment
+/// - `to`: Address to transfer tokens to
+/// - `amount`: Amount of tokens to transfer
+///
+/// # Panics
+/// - If token transfer fails (insufficient contract balance, should not happen)
+fn push_token(env: &Env, to: &Address, amount: i128) {
+    let token_client = token::Client::new(env, &get_token(env));
+    token_client.transfer(&env.current_contract_address(), to, &amount);
 }
 
 // ---------------------------------------------------------------------------
@@ -244,7 +284,7 @@ impl FluxoraStream {
         cliff_time: u64,
         end_time: u64,
     ) -> u64 {
-        let stream_id = get_stream_count(env);
+        let stream_id = read_stream_count(env);
         set_stream_count(env, stream_id + 1);
 
         let stream = Stream {
@@ -422,8 +462,7 @@ impl FluxoraStream {
         // Transfer tokens from sender to this contract (#36)
         // If transfer fails (insufficient balance/allowance), this will panic
         // and no state will be persisted (atomic transaction)
-        let token_client = token::Client::new(&env, &get_token(&env));
-        token_client.transfer(&sender, &env.current_contract_address(), &deposit_amount);
+        pull_token(&env, &sender, deposit_amount);
 
         // Only allocate stream id and persist state AFTER successful transfer
         Self::persist_new_stream(
@@ -531,7 +570,7 @@ impl FluxoraStream {
     pub fn pause_stream(env: Env, stream_id: u64) -> Result<(), ContractError> {
         let mut stream = load_stream(&env, stream_id)?;
 
-        Self::require_sender_or_admin(&env, &stream.sender);
+        Self::require_stream_sender(&stream.sender);
 
         if stream.status == StreamStatus::Paused {
             panic!("stream is already paused");
@@ -581,7 +620,7 @@ impl FluxoraStream {
     /// - After resume, recipient can immediately withdraw accrued funds
     pub fn resume_stream(env: Env, stream_id: u64) -> Result<(), ContractError> {
         let mut stream = load_stream(&env, stream_id)?;
-        Self::require_sender_or_admin(&env, &stream.sender);
+        Self::require_stream_sender(&stream.sender);
 
         match stream.status {
             StreamStatus::Active => panic!("stream is active, not paused"),
@@ -647,7 +686,7 @@ impl FluxoraStream {
     /// - Cancel before cliff → sender gets 100% refund (no accrual before cliff)
     pub fn cancel_stream(env: Env, stream_id: u64) -> Result<(), ContractError> {
         let mut stream = load_stream(&env, stream_id)?;
-        Self::require_sender_or_admin(&env, &stream.sender);
+        Self::require_stream_sender(&stream.sender);
         Self::require_cancellable_status(&env, stream.status);
 
         let accrued = Self::calculate_accrued(env.clone(), stream_id)?;
@@ -659,13 +698,12 @@ impl FluxoraStream {
         save_stream(&env, &stream);
 
         if unstreamed > 0 {
-            let token_client = token::Client::new(&env, &get_token(&env));
-            token_client.transfer(&env.current_contract_address(), &stream.sender, &unstreamed);
+            push_token(&env, &stream.sender, unstreamed);
         }
 
         env.events().publish(
             (symbol_short!("cancelled"), stream_id),
-            StreamEvent::Cancelled(stream_id),
+            StreamEvent::StreamCancelled(stream_id),
         );
         Ok(())
     }
@@ -755,17 +793,13 @@ impl FluxoraStream {
 
         // CEI: update state before external token transfer to reduce reentrancy risk.
         stream.withdrawn_amount += withdrawable;
-        if stream.withdrawn_amount == stream.deposit_amount {
+        let completed_now = stream.withdrawn_amount == stream.deposit_amount;
+        if completed_now {
             stream.status = StreamStatus::Completed;
         }
         save_stream(&env, &stream);
 
-        let token_client = token::Client::new(&env, &get_token(&env));
-        token_client.transfer(
-            &env.current_contract_address(),
-            &stream.recipient,
-            &withdrawable,
-        );
+        push_token(&env, &stream.recipient, withdrawable);
 
         env.events().publish(
             (symbol_short!("withdrew"), stream_id),
@@ -775,6 +809,13 @@ impl FluxoraStream {
                 amount: withdrawable,
             },
         );
+
+        if completed_now {
+            env.events().publish(
+                (symbol_short!("completed"), stream_id),
+                StreamEvent::StreamCompleted(stream_id),
+            );
+        }
         Ok(withdrawable)
     }
 
@@ -887,7 +928,7 @@ impl FluxoraStream {
     /// - Token address remains unchanged
     ///
     /// # Events
-    /// - Publishes `admin_updated(old_admin, new_admin)` event on success
+    /// - Publishes `AdminUpdated(old_admin, new_admin)` event on success
     ///
     /// # Usage Notes
     /// - This is a security-critical function for admin key rotation
@@ -914,10 +955,8 @@ impl FluxoraStream {
         bump_instance_ttl(&env);
 
         // Emit event with old and new admin addresses
-        env.events().publish(
-            (symbol_short!("admin"), symbol_short!("updated")),
-            (old_admin, new_admin),
-        );
+        env.events()
+            .publish((Symbol::new(&env, "AdminUpdated"),), (old_admin, new_admin));
     }
 
     /// Retrieve the complete state of a payment stream.
@@ -958,6 +997,14 @@ impl FluxoraStream {
         load_stream(&env, stream_id).expect("stream not found")
     }
 
+    /// Return the total number of streams created so far.
+    ///
+    /// This value is backed by `NextStreamId`, which is incremented exactly once for
+    /// each successful stream creation.
+    pub fn get_stream_count(env: Env) -> u64 {
+        read_stream_count(&env)
+    }
+
     /// Return the contract version number.
     ///
     /// Reads the compile-time `CONTRACT_VERSION` constant — no storage access required.
@@ -976,10 +1023,10 @@ impl FluxoraStream {
         CONTRACT_VERSION
     }
 
-    /// Internal helper to check authorization for sender or admin.
-    fn require_sender_or_admin(_env: &Env, sender: &Address) {
-        // Only the sender can manage their own stream via these paths.
-        // Admin overrides are handled by the 'as_admin' specific functions.
+    /// Internal helper to require authorization from the stream sender.
+    ///
+    /// Admin override paths are handled by dedicated `*_as_admin` entrypoints.
+    fn require_stream_sender(sender: &Address) {
         sender.require_auth();
     }
 
@@ -1046,13 +1093,12 @@ impl FluxoraStream {
         save_stream(&env, &stream);
 
         if unstreamed > 0 {
-            let token_client = token::Client::new(&env, &get_token(&env));
-            token_client.transfer(&env.current_contract_address(), &stream.sender, &unstreamed);
+            push_token(&env, &stream.sender, unstreamed);
         }
 
         env.events().publish(
             (symbol_short!("cancelled"), stream_id),
-            StreamEvent::Cancelled(stream_id),
+            StreamEvent::StreamCancelled(stream_id),
         );
         Ok(())
     }
