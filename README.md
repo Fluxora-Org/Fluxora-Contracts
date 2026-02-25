@@ -5,11 +5,13 @@ Soroban smart contracts for the Fluxora treasury streaming protocol on Stellar. 
 ## Documentation
 
 - **[Stream contract docs](docs/streaming.md)** — Lifecycle, accrual formula, cliff/end_time, access control, events, and error codes.
+- **[Capability delegation docs](docs/capabilities.md)** — Short-lived, revocable delegated rights (`Claim`, `Release`, `RefundOnce`).
 
 ## What's in this repo
 
 - **Stream contract** (`contracts/stream`) — Lock USDC, accrue per second, withdraw on demand.
 - **Data model** — `Stream` (sender, recipient, deposit_amount, rate_per_second, start/cliff/end time, withdrawn_amount, status).
+- **Delegation model** — `Capability` (owner, holder, action, amount limit, expiry, revocation state).
 - **Status** — Active, Paused, Completed, Cancelled.
 - **Methods (stubs)** — `init`, `create_stream`, `pause_stream`, `resume_stream`, `cancel_stream`, `withdraw`, `calculate_accrued`, `get_stream_state`.
 - **Cancel semantics** — `cancel_stream` is valid only in `Active` or `Paused`; `Completed` and `Cancelled` return `InvalidState`.
@@ -17,6 +19,7 @@ Soroban smart contracts for the Fluxora treasury streaming protocol on Stellar. 
 Implementation is scaffolded; storage, token transfers, and events are left for you to complete.
 - **Methods** — `init`, `create_stream`, `pause_stream`, `resume_stream`, `cancel_stream`, `withdraw`, `calculate_accrued`, `get_stream_state`, `set_admin`.
 - **Admin functions** — `pause_stream_as_admin`, `resume_stream_as_admin`, `cancel_stream_as_admin`, `set_admin` for key rotation.
+- **Capability functions** — `issue_capability`, `revoke_capability`, `get_capability`, `delegated_release`, `delegated_refund`.
 
 **Documentation:** [Audit preparation](docs/audit.md) (entrypoints and invariants for auditors).
 

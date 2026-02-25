@@ -7,7 +7,7 @@ use soroban_sdk::{
     Address, Env, FromVal, Vec,
 };
 
-use crate::{FluxoraStream, FluxoraStreamClient, StreamEvent, StreamStatus};
+use crate::{CapabilityAction, FluxoraStream, FluxoraStreamClient, StreamEvent, StreamStatus};
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -3663,4 +3663,179 @@ fn test_withdraw_after_cancel_then_completed() {
     // Try to withdraw again - should panic with "nothing to withdraw"
     // because accrued (600) - withdrawn (600) = 0
     ctx.client().withdraw(&stream_id);
+}
+
+// ---------------------------------------------------------------------------
+// Tests — Delegated capability tokens
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_issue_release_capability_stores_expected_fields() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let holder = Address::generate(&ctx.env);
+
+    let capability_id = ctx.client().issue_capability(
+        &stream_id,
+        &holder,
+        &CapabilityAction::Release,
+        &300_i128,
+        &2_000_u64,
+    );
+
+    let capability = ctx.client().get_capability(&capability_id);
+    assert_eq!(capability.stream_id, stream_id);
+    assert_eq!(capability.holder, holder);
+    assert_eq!(capability.action, CapabilityAction::Release);
+    assert_eq!(capability.amount_limit, 300);
+    assert_eq!(capability.remaining_amount, 300);
+    assert!(!capability.revoked);
+}
+
+#[test]
+fn test_delegated_release_uses_capability_and_consumes_limit() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let holder = Address::generate(&ctx.env);
+
+    let capability_id = ctx.client().issue_capability(
+        &stream_id,
+        &holder,
+        &CapabilityAction::Release,
+        &300_i128,
+        &2_000_u64,
+    );
+
+    ctx.env.ledger().set_timestamp(500);
+    let released_1 = ctx
+        .client()
+        .delegated_release(&stream_id, &capability_id, &holder, &200_i128);
+    assert_eq!(released_1, 200);
+
+    let state_after_first = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_after_first.withdrawn_amount, 200);
+
+    ctx.env.ledger().set_timestamp(700);
+    let released_2 = ctx
+        .client()
+        .delegated_release(&stream_id, &capability_id, &holder, &100_i128);
+    assert_eq!(released_2, 100);
+
+    let capability = ctx.client().get_capability(&capability_id);
+    assert_eq!(capability.remaining_amount, 0);
+    assert!(capability.revoked);
+
+    let state_after_second = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_after_second.withdrawn_amount, 300);
+}
+
+#[test]
+#[should_panic(expected = "capability expired")]
+fn test_delegated_release_expired_capability_panics() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let holder = Address::generate(&ctx.env);
+
+    let capability_id = ctx.client().issue_capability(
+        &stream_id,
+        &holder,
+        &CapabilityAction::Release,
+        &100_i128,
+        &100_u64,
+    );
+
+    ctx.env.ledger().set_timestamp(101);
+    ctx.client()
+        .delegated_release(&stream_id, &capability_id, &holder, &10_i128);
+}
+
+#[test]
+#[should_panic(expected = "capability revoked")]
+fn test_delegated_release_revoked_capability_panics() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let holder = Address::generate(&ctx.env);
+
+    let capability_id = ctx.client().issue_capability(
+        &stream_id,
+        &holder,
+        &CapabilityAction::Release,
+        &150_i128,
+        &2_000_u64,
+    );
+
+    ctx.client().revoke_capability(&capability_id);
+    ctx.env.ledger().set_timestamp(200);
+    ctx.client()
+        .delegated_release(&stream_id, &capability_id, &holder, &10_i128);
+}
+
+#[test]
+#[should_panic(expected = "capability exceeds owner's remaining authority")]
+fn test_issue_capability_cannot_exceed_original_owner_authority() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let holder = Address::generate(&ctx.env);
+
+    // Withdraw first so recipient's remaining authority is reduced.
+    ctx.env.ledger().set_timestamp(400);
+    let _ = ctx.client().withdraw(&stream_id);
+
+    // Remaining authority is 600, so 700 must fail.
+    ctx.client().issue_capability(
+        &stream_id,
+        &holder,
+        &CapabilityAction::Release,
+        &700_i128,
+        &2_000_u64,
+    );
+}
+
+#[test]
+fn test_delegated_refund_once_cancels_stream_and_exhausts_capability() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let holder = Address::generate(&ctx.env);
+
+    let capability_id = ctx.client().issue_capability(
+        &stream_id,
+        &holder,
+        &CapabilityAction::RefundOnce,
+        &1_i128,
+        &2_000_u64,
+    );
+
+    ctx.env.ledger().set_timestamp(300);
+    ctx.client()
+        .delegated_refund(&stream_id, &capability_id, &holder);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+
+    let capability = ctx.client().get_capability(&capability_id);
+    assert_eq!(capability.remaining_amount, 0);
+    assert!(capability.revoked);
+}
+
+#[test]
+#[should_panic(expected = "capability revoked")]
+fn test_delegated_refund_once_cannot_be_reused() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let holder = Address::generate(&ctx.env);
+
+    let capability_id = ctx.client().issue_capability(
+        &stream_id,
+        &holder,
+        &CapabilityAction::RefundOnce,
+        &1_i128,
+        &2_000_u64,
+    );
+
+    ctx.env.ledger().set_timestamp(300);
+    ctx.client()
+        .delegated_refund(&stream_id, &capability_id, &holder);
+
+    ctx.client()
+        .delegated_refund(&stream_id, &capability_id, &holder);
 }

@@ -15,9 +15,11 @@ All storage keys are defined in the `DataKey` enum:
 ```rust
 #[contracttype]
 pub enum DataKey {
-    Config,       // Instance storage for global settings (admin/token).
-    NextStreamId, // Instance storage for the auto-incrementing ID counter.
-    Stream(u64),  // Persistent storage for individual stream data (O(1) lookup).
+    Config,           // Instance storage for global settings (admin/token).
+    NextStreamId,     // Instance storage for the auto-incrementing ID counter.
+    Stream(u64),      // Persistent storage for individual stream data (O(1) lookup).
+    NextCapabilityId, // Instance storage for delegated capability IDs.
+    Capability(u64),  // Persistent storage for delegated capability records.
 }
 ```
 
@@ -31,6 +33,7 @@ Instance storage is used for contract-wide configuration that applies to all str
 |-----|------|-------------|--------|-------------|
 | `Config` | `Config` struct | Contains `token` address and `admin` address | `init()` | Never (immutable after init) |
 | `NextStreamId` | `u64` | Auto-incrementing counter for stream IDs | `init()` (set to 0) | `create_stream()` (incremented) |
+| `NextCapabilityId` | `u64` | Auto-incrementing counter for capability IDs | `init()` (set to 0) | `issue_capability()` (incremented) |
 
 **Characteristics:**
 - Shared across all contract operations
@@ -44,7 +47,8 @@ Persistent storage is used for individual stream records:
 
 | Key Pattern | Type | Description | Set By | Modified By |
 |-------------|------|-------------|--------|-------------|
-| `Stream(stream_id)` | `Stream` struct | Complete stream state including participants, amounts, timing, and status | `create_stream()` | `pause_stream()`, `resume_stream()`, `cancel_stream()`, `withdraw()` |
+| `Stream(stream_id)` | `Stream` struct | Complete stream state including participants, amounts, timing, and status | `create_stream()` | `pause_stream()`, `resume_stream()`, `cancel_stream()`, `withdraw()`, delegated entrypoints |
+| `Capability(capability_id)` | `Capability` struct | Delegated short-lived rights (holder/action/limit/expiry/revoked) | `issue_capability()` | `delegated_release()`, `delegated_refund()`, `revoke_capability()` |
 
 **Characteristics:**
 - One entry per stream (unbounded growth)
@@ -91,15 +95,20 @@ env.storage().persistent().extend_ttl(&key, 17280, 120960);
 - `get_config()` → reads `Config` from instance storage
 - `get_stream_state(stream_id)` → reads `Stream(stream_id)` from persistent storage
 - `calculate_accrued(stream_id)` → reads `Stream(stream_id)` from persistent storage
+- `get_capability(capability_id)` → reads `Capability(capability_id)` from persistent storage
 
 ### Write Operations (State Mutations)
 
-- `init()` → writes `Config` and `NextStreamId` to instance storage
+- `init()` → writes `Config`, `NextStreamId`, and `NextCapabilityId` to instance storage
 - `create_stream()` → reads/writes `NextStreamId`, writes `Stream(stream_id)`
 - `pause_stream()` → reads/writes `Stream(stream_id)`
 - `resume_stream()` → reads/writes `Stream(stream_id)`
 - `cancel_stream()` → reads/writes `Stream(stream_id)`
 - `withdraw()` → reads/writes `Stream(stream_id)`
+- `issue_capability()` → reads/writes `NextCapabilityId`, writes `Capability(capability_id)`
+- `revoke_capability()` → reads/writes `Capability(capability_id)`
+- `delegated_release()` → reads/writes `Capability(capability_id)` and `Stream(stream_id)`
+- `delegated_refund()` → reads/writes `Capability(capability_id)` and `Stream(stream_id)`
 
 ## Storage Cost Considerations
 

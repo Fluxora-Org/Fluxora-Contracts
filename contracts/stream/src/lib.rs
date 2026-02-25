@@ -41,6 +41,33 @@ pub enum StreamEvent {
     Cancelled(u64),
 }
 
+/// Capability actions that can be delegated to another account.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CapabilityAction {
+    /// Delegate recipient-side claiming/releasing of streamed funds.
+    Claim = 0,
+    /// Delegate recipient-side release up to an explicit amount limit.
+    Release = 1,
+    /// Delegate sender-side one-time refund (cancellation) authority.
+    RefundOnce = 2,
+}
+
+/// Short-lived, revocable delegated capability.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Capability {
+    pub capability_id: u64,
+    pub stream_id: u64,
+    pub owner: Address,
+    pub holder: Address,
+    pub action: CapabilityAction,
+    pub amount_limit: i128,
+    pub remaining_amount: i128,
+    pub expiry: u64,
+    pub revoked: bool,
+}
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct Stream {
@@ -71,9 +98,11 @@ pub struct CreateStreamParams {
 /// Namespace for all contract storage keys.
 #[contracttype]
 pub enum DataKey {
-    Config,       // Instance storage for global settings (admin/token).
-    NextStreamId, // Instance storage for the auto-incrementing ID counter.
-    Stream(u64),  // Persistent storage for individual stream data (O(1) lookup).
+    Config,           // Instance storage for global settings (admin/token).
+    NextStreamId,     // Instance storage for the auto-incrementing ID counter.
+    Stream(u64),      // Persistent storage for individual stream data (O(1) lookup).
+    NextCapabilityId, // Instance storage for delegated capability IDs.
+    Capability(u64),  // Persistent storage for individual delegated capabilities.
 }
 
 // ---------------------------------------------------------------------------
@@ -106,6 +135,19 @@ fn set_stream_count(env: &Env, count: u64) {
     env.storage().instance().set(&DataKey::NextStreamId, &count);
 }
 
+fn get_capability_count(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&DataKey::NextCapabilityId)
+        .unwrap_or(0u64)
+}
+
+fn set_capability_count(env: &Env, count: u64) {
+    env.storage()
+        .instance()
+        .set(&DataKey::NextCapabilityId, &count);
+}
+
 fn load_stream(env: &Env, stream_id: u64) -> Stream {
     env.storage()
         .persistent()
@@ -118,6 +160,19 @@ fn save_stream(env: &Env, stream: &Stream) {
     env.storage().persistent().set(&key, stream);
 
     // Requirement from Issue #1: extend TTL on stream save to ensure persistence
+    env.storage().persistent().extend_ttl(&key, 17280, 120960);
+}
+
+fn load_capability(env: &Env, capability_id: u64) -> Capability {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Capability(capability_id))
+        .unwrap_or_else(|| panic!("capability not found"))
+}
+
+fn save_capability(env: &Env, capability: &Capability) {
+    let key = DataKey::Capability(capability.capability_id);
+    env.storage().persistent().set(&key, capability);
     env.storage().persistent().extend_ttl(&key, 17280, 120960);
 }
 
@@ -198,6 +253,91 @@ impl FluxoraStream {
 
         stream_id
     }
+
+    fn capability_owner_for_action(stream: &Stream, action: CapabilityAction) -> Address {
+        match action {
+            CapabilityAction::Claim | CapabilityAction::Release => stream.recipient.clone(),
+            CapabilityAction::RefundOnce => stream.sender.clone(),
+        }
+    }
+
+    fn assert_capability_is_live(env: &Env, capability: &Capability) {
+        assert!(!capability.revoked, "capability revoked");
+        assert!(
+            env.ledger().timestamp() <= capability.expiry,
+            "capability expired"
+        );
+    }
+
+    fn withdraw_internal(
+        env: &Env,
+        stream_id: u64,
+        requested_amount: Option<i128>,
+    ) -> Result<i128, ContractError> {
+        let mut stream = load_stream(env, stream_id);
+
+        assert!(
+            stream.status != StreamStatus::Completed,
+            "stream already completed"
+        );
+        assert!(
+            stream.status != StreamStatus::Paused,
+            "cannot withdraw from paused stream"
+        );
+
+        let accrued = Self::calculate_accrued(env.clone(), stream_id)?;
+        let withdrawable = accrued - stream.withdrawn_amount;
+        assert!(withdrawable > 0, "nothing to withdraw");
+
+        let amount = if let Some(requested) = requested_amount {
+            assert!(requested > 0, "requested amount must be positive");
+            assert!(
+                requested <= withdrawable,
+                "requested amount exceeds withdrawable"
+            );
+            requested
+        } else {
+            withdrawable
+        };
+
+        // CEI: update state before external token transfer to reduce reentrancy risk.
+        stream.withdrawn_amount += amount;
+        if stream.withdrawn_amount == stream.deposit_amount {
+            stream.status = StreamStatus::Completed;
+        }
+        save_stream(env, &stream);
+
+        let token_client = token::Client::new(env, &get_token(env));
+        token_client.transfer(&env.current_contract_address(), &stream.recipient, &amount);
+
+        env.events()
+            .publish((symbol_short!("withdrew"), stream_id), amount);
+        Ok(amount)
+    }
+
+    fn cancel_stream_internal(env: &Env, stream_id: u64) -> Result<(), ContractError> {
+        let mut stream = load_stream(env, stream_id);
+        Self::require_cancellable_status(env, stream.status);
+
+        let accrued = Self::calculate_accrued(env.clone(), stream_id)?;
+        let unstreamed = stream.deposit_amount - accrued;
+
+        // CEI: update state before external token transfer to reduce reentrancy risk.
+        stream.status = StreamStatus::Cancelled;
+        stream.cancelled_at = Some(env.ledger().timestamp());
+        save_stream(env, &stream);
+
+        if unstreamed > 0 {
+            let token_client = token::Client::new(env, &get_token(env));
+            token_client.transfer(&env.current_contract_address(), &stream.sender, &unstreamed);
+        }
+
+        env.events().publish(
+            (symbol_short!("cancelled"), stream_id),
+            StreamEvent::Cancelled(stream_id),
+        );
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -237,6 +377,9 @@ impl FluxoraStream {
         let config = Config { token, admin };
         env.storage().instance().set(&DataKey::Config, &config);
         env.storage().instance().set(&DataKey::NextStreamId, &0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::NextCapabilityId, &0u64);
 
         // Ensure instance storage (Config/ID) doesn't expire quickly
         env.storage().instance().extend_ttl(17280, 120960);
@@ -561,28 +704,9 @@ impl FluxoraStream {
     /// - Cancel at 100% completion → sender gets 0% refund, recipient can withdraw 100%
     /// - Cancel before cliff → sender gets 100% refund (no accrual before cliff)
     pub fn cancel_stream(env: Env, stream_id: u64) -> Result<(), ContractError> {
-        let mut stream = load_stream(&env, stream_id);
+        let stream = load_stream(&env, stream_id);
         Self::require_sender_or_admin(&env, &stream.sender);
-        Self::require_cancellable_status(&env, stream.status);
-
-        let accrued = Self::calculate_accrued(env.clone(), stream_id)?;
-        let unstreamed = stream.deposit_amount - accrued;
-
-        // CEI: update state before external token transfer to reduce reentrancy risk.
-        stream.status = StreamStatus::Cancelled;
-        stream.cancelled_at = Some(env.ledger().timestamp());
-        save_stream(&env, &stream);
-
-        if unstreamed > 0 {
-            let token_client = token::Client::new(&env, &get_token(&env));
-            token_client.transfer(&env.current_contract_address(), &stream.sender, &unstreamed);
-        }
-
-        env.events().publish(
-            (symbol_short!("cancelled"), stream_id),
-            StreamEvent::Cancelled(stream_id),
-        );
-        Ok(())
+        Self::cancel_stream_internal(&env, stream_id)
     }
 
     /// Withdraw accrued tokens from a payment stream to the recipient.
@@ -640,48 +764,14 @@ impl FluxoraStream {
     /// - At t=800: withdraw() returns 500 tokens (800 - 300 already withdrawn)
     /// - At t=1000: withdraw() returns 200 tokens, status → Completed
     pub fn withdraw(env: Env, stream_id: u64) -> Result<i128, ContractError> {
-        let mut stream = load_stream(&env, stream_id);
+        let stream = load_stream(&env, stream_id);
 
         // Enforce recipient-only authorization: only the stream's recipient can withdraw
         // This is equivalent to checking env.invoker() == stream.recipient
         // require_auth() ensures only the recipient can authorize this call,
         // preventing anyone from withdrawing on behalf of the recipient
         stream.recipient.require_auth();
-
-        assert!(
-            stream.status != StreamStatus::Completed,
-            "stream already completed"
-        );
-
-        assert!(
-            stream.status != StreamStatus::Paused,
-            "cannot withdraw from paused stream"
-        );
-
-        let accrued = Self::calculate_accrued(env.clone(), stream_id)?;
-        let withdrawable = accrued - stream.withdrawn_amount;
-
-        // Handle zero withdrawable: panic if nothing to withdraw
-        // This occurs before cliff or when all accrued funds have been withdrawn.
-        assert!(withdrawable > 0, "nothing to withdraw");
-
-        // CEI: update state before external token transfer to reduce reentrancy risk.
-        stream.withdrawn_amount += withdrawable;
-        if stream.withdrawn_amount == stream.deposit_amount {
-            stream.status = StreamStatus::Completed;
-        }
-        save_stream(&env, &stream);
-
-        let token_client = token::Client::new(&env, &get_token(&env));
-        token_client.transfer(
-            &env.current_contract_address(),
-            &stream.recipient,
-            &withdrawable,
-        );
-
-        env.events()
-            .publish((symbol_short!("withdrew"), stream_id), withdrawable);
-        Ok(withdrawable)
+        Self::withdraw_internal(&env, stream_id, None)
     }
 
     /// Calculate the total amount accrued to the recipient at the current time.
@@ -748,6 +838,198 @@ impl FluxoraStream {
             stream.deposit_amount,
             now,
         ))
+    }
+
+    /// Issue a short-lived, revocable capability that delegates a limited action.
+    ///
+    /// Authorization model:
+    /// - `Claim`/`Release`: only stream recipient may issue
+    /// - `RefundOnce`: only stream sender may issue
+    ///
+    /// Security constraints:
+    /// - Capability must have future expiry
+    /// - `Claim`/`Release` amount limit must be positive and cannot exceed
+    ///   recipient's remaining stream authority (`deposit_amount - withdrawn_amount`)
+    /// - `RefundOnce` is always one-time (`amount_limit` must be `1`)
+    pub fn issue_capability(
+        env: Env,
+        stream_id: u64,
+        holder: Address,
+        action: CapabilityAction,
+        amount_limit: i128,
+        expiry: u64,
+    ) -> u64 {
+        let stream = load_stream(&env, stream_id);
+        let owner = Self::capability_owner_for_action(&stream, action);
+        owner.require_auth();
+
+        assert!(
+            expiry > env.ledger().timestamp(),
+            "capability expiry must be in the future"
+        );
+        assert!(holder != owner, "capability holder must differ from owner");
+
+        let normalized_limit = match action {
+            CapabilityAction::Claim | CapabilityAction::Release => {
+                assert!(amount_limit > 0, "capability amount_limit must be positive");
+                let remaining_authority = stream.deposit_amount - stream.withdrawn_amount;
+                assert!(
+                    amount_limit <= remaining_authority,
+                    "capability exceeds owner's remaining authority"
+                );
+                amount_limit
+            }
+            CapabilityAction::RefundOnce => {
+                assert!(
+                    stream.status == StreamStatus::Active || stream.status == StreamStatus::Paused,
+                    "stream must be active or paused for refund capability"
+                );
+                assert!(
+                    amount_limit == 1,
+                    "refund capability amount_limit must be 1"
+                );
+                1
+            }
+        };
+
+        let capability_id = get_capability_count(&env);
+        set_capability_count(&env, capability_id + 1);
+
+        let capability = Capability {
+            capability_id,
+            stream_id,
+            owner,
+            holder: holder.clone(),
+            action,
+            amount_limit: normalized_limit,
+            remaining_amount: normalized_limit,
+            expiry,
+            revoked: false,
+        };
+
+        save_capability(&env, &capability);
+        env.events().publish(
+            (symbol_short!("cap"), symbol_short!("issued"), capability_id),
+            (stream_id, action as u32, holder, normalized_limit, expiry),
+        );
+
+        capability_id
+    }
+
+    /// Revoke a capability before its expiry.
+    pub fn revoke_capability(env: Env, capability_id: u64) {
+        let mut capability = load_capability(&env, capability_id);
+        capability.owner.require_auth();
+
+        assert!(!capability.revoked, "capability already revoked");
+        capability.revoked = true;
+        save_capability(&env, &capability);
+
+        env.events().publish(
+            (
+                symbol_short!("cap"),
+                symbol_short!("revoked"),
+                capability_id,
+            ),
+            capability.stream_id,
+        );
+    }
+
+    /// Read the current state of a delegated capability.
+    pub fn get_capability(env: Env, capability_id: u64) -> Capability {
+        load_capability(&env, capability_id)
+    }
+
+    /// Use a `Claim`/`Release` capability to withdraw a limited amount.
+    ///
+    /// Tokens are always transferred to the stream recipient, not to the holder.
+    pub fn delegated_release(
+        env: Env,
+        stream_id: u64,
+        capability_id: u64,
+        holder: Address,
+        amount: i128,
+    ) -> Result<i128, ContractError> {
+        let mut capability = load_capability(&env, capability_id);
+        holder.require_auth();
+
+        assert!(
+            capability.stream_id == stream_id,
+            "capability does not belong to stream"
+        );
+        assert!(capability.holder == holder, "capability holder mismatch");
+        Self::assert_capability_is_live(&env, &capability);
+        assert!(
+            capability.action == CapabilityAction::Claim
+                || capability.action == CapabilityAction::Release,
+            "capability action does not allow release"
+        );
+
+        let stream = load_stream(&env, stream_id);
+        assert!(
+            capability.owner == stream.recipient,
+            "capability owner mismatch for release"
+        );
+        assert!(amount > 0, "requested amount must be positive");
+        assert!(
+            amount <= capability.remaining_amount,
+            "capability amount limit exceeded"
+        );
+
+        let released = Self::withdraw_internal(&env, stream_id, Some(amount))?;
+
+        capability.remaining_amount -= released;
+        if capability.remaining_amount == 0 {
+            capability.revoked = true;
+        }
+        save_capability(&env, &capability);
+
+        env.events().publish(
+            (symbol_short!("cap"), symbol_short!("used"), capability_id),
+            (stream_id, released),
+        );
+        Ok(released)
+    }
+
+    /// Use a `RefundOnce` capability to cancel a stream exactly once.
+    pub fn delegated_refund(
+        env: Env,
+        stream_id: u64,
+        capability_id: u64,
+        holder: Address,
+    ) -> Result<(), ContractError> {
+        let mut capability = load_capability(&env, capability_id);
+        holder.require_auth();
+
+        assert!(
+            capability.stream_id == stream_id,
+            "capability does not belong to stream"
+        );
+        assert!(capability.holder == holder, "capability holder mismatch");
+        Self::assert_capability_is_live(&env, &capability);
+        assert!(
+            capability.action == CapabilityAction::RefundOnce,
+            "capability action does not allow refund"
+        );
+        assert!(capability.remaining_amount > 0, "capability exhausted");
+
+        let stream = load_stream(&env, stream_id);
+        assert!(
+            capability.owner == stream.sender,
+            "capability owner mismatch for refund"
+        );
+
+        Self::cancel_stream_internal(&env, stream_id)?;
+
+        capability.remaining_amount = 0;
+        capability.revoked = true;
+        save_capability(&env, &capability);
+        env.events().publish(
+            (symbol_short!("cap"), symbol_short!("used"), capability_id),
+            (stream_id, 1_i128),
+        );
+
+        Ok(())
     }
 
     /// Retrieve the global contract configuration.
@@ -914,32 +1196,7 @@ impl FluxoraStream {
     pub fn cancel_stream_as_admin(env: Env, stream_id: u64) -> Result<(), ContractError> {
         let admin = get_admin(&env);
         admin.require_auth();
-
-        let mut stream = load_stream(&env, stream_id);
-
-        assert!(
-            stream.status == StreamStatus::Active || stream.status == StreamStatus::Paused,
-            "stream must be active or paused to cancel"
-        );
-
-        let accrued = Self::calculate_accrued(env.clone(), stream_id)?;
-        let unstreamed = stream.deposit_amount - accrued;
-
-        // CEI: update state before external token transfer to reduce reentrancy risk.
-        stream.status = StreamStatus::Cancelled;
-        stream.cancelled_at = Some(env.ledger().timestamp());
-        save_stream(&env, &stream);
-
-        if unstreamed > 0 {
-            let token_client = token::Client::new(&env, &get_token(&env));
-            token_client.transfer(&env.current_contract_address(), &stream.sender, &unstreamed);
-        }
-
-        env.events().publish(
-            (symbol_short!("cancelled"), stream_id),
-            StreamEvent::Cancelled(stream_id),
-        );
-        Ok(())
+        Self::cancel_stream_internal(&env, stream_id)
     }
 
     /// Pause a payment stream as the contract admin.
