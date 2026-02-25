@@ -686,6 +686,92 @@ fn integration_cancel_after_partial_withdrawal() {
     assert_eq!(withdrawn_1 + withdrawn_2, 2400);
 }
 
+/// Integration test: create stream → multiple partial withdrawals → cancel → correct refund.
+///
+/// This test covers:
+/// - Multiple partial withdrawals before cancellation
+/// - Cancellation after multiple withdrawal transactions
+/// - Sender receives refund of unstreamed amount (independent of withdrawal count)
+/// - Accrued but not withdrawn remains for recipient
+/// - All balances remain consistent through multiple withdrawal operations
+#[test]
+fn integration_cancel_after_multiple_partial_withdrawals() {
+    let ctx = TestContext::setup();
+
+    // Create stream: 5000 tokens over 5000 seconds (1 token/sec)
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &5000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &5000u64,
+    );
+
+    // Verify initial balances
+    assert_eq!(ctx.token.balance(&ctx.sender), 5_000);
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 5_000);
+
+    // First withdrawal at t=1000 (20% accrual)
+    ctx.env.ledger().set_timestamp(1000);
+    let withdrawn_1 = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn_1, 1000);
+    assert_eq!(ctx.token.balance(&ctx.recipient), 1_000);
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 4_000);
+
+    // Second withdrawal at t=2500 (50% accrual)
+    ctx.env.ledger().set_timestamp(2500);
+    let withdrawn_2 = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn_2, 1500); // 2500 accrued - 1000 already withdrawn
+    assert_eq!(ctx.token.balance(&ctx.recipient), 2_500);
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 2_500);
+
+    // Third withdrawal at t=3500 (70% accrual)
+    ctx.env.ledger().set_timestamp(3500);
+    let withdrawn_3 = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn_3, 1000); // 3500 accrued - 2500 already withdrawn
+    assert_eq!(ctx.token.balance(&ctx.recipient), 3_500);
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 1_500);
+
+    // Cancel at t=4200 (84% accrual)
+    ctx.env.ledger().set_timestamp(4200);
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued, 4200);
+
+    let sender_before_cancel = ctx.token.balance(&ctx.sender);
+    ctx.client().cancel_stream(&stream_id);
+
+    // Verify stream status is Cancelled
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+    assert_eq!(state.withdrawn_amount, 3500);
+
+    // Verify sender received refund of unstreamed amount
+    // Unstreamed = deposit - accrued = 5000 - 4200 = 800
+    let sender_after_cancel = ctx.token.balance(&ctx.sender);
+    let refund = sender_after_cancel - sender_before_cancel;
+    assert_eq!(refund, 800);
+    assert_eq!(sender_after_cancel, 5_800);
+
+    // Verify accrued but not withdrawn amount remains in contract
+    // Accrued = 4200, Withdrawn = 3500, Remaining = 700
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 700);
+
+    // Verify recipient can withdraw remaining accrued amount
+    let withdrawn_final = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn_final, 700);
+    assert_eq!(ctx.token.balance(&ctx.recipient), 4_200);
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 0);
+
+    // Verify total withdrawn across all calls equals accrued
+    assert_eq!(
+        withdrawn_1 + withdrawn_2 + withdrawn_3 + withdrawn_final,
+        4200
+    );
+}
+
 /// Integration test: create stream with cliff → cancel before cliff → full refund.
 ///
 /// This test covers:
@@ -1313,7 +1399,6 @@ fn integration_pause_then_cancel_preserves_accrual() {
     assert_eq!(ctx.token.balance(&ctx.recipient), 1800);
     assert_eq!(ctx.token.balance(&ctx.contract_id), 0);
 }
-
 
 #[test]
 fn test_create_many_streams_from_same_sender() {

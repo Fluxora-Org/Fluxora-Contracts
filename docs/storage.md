@@ -29,13 +29,13 @@ Instance storage is used for contract-wide configuration that applies to all str
 
 | Key | Type | Description | Set By | Modified By |
 |-----|------|-------------|--------|-------------|
-| `Config` | `Config` struct | Contains `token` address and `admin` address | `init()` | Never (immutable after init) |
+| `Config` | `Config` struct | Contains `token` address and `admin` address | `init()` | `set_admin()` (admin key rotation) |
 | `NextStreamId` | `u64` | Auto-incrementing counter for stream IDs | `init()` (set to 0) | `create_stream()` (incremented) |
 
 **Characteristics:**
 - Shared across all contract operations
 - Low cardinality (only 2 keys)
-- Extended TTL on initialization: 17,280 ledgers threshold, 120,960 ledgers max
+- TTL extended on **every** read and write (see TTL Policy below)
 - Accessed frequently by most contract functions
 
 ### Persistent Storage
@@ -50,56 +50,94 @@ Persistent storage is used for individual stream records:
 - One entry per stream (unbounded growth)
 - O(1) lookup by stream ID
 - Contains all stream metadata and state
-- TTL extended on every write operation
+- TTL extended on every **read and write** operation
 
 ## TTL (Time To Live) Policy
 
+### Constants
+
+All TTL values are defined as named constants for maintainability:
+
+```rust
+/// Minimum remaining TTL (in ledgers) before we bump.  ~1 day at 5 s/ledger.
+const INSTANCE_LIFETIME_THRESHOLD: u32 = 17_280;
+/// Extend to ~7 days of ledgers when bumping instance storage.
+const INSTANCE_BUMP_AMOUNT: u32 = 120_960;
+/// Minimum remaining TTL for persistent (stream) entries.
+const PERSISTENT_LIFETIME_THRESHOLD: u32 = 17_280;
+/// Extend persistent entries to ~7 days of ledgers.
+const PERSISTENT_BUMP_AMOUNT: u32 = 120_960;
+```
+
 ### Instance Storage TTL
 
-Set during contract initialization (`init()`):
+Instance TTL is extended via the `bump_instance_ttl()` helper, which is called on **every** entry-point that reads or writes instance storage:
+
 ```rust
-env.storage().instance().extend_ttl(17280, 120960);
+fn bump_instance_ttl(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+}
 ```
+
+**Extension points (exhaustive):**
+
+| Function | Trigger |
+|----------|---------|
+| `init()` | After initial writes |
+| `get_config()` | On every read of Config |
+| `get_stream_count()` | On every read of NextStreamId |
+| `set_stream_count()` | After writing NextStreamId |
+| `set_admin()` | After updating Config with new admin |
 
 - **Threshold**: 17,280 ledgers (~24 hours at 5s/ledger)
 - **Max extension**: 120,960 ledgers (~7 days)
-- **Rationale**: Ensures contract configuration remains accessible for active operations
+- **Rationale**: Any contract interaction — whether a read (e.g., `get_config`, `calculate_accrued`) or a write — refreshes the instance TTL.  This prevents the contract from becoming unusable due to storage expiration on testnet or mainnet, even during periods of low activity.
 
 ### Persistent Storage TTL
 
-Extended on every stream save operation (`save_stream()`):
+Extended on **every** stream load (`load_stream()`) and save (`save_stream()`):
+
 ```rust
-env.storage().persistent().extend_ttl(&key, 17280, 120960);
+// On read:
+env.storage().persistent().extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+
+// On write:
+env.storage().persistent().extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
 ```
 
 - **Threshold**: 17,280 ledgers (~24 hours)
 - **Max extension**: 120,960 ledgers (~7 days)
-- **Trigger**: Every state modification (create, pause, resume, cancel, withdraw)
-- **Rationale**: Active streams remain accessible; inactive streams may expire after ~7 days of no activity
+- **Trigger**: Every read or write (create, pause, resume, cancel, withdraw, get_stream_state, calculate_accrued)
+- **Rationale**: Both active and queried streams remain accessible. A UI polling `calculate_accrued` or `get_stream_state` will keep the stream alive.
 
 ### TTL Implications
 
-- **Active streams**: TTL automatically extended on withdrawals and state changes
-- **Inactive streams**: May expire after max TTL period without interaction
-- **Completed/Cancelled streams**: No automatic TTL extension after terminal state
-- **Recovery**: Expired streams cannot be recovered; data is permanently lost
+- **Active streams**: TTL refreshed on any interaction (reads or writes)
+- **Queried streams**: TTL refreshed when viewed via `get_stream_state` or `calculate_accrued`
+- **Inactive streams**: May expire after ~7 days with **zero** interaction
+- **Completed/Cancelled streams**: TTL still refreshed when queried; expire only if nobody reads them for 7 days
+- **Recovery**: Expired entries cannot be recovered; data is permanently lost
+- **Contract liveness**: Because instance TTL is bumped on every entry-point, the contract itself (Config + NextStreamId) stays alive as long as any function is called at least once per 7 days
 
 ## Storage Access Patterns
 
 ### Read Operations (View Functions)
 
-- `get_config()` → reads `Config` from instance storage
-- `get_stream_state(stream_id)` → reads `Stream(stream_id)` from persistent storage
-- `calculate_accrued(stream_id)` → reads `Stream(stream_id)` from persistent storage
+- `get_config()` → reads `Config` from instance storage, **bumps instance TTL**
+- `get_stream_state(stream_id)` → reads `Stream(stream_id)` from persistent storage, **bumps stream TTL**
+- `calculate_accrued(stream_id)` → reads `Stream(stream_id)` from persistent storage, **bumps stream TTL**
 
 ### Write Operations (State Mutations)
 
-- `init()` → writes `Config` and `NextStreamId` to instance storage
-- `create_stream()` → reads/writes `NextStreamId`, writes `Stream(stream_id)`
-- `pause_stream()` → reads/writes `Stream(stream_id)`
-- `resume_stream()` → reads/writes `Stream(stream_id)`
-- `cancel_stream()` → reads/writes `Stream(stream_id)`
-- `withdraw()` → reads/writes `Stream(stream_id)`
+- `init()` → writes `Config` and `NextStreamId` to instance storage, **bumps instance TTL**
+- `create_stream()` → reads/writes `NextStreamId`, writes `Stream(stream_id)`, **bumps both TTLs**
+- `pause_stream()` → reads/writes `Stream(stream_id)`, **bumps both stream and instance TTLs**
+- `resume_stream()` → reads/writes `Stream(stream_id)`, **bumps both stream and instance TTLs**
+- `cancel_stream()` → reads/writes `Stream(stream_id)`, **bumps both stream and instance TTLs**
+- `withdraw()` → reads/writes `Stream(stream_id)`, **bumps both stream and instance TTLs**
+- `set_admin()` → writes `Config`, **bumps instance TTL**
 
 ## Storage Cost Considerations
 
@@ -112,7 +150,7 @@ env.storage().persistent().extend_ttl(&key, 17280, 120960);
 - Linear growth: 1 key per stream
 - Per-stream footprint: ~200-300 bytes (depends on address sizes)
 - Unbounded growth potential
-- TTL maintenance required for long-lived streams
+- TTL maintenance automatic through usage
 
 ### Optimization Notes
 - Stream IDs are sequential `u64` values (efficient key space)
@@ -122,10 +160,11 @@ env.storage().persistent().extend_ttl(&key, 17280, 120960);
 
 ## Security Considerations
 
-- **Immutable config**: Token and admin addresses cannot be changed after `init()`
+- **Admin rotation**: Admin can be changed via `set_admin()` with current-admin authorization
 - **Atomic operations**: All state changes are transactional (no partial updates)
 - **Key isolation**: Each stream has independent storage (no cross-stream interference)
-- **TTL protection**: Active streams automatically maintain their TTL through normal usage
+- **TTL protection**: Both reads and writes keep storage alive, preventing accidental expiration
+- **No stale state**: TTL bumps on reads mean even monitoring/UI queries keep data fresh
 
 ## Future Enhancements
 
