@@ -2,9 +2,9 @@ extern crate std;
 
 use fluxora_stream::{FluxoraStream, FluxoraStreamClient, StreamStatus};
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
+    testutils::{Address as _, Ledger, Events},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env,
+    Address, Env, IntoVal,
 };
 
 struct TestContext<'a> {
@@ -1293,4 +1293,36 @@ fn integration_pause_then_cancel_preserves_accrual() {
 
     assert_eq!(ctx.token.balance(&ctx.recipient), 1800);
     assert_eq!(ctx.token.balance(&ctx.contract_id), 0);
+}
+
+
+#[test]
+fn test_create_many_streams_from_same_sender() {
+    let ctx = TestContext::setup();
+    for _ in 0..100 {
+        ctx.create_default_stream();
+    }
+
+    let cpu_insns = ctx.env.events().all().iter().find_map(|e| {
+        // e.1 is Topics (Vec<Val>), e.2 is Data (Val)
+        let topic_0_val = e.1.get(0)?;
+        
+        // Use into_val to convert back to Symbol
+        let topic_0: soroban_sdk::Symbol = topic_0_val.into_val(&ctx.env);
+        
+        if topic_0 == soroban_sdk::symbol_short!("log") {
+            let topic_1_val = e.1.get(1)?;
+            let topic_1: soroban_sdk::Symbol = topic_1_val.into_val(&ctx.env);
+            
+            if topic_1 == soroban_sdk::Symbol::new(&ctx.env, "cpu_insns") {
+                // Convert the data Val into u64
+                let v: u64 = e.2.into_val(&ctx.env);
+                return Some(v);
+            }
+        }
+        None
+    }).unwrap_or(0);
+
+    std::println!("Actual CPU Instructions: {}", cpu_insns);    
+    assert_eq!(cpu_insns, 19_867_571);
 }
