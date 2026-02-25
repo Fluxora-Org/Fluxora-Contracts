@@ -247,6 +247,14 @@
                   "map": [
                     {
                       "key": {
+                        "symbol": "cancelled_at"
+                      },
+                      "val": {
+                        "u64": 1000
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "cliff_time"
                       },
                       "val": {
@@ -1376,6 +1384,14 @@
             ],
             "data": {
               "map": [
+                {
+                  "key": {
+                    "symbol": "cancelled_at"
+                  },
+                  "val": {
+                    "u64": 1000
+                  }
+                },
                 {
                   "key": {
                     "symbol": "cliff_time"
