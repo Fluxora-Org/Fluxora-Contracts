@@ -37,7 +37,7 @@ Instance storage is used for contract-wide configuration that applies to all str
 
 **Characteristics:**
 - Shared across all contract operations
-- Low cardinality (only 2 keys)
+- Low cardinality (3 keys)
 - Extended TTL on initialization: 17,280 ledgers threshold, 120,960 ledgers max
 - Accessed frequently by most contract functions
 
@@ -113,7 +113,7 @@ env.storage().persistent().extend_ttl(&key, 17280, 120960);
 ## Storage Cost Considerations
 
 ### Instance Storage
-- Fixed cost: 2 keys regardless of stream count
+- Fixed cost: 3 keys regardless of stream/capability count
 - Minimal storage footprint (~100 bytes total)
 - Shared across all operations
 
