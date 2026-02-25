@@ -1574,6 +1574,57 @@ fn test_accrued_after_cliff_before_end() {
 }
 
 #[test]
+fn test_create_stream_with_cliff_equals_start_accrues_immediately() {
+    let ctx = TestContext::setup();
+
+    // Create stream where cliff_time == start_time (no cliff period, immediate vesting)
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128, // deposit_amount
+        &1_i128,    // rate_per_second (1 token per second)
+        &0u64,      // start_time
+        &0u64,      // cliff_time (equal to start_time)
+        &1000u64,   // end_time
+    );
+
+    // Advance time past start; since cliff == start, accrual should begin immediately
+    ctx.env.ledger().set_timestamp(500);
+
+    // Verify accrual begins immediately at start_time
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(
+        accrued, 500,
+        "accrual should start immediately at start_time when cliff == start; 500s × 1/s = 500"
+    );
+
+    // Verify stream state before withdrawal
+    let state_before = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_before.status, StreamStatus::Active);
+    assert_eq!(state_before.withdrawn_amount, 0);
+
+    // Withdraw accrued amount
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(
+        withdrawn, 500,
+        "should withdraw the full accrued amount (no cliff to block)"
+    );
+
+    // Verify stream state after withdrawal
+    let state_after = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(
+        state_after.withdrawn_amount, 500,
+        "withdrawn_amount should be updated"
+    );
+    assert_eq!(
+        state_after.status,
+        StreamStatus::Active,
+        "stream should remain active (not completed)"
+    );
+}
+
+#[test]
 fn test_calculate_accrued_max_values() {
     let ctx = TestContext::setup();
     ctx.sac.mint(&ctx.sender, &(i128::MAX - 10_000_i128));
