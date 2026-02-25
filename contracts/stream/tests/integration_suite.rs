@@ -963,7 +963,6 @@ fn integration_cancel_paused_stream() {
     assert_eq!(ctx.token.balance(&ctx.contract_id), 2_000);
 }
 
-<<<<<<< HEAD
 /// Integration test: create stream, pause, advance time, resume, advance time, withdraw.
 /// Asserts accrual and withdrawals reflect paused period (accrual continues, withdrawals blocked).
 ///
@@ -1315,6 +1314,7 @@ fn integration_pause_then_cancel_preserves_accrual() {
     assert_eq!(ctx.token.balance(&ctx.contract_id), 0);
 }
 
+
 #[test]
 fn test_create_many_streams_from_same_sender() {
     let ctx = TestContext::setup();
@@ -1323,24 +1323,13 @@ fn test_create_many_streams_from_same_sender() {
     ctx.env.budget().reset_unlimited();
 
     let sac = StellarAssetClient::new(&ctx.env, &ctx.token_id);
-=======
-#[test]
-fn test_create_many_streams_from_same_sender() {
-    let ctx = TestContext::setup();
-    ctx.env.budget().reset_unlimited();
-
-    let sac = StellarAssetClient::new(&ctx.env, &ctx.token_id);
     // Mint 200k to cover 100 streams
->>>>>>> 8d672ff (test: use range assertion for cpu instructions to support local and CI environments)
     sac.mint(&ctx.sender, &200_000_i128);
 
     for _ in 0..100 {
         ctx.create_default_stream();
     }
 
-<<<<<<< HEAD
-    // Get the actual cost from the budget tracker
-    // ... inside test_create_many_streams_from_same_sender
     let cpu_insns = ctx.env.budget().cpu_instruction_cost();
     std::println!("Actual CPU Instructions: {}", cpu_insns);
 
@@ -1348,24 +1337,8 @@ fn test_create_many_streams_from_same_sender() {
 
     // Range assertion to satisfy both Local (43M) and CI (19M) environments
     assert!(
-        cpu_insns > 15_000_000,
-        "Instruction count too low: {}",
+        cpu_insns > 15_000_000 && cpu_insns < 50_000_000,
+        "CPU instructions {} out of expected range",
         cpu_insns
-    );
-    assert!(
-        cpu_insns < 50_000_000,
-        "Instruction count too high: {}",
-        cpu_insns
-=======
-    let cpu_insns = ctx.env.budget().cpu_instruction_cost();
-    std::println!("Actual CPU Instructions: {}", cpu_insns);
-
-    // We expect ~19M in CI and ~43M locally.
-    // This check ensures we are tracking usage without being brittle to env changes.
-    assert!(cpu_insns > 15_000_000, "Instruction count suspiciously low");
-    assert!(
-        cpu_insns < 50_000_000,
-        "Instruction count exceeds threshold"
->>>>>>> 8d672ff (test: use range assertion for cpu instructions to support local and CI environments)
     );
 }
