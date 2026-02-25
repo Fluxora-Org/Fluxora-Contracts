@@ -106,6 +106,7 @@ sequenceDiagram
     Contract ->> Contract: status = Completed
     Contract -->> Recipient: withdrawable
     Note right of Contract: Event: ("withdrew", stream_id) → withdrawable
+    Note right of Contract: Event: ("completed", stream_id)
 
     Note over Sender, Recipient: 5b. Alternative — Cancellation
 

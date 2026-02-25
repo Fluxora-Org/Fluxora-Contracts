@@ -62,7 +62,8 @@ pub enum ContractError {
 pub enum StreamEvent {
     Paused(u64),
     Resumed(u64),
-    Cancelled(u64),
+    StreamCancelled(u64),
+    StreamCompleted(u64),
 }
 
 #[contracttype]
@@ -702,7 +703,7 @@ impl FluxoraStream {
 
         env.events().publish(
             (symbol_short!("cancelled"), stream_id),
-            StreamEvent::Cancelled(stream_id),
+            StreamEvent::StreamCancelled(stream_id),
         );
         Ok(())
     }
@@ -792,7 +793,8 @@ impl FluxoraStream {
 
         // CEI: update state before external token transfer to reduce reentrancy risk.
         stream.withdrawn_amount += withdrawable;
-        if stream.withdrawn_amount == stream.deposit_amount {
+        let completed_now = stream.withdrawn_amount == stream.deposit_amount;
+        if completed_now {
             stream.status = StreamStatus::Completed;
         }
         save_stream(&env, &stream);
@@ -807,6 +809,13 @@ impl FluxoraStream {
                 amount: withdrawable,
             },
         );
+
+        if completed_now {
+            env.events().publish(
+                (symbol_short!("completed"), stream_id),
+                StreamEvent::StreamCompleted(stream_id),
+            );
+        }
         Ok(withdrawable)
     }
 
@@ -1089,7 +1098,7 @@ impl FluxoraStream {
 
         env.events().publish(
             (symbol_short!("cancelled"), stream_id),
-            StreamEvent::Cancelled(stream_id),
+            StreamEvent::StreamCancelled(stream_id),
         );
         Ok(())
     }
