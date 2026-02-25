@@ -1,121 +1,155 @@
-   Compiling fluxora_stream v0.1.0 (/Users/truthixify/dev/os/drip/Fluxora-Contracts/contracts/stream)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.43s
-     Running unittests src/lib.rs (target/debug/deps/fluxora_stream-1c1109f19c1ab73e)
 
-running 113 tests
+running 150 tests
+test accrual::accrued_after_end_time::at_start_time_accrues_zero ... ok
+test accrual::accrued_after_end_time::cap_matches_issue_formula ... ok
+test accrual::accrued_after_end_time::exactly_at_end_time_equals_deposit ... ok
+test accrual::accrued_after_end_time::high_rate_caps_at_deposit_at_end_time ... ok
+test accrual::accrued_after_end_time::max_time_does_not_overflow ... ok
+test accrual::accrued_after_end_time::one_second_after_end_time_still_capped ... ok
+test accrual::accrued_after_end_time::high_rate_long_after_end_still_caps_at_deposit ... ok
+test accrual::accrued_after_end_time::long_after_end_time_still_capped ... ok
+test accrual::accrued_after_end_time::midway_accrues_half_deposit ... ok
+test accrual::accrued_after_end_time::one_second_before_end_time_less_than_deposit ... ok
+test accrual::accrued_after_end_time::past_end_but_before_cliff_returns_zero ... ok
+test accrual::accrued_after_end_time::pure_function_same_result_on_repeat_calls ... ok
+test accrual::tests::accrues_from_start_at_cliff ... ok
 test accrual::tests::caps_at_end_time_and_deposit ... ok
 test accrual::tests::multiplication_overflow_returns_capped_deposit ... ok
-test accrual::tests::returns_zero_for_negative_rate ... ok
-test accrual::tests::returns_zero_for_invalid_schedule ... ok
 test accrual::tests::returns_zero_before_cliff ... ok
-test accrual::tests::accrues_from_start_at_cliff ... ok
+test accrual::tests::returns_zero_for_invalid_schedule ... ok
+test accrual::tests::returns_zero_for_negative_rate ... ok
+test test::test_admin_can_pause_via_admin_path ... ok
 test test::test_calculate_accrued_after_cliff ... ok
+test test::test_admin_can_resume_stream ... ok
+test test::test_admin_can_pause_stream ... ok
 test test::test_calculate_accrued_capped_at_deposit ... ok
 test test::test_calculate_accrued_before_cliff_returns_zero ... ok
-test test::test_calculate_accrued_mid_stream ... ok
 test test::test_calculate_accrued_at_start ... ok
 test test::test_calculate_accrued_exactly_at_cliff ... ok
 test test::test_calculate_accrued_overflow_protection ... ok
-test test::test_cancel_event ... ok
-test test::test_admin_can_pause_via_admin_path ... ok
-test test::test_admin_can_pause_stream ... ok
+test test::test_calculate_accrued_mid_stream ... ok
 test test::test_calculate_accrued_max_values ... ok
-test test::test_admin_can_resume_stream ... ok
-test test::test_create_stream_cliff_before_start_panics - should panic ... ok
-test test::test_create_stream_cliff_after_end_panics - should panic ... ok
 test test::test_cancel_already_cancelled_panics - should panic ... ok
+test test::test_cancel_event ... ok
 test test::test_cancel_completed_stream_panics - should panic ... ok
-test test::test_cancel_stream_as_random_address_fails - should panic ... ok
-test test::test_create_stream_all_fields_correct ... ok
-test test::test_cancel_stream_as_admin_works ... ok
 test test::test_cancel_fully_accrued_no_refund ... ok
-test test::test_cancel_stream_as_admin ... ok
-test test::test_cancel_stream_partial_refund ... ok
 test test::test_cancel_paused_stream ... ok
+test test::test_cancel_stream_admin_success ... ok
+test test::test_cancel_stream_as_admin ... ok
+test test::test_cancel_stream_as_admin_works ... ok
+test test::test_cancel_stream_as_random_address_fails - should panic ... ok
+test test::test_cancel_stream_sender_success ... ok
 test test::test_cancel_stream_full_refund ... ok
-test test::test_create_stream_cliff_equals_end_succeeds ... ok
+test test::test_cancel_stream_partial_refund ... ok
+test test::test_config_unchanged_after_failed_reinit ... ok
+test test::test_create_stream_all_fields_correct ... ok
+test test::test_cancel_stream_recipient_unauthorized - should panic ... ok
+test test::test_create_stream_cliff_after_end_panics - should panic ... ok
+test test::test_cancel_stream_third_party_unauthorized - should panic ... ok
+test test::test_create_stream_cliff_before_start_panics - should panic ... ok
 test test::test_create_stream_cliff_equals_end ... ok
-test test::test_create_stream_deposit_less_than_total_panics - should panic ... ok
-test test::test_create_stream_equal_start_end_times_panics - should panic ... ok
+test test::test_create_stream_cliff_equals_end_succeeds ... ok
 test test::test_create_stream_cliff_equals_start ... ok
 test test::test_create_stream_cliff_equals_start_succeeds ... ok
 test test::test_create_stream_deposit_equals_total_succeeds ... ok
 test test::test_create_stream_deposit_greater_than_total_succeeds ... ok
+test test::test_create_stream_deposit_less_than_total_panics - should panic ... ok
 test test::test_create_stream_different_addresses ... ok
-test test::test_create_stream_invalid_cliff_panics - should panic ... ok
+test test::test_create_stream_equal_start_end_times_panics - should panic ... ok
 test test::test_create_stream_future_start_time ... ok
+test test::test_create_stream_edge_cliffs ... ok
 test test::test_create_stream_high_rate ... ok
 test test::test_create_stream_initial_state ... ok
+test test::test_create_stream_increments_id_correctly ... ok
 test test::test_create_stream_insufficient_balance_panics - should panic ... ok
+test test::test_create_stream_large_deposit ... ok
 test test::test_create_stream_invalid_times_panics - should panic ... ok
-test test::test_create_stream_edge_cliffs ... ok
+test test::test_create_stream_invalid_cliff_panics - should panic ... ok
+test test::test_create_stream_minimum_duration ... ok
 test test::test_create_stream_negative_deposit_panics - should panic ... ok
 test test::test_create_stream_negative_rate_panics - should panic ... ok
+test test::test_create_stream_multiple ... ok
 test test::test_create_stream_self_stream_panics - should panic ... ok
 test test::test_create_stream_sender_equals_recipient_panics - should panic ... ok
-test test::test_create_stream_minimum_duration ... ok
-test test::test_create_stream_zero_deposit_panics - should panic ... ok
-test test::test_create_stream_large_deposit ... ok
-test test::test_create_stream_zero_rate_panics - should panic ... ok
-test test::test_create_stream_increments_id_correctly ... ok
-test test::test_create_stream_transfer_failure_no_state_change ... ok
 test test::test_create_stream_token_balances ... ok
-test test::test_init_stores_config ... ok
-test test::test_get_stream_state_non_existent - should panic ... ok
-test test::test_get_stream_state_create_stream ... ok
-test test::test_get_stream_state_non_existence_stream - should panic ... ok
-test test::test_init_twice_panics - should panic ... ok
-test test::test_init_with_different_addresses ... ok
-test test::test_get_stream_state_initial ... ok
+test test::test_create_stream_transfer_failure_no_state_change ... ok
+test test::test_create_stream_zero_deposit_panics - should panic ... ok
+test test::test_create_stream_zero_rate_panics - should panic ... ok
 test test::test_get_stream_state_create_stream_cancel ... ok
-test test::test_get_stream_state_create_stream_withdraw ... ok
+test test::test_get_stream_state_create_stream ... ok
 test test::test_get_stream_state_create_stream_withdraw_during_cliff ... ok
-test test::test_init_sets_stream_counter_to_zero ... ok
-test test::test_get_stream_state_pause_stream_cancel ... ok
-test test::test_get_stream_state_pause_resume_stream_cancel ... ok
-test test::test_create_stream_multiple ... ok
-test test::test_pause_already_paused_panics - should panic ... ok
-test test::test_pause_stream_as_recipient_fails - should panic ... ok
-test test::test_pause_resume_events ... ok
-test test::test_resume_active_stream_panics - should panic ... ok
-test test::test_pause_and_resume ... ok
-test test::test_multiple_streams_independent ... ok
 test test::test_get_stream_state_all_statuses ... ok
-test test::test_withdraw_accrued_capped_at_deposit ... ok
-test test::test_resume_cancelled_stream_panics - should panic ... ok
+test test::test_get_stream_state_create_stream_withdraw ... ok
+test test::test_get_stream_state_initial ... ok
+test test::test_get_stream_state_non_existence_stream - should panic ... ok
+test test::test_get_stream_state_non_existent - should panic ... ok
+test test::test_get_stream_state_pause_resume_stream_cancel ... ok
+test test::test_init_stores_config ... ok
+test test::test_init_sets_stream_counter_to_zero ... ok
+test test::test_init_with_different_addresses ... ok
+test test::test_init_twice_panics - should panic ... ok
+test test::test_get_stream_state_pause_stream_cancel ... ok
+test test::test_multiple_streams_independent ... ok
+test test::test_operations_work_after_failed_reinit ... ok
+test test::test_pause_already_paused_panics - should panic ... ok
+test test::test_pause_resume_events ... ok
+test test::test_pause_and_resume ... ok
+test test::test_pause_stream_admin_success ... ok
+test test::test_pause_stream_as_recipient_fails - should panic ... ok
+test test::test_pause_stream_recipient_unauthorized - should panic ... ok
+test test::test_reinit_different_token_same_admin_panics - should panic ... ok
+test test::test_pause_stream_sender_success ... ok
+test test::test_pause_stream_third_party_unauthorized - should panic ... ok
+test test::test_reinit_same_token_different_admin_panics - should panic ... ok
+test test::test_reinit_same_token_same_admin_panics - should panic ... ok
 test test::test_resume_completed_stream_panics - should panic ... ok
+test test::test_resume_active_stream_panics - should panic ... ok
+test test::test_resume_cancelled_stream_panics - should panic ... ok
 test test::test_withdraw_after_cancel_gets_accrued_amount ... ok
+test test::test_withdraw_accrued_capped_at_deposit ... ok
 test test::test_withdraw_after_cancel_partial_accrual ... ok
-test test::test_withdraw_before_cliff_panics - should panic ... ok
+test test::test_withdraw_after_cancel_status_stays_cancelled ... ok
 test test::test_withdraw_after_cancel_then_completed - should panic ... ok
+test test::test_withdraw_before_cliff_panics - should panic ... ok
 test test::test_withdraw_after_resume_succeeds ... ok
 test test::test_withdraw_capped_at_accrued_amount ... ok
+test test::test_withdraw_completed_in_batch ... ok
+test test::test_withdraw_cliff_updates_withdrawn_correctly ... ok
 test test::test_withdraw_completed ... ok
+test test::test_withdraw_completed_stream_panics - should panic ... ok
+test test::test_withdraw_completed_panic ... ok
+test test::test_withdraw_contract_balance_decreases ... ok
+test test::test_withdraw_contract_balance_tracking ... ok
+test test::test_withdraw_excess_deposit_only_streams_calculated_amount ... ok
 test test::test_withdraw_exactly_at_cliff ... ok
 test test::test_withdraw_mid_stream ... ok
-test test::test_withdraw_completed_panic - should panic ... ok
-test test::test_withdraw_excess_deposit_only_streams_calculated_amount ... ok
-test test::test_withdraw_contract_balance_tracking ... ok
-test test::test_withdraw_completed_in_batch ... ok
-test test::test_withdraw_multiple_times ... ok
+test test::test_withdraw_monotonic_increase ... ok
+test test::test_withdraw_many_small_increments ... ok
 test test::test_withdraw_multiple_partial_no_excess ... ok
+test test::test_withdraw_multiple_times ... ok
+test test::test_withdraw_no_negative_withdrawable ... ok
 test test::test_withdraw_no_overflow_max_values ... ok
 test test::test_withdraw_not_recipient_unauthorized - should panic ... ok
-test test::test_withdraw_no_negative_withdrawable ... ok
 test test::test_withdraw_paused_stream_panics - should panic ... ok
-test test::test_withdraw_monotonic_increase ... ok
-test test::test_withdraw_small_rate_no_underflow ... ok
-test test::test_withdraw_requires_recipient_authorization ... ok
-test test::test_withdraw_twice_after_cancel_panics - should panic ... ok
-test test::test_withdraw_zero_after_full_withdrawal - should panic ... ok
-test test::test_withdraw_status_transition_to_completed ... ok
+test test::test_withdraw_recipient_balance_increases ... ok
 test test::test_withdraw_recipient_success ... ok
+test test::test_withdraw_partial_then_full_with_intermediate_checks ... ok
+test test::test_withdraw_requires_recipient_authorization ... ok
+test test::test_withdraw_small_rate_no_underflow ... ok
+test test::test_withdraw_state_persists_across_calls ... ok
+test test::test_withdraw_returned_amount_matches_increment ... ok
+test test::test_withdraw_status_transition_to_completed ... ok
+test test::test_withdraw_twice_after_cancel_panics ... ok
+test test::test_withdraw_status_transitions_correctly ... ok
+test test::test_withdraw_updates_withdrawn_amount_and_status ... ok
+test test::test_withdraw_withdrawn_amount_monotonic_increase ... ok
+test test::test_withdraw_zero_after_full_withdrawal - should panic ... ok
+test test::test_withdraw_zero_after_immediate_cancel - should panic ... ok
 test test::test_withdraw_zero_at_start_time - should panic ... ok
 test test::test_withdraw_zero_before_cliff - should panic ... ok
-test test::test_withdraw_zero_after_immediate_cancel - should panic ... ok
-test test::test_withdraw_zero_one_second_before_cliff - should panic ... ok
 test test::test_withdraw_zero_no_time_elapsed - should panic ... ok
+test test::test_withdraw_zero_one_second_before_cliff - should panic ... ok
 test test::test_create_stream_multiple_loop ... ok
 
-test result: ok. 113 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.27s
+test result: ok. 150 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.06s
 

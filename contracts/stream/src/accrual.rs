@@ -80,6 +80,101 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod invariants {
+    use super::calculate_accrued_amount;
+
+    fn sample_streams() -> &'static [(u64, u64, u64, i128, i128)] {
+        &[
+            (0, 0, 1_000, 1, 1_000),
+            (1_000, 1_000, 2_000, 1, 1_000),
+            (0, 500, 1_000, 2, 1_500),
+            (0, 0, 1_000, 10, 5_000),
+            (0, 0, 10_000, 0, 0),
+            (0, 0, 1_000, 3, 500),
+        ]
+    }
+
+    #[test]
+    fn accrued_non_negative_and_bounded_by_deposit() {
+        for &(start, cliff, end, rate, deposit) in sample_streams() {
+            let times = [
+                0,
+                start.saturating_sub(1),
+                start,
+                cliff,
+                start.saturating_add(cliff) / 2,
+                end.saturating_sub(1),
+                end,
+                end.saturating_add(1),
+            ];
+
+            for &t in &times {
+                let accrued = calculate_accrued_amount(start, cliff, end, rate, deposit, t);
+
+                assert!(
+                    accrued >= 0,
+                    "accrued negative for stream {:?} at t={}",
+                    (start, cliff, end, rate, deposit),
+                    t
+                );
+
+                assert!(
+                    accrued <= deposit,
+                    "accrued greater than deposit for stream {:?} at t={}",
+                    (start, cliff, end, rate, deposit),
+                    t
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn accrued_is_monotonic_in_time_after_cliff() {
+        for &(start, cliff, end, rate, deposit) in sample_streams() {
+            if cliff >= end {
+                continue;
+            }
+
+            let t0 = if cliff > start { cliff } else { start };
+            let span = end.saturating_sub(t0);
+
+            let mut times_buf = [t0, t0, t0, t0, end];
+            let mut len: usize = 1;
+
+            if span > 1 {
+                times_buf[len] = t0.saturating_add(span / 3);
+                len += 1;
+
+                times_buf[len] = t0.saturating_add(span / 2);
+                len += 1;
+
+                times_buf[len] = end.saturating_sub(1);
+                len += 1;
+            }
+
+            times_buf[len] = end;
+            len += 1;
+
+            let mut prev = calculate_accrued_amount(start, cliff, end, rate, deposit, times_buf[0]);
+
+            for &t in times_buf.iter().take(len).skip(1) {
+                let now = calculate_accrued_amount(start, cliff, end, rate, deposit, t);
+
+                assert!(
+                    now >= prev,
+                    "accrued not monotonic for stream {:?}: at t={} got {}, previous {}",
+                    (start, cliff, end, rate, deposit),
+                    t,
+                    now,
+                    prev
+                );
+                prev = now;
+            }
+        }
+    }
+}
+
 /// Tests for Issue #47: calculate_accrued is capped after end_time
 ///
 /// These tests verify that accrual stops at end_time regardless of how much
