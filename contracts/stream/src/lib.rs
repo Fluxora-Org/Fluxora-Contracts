@@ -45,6 +45,19 @@ pub enum StreamEvent {
 
 #[contracttype]
 #[derive(Clone, Debug)]
+pub struct StreamCreated {
+    pub stream_id: u64,
+    pub sender: Address,
+    pub recipient: Address,
+    pub deposit_amount: i128,
+    pub rate_per_second: i128,
+    pub start_time: u64,
+    pub cliff_time: u64,
+    pub end_time: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
 pub struct Stream {
     pub stream_id: u64,
     pub sender: Address,
@@ -181,8 +194,8 @@ impl FluxoraStream {
 
         let stream = Stream {
             stream_id,
-            sender,
-            recipient,
+            sender: sender.clone(),
+            recipient: recipient.clone(),
             deposit_amount,
             rate_per_second,
             start_time,
@@ -195,8 +208,19 @@ impl FluxoraStream {
 
         save_stream(env, &stream);
 
-        env.events()
-            .publish((symbol_short!("created"), stream_id), deposit_amount);
+        env.events().publish(
+            (symbol_short!("created"), stream_id),
+            StreamCreated {
+                stream_id,
+                sender,
+                recipient,
+                deposit_amount,
+                rate_per_second,
+                start_time,
+                cliff_time,
+                end_time,
+            },
+        );
 
         stream_id
     }

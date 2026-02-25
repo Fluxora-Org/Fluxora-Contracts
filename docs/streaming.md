@@ -130,9 +130,28 @@ deposit_amount >= rate_per_second * (end_time - start_time)
 
 ## 5. Events
 
+### Event Schema
+
+#### StreamCreated
+
+Emitted when a new stream is created via `create_stream` or `create_streams`.
+
+**Topic:** `("created", stream_id)`
+
+**Payload:** `StreamCreated` struct containing:
+- `stream_id` (u64): Unique identifier for the stream
+- `sender` (Address): Address that created and funded the stream
+- `recipient` (Address): Address that receives the streamed tokens
+- `deposit_amount` (i128): Total tokens deposited
+- `rate_per_second` (i128): Streaming rate in tokens per second
+- `start_time` (u64): When streaming begins (ledger timestamp)
+- `cliff_time` (u64): When tokens first become available (vesting cliff)
+- `end_time` (u64): When streaming completes (ledger timestamp)
+
+#### Other Events
+
 | Topic | Payload | When Emitted |
 |-------|---------|--------------|
-| `("created", stream_id)` | `deposit_amount` (i128) | `create_stream` |
 | `("paused", stream_id)` | `StreamEvent::Paused(stream_id)` | `pause_stream` / `pause_stream_as_admin` |
 | `("resumed", stream_id)` | `StreamEvent::Resumed(stream_id)` | `resume_stream` / `resume_stream_as_admin` |
 | `("cancelled", stream_id)` | `StreamEvent::Cancelled(stream_id)` | `cancel_stream` / `cancel_stream_as_admin` |
