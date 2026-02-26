@@ -904,6 +904,35 @@ impl FluxoraStream {
         ))
     }
 
+    /// Calculate the currently withdrawable amount for a stream without performing a withdrawal.
+    ///
+    /// This is a read-only view function intended for UIs to display the "available to withdraw"
+    /// balance. It mirrors the exact accrual and availability logic of `withdraw()`.
+    ///
+    /// # Parameters
+    /// - `stream_id`: Unique identifier of the stream
+    ///
+    /// # Returns
+    /// - `i128`: The amount currently available to withdraw. Returns `0` if the stream
+    ///   is `Paused`, `Completed`, or before the cliff time.
+    ///
+    /// # Errors
+    /// - Returns `ContractError::StreamNotFound` if the stream does not exist.
+    pub fn get_withdrawable(env: Env, stream_id: u64) -> Result<i128, ContractError> {
+        let stream = load_stream(&env, stream_id)?;
+
+        // If the stream is completed or paused, withdrawals are not allowed.
+        if stream.status == StreamStatus::Completed || stream.status == StreamStatus::Paused {
+            return Ok(0);
+        }
+
+        let accrued = Self::calculate_accrued(env.clone(), stream_id)?;
+        let withdrawable = accrued - stream.withdrawn_amount;
+
+        // Fallback max(0) just in case, though accrual is strictly monotonic
+        Ok(if withdrawable > 0 { withdrawable } else { 0 })
+    }
+
     /// Retrieve the global contract configuration.
     ///
     /// Returns the contract's configuration containing the token address used for all
