@@ -711,6 +711,17 @@ impl FluxoraStream {
         let accrued = Self::calculate_accrued(env.clone(), stream_id)?;
         let unstreamed = stream.deposit_amount - accrued;
 
+        // REENTRANCY PROTECTION: state is updated and persisted before the token
+        // transfer executes. Soroban's execution model prevents true reentrancy,
+        // but we follow the checks-effects-interactions pattern as best practice.
+        // Assumption: the token contract does not reenter this contract.
+        stream.status = StreamStatus::Cancelled;
+        save_stream(&env, &stream);
+
+        // Transfer after state is saved
+        if unstreamed > 0 {
+            let token_client = token::Client::new(&env, &get_token(&env));
+            token_client.transfer(&env.current_contract_address(), &stream.sender, &unstreamed);
         // CEI: update state before external token transfer to reduce reentrancy risk.
         stream.status = StreamStatus::Cancelled;
         stream.cancelled_at = Some(env.ledger().timestamp());
@@ -784,10 +795,7 @@ impl FluxoraStream {
     pub fn withdraw(env: Env, stream_id: u64) -> Result<i128, ContractError> {
         let mut stream = load_stream(&env, stream_id)?;
 
-        // Enforce recipient-only authorization: only the stream's recipient can withdraw
-        // This is equivalent to checking env.invoker() == stream.recipient
-        // require_auth() ensures only the recipient can authorize this call,
-        // preventing anyone from withdrawing on behalf of the recipient
+        // Enforce recipient-only authorization
         stream.recipient.require_auth();
 
         assert!(
@@ -803,6 +811,13 @@ impl FluxoraStream {
         let accrued = Self::calculate_accrued(env.clone(), stream_id)?;
         let withdrawable = accrued - stream.withdrawn_amount;
 
+        // REENTRANCY PROTECTION: state is updated and persisted before the token
+        // transfer executes. Soroban's execution model prevents true reentrancy,
+        // but we follow the checks-effects-interactions pattern as best practice.
+        // Assumption: the token contract does not reenter this contract.
+        stream.withdrawn_amount += withdrawable;
+
+        if stream.withdrawn_amount >= stream.deposit_amount {
         // Handle zero withdrawable: return 0 without transfer or state change (idempotent).
         // This occurs before cliff or when all accrued funds have been withdrawn.
         // Frontends can safely call withdraw without checking balance first.
@@ -818,6 +833,17 @@ impl FluxoraStream {
         }
         save_stream(&env, &stream);
 
+        // Transfer after state is saved
+        let token_client = token::Client::new(&env, &get_token(&env));
+        token_client.transfer(
+            &env.current_contract_address(),
+            &stream.recipient,
+            &withdrawable,
+        );
+
+        env.events()
+            .publish((symbol_short!("withdrew"), stream_id), withdrawable);
+        withdrawable
         push_token(&env, &stream.recipient, withdrawable);
 
         env.events().publish(
@@ -1140,6 +1166,17 @@ impl FluxoraStream {
         let accrued = Self::calculate_accrued(env.clone(), stream_id)?;
         let unstreamed = stream.deposit_amount - accrued;
 
+        // REENTRANCY PROTECTION: state is updated and persisted before the token
+        // transfer executes. Soroban's execution model prevents true reentrancy,
+        // but we follow the checks-effects-interactions pattern as best practice.
+        // Assumption: the token contract does not reenter this contract.
+        stream.status = StreamStatus::Cancelled;
+        save_stream(&env, &stream);
+
+        // Transfer after state is saved
+        if unstreamed > 0 {
+            let token_client = token::Client::new(&env, &get_token(&env));
+            token_client.transfer(&env.current_contract_address(), &stream.sender, &unstreamed);
         // CEI: update state before external token transfer to reduce reentrancy risk.
         stream.status = StreamStatus::Cancelled;
         stream.cancelled_at = Some(env.ledger().timestamp());

@@ -301,6 +301,110 @@ fn harness_mints_sender_balance() {
     assert_eq!(ctx.token.balance(&ctx.sender), 10_000);
 }
 
+#[test]
+fn cancel_stream_updates_state_before_transfer() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Cancel at t=500, so 500 accrued, 500 unstreamed
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().cancel_stream(&stream_id);
+
+    // State must be Cancelled
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+
+    // Sender gets back unstreamed 500
+    assert_eq!(ctx.token.balance(&ctx.sender), 9_500);
+    // Contract retains accrued 500 for recipient
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 500);
+}
+
+#[test]
+fn cancel_stream_as_admin_updates_state_before_transfer() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(300);
+    ctx.client().cancel_stream_as_admin(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+
+    // Sender gets back 700 unstreamed
+    assert_eq!(ctx.token.balance(&ctx.sender), 9_700);
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 300);
+}
+
+#[test]
+fn withdraw_updates_state_before_transfer() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(600);
+    let withdrawn = ctx.client().withdraw(&stream_id);
+
+    // Verify state was correctly updated
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(withdrawn, 600);
+    assert_eq!(state.withdrawn_amount, 600);
+    assert_eq!(state.status, StreamStatus::Active);
+
+    // Verify balances reflect transfer
+    assert_eq!(ctx.token.balance(&ctx.recipient), 600);
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 400);
+}
+
+#[test]
+fn withdraw_marks_completed_when_fully_withdrawn() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Withdraw entire deposit at end of stream
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+    assert_eq!(state.withdrawn_amount, 1000);
+}
+
+#[test]
+#[should_panic(expected = "stream must be active or paused to cancel")]
+fn cancel_completed_stream_panics() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Complete the stream first
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    // Attempt to cancel completed stream should panic
+    ctx.client().cancel_stream(&stream_id);
+}
+
+#[test]
+#[should_panic(expected = "stream already completed")]
+fn withdraw_from_completed_stream_panics() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    // Second withdraw should panic
+    ctx.client().withdraw(&stream_id);
+}
+
+#[test]
+#[should_panic(expected = "cannot withdraw from paused stream")]
+fn withdraw_from_paused_stream_panics() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().pause_stream(&stream_id);
+    ctx.client().withdraw(&stream_id);
 /// End-to-end integration test: create stream, advance time in steps,
 /// withdraw multiple times, verify amounts and final Completed status.
 ///
