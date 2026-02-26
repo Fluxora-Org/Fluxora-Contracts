@@ -1,0 +1,35 @@
+   Compiling fluxora_stream v0.1.0 (/home/robi/Desktop/Fluxora-Contracts/contracts/stream)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.97s
+     Running tests/integration_suite.rs (target/debug/deps/integration_suite-a56751014c1d8e6d)
+
+running 27 tests
+test harness_mints_sender_balance ... ok
+test get_stream_state_returns_latest_status ... ok
+test create_stream_persists_state_and_moves_deposit ... ok
+test init_sets_config_and_keeps_token_address ... ok
+test full_lifecycle_create_withdraw_to_completion ... ok
+test integration_cancel_immediately_full_refund ... ok
+test integration_cancel_fully_accrued_no_refund ... ok
+test integration_cancel_before_cliff_full_refund ... ok
+test integration_cancel_after_partial_withdrawal ... ok
+test integration_cancel_after_cliff_partial_refund ... ok
+test get_stream_state_unknown_id_panics - should panic ... ok
+test init_twice_panics - should panic ... ok
+test create_stream_rejects_underfunded_deposit ... ok
+test integration_pause_resume_past_end_time_accrual_capped ... ok
+test integration_multiple_pause_resume_cycles ... ok
+test integration_full_flow_multiple_withdraws_to_completed ... ok
+test integration_cancel_paused_stream ... ok
+test integration_cancel_partial_accrual_partial_refund ... ok
+test integration_pause_then_cancel_preserves_accrual ... ok
+test integration_pause_resume_withdraw_lifecycle ... ok
+test reinit_with_different_params_preserves_config ... ok
+test integration_withdraw_beyond_end_time ... ok
+test integration_same_sender_multiple_streams ... ok
+test withdraw_accrued_amount_updates_balances_and_state ... ok
+test stream_counter_unaffected_by_reinit_attempt ... ok
+test withdraw_before_cliff_panics - should panic ... ok
+test integration_same_sender_same_recipient_multiple_streams ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.67s
+

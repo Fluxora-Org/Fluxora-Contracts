@@ -81,6 +81,8 @@ jobs:
         run: cargo build --release -p fluxora_stream --target wasm32-unknown-unknown
 
       - name: Install Stellar CLI
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           curl -sSfL https://raw.githubusercontent.com/stellar/stellar-cli/main/install.sh | sh
           echo "$HOME/.local/bin" >> $GITHUB_PATH
@@ -199,6 +201,8 @@ jobs:
           path: ./artifacts
 
       - name: Install Stellar CLI
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           curl -sSfL https://raw.githubusercontent.com/stellar/stellar-cli/main/install.sh | sh
           echo "$HOME/.local/bin" >> $GITHUB_PATH
@@ -255,6 +259,8 @@ jobs:
           path: ./artifacts
 
       - name: Install Stellar CLI
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           curl -sSfL https://raw.githubusercontent.com/stellar/stellar-cli/main/install.sh | sh
           echo "$HOME/.local/bin" >> $GITHUB_PATH

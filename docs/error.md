@@ -23,7 +23,7 @@ This table lists all possible errors in the FluxoraStream contract, including bo
 | `nothing to withdraw`                            | No withdrawable tokens available                                             | `withdraw` |
 | `stream must be active`                         | Admin cannot pause a stream that is not active                                 | `pause_stream_as_admin` |
 | `stream is not paused`                          | Admin cannot resume a stream that is not paused                                | `resume_stream_as_admin` |
-| `Unauthorized`                                  | Caller is not authorized to perform this operation                             | `set_admin`, `require_sender_or_admin` (internal checks) |
+| `Unauthorized`                                  | Caller is not authorized to perform this operation                             | `set_admin`, `require_stream_sender` (internal checks) |
 | `InsufficientBalance`                           | Token transfer failed due to insufficient balance or allowance                 | `create_stream`, `cancel_stream`, `cancel_stream_as_admin`, `withdraw` |
 | `Overflow calculating total streamable amount` | Overflow occurred when calculating total streamable tokens                     | `create_stream` |
 | `contract not initialised: missing config`     | Contract storage not initialized before access                                  | `get_config`, `get_token`, `get_admin` |
