@@ -157,3 +157,21 @@ Each is a separate Git repository.
 ## Contributing
 
 We welcome contributions from the community! Please read our [Contributing Guidelines](CONTRIBUTING.md) for details on our development workflow, branch naming, and testing requirements (including our 95% test coverage standard).
+
+# WASM Build Hash Verification
+
+After each CI build, the pipeline computes a SHA256 hash of the contract WASM artifact(s) and uploads them as CI artifacts. This allows deployers and auditors to verify that the deployed contract matches the tested build.
+
+Artifacts:
+- fluxora_stream.wasm.sha256 — Hash of the main WASM build
+- fluxora_stream.optimized.wasm.sha256 — Hash of the optimized WASM (if present)
+
+To verify a deployment:
+1. Download the hash artifact from the CI run (GitHub Actions > Artifacts > fluxora_stream-wasm-hash).
+2. Compute the SHA256 hash of your local WASM file:
+   bash
+   sha256sum path/to/your/fluxora_stream.wasm
+   
+3. Compare the output to the CI hash file. If they match, your binary is identical to the tested build.
+
+This improves supply-chain clarity and ensures reproducible deployments.
