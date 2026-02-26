@@ -837,6 +837,46 @@ fn test_create_stream_long_duration_accepted() {
     assert_eq!(state.status, StreamStatus::Active);
 }
 
+/// The contract must handle a deposit_amount close to i128::MAX correctly.
+/// This verifies that calculate_accrued does not overflow when dealing with
+/// the maximum possible token amounts supported by the type system.
+#[test]
+fn test_large_deposit_amount_sanity() {
+    let ctx = TestContext::setup();
+
+    // Use a value very close to i128::MAX
+    let deposit: i128 = i128::MAX - 100_000_000_i128;
+    let rate: i128 = 10_000_000_i128;
+    let duration: u64 = (deposit / rate) as u64; // Perfectly covers duration
+
+    ctx.sac.mint(&ctx.sender, &deposit);
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &deposit,
+        &rate,
+        &0u64,
+        &0u64,
+        &duration,
+    );
+
+    // Check midway
+    let midway = duration / 2;
+    ctx.env.ledger().set_timestamp(midway);
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued, (midway as i128) * rate);
+
+    // Check at end
+    ctx.env.ledger().set_timestamp(duration);
+    let accrued_end = ctx.client().calculate_accrued(&stream_id);
+    assert!(accrued_end <= deposit);
+    // Due to precision/rounding in duration calculation, it might be slightly less than deposit
+    // but should be exactly (duration * rate)
+    assert_eq!(accrued_end, (duration as i128) * rate);
+}
+
 // ---------------------------------------------------------------------------
 // Tests — Issue #44: create_stream validation (invalid params) — full suite
 // ---------------------------------------------------------------------------

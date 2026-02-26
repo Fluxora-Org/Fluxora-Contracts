@@ -1416,14 +1416,11 @@ fn test_create_many_streams_from_same_sender() {
     }
 
     let cpu_insns = ctx.env.budget().cpu_instruction_cost();
-    std::println!("Actual CPU Instructions: {}", cpu_insns);
+    log!(&ctx.env, "cpu_insns", cpu_insns);
+    assert!(cpu_insns == 19_867_571);
 
-    assert_ne!(cpu_insns, 0, "CPU instructions should not be zero.");
-
-    // Range assertion to satisfy both Local (43M) and CI (19M) environments
-    assert!(
-        cpu_insns > 15_000_000 && cpu_insns < 50_000_000,
-        "CPU instructions {} out of expected range",
-        cpu_insns
-    );
+    // Check memory bytes consumed
+    let mem_bytes = ctx.env.budget().memory_bytes_cost();
+    log!(&ctx.env, "mem_bytes", mem_bytes);
+    assert!(mem_bytes == 4_115_235);
 }
