@@ -489,6 +489,12 @@
                   "map": [
                     {
                       "key": {
+                        "symbol": "cancelled_at"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "cliff_time"
                       },
                       "val": {
@@ -622,6 +628,12 @@
                 "durability": "persistent",
                 "val": {
                   "map": [
+                    {
+                      "key": {
+                        "symbol": "cancelled_at"
+                      },
+                      "val": "void"
+                    },
                     {
                       "key": {
                         "symbol": "cliff_time"
@@ -759,6 +771,14 @@
                   "map": [
                     {
                       "key": {
+                        "symbol": "cancelled_at"
+                      },
+                      "val": {
+                        "u64": 0
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "cliff_time"
                       },
                       "val": {
@@ -892,6 +912,12 @@
                 "durability": "persistent",
                 "val": {
                   "map": [
+                    {
+                      "key": {
+                        "symbol": "cancelled_at"
+                      },
+                      "val": "void"
+                    },
                     {
                       "key": {
                         "symbol": "cliff_time"
@@ -2186,6 +2212,12 @@
               "map": [
                 {
                   "key": {
+                    "symbol": "cancelled_at"
+                  },
+                  "val": "void"
+                },
+                {
+                  "key": {
                     "symbol": "cliff_time"
                   },
                   "val": {
@@ -2595,6 +2627,12 @@
             ],
             "data": {
               "map": [
+                {
+                  "key": {
+                    "symbol": "cancelled_at"
+                  },
+                  "val": "void"
+                },
                 {
                   "key": {
                     "symbol": "cliff_time"
@@ -3100,6 +3138,14 @@
               "map": [
                 {
                   "key": {
+                    "symbol": "cancelled_at"
+                  },
+                  "val": {
+                    "u64": 0
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "cliff_time"
                   },
                   "val": {
@@ -3602,6 +3648,12 @@
             ],
             "data": {
               "map": [
+                {
+                  "key": {
+                    "symbol": "cancelled_at"
+                  },
+                  "val": "void"
+                },
                 {
                   "key": {
                     "symbol": "cliff_time"

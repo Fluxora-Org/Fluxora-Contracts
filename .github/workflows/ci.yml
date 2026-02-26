@@ -81,6 +81,8 @@ jobs:
         run: cargo build --release -p fluxora_stream --target wasm32-unknown-unknown
 
       - name: Install Stellar CLI
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           curl -sSfL https://raw.githubusercontent.com/stellar/stellar-cli/main/install.sh | sh
           echo "$HOME/.local/bin" >> $GITHUB_PATH
@@ -89,6 +91,23 @@ jobs:
         run: |
           stellar contract optimize --wasm target/wasm32-unknown-unknown/release/fluxora_stream.wasm
         continue-on-error: true
+
+        - name: Compute WASM SHA256 hash
+          run: |
+            sha256sum target/wasm32-unknown-unknown/release/fluxora_stream.wasm > target/wasm32-unknown-unknown/release/fluxora_stream.wasm.sha256
+            if [ -f target/wasm32-unknown-unknown/release/fluxora_stream.optimized.wasm ]; then
+              sha256sum target/wasm32-unknown-unknown/release/fluxora_stream.optimized.wasm > target/wasm32-unknown-unknown/release/fluxora_stream.optimized.wasm.sha256
+            fi
+
+        - name: Upload WASM hash artifact
+          uses: actions/upload-artifact@v4
+          with:
+            name: fluxora_stream-wasm-hash
+            path: |
+              target/wasm32-unknown-unknown/release/fluxora_stream.wasm.sha256
+              target/wasm32-unknown-unknown/release/fluxora_stream.optimized.wasm.sha256
+            retention-days: 30
+            if-no-files-found: warn
 
       - name: Upload WASM artifact
         uses: actions/upload-artifact@v4
@@ -199,6 +218,8 @@ jobs:
           path: ./artifacts
 
       - name: Install Stellar CLI
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           curl -sSfL https://raw.githubusercontent.com/stellar/stellar-cli/main/install.sh | sh
           echo "$HOME/.local/bin" >> $GITHUB_PATH
@@ -255,6 +276,8 @@ jobs:
           path: ./artifacts
 
       - name: Install Stellar CLI
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           curl -sSfL https://raw.githubusercontent.com/stellar/stellar-cli/main/install.sh | sh
           echo "$HOME/.local/bin" >> $GITHUB_PATH

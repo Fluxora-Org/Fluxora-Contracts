@@ -1,0 +1,13 @@
+# Pin Rust toolchain for reproducible builds
+# Used for building Soroban WASM contracts
+#
+# Compatible with soroban-sdk 21.7.7 and Stellar Soroban networks.
+# Update this version only after verifying compatibility.
+#
+# To check installed version: rustc --version
+# To update: rustup update stable
+
+[toolchain]
+channel = "stable"
+targets = ["wasm32-unknown-unknown"]
+

@@ -2,14 +2,23 @@
 
 Soroban smart contracts for the Fluxora treasury streaming protocol on Stellar. Stream USDC from a treasury to recipients over time with configurable rate, duration, and cliff.
 
+## Documentation
+
+- **[Stream contract docs](docs/streaming.md)** — Lifecycle, accrual formula, cliff/end_time, access control, events, and error codes.
+
 ## What's in this repo
 
 - **Stream contract** (`contracts/stream`) — Lock USDC, accrue per second, withdraw on demand.
 - **Data model** — `Stream` (sender, recipient, deposit_amount, rate_per_second, start/cliff/end time, withdrawn_amount, status).
 - **Status** — Active, Paused, Completed, Cancelled.
 - **Methods (stubs)** — `init`, `create_stream`, `pause_stream`, `resume_stream`, `cancel_stream`, `withdraw`, `calculate_accrued`, `get_stream_state`.
+- **Cancel semantics** — `cancel_stream` is valid only in `Active` or `Paused`; `Completed` and `Cancelled` return `InvalidState`.
 
 Implementation is scaffolded; storage, token transfers, and events are left for you to complete.
+- **Methods** — `init`, `create_stream`, `pause_stream`, `resume_stream`, `cancel_stream`, `withdraw`, `calculate_accrued`, `get_stream_state`, `set_admin`.
+- **Admin functions** — `pause_stream_as_admin`, `resume_stream_as_admin`, `cancel_stream_as_admin`, `set_admin` for key rotation.
+
+**Documentation:** [Audit preparation](docs/audit.md) (entrypoints and invariants for auditors).
 
 ## Tech stack
 
@@ -17,15 +26,48 @@ Implementation is scaffolded; storage, token transfers, and events are left for 
 - [soroban-sdk](https://docs.rs/soroban-sdk) (Stellar Soroban)
 - Build target: `wasm32-unknown-unknown` for deployment
 
+## Version pinning
+
+This project pins dependencies for **reproducible builds** and **auditor compatibility**:
+
+| Component | Version | Location | Purpose |
+|---|---|---|---|
+| **Rust** | 1.75 | `rust-toolchain.toml` | Ensures consistent WASM compilation |
+| **soroban-sdk** | 21.7.7 | `contracts/stream/Cargo.toml` | Locked to tested Stellar Soroban network version |
+
+When upgrading versions:
+
+1. Update `rust-toolchain.toml` → run `rustup update` → rebuild and test
+2. Update `soroban-sdk` version in Cargo.toml → update lock file → run full test suite
+3. Verify compatibility with the target Stellar network (testnet, mainnet, etc.)
+4. Document the change in the PR or release notes
+
 ## Local setup
 
-### Prerequisites
-
-- Rust 1.70+
-- [Stellar CLI](https://developers.stellar.org/docs/tools/developer-tools) (optional, for deploy/test on network)
+### Clone and prerequisites
 
 ```bash
+git clone https://github.com/Fluxora-Org/Fluxora-Contracts.git
+cd Fluxora-Contracts
+```
+
+- **Rust 1.75+** — Pinned in `rust-toolchain.toml` (auto-enforced via `rustup`; see [Rust version pinning](#rust-version-pinning))
+- **Soroban SDK 21.7.7** — Pinned in `contracts/stream/Cargo.toml` for reproducible builds
+- [Stellar CLI](https://developers.stellar.org/docs/tools/developer-tools) (optional, for deploy/test on network)
+
+Install dependencies:
+
+```bash
+rustup update stable
 rustup target add wasm32-unknown-unknown
+```
+
+Then verify:
+
+```bash
+rustc --version       # Should show 1.75 or newer
+cargo --version
+stellar --version     # Only if installing Stellar CLI
 ```
 
 ### Build
@@ -33,44 +75,57 @@ rustup target add wasm32-unknown-unknown
 From the repo root:
 
 ```bash
+# Development build (faster compile, for local testing)
+cargo build -p fluxora_stream
+
+# Release build (optimized WASM for deployment)
 cargo build --release -p fluxora_stream
 ```
 
-WASM output is under `target/wasm32-unknown-unknown/release/fluxora_stream.wasm`.
+Release WASM output: `target/wasm32-unknown-unknown/release/fluxora_stream.wasm`.
 
-### Test
+### Run tests
+
+To run all tests (unit and integration tests), use:
 
 ```bash
 cargo test -p fluxora_stream
 ```
 
-This runs both:
-- Unit tests in `contracts/stream/src/test.rs`
-- Integration tests in `contracts/stream/tests/integration_suite.rs`
+This runs **unit tests** and **integration tests** in one go. No environment variables or external services are required. Integration tests use Soroban’s in-process test environment (`soroban_sdk::testutils`): the contract and a mock Stellar asset are built in memory, so no emulator or network is needed.
+**Note:** Tests rely on the `testutils` feature of the `soroban-sdk` to simulate the ledger environment and manipulate time (e.g., fast-forwarding to test cliff and end periods). 
+This feature is already enabled in `contracts/stream/Cargo.toml` under `[dev-dependencies]`. No extra environment setup is required.
 
-The integration suite invokes the contract with Soroban `testutils` and covers:
-- `init`
-- `create_stream`
-- `withdraw`
-- `get_stream_state`
-- A full stream lifecycle from create to completed withdrawal
-- Key edge cases (`init` twice, pre-cliff withdrawal, unknown stream id, underfunded deposit)
+The test files are located at:
+- Unit tests: `contracts/stream/src/test.rs`
+- Integration tests: `contracts/stream/tests/integration_suite.rs`
 
-### Deploy (after Stellar CLI setup)
+- **Unit tests**: `contracts/stream/src/test.rs` (contract logic, accrual, auth, edge cases).
+- **Integration tests**: `contracts/stream/tests/integration_suite.rs` — full flows with `init`, `create_stream`, `withdraw`, `get_stream_state`, lifecycle and edge cases (double init, pre-cliff withdraw, unknown stream id, underfunded deposit).
+
+### Deploy to Stellar Testnet
+
+> **📋 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for a complete step-by-step deployment checklist**, including build, deploy, init, and verification steps.
+
+Quick start:
 
 ```bash
-stellar contract deploy \
-  --wasm-file target/wasm32-unknown-unknown/release/fluxora_stream.wasm \
-  --network testnet
+cp .env.example .env
+# Edit .env with your STELLAR_SECRET_KEY, STELLAR_TOKEN_ADDRESS, STELLAR_ADMIN_ADDRESS
+
+source .env
+bash script/deploy-testnet.sh
 ```
 
-Then invoke `init` with token and admin addresses, and use `create_stream`, `withdraw`, etc. as needed.
+Then invoke `create_stream`, `withdraw`, etc. as needed. Contract ID is saved to `.contract_id`.
 
 ## Project structure
 
 ```
 fluxora-contracts/
   Cargo.toml              # workspace
+  docs/
+    storage.md            # storage layout and key design
   contracts/
     stream/
       Cargo.toml
@@ -81,11 +136,16 @@ fluxora-contracts/
         integration_suite.rs  # integration tests (Soroban testutils)
 ```
 
+## Documentation
+
+- **[Storage Layout](docs/storage.md)** — Contract storage architecture, key design, and TTL policies
+
 ## Accrual formula (reference)
 
-- **Accrued** = `min((current_time - start_time) * rate_per_second, deposit_amount)`
+- **Accrued** = `0` when `current_time < cliff_time`
+- Otherwise: `min((min(current_time, end_time) - start_time) * rate_per_second, deposit_amount)`
 - **Withdrawable** = `Accrued - withdrawn_amount`
-- Before `cliff_time`: withdrawable = 0.
+- No accrual after `end_time` (elapsed time is capped at `end_time`).
 
 ## Related repos
 
@@ -93,3 +153,25 @@ fluxora-contracts/
 - **fluxora-frontend** — Dashboard and recipient UI
 
 Each is a separate Git repository.
+
+## Contributing
+
+We welcome contributions from the community! Please read our [Contributing Guidelines](CONTRIBUTING.md) for details on our development workflow, branch naming, and testing requirements (including our 95% test coverage standard).
+
+# WASM Build Hash Verification
+
+After each CI build, the pipeline computes a SHA256 hash of the contract WASM artifact(s) and uploads them as CI artifacts. This allows deployers and auditors to verify that the deployed contract matches the tested build.
+
+Artifacts:
+- fluxora_stream.wasm.sha256 — Hash of the main WASM build
+- fluxora_stream.optimized.wasm.sha256 — Hash of the optimized WASM (if present)
+
+To verify a deployment:
+1. Download the hash artifact from the CI run (GitHub Actions > Artifacts > fluxora_stream-wasm-hash).
+2. Compute the SHA256 hash of your local WASM file:
+   bash
+   sha256sum path/to/your/fluxora_stream.wasm
+   
+3. Compare the output to the CI hash file. If they match, your binary is identical to the tested build.
+
+This improves supply-chain clarity and ensures reproducible deployments.
