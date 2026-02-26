@@ -7106,3 +7106,118 @@ fn test_create_stream_past_start_no_token_transfer() {
         "sender balance must not change on validation failure"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Tests — get_withdrawable
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_withdrawable_stream_not_found() {
+    let ctx = TestContext::setup();
+    let result = ctx.client().try_get_withdrawable(&999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_withdrawable_before_cliff() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_cliff_stream(); // cliff at t=500
+
+    // Check before cliff
+    ctx.env.ledger().set_timestamp(100);
+    let withdrawable = ctx.client().get_withdrawable(&stream_id);
+
+    assert_eq!(withdrawable, 0, "withdrawable should be 0 before cliff");
+}
+
+#[test]
+fn test_get_withdrawable_after_cliff() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_cliff_stream(); // cliff at t=500, rate=1
+
+    // Check after cliff
+    ctx.env.ledger().set_timestamp(600);
+    let withdrawable = ctx.client().get_withdrawable(&stream_id);
+
+    assert_eq!(
+        withdrawable, 600,
+        "withdrawable should equal full accrual after cliff"
+    );
+}
+
+#[test]
+fn test_get_withdrawable_after_partial_withdraw() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Withdraw at t=300
+    ctx.env.ledger().set_timestamp(300);
+    ctx.client().withdraw(&stream_id);
+
+    // Advance time to t=800 and check withdrawable
+    ctx.env.ledger().set_timestamp(800);
+    let withdrawable = ctx.client().get_withdrawable(&stream_id);
+
+    // Accrued (800) - Withdrawn (300) = 500
+    assert_eq!(
+        withdrawable, 500,
+        "withdrawable should subtract already withdrawn amount"
+    );
+}
+
+#[test]
+fn test_get_withdrawable_paused_stream_returns_zero() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(500);
+
+    // Pause the stream
+    ctx.client().pause_stream(&stream_id);
+
+    // Even though 500 is accrued, pause blocks withdrawals
+    let withdrawable = ctx.client().get_withdrawable(&stream_id);
+    assert_eq!(
+        withdrawable, 0,
+        "withdrawable must be 0 when stream is Paused"
+    );
+}
+
+#[test]
+fn test_get_withdrawable_completed_stream_returns_zero() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Fully withdraw to mark stream as Completed
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+
+    let withdrawable = ctx.client().get_withdrawable(&stream_id);
+    assert_eq!(
+        withdrawable, 0,
+        "withdrawable must be 0 when stream is Completed"
+    );
+}
+
+#[test]
+fn test_get_withdrawable_cancelled_stream_returns_accrued() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Cancel stream midway
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().cancel_stream(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+
+    // The recipient should still be able to see and withdraw the accrued amount prior to cancellation
+    let withdrawable = ctx.client().get_withdrawable(&stream_id);
+    assert_eq!(
+        withdrawable, 400,
+        "withdrawable must equal frozen accrued amount on Cancelled stream"
+    );
+}
