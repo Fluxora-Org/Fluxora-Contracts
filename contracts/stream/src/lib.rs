@@ -88,6 +88,16 @@ pub struct Withdrawal {
     pub amount: i128,
 }
 
+/// Emitted when a recipient withdraws to a specified destination via `withdraw_to`.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct WithdrawalTo {
+    pub stream_id: u64,
+    pub recipient: Address,
+    pub destination: Address,
+    pub amount: i128,
+}
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct RateUpdated {
@@ -851,6 +861,89 @@ impl FluxoraStream {
             Withdrawal {
                 stream_id,
                 recipient: stream.recipient.clone(),
+                amount: withdrawable,
+            },
+        );
+
+        if completed_now {
+            env.events().publish(
+                (symbol_short!("completed"), stream_id),
+                StreamEvent::StreamCompleted(stream_id),
+            );
+        }
+
+        Ok(withdrawable)
+    }
+
+    /// Withdraw accrued tokens from a payment stream to a specified destination address.
+    ///
+    /// Same accounting as `withdraw`, but transfers tokens to `destination` instead of
+    /// the stream's recipient. Use for wallet migration or custody workflows. The caller
+    /// must still be the stream's recipient (recipient-authorized).
+    ///
+    /// # Parameters
+    /// - `stream_id`: Unique identifier of the stream to withdraw from
+    /// - `destination`: Address to receive the withdrawn tokens (must not be the contract)
+    ///
+    /// # Returns
+    /// - `i128`: The amount of tokens transferred to the destination (0 if nothing to withdraw)
+    ///
+    /// # Authorization
+    /// - Requires authorization from the stream's recipient (only recipient can withdraw)
+    ///
+    /// # Validation
+    /// - `destination` must not be the contract address (tokens must leave the contract)
+    ///
+    /// # Panics
+    /// - If the stream is `Completed` or `Paused`
+    /// - If the stream does not exist or caller is not the recipient
+    /// - If `destination` is the contract address
+    pub fn withdraw_to(
+        env: Env,
+        stream_id: u64,
+        destination: Address,
+    ) -> Result<i128, ContractError> {
+        let mut stream = load_stream(&env, stream_id)?;
+
+        stream.recipient.require_auth();
+
+        assert!(
+            destination != env.current_contract_address(),
+            "destination must not be the contract"
+        );
+
+        assert!(
+            stream.status != StreamStatus::Completed,
+            "stream already completed"
+        );
+
+        assert!(
+            stream.status != StreamStatus::Paused,
+            "cannot withdraw from paused stream"
+        );
+
+        let accrued = Self::calculate_accrued(env.clone(), stream_id)?;
+        let withdrawable = accrued - stream.withdrawn_amount;
+
+        if withdrawable == 0 {
+            return Ok(0);
+        }
+
+        stream.withdrawn_amount += withdrawable;
+        let completed_now = stream.withdrawn_amount == stream.deposit_amount;
+        if completed_now {
+            stream.status = StreamStatus::Completed;
+        }
+        save_stream(&env, &stream);
+
+        push_token(&env, &destination, withdrawable);
+
+        env.events().publish(
+            (symbol_short!("wdraw_to"), stream_id),
+            WithdrawalTo {
+                stream_id,
+                recipient: stream.recipient.clone(),
+                destination: destination.clone(),
                 amount: withdrawable,
             },
         );
