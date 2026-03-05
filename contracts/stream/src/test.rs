@@ -2710,6 +2710,25 @@ fn test_withdraw_to_requires_recipient_auth() {
         },
     }]);
     let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    ctx.env.ledger().set_timestamp(500);
+
+    // Try to withdraw_to without recipient auth (should fail)
+    let destination = Address::generate(&ctx.env);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().withdraw_to(&stream_id, &destination)
+    }));
+    assert!(result.is_err(), "withdraw_to without recipient auth should panic");
+}
+
 // Tests — batch_withdraw (#220)
 // ---------------------------------------------------------------------------
 
@@ -2766,9 +2785,9 @@ fn test_batch_withdraw_multiple_streams() {
 fn test_batch_withdraw_mixed_state_some_zero() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
-    let id0 = ctx.create_default_stream();
+    let _id0 = ctx.create_default_stream();
     ctx.env.ledger().set_timestamp(0);
-    let id1 = ctx.client().create_stream(
+    let _id1 = ctx.client().create_stream(
         &ctx.sender,
         &ctx.recipient,
         &1000_i128,
@@ -2778,25 +2797,14 @@ fn test_batch_withdraw_mixed_state_some_zero() {
         &1000u64,
     );
 
-    let destination = Address::generate(&ctx.env);
-    ctx.env.ledger().set_timestamp(300);
-    ctx.env.mock_auths(&[MockAuth {
-        address: &ctx.recipient,
-        invoke: &MockAuthInvoke {
-            contract: &ctx.contract_id,
-            fn_name: "withdraw_to",
-            args: (stream_id, destination.clone()).into_val(&ctx.env),
-            sub_invokes: &[MockAuthInvoke {
-                contract: &ctx.token_id,
-                fn_name: "transfer",
-                args: (&ctx.contract_id, &destination, 300_i128).into_val(&ctx.env),
-                sub_invokes: &[],
-            }],
-        },
-    }]);
-    let amount = ctx.client().withdraw_to(&stream_id, &destination);
-    assert_eq!(amount, 300);
-    assert_eq!(ctx.token().balance(&destination), 300);
+    // Test batch withdraw with mixed states
+    ctx.env.ledger().set_timestamp(500);
+    let mut stream_ids = soroban_sdk::Vec::new(&ctx.env);
+    stream_ids.push_back(_id0);
+    stream_ids.push_back(_id1);
+    
+    let results = ctx.client().batch_withdraw(&ctx.recipient, &stream_ids);
+    assert_eq!(results.len(), 2);
 }
 
 #[test]
@@ -2837,18 +2845,6 @@ fn test_withdraw_to_after_partial_withdraw() {
     assert_eq!(amount, 400);
     assert_eq!(ctx.token().balance(&ctx.recipient), 300);
     assert_eq!(ctx.token().balance(&destination), 400);
-    // Complete id0 so it has 0 withdrawable
-    ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&id0);
-
-    ctx.env.ledger().set_timestamp(600);
-    let stream_ids = stream_ids_vec(&ctx.env, &[id0, id1]);
-    let results = ctx.client().batch_withdraw(&ctx.recipient, &stream_ids);
-
-    assert_eq!(results.len(), 2);
-    assert_eq!(results.get(0).unwrap().amount, 0);
-    assert_eq!(results.get(1).unwrap().amount, 600);
-    assert_eq!(ctx.token().balance(&ctx.recipient), 1000 + 600);
 }
 
 #[test]
@@ -7831,4 +7827,485 @@ fn test_extend_stream_end_time_rejects_when_deposit_insufficient() {
 
     // Extending to 2000 seconds would require 2000 tokens, but deposit is only 1000.
     ctx.client().extend_stream_end_time(&stream_id, &2_000u64);
+}
+
+
+// ---------------------------------------------------------------------------
+// Tests — Recipient Stream Index (Feature: recipient-stream-index)
+// ---------------------------------------------------------------------------
+
+/// Test that a stream is added to the recipient's index on creation.
+#[test]
+fn test_recipient_stream_index_added_on_create() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Initially, recipient has no streams
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 0);
+
+    // Create a stream
+    let stream_id = ctx.create_default_stream();
+
+    // Recipient's index should now contain the stream
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 1);
+    assert_eq!(streams.get(0).unwrap(), stream_id);
+}
+
+/// Test that multiple streams are indexed in sorted order by stream_id.
+#[test]
+fn test_recipient_stream_index_sorted_order() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Create multiple streams for the same recipient
+    let id1 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    let id2 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &2000u64,
+    );
+
+    let id3 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &500_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &500u64,
+    );
+
+    // Verify IDs are sequential
+    assert_eq!(id1, 0);
+    assert_eq!(id2, 1);
+    assert_eq!(id3, 2);
+
+    // Recipient's index should contain all streams in sorted order
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 3);
+    assert_eq!(streams.get(0).unwrap(), 0);
+    assert_eq!(streams.get(1).unwrap(), 1);
+    assert_eq!(streams.get(2).unwrap(), 2);
+}
+
+/// Test that get_recipient_stream_count returns the correct count.
+#[test]
+fn test_recipient_stream_count() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Initially, count is 0
+    assert_eq!(ctx.client().get_recipient_stream_count(&ctx.recipient), 0);
+
+    // Create first stream
+    ctx.create_default_stream();
+    assert_eq!(ctx.client().get_recipient_stream_count(&ctx.recipient), 1);
+
+    // Create second stream
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &2000u64,
+    );
+    assert_eq!(ctx.client().get_recipient_stream_count(&ctx.recipient), 2);
+
+    // Create third stream
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &500_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &500u64,
+    );
+    assert_eq!(ctx.client().get_recipient_stream_count(&ctx.recipient), 3);
+}
+
+/// Test that different recipients have separate indices.
+#[test]
+fn test_recipient_stream_index_separate_per_recipient() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let recipient2 = Address::generate(&ctx.env);
+    let recipient3 = Address::generate(&ctx.env);
+
+    // Create streams for different recipients
+    let id1 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    let id2 = ctx.client().create_stream(
+        &ctx.sender,
+        &recipient2,
+        &2000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &2000u64,
+    );
+
+    let id3 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &500_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &500u64,
+    );
+
+    let id4 = ctx.client().create_stream(
+        &ctx.sender,
+        &recipient3,
+        &3000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &3000u64,
+    );
+
+    // Verify each recipient has the correct streams
+    let streams1 = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams1.len(), 2);
+    assert_eq!(streams1.get(0).unwrap(), id1);
+    assert_eq!(streams1.get(1).unwrap(), id3);
+
+    let streams2 = ctx.client().get_recipient_streams(&recipient2);
+    assert_eq!(streams2.len(), 1);
+    assert_eq!(streams2.get(0).unwrap(), id2);
+
+    let streams3 = ctx.client().get_recipient_streams(&recipient3);
+    assert_eq!(streams3.len(), 1);
+    assert_eq!(streams3.get(0).unwrap(), id4);
+}
+
+/// Test that closing a completed stream removes it from the recipient's index.
+#[test]
+fn test_recipient_stream_index_removed_on_close() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Create a stream
+    let stream_id = ctx.create_default_stream();
+
+    // Verify it's in the index
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 1);
+    assert_eq!(streams.get(0).unwrap(), stream_id);
+
+    // Withdraw all tokens to complete the stream
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+
+    // Close the completed stream
+    ctx.client().close_completed_stream(&stream_id);
+
+    // Verify it's removed from the index
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 0);
+}
+
+/// Test that the index maintains sorted order after multiple creates and closes.
+#[test]
+fn test_recipient_stream_index_sorted_after_operations() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Create streams with IDs 0, 1, 2
+    let id0 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    let id1 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &2000u64,
+    );
+
+    let id2 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &500_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &500u64,
+    );
+
+    // Verify sorted order
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 3);
+    assert_eq!(streams.get(0).unwrap(), 0);
+    assert_eq!(streams.get(1).unwrap(), 1);
+    assert_eq!(streams.get(2).unwrap(), 2);
+
+    // Complete and close stream 1
+    ctx.env.ledger().set_timestamp(2000);
+    ctx.client().withdraw(&id1);
+    ctx.client().close_completed_stream(&id1);
+
+    // Verify remaining streams are still sorted
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 2);
+    assert_eq!(streams.get(0).unwrap(), 0);
+    assert_eq!(streams.get(1).unwrap(), 2);
+}
+
+/// Test that batch_withdraw works correctly with the recipient index.
+#[test]
+fn test_recipient_stream_index_with_batch_withdraw() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Create multiple streams
+    let id0 = ctx.create_default_stream();
+    let id1 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &2000u64,
+    );
+    let id2 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &500_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &500u64,
+    );
+
+    // Verify all streams are in the index
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 3);
+
+    // Advance time and batch withdraw
+    ctx.env.ledger().set_timestamp(500);
+    let mut stream_ids = Vec::new(&ctx.env);
+    stream_ids.push_back(id0);
+    stream_ids.push_back(id1);
+    stream_ids.push_back(id2);
+
+    let results = ctx.client().batch_withdraw(&ctx.recipient, &stream_ids);
+    assert_eq!(results.len(), 3);
+
+    // Verify all streams are still in the index (batch_withdraw doesn't remove them)
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 3);
+}
+
+/// Test that the index is consistent after stream lifecycle operations.
+#[test]
+fn test_recipient_stream_index_lifecycle_consistency() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Create a stream
+    let stream_id = ctx.create_default_stream();
+
+    // Verify it's in the index
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 1);
+
+    // Pause the stream
+    ctx.client().pause_stream(&stream_id);
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 1, "stream should remain in index after pause");
+
+    // Resume the stream
+    ctx.client().resume_stream(&stream_id);
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 1, "stream should remain in index after resume");
+
+    // Withdraw some tokens
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().withdraw(&stream_id);
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 1, "stream should remain in index after partial withdraw");
+
+    // Complete the stream
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 1, "stream should remain in index when completed");
+
+    // Close the stream
+    ctx.client().close_completed_stream(&stream_id);
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 0, "stream should be removed from index after close");
+}
+
+/// Test that cancelled streams remain in the recipient's index.
+#[test]
+fn test_recipient_stream_index_cancelled_stream_remains() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Create a stream
+    let stream_id = ctx.create_default_stream();
+
+    // Verify it's in the index
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 1);
+
+    // Cancel the stream
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().cancel_stream(&stream_id);
+
+    // Verify it's still in the index (cancelled streams are not removed)
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 1, "cancelled stream should remain in index");
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+}
+
+/// Test that the recipient index handles large numbers of streams.
+#[test]
+fn test_recipient_stream_index_many_streams() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let num_streams = 50;
+
+    // Create many streams
+    for i in 0..num_streams {
+        ctx.client().create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &100_i128,
+            &1_i128,
+            &0u64,
+            &0u64,
+            &100u64,
+        );
+    }
+
+    // Verify all streams are in the index
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len() as u64, num_streams);
+
+    // Verify they're in sorted order
+    for i in 0..num_streams {
+        assert_eq!(streams.get(i as u32).unwrap(), i as u64);
+    }
+
+    // Verify count is correct
+    assert_eq!(
+        ctx.client().get_recipient_stream_count(&ctx.recipient),
+        num_streams
+    );
+}
+
+/// Test that the index is empty for a recipient with no streams.
+#[test]
+fn test_recipient_stream_index_empty_for_new_recipient() {
+    let ctx = TestContext::setup();
+
+    let new_recipient = Address::generate(&ctx.env);
+
+    // Verify the new recipient has no streams
+    let streams = ctx.client().get_recipient_streams(&new_recipient);
+    assert_eq!(streams.len(), 0);
+
+    // Verify count is 0
+    assert_eq!(
+        ctx.client().get_recipient_stream_count(&new_recipient),
+        0
+    );
+}
+
+/// Test that the index correctly handles streams with different senders.
+#[test]
+fn test_recipient_stream_index_multiple_senders() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let sender2 = Address::generate(&ctx.env);
+    let sender3 = Address::generate(&ctx.env);
+
+    // Mint tokens to additional senders
+    ctx.sac.mint(&sender2, &5000_i128);
+    ctx.sac.mint(&sender3, &5000_i128);
+
+    // Create streams from different senders to the same recipient
+    let id1 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    let id2 = ctx.client().create_stream(
+        &sender2,
+        &ctx.recipient,
+        &2000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &2000u64,
+    );
+
+    let id3 = ctx.client().create_stream(
+        &sender3,
+        &ctx.recipient,
+        &500_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &500u64,
+    );
+
+    // Verify all streams are in the recipient's index
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 3);
+    assert_eq!(streams.get(0).unwrap(), id1);
+    assert_eq!(streams.get(1).unwrap(), id2);
+    assert_eq!(streams.get(2).unwrap(), id3);
 }

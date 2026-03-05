@@ -96,6 +96,9 @@ pub struct WithdrawalTo {
     pub stream_id: u64,
     pub recipient: Address,
     pub destination: Address,
+    pub amount: i128,
+}
+
 /// Per-stream result for `batch_withdraw`.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -161,9 +164,10 @@ pub struct CreateStreamParams {
 /// Namespace for all contract storage keys.
 #[contracttype]
 pub enum DataKey {
-    Config,       // Instance storage for global settings (admin/token).
-    NextStreamId, // Instance storage for the auto-incrementing ID counter.
-    Stream(u64),  // Persistent storage for individual stream data (O(1) lookup).
+    Config,                          // Instance storage for global settings (admin/token).
+    NextStreamId,                    // Instance storage for the auto-incrementing ID counter.
+    Stream(u64),                     // Persistent storage for individual stream data (O(1) lookup).
+    RecipientStreams(Address),       // Persistent storage for recipient stream index (sorted by stream_id).
 }
 
 // ---------------------------------------------------------------------------
@@ -240,6 +244,82 @@ fn save_stream(env: &Env, stream: &Stream) {
 fn remove_stream(env: &Env, stream_id: u64) {
     let key = DataKey::Stream(stream_id);
     env.storage().persistent().remove(&key);
+}
+
+// ---------------------------------------------------------------------------
+// Recipient stream index helpers
+// ---------------------------------------------------------------------------
+
+/// Load the list of stream IDs for a recipient (sorted by stream_id).
+fn load_recipient_streams(env: &Env, recipient: &Address) -> soroban_sdk::Vec<u64> {
+    let key = DataKey::RecipientStreams(recipient.clone());
+    let streams: soroban_sdk::Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+
+    // Only bump TTL if the key exists (has streams)
+    if !streams.is_empty() {
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+
+    streams
+}
+
+/// Save the list of stream IDs for a recipient (maintains sorted order).
+fn save_recipient_streams(env: &Env, recipient: &Address, streams: &soroban_sdk::Vec<u64>) {
+    let key = DataKey::RecipientStreams(recipient.clone());
+    env.storage().persistent().set(&key, streams);
+
+    // Extend TTL on write to ensure persistence
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+}
+
+/// Add a stream ID to a recipient's index (maintains sorted order).
+/// Assumes stream_id is not already in the list.
+fn add_stream_to_recipient_index(env: &Env, recipient: &Address, stream_id: u64) {
+    let mut streams = load_recipient_streams(env, recipient);
+
+    // Insert in sorted order (binary search for insertion point)
+    let mut insert_pos: u32 = 0;
+    for (i, id) in streams.iter().enumerate() {
+        if id > stream_id {
+            insert_pos = i as u32;
+            break;
+        }
+        insert_pos = (i + 1) as u32;
+    }
+
+    streams.insert(insert_pos, stream_id);
+    save_recipient_streams(env, recipient, &streams);
+}
+
+/// Remove a stream ID from a recipient's index.
+fn remove_stream_from_recipient_index(env: &Env, recipient: &Address, stream_id: u64) {
+    let mut streams = load_recipient_streams(env, recipient);
+
+    // Find and remove the stream_id
+    let mut found_index = None;
+    for (i, id) in streams.iter().enumerate() {
+        if id == stream_id {
+            found_index = Some(i as u32);
+            break;
+        }
+    }
+
+    if let Some(idx) = found_index {
+        streams.remove(idx);
+        save_recipient_streams(env, recipient, &streams);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -357,6 +437,9 @@ impl FluxoraStream {
         };
 
         save_stream(env, &stream);
+        
+        // Add stream to recipient's index (maintains sorted order by stream_id)
+        add_stream_to_recipient_index(env, &recipient, stream_id);
 
         env.events().publish(
             (symbol_short!("created"), stream_id),
@@ -967,6 +1050,8 @@ impl FluxoraStream {
         }
 
         Ok(withdrawable)
+    }
+
     /// Withdraw accrued tokens from multiple streams in one call (recipient-only).
     ///
     /// The caller must be the recipient of every stream in `stream_ids`. Each stream
@@ -1650,6 +1735,8 @@ impl FluxoraStream {
             StreamEvent::StreamClosed(stream_id),
         );
 
+        // Remove stream from recipient's index before deleting the stream
+        remove_stream_from_recipient_index(&env, &stream.recipient, stream_id);
         remove_stream(&env, stream_id);
 
         Ok(())
@@ -1671,6 +1758,75 @@ impl FluxoraStream {
     /// - Increment `CONTRACT_VERSION` and redeploy when introducing breaking changes
     pub fn version(_env: Env) -> u32 {
         CONTRACT_VERSION
+    }
+
+    /// Retrieve all stream IDs for a given recipient (sorted by stream_id).
+    ///
+    /// Returns a vector of stream IDs where the recipient is the stream's recipient address.
+    /// The list is maintained in sorted ascending order by stream_id for deterministic
+    /// pagination and UI display. This enables efficient recipient portal workflows where
+    /// users can see all their incoming streams.
+    ///
+    /// # Parameters
+    /// - `recipient`: Address to query streams for
+    ///
+    /// # Returns
+    /// - `Vec<u64>`: Vector of stream IDs (sorted ascending by stream_id)
+    ///   - Empty vector if the recipient has no streams
+    ///   - Includes streams in all statuses (Active, Paused, Completed, Cancelled)
+    ///   - Does not include closed streams (removed via `close_completed_stream`)
+    ///
+    /// # Behavior
+    /// - This is a view function (read-only, no state changes)
+    /// - No authorization required (public information)
+    /// - Extends TTL on the recipient's index to prevent expiration
+    /// - Useful for recipient portals to enumerate all streams
+    /// - Can be used for pagination by combining with `get_stream_state`
+    ///
+    /// # Consistency Guarantees
+    /// - **Sorted order**: Always returns streams in ascending order by stream_id
+    /// - **Completeness**: Includes all active streams for the recipient
+    /// - **Lifecycle consistency**: Streams are added on creation, removed on close
+    /// - **Recipient updates**: If recipient changes (not currently supported), index remains consistent
+    ///
+    /// # Usage Notes
+    /// - Combine with `get_stream_state` to fetch full stream details
+    /// - Use with `calculate_accrued` to show real-time balances
+    /// - For large recipient portfolios, consider pagination strategies
+    /// - Closed streams are not included (use `get_stream_state` to verify existence)
+    ///
+    /// # Examples
+    /// - Get all streams for a recipient: `get_recipient_streams(env, recipient_address)`
+    /// - Paginate: fetch first N IDs, then call `get_stream_state` for each
+    /// - Filter by status: fetch all IDs, then check status of each via `get_stream_state`
+    pub fn get_recipient_streams(env: Env, recipient: Address) -> soroban_sdk::Vec<u64> {
+        load_recipient_streams(&env, &recipient)
+    }
+
+    /// Count the total number of streams for a recipient.
+    ///
+    /// Returns the count of streams where the recipient is the stream's recipient address.
+    /// This is a convenience function that avoids fetching the full vector when only
+    /// the count is needed.
+    ///
+    /// # Parameters
+    /// - `recipient`: Address to query stream count for
+    ///
+    /// # Returns
+    /// - `u64`: Number of streams for the recipient (0 if none)
+    ///
+    /// # Behavior
+    /// - This is a view function (read-only, no state changes)
+    /// - No authorization required (public information)
+    /// - Extends TTL on the recipient's index to prevent expiration
+    /// - More gas-efficient than `get_recipient_streams` when only count is needed
+    ///
+    /// # Usage Notes
+    /// - Use for UI indicators (e.g., "You have 5 active streams")
+    /// - Combine with `get_recipient_streams` for pagination
+    /// - Closed streams are not included in the count
+    pub fn get_recipient_stream_count(env: Env, recipient: Address) -> u64 {
+        load_recipient_streams(&env, &recipient).len() as u64
     }
 
     /// Internal helper to require authorization from the stream sender.
