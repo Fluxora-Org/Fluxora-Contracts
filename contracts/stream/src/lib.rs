@@ -96,6 +96,9 @@ pub struct WithdrawalTo {
     pub stream_id: u64,
     pub recipient: Address,
     pub destination: Address,
+    pub amount: i128,
+}
+
 /// Per-stream result for `batch_withdraw`.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -161,9 +164,10 @@ pub struct CreateStreamParams {
 /// Namespace for all contract storage keys.
 #[contracttype]
 pub enum DataKey {
-    Config,       // Instance storage for global settings (admin/token).
-    NextStreamId, // Instance storage for the auto-incrementing ID counter.
-    Stream(u64),  // Persistent storage for individual stream data (O(1) lookup).
+    Config,                    // Instance storage for global settings (admin/token).
+    NextStreamId,              // Instance storage for the auto-incrementing ID counter.
+    Stream(u64),               // Persistent storage for individual stream data (O(1) lookup).
+    SenderStreamIndex(Address), // Persistent storage for sender-based stream enumeration.
 }
 
 // ---------------------------------------------------------------------------
@@ -240,6 +244,67 @@ fn save_stream(env: &Env, stream: &Stream) {
 fn remove_stream(env: &Env, stream_id: u64) {
     let key = DataKey::Stream(stream_id);
     env.storage().persistent().remove(&key);
+}
+
+// ---------------------------------------------------------------------------
+// Sender-based stream index helpers
+// ---------------------------------------------------------------------------
+
+/// Load the list of stream IDs for a given sender.
+///
+/// Returns an empty vector if the sender has no streams.
+fn load_sender_streams(env: &Env, sender: &Address) -> soroban_sdk::Vec<u64> {
+    let key = DataKey::SenderStreamIndex(sender.clone());
+    env.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| soroban_sdk::Vec::new(env))
+}
+
+/// Save the list of stream IDs for a given sender.
+fn save_sender_streams(env: &Env, sender: &Address, stream_ids: &soroban_sdk::Vec<u64>) {
+    let key = DataKey::SenderStreamIndex(sender.clone());
+    env.storage().persistent().set(&key, stream_ids);
+
+    // Extend TTL on index save to ensure persistence
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+}
+
+/// Add a stream ID to the sender's index.
+fn add_stream_to_sender_index(env: &Env, sender: &Address, stream_id: u64) {
+    let mut stream_ids = load_sender_streams(env, sender);
+    stream_ids.push_back(stream_id);
+    save_sender_streams(env, sender, &stream_ids);
+}
+
+/// Retrieve all stream IDs created by a sender.
+///
+/// Returns a vector of stream IDs in creation order (oldest to newest).
+/// Returns an empty vector if the sender has no streams.
+fn get_sender_stream_ids(env: &Env, sender: &Address) -> soroban_sdk::Vec<u64> {
+    let key = DataKey::SenderStreamIndex(sender.clone());
+    
+    // Try to load the index; if it doesn't exist, return empty vector
+    let stream_ids: soroban_sdk::Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+
+    // Only bump TTL if the key exists
+    if !stream_ids.is_empty() || env.storage().persistent().has(&key) {
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+
+    stream_ids
 }
 
 // ---------------------------------------------------------------------------
@@ -357,6 +422,9 @@ impl FluxoraStream {
         };
 
         save_stream(env, &stream);
+        
+        // Add stream to sender's index for efficient enumeration
+        add_stream_to_sender_index(env, &sender, stream_id);
 
         env.events().publish(
             (symbol_short!("created"), stream_id),
@@ -967,6 +1035,8 @@ impl FluxoraStream {
         }
 
         Ok(withdrawable)
+    }
+
     /// Withdraw accrued tokens from multiple streams in one call (recipient-only).
     ///
     /// The caller must be the recipient of every stream in `stream_ids`. Each stream
@@ -1326,6 +1396,33 @@ impl FluxoraStream {
     /// each successful stream creation.
     pub fn get_stream_count(env: Env) -> u64 {
         read_stream_count(&env)
+    }
+
+    /// Retrieve all stream IDs created by a specific sender.
+    ///
+    /// Returns a vector of stream IDs in creation order (oldest to newest).
+    /// This enables efficient enumeration and analytics queries for a sender's streams.
+    ///
+    /// # Parameters
+    /// - `sender`: Address of the stream creator to query
+    ///
+    /// # Returns
+    /// - `Vec<u64>`: Vector of stream IDs created by the sender, in creation order.
+    ///   Returns an empty vector if the sender has no streams.
+    ///
+    /// # Usage Notes
+    /// - This is a view function (read-only, no state changes)
+    /// - No authorization required (public information)
+    /// - Stream IDs are returned in creation order (oldest first)
+    /// - Useful for UIs to display all streams created by a user
+    /// - Useful for analytics and reporting on sender activity
+    /// - Pagination can be implemented by the caller using vector slicing
+    ///
+    /// # Examples
+    /// - Get all streams created by an address: `get_sender_streams(env, sender_address)`
+    /// - Implement pagination: slice the returned vector with `[start..end]`
+    pub fn get_sender_streams(env: Env, sender: Address) -> soroban_sdk::Vec<u64> {
+        get_sender_stream_ids(&env, &sender)
     }
 
     /// Update the `rate_per_second` of an existing stream.
