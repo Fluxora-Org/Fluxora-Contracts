@@ -3093,6 +3093,93 @@ fn test_close_completed_stream_second_close_panics() {
 }
 
 // ---------------------------------------------------------------------------
+// Tests — top_up_stream
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_top_up_stream_increases_deposit_and_contract_balance() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // After creation, sender has 9000, contract has 1000
+    assert_eq!(ctx.token().balance(&ctx.sender), 9_000);
+    assert_eq!(ctx.token().balance(&ctx.contract_id), 1_000);
+
+    // Top up by 500 from the sender
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client()
+        .top_up_stream(&stream_id, &ctx.sender, &500_i128);
+
+    // Deposit amount should increase
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.deposit_amount, 1_500);
+
+    // Balances: sender 8500, contract 1500
+    assert_eq!(ctx.token().balance(&ctx.sender), 8_500);
+    assert_eq!(ctx.token().balance(&ctx.contract_id), 1_500);
+}
+
+#[test]
+fn test_top_up_stream_fails_for_terminal_states() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Complete the stream
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+
+    // Attempting to top up a completed stream should panic
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client()
+            .top_up_stream(&stream_id, &ctx.sender, &100_i128);
+    }));
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_top_up_stream_rejects_non_positive_amount() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    let result_zero = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client()
+            .top_up_stream(&stream_id, &ctx.sender, &0_i128);
+    }));
+    assert!(result_zero.is_err());
+
+    let result_negative = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client()
+            .top_up_stream(&stream_id, &ctx.sender, &-1_i128);
+    }));
+    assert!(result_negative.is_err());
+}
+
+#[test]
+fn test_top_up_stream_preserves_invariants_for_large_streams() {
+    let ctx = TestContext::setup();
+
+    // Use a standard stream where deposit comfortably covers rate * duration.
+    let stream_id = ctx.create_default_stream();
+    let state = ctx.client().get_stream_state(&stream_id);
+    let start = state.start_time;
+    let end = state.end_time;
+    let rate = state.rate_per_second;
+
+    // Top up multiple times; deposit must remain >= rate * duration.
+    ctx.env.ledger().set_timestamp(100);
+
+    for _ in 0..5 {
+        ctx.client()
+            .top_up_stream(&stream_id, &ctx.sender, &1_000_i128);
+    }
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert!(state.deposit_amount >= rate * (end - start) as i128);
+}
+
+// ---------------------------------------------------------------------------
 // Tests — Issue #37: withdraw reject when stream is Paused
 // ---------------------------------------------------------------------------
 

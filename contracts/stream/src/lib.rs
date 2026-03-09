@@ -136,6 +136,14 @@ pub struct StreamEndExtended {
 
 #[contracttype]
 #[derive(Clone, Debug)]
+pub struct StreamToppedUp {
+    pub stream_id: u64,
+    pub top_up_amount: i128,
+    pub new_deposit_amount: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
 pub struct Stream {
     pub stream_id: u64,
     pub sender: Address,
@@ -710,7 +718,10 @@ impl FluxoraStream {
     /// - Stream can be cancelled while paused
     /// - Use `resume_stream` to reactivate withdrawals
     pub fn pause_stream(env: Env, stream_id: u64) -> Result<(), ContractError> {
-        let mut stream = load_stream(&env, stream_id)?;
+        let mut stream = match load_stream(&env, stream_id) {
+            Ok(stream) => stream,
+            Err(err) => panic_with_error!(&env, err),
+        };
 
         Self::require_stream_sender(&stream.sender);
 
@@ -761,7 +772,9 @@ impl FluxoraStream {
     /// - Accrual calculations are time-based and unaffected by pause/resume
     /// - After resume, recipient can immediately withdraw accrued funds
     pub fn resume_stream(env: Env, stream_id: u64) -> Result<(), ContractError> {
-        let mut stream = load_stream(&env, stream_id)?;
+        let mut stream = load_stream(&env, stream_id).unwrap_or_else(|err| {
+            panic_with_error!(&env, err);
+        });
         Self::require_stream_sender(&stream.sender);
 
         match stream.status {
@@ -1684,6 +1697,74 @@ impl FluxoraStream {
         );
 
         Ok(())
+    }
+
+    /// Increase the deposit amount of an existing stream.
+    ///
+    /// This operation **tops up** the locked funding backing a stream without changing
+    /// its schedule (`start_time`, `cliff_time`, `end_time`) or rate. It is intended
+    /// for treasury operations that want to increase the total allocation for an
+    /// existing agreement.
+    ///
+    /// # Parameters
+    /// - `stream_id`: Unique identifier of the stream to top up.
+    /// - `funder`: Address providing the additional tokens. This may be the original
+    ///   sender, the contract admin, or any other authorized treasury address.
+    /// - `amount`: Additional amount of tokens to lock into the stream (must be > 0).
+    ///
+    /// # Authorization
+    /// - Requires authorization from `funder`.
+    /// - No special relationship between `funder` and the original `sender` is enforced
+    ///   by the contract; protocol operators should constrain who can call this entrypoint
+    ///   at the application layer (e.g. only treasury multisig).
+    ///
+    /// # Behaviour
+    /// - Pulls `amount` tokens from `funder` into the contract.
+    /// - Increases `deposit_amount` by `amount` (with overflow protection).
+    /// - Does **not** modify `rate_per_second` or any timing fields.
+    /// - Preserves all invariants: `deposit_amount` remains greater than or equal to
+    ///   the maximum streamable amount under the current schedule.
+    ///
+    /// # Restrictions
+    /// - Only streams in `Active` or `Paused` status can be topped up.
+    /// - `amount` must be strictly positive.
+    ///
+    /// # Events
+    /// - Emits a `top_up` event with `StreamToppedUp` payload on success.
+    pub fn top_up_stream(env: Env, stream_id: u64, funder: Address, amount: i128) {
+        funder.require_auth();
+
+        assert!(amount > 0, "top up amount must be positive");
+
+        let mut stream = match load_stream(&env, stream_id) {
+            Ok(stream) => stream,
+            Err(err) => panic_with_error!(&env, err),
+        };
+
+        assert!(
+            stream.status == StreamStatus::Active || stream.status == StreamStatus::Paused,
+            "can only top up active or paused streams"
+        );
+
+        // Pull additional funds into the contract before mutating stream state.
+        pull_token(&env, &funder, amount);
+
+        // Increase deposit_amount with overflow protection.
+        stream.deposit_amount = stream
+            .deposit_amount
+            .checked_add(amount)
+            .expect("overflow increasing stream deposit_amount");
+
+        save_stream(&env, &stream);
+
+        env.events().publish(
+            (symbol_short!("top_up"), stream_id),
+            StreamToppedUp {
+                stream_id,
+                top_up_amount: amount,
+                new_deposit_amount: stream.deposit_amount,
+            },
+        );
     }
 
     /// Return the contract version number.

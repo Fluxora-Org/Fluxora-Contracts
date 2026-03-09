@@ -224,6 +224,7 @@ deposit_amount >= rate_per_second * (end_time - start_time)
 | `resume_stream_as_admin` | Admin             | `admin.require_auth()`     |
 | `cancel_stream_as_admin` | Admin             | `admin.require_auth()`     |
 | `close_completed_stream` | Anyone            | None (permissionless cleanup) |
+| `top_up_stream`          | Funder address    | `funder.require_auth()`    |
 
 **Note:** Sender-managed functions (`pause_stream`, `resume_stream`, `cancel_stream`) require sender auth. Admin uses separate `_as_admin` entry points.
 
@@ -264,14 +265,15 @@ Emitted when a recipient successfully withdraws tokens via `withdraw`.
 
 #### Other Events
 
-| Topic                      | Payload                             | When Emitted                               |
-| -------------------------- | ----------------------------------- | ------------------------------------------ |
-| `("created", stream_id)`   | `deposit_amount` (i128)             | `create_stream`                            |
-| `("paused", stream_id)`    | `StreamEvent::Paused(stream_id)`    | `pause_stream` / `pause_stream_as_admin`   |
-| `("resumed", stream_id)`   | `StreamEvent::Resumed(stream_id)`   | `resume_stream` / `resume_stream_as_admin` |
-| `("cancelled", stream_id)` | `StreamEvent::Cancelled(stream_id)` | `cancel_stream` / `cancel_stream_as_admin` |
-| `("withdrew", stream_id)`  | `withdrawable` (i128)               | `withdraw`                                 |
-| `("closed", stream_id)`    | `StreamEvent::StreamClosed(stream_id)` | `close_completed_stream`                 |
+| Topic                      | Payload                                  | When Emitted                               |
+| -------------------------- | ---------------------------------------- | ------------------------------------------ |
+| `("created", stream_id)`   | `deposit_amount` (i128)                  | `create_stream`                            |
+| `("paused", stream_id)`    | `StreamEvent::Paused(stream_id)`         | `pause_stream` / `pause_stream_as_admin`   |
+| `("resumed", stream_id)`   | `StreamEvent::Resumed(stream_id)`        | `resume_stream` / `resume_stream_as_admin` |
+| `("cancelled", stream_id)` | `StreamEvent::Cancelled(stream_id)`      | `cancel_stream` / `cancel_stream_as_admin` |
+| `("withdrew", stream_id)`  | `withdrawable` (i128)                    | `withdraw`                                 |
+| `("closed", stream_id)`    | `StreamEvent::StreamClosed(stream_id)`   | `close_completed_stream`                   |
+| `("top_up", stream_id)`    | `StreamToppedUp` (struct payload)        | `top_up_stream`                            |
 
 ---
 
