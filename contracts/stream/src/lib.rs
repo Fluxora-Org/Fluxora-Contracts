@@ -56,6 +56,8 @@ pub enum ContractError {
     StreamNotFound = 1,
     InvalidState = 2,
     InvalidParams = 3,
+    /// Global emergency pause is active; stream creation is blocked.
+    ContractPaused = 4,
 }
 
 #[contracttype]
