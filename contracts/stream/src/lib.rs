@@ -1392,6 +1392,13 @@ impl FluxoraStream {
             .publish((Symbol::new(&env, "AdminUpdated"),), (old_admin, new_admin));
     }
 
+    /// Set global pause; create_stream/create_streams panic_with_error(ContractPaused) while true.
+    pub fn set_contract_paused(env: Env, paused: bool) {
+        get_admin(&env).require_auth();
+        env.storage().instance().set(&DataKey::GlobalPaused, &paused);
+        bump_instance_ttl(&env);
+    }
+
     /// Retrieve the complete state of a payment stream.
     ///
     /// Returns all stored information about a stream including participants, amounts,
