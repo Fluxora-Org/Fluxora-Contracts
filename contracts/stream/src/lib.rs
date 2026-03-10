@@ -608,6 +608,9 @@ impl FluxoraStream {
         end_time: u64,
     ) -> u64 {
         sender.require_auth();
+        if read_global_paused(&env) {
+            panic_with_error!(&env, ContractError::ContractPaused);
+        }
 
         Self::validate_stream_params(
             &sender,
@@ -658,6 +661,9 @@ impl FluxoraStream {
         streams: soroban_sdk::Vec<CreateStreamParams>,
     ) -> soroban_sdk::Vec<u64> {
         sender.require_auth();
+        if read_global_paused(&env) {
+            panic_with_error!(&env, ContractError::ContractPaused);
+        }
 
         let mut total_deposit: i128 = 0;
 
