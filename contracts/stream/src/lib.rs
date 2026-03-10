@@ -178,6 +178,8 @@ pub enum DataKey {
     NextStreamId,                    // Instance storage for the auto-incrementing ID counter.
     Stream(u64),                     // Persistent storage for individual stream data (O(1) lookup).
     RecipientStreams(Address),       // Persistent storage for recipient stream index (sorted by stream_id).
+    /// Emergency pause flag (bool). Appended to avoid shifting existing key discriminants.
+    GlobalPaused,
 }
 
 // ---------------------------------------------------------------------------
