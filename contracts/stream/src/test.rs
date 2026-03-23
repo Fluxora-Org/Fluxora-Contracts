@@ -8459,3 +8459,335 @@ fn test_recipient_stream_index_multiple_senders() {
     assert_eq!(streams.get(1).unwrap(), id2);
     assert_eq!(streams.get(2).unwrap(), id3);
 }
+
+// ---------------------------------------------------------------------------
+// Tests — Issue #252: create_stream deposit, rate, and schedule validation matrix
+// ---------------------------------------------------------------------------
+
+/// Verify ContractPaused fires as a structured error (not a generic panic).
+/// This allows integrators to distinguish a paused-contract rejection from
+/// other failures using the typed ContractError discriminant.
+#[test]
+fn test_create_stream_contract_paused_returns_structured_error() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().set_contract_paused(&true);
+
+    let result = ctx.client().try_create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    assert_eq!(
+        result,
+        Err(Ok(Error::from_contract_error(
+            ContractError::ContractPaused as u32
+        ))),
+        "create_stream must return ContractError::ContractPaused when global pause is active"
+    );
+}
+
+/// create_streams (batch) must reject when any stream's start_time is in the past,
+/// emitting StartTimeInPast as a structured error so integrators can handle it.
+#[test]
+fn test_create_streams_batch_start_time_in_past_returns_structured_error() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(1000);
+
+    let params = soroban_sdk::Vec::from_array(
+        &ctx.env,
+        [CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000,
+            rate_per_second: 1,
+            start_time: 500, // < current ledger time (1000)
+            cliff_time: 500,
+            end_time: 1500,
+        }],
+    );
+
+    let result = ctx.client().try_create_streams(&ctx.sender, &params);
+
+    assert_eq!(
+        result,
+        Err(Ok(Error::from_contract_error(
+            ContractError::StartTimeInPast as u32
+        ))),
+        "create_streams must propagate StartTimeInPast from validate_stream_params"
+    );
+}
+
+/// validate_stream_params uses checked_mul for rate * duration; if the product
+/// overflows i128, the contract must panic before any state or balance changes.
+/// No stream must be created and the sender's balance must be unchanged.
+///
+/// Note: we choose rate = i128::MAX / 2, duration = 3 so that rate * duration
+/// definitely overflows i128. The deposit value passed is irrelevant — the
+/// overflow check fires first and panics before the deposit check or any token
+/// transfer. We use a small deposit (≤ sender's existing balance) so the mint
+/// in TestContext::setup() is sufficient and we do not trigger a SAC balance
+/// overflow when minting.
+#[test]
+fn test_create_stream_rate_times_duration_overflow_panics_no_state_change() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // rate = i128::MAX / 2, duration = 3 → rate * duration overflows i128.
+    // validate_stream_params panics on this via checked_mul before it ever
+    // looks at the deposit amount or initiates a token transfer.
+    let overflow_rate: i128 = i128::MAX / 2;
+    let start: u64 = 0;
+    let end: u64 = 3; // duration = 3 → rate * 3 overflows
+
+    // Use a small deposit within the sender's existing balance (10_000 from setup).
+    // The value does not matter — the panic fires before the deposit check.
+    let deposit: i128 = 1000;
+
+    let sender_balance_before = ctx.token().balance(&ctx.sender);
+    let stream_count_before = ctx.client().get_stream_count();
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &deposit,
+            &overflow_rate,
+            &start,
+            &start,
+            &end,
+        )
+    }));
+
+    assert!(
+        result.is_err(),
+        "create_stream must panic when rate * duration overflows i128"
+    );
+
+    // Stream counter must not have advanced.
+    assert_eq!(
+        ctx.client().get_stream_count(),
+        stream_count_before,
+        "stream counter must not advance after overflow panic"
+    );
+
+    // Sender balance must be unchanged — no token transfer occurred.
+    assert_eq!(
+        ctx.token().balance(&ctx.sender),
+        sender_balance_before,
+        "sender balance must not change after overflow panic"
+    );
+}
+
+/// Confirm that the StreamCreated event payload exactly matches the documented
+/// schema in events.md: topics = ["created", stream_id], data = StreamCreated struct
+/// with all eight fields populated correctly.
+#[test]
+fn test_create_stream_event_payload_matches_events_md_schema() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let deposit: i128 = 2000;
+    let rate: i128 = 2;
+    let start: u64 = 0;
+    let cliff: u64 = 500;
+    let end: u64 = 1000;
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &deposit,
+        &rate,
+        &start,
+        &cliff,
+        &end,
+    );
+
+    // The last event must be the StreamCreated event.
+    let events = ctx.env.events().all();
+    let last = events.last().expect("expected at least one event");
+
+    // Decode the data payload as a StreamCreated struct.
+    let event_data = crate::StreamCreated::try_from_val(&ctx.env, &last.2)
+        .expect("event data must deserialise as StreamCreated");
+
+    assert_eq!(event_data.stream_id, stream_id, "stream_id field");
+    assert_eq!(event_data.sender, ctx.sender, "sender field");
+    assert_eq!(event_data.recipient, ctx.recipient, "recipient field");
+    assert_eq!(event_data.deposit_amount, deposit, "deposit_amount field");
+    assert_eq!(event_data.rate_per_second, rate, "rate_per_second field");
+    assert_eq!(event_data.start_time, start, "start_time field");
+    assert_eq!(event_data.cliff_time, cliff, "cliff_time field");
+    assert_eq!(event_data.end_time, end, "end_time field");
+}
+
+/// A failed create_stream (past start_time) must emit NO events — neither a
+/// partial StreamCreated nor any other observable event.
+#[test]
+fn test_create_stream_past_start_emits_no_events() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(500);
+
+    let events_before = ctx.env.events().all().len();
+
+    let result = ctx.client().try_create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &400u64, // past
+        &400u64,
+        &1400u64,
+    );
+    assert!(result.is_err());
+
+    assert_eq!(
+        ctx.env.events().all().len(),
+        events_before,
+        "no event must be emitted when create_stream fails validation"
+    );
+}
+
+/// When deposit exactly equals rate * duration (minimum valid deposit), the
+/// stored stream fields must reflect exactly what was provided with no silent
+/// rounding or clamping, and the contract must hold exactly deposit_amount tokens.
+#[test]
+fn test_create_stream_exact_minimum_deposit_stored_fields_are_exact() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let rate: i128 = 7;
+    let duration: u64 = 143;
+    let deposit: i128 = rate * duration as i128; // exactly 1001 — minimum valid
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &deposit,
+        &rate,
+        &0u64,
+        &0u64,
+        &duration,
+    );
+
+    let state = ctx.client().get_stream_state(&stream_id);
+
+    assert_eq!(
+        state.deposit_amount, deposit,
+        "deposit_amount must be stored as-is"
+    );
+    assert_eq!(
+        state.rate_per_second, rate,
+        "rate_per_second must be stored as-is"
+    );
+    assert_eq!(state.start_time, 0, "start_time must be stored as-is");
+    assert_eq!(state.cliff_time, 0, "cliff_time must be stored as-is");
+    assert_eq!(state.end_time, duration, "end_time must be stored as-is");
+    assert_eq!(
+        state.withdrawn_amount, 0,
+        "withdrawn_amount must start at 0"
+    );
+    assert_eq!(
+        state.status,
+        StreamStatus::Active,
+        "status must start Active"
+    );
+
+    assert_eq!(
+        ctx.token().balance(&ctx.contract_id),
+        deposit,
+        "contract must hold exactly deposit_amount tokens"
+    );
+}
+
+/// Verify the full role matrix for create_stream:
+/// - Only the sender (the address passed as first argument) is required to authorise.
+/// - The recipient requires no auth at creation time.
+/// - The admin requires no auth at creation time.
+/// This is tested via setup_strict() where only mocked auths are honoured.
+#[test]
+fn test_create_stream_only_sender_auth_required() {
+    let ctx = TestContext::setup_strict();
+
+    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+
+    ctx.env.ledger().set_timestamp(0);
+
+    // Only mock sender's auth — no recipient or admin auth provided.
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "create_stream",
+            args: (
+                &ctx.sender,
+                &ctx.recipient,
+                1000_i128,
+                1_i128,
+                0u64,
+                0u64,
+                1000u64,
+            )
+                .into_val(&ctx.env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &ctx.token_id,
+                fn_name: "transfer",
+                args: (&ctx.sender, &ctx.contract_id, 1000_i128).into_val(&ctx.env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Active);
+}
+
+/// top_up_stream must follow CEI: state must be persisted BEFORE the token pull.
+/// We verify this indirectly by confirming that if the funder has insufficient
+/// balance (token pull will fail), no deposit_amount change is visible — i.e.,
+/// the transaction reverts atomically and the stream state is unchanged.
+///
+/// Note: because the CEI fix moves save_stream before pull_token, a token pull
+/// failure still causes the whole transaction to revert (Soroban atomicity), so
+/// on-chain state will be as if neither the save nor the pull happened. This test
+/// confirms the revert is clean.
+#[test]
+fn test_top_up_stream_insufficient_balance_reverts_cleanly() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    let deposit_before = ctx.client().get_stream_state(&stream_id).deposit_amount;
+
+    // Attempt top-up with an amount the funder cannot cover (funder has 9000 left,
+    // top-up amount is 1_000_000 — way more than available).
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client()
+            .top_up_stream(&stream_id, &ctx.sender, &1_000_000_i128);
+    }));
+
+    assert!(
+        result.is_err(),
+        "top_up must panic when funder has insufficient balance"
+    );
+
+    // Stream state must be unchanged (full revert).
+    let deposit_after = ctx.client().get_stream_state(&stream_id).deposit_amount;
+    assert_eq!(
+        deposit_after, deposit_before,
+        "deposit_amount must be unchanged after failed top_up"
+    );
+}

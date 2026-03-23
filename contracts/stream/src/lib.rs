@@ -1778,9 +1778,8 @@ impl FluxoraStream {
             "can only top up active or paused streams"
         );
 
-        // Pull additional funds into the contract before mutating stream state.
-        pull_token(&env, &funder, amount);
-
+        // CEI: update and persist state BEFORE the external token transfer to reduce
+        // reentrancy risk. This mirrors the pattern used in cancel_stream and withdraw.
         // Increase deposit_amount with overflow protection.
         stream.deposit_amount = stream
             .deposit_amount
@@ -1788,6 +1787,9 @@ impl FluxoraStream {
             .expect("overflow increasing stream deposit_amount");
 
         save_stream(&env, &stream);
+
+        // External token pull happens AFTER state is persisted (CEI-compliant).
+        pull_token(&env, &funder, amount);
 
         env.events().publish(
             (symbol_short!("top_up"), stream_id),
