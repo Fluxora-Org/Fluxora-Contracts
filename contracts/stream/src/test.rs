@@ -8,8 +8,8 @@ use soroban_sdk::{
 };
 
 use crate::{
-    ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamCreated, StreamEvent,
-    StreamStatus, WithdrawalTo,
+    ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamCreated,
+    StreamEvent, StreamStatus, WithdrawalTo,
 };
 
 // ---------------------------------------------------------------------------
