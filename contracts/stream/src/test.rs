@@ -80,12 +80,23 @@ impl<'a> TestContext<'a> {
         let recipient = Address::generate(&env);
 
         let client = FluxoraStreamClient::new(&env, &contract_id);
+
+        // init requires bootstrap admin authorization in strict mode.
+        use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "init",
+                args: (&token_id, &admin).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
         client.init(&token_id, &admin);
 
         let sac = StellarAssetClient::new(&env, &token_id);
 
         // Mock the minting auth since mock_all_auths is not enabled.
-        use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
         env.mock_auths(&[MockAuth {
             address: &token_admin,
             invoke: &MockAuthInvoke {
@@ -178,6 +189,7 @@ impl<'a> TestContext<'a> {
 #[test]
 fn test_init_stores_token_and_admin() {
     let env = Env::default();
+    env.mock_all_auths();
     let contract_id = env.register_contract(None, FluxoraStream);
     let client = FluxoraStreamClient::new(&env, &contract_id);
 
@@ -192,9 +204,77 @@ fn test_init_stores_token_and_admin() {
 }
 
 #[test]
+fn test_init_requires_admin_authorization_in_strict_mode() {
+    let env = Env::default();
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let token_id = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+
+    use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "init",
+            args: (&token_id, &admin).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.init(&token_id, &admin);
+
+    let cfg = client.get_config();
+    assert_eq!(cfg.token, token_id);
+    assert_eq!(cfg.admin, admin);
+}
+
+#[test]
+fn test_init_rejects_wrong_signer_and_has_no_side_effects() {
+    let env = Env::default();
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let token_id = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+
+    use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+    env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "init",
+            args: (&token_id, &admin).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.init(&token_id, &admin);
+    }));
+    assert!(result.is_err(), "init must reject non-admin signer");
+
+    // Bootstrap state must remain unset after failed auth.
+    let cfg_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.get_config();
+    }));
+    assert!(
+        cfg_result.is_err(),
+        "failed init auth must not write config into storage"
+    );
+    assert_eq!(
+        client.get_stream_count(),
+        0,
+        "failed init auth must not initialize stream counter"
+    );
+}
+
+#[test]
 #[should_panic(expected = "already initialised")]
 fn test_init_second_call_fails() {
     let env = Env::default();
+    env.mock_all_auths();
     let contract_id = env.register_contract(None, FluxoraStream);
     let client = FluxoraStreamClient::new(&env, &contract_id);
 

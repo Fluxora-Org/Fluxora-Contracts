@@ -8,7 +8,7 @@ This document lists all public entrypoints and core invariants of the Fluxora st
 
 | Entrypoint | Parameters | Return type | Authorization | Description |
 |------------|------------|-------------|---------------|-------------|
-| `init` | `env: Env`, `token: Address`, `admin: Address` | — | None (deployer) | One-time setup: store token and admin. Panics if already initialised. |
+| `init` | `env: Env`, `token: Address`, `admin: Address` | — | Bootstrap admin only (`admin.require_auth()`) | One-time setup: store token and admin. Panics if already initialised. |
 | `create_stream` | `env: Env`, `sender: Address`, `recipient: Address`, `deposit_amount: i128`, `rate_per_second: i128`, `start_time: u64`, `cliff_time: u64`, `end_time: u64` | `u64` | Sender | Create stream, transfer deposit to contract, return new stream ID. |
 | `pause_stream` | `env: Env`, `stream_id: u64` | — | Sender | Set stream status to Paused. Only Active streams. |
 | `resume_stream` | `env: Env`, `stream_id: u64` | — | Sender | Set stream status to Active. Only Paused streams. |
@@ -58,8 +58,8 @@ Auditors can use these as a checklist; the implementation is intended to preserv
 7. **Time bounds**  
    `start_time < end_time` and `cliff_time ∈ [start_time, end_time]` are enforced in `create_stream`.
 
-8. **Init once**  
-   `init` panics if config already exists; token and admin are immutable after init.
+8. **Init once (authenticated bootstrap)**  
+   `init` requires admin authorization and panics if config already exists; token is immutable after init and admin changes only via `set_admin`.
 
 9. **Pause / resume / cancel authorization**  
    `pause_stream`, `resume_stream`, and `cancel_stream` require sender auth. The `_as_admin` variants require admin auth and provide the same behaviour. Only the recipient can call `withdraw`.

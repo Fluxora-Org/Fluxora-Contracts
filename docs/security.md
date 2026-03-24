@@ -117,6 +117,10 @@ instance storage under `DataKey::GlobalPaused`.
 
 ## Re-initialization prevention
 
-`init` checks for the presence of `DataKey::Config` in instance storage and panics
-with `"already initialised"` if called a second time. This prevents an attacker from
-repointing the contract to a different token address or replacing the admin after deployment.
+`init` is bootstrap-authenticated and one-shot:
+
+- It requires `admin.require_auth()` from the declared bootstrap admin.
+- It checks `DataKey::Config` and panics with `"already initialised"` on any second call.
+
+This prevents unauthorized bootstrap and prevents later repointing to a different token
+address or replacing the admin through `init`.

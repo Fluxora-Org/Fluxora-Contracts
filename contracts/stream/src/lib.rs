@@ -505,6 +505,7 @@ impl FluxoraStream {
     /// # Parameters
     /// - `token`: Address of the token contract used for all payment streams
     /// - `admin`: Address authorized to perform administrative operations (pause, cancel, etc.)
+    ///   and required to authorize this bootstrap transaction
     ///
     /// # Storage
     /// - Stores `Config { token, admin }` in instance storage under `DataKey::Config`
@@ -513,11 +514,14 @@ impl FluxoraStream {
     ///
     /// # Panics
     /// - If called more than once (contract already initialized)
+    /// - If `admin` does not authorize the call
     ///
     /// # Security
+    /// - Bootstrap authorization is explicit: only a signer controlling `admin` can initialize
     /// - Re-initialization is prevented to ensure immutable token and admin configuration
-    /// - No authorization required for initial setup (deployer calls this once)
+    /// - Failed re-initialization attempts are side-effect free (config/counter unchanged)
     pub fn init(env: Env, token: Address, admin: Address) {
+        admin.require_auth();
         if env.storage().instance().has(&DataKey::Config) {
             panic!("already initialised");
         }

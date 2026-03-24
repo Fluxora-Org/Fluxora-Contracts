@@ -5,7 +5,7 @@ use soroban_sdk::log;
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    vec, Address, Env,
+    vec, Address, Env, IntoVal,
 };
 
 struct TestContext<'a> {
@@ -98,6 +98,64 @@ fn init_sets_config_and_keeps_token_address() {
 fn init_twice_panics() {
     let ctx = TestContext::setup();
     ctx.client().init(&ctx.token_id, &ctx.admin);
+}
+
+#[test]
+fn init_requires_admin_authorization_in_strict_mode() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let token_id = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "init",
+            args: (&token_id, &admin).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    client.init(&token_id, &admin);
+    let cfg = client.get_config();
+    assert_eq!(cfg.token, token_id);
+    assert_eq!(cfg.admin, admin);
+}
+
+#[test]
+fn init_wrong_signer_rejected_and_bootstrap_state_unset() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let token_id = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &attacker,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "init",
+            args: (&token_id, &admin).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let init_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.init(&token_id, &admin);
+    }));
+    assert!(init_result.is_err(), "init must reject non-admin signer");
+
+    let cfg_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.get_config();
+    }));
+    assert!(
+        cfg_result.is_err(),
+        "failed init auth must not persist bootstrap config"
+    );
+    assert_eq!(client.get_stream_count(), 0);
 }
 
 // ---------------------------------------------------------------------------

@@ -214,7 +214,7 @@ deposit_amount >= rate_per_second * (end_time - start_time)
 
 | Function                 | Authorized Caller | Auth Check                 |
 | ------------------------ | ----------------- | -------------------------- |
-| `init`                   | Deployer (once)   | None                       |
+| `init`                   | Bootstrap admin signer (once) | `admin.require_auth()` |
 | `create_stream`          | Sender            | `sender.require_auth()`    |
 | `create_streams`         | Sender            | `sender.require_auth()` (once per batch) |
 | `pause_stream`           | Sender            | `sender.require_auth()`    |
@@ -235,6 +235,18 @@ deposit_amount >= rate_per_second * (end_time - start_time)
 | `top_up_stream`          | Funder address    | `funder.require_auth()`    |
 
 **Note:** Sender-managed functions (`pause_stream`, `resume_stream`, `cancel_stream`) require sender auth. Admin uses separate `_as_admin` entry points.
+
+### One-Shot Init and Immutable Bootstrap
+
+`init(token, admin)` has explicit externally observable bootstrap semantics:
+
+- One-shot: first successful call writes `Config { token, admin }` and `NextStreamId = 0`.
+- Auth boundary: the supplied `admin` address must authorize the call.
+- Re-init failure: any second call panics with `"already initialised"`.
+- Failure atomicity: failed auth or re-init leaves bootstrap storage unchanged.
+- Immutability boundary: `token` is immutable after init; `admin` can rotate only via `set_admin` with current-admin auth.
+
+Residual assumption: deployment flow must ensure the intended bootstrap admin signs the first init transaction.
 
 ### create_streams: Batch Atomicity and Single Auth
 
@@ -308,6 +320,7 @@ errors relevant to stream creation and timing.
 | Message                                                                 | Function                                   | Trigger                      |
 | ----------------------------------------------------------------------- | ------------------------------------------ | ---------------------------- |
 | `"already initialised"`                                                 | `init`                                     | Re-init attempt              |
+| authorization failure                                                   | `init`                                     | caller did not satisfy `admin.require_auth()` |
 | `"deposit_amount must be positive"`                                     | `create_stream` / `create_streams`         | deposit_amount <= 0          |
 | `"rate_per_second must be positive"`                                    | `create_stream` / `create_streams`         | rate_per_second <= 0         |
 | `"sender and recipient must be different"`                              | `create_stream` / `create_streams`         | sender == recipient          |
