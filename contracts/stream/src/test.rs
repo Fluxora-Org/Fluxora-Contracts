@@ -12537,3 +12537,631 @@ fn regression_double_init_interleaved_with_lifecycle() {
     assert_eq!(stream_id2, 1);
     assert_eq!(client.get_stream_count(), 2);
 }
+
+// ===========================================================================
+// get_claimable_at: future simulation and cancel clamping (Issue #270)
+// ===========================================================================
+//
+// `get_claimable_at(stream_id, timestamp)` is a read-only view function that
+// simulates  "how much could the recipient claim at time T?" without mutating
+// state. The two key invariants this suite codifies:
+//
+//   1. **Future simulation**: for Active/Paused streams, claimable grows
+//      with timestamp exactly as `calculate_accrued(timestamp) - withdrawn`,
+//      clamped at deposit.
+//
+//   2. **Cancel clamping**: for Cancelled streams, the effective time is
+//      `min(timestamp, cancelled_at)`, so claimable can never exceed what
+//      was accrued at the moment of cancellation.
+//
+//   3. **Completed**: always returns 0 (nothing left to claim).
+
+// ---------------------------------------------------------------------------
+// §1  Future simulation: Active streams
+// ---------------------------------------------------------------------------
+
+/// Claimable at t=0 (start_time) for a no-cliff stream must be 0.
+#[test]
+fn claimable_at_start_time_returns_zero() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream(); // 0..1000, rate=1, no cliff
+
+    let claimable = ctx.client().get_claimable_at(&stream_id, &0);
+    assert_eq!(claimable, 0, "claimable at start_time must be 0");
+}
+
+/// Claimable at t=1 (one second into stream) returns 1 token.
+#[test]
+fn claimable_at_one_second_in() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    let claimable = ctx.client().get_claimable_at(&stream_id, &1);
+    assert_eq!(claimable, 1, "1 second at rate=1 → 1 token");
+}
+
+/// Claimable grows linearly with time for a constant-rate stream.
+#[test]
+fn claimable_at_linearly_proportional() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream(); // rate=1, 0..1000
+
+    for &t in &[0u64, 100, 250, 500, 750, 999, 1000] {
+        let claimable = ctx.client().get_claimable_at(&stream_id, &t);
+        assert_eq!(
+            claimable, t as i128,
+            "at t={t}, claimable must be {t} (rate=1, no withdraw)"
+        );
+    }
+}
+
+/// Claimable is capped at deposit for timestamps beyond end_time.
+#[test]
+fn claimable_at_capped_beyond_end() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream(); // deposit=1000
+
+    for &t in &[1000u64, 1001, 2000, 999_999] {
+        let claimable = ctx.client().get_claimable_at(&stream_id, &t);
+        assert_eq!(
+            claimable, 1000,
+            "at t={t} (>= end_time), claimable must equal deposit 1000"
+        );
+    }
+}
+
+/// After a partial withdraw, claimable deducts the withdrawn amount.
+#[test]
+fn claimable_at_deducts_withdrawn() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(300);
+    ctx.client().withdraw(&stream_id); // withdraws 300
+
+    // Simulate at t=700: accrued=700, withdrawn=300 → claimable=400
+    let claimable = ctx.client().get_claimable_at(&stream_id, &700);
+    assert_eq!(claimable, 400);
+
+    // At t=300: accrued=300, withdrawn=300 → claimable=0
+    let claimable_at_300 = ctx.client().get_claimable_at(&stream_id, &300);
+    assert_eq!(claimable_at_300, 0);
+
+    // At t=1000 (end): accrued=1000, withdrawn=300 → claimable=700
+    let claimable_at_end = ctx.client().get_claimable_at(&stream_id, &1000);
+    assert_eq!(claimable_at_end, 700);
+}
+
+/// After multiple partial withdrawals, claimable reflects cumulative withdrawn.
+#[test]
+fn claimable_at_after_multiple_withdrawals() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(200);
+    ctx.client().withdraw(&stream_id); // withdrawn=200
+
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().withdraw(&stream_id); // withdrawn=500
+
+    // At t=800: accrued=800, withdrawn=500 → claimable=300
+    let claimable = ctx.client().get_claimable_at(&stream_id, &800);
+    assert_eq!(claimable, 300);
+}
+
+/// Claimable at a time equal to withdrawn amount returns 0.
+#[test]
+fn claimable_at_exact_withdrawn_returns_zero() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().withdraw(&stream_id); // withdrawn=500
+
+    let claimable = ctx.client().get_claimable_at(&stream_id, &500);
+    assert_eq!(claimable, 0, "accrued == withdrawn → claimable must be 0");
+}
+
+/// Claimable before the withdrawn timestamp still returns 0 (can't have
+/// negative claimable).
+#[test]
+fn claimable_at_before_withdrawn_returns_zero() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().withdraw(&stream_id); // withdrawn=500
+
+    // At t=300: accrued=300, withdrawn=500 → claimable=max(0, -200)=0
+    let claimable = ctx.client().get_claimable_at(&stream_id, &300);
+    assert_eq!(claimable, 0);
+}
+
+// ---------------------------------------------------------------------------
+// §2  Future simulation: Cliff interactions
+// ---------------------------------------------------------------------------
+
+/// With a cliff, claimable is 0 before cliff and jumps at cliff.
+#[test]
+fn claimable_at_cliff_boundary_detailed() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_cliff_stream(); // cliff=500, 0..1000, rate=1
+
+    // One second before cliff: 0
+    assert_eq!(ctx.client().get_claimable_at(&stream_id, &499), 0);
+    // At cliff: accrual from start → 500
+    assert_eq!(ctx.client().get_claimable_at(&stream_id, &500), 500);
+    // One second after cliff: 501
+    assert_eq!(ctx.client().get_claimable_at(&stream_id, &501), 501);
+}
+
+/// With a cliff, withdrawing at cliff then querying future shows correct deduction.
+#[test]
+fn claimable_at_cliff_after_withdraw() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_cliff_stream();
+
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().withdraw(&stream_id); // withdraws 500
+
+    // At t=800: accrued=800, withdrawn=500 → claimable=300
+    let claimable = ctx.client().get_claimable_at(&stream_id, &800);
+    assert_eq!(claimable, 300);
+
+    // Before cliff: still 0 (accrual=0 < withdrawn=500, clamp to 0)
+    let claimable_pre = ctx.client().get_claimable_at(&stream_id, &100);
+    assert_eq!(claimable_pre, 0);
+}
+
+// ---------------------------------------------------------------------------
+// §3  Cancel clamping: core invariant
+// ---------------------------------------------------------------------------
+
+/// After cancel at t=400, claimable for any timestamp >= 400 is frozen at 400.
+#[test]
+fn claimable_at_cancel_clamped_at_all_future_times() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().cancel_stream(&stream_id); // cancelled_at=400
+
+    // Claimable at exactly cancelled_at
+    assert_eq!(ctx.client().get_claimable_at(&stream_id, &400), 400);
+
+    // Claimable at future timestamps: all clamped to 400
+    for &t in &[401u64, 500, 800, 1000, 5000, 999_999] {
+        let claimable = ctx.client().get_claimable_at(&stream_id, &t);
+        assert_eq!(
+            claimable, 400,
+            "cancelled at 400: claimable at t={t} must be clamped to 400"
+        );
+    }
+}
+
+/// Cancel at t=400 + timestamps before cancel_time still work normally.
+#[test]
+fn claimable_at_cancel_before_cancel_time_follows_schedule() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().cancel_stream(&stream_id);
+
+    // Before cancel_time: effective_time = min(t, 400) = t
+    for &t in &[0u64, 100, 200, 300, 399] {
+        let claimable = ctx.client().get_claimable_at(&stream_id, &t);
+        assert_eq!(
+            claimable, t as i128,
+            "cancelled at 400: claimable at t={t} (<cancel) should follow schedule"
+        );
+    }
+}
+
+/// Cancel at t=0 (immediately) → claimable is always 0.
+#[test]
+fn claimable_at_cancel_at_start_always_zero() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().cancel_stream(&stream_id);
+
+    for &t in &[0u64, 1, 100, 1000, 999_999] {
+        let claimable = ctx.client().get_claimable_at(&stream_id, &t);
+        assert_eq!(
+            claimable, 0,
+            "cancelled at t=0: claimable at any time must be 0"
+        );
+    }
+}
+
+/// Cancel at end_time → claimable at any future time equals full deposit.
+#[test]
+fn claimable_at_cancel_at_end_time_equals_deposit() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream(); // 0..1000, deposit=1000
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().cancel_stream(&stream_id);
+
+    let claimable = ctx.client().get_claimable_at(&stream_id, &9999);
+    assert_eq!(claimable, 1000, "cancel at end → full deposit claimable");
+}
+
+/// Cancel with partial withdraw: claimable is clamped to (accrued_at_cancel - withdrawn).
+#[test]
+fn claimable_at_cancel_after_partial_withdraw() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Withdraw 200 at t=200
+    ctx.env.ledger().set_timestamp(200);
+    ctx.client().withdraw(&stream_id);
+
+    // Cancel at t=600: accrued=600, withdrawn=200
+    ctx.env.ledger().set_timestamp(600);
+    ctx.client().cancel_stream(&stream_id);
+
+    // At any future time: accrued clamped to 600, withdrawn=200 → claimable=400
+    for &t in &[600u64, 700, 1000, 5000] {
+        let claimable = ctx.client().get_claimable_at(&stream_id, &t);
+        assert_eq!(
+            claimable, 400,
+            "cancel at 600 with 200 withdrawn: claimable at t={t} must be 400"
+        );
+    }
+
+    // Before cancel: e.g. t=400 → accrued=400, withdrawn=200 → claimable=200
+    assert_eq!(ctx.client().get_claimable_at(&stream_id, &400), 200);
+
+    // Before withdrawn: e.g. t=100 → accrued=100, withdrawn=200 → claimable=0
+    assert_eq!(ctx.client().get_claimable_at(&stream_id, &100), 0);
+}
+
+/// Cancel with full withdraw: recipient withdrew everything at cancel → claimable=0.
+#[test]
+fn claimable_at_cancel_after_full_accrual_withdraw() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().withdraw(&stream_id); // withdrawn=500
+
+    ctx.client().cancel_stream(&stream_id); // cancelled_at=500
+
+    // accrued clamped at 500, withdrawn=500 → claimable=0
+    for &t in &[500u64, 1000, 9999] {
+        assert_eq!(
+            ctx.client().get_claimable_at(&stream_id, &t),
+            0,
+            "cancelled after full withdraw: claimable at t={t} must be 0"
+        );
+    }
+}
+
+/// Admin cancel uses the same clamping logic.
+#[test]
+fn claimable_at_admin_cancel_clamped() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(300);
+    ctx.client().cancel_stream_as_admin(&stream_id);
+
+    // Clamped at 300
+    assert_eq!(ctx.client().get_claimable_at(&stream_id, &300), 300);
+    assert_eq!(ctx.client().get_claimable_at(&stream_id, &999), 300);
+    assert_eq!(ctx.client().get_claimable_at(&stream_id, &100), 100);
+}
+
+// ---------------------------------------------------------------------------
+// §4  Cancel clamping with cliff
+// ---------------------------------------------------------------------------
+
+/// Cancel before cliff: accrual was 0 at cancel → claimable always 0.
+#[test]
+fn claimable_at_cancel_before_cliff() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_cliff_stream(); // cliff=500
+
+    ctx.env.ledger().set_timestamp(200);
+    ctx.client().cancel_stream(&stream_id); // cancelled_at=200 < cliff
+
+    // Even at future times, effective_time = min(t, 200) < cliff → accrued=0
+    for &t in &[0u64, 200, 500, 1000, 9999] {
+        assert_eq!(
+            ctx.client().get_claimable_at(&stream_id, &t),
+            0,
+            "cancel at t=200 before cliff=500: claimable at t={t} must be 0"
+        );
+    }
+}
+
+/// Cancel exactly at cliff: accrual=500 (from start_time=0 to cliff=500).
+#[test]
+fn claimable_at_cancel_at_cliff_boundary() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_cliff_stream(); // cliff=500
+
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().cancel_stream(&stream_id); // cancelled_at=500
+
+    assert_eq!(ctx.client().get_claimable_at(&stream_id, &500), 500);
+    assert_eq!(ctx.client().get_claimable_at(&stream_id, &9999), 500);
+    // Before cliff: 0
+    assert_eq!(ctx.client().get_claimable_at(&stream_id, &499), 0);
+}
+
+/// Cancel after cliff: normal clamping at cancel_time.
+#[test]
+fn claimable_at_cancel_after_cliff() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_cliff_stream(); // cliff=500
+
+    ctx.env.ledger().set_timestamp(700);
+    ctx.client().cancel_stream(&stream_id); // cancelled_at=700
+
+    // Before cliff: 0
+    assert_eq!(ctx.client().get_claimable_at(&stream_id, &499), 0);
+    // At cliff: 500
+    assert_eq!(ctx.client().get_claimable_at(&stream_id, &500), 500);
+    // Between cliff and cancel: follows schedule
+    assert_eq!(ctx.client().get_claimable_at(&stream_id, &600), 600);
+    // At and beyond cancel: clamped
+    assert_eq!(ctx.client().get_claimable_at(&stream_id, &700), 700);
+    assert_eq!(ctx.client().get_claimable_at(&stream_id, &9999), 700);
+}
+
+// ---------------------------------------------------------------------------
+// §5  Paused stream simulation
+// ---------------------------------------------------------------------------
+
+/// Paused stream: get_claimable_at still simulates using the given timestamp
+/// (accrual is computed at `timestamp`, not frozen at pause time).
+#[test]
+fn claimable_at_paused_stream_simulates_at_timestamp() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(300);
+    ctx.client().pause_stream(&stream_id);
+
+    // get_claimable_at simulates at requested timestamp, regardless of pause
+    assert_eq!(ctx.client().get_claimable_at(&stream_id, &500), 500);
+    assert_eq!(ctx.client().get_claimable_at(&stream_id, &1000), 1000);
+    assert_eq!(ctx.client().get_claimable_at(&stream_id, &100), 100);
+}
+
+/// Paused after partial withdraw: claimable deducts withdrawn.
+#[test]
+fn claimable_at_paused_after_withdraw() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(300);
+    ctx.client().withdraw(&stream_id); // withdrawn=300
+    ctx.client().pause_stream(&stream_id);
+
+    // At t=600: accrued=600, withdrawn=300 → claimable=300
+    assert_eq!(ctx.client().get_claimable_at(&stream_id, &600), 300);
+}
+
+// ---------------------------------------------------------------------------
+// §6  Completed stream
+// ---------------------------------------------------------------------------
+
+/// Completed stream always returns 0 regardless of timestamp.
+#[test]
+fn claimable_at_completed_always_zero() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+
+    for &t in &[0u64, 500, 1000, 9999] {
+        assert_eq!(
+            ctx.client().get_claimable_at(&stream_id, &t),
+            0,
+            "completed stream: claimable at t={t} must be 0"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// §7  Monotonicity invariant (active stream)
+// ---------------------------------------------------------------------------
+
+/// For an active stream with no withdrawals, claimable_at(t1) <= claimable_at(t2)
+/// for all t1 <= t2 (monotonically non-decreasing).
+#[test]
+fn claimable_at_monotonic_active_no_withdraw() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    let mut prev = 0i128;
+    for t in (0..=1200).step_by(50) {
+        let claimable = ctx.client().get_claimable_at(&stream_id, &t);
+        assert!(
+            claimable >= prev,
+            "monotonicity violated: claimable({t})={claimable} < prev={prev}"
+        );
+        prev = claimable;
+    }
+}
+
+/// For a cancelled stream, claimable_at(t1) <= claimable_at(t2) for t1 <= t2.
+#[test]
+fn claimable_at_monotonic_cancelled() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().cancel_stream(&stream_id);
+
+    let mut prev = 0i128;
+    for t in (0..=1200).step_by(50) {
+        let claimable = ctx.client().get_claimable_at(&stream_id, &t);
+        assert!(
+            claimable >= prev,
+            "monotonicity violated (cancelled): claimable({t})={claimable} < prev={prev}"
+        );
+        prev = claimable;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// §8  Equivalence with get_withdrawable at current ledger time
+// ---------------------------------------------------------------------------
+
+/// get_claimable_at(now) == get_withdrawable(stream_id) for active streams
+/// at any point in the lifecycle.
+#[test]
+fn claimable_at_equals_withdrawable_at_current_time() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    for &t in &[0u64, 100, 500, 999, 1000] {
+        ctx.env.ledger().set_timestamp(t);
+        let withdrawable = ctx.client().get_withdrawable(&stream_id);
+        let claimable = ctx.client().get_claimable_at(&stream_id, &t);
+        assert_eq!(
+            withdrawable, claimable,
+            "at t={t}: get_withdrawable ({withdrawable}) != get_claimable_at ({claimable})"
+        );
+    }
+}
+
+/// After partial withdraw, equivalence still holds at current time.
+#[test]
+fn claimable_at_equals_withdrawable_after_withdraw() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(300);
+    ctx.client().withdraw(&stream_id);
+
+    ctx.env.ledger().set_timestamp(700);
+    let withdrawable = ctx.client().get_withdrawable(&stream_id);
+    let claimable = ctx.client().get_claimable_at(&stream_id, &700);
+    assert_eq!(withdrawable, claimable);
+}
+
+/// After cancel, equivalence at current time (both should work with clamping).
+#[test]
+fn claimable_at_equals_withdrawable_cancelled() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().cancel_stream(&stream_id);
+
+    // At cancel time
+    let withdrawable = ctx.client().get_withdrawable(&stream_id);
+    let claimable = ctx.client().get_claimable_at(&stream_id, &400);
+    assert_eq!(withdrawable, claimable);
+}
+
+// ---------------------------------------------------------------------------
+// §9  Idempotency: repeated reads don't change results
+// ---------------------------------------------------------------------------
+
+/// Calling get_claimable_at multiple times returns the same value (read-only).
+#[test]
+fn claimable_at_idempotent() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    let first = ctx.client().get_claimable_at(&stream_id, &500);
+    let second = ctx.client().get_claimable_at(&stream_id, &500);
+    let third = ctx.client().get_claimable_at(&stream_id, &500);
+    assert_eq!(first, second);
+    assert_eq!(second, third);
+}
+
+// ---------------------------------------------------------------------------
+// §10  Error cases
+// ---------------------------------------------------------------------------
+
+/// Non-existent stream returns StreamNotFound.
+#[test]
+fn claimable_at_stream_not_found() {
+    let ctx = TestContext::setup();
+    let result = ctx.client().try_get_claimable_at(&999, &100u64);
+    assert!(result.is_err());
+}
+
+/// Calling claimable_at on uninitialized contract with bogus stream ID
+/// returns StreamNotFound (not a config error, since it's stream-scoped).
+#[test]
+fn claimable_at_uninitialised_returns_stream_not_found() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+
+    let result = client.try_get_claimable_at(&0, &100u64);
+    assert!(result.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// §11  Cancel clamping invariant: claimable_at(any_t) <= accrued_at_cancel
+// ---------------------------------------------------------------------------
+
+/// For a cancelled stream, claimable at any timestamp never exceeds
+/// the accrual at cancellation time minus the withdrawn amount.
+#[test]
+fn claimable_at_cancel_never_exceeds_frozen_accrual() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Withdraw 150
+    ctx.env.ledger().set_timestamp(150);
+    ctx.client().withdraw(&stream_id);
+
+    // Cancel at t=600
+    ctx.env.ledger().set_timestamp(600);
+    ctx.client().cancel_stream(&stream_id);
+
+    // Frozen accrual = 600, withdrawn = 150 → max claimable = 450
+    for t in (0..=2000).step_by(100) {
+        let claimable = ctx.client().get_claimable_at(&stream_id, &(t as u64));
+        assert!(
+            claimable <= 450,
+            "claimable({t})={claimable} exceeds max 450 (frozen accrual - withdrawn)"
+        );
+    }
+}
+
+/// Multiple cancel scenarios: the clamping ceiling is always
+/// accrued_at_cancel - withdrawn_at_cancel.
+#[test]
+fn claimable_at_cancel_ceiling_parametric() {
+    // Cancel at various times with various withdraw amounts
+    for &(withdraw_time, cancel_time) in &[(0u64, 200u64), (100, 500), (300, 300), (0, 1000)] {
+        let ctx = TestContext::setup();
+        let stream_id = ctx.create_default_stream();
+
+        if withdraw_time > 0 {
+            ctx.env.ledger().set_timestamp(withdraw_time);
+            ctx.client().withdraw(&stream_id);
+        }
+
+        ctx.env.ledger().set_timestamp(cancel_time);
+        ctx.client().cancel_stream(&stream_id);
+
+        let ceiling = cancel_time as i128 - withdraw_time as i128;
+        let ceiling = if ceiling > 0 { ceiling } else { 0 };
+
+        // At max future time
+        let claimable = ctx.client().get_claimable_at(&stream_id, &999_999u64);
+        assert_eq!(
+            claimable, ceiling,
+            "withdraw={withdraw_time}, cancel={cancel_time}: future claimable must be {ceiling}"
+        );
+    }
+}
