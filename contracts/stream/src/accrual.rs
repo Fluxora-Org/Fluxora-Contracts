@@ -409,16 +409,16 @@ mod property_monotonicity {
     /// high-rate (deposit-capped), zero-rate, and near-overflow.
     const STREAMS: &[(u64, u64, u64, i128, i128)] = &[
         // (start, cliff, end, rate, deposit)
-        (0, 0, 1_000, 1, 1_000),          // standard linear, no cliff
-        (0, 500, 1_000, 1, 1_000),         // cliff at midpoint
-        (0, 1_000, 1_000, 1, 1_000),       // cliff == end (degenerate: nothing ever accrues)
-        (1_000, 1_000, 2_000, 2, 2_000),   // non-zero start, rate=2
-        (0, 0, 1_000, 10, 5_000),          // high rate, deposit is binding cap
-        (0, 0, 10_000, 0, 0),              // zero rate, zero deposit
-        (0, 0, 1_000, 3, 500),             // rate*duration > deposit (deposit caps)
-        (0, 0, u64::MAX, 1, i128::MAX),    // near-overflow duration
-        (100, 200, 1_000, 5, 4_500),       // cliff after start
-        (0, 0, 1_000, 1, 2_000),           // deposit > rate*duration (excess deposit)
+        (0, 0, 1_000, 1, 1_000),         // standard linear, no cliff
+        (0, 500, 1_000, 1, 1_000),       // cliff at midpoint
+        (0, 1_000, 1_000, 1, 1_000),     // cliff == end (degenerate: nothing ever accrues)
+        (1_000, 1_000, 2_000, 2, 2_000), // non-zero start, rate=2
+        (0, 0, 1_000, 10, 5_000),        // high rate, deposit is binding cap
+        (0, 0, 10_000, 0, 0),            // zero rate, zero deposit
+        (0, 0, 1_000, 3, 500),           // rate*duration > deposit (deposit caps)
+        (0, 0, u64::MAX, 1, i128::MAX),  // near-overflow duration
+        (100, 200, 1_000, 5, 4_500),     // cliff after start
+        (0, 0, 1_000, 1, 2_000),         // deposit > rate*duration (excess deposit)
     ];
 
     /// Dense time grid for a stream: samples before, at, and after every boundary.
@@ -605,8 +605,12 @@ mod property_monotonicity {
     /// Boundary: current_time == start_time with cliff < start → accrued == 0 (elapsed == 0).
     #[test]
     fn prop_elapsed_zero_at_start_with_early_cliff() {
+        // Confirm behavior is unchanged with early cliff boundary condition.
         let accrued = calculate_accrued_amount(500, 0, 1_000, 1, 1_000, 500);
-        assert_eq!(accrued, 0, "at start_time with early cliff, elapsed=0 so accrued=0");
+        assert_eq!(
+            accrued, 0,
+            "at start_time with early cliff, elapsed=0 so accrued=0"
+        );
     }
 
     /// One second past start with early cliff → accrues normally.
