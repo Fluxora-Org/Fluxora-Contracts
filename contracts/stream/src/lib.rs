@@ -3,7 +3,7 @@
 mod accrual;
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, token, Address, Env, Symbol,
+    contract, contractimpl, contracttype, symbol_short, token, Address, Env,
 };
 
 // ---------------------------------------------------------------------------
@@ -1449,7 +1449,7 @@ impl FluxoraStream {
         // Emit event with old and new admin addresses
         env.events()
             .publish((symbol_short!("AdminUpd"),), (old_admin, new_admin));
-        
+
         Ok(())
     }
 

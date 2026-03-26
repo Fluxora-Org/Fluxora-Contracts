@@ -2569,7 +2569,7 @@ fn integration_set_admin_rotation_flow() {
     assert_eq!(last_event.0, ctx.contract_id);
     assert_eq!(
         soroban_sdk::Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
-        soroban_sdk::Symbol::new(&ctx.env, "AdminUpdated")
+        soroban_sdk::Symbol::new(&ctx.env, "AdminUpd")
     );
     let data: (Address, Address) = last_event.2.into_val(&ctx.env);
     assert_eq!(data.0, ctx.admin); // old admin
@@ -2581,7 +2581,7 @@ fn integration_set_admin_rotation_flow() {
         invoke: &soroban_sdk::testutils::MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "pause_stream_as_admin",
-            args: (stream_id.clone(),).into_val(&ctx.env),
+            args: (stream_id,).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
@@ -2597,7 +2597,7 @@ fn integration_set_admin_rotation_flow() {
         invoke: &soroban_sdk::testutils::MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "resume_stream_as_admin",
-            args: (stream_id.clone(),).into_val(&ctx.env),
+            args: (stream_id,).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
@@ -2609,4 +2609,233 @@ fn integration_set_admin_rotation_flow() {
         result.is_err(),
         "Old admin should not be able to resume after rotation"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Integration — Gas / budget review: hot paths and batching
+// ---------------------------------------------------------------------------
+//
+// These tests measure Soroban CPU instruction and memory byte costs for the
+// three hot paths identified in the issue:
+//   1. `withdraw`          — single-stream accrual + token push
+//   2. `batch_withdraw`    — N-stream loop with one auth
+//   3. `create_streams`    — N-stream validation + single bulk token pull
+//
+// Budget is reset to unlimited before each measured call so that setup
+// overhead does not pollute the reading. Guardrails are 10× observed
+// baseline to catch regressions without being brittle to minor SDK changes.
+
+/// Budget guardrail: single `withdraw` on an active stream.
+#[test]
+fn integration_budget_single_withdraw() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    ctx.env.ledger().set_timestamp(500);
+
+    ctx.env.budget().reset_unlimited();
+    ctx.client().withdraw(&stream_id);
+
+    let cpu = ctx.env.budget().cpu_instruction_cost();
+    let mem = ctx.env.budget().memory_bytes_cost();
+
+    assert!(
+        cpu <= 1_000_000,
+        "integration single withdraw cpu={cpu} exceeds guardrail 1_000_000"
+    );
+    assert!(
+        mem <= 500_000,
+        "integration single withdraw mem={mem} exceeds guardrail 500_000"
+    );
+}
+
+/// Budget guardrail: `batch_withdraw` over 20 active streams.
+#[test]
+fn integration_budget_batch_withdraw_20_streams() {
+    let ctx = TestContext::setup();
+    let sac = StellarAssetClient::new(&ctx.env, &ctx.token_id);
+    sac.mint(&ctx.sender, &200_000_i128);
+
+    ctx.env.ledger().set_timestamp(0);
+    let mut ids = vec![&ctx.env];
+    for _ in 0..20 {
+        let id = ctx.client().create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &1000_i128,
+            &1_i128,
+            &0u64,
+            &0u64,
+            &1000u64,
+        );
+        ids.push_back(id);
+    }
+
+    ctx.env.ledger().set_timestamp(500);
+    ctx.env.budget().reset_unlimited();
+    let results = ctx.client().batch_withdraw(&ctx.recipient, &ids);
+
+    assert_eq!(results.len(), 20);
+    for i in 0..20 {
+        assert_eq!(results.get(i).unwrap().amount, 500);
+    }
+
+    let cpu = ctx.env.budget().cpu_instruction_cost();
+    let mem = ctx.env.budget().memory_bytes_cost();
+
+    // Guardrail: 20-stream batch must stay under 10 M CPU and 4 MB.
+    assert!(
+        cpu <= 10_000_000,
+        "batch_withdraw(20) cpu={cpu} exceeds guardrail 10_000_000"
+    );
+    assert!(
+        mem <= 4_000_000,
+        "batch_withdraw(20) mem={mem} exceeds guardrail 4_000_000"
+    );
+}
+
+/// Budget guardrail: `create_streams` with 10 entries (single bulk token pull).
+#[test]
+fn integration_budget_create_streams_batch_10() {
+    let ctx = TestContext::setup();
+    let sac = StellarAssetClient::new(&ctx.env, &ctx.token_id);
+    sac.mint(&ctx.sender, &100_000_i128);
+
+    ctx.env.ledger().set_timestamp(0);
+    let mut params = vec![&ctx.env];
+    for _ in 0..10 {
+        params.push_back(CreateStreamParams {
+            recipient: Address::generate(&ctx.env),
+            deposit_amount: 1000,
+            rate_per_second: 1,
+            start_time: 0,
+            cliff_time: 0,
+            end_time: 1000,
+        });
+    }
+
+    ctx.env.budget().reset_unlimited();
+    let ids = ctx.client().create_streams(&ctx.sender, &params);
+
+    assert_eq!(ids.len(), 10);
+
+    let cpu = ctx.env.budget().cpu_instruction_cost();
+    let mem = ctx.env.budget().memory_bytes_cost();
+
+    // Guardrail: 10-stream batch create must stay under 6 M CPU and 3 MB.
+    assert!(
+        cpu <= 6_000_000,
+        "create_streams(10) cpu={cpu} exceeds guardrail 6_000_000"
+    );
+    assert!(
+        mem <= 3_000_000,
+        "create_streams(10) mem={mem} exceeds guardrail 3_000_000"
+    );
+}
+
+/// batch_withdraw on a cancelled stream transfers only the remaining
+/// accrued-but-not-withdrawn amount (integration-level token balance check).
+#[test]
+fn integration_batch_withdraw_cancelled_stream_accrued_remainder() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream(); // 1000 tokens, rate=1, end=1000
+
+    // Withdraw 300 at t=300
+    ctx.env.ledger().set_timestamp(300);
+    ctx.client().withdraw(&stream_id);
+    assert_eq!(ctx.token.balance(&ctx.recipient), 300);
+
+    // Cancel at t=700 → accrued_at_cancel=700, refund=300 to sender, 400 left for recipient
+    ctx.env.ledger().set_timestamp(700);
+    ctx.client().cancel_stream(&stream_id);
+
+    let recipient_before = ctx.token.balance(&ctx.recipient);
+    let contract_before = ctx.token.balance(&ctx.contract_id);
+
+    let ids = vec![&ctx.env, stream_id];
+    let results = ctx.client().batch_withdraw(&ctx.recipient, &ids);
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results.get(0).unwrap().amount,
+        400,
+        "cancelled stream: batch_withdraw must transfer accrued(700) - withdrawn(300) = 400"
+    );
+    assert_eq!(ctx.token.balance(&ctx.recipient), recipient_before + 400);
+    assert_eq!(ctx.token.balance(&ctx.contract_id), contract_before - 400);
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 0);
+}
+
+/// batch_withdraw: single-auth covers all streams — wrong recipient on any
+/// stream returns Unauthorized and reverts the whole batch.
+#[test]
+fn integration_batch_withdraw_wrong_recipient_unauthorized() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let id0 = ctx.create_default_stream();
+    let id1 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    ctx.env.ledger().set_timestamp(500);
+    let other = Address::generate(&ctx.env);
+    let ids = vec![&ctx.env, id0, id1];
+
+    let result = ctx.client().try_batch_withdraw(&other, &ids);
+    assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
+
+    // No state change: both streams still have withdrawn_amount = 0
+    assert_eq!(ctx.client().get_stream_state(&id0).withdrawn_amount, 0);
+    assert_eq!(ctx.client().get_stream_state(&id1).withdrawn_amount, 0);
+}
+
+/// create_streams: single bulk token pull equals sum of individual deposits.
+/// Verifies the gas-saving invariant: one transfer instead of N.
+#[test]
+fn integration_create_streams_single_token_pull_equals_sum() {
+    let ctx = TestContext::setup();
+    let sac = StellarAssetClient::new(&ctx.env, &ctx.token_id);
+    sac.mint(&ctx.sender, &10_000_i128);
+
+    ctx.env.ledger().set_timestamp(0);
+    let sender_before = ctx.token.balance(&ctx.sender);
+
+    let p1 = CreateStreamParams {
+        recipient: Address::generate(&ctx.env),
+        deposit_amount: 1000,
+        rate_per_second: 1,
+        start_time: 0,
+        cliff_time: 0,
+        end_time: 1000,
+    };
+    let p2 = CreateStreamParams {
+        recipient: Address::generate(&ctx.env),
+        deposit_amount: 2000,
+        rate_per_second: 2,
+        start_time: 0,
+        cliff_time: 0,
+        end_time: 1000,
+    };
+    let p3 = CreateStreamParams {
+        recipient: Address::generate(&ctx.env),
+        deposit_amount: 500,
+        rate_per_second: 1,
+        start_time: 0,
+        cliff_time: 0,
+        end_time: 500,
+    };
+
+    let params = vec![&ctx.env, p1, p2, p3];
+    let ids = ctx.client().create_streams(&ctx.sender, &params);
+
+    assert_eq!(ids.len(), 3);
+    // Total pulled = 1000 + 2000 + 500 = 3500
+    assert_eq!(ctx.token.balance(&ctx.sender), sender_before - 3500);
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 3500);
 }
