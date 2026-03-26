@@ -775,7 +775,7 @@ impl FluxoraStream {
     pub fn pause_stream(env: Env, stream_id: u64) -> Result<(), ContractError> {
         let mut stream = load_stream(&env, stream_id)?;
 
-        Self::require_stream_sender(&stream.sender);
+        Self::require_sender_or_admin(&env, &stream);
 
         if stream.status == StreamStatus::Paused {
             return Err(ContractError::InvalidState); // Already paused
@@ -824,7 +824,7 @@ impl FluxoraStream {
     /// - After resume, recipient can immediately withdraw accrued funds
     pub fn resume_stream(env: Env, stream_id: u64) -> Result<(), ContractError> {
         let mut stream = load_stream(&env, stream_id)?;
-        Self::require_stream_sender(&stream.sender);
+        Self::require_sender_or_admin(&env, &stream);
 
         if stream.status != StreamStatus::Paused {
             return Err(ContractError::InvalidState);
@@ -898,7 +898,7 @@ impl FluxoraStream {
     /// - Cancel before cliff → sender gets 100% refund (no accrual before cliff)
     pub fn cancel_stream(env: Env, stream_id: u64) -> Result<(), ContractError> {
         let mut stream = load_stream(&env, stream_id)?;
-        Self::require_stream_sender(&stream.sender);
+        Self::require_sender_or_admin(&env, &stream);
         Self::cancel_stream_internal(&env, &mut stream)
     }
 
@@ -962,7 +962,7 @@ impl FluxoraStream {
         let mut stream = load_stream(&env, stream_id)?;
 
         // Enforce recipient-only authorization
-        stream.recipient.require_auth();
+        Self::require_recipient(&stream);
 
         if stream.status == StreamStatus::Completed {
             return Err(ContractError::InvalidState);
@@ -1075,7 +1075,7 @@ impl FluxoraStream {
     ) -> Result<i128, ContractError> {
         let mut stream = load_stream(&env, stream_id)?;
 
-        stream.recipient.require_auth();
+        Self::require_recipient(&stream);
 
         if destination == env.current_contract_address() {
             return Err(ContractError::InvalidParams);
@@ -1963,9 +1963,29 @@ impl FluxoraStream {
         load_recipient_streams(&env, &recipient).len() as u64
     }
 
-    /// Internal helper to require authorization from the stream sender.
+    /// Internal helper to require authorization from the stream sender or admin.
     ///
-    /// Admin override paths are handled by dedicated `*_as_admin` entrypoints.
+    /// This helper unifies authorization logic for stream state-mutating operations.
+    /// Note: due to Soroban SDK 21.7.7 limitations, this function prioritizes sender
+    /// authorization for standard entrypoints; administrative override is still handled
+    /// by `*_as_admin` entrypoints.
+    fn require_sender_or_admin(env: &Env, stream: &Stream) {
+        let admin = get_admin(env).expect("Contract must be initialized");
+
+        // Prefer sender authorization, but if sender and admin are the same address,
+        // this also supports the admin path.
+        if stream.sender == admin {
+            admin.require_auth();
+        } else {
+            stream.sender.require_auth();
+        }
+    }
+
+    /// Internal helper to require authorization from stream recipient.
+    fn require_recipient(stream: &Stream) {
+        stream.recipient.require_auth();
+    }
+
     fn require_stream_sender(sender: &Address) {
         sender.require_auth();
     }
