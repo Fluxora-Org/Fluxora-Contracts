@@ -1777,8 +1777,11 @@ fn integration_pause_resume_past_end_time_accrual_capped() {
         "accrual must be capped at deposit_amount even past end_time"
     );
 
-    // Resume and withdraw
-    ctx.client().resume_stream(&stream_id);
+    // Resume should fail now because it's past end_time (terminal)
+    let resume_result = ctx.client().try_resume_stream(&stream_id);
+    assert_eq!(resume_result, Err(Ok(ContractError::StreamTerminalState)));
+
+    // However, withdraw should still work to claim the accrued funds
     let withdrawn = ctx.client().withdraw(&stream_id);
     assert_eq!(withdrawn, 1000);
 
@@ -2569,7 +2572,7 @@ fn integration_set_admin_rotation_flow() {
     assert_eq!(last_event.0, ctx.contract_id);
     assert_eq!(
         soroban_sdk::Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
-        soroban_sdk::Symbol::new(&ctx.env, "AdminUpdated")
+        soroban_sdk::Symbol::new(&ctx.env, "AdminUpd")
     );
     let data: (Address, Address) = last_event.2.into_val(&ctx.env);
     assert_eq!(data.0, ctx.admin); // old admin
@@ -2609,4 +2612,96 @@ fn integration_set_admin_rotation_flow() {
         result.is_err(),
         "Old admin should not be able to resume after rotation"
     );
+}
+
+#[test]
+fn integration_test_admin_pause_resume_flow() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Admin pauses
+    ctx.client().pause_stream_as_admin(&stream_id);
+    assert_eq!(ctx.client().get_stream_state(&stream_id).status, StreamStatus::Paused);
+
+    // Recipient cannot withdraw while paused
+    let result = ctx.client().try_withdraw(&stream_id);
+    assert!(result.is_err());
+
+    // Admin resumes
+    ctx.client().resume_stream_as_admin(&stream_id);
+    assert_eq!(ctx.client().get_stream_state(&stream_id).status, StreamStatus::Active);
+
+    // Recipient can withdraw after resume
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().withdraw(&stream_id);
+}
+
+#[test]
+fn integration_test_admin_pause_accrual_integrity() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &2000, &2, &0, &0, &1000
+    );
+
+    // At t=100, accrued=200
+    ctx.env.ledger().set_timestamp(100);
+    assert_eq!(ctx.client().calculate_accrued(&stream_id), 200);
+
+    // Admin pauses at t=100
+    ctx.client().pause_stream_as_admin(&stream_id);
+
+    // Advance to t=200 while paused
+    ctx.env.ledger().set_timestamp(200);
+    // Accrual MUST continue (time-based)
+    assert_eq!(ctx.client().calculate_accrued(&stream_id), 400);
+
+    // Admin resumes at t=200
+    ctx.client().resume_stream_as_admin(&stream_id);
+    
+    // Recipient withdraws the full 400
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn, 400);
+}
+
+#[test]
+fn integration_test_admin_cancel_from_paused() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000
+    );
+
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().pause_stream_as_admin(&stream_id);
+
+    // Admin cancels while stream is paused
+    // Transitions Paused -> Cancelled
+    ctx.client().cancel_stream_as_admin(&stream_id);
+    
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+    // Accrual freeze should be at t=100 (when cancelled)
+    assert_eq!(state.cancelled_at, Some(100));
+}
+
+#[test]
+fn integration_test_admin_unauthorized_pause() {
+    let ctx = TestContext::setup_strict();
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000
+    );
+
+    // Non-admin (recipient) tries to call admin pause
+    ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &ctx.recipient,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "pause_stream_as_admin",
+            args: (stream_id.clone(),).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = ctx.client().try_pause_stream_as_admin(&stream_id);
+    // Should fail because recipient is not admin
+    assert!(result.is_err());
 }
