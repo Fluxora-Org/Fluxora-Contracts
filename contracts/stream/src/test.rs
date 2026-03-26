@@ -2130,7 +2130,7 @@ fn test_calculate_accrued_permissionless_access() {
     let stream_id = ctx.create_default_stream();
 
     // Create a random third-party address (not sender, not recipient, not admin)
-    let third_party = Address::random(&ctx.env);
+    let _third_party = Address::generate(&ctx.env);
 
     // Third party must be able to call calculate_accrued without auth
     // This would panic if auth was required
@@ -9371,14 +9371,15 @@ fn test_update_rate_per_second_emits_event() {
 
     // Verify event was emitted.
     let events = ctx.env.events().all();
-    let rate_update_events: Vec<_> = events
+    let rate_update_events: std::vec::Vec<_> = events
         .iter()
         .filter(|e| {
-            if let Ok(topics) = <(Symbol, u64)>::try_from_val(&ctx.env, &e.topics) {
-                topics.0 == Symbol::new(&ctx.env, "rate_upd") && topics.1 == stream_id
-            } else {
-                false
-            }
+            if e.0 != ctx.contract_id { return false; }
+            let topics = &e.1;
+            if topics.len() < 2 { return false; }
+            let t0 = Symbol::from_val(&ctx.env, &topics.get(0).unwrap());
+            let t1: u64 = topics.get(1).unwrap().into_val(&ctx.env);
+            t0 == Symbol::new(&ctx.env, "rate_upd") && t1 == stream_id
         })
         .collect();
 
@@ -14447,3 +14448,302 @@ fn test_create_streams_batch_deposit_overflow_is_atomic() {
         "stream count must not change on overflow failure"
     );
 }
+
+// ===========================================================================
+// DataKey evolution policy tests
+//
+// Scope: observable guarantees that the DataKey discriminant table is stable
+// and that each key reads/writes the correct storage tier.
+//
+// Audit notes:
+// - Discriminant ordering cannot be tested directly in Soroban testutils
+//   (the SDK does not expose raw discriminant values at runtime). The tests
+//   here verify the observable contract: that each key is readable after being
+//   written, that instance and persistent storage behave independently, and
+//   that the documented invariants hold.
+// - The discriminant stability rule (never reorder, never insert in the middle,
+//   always append) is enforced by code review and CI, not by automated tests.
+// ===========================================================================
+#[cfg(test)]
+mod datakey_evolution_policy {
+    use super::*;
+    use soroban_sdk::Env;
+
+    // -----------------------------------------------------------------------
+    // 1. Config (discriminant 0) — instance storage
+    // -----------------------------------------------------------------------
+
+    /// Config is readable after init and contains the correct token and admin.
+    #[test]
+    fn config_key_readable_after_init() {
+        let ctx = TestContext::setup();
+        let cfg = ctx.client().get_config();
+        assert_eq!(cfg.token, ctx.token_id);
+        assert_eq!(cfg.admin, ctx.admin);
+    }
+
+    /// Config survives a stream create/withdraw cycle unchanged (except admin field).
+    #[test]
+    fn config_key_stable_across_stream_lifecycle() {
+        let ctx = TestContext::setup();
+        let cfg_before = ctx.client().get_config();
+
+        let stream_id = ctx.create_default_stream();
+        ctx.env.ledger().set_timestamp(1000);
+        ctx.client().withdraw(&stream_id);
+
+        let cfg_after = ctx.client().get_config();
+        assert_eq!(cfg_after.token, cfg_before.token);
+        assert_eq!(cfg_after.admin, cfg_before.admin);
+    }
+
+    /// set_admin updates Config.admin without touching Config.token.
+    #[test]
+    fn config_key_admin_rotation_preserves_token() {
+        let ctx = TestContext::setup();
+        let new_admin = soroban_sdk::Address::generate(&ctx.env);
+        ctx.client().set_admin(&new_admin);
+        let cfg = ctx.client().get_config();
+        assert_eq!(cfg.token, ctx.token_id, "token must not change on admin rotation");
+        assert_eq!(cfg.admin, new_admin);
+    }
+
+    // -----------------------------------------------------------------------
+    // 2. NextStreamId (discriminant 1) — instance storage
+    // -----------------------------------------------------------------------
+
+    /// NextStreamId starts at 0 after init.
+    #[test]
+    fn next_stream_id_starts_at_zero() {
+        let ctx = TestContext::setup();
+        assert_eq!(ctx.client().get_stream_count(), 0);
+    }
+
+    /// NextStreamId increments by 1 for each created stream and never decrements.
+    #[test]
+    fn next_stream_id_monotonically_increases() {
+        let ctx = TestContext::setup();
+        assert_eq!(ctx.client().get_stream_count(), 0);
+        ctx.create_default_stream();
+        assert_eq!(ctx.client().get_stream_count(), 1);
+        ctx.client().create_stream(
+            &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+        );
+        assert_eq!(ctx.client().get_stream_count(), 2);
+    }
+
+    /// NextStreamId is not affected by cancel or withdraw (terminal state changes).
+    #[test]
+    fn next_stream_id_unaffected_by_cancel_or_withdraw() {
+        let ctx = TestContext::setup();
+        let stream_id = ctx.create_default_stream();
+        assert_eq!(ctx.client().get_stream_count(), 1);
+
+        ctx.env.ledger().set_timestamp(500);
+        ctx.client().cancel_stream(&stream_id);
+        assert_eq!(ctx.client().get_stream_count(), 1, "cancel must not change stream count");
+
+        // Create another stream starting at current ledger time
+        let stream_id2 = ctx.client().create_stream(
+            &ctx.sender, &ctx.recipient, &1000, &1, &500, &500, &1500,
+        );
+        ctx.env.ledger().set_timestamp(1500);
+        ctx.client().withdraw(&stream_id2);
+        assert_eq!(ctx.client().get_stream_count(), 2, "withdraw must not change stream count");
+    }
+
+    // -----------------------------------------------------------------------
+    // 3. Stream(u64) (discriminant 2) — persistent storage
+    // -----------------------------------------------------------------------
+
+    /// Stream entry is readable immediately after creation with correct fields.
+    #[test]
+    fn stream_key_readable_after_create() {
+        let ctx = TestContext::setup();
+        let stream_id = ctx.create_default_stream();
+        let state = ctx.client().get_stream_state(&stream_id);
+        assert_eq!(state.stream_id, stream_id);
+        assert_eq!(state.deposit_amount, 1000);
+        assert_eq!(state.rate_per_second, 1);
+        assert_eq!(state.withdrawn_amount, 0);
+        assert_eq!(state.status, StreamStatus::Active);
+        assert!(state.cancelled_at.is_none());
+    }
+
+    /// Stream entry reflects status mutations (pause, resume, cancel).
+    #[test]
+    fn stream_key_reflects_status_mutations() {
+        let ctx = TestContext::setup();
+        let stream_id = ctx.create_default_stream();
+
+        ctx.env.ledger().set_timestamp(100);
+        ctx.client().pause_stream(&stream_id);
+        assert_eq!(ctx.client().get_stream_state(&stream_id).status, StreamStatus::Paused);
+
+        ctx.client().resume_stream(&stream_id);
+        assert_eq!(ctx.client().get_stream_state(&stream_id).status, StreamStatus::Active);
+
+        ctx.env.ledger().set_timestamp(500);
+        ctx.client().cancel_stream(&stream_id);
+        let state = ctx.client().get_stream_state(&stream_id);
+        assert_eq!(state.status, StreamStatus::Cancelled);
+        assert_eq!(state.cancelled_at, Some(500));
+    }
+
+    /// Stream entry reflects withdrawn_amount after withdraw.
+    #[test]
+    fn stream_key_reflects_withdrawn_amount() {
+        let ctx = TestContext::setup();
+        let stream_id = ctx.create_default_stream();
+
+        ctx.env.ledger().set_timestamp(400);
+        ctx.client().withdraw(&stream_id);
+        assert_eq!(ctx.client().get_stream_state(&stream_id).withdrawn_amount, 400);
+    }
+
+    /// Stream entry for unknown ID returns StreamNotFound.
+    #[test]
+    fn stream_key_missing_returns_stream_not_found() {
+        let ctx = TestContext::setup();
+        let result = ctx.client().try_get_stream_state(&9999);
+        assert_eq!(result, Err(Ok(ContractError::StreamNotFound)));
+    }
+
+    /// Stream entry is removed after close_completed_stream.
+    #[test]
+    fn stream_key_removed_after_close() {
+        let ctx = TestContext::setup();
+        let stream_id = ctx.create_default_stream();
+        ctx.env.ledger().set_timestamp(1000);
+        ctx.client().withdraw(&stream_id);
+        ctx.client().close_completed_stream(&stream_id);
+        let result = ctx.client().try_get_stream_state(&stream_id);
+        assert_eq!(result, Err(Ok(ContractError::StreamNotFound)));
+    }
+
+    // -----------------------------------------------------------------------
+    // 4. RecipientStreams(Address) (discriminant 3) — persistent storage
+    // -----------------------------------------------------------------------
+
+    /// RecipientStreams is empty before any stream is created for a recipient.
+    #[test]
+    fn recipient_streams_key_empty_before_create() {
+        let ctx = TestContext::setup();
+        let count = ctx.client().get_recipient_stream_count(&ctx.recipient);
+        assert_eq!(count, 0);
+    }
+
+    /// RecipientStreams is populated after stream creation and sorted.
+    #[test]
+    fn recipient_streams_key_populated_after_create() {
+        let ctx = TestContext::setup();
+        let id0 = ctx.create_default_stream();
+        let id1 = ctx.client().create_stream(
+            &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+        );
+        let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+        assert_eq!(streams.len(), 2);
+        assert_eq!(streams.get(0).unwrap(), id0);
+        assert_eq!(streams.get(1).unwrap(), id1);
+    }
+
+    /// RecipientStreams entry is removed after close_completed_stream.
+    #[test]
+    fn recipient_streams_key_updated_after_close() {
+        let ctx = TestContext::setup();
+        let stream_id = ctx.create_default_stream();
+        ctx.env.ledger().set_timestamp(1000);
+        ctx.client().withdraw(&stream_id);
+        ctx.client().close_completed_stream(&stream_id);
+        assert_eq!(ctx.client().get_recipient_stream_count(&ctx.recipient), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // 5. GlobalPaused (discriminant 4) — instance storage
+    // -----------------------------------------------------------------------
+
+    /// GlobalPaused defaults to false (create_stream works without explicit set).
+    #[test]
+    fn global_paused_defaults_false() {
+        let ctx = TestContext::setup();
+        // If GlobalPaused were true by default, create_stream would fail
+        let result = ctx.client().try_create_stream(
+            &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+        );
+        assert!(result.is_ok(), "GlobalPaused must default to false");
+    }
+
+    /// GlobalPaused=true blocks create_stream with ContractPaused.
+    #[test]
+    fn global_paused_true_blocks_create_stream() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+        ctx.client().set_contract_paused(&true);
+        let result = ctx.client().try_create_stream(
+            &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+        );
+        assert_eq!(result, Err(Ok(ContractError::ContractPaused)));
+    }
+
+    /// GlobalPaused=false after set_contract_paused(false) allows create_stream.
+    #[test]
+    fn global_paused_false_allows_create_stream() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+        ctx.client().set_contract_paused(&true);
+        ctx.client().set_contract_paused(&false);
+        let result = ctx.client().try_create_stream(
+            &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+        );
+        assert!(result.is_ok());
+    }
+
+    /// GlobalPaused does not affect withdraw or cancel on existing streams.
+    #[test]
+    fn global_paused_does_not_affect_existing_streams() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+        let stream_id = ctx.create_default_stream();
+
+        ctx.client().set_contract_paused(&true);
+
+        ctx.env.ledger().set_timestamp(500);
+        let withdrawn = ctx.client().withdraw(&stream_id);
+        assert_eq!(withdrawn, 500, "withdraw must work while contract is paused");
+
+        ctx.client().cancel_stream(&stream_id);
+        assert_eq!(
+            ctx.client().get_stream_state(&stream_id).status,
+            StreamStatus::Cancelled,
+            "cancel must work while contract is paused"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 6. Instance vs persistent storage independence
+    // -----------------------------------------------------------------------
+
+    /// Instance storage (Config, NextStreamId, GlobalPaused) and persistent
+    /// storage (Stream, RecipientStreams) are independent — mutating one does
+    /// not corrupt the other.
+    #[test]
+    fn instance_and_persistent_storage_are_independent() {
+        let ctx = TestContext::setup();
+        let stream_id = ctx.create_default_stream();
+
+        // Mutate instance storage
+        let new_admin = soroban_sdk::Address::generate(&ctx.env);
+        ctx.client().set_admin(&new_admin);
+        ctx.client().set_contract_paused(&true);
+        ctx.client().set_contract_paused(&false);
+
+        // Persistent storage must be unaffected
+        let state = ctx.client().get_stream_state(&stream_id);
+        assert_eq!(state.deposit_amount, 1000);
+        assert_eq!(state.status, StreamStatus::Active);
+
+        // Instance storage must reflect mutations
+        assert_eq!(ctx.client().get_config().admin, new_admin);
+    }
+
+} // mod datakey_evolution_policy

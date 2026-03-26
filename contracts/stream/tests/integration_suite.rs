@@ -2839,3 +2839,113 @@ fn integration_create_streams_single_token_pull_equals_sum() {
     assert_eq!(ctx.token.balance(&ctx.sender), sender_before - 3500);
     assert_eq!(ctx.token.balance(&ctx.contract_id), 3500);
 }
+
+// ===========================================================================
+// DataKey evolution policy — integration tests
+// ===========================================================================
+
+/// Config key (discriminant 0): readable after init with correct values.
+#[test]
+fn datakey_config_readable_after_init() {
+    let ctx = TestContext::setup();
+    let cfg = ctx.client().get_config();
+    assert_eq!(cfg.token, ctx.token_id);
+    assert_eq!(cfg.admin, ctx.admin);
+}
+
+/// NextStreamId key (discriminant 1): monotonically increases with each stream.
+#[test]
+fn datakey_next_stream_id_monotonic() {
+    let ctx = TestContext::setup();
+    assert_eq!(ctx.client().get_stream_count(), 0);
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
+    assert_eq!(ctx.client().get_stream_count(), 1);
+    ctx.client().create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
+    assert_eq!(ctx.client().get_stream_count(), 2);
+}
+
+/// Stream key (discriminant 2): entry readable after create, reflects mutations.
+#[test]
+fn datakey_stream_key_readable_and_mutable() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+    );
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Active);
+    assert_eq!(state.withdrawn_amount, 0);
+
+    ctx.env.ledger().set_timestamp(600);
+    ctx.client().withdraw(&stream_id);
+    assert_eq!(ctx.client().get_stream_state(&stream_id).withdrawn_amount, 600);
+}
+
+/// Stream key (discriminant 2): removed after close_completed_stream.
+#[test]
+fn datakey_stream_key_removed_after_close() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+    );
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+    ctx.client().close_completed_stream(&stream_id);
+    let result = ctx.client().try_get_stream_state(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::StreamNotFound)));
+}
+
+/// RecipientStreams key (discriminant 3): populated and sorted after create.
+#[test]
+fn datakey_recipient_streams_populated_and_sorted() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let id0 = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+    );
+    let id1 = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+    );
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 2);
+    assert_eq!(streams.get(0).unwrap(), id0);
+    assert_eq!(streams.get(1).unwrap(), id1);
+}
+
+/// GlobalPaused key (discriminant 4): defaults false, blocks create when true.
+#[test]
+fn datakey_global_paused_blocks_create_when_true() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().set_contract_paused(&true);
+    let result = ctx.client().try_create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+    );
+    assert_eq!(result, Err(Ok(ContractError::ContractPaused)));
+    ctx.client().set_contract_paused(&false);
+    let result2 = ctx.client().try_create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+    );
+    assert!(result2.is_ok());
+}
+
+/// GlobalPaused key (discriminant 4): does not affect withdraw or cancel.
+#[test]
+fn datakey_global_paused_does_not_affect_existing_streams() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+    );
+    ctx.client().set_contract_paused(&true);
+    ctx.env.ledger().set_timestamp(500);
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn, 500);
+    ctx.client().cancel_stream(&stream_id);
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).status,
+        StreamStatus::Cancelled
+    );
+}

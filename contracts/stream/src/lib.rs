@@ -184,6 +184,35 @@ pub struct CreateStreamParams {
 }
 
 /// Namespace for all contract storage keys.
+///
+/// # Evolution policy
+///
+/// `DataKey` is a `#[contracttype]` enum. Soroban serialises enum variants by
+/// their **discriminant index** (0-based, in declaration order). Changing the
+/// order of existing variants, or inserting a new variant anywhere other than
+/// the **end** of the enum, will silently shift all subsequent discriminants
+/// and make every existing persistent storage entry unreadable.
+///
+/// Rules for contributors:
+/// 1. **Never reorder** existing variants.
+/// 2. **Never remove** a variant that has ever been written to a live network.
+///    Mark it deprecated in a doc comment instead and stop writing to it.
+/// 3. **Always append** new variants at the end of the enum.
+/// 4. **Increment `CONTRACT_VERSION`** whenever a new variant is added or an
+///    existing variant's associated type changes — both are breaking changes
+///    for any off-chain tool that reads storage directly.
+/// 5. Document the ledger at which each variant was first deployed so that
+///    migration tooling can determine which entries exist on a given instance.
+///
+/// Current discriminant assignments (must never change):
+///
+/// | Discriminant | Variant | Storage type | Notes |
+/// |---|---|---|---|
+/// | 0 | `Config` | Instance | Set at `init`; mutated only by `set_admin` |
+/// | 1 | `NextStreamId` | Instance | Monotonically increasing `u64` counter |
+/// | 2 | `Stream(u64)` | Persistent | One entry per stream |
+/// | 3 | `RecipientStreams(Address)` | Persistent | Sorted `Vec<u64>` of stream IDs |
+/// | 4 | `GlobalPaused` | Instance | `bool`; appended to avoid shifting earlier discriminants |
 #[contracttype]
 pub enum DataKey {
     Config,                    // Instance storage for global settings (admin/token).
