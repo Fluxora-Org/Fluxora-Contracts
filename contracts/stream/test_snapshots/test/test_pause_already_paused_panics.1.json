@@ -1545,18 +1545,16 @@
           "v0": {
             "topics": [
               {
-                "symbol": "log"
+                "symbol": "fn_return"
+              },
+              {
+                "symbol": "pause_stream"
               }
             ],
             "data": {
-              "vec": [
-                {
-                  "string": "caught panic 'stream is already paused' from contract function 'Symbol(obj#375)'"
-                },
-                {
-                  "u64": 0
-                }
-              ]
+              "error": {
+                "contract": 2
+              }
             }
           }
         }
@@ -1576,12 +1574,12 @@
               },
               {
                 "error": {
-                  "wasm_vm": "invalid_action"
+                  "contract": 2
                 }
               }
             ],
             "data": {
-              "string": "caught error from function"
+              "string": "escalating Ok(ScErrorType::Contract) frame-exit to Err"
             }
           }
         }
@@ -1601,7 +1599,7 @@
               },
               {
                 "error": {
-                  "wasm_vm": "invalid_action"
+                  "contract": 2
                 }
               }
             ],
@@ -1640,7 +1638,7 @@
               },
               {
                 "error": {
-                  "wasm_vm": "invalid_action"
+                  "contract": 2
                 }
               }
             ],

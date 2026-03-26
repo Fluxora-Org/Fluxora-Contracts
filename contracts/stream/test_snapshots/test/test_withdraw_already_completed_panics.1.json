@@ -1766,18 +1766,16 @@
           "v0": {
             "topics": [
               {
-                "symbol": "log"
+                "symbol": "fn_return"
+              },
+              {
+                "symbol": "withdraw"
               }
             ],
             "data": {
-              "vec": [
-                {
-                  "string": "caught panic 'stream already completed' from contract function 'Symbol(withdraw)'"
-                },
-                {
-                  "u64": 0
-                }
-              ]
+              "error": {
+                "contract": 2
+              }
             }
           }
         }
@@ -1797,12 +1795,12 @@
               },
               {
                 "error": {
-                  "wasm_vm": "invalid_action"
+                  "contract": 2
                 }
               }
             ],
             "data": {
-              "string": "caught error from function"
+              "string": "escalating Ok(ScErrorType::Contract) frame-exit to Err"
             }
           }
         }
@@ -1822,7 +1820,7 @@
               },
               {
                 "error": {
-                  "wasm_vm": "invalid_action"
+                  "contract": 2
                 }
               }
             ],
@@ -1861,7 +1859,7 @@
               },
               {
                 "error": {
-                  "wasm_vm": "invalid_action"
+                  "contract": 2
                 }
               }
             ],

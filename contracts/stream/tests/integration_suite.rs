@@ -1,6 +1,6 @@
 extern crate std;
 
-use fluxora_stream::{CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamStatus};
+use fluxora_stream::{ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamStatus};
 use soroban_sdk::log;
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
@@ -94,10 +94,10 @@ fn init_sets_config_and_keeps_token_address() {
 }
 
 #[test]
-#[should_panic(expected = "already initialised")]
 fn init_twice_panics() {
     let ctx = TestContext::setup();
-    ctx.client().init(&ctx.token_id, &ctx.admin);
+    let result = ctx.client().try_init(&ctx.token_id, &ctx.admin);
+    assert_eq!(result, Err(Ok(ContractError::AlreadyInitialised)));
 }
 
 #[test]
@@ -143,19 +143,26 @@ fn init_wrong_signer_rejected_and_bootstrap_state_unset() {
         },
     }]);
 
+    // In mock_all_auths() mode, provide_auth is usually enough, but here we 
+    // are testing explicit authorization failure. 
+    // Soroban's require_auth will still panic in testutils even if we use try_init,
+    // if the auth is missing. However, we want to move away from catch_unwind
+    // for contract errors. In this specific case of auth failure, catch_unwind
+    // might still be needed if we want to assert it doesn't persist state,
+    // as auth failures in Soroban are host-traps.
+    
     let init_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         client.init(&token_id, &admin);
     }));
     assert!(init_result.is_err(), "init must reject non-admin signer");
 
-    let cfg_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.get_config();
-    }));
-    assert!(
-        cfg_result.is_err(),
-        "failed init auth must not persist bootstrap config"
-    );
-    assert_eq!(client.get_stream_count(), 0);
+    // Since it panicked, the config must not have been set.
+    let count = client.get_stream_count();
+    assert_eq!(count, 0);
+    
+    // get_config should return Err(ContractError::InvalidState) if not initialized
+    let cfg_result = client.try_get_config();
+    assert_eq!(cfg_result, Err(Ok(ContractError::InvalidState)));
 }
 
 // ---------------------------------------------------------------------------
@@ -174,10 +181,9 @@ fn reinit_with_different_params_preserves_config() {
     // Attempt re-init with completely different addresses
     let new_token = Address::generate(&ctx.env);
     let new_admin = Address::generate(&ctx.env);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.client().init(&new_token, &new_admin);
-    }));
-    assert!(result.is_err(), "re-init should have panicked");
+    
+    let result = ctx.client().try_init(&new_token, &new_admin);
+    assert_eq!(result, Err(Ok(ContractError::AlreadyInitialised)));
 
     // Config must be unchanged
     let after = ctx.client().get_config();
@@ -202,10 +208,8 @@ fn stream_counter_unaffected_by_reinit_attempt() {
 
     // Attempt re-init (should fail)
     let new_admin = Address::generate(&ctx.env);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.client().init(&ctx.token_id, &new_admin);
-    }));
-    assert!(result.is_err(), "re-init should have panicked");
+    let result = ctx.client().try_init(&ctx.token_id, &new_admin);
+    assert_eq!(result, Err(Ok(ContractError::AlreadyInitialised)));
 
     // Create second stream — counter must still be 1
     ctx.env.ledger().set_timestamp(0);
@@ -256,19 +260,17 @@ fn create_stream_rejects_self_stream_without_side_effects() {
     let contract_balance_before = ctx.token.balance(&ctx.contract_id);
     let events_before = ctx.env.events().all().len();
 
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.client().create_stream(
-            &ctx.sender,
-            &ctx.sender, // invalid: sender == recipient
-            &1000_i128,
-            &1_i128,
-            &0u64,
-            &0u64,
-            &1000u64,
-        );
-    }));
+    let result = ctx.client().try_create_stream(
+        &ctx.sender,
+        &ctx.sender, // invalid: sender == recipient
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
 
-    assert!(result.is_err(), "self-streaming must be rejected");
+    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
     assert_eq!(
         ctx.client().get_stream_count(),
         stream_count_before,
@@ -359,13 +361,9 @@ fn create_streams_batch_invalid_entry_is_atomic_and_emits_no_events() {
     let events_before = ctx.env.events().all().len();
 
     let streams = vec![&ctx.env, valid, invalid];
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.client().create_streams(&ctx.sender, &streams);
-    }));
-    assert!(
-        result.is_err(),
-        "batch with invalid entry must fail atomically"
-    );
+    let result = ctx.client().try_create_streams(&ctx.sender, &streams);
+    
+    assert_eq!(result, Err(Ok(ContractError::InsufficientDeposit)));
     assert_eq!(ctx.client().get_stream_count(), stream_count_before);
     assert_eq!(ctx.token.balance(&ctx.sender), sender_balance_before);
     assert_eq!(ctx.token.balance(&ctx.contract_id), contract_balance_before);
@@ -455,7 +453,7 @@ fn full_lifecycle_create_withdraw_to_completion() {
 fn get_stream_state_unknown_id_panics() {
     let ctx = TestContext::setup();
     let result = ctx.client().try_get_stream_state(&99);
-    assert!(result.is_err());
+    assert_eq!(result, Err(Ok(ContractError::StreamNotFound)));
 }
 
 #[test]
@@ -463,19 +461,17 @@ fn create_stream_rejects_underfunded_deposit() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
 
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.client().create_stream(
-            &ctx.sender,
-            &ctx.recipient,
-            &100_i128,
-            &1_i128,
-            &0u64,
-            &0u64,
-            &1000u64,
-        );
-    }));
+    let result = ctx.client().try_create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &100_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
 
-    assert!(result.is_err());
+    assert_eq!(result, Err(Ok(ContractError::InsufficientDeposit)));
     assert_eq!(ctx.token.balance(&ctx.sender), 10_000);
     assert_eq!(ctx.token.balance(&ctx.contract_id), 0);
 }
@@ -616,7 +612,6 @@ fn withdraw_final_drain_emits_withdrew_then_completed() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract")]
 fn cancel_completed_stream_panics() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
@@ -625,12 +620,12 @@ fn cancel_completed_stream_panics() {
     ctx.env.ledger().set_timestamp(1000);
     ctx.client().withdraw(&stream_id);
 
-    // Attempt to cancel completed stream should panic
-    ctx.client().cancel_stream(&stream_id);
+    // Attempt to cancel completed stream should return error
+    let result = ctx.client().try_cancel_stream(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::InvalidState)));
 }
 
 #[test]
-#[should_panic(expected = "stream already completed")]
 fn withdraw_from_completed_stream_panics() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
@@ -638,19 +633,20 @@ fn withdraw_from_completed_stream_panics() {
     ctx.env.ledger().set_timestamp(1000);
     ctx.client().withdraw(&stream_id);
 
-    // Second withdraw should panic
-    ctx.client().withdraw(&stream_id);
+    // Second withdraw should return error
+    let result = ctx.client().try_withdraw(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::InvalidState)));
 }
 
 #[test]
-#[should_panic(expected = "cannot withdraw from paused stream")]
 fn withdraw_from_paused_stream_panics() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(500);
     ctx.client().pause_stream(&stream_id);
-    ctx.client().withdraw(&stream_id);
+    let result = ctx.client().try_withdraw(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::InvalidState)));
 }
 
 #[test]
@@ -1383,19 +1379,17 @@ fn integration_failed_creation_does_not_advance_counter() {
     );
     assert_eq!(id0, 0, "first stream must be id 0");
 
-    // Attempt a stream with an underfunded deposit → must panic
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.client().create_stream(
-            &ctx.sender,
-            &ctx.recipient,
-            &1_i128, // deposit < rate * duration
-            &1_i128,
-            &0u64,
-            &0u64,
-            &1000u64,
-        );
-    }));
-    assert!(result.is_err(), "underfunded create_stream must panic");
+    // Attempt a stream with an underfunded deposit → must return error
+    let result = ctx.client().try_create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1_i128, // deposit < rate * duration
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+    assert_eq!(result, Err(Ok(ContractError::InsufficientDeposit)));
 
     // Next successful stream must be id = 1, not 2
     let id1 = ctx.client().create_stream(
@@ -1553,22 +1547,9 @@ fn integration_pause_resume_withdraw_lifecycle() {
         "accrual must continue during pause period"
     );
 
-    // Attempt to withdraw while paused — should fail
-    let withdrawal_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.client().withdraw(&stream_id);
-    }));
-    let err = withdrawal_result.expect_err("withdrawal should panic while stream is paused");
-    // Ensure the panic reason matches the expected paused-stream invariant
-    let panic_msg = err
-        .downcast_ref::<&str>()
-        .copied()
-        .or_else(|| err.downcast_ref::<String>().map(|s| s.as_str()))
-        .unwrap_or("<non-string panic payload>");
-    assert!(
-        panic_msg.contains("cannot withdraw from paused stream"),
-        "unexpected panic message when withdrawing from paused stream: {}",
-        panic_msg
-    );
+    // Attempt to withdraw while paused — should fail with InvalidState
+    let withdrawal_result = ctx.client().try_withdraw(&stream_id);
+    assert_eq!(withdrawal_result, Err(Ok(ContractError::InvalidState)));
 
     // Verify stream still paused and no tokens transferred
     let state = ctx.client().get_stream_state(&stream_id);
@@ -1914,7 +1895,7 @@ fn integration_extend_end_time_insufficient_deposit_rejected_no_side_effects() {
     let result = ctx
         .client()
         .try_extend_stream_end_time(&stream_id, &2000u64);
-    assert!(result.is_err(), "extension must fail");
+    assert_eq!(result, Err(Ok(ContractError::InsufficientDeposit)));
 
     // Balances unchanged
     assert_eq!(ctx.token.balance(&ctx.sender), sender_before);
@@ -2119,6 +2100,104 @@ fn integration_batch_withdraw_completed_streams_yield_zero() {
 }
 
 // ===========================================================================
+// Integration: get_claimable_at simulation and cancel clamping (Issue #270)
+// ===========================================================================
+
+/// Full lifecycle: claimable_at predicts correctly before and after each operation.
+#[test]
+fn integration_claimable_at_lifecycle_prediction() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream(); // 0..1000, rate=1, deposit=1000
+
+    // Before any operation: simulate at t=500 → 500
+    assert_eq!(ctx.client().get_claimable_at(&stream_id, &500), 500);
+
+    // Withdraw 300 at t=300
+    ctx.env.ledger().set_timestamp(300);
+    ctx.client().withdraw(&stream_id);
+    assert_eq!(ctx.token.balance(&ctx.recipient), 300);
+
+    // After withdraw: simulate at t=800 → accrued=800, withdrawn=300 → 500
+    assert_eq!(ctx.client().get_claimable_at(&stream_id, &800), 500);
+
+    // Simulate at end → 700
+    assert_eq!(ctx.client().get_claimable_at(&stream_id, &1000), 700);
+
+    // Actually withdraw at t=1000
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+    assert_eq!(ctx.token.balance(&ctx.recipient), 1000);
+
+    // Completed: claimable always 0
+    assert_eq!(ctx.client().get_claimable_at(&stream_id, &9999), 0);
+}
+
+/// Cancel clamping: claimable prediction matches actual fund flow.
+#[test]
+fn integration_claimable_at_cancel_matches_funds() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Cancel at t=600
+    ctx.env.ledger().set_timestamp(600);
+    ctx.client().cancel_stream(&stream_id);
+
+    // Claimable prediction: 600 at any future time
+    assert_eq!(ctx.client().get_claimable_at(&stream_id, &9999), 600);
+
+    // Actually withdraw what's claimable
+    ctx.client().withdraw(&stream_id);
+    assert_eq!(
+        ctx.token.balance(&ctx.recipient),
+        600,
+        "actual withdrawal must match claimable prediction"
+    );
+
+    // After withdraw: claimable drops to 0
+    assert_eq!(ctx.client().get_claimable_at(&stream_id, &9999), 0);
+}
+
+/// Partial withdraw then cancel: prediction verified against real withdrawal.
+#[test]
+fn integration_claimable_at_partial_then_cancel() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Withdraw 200 at t=200
+    ctx.env.ledger().set_timestamp(200);
+    ctx.client().withdraw(&stream_id);
+
+    // Cancel at t=700
+    ctx.env.ledger().set_timestamp(700);
+    ctx.client().cancel_stream(&stream_id);
+
+    // Prediction: accrued clamped at 700, withdrawn 200 → claimable=500
+    let predicted = ctx.client().get_claimable_at(&stream_id, &999_999);
+    assert_eq!(predicted, 500);
+
+    // Actual withdraw
+    ctx.client().withdraw(&stream_id);
+    assert_eq!(ctx.token.balance(&ctx.recipient), 700); // 200 + 500
+
+    // After full withdraw: claimable=0
+    assert_eq!(ctx.client().get_claimable_at(&stream_id, &999_999), 0);
+}
+
+/// Claimable at current time matches get_withdrawable across multiple time points.
+#[test]
+fn integration_claimable_at_equals_withdrawable() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    for &t in &[0u64, 250, 500, 750, 1000] {
+        ctx.env.ledger().set_timestamp(t);
+        let withdrawable = ctx.client().get_withdrawable(&stream_id);
+        let claimable = ctx.client().get_claimable_at(&stream_id, &t);
+        assert_eq!(
+            withdrawable, claimable,
+            "at t={t}: get_withdrawable != get_claimable_at"
+        );
+    }
 // Integration regression: double-init and missing-config reads (Issue #246)
 // ===========================================================================
 
