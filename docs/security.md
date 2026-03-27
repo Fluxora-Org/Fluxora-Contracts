@@ -13,3 +13,9 @@ The contract follows the **Checks-Effects-Interactions** pattern to reduce reent
   After checks and computing the refund amount, the contract sets `stream.status = Cancelled` and calls `save_stream`. The refund transfer to the sender is performed only after the updated state is saved.
 
 This ordering ensures that if a downstream token contract or hook re-enters the stream contract, the on-chain state (e.g. `withdrawn_amount`, `status`) already reflects the current operation, limiting reentrancy impact. For broader reentrancy mitigation, see [Issue #55](https://github.com/Fluxora-Org/Fluxora-Contracts/issues/55).
+
+## Global emergency pause
+
+The admin may set instance flag `GlobalEmergencyPaused` via `set_global_emergency_paused`. User-facing mutations that could move funds or change stream configuration check this flag first and panic with `contract is globally paused` so incidents can freeze routine traffic without deleting data.
+
+Admin-only paths (`*_as_admin`, toggling the flag) and all read-only views remain available. Operational semantics and the allow/deny matrix are documented in `docs/streaming.md` under **Global emergency pause**.

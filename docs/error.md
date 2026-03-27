@@ -31,3 +31,8 @@ This table lists all possible errors in the FluxoraStream contract, including bo
 | `contract not initialised: missing config`     | Contract storage not initialized before access                                  | `get_config`, `get_token`, `get_admin` |
 | `InvalidState`                                  | Operation attempted on a stream in an invalid state (Paused, Completed, Cancelled) | `pause_stream`, `resume_stream`, `cancel_stream`, `withdraw` |
 | `InvalidParams`                                 | Function input parameters are invalid (generic catch-all for asserts)          | `create_stream` |
+| `contract is globally paused`                   | Global emergency pause is active; routine mutation blocked                      | `create_stream`, `create_streams`, `pause_stream`, `resume_stream`, `cancel_stream`, `withdraw`, `withdraw_to`, `batch_withdraw`, `update_rate_per_second`, `shorten_stream_end_time`, `extend_stream_end_time`, `top_up_stream`, `set_admin` |
+| `only stream sender or admin may top up`       | `top_up_stream` funder must be the stream sender or contract admin            | `top_up_stream` |
+| `batch_withdraw stream_ids must be unique`      | Duplicate stream IDs in `batch_withdraw` input are rejected                      | `batch_withdraw` |
+| `top up amount must be positive`                | Top-up `amount` must be > 0                                                    | `top_up_stream` |
+| `can only top up active or paused streams`     | Cannot top up completed or cancelled streams                                    | `top_up_stream` |

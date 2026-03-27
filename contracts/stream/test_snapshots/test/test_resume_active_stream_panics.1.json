@@ -1368,7 +1368,7 @@
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'stream is active, not paused' from contract function 'Symbol(obj#315)'"
+                  "string": "caught panic 'stream is active, not paused' from contract function 'Symbol(obj#319)'"
                 },
                 {
                   "u64": 0

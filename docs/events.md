@@ -21,6 +21,8 @@ Notes:
 | StreamResumed | ["resumed", stream_id] | StreamEvent::Resumed(stream_id) — enum wrapper containing the u64 stream id | When a paused stream is resumed by the sender or admin.
 | StreamCancelled | ["cancelled", stream_id] | StreamEvent::Cancelled(stream_id) — enum wrapper containing the u64 stream id | When a stream is cancelled by the sender or admin.
 | AdminUpdated | ["admin", "updated"] | (old_admin: Address, new_admin: Address) | When contract admin is rotated via `set_admin`.
+| StreamToppedUp | ["top_up", stream_id] | `StreamToppedUp { stream_id, top_up_amount, new_deposit_amount }` | After a successful `top_up_stream`.
+| GlobalEmergencyPauseChanged | ["gl_pause"] | `GlobalEmergencyPauseChanged { paused }` | After `set_global_emergency_paused`.
 
 ## Exact Soroban event structure
 

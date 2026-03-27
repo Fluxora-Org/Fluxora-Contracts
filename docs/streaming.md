@@ -18,21 +18,15 @@ When changing the contract:
 
 ### Phases
 
-| Phase            | Action                                     | Notes                                                                   |
-| ---------------- | ------------------------------------------ | ----------------------------------------------------------------------- |
-| **Creation**     | `create_stream`                            | Sender deposits tokens; stream starts as `Active`                       |
-| **Pause**        | `pause_stream` / `pause_stream_as_admin`   | Stops withdrawals; accrual continues by time                            |
-| **Resume**       | `resume_stream` / `resume_stream_as_admin` | Restores withdrawals                                                    |
-| Phase            | Action                                     | Notes                                                                   |
-| ---------------- | ------------------------------------------ | ----------------------------------------------------------------------- |
-| **Creation**     | `create_stream`                            | Sender deposits tokens; stream starts as `Active`                       |
-| **Pause**        | `pause_stream` / `pause_stream_as_admin`   | Stops withdrawals; accrual continues by time                            |
-| **Resume**       | `resume_stream` / `resume_stream_as_admin` | Restores withdrawals                                                    |
-| **Cancellation** | `cancel_stream` / `cancel_stream_as_admin` | Refunds unstreamed amount to sender; accrued amount stays for recipient |
-| **Withdrawal**   | `withdraw`                                 | Recipient pulls accrued tokens                                          |
-| **Completion**   | Automatic                                  | When `withdrawn_amount == deposit_amount`, status becomes `Completed`   |
-| **Withdrawal**   | `withdraw`                                 | Recipient pulls accrued tokens                                          |
-| **Completion**   | Automatic                                  | When `withdrawn_amount == deposit_amount`, status becomes `Completed`   |
+| Phase            | Action                                       | Notes                                                                   |
+| ---------------- | -------------------------------------------- | ----------------------------------------------------------------------- |
+| **Creation**     | `create_stream`                              | Sender deposits tokens; stream starts as `Active`                       |
+| **Top-up**       | `top_up_stream`                              | Extra deposit locked (sender or admin only); schedule unchanged         |
+| **Pause**        | `pause_stream` / `pause_stream_as_admin`     | Stops withdrawals; accrual continues by time                            |
+| **Resume**       | `resume_stream` / `resume_stream_as_admin`   | Restores withdrawals                                                    |
+| **Cancellation** | `cancel_stream` / `cancel_stream_as_admin`   | Refunds unstreamed amount to sender; accrued amount stays for recipient |
+| **Withdrawal**   | `withdraw` / `withdraw_to` / `batch_withdraw` | Recipient pulls accrued tokens                                       |
+| **Completion**   | Automatic                                    | When `withdrawn_amount == deposit_amount`, status becomes `Completed`   |
 
 ### State Transitions
 
@@ -224,9 +218,30 @@ deposit_amount >= rate_per_second * (end_time - start_time)
 | `resume_stream_as_admin` | Admin             | `admin.require_auth()`     |
 | `cancel_stream_as_admin` | Admin             | `admin.require_auth()`     |
 | `close_completed_stream` | Anyone            | None (permissionless cleanup) |
-| `top_up_stream`          | Funder address    | `funder.require_auth()`    |
+| `top_up_stream`          | Stream sender **or** admin | `funder.require_auth()`; funder must equal stream `sender` or contract `admin` |
+| `set_global_emergency_paused` | Admin       | `admin.require_auth()`     |
+| `get_global_emergency_paused` | Anyone     | None (view)                |
 
 **Note:** Sender-managed functions (`pause_stream`, `resume_stream`, `cancel_stream`) require sender auth. Admin uses separate `_as_admin` entry points.
+
+### Global emergency pause
+
+- **Storage:** Boolean `GlobalEmergencyPaused` in instance storage (default `false`).
+- **Toggle:** `set_global_emergency_paused(paused)` — admin only; emits `gl_pause` → `GlobalEmergencyPauseChanged { paused }`.
+- **Read:** `get_global_emergency_paused()`.
+
+When paused (`true`), the following **panic** with `contract is globally paused` at entry:
+
+`create_stream`, `create_streams`, `pause_stream`, `resume_stream`, `cancel_stream`, `withdraw`, `withdraw_to`, `batch_withdraw`, `update_rate_per_second`, `shorten_stream_end_time`, `extend_stream_end_time`, `top_up_stream`, `set_admin`.
+
+**Still allowed (observability / operations):**
+
+- All read-only views: `calculate_accrued`, `get_withdrawable`, `get_claimable_at`, `get_stream_state`, `get_config`, `get_recipient_streams`, `get_global_emergency_paused`, etc.
+- **Per-stream pause semantics:** `calculate_accrued` for an **Active** or **Paused** stream still uses the current ledger timestamp. Global pause does **not** freeze accrual math; it only blocks token-moving / state-mutating entrypoints listed above (same pattern as per-stream pause: accrual follows time, withdrawal paths are gated).
+- **Admin override:** `pause_stream_as_admin`, `resume_stream_as_admin`, `cancel_stream_as_admin`, and `set_global_emergency_paused` remain callable by the admin while globally paused.
+- **Cleanup:** `close_completed_stream` remains callable (completed-stream archival only).
+
+`batch_withdraw` requires **unique** `stream_id` values in the input vector; duplicates panic with `batch_withdraw stream_ids must be unique`.
 
 ---
 

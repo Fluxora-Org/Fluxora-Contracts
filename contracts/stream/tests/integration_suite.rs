@@ -5,7 +5,7 @@ use soroban_sdk::log;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env,
+    vec, Address, Env,
 };
 
 struct TestContext<'a> {
@@ -1556,4 +1556,37 @@ fn test_create_many_streams_from_same_sender() {
     log!(&ctx.env, "mem_bytes", mem_bytes);
     // Guardrail: ensure memory usage stays bounded for 100 streams.
     assert!(mem_bytes <= 20_000_000);
+}
+
+/// Global emergency pause: withdraw path blocked, accrual still follows ledger time (#305-style).
+#[test]
+fn integration_global_pause_blocks_withdraw_but_time_accrual_continues() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    ctx.env.ledger().set_timestamp(300);
+    assert_eq!(ctx.client().calculate_accrued(&stream_id), 300);
+    ctx.client().set_global_emergency_paused(&true);
+    ctx.env.ledger().set_timestamp(500);
+    assert_eq!(
+        ctx.client().calculate_accrued(&stream_id),
+        500,
+        "calculate_accrued uses ledger time; global pause does not freeze accrual math"
+    );
+    let w = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().withdraw(&stream_id);
+    }));
+    assert!(w.is_err());
+    ctx.client().set_global_emergency_paused(&false);
+    assert_eq!(ctx.client().withdraw(&stream_id), 500);
+}
+
+/// `batch_withdraw` must reject duplicate IDs so results/events stay unambiguous (#309).
+#[test]
+#[should_panic(expected = "batch_withdraw stream_ids must be unique")]
+fn integration_batch_withdraw_duplicate_ids_panics() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    ctx.env.ledger().set_timestamp(200);
+    let ids = vec![&ctx.env, stream_id, stream_id];
+    let _ = ctx.client().batch_withdraw(&ctx.recipient, &ids);
 }
