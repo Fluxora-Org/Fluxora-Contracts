@@ -2839,3 +2839,140 @@ fn integration_create_streams_single_token_pull_equals_sum() {
     assert_eq!(ctx.token.balance(&ctx.sender), sender_before - 3500);
     assert_eq!(ctx.token.balance(&ctx.contract_id), 3500);
 }
+
+// ===========================================================================
+// close_completed_stream: permissionless cleanup and events — integration tests
+// ===========================================================================
+
+/// Success: close removes stream from storage and recipient index.
+#[test]
+fn close_completed_removes_stream_and_updates_index() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+    );
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    assert_eq!(ctx.client().get_recipient_stream_count(&ctx.recipient), 1);
+    ctx.client().close_completed_stream(&stream_id);
+
+    assert_eq!(ctx.client().try_get_stream_state(&stream_id), Err(Ok(ContractError::StreamNotFound)));
+    assert_eq!(ctx.client().get_recipient_stream_count(&ctx.recipient), 0);
+}
+
+/// Success: no tokens transferred during close.
+#[test]
+fn close_completed_does_not_move_tokens() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+    );
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    let recipient_bal = ctx.token.balance(&ctx.recipient);
+    let contract_bal = ctx.token.balance(&ctx.contract_id);
+    ctx.client().close_completed_stream(&stream_id);
+    assert_eq!(ctx.token.balance(&ctx.recipient), recipient_bal);
+    assert_eq!(ctx.token.balance(&ctx.contract_id), contract_bal);
+}
+
+/// Success: "closed" event emitted with correct topic and payload.
+#[test]
+fn close_completed_emits_closed_event() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+    );
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    let events_before = ctx.env.events().all().len();
+    ctx.client().close_completed_stream(&stream_id);
+
+    let events = ctx.env.events().all();
+    let close_ev = events.iter().skip(events_before as usize).find(|e| {
+        if e.0 != ctx.contract_id { return false; }
+        let t0 = soroban_sdk::Symbol::from_val(&ctx.env, &e.1.get(0).unwrap());
+        t0 == soroban_sdk::Symbol::new(&ctx.env, "closed")
+    });
+    assert!(close_ev.is_some(), "closed event must be emitted");
+    let topic_id: u64 = close_ev.unwrap().1.get(1).unwrap().into_val(&ctx.env);
+    assert_eq!(topic_id, stream_id);
+}
+
+/// Failure: closing Active stream returns InvalidState.
+#[test]
+fn close_active_stream_returns_invalid_state() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+    );
+    assert_eq!(
+        ctx.client().try_close_completed_stream(&stream_id),
+        Err(Ok(ContractError::InvalidState))
+    );
+}
+
+/// Failure: closing Cancelled stream returns InvalidState.
+#[test]
+fn close_cancelled_stream_returns_invalid_state() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+    );
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().cancel_stream(&stream_id);
+    assert_eq!(
+        ctx.client().try_close_completed_stream(&stream_id),
+        Err(Ok(ContractError::InvalidState))
+    );
+}
+
+/// Failure: closing non-existent stream returns StreamNotFound.
+#[test]
+fn close_nonexistent_stream_returns_stream_not_found() {
+    let ctx = TestContext::setup();
+    assert_eq!(
+        ctx.client().try_close_completed_stream(&9999),
+        Err(Ok(ContractError::StreamNotFound))
+    );
+}
+
+/// Failure: closing already-closed stream returns StreamNotFound.
+#[test]
+fn close_already_closed_returns_stream_not_found() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+    );
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+    ctx.client().close_completed_stream(&stream_id);
+    assert_eq!(
+        ctx.client().try_close_completed_stream(&stream_id),
+        Err(Ok(ContractError::StreamNotFound))
+    );
+}
+
+/// Permissionless: stream count unchanged after close (IDs never reused).
+#[test]
+fn close_completed_stream_count_unchanged() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+    );
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+    let count = ctx.client().get_stream_count();
+    ctx.client().close_completed_stream(&stream_id);
+    assert_eq!(ctx.client().get_stream_count(), count);
+}

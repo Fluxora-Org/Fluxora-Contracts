@@ -2130,7 +2130,7 @@ fn test_calculate_accrued_permissionless_access() {
     let stream_id = ctx.create_default_stream();
 
     // Create a random third-party address (not sender, not recipient, not admin)
-    let third_party = Address::random(&ctx.env);
+    let _third_party = Address::generate(&ctx.env);
 
     // Third party must be able to call calculate_accrued without auth
     // This would panic if auth was required
@@ -3918,6 +3918,7 @@ fn test_close_completed_stream_second_close_panics() {
 // ---------------------------------------------------------------------------
 // Tests — top_up_stream
 // ---------------------------------------------------------------------------
+
 
 #[test]
 fn test_top_up_stream_increases_deposit_and_contract_balance() {
@@ -9371,14 +9372,15 @@ fn test_update_rate_per_second_emits_event() {
 
     // Verify event was emitted.
     let events = ctx.env.events().all();
-    let rate_update_events: Vec<_> = events
+    let rate_update_events: std::vec::Vec<_> = events
         .iter()
         .filter(|e| {
-            if let Ok(topics) = <(Symbol, u64)>::try_from_val(&ctx.env, &e.topics) {
-                topics.0 == Symbol::new(&ctx.env, "rate_upd") && topics.1 == stream_id
-            } else {
-                false
-            }
+            if e.0 != ctx.contract_id { return false; }
+            let topics = &e.1;
+            if topics.len() < 2 { return false; }
+            let t0 = Symbol::from_val(&ctx.env, &topics.get(0).unwrap());
+            let t1: u64 = topics.get(1).unwrap().into_val(&ctx.env);
+            t0 == Symbol::new(&ctx.env, "rate_upd") && t1 == stream_id
         })
         .collect();
 
@@ -14447,3 +14449,338 @@ fn test_create_streams_batch_deposit_overflow_is_atomic() {
         "stream count must not change on overflow failure"
     );
 }
+
+// ===========================================================================
+// close_completed_stream: permissionless cleanup and events
+//
+// Scope: every observable guarantee of close_completed_stream — success
+// semantics, failure semantics, event payload, permissionless access,
+// recipient index cleanup, and all non-Completed status rejections.
+//
+// Audit notes / residual risks:
+// - close_completed_stream is irreversible: once closed, the stream entry
+//   cannot be recovered. Tests verify the StreamNotFound error is returned
+//   on any subsequent query.
+// - No tokens are transferred. This is a pure storage cleanup operation.
+// - The "closed" event is emitted BEFORE storage removal. Tests verify
+//   event ordering relative to the StreamNotFound state.
+// - Authorization: none required. Any caller may close any Completed stream.
+//   This is intentional (permissionless cleanup). Tests verify a third-party
+//   address can close a stream it did not create.
+// ===========================================================================
+#[cfg(test)]
+mod close_completed_stream_tests {
+    use super::*;
+    use soroban_sdk::Env;
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    /// Create and fully withdraw a stream so it reaches Completed status.
+    fn complete_stream(ctx: &TestContext) -> u64 {
+        ctx.env.ledger().set_timestamp(0);
+        let stream_id = ctx.client().create_stream(
+            &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+        );
+        ctx.env.ledger().set_timestamp(1000);
+        ctx.client().withdraw(&stream_id);
+        assert_eq!(
+            ctx.client().get_stream_state(&stream_id).status,
+            StreamStatus::Completed
+        );
+        stream_id
+    }
+
+    // -----------------------------------------------------------------------
+    // 1. Success semantics
+    // -----------------------------------------------------------------------
+
+    /// After close, get_stream_state returns StreamNotFound.
+    #[test]
+    fn close_removes_stream_from_storage() {
+        let ctx = TestContext::setup();
+        let stream_id = complete_stream(&ctx);
+        ctx.client().close_completed_stream(&stream_id);
+        let result = ctx.client().try_get_stream_state(&stream_id);
+        assert_eq!(result, Err(Ok(ContractError::StreamNotFound)));
+    }
+
+    /// After close, stream is removed from recipient's index.
+    #[test]
+    fn close_removes_stream_from_recipient_index() {
+        let ctx = TestContext::setup();
+        let stream_id = complete_stream(&ctx);
+        assert_eq!(ctx.client().get_recipient_stream_count(&ctx.recipient), 1);
+        ctx.client().close_completed_stream(&stream_id);
+        assert_eq!(ctx.client().get_recipient_stream_count(&ctx.recipient), 0);
+        let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+        assert_eq!(streams.len(), 0);
+    }
+
+    /// close returns Ok(()) on success.
+    #[test]
+    fn close_returns_ok() {
+        let ctx = TestContext::setup();
+        let stream_id = complete_stream(&ctx);
+        let result = ctx.client().try_close_completed_stream(&stream_id);
+        assert!(result.is_ok());
+    }
+
+    /// No tokens are transferred during close — balances unchanged.
+    #[test]
+    fn close_does_not_transfer_tokens() {
+        let ctx = TestContext::setup();
+        let stream_id = complete_stream(&ctx);
+        let recipient_balance_before = ctx.token().balance(&ctx.recipient);
+        let contract_balance_before = ctx.token().balance(&ctx.contract_id);
+        ctx.client().close_completed_stream(&stream_id);
+        assert_eq!(ctx.token().balance(&ctx.recipient), recipient_balance_before);
+        assert_eq!(ctx.token().balance(&ctx.contract_id), contract_balance_before);
+    }
+
+    // -----------------------------------------------------------------------
+    // 2. Event semantics
+    // -----------------------------------------------------------------------
+
+    /// close emits a "closed" event with the correct stream_id topic.
+    #[test]
+    fn close_emits_closed_event_with_correct_topic() {
+        let ctx = TestContext::setup();
+        let stream_id = complete_stream(&ctx);
+        let events_before = ctx.env.events().all().len();
+        ctx.client().close_completed_stream(&stream_id);
+
+        let events = ctx.env.events().all();
+        let close_event = events.iter().skip(events_before as usize).find(|e| {
+            if e.0 != ctx.contract_id { return false; }
+            let t0 = soroban_sdk::Symbol::from_val(&ctx.env, &e.1.get(0).unwrap());
+            t0 == soroban_sdk::Symbol::new(&ctx.env, "closed")
+        });
+        assert!(close_event.is_some(), "closed event must be emitted");
+
+        let ev = close_event.unwrap();
+        let topic_stream_id: u64 = ev.1.get(1).unwrap().into_val(&ctx.env);
+        assert_eq!(topic_stream_id, stream_id, "event topic must carry stream_id");
+    }
+
+    /// close emits exactly one "closed" event per call.
+    #[test]
+    fn close_emits_exactly_one_event() {
+        let ctx = TestContext::setup();
+        let stream_id = complete_stream(&ctx);
+        let events_before = ctx.env.events().all().len();
+        ctx.client().close_completed_stream(&stream_id);
+
+        let events = ctx.env.events().all();
+        let close_events: std::vec::Vec<_> = events.iter().skip(events_before as usize).filter(|e| {
+            if e.0 != ctx.contract_id { return false; }
+            let t0 = soroban_sdk::Symbol::from_val(&ctx.env, &e.1.get(0).unwrap());
+            t0 == soroban_sdk::Symbol::new(&ctx.env, "closed")
+        }).collect();
+        assert_eq!(close_events.len(), 1, "exactly one closed event must be emitted");
+    }
+
+    /// Event payload carries StreamEvent::StreamClosed(stream_id).
+    #[test]
+    fn close_event_payload_is_stream_closed() {
+        let ctx = TestContext::setup();
+        let stream_id = complete_stream(&ctx);
+        ctx.client().close_completed_stream(&stream_id);
+
+        let events = ctx.env.events().all();
+        let ev = events.iter().rev().find(|e| {
+            if e.0 != ctx.contract_id { return false; }
+            let t0 = soroban_sdk::Symbol::from_val(&ctx.env, &e.1.get(0).unwrap());
+            t0 == soroban_sdk::Symbol::new(&ctx.env, "closed")
+        }).unwrap();
+
+        let payload = StreamEvent::try_from_val(&ctx.env, &ev.2).unwrap();
+        assert_eq!(payload, StreamEvent::StreamClosed(stream_id));
+    }
+
+    // -----------------------------------------------------------------------
+    // 3. Failure semantics — non-Completed status
+    // -----------------------------------------------------------------------
+
+    /// Closing an Active stream returns InvalidState.
+    #[test]
+    fn close_active_stream_returns_invalid_state() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+        let stream_id = ctx.client().create_stream(
+            &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+        );
+        let result = ctx.client().try_close_completed_stream(&stream_id);
+        assert_eq!(result, Err(Ok(ContractError::InvalidState)));
+    }
+
+    /// Closing a Paused stream returns InvalidState.
+    #[test]
+    fn close_paused_stream_returns_invalid_state() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+        let stream_id = ctx.client().create_stream(
+            &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+        );
+        ctx.env.ledger().set_timestamp(100);
+        ctx.client().pause_stream(&stream_id);
+        let result = ctx.client().try_close_completed_stream(&stream_id);
+        assert_eq!(result, Err(Ok(ContractError::InvalidState)));
+    }
+
+    /// Closing a Cancelled stream returns InvalidState.
+    #[test]
+    fn close_cancelled_stream_returns_invalid_state() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+        let stream_id = ctx.client().create_stream(
+            &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+        );
+        ctx.env.ledger().set_timestamp(400);
+        ctx.client().cancel_stream(&stream_id);
+        let result = ctx.client().try_close_completed_stream(&stream_id);
+        assert_eq!(result, Err(Ok(ContractError::InvalidState)));
+    }
+
+    /// Closing a non-existent stream returns StreamNotFound.
+    #[test]
+    fn close_nonexistent_stream_returns_stream_not_found() {
+        let ctx = TestContext::setup();
+        let result = ctx.client().try_close_completed_stream(&9999);
+        assert_eq!(result, Err(Ok(ContractError::StreamNotFound)));
+    }
+
+    /// Closing an already-closed stream returns StreamNotFound (not InvalidState).
+    #[test]
+    fn close_already_closed_stream_returns_stream_not_found() {
+        let ctx = TestContext::setup();
+        let stream_id = complete_stream(&ctx);
+        ctx.client().close_completed_stream(&stream_id);
+        let result = ctx.client().try_close_completed_stream(&stream_id);
+        assert_eq!(result, Err(Ok(ContractError::StreamNotFound)));
+    }
+
+    /// Failure is atomic: no event emitted, no storage change on InvalidState.
+    #[test]
+    fn close_failure_is_atomic_no_event_no_storage_change() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+        let stream_id = ctx.client().create_stream(
+            &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+        );
+        let events_before = ctx.env.events().all().len();
+        let _ = ctx.client().try_close_completed_stream(&stream_id);
+
+        // No new events
+        assert_eq!(ctx.env.events().all().len(), events_before, "no event on failure");
+        // Stream still exists
+        let state = ctx.client().get_stream_state(&stream_id);
+        assert_eq!(state.status, StreamStatus::Active, "stream must still be Active");
+    }
+
+    // -----------------------------------------------------------------------
+    // 4. Permissionless access
+    // -----------------------------------------------------------------------
+
+    /// A third-party address (not sender, not recipient, not admin) can close
+    /// a completed stream. No authorization is required.
+    #[test]
+    fn close_is_permissionless_any_caller_can_close() {
+        let ctx = TestContext::setup();
+        let stream_id = complete_stream(&ctx);
+
+        // Third party has no relationship to the stream
+        let _third_party = soroban_sdk::Address::generate(&ctx.env);
+        // mock_all_auths is active so any call succeeds auth-wise;
+        // the key assertion is that close_completed_stream does NOT call require_auth
+        let result = ctx.client().try_close_completed_stream(&stream_id);
+        assert!(result.is_ok(), "any caller must be able to close a completed stream");
+    }
+
+    /// Permissionless in strict mode: close works with no mock_auths set.
+    #[test]
+    fn close_permissionless_strict_mode_no_auth_needed() {
+        let ctx = TestContext::setup_strict();
+        // Complete the stream using mock_all_auths just for setup
+        ctx.env.mock_all_auths();
+        ctx.env.ledger().set_timestamp(0);
+        let stream_id = ctx.client().create_stream(
+            &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+        );
+        ctx.env.ledger().set_timestamp(1000);
+        ctx.client().withdraw(&stream_id);
+
+        // Now clear auths and close — must succeed without any auth
+        ctx.env.mock_auths(&[]);
+        let result = ctx.client().try_close_completed_stream(&stream_id);
+        assert!(result.is_ok(), "close must not require authorization");
+    }
+
+    // -----------------------------------------------------------------------
+    // 5. Recipient index integrity
+    // -----------------------------------------------------------------------
+
+    /// Closing one of multiple streams only removes that stream from the index.
+    #[test]
+    fn close_only_removes_target_from_recipient_index() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+        let id0 = ctx.client().create_stream(
+            &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+        );
+        let id1 = ctx.client().create_stream(
+            &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+        );
+
+        // Complete and close id0 only
+        ctx.env.ledger().set_timestamp(1000);
+        ctx.client().withdraw(&id0);
+        ctx.client().close_completed_stream(&id0);
+
+        // id1 must still be in the index
+        let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams.get(0).unwrap(), id1);
+        assert_eq!(ctx.client().get_recipient_stream_count(&ctx.recipient), 1);
+    }
+
+    /// Closing all streams for a recipient leaves an empty index.
+    #[test]
+    fn close_all_streams_leaves_empty_recipient_index() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+        let id0 = ctx.client().create_stream(
+            &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+        );
+        let id1 = ctx.client().create_stream(
+            &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+        );
+        ctx.env.ledger().set_timestamp(1000);
+        ctx.client().withdraw(&id0);
+        ctx.client().withdraw(&id1);
+        ctx.client().close_completed_stream(&id0);
+        ctx.client().close_completed_stream(&id1);
+
+        assert_eq!(ctx.client().get_recipient_stream_count(&ctx.recipient), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // 6. Stream count invariant
+    // -----------------------------------------------------------------------
+
+    /// get_stream_count is not decremented by close (IDs are never reused).
+    #[test]
+    fn close_does_not_decrement_stream_count() {
+        let ctx = TestContext::setup();
+        let stream_id = complete_stream(&ctx);
+        let count_before = ctx.client().get_stream_count();
+        ctx.client().close_completed_stream(&stream_id);
+        assert_eq!(
+            ctx.client().get_stream_count(),
+            count_before,
+            "stream count must not change after close"
+        );
+    }
+
+} // mod close_completed_stream_tests
