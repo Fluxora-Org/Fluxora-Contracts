@@ -1,3 +1,6 @@
 [workspace]
 members = ["contracts/stream"]
 resolver = "2"
+
+# Issue #205 — token vesting: scaffold branch. Full vesting crate + docs/vesting.md in follow-up commits.
+# Beneficiary, allocation, cliff, duration, claim — see Fluxora-Org/Fluxora-Contracts#205.

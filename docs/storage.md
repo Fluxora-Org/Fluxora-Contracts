@@ -29,7 +29,7 @@ Instance storage is used for contract-wide configuration that applies to all str
 
 | Key | Type | Description | Set By | Modified By |
 |-----|------|-------------|--------|-------------|
-| `Config` | `Config` struct | Contains `token` address and `admin` address | `init()` | `set_admin()` (admin key rotation) |
+| `Config` | `Config` struct | Contains `token` address and `admin` address | `init()` (one-shot, `admin.require_auth()`) | `set_admin()` (admin key rotation only) |
 | `NextStreamId` | `u64` | Auto-incrementing counter for stream IDs | `init()` (set to 0) | `create_stream()` (incremented) |
 
 **Characteristics:**
@@ -132,7 +132,7 @@ env.storage().persistent().extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, PERSI
 
 ### Write Operations (State Mutations)
 
-- `init()` → writes `Config` and `NextStreamId` to instance storage, **bumps instance TTL**
+- `init()` → writes `Config` and `NextStreamId` once (requires bootstrap `admin` auth), **bumps instance TTL**
 - `create_stream()` → reads/writes `NextStreamId`, writes `Stream(stream_id)`, **bumps both TTLs**
 - `pause_stream()` → reads/writes `Stream(stream_id)`, **bumps both stream and instance TTLs**
 - `resume_stream()` → reads/writes `Stream(stream_id)`, **bumps both stream and instance TTLs**

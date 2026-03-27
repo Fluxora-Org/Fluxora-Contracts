@@ -385,3 +385,253 @@ mod accrued_after_end_time {
         );
     }
 }
+
+/// Property-based monotonicity and invariant tests for `calculate_accrued_amount`.
+///
+/// These tests systematically verify the mathematical properties that must hold
+/// for all valid (and some degenerate) stream configurations:
+///
+/// 1. **Monotonicity**: accrued(t1) <= accrued(t2) for all t1 <= t2 after cliff.
+/// 2. **Boundedness**: 0 <= accrued(t) <= deposit_amount for all t.
+/// 3. **Zero before cliff**: accrued(t) == 0 for all t < cliff_time.
+/// 4. **Saturation**: accrued(t) == deposit_amount for all t >= end_time (when rate*duration >= deposit).
+/// 5. **Determinism**: same inputs always produce the same output.
+/// 6. **Elapsed underflow guard**: returns 0 when elapsed_now < start_time (cliff < start edge).
+#[cfg(test)]
+mod property_monotonicity {
+    use super::calculate_accrued_amount;
+
+    // -----------------------------------------------------------------------
+    // Test fixtures: (start, cliff, end, rate, deposit)
+    // -----------------------------------------------------------------------
+
+    /// Streams covering a wide range of shapes: no-cliff, mid-cliff, end-cliff,
+    /// high-rate (deposit-capped), zero-rate, and near-overflow.
+    const STREAMS: &[(u64, u64, u64, i128, i128)] = &[
+        // (start, cliff, end, rate, deposit)
+        (0, 0, 1_000, 1, 1_000),          // standard linear, no cliff
+        (0, 500, 1_000, 1, 1_000),         // cliff at midpoint
+        (0, 1_000, 1_000, 1, 1_000),       // cliff == end (degenerate: nothing ever accrues)
+        (1_000, 1_000, 2_000, 2, 2_000),   // non-zero start, rate=2
+        (0, 0, 1_000, 10, 5_000),          // high rate, deposit is binding cap
+        (0, 0, 10_000, 0, 0),              // zero rate, zero deposit
+        (0, 0, 1_000, 3, 500),             // rate*duration > deposit (deposit caps)
+        (0, 0, u64::MAX, 1, i128::MAX),    // near-overflow duration
+        (100, 200, 1_000, 5, 4_500),       // cliff after start
+        (0, 0, 1_000, 1, 2_000),           // deposit > rate*duration (excess deposit)
+    ];
+
+    /// Dense time grid for a stream: samples before, at, and after every boundary.
+    fn time_grid(start: u64, cliff: u64, end: u64) -> [u64; 12] {
+        let mid = start.saturating_add((end.saturating_sub(start)) / 2);
+        let q1 = start.saturating_add((end.saturating_sub(start)) / 4);
+        let q3 = start.saturating_add(3 * (end.saturating_sub(start)) / 4);
+        [
+            0,
+            start.saturating_sub(1),
+            start,
+            cliff.saturating_sub(1),
+            cliff,
+            q1,
+            mid,
+            q3,
+            end.saturating_sub(1),
+            end,
+            end.saturating_add(1),
+            end.saturating_add(1_000),
+        ]
+    }
+
+    // -----------------------------------------------------------------------
+    // Property 1: Monotonicity — accrued never decreases as time advances
+    // -----------------------------------------------------------------------
+
+    /// For every stream and every pair of consecutive time points t1 <= t2,
+    /// accrued(t1) <= accrued(t2).
+    #[test]
+    fn prop_monotonic_over_dense_grid() {
+        for &(start, cliff, end, rate, deposit) in STREAMS {
+            let times = time_grid(start, cliff, end);
+            let mut prev = calculate_accrued_amount(start, cliff, end, rate, deposit, times[0]);
+
+            for &t in times.iter().skip(1) {
+                let now = calculate_accrued_amount(start, cliff, end, rate, deposit, t);
+                assert!(
+                    now >= prev,
+                    "monotonicity violated for stream ({start},{cliff},{end},{rate},{deposit}): \
+                     accrued({t})={now} < previous={prev}"
+                );
+                prev = now;
+            }
+        }
+    }
+
+    /// Monotonicity holds across a fine-grained sweep of every second in a short stream.
+    #[test]
+    fn prop_monotonic_second_by_second() {
+        // start=0, cliff=100, end=500, rate=2, deposit=1000
+        let (start, cliff, end, rate, deposit) = (0u64, 100u64, 500u64, 2i128, 1_000i128);
+        let mut prev = calculate_accrued_amount(start, cliff, end, rate, deposit, 0);
+        for t in 1..=600u64 {
+            let now = calculate_accrued_amount(start, cliff, end, rate, deposit, t);
+            assert!(
+                now >= prev,
+                "second-by-second monotonicity violated at t={t}: got {now}, prev={prev}"
+            );
+            prev = now;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property 2: Boundedness — result always in [0, deposit_amount]
+    // -----------------------------------------------------------------------
+
+    /// For every stream and every time point, 0 <= accrued <= deposit_amount.
+    #[test]
+    fn prop_bounded_by_deposit_over_dense_grid() {
+        for &(start, cliff, end, rate, deposit) in STREAMS {
+            for &t in time_grid(start, cliff, end).iter() {
+                let accrued = calculate_accrued_amount(start, cliff, end, rate, deposit, t);
+                assert!(
+                    accrued >= 0,
+                    "negative accrual for stream ({start},{cliff},{end},{rate},{deposit}) at t={t}: {accrued}"
+                );
+                assert!(
+                    accrued <= deposit,
+                    "accrual exceeds deposit for stream ({start},{cliff},{end},{rate},{deposit}) at t={t}: \
+                     accrued={accrued} > deposit={deposit}"
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property 3: Zero before cliff
+    // -----------------------------------------------------------------------
+
+    /// accrued(t) == 0 for all t strictly before cliff_time.
+    #[test]
+    fn prop_zero_before_cliff() {
+        for &(start, cliff, end, rate, deposit) in STREAMS {
+            if cliff == 0 {
+                continue; // no pre-cliff window to test
+            }
+            for t in [0u64, 1, cliff.saturating_sub(1)] {
+                if t >= cliff {
+                    continue;
+                }
+                let accrued = calculate_accrued_amount(start, cliff, end, rate, deposit, t);
+                assert_eq!(
+                    accrued, 0,
+                    "expected 0 before cliff for stream ({start},{cliff},{end},{rate},{deposit}) at t={t}, got {accrued}"
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property 4: Saturation at end_time
+    // -----------------------------------------------------------------------
+
+    /// When rate * (end - start) >= deposit, accrued(t) == deposit for all t >= end_time.
+    #[test]
+    fn prop_saturates_at_end_time_when_rate_covers_deposit() {
+        // Streams where rate * duration >= deposit (deposit is the binding cap)
+        let saturating_streams: &[(u64, u64, u64, i128, i128)] = &[
+            (0, 0, 1_000, 1, 1_000),
+            (0, 0, 1_000, 10, 5_000),
+            (0, 0, 1_000, 3, 500),
+            (1_000, 1_000, 2_000, 2, 2_000),
+        ];
+        for &(start, cliff, end, rate, deposit) in saturating_streams {
+            for &t in &[end, end + 1, end + 1_000, end + 1_000_000] {
+                let accrued = calculate_accrued_amount(start, cliff, end, rate, deposit, t);
+                assert_eq!(
+                    accrued, deposit,
+                    "expected saturation at deposit={deposit} for stream ({start},{cliff},{end},{rate},{deposit}) \
+                     at t={t}, got {accrued}"
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property 5: Determinism
+    // -----------------------------------------------------------------------
+
+    /// Same inputs always produce the same output (pure function).
+    #[test]
+    fn prop_deterministic() {
+        for &(start, cliff, end, rate, deposit) in STREAMS {
+            for &t in time_grid(start, cliff, end).iter() {
+                let a = calculate_accrued_amount(start, cliff, end, rate, deposit, t);
+                let b = calculate_accrued_amount(start, cliff, end, rate, deposit, t);
+                assert_eq!(
+                    a, b,
+                    "non-deterministic result for stream ({start},{cliff},{end},{rate},{deposit}) at t={t}"
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property 6: Elapsed underflow guard (covers line 31 — None branch)
+    // -----------------------------------------------------------------------
+
+    /// When cliff_time < start_time (degenerate: cliff before start), and
+    /// current_time is in [cliff_time, start_time), elapsed_now = current_time < start_time,
+    /// so checked_sub returns None and the function returns 0.
+    ///
+    /// This covers the previously uncovered `None => return 0` branch in the
+    /// `elapsed_seconds` calculation (accrual.rs line 31).
+    #[test]
+    fn prop_elapsed_underflow_returns_zero() {
+        // cliff=0 < start=500, end=1000: current_time=200 passes cliff check
+        // but elapsed_now=200 < start=500 → checked_sub underflows → 0
+        let accrued = calculate_accrued_amount(
+            500,   // start_time
+            0,     // cliff_time (before start — degenerate)
+            1_000, // end_time
+            1,     // rate
+            1_000, // deposit
+            200,   // current_time: past cliff but before start
+        );
+        assert_eq!(
+            accrued, 0,
+            "elapsed underflow (current_time < start_time after cliff) must return 0"
+        );
+    }
+
+    /// Boundary: current_time == start_time with cliff < start → accrued == 0 (elapsed == 0).
+    #[test]
+    fn prop_elapsed_zero_at_start_with_early_cliff() {
+        let accrued = calculate_accrued_amount(500, 0, 1_000, 1, 1_000, 500);
+        assert_eq!(accrued, 0, "at start_time with early cliff, elapsed=0 so accrued=0");
+    }
+
+    /// One second past start with early cliff → accrues normally.
+    #[test]
+    fn prop_accrues_normally_after_start_with_early_cliff() {
+        let accrued = calculate_accrued_amount(500, 0, 1_000, 1, 1_000, 501);
+        assert_eq!(accrued, 1, "one second past start should accrue 1 token");
+    }
+
+    // -----------------------------------------------------------------------
+    // Property 7: Linearity between cliff and end (when deposit is not binding)
+    // -----------------------------------------------------------------------
+
+    /// When deposit > rate * duration, accrued(t) == rate * (t - start) for t in [start, end].
+    #[test]
+    fn prop_linear_when_deposit_not_binding() {
+        // deposit=2000 > rate*duration=1000: pure linear region
+        let (start, cliff, end, rate, deposit) = (0u64, 0u64, 1_000u64, 1i128, 2_000i128);
+        for t in [0u64, 1, 100, 250, 500, 750, 999, 1_000] {
+            let expected = (rate * (t.min(end) - start) as i128).min(deposit).max(0);
+            let accrued = calculate_accrued_amount(start, cliff, end, rate, deposit, t);
+            assert_eq!(
+                accrued, expected,
+                "linear accrual mismatch at t={t}: expected={expected}, got={accrued}"
+            );
+        }
+    }
+}

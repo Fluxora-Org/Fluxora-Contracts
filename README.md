@@ -6,6 +6,10 @@ Soroban smart contracts for the Fluxora treasury streaming protocol on Stellar. 
 
 - **[Stream contract docs](docs/streaming.md)** — Lifecycle, accrual formula, cliff/end_time, access control, events, and error codes.
 
+<!-- Issue #207 — global resume: scaffold branch. -->
+<!-- Admin-only resume clears pause; post-incident checks in docs to follow. -->
+<!-- See Fluxora-Org/Fluxora-Contracts#207. -->
+
 ## What's in this repo
 
 - **Stream contract** (`contracts/stream`) — Lock USDC, accrue per second, withdraw on demand.

@@ -156,6 +156,30 @@ If recipient updates are supported in the future (e.g., stream transfer), the in
 
 This ensures consistency across all indices.
 
+## Protocol Semantics & Audit Notes
+
+To provide crisp assurances to integrators, the recipient index observes strict invariants across all execution paths.
+
+### Success Semantics
+- The index strictly maintains `stream_id` in ascending order (enforced internally via `binary_search`).
+- Index mutation is completely atomic with stream status changes. A `create_stream` guarantees the recipient index includes the new stream. A `close_completed_stream` guarantees it is removed.
+- State views emit deterministic, deduplicated, sorted output regardless of the creation order of individual underlying stream persistence.
+
+### Failure Semantics
+- Any failure during insertion (e.g., Soroban environment memory limit on highly unbounded indices) will revert the entire transaction. There is no silent drift where a stream is persisted but the index is not.
+- Indexing code correctly cascades errors back to the caller instead of isolating failures.
+- Direct non-authorized mutation is impossible; index updates are intentionally unexposed to cross-contract endpoints except via internally triggered side-effects of authorized stream lifecycle functions.
+
+### Roles and Authorization
+- **Sender**: Authorizes stream creation (`create_stream`, `create_streams`), implicitly appending the resulting `stream_id` to the recipient index.
+- **Requester (Recipient/Admin/Anyone)**: Anyone executing `close_completed_stream` implicitly proves the stream is fully depleted. This authorization-free action triggers the internal removal of the `stream_id` from the index.
+- **Indexers / Third Parties**: Any caller can query the index via `get_recipient_streams`. No proof of identity is required.
+
+### Edge Cases and Residual Risks
+1. **Time Boundaries**: The index is agnostic to start times, cliff times, or end times. Progressing ledger timestamps will **not** alter index composition. A stream remains in the index before its start and long after its end until explicitly closed.
+2. **Stream Status Configurations**: Active, Paused, and Cancelled streams persist within the index. Pause or Cancel operations neither remove nor re-append items to the index.
+3. **Numeric Bounds & Host Limits (Audit Note)**: The protocol does not actively bounded the maximum number of streams a single recipient can harbor. Extreme volumes of incoming streams to a single recipient could exceed Soroban's local storage read/write operational budgets, leading to out-of-gas (`HostError`) during insertion/lookup. Senders are responsible for ensuring they do not grief recipients by deliberately bloating their indexes.
+
 ## Performance Characteristics
 
 ### Time Complexity
