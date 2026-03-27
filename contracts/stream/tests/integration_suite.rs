@@ -2839,3 +2839,146 @@ fn integration_create_streams_single_token_pull_equals_sum() {
     assert_eq!(ctx.token.balance(&ctx.sender), sender_before - 3500);
     assert_eq!(ctx.token.balance(&ctx.contract_id), 3500);
 }
+
+// ===========================================================================
+// Negative tests: pause/resume by non-sender/non-admin — integration tests
+// ===========================================================================
+
+/// pause_stream: recipient is rejected, stream stays Active, no event emitted.
+#[test]
+fn neg_pause_recipient_rejected_stream_unchanged() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+    );
+    let events_before = ctx.env.events().all().len();
+
+    ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &ctx.recipient,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "pause_stream",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().pause_stream(&stream_id);
+    }));
+    assert!(result.is_err(), "recipient must not pause");
+    assert_eq!(ctx.client().get_stream_state(&stream_id).status, StreamStatus::Active);
+    assert_eq!(ctx.env.events().all().len(), events_before);
+}
+
+/// pause_stream: third party is rejected, stream stays Active.
+#[test]
+fn neg_pause_third_party_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+    );
+    let third_party = Address::generate(&ctx.env);
+
+    ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &third_party,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "pause_stream",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().pause_stream(&stream_id);
+    }));
+    assert!(result.is_err(), "third party must not pause");
+    assert_eq!(ctx.client().get_stream_state(&stream_id).status, StreamStatus::Active);
+}
+
+/// resume_stream: recipient is rejected, stream stays Paused.
+#[test]
+fn neg_resume_recipient_rejected_stream_stays_paused() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+    );
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().pause_stream(&stream_id);
+    let events_before = ctx.env.events().all().len();
+
+    ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &ctx.recipient,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "resume_stream",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().resume_stream(&stream_id);
+    }));
+    assert!(result.is_err(), "recipient must not resume");
+    assert_eq!(ctx.client().get_stream_state(&stream_id).status, StreamStatus::Paused);
+    assert_eq!(ctx.env.events().all().len(), events_before);
+}
+
+/// pause_stream_as_admin: sender is rejected on admin path.
+#[test]
+fn neg_pause_as_admin_sender_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+    );
+
+    ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &ctx.sender,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "pause_stream_as_admin",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().pause_stream_as_admin(&stream_id);
+    }));
+    assert!(result.is_err(), "sender must not use admin pause path");
+    assert_eq!(ctx.client().get_stream_state(&stream_id).status, StreamStatus::Active);
+}
+
+/// resume_stream_as_admin: sender is rejected on admin path.
+#[test]
+fn neg_resume_as_admin_sender_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+    );
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().pause_stream(&stream_id);
+
+    ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &ctx.sender,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "resume_stream_as_admin",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().resume_stream_as_admin(&stream_id);
+    }));
+    assert!(result.is_err(), "sender must not use admin resume path");
+    assert_eq!(ctx.client().get_stream_state(&stream_id).status, StreamStatus::Paused);
+}

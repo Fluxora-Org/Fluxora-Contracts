@@ -2130,7 +2130,7 @@ fn test_calculate_accrued_permissionless_access() {
     let stream_id = ctx.create_default_stream();
 
     // Create a random third-party address (not sender, not recipient, not admin)
-    let third_party = Address::random(&ctx.env);
+    let _third_party = Address::generate(&ctx.env);
 
     // Third party must be able to call calculate_accrued without auth
     // This would panic if auth was required
@@ -9371,14 +9371,15 @@ fn test_update_rate_per_second_emits_event() {
 
     // Verify event was emitted.
     let events = ctx.env.events().all();
-    let rate_update_events: Vec<_> = events
+    let rate_update_events: std::vec::Vec<_> = events
         .iter()
         .filter(|e| {
-            if let Ok(topics) = <(Symbol, u64)>::try_from_val(&ctx.env, &e.topics) {
-                topics.0 == Symbol::new(&ctx.env, "rate_upd") && topics.1 == stream_id
-            } else {
-                false
-            }
+            if e.0 != ctx.contract_id { return false; }
+            let topics = &e.1;
+            if topics.len() < 2 { return false; }
+            let t0 = Symbol::from_val(&ctx.env, &topics.get(0).unwrap());
+            let t1: u64 = topics.get(1).unwrap().into_val(&ctx.env);
+            t0 == Symbol::new(&ctx.env, "rate_upd") && t1 == stream_id
         })
         .collect();
 
@@ -14447,3 +14448,370 @@ fn test_create_streams_batch_deposit_overflow_is_atomic() {
         "stream count must not change on overflow failure"
     );
 }
+
+// ===========================================================================
+// Negative tests: pause/resume by non-sender/non-admin
+//
+// Scope: every unauthorized caller path for pause_stream, resume_stream,
+// pause_stream_as_admin, and resume_stream_as_admin. For each rejection:
+// - The call panics (host trap from require_auth)
+// - Stream status is unchanged
+// - No events are emitted
+// - No token balances change
+//
+// Authorization model:
+// - pause_stream / resume_stream: only the stream's sender may call
+// - pause_stream_as_admin / resume_stream_as_admin: only the contract admin
+// - recipient, third parties, and the admin (on sender paths) are all rejected
+//
+// Audit notes:
+// - Soroban's require_auth failures surface as host traps (panics), not as
+//   ContractError variants. Tests use catch_unwind to assert the panic and
+//   then verify no side effects occurred.
+// - The admin cannot use pause_stream (sender path) — they must use
+//   pause_stream_as_admin. This is intentional role separation.
+// - The sender cannot use pause_stream_as_admin — they must use pause_stream.
+// ===========================================================================
+#[cfg(test)]
+mod negative_pause_resume_auth {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    /// Create a default stream and return (ctx, stream_id).
+    fn setup_active_stream() -> (TestContext<'static>, u64) {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+        let stream_id = ctx.client().create_stream(
+            &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+        );
+        (ctx, stream_id)
+    }
+
+    /// Assert stream status is unchanged and no new events were emitted.
+    fn assert_no_side_effects(
+        ctx: &TestContext,
+        stream_id: u64,
+        expected_status: StreamStatus,
+        events_before: u32,
+    ) {
+        let state = ctx.client().get_stream_state(&stream_id);
+        assert_eq!(
+            state.status, expected_status,
+            "stream status must be unchanged after rejected call"
+        );
+        assert_eq!(
+            ctx.env.events().all().len(),
+            events_before,
+            "no events must be emitted after rejected call"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // pause_stream: recipient cannot pause
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pause_stream_recipient_rejected_no_side_effects() {
+        let (ctx, stream_id) = setup_active_stream();
+        let events_before = ctx.env.events().all().len();
+
+        // Provide auth as recipient (not sender) — must be rejected
+        ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &ctx.recipient,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &ctx.contract_id,
+                fn_name: "pause_stream",
+                args: (stream_id,).into_val(&ctx.env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ctx.client().pause_stream(&stream_id);
+        }));
+        assert!(result.is_err(), "recipient must not be able to pause");
+        assert_no_side_effects(&ctx, stream_id, StreamStatus::Active, events_before);
+    }
+
+    // -----------------------------------------------------------------------
+    // pause_stream: third party cannot pause
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pause_stream_third_party_rejected_no_side_effects() {
+        let (ctx, stream_id) = setup_active_stream();
+        let third_party = soroban_sdk::Address::generate(&ctx.env);
+        let events_before = ctx.env.events().all().len();
+
+        ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &third_party,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &ctx.contract_id,
+                fn_name: "pause_stream",
+                args: (stream_id,).into_val(&ctx.env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ctx.client().pause_stream(&stream_id);
+        }));
+        assert!(result.is_err(), "third party must not be able to pause");
+        assert_no_side_effects(&ctx, stream_id, StreamStatus::Active, events_before);
+    }
+
+    // -----------------------------------------------------------------------
+    // pause_stream: admin cannot use sender path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pause_stream_admin_on_sender_path_rejected() {
+        let (ctx, stream_id) = setup_active_stream();
+        let events_before = ctx.env.events().all().len();
+
+        // Admin tries to use pause_stream (sender path) — must be rejected
+        ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &ctx.admin,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &ctx.contract_id,
+                fn_name: "pause_stream",
+                args: (stream_id,).into_val(&ctx.env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ctx.client().pause_stream(&stream_id);
+        }));
+        assert!(result.is_err(), "admin must not use sender pause path");
+        assert_no_side_effects(&ctx, stream_id, StreamStatus::Active, events_before);
+    }
+
+    // -----------------------------------------------------------------------
+    // resume_stream: recipient cannot resume
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resume_stream_recipient_rejected_no_side_effects() {
+        let (ctx, stream_id) = setup_active_stream();
+        // First pause the stream as sender
+        ctx.env.mock_all_auths();
+        ctx.env.ledger().set_timestamp(100);
+        ctx.client().pause_stream(&stream_id);
+        let events_before = ctx.env.events().all().len();
+
+        ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &ctx.recipient,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &ctx.contract_id,
+                fn_name: "resume_stream",
+                args: (stream_id,).into_val(&ctx.env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ctx.client().resume_stream(&stream_id);
+        }));
+        assert!(result.is_err(), "recipient must not be able to resume");
+        assert_no_side_effects(&ctx, stream_id, StreamStatus::Paused, events_before);
+    }
+
+    // -----------------------------------------------------------------------
+    // resume_stream: third party cannot resume
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resume_stream_third_party_rejected_no_side_effects() {
+        let (ctx, stream_id) = setup_active_stream();
+        ctx.env.mock_all_auths();
+        ctx.env.ledger().set_timestamp(100);
+        ctx.client().pause_stream(&stream_id);
+        let events_before = ctx.env.events().all().len();
+
+        let third_party = soroban_sdk::Address::generate(&ctx.env);
+        ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &third_party,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &ctx.contract_id,
+                fn_name: "resume_stream",
+                args: (stream_id,).into_val(&ctx.env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ctx.client().resume_stream(&stream_id);
+        }));
+        assert!(result.is_err(), "third party must not be able to resume");
+        assert_no_side_effects(&ctx, stream_id, StreamStatus::Paused, events_before);
+    }
+
+    // -----------------------------------------------------------------------
+    // resume_stream: admin cannot use sender path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resume_stream_admin_on_sender_path_rejected() {
+        let (ctx, stream_id) = setup_active_stream();
+        ctx.env.mock_all_auths();
+        ctx.env.ledger().set_timestamp(100);
+        ctx.client().pause_stream(&stream_id);
+        let events_before = ctx.env.events().all().len();
+
+        ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &ctx.admin,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &ctx.contract_id,
+                fn_name: "resume_stream",
+                args: (stream_id,).into_val(&ctx.env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ctx.client().resume_stream(&stream_id);
+        }));
+        assert!(result.is_err(), "admin must not use sender resume path");
+        assert_no_side_effects(&ctx, stream_id, StreamStatus::Paused, events_before);
+    }
+
+    // -----------------------------------------------------------------------
+    // pause_stream_as_admin: sender cannot use admin path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pause_stream_as_admin_sender_rejected() {
+        let (ctx, stream_id) = setup_active_stream();
+        let events_before = ctx.env.events().all().len();
+
+        ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &ctx.sender,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &ctx.contract_id,
+                fn_name: "pause_stream_as_admin",
+                args: (stream_id,).into_val(&ctx.env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ctx.client().pause_stream_as_admin(&stream_id);
+        }));
+        assert!(result.is_err(), "sender must not use admin pause path");
+        assert_no_side_effects(&ctx, stream_id, StreamStatus::Active, events_before);
+    }
+
+    // -----------------------------------------------------------------------
+    // pause_stream_as_admin: recipient cannot use admin path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pause_stream_as_admin_recipient_rejected() {
+        let (ctx, stream_id) = setup_active_stream();
+        let events_before = ctx.env.events().all().len();
+
+        ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &ctx.recipient,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &ctx.contract_id,
+                fn_name: "pause_stream_as_admin",
+                args: (stream_id,).into_val(&ctx.env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ctx.client().pause_stream_as_admin(&stream_id);
+        }));
+        assert!(result.is_err(), "recipient must not use admin pause path");
+        assert_no_side_effects(&ctx, stream_id, StreamStatus::Active, events_before);
+    }
+
+    // -----------------------------------------------------------------------
+    // resume_stream_as_admin: sender cannot use admin path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resume_stream_as_admin_sender_rejected() {
+        let (ctx, stream_id) = setup_active_stream();
+        ctx.env.mock_all_auths();
+        ctx.env.ledger().set_timestamp(100);
+        ctx.client().pause_stream(&stream_id);
+        let events_before = ctx.env.events().all().len();
+
+        ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &ctx.sender,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &ctx.contract_id,
+                fn_name: "resume_stream_as_admin",
+                args: (stream_id,).into_val(&ctx.env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ctx.client().resume_stream_as_admin(&stream_id);
+        }));
+        assert!(result.is_err(), "sender must not use admin resume path");
+        assert_no_side_effects(&ctx, stream_id, StreamStatus::Paused, events_before);
+    }
+
+    // -----------------------------------------------------------------------
+    // resume_stream_as_admin: recipient cannot use admin path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resume_stream_as_admin_recipient_rejected() {
+        let (ctx, stream_id) = setup_active_stream();
+        ctx.env.mock_all_auths();
+        ctx.env.ledger().set_timestamp(100);
+        ctx.client().pause_stream(&stream_id);
+        let events_before = ctx.env.events().all().len();
+
+        ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &ctx.recipient,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &ctx.contract_id,
+                fn_name: "resume_stream_as_admin",
+                args: (stream_id,).into_val(&ctx.env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ctx.client().resume_stream_as_admin(&stream_id);
+        }));
+        assert!(result.is_err(), "recipient must not use admin resume path");
+        assert_no_side_effects(&ctx, stream_id, StreamStatus::Paused, events_before);
+    }
+
+    // -----------------------------------------------------------------------
+    // Positive: sender CAN pause/resume (baseline)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sender_can_pause_and_resume() {
+        let (ctx, stream_id) = setup_active_stream();
+        ctx.env.mock_all_auths();
+        ctx.env.ledger().set_timestamp(100);
+        ctx.client().pause_stream(&stream_id);
+        assert_eq!(ctx.client().get_stream_state(&stream_id).status, StreamStatus::Paused);
+        ctx.client().resume_stream(&stream_id);
+        assert_eq!(ctx.client().get_stream_state(&stream_id).status, StreamStatus::Active);
+    }
+
+    #[test]
+    fn admin_can_pause_and_resume_via_admin_paths() {
+        let (ctx, stream_id) = setup_active_stream();
+        ctx.env.mock_all_auths();
+        ctx.client().pause_stream_as_admin(&stream_id);
+        assert_eq!(ctx.client().get_stream_state(&stream_id).status, StreamStatus::Paused);
+        ctx.client().resume_stream_as_admin(&stream_id);
+        assert_eq!(ctx.client().get_stream_state(&stream_id).status, StreamStatus::Active);
+    }
+
+} // mod negative_pause_resume_auth
