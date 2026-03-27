@@ -18,21 +18,15 @@ When changing the contract:
 
 ### Phases
 
-| Phase            | Action                                     | Notes                                                                   |
-| ---------------- | ------------------------------------------ | ----------------------------------------------------------------------- |
-| **Creation**     | `create_stream`                            | Sender deposits tokens; stream starts as `Active`                       |
-| **Pause**        | `pause_stream` / `pause_stream_as_admin`   | Stops withdrawals; accrual continues by time                            |
-| **Resume**       | `resume_stream` / `resume_stream_as_admin` | Restores withdrawals                                                    |
-| Phase            | Action                                     | Notes                                                                   |
-| ---------------- | ------------------------------------------ | ----------------------------------------------------------------------- |
-| **Creation**     | `create_stream`                            | Sender deposits tokens; stream starts as `Active`                       |
-| **Pause**        | `pause_stream` / `pause_stream_as_admin`   | Stops withdrawals; accrual continues by time                            |
-| **Resume**       | `resume_stream` / `resume_stream_as_admin` | Restores withdrawals                                                    |
-| **Cancellation** | `cancel_stream` / `cancel_stream_as_admin` | Refunds unstreamed amount to sender; accrued amount stays for recipient |
-| **Withdrawal**   | `withdraw`                                 | Recipient pulls accrued tokens                                          |
-| **Completion**   | Automatic                                  | When `withdrawn_amount == deposit_amount`, status becomes `Completed`   |
-| **Withdrawal**   | `withdraw`                                 | Recipient pulls accrued tokens                                          |
-| **Completion**   | Automatic                                  | When `withdrawn_amount == deposit_amount`, status becomes `Completed`   |
+| Phase            | Action                                       | Notes                                                                   |
+| ---------------- | -------------------------------------------- | ----------------------------------------------------------------------- |
+| **Creation**     | `create_stream`                              | Sender deposits tokens; stream starts as `Active`                       |
+| **Top-up**       | `top_up_stream`                              | Extra deposit locked (sender or admin only); schedule unchanged         |
+| **Pause**        | `pause_stream` / `pause_stream_as_admin`     | Stops withdrawals; accrual continues by time                            |
+| **Resume**       | `resume_stream` / `resume_stream_as_admin`   | Restores withdrawals                                                    |
+| **Cancellation** | `cancel_stream` / `cancel_stream_as_admin`   | Refunds unstreamed amount to sender; accrued amount stays for recipient |
+| **Withdrawal**   | `withdraw` / `withdraw_to` / `batch_withdraw` | Recipient pulls accrued tokens                                       |
+| **Completion**   | Automatic                                    | When `withdrawn_amount == deposit_amount`, status becomes `Completed`   |
 
 ### State Transitions
 
