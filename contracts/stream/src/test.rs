@@ -14007,6 +14007,136 @@ fn claimable_at_cancel_ceiling_parametric() {
         );
     }
 }
+/// Test that recipient index remains consistent when streams transition through
+/// multiple state changes including pause, resume, cancel, and completion.
+/// Verifies that only close_completed_stream removes entries from the index.
+#[test]
+fn test_recipient_index_persistence_across_state_transitions() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let recipient = Address::generate(&ctx.env);
+
+    // Create 4 streams for the same recipient
+    let id1 = ctx.client().create_stream(
+        &ctx.sender,
+        &recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    let id2 = ctx.client().create_stream(
+        &ctx.sender,
+        &recipient,
+        &2000_i128,
+        &2_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    let id3 = ctx.client().create_stream(
+        &ctx.sender,
+        &recipient,
+        &1500_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1500u64,
+    );
+
+    let id4 = ctx.client().create_stream(
+        &ctx.sender,
+        &recipient,
+        &3000_i128,
+        &3_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    // Verify all 4 streams are in the index
+    let streams_initial = ctx.client().get_recipient_streams(&recipient);
+    assert_eq!(streams_initial.len(), 4);
+    assert_eq!(ctx.client().get_recipient_stream_count(&recipient), 4);
+
+    // Transition stream 1: pause it
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().pause_stream(&id1);
+    
+    // Index should still contain all 4 streams
+    let streams_after_pause = ctx.client().get_recipient_streams(&recipient);
+    assert_eq!(streams_after_pause.len(), 4);
+    assert_eq!(ctx.client().get_recipient_stream_count(&recipient), 4);
+
+    // Transition stream 2: cancel it
+    ctx.env.ledger().set_timestamp(200);
+    ctx.client().cancel_stream(&id2);
+    
+    // Index should still contain all 4 streams (cancelled streams remain)
+    let streams_after_cancel = ctx.client().get_recipient_streams(&recipient);
+    assert_eq!(streams_after_cancel.len(), 4);
+    assert_eq!(ctx.client().get_recipient_stream_count(&recipient), 4);
+
+    // Transition stream 1: resume it
+    ctx.client().resume_stream(&id1);
+    
+    // Index should still contain all 4 streams
+    let streams_after_resume = ctx.client().get_recipient_streams(&recipient);
+    assert_eq!(streams_after_resume.len(), 4);
+    assert_eq!(ctx.client().get_recipient_stream_count(&recipient), 4);
+
+    // Transition stream 3: complete it
+    ctx.env.ledger().set_timestamp(1500);
+    ctx.client().withdraw(&id3);
+    
+    // Index should still contain all 4 streams (completed streams remain until closed)
+    let streams_after_complete = ctx.client().get_recipient_streams(&recipient);
+    assert_eq!(streams_after_complete.len(), 4);
+    assert_eq!(ctx.client().get_recipient_stream_count(&recipient), 4);
+
+    // Verify states
+    assert_eq!(ctx.client().get_stream_state(&id1).status, StreamStatus::Active);
+    assert_eq!(ctx.client().get_stream_state(&id2).status, StreamStatus::Cancelled);
+    assert_eq!(ctx.client().get_stream_state(&id3).status, StreamStatus::Completed);
+    assert_eq!(ctx.client().get_stream_state(&id4).status, StreamStatus::Active);
+
+    // Now close the completed stream - this should remove it from index
+    ctx.client().close_completed_stream(&id3);
+    
+    // Index should now contain only 3 streams
+    let streams_after_close = ctx.client().get_recipient_streams(&recipient);
+    assert_eq!(streams_after_close.len(), 3);
+    assert_eq!(ctx.client().get_recipient_stream_count(&recipient), 3);
+    
+    // Verify the remaining streams are id1, id2, id4 (sorted)
+    assert_eq!(streams_after_close.get(0).unwrap(), id1);
+    assert_eq!(streams_after_close.get(1).unwrap(), id2);
+    assert_eq!(streams_after_close.get(2).unwrap(), id4);
+
+    // Complete and close stream 4
+    ctx.client().withdraw(&id4);
+    ctx.client().close_completed_stream(&id4);
+    
+    // Index should now contain only 2 streams (id1 and id2)
+    let streams_final = ctx.client().get_recipient_streams(&recipient);
+    assert_eq!(streams_final.len(), 2);
+    assert_eq!(ctx.client().get_recipient_stream_count(&recipient), 2);
+    assert_eq!(streams_final.get(0).unwrap(), id1);
+    assert_eq!(streams_final.get(1).unwrap(), id2);
+
+    // Verify we can still interact with the remaining streams
+    ctx.client().pause_stream(&id1);
+    assert_eq!(ctx.client().get_stream_state(&id1).status, StreamStatus::Paused);
+    
+    // Cancelled stream should still allow withdrawal of accrued amount
+    let withdrawable = ctx.client().get_withdrawable(&id2);
+    assert!(withdrawable > 0);
+}
+
 // ---------------------------------------------------------------------------
 // Tests — Overflow Protection (Issue: create_streams total deposit overflow)
 // ---------------------------------------------------------------------------
