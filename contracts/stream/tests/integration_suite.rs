@@ -2839,3 +2839,136 @@ fn integration_create_streams_single_token_pull_equals_sum() {
     assert_eq!(ctx.token.balance(&ctx.sender), sender_before - 3500);
     assert_eq!(ctx.token.balance(&ctx.contract_id), 3500);
 }
+
+// ===========================================================================
+// Accrual property tests: bounds and monotonicity — integration tests
+// ===========================================================================
+
+/// Property: calculate_accrued is always non-negative and bounded by deposit.
+#[test]
+fn accrual_prop_non_negative_and_bounded() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+    );
+
+    for t in [0u64, 1, 250, 500, 750, 999, 1000, 1001, 9999] {
+        ctx.env.ledger().set_timestamp(t);
+        let accrued = ctx.client().calculate_accrued(&stream_id);
+        assert!(accrued >= 0, "negative accrual at t={t}: {accrued}");
+        assert!(accrued <= 1000, "accrual {accrued} exceeds deposit at t={t}");
+    }
+}
+
+/// Property: calculate_accrued is monotonically non-decreasing over time.
+#[test]
+fn accrual_prop_monotonic_no_cliff() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+    );
+
+    let times = [0u64, 100, 250, 500, 750, 999, 1000, 1001, 5000];
+    ctx.env.ledger().set_timestamp(times[0]);
+    let mut prev = ctx.client().calculate_accrued(&stream_id);
+
+    for &t in times.iter().skip(1) {
+        ctx.env.ledger().set_timestamp(t);
+        let now = ctx.client().calculate_accrued(&stream_id);
+        assert!(now >= prev, "monotonicity violated at t={t}: got {now}, prev={prev}");
+        prev = now;
+    }
+}
+
+/// Property: calculate_accrued is monotonic for a stream with a cliff.
+#[test]
+fn accrual_prop_monotonic_with_cliff() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &500, &1000,
+    );
+
+    let times = [0u64, 100, 499, 500, 501, 750, 1000, 1001, 5000];
+    ctx.env.ledger().set_timestamp(times[0]);
+    let mut prev = ctx.client().calculate_accrued(&stream_id);
+
+    for &t in times.iter().skip(1) {
+        ctx.env.ledger().set_timestamp(t);
+        let now = ctx.client().calculate_accrued(&stream_id);
+        assert!(now >= prev, "cliff-stream monotonicity violated at t={t}: got {now}, prev={prev}");
+        prev = now;
+    }
+}
+
+/// Property: calculate_accrued == 0 for all t < cliff_time.
+#[test]
+fn accrual_prop_zero_before_cliff() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &500, &1000,
+    );
+
+    for t in [0u64, 1, 100, 250, 499] {
+        ctx.env.ledger().set_timestamp(t);
+        let accrued = ctx.client().calculate_accrued(&stream_id);
+        assert_eq!(accrued, 0, "expected 0 before cliff at t={t}");
+    }
+}
+
+/// Property: calculate_accrued == deposit for all t >= end_time.
+#[test]
+fn accrual_prop_saturates_at_end_time() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+    );
+
+    for t in [1000u64, 1001, 5000, 99999] {
+        ctx.env.ledger().set_timestamp(t);
+        let accrued = ctx.client().calculate_accrued(&stream_id);
+        assert_eq!(accrued, 1000, "must saturate at deposit for t={t}");
+    }
+}
+
+/// Property: accrual is frozen after cancellation.
+#[test]
+fn accrual_prop_frozen_after_cancel() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+    );
+
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().cancel_stream(&stream_id);
+    let frozen = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(frozen, 400);
+
+    for t in [500u64, 800, 1000, 9999] {
+        ctx.env.ledger().set_timestamp(t);
+        let later = ctx.client().calculate_accrued(&stream_id);
+        assert_eq!(later, frozen, "accrual must be frozen after cancel at t={t}");
+    }
+}
+
+/// Property: paused stream accrual continues (pause only blocks withdrawals).
+#[test]
+fn accrual_prop_paused_stream_continues_accruing() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+    );
+
+    ctx.env.ledger().set_timestamp(300);
+    ctx.client().pause_stream(&stream_id);
+
+    ctx.env.ledger().set_timestamp(700);
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued, 700, "paused stream must accrue by time");
+}

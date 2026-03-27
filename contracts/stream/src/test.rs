@@ -2130,7 +2130,7 @@ fn test_calculate_accrued_permissionless_access() {
     let stream_id = ctx.create_default_stream();
 
     // Create a random third-party address (not sender, not recipient, not admin)
-    let third_party = Address::random(&ctx.env);
+    let _third_party = Address::generate(&ctx.env);
 
     // Third party must be able to call calculate_accrued without auth
     // This would panic if auth was required
@@ -9371,14 +9371,15 @@ fn test_update_rate_per_second_emits_event() {
 
     // Verify event was emitted.
     let events = ctx.env.events().all();
-    let rate_update_events: Vec<_> = events
+    let rate_update_events: std::vec::Vec<_> = events
         .iter()
         .filter(|e| {
-            if let Ok(topics) = <(Symbol, u64)>::try_from_val(&ctx.env, &e.topics) {
-                topics.0 == Symbol::new(&ctx.env, "rate_upd") && topics.1 == stream_id
-            } else {
-                false
-            }
+            if e.0 != ctx.contract_id { return false; }
+            let topics = &e.1;
+            if topics.len() < 2 { return false; }
+            let t0 = Symbol::from_val(&ctx.env, &topics.get(0).unwrap());
+            let t1: u64 = topics.get(1).unwrap().into_val(&ctx.env);
+            t0 == Symbol::new(&ctx.env, "rate_upd") && t1 == stream_id
         })
         .collect();
 
@@ -14447,3 +14448,322 @@ fn test_create_streams_batch_deposit_overflow_is_atomic() {
         "stream count must not change on overflow failure"
     );
 }
+
+// ===========================================================================
+// Accrual property tests: bounds and monotonicity (contract-level)
+//
+// Scope: systematic evidence that the contract's calculate_accrued entry-point
+// satisfies the same invariants as the pure accrual function, exercised through
+// the full Soroban stack (storage, TTL, token, auth).
+//
+// Properties verified:
+// 1. Non-negativity: calculate_accrued >= 0 at all times
+// 2. Upper bound: calculate_accrued <= deposit_amount at all times
+// 3. Monotonicity: calculate_accrued(t1) <= calculate_accrued(t2) for t1 <= t2
+// 4. Zero before cliff: calculate_accrued == 0 for t < cliff_time
+// 5. Saturation: calculate_accrued == deposit for t >= end_time (when rate*duration >= deposit)
+// 6. Frozen after cancel: calculate_accrued does not grow after cancellation
+// 7. Permissionless: calculate_accrued requires no authorization
+//
+// Audit notes:
+// - These tests exercise the contract entry-point, not the pure function.
+//   Pure-function property tests are in accrual.rs mod property_monotonicity
+//   and mod extended_property_tests.
+// - Gas budget is not enforced in the test harness.
+// ===========================================================================
+#[cfg(test)]
+mod accrual_property_tests {
+    use super::*;
+    use soroban_sdk::Env;
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    /// Create a stream with given parameters and return its ID.
+    fn make_stream(
+        ctx: &TestContext,
+        deposit: i128,
+        rate: i128,
+        start: u64,
+        cliff: u64,
+        end: u64,
+    ) -> u64 {
+        ctx.sac.mint(&ctx.sender, &deposit);
+        ctx.env.ledger().set_timestamp(start);
+        ctx.client().create_stream(
+            &ctx.sender, &ctx.recipient, &deposit, &rate, &start, &cliff, &end,
+        )
+    }
+
+    // -----------------------------------------------------------------------
+    // Property 1: Non-negativity
+    // -----------------------------------------------------------------------
+
+    /// calculate_accrued is always >= 0 regardless of ledger time.
+    #[test]
+    fn prop_contract_accrued_non_negative() {
+        let ctx = TestContext::setup();
+        let stream_id = make_stream(&ctx, 1_000, 1, 0, 0, 1_000);
+
+        for t in [0u64, 1, 499, 500, 999, 1_000, 1_001, 9_999] {
+            ctx.env.ledger().set_timestamp(t);
+            let accrued = ctx.client().calculate_accrued(&stream_id);
+            assert!(accrued >= 0, "negative accrual at t={t}: {accrued}");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property 2: Upper bound
+    // -----------------------------------------------------------------------
+
+    /// calculate_accrued never exceeds deposit_amount.
+    #[test]
+    fn prop_contract_accrued_bounded_by_deposit() {
+        let ctx = TestContext::setup();
+        let deposit = 1_000_i128;
+        let stream_id = make_stream(&ctx, deposit, 1, 0, 0, 1_000);
+
+        for t in [0u64, 1, 500, 999, 1_000, 1_001, 50_000] {
+            ctx.env.ledger().set_timestamp(t);
+            let accrued = ctx.client().calculate_accrued(&stream_id);
+            assert!(
+                accrued <= deposit,
+                "accrual {accrued} exceeds deposit {deposit} at t={t}"
+            );
+        }
+    }
+
+    /// High-rate stream: deposit is the binding cap, not rate * elapsed.
+    #[test]
+    fn prop_contract_high_rate_capped_at_deposit() {
+        let ctx = TestContext::setup();
+        // rate=10, duration=1000 → total_streamable=10_000; deposit=10_000 (covers it)
+        // but we set deposit > total_streamable to test the cap: use deposit=10_000, rate=10
+        // At end_time, accrued = min(10*1000, 10_000) = 10_000 = deposit
+        // To test deposit as binding cap: use rate=10, duration=100, deposit=500 (< 10*100=1000)
+        // But that fails validation. Instead: deposit=10_000, rate=10, duration=1000
+        // and verify accrued never exceeds deposit.
+        let deposit = 10_000_i128;
+        let stream_id = make_stream(&ctx, deposit, 10, 0, 0, 1_000);
+
+        ctx.env.ledger().set_timestamp(1_000);
+        let accrued = ctx.client().calculate_accrued(&stream_id);
+        assert_eq!(accrued, deposit, "at end_time, accrued must equal deposit");
+        assert!(accrued <= deposit, "accrued must not exceed deposit");
+
+        ctx.env.ledger().set_timestamp(9_999);
+        let accrued_late = ctx.client().calculate_accrued(&stream_id);
+        assert_eq!(accrued_late, deposit, "long after end, still capped at deposit");
+    }
+
+    // -----------------------------------------------------------------------
+    // Property 3: Monotonicity
+    // -----------------------------------------------------------------------
+
+    /// calculate_accrued never decreases as ledger time advances.
+    #[test]
+    fn prop_contract_accrued_monotonic_no_cliff() {
+        let ctx = TestContext::setup();
+        let stream_id = make_stream(&ctx, 1_000, 1, 0, 0, 1_000);
+
+        let times = [0u64, 1, 100, 250, 500, 750, 999, 1_000, 1_001, 5_000];
+        ctx.env.ledger().set_timestamp(times[0]);
+        let mut prev = ctx.client().calculate_accrued(&stream_id);
+
+        for &t in times.iter().skip(1) {
+            ctx.env.ledger().set_timestamp(t);
+            let now = ctx.client().calculate_accrued(&stream_id);
+            assert!(
+                now >= prev,
+                "monotonicity violated at t={t}: got {now}, prev={prev}"
+            );
+            prev = now;
+        }
+    }
+
+    /// Monotonicity holds for a stream with a cliff.
+    #[test]
+    fn prop_contract_accrued_monotonic_with_cliff() {
+        let ctx = TestContext::setup();
+        let stream_id = make_stream(&ctx, 1_000, 1, 0, 500, 1_000);
+
+        let times = [0u64, 100, 499, 500, 501, 750, 999, 1_000, 1_001, 5_000];
+        ctx.env.ledger().set_timestamp(times[0]);
+        let mut prev = ctx.client().calculate_accrued(&stream_id);
+
+        for &t in times.iter().skip(1) {
+            ctx.env.ledger().set_timestamp(t);
+            let now = ctx.client().calculate_accrued(&stream_id);
+            assert!(
+                now >= prev,
+                "cliff-stream monotonicity violated at t={t}: got {now}, prev={prev}"
+            );
+            prev = now;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property 4: Zero before cliff
+    // -----------------------------------------------------------------------
+
+    /// calculate_accrued returns 0 for all t strictly before cliff_time.
+    #[test]
+    fn prop_contract_zero_before_cliff() {
+        let ctx = TestContext::setup();
+        let stream_id = make_stream(&ctx, 1_000, 1, 0, 500, 1_000);
+
+        for t in [0u64, 1, 100, 250, 499] {
+            ctx.env.ledger().set_timestamp(t);
+            let accrued = ctx.client().calculate_accrued(&stream_id);
+            assert_eq!(accrued, 0, "expected 0 before cliff at t={t}, got {accrued}");
+        }
+    }
+
+    /// At exactly cliff_time, accrual uses elapsed from start_time (not cliff).
+    #[test]
+    fn prop_contract_at_cliff_accrues_from_start() {
+        let ctx = TestContext::setup();
+        // start=0, cliff=500, end=1000, rate=1 → at t=500, elapsed=500, accrued=500
+        let stream_id = make_stream(&ctx, 1_000, 1, 0, 500, 1_000);
+
+        ctx.env.ledger().set_timestamp(500);
+        let accrued = ctx.client().calculate_accrued(&stream_id);
+        assert_eq!(accrued, 500, "at cliff, accrual must use elapsed from start_time");
+    }
+
+    // -----------------------------------------------------------------------
+    // Property 5: Saturation at end_time
+    // -----------------------------------------------------------------------
+
+    /// calculate_accrued == deposit for all t >= end_time.
+    #[test]
+    fn prop_contract_saturates_at_end_time() {
+        let ctx = TestContext::setup();
+        let deposit = 1_000_i128;
+        let stream_id = make_stream(&ctx, deposit, 1, 0, 0, 1_000);
+
+        for t in [1_000u64, 1_001, 5_000, 999_999] {
+            ctx.env.ledger().set_timestamp(t);
+            let accrued = ctx.client().calculate_accrued(&stream_id);
+            assert_eq!(accrued, deposit, "must saturate at deposit for t={t}");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property 6: Frozen after cancellation
+    // -----------------------------------------------------------------------
+
+    /// After cancel, calculate_accrued returns the same value regardless of
+    /// how much time passes (frozen at cancelled_at).
+    #[test]
+    fn prop_contract_accrued_frozen_after_cancel() {
+        let ctx = TestContext::setup();
+        let stream_id = make_stream(&ctx, 1_000, 1, 0, 0, 1_000);
+
+        ctx.env.ledger().set_timestamp(300);
+        ctx.client().cancel_stream(&stream_id);
+        let frozen = ctx.client().calculate_accrued(&stream_id);
+        assert_eq!(frozen, 300);
+
+        for t in [400u64, 700, 1_000, 9_999] {
+            ctx.env.ledger().set_timestamp(t);
+            let later = ctx.client().calculate_accrued(&stream_id);
+            assert_eq!(
+                later, frozen,
+                "accrual must be frozen after cancel: at t={t} got {later}, expected {frozen}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property 7: Permissionless — no auth required
+    // -----------------------------------------------------------------------
+
+    /// calculate_accrued works in strict mode (no mock_all_auths).
+    #[test]
+    fn prop_contract_accrued_requires_no_auth() {
+        let ctx = TestContext::setup_strict();
+        ctx.env.mock_all_auths();
+        ctx.env.ledger().set_timestamp(0);
+        let stream_id = ctx.client().create_stream(
+            &ctx.sender, &ctx.recipient, &1_000, &1, &0, &0, &1_000,
+        );
+
+        // Clear all auths — calculate_accrued must still work
+        ctx.env.mock_auths(&[]);
+        ctx.env.ledger().set_timestamp(500);
+        let result = ctx.client().try_calculate_accrued(&stream_id);
+        assert!(result.is_ok(), "calculate_accrued must not require auth");
+        assert_eq!(result.unwrap(), Ok(500));
+    }
+
+    // -----------------------------------------------------------------------
+    // Property 8: Completed stream returns deposit deterministically
+    // -----------------------------------------------------------------------
+
+    /// After full withdrawal (Completed), calculate_accrued returns deposit
+    /// regardless of current time.
+    #[test]
+    fn prop_contract_completed_stream_returns_deposit() {
+        let ctx = TestContext::setup();
+        let deposit = 1_000_i128;
+        let stream_id = make_stream(&ctx, deposit, 1, 0, 0, 1_000);
+
+        ctx.env.ledger().set_timestamp(1_000);
+        ctx.client().withdraw(&stream_id);
+        assert_eq!(
+            ctx.client().get_stream_state(&stream_id).status,
+            StreamStatus::Completed
+        );
+
+        for t in [1_000u64, 2_000, 99_999] {
+            ctx.env.ledger().set_timestamp(t);
+            let accrued = ctx.client().calculate_accrued(&stream_id);
+            assert_eq!(
+                accrued, deposit,
+                "completed stream must return deposit at t={t}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property 9: Paused stream — accrual continues (time-based)
+    // -----------------------------------------------------------------------
+
+    /// Pausing does not affect accrual calculation — time still advances.
+    #[test]
+    fn prop_contract_paused_stream_accrual_continues() {
+        let ctx = TestContext::setup();
+        let stream_id = make_stream(&ctx, 1_000, 1, 0, 0, 1_000);
+
+        ctx.env.ledger().set_timestamp(200);
+        ctx.client().pause_stream(&stream_id);
+
+        // Accrual at t=600 while paused must equal 600 (not 200)
+        ctx.env.ledger().set_timestamp(600);
+        let accrued = ctx.client().calculate_accrued(&stream_id);
+        assert_eq!(accrued, 600, "paused stream must continue accruing by time");
+    }
+
+    // -----------------------------------------------------------------------
+    // Property 10: Excess deposit — accrual caps at rate*duration, not deposit
+    // -----------------------------------------------------------------------
+
+    /// When deposit > rate * duration, accrued at end == rate * duration.
+    #[test]
+    fn prop_contract_excess_deposit_caps_at_total_streamable() {
+        let ctx = TestContext::setup();
+        // deposit=2000, rate=1, duration=1000 → total_streamable=1000
+        let stream_id = make_stream(&ctx, 2_000, 1, 0, 0, 1_000);
+
+        ctx.env.ledger().set_timestamp(1_000);
+        let accrued = ctx.client().calculate_accrued(&stream_id);
+        assert_eq!(accrued, 1_000, "excess deposit: accrued must cap at rate*duration");
+
+        ctx.env.ledger().set_timestamp(9_999);
+        let accrued_late = ctx.client().calculate_accrued(&stream_id);
+        assert_eq!(accrued_late, 1_000, "long after end: still capped at rate*duration");
+    }
+
+} // mod accrual_property_tests

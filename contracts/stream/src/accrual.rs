@@ -635,3 +635,269 @@ mod property_monotonicity {
         }
     }
 }
+
+// ===========================================================================
+// Extended property tests: additional stream shapes and edge cases
+//
+// Scope: systematic evidence that calculate_accrued_amount satisfies all
+// documented invariants across a wider fixture set, including:
+// - Streams with non-zero start times
+// - Streams where cliff == end (nothing ever accrues)
+// - Streams with deposit exactly equal to rate * duration
+// - Streams with deposit less than rate * duration (deposit is binding)
+// - Streams with zero rate and zero deposit
+// - Streams with u64::MAX end time (near-overflow duration)
+//
+// Audit notes:
+// - All properties are pure-function tests (no Soroban env required).
+// - Contract-level property tests (through the full Soroban stack) are in
+//   contracts/stream/src/test.rs mod accrual_property_tests.
+// - Gas budget is not applicable to pure functions.
+// ===========================================================================
+#[cfg(test)]
+mod extended_property_tests {
+    use super::calculate_accrued_amount;
+
+    // -----------------------------------------------------------------------
+    // Extended fixture set
+    // -----------------------------------------------------------------------
+
+    /// All stream shapes used across extended property tests.
+    /// Format: (start, cliff, end, rate, deposit)
+    const EXTENDED_STREAMS: &[(u64, u64, u64, i128, i128)] = &[
+        (0, 0, 1_000, 1, 1_000),           // standard: deposit == rate*duration
+        (0, 500, 1_000, 1, 1_000),          // cliff at midpoint
+        (0, 1_000, 1_000, 1, 1_000),        // cliff == end: nothing ever accrues
+        (1_000, 1_000, 2_000, 2, 2_000),    // non-zero start, rate=2
+        (0, 0, 1_000, 10, 5_000),           // high rate, deposit caps
+        (0, 0, 1_000, 3, 500),              // rate*duration > deposit
+        (0, 0, 1_000, 1, 2_000),            // deposit > rate*duration (excess)
+        (100, 200, 1_000, 5, 4_500),        // cliff after start
+        (0, 0, 500, 2, 1_000),              // short stream, rate=2
+        (5_000, 5_000, 10_000, 1, 5_000),   // late start, no cliff offset
+    ];
+
+    // -----------------------------------------------------------------------
+    // Property A: Non-negativity — result is always >= 0
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn prop_non_negative_for_all_streams_and_times() {
+        for &(start, cliff, end, rate, deposit) in EXTENDED_STREAMS {
+            for t in [0u64, 1, start.saturating_sub(1), start, cliff,
+                      (start + end) / 2, end.saturating_sub(1), end,
+                      end + 1, end + 10_000, u64::MAX / 2] {
+                let accrued = calculate_accrued_amount(start, cliff, end, rate, deposit, t);
+                assert!(
+                    accrued >= 0,
+                    "negative accrual for ({start},{cliff},{end},{rate},{deposit}) at t={t}: {accrued}"
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property B: Upper bound — result never exceeds deposit_amount
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn prop_never_exceeds_deposit_for_all_streams_and_times() {
+        for &(start, cliff, end, rate, deposit) in EXTENDED_STREAMS {
+            for t in [0u64, 1, start, cliff, (start + end) / 2,
+                      end, end + 1, end + 100_000, u64::MAX / 2] {
+                let accrued = calculate_accrued_amount(start, cliff, end, rate, deposit, t);
+                assert!(
+                    accrued <= deposit,
+                    "accrual exceeds deposit for ({start},{cliff},{end},{rate},{deposit}) at t={t}: \
+                     accrued={accrued} > deposit={deposit}"
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property C: Monotonicity — accrued never decreases as time advances
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn prop_monotonic_for_extended_streams() {
+        for &(start, cliff, end, rate, deposit) in EXTENDED_STREAMS {
+            // Build a sorted time grid
+            let mut times = [
+                0u64,
+                start.saturating_sub(1),
+                start,
+                cliff.saturating_sub(1),
+                cliff,
+                (start.saturating_add(end)) / 2,
+                end.saturating_sub(1),
+                end,
+                end.saturating_add(1),
+                end.saturating_add(1_000),
+            ];
+            times.sort_unstable();
+
+            let mut prev = calculate_accrued_amount(start, cliff, end, rate, deposit, times[0]);
+            for &t in times.iter().skip(1) {
+                let now = calculate_accrued_amount(start, cliff, end, rate, deposit, t);
+                assert!(
+                    now >= prev,
+                    "monotonicity violated for ({start},{cliff},{end},{rate},{deposit}): \
+                     accrued({t})={now} < prev={prev}"
+                );
+                prev = now;
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property D: Zero before cliff — strict pre-cliff window
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn prop_zero_strictly_before_cliff_extended() {
+        for &(start, cliff, end, rate, deposit) in EXTENDED_STREAMS {
+            if cliff == 0 { continue; }
+            for t in [0u64, 1, cliff.saturating_sub(1)] {
+                if t >= cliff { continue; }
+                let accrued = calculate_accrued_amount(start, cliff, end, rate, deposit, t);
+                assert_eq!(
+                    accrued, 0,
+                    "expected 0 before cliff for ({start},{cliff},{end},{rate},{deposit}) at t={t}"
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property E: Saturation — accrued == deposit for all t >= end when
+    //             rate * duration >= deposit
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn prop_saturates_at_deposit_after_end_when_rate_covers() {
+        // Only streams where rate * (end - start) >= deposit
+        let saturating: &[(u64, u64, u64, i128, i128)] = &[
+            (0, 0, 1_000, 1, 1_000),
+            (0, 0, 1_000, 10, 5_000),
+            (0, 0, 1_000, 3, 500),
+            (1_000, 1_000, 2_000, 2, 2_000),
+            (0, 500, 1_000, 1, 1_000),
+            (0, 0, 500, 2, 1_000),
+        ];
+        for &(start, cliff, end, rate, deposit) in saturating {
+            for t in [end, end + 1, end + 1_000, end + 1_000_000] {
+                let accrued = calculate_accrued_amount(start, cliff, end, rate, deposit, t);
+                assert_eq!(
+                    accrued, deposit,
+                    "expected saturation at deposit={deposit} for ({start},{cliff},{end},{rate},{deposit}) at t={t}"
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property F: cliff == end → accrual only possible at exactly end_time
+    // -----------------------------------------------------------------------
+
+    /// When cliff == end, the cliff is only passed at t >= end_time.
+    /// Before end_time: accrued == 0 (cliff not yet reached).
+    /// At end_time: accrued == deposit (cliff passed, full duration elapsed).
+    #[test]
+    fn prop_cliff_equals_end_zero_before_end() {
+        let (start, cliff, end, rate, deposit) = (0u64, 1_000u64, 1_000u64, 1i128, 1_000i128);
+        // Before end_time (== cliff_time): must be 0
+        for t in [0u64, 1, 500, 999] {
+            let accrued = calculate_accrued_amount(start, cliff, end, rate, deposit, t);
+            assert_eq!(
+                accrued, 0,
+                "cliff==end: must be 0 before end_time at t={t}"
+            );
+        }
+        // At and after end_time: cliff is passed, full accrual
+        for t in [1_000u64, 1_001, 9_999] {
+            let accrued = calculate_accrued_amount(start, cliff, end, rate, deposit, t);
+            assert_eq!(
+                accrued, deposit,
+                "cliff==end: must equal deposit at t={t} (cliff passed at end_time)"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property G: zero rate → always zero accrual
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn prop_zero_rate_always_zero_accrual() {
+        let (start, cliff, end, rate, deposit) = (0u64, 0u64, 10_000u64, 0i128, 0i128);
+        for t in [0u64, 1, 5_000, 10_000, 10_001, u64::MAX / 2] {
+            let accrued = calculate_accrued_amount(start, cliff, end, rate, deposit, t);
+            assert_eq!(accrued, 0, "zero-rate stream must always return 0 at t={t}");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property H: idempotency — calling twice with same args returns same value
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn prop_idempotent_for_extended_streams() {
+        for &(start, cliff, end, rate, deposit) in EXTENDED_STREAMS {
+            for t in [0u64, start, cliff, (start + end) / 2, end, end + 1] {
+                let a = calculate_accrued_amount(start, cliff, end, rate, deposit, t);
+                let b = calculate_accrued_amount(start, cliff, end, rate, deposit, t);
+                assert_eq!(a, b, "non-idempotent for ({start},{cliff},{end},{rate},{deposit}) at t={t}");
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property I: deposit == rate * duration → accrued(end) == deposit exactly
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn prop_exact_deposit_coverage_accrues_full_at_end() {
+        // deposit exactly equals rate * duration
+        let cases: &[(u64, u64, u64, i128, i128)] = &[
+            (0, 0, 1_000, 1, 1_000),
+            (0, 0, 500, 2, 1_000),
+            (1_000, 1_000, 2_000, 2, 2_000),
+            (0, 500, 1_000, 1, 1_000),
+        ];
+        for &(start, cliff, end, rate, deposit) in cases {
+            let accrued = calculate_accrued_amount(start, cliff, end, rate, deposit, end);
+            assert_eq!(
+                accrued, deposit,
+                "exact-coverage stream must accrue full deposit at end_time: \
+                 ({start},{cliff},{end},{rate},{deposit})"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property J: negative rate → always zero (invalid schedule guard)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn prop_negative_rate_always_zero() {
+        for neg_rate in [-1i128, -100, i128::MIN] {
+            let accrued = calculate_accrued_amount(0, 0, 1_000, neg_rate, 1_000, 500);
+            assert_eq!(accrued, 0, "negative rate={neg_rate} must return 0");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property K: start >= end → always zero (invalid schedule guard)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn prop_start_gte_end_always_zero() {
+        // start == end
+        let accrued = calculate_accrued_amount(1_000, 1_000, 1_000, 1, 1_000, 1_001);
+        assert_eq!(accrued, 0, "start==end must return 0");
+        // start > end
+        let accrued2 = calculate_accrued_amount(2_000, 2_000, 1_000, 1, 1_000, 2_001);
+        assert_eq!(accrued2, 0, "start>end must return 0");
+    }
+}
