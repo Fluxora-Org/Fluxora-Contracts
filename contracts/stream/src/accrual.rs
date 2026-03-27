@@ -423,9 +423,10 @@ mod property_monotonicity {
 
     /// Dense time grid for a stream: samples before, at, and after every boundary.
     fn time_grid(start: u64, cliff: u64, end: u64) -> [u64; 12] {
-        let mid = start.saturating_add((end.saturating_sub(start)) / 2);
-        let q1 = start.saturating_add((end.saturating_sub(start)) / 4);
-        let q3 = start.saturating_add(3 * (end.saturating_sub(start)) / 4);
+        let duration = end.saturating_sub(start);
+        let mid = start.saturating_add(duration / 2);
+        let q1 = start.saturating_add(duration / 4);
+        let q3 = start.saturating_add(duration.saturating_mul(3) / 4);
         [
             0,
             start.saturating_sub(1),
@@ -442,6 +443,18 @@ mod property_monotonicity {
         ]
     }
 
+    fn sort_array(arr: &mut [u64]) {
+        for i in 0..arr.len() {
+            for j in 0..arr.len() - i - 1 {
+                if arr[j] > arr[j + 1] {
+                    let temp = arr[j];
+                    arr[j] = arr[j + 1];
+                    arr[j + 1] = temp;
+                }
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Property 1: Monotonicity — accrued never decreases as time advances
     // -----------------------------------------------------------------------
@@ -451,7 +464,8 @@ mod property_monotonicity {
     #[test]
     fn prop_monotonic_over_dense_grid() {
         for &(start, cliff, end, rate, deposit) in STREAMS {
-            let times = time_grid(start, cliff, end);
+            let mut times = time_grid(start, cliff, end);
+            sort_array(&mut times);
             let mut prev = calculate_accrued_amount(start, cliff, end, rate, deposit, times[0]);
 
             for &t in times.iter().skip(1) {

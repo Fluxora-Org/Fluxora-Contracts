@@ -2124,13 +2124,11 @@ fn test_calculate_accrued_completed_deterministic() {
 /// This verifies that no auth is required, which is essential for indexers and UI.
 #[test]
 fn test_calculate_accrued_permissionless_access() {
-    use soroban_sdk::testutils::Address as _;
-
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
 
     // Create a random third-party address (not sender, not recipient, not admin)
-    let third_party = Address::random(&ctx.env);
+    let _third_party = Address::generate(&ctx.env);
 
     // Third party must be able to call calculate_accrued without auth
     // This would panic if auth was required
@@ -9371,14 +9369,12 @@ fn test_update_rate_per_second_emits_event() {
 
     // Verify event was emitted.
     let events = ctx.env.events().all();
-    let rate_update_events: Vec<_> = events
+    let rate_update_events: std::vec::Vec<_> = events
         .iter()
         .filter(|e| {
-            if let Ok(topics) = <(Symbol, u64)>::try_from_val(&ctx.env, &e.topics) {
-                topics.0 == Symbol::new(&ctx.env, "rate_upd") && topics.1 == stream_id
-            } else {
-                false
-            }
+            e.1.len() == 2
+                && Symbol::try_from_val(&ctx.env, &e.1.get(0).unwrap()).map_or(false, |s| s == Symbol::new(&ctx.env, "rate_upd"))
+                && u64::try_from_val(&ctx.env, &e.1.get(1).unwrap()).map_or(false, |id| id == stream_id)
         })
         .collect();
 
@@ -9521,7 +9517,6 @@ fn test_update_rate_per_second_with_overflow_protection() {
     // Create stream with max-ish values.
     ctx.env.ledger().set_timestamp(0);
     let max_rate = i128::MAX / 1000; // Safe rate for 1000 second duration.
-    let deposit = max_rate * 1000;
 
     let stream_id = ctx.client().create_stream(
         &ctx.sender,
