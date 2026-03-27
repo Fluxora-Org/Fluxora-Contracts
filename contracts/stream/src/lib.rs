@@ -49,20 +49,137 @@ pub enum StreamStatus {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum ContractError {
+    /// Stream ID does not exist in persistent storage.
+    ///
+    /// Returned by any function that loads a stream by ID when the ID has
+    /// never been created, or when the stream has been removed via
+    /// `close_completed_stream`.
+    ///
+    /// **Discriminant:** 1 (stable; never changes)
+    ///
+    /// **Affected functions:** `get_stream_state`, `calculate_accrued`,
+    /// `get_withdrawable`, `get_claimable_at`, `pause_stream`,
+    /// `resume_stream`, `cancel_stream`, `withdraw`, `withdraw_to`,
+    /// `batch_withdraw`, `top_up_stream`, `update_rate_per_second`,
+    /// `shorten_stream_end_time`, `extend_stream_end_time`,
+    /// `close_completed_stream`, `pause_stream_as_admin`,
+    /// `resume_stream_as_admin`, `cancel_stream_as_admin`.
     StreamNotFound = 1,
+
+    /// Operation is not valid for the stream's current status, or the
+    /// contract has not been initialised.
+    ///
+    /// Common triggers:
+    /// - Pausing a stream that is not `Active`.
+    /// - Resuming a stream that is not `Paused`.
+    /// - Cancelling a stream that is `Completed` or already `Cancelled`.
+    /// - Withdrawing from a `Completed` or `Paused` stream.
+    /// - Calling any config-dependent function before `init`.
+    /// - Closing a stream that is not `Completed`.
+    ///
+    /// **Discriminant:** 2 (stable; never changes)
+    ///
+    /// **Affected functions:** `pause_stream`, `resume_stream`,
+    /// `cancel_stream`, `withdraw`, `withdraw_to`, `batch_withdraw`,
+    /// `close_completed_stream`, `pause_stream_as_admin`,
+    /// `resume_stream_as_admin`, `cancel_stream_as_admin`,
+    /// `get_config`, `get_token`, `get_admin` (when not initialised).
     InvalidState = 2,
+
+    /// One or more input parameters are invalid.
+    ///
+    /// Common triggers:
+    /// - `deposit_amount <= 0` or `rate_per_second <= 0`.
+    /// - `sender == recipient` (self-streaming disallowed).
+    /// - `start_time >= end_time`.
+    /// - `cliff_time` outside `[start_time, end_time]`.
+    /// - `rate_per_second * (end_time - start_time)` overflows `i128`.
+    /// - Batch total deposit overflows `i128`.
+    /// - `top_up_stream` amount <= 0.
+    /// - `update_rate_per_second` new rate <= 0 or causes overflow.
+    /// - `shorten_stream_end_time` new end not strictly before current end.
+    /// - `extend_stream_end_time` new end not strictly after current end.
+    ///
+    /// **Discriminant:** 3 (stable; never changes)
+    ///
+    /// **Affected functions:** `create_stream`, `create_streams`,
+    /// `top_up_stream`, `update_rate_per_second`, `shorten_stream_end_time`,
+    /// `extend_stream_end_time`.
     InvalidParams = 3,
-    /// Global emergency pause is active; stream creation is blocked.
+
+    /// Global emergency pause is active; new stream creation is blocked.
+    ///
+    /// Set by `set_contract_paused(true)`. Cleared by
+    /// `set_contract_paused(false)`. Only affects `create_stream` and
+    /// `create_streams`; all other operations (withdraw, cancel, etc.)
+    /// continue normally while the contract is paused.
+    ///
+    /// **Discriminant:** 4 (stable; never changes)
+    ///
+    /// **Affected functions:** `create_stream`, `create_streams`.
     ContractPaused = 4,
-    /// Start time is before the current ledger timestamp.
+
+    /// `start_time` is strictly before the current ledger timestamp.
+    ///
+    /// Streams cannot be created with a start time in the past.
+    /// `start_time == ledger.timestamp()` is valid ("start now").
+    /// Failure is atomic: no stream is persisted, no tokens move, and no
+    /// `created` event is emitted.
+    ///
+    /// **Discriminant:** 5 (stable; never changes)
+    ///
+    /// **Affected functions:** `create_stream`, `create_streams`.
     StartTimeInPast = 5,
+
     /// Caller is not authorized to perform this operation.
+    ///
+    /// Returned when an explicit authorization check fails beyond the
+    /// standard `require_auth` host trap. Currently used in `withdraw_to`
+    /// when the caller is not the stream's recipient.
+    ///
+    /// Note: most authorization failures in Soroban surface as host traps
+    /// (panics), not as this error code. This variant is reserved for
+    /// cases where the contract performs an explicit role check after auth.
+    ///
+    /// **Discriminant:** 6 (stable; never changes)
+    ///
+    /// **Affected functions:** `withdraw_to` (non-recipient destination check).
     Unauthorized = 6,
-    /// Contract is already initialized.
+
+    /// Contract has already been initialised.
+    ///
+    /// `init` is one-shot. Any second call returns this error regardless of
+    /// the supplied parameters. The existing `Config` and `NextStreamId`
+    /// are unchanged.
+    ///
+    /// **Discriminant:** 7 (stable; never changes)
+    ///
+    /// **Affected functions:** `init`.
     AlreadyInitialised = 7,
-    /// Token balance or allowance is insufficient (emulated check if possible, otherwise caught by token client).
+
+    /// Token balance or allowance is insufficient.
+    ///
+    /// Reserved for cases where the contract can detect an insufficient
+    /// balance before calling the token contract. In practice, most token
+    /// transfer failures surface as host traps from the token client rather
+    /// than this error code.
+    ///
+    /// **Discriminant:** 8 (stable; never changes)
+    ///
+    /// **Affected functions:** `create_stream`, `create_streams`,
+    /// `cancel_stream`, `withdraw` (token client failures).
     InsufficientBalance = 8,
+
     /// Deposit amount does not cover the total streamable amount.
+    ///
+    /// Enforced at creation: `deposit_amount >= rate_per_second * (end_time - start_time)`.
+    /// Also enforced when extending a stream's end time if the existing
+    /// deposit does not cover the new duration.
+    ///
+    /// **Discriminant:** 9 (stable; never changes)
+    ///
+    /// **Affected functions:** `create_stream`, `create_streams`,
+    /// `extend_stream_end_time`.
     InsufficientDeposit = 9,
 }
 
@@ -1821,21 +1938,19 @@ impl FluxoraStream {
         Ok(())
     }
 
-    /// Return the contract version number.
+    /// Close (archive) a completed stream to reclaim persistent storage.
     ///
-    /// Reads the compile-time `CONTRACT_VERSION` constant — no storage access required.
-    /// Frontends and deployment scripts can call this to confirm which version of the
-    /// contract is currently deployed before interacting with it.
+    /// Permanently removes the stream's persistent storage entry **and** its entry in
+    /// the recipient's index. Only streams in `Completed` status may be closed; that
+    /// status is reached when the recipient has withdrawn the full `deposit_amount`.
     ///
-    /// # Returns
-    /// - `u32`: The current contract version (currently `1`)
+    /// After a successful close:
+    /// - `get_stream_state(stream_id)` returns `ContractError::StreamNotFound`.
+    /// - `get_recipient_streams(recipient)` no longer includes `stream_id`.
+    /// - The `closed` event is searchable in the ledger history at the closing ledger.
     ///
-    /// Close (archive) a completed stream to reduce long-term storage.
-    ///
-    /// Permanently removes the stream's persistent storage entry. Only streams in
-    /// `Completed` status can be closed; all payouts must already have been made.
-    /// After close, the stream is no longer queryable (`get_stream_state` returns
-    /// `StreamNotFound`).
+    /// This function is **permissionless**: any caller may invoke it for any stream
+    /// that has reached `Completed` status. No authorization is required.
     ///
     /// # Parameters
     /// - `stream_id`: Unique identifier of the stream to close
@@ -1844,19 +1959,25 @@ impl FluxoraStream {
     /// - `Result<(), ContractError>`: `Ok(())` on success
     ///
     /// # Preconditions
-    /// - Stream must exist and have status `Completed`
+    /// - Stream must exist (`ContractError::StreamNotFound` if unknown `stream_id`).
+    /// - Stream status must be `Completed` (`ContractError::InvalidState` otherwise).
     ///
-    /// # Panics
-    /// - If the stream does not exist
-    /// - If the stream is not `Completed` (Active, Paused, or Cancelled)
+    /// # Errors
+    /// - `ContractError::StreamNotFound` — `stream_id` does not exist in storage.
+    /// - `ContractError::InvalidState` — stream exists but status is `Active`, `Paused`,
+    ///   or `Cancelled` (only `Completed` is accepted).
     ///
     /// # Events
-    /// - Publishes `closed(stream_id)` with `StreamEvent::StreamClosed(stream_id)` before removal
+    /// - Emits `("closed", stream_id) → StreamEvent::StreamClosed(stream_id)` **before**
+    ///   the storage entry is deleted. Indexers can rely on this ordering.
     ///
     /// # Operational guidance
     /// - Callable by anyone; no authorization required (permissionless cleanup).
-    /// - Indexers and UIs should treat closed stream IDs as non-existent.
-    /// - Do not close streams that might still need historical data for accounting.
+    /// - No tokens are transferred; this is a pure storage cleanup operation.
+    /// - Indexers and UIs should listen for the `"closed"` event and treat that
+    ///   stream ID as non-existent from the emitting ledger onward.
+    /// - Do not close streams that might still need historical data for accounting
+    ///   purposes; the on-chain entry is irrecoverably removed after this call.
     pub fn close_completed_stream(env: Env, stream_id: u64) -> Result<(), ContractError> {
         let stream = load_stream(&env, stream_id)?;
 

@@ -2839,3 +2839,114 @@ fn integration_create_streams_single_token_pull_equals_sum() {
     assert_eq!(ctx.token.balance(&ctx.sender), sender_before - 3500);
     assert_eq!(ctx.token.balance(&ctx.contract_id), 3500);
 }
+
+// ===========================================================================
+// ContractError: user-facing mapping — integration tests
+// ===========================================================================
+
+/// Discriminant values are stable and match documented values.
+#[test]
+fn error_discriminants_stable() {
+    assert_eq!(ContractError::StreamNotFound as u32, 1);
+    assert_eq!(ContractError::InvalidState as u32, 2);
+    assert_eq!(ContractError::InvalidParams as u32, 3);
+    assert_eq!(ContractError::ContractPaused as u32, 4);
+    assert_eq!(ContractError::StartTimeInPast as u32, 5);
+    assert_eq!(ContractError::Unauthorized as u32, 6);
+    assert_eq!(ContractError::AlreadyInitialised as u32, 7);
+    assert_eq!(ContractError::InsufficientBalance as u32, 8);
+    assert_eq!(ContractError::InsufficientDeposit as u32, 9);
+}
+
+/// StreamNotFound (1): unknown stream ID.
+#[test]
+fn error_stream_not_found_unknown_id() {
+    let ctx = TestContext::setup();
+    assert_eq!(
+        ctx.client().try_get_stream_state(&9999),
+        Err(Ok(ContractError::StreamNotFound))
+    );
+}
+
+/// InvalidState (2): withdraw from completed stream.
+#[test]
+fn error_invalid_state_withdraw_completed() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let id = ctx.create_default_stream();
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&id);
+    assert_eq!(
+        ctx.client().try_withdraw(&id),
+        Err(Ok(ContractError::InvalidState))
+    );
+}
+
+/// InvalidState (2): cancel already cancelled stream.
+#[test]
+fn error_invalid_state_cancel_cancelled() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let id = ctx.create_default_stream();
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().cancel_stream(&id);
+    assert_eq!(
+        ctx.client().try_cancel_stream(&id),
+        Err(Ok(ContractError::InvalidState))
+    );
+}
+
+/// InvalidParams (3): zero deposit.
+#[test]
+fn error_invalid_params_zero_deposit() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    assert_eq!(
+        ctx.client().try_create_stream(&ctx.sender, &ctx.recipient, &0, &1, &0, &0, &1000),
+        Err(Ok(ContractError::InvalidParams))
+    );
+}
+
+/// ContractPaused (4): create blocked when paused.
+#[test]
+fn error_contract_paused_blocks_create() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().set_contract_paused(&true);
+    assert_eq!(
+        ctx.client().try_create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000),
+        Err(Ok(ContractError::ContractPaused))
+    );
+}
+
+/// StartTimeInPast (5): start_time before ledger timestamp.
+#[test]
+fn error_start_time_in_past() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(1000);
+    assert_eq!(
+        ctx.client().try_create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000),
+        Err(Ok(ContractError::StartTimeInPast))
+    );
+}
+
+/// AlreadyInitialised (7): second init call.
+#[test]
+fn error_already_initialised_second_init() {
+    let ctx = TestContext::setup();
+    assert_eq!(
+        ctx.client().try_init(&ctx.token_id, &ctx.admin),
+        Err(Ok(ContractError::AlreadyInitialised))
+    );
+}
+
+/// InsufficientDeposit (9): deposit < rate * duration.
+#[test]
+fn error_insufficient_deposit() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    assert_eq!(
+        ctx.client().try_create_stream(&ctx.sender, &ctx.recipient, &100, &1, &0, &0, &1000),
+        Err(Ok(ContractError::InsufficientDeposit))
+    );
+}

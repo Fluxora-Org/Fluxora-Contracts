@@ -2130,7 +2130,7 @@ fn test_calculate_accrued_permissionless_access() {
     let stream_id = ctx.create_default_stream();
 
     // Create a random third-party address (not sender, not recipient, not admin)
-    let third_party = Address::random(&ctx.env);
+    let _third_party = Address::generate(&ctx.env);
 
     // Third party must be able to call calculate_accrued without auth
     // This would panic if auth was required
@@ -9371,14 +9371,15 @@ fn test_update_rate_per_second_emits_event() {
 
     // Verify event was emitted.
     let events = ctx.env.events().all();
-    let rate_update_events: Vec<_> = events
+    let rate_update_events: std::vec::Vec<_> = events
         .iter()
         .filter(|e| {
-            if let Ok(topics) = <(Symbol, u64)>::try_from_val(&ctx.env, &e.topics) {
-                topics.0 == Symbol::new(&ctx.env, "rate_upd") && topics.1 == stream_id
-            } else {
-                false
-            }
+            if e.0 != ctx.contract_id { return false; }
+            let topics = &e.1;
+            if topics.len() < 2 { return false; }
+            let t0 = Symbol::from_val(&ctx.env, &topics.get(0).unwrap());
+            let t1: u64 = topics.get(1).unwrap().into_val(&ctx.env);
+            t0 == Symbol::new(&ctx.env, "rate_upd") && t1 == stream_id
         })
         .collect();
 
@@ -14447,3 +14448,389 @@ fn test_create_streams_batch_deposit_overflow_is_atomic() {
         "stream count must not change on overflow failure"
     );
 }
+
+// ===========================================================================
+// ContractError: user-facing mapping tests
+//
+// Scope: every ContractError variant is returned by the correct function
+// under the correct conditions, with the correct discriminant value.
+//
+// Audit notes:
+// - Discriminant values are tested explicitly to guard against accidental
+//   reordering of the enum variants.
+// - Host trap panics (require_auth failures) are NOT ContractError variants
+//   and are not tested here.
+// - InsufficientBalance (discriminant 8) is rarely returned directly by the
+//   contract; most token failures surface as host traps. It is documented
+//   but not tested with a specific trigger here.
+// ===========================================================================
+#[cfg(test)]
+mod contract_error_mapping {
+    use super::*;
+    use soroban_sdk::Env;
+
+    // -----------------------------------------------------------------------
+    // Discriminant stability: verify numeric values are stable
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn error_discriminants_are_stable() {
+        assert_eq!(ContractError::StreamNotFound as u32, 1);
+        assert_eq!(ContractError::InvalidState as u32, 2);
+        assert_eq!(ContractError::InvalidParams as u32, 3);
+        assert_eq!(ContractError::ContractPaused as u32, 4);
+        assert_eq!(ContractError::StartTimeInPast as u32, 5);
+        assert_eq!(ContractError::Unauthorized as u32, 6);
+        assert_eq!(ContractError::AlreadyInitialised as u32, 7);
+        assert_eq!(ContractError::InsufficientBalance as u32, 8);
+        assert_eq!(ContractError::InsufficientDeposit as u32, 9);
+    }
+
+    // -----------------------------------------------------------------------
+    // StreamNotFound (1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn stream_not_found_on_get_stream_state() {
+        let ctx = TestContext::setup();
+        assert_eq!(
+            ctx.client().try_get_stream_state(&9999),
+            Err(Ok(ContractError::StreamNotFound))
+        );
+    }
+
+    #[test]
+    fn stream_not_found_on_calculate_accrued() {
+        let ctx = TestContext::setup();
+        assert_eq!(
+            ctx.client().try_calculate_accrued(&9999),
+            Err(Ok(ContractError::StreamNotFound))
+        );
+    }
+
+    #[test]
+    fn stream_not_found_on_pause_stream() {
+        let ctx = TestContext::setup();
+        assert_eq!(
+            ctx.client().try_pause_stream(&9999),
+            Err(Ok(ContractError::StreamNotFound))
+        );
+    }
+
+    #[test]
+    fn stream_not_found_on_cancel_stream() {
+        let ctx = TestContext::setup();
+        assert_eq!(
+            ctx.client().try_cancel_stream(&9999),
+            Err(Ok(ContractError::StreamNotFound))
+        );
+    }
+
+    #[test]
+    fn stream_not_found_on_withdraw() {
+        let ctx = TestContext::setup();
+        assert_eq!(
+            ctx.client().try_withdraw(&9999),
+            Err(Ok(ContractError::StreamNotFound))
+        );
+    }
+
+    #[test]
+    fn stream_not_found_on_close_completed_stream() {
+        let ctx = TestContext::setup();
+        assert_eq!(
+            ctx.client().try_close_completed_stream(&9999),
+            Err(Ok(ContractError::StreamNotFound))
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // InvalidState (2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn invalid_state_pause_already_paused() {
+        let ctx = TestContext::setup();
+        let id = ctx.create_default_stream();
+        ctx.env.ledger().set_timestamp(100);
+        ctx.client().pause_stream(&id);
+        assert_eq!(
+            ctx.client().try_pause_stream(&id),
+            Err(Ok(ContractError::InvalidState))
+        );
+    }
+
+    #[test]
+    fn invalid_state_pause_completed_stream() {
+        let ctx = TestContext::setup();
+        let id = ctx.create_default_stream();
+        ctx.env.ledger().set_timestamp(1000);
+        ctx.client().withdraw(&id);
+        assert_eq!(
+            ctx.client().try_pause_stream(&id),
+            Err(Ok(ContractError::InvalidState))
+        );
+    }
+
+    #[test]
+    fn invalid_state_resume_active_stream() {
+        let ctx = TestContext::setup();
+        let id = ctx.create_default_stream();
+        assert_eq!(
+            ctx.client().try_resume_stream(&id),
+            Err(Ok(ContractError::InvalidState))
+        );
+    }
+
+    #[test]
+    fn invalid_state_cancel_completed_stream() {
+        let ctx = TestContext::setup();
+        let id = ctx.create_default_stream();
+        ctx.env.ledger().set_timestamp(1000);
+        ctx.client().withdraw(&id);
+        assert_eq!(
+            ctx.client().try_cancel_stream(&id),
+            Err(Ok(ContractError::InvalidState))
+        );
+    }
+
+    #[test]
+    fn invalid_state_cancel_already_cancelled() {
+        let ctx = TestContext::setup();
+        let id = ctx.create_default_stream();
+        ctx.env.ledger().set_timestamp(500);
+        ctx.client().cancel_stream(&id);
+        assert_eq!(
+            ctx.client().try_cancel_stream(&id),
+            Err(Ok(ContractError::InvalidState))
+        );
+    }
+
+    #[test]
+    fn invalid_state_withdraw_from_completed() {
+        let ctx = TestContext::setup();
+        let id = ctx.create_default_stream();
+        ctx.env.ledger().set_timestamp(1000);
+        ctx.client().withdraw(&id);
+        assert_eq!(
+            ctx.client().try_withdraw(&id),
+            Err(Ok(ContractError::InvalidState))
+        );
+    }
+
+    #[test]
+    fn invalid_state_withdraw_from_paused() {
+        let ctx = TestContext::setup();
+        let id = ctx.create_default_stream();
+        ctx.env.ledger().set_timestamp(100);
+        ctx.client().pause_stream(&id);
+        assert_eq!(
+            ctx.client().try_withdraw(&id),
+            Err(Ok(ContractError::InvalidState))
+        );
+    }
+
+    #[test]
+    fn invalid_state_close_active_stream() {
+        let ctx = TestContext::setup();
+        let id = ctx.create_default_stream();
+        assert_eq!(
+            ctx.client().try_close_completed_stream(&id),
+            Err(Ok(ContractError::InvalidState))
+        );
+    }
+
+    #[test]
+    fn invalid_state_close_cancelled_stream() {
+        let ctx = TestContext::setup();
+        let id = ctx.create_default_stream();
+        ctx.env.ledger().set_timestamp(500);
+        ctx.client().cancel_stream(&id);
+        assert_eq!(
+            ctx.client().try_close_completed_stream(&id),
+            Err(Ok(ContractError::InvalidState))
+        );
+    }
+
+    #[test]
+    fn invalid_state_get_config_before_init() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, FluxoraStream);
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+        assert_eq!(
+            client.try_get_config(),
+            Err(Ok(ContractError::InvalidState))
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // InvalidParams (3)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn invalid_params_zero_deposit() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+        assert_eq!(
+            ctx.client().try_create_stream(&ctx.sender, &ctx.recipient, &0, &1, &0, &0, &1000),
+            Err(Ok(ContractError::InvalidParams))
+        );
+    }
+
+    #[test]
+    fn invalid_params_zero_rate() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+        assert_eq!(
+            ctx.client().try_create_stream(&ctx.sender, &ctx.recipient, &1000, &0, &0, &0, &1000),
+            Err(Ok(ContractError::InvalidParams))
+        );
+    }
+
+    #[test]
+    fn invalid_params_self_stream() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+        assert_eq!(
+            ctx.client().try_create_stream(&ctx.sender, &ctx.sender, &1000, &1, &0, &0, &1000),
+            Err(Ok(ContractError::InvalidParams))
+        );
+    }
+
+    #[test]
+    fn invalid_params_start_gte_end() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+        assert_eq!(
+            ctx.client().try_create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &1000, &1000, &500),
+            Err(Ok(ContractError::InvalidParams))
+        );
+    }
+
+    #[test]
+    fn invalid_params_cliff_out_of_range() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+        // cliff > end
+        assert_eq!(
+            ctx.client().try_create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &2000, &1000),
+            Err(Ok(ContractError::InvalidParams))
+        );
+    }
+
+    #[test]
+    fn invalid_params_rate_duration_overflow() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+        // rate * duration overflows i128
+        assert_eq!(
+            ctx.client().try_create_stream(
+                &ctx.sender, &ctx.recipient,
+                &(i128::MAX / 2), &(i128::MAX / 2), &0, &0, &3
+            ),
+            Err(Ok(ContractError::InvalidParams))
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ContractPaused (4)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn contract_paused_blocks_create_stream() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+        ctx.client().set_contract_paused(&true);
+        assert_eq!(
+            ctx.client().try_create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000),
+            Err(Ok(ContractError::ContractPaused))
+        );
+    }
+
+    #[test]
+    fn contract_paused_does_not_block_withdraw() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+        let id = ctx.create_default_stream();
+        ctx.client().set_contract_paused(&true);
+        ctx.env.ledger().set_timestamp(500);
+        let result = ctx.client().try_withdraw(&id);
+        assert!(result.is_ok(), "withdraw must work while contract is paused");
+    }
+
+    // -----------------------------------------------------------------------
+    // StartTimeInPast (5)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn start_time_in_past_rejected() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(1000);
+        assert_eq!(
+            ctx.client().try_create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000),
+            Err(Ok(ContractError::StartTimeInPast))
+        );
+    }
+
+    #[test]
+    fn start_time_equal_to_now_accepted() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(500);
+        let result = ctx.client().try_create_stream(
+            &ctx.sender, &ctx.recipient, &1000, &1, &500, &500, &1500,
+        );
+        assert!(result.is_ok(), "start_time == now must be accepted");
+    }
+
+    // -----------------------------------------------------------------------
+    // AlreadyInitialised (7)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn already_initialised_on_second_init() {
+        let ctx = TestContext::setup();
+        assert_eq!(
+            ctx.client().try_init(&ctx.token_id, &ctx.admin),
+            Err(Ok(ContractError::AlreadyInitialised))
+        );
+    }
+
+    #[test]
+    fn already_initialised_config_unchanged() {
+        let ctx = TestContext::setup();
+        let original = ctx.client().get_config();
+        let new_token = soroban_sdk::Address::generate(&ctx.env);
+        let _ = ctx.client().try_init(&new_token, &ctx.admin);
+        let after = ctx.client().get_config();
+        assert_eq!(after.token, original.token);
+        assert_eq!(after.admin, original.admin);
+    }
+
+    // -----------------------------------------------------------------------
+    // InsufficientDeposit (9)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn insufficient_deposit_on_create_stream() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+        // deposit=100 < rate*duration=1000
+        assert_eq!(
+            ctx.client().try_create_stream(&ctx.sender, &ctx.recipient, &100, &1, &0, &0, &1000),
+            Err(Ok(ContractError::InsufficientDeposit))
+        );
+    }
+
+    #[test]
+    fn insufficient_deposit_is_atomic_no_tokens_move() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+        let balance_before = ctx.token().balance(&ctx.sender);
+        let _ = ctx.client().try_create_stream(
+            &ctx.sender, &ctx.recipient, &100, &1, &0, &0, &1000,
+        );
+        assert_eq!(ctx.token().balance(&ctx.sender), balance_before);
+        assert_eq!(ctx.token().balance(&ctx.contract_id), 0);
+    }
+
+} // mod contract_error_mapping
