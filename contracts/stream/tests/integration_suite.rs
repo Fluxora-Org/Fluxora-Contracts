@@ -1914,14 +1914,7 @@ fn integration_create_streams_batch_overflow_protection() {
     // when errors are defined in the enum.
     let result = ctx.client().try_create_streams(&ctx.sender, &streams);
 
-    assert!(result.is_err());
-    // Soroban contract errors are returned as Env::Error in tests
-    let err = result.unwrap_err();
-
-    // In integration tests, we can check for the specific contract error value
-    // ArithmeticOverflow = 6
-    use soroban_sdk::Error;
-    assert_eq!(err, Ok(Error::from_contract_error(6)));
+    assert_eq!(result, Err(Ok(fluxora_stream::ContractError::ArithmeticOverflow)));
 
     // Verify atomicity: no tokens moved
     assert_eq!(ctx.token.balance(&ctx.sender), 10_000);

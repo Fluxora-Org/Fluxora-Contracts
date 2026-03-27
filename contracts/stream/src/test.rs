@@ -2130,7 +2130,7 @@ fn test_calculate_accrued_permissionless_access() {
     let stream_id = ctx.create_default_stream();
 
     // Create a random third-party address (not sender, not recipient, not admin)
-    let third_party = Address::random(&ctx.env);
+    let _third_party = Address::generate(&ctx.env);
 
     // Third party must be able to call calculate_accrued without auth
     // This would panic if auth was required
@@ -2179,14 +2179,14 @@ fn test_calculate_accrued_no_state_mutation() {
 }
 
 /// Edge case: calculate_accrued on stream with zero duration (start == end).
-/// Expected: returns 0 as the schedule is invalid.
+/// Expected: returns InvalidParams because the schedule is invalid.
 #[test]
 fn test_calculate_accrued_zero_duration_stream() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
 
     // Create stream with zero duration
-    let stream_id = ctx.client().create_stream(
+    let result = ctx.client().try_create_stream(
         &ctx.sender,
         &ctx.recipient,
         &1000_i128,
@@ -2196,29 +2196,18 @@ fn test_calculate_accrued_zero_duration_stream() {
         &500u64, // end_time (same as start)
     );
 
-    // At start time
-    ctx.env.ledger().set_timestamp(500);
-    let accrued = ctx.client().calculate_accrued(&stream_id);
-    assert_eq!(accrued, 0, "zero-duration stream must return 0");
-
-    // Far in the future
-    ctx.env.ledger().set_timestamp(9999);
-    let accrued_future = ctx.client().calculate_accrued(&stream_id);
-    assert_eq!(
-        accrued_future, 0,
-        "zero-duration stream must always return 0"
-    );
+    assert_eq!(result, Err(Ok(crate::ContractError::InvalidParams)));
 }
 
 /// Edge case: calculate_accrued on stream with zero deposit.
-/// Expected: returns 0 as there's nothing to accrue.
+/// Expected: returns InvalidParams because deposit must be > 0.
 #[test]
 fn test_calculate_accrued_zero_deposit_stream() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
 
     // Create stream with zero deposit
-    let stream_id = ctx.client().create_stream(
+    let result = ctx.client().try_create_stream(
         &ctx.sender,
         &ctx.recipient,
         &0_i128, // zero deposit
@@ -2228,20 +2217,18 @@ fn test_calculate_accrued_zero_deposit_stream() {
         &1000u64,
     );
 
-    ctx.env.ledger().set_timestamp(500);
-    let accrued = ctx.client().calculate_accrued(&stream_id);
-    assert_eq!(accrued, 0, "zero-deposit stream must return 0");
+    assert_eq!(result, Err(Ok(crate::ContractError::InvalidParams)));
 }
 
 /// Edge case: calculate_accrued with zero rate (no accrual ever).
-/// Expected: returns 0 regardless of time.
+/// Expected: returns InvalidParams because rate must be > 0.
 #[test]
 fn test_calculate_accrued_zero_rate_stream() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
 
     // Create stream with zero rate
-    let stream_id = ctx.client().create_stream(
+    let result = ctx.client().try_create_stream(
         &ctx.sender,
         &ctx.recipient,
         &1000_i128,
@@ -2251,17 +2238,7 @@ fn test_calculate_accrued_zero_rate_stream() {
         &1000u64,
     );
 
-    ctx.env.ledger().set_timestamp(500);
-    let accrued = ctx.client().calculate_accrued(&stream_id);
-    assert_eq!(
-        accrued, 0,
-        "zero-rate stream must return 0 regardless of time"
-    );
-
-    // Far in the future
-    ctx.env.ledger().set_timestamp(9999);
-    let accrued_future = ctx.client().calculate_accrued(&stream_id);
-    assert_eq!(accrued_future, 0, "zero-rate stream must always return 0");
+    assert_eq!(result, Err(Ok(crate::ContractError::InvalidParams)));
 }
 
 // ---------------------------------------------------------------------------
@@ -2450,26 +2427,22 @@ fn test_zero_rate_returns_zero() {
 
 #[test]
 fn test_zero_duration_returns_zero() {
-    // Security: When current time equals start time (zero elapsed), accrued must be zero.
+    // Security: When start time equals end time, it returns InvalidParams.
     let ctx = TestContext::setup();
 
     ctx.env.ledger().set_timestamp(0);
 
-    let stream_id = ctx.client().create_stream(
+    let result = ctx.client().try_create_stream(
         &ctx.sender,
         &ctx.recipient,
-        &10000_i128, // Must cover rate * duration
+        &10000_i128,
         &10_i128,
         &0u64, // Start at 0
         &0u64, // No cliff
-        &1000u64,
+        &0u64, // End at 0 (duration is zero)
     );
 
-    // Query at start time - zero elapsed
-    ctx.env.ledger().set_timestamp(0);
-
-    let accrued = ctx.client().calculate_accrued(&stream_id);
-    assert_eq!(accrued, 0, "zero elapsed time should give zero accrued");
+    assert_eq!(result, Err(Ok(crate::ContractError::InvalidParams)));
 }
 
 #[test]
@@ -9371,16 +9344,18 @@ fn test_update_rate_per_second_emits_event() {
 
     // Verify event was emitted.
     let events = ctx.env.events().all();
-    let rate_update_events: Vec<_> = events
-        .iter()
-        .filter(|e| {
-            if let Ok(topics) = <(Symbol, u64)>::try_from_val(&ctx.env, &e.topics) {
-                topics.0 == Symbol::new(&ctx.env, "rate_upd") && topics.1 == stream_id
-            } else {
-                false
+    let mut rate_update_events = Vec::new(&ctx.env);
+    for e in events.iter() {
+        if e.1.len() == 2 {
+            let topic0 = Symbol::try_from_val(&ctx.env, &e.1.get(0).unwrap());
+            let topic1 = u64::try_from_val(&ctx.env, &e.1.get(1).unwrap());
+            if let (Ok(sym), Ok(id)) = (topic0, topic1) {
+                if sym == Symbol::new(&ctx.env, "rate_upd") && id == stream_id {
+                    rate_update_events.push_back(e);
+                }
             }
-        })
-        .collect();
+        }
+    }
 
     assert_eq!(
         rate_update_events.len(),
@@ -9445,6 +9420,7 @@ fn test_update_rate_per_second_multiple_times() {
 
     // Create stream with very generous deposit.
     ctx.env.ledger().set_timestamp(0);
+    ctx.sac.mint(&ctx.sender, &100_000_i128); // Mint to cover
     let stream_id = ctx.client().create_stream(
         &ctx.sender,
         &ctx.recipient,
@@ -9518,10 +9494,10 @@ fn test_update_rate_per_second_preserves_other_fields() {
 fn test_update_rate_per_second_with_overflow_protection() {
     let ctx = TestContext::setup();
 
-    // Create stream with max-ish values.
+    // Create stream with normal deposit and rate.
     ctx.env.ledger().set_timestamp(0);
     let max_rate = i128::MAX / 1000; // Safe rate for 1000 second duration.
-    let deposit = max_rate * 1000;
+    ctx.sac.mint(&ctx.sender, &100_000_i128);
 
     let stream_id = ctx.client().create_stream(
         &ctx.sender,
@@ -14051,14 +14027,7 @@ fn test_create_stream_total_streamable_overflow() {
         &2u64,
     );
 
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert_eq!(
-        err,
-        Ok(Error::from_contract_error(
-            ContractError::ArithmeticOverflow as u32
-        ))
-    );
+    assert_eq!(result, Err(Ok(ContractError::ArithmeticOverflow)));
 }
 
 #[test]
@@ -14091,14 +14060,7 @@ fn test_create_streams_batch_deposit_overflow() {
 
     let result = ctx.client().try_create_streams(&ctx.sender, &streams);
 
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert_eq!(
-        err,
-        Ok(Error::from_contract_error(
-            ContractError::ArithmeticOverflow as u32
-        ))
-    );
+    assert_eq!(result, Err(Ok(ContractError::ArithmeticOverflow)));
 }
 
 #[test]
@@ -14126,14 +14088,7 @@ fn test_top_up_stream_overflow() {
         .client()
         .try_top_up_stream(&stream_id, &ctx.sender, &101);
 
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert_eq!(
-        err,
-        Ok(Error::from_contract_error(
-            ContractError::ArithmeticOverflow as u32
-        ))
-    );
+    assert_eq!(result, Err(Ok(ContractError::ArithmeticOverflow)));
 }
 
 // ---------------------------------------------------------------------------

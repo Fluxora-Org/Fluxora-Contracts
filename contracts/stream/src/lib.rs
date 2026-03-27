@@ -2,7 +2,9 @@
 
 mod accrual;
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, panic_with_error, symbol_short, token, Address, Env,
+};
 
 // ---------------------------------------------------------------------------
 // TTL constants
@@ -59,13 +61,13 @@ pub enum ContractError {
     /// Arithmetic overflow in stream calculations (e.g. deposit total).
     ArithmeticOverflow = 6,
     /// Caller is not authorized to perform this operation.
-    Unauthorized = 6,
+    Unauthorized = 7,
     /// Contract is already initialized.
-    AlreadyInitialised = 7,
+    AlreadyInitialised = 8,
     /// Token balance or allowance is insufficient (emulated check if possible, otherwise caught by token client).
-    InsufficientBalance = 8,
+    InsufficientBalance = 9,
     /// Deposit amount does not cover the total streamable amount.
-    InsufficientDeposit = 9,
+    InsufficientDeposit = 10,
 }
 
 #[contracttype]
@@ -426,16 +428,9 @@ impl FluxoraStream {
 
         // Validate deposit covers total streamable amount (#34)
         let duration = (end_time - start_time) as i128;
-        let total_streamable = rate_per_second.checked_mul(duration).unwrap_or_else(|| {
-            panic_with_error!(env, ContractError::ArithmeticOverflow);
-        });
-        assert!(
-            deposit_amount >= total_streamable,
-            "deposit_amount must cover total streamable amount (rate * duration)"
-        );
         let total_streamable = rate_per_second
             .checked_mul(duration)
-            .ok_or(ContractError::InvalidParams)?; // overflow
+            .ok_or(ContractError::ArithmeticOverflow)?; // overflow
 
         if deposit_amount < total_streamable {
             return Err(ContractError::InsufficientDeposit);
@@ -1810,20 +1805,6 @@ impl FluxoraStream {
 
         let mut stream = load_stream(&env, stream_id)?;
 
-        // Increase deposit_amount with overflow protection BEFORE pulling tokens.
-        // This ensures we fail with ArithmeticOverflow if the new total exceeds i128::MAX,
-        // and avoid a redundant (and potentially failing) token transfer.
-        let new_deposit_amount = stream
-            .deposit_amount
-            .checked_add(amount)
-            .unwrap_or_else(|| {
-                panic_with_error!(env, ContractError::ArithmeticOverflow);
-            });
-
-        // Pull additional funds into the contract.
-        pull_token(&env, &funder, amount);
-
-        stream.deposit_amount = new_deposit_amount;
         if stream.status != StreamStatus::Active && stream.status != StreamStatus::Paused {
             return Err(ContractError::InvalidState);
         }
@@ -1834,7 +1815,7 @@ impl FluxoraStream {
         stream.deposit_amount = stream
             .deposit_amount
             .checked_add(amount)
-            .ok_or(ContractError::InvalidParams)?; // overflow
+            .ok_or(ContractError::ArithmeticOverflow)?; // overflow
 
         save_stream(&env, &stream);
 
