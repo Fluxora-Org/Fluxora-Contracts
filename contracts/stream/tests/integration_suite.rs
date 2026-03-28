@@ -7,7 +7,7 @@ use soroban_sdk::log;
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    vec, Address, Env, FromVal, IntoVal,
+    vec, Address, Env, FromVal, IntoVal, TryFromVal,
 };
 
 struct TestContext<'a> {
