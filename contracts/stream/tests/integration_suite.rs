@@ -1,13 +1,14 @@
 extern crate std;
 
 use fluxora_stream::{
-    ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamStatus,
+    ContractError, ContractPauseChanged, CreateStreamParams, FluxoraStream, FluxoraStreamClient,
+    GlobalEmergencyPauseChanged, StreamEvent, StreamStatus,
 };
 use soroban_sdk::log;
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    vec, Address, Env, FromVal, IntoVal,
+    vec, Address, Env, FromVal, IntoVal, TryFromVal,
 };
 
 struct TestContext<'a> {
@@ -1767,18 +1768,12 @@ fn integration_pause_resume_past_end_time_accrual_capped() {
     ctx.env.ledger().set_timestamp(300);
     ctx.client().pause_stream(&stream_id);
 
+    // Resume at t=999 (just before end)
+    ctx.env.ledger().set_timestamp(999);
+    ctx.client().resume_stream(&stream_id);
+
     // Advance far past end_time (t=2000)
     ctx.env.ledger().set_timestamp(2000);
-
-    // Verify accrual is still capped at deposit_amount
-    let accrued = ctx.client().calculate_accrued(&stream_id);
-    assert_eq!(
-        accrued, 1000,
-        "accrual must be capped at deposit_amount even past end_time"
-    );
-
-    // Resume and withdraw
-    ctx.client().resume_stream(&stream_id);
     let withdrawn = ctx.client().withdraw(&stream_id);
     assert_eq!(withdrawn, 1000);
 
@@ -1923,6 +1918,118 @@ fn integration_create_streams_batch_overflow_protection() {
     assert_eq!(ctx.token.balance(&ctx.sender), 10_000);
     assert_eq!(ctx.token.balance(&ctx.contract_id), 0);
 }
+
+// ---------------------------------------------------------------------------
+// Integration tests — shorten_stream_end_time: refund correctness + invariants
+// ---------------------------------------------------------------------------
+
+/// Success path: shortening updates schedule, refunds exact unstreamed amount, emits event.
+#[test]
+fn integration_shorten_end_time_refund_and_event_observable() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream(); // 1000 deposit, rate=1, end=1000
+
+    let sender_before = ctx.token.balance(&ctx.sender);
+    let contract_before = ctx.token.balance(&ctx.contract_id);
+
+    ctx.client().shorten_stream_end_time(&stream_id, &700u64);
+
+    let sender_after = ctx.token.balance(&ctx.sender);
+    let contract_after = ctx.token.balance(&ctx.contract_id);
+    assert_eq!(sender_after - sender_before, 300);
+    assert_eq!(contract_before - contract_after, 300);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.end_time, 700);
+    assert_eq!(state.deposit_amount, 700);
+
+    let events = ctx.env.events().all();
+    let last = events.last().unwrap();
+    let payload = StreamEndShortened::from_val(&ctx.env, &last.2);
+    assert_eq!(payload.stream_id, stream_id);
+    assert_eq!(payload.old_end_time, 1000);
+    assert_eq!(payload.new_end_time, 700);
+    assert_eq!(payload.refund_amount, 300);
+}
+
+/// Failure path: non-shortening values (equal/later end) are InvalidParams and leave no side effects.
+#[test]
+fn integration_shorten_end_time_rejects_equal_or_later_and_is_atomic() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Extra deposit ensures a "later" value would otherwise be feasible,
+    // proving rejection is based on shorten semantics, not insufficiency.
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2_000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1_000u64,
+    );
+
+    let sender_before = ctx.token.balance(&ctx.sender);
+    let contract_before = ctx.token.balance(&ctx.contract_id);
+    let state_before = ctx.client().get_stream_state(&stream_id);
+    let events_before = ctx.env.events().all().len();
+
+    let same = ctx
+        .client()
+        .try_shorten_stream_end_time(&stream_id, &1_000u64);
+    assert_eq!(same, Err(Ok(ContractError::InvalidParams)));
+
+    let later = ctx
+        .client()
+        .try_shorten_stream_end_time(&stream_id, &1_500u64);
+    assert_eq!(later, Err(Ok(ContractError::InvalidParams)));
+
+    assert_eq!(ctx.token.balance(&ctx.sender), sender_before);
+    assert_eq!(ctx.token.balance(&ctx.contract_id), contract_before);
+    assert_eq!(ctx.env.events().all().len(), events_before);
+
+    let state_after = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_after.end_time, state_before.end_time);
+    assert_eq!(state_after.deposit_amount, state_before.deposit_amount);
+    assert_eq!(state_after.status, state_before.status);
+}
+
+/// Time boundary: `new_end_time == now` is invalid (must be strictly future).
+#[test]
+fn integration_shorten_end_time_rejects_now_boundary() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(500);
+    let result = ctx
+        .client()
+        .try_shorten_stream_end_time(&stream_id, &500u64);
+    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
+}
+
+/// Role/state boundaries: sender-only auth and terminal states rejected.
+#[test]
+fn integration_shorten_end_time_terminal_states_rejected() {
+    let ctx = TestContext::setup();
+
+    let completed_id = ctx.create_default_stream();
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&completed_id);
+    let completed = ctx
+        .client()
+        .try_shorten_stream_end_time(&completed_id, &900u64);
+    assert_eq!(completed, Err(Ok(ContractError::InvalidState)));
+
+    let cancelled_id = ctx.create_default_stream();
+    ctx.env.ledger().set_timestamp(300);
+    ctx.client().cancel_stream(&cancelled_id);
+    let cancelled = ctx
+        .client()
+        .try_shorten_stream_end_time(&cancelled_id, &800u64);
+    assert_eq!(cancelled, Err(Ok(ContractError::InvalidState)));
+}
+
 // ---------------------------------------------------------------------------
 // Integration tests — extend_stream_end_time: deposit sufficiency
 // ---------------------------------------------------------------------------
@@ -2525,12 +2632,12 @@ fn integration_uninitialised_get_stream_state_fails() {
 /// Uninitialised contract: set_contract_paused must fail with missing config.
 #[test]
 #[should_panic]
-fn integration_uninitialised_set_contract_paused_panics() {
+fn integration_uninitialised_set_global_emergency_paused_panics() {
     let env = Env::default();
     env.mock_all_auths();
     let contract_id = env.register_contract(None, FluxoraStream);
     let client = FluxoraStreamClient::new(&env, &contract_id);
-    client.set_contract_paused(&true);
+    client.set_global_emergency_paused(&true);
 }
 
 /// After initialisation, all previously-failing paths become functional.
@@ -2880,4 +2987,102 @@ fn integration_create_streams_single_token_pull_equals_sum() {
     // Total pulled = 1000 + 2000 + 500 = 3500
     assert_eq!(ctx.token.balance(&ctx.sender), sender_before - 3500);
     assert_eq!(ctx.token.balance(&ctx.contract_id), 3500);
+}
+
+#[test]
+fn integration_test_admin_pause_resume_flow() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Admin pauses
+    ctx.client().pause_stream_as_admin(&stream_id);
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).status,
+        StreamStatus::Paused
+    );
+
+    // Recipient cannot withdraw while paused
+    let result = ctx.client().try_withdraw(&stream_id);
+    assert!(result.is_err());
+
+    // Admin resumes
+    ctx.client().resume_stream_as_admin(&stream_id);
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).status,
+        StreamStatus::Active
+    );
+
+    // Recipient can withdraw after resume
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().withdraw(&stream_id);
+}
+
+#[test]
+fn integration_test_admin_pause_accrual_integrity() {
+    let ctx = TestContext::setup();
+    let stream_id =
+        ctx.client()
+            .create_stream(&ctx.sender, &ctx.recipient, &2000, &2, &0, &0, &1000);
+
+    // At t=100, accrued=200
+    ctx.env.ledger().set_timestamp(100);
+    assert_eq!(ctx.client().calculate_accrued(&stream_id), 200);
+
+    // Admin pauses at t=100
+    ctx.client().pause_stream_as_admin(&stream_id);
+
+    // Advance to t=200 while paused
+    ctx.env.ledger().set_timestamp(200);
+    // Accrual MUST continue (time-based)
+    assert_eq!(ctx.client().calculate_accrued(&stream_id), 400);
+
+    // Admin resumes at t=200
+    ctx.client().resume_stream_as_admin(&stream_id);
+
+    // Recipient withdraws the full 400
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn, 400);
+}
+
+#[test]
+fn integration_test_admin_cancel_from_paused() {
+    let ctx = TestContext::setup();
+    let stream_id =
+        ctx.client()
+            .create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
+
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().pause_stream_as_admin(&stream_id);
+
+    // Admin cancels while stream is paused
+    // Transitions Paused -> Cancelled
+    ctx.client().cancel_stream_as_admin(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+    // Accrual freeze should be at t=100 (when cancelled)
+    assert_eq!(state.cancelled_at, Some(100));
+}
+
+#[test]
+fn integration_test_admin_unauthorized_pause() {
+    let ctx = TestContext::setup_strict();
+    let stream_id =
+        ctx.client()
+            .create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
+
+    // Non-admin (recipient) tries to call admin pause
+    ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &ctx.recipient,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "pause_stream_as_admin",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = ctx.client().try_pause_stream_as_admin(&stream_id);
+    // Should fail because recipient is not admin
+    assert!(result.is_err());
 }

@@ -55,9 +55,30 @@ After authorization and amount validation, the contract:
 
 ### `shorten_stream_end_time`
 
+Authorization and state gate:
+- Caller must be the stream `sender`.
+- Stream must be `Active` or `Paused` (terminal states return `InvalidState`).
+
+Parameter/time gate (`InvalidParams` on failure):
+- `new_end_time > now` (strictly future; equality is rejected).
+- `new_end_time > start_time`.
+- `new_end_time >= cliff_time`.
+- `new_end_time < old_end_time` (strictly shorter; equal/later values are rejected).
+
+Success path (CEI order):
 1. Updates `stream.end_time` and `stream.deposit_amount`.
 2. Calls `save_stream`.
 3. **Only then** transfers the refund to the sender.
+4. Emits `end_shrt(stream_id)` with `StreamEndShortened { old_end_time, new_end_time, refund_amount }`.
+
+Failure path:
+- No state changes.
+- No token transfer.
+- No `end_shrt` event.
+
+Refund invariant:
+- `refund_amount = old_deposit_amount - rate_per_second × (new_end_time - start_time)`
+- On success, sender balance increases by `refund_amount` and contract token balance decreases by `refund_amount`.
 
 ### `withdraw_to`
 
@@ -76,6 +97,8 @@ The contract interacts with exactly one token, fixed at `init` time and stored i
 
 If a malicious token is used, the CEI ordering above reduces (but does not eliminate)
 reentrancy impact — state will already reflect the current operation when the re-entry occurs.
+
+**Comprehensive documentation**: See [`token-assumptions.md`](token-assumptions.md) for the complete token trust model, explicit non-goals, and residual risks.
 
 ---
 
@@ -153,129 +176,88 @@ The contract employs exhaustive arithmetic safety checks across all fund-related
 - **Structured Error Signals**: Arithmetic failures (such as a batch deposit exceeding `i128::MAX`) no longer trigger generic string-based panics. Instead, they emit a formal `ContractError::ArithmeticOverflow` (code 6). This provides crisp, programmable failure semantics for indexers, wallets, and treasury tooling.
 - **Defensive Ordering**: In `top_up_stream`, the overflow check is performed **before** the token transfer. This prevents unnecessary token movement (and associated gas costs) for transactions destined to fail.
 - **Accrual Capping**: Per-second accrual math implicitly caps at the `deposit_amount` on multiplication overflow, ensuring that technical overflows cannot be exploited to drain the contract beyond its funded limits.
-  This prevents unauthorized bootstrap and prevents later repointing to a different token
-  address or replacing the admin through `init`.
+This prevents unauthorized bootstrap and prevents later repointing to a different token
+address or replacing the admin through `init`.
 
 ---
 
-## Formal invariants (pre-audit) — Issue #291
+## Malicious Token Assumptions and Non-Goals
 
-The following invariants are verified by automated tests in `contracts/stream/src/test.rs`
-(module `§INVARIANTS`). An independent reader can confirm each by running `cargo test -p fluxora_stream`.
+The streaming contract makes explicit assumptions about token behavior and defines clear non-goals for malicious token scenarios. These are documented in detail in [`token-assumptions.md`](token-assumptions.md).
 
-### INV-1 Conservation: refund + frozen_accrued == deposit_amount
+### Key Assumptions
 
-At any cancellation timestamp `t`, the refund transferred to the sender plus the accrued
-amount frozen for the recipient equals the original deposit exactly:
+1. **No reentrancy**: The token contract does not call back into the streaming contract during transfers.
+2. **Explicit failures**: The token contract panics or returns errors on insufficient balance/allowance, rather than silently failing.
+3. **Standard SEP-41 interface**: The token implements the standard Soroban token interface.
+4. **Deterministic behavior**: Token operations produce consistent, predictable results.
 
-```
-refund_amount + accrued_at(cancelled_at) == deposit_amount
-```
+### Explicit Non-Goals
 
-Verified across: immediate cancel, midway cancel, cancel after partial withdrawal, cancel
-at end_time (zero refund), cancel before cliff (zero accrued), and admin-cancel path.
+The following are **intentionally not mitigated** by the streaming contract:
 
-### INV-2 Monotonicity: withdrawn_amount never decreases; never exceeds deposit
+1. **Malicious token contracts**: The contract does not protect against tokens that violate SEP-41 guarantees.
+2. **Token supply manipulation**: The contract does not monitor or restrict token supply changes.
+3. **Token upgradeability**: The contract does not protect against token contract upgrades that change behavior.
+4. **Token balance verification**: The contract does not verify that actual token balances match internal accounting.
+5. **Token allowance management**: The contract does not manage token allowances on behalf of users.
+6. **Token decimals and precision**: The contract does not enforce or verify token decimal precision.
 
-- `withdrawn_amount` is non-decreasing across all `withdraw` calls.
-- `withdrawn_amount` never exceeds `deposit_amount`.
-- At completion, `withdrawn_amount == deposit_amount` exactly.
-- For cancelled streams, `withdrawn_amount` is capped at `accrued_at(cancelled_at)`;
-  status remains `Cancelled` (not `Completed`) after full withdrawal.
+### Rationale
 
-### INV-3 Terminal-state immutability
+These non-goals are intentional design choices that:
+- Reduce gas overhead and complexity
+- Allow permissionless composability with any SEP-41 token
+- Simplify the contract logic
+- Place responsibility on token deployers and operators
 
-`Completed` and `Cancelled` are terminal. No operation can transition out of them:
+### Residual Risks
 
-| Operation                | Completed      | Cancelled      |
-| ------------------------ | -------------- | -------------- |
-| cancel / cancel_as_admin | `InvalidState` | `InvalidState` |
-| pause / pause_as_admin   | `InvalidState` | `InvalidState` |
-| resume / resume_as_admin | `InvalidState` | `InvalidState` |
-| top_up_stream            | `InvalidState` | `InvalidState` |
+1. **Non-standard tokens**: If a token violates SEP-41 guarantees, behavior may become unpredictable.
+2. **Direct transfers**: Tokens sent directly to the contract address are permanently locked.
+3. **Token upgrades**: If a token contract is upgraded to violate SEP-41 guarantees, behavior may change.
 
-Additionally: an already-`Paused` stream cannot be paused again; an already-`Active`
-stream cannot be resumed.
-
-### INV-4 cancelled_at is set exactly once and is immutable
-
-- `cancelled_at` is `None` before cancellation and for `Completed` streams.
-- After cancellation, `cancelled_at == Some(ledger.timestamp())` at the moment of cancel.
-- Holds for both sender-cancel and admin-cancel paths, including cancel of paused streams.
-
-### INV-5 Accrual freeze after cancellation
-
-`calculate_accrued` returns a constant value for all future timestamps after cancellation.
-The frozen value equals `accrued_at(cancelled_at)`. For active streams, accrual is
-non-decreasing with time. For completed streams, it always returns `deposit_amount`.
-
-### INV-6 Authorization boundaries
-
-| Operation                  | Required auth        | Rejection on wrong caller |
-| -------------------------- | -------------------- | ------------------------- |
-| `cancel_stream`            | stream `sender`      | auth failure              |
-| `cancel_stream_as_admin`   | contract `admin`     | auth failure              |
-| `pause_stream`             | stream `sender`      | auth failure              |
-| `withdraw` / `withdraw_to` | stream `recipient`   | auth failure              |
-| `batch_withdraw`           | supplied `recipient` | `Unauthorized`            |
-| `top_up_stream`            | `funder`             | auth failure              |
-| `update_rate_per_second`   | stream `sender`      | auth failure              |
-| `set_admin`                | current `admin`      | auth failure              |
-
-### INV-7 Event coherence
-
-Every successful state-changing operation emits exactly one event with the documented
-topic and payload. Failures emit no events. Key ordering guarantee: for a final
-withdrawal that completes a stream, `"withdrew"` is emitted before `"completed"` in
-the same transaction.
-
-### INV-8 Global emergency pause
-
-`set_global_emergency_paused(true)` blocks `create_stream`, `create_streams`, `withdraw`,
-`withdraw_to`, `batch_withdraw`, `cancel_stream`, `pause_stream`, `resume_stream`, and
-schedule-modification functions with `ContractError::ContractPaused`. Admin override
-entrypoints (`*_as_admin`, `set_global_emergency_paused`) and read-only views are not
-blocked.
-
-> **Fix (Issue #291):** `require_not_globally_paused` previously used `assert!` which
-> produced an untyped `Abort` panic. It now uses `panic_with_error!(env, ContractError::ContractPaused)`
-> so indexers and wallets receive a structured, classifiable error code.
-
-### INV-9 Schedule modifications
-
-- `update_rate_per_second`: forward-only (new > old), deposit must cover new total, terminal states rejected.
-- `shorten_stream_end_time`: `new_end_time` must be strictly less than `old_end_time` (and in the future, after `start_time`, not before `cliff_time`). Terminal states rejected.
-- `extend_stream_end_time`: `new_end_time` must be strictly greater than `old_end_time`, deposit must cover extended duration. Terminal states rejected.
-- `top_up_stream`: amount must be positive, stream must be non-terminal.
-
-> **Fix (Issue #291):** `shorten_stream_end_time` previously did not validate that
-> `new_end_time < stream.end_time`, allowing a "shorten" call with `new_end_time == old_end_time`
-> to succeed silently. The guard `new_end_time >= stream.end_time` now returns `InvalidParams`.
-
-### INV-10 close_completed_stream
-
-Permissionless (no auth required). Only `Completed` streams can be closed; `Active`,
-`Paused`, and `Cancelled` streams return `InvalidState`. After close, the stream is
-removed from storage and from the recipient's index; `get_stream_state` returns `StreamNotFound`.
-
-### INV-11 set_admin rotation
-
-Requires current admin auth. Updates `Config.admin`. Emits `AdminUpd` event with
-`(old_admin, new_admin)`. New admin can immediately exercise all admin powers.
-
-### INV-12 withdraw_to destination constraint
-
-`destination` must not equal `env.current_contract_address()` (returns `InvalidParams`).
-Self-redirect (`destination == recipient`) is allowed. Event payload records both
-`recipient` (authorizer) and `destination` (token receiver) for audit trails.
+**Mitigation**: Use only well-audited, standard SEP-41 tokens. See [`token-assumptions.md`](token-assumptions.md) for detailed integration guidelines.
 
 ---
 
-## Residual risks and audit exceptions
+## Reproducible WASM builds
 
-| Area                       | Risk                                              | Mitigation                                                        |
-| -------------------------- | ------------------------------------------------- | ----------------------------------------------------------------- |
-| Token trust                | Non-SEP-41 token may re-enter or silently fail    | CEI ordering; single fixed token at init                          |
-| Off-chain indexer liveness | Indexers may miss events during network partition | Out of scope; documented in events.md                             |
-| Economic policy            | Who bears operational costs (gas, TTL bumps)      | Out of scope; operator runbook in DEPLOYMENT.md                   |
-| Recipient index growth     | Unbounded index for long-lived recipients         | Pagination via `get_recipient_streams`; no on-chain cap by design |
+The CI pipeline verifies that the WASM artifact produced by `cargo build --release --target wasm32-unknown-unknown` matches a committed reference checksum in `wasm/checksums.sha256`. This ensures that:
+
+1. **Byte-identical output**: Any developer or CI runner with the pinned toolchain produces the same WASM binary.
+2. **Supply chain integrity**: Changes to dependencies or toolchain that alter the WASM output are detected before merge.
+3. **Auditability**: Auditors can independently rebuild and verify the deployed WASM matches the source.
+
+### Determinism contract
+
+| Factor                     | How it is pinned                                                |
+|---------------------------|-----------------------------------------------------------------|
+| Rust toolchain            | `rust-toolchain.toml` — `channel = "stable"`, targets pinned    |
+| soroban-sdk version       | `contracts/stream/Cargo.toml` — `21.7.7` exact version          |
+| Build profile             | `--release` with `wasm32-unknown-unknown` target                |
+| Feature flags             | Only default features during WASM build (`testutils` is test-only) |
+| `Cargo.lock`              | Committed; transitive dependencies locked                       |
+
+### CI verification flow
+
+1. Build WASM with pinned toolchain
+2. Compute `sha256sum` of the artifact
+3. Compare against `wasm/checksums.sha256`
+4. Fail with actionable error if mismatch detected
+
+### Updating checksums
+
+When the contract source changes intentionally:
+
+```bash
+bash script/update-wasm-checksums.sh
+git add wasm/checksums.sha256
+git commit -m "chore: update wasm checksums"
+```
+
+### Residual risks
+
+- **Optimized WASM**: The Stellar CLI `optimize` step may produce non-deterministic output. The reference checksum covers only the raw (unoptimized) WASM.
+- **Cross-host builds**: The pinned `wasm32-unknown-unknown` target is deterministic across hosts, but minor differences in host libc or linker could theoretically affect non-WASM builds.
+- **Dependency supply chain**: A compromised transitive dependency could alter WASM output. The `Cargo.lock` pin and checksum verification detect this at CI time.
