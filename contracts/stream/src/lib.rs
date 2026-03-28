@@ -238,17 +238,16 @@ fn is_global_emergency_paused(env: &Env) -> bool {
     bump_instance_ttl(env);
     env.storage()
         .instance()
-        .get(&DataKey::GlobalEmergencyPaused)
+        .get(&DataKey::GlobalPaused)
         .unwrap_or(false)
 }
 
 /// Panics when [`is_global_emergency_paused`] is true. Admin/admin-override entrypoints
 /// must not call this so operators can still intervene.
 fn require_not_globally_paused(env: &Env) {
-    assert!(
-        !is_global_emergency_paused(env),
-        "contract is globally paused"
-    );
+    if is_global_emergency_paused(env) {
+        panic_with_error!(env, ContractError::ContractPaused);
+    }
 }
 
 fn read_stream_count(env: &Env) -> u64 {
@@ -1685,8 +1684,11 @@ impl FluxoraStream {
 
         let now = env.ledger().timestamp();
 
-        // New end time must be in the future relative to the current ledger timestamp.
-        if new_end_time < now
+        // New end time must be strictly less than the current end_time (must actually shorten),
+        // in the future relative to the current ledger timestamp, after start_time, and
+        // not before cliff_time.
+        if new_end_time >= stream.end_time
+            || new_end_time < now
             || new_end_time <= stream.start_time
             || new_end_time < stream.cliff_time
         {
@@ -2224,11 +2226,11 @@ impl FluxoraStream {
     /// - Publishes topic `gl_pause` with [`GlobalEmergencyPauseChanged`] data.
     pub fn set_global_emergency_paused(env: Env, paused: bool) {
         let admin = get_admin(&env);
-        admin.require_auth();
+        admin.unwrap().require_auth();
 
         env.storage()
             .instance()
-            .set(&DataKey::GlobalEmergencyPaused, &paused);
+            .set(&DataKey::GlobalPaused, &paused);
         bump_instance_ttl(&env);
 
         env.events().publish(

@@ -14506,3 +14506,2098 @@ fn test_create_streams_batch_deposit_overflow_is_atomic() {
         "stream count must not change on overflow failure"
     );
 }
+
+// ===========================================================================
+// §INVARIANTS  Formal invariants checklist (pre-audit)
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// INV-1  Conservation invariant: refund + frozen_accrued == deposit_amount
+// ---------------------------------------------------------------------------
+
+/// Invariant: at any cancellation time t, the refund sent to the sender plus
+/// the accrued amount frozen for the recipient must equal the original deposit.
+///
+/// Formally: refund_amount + accrued_at(cancelled_at) == deposit_amount
+///
+/// Verified by checking token balances before/after cancel and reading
+/// calculate_accrued (which is frozen post-cancel).
+#[test]
+fn inv1_cancel_conservation_immediate() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream(); // deposit=1000, rate=1, end=1000
+
+    let sender_before = ctx.token().balance(&ctx.sender);
+    let contract_before = ctx.token().balance(&ctx.contract_id);
+
+    // Cancel immediately at t=0 → full refund, zero accrued
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().cancel_stream(&stream_id);
+
+    let sender_after = ctx.token().balance(&ctx.sender);
+    let contract_after = ctx.token().balance(&ctx.contract_id);
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+
+    let refund = sender_after - sender_before;
+    assert_eq!(
+        refund + accrued,
+        1000,
+        "INV-1: refund + accrued must equal deposit"
+    );
+    assert_eq!(
+        contract_before - contract_after,
+        refund,
+        "contract balance must decrease by refund"
+    );
+}
+
+#[test]
+fn inv1_cancel_conservation_midway() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    let sender_before = ctx.token().balance(&ctx.sender);
+
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().cancel_stream(&stream_id);
+
+    let sender_after = ctx.token().balance(&ctx.sender);
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    let refund = sender_after - sender_before;
+
+    assert_eq!(
+        refund + accrued,
+        1000,
+        "INV-1: refund + accrued must equal deposit at t=400"
+    );
+    assert_eq!(accrued, 400);
+    assert_eq!(refund, 600);
+}
+
+#[test]
+fn inv1_cancel_conservation_after_partial_withdraw() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Withdraw 300 first
+    ctx.env.ledger().set_timestamp(300);
+    ctx.client().withdraw(&stream_id);
+
+    let sender_before = ctx.token().balance(&ctx.sender);
+
+    // Cancel at t=700
+    ctx.env.ledger().set_timestamp(700);
+    ctx.client().cancel_stream(&stream_id);
+
+    let sender_after = ctx.token().balance(&ctx.sender);
+    let accrued_frozen = ctx.client().calculate_accrued(&stream_id); // frozen at 700
+    let refund = sender_after - sender_before;
+
+    // refund = deposit - accrued_at_cancel = 1000 - 700 = 300
+    // accrued_frozen = 700 (frozen)
+    // refund + accrued_frozen == deposit
+    assert_eq!(
+        refund + accrued_frozen,
+        1000,
+        "INV-1: conservation holds after partial withdraw"
+    );
+    assert_eq!(refund, 300);
+    assert_eq!(accrued_frozen, 700);
+}
+
+#[test]
+fn inv1_cancel_conservation_at_end_time() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    let sender_before = ctx.token().balance(&ctx.sender);
+
+    // Cancel exactly at end_time → fully accrued, zero refund
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().cancel_stream(&stream_id);
+
+    let sender_after = ctx.token().balance(&ctx.sender);
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    let refund = sender_after - sender_before;
+
+    assert_eq!(refund, 0, "INV-1: no refund when fully accrued");
+    assert_eq!(accrued, 1000);
+    assert_eq!(refund + accrued, 1000);
+}
+
+#[test]
+fn inv1_cancel_conservation_before_cliff() {
+    let ctx = TestContext::setup();
+    // cliff at t=500, end=1000, deposit=1000, rate=1
+    let stream_id = ctx.create_cliff_stream();
+
+    let sender_before = ctx.token().balance(&ctx.sender);
+
+    // Cancel before cliff → accrued=0, full refund
+    ctx.env.ledger().set_timestamp(200);
+    ctx.client().cancel_stream(&stream_id);
+
+    let sender_after = ctx.token().balance(&ctx.sender);
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    let refund = sender_after - sender_before;
+
+    assert_eq!(accrued, 0, "INV-1: no accrual before cliff");
+    assert_eq!(refund, 1000, "INV-1: full refund before cliff");
+    assert_eq!(refund + accrued, 1000);
+}
+
+#[test]
+fn inv1_admin_cancel_same_conservation() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    let sender_before = ctx.token().balance(&ctx.sender);
+
+    ctx.env.ledger().set_timestamp(600);
+    ctx.client().cancel_stream_as_admin(&stream_id);
+
+    let sender_after = ctx.token().balance(&ctx.sender);
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    let refund = sender_after - sender_before;
+
+    assert_eq!(
+        refund + accrued,
+        1000,
+        "INV-1: admin cancel must satisfy same conservation"
+    );
+    assert_eq!(accrued, 600);
+    assert_eq!(refund, 400);
+}
+
+// ---------------------------------------------------------------------------
+// INV-2  Monotonicity: withdrawn_amount never decreases; never exceeds deposit
+// ---------------------------------------------------------------------------
+
+/// withdrawn_amount must be non-decreasing across all withdraw calls.
+#[test]
+fn inv2_withdrawn_amount_monotonically_increases() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    let mut prev_withdrawn = 0i128;
+    for &t in &[100u64, 300, 500, 700, 1000] {
+        ctx.env.ledger().set_timestamp(t);
+        ctx.client().withdraw(&stream_id);
+        let state = ctx.client().get_stream_state(&stream_id);
+        assert!(
+            state.withdrawn_amount >= prev_withdrawn,
+            "INV-2: withdrawn_amount must not decrease at t={t}"
+        );
+        prev_withdrawn = state.withdrawn_amount;
+    }
+}
+
+/// withdrawn_amount must never exceed deposit_amount.
+#[test]
+fn inv2_withdrawn_amount_never_exceeds_deposit() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    for &t in &[0u64, 250, 500, 750, 1000] {
+        ctx.env.ledger().set_timestamp(t);
+        ctx.client().withdraw(&stream_id);
+        let state = ctx.client().get_stream_state(&stream_id);
+        assert!(
+            state.withdrawn_amount <= state.deposit_amount,
+            "INV-2: withdrawn_amount={} must not exceed deposit={} at t={t}",
+            state.withdrawn_amount,
+            state.deposit_amount
+        );
+        // Stop once completed — further withdrawals are rejected
+        if state.status == StreamStatus::Completed {
+            break;
+        }
+    }
+}
+
+/// After full withdrawal, withdrawn_amount == deposit_amount exactly.
+#[test]
+fn inv2_withdrawn_equals_deposit_at_completion() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(
+        state.withdrawn_amount, state.deposit_amount,
+        "INV-2: withdrawn_amount must equal deposit_amount at completion"
+    );
+    assert_eq!(state.status, StreamStatus::Completed);
+}
+
+/// For a cancelled stream, withdrawn_amount after full recipient withdrawal
+/// equals accrued_at_cancel, never the full deposit.
+#[test]
+fn inv2_cancelled_stream_withdrawn_capped_at_accrued() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(600);
+    ctx.client().cancel_stream(&stream_id);
+
+    // Withdraw the frozen accrued amount
+    ctx.client().withdraw(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(
+        state.withdrawn_amount, 600,
+        "INV-2: withdrawn capped at accrued_at_cancel"
+    );
+    assert!(state.withdrawn_amount <= state.deposit_amount);
+    // Status stays Cancelled (not Completed) after full withdrawal from cancelled stream
+    assert_eq!(state.status, StreamStatus::Cancelled);
+}
+
+// ---------------------------------------------------------------------------
+// INV-3  Terminal-state immutability: Cancelled/Completed cannot transition
+// ---------------------------------------------------------------------------
+
+/// A Completed stream cannot be cancelled.
+#[test]
+fn inv3_completed_stream_cannot_be_cancelled() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).status,
+        StreamStatus::Completed
+    );
+
+    let result = ctx.client().try_cancel_stream(&stream_id);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InvalidState)),
+        "INV-3: Completed cannot be cancelled"
+    );
+}
+
+/// A Completed stream cannot be cancelled by admin either.
+#[test]
+fn inv3_completed_stream_cannot_be_admin_cancelled() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    let result = ctx.client().try_cancel_stream_as_admin(&stream_id);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InvalidState)),
+        "INV-3: Completed cannot be admin-cancelled"
+    );
+}
+
+/// A Cancelled stream cannot be cancelled again.
+#[test]
+fn inv3_cancelled_stream_cannot_be_cancelled_again() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().cancel_stream(&stream_id);
+
+    let result = ctx.client().try_cancel_stream(&stream_id);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InvalidState)),
+        "INV-3: Cancelled cannot be cancelled again"
+    );
+}
+
+/// A Completed stream cannot be paused.
+#[test]
+fn inv3_completed_stream_cannot_be_paused() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    let result = ctx.client().try_pause_stream(&stream_id);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InvalidState)),
+        "INV-3: Completed cannot be paused"
+    );
+}
+
+/// A Cancelled stream cannot be paused.
+#[test]
+fn inv3_cancelled_stream_cannot_be_paused() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().cancel_stream(&stream_id);
+
+    let result = ctx.client().try_pause_stream(&stream_id);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InvalidState)),
+        "INV-3: Cancelled cannot be paused"
+    );
+}
+
+/// A Completed stream cannot be resumed.
+#[test]
+fn inv3_completed_stream_cannot_be_resumed() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    let result = ctx.client().try_resume_stream(&stream_id);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InvalidState)),
+        "INV-3: Completed cannot be resumed"
+    );
+}
+
+/// A Cancelled stream cannot be resumed.
+#[test]
+fn inv3_cancelled_stream_cannot_be_resumed() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().cancel_stream(&stream_id);
+
+    let result = ctx.client().try_resume_stream(&stream_id);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InvalidState)),
+        "INV-3: Cancelled cannot be resumed"
+    );
+}
+
+/// An already-Active stream cannot be resumed (not paused).
+#[test]
+fn inv3_active_stream_cannot_be_resumed() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(100);
+    let result = ctx.client().try_resume_stream(&stream_id);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InvalidState)),
+        "INV-3: Active cannot be resumed"
+    );
+}
+
+/// An already-Paused stream cannot be paused again.
+#[test]
+fn inv3_paused_stream_cannot_be_paused_again() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().pause_stream(&stream_id);
+
+    let result = ctx.client().try_pause_stream(&stream_id);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InvalidState)),
+        "INV-3: Paused cannot be paused again"
+    );
+}
+
+/// Terminal states cannot be modified by schedule operations.
+#[test]
+fn inv3_cancelled_stream_cannot_be_topped_up() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().cancel_stream(&stream_id);
+
+    let result = ctx
+        .client()
+        .try_top_up_stream(&stream_id, &ctx.sender, &100);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InvalidState)),
+        "INV-3: Cancelled cannot be topped up"
+    );
+}
+
+#[test]
+fn inv3_completed_stream_cannot_be_topped_up() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    let result = ctx
+        .client()
+        .try_top_up_stream(&stream_id, &ctx.sender, &100);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InvalidState)),
+        "INV-3: Completed cannot be topped up"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// INV-4  cancelled_at is set exactly once and is immutable
+// ---------------------------------------------------------------------------
+
+/// After cancellation, cancelled_at is Some(now) and matches the ledger timestamp.
+#[test]
+fn inv4_cancelled_at_set_to_cancel_timestamp() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(750);
+    ctx.client().cancel_stream(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(
+        state.cancelled_at,
+        Some(750),
+        "INV-4: cancelled_at must equal ledger timestamp at cancel"
+    );
+}
+
+/// cancelled_at is None before cancellation.
+#[test]
+fn inv4_cancelled_at_none_before_cancel() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(300);
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(
+        state.cancelled_at, None,
+        "INV-4: cancelled_at must be None before cancellation"
+    );
+}
+
+/// cancelled_at is None for a Completed stream (completion is not cancellation).
+#[test]
+fn inv4_cancelled_at_none_for_completed_stream() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+    assert_eq!(
+        state.cancelled_at, None,
+        "INV-4: cancelled_at must be None for Completed stream"
+    );
+}
+
+/// Admin cancel also sets cancelled_at correctly.
+#[test]
+fn inv4_admin_cancel_sets_cancelled_at() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(333);
+    ctx.client().cancel_stream_as_admin(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(
+        state.cancelled_at,
+        Some(333),
+        "INV-4: admin cancel must set cancelled_at"
+    );
+}
+
+/// Cancelling a paused stream sets cancelled_at correctly.
+#[test]
+fn inv4_cancel_paused_stream_sets_cancelled_at() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(200);
+    ctx.client().pause_stream(&stream_id);
+
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().cancel_stream(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(
+        state.cancelled_at,
+        Some(500),
+        "INV-4: cancel of paused stream must set cancelled_at to cancel time"
+    );
+    assert_eq!(state.status, StreamStatus::Cancelled);
+}
+
+// ---------------------------------------------------------------------------
+// INV-5  Accrual freeze: calculate_accrued is constant after cancellation
+// ---------------------------------------------------------------------------
+
+/// After cancellation, calculate_accrued returns the same value regardless of
+/// how much ledger time passes — it is frozen at cancelled_at.
+#[test]
+fn inv5_accrued_frozen_after_cancel() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(600);
+    ctx.client().cancel_stream(&stream_id);
+
+    let accrued_at_cancel = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued_at_cancel, 600);
+
+    // Advance time well past end_time — accrued must not change
+    for &t in &[700u64, 1000, 5000, 999_999] {
+        ctx.env.ledger().set_timestamp(t);
+        let accrued = ctx.client().calculate_accrued(&stream_id);
+        assert_eq!(
+            accrued, accrued_at_cancel,
+            "INV-5: accrued must be frozen at {accrued_at_cancel} after cancel, got {accrued} at t={t}"
+        );
+    }
+}
+
+/// Accrual freeze holds even when cancelled before cliff (frozen at 0).
+#[test]
+fn inv5_accrued_frozen_at_zero_when_cancelled_before_cliff() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_cliff_stream(); // cliff=500
+
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().cancel_stream(&stream_id);
+
+    for &t in &[200u64, 500, 1000, 9999] {
+        ctx.env.ledger().set_timestamp(t);
+        let accrued = ctx.client().calculate_accrued(&stream_id);
+        assert_eq!(
+            accrued, 0,
+            "INV-5: accrued frozen at 0 when cancelled before cliff, t={t}"
+        );
+    }
+}
+
+/// For an active stream, accrued is non-decreasing with time (not frozen).
+#[test]
+fn inv5_accrued_increases_for_active_stream() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    let mut prev = 0i128;
+    for &t in &[0u64, 100, 300, 600, 900, 1000] {
+        ctx.env.ledger().set_timestamp(t);
+        let accrued = ctx.client().calculate_accrued(&stream_id);
+        assert!(
+            accrued >= prev,
+            "INV-5: accrued must be non-decreasing for active stream at t={t}"
+        );
+        prev = accrued;
+    }
+}
+
+/// For a completed stream, calculate_accrued always returns deposit_amount.
+#[test]
+fn inv5_accrued_equals_deposit_for_completed_stream() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    for &t in &[0u64, 500, 1000, 9999] {
+        ctx.env.ledger().set_timestamp(t);
+        let accrued = ctx.client().calculate_accrued(&stream_id);
+        assert_eq!(
+            accrued, 1000,
+            "INV-5: completed stream accrued must always equal deposit at t={t}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// INV-6  Authorization boundaries
+// ---------------------------------------------------------------------------
+
+/// Only the stream sender can cancel via cancel_stream.
+/// A third party (non-sender) must be rejected.
+#[test]
+fn inv6_only_sender_can_cancel_stream() {
+    let ctx = TestContext::setup_strict();
+    let client = ctx.client();
+
+    use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+
+    // Create stream with sender auth
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "create_stream",
+            args: (
+                &ctx.sender,
+                &ctx.recipient,
+                1000_i128,
+                1_i128,
+                0u64,
+                0u64,
+                1000u64,
+            )
+                .into_val(&ctx.env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &ctx.token_id,
+                fn_name: "transfer",
+                args: (&ctx.sender, &ctx.contract_id, 1000_i128).into_val(&ctx.env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = client.create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
+
+    // Attempt cancel as recipient (not sender) — must fail
+    let attacker = ctx.recipient.clone();
+    ctx.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "cancel_stream",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+    ctx.env.ledger().set_timestamp(100);
+    let result = client.try_cancel_stream(&stream_id);
+    assert!(result.is_err(), "INV-6: non-sender must not cancel stream");
+}
+
+/// Only the stream recipient can withdraw.
+#[test]
+fn inv6_only_recipient_can_withdraw() {
+    let ctx = TestContext::setup_strict();
+    let client = ctx.client();
+
+    use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "create_stream",
+            args: (
+                &ctx.sender,
+                &ctx.recipient,
+                1000_i128,
+                1_i128,
+                0u64,
+                0u64,
+                1000u64,
+            )
+                .into_val(&ctx.env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &ctx.token_id,
+                fn_name: "transfer",
+                args: (&ctx.sender, &ctx.contract_id, 1000_i128).into_val(&ctx.env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = client.create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
+
+    // Attempt withdraw as sender (not recipient) — must fail
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "withdraw",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+    ctx.env.ledger().set_timestamp(500);
+    let result = client.try_withdraw(&stream_id);
+    assert!(result.is_err(), "INV-6: non-recipient must not withdraw");
+}
+
+/// Only the contract admin can call cancel_stream_as_admin.
+#[test]
+fn inv6_only_admin_can_cancel_as_admin() {
+    let ctx = TestContext::setup_strict();
+    let client = ctx.client();
+
+    use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "create_stream",
+            args: (
+                &ctx.sender,
+                &ctx.recipient,
+                1000_i128,
+                1_i128,
+                0u64,
+                0u64,
+                1000u64,
+            )
+                .into_val(&ctx.env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &ctx.token_id,
+                fn_name: "transfer",
+                args: (&ctx.sender, &ctx.contract_id, 1000_i128).into_val(&ctx.env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = client.create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
+
+    // Attempt admin-cancel as sender (not admin) — must fail
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "cancel_stream_as_admin",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+    ctx.env.ledger().set_timestamp(100);
+    let result = client.try_cancel_stream_as_admin(&stream_id);
+    assert!(
+        result.is_err(),
+        "INV-6: non-admin must not cancel_stream_as_admin"
+    );
+}
+
+/// Only the stream sender can pause via pause_stream.
+#[test]
+fn inv6_only_sender_can_pause() {
+    let ctx = TestContext::setup_strict();
+    let client = ctx.client();
+
+    use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "create_stream",
+            args: (
+                &ctx.sender,
+                &ctx.recipient,
+                1000_i128,
+                1_i128,
+                0u64,
+                0u64,
+                1000u64,
+            )
+                .into_val(&ctx.env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &ctx.token_id,
+                fn_name: "transfer",
+                args: (&ctx.sender, &ctx.contract_id, 1000_i128).into_val(&ctx.env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = client.create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
+
+    // Attempt pause as recipient — must fail
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.recipient,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "pause_stream",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+    ctx.env.ledger().set_timestamp(100);
+    let result = client.try_pause_stream(&stream_id);
+    assert!(result.is_err(), "INV-6: non-sender must not pause stream");
+}
+
+/// batch_withdraw: wrong recipient is rejected with Unauthorized.
+#[test]
+fn inv6_batch_withdraw_wrong_recipient_rejected() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    ctx.env.ledger().set_timestamp(500);
+
+    let wrong = Address::generate(&ctx.env);
+    let ids = stream_ids_vec(&ctx.env, &[stream_id]);
+    let result = ctx.client().try_batch_withdraw(&wrong, &ids);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::Unauthorized)),
+        "INV-6: wrong recipient must get Unauthorized"
+    );
+}
+
+/// top_up_stream: unauthorized funder is rejected.
+#[test]
+fn inv6_top_up_unauthorized_funder_rejected() {
+    let ctx = TestContext::setup_strict();
+    let client = ctx.client();
+
+    use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "create_stream",
+            args: (
+                &ctx.sender,
+                &ctx.recipient,
+                1000_i128,
+                1_i128,
+                0u64,
+                0u64,
+                1000u64,
+            )
+                .into_val(&ctx.env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &ctx.token_id,
+                fn_name: "transfer",
+                args: (&ctx.sender, &ctx.contract_id, 1000_i128).into_val(&ctx.env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = client.create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
+
+    // Attempt top_up as attacker without providing their own auth
+    let attacker = Address::generate(&ctx.env);
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender, // sender auth, but funder is attacker
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "top_up_stream",
+            args: (stream_id, &attacker, 100_i128).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+    let result = client.try_top_up_stream(&stream_id, &attacker, &100);
+    assert!(result.is_err(), "INV-6: top_up must require funder auth");
+}
+
+/// set_admin: non-admin caller is rejected.
+#[test]
+fn inv6_set_admin_requires_current_admin_auth() {
+    let ctx = TestContext::setup_strict();
+    let client = ctx.client();
+
+    use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+
+    let new_admin = Address::generate(&ctx.env);
+    let attacker = Address::generate(&ctx.env);
+
+    // Attempt set_admin as attacker
+    ctx.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "set_admin",
+            args: (&new_admin,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+    let result = client.try_set_admin(&new_admin);
+    assert!(result.is_err(), "INV-6: non-admin must not call set_admin");
+}
+
+/// update_rate_per_second: non-sender caller is rejected.
+#[test]
+fn inv6_update_rate_requires_sender_auth() {
+    let ctx = TestContext::setup_strict();
+    let client = ctx.client();
+
+    use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "create_stream",
+            args: (
+                &ctx.sender,
+                &ctx.recipient,
+                2000_i128,
+                1_i128,
+                0u64,
+                0u64,
+                1000u64,
+            )
+                .into_val(&ctx.env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &ctx.token_id,
+                fn_name: "transfer",
+                args: (&ctx.sender, &ctx.contract_id, 2000_i128).into_val(&ctx.env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = client.create_stream(&ctx.sender, &ctx.recipient, &2000, &1, &0, &0, &1000);
+
+    // Attempt rate update as recipient
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.recipient,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "update_rate_per_second",
+            args: (stream_id, 2_i128).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+    let result = client.try_update_rate_per_second(&stream_id, &2);
+    assert!(result.is_err(), "INV-6: non-sender must not update rate");
+}
+
+// ---------------------------------------------------------------------------
+// INV-7  Event coherence: every state-changing success emits the right event
+// ---------------------------------------------------------------------------
+
+/// pause_stream emits StreamEvent::Paused with correct stream_id.
+#[test]
+fn inv7_pause_emits_paused_event() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().pause_stream(&stream_id);
+
+    let events = ctx.env.events().all();
+    let last = events.last().unwrap();
+    let topic_sym = Symbol::try_from_val(&ctx.env, &last.1.get(0).unwrap()).unwrap();
+    assert_eq!(
+        topic_sym,
+        Symbol::new(&ctx.env, "paused"),
+        "INV-7: pause must emit 'paused' topic"
+    );
+    let data = StreamEvent::try_from_val(&ctx.env, &last.2).unwrap();
+    assert_eq!(data, StreamEvent::Paused(stream_id));
+}
+
+/// resume_stream emits StreamEvent::Resumed with correct stream_id.
+#[test]
+fn inv7_resume_emits_resumed_event() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().pause_stream(&stream_id);
+    ctx.client().resume_stream(&stream_id);
+
+    let events = ctx.env.events().all();
+    let last = events.last().unwrap();
+    let topic_sym = Symbol::try_from_val(&ctx.env, &last.1.get(0).unwrap()).unwrap();
+    assert_eq!(
+        topic_sym,
+        Symbol::new(&ctx.env, "resumed"),
+        "INV-7: resume must emit 'resumed' topic"
+    );
+    let data = StreamEvent::try_from_val(&ctx.env, &last.2).unwrap();
+    assert_eq!(data, StreamEvent::Resumed(stream_id));
+}
+
+/// cancel_stream emits StreamEvent::StreamCancelled with correct stream_id.
+#[test]
+fn inv7_cancel_emits_cancelled_event() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().cancel_stream(&stream_id);
+
+    let events = ctx.env.events().all();
+    let last = events.last().unwrap();
+    let topic_sym = Symbol::try_from_val(&ctx.env, &last.1.get(0).unwrap()).unwrap();
+    assert_eq!(
+        topic_sym,
+        Symbol::new(&ctx.env, "cancelled"),
+        "INV-7: cancel must emit 'cancelled' topic"
+    );
+    let data = StreamEvent::try_from_val(&ctx.env, &last.2).unwrap();
+    assert_eq!(data, StreamEvent::StreamCancelled(stream_id));
+}
+
+/// cancel_stream_as_admin emits the same StreamCancelled event shape as cancel_stream.
+#[test]
+fn inv7_admin_cancel_emits_same_event_shape_as_sender_cancel() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().cancel_stream_as_admin(&stream_id);
+
+    let events = ctx.env.events().all();
+    let last = events.last().unwrap();
+    let topic_sym = Symbol::try_from_val(&ctx.env, &last.1.get(0).unwrap()).unwrap();
+    assert_eq!(
+        topic_sym,
+        Symbol::new(&ctx.env, "cancelled"),
+        "INV-7: admin cancel must emit 'cancelled' topic"
+    );
+    let data = StreamEvent::try_from_val(&ctx.env, &last.2).unwrap();
+    assert_eq!(data, StreamEvent::StreamCancelled(stream_id));
+}
+
+/// withdraw emits Withdrawal event; completing the stream also emits StreamCompleted
+/// in the correct order (withdrew before completed).
+#[test]
+fn inv7_final_withdraw_emits_withdrew_then_completed() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    let events = ctx.env.events().all();
+    // Last two events: withdrew, then completed
+    let n = events.len();
+    assert!(
+        n >= 2,
+        "INV-7: must have at least 2 events after final withdraw"
+    );
+
+    let withdrew_event = events.get(n - 2).unwrap();
+    let completed_event = events.get(n - 1).unwrap();
+
+    let withdrew_topic = Symbol::try_from_val(&ctx.env, &withdrew_event.1.get(0).unwrap()).unwrap();
+    let completed_topic =
+        Symbol::try_from_val(&ctx.env, &completed_event.1.get(0).unwrap()).unwrap();
+
+    assert_eq!(
+        withdrew_topic,
+        Symbol::new(&ctx.env, "withdrew"),
+        "INV-7: withdrew event must come before completed"
+    );
+    assert_eq!(
+        completed_topic,
+        Symbol::new(&ctx.env, "completed"),
+        "INV-7: completed event must follow withdrew"
+    );
+
+    let completed_data = StreamEvent::try_from_val(&ctx.env, &completed_event.2).unwrap();
+    assert_eq!(completed_data, StreamEvent::StreamCompleted(stream_id));
+}
+
+/// update_rate_per_second emits RateUpdated event with correct fields.
+#[test]
+fn inv7_update_rate_emits_rate_updated_event() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    // deposit=2000 covers rate=2 * duration=1000
+    let stream_id =
+        ctx.client()
+            .create_stream(&ctx.sender, &ctx.recipient, &2000, &1, &0, &0, &1000);
+
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().update_rate_per_second(&stream_id, &2);
+
+    let events = ctx.env.events().all();
+    let last = events.last().unwrap();
+    let topic_sym = Symbol::try_from_val(&ctx.env, &last.1.get(0).unwrap()).unwrap();
+    assert_eq!(
+        topic_sym,
+        Symbol::new(&ctx.env, "rate_upd"),
+        "INV-7: rate update must emit 'rate_upd' topic"
+    );
+
+    let data = crate::RateUpdated::try_from_val(&ctx.env, &last.2).unwrap();
+    assert_eq!(data.stream_id, stream_id);
+    assert_eq!(data.old_rate_per_second, 1);
+    assert_eq!(data.new_rate_per_second, 2);
+    assert_eq!(data.effective_time, 100);
+}
+
+/// shorten_stream_end_time emits StreamEndShortened event with correct fields.
+#[test]
+fn inv7_shorten_emits_end_shortened_event() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream(); // end=1000
+
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().shorten_stream_end_time(&stream_id, &500);
+
+    let events = ctx.env.events().all();
+    let last = events.last().unwrap();
+    let topic_sym = Symbol::try_from_val(&ctx.env, &last.1.get(0).unwrap()).unwrap();
+    assert_eq!(
+        topic_sym,
+        Symbol::new(&ctx.env, "end_shrt"),
+        "INV-7: shorten must emit 'end_shrt' topic"
+    );
+
+    let data = crate::StreamEndShortened::try_from_val(&ctx.env, &last.2).unwrap();
+    assert_eq!(data.stream_id, stream_id);
+    assert_eq!(data.old_end_time, 1000);
+    assert_eq!(data.new_end_time, 500);
+    assert_eq!(data.refund_amount, 500); // 1000 - 500 = 500 refunded
+}
+
+/// extend_stream_end_time emits StreamEndExtended event with correct fields.
+#[test]
+fn inv7_extend_emits_end_extended_event() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    // deposit=2000 covers rate=1 * duration=2000
+    let stream_id =
+        ctx.client()
+            .create_stream(&ctx.sender, &ctx.recipient, &2000, &1, &0, &0, &1000);
+
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().extend_stream_end_time(&stream_id, &2000);
+
+    let events = ctx.env.events().all();
+    let last = events.last().unwrap();
+    let topic_sym = Symbol::try_from_val(&ctx.env, &last.1.get(0).unwrap()).unwrap();
+    assert_eq!(
+        topic_sym,
+        Symbol::new(&ctx.env, "end_ext"),
+        "INV-7: extend must emit 'end_ext' topic"
+    );
+
+    let data = crate::StreamEndExtended::try_from_val(&ctx.env, &last.2).unwrap();
+    assert_eq!(data.stream_id, stream_id);
+    assert_eq!(data.old_end_time, 1000);
+    assert_eq!(data.new_end_time, 2000);
+}
+
+/// top_up_stream emits StreamToppedUp event with correct fields.
+#[test]
+fn inv7_top_up_emits_topped_up_event() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream(); // deposit=1000
+
+    ctx.sac.mint(&ctx.sender, &500);
+    ctx.client().top_up_stream(&stream_id, &ctx.sender, &500);
+
+    let events = ctx.env.events().all();
+    let last = events.last().unwrap();
+    let topic_sym = Symbol::try_from_val(&ctx.env, &last.1.get(0).unwrap()).unwrap();
+    assert_eq!(
+        topic_sym,
+        Symbol::new(&ctx.env, "top_up"),
+        "INV-7: top_up must emit 'top_up' topic"
+    );
+
+    let data = crate::StreamToppedUp::try_from_val(&ctx.env, &last.2).unwrap();
+    assert_eq!(data.stream_id, stream_id);
+    assert_eq!(data.top_up_amount, 500);
+    assert_eq!(data.new_deposit_amount, 1500);
+}
+
+/// close_completed_stream emits StreamClosed event before storage removal.
+#[test]
+fn inv7_close_emits_closed_event() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+    ctx.client().close_completed_stream(&stream_id);
+
+    let events = ctx.env.events().all();
+    let last = events.last().unwrap();
+    let topic_sym = Symbol::try_from_val(&ctx.env, &last.1.get(0).unwrap()).unwrap();
+    assert_eq!(
+        topic_sym,
+        Symbol::new(&ctx.env, "closed"),
+        "INV-7: close must emit 'closed' topic"
+    );
+
+    let data = StreamEvent::try_from_val(&ctx.env, &last.2).unwrap();
+    assert_eq!(data, StreamEvent::StreamClosed(stream_id));
+}
+
+/// set_admin emits AdminUpdated event with old and new admin addresses.
+#[test]
+fn inv7_set_admin_emits_admin_updated_event() {
+    let ctx = TestContext::setup();
+    let new_admin = Address::generate(&ctx.env);
+
+    ctx.client().set_admin(&new_admin);
+
+    let events = ctx.env.events().all();
+    let last = events.last().unwrap();
+    let topic_sym = Symbol::try_from_val(&ctx.env, &last.1.get(0).unwrap()).unwrap();
+    assert_eq!(
+        topic_sym,
+        Symbol::new(&ctx.env, "AdminUpd"),
+        "INV-7: set_admin must emit 'AdminUpd' topic"
+    );
+
+    // Data is a tuple (old_admin, new_admin)
+    let (old, new): (Address, Address) =
+        soroban_sdk::TryFromVal::try_from_val(&ctx.env, &last.2).unwrap();
+    assert_eq!(new, new_admin);
+    // old must be the original admin (not the new one)
+    assert_ne!(old, new_admin);
+}
+
+/// No event is emitted when cancel fails (atomic failure — no side effects).
+#[test]
+fn inv7_failed_cancel_emits_no_event() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Complete the stream
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    let events_before = ctx.env.events().all().len();
+
+    // Attempt cancel on completed stream — must fail
+    let _ = ctx.client().try_cancel_stream(&stream_id);
+
+    assert_eq!(
+        ctx.env.events().all().len(),
+        events_before,
+        "INV-7: failed cancel must emit no events"
+    );
+}
+
+/// No event is emitted when withdraw returns 0 (nothing to withdraw).
+#[test]
+fn inv7_zero_withdraw_emits_no_event() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_cliff_stream(); // cliff=500
+
+    ctx.env.ledger().set_timestamp(100); // before cliff
+    let events_before = ctx.env.events().all().len();
+
+    let amount = ctx.client().withdraw(&stream_id);
+    assert_eq!(amount, 0);
+    assert_eq!(
+        ctx.env.events().all().len(),
+        events_before,
+        "INV-7: zero-amount withdraw must emit no events"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// INV-8  Global emergency pause blocks user mutations; admin paths bypass it
+// ---------------------------------------------------------------------------
+
+/// create_stream is blocked when global emergency pause is active.
+#[test]
+fn inv8_global_pause_blocks_create_stream() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().set_global_emergency_paused(&true);
+
+    let result =
+        ctx.client()
+            .try_create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::ContractPaused)),
+        "INV-8: create_stream must be blocked by global pause"
+    );
+}
+
+/// create_streams is blocked when global emergency pause is active.
+#[test]
+fn inv8_global_pause_blocks_create_streams() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().set_global_emergency_paused(&true);
+
+    let mut params = soroban_sdk::Vec::new(&ctx.env);
+    params.push_back(crate::CreateStreamParams {
+        recipient: ctx.recipient.clone(),
+        deposit_amount: 1000,
+        rate_per_second: 1,
+        start_time: 0,
+        cliff_time: 0,
+        end_time: 1000,
+    });
+    let result = ctx.client().try_create_streams(&ctx.sender, &params);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::ContractPaused)),
+        "INV-8: create_streams must be blocked by global pause"
+    );
+}
+
+/// withdraw is blocked when global emergency pause is active.
+#[test]
+fn inv8_global_pause_blocks_withdraw() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().set_global_emergency_paused(&true);
+
+    let result = ctx.client().try_withdraw(&stream_id);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::ContractPaused)),
+        "INV-8: withdraw must be blocked by global pause"
+    );
+}
+
+/// cancel_stream is blocked when global emergency pause is active.
+#[test]
+fn inv8_global_pause_blocks_cancel_stream() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().set_global_emergency_paused(&true);
+
+    let result = ctx.client().try_cancel_stream(&stream_id);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::ContractPaused)),
+        "INV-8: cancel_stream must be blocked by global pause"
+    );
+}
+
+/// Admin cancel_stream_as_admin bypasses global emergency pause.
+#[test]
+fn inv8_admin_cancel_bypasses_global_pause() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().set_global_emergency_paused(&true);
+
+    // Admin path must succeed even while globally paused
+    ctx.client().cancel_stream_as_admin(&stream_id);
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(
+        state.status,
+        StreamStatus::Cancelled,
+        "INV-8: admin cancel must bypass global pause"
+    );
+}
+
+/// Admin pause_stream_as_admin bypasses global emergency pause.
+#[test]
+fn inv8_admin_pause_bypasses_global_pause() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().set_global_emergency_paused(&true);
+
+    ctx.client().pause_stream_as_admin(&stream_id);
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(
+        state.status,
+        StreamStatus::Paused,
+        "INV-8: admin pause must bypass global pause"
+    );
+}
+
+/// Read-only views (get_stream_state, calculate_accrued) are not blocked by global pause.
+#[test]
+fn inv8_views_not_blocked_by_global_pause() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(300);
+    ctx.client().set_global_emergency_paused(&true);
+
+    // These must not panic
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Active);
+
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued, 300);
+
+    let withdrawable = ctx.client().get_withdrawable(&stream_id);
+    assert_eq!(withdrawable, 300);
+}
+
+/// Unpausing restores normal operation.
+#[test]
+fn inv8_unpause_restores_operations() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().set_global_emergency_paused(&true);
+    ctx.client().set_global_emergency_paused(&false);
+
+    // Operations must work again
+    let amount = ctx.client().withdraw(&stream_id);
+    assert_eq!(
+        amount, 500,
+        "INV-8: withdraw must work after global pause is lifted"
+    );
+}
+
+/// Global emergency pause state is persisted and readable.
+#[test]
+fn inv8_global_pause_state_is_readable() {
+    let ctx = TestContext::setup();
+
+    assert!(
+        !ctx.client().get_global_emergency_paused(),
+        "INV-8: default global pause must be false"
+    );
+
+    ctx.client().set_global_emergency_paused(&true);
+    assert!(
+        ctx.client().get_global_emergency_paused(),
+        "INV-8: global pause must be true after set"
+    );
+
+    ctx.client().set_global_emergency_paused(&false);
+    assert!(
+        !ctx.client().get_global_emergency_paused(),
+        "INV-8: global pause must be false after clear"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// INV-9  Schedule modifications — valid/invalid inputs and invariants
+// ---------------------------------------------------------------------------
+
+// --- update_rate_per_second ---
+
+/// Rate update succeeds when new_rate > old_rate and deposit covers new total.
+#[test]
+fn inv9_update_rate_success() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    // deposit=2000 covers rate=2 * 1000s
+    let stream_id =
+        ctx.client()
+            .create_stream(&ctx.sender, &ctx.recipient, &2000, &1, &0, &0, &1000);
+
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().update_rate_per_second(&stream_id, &2);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.rate_per_second, 2, "INV-9: rate must be updated");
+}
+
+/// Rate update fails when new_rate <= old_rate (forward-only).
+#[test]
+fn inv9_update_rate_decrease_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream(); // rate=1
+
+    let result = ctx.client().try_update_rate_per_second(&stream_id, &1);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InvalidParams)),
+        "INV-9: rate decrease must be rejected"
+    );
+}
+
+/// Rate update fails when deposit would not cover new total streamable amount.
+#[test]
+fn inv9_update_rate_insufficient_deposit_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    // deposit=1000, rate=1, duration=1000 — exactly covers current rate
+    let stream_id = ctx.create_default_stream();
+
+    // new_rate=2 would require 2000 but deposit is only 1000
+    let result = ctx.client().try_update_rate_per_second(&stream_id, &2);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InsufficientDeposit)),
+        "INV-9: rate update with insufficient deposit must fail"
+    );
+}
+
+/// Rate update on a terminal stream is rejected.
+#[test]
+fn inv9_update_rate_on_cancelled_stream_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id =
+        ctx.client()
+            .create_stream(&ctx.sender, &ctx.recipient, &2000, &1, &0, &0, &1000);
+
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().cancel_stream(&stream_id);
+
+    let result = ctx.client().try_update_rate_per_second(&stream_id, &2);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InvalidState)),
+        "INV-9: rate update on cancelled stream must fail"
+    );
+}
+
+/// Rate update on a zero or negative rate is rejected.
+#[test]
+fn inv9_update_rate_zero_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream();
+
+    let result = ctx.client().try_update_rate_per_second(&stream_id, &0);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InvalidParams)),
+        "INV-9: zero rate must be rejected"
+    );
+}
+
+// --- shorten_stream_end_time ---
+
+/// Shorten succeeds: new_end < old_end, refund = old_deposit - new_max_streamable.
+#[test]
+fn inv9_shorten_success_refunds_correctly() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream(); // deposit=1000, rate=1, end=1000
+
+    let sender_before = ctx.token().balance(&ctx.sender);
+
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().shorten_stream_end_time(&stream_id, &500);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.end_time, 500, "INV-9: end_time must be updated");
+    // new deposit = rate * new_duration = 1 * 500 = 500
+    assert_eq!(
+        state.deposit_amount, 500,
+        "INV-9: deposit must be reduced to new max streamable"
+    );
+
+    let refund = ctx.token().balance(&ctx.sender) - sender_before;
+    assert_eq!(
+        refund, 500,
+        "INV-9: refund must equal old_deposit - new_deposit"
+    );
+}
+
+/// Shorten fails when new_end_time >= old_end_time.
+#[test]
+fn inv9_shorten_with_new_end_gte_old_end_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream(); // end=1000
+
+    let result = ctx.client().try_shorten_stream_end_time(&stream_id, &1000);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InvalidParams)),
+        "INV-9: shorten with new_end >= old_end must fail"
+    );
+}
+
+/// Shorten fails when new_end_time is in the past.
+#[test]
+fn inv9_shorten_with_past_end_time_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(600);
+    // new_end=500 is in the past relative to now=600
+    let result = ctx.client().try_shorten_stream_end_time(&stream_id, &500);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InvalidParams)),
+        "INV-9: shorten with past end_time must fail"
+    );
+}
+
+/// Shorten on a terminal stream is rejected.
+#[test]
+fn inv9_shorten_on_cancelled_stream_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().cancel_stream(&stream_id);
+
+    let result = ctx.client().try_shorten_stream_end_time(&stream_id, &600);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InvalidState)),
+        "INV-9: shorten on cancelled stream must fail"
+    );
+}
+
+// --- extend_stream_end_time ---
+
+/// Extend succeeds: new_end > old_end, deposit covers extended duration.
+#[test]
+fn inv9_extend_success() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    // deposit=2000 covers rate=1 * 2000s
+    let stream_id =
+        ctx.client()
+            .create_stream(&ctx.sender, &ctx.recipient, &2000, &1, &0, &0, &1000);
+
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().extend_stream_end_time(&stream_id, &2000);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.end_time, 2000, "INV-9: end_time must be extended");
+    assert_eq!(
+        state.deposit_amount, 2000,
+        "INV-9: deposit must be unchanged after extend"
+    );
+}
+
+/// Extend fails when new_end_time <= old_end_time.
+#[test]
+fn inv9_extend_with_new_end_lte_old_end_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream(); // end=1000
+
+    let result = ctx.client().try_extend_stream_end_time(&stream_id, &1000);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InvalidParams)),
+        "INV-9: extend with new_end <= old_end must fail"
+    );
+}
+
+/// Extend fails when deposit does not cover extended duration.
+#[test]
+fn inv9_extend_insufficient_deposit_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    // deposit=1000 exactly covers rate=1 * 1000s
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(100);
+    // Extending to 2000 would require 2000 tokens but deposit is only 1000
+    let result = ctx.client().try_extend_stream_end_time(&stream_id, &2000);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InsufficientDeposit)),
+        "INV-9: extend with insufficient deposit must fail"
+    );
+}
+
+/// Extend on a terminal stream is rejected.
+#[test]
+fn inv9_extend_on_cancelled_stream_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id =
+        ctx.client()
+            .create_stream(&ctx.sender, &ctx.recipient, &2000, &1, &0, &0, &1000);
+
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().cancel_stream(&stream_id);
+
+    let result = ctx.client().try_extend_stream_end_time(&stream_id, &2000);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InvalidState)),
+        "INV-9: extend on cancelled stream must fail"
+    );
+}
+
+// --- top_up_stream ---
+
+/// top_up increases deposit_amount and pulls tokens from funder.
+#[test]
+fn inv9_top_up_increases_deposit() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream(); // deposit=1000
+
+    ctx.sac.mint(&ctx.sender, &500);
+    let contract_before = ctx.token().balance(&ctx.contract_id);
+
+    ctx.client().top_up_stream(&stream_id, &ctx.sender, &500);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(
+        state.deposit_amount, 1500,
+        "INV-9: deposit must increase by top_up amount"
+    );
+    assert_eq!(
+        ctx.token().balance(&ctx.contract_id),
+        contract_before + 500,
+        "INV-9: contract must receive top_up tokens"
+    );
+}
+
+/// top_up with zero amount is rejected.
+#[test]
+fn inv9_top_up_zero_amount_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream();
+
+    let result = ctx.client().try_top_up_stream(&stream_id, &ctx.sender, &0);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InvalidParams)),
+        "INV-9: top_up with zero amount must fail"
+    );
+}
+
+/// top_up with negative amount is rejected.
+#[test]
+fn inv9_top_up_negative_amount_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream();
+
+    let result = ctx.client().try_top_up_stream(&stream_id, &ctx.sender, &-1);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InvalidParams)),
+        "INV-9: top_up with negative amount must fail"
+    );
+}
+
+/// top_up on a paused stream succeeds (paused is non-terminal).
+#[test]
+fn inv9_top_up_on_paused_stream_succeeds() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().pause_stream(&stream_id);
+
+    ctx.sac.mint(&ctx.sender, &200);
+    ctx.client().top_up_stream(&stream_id, &ctx.sender, &200);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(
+        state.deposit_amount, 1200,
+        "INV-9: top_up on paused stream must succeed"
+    );
+    assert_eq!(state.status, StreamStatus::Paused);
+}
+
+// ---------------------------------------------------------------------------
+// INV-10  close_completed_stream — permissionless, terminal-only, removes storage
+// ---------------------------------------------------------------------------
+
+/// close_completed_stream removes the stream from storage (StreamNotFound after close).
+#[test]
+fn inv10_close_removes_stream_from_storage() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+    ctx.client().close_completed_stream(&stream_id);
+
+    let result = ctx.client().try_get_stream_state(&stream_id);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::StreamNotFound)),
+        "INV-10: closed stream must not be queryable"
+    );
+}
+
+/// close_completed_stream is permissionless — any caller can close a completed stream.
+#[test]
+fn inv10_close_is_permissionless() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    // Call close as a random third party (mock_all_auths is active so this passes auth)
+    // The key invariant: no specific auth is required by the contract logic
+    ctx.client().close_completed_stream(&stream_id);
+
+    let result = ctx.client().try_get_stream_state(&stream_id);
+    assert!(
+        result.is_err(),
+        "INV-10: stream must be gone after permissionless close"
+    );
+}
+
+/// close_completed_stream fails on an Active stream.
+#[test]
+fn inv10_close_active_stream_rejected() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(500);
+    let result = ctx.client().try_close_completed_stream(&stream_id);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InvalidState)),
+        "INV-10: close of Active stream must fail"
+    );
+}
+
+/// close_completed_stream fails on a Cancelled stream.
+#[test]
+fn inv10_close_cancelled_stream_rejected() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().cancel_stream(&stream_id);
+
+    let result = ctx.client().try_close_completed_stream(&stream_id);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InvalidState)),
+        "INV-10: close of Cancelled stream must fail"
+    );
+}
+
+/// close_completed_stream fails on a Paused stream.
+#[test]
+fn inv10_close_paused_stream_rejected() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().pause_stream(&stream_id);
+
+    let result = ctx.client().try_close_completed_stream(&stream_id);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InvalidState)),
+        "INV-10: close of Paused stream must fail"
+    );
+}
+
+/// close_completed_stream removes the stream from the recipient's index.
+#[test]
+fn inv10_close_removes_stream_from_recipient_index() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    let count_before = ctx.client().get_recipient_stream_count(&ctx.recipient);
+    assert_eq!(count_before, 1);
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+    ctx.client().close_completed_stream(&stream_id);
+
+    let count_after = ctx.client().get_recipient_stream_count(&ctx.recipient);
+    assert_eq!(
+        count_after, 0,
+        "INV-10: recipient index must be updated after close"
+    );
+}
+
+/// close_completed_stream on a non-existent stream returns StreamNotFound.
+#[test]
+fn inv10_close_nonexistent_stream_returns_not_found() {
+    let ctx = TestContext::setup();
+    let result = ctx.client().try_close_completed_stream(&9999);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::StreamNotFound)),
+        "INV-10: close of non-existent stream must return StreamNotFound"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// INV-11  set_admin rotation — auth required, event emitted, config updated
+// ---------------------------------------------------------------------------
+
+/// set_admin updates the admin in config and the new admin can exercise admin powers.
+#[test]
+fn inv11_set_admin_updates_config() {
+    let ctx = TestContext::setup();
+    let new_admin = Address::generate(&ctx.env);
+
+    ctx.client().set_admin(&new_admin);
+
+    let config = ctx.client().get_config();
+    assert_eq!(
+        config.admin, new_admin,
+        "INV-11: config.admin must be updated after set_admin"
+    );
+}
+
+/// After set_admin, the old admin can no longer exercise admin powers.
+/// The new admin can.
+#[test]
+fn inv11_new_admin_can_exercise_admin_powers() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let new_admin = Address::generate(&ctx.env);
+
+    ctx.client().set_admin(&new_admin);
+
+    // New admin can cancel (mock_all_auths is active so auth passes)
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().cancel_stream_as_admin(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(
+        state.status,
+        StreamStatus::Cancelled,
+        "INV-11: new admin must be able to cancel streams"
+    );
+}
+
+/// set_admin with the same address as current admin is a no-op but succeeds.
+#[test]
+fn inv11_set_admin_to_same_address_succeeds() {
+    let ctx = TestContext::setup();
+    let current_admin = ctx.client().get_config().admin;
+
+    // Should not panic
+    ctx.client().set_admin(&current_admin);
+
+    let config = ctx.client().get_config();
+    assert_eq!(
+        config.admin, current_admin,
+        "INV-11: set_admin to same address must keep admin unchanged"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// INV-12  withdraw_to destination constraint
+// ---------------------------------------------------------------------------
+
+/// withdraw_to succeeds when destination is a valid external address.
+#[test]
+fn inv12_withdraw_to_valid_destination() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    let destination = Address::generate(&ctx.env);
+    ctx.env.ledger().set_timestamp(500);
+    let amount = ctx.client().withdraw_to(&stream_id, &destination);
+
+    assert_eq!(
+        amount, 500,
+        "INV-12: withdraw_to must transfer correct amount"
+    );
+    assert_eq!(
+        ctx.token().balance(&destination),
+        500,
+        "INV-12: destination must receive tokens"
+    );
+    assert_eq!(
+        ctx.token().balance(&ctx.recipient),
+        0,
+        "INV-12: recipient must not receive tokens when using withdraw_to"
+    );
+}
+
+/// withdraw_to with destination == contract address is rejected.
+#[test]
+fn inv12_withdraw_to_contract_address_rejected() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(500);
+    let result = ctx.client().try_withdraw_to(&stream_id, &ctx.contract_id);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InvalidParams)),
+        "INV-12: withdraw_to contract address must be rejected"
+    );
+}
+
+/// withdraw_to emits WithdrawalTo event with correct recipient and destination fields.
+#[test]
+fn inv12_withdraw_to_emits_correct_event() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    let destination = Address::generate(&ctx.env);
+    ctx.env.ledger().set_timestamp(300);
+    ctx.client().withdraw_to(&stream_id, &destination);
+
+    let events = ctx.env.events().all();
+    let last = events.last().unwrap();
+    let topic_sym = Symbol::try_from_val(&ctx.env, &last.1.get(0).unwrap()).unwrap();
+    assert_eq!(
+        topic_sym,
+        Symbol::new(&ctx.env, "wdraw_to"),
+        "INV-12: withdraw_to must emit 'wdraw_to' topic"
+    );
+
+    let data = crate::WithdrawalTo::try_from_val(&ctx.env, &last.2).unwrap();
+    assert_eq!(data.stream_id, stream_id);
+    assert_eq!(
+        data.recipient, ctx.recipient,
+        "INV-12: event.recipient must be stream recipient"
+    );
+    assert_eq!(
+        data.destination, destination,
+        "INV-12: event.destination must be the target address"
+    );
+    assert_eq!(data.amount, 300);
+}
+
+/// withdraw_to on a paused stream is rejected.
+#[test]
+fn inv12_withdraw_to_paused_stream_rejected() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().pause_stream(&stream_id);
+
+    let destination = Address::generate(&ctx.env);
+    let result = ctx.client().try_withdraw_to(&stream_id, &destination);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InvalidState)),
+        "INV-12: withdraw_to on paused stream must fail"
+    );
+}
+
+/// withdraw_to on a completed stream is rejected.
+#[test]
+fn inv12_withdraw_to_completed_stream_rejected() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    let destination = Address::generate(&ctx.env);
+    let result = ctx.client().try_withdraw_to(&stream_id, &destination);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InvalidState)),
+        "INV-12: withdraw_to on completed stream must fail"
+    );
+}
+
+/// withdraw_to destination == recipient is allowed (self-redirect).
+#[test]
+fn inv12_withdraw_to_self_is_allowed() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(400);
+    let amount = ctx.client().withdraw_to(&stream_id, &ctx.recipient);
+    assert_eq!(
+        amount, 400,
+        "INV-12: withdraw_to self (recipient) must be allowed"
+    );
+    assert_eq!(ctx.token().balance(&ctx.recipient), 400);
+}
