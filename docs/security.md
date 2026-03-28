@@ -44,6 +44,13 @@ After authorization and amount validation, the contract:
 2. Calls `save_stream` to persist the new deposit amount.
 3. **Only then** calls the token contract to pull the top-up amount from the funder (`pull_token`).
 
+Observable contract guarantees for this entrypoint:
+
+- Auth boundary: only `funder.require_auth()` is enforced. The contract does not restrict `funder` to the stream sender or admin.
+- State boundary: only `Active` and `Paused` streams may be topped up. `Completed` and `Cancelled` return `ContractError::InvalidState`.
+- Success surface: `deposit_amount` increases exactly by `amount`; schedule fields, `withdrawn_amount`, and `status` remain unchanged.
+- Failure surface: invalid amount (`InvalidParams`), arithmetic overflow (`ArithmeticOverflow`), auth failure, or failed token pull leave storage and balances unchanged and emit no `top_up` event.
+
 > **Audit note (resolved):** Prior to the fix in this change, `top_up_stream` pulled
 > tokens from the funder *before* persisting the updated `deposit_amount`. This violated
 > CEI ordering: if the token contract had re-entered the stream contract between the

@@ -1450,9 +1450,10 @@ impl FluxoraStream {
 
     /// Returns `true` when the contract is in **global emergency pause**.
     ///
-    /// In this mode, routine user-facing mutations (create, withdraw, sender pause/resume/cancel,
-    /// schedule updates, `top_up_stream`, `set_admin`) revert; views and admin override entrypoints
-    /// still run. See protocol docs for the full matrix.
+    /// In this mode, entrypoints guarded by `require_not_globally_paused` (stream
+    /// creation, withdrawal, pause/resume/cancel, and schedule/rate updates) revert;
+    /// views and admin maintenance entrypoints still run. `top_up_stream` is not
+    /// currently gated by this flag.
     pub fn get_global_emergency_paused(env: Env) -> bool {
         is_global_emergency_paused(&env)
     }

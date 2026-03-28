@@ -9,7 +9,7 @@ use soroban_sdk::{
 
 use crate::{
     ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamCreated,
-    StreamEvent, StreamStatus, WithdrawalTo,
+    StreamEvent, StreamStatus, StreamToppedUp, WithdrawalTo,
 };
 
 // ---------------------------------------------------------------------------
@@ -3916,6 +3916,148 @@ fn test_top_up_stream_increases_deposit_and_contract_balance() {
 }
 
 #[test]
+fn test_top_up_stream_sender_auth_success_strict() {
+    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+
+    let ctx = TestContext::setup_strict();
+    let stream_id = strict_create_stream(&ctx);
+    let events_before = ctx.env.events().all().len();
+
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "top_up_stream",
+            args: (stream_id, ctx.sender.clone(), 400_i128).into_val(&ctx.env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &ctx.token_id,
+                fn_name: "transfer",
+                args: (&ctx.sender, &ctx.contract_id, 400_i128).into_val(&ctx.env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+
+    ctx.client()
+        .top_up_stream(&stream_id, &ctx.sender, &400_i128);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.deposit_amount, 1_400);
+    assert_eq!(ctx.token().balance(&ctx.sender), 8_600);
+    assert_eq!(ctx.token().balance(&ctx.contract_id), 1_400);
+
+    let events = ctx.env.events().all();
+    let mut payload: Option<StreamToppedUp> = None;
+    for i in events_before..events.len() {
+        let event = events.get(i).unwrap();
+        if event.0 != ctx.contract_id || event.1.len() != 2 {
+            continue;
+        }
+
+        let topic0 = Symbol::try_from_val(&ctx.env, &event.1.get(0).unwrap());
+        let topic1 = u64::try_from_val(&ctx.env, &event.1.get(1).unwrap());
+        if topic0 == Ok(Symbol::new(&ctx.env, "top_up")) && topic1 == Ok(stream_id) {
+            payload = Some(
+                StreamToppedUp::try_from_val(&ctx.env, &event.2)
+                    .expect("top_up event payload must decode"),
+            );
+        }
+    }
+
+    let payload = payload.expect("expected a top_up event for the topped-up stream");
+    assert_eq!(payload.stream_id, stream_id);
+    assert_eq!(payload.top_up_amount, 400);
+    assert_eq!(payload.new_deposit_amount, 1_400);
+}
+
+#[test]
+fn test_top_up_stream_allows_third_party_funder_and_emits_payload() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let treasury = Address::generate(&ctx.env);
+    ctx.sac.mint(&treasury, &2_000_i128);
+
+    let sender_balance_before = ctx.token().balance(&ctx.sender);
+    let treasury_balance_before = ctx.token().balance(&treasury);
+    let contract_balance_before = ctx.token().balance(&ctx.contract_id);
+    let events_before = ctx.env.events().all().len();
+
+    ctx.env.ledger().set_timestamp(250);
+    ctx.client().top_up_stream(&stream_id, &treasury, &750_i128);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.deposit_amount, 1_750);
+    assert_eq!(state.status, StreamStatus::Active);
+    assert_eq!(state.start_time, 0);
+    assert_eq!(state.cliff_time, 0);
+    assert_eq!(state.end_time, 1_000);
+    assert_eq!(state.withdrawn_amount, 0);
+
+    assert_eq!(ctx.token().balance(&ctx.sender), sender_balance_before);
+    assert_eq!(
+        ctx.token().balance(&treasury),
+        treasury_balance_before - 750
+    );
+    assert_eq!(
+        ctx.token().balance(&ctx.contract_id),
+        contract_balance_before + 750
+    );
+
+    let events = ctx.env.events().all();
+    let mut payload: Option<StreamToppedUp> = None;
+    for i in events_before..events.len() {
+        let event = events.get(i).unwrap();
+        if event.0 != ctx.contract_id || event.1.len() != 2 {
+            continue;
+        }
+
+        let topic0 = Symbol::try_from_val(&ctx.env, &event.1.get(0).unwrap());
+        let topic1 = u64::try_from_val(&ctx.env, &event.1.get(1).unwrap());
+        if topic0 == Ok(Symbol::new(&ctx.env, "top_up")) && topic1 == Ok(stream_id) {
+            payload = Some(
+                StreamToppedUp::try_from_val(&ctx.env, &event.2)
+                    .expect("top_up event payload must decode"),
+            );
+        }
+    }
+
+    let payload = payload.expect("expected a top_up event for the topped-up stream");
+    assert_eq!(payload.stream_id, stream_id);
+    assert_eq!(payload.top_up_amount, 750);
+    assert_eq!(payload.new_deposit_amount, 1_750);
+}
+
+#[test]
+fn test_top_up_stream_paused_preserves_schedule_and_status() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().pause_stream(&stream_id);
+
+    let state_before = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_before.status, StreamStatus::Paused);
+
+    ctx.client()
+        .top_up_stream(&stream_id, &ctx.sender, &250_i128);
+
+    let state_after = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_after.stream_id, state_before.stream_id);
+    assert_eq!(state_after.sender, state_before.sender);
+    assert_eq!(state_after.recipient, state_before.recipient);
+    assert_eq!(state_after.start_time, state_before.start_time);
+    assert_eq!(state_after.cliff_time, state_before.cliff_time);
+    assert_eq!(state_after.end_time, state_before.end_time);
+    assert_eq!(state_after.rate_per_second, state_before.rate_per_second);
+    assert_eq!(state_after.withdrawn_amount, state_before.withdrawn_amount);
+    assert_eq!(state_after.status, StreamStatus::Paused);
+    assert_eq!(
+        state_after.deposit_amount,
+        state_before.deposit_amount + 250
+    );
+}
+
+#[test]
 fn test_top_up_stream_fails_for_terminal_states() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
@@ -3926,29 +4068,91 @@ fn test_top_up_stream_fails_for_terminal_states() {
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Completed);
 
-    // Attempting to top up a completed stream should panic
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.client()
-            .top_up_stream(&stream_id, &ctx.sender, &100_i128);
-    }));
-    assert!(result.is_err());
+    let deposit_before = state.deposit_amount;
+    let sender_balance_before = ctx.token().balance(&ctx.sender);
+    let contract_balance_before = ctx.token().balance(&ctx.contract_id);
+    let events_before = ctx.env.events().all().len();
+
+    let result = ctx
+        .client()
+        .try_top_up_stream(&stream_id, &ctx.sender, &100_i128);
+    assert_eq!(result, Err(Ok(ContractError::InvalidState)));
+
+    let state_after = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_after.deposit_amount, deposit_before);
+    assert_eq!(ctx.token().balance(&ctx.sender), sender_balance_before);
+    assert_eq!(
+        ctx.token().balance(&ctx.contract_id),
+        contract_balance_before
+    );
+    assert_eq!(ctx.env.events().all().len(), events_before);
 }
 
 #[test]
 fn test_top_up_stream_rejects_non_positive_amount() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
+    let state_before = ctx.client().get_stream_state(&stream_id);
+    let sender_balance_before = ctx.token().balance(&ctx.sender);
+    let contract_balance_before = ctx.token().balance(&ctx.contract_id);
+    let events_before = ctx.env.events().all().len();
 
-    let result_zero = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.client().top_up_stream(&stream_id, &ctx.sender, &0_i128);
-    }));
-    assert!(result_zero.is_err());
+    let result_zero = ctx
+        .client()
+        .try_top_up_stream(&stream_id, &ctx.sender, &0_i128);
+    assert_eq!(result_zero, Err(Ok(ContractError::InvalidParams)));
 
-    let result_negative = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let result_negative = ctx
+        .client()
+        .try_top_up_stream(&stream_id, &ctx.sender, &-1_i128);
+    assert_eq!(result_negative, Err(Ok(ContractError::InvalidParams)));
+
+    let state_after = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_after.deposit_amount, state_before.deposit_amount);
+    assert_eq!(state_after.status, state_before.status);
+    assert_eq!(ctx.token().balance(&ctx.sender), sender_balance_before);
+    assert_eq!(
+        ctx.token().balance(&ctx.contract_id),
+        contract_balance_before
+    );
+    assert_eq!(ctx.env.events().all().len(), events_before);
+}
+
+#[test]
+fn test_top_up_stream_rejects_impersonated_funder_and_emits_no_event_strict() {
+    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+
+    let ctx = TestContext::setup_strict();
+    let stream_id = strict_create_stream(&ctx);
+    let deposit_before = ctx.client().get_stream_state(&stream_id).deposit_amount;
+    let sender_balance_before = ctx.token().balance(&ctx.sender);
+    let contract_balance_before = ctx.token().balance(&ctx.contract_id);
+    let events_before = ctx.env.events().all().len();
+
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.recipient,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "top_up_stream",
+            args: (stream_id, ctx.sender.clone(), 100_i128).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         ctx.client()
-            .top_up_stream(&stream_id, &ctx.sender, &-1_i128);
+            .top_up_stream(&stream_id, &ctx.sender, &100_i128);
     }));
-    assert!(result_negative.is_err());
+    assert!(result.is_err(), "impersonated funder auth must be rejected");
+
+    let state_after = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_after.deposit_amount, deposit_before);
+    assert_eq!(ctx.token().balance(&ctx.sender), sender_balance_before);
+    assert_eq!(
+        ctx.token().balance(&ctx.contract_id),
+        contract_balance_before
+    );
+    assert_eq!(ctx.env.events().all().len(), events_before);
 }
 
 #[test]

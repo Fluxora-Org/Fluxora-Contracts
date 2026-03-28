@@ -21,7 +21,7 @@ When changing the contract:
 | Phase            | Action                                       | Notes                                                                   |
 | ---------------- | -------------------------------------------- | ----------------------------------------------------------------------- |
 | **Creation**     | `create_stream`                              | Sender deposits tokens; stream starts as `Active`                       |
-| **Top-up**       | `top_up_stream`                              | Extra deposit locked (sender or admin only); schedule unchanged         |
+| **Top-up**       | `top_up_stream`                              | Extra deposit locked by any self-authorizing funder; schedule unchanged |
 | **Pause**        | `pause_stream` / `pause_stream_as_admin`     | Stops withdrawals; accrual continues by time                            |
 | **Resume**       | `resume_stream` / `resume_stream_as_admin`   | Restores withdrawals                                                    |
 | **Cancellation** | `cancel_stream` / `cancel_stream_as_admin`   | Refunds unstreamed amount to sender; accrued amount stays for recipient |
@@ -292,6 +292,20 @@ If the existing deposit does not cover the extended duration, `extend_stream_end
 | `extend_stream_end_time` | Sender            | `sender.require_auth()`    |
 
 **Note:** Sender-managed functions (`pause_stream`, `resume_stream`, `cancel_stream`) require sender auth. Admin uses separate `_as_admin` entry points.
+
+### top_up_stream: Observable Semantics
+
+`top_up_stream(stream_id, funder, amount)` is a deposit-only mutation for existing streams.
+
+- Auth boundary: only `funder` must authorize. The contract does not require `funder` to be the stream sender or the contract admin.
+- Allowed states: `Active` and `Paused` only. `Completed` and `Cancelled` return `ContractError::InvalidState`.
+- Amount validation: `amount <= 0` returns `ContractError::InvalidParams`.
+- State transition on success: only `deposit_amount` changes, and it increases by exactly `amount`.
+- Preserved fields on success: `sender`, `recipient`, `start_time`, `cliff_time`, `end_time`, `rate_per_second`, `withdrawn_amount`, and `status`.
+- Atomic failure semantics: failed auth, failed token pull, or arithmetic overflow revert the whole transaction, leaving balances, stored deposit, and emitted contract events unchanged.
+- Event semantics: a successful top-up emits exactly one contract event with topics `("top_up", stream_id)` and payload `StreamToppedUp { stream_id, top_up_amount: amount, new_deposit_amount }`.
+
+Treasury policy note: if an application wants to restrict who may fund streams, that policy must be enforced off-chain or in a wrapper contract. The base stream contract intentionally accepts any self-authorizing funder.
 
 ### batch_withdraw: completed stream behavior
 

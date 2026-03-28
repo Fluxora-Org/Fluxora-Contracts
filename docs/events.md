@@ -209,6 +209,10 @@ data:   StreamEndExtended {
 
 ### 8) StreamToppedUp
 
+This event is emitted only after the top-up has succeeded. Validation failures,
+authorization failures, arithmetic overflow, or failed token pulls emit no
+`top_up` contract event.
+
 ```
 topics: ["top_up", <stream_id: u64>]
 data:   StreamToppedUp {
