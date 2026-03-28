@@ -26,7 +26,7 @@ extern crate std;
 
 use fluxora_stream::{ContractError, FluxoraStream, FluxoraStreamClient, StreamStatus};
 use soroban_sdk::{
-    testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke},
+    testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke},
     token::StellarAssetClient,
     Address, Env, IntoVal,
 };

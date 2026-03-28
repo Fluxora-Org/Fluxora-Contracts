@@ -1,8 +1,8 @@
 extern crate std;
 
 use fluxora_stream::{
-    ContractError, ContractPauseChanged, CreateStreamParams, FluxoraStream, FluxoraStreamClient,
-    GlobalEmergencyPauseChanged, StreamEndShortened, StreamEvent, StreamStatus, StreamToppedUp,
+    ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient,
+    StreamEndShortened, StreamStatus, StreamToppedUp,
 };
 use soroban_sdk::log;
 use soroban_sdk::{
@@ -600,8 +600,8 @@ fn top_up_stream_allows_third_party_funder_and_emits_payload() {
     let payload = StreamToppedUp::try_from_val(&ctx.env, &top_up_event.2)
         .expect("top_up event payload must decode");
     assert_eq!(payload.stream_id, stream_id);
-    assert_eq!(payload.top_up_amount, 800);
-    assert_eq!(payload.new_deposit_amount, 1_800);
+    assert_eq!(payload.added_amount, 800);
+    assert_eq!(payload.new_total, 1_800);
 }
 
 #[test]

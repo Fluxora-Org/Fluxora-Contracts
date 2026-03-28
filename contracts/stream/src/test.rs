@@ -3944,7 +3944,7 @@ fn test_close_completed_stream_emits_correct_event_topic() {
         topics.len() >= 2
             && topics
                 .get(1)
-                .map(|t: &Val| t.clone().try_from_val(&ctx.env) == Ok(stream_id))
+                .map(|t: Val| u64::try_from_val(&ctx.env, &t) == Ok(stream_id))
                 .unwrap_or(false)
     });
     assert!(
@@ -4273,8 +4273,8 @@ fn test_top_up_stream_sender_auth_success_strict() {
     let payload = StreamToppedUp::try_from_val(&ctx.env, &top_up_event.2)
         .expect("top_up event payload must decode");
     assert_eq!(payload.stream_id, stream_id);
-    assert_eq!(payload.top_up_amount, 400);
-    assert_eq!(payload.new_deposit_amount, 1_400);
+    assert_eq!(payload.added_amount, 400);
+    assert_eq!(payload.new_total, 1_400);
 }
 
 #[test]
@@ -4326,8 +4326,8 @@ fn test_top_up_stream_allows_third_party_funder_and_emits_payload() {
     let payload = StreamToppedUp::try_from_val(&ctx.env, &top_up_event.2)
         .expect("top_up event payload must decode");
     assert_eq!(payload.stream_id, stream_id);
-    assert_eq!(payload.top_up_amount, 750);
-    assert_eq!(payload.new_deposit_amount, 1_750);
+    assert_eq!(payload.added_amount, 750);
+    assert_eq!(payload.new_total, 1_750);
 }
 
 #[test]
@@ -16485,8 +16485,8 @@ mod i128_boundary_streams {
     #[test]
     fn near_max_deposit_two_partial_withdrawals_complete_stream() {
         // Use rate=1 and a round deposit to avoid integer division truncation
-        let rate: i128 = 1;
-        let duration: u64 = 1_000;
+        let _rate: i128 = 1;
+        let _duration: u64 = 1_000;
         let large_deposit: i128 = i128::MAX / 1_000_000 / 1_000 * 1_000; // divisible by 1000
         let rate: i128 = large_deposit / 1_000;
         let (env, contract_id, token_id, _a, sender, recipient) = setup_with_balance(large_deposit);
