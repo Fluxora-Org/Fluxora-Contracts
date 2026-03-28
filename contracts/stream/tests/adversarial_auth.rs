@@ -105,17 +105,17 @@ impl<'a> Ctx<'a> {
                 args: (
                     &self.sender,
                     &self.recipient,
-                    &1000_i128,
-                    &1_i128,
-                    &0u64,
-                    &0u64,
-                    &1000u64,
+                    1000_i128,
+                    1_i128,
+                    0u64,
+                    0u64,
+                    1000u64,
                 )
                     .into_val(&self.env),
                 sub_invokes: &[MockAuthInvoke {
                     contract: &self.token_id,
                     fn_name: "transfer",
-                    args: (&self.sender, &self.contract_id, &1000_i128).into_val(&self.env),
+                    args: (&self.sender, &self.contract_id, 1000_i128).into_val(&self.env),
                     sub_invokes: &[],
                 }],
             },
@@ -177,11 +177,11 @@ fn adversarial_create_stream_stranger_cannot_impersonate_sender() {
             args: (
                 &ctx.sender,
                 &ctx.recipient,
-                &1000_i128,
-                &1_i128,
-                &0u64,
-                &0u64,
-                &1000u64,
+                1000_i128,
+                1_i128,
+                0u64,
+                0u64,
+                1000u64,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[],
@@ -729,17 +729,17 @@ fn adversarial_batch_withdraw_cross_stream_recipient_rejected() {
             args: (
                 &ctx.sender,
                 &other_recipient,
-                &1000_i128,
-                &1_i128,
-                &0u64,
-                &0u64,
-                &1000u64,
+                1000_i128,
+                1_i128,
+                0u64,
+                0u64,
+                1000u64,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[MockAuthInvoke {
                 contract: &ctx.token_id,
                 fn_name: "transfer",
-                args: (&ctx.sender, &ctx.contract_id, &1000_i128).into_val(&ctx.env),
+                args: (&ctx.sender, &ctx.contract_id, 1000_i128).into_val(&ctx.env),
                 sub_invokes: &[],
             }],
         },
@@ -1086,7 +1086,7 @@ fn adversarial_set_contract_paused_stranger_rejected() {
         invoke: &MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "set_contract_paused",
-            args: (&true,).into_val(&ctx.env),
+            args: (true,).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
@@ -1117,7 +1117,7 @@ fn adversarial_set_contract_paused_stranger_rejected() {
             sub_invokes: &[MockAuthInvoke {
                 contract: &ctx.token_id,
                 fn_name: "transfer",
-                args: (&ctx.sender, &ctx.contract_id, &1000_i128).into_val(&ctx.env),
+                args: (&ctx.sender, &ctx.contract_id, 1000_i128).into_val(&ctx.env),
                 sub_invokes: &[],
             }],
         },
@@ -1147,7 +1147,7 @@ fn adversarial_set_contract_paused_sender_rejected() {
         invoke: &MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "set_contract_paused",
-            args: (&true,).into_val(&ctx.env),
+            args: (true,).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
@@ -1178,7 +1178,7 @@ fn adversarial_update_rate_stranger_rejected_no_side_effects() {
         invoke: &MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "update_rate_per_second",
-            args: (stream_id, &2_i128).into_val(&ctx.env),
+            args: (stream_id, 2_i128).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
@@ -1209,7 +1209,7 @@ fn adversarial_update_rate_recipient_rejected() {
         invoke: &MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "update_rate_per_second",
-            args: (stream_id, &2_i128).into_val(&ctx.env),
+            args: (stream_id, 2_i128).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
@@ -1245,7 +1245,7 @@ fn adversarial_shorten_end_time_stranger_rejected_no_side_effects() {
         invoke: &MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "shorten_stream_end_time",
-            args: (stream_id, &500u64).into_val(&ctx.env),
+            args: (stream_id, 500u64).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
@@ -1286,7 +1286,7 @@ fn adversarial_extend_end_time_stranger_rejected_no_side_effects() {
             sub_invokes: &[MockAuthInvoke {
                 contract: &ctx.token_id,
                 fn_name: "transfer",
-                args: (&ctx.sender, &ctx.contract_id, &2000_i128).into_val(&ctx.env),
+                args: (&ctx.sender, &ctx.contract_id, 2000_i128).into_val(&ctx.env),
                 sub_invokes: &[],
             }],
         },
@@ -1309,7 +1309,7 @@ fn adversarial_extend_end_time_stranger_rejected_no_side_effects() {
         invoke: &MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "extend_stream_end_time",
-            args: (stream_id, &2000u64).into_val(&ctx.env),
+            args: (stream_id, 2000u64).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
