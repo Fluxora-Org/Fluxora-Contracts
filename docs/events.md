@@ -196,6 +196,10 @@ data:   StreamEndShortened {
         }
 ```
 
+Emission guarantees:
+- Emitted exactly once on successful `shorten_stream_end_time`.
+- Not emitted on failed shorten calls (`InvalidParams`, `InvalidState`, auth failure).
+
 ### 7) StreamEndExtended
 
 ```

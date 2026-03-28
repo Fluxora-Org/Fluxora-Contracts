@@ -1,5 +1,18 @@
 # Mainnet Deployment Checklist
 
+**Alignment Verification**: See [mainnet-deployment-checklist-alignment.md](./mainnet-deployment-checklist-alignment.md) for complete mapping between deployment procedures and protocol semantics.
+
+## Externally Visible Assurances
+
+This checklist ensures deployment correctness through:
+
+1. **On-chain verification**: All deployment steps produce observable on-chain state
+2. **Protocol alignment**: Deployment procedures match documented protocol semantics
+3. **Authorization boundaries**: All roles and permissions are explicitly verified
+4. **Time and numeric boundaries**: All edge cases are tested post-deployment
+
+Treasury operators, recipient applications, and auditors can verify deployment correctness using only on-chain observables and published documentation.
+
 ## Risk Summary and Security Considerations
 
 ### Critical Risks
@@ -103,12 +116,21 @@ soroban contract invoke \
 ### 5. Verify
 
 - [ ] Verify contract source code on block explorer
-- [ ] Test read-only functions (get_config, get_stream_state)
+- [ ] **Protocol Alignment Verification** (see [mainnet-deployment-checklist-alignment.md](./mainnet-deployment-checklist-alignment.md)):
+  - [ ] Verify config: `get_config` returns correct token and admin
+  - [ ] Verify stream count: `get_stream_count` returns 0
+  - [ ] Verify version: `version` returns 1
+  - [ ] Test time boundaries: Create stream with past start_time (should fail with `StartTimeInPast`)
+  - [ ] Test numeric boundaries: Create stream with zero deposit (should fail with `InvalidParams`)
+  - [ ] Test authorization: Non-admin cannot call admin functions (should fail with auth error)
 - [ ] Create a small test stream with minimal funds
-- [ ] Verify stream creation succeeded
+- [ ] Verify stream creation succeeded: `get_stream_state` returns correct values
+- [ ] Verify stream count incremented: `get_stream_count` returns 1
+- [ ] Verify recipient index updated: `get_recipient_streams` contains stream_id
 - [ ] Test withdrawal functionality with test stream
 - [ ] Test pause/resume functionality (if applicable)
-- [ ] Verify all events are emitted correctly
+- [ ] Verify all events are emitted correctly (query transaction events)
+- [ ] Verify token transfers work (check token balances)
 - [ ] Monitor contract for first 24-48 hours
 
 ### 6. Post-Deployment
@@ -140,12 +162,43 @@ soroban contract invoke \
 
 ## Additional Resources
 
+- [Mainnet Deployment Checklist Alignment](./mainnet-deployment-checklist-alignment.md) - Complete verification procedures
+- [Protocol Narrative vs Code Alignment](./protocol-narrative-code-alignment.md) - Protocol semantics verification
 - [Security Documentation](./security.md)
 - [Error Handling](./error.md)
 - [Audit Report](./audit.md)
 - [Storage Layout](./storage.md)
 - [Streaming Mechanics](./streaming.md)
+- [Testnet Deployment Guide](./DEPLOYMENT.md)
 
 ---
 
 **Remember**: Mainnet deployment is irreversible. Take your time, verify everything, and when in doubt, seek additional review.
+
+## Cross-References
+
+### For Deployers
+
+- **Pre-deployment**: Review [mainnet-deployment-checklist-alignment.md](./mainnet-deployment-checklist-alignment.md) §Pre-Deployment Verification
+- **Deployment**: Follow this checklist steps 1-4
+- **Post-deployment**: Follow [mainnet-deployment-checklist-alignment.md](./mainnet-deployment-checklist-alignment.md) §Post-Deployment Verification
+
+### For Verifiers
+
+- **Initialization**: [mainnet-deployment-checklist-alignment.md](./mainnet-deployment-checklist-alignment.md) §Initialization Semantics
+- **Time boundaries**: [mainnet-deployment-checklist-alignment.md](./mainnet-deployment-checklist-alignment.md) §Time Boundary Verification
+- **Numeric ranges**: [mainnet-deployment-checklist-alignment.md](./mainnet-deployment-checklist-alignment.md) §Numeric Range Verification
+- **Authorization**: [mainnet-deployment-checklist-alignment.md](./mainnet-deployment-checklist-alignment.md) §Admin Key Verification
+
+### Verification Status
+
+This deployment checklist is verified against protocol semantics in [mainnet-deployment-checklist-alignment.md](./mainnet-deployment-checklist-alignment.md):
+
+- ✅ All deployment steps have observable on-chain verification
+- ✅ All authorization boundaries are tested
+- ✅ All time boundaries are tested
+- ✅ All numeric boundaries are tested
+- ✅ All failure modes are documented
+- ✅ Zero contradictions with protocol documentation
+
+Last verified: 2026-03-27

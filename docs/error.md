@@ -1,36 +1,23 @@
 # Error Code Reference Table
 
-This table lists all possible errors in the FluxoraStream contract, including both formal `ContractError` variants and runtime errors/panics that can occur. It enables integrators and frontends to handle errors correctly.
+This table lists the possible errors in the FluxoraStream contract, including formal `ContractError` variants and common runtime asserts. It enables integrators and frontends to handle protocol exceptions correctly.
 
-| Error Code / Panic Message                       | Description                                                                 | Functions Returning It |
-|-------------------------------------------------|-----------------------------------------------------------------------------|----------------------|
-| `StreamNotFound`                                | The specified stream does not exist                                          | `pause_stream`, `resume_stream`, `cancel_stream`, `withdraw`, `calculate_accrued`, `get_stream_state`, `cancel_stream_as_admin`, `pause_stream_as_admin`, `resume_stream_as_admin` |
-| `StartTimeInPast`                               | `start_time` is before the current ledger timestamp; creation rejected        | `create_stream`, `create_streams` |
-| `deposit_amount must be positive`               | Deposit amount must be greater than zero                                     | `create_stream`, `create_streams` |
-| `rate_per_second must be positive`              | Stream rate must be greater than zero                                        | `create_stream`, `create_streams` |
-| `sender and recipient must be different`       | Sender cannot stream to themselves                                           | `create_stream`, `create_streams` |
-| `start_time must be before end_time`           | Stream start time must be less than end time                                  | `create_stream`, `create_streams` |
-| `cliff_time must be within [start_time, end_time]` | Vesting cliff must be within the stream duration                          | `create_stream`, `create_streams` |
-| `deposit_amount must cover total streamable amount (rate * duration)` | Deposit must be sufficient to cover total streaming                          | `create_stream`, `create_streams` |
-| `already initialised`                           | Contract has already been initialized                                        | `init` |
-| `stream must be active to pause`                | Cannot pause a stream unless it is active                                     | `pause_stream`, `pause_stream_as_admin` |
-| `stream is already paused`                      | Stream is already paused                                                     | `pause_stream` |
-| `stream is active, not paused`                 | Cannot resume a stream that is already active                                 | `resume_stream` |
-| `stream is completed`                           | Cannot resume a completed stream                                              | `resume_stream` |
-| `stream is cancelled`                           | Cannot resume a cancelled stream                                             | `resume_stream` |
-| `InvalidState`                                  | Can only cancel streams in `Active` or `Paused` state                         | `cancel_stream`, `cancel_stream_as_admin` |
-| `stream already completed`                      | Cannot withdraw from a completed stream                                      | `withdraw`, `withdraw_to` |
-| `cannot withdraw from paused stream`           | Cannot withdraw while stream is paused                                        | `withdraw`, `withdraw_to` |
-| `destination must not be the contract`        | Withdraw destination cannot be the contract address                           | `withdraw_to` |
-| `stream must be active`                         | Admin cannot pause a stream that is not active                                 | `pause_stream_as_admin` |
-| `stream is not paused`                          | Admin cannot resume a stream that is not paused                                | `resume_stream_as_admin` |
-| `Unauthorized`                                  | Caller is not authorized to perform this operation                             | `init` (bootstrap admin auth), `set_admin`, `require_stream_sender` (internal checks) |
-| `InsufficientBalance`                           | Token transfer failed due to insufficient balance or allowance                 | `create_stream`, `cancel_stream`, `cancel_stream_as_admin`, `withdraw` |
-| `ArithmeticOverflow` (error code 6) | Arithmetic overflow in stream calculations (e.g. deposit total) | `create_stream`, `create_streams`, `update_rate_per_second`, `shorten_stream_end_time`, `extend_stream_end_time`, `top_up_stream` |
-| `Overflow calculating total streamable amount` | Overflow occurred when calculating total streamable tokens                     | `create_stream`, `create_streams` |
-| `overflow calculating total batch deposit`     | Overflow occurred when summing deposits across batch entries                   | `create_streams` |
-| `can only close completed streams`             | Stream must be Completed to be closed                                           | `close_completed_stream` |
-| `contract not initialised: missing config`     | Contract storage not initialized before access                                  | `get_config`, `get_token`, `get_admin` |
-| `InvalidState`                                  | Operation attempted on a stream in an invalid state (for cancel: not Active/Paused) | `pause_stream`, `resume_stream`, `cancel_stream`, `cancel_stream_as_admin`, `withdraw` |
-| `InvalidParams`                                 | Function input parameters are invalid (generic catch-all for asserts)          | `create_stream` |
-| `ContractPaused` (error code 4)                 | Global pause active; creation blocked until admin calls `set_contract_paused(false)` | `create_stream`, `create_streams` |
+| Error Code / Panic Message                 | Description                                                                       | Functions Returning It                                                                                                 |
+| ------------------------------------------ | --------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `StreamNotFound` (1)                       | The specified stream does not exist                                               | `pause_stream`, `resume_stream`, `cancel_stream`, `withdraw`, `calculate_accrued`, `get_stream_state`, admin overrides |
+| `InvalidState` (2)                         | Operation attempted in an invalid state (e.g., withdraw from non-terminal paused) | `cancel_stream`, `withdraw`, `withdraw_to`, `batch_withdraw`, admin overrides                                          |
+| `InvalidParams` (3)                        | Function input parameters are invalid (e.g., withdraw to contract address)        | `create_stream`, `withdraw_to`, `update_rate_per_second`                                                               |
+| `ContractPaused` (4)                       | Global emergency pause is active; non-admin mutations are blocked                 | `create_stream`, `create_streams`, `withdraw`, `cancel_stream`, `top_up_stream`, `update_rate_per_second`              |
+| `StartTimeInPast` (5)                      | `start_time` is before the current ledger timestamp; creation rejected            | `create_stream`, `create_streams`                                                                                      |
+| `ArithmeticOverflow` (6)                   | Arithmetic overflow in stream calculations (e.g. deposit total)                   | `create_stream`, `create_streams`, `update_rate_per_second`, `top_up_stream`                                           |
+| `Unauthorized` (7)                         | Caller is not authorized to perform this operation                                | `init`, `set_admin`, `require_stream_sender`, admin overrides                                                          |
+| `AlreadyInitialised` (8)                   | Contract has already been initialized                                             | `init`                                                                                                                 |
+| `InsufficientBalance` (9)                  | Token transfer failed due to insufficient balance or allowance                    | `create_stream`, `cancel_stream`, `withdraw`, `top_up_stream`                                                          |
+| `InsufficientDeposit` (10)                 | Deposit amount does not cover the planned duration at the specified rate          | `create_stream`, `create_streams`                                                                                      |
+| `StreamAlreadyPaused` (11)                 | Stream is already in `Paused` state; redundant pause rejected                     | `pause_stream`, `pause_stream_as_admin`                                                                                |
+| `StreamNotPaused` (12)                     | Stream is not `Paused`; cannot resume an `Active` stream                          | `resume_stream`, `resume_stream_as_admin`                                                                              |
+| `StreamTerminalState` (13)                 | Stream is `Completed` or `Cancelled` (or past `end_time`); modification blocked   | `pause_stream`, `resume_stream`, admin overrides                                                                       |
+| `can only close completed streams`         | Stream must be Completed to be closed                                             | `close_completed_stream`                                                                                               |
+| `contract not initialised: missing config` | Contract storage not initialized before access                                    | `get_config`, `get_token`, `get_admin`                                                                                 |
+
+For a machine-readable list of error codes, see the `ContractError` enum in [lib.rs](../contracts/stream/src/lib.rs).
