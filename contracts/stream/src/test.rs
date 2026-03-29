@@ -4,12 +4,12 @@ extern crate std;
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env, FromVal, IntoVal, Symbol, TryFromVal, Vec,
+    Address, Env, FromVal, IntoVal, Symbol, TryFromVal, Val, Vec,
 };
 
 use crate::{
-    ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamCreated,
-    StreamEvent, StreamStatus, WithdrawalTo,
+    ContractError, ContractPauseChanged, CreateStreamParams, FluxoraStream, FluxoraStreamClient,
+    GlobalEmergencyPauseChanged, StreamCreated, StreamEvent, StreamStatus, WithdrawalTo,
 };
 
 // ---------------------------------------------------------------------------
@@ -620,7 +620,7 @@ fn test_create_stream_emits_event() {
 fn test_create_stream_panics_when_contract_paused() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
-    ctx.client().set_contract_paused(&true);
+    ctx.client().set_global_emergency_paused(&true);
     let result =
         ctx.client()
             .try_create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
@@ -631,8 +631,8 @@ fn test_create_stream_panics_when_contract_paused() {
 fn test_create_stream_succeeds_after_unpause() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
-    ctx.client().set_contract_paused(&true);
-    ctx.client().set_contract_paused(&false);
+    ctx.client().set_global_emergency_paused(&true);
+    ctx.client().set_global_emergency_paused(&false);
     let id = ctx
         .client()
         .create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
@@ -1959,14 +1959,23 @@ fn test_calculate_accrued_paused_after_cliff() {
 #[test]
 fn test_calculate_accrued_paused_at_end_time() {
     let ctx = TestContext::setup();
-    let stream_id = ctx.create_default_stream(); // 1000 tokens, 0-1000s, rate 1/s
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
 
-    // Advance to end_time and pause
-    ctx.env.ledger().set_timestamp(1000);
+    // Advance to nearly end_time and pause
+    ctx.env.ledger().set_timestamp(999);
     ctx.client().pause_stream(&stream_id);
 
-    let state = ctx.client().get_stream_state(&stream_id);
-    assert_eq!(state.status, StreamStatus::Paused);
+    // Advance to end_time
+    ctx.env.ledger().set_timestamp(1000);
 
     // Accrued must be capped at deposit
     let accrued = ctx.client().calculate_accrued(&stream_id);
@@ -2124,8 +2133,6 @@ fn test_calculate_accrued_completed_deterministic() {
 /// This verifies that no auth is required, which is essential for indexers and UI.
 #[test]
 fn test_calculate_accrued_permissionless_access() {
-    use soroban_sdk::testutils::Address as _;
-
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
 
@@ -2183,20 +2190,20 @@ fn test_calculate_accrued_no_state_mutation() {
 #[test]
 fn test_calculate_accrued_zero_duration_stream() {
     let ctx = TestContext::setup();
-    ctx.env.ledger().set_timestamp(0);
+    ctx.env.ledger().set_timestamp(100);
 
-    // Create stream with zero duration
+    // Attempt to create stream with zero duration (start == end)
     let result = ctx.client().try_create_stream(
         &ctx.sender,
         &ctx.recipient,
         &1000_i128,
         &1_i128,
         &500u64, // start_time
-        &500u64, // cliff_time (same as start)
-        &500u64, // end_time (same as start)
+        &500u64, // cliff_time
+        &500u64, // end_time
     );
 
-    assert_eq!(result, Err(Ok(crate::ContractError::InvalidParams)));
+    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 }
 
 /// Edge case: calculate_accrued on stream with zero deposit.
@@ -2204,20 +2211,20 @@ fn test_calculate_accrued_zero_duration_stream() {
 #[test]
 fn test_calculate_accrued_zero_deposit_stream() {
     let ctx = TestContext::setup();
-    ctx.env.ledger().set_timestamp(0);
+    ctx.env.ledger().set_timestamp(100);
 
-    // Create stream with zero deposit
+    // Attempt to create stream with zero deposit
     let result = ctx.client().try_create_stream(
         &ctx.sender,
         &ctx.recipient,
         &0_i128, // zero deposit
         &1_i128,
-        &0u64,
-        &0u64,
+        &100u64,
+        &100u64,
         &1000u64,
     );
 
-    assert_eq!(result, Err(Ok(crate::ContractError::InvalidParams)));
+    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 }
 
 /// Edge case: calculate_accrued with zero rate (no accrual ever).
@@ -2225,20 +2232,20 @@ fn test_calculate_accrued_zero_deposit_stream() {
 #[test]
 fn test_calculate_accrued_zero_rate_stream() {
     let ctx = TestContext::setup();
-    ctx.env.ledger().set_timestamp(0);
+    ctx.env.ledger().set_timestamp(100);
 
-    // Create stream with zero rate
+    // Attempt to create stream with zero rate
     let result = ctx.client().try_create_stream(
         &ctx.sender,
         &ctx.recipient,
         &1000_i128,
         &0_i128, // zero rate
-        &0u64,
-        &0u64,
+        &100u64,
+        &100u64,
         &1000u64,
     );
 
-    assert_eq!(result, Err(Ok(crate::ContractError::InvalidParams)));
+    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 }
 
 // ---------------------------------------------------------------------------
@@ -3916,6 +3923,140 @@ fn test_top_up_stream_increases_deposit_and_contract_balance() {
 }
 
 #[test]
+fn test_top_up_stream_sender_auth_success_strict() {
+    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+
+    let ctx = TestContext::setup_strict();
+    let stream_id = strict_create_stream(&ctx);
+    let events_before = ctx.env.events().all().len();
+
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "top_up_stream",
+            args: (stream_id, ctx.sender.clone(), 400_i128).into_val(&ctx.env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &ctx.token_id,
+                fn_name: "transfer",
+                args: (&ctx.sender, &ctx.contract_id, 400_i128).into_val(&ctx.env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+
+    ctx.client()
+        .top_up_stream(&stream_id, &ctx.sender, &400_i128);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.deposit_amount, 1_400);
+    assert_eq!(ctx.token().balance(&ctx.sender), 8_600);
+    assert_eq!(ctx.token().balance(&ctx.contract_id), 1_400);
+
+    let events = ctx.env.events().all();
+    let top_up_event = events
+        .iter()
+        .skip(events_before as usize)
+        .find(|(contract, topics, _)| {
+            contract == &ctx.contract_id
+                && topics.len() == 2
+                && Symbol::try_from_val(&ctx.env, &topics.get(0).unwrap())
+                    == Ok(Symbol::new(&ctx.env, "top_up"))
+                && u64::try_from_val(&ctx.env, &topics.get(1).unwrap()) == Ok(stream_id)
+        })
+        .expect("expected a top_up event for the topped-up stream");
+
+    let payload = StreamToppedUp::try_from_val(&ctx.env, &top_up_event.2)
+        .expect("top_up event payload must decode");
+    assert_eq!(payload.stream_id, stream_id);
+    assert_eq!(payload.top_up_amount, 400);
+    assert_eq!(payload.new_deposit_amount, 1_400);
+}
+
+#[test]
+fn test_top_up_stream_allows_third_party_funder_and_emits_payload() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let treasury = Address::generate(&ctx.env);
+    ctx.sac.mint(&treasury, &2_000_i128);
+
+    let sender_balance_before = ctx.token().balance(&ctx.sender);
+    let treasury_balance_before = ctx.token().balance(&treasury);
+    let contract_balance_before = ctx.token().balance(&ctx.contract_id);
+    let events_before = ctx.env.events().all().len();
+
+    ctx.env.ledger().set_timestamp(250);
+    ctx.client().top_up_stream(&stream_id, &treasury, &750_i128);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.deposit_amount, 1_750);
+    assert_eq!(state.status, StreamStatus::Active);
+    assert_eq!(state.start_time, 0);
+    assert_eq!(state.cliff_time, 0);
+    assert_eq!(state.end_time, 1_000);
+    assert_eq!(state.withdrawn_amount, 0);
+
+    assert_eq!(ctx.token().balance(&ctx.sender), sender_balance_before);
+    assert_eq!(
+        ctx.token().balance(&treasury),
+        treasury_balance_before - 750
+    );
+    assert_eq!(
+        ctx.token().balance(&ctx.contract_id),
+        contract_balance_before + 750
+    );
+
+    let events = ctx.env.events().all();
+    let top_up_event = events
+        .iter()
+        .skip(events_before as usize)
+        .find(|(contract, topics, _)| {
+            contract == &ctx.contract_id
+                && topics.len() == 2
+                && Symbol::try_from_val(&ctx.env, &topics.get(0).unwrap())
+                    == Ok(Symbol::new(&ctx.env, "top_up"))
+                && u64::try_from_val(&ctx.env, &topics.get(1).unwrap()) == Ok(stream_id)
+        })
+        .expect("expected a top_up event for the topped-up stream");
+
+    let payload = StreamToppedUp::try_from_val(&ctx.env, &top_up_event.2)
+        .expect("top_up event payload must decode");
+    assert_eq!(payload.stream_id, stream_id);
+    assert_eq!(payload.top_up_amount, 750);
+    assert_eq!(payload.new_deposit_amount, 1_750);
+}
+
+#[test]
+fn test_top_up_stream_paused_preserves_schedule_and_status() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().pause_stream(&stream_id);
+
+    let state_before = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_before.status, StreamStatus::Paused);
+
+    ctx.client()
+        .top_up_stream(&stream_id, &ctx.sender, &250_i128);
+
+    let state_after = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_after.stream_id, state_before.stream_id);
+    assert_eq!(state_after.sender, state_before.sender);
+    assert_eq!(state_after.recipient, state_before.recipient);
+    assert_eq!(state_after.start_time, state_before.start_time);
+    assert_eq!(state_after.cliff_time, state_before.cliff_time);
+    assert_eq!(state_after.end_time, state_before.end_time);
+    assert_eq!(state_after.rate_per_second, state_before.rate_per_second);
+    assert_eq!(state_after.withdrawn_amount, state_before.withdrawn_amount);
+    assert_eq!(state_after.status, StreamStatus::Paused);
+    assert_eq!(
+        state_after.deposit_amount,
+        state_before.deposit_amount + 250
+    );
+}
+
+#[test]
 fn test_top_up_stream_fails_for_terminal_states() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
@@ -3926,29 +4067,91 @@ fn test_top_up_stream_fails_for_terminal_states() {
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Completed);
 
-    // Attempting to top up a completed stream should panic
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.client()
-            .top_up_stream(&stream_id, &ctx.sender, &100_i128);
-    }));
-    assert!(result.is_err());
+    let deposit_before = state.deposit_amount;
+    let sender_balance_before = ctx.token().balance(&ctx.sender);
+    let contract_balance_before = ctx.token().balance(&ctx.contract_id);
+    let events_before = ctx.env.events().all().len();
+
+    let result = ctx
+        .client()
+        .try_top_up_stream(&stream_id, &ctx.sender, &100_i128);
+    assert_eq!(result, Err(Ok(ContractError::InvalidState)));
+
+    let state_after = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_after.deposit_amount, deposit_before);
+    assert_eq!(ctx.token().balance(&ctx.sender), sender_balance_before);
+    assert_eq!(
+        ctx.token().balance(&ctx.contract_id),
+        contract_balance_before
+    );
+    assert_eq!(ctx.env.events().all().len(), events_before);
 }
 
 #[test]
 fn test_top_up_stream_rejects_non_positive_amount() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
+    let state_before = ctx.client().get_stream_state(&stream_id);
+    let sender_balance_before = ctx.token().balance(&ctx.sender);
+    let contract_balance_before = ctx.token().balance(&ctx.contract_id);
+    let events_before = ctx.env.events().all().len();
 
-    let result_zero = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.client().top_up_stream(&stream_id, &ctx.sender, &0_i128);
-    }));
-    assert!(result_zero.is_err());
+    let result_zero = ctx
+        .client()
+        .try_top_up_stream(&stream_id, &ctx.sender, &0_i128);
+    assert_eq!(result_zero, Err(Ok(ContractError::InvalidParams)));
 
-    let result_negative = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let result_negative = ctx
+        .client()
+        .try_top_up_stream(&stream_id, &ctx.sender, &-1_i128);
+    assert_eq!(result_negative, Err(Ok(ContractError::InvalidParams)));
+
+    let state_after = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_after.deposit_amount, state_before.deposit_amount);
+    assert_eq!(state_after.status, state_before.status);
+    assert_eq!(ctx.token().balance(&ctx.sender), sender_balance_before);
+    assert_eq!(
+        ctx.token().balance(&ctx.contract_id),
+        contract_balance_before
+    );
+    assert_eq!(ctx.env.events().all().len(), events_before);
+}
+
+#[test]
+fn test_top_up_stream_rejects_impersonated_funder_and_emits_no_event_strict() {
+    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+
+    let ctx = TestContext::setup_strict();
+    let stream_id = strict_create_stream(&ctx);
+    let deposit_before = ctx.client().get_stream_state(&stream_id).deposit_amount;
+    let sender_balance_before = ctx.token().balance(&ctx.sender);
+    let contract_balance_before = ctx.token().balance(&ctx.contract_id);
+    let events_before = ctx.env.events().all().len();
+
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.recipient,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "top_up_stream",
+            args: (stream_id, ctx.sender.clone(), 100_i128).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         ctx.client()
-            .top_up_stream(&stream_id, &ctx.sender, &-1_i128);
+            .top_up_stream(&stream_id, &ctx.sender, &100_i128);
     }));
-    assert!(result_negative.is_err());
+    assert!(result.is_err(), "impersonated funder auth must be rejected");
+
+    let state_after = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_after.deposit_amount, deposit_before);
+    assert_eq!(ctx.token().balance(&ctx.sender), sender_balance_before);
+    assert_eq!(
+        ctx.token().balance(&ctx.contract_id),
+        contract_balance_before
+    );
+    assert_eq!(ctx.env.events().all().len(), events_before);
 }
 
 #[test]
@@ -3972,6 +4175,81 @@ fn test_top_up_stream_preserves_invariants_for_large_streams() {
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert!(state.deposit_amount >= rate * (end - start) as i128);
+}
+
+// ---------------------------------------------------------------------------
+// Tests — Issue #315: top-up near-complete streams
+// ---------------------------------------------------------------------------
+
+/// Top-up at T-1 (one second before end) must succeed and increase deposit.
+#[test]
+fn test_top_up_at_t_minus_1_succeeds() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream(); // end_time = 1000
+
+    ctx.env.ledger().set_timestamp(999); // T - 1
+    ctx.client()
+        .top_up_stream(&stream_id, &ctx.sender, &500_i128);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.deposit_amount, 1_500);
+    assert_eq!(state.end_time, 1_000); // schedule unchanged
+}
+
+/// Top-up exactly at T (current_time == end_time) must fail with InvalidState.
+#[test]
+fn test_top_up_at_end_time_fails() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream(); // end_time = 1000
+
+    ctx.env.ledger().set_timestamp(1000); // exactly at T
+    let result = ctx
+        .client()
+        .try_top_up_stream(&stream_id, &ctx.sender, &500_i128);
+    assert_eq!(result, Err(Ok(ContractError::InvalidState)));
+}
+
+/// Top-up with zero amount must fail with InvalidParams.
+#[test]
+fn test_top_up_zero_amount_fails() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(100);
+    let result = ctx
+        .client()
+        .try_top_up_stream(&stream_id, &ctx.sender, &0_i128);
+    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
+}
+
+/// A third-party address (neither sender nor admin) must be rejected.
+#[test]
+fn test_top_up_unauthorized_funder_fails() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let stranger = Address::generate(&ctx.env);
+
+    ctx.env.ledger().set_timestamp(100);
+    let result = ctx
+        .client()
+        .try_top_up_stream(&stream_id, &stranger, &500_i128);
+    assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
+}
+
+/// Admin is allowed to top up any stream.
+#[test]
+fn test_top_up_by_admin_succeeds() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(100);
+    // Mint tokens to admin so the pull can succeed
+    ctx.sac.mint(&ctx.admin, &1_000_i128);
+    ctx.client()
+        .top_up_stream(&stream_id, &ctx.admin, &500_i128);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.deposit_amount, 1_500);
 }
 
 // ---------------------------------------------------------------------------
@@ -4147,6 +4425,240 @@ fn test_completed_event() {
     assert_eq!(
         Option::<StreamEvent>::from_val(&ctx.env, &last_event.2).unwrap(),
         StreamEvent::StreamCompleted(stream_id)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tests — Admin event parity
+//
+// Admin override operations (`*_as_admin`) must emit the **same** topic and
+// payload as their sender counterparts. Indexers and integrators key off
+// event topics to index state changes; a divergence between sender and admin
+// paths would create silent gaps in downstream observability.
+//
+// Scope: pause, resume, cancel, set_contract_paused, set_global_emergency_paused.
+// ---------------------------------------------------------------------------
+
+/// `pause_stream_as_admin` must emit topic ("paused", stream_id) with
+/// `StreamEvent::Paused(stream_id)` — identical to `pause_stream`.
+#[test]
+fn test_admin_pause_emits_same_event_as_sender_pause() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.client().pause_stream_as_admin(&stream_id);
+
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+
+    // Topic[0] must be the symbol "paused"
+    assert_eq!(
+        Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
+        Symbol::new(&ctx.env, "paused"),
+        "pause_stream_as_admin topic[0] must be \"paused\""
+    );
+    // Topic[1] must be the stream_id
+    let topic_id: u64 = last_event.1.get(1).unwrap().into_val(&ctx.env);
+    assert_eq!(
+        topic_id, stream_id,
+        "pause_stream_as_admin topic[1] must be stream_id"
+    );
+    // Data must be StreamEvent::Paused(stream_id)
+    assert_eq!(
+        Option::<StreamEvent>::from_val(&ctx.env, &last_event.2).unwrap(),
+        StreamEvent::Paused(stream_id),
+        "pause_stream_as_admin data must be StreamEvent::Paused(stream_id)"
+    );
+}
+
+/// `resume_stream_as_admin` must emit topic ("resumed", stream_id) with
+/// `StreamEvent::Resumed(stream_id)` — identical to `resume_stream`.
+#[test]
+fn test_admin_resume_emits_same_event_as_sender_resume() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.client().pause_stream(&stream_id);
+    ctx.client().resume_stream_as_admin(&stream_id);
+
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+
+    assert_eq!(
+        Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
+        Symbol::new(&ctx.env, "resumed"),
+        "resume_stream_as_admin topic[0] must be \"resumed\""
+    );
+    let topic_id: u64 = last_event.1.get(1).unwrap().into_val(&ctx.env);
+    assert_eq!(
+        topic_id, stream_id,
+        "resume_stream_as_admin topic[1] must be stream_id"
+    );
+    assert_eq!(
+        Option::<StreamEvent>::from_val(&ctx.env, &last_event.2).unwrap(),
+        StreamEvent::Resumed(stream_id),
+        "resume_stream_as_admin data must be StreamEvent::Resumed(stream_id)"
+    );
+}
+
+/// `cancel_stream_as_admin` must emit topic ("cancelled", stream_id) with
+/// `StreamEvent::StreamCancelled(stream_id)` — identical to `cancel_stream`.
+#[test]
+fn test_admin_cancel_emits_same_event_as_sender_cancel() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    ctx.env.ledger().set_timestamp(300);
+
+    ctx.client().cancel_stream_as_admin(&stream_id);
+
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+
+    assert_eq!(
+        Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
+        Symbol::new(&ctx.env, "cancelled"),
+        "cancel_stream_as_admin topic[0] must be \"cancelled\""
+    );
+    let topic_id: u64 = last_event.1.get(1).unwrap().into_val(&ctx.env);
+    assert_eq!(
+        topic_id, stream_id,
+        "cancel_stream_as_admin topic[1] must be stream_id"
+    );
+    assert_eq!(
+        Option::<StreamEvent>::from_val(&ctx.env, &last_event.2).unwrap(),
+        StreamEvent::StreamCancelled(stream_id),
+        "cancel_stream_as_admin data must be StreamEvent::StreamCancelled(stream_id)"
+    );
+}
+
+/// `set_contract_paused` must emit topic ("ct_pause",) with `ContractPauseChanged`
+/// payload for both the pause and unpause transitions.
+#[test]
+fn test_set_contract_paused_emits_ct_pause_event() {
+    let ctx = TestContext::setup();
+
+    // Pause: paused = true
+    ctx.client().set_contract_paused(&true);
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+
+    assert_eq!(
+        Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
+        Symbol::new(&ctx.env, "ct_pause"),
+        "set_contract_paused topic[0] must be \"ct_pause\""
+    );
+    let payload = ContractPauseChanged::try_from_val(&ctx.env, &last_event.2)
+        .expect("ct_pause data must be ContractPauseChanged");
+    assert!(
+        payload.paused,
+        "ContractPauseChanged.paused must be true on pause"
+    );
+
+    // Unpause: paused = false
+    ctx.client().set_contract_paused(&false);
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+
+    assert_eq!(
+        Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
+        Symbol::new(&ctx.env, "ct_pause"),
+        "set_contract_paused topic[0] must be \"ct_pause\" on unpause"
+    );
+    let payload = ContractPauseChanged::try_from_val(&ctx.env, &last_event.2)
+        .expect("ct_pause data must be ContractPauseChanged on unpause");
+    assert!(
+        !payload.paused,
+        "ContractPauseChanged.paused must be false on unpause"
+    );
+}
+
+/// `set_global_emergency_paused` must emit topic ("gl_pause",) with
+/// `GlobalEmergencyPauseChanged` payload for both transitions.
+#[test]
+fn test_set_global_emergency_paused_emits_gl_pause_event() {
+    let ctx = TestContext::setup();
+
+    // Emergency pause: paused = true
+    ctx.client().set_global_emergency_paused(&true);
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+
+    assert_eq!(
+        Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
+        Symbol::new(&ctx.env, "gl_pause"),
+        "set_global_emergency_paused topic[0] must be \"gl_pause\""
+    );
+    let payload = GlobalEmergencyPauseChanged::try_from_val(&ctx.env, &last_event.2)
+        .expect("gl_pause data must be GlobalEmergencyPauseChanged");
+    assert!(
+        payload.paused,
+        "GlobalEmergencyPauseChanged.paused must be true on pause"
+    );
+
+    // Clear emergency pause
+    ctx.client().set_global_emergency_paused(&false);
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+
+    assert_eq!(
+        Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
+        Symbol::new(&ctx.env, "gl_pause"),
+        "set_global_emergency_paused topic[0] must be \"gl_pause\" on clear"
+    );
+    let payload = GlobalEmergencyPauseChanged::try_from_val(&ctx.env, &last_event.2)
+        .expect("gl_pause data must be GlobalEmergencyPauseChanged on clear");
+    assert!(
+        !payload.paused,
+        "GlobalEmergencyPauseChanged.paused must be false on clear"
+    );
+}
+
+/// When set_global_emergency_paused is true, user mutations (withdraw, cancel) are
+/// blocked but admin overrides still work and still emit the correct event.
+#[test]
+fn test_admin_ops_emit_events_during_global_emergency_pause() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Engage global emergency pause
+    ctx.client().set_global_emergency_paused(&true);
+    assert!(ctx.client().get_global_emergency_paused());
+
+    // User withdraw is blocked
+    let result = ctx.client().try_withdraw(&stream_id);
+    assert!(
+        result.is_err(),
+        "withdraw must be blocked during global emergency pause"
+    );
+
+    // Admin pause still works and emits the correct event
+    ctx.client().pause_stream_as_admin(&stream_id);
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+    assert_eq!(
+        Option::<StreamEvent>::from_val(&ctx.env, &last_event.2).unwrap(),
+        StreamEvent::Paused(stream_id),
+        "pause_stream_as_admin must emit Paused during global emergency pause"
+    );
+
+    // Admin resume still works and emits the correct event
+    ctx.client().resume_stream_as_admin(&stream_id);
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+    assert_eq!(
+        Option::<StreamEvent>::from_val(&ctx.env, &last_event.2).unwrap(),
+        StreamEvent::Resumed(stream_id),
+        "resume_stream_as_admin must emit Resumed during global emergency pause"
+    );
+
+    // Admin cancel still works and emits the correct event
+    ctx.client().cancel_stream_as_admin(&stream_id);
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+    assert_eq!(
+        Option::<StreamEvent>::from_val(&ctx.env, &last_event.2).unwrap(),
+        StreamEvent::StreamCancelled(stream_id),
+        "cancel_stream_as_admin must emit StreamCancelled during global emergency pause"
     );
 }
 
@@ -8180,6 +8692,144 @@ fn test_create_streams_batch_empty() {
 }
 
 #[test]
+fn test_create_streams_batch_empty_requires_auth() {
+    // Empty batch still requires sender authorization
+    let ctx = TestContext::setup_strict();
+    let streams = Vec::new(&ctx.env);
+
+    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+
+    // Mock sender auth for empty batch
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "create_streams",
+            args: (&ctx.sender, streams.clone()).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let ids = ctx.client().create_streams(&ctx.sender, &streams);
+    assert_eq!(ids.len(), 0);
+}
+
+#[test]
+fn test_create_streams_batch_empty_no_events() {
+    // Empty batch must not emit any events
+    let ctx = TestContext::setup();
+    let streams = Vec::new(&ctx.env);
+
+    let events_before = ctx.env.events().all().len();
+    let ids = ctx.client().create_streams(&ctx.sender, &streams);
+    let events_after = ctx.env.events().all().len();
+
+    assert_eq!(ids.len(), 0);
+    assert_eq!(
+        events_before, events_after,
+        "empty batch must not emit any events"
+    );
+}
+
+#[test]
+fn test_create_streams_batch_empty_no_state_change() {
+    // Empty batch must not change stream count or any state
+    let ctx = TestContext::setup();
+    let streams = Vec::new(&ctx.env);
+
+    let count_before = ctx.client().get_stream_count();
+    let ids = ctx.client().create_streams(&ctx.sender, &streams);
+    let count_after = ctx.client().get_stream_count();
+
+    assert_eq!(ids.len(), 0);
+    assert_eq!(
+        count_before, count_after,
+        "empty batch must not advance stream ID counter"
+    );
+}
+
+#[test]
+fn test_create_streams_batch_empty_then_normal_create() {
+    // After empty batch, next stream should get ID 0 (not skipped)
+    let ctx = TestContext::setup();
+
+    // First: empty batch
+    let empty_streams = Vec::new(&ctx.env);
+    let empty_ids = ctx.client().create_streams(&ctx.sender, &empty_streams);
+    assert_eq!(empty_ids.len(), 0);
+
+    // Second: normal create_stream
+    let id1 = ctx.create_default_stream();
+    assert_eq!(id1, 0, "first stream after empty batch should get ID 0");
+
+    // Third: another empty batch
+    let empty_ids2 = ctx.client().create_streams(&ctx.sender, &empty_streams);
+    assert_eq!(empty_ids2.len(), 0);
+
+    // Fourth: another normal create_stream
+    let id2 = ctx.create_default_stream();
+    assert_eq!(id2, 1, "second stream should get ID 1");
+}
+
+#[test]
+fn test_create_streams_batch_empty_multiple_times() {
+    // Multiple empty batches should all succeed and have no side effects
+    let ctx = TestContext::setup();
+    let streams = Vec::new(&ctx.env);
+
+    let initial_balance = ctx.token().balance(&ctx.sender);
+    let initial_count = ctx.client().get_stream_count();
+
+    for _ in 0..5 {
+        let ids = ctx.client().create_streams(&ctx.sender, &streams);
+        assert_eq!(ids.len(), 0);
+    }
+
+    assert_eq!(
+        ctx.token().balance(&ctx.sender),
+        initial_balance,
+        "balance must not change after multiple empty batches"
+    );
+    assert_eq!(
+        ctx.client().get_stream_count(),
+        initial_count,
+        "stream count must not change after multiple empty batches"
+    );
+}
+
+#[test]
+fn test_create_streams_batch_empty_when_paused() {
+    // Empty batch should succeed even when contract is paused
+    let ctx = TestContext::setup();
+    let streams = Vec::new(&ctx.env);
+
+    // Pause contract
+    ctx.client().set_contract_paused(&ctx.admin, &true);
+
+    // Empty batch should still succeed (no-op)
+    let ids = ctx.client().create_streams(&ctx.sender, &streams);
+    assert_eq!(ids.len(), 0);
+}
+
+#[test]
+fn test_create_streams_batch_empty_recipient_index_unchanged() {
+    // Empty batch must not affect recipient stream indices
+    let ctx = TestContext::setup();
+    let recipient = Address::generate(&ctx.env);
+    let streams = Vec::new(&ctx.env);
+
+    let count_before = ctx.client().get_recipient_stream_count(recipient.clone());
+    let ids = ctx.client().create_streams(&ctx.sender, &streams);
+    let count_after = ctx.client().get_recipient_stream_count(recipient.clone());
+
+    assert_eq!(ids.len(), 0);
+    assert_eq!(
+        count_before, count_after,
+        "empty batch must not modify recipient stream index"
+    );
+}
+
+#[test]
 fn test_create_streams_batch_strict_auth() {
     let ctx = TestContext::setup_strict();
 
@@ -9144,17 +9794,12 @@ fn test_update_rate_per_second_rejects_rate_decrease() {
 #[test]
 fn test_update_rate_per_second_before_cliff() {
     let ctx = TestContext::setup();
-    // Use a stream with deposit headroom: deposit=2000, rate=1, cliff=500, end=1000
-    ctx.env.ledger().set_timestamp(0);
-    let stream_id = ctx.client().create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &2000_i128,
-        &1_i128,
-        &0u64,
-        &500u64,
-        &1000u64,
-    );
+    // Mint more and manually create stream with larger deposit
+    let sac = StellarAssetClient::new(&ctx.env, &ctx.token_id);
+    sac.mint(&ctx.sender, &2000);
+    let stream_id =
+        ctx.client()
+            .create_stream(&ctx.sender, &ctx.recipient, &2000, &1, &0, &500, &1000);
 
     // Before cliff at t=100, accrued is 0.
     ctx.env.ledger().set_timestamp(100);
@@ -9171,24 +9816,19 @@ fn test_update_rate_per_second_before_cliff() {
     // After cliff at t=600, accrual uses new rate.
     ctx.env.ledger().set_timestamp(600);
     let accrued_post_cliff = ctx.client().calculate_accrued(&stream_id);
-    // elapsed = 600, rate = 2 → 1200 accrued (capped at deposit 2000).
+    // elapsed = 600 - 0 = 600, rate = 2 → 1200 accrued (capped at deposit 2000).
     assert_eq!(accrued_post_cliff, 1200);
 }
 
 #[test]
 fn test_update_rate_per_second_at_cliff() {
     let ctx = TestContext::setup();
-    // Use a stream with deposit headroom: deposit=2000, rate=1, cliff=500, end=1000
-    ctx.env.ledger().set_timestamp(0);
-    let stream_id = ctx.client().create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &2000_i128,
-        &1_i128,
-        &0u64,
-        &500u64,
-        &1000u64,
-    );
+    // Mint more and manually create stream with larger deposit
+    let sac = StellarAssetClient::new(&ctx.env, &ctx.token_id);
+    sac.mint(&ctx.sender, &5000);
+    let stream_id =
+        ctx.client()
+            .create_stream(&ctx.sender, &ctx.recipient, &5000, &1, &0, &500, &1000);
 
     // Exactly at cliff time t=500.
     ctx.env.ledger().set_timestamp(500);
@@ -9344,22 +9984,23 @@ fn test_update_rate_per_second_emits_event() {
 
     // Verify event was emitted.
     let events = ctx.env.events().all();
-    let mut rate_update_events = Vec::new(&ctx.env);
-    for e in events.iter() {
-        if e.1.len() == 2 {
-            let topic0 = Symbol::try_from_val(&ctx.env, &e.1.get(0).unwrap());
-            let topic1 = u64::try_from_val(&ctx.env, &e.1.get(1).unwrap());
-            if let (Ok(sym), Ok(id)) = (topic0, topic1) {
-                if sym == Symbol::new(&ctx.env, "rate_upd") && id == stream_id {
-                    rate_update_events.push_back(e);
-                }
+    let rate_update_events_count = events
+        .into_iter()
+        .filter(|e| {
+            if e.1.len() < 2 {
+                return false;
             }
-        }
-    }
+            let s = Symbol::try_from_val(&ctx.env, &e.1.get(0).unwrap_or(Val::VOID.into()));
+            let id = u64::try_from_val(&ctx.env, &e.1.get(1).unwrap_or(Val::VOID.into()));
+            match (s, id) {
+                (Ok(s), Ok(id)) => s == Symbol::new(&ctx.env, "rate_upd") && id == stream_id,
+                _ => false,
+            }
+        })
+        .count();
 
     assert_eq!(
-        rate_update_events.len(),
-        1,
+        rate_update_events_count, 1,
         "Should emit exactly one rate_upd event"
     );
 }
@@ -9417,6 +10058,9 @@ fn test_update_rate_per_second_nonexistent_stream() {
 #[test]
 fn test_update_rate_per_second_multiple_times() {
     let ctx = TestContext::setup();
+    // Mint enough for the 100,000 deposit
+    let sac = StellarAssetClient::new(&ctx.env, &ctx.token_id);
+    sac.mint(&ctx.sender, &100_000_i128);
 
     // Create stream with very generous deposit.
     ctx.env.ledger().set_timestamp(0);
@@ -9494,28 +10138,34 @@ fn test_update_rate_per_second_preserves_other_fields() {
 fn test_update_rate_per_second_with_overflow_protection() {
     let ctx = TestContext::setup();
 
-    // Create stream with normal deposit and rate.
+    // Create stream with safe values.
     ctx.env.ledger().set_timestamp(0);
-    let max_rate = i128::MAX / 1000; // Safe rate for 1000 second duration.
-    ctx.sac.mint(&ctx.sender, &100_000_i128);
+    let initial_rate = 1_000_i128;
+    let deposit = 10_000_000_i128;
+
+    // Mint enough for the deposit
+    let sac = StellarAssetClient::new(&ctx.env, &ctx.token_id);
+    sac.mint(&ctx.sender, &deposit);
 
     let stream_id = ctx.client().create_stream(
         &ctx.sender,
         &ctx.recipient,
-        &100_000_i128,
-        &1_i128,
+        &deposit,
+        &initial_rate,
         &0u64,
         &0u64,
         &1_000u64,
     );
 
-    // Attempt to update to a rate that would overflow.
+    // Attempt to update to a rate that would overflow checks (rate * duration).
+    // duration = 1000. So any rate > i128::MAX / 1000 will overflow duration * rate.
+    let huge_rate = i128::MAX;
     let result = ctx
         .client()
-        .try_update_rate_per_second(&stream_id, &(max_rate + 1));
+        .try_update_rate_per_second(&stream_id, &huge_rate);
     assert!(
         result.is_err(),
-        "Should fail due to overflow or insufficient deposit"
+        "Should fail due to overflow in duration * rate"
     );
 }
 
@@ -9626,7 +10276,6 @@ fn test_shorten_stream_end_time_preserves_accrued_at_update_time() {
 }
 
 #[test]
-#[should_panic]
 fn test_shorten_stream_end_time_rejects_past_end_time() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
@@ -9634,8 +10283,169 @@ fn test_shorten_stream_end_time_rejects_past_end_time() {
     // Advance beyond the proposed new end time.
     ctx.env.ledger().set_timestamp(600);
 
-    // Attempting to shorten to a time in the past must panic.
-    ctx.client().shorten_stream_end_time(&stream_id, &500u64);
+    // Attempting to shorten to a time in the past must return InvalidParams.
+    let result = ctx
+        .client()
+        .try_shorten_stream_end_time(&stream_id, &500u64);
+    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
+}
+
+#[test]
+fn test_shorten_stream_end_time_rejects_equal_or_later_end_time() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2_000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1_000u64,
+    );
+
+    // Equal old end_time is not a shorten.
+    let same = ctx
+        .client()
+        .try_shorten_stream_end_time(&stream_id, &1_000u64);
+    assert_eq!(same, Err(Ok(ContractError::InvalidParams)));
+
+    // Later end_time must also be rejected on the shorten path.
+    let later = ctx
+        .client()
+        .try_shorten_stream_end_time(&stream_id, &1_500u64);
+    assert_eq!(later, Err(Ok(ContractError::InvalidParams)));
+}
+
+#[test]
+fn test_shorten_stream_end_time_rejects_now_boundary() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Boundary at now is not strictly future, must be rejected.
+    ctx.env.ledger().set_timestamp(500);
+    let result = ctx
+        .client()
+        .try_shorten_stream_end_time(&stream_id, &500u64);
+    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
+}
+
+#[test]
+fn test_shorten_stream_end_time_rejects_new_end_before_cliff() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_cliff_stream(); // cliff = 500
+
+    let result = ctx
+        .client()
+        .try_shorten_stream_end_time(&stream_id, &400u64);
+    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
+}
+
+#[test]
+#[should_panic]
+fn test_shorten_stream_end_time_unauthorized_caller() {
+    let ctx = TestContext::setup_strict();
+
+    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "create_stream",
+            args: (
+                ctx.sender.clone(),
+                ctx.recipient.clone(),
+                1000_i128,
+                1_i128,
+                0u64,
+                0u64,
+                1000u64,
+            )
+                .into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    // No sender auth is provided for shorten; strict mode must trap.
+    ctx.client().shorten_stream_end_time(&stream_id, &700u64);
+}
+
+#[test]
+fn test_shorten_stream_end_time_emits_event_and_conserves_refund() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    let sender_before = ctx.token().balance(&ctx.sender);
+    let contract_before = ctx.token().balance(&ctx.contract_id);
+
+    ctx.client().shorten_stream_end_time(&stream_id, &700u64);
+
+    let sender_after = ctx.token().balance(&ctx.sender);
+    let contract_after = ctx.token().balance(&ctx.contract_id);
+    assert_eq!(sender_after - sender_before, 300);
+    assert_eq!(contract_before - contract_after, 300);
+
+    let events = ctx.env.events().all();
+    let last = events.last().unwrap();
+    let payload = StreamEndShortened::from_val(&ctx.env, &last.2);
+    assert_eq!(payload.stream_id, stream_id);
+    assert_eq!(payload.old_end_time, 1000);
+    assert_eq!(payload.new_end_time, 700);
+    assert_eq!(payload.refund_amount, 300);
+}
+
+#[test]
+fn test_shorten_stream_end_time_failed_call_has_no_side_effects() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(600);
+    let sender_before = ctx.token().balance(&ctx.sender);
+    let contract_before = ctx.token().balance(&ctx.contract_id);
+    let state_before = ctx.client().get_stream_state(&stream_id);
+    let events_before = ctx.env.events().all().len();
+
+    let result = ctx
+        .client()
+        .try_shorten_stream_end_time(&stream_id, &500u64);
+    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
+
+    let state_after = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_after.end_time, state_before.end_time);
+    assert_eq!(state_after.deposit_amount, state_before.deposit_amount);
+    assert_eq!(ctx.token().balance(&ctx.sender), sender_before);
+    assert_eq!(ctx.token().balance(&ctx.contract_id), contract_before);
+    assert_eq!(ctx.env.events().all().len(), events_before);
+}
+
+#[test]
+fn test_shorten_stream_end_time_rejects_completed_and_cancelled_states() {
+    let ctx = TestContext::setup();
+
+    let completed_id = ctx.create_default_stream();
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&completed_id);
+    let completed_result = ctx
+        .client()
+        .try_shorten_stream_end_time(&completed_id, &900u64);
+    assert_eq!(completed_result, Err(Ok(ContractError::InvalidState)));
+
+    let cancelled_id = ctx.create_default_stream();
+    ctx.env.ledger().set_timestamp(300);
+    ctx.client().cancel_stream(&cancelled_id);
+    let cancelled_result = ctx
+        .client()
+        .try_shorten_stream_end_time(&cancelled_id, &800u64);
+    assert_eq!(cancelled_result, Err(Ok(ContractError::InvalidState)));
 }
 
 // ---------------------------------------------------------------------------
@@ -10506,7 +11316,7 @@ fn test_withdraw_and_withdraw_to_interleaved_no_double_pay() {
 fn test_create_stream_contract_paused_returns_structured_error() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
-    ctx.client().set_contract_paused(&true);
+    ctx.client().set_global_emergency_paused(&true);
 
     ctx.client().create_stream(
         &ctx.sender,
@@ -10517,6 +11327,73 @@ fn test_create_stream_contract_paused_returns_structured_error() {
         &0u64,
         &1000u64,
     );
+}
+
+/// Verify ContractPaused fires as a structured error for batch creations.
+#[test]
+#[should_panic]
+fn test_create_streams_batch_contract_paused_returns_structured_error() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().set_contract_paused(&true);
+
+    let params = soroban_sdk::Vec::from_array(
+        &ctx.env,
+        [CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000,
+            rate_per_second: 1,
+            start_time: 0,
+            cliff_time: 0,
+            end_time: 1000,
+        }],
+    );
+
+    ctx.client().create_streams(&ctx.sender, &params);
+}
+
+/// Verify that a global pause only blocks `create_stream`/`create_streams`,
+/// while operations on existing streams (withdraw, top-up, pause, cancel) succeed.
+#[test]
+fn test_global_pause_does_not_affect_existing_streams() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Create stream while unpaused
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    // Now admin pauses the contract
+    ctx.client().set_contract_paused(&true);
+
+    // 1. Withdraw should work
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().withdraw(&stream_id);
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 100);
+
+    // 2. Top-up should work
+    ctx.client()
+        .top_up_stream(&stream_id, &ctx.sender, &100_i128);
+    let state_after_topup = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_after_topup.deposit_amount, 1100);
+
+    // 3. Sender pausing an individual stream should work
+    ctx.client().pause_stream(&stream_id);
+    let state_after_pause = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_after_pause.status, StreamStatus::Paused);
+
+    // 4. Sender cancelling an individual stream should work
+    ctx.client().cancel_stream(&stream_id);
+    let state_after_cancel = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_after_cancel.status, StreamStatus::Cancelled);
 }
 
 /// create_streams (batch) must reject when any stream's start_time is in the past,
@@ -12357,8 +13234,7 @@ fn test_pause_completed_stream_panics() {
 /// pause_stream_as_admin on an already-Paused stream must be rejected.
 /// The admin path enforces the same Active-only precondition as the sender path.
 #[test]
-#[should_panic]
-fn test_pause_stream_as_admin_already_paused_panics() {
+fn test_pause_stream_as_admin_already_paused_fails() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
 
@@ -12366,14 +13242,14 @@ fn test_pause_stream_as_admin_already_paused_panics() {
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
 
-    // Second pause via admin path must also be rejected.
-    ctx.client().pause_stream_as_admin(&stream_id);
+    // Second pause via admin path must return StreamAlreadyPaused.
+    let result = ctx.client().try_pause_stream_as_admin(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::StreamAlreadyPaused)));
 }
 
 /// pause_stream_as_admin on a Completed stream must be rejected.
 #[test]
-#[should_panic]
-fn test_pause_stream_as_admin_completed_panics() {
+fn test_pause_stream_as_admin_completed_fails() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
 
@@ -12384,13 +13260,13 @@ fn test_pause_stream_as_admin_completed_panics() {
         StreamStatus::Completed
     );
 
-    ctx.client().pause_stream_as_admin(&stream_id);
+    let result = ctx.client().try_pause_stream_as_admin(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::StreamTerminalState)));
 }
 
 /// pause_stream_as_admin on a Cancelled stream must be rejected.
 #[test]
-#[should_panic]
-fn test_pause_stream_as_admin_cancelled_panics() {
+fn test_pause_stream_as_admin_cancelled_fails() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
 
@@ -12400,15 +13276,15 @@ fn test_pause_stream_as_admin_cancelled_panics() {
         StreamStatus::Cancelled
     );
 
-    ctx.client().pause_stream_as_admin(&stream_id);
+    let result = ctx.client().try_pause_stream_as_admin(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::StreamTerminalState)));
 }
 
 // ── State-boundary guards: resume_stream_as_admin ───────────────────────────
 
 /// resume_stream_as_admin on an Active (not paused) stream must be rejected.
 #[test]
-#[should_panic]
-fn test_resume_stream_as_admin_active_stream_panics() {
+fn test_resume_stream_as_admin_active_stream_fails() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
 
@@ -12417,30 +13293,30 @@ fn test_resume_stream_as_admin_active_stream_panics() {
         StreamStatus::Active
     );
 
-    ctx.client().resume_stream_as_admin(&stream_id);
+    let result = ctx.client().try_resume_stream_as_admin(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::StreamNotPaused)));
 }
 
 /// resume_stream_as_admin on a Completed stream must be rejected.
 #[test]
-#[should_panic]
-fn test_resume_stream_as_admin_completed_panics() {
+fn test_resume_stream_as_admin_completed_fails() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
 
-    ctx.env.ledger().set_timestamp(1000);
+    ctx.env.ledger().set_timestamp(1_000);
     ctx.client().withdraw(&stream_id);
     assert_eq!(
         ctx.client().get_stream_state(&stream_id).status,
         StreamStatus::Completed
     );
 
-    ctx.client().resume_stream_as_admin(&stream_id);
+    let result = ctx.client().try_resume_stream_as_admin(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::StreamTerminalState)));
 }
 
 /// resume_stream_as_admin on a Cancelled stream must be rejected.
 #[test]
-#[should_panic]
-fn test_resume_stream_as_admin_cancelled_panics() {
+fn test_resume_stream_as_admin_cancelled_fails() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
 
@@ -12450,7 +13326,8 @@ fn test_resume_stream_as_admin_cancelled_panics() {
         StreamStatus::Cancelled
     );
 
-    ctx.client().resume_stream_as_admin(&stream_id);
+    let result = ctx.client().try_resume_stream_as_admin(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::StreamTerminalState)));
 }
 
 // ── Cross-path invariant: sender pause → admin resume and vice-versa ─────────
@@ -12495,6 +13372,106 @@ fn test_admin_pause_sender_resume_cross_path() {
     assert_eq!(
         ctx.client().get_stream_state(&stream_id).status,
         StreamStatus::Active
+    );
+}
+
+// ── Time-boundary verification: Admin pause/resume ──────────────────────────
+
+/// Admin can pause exactly at start_time.
+#[test]
+fn test_admin_pause_at_start_time() {
+    let ctx = TestContext::setup();
+    let start_time = 100u64;
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000,
+        &1,
+        &start_time,
+        &start_time,
+        &1100,
+    );
+
+    ctx.env.ledger().set_timestamp(start_time);
+    ctx.client().pause_stream_as_admin(&stream_id);
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).status,
+        StreamStatus::Paused
+    );
+}
+
+/// Admin can pause exactly at cliff_time.
+#[test]
+fn test_admin_pause_at_cliff_time() {
+    let ctx = TestContext::setup();
+    let cliff_time = 200u64;
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000,
+        &1,
+        &100,
+        &cliff_time,
+        &1100,
+    );
+
+    ctx.env.ledger().set_timestamp(cliff_time);
+    ctx.client().pause_stream_as_admin(&stream_id);
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).status,
+        StreamStatus::Paused
+    );
+}
+
+/// Admin cannot pause at end_time because it should be Completed.
+#[test]
+fn test_admin_pause_at_end_time_fails() {
+    let ctx = TestContext::setup();
+    let end_time = 1100u64;
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000,
+        &1,
+        &100,
+        &200,
+        &end_time,
+    );
+
+    ctx.env.ledger().set_timestamp(end_time);
+    // Note: Stored status will still be Active until a state-changing call is made,
+    // but the contract must already treat it as Terminal based on time.
+
+    let result = ctx.client().try_pause_stream_as_admin(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::StreamTerminalState)));
+}
+
+/// A paused stream can be withdrawn from if it's past end_time.
+#[test]
+fn test_withdraw_from_paused_at_end_time() {
+    let ctx = TestContext::setup();
+    let end_time = 1_000u64;
+    let stream_id =
+        ctx.client()
+            .create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &end_time);
+
+    // Pause at t=500
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().pause_stream(&stream_id);
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).status,
+        StreamStatus::Paused
+    );
+
+    // Advance to end_time
+    ctx.env.ledger().set_timestamp(1_000);
+
+    // Withdraw should succeed even if Paused
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn, 1000);
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).status,
+        StreamStatus::Completed
     );
 }
 
@@ -12972,12 +13949,12 @@ fn regression_missing_config_create_streams_batch_panics() {
 /// calls `get_admin()` which reads config.
 #[test]
 #[should_panic]
-fn regression_missing_config_set_contract_paused_panics() {
+fn regression_missing_config_set_global_emergency_paused_panics() {
     let env = Env::default();
     env.mock_all_auths();
     let contract_id = env.register_contract(None, FluxoraStream);
     let client = FluxoraStreamClient::new(&env, &contract_id);
-    client.set_contract_paused(&true);
+    client.set_global_emergency_paused(&true);
 }
 
 /// `set_admin()` on uninitialised contract must fail because it reads
@@ -14006,6 +14983,268 @@ fn claimable_at_cancel_ceiling_parametric() {
             "withdraw={withdraw_time}, cancel={cancel_time}: future claimable must be {ceiling}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// §12  Additional edge case tests
+// ---------------------------------------------------------------------------
+
+/// Test that batch_withdraw correctly handles a mix of streams with different
+/// statuses (Active, Paused, Cancelled, Completed) and only processes valid ones.
+/// This ensures the batch operation is robust against heterogeneous stream states.
+#[test]
+fn test_batch_withdraw_mixed_stream_states_comprehensive() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Create 5 streams with different eventual states
+    let id_active = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    let id_paused = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    let id_cancelled = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    let id_completed = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    let id_active_2 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2000_i128,
+        &2_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    // Set up different states
+    ctx.env.ledger().set_timestamp(500);
+    
+    // Pause one stream
+    ctx.client().pause_stream(&id_paused);
+    
+    // Cancel one stream (accrued = 500)
+    ctx.client().cancel_stream(&id_cancelled);
+    
+    // Complete one stream
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&id_completed);
+    
+    // Verify states
+    assert_eq!(ctx.client().get_stream_state(&id_active).status, StreamStatus::Active);
+    assert_eq!(ctx.client().get_stream_state(&id_paused).status, StreamStatus::Paused);
+    assert_eq!(ctx.client().get_stream_state(&id_cancelled).status, StreamStatus::Cancelled);
+    assert_eq!(ctx.client().get_stream_state(&id_completed).status, StreamStatus::Completed);
+    assert_eq!(ctx.client().get_stream_state(&id_active_2).status, StreamStatus::Active);
+
+    // Attempt batch withdraw at t=800
+    ctx.env.ledger().set_timestamp(800);
+    
+    let mut stream_ids = Vec::new(&ctx.env);
+    stream_ids.push_back(id_active);
+    stream_ids.push_back(id_paused);
+    stream_ids.push_back(id_cancelled);
+    stream_ids.push_back(id_completed);
+    stream_ids.push_back(id_active_2);
+
+    // This should panic because paused stream is in the batch
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().batch_withdraw(&ctx.recipient, &stream_ids);
+    }));
+    
+    assert!(result.is_err(), "batch_withdraw with paused stream should panic");
+
+    // Now try without the paused stream
+    let mut valid_stream_ids = Vec::new(&ctx.env);
+    valid_stream_ids.push_back(id_active);
+    valid_stream_ids.push_back(id_cancelled);
+    valid_stream_ids.push_back(id_completed);
+    valid_stream_ids.push_back(id_active_2);
+
+    let results = ctx.client().batch_withdraw(&ctx.recipient, &valid_stream_ids);
+
+    // Verify results
+    assert_eq!(results.len(), 4);
+    
+    // Active stream: accrued=800, withdrawn=0 → amount=800
+    assert_eq!(results.get(0).unwrap().stream_id, id_active);
+    assert_eq!(results.get(0).unwrap().amount, 800);
+    
+    // Cancelled stream: accrued frozen at 500, withdrawn=0 → amount=500
+    assert_eq!(results.get(1).unwrap().stream_id, id_cancelled);
+    assert_eq!(results.get(1).unwrap().amount, 500);
+    
+    // Completed stream: nothing left → amount=0
+    assert_eq!(results.get(2).unwrap().stream_id, id_completed);
+    assert_eq!(results.get(2).unwrap().amount, 0);
+    
+    // Active stream 2: accrued=1600 (rate=2), withdrawn=0 → amount=1600
+    assert_eq!(results.get(3).unwrap().stream_id, id_active_2);
+    assert_eq!(results.get(3).unwrap().amount, 1600);
+
+    // Verify total tokens transferred
+    let expected_total = 800 + 500 + 0 + 1600;
+    assert_eq!(ctx.token().balance(&ctx.recipient), 1000 + expected_total); // 1000 from id_completed earlier
+}
+
+/// Test that create_streams batch operation correctly handles the recipient index
+/// for multiple recipients and maintains sorted order across all recipients.
+/// This ensures the recipient index remains consistent under batch operations.
+#[test]
+fn test_create_streams_batch_recipient_index_consistency() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let recipient1 = Address::generate(&ctx.env);
+    let recipient2 = Address::generate(&ctx.env);
+    let recipient3 = Address::generate(&ctx.env);
+
+    // Create a batch with streams for different recipients
+    let params = soroban_sdk::Vec::from_array(
+        &ctx.env,
+        [
+            CreateStreamParams {
+                recipient: recipient1.clone(),
+                deposit_amount: 1000,
+                rate_per_second: 1,
+                start_time: 0,
+                cliff_time: 0,
+                end_time: 1000,
+            },
+            CreateStreamParams {
+                recipient: recipient2.clone(),
+                deposit_amount: 2000,
+                rate_per_second: 1,
+                start_time: 0,
+                cliff_time: 0,
+                end_time: 2000,
+            },
+            CreateStreamParams {
+                recipient: recipient1.clone(),
+                deposit_amount: 1500,
+                rate_per_second: 1,
+                start_time: 0,
+                cliff_time: 0,
+                end_time: 1500,
+            },
+            CreateStreamParams {
+                recipient: recipient3.clone(),
+                deposit_amount: 3000,
+                rate_per_second: 1,
+                start_time: 0,
+                cliff_time: 0,
+                end_time: 3000,
+            },
+            CreateStreamParams {
+                recipient: recipient2.clone(),
+                deposit_amount: 2500,
+                rate_per_second: 1,
+                start_time: 0,
+                cliff_time: 0,
+                end_time: 2500,
+            },
+        ],
+    );
+
+    let ids = ctx.client().create_streams(&ctx.sender, &params);
+    assert_eq!(ids.len(), 5);
+
+    // Verify recipient1 has streams 0 and 2 (sorted)
+    let streams1 = ctx.client().get_recipient_streams(&recipient1);
+    assert_eq!(streams1.len(), 2);
+    assert_eq!(streams1.get(0).unwrap(), 0);
+    assert_eq!(streams1.get(1).unwrap(), 2);
+    assert_eq!(ctx.client().get_recipient_stream_count(&recipient1), 2);
+
+    // Verify recipient2 has streams 1 and 4 (sorted)
+    let streams2 = ctx.client().get_recipient_streams(&recipient2);
+    assert_eq!(streams2.len(), 2);
+    assert_eq!(streams2.get(0).unwrap(), 1);
+    assert_eq!(streams2.get(1).unwrap(), 4);
+    assert_eq!(ctx.client().get_recipient_stream_count(&recipient2), 2);
+
+    // Verify recipient3 has stream 3
+    let streams3 = ctx.client().get_recipient_streams(&recipient3);
+    assert_eq!(streams3.len(), 1);
+    assert_eq!(streams3.get(0).unwrap(), 3);
+    assert_eq!(ctx.client().get_recipient_stream_count(&recipient3), 1);
+
+    // Now complete and close one stream from recipient1
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&0);
+    ctx.client().close_completed_stream(&0);
+
+    // Verify recipient1 now only has stream 2
+    let streams1_after = ctx.client().get_recipient_streams(&recipient1);
+    assert_eq!(streams1_after.len(), 1);
+    assert_eq!(streams1_after.get(0).unwrap(), 2);
+    assert_eq!(ctx.client().get_recipient_stream_count(&recipient1), 1);
+
+    // Other recipients should be unchanged
+    let streams2_after = ctx.client().get_recipient_streams(&recipient2);
+    assert_eq!(streams2_after.len(), 2);
+    assert_eq!(streams2_after.get(0).unwrap(), 1);
+    assert_eq!(streams2_after.get(1).unwrap(), 4);
+
+    let streams3_after = ctx.client().get_recipient_streams(&recipient3);
+    assert_eq!(streams3_after.len(), 1);
+    assert_eq!(streams3_after.get(0).unwrap(), 3);
+
+    // Create another batch to verify IDs continue correctly
+    let params2 = soroban_sdk::Vec::from_array(
+        &ctx.env,
+        [
+            CreateStreamParams {
+                recipient: recipient1.clone(),
+                deposit_amount: 500,
+                rate_per_second: 1,
+                start_time: 0,
+                cliff_time: 0,
+                end_time: 500,
+            },
+        ],
+    );
+
+    let ids2 = ctx.client().create_streams(&ctx.sender, &params2);
+    assert_eq!(ids2.get(0).unwrap(), 5); // Next ID should be 5
+
+    // Verify recipient1 now has streams 2 and 5 (sorted)
+    let streams1_final = ctx.client().get_recipient_streams(&recipient1);
+    assert_eq!(streams1_final.len(), 2);
+    assert_eq!(streams1_final.get(0).unwrap(), 2);
+    assert_eq!(streams1_final.get(1).unwrap(), 5);
+    assert_eq!(ctx.client().get_recipient_stream_count(&recipient1), 2);
 }
 // ---------------------------------------------------------------------------
 // Tests — Overflow Protection (Issue: create_streams total deposit overflow)

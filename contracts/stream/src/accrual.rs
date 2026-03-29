@@ -21,14 +21,15 @@ pub fn calculate_accrued_amount(
         return 0;
     }
 
-    if start_time >= end_time || rate_per_second < 0 {
+    if rate_per_second < 0 {
         return 0;
     }
 
     let elapsed_now = current_time.min(end_time);
-    let elapsed_seconds = match elapsed_now.checked_sub(start_time) {
-        Some(elapsed) => elapsed as i128,
-        None => return 0,
+    let elapsed_seconds = if elapsed_now < start_time {
+        0
+    } else {
+        (elapsed_now - start_time) as i128
     };
 
     let accrued = match elapsed_seconds.checked_mul(rate_per_second) {
@@ -423,11 +424,11 @@ mod property_monotonicity {
 
     /// Dense time grid for a stream: samples before, at, and after every boundary.
     fn time_grid(start: u64, cliff: u64, end: u64) -> [u64; 12] {
-        let span = end.saturating_sub(start);
-        let mid = start.saturating_add(span / 2);
-        let q1 = start.saturating_add(span / 4);
-        let q3 = start.saturating_add(span / 2 + span / 4);
-        let mut arr = [
+        let duration = end.saturating_sub(start);
+        let mid = start.saturating_add(duration / 2);
+        let q1 = start.saturating_add(duration / 4);
+        let q3 = start.saturating_add((duration / 4).saturating_mul(3));
+        let mut times = [
             0,
             start.saturating_sub(1),
             start,
@@ -441,8 +442,32 @@ mod property_monotonicity {
             end.saturating_add(1),
             end.saturating_add(1_000),
         ];
-        arr.sort_unstable();
-        arr
+        times.sort();
+        times
+    }
+
+    fn sort_array(arr: &mut [u64]) {
+        for i in 0..arr.len() {
+            for j in 0..arr.len() - i - 1 {
+                if arr[j] > arr[j + 1] {
+                    let temp = arr[j];
+                    arr[j] = arr[j + 1];
+                    arr[j + 1] = temp;
+                }
+            }
+        }
+    }
+
+    fn sort_array(arr: &mut [u64]) {
+        for i in 0..arr.len() {
+            for j in 0..arr.len() - i - 1 {
+                if arr[j] > arr[j + 1] {
+                    let temp = arr[j];
+                    arr[j] = arr[j + 1];
+                    arr[j + 1] = temp;
+                }
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -454,7 +479,8 @@ mod property_monotonicity {
     #[test]
     fn prop_monotonic_over_dense_grid() {
         for &(start, cliff, end, rate, deposit) in STREAMS {
-            let times = time_grid(start, cliff, end);
+            let mut times = time_grid(start, cliff, end);
+            sort_array(&mut times);
             let mut prev = calculate_accrued_amount(start, cliff, end, rate, deposit, times[0]);
 
             for &t in times.iter().skip(1) {
@@ -639,5 +665,169 @@ mod property_monotonicity {
                 "linear accrual mismatch at t={t}: expected={expected}, got={accrued}"
             );
         }
+    }
+}
+
+// ===========================================================================
+// i128 boundary streams: near-max rate/deposit scenarios — pure math tests
+//
+// These tests exercise `calculate_accrued_amount` directly at i128-scale
+// values, independent of the Soroban environment.
+//
+// Scope: every observable property of the accrual function at near-max values.
+// Exclusions: token transfer mechanics and contract storage (covered in test.rs
+// and integration_suite.rs). Gas budget is not applicable to pure functions.
+// ===========================================================================
+#[cfg(test)]
+mod i128_boundary {
+    use super::calculate_accrued_amount;
+
+    // -----------------------------------------------------------------------
+    // 1. Near-max deposit, rate=deposit, duration=1s
+    // -----------------------------------------------------------------------
+
+    /// At t=0 (start), accrued is 0 for near-max deposit.
+    #[test]
+    fn near_max_deposit_zero_at_start() {
+        let deposit = i128::MAX / 2;
+        let rate = i128::MAX / 2;
+        let accrued = calculate_accrued_amount(0, 0, 1, rate, deposit, 0);
+        assert_eq!(accrued, 0);
+    }
+
+    /// At t=1 (end), accrued equals deposit for near-max stream.
+    #[test]
+    fn near_max_deposit_equals_deposit_at_end() {
+        let deposit = i128::MAX / 2;
+        let rate = i128::MAX / 2;
+        let accrued = calculate_accrued_amount(0, 0, 1, rate, deposit, 1);
+        assert_eq!(accrued, deposit);
+    }
+
+    /// Long after end_time, accrued is still capped at deposit.
+    #[test]
+    fn near_max_deposit_capped_long_after_end() {
+        let deposit = i128::MAX / 2;
+        let rate = i128::MAX / 2;
+        let accrued = calculate_accrued_amount(0, 0, 1, rate, deposit, u64::MAX);
+        assert_eq!(accrued, deposit);
+    }
+
+    // -----------------------------------------------------------------------
+    // 2. Overflow path: elapsed * rate overflows i128 → returns deposit_amount
+    // -----------------------------------------------------------------------
+
+    /// elapsed=2, rate=i128::MAX/2+1 → product overflows → returns deposit.
+    /// This directly exercises the `None => deposit_amount` branch in checked_mul.
+    #[test]
+    fn overflow_in_multiplication_returns_deposit() {
+        // rate = i128::MAX/2 + 1, elapsed = 2 → product = i128::MAX + 2 → overflow
+        let rate = i128::MAX / 2 + 1;
+        let deposit = i128::MAX / 4; // deposit < rate*2, so overflow path is hit
+        // start=0, cliff=0, end=10, current=2 → elapsed=2
+        let accrued = calculate_accrued_amount(0, 0, 10, rate, deposit, 2);
+        // overflow → returns deposit_amount, then clamped to deposit
+        assert_eq!(accrued, deposit, "overflow must return deposit_amount");
+    }
+
+    /// i128::MAX rate, elapsed=2 → overflow → returns deposit.
+    #[test]
+    fn max_rate_overflow_returns_deposit() {
+        let deposit = 42_i128;
+        let accrued = calculate_accrued_amount(0, 0, 100, i128::MAX, deposit, 2);
+        assert_eq!(accrued, deposit);
+    }
+
+    // -----------------------------------------------------------------------
+    // 3. Near-max deposit with cliff boundary
+    // -----------------------------------------------------------------------
+
+    /// Before cliff, accrued is 0 even for near-max deposit.
+    #[test]
+    fn near_max_deposit_zero_before_cliff() {
+        let deposit = i128::MAX / 1_000_000;
+        let rate = deposit / 1_000;
+        // cliff=500, current=499 → must return 0
+        let accrued = calculate_accrued_amount(0, 500, 1_000, rate, deposit, 499);
+        assert_eq!(accrued, 0);
+    }
+
+    /// Exactly at cliff, accrual uses elapsed from start_time.
+    #[test]
+    fn near_max_deposit_at_cliff_uses_start_time() {
+        let deposit = i128::MAX / 1_000_000;
+        let rate = deposit / 1_000;
+        // start=0, cliff=500, end=1000, current=500 → elapsed=500
+        let accrued = calculate_accrued_amount(0, 500, 1_000, rate, deposit, 500);
+        let expected = 500_i128 * rate;
+        assert_eq!(accrued, expected);
+    }
+
+    // -----------------------------------------------------------------------
+    // 4. Monotonicity at near-max scale
+    // -----------------------------------------------------------------------
+
+    /// Accrual is monotonically non-decreasing across a dense time grid.
+    #[test]
+    fn near_max_deposit_monotonic_over_time_grid() {
+        let deposit = i128::MAX / 1_000_000;
+        let rate = deposit / 1_000;
+        let times = [0u64, 1, 100, 499, 500, 501, 750, 999, 1_000, 1_001, 999_999];
+        let mut prev = calculate_accrued_amount(0, 500, 1_000, rate, deposit, times[0]);
+        for &t in times.iter().skip(1) {
+            let now = calculate_accrued_amount(0, 500, 1_000, rate, deposit, t);
+            assert!(
+                now >= prev,
+                "monotonicity violated at t={t}: got {now}, prev={prev}"
+            );
+            prev = now;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 5. Boundedness at near-max scale
+    // -----------------------------------------------------------------------
+
+    /// For all time points, 0 <= accrued <= deposit at near-max scale.
+    #[test]
+    fn near_max_deposit_bounded_at_all_times() {
+        let deposit = i128::MAX / 1_000_000;
+        let rate = deposit / 1_000;
+        let times = [0u64, 1, 499, 500, 750, 1_000, 1_001, u64::MAX / 2, u64::MAX];
+        for &t in &times {
+            let accrued = calculate_accrued_amount(0, 500, 1_000, rate, deposit, t);
+            assert!(accrued >= 0, "negative accrual at t={t}: {accrued}");
+            assert!(accrued <= deposit, "accrual exceeds deposit at t={t}: {accrued}");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 6. Deposit > rate * duration (excess deposit)
+    // -----------------------------------------------------------------------
+
+    /// When deposit > rate * duration, accrued at end == rate * duration (not deposit).
+    #[test]
+    fn near_max_deposit_excess_deposit_caps_at_total_streamable() {
+        let rate: i128 = i128::MAX / 1_000_000;
+        let duration: u64 = 1_000;
+        let total_streamable = rate * duration as i128;
+        let deposit = total_streamable + 999_999; // excess deposit
+
+        let accrued = calculate_accrued_amount(0, 0, duration, rate, deposit, duration);
+        assert_eq!(accrued, total_streamable, "must cap at rate*duration, not deposit");
+    }
+
+    // -----------------------------------------------------------------------
+    // 7. Determinism at near-max scale
+    // -----------------------------------------------------------------------
+
+    /// Same near-max inputs always produce the same output.
+    #[test]
+    fn near_max_deposit_deterministic() {
+        let deposit = i128::MAX / 2;
+        let rate = i128::MAX / 2;
+        let a = calculate_accrued_amount(0, 0, 1, rate, deposit, 1);
+        let b = calculate_accrued_amount(0, 0, 1, rate, deposit, 1);
+        assert_eq!(a, b);
     }
 }

@@ -196,6 +196,10 @@ data:   StreamEndShortened {
         }
 ```
 
+Emission guarantees:
+- Emitted exactly once on successful `shorten_stream_end_time`.
+- Not emitted on failed shorten calls (`InvalidParams`, `InvalidState`, auth failure).
+
 ### 7) StreamEndExtended
 
 ```
@@ -208,6 +212,10 @@ data:   StreamEndExtended {
 ```
 
 ### 8) StreamToppedUp
+
+This event is emitted only after the top-up has succeeded. Validation failures,
+authorization failures, arithmetic overflow, or failed token pulls emit no
+`top_up` contract event.
 
 ```
 topics: ["top_up", <stream_id: u64>]
