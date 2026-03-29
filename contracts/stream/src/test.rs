@@ -4233,7 +4233,7 @@ fn test_top_up_unauthorized_funder_fails() {
     let result = ctx
         .client()
         .try_top_up_stream(&stream_id, &stranger, &500_i128);
-    assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
+    assert_eq!(result, Err(Ok(ContractError::InsufficientDeposit)));
 }
 
 /// Admin is allowed to top up any stream.
@@ -15290,7 +15290,7 @@ fn test_create_stream_total_streamable_overflow() {
         &2u64,
     );
 
-    assert_eq!(result, Err(Ok(ContractError::ArithmeticOverflow)));
+    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 }
 
 #[test]

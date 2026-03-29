@@ -983,6 +983,11 @@ impl FluxoraStream {
         streams: soroban_sdk::Vec<CreateStreamParams>,
     ) -> Result<soroban_sdk::Vec<u64>, ContractError> {
         sender.require_auth();
+
+        if streams.is_empty() {
+            return Ok(soroban_sdk::Vec::new(&env));
+        }
+
         if is_global_emergency_paused(&env) || is_creation_paused(&env) {
             return Err(ContractError::ContractPaused);
         }
