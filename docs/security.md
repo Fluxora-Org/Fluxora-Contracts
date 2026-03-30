@@ -228,6 +228,62 @@ These non-goals are intentional design choices that:
 
 ---
 
+## Ledger Timestamp Assumptions (#313)
+
+All time comparisons in the contract use `env.ledger().timestamp()`, which returns the
+UNIX timestamp of the **current ledger close time** as a `u64`. The following invariants
+are enforced and verified by boundary tests in `integration_suite.rs`.
+
+### Cliff boundary
+
+| Ledger time | `calculate_accrued` result | `withdraw` result |
+|---|---|---|
+| `< cliff_time` | `0` | `0` (no transfer, no state change) |
+| `== cliff_time` | `(cliff_time − start_time) × rate_per_second` | full accrued amount |
+| `> cliff_time` | linear accrual from `start_time` | withdrawable amount |
+
+The cliff check is a **strict less-than** (`current_time < cliff_time`). At exactly
+`T = cliff_time` the cliff is considered passed and accrual is computed from `start_time`.
+
+### end_time boundary
+
+| Ledger time | `calculate_accrued` result |
+|---|---|
+| `< end_time` | `(current_time − start_time) × rate_per_second` |
+| `== end_time` | `deposit_amount` (capped) |
+| `> end_time` | `deposit_amount` (capped; no extra accrual) |
+
+Accrual uses `min(current_time, end_time)` before computing elapsed seconds, so the
+result is deterministically capped at `deposit_amount` for all `T ≥ end_time`.
+
+### Cancellation freeze
+
+When `cancel_stream` or `cancel_stream_as_admin` executes, `cancelled_at` is set to
+`env.ledger().timestamp()` at that instant. All subsequent calls to `calculate_accrued`
+on a cancelled stream use `cancelled_at` as the effective `current_time`, freezing
+accrual permanently. Advancing the ledger after cancellation does not increase the
+withdrawable amount.
+
+### start_time validation
+
+`create_stream` and `create_streams` reject any `start_time < env.ledger().timestamp()`
+with `ContractError::StartTimeInPast`. A `start_time` equal to the current ledger
+timestamp is accepted (not considered "in the past").
+
+### shorten_stream_end_time boundary
+
+`new_end_time` must satisfy `new_end_time > env.ledger().timestamp()` (strictly future).
+Equality with the current timestamp is rejected with `ContractError::InvalidParams`.
+
+### Test coverage
+
+All boundaries above are exercised by the `#[test]` functions in
+`contracts/stream/tests/integration_suite.rs` under the `// Time-assumption boundary
+tests (#313)` section. Each test uses `env.ledger().with_mut(|l| l.timestamp = ...)` to
+set the ledger time precisely and asserts both the T−1 and T+1 cases around each gate.
+
+---
+
 ## Reproducible WASM builds
 
 The CI pipeline verifies that the WASM artifact produced by `cargo build --release --target wasm32-unknown-unknown` matches a committed reference checksum in `wasm/checksums.sha256`. This ensures that:
