@@ -3194,6 +3194,10 @@ fn test_recipient_index_stress_and_cleanup_lifecycle() {
     let ctx = TestContext::setup();
     let recipient = Address::generate(&ctx.env);
 
+    // Mint tokens for 100 streams (100 * 1000 = 100,000)
+    let sac = StellarAssetClient::new(&ctx.env, &ctx.token_id);
+    sac.mint(&ctx.sender, &1_000_000_i128);
+
     // 1. Create 100 streams for the recipient (batch creation)
     let batch_size = 50;
     for _ in 0..2 {
