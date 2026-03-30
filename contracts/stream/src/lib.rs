@@ -220,6 +220,12 @@ pub struct GlobalEmergencyPauseChanged {
     pub paused: bool,
 }
 
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct GlobalResumed {
+    pub resumed_at: u64,
+}
+
 /// Emitted when the contract admin toggles the creation-pause flag via `set_contract_paused`.
 ///
 /// When `paused == true`, `create_stream` and `create_streams` revert with
@@ -292,7 +298,7 @@ pub struct CreateStreamParams {
 /// | 1 | `NextStreamId` | Instance | Monotonically increasing `u64` counter |
 /// | 2 | `Stream(u64)` | Persistent | One entry per stream |
 /// | 3 | `RecipientStreams(Address)` | Persistent | Sorted `Vec<u64>` of stream IDs |
-/// | 4 | `GlobalPaused` | Instance | `bool`; appended to avoid shifting earlier discriminants |
+/// | 4 | `GlobalEmergencyPaused` | Instance | `bool`; appended to avoid shifting earlier discriminants |
 #[contracttype]
 pub enum DataKey {
     Config,                    // Instance storage for global settings (admin/token).
@@ -336,7 +342,7 @@ fn is_global_emergency_paused(env: &Env) -> bool {
     bump_instance_ttl(env);
     env.storage()
         .instance()
-        .get(&DataKey::GlobalPaused)
+        .get(&DataKey::GlobalEmergencyPaused)
         .unwrap_or(false)
 }
 
@@ -2601,7 +2607,7 @@ impl FluxoraStream {
 
         env.storage()
             .instance()
-            .set(&DataKey::GlobalPaused, &paused);
+            .set(&DataKey::GlobalEmergencyPaused, &paused);
         bump_instance_ttl(&env);
 
         env.events().publish(

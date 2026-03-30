@@ -12,6 +12,8 @@ use crate::{
     GlobalEmergencyPauseChanged, StreamCreated, StreamEvent, StreamStatus, WithdrawalTo,
 };
 
+use crate::{GlobalResumed, StreamToppedUp, StreamEndShortened};
+
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
