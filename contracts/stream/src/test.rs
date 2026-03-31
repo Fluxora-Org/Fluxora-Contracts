@@ -13,6 +13,8 @@ use crate::{
     StreamToppedUp, WithdrawalTo,
 };
 
+use crate::{GlobalResumed, StreamToppedUp, StreamEndShortened};
+
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
