@@ -1,7 +1,7 @@
 /// Computes accrued stream amount without relying on Soroban environment state.
 ///
 /// This helper is intentionally pure to make the core vesting math easy to unit test.
-///
+///    
 /// Rules:
 /// - Returns `0` before `cliff_time`.
 /// - Returns `0` for invalid schedules (`start_time >= end_time`) or negative rates.
