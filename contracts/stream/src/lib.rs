@@ -2552,8 +2552,9 @@ impl FluxoraStream {
     ///
     /// # Events
     /// - Publishes topic `gl_pause` with [`GlobalEmergencyPauseChanged`] data.
-    pub fn set_global_emergency_paused(env: Env, paused: bool) -> Result<(), ContractError> {
-        get_admin(&env)?.require_auth();
+    pub fn set_global_emergency_paused(env: Env, paused: bool) {
+        let admin = get_admin(&env).unwrap();
+        admin.require_auth();
 
         env.storage()
             .instance()
