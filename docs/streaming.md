@@ -382,6 +382,36 @@ On failure (`InvalidParams` or `InvalidState`):
 
 Treasury policy note: if an application wants to restrict who may fund streams, that policy must be enforced off-chain or in a wrapper contract. The base stream contract intentionally accepts any self-authorizing funder.
 
+### update_rate_per_second: Observable Semantics
+
+`update_rate_per_second(stream_id, new_rate_per_second)` allows the stream sender to increase the streaming rate for an existing stream.
+
+#### Success Semantics (Observable)
+
+- **Authorization**: Only the stream `sender` can authorize the call.
+- **State Requirements**: Stream must be in `Active` or `Paused` status (not `Completed` or `Cancelled`).
+- **Rate Validation**: `new_rate_per_second > 0` and `new_rate_per_second > current rate_per_second` (forward-only increases).
+- **Deposit Coverage**: `deposit_amount >= new_rate_per_second * (end_time - start_time)` must hold.
+- **Accrual Impact**: The accrual calculation uses the new rate retroactively for the entire elapsed time since `start_time`, ensuring accrued amounts are monotonically non-decreasing.
+- **Partial Withdrawal Interaction**: `withdrawn_amount` remains unchanged. Withdrawable amount becomes `accrued (with new rate) - withdrawn_amount`.
+- **Event**: Emits `("rate_upd", stream_id)` with `RateUpdated` payload including old/new rates and `effective_time`.
+- **No State Changes**: `status`, `deposit_amount`, `withdrawn_amount`, schedule fields (`start_time`, `cliff_time`, `end_time`) are preserved.
+
+#### Failure Semantics (Observable)
+
+- **StreamNotFound**: Invalid `stream_id`.
+- **Unauthorized**: Caller is not the stream sender.
+- **InvalidState**: Stream is `Completed` or `Cancelled`.
+- **InvalidParams**: `new_rate_per_second <= 0` or `new_rate_per_second <= old_rate`.
+- **InsufficientDeposit**: `deposit_amount < new_rate_per_second * (end_time - start_time)`.
+- **Atomicity**: Any failure reverts the entire transaction with no state changes or events.
+
+#### Invariants
+
+- Accrued amounts never decrease due to rate updates.
+- Recipient entitlement is preserved or increased.
+- Deposit coverage ensures the stream remains fully fundable at the new rate.
+
 ### batch_withdraw: completed stream behavior
 
 `batch_withdraw` processes each stream ID in order. A stream with status `Completed` **does not panic** — it contributes a zero-amount result (`BatchWithdrawResult { stream_id, amount: 0 }`) and is skipped silently. No token transfer and no event are emitted for that entry. This allows callers to pass a mixed list of active and already-completed streams without pre-filtering.
@@ -528,6 +558,19 @@ Emitted when a recipient successfully withdraws tokens via `withdraw`.
 - `recipient` (Address): Address that received the tokens
 - `amount` (i128): Amount of tokens withdrawn
 
+#### RateUpdated
+
+Emitted when a sender successfully updates the streaming rate via `update_rate_per_second`.
+
+**Topic:** `("rate_upd", stream_id)`
+
+**Payload:** `RateUpdated` struct containing:
+
+- `stream_id` (u64): Unique identifier of the stream
+- `old_rate_per_second` (i128): The previous streaming rate
+- `new_rate_per_second` (i128): The new streaming rate
+- `effective_time` (u64): Ledger timestamp when the rate update became effective
+
 #### Other Events
 
 | Topic                      | Payload                                       | When Emitted                                       |
@@ -538,6 +581,7 @@ Emitted when a recipient successfully withdraws tokens via `withdraw`.
 | `("cancelled", stream_id)` | `StreamEvent::StreamCancelled(stream_id)`     | `cancel_stream` / `cancel_stream_as_admin`         |
 | `("withdrew", stream_id)`  | `Withdrawal { stream_id, recipient, amount }` | `withdraw`                                         |
 | `("completed", stream_id)` | `StreamEvent::StreamCompleted(stream_id)`     | `withdraw` / `batch_withdraw` (active final drain) |
+| `("rate_upd", stream_id)` | `RateUpdated` (struct payload)                | `update_rate_per_second`                          |
 | `("closed", stream_id)`    | `StreamEvent::StreamClosed(stream_id)`        | `close_completed_stream`                           |
 | `("top_up", stream_id)`    | `StreamToppedUp` (struct payload)             | `top_up_stream`                                    |
 

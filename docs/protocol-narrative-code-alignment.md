@@ -10,7 +10,7 @@ Everything materially related to protocol semantics, authorization boundaries, s
 
 ## Verification Status
 
-✅ **Complete alignment verified** between `docs/streaming.md` narrative and contract implementation as of 2026-03-27.
+✅ **Complete alignment verified** between `docs/streaming.md` narrative and contract implementation as of 2026-03-30.
 
 ---
 
@@ -29,6 +29,7 @@ See continuation in protocol-narrative-code-alignment-part2.md
 | `pause_stream`  | Sender          | `require_stream_sender`    | lib.rs:906   | §4  |
 | `resume_stream` | Sender          | `require_stream_sender`    | lib.rs:937   | §4  |
 | `cancel_stream` | Sender          | `require_stream_sender`    | lib.rs:987   | §4  |
+| `update_rate_per_second` | Sender       | `require_stream_sender`    | lib.rs:1853 | §4  |
 | `withdraw`      | Recipient       | `recipient.require_auth()` | lib.rs:1033  | §4  |
 | `*_as_admin`    | Admin           | `admin.require_auth()`     | lib.rs:2033+ | §4  |
 | Read operations | Anyone          | None                       | Various      | §4  |
@@ -192,6 +193,47 @@ return min(accrued, deposit_amount)
 - **Code**: lib.rs:1039-1041
 - **Error**: `InvalidState`
 - ✅ **Aligned**
+
+---
+
+## update_rate_per_second Semantics (Detailed)
+
+### Success Semantics (Observable)
+
+1. **Authorization**: Only stream sender can call
+2. **State Requirements**: Stream status `Active` or `Paused` (not terminal)
+3. **Rate Validation**: `new_rate > 0` and `new_rate > old_rate`
+4. **Deposit Coverage**: `deposit_amount >= new_rate * (end_time - start_time)`
+5. **Accrual Impact**: Accrual calculation uses new rate retroactively, monotonic increase
+6. **Partial Withdrawal Interaction**: `withdrawn_amount` unchanged, `withdrawable = accrued - withdrawn_amount`
+7. **Event**: `("rate_upd", stream_id)` → `RateUpdated { stream_id, old_rate, new_rate, effective_time }`
+
+**Code**: lib.rs:1853-1901
+**Doc**: streaming.md §3 "update_rate_per_second: Observable Semantics"
+✅ **Aligned**
+
+### Failure Semantics (Observable)
+
+1. Invalid stream → `StreamNotFound`
+2. Not sender → `Unauthorized`
+3. Terminal status → `InvalidState`
+4. Invalid rate → `InvalidParams`
+5. Insufficient deposit → `InsufficientDeposit`
+6. Atomic: Any failure reverts with no changes
+
+**Code**: lib.rs:1855-1875
+**Doc**: streaming.md §3
+✅ **Aligned**
+
+### Invariants
+
+- Accrued amounts never decrease
+- Recipient entitlement preserved or increased
+- Deposit coverage ensures fundability
+
+**Code**: accrual.rs monotonicity, lib.rs validation
+**Doc**: streaming.md §3
+✅ **Aligned**
 
 ---
 

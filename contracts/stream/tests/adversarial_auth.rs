@@ -663,7 +663,7 @@ fn adversarial_batch_withdraw_stranger_rejected_no_side_effects() {
         invoke: &MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "batch_withdraw",
-            args: (stranger.clone(), ids.clone()).into_val(&ctx.env),
+            args: (&stranger, ids.clone()).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
@@ -698,7 +698,8 @@ fn adversarial_batch_withdraw_sender_rejected() {
         invoke: &MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "batch_withdraw",
-            args: (ctx.sender.clone(), ids.clone()).into_val(&ctx.env),
+            fn_name: "batch_withdraw",
+            args: (&ctx.sender, ids.clone()).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
@@ -763,7 +764,8 @@ fn adversarial_batch_withdraw_cross_stream_recipient_rejected() {
         invoke: &MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "batch_withdraw",
-            args: (ctx.recipient.clone(), ids.clone()).into_val(&ctx.env),
+            fn_name: "batch_withdraw",
+            args: (&ctx.recipient, ids.clone()).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
@@ -1322,5 +1324,126 @@ fn adversarial_extend_end_time_stranger_rejected_no_side_effects() {
     assert_eq!(
         ctx.client().get_stream_state(&stream_id).end_time,
         state_before.end_time
+    );
+}
+
+/// The recipient cannot shorten their incoming stream's end time.
+#[test]
+fn adversarial_shorten_end_time_recipient_rejected() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream(); // end_time = 1000
+
+    ctx.env.ledger().set_timestamp(100);
+    let state_before = ctx.client().get_stream_state(&stream_id);
+
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.recipient,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "shorten_stream_end_time",
+            args: (stream_id, &500u64).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().shorten_stream_end_time(&stream_id, &500u64);
+    }));
+
+    assert!(result.is_err(), "recipient must not shorten end time");
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).end_time,
+        state_before.end_time
+    );
+}
+
+/// The recipient cannot extend their incoming stream's end time.
+#[test]
+fn adversarial_extend_end_time_recipient_rejected() {
+    let ctx = Ctx::setup();
+    // deposit=2000 so extension to 2000 is valid if authorized
+    ctx.env.ledger().set_timestamp(0);
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "create_stream",
+            args: (
+                &ctx.sender,
+                &ctx.recipient,
+                &2000_i128,
+                &1_i128,
+                &0u64,
+                &0u64,
+                &1000u64,
+            )
+                .into_val(&ctx.env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &ctx.token_id,
+                fn_name: "transfer",
+                args: (&ctx.sender, &ctx.contract_id, 2000_i128).into_val(&ctx.env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    let state_before = ctx.client().get_stream_state(&stream_id);
+
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.recipient,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "extend_stream_end_time",
+            args: (stream_id, 2000u64).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().extend_stream_end_time(&stream_id, &2000u64);
+    }));
+
+    assert!(result.is_err(), "recipient must not extend end time");
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).end_time,
+        state_before.end_time
+    );
+}
+
+/// The admin cannot update rate via the sender-only path.
+#[test]
+fn adversarial_update_rate_admin_rejected() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream();
+
+    let state_before = ctx.client().get_stream_state(&stream_id);
+
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.admin,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "update_rate_per_second",
+            args: (stream_id, &2_i128).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().update_rate_per_second(&stream_id, &2_i128);
+    }));
+
+    assert!(result.is_err(), "admin must not update rate via sender path");
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).rate_per_second,
+        state_before.rate_per_second
     );
 }

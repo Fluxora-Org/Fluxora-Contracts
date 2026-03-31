@@ -600,8 +600,8 @@ fn top_up_stream_allows_third_party_funder_and_emits_payload() {
     let payload = StreamToppedUp::try_from_val(&ctx.env, &top_up_event.2)
         .expect("top_up event payload must decode");
     assert_eq!(payload.stream_id, stream_id);
-    assert_eq!(payload.top_up_amount, 800);
-    assert_eq!(payload.new_deposit_amount, 1_800);
+    assert_eq!(payload.added_amount, 800);
+    assert_eq!(payload.new_total, 1_800);
 }
 
 #[test]
@@ -3248,4 +3248,229 @@ fn test_recipient_index_stress_and_cleanup_lifecycle() {
 
     // Verify no ID drift: the first remaining ID should be ID 50
     assert_eq!(final_index.get(0).unwrap(), 50);
+}
+
+// ---------------------------------------------------------------------------
+// Time-assumption boundary tests (#313)
+//
+// Each test probes a single timestamp boundary (T−1 / T / T+1) to ensure
+// deterministic, crisp pass/fail semantics at every time gate in the contract.
+// Ledger time is manipulated via `env.ledger().with_mut(|l| l.timestamp = ...)`.
+// ---------------------------------------------------------------------------
+
+// ── Cliff boundary ──────────────────────────────────────────────────────────
+
+/// T = cliff_time − 1: accrual must be zero; withdraw returns 0 with no transfer.
+#[test]
+fn cliff_boundary_t_minus_1_no_accrual() {
+    let ctx = TestContext::setup();
+    // stream: start=0, cliff=500, end=1000, rate=1, deposit=1000
+    let stream_id = ctx.create_stream_with_cliff(500);
+
+    ctx.env.ledger().with_mut(|l| l.timestamp = 499);
+    let amount = ctx.client().withdraw(&stream_id);
+    assert_eq!(amount, 0, "T-1 before cliff must yield zero withdrawal");
+
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued, 0, "T-1 before cliff must yield zero accrual");
+}
+
+/// T = cliff_time exactly: accrual unlocks; withdraw returns elapsed * rate.
+#[test]
+fn cliff_boundary_t_exact_accrual_unlocks() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_stream_with_cliff(500);
+
+    ctx.env.ledger().with_mut(|l| l.timestamp = 500);
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    // elapsed = 500 − 0 = 500 seconds × 1 token/s = 500
+    assert_eq!(accrued, 500, "T=cliff must unlock accrual from start_time");
+
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn, 500, "T=cliff must allow full accrued withdrawal");
+}
+
+/// T = cliff_time + 1: accrual continues normally one second past cliff.
+#[test]
+fn cliff_boundary_t_plus_1_accrual_continues() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_stream_with_cliff(500);
+
+    ctx.env.ledger().with_mut(|l| l.timestamp = 501);
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued, 501, "T+1 past cliff must accrue one extra second");
+}
+
+// ── end_time boundary ───────────────────────────────────────────────────────
+
+/// T = end_time − 1: accrual is one second short of deposit_amount.
+#[test]
+fn end_time_boundary_t_minus_1_partial_accrual() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream(); // end=1000, rate=1, deposit=1000
+
+    ctx.env.ledger().with_mut(|l| l.timestamp = 999);
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued, 999, "T-1 before end must accrue 999 tokens");
+}
+
+/// T = end_time exactly: accrual is capped at deposit_amount.
+#[test]
+fn end_time_boundary_t_exact_accrual_capped() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().with_mut(|l| l.timestamp = 1000);
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued, 1000, "T=end_time must cap accrual at deposit_amount");
+}
+
+/// T = end_time + 1: accrual remains capped; no extra tokens beyond deposit.
+#[test]
+fn end_time_boundary_t_plus_1_no_extra_accrual() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().with_mut(|l| l.timestamp = 1001);
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(
+        accrued, 1000,
+        "T+1 past end_time must not accrue beyond deposit_amount"
+    );
+}
+
+// ── cancel freeze boundary ───────────────────────────────────────────────────
+
+/// Cancelling at T=cliff−1 freezes accrual at 0; full deposit refunded to sender.
+#[test]
+fn cancel_freeze_before_cliff_full_refund() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_stream_with_cliff(500);
+
+    ctx.env.ledger().with_mut(|l| l.timestamp = 499);
+    ctx.client().cancel_stream(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+    assert_eq!(state.cancelled_at, Some(499));
+
+    // Accrual frozen at 0 → recipient gets nothing, sender gets full refund.
+    ctx.env.ledger().with_mut(|l| l.timestamp = 9999);
+    let withdrawable = ctx.client().get_withdrawable(&stream_id);
+    assert_eq!(withdrawable, 0, "Frozen accrual before cliff must be 0");
+}
+
+/// Cancelling at T=cliff exactly freezes accrual at cliff-elapsed amount.
+#[test]
+fn cancel_freeze_at_cliff_exact() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_stream_with_cliff(500);
+
+    ctx.env.ledger().with_mut(|l| l.timestamp = 500);
+    ctx.client().cancel_stream(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.cancelled_at, Some(500));
+
+    // Frozen accrual = 500 (elapsed from start=0 to cliff=500 at rate=1).
+    let withdrawable = ctx.client().get_withdrawable(&stream_id);
+    assert_eq!(withdrawable, 500, "Frozen accrual at cliff must equal 500");
+}
+
+/// After cancellation, accrual does not grow even as ledger time advances.
+#[test]
+fn cancel_freeze_accrual_does_not_grow_after_cancel() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream(); // no cliff, end=1000
+
+    ctx.env.ledger().with_mut(|l| l.timestamp = 300);
+    ctx.client().cancel_stream(&stream_id);
+
+    // Advance time well past end_time.
+    ctx.env.ledger().with_mut(|l| l.timestamp = 5000);
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(
+        accrued, 300,
+        "Accrual must remain frozen at cancelled_at value"
+    );
+}
+
+// ── start_time validation boundary ──────────────────────────────────────────
+
+/// Creating a stream with start_time == ledger.timestamp() must succeed.
+#[test]
+fn create_stream_start_time_equals_now_succeeds() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().with_mut(|l| l.timestamp = 100);
+
+    // start_time == now (100), cliff == start, end = 1100
+    let result = ctx.client().try_create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &100u64,
+        &100u64,
+        &1100u64,
+    );
+    assert!(
+        result.is_ok(),
+        "start_time == now must be accepted (not in the past)"
+    );
+}
+
+/// Creating a stream with start_time == ledger.timestamp() − 1 must fail.
+#[test]
+fn create_stream_start_time_one_second_in_past_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().with_mut(|l| l.timestamp = 100);
+
+    let result = ctx.client().try_create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &99u64,  // start_time = now − 1
+        &99u64,
+        &1099u64,
+    );
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::StartTimeInPast)),
+        "start_time < now must be rejected with StartTimeInPast"
+    );
+}
+
+// ── shorten_stream_end_time boundary ────────────────────────────────────────
+
+/// new_end_time == now must be rejected (must be strictly future).
+#[test]
+fn shorten_end_time_equal_to_now_rejected() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream(); // end=1000
+
+    ctx.env.ledger().with_mut(|l| l.timestamp = 500);
+    let result = ctx
+        .client()
+        .try_shorten_stream_end_time(&stream_id, &500u64);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InvalidParams)),
+        "new_end_time == now must be rejected"
+    );
+}
+
+/// new_end_time == now + 1 must succeed (strictly future).
+#[test]
+fn shorten_end_time_one_second_future_accepted() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream(); // end=1000, rate=1, deposit=1000
+
+    ctx.env.ledger().with_mut(|l| l.timestamp = 500);
+    // new_end_time=501 is strictly future and strictly less than old end=1000
+    // new deposit = 501 * 1 = 501 ≤ 1000 ✓
+    let result = ctx
+        .client()
+        .try_shorten_stream_end_time(&stream_id, &501u64);
+    assert!(result.is_ok(), "new_end_time = now+1 must be accepted");
 }

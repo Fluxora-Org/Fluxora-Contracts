@@ -228,6 +228,62 @@ These non-goals are intentional design choices that:
 
 ---
 
+## Ledger Timestamp Assumptions (#313)
+
+All time comparisons in the contract use `env.ledger().timestamp()`, which returns the
+UNIX timestamp of the **current ledger close time** as a `u64`. The following invariants
+are enforced and verified by boundary tests in `integration_suite.rs`.
+
+### Cliff boundary
+
+| Ledger time | `calculate_accrued` result | `withdraw` result |
+|---|---|---|
+| `< cliff_time` | `0` | `0` (no transfer, no state change) |
+| `== cliff_time` | `(cliff_time − start_time) × rate_per_second` | full accrued amount |
+| `> cliff_time` | linear accrual from `start_time` | withdrawable amount |
+
+The cliff check is a **strict less-than** (`current_time < cliff_time`). At exactly
+`T = cliff_time` the cliff is considered passed and accrual is computed from `start_time`.
+
+### end_time boundary
+
+| Ledger time | `calculate_accrued` result |
+|---|---|
+| `< end_time` | `(current_time − start_time) × rate_per_second` |
+| `== end_time` | `deposit_amount` (capped) |
+| `> end_time` | `deposit_amount` (capped; no extra accrual) |
+
+Accrual uses `min(current_time, end_time)` before computing elapsed seconds, so the
+result is deterministically capped at `deposit_amount` for all `T ≥ end_time`.
+
+### Cancellation freeze
+
+When `cancel_stream` or `cancel_stream_as_admin` executes, `cancelled_at` is set to
+`env.ledger().timestamp()` at that instant. All subsequent calls to `calculate_accrued`
+on a cancelled stream use `cancelled_at` as the effective `current_time`, freezing
+accrual permanently. Advancing the ledger after cancellation does not increase the
+withdrawable amount.
+
+### start_time validation
+
+`create_stream` and `create_streams` reject any `start_time < env.ledger().timestamp()`
+with `ContractError::StartTimeInPast`. A `start_time` equal to the current ledger
+timestamp is accepted (not considered "in the past").
+
+### shorten_stream_end_time boundary
+
+`new_end_time` must satisfy `new_end_time > env.ledger().timestamp()` (strictly future).
+Equality with the current timestamp is rejected with `ContractError::InvalidParams`.
+
+### Test coverage
+
+All boundaries above are exercised by the `#[test]` functions in
+`contracts/stream/tests/integration_suite.rs` under the `// Time-assumption boundary
+tests (#313)` section. Each test uses `env.ledger().with_mut(|l| l.timestamp = ...)` to
+set the ledger time precisely and asserts both the T−1 and T+1 cases around each gate.
+
+---
+
 ## Reproducible WASM builds
 
 The CI pipeline verifies that the WASM artifact produced by `cargo build --release --target wasm32-unknown-unknown` matches a committed reference checksum in `wasm/checksums.sha256`. This ensures that:
@@ -268,3 +324,50 @@ git commit -m "chore: update wasm checksums"
 - **Optimized WASM**: The Stellar CLI `optimize` step may produce non-deterministic output. The reference checksum covers only the raw (unoptimized) WASM.
 - **Cross-host builds**: The pinned `wasm32-unknown-unknown` target is deterministic across hosts, but minor differences in host libc or linker could theoretically affect non-WASM builds.
 - **Dependency supply chain**: A compromised transitive dependency could alter WASM output. The `Cargo.lock` pin and checksum verification detect this at CI time.
+
+
+## Accrual Fuzz Harness (#292)
+
+Property-based tests for `calculate_accrued_amount` live in the `accrual_fuzz` module
+inside `contracts/stream/src/accrual.rs`. They use the `proptest` crate to generate
+arbitrary inputs and verify six mathematical invariants on every run.
+
+### Fuzzing strategy
+
+The harness generates random `(start_time, cliff_time, end_time, rate_per_second,
+deposit_amount, current_time)` tuples via `proptest` strategies and asserts:
+
+| # | Property | Assertion |
+|---|---|---|
+| 1 | **Boundedness** | `0 <= accrued <= deposit_amount` for all inputs |
+| 2 | **Zero before cliff** | `accrued == 0` when `current_time < cliff_time` |
+| 3 | **Monotonicity** | `accrued(t) <= accrued(t+1)` for all `t` |
+| 4 | **Saturation** | `accrued == deposit` for all `t >= end_time` when `rate*(end-start) >= deposit` |
+| 5 | **Determinism** | Same inputs always produce the same output |
+| 6 | **Overflow safety** | No panic on any `i128`/`u64` combination, including `i128::MAX` rate and `u64::MAX` time |
+
+### Edge cases targeted
+
+- `rate_per_second = i128::MAX` with `elapsed_seconds = 2` → `checked_mul` overflows → returns `deposit_amount` (safe fallback)
+- `current_time = u64::MAX` with any schedule → capped at `end_time` via `min(current_time, end_time)`
+- `cliff_time > end_time` (degenerate schedule) → `current_time < cliff_time` always true → returns 0
+- `deposit_amount = 0` → result is always 0 (bounded by deposit)
+- `rate_per_second < 0` → returns 0 (negative rate guard)
+
+### Running the harness
+
+```bash
+cargo test -p fluxora_stream accrual_fuzz
+```
+
+`proptest` runs 256 cases per property by default. To increase coverage:
+
+```bash
+PROPTEST_CASES=10000 cargo test -p fluxora_stream accrual_fuzz
+```
+
+### Found/fixed edge cases
+
+No new bugs were found during initial harness development. The existing overflow
+fallback (`None => deposit_amount` in `checked_mul`) was confirmed correct by
+`prop_no_panic_on_extreme_inputs` and `prop_bounded_by_deposit`.

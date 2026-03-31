@@ -219,3 +219,5 @@ Each is a separate Git repository.
 ## Contributing
 
 Please read [CONTRIBUTING.md](CONTRIBUTING.md) for details on the development workflow, branch naming, and testing requirements (including the 95% test coverage standard).
+
+See [CHANGELOG.md](./CHANGELOG.md) for a full history of changes between contract versions.
