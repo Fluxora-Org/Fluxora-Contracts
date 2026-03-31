@@ -450,21 +450,10 @@ mod property_monotonicity {
         for i in 0..arr.len() {
             for j in 0..arr.len() - i - 1 {
                 if arr[j] > arr[j + 1] {
-                    let temp = arr[j];
-                    arr[j] = arr[j + 1];
-                    arr[j + 1] = temp;
-                }
-            }
-        }
-    }
-
-    fn sort_array(arr: &mut [u64]) {
-        for i in 0..arr.len() {
-            for j in 0..arr.len() - i - 1 {
-                if arr[j] > arr[j + 1] {
-                    let temp = arr[j];
-                    arr[j] = arr[j + 1];
-                    arr[j + 1] = temp;
+                    // let temp = arr[j];
+                    // arr[j] = arr[j + 1];
+                    // arr[j + 1] = temp;
+                    arr.swap(j, j + 1);
                 }
             }
         }
@@ -724,7 +713,7 @@ mod i128_boundary {
         // rate = i128::MAX/2 + 1, elapsed = 2 → product = i128::MAX + 2 → overflow
         let rate = i128::MAX / 2 + 1;
         let deposit = i128::MAX / 4; // deposit < rate*2, so overflow path is hit
-        // start=0, cliff=0, end=10, current=2 → elapsed=2
+                                     // start=0, cliff=0, end=10, current=2 → elapsed=2
         let accrued = calculate_accrued_amount(0, 0, 10, rate, deposit, 2);
         // overflow → returns deposit_amount, then clamped to deposit
         assert_eq!(accrued, deposit, "overflow must return deposit_amount");
@@ -797,7 +786,10 @@ mod i128_boundary {
         for &t in &times {
             let accrued = calculate_accrued_amount(0, 500, 1_000, rate, deposit, t);
             assert!(accrued >= 0, "negative accrual at t={t}: {accrued}");
-            assert!(accrued <= deposit, "accrual exceeds deposit at t={t}: {accrued}");
+            assert!(
+                accrued <= deposit,
+                "accrual exceeds deposit at t={t}: {accrued}"
+            );
         }
     }
 
@@ -814,7 +806,10 @@ mod i128_boundary {
         let deposit = total_streamable + 999_999; // excess deposit
 
         let accrued = calculate_accrued_amount(0, 0, duration, rate, deposit, duration);
-        assert_eq!(accrued, total_streamable, "must cap at rate*duration, not deposit");
+        assert_eq!(
+            accrued, total_streamable,
+            "must cap at rate*duration, not deposit"
+        );
     }
 
     // -----------------------------------------------------------------------

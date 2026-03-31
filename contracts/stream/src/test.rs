@@ -9,7 +9,8 @@ use soroban_sdk::{
 
 use crate::{
     ContractError, ContractPauseChanged, CreateStreamParams, FluxoraStream, FluxoraStreamClient,
-    GlobalEmergencyPauseChanged, StreamCreated, StreamEvent, StreamStatus, WithdrawalTo,
+    GlobalEmergencyPauseChanged, StreamCreated, StreamEndShortened, StreamEvent, StreamStatus,
+    StreamToppedUp, WithdrawalTo,
 };
 
 // ---------------------------------------------------------------------------
@@ -3895,6 +3896,309 @@ fn test_close_completed_stream_second_close_panics() {
     );
 }
 
+// COMPREHENSIVE EDGE CASE TESTS FOR close_completed_stream
+
+#[test]
+#[should_panic]
+fn test_close_completed_stream_rejects_paused() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Pause the stream
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().pause_stream(&stream_id);
+
+    // Try to close paused stream (should fail with InvalidState)
+    ctx.client().close_completed_stream(&stream_id);
+}
+
+#[test]
+#[should_panic]
+fn test_close_completed_stream_rejects_nonexistent() {
+    let ctx = TestContext::setup();
+
+    // Try to close a stream that doesn't exist (should fail with StreamNotFound)
+    ctx.client().close_completed_stream(&999u64);
+}
+
+#[test]
+fn test_close_completed_stream_emits_correct_event_topic() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    // Clear events before close
+    let _ = ctx.env.events().all();
+
+    ctx.client().close_completed_stream(&stream_id);
+
+    let events = ctx.env.events().all();
+    assert!(!events.is_empty(), "StreamClosed event must be emitted");
+
+    // Verify the event contains the correct stream_id
+    // The event structure is: (symbol_short!("closed"), stream_id) -> StreamEvent::StreamClosed(stream_id)
+    let found = events.iter().any(|e| {
+        let topics = e.1.clone();
+        topics.len() >= 2
+            && topics
+                .get(1)
+                .map(|t: Val| u64::try_from_val(&ctx.env, &t) == Ok(stream_id))
+                .unwrap_or(false)
+    });
+    assert!(
+        found,
+        "event must contain correct stream_id in topic (index 1)"
+    );
+}
+
+#[test]
+fn test_close_completed_stream_multiple_streams_closes_correct_one() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Create three streams for the same recipient
+    let id0 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    let id1 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &2000u64,
+    );
+
+    let id2 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &500_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &500u64,
+    );
+
+    // Complete all three streams
+    ctx.env.ledger().set_timestamp(2000);
+    ctx.client().withdraw(&id0);
+    ctx.client().withdraw(&id1);
+    ctx.client().withdraw(&id2);
+
+    // Verify all are in recipient's index
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 3);
+
+    // Close only the middle stream (id1)
+    ctx.client().close_completed_stream(&id1);
+
+    // Verify only id1 is removed
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 2);
+    assert_eq!(streams.get(0).unwrap(), id0);
+    assert_eq!(streams.get(1).unwrap(), id2);
+
+    // Verify remaining streams are still queryable
+    let state0 = ctx.client().get_stream_state(&id0);
+    assert_eq!(state0.status, StreamStatus::Completed);
+
+    let state2 = ctx.client().get_stream_state(&id2);
+    assert_eq!(state2.status, StreamStatus::Completed);
+
+    // Verify removed stream is not queryable
+    let result = ctx.client().try_get_stream_state(&id1);
+    assert!(result.is_err(), "closed stream must not be queryable");
+}
+
+#[test]
+fn test_close_completed_stream_permissionless_access() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    // Any caller (including non-owner) should be able to close
+    // This test demonstrates permissionless cleanup semantics
+    ctx.client().close_completed_stream(&stream_id);
+
+    let result = ctx.client().try_get_stream_state(&stream_id);
+    assert!(result.is_err(), "stream must be closed");
+}
+
+#[test]
+fn test_close_completed_stream_recipient_index_sorted_after_close() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Create streams: 0, 1, 2, 3, 4
+    for _ in 0..5 {
+        ctx.client().create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &100_i128,
+            &1_i128,
+            &0u64,
+            &0u64,
+            &100u64,
+        );
+    }
+
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 5);
+
+    // Complete and close stream 2 (middle)
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().withdraw(&2u64);
+    ctx.client().close_completed_stream(&2u64);
+
+    // Verify remaining streams are still sorted
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 4);
+    assert_eq!(streams.get(0).unwrap(), 0);
+    assert_eq!(streams.get(1).unwrap(), 1);
+    assert_eq!(streams.get(2).unwrap(), 3);
+    assert_eq!(streams.get(3).unwrap(), 4);
+
+    // Close stream 0 (first)
+    ctx.client().close_completed_stream(&0u64);
+
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 3);
+    assert_eq!(streams.get(0).unwrap(), 1);
+    assert_eq!(streams.get(1).unwrap(), 3);
+    assert_eq!(streams.get(2).unwrap(), 4);
+
+    // Close stream 4 (last)
+    ctx.client().close_completed_stream(&4u64);
+
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 2);
+    assert_eq!(streams.get(0).unwrap(), 1);
+    assert_eq!(streams.get(1).unwrap(), 3);
+}
+
+#[test]
+fn test_close_completed_stream_after_cliff_passed() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Create stream with cliff at t=500
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &500u64, // cliff at 500
+        &1000u64,
+    );
+
+    // Advance past cliff and end time
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    // Verify stream is completed
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+
+    // Close should succeed
+    ctx.client().close_completed_stream(&stream_id);
+
+    let result = ctx.client().try_get_stream_state(&stream_id);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_close_completed_stream_count_decreases() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Create three streams
+    for _ in 0..3 {
+        ctx.client().create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &100_i128,
+            &1_i128,
+            &0u64,
+            &0u64,
+            &100u64,
+        );
+    }
+
+    assert_eq!(ctx.client().get_recipient_stream_count(&ctx.recipient), 3);
+
+    // Complete and close one
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().withdraw(&0u64);
+    ctx.client().close_completed_stream(&0u64);
+
+    assert_eq!(ctx.client().get_recipient_stream_count(&ctx.recipient), 2);
+
+    // Complete and close another
+    ctx.client().withdraw(&1u64);
+    ctx.client().close_completed_stream(&1u64);
+
+    assert_eq!(ctx.client().get_recipient_stream_count(&ctx.recipient), 1);
+}
+
+#[test]
+fn test_close_completed_stream_different_recipients_independent() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let recipient2 = Address::generate(&ctx.env);
+
+    // Create stream for ctx.recipient
+    let id_r1 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &100_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &100u64,
+    );
+
+    // Create stream for recipient2
+    let id_r2 = ctx.client().create_stream(
+        &ctx.sender,
+        &recipient2,
+        &100_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &100u64,
+    );
+
+    assert_eq!(ctx.client().get_recipient_stream_count(&ctx.recipient), 1);
+    assert_eq!(ctx.client().get_recipient_stream_count(&recipient2), 1);
+
+    // Complete and close stream for ctx.recipient
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().withdraw(&id_r1);
+    ctx.client().close_completed_stream(&id_r1);
+
+    // Verify ctx.recipient's index is updated
+    assert_eq!(ctx.client().get_recipient_stream_count(&ctx.recipient), 0);
+
+    // Verify recipient2's index is unchanged
+    assert_eq!(ctx.client().get_recipient_stream_count(&recipient2), 1);
+    let streams = ctx.client().get_recipient_streams(&recipient2);
+    assert_eq!(streams.get(0).unwrap(), id_r2);
+}
+
 // ---------------------------------------------------------------------------
 // Tests — top_up_stream
 // ---------------------------------------------------------------------------
@@ -3969,8 +4273,8 @@ fn test_top_up_stream_sender_auth_success_strict() {
     let payload = StreamToppedUp::try_from_val(&ctx.env, &top_up_event.2)
         .expect("top_up event payload must decode");
     assert_eq!(payload.stream_id, stream_id);
-    assert_eq!(payload.top_up_amount, 400);
-    assert_eq!(payload.new_deposit_amount, 1_400);
+    assert_eq!(payload.added_amount, 400);
+    assert_eq!(payload.new_total, 1_400);
 }
 
 #[test]
@@ -4022,8 +4326,8 @@ fn test_top_up_stream_allows_third_party_funder_and_emits_payload() {
     let payload = StreamToppedUp::try_from_val(&ctx.env, &top_up_event.2)
         .expect("top_up event payload must decode");
     assert_eq!(payload.stream_id, stream_id);
-    assert_eq!(payload.top_up_amount, 750);
-    assert_eq!(payload.new_deposit_amount, 1_750);
+    assert_eq!(payload.added_amount, 750);
+    assert_eq!(payload.new_total, 1_750);
 }
 
 #[test]
@@ -8804,7 +9108,7 @@ fn test_create_streams_batch_empty_when_paused() {
     let streams = Vec::new(&ctx.env);
 
     // Pause contract
-    ctx.client().set_contract_paused(&ctx.admin, &true);
+    ctx.client().set_contract_paused(&true);
 
     // Empty batch should still succeed (no-op)
     let ids = ctx.client().create_streams(&ctx.sender, &streams);
@@ -8818,9 +9122,9 @@ fn test_create_streams_batch_empty_recipient_index_unchanged() {
     let recipient = Address::generate(&ctx.env);
     let streams = Vec::new(&ctx.env);
 
-    let count_before = ctx.client().get_recipient_stream_count(recipient.clone());
+    let count_before = ctx.client().get_recipient_stream_count(&recipient);
     let ids = ctx.client().create_streams(&ctx.sender, &streams);
-    let count_after = ctx.client().get_recipient_stream_count(recipient.clone());
+    let count_after = ctx.client().get_recipient_stream_count(&recipient);
 
     assert_eq!(ids.len(), 0);
     assert_eq!(
@@ -10058,9 +10362,6 @@ fn test_update_rate_per_second_nonexistent_stream() {
 #[test]
 fn test_update_rate_per_second_multiple_times() {
     let ctx = TestContext::setup();
-    // Mint enough for the 100,000 deposit
-    let sac = StellarAssetClient::new(&ctx.env, &ctx.token_id);
-    sac.mint(&ctx.sender, &100_000_i128);
 
     // Create stream with very generous deposit.
     ctx.env.ledger().set_timestamp(0);
@@ -10138,34 +10439,28 @@ fn test_update_rate_per_second_preserves_other_fields() {
 fn test_update_rate_per_second_with_overflow_protection() {
     let ctx = TestContext::setup();
 
-    // Create stream with safe values.
+    // Create stream with max-ish values.
     ctx.env.ledger().set_timestamp(0);
-    let initial_rate = 1_000_i128;
-    let deposit = 10_000_000_i128;
-
-    // Mint enough for the deposit
-    let sac = StellarAssetClient::new(&ctx.env, &ctx.token_id);
-    sac.mint(&ctx.sender, &deposit);
+    let max_rate = i128::MAX / 1000; // Safe rate for 1000 second duration.
+    let deposit = max_rate * 1000;
 
     let stream_id = ctx.client().create_stream(
         &ctx.sender,
         &ctx.recipient,
         &deposit,
-        &initial_rate,
+        &max_rate,
         &0u64,
         &0u64,
         &1_000u64,
     );
 
-    // Attempt to update to a rate that would overflow checks (rate * duration).
-    // duration = 1000. So any rate > i128::MAX / 1000 will overflow duration * rate.
-    let huge_rate = i128::MAX;
+    // Attempt to update to a rate that would overflow.
     let result = ctx
         .client()
-        .try_update_rate_per_second(&stream_id, &huge_rate);
+        .try_update_rate_per_second(&stream_id, &(max_rate + 1));
     assert!(
         result.is_err(),
-        "Should fail due to overflow in duration * rate"
+        "Should fail due to overflow or insufficient deposit"
     );
 }
 
@@ -15050,27 +15345,42 @@ fn test_batch_withdraw_mixed_stream_states_comprehensive() {
 
     // Set up different states
     ctx.env.ledger().set_timestamp(500);
-    
+
     // Pause one stream
     ctx.client().pause_stream(&id_paused);
-    
+
     // Cancel one stream (accrued = 500)
     ctx.client().cancel_stream(&id_cancelled);
-    
+
     // Complete one stream
     ctx.env.ledger().set_timestamp(1000);
     ctx.client().withdraw(&id_completed);
-    
+
     // Verify states
-    assert_eq!(ctx.client().get_stream_state(&id_active).status, StreamStatus::Active);
-    assert_eq!(ctx.client().get_stream_state(&id_paused).status, StreamStatus::Paused);
-    assert_eq!(ctx.client().get_stream_state(&id_cancelled).status, StreamStatus::Cancelled);
-    assert_eq!(ctx.client().get_stream_state(&id_completed).status, StreamStatus::Completed);
-    assert_eq!(ctx.client().get_stream_state(&id_active_2).status, StreamStatus::Active);
+    assert_eq!(
+        ctx.client().get_stream_state(&id_active).status,
+        StreamStatus::Active
+    );
+    assert_eq!(
+        ctx.client().get_stream_state(&id_paused).status,
+        StreamStatus::Paused
+    );
+    assert_eq!(
+        ctx.client().get_stream_state(&id_cancelled).status,
+        StreamStatus::Cancelled
+    );
+    assert_eq!(
+        ctx.client().get_stream_state(&id_completed).status,
+        StreamStatus::Completed
+    );
+    assert_eq!(
+        ctx.client().get_stream_state(&id_active_2).status,
+        StreamStatus::Active
+    );
 
     // Attempt batch withdraw at t=800
     ctx.env.ledger().set_timestamp(800);
-    
+
     let mut stream_ids = Vec::new(&ctx.env);
     stream_ids.push_back(id_active);
     stream_ids.push_back(id_paused);
@@ -15082,8 +15392,11 @@ fn test_batch_withdraw_mixed_stream_states_comprehensive() {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         ctx.client().batch_withdraw(&ctx.recipient, &stream_ids);
     }));
-    
-    assert!(result.is_err(), "batch_withdraw with paused stream should panic");
+
+    assert!(
+        result.is_err(),
+        "batch_withdraw with paused stream should panic"
+    );
 
     // Now try without the paused stream
     let mut valid_stream_ids = Vec::new(&ctx.env);
@@ -15092,29 +15405,31 @@ fn test_batch_withdraw_mixed_stream_states_comprehensive() {
     valid_stream_ids.push_back(id_completed);
     valid_stream_ids.push_back(id_active_2);
 
-    let results = ctx.client().batch_withdraw(&ctx.recipient, &valid_stream_ids);
+    let results = ctx
+        .client()
+        .batch_withdraw(&ctx.recipient, &valid_stream_ids);
 
     // Verify results
     assert_eq!(results.len(), 4);
-    
+
     // Active stream: accrued=800, withdrawn=0 → amount=800
     assert_eq!(results.get(0).unwrap().stream_id, id_active);
     assert_eq!(results.get(0).unwrap().amount, 800);
-    
+
     // Cancelled stream: accrued frozen at 500, withdrawn=0 → amount=500
     assert_eq!(results.get(1).unwrap().stream_id, id_cancelled);
     assert_eq!(results.get(1).unwrap().amount, 500);
-    
+
     // Completed stream: nothing left → amount=0
     assert_eq!(results.get(2).unwrap().stream_id, id_completed);
     assert_eq!(results.get(2).unwrap().amount, 0);
-    
+
     // Active stream 2: accrued=1600 (rate=2), withdrawn=0 → amount=1600
     assert_eq!(results.get(3).unwrap().stream_id, id_active_2);
     assert_eq!(results.get(3).unwrap().amount, 1600);
 
     // Verify total tokens transferred
-    let expected_total = 800 + 500 + 0 + 1600;
+    let expected_total = 800 + 500 + 1600;
     assert_eq!(ctx.token().balance(&ctx.recipient), 1000 + expected_total); // 1000 from id_completed earlier
 }
 
@@ -15224,16 +15539,14 @@ fn test_create_streams_batch_recipient_index_consistency() {
     // Create another batch to verify IDs continue correctly
     let params2 = soroban_sdk::Vec::from_array(
         &ctx.env,
-        [
-            CreateStreamParams {
-                recipient: recipient1.clone(),
-                deposit_amount: 500,
-                rate_per_second: 1,
-                start_time: 0,
-                cliff_time: 0,
-                end_time: 500,
-            },
-        ],
+        [CreateStreamParams {
+            recipient: recipient1.clone(),
+            deposit_amount: 500,
+            rate_per_second: 1,
+            start_time: 0,
+            cliff_time: 0,
+            end_time: 500,
+        }],
     );
 
     let ids2 = ctx.client().create_streams(&ctx.sender, &params2);
@@ -15764,11 +16077,7 @@ fn test_create_streams_batch_deposit_overflow_is_atomic() {
 #[cfg(test)]
 mod i128_boundary_streams {
     use super::*;
-    use soroban_sdk::{
-        testutils::Ledger,
-        token::StellarAssetClient,
-        Address, Env,
-    };
+    use soroban_sdk::{testutils::Ledger, token::StellarAssetClient, Address, Env};
 
     // -----------------------------------------------------------------------
     // Shared helpers
@@ -15781,8 +16090,11 @@ mod i128_boundary_streams {
 
     /// A safe large deposit: rate=1, duration=i128::MAX/2 seconds.
     /// Avoids rate*duration overflow while exercising large deposit values.
-    const LARGE_DEPOSIT_RATE1: i128 = 1_000_000_000_000_000_000_i128; // 10^18
-    const LARGE_DEPOSIT_DURATION: u64 = 1_000_000_000_000_000_000_u64; // 10^18 s
+    // const LARGE_DEPOSIT_RATE1: i128 = 1_000_000_000_000_000_000_i128; // 10^18
+    // const LARGE_DEPOSIT_DURATION: u64 = 1_000_000_000_000_000_000_u64; // 10^18 s
+
+    const _LARGE_DEPOSIT_RATE1: i128 = 1_000_000_000_000_000_000_i128;
+    const _LARGE_DEPOSIT_DURATION: u64 = 1_000_000_000_000_000_000_u64;
 
     fn setup_with_balance(balance: i128) -> (Env, Address, Address, Address, Address, Address) {
         let env = Env::default();
@@ -15840,8 +16152,7 @@ mod i128_boundary_streams {
     fn near_max_deposit_with_cliff_persists_cliff_time() {
         let large_deposit: i128 = i128::MAX / 1_000_000;
         let rate: i128 = large_deposit / 1_000; // duration = 1000s
-        let (env, contract_id, _t, _a, sender, recipient) =
-            setup_with_balance(large_deposit);
+        let (env, contract_id, _t, _a, sender, recipient) = setup_with_balance(large_deposit);
         let client = FluxoraStreamClient::new(&env, &contract_id);
         env.ledger().set_timestamp(0);
 
@@ -15899,24 +16210,21 @@ mod i128_boundary_streams {
         // i128::MAX / 2 * 3 overflows i128
         let rate: i128 = i128::MAX / 2;
         let deposit: i128 = i128::MAX / 2; // not enough to cover overflow
-        let (env, contract_id, _token_id, _admin, sender, recipient) =
-            setup_with_balance(deposit);
+        let (env, contract_id, _token_id, _admin, sender, recipient) = setup_with_balance(deposit);
         let client = FluxoraStreamClient::new(&env, &contract_id);
         env.ledger().set_timestamp(0);
 
         let count_before = client.get_stream_count();
         let result = client.try_create_stream(
-            &sender,
-            &recipient,
-            &deposit,
-            &rate,
-            &0u64,
-            &0u64,
-            &3u64, // rate * 3 overflows
+            &sender, &recipient, &deposit, &rate, &0u64, &0u64, &3u64, // rate * 3 overflows
         );
 
         assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
-        assert_eq!(client.get_stream_count(), count_before, "counter must not advance");
+        assert_eq!(
+            client.get_stream_count(),
+            count_before,
+            "counter must not advance"
+        );
         assert_eq!(
             soroban_sdk::token::Client::new(&env, &_token_id).balance(&contract_id),
             0,
@@ -15932,19 +16240,12 @@ mod i128_boundary_streams {
         let required = rate * duration as i128;
         let deposit = required - 1; // one token short
 
-        let (env, contract_id, token_id, _admin, sender, recipient) =
-            setup_with_balance(deposit);
+        let (env, contract_id, token_id, _admin, sender, recipient) = setup_with_balance(deposit);
         let client = FluxoraStreamClient::new(&env, &contract_id);
         env.ledger().set_timestamp(0);
 
         let result = client.try_create_stream(
-            &sender,
-            &recipient,
-            &deposit,
-            &rate,
-            &0u64,
-            &0u64,
-            &duration,
+            &sender, &recipient, &deposit, &rate, &0u64, &0u64, &duration,
         );
 
         assert_eq!(result, Err(Ok(ContractError::InsufficientDeposit)));
@@ -15967,7 +16268,13 @@ mod i128_boundary_streams {
         env.ledger().set_timestamp(0);
 
         let stream_id = client.create_stream(
-            &sender, &recipient, &NEAR_MAX_DEPOSIT, &NEAR_MAX_RATE, &0u64, &0u64, &1u64,
+            &sender,
+            &recipient,
+            &NEAR_MAX_DEPOSIT,
+            &NEAR_MAX_RATE,
+            &0u64,
+            &0u64,
+            &1u64,
         );
 
         let accrued = client.calculate_accrued(&stream_id);
@@ -15982,7 +16289,13 @@ mod i128_boundary_streams {
         env.ledger().set_timestamp(0);
 
         let stream_id = client.create_stream(
-            &sender, &recipient, &NEAR_MAX_DEPOSIT, &NEAR_MAX_RATE, &0u64, &0u64, &1u64,
+            &sender,
+            &recipient,
+            &NEAR_MAX_DEPOSIT,
+            &NEAR_MAX_RATE,
+            &0u64,
+            &0u64,
+            &1u64,
         );
 
         env.ledger().set_timestamp(1);
@@ -15998,7 +16311,13 @@ mod i128_boundary_streams {
         env.ledger().set_timestamp(0);
 
         let stream_id = client.create_stream(
-            &sender, &recipient, &NEAR_MAX_DEPOSIT, &NEAR_MAX_RATE, &0u64, &0u64, &1u64,
+            &sender,
+            &recipient,
+            &NEAR_MAX_DEPOSIT,
+            &NEAR_MAX_RATE,
+            &0u64,
+            &0u64,
+            &1u64,
         );
 
         env.ledger().set_timestamp(u64::MAX / 2);
@@ -16076,7 +16395,13 @@ mod i128_boundary_streams {
         env.ledger().set_timestamp(0);
 
         let stream_id = client.create_stream(
-            &sender, &recipient, &deposit, &NEAR_MAX_RATE, &0u64, &0u64, &1u64,
+            &sender,
+            &recipient,
+            &deposit,
+            &NEAR_MAX_RATE,
+            &0u64,
+            &0u64,
+            &1u64,
         );
 
         // Set time far past end — elapsed is capped at end_time=1, no overflow possible
@@ -16101,7 +16426,13 @@ mod i128_boundary_streams {
         env.ledger().set_timestamp(0);
 
         let stream_id = client.create_stream(
-            &sender, &recipient, &NEAR_MAX_DEPOSIT, &NEAR_MAX_RATE, &0u64, &0u64, &1u64,
+            &sender,
+            &recipient,
+            &NEAR_MAX_DEPOSIT,
+            &NEAR_MAX_RATE,
+            &0u64,
+            &0u64,
+            &1u64,
         );
 
         env.ledger().set_timestamp(1);
@@ -16124,7 +16455,13 @@ mod i128_boundary_streams {
         env.ledger().set_timestamp(0);
 
         let stream_id = client.create_stream(
-            &sender, &recipient, &NEAR_MAX_DEPOSIT, &NEAR_MAX_RATE, &0u64, &0u64, &1u64,
+            &sender,
+            &recipient,
+            &NEAR_MAX_DEPOSIT,
+            &NEAR_MAX_RATE,
+            &0u64,
+            &0u64,
+            &1u64,
         );
 
         env.ledger().set_timestamp(1);
@@ -16133,7 +16470,9 @@ mod i128_boundary_streams {
         let events = env.events().all();
         // Find the withdrew event
         let withdrew_event = events.iter().rev().find(|e| {
-            if e.0 != contract_id { return false; }
+            if e.0 != contract_id {
+                return false;
+            }
             let topic0 = soroban_sdk::Symbol::from_val(&env, &e.1.get(0).unwrap());
             topic0 == soroban_sdk::Symbol::new(&env, "withdrew")
         });
@@ -16149,10 +16488,8 @@ mod i128_boundary_streams {
     #[test]
     fn near_max_deposit_two_partial_withdrawals_complete_stream() {
         // Use rate=1 and a round deposit to avoid integer division truncation
-        let rate: i128 = 1;
-        let duration: u64 = 1_000;
-        let large_deposit: i128 = rate * duration as i128; // exactly 1000
-        // Mint a large amount but use a clean deposit for precision
+        let _rate: i128 = 1;
+        let _duration: u64 = 1_000;
         let large_deposit: i128 = i128::MAX / 1_000_000 / 1_000 * 1_000; // divisible by 1000
         let rate: i128 = large_deposit / 1_000;
         let (env, contract_id, token_id, _a, sender, recipient) = setup_with_balance(large_deposit);
@@ -16161,7 +16498,13 @@ mod i128_boundary_streams {
         env.ledger().set_timestamp(0);
 
         let stream_id = client.create_stream(
-            &sender, &recipient, &large_deposit, &rate, &0u64, &0u64, &1_000u64,
+            &sender,
+            &recipient,
+            &large_deposit,
+            &rate,
+            &0u64,
+            &0u64,
+            &1_000u64,
         );
 
         // First withdrawal at t=400
@@ -16169,7 +16512,10 @@ mod i128_boundary_streams {
         let first = client.withdraw(&stream_id);
         let expected_first = 400_i128 * rate;
         assert_eq!(first, expected_first);
-        assert_eq!(client.get_stream_state(&stream_id).withdrawn_amount, expected_first);
+        assert_eq!(
+            client.get_stream_state(&stream_id).withdrawn_amount,
+            expected_first
+        );
 
         // Second withdrawal at t=1000 (end)
         env.ledger().set_timestamp(1_000);
@@ -16199,7 +16545,13 @@ mod i128_boundary_streams {
         env.ledger().set_timestamp(0);
 
         let stream_id = client.create_stream(
-            &sender, &recipient, &large_deposit, &rate, &0u64, &0u64, &1_000u64,
+            &sender,
+            &recipient,
+            &large_deposit,
+            &rate,
+            &0u64,
+            &0u64,
+            &1_000u64,
         );
 
         // Cancel immediately at t=0
@@ -16224,7 +16576,13 @@ mod i128_boundary_streams {
         env.ledger().set_timestamp(0);
 
         let stream_id = client.create_stream(
-            &sender, &recipient, &large_deposit, &rate, &0u64, &0u64, &1_000u64,
+            &sender,
+            &recipient,
+            &large_deposit,
+            &rate,
+            &0u64,
+            &0u64,
+            &1_000u64,
         );
 
         env.ledger().set_timestamp(500);
@@ -16255,7 +16613,13 @@ mod i128_boundary_streams {
         env.ledger().set_timestamp(0);
 
         let stream_id = client.create_stream(
-            &sender, &recipient, &large_deposit, &rate, &0u64, &0u64, &1_000u64,
+            &sender,
+            &recipient,
+            &large_deposit,
+            &rate,
+            &0u64,
+            &0u64,
+            &1_000u64,
         );
 
         env.ledger().set_timestamp(300);
@@ -16265,7 +16629,10 @@ mod i128_boundary_streams {
         // Advance time significantly — accrual must not grow
         env.ledger().set_timestamp(999_999);
         let accrued_later = client.calculate_accrued(&stream_id);
-        assert_eq!(accrued_later, accrued_at_cancel, "cancelled accrual must be frozen");
+        assert_eq!(
+            accrued_later, accrued_at_cancel,
+            "cancelled accrual must be frozen"
+        );
     }
 
     /// Recipient can withdraw frozen accrued amount after cancellation.
@@ -16279,7 +16646,13 @@ mod i128_boundary_streams {
         env.ledger().set_timestamp(0);
 
         let stream_id = client.create_stream(
-            &sender, &recipient, &large_deposit, &rate, &0u64, &0u64, &1_000u64,
+            &sender,
+            &recipient,
+            &large_deposit,
+            &rate,
+            &0u64,
+            &0u64,
+            &1_000u64,
         );
 
         env.ledger().set_timestamp(700);
@@ -16309,7 +16682,13 @@ mod i128_boundary_streams {
         env.ledger().set_timestamp(0);
 
         let stream_id = client.create_stream(
-            &sender, &recipient, &large_deposit, &rate, &0u64, &0u64, &1_000u64,
+            &sender,
+            &recipient,
+            &large_deposit,
+            &rate,
+            &0u64,
+            &0u64,
+            &1_000u64,
         );
 
         // Sender can cancel — must succeed
@@ -16331,7 +16710,13 @@ mod i128_boundary_streams {
         env.ledger().set_timestamp(0);
 
         let stream_id = client.create_stream(
-            &sender, &recipient, &large_deposit, &rate, &0u64, &0u64, &1_000u64,
+            &sender,
+            &recipient,
+            &large_deposit,
+            &rate,
+            &0u64,
+            &0u64,
+            &1_000u64,
         );
 
         env.ledger().set_timestamp(500);
@@ -16354,7 +16739,13 @@ mod i128_boundary_streams {
         env.ledger().set_timestamp(0);
 
         let stream_id = client.create_stream(
-            &sender, &recipient, &large_deposit, &rate, &0u64, &0u64, &1_000u64,
+            &sender,
+            &recipient,
+            &large_deposit,
+            &rate,
+            &0u64,
+            &0u64,
+            &1_000u64,
         );
 
         env.ledger().set_timestamp(200);
@@ -16377,7 +16768,13 @@ mod i128_boundary_streams {
         env.ledger().set_timestamp(0);
 
         let stream_id = client.create_stream(
-            &sender, &recipient, &large_deposit, &rate, &0u64, &0u64, &1_000u64,
+            &sender,
+            &recipient,
+            &large_deposit,
+            &rate,
+            &0u64,
+            &0u64,
+            &1_000u64,
         );
 
         env.ledger().set_timestamp(300);
@@ -16424,8 +16821,16 @@ mod i128_boundary_streams {
 
         let result = client.try_create_streams(&sender, &params);
         assert!(result.is_err(), "overflow batch must fail");
-        assert_eq!(client.get_stream_count(), count_before, "counter must not advance");
-        assert_eq!(token.balance(&sender), sender_balance_before, "no tokens must move");
+        assert_eq!(
+            client.get_stream_count(),
+            count_before,
+            "counter must not advance"
+        );
+        assert_eq!(
+            token.balance(&sender),
+            sender_balance_before,
+            "no tokens must move"
+        );
     }
 
     /// Batch with one valid near-max entry and one invalid entry: entire batch rejected.
@@ -16480,7 +16885,13 @@ mod i128_boundary_streams {
         env.ledger().set_timestamp(0);
 
         let stream_id = client.create_stream(
-            &sender, &recipient, &large_deposit, &rate, &0u64, &0u64, &1_000u64,
+            &sender,
+            &recipient,
+            &large_deposit,
+            &rate,
+            &0u64,
+            &0u64,
+            &1_000u64,
         );
 
         // Partial withdrawal at t=300
@@ -16495,5 +16906,4 @@ mod i128_boundary_streams {
         assert_eq!(withdrawable, accrued - withdrawn);
         assert!(withdrawable > 0);
     }
-
 } // mod i128_boundary_streams
