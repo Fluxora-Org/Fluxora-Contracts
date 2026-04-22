@@ -17664,15 +17664,8 @@ mod recipient_index_stress {
 
         // Create 3 streams (IDs 0, 1, 2)
         for _ in 0..3 {
-            ctx.client().create_stream(
-                &ctx.sender,
-                &ctx.recipient,
-                &1000,
-                &1,
-                &0,
-                &0,
-                &1000,
-            );
+            ctx.client()
+                .create_stream(&ctx.sender, &ctx.recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64);
         }
 
         // Request range [0, 100] with limit 10 - only 3 exist
