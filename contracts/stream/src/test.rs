@@ -600,7 +600,7 @@ fn test_create_stream_emits_event() {
 
     let stream_id =
         ctx.client()
-            .create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
+            .create_stream(&ctx.sender, &ctx.recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64);
 
     let events = ctx.env.events().all();
     let event = events.last().unwrap();
@@ -623,7 +623,7 @@ fn test_create_stream_panics_when_contract_paused() {
     ctx.client().set_global_emergency_paused(&true);
     let result =
         ctx.client()
-            .try_create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
+            .try_create_stream(&ctx.sender, &ctx.recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64);
     assert_eq!(result, Err(Ok(ContractError::ContractPaused)));
 }
 
@@ -635,7 +635,7 @@ fn test_create_stream_succeeds_after_unpause() {
     ctx.client().set_global_emergency_paused(&false);
     let id = ctx
         .client()
-        .create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
+        .create_stream(&ctx.sender, &ctx.recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64);
     assert_eq!(id, 0);
     assert_eq!(
         ctx.client().get_stream_state(&id).status,
@@ -17344,11 +17344,11 @@ mod recipient_index_stress {
             let id = ctx.client().create_stream(
                 &ctx.sender,
                 &ctx.recipient,
-                &1000,
-                &1,
-                &0,
-                &0,
-                &1000,
+                &1000_i128,
+                &1_i128,
+                &0u64,
+                &0u64,
+                &1000u64,
             );
             ids.push_back(id);
         }
@@ -17369,7 +17369,7 @@ mod recipient_index_stress {
         ctx.env.ledger().set_timestamp(0);
 
         // Create a stream
-        ctx.client().create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
+        ctx.client().create_stream(&ctx.sender, &ctx.recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64);
 
         // Range with start > end returns empty
         let streams = ctx.client().get_streams_by_id_range(&5, &1, &10);
@@ -17386,11 +17386,11 @@ mod recipient_index_stress {
             ctx.client().create_stream(
                 &ctx.sender,
                 &ctx.recipient,
-                &100,
-                &1,
-                &0,
-                &0,
-                &100,
+                &100_i128,
+                &1_i128,
+                &0u64,
+                &0u64,
+                &100u64,
             );
         }
 
@@ -17444,11 +17444,11 @@ mod recipient_index_stress {
             ctx.client().create_stream(
                 &ctx.sender,
                 &ctx.recipient,
-                &100,
-                &1,
-                &0,
-                &0,
-                &100,
+                &100_i128,
+                &1_i128,
+                &0u64,
+                &0u64,
+                &100u64,
             );
         }
 
@@ -17465,7 +17465,7 @@ mod recipient_index_stress {
         let ctx = TestContext::setup();
         ctx.env.ledger().set_timestamp(0);
 
-        ctx.client().create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
+        ctx.client().create_stream(&ctx.sender, &ctx.recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64);
 
         let streams = ctx.client().get_streams_by_id_range(&0, &10, &0);
         assert_eq!(streams.len(), 0, "Zero limit should return empty");
@@ -17480,7 +17480,7 @@ mod recipient_index_stress {
 
         // Create 10 streams for this recipient
         for _ in 0..10 {
-            ctx.client().create_stream(&ctx.sender, &recipient, &1000, &1, &0, &0, &1000);
+            ctx.client().create_stream(&ctx.sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64);
         }
 
         // Page 1: cursor=0, limit=3
@@ -17534,7 +17534,7 @@ mod recipient_index_stress {
         ctx.env.ledger().set_timestamp(0);
 
         let recipient = Address::generate(&ctx.env);
-        ctx.client().create_stream(&ctx.sender, &recipient, &1000, &1, &0, &0, &1000);
+        ctx.client().create_stream(&ctx.sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64);
 
         // Cursor beyond total count
         let result = ctx.client().get_recipient_streams_paginated(&recipient, &100, &10);
@@ -17547,7 +17547,7 @@ mod recipient_index_stress {
         ctx.env.ledger().set_timestamp(0);
 
         let recipient = Address::generate(&ctx.env);
-        ctx.client().create_stream(&ctx.sender, &recipient, &1000, &1, &0, &0, &1000);
+        ctx.client().create_stream(&ctx.sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64);
 
         let result = ctx.client().get_recipient_streams_paginated(&recipient, &0, &0);
         assert_eq!(result.len(), 0, "Zero limit should return empty");
@@ -17564,13 +17564,13 @@ mod recipient_index_stress {
         // Create 5 streams for recipient1
         for _ in 0..5 {
             ctx.client()
-                .create_stream(&ctx.sender, &recipient1, &1000, &1, &0, &0, &1000);
+                .create_stream(&ctx.sender, &recipient1, &1000_i128, &1_i128, &0u64, &0u64, &1000u64);
         }
 
         // Create 3 streams for recipient2
         for _ in 0..3 {
             ctx.client()
-                .create_stream(&ctx.sender, &recipient2, &1000, &1, &0, &0, &1000);
+                .create_stream(&ctx.sender, &recipient2, &1000_i128, &1_i128, &0u64, &0u64, &1000u64);
         }
 
         // Paginate recipient1
@@ -17591,7 +17591,7 @@ mod recipient_index_stress {
 
         // Create 5 streams
         for _ in 0..5 {
-            ctx.client().create_stream(&ctx.sender, &recipient, &1000, &1, &0, &0, &1000);
+            ctx.client().create_stream(&ctx.sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64);
         }
 
         // Close stream 2 (make completed first)
