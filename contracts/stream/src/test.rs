@@ -17328,4 +17328,355 @@ mod recipient_index_stress {
             assert!(index.get(i).unwrap() < index.get(i + 1).unwrap());
         }
     }
+
+    // ---------------------------------------------------------------------------
+    // Paginated Export Views Tests (#429)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_get_streams_by_id_range_basic() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+
+        // Create 5 streams
+        let mut ids = Vec::new(&ctx.env);
+        for i in 0..5 {
+            let id = ctx.client().create_stream(
+                &ctx.sender,
+                &ctx.recipient,
+                &1000,
+                &1,
+                &0,
+                &0,
+                &1000,
+            );
+            ids.push_back(id);
+        }
+
+        // Get range [1, 3] with limit 10
+        let streams = ctx.client().get_streams_by_id_range(&1, &3, &10);
+        assert_eq!(streams.len(), 3, "Should return 3 streams");
+
+        // Verify order and content
+        assert_eq!(streams.get(0).unwrap().id, 1);
+        assert_eq!(streams.get(1).unwrap().id, 2);
+        assert_eq!(streams.get(2).unwrap().id, 3);
+    }
+
+    #[test]
+    fn test_get_streams_by_id_range_empty_range() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+
+        // Create a stream
+        ctx.client().create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
+
+        // Range with start > end returns empty
+        let streams = ctx.client().get_streams_by_id_range(&5, &1, &10);
+        assert_eq!(streams.len(), 0, "Empty range should return empty vector");
+    }
+
+    #[test]
+    fn test_get_streams_by_id_range_respects_max_page_size() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+
+        // Create 150 streams (exceeds MAX_PAGE_SIZE of 100)
+        for _ in 0..150 {
+            ctx.client().create_stream(
+                &ctx.sender,
+                &ctx.recipient,
+                &100,
+                &1,
+                &0,
+                &0,
+                &100,
+            );
+        }
+
+        // Request 200, should be capped at MAX_PAGE_SIZE (100)
+        let streams = ctx.client().get_streams_by_id_range(&0, &200, &200);
+        assert_eq!(
+            streams.len(),
+            100,
+            "Should respect MAX_PAGE_SIZE limit of 100"
+        );
+    }
+
+    #[test]
+    fn test_get_streams_by_id_range_handles_closed_streams() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+
+        // Create 5 streams
+        for _ in 0..5 {
+            ctx.client().create_stream(
+                &ctx.sender,
+                &ctx.recipient,
+                &1000,
+                &1,
+                &0,
+                &0,
+                &1000,
+            );
+        }
+
+        // Close stream 2 (make it completed first)
+        ctx.env.ledger().set_timestamp(1001);
+        ctx.client().withdraw(&2);
+        ctx.client().close_completed_stream(&2);
+
+        // Range should return streams 1, 3, 4 (skipping closed stream 2)
+        let streams = ctx.client().get_streams_by_id_range(&1, &4, &10);
+        assert_eq!(streams.len(), 3, "Should skip closed stream");
+        assert_eq!(streams.get(0).unwrap().id, 1);
+        assert_eq!(streams.get(1).unwrap().id, 3);
+        assert_eq!(streams.get(2).unwrap().id, 4);
+    }
+
+    #[test]
+    fn test_get_streams_by_id_range_open_ended() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+
+        // Create 10 streams
+        for _ in 0..10 {
+            ctx.client().create_stream(
+                &ctx.sender,
+                &ctx.recipient,
+                &100,
+                &1,
+                &0,
+                &0,
+                &100,
+            );
+        }
+
+        // Use u64::MAX for open-ended range with limit 5
+        let max = u64::MAX;
+        let streams = ctx.client().get_streams_by_id_range(&5, &max, &5);
+        assert_eq!(streams.len(), 5, "Should return 5 streams from position 5");
+        assert_eq!(streams.get(0).unwrap().id, 5);
+        assert_eq!(streams.get(4).unwrap().id, 9);
+    }
+
+    #[test]
+    fn test_get_streams_by_id_range_zero_limit() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+
+        ctx.client().create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
+
+        let streams = ctx.client().get_streams_by_id_range(&0, &10, &0);
+        assert_eq!(streams.len(), 0, "Zero limit should return empty");
+    }
+
+    #[test]
+    fn test_get_recipient_streams_paginated_basic() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+
+        let recipient = Address::generate(&ctx.env);
+
+        // Create 10 streams for this recipient
+        for _ in 0..10 {
+            ctx.client().create_stream(&ctx.sender, &recipient, &1000, &1, &0, &0, &1000);
+        }
+
+        // Page 1: cursor=0, limit=3
+        let page1 = ctx.client().get_recipient_streams_paginated(&recipient, &0, &3);
+        assert_eq!(page1.len(), 3);
+        assert_eq!(page1.get(0).unwrap(), 0);
+        assert_eq!(page1.get(1).unwrap(), 1);
+        assert_eq!(page1.get(2).unwrap(), 2);
+
+        // Page 2: cursor=3, limit=3
+        let page2 = ctx.client().get_recipient_streams_paginated(&recipient, &3, &3);
+        assert_eq!(page2.len(), 3);
+        assert_eq!(page2.get(0).unwrap(), 3);
+        assert_eq!(page2.get(1).unwrap(), 4);
+        assert_eq!(page2.get(2).unwrap(), 5);
+
+        // Page 3: cursor=6, limit=3 (only 4 left)
+        let page3 = ctx.client().get_recipient_streams_paginated(&recipient, &6, &3);
+        assert_eq!(page3.len(), 3);
+
+        // Page 4: cursor=9, limit=3 (only 1 left)
+        let page4 = ctx.client().get_recipient_streams_paginated(&recipient, &9, &3);
+        assert_eq!(page4.len(), 1);
+        assert_eq!(page4.get(0).unwrap(), 9);
+
+        // Page 5: cursor=10, should be empty (past end)
+        let page5 = ctx.client().get_recipient_streams_paginated(&recipient, &10, &3);
+        assert_eq!(page5.len(), 0);
+    }
+
+    #[test]
+    fn test_get_recipient_streams_paginated_respects_max_page_size() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+
+        let recipient = Address::generate(&ctx.env);
+
+        // Create 150 streams
+        for _ in 0..150 {
+            ctx.client().create_stream(&ctx.sender, &recipient, &100, &1, &0, &0, &100);
+        }
+
+        // Request 200, should be capped at MAX_PAGE_SIZE (100)
+        let page = ctx.client().get_recipient_streams_paginated(&recipient, &0, &200);
+        assert_eq!(page.len(), 100, "Should respect MAX_PAGE_SIZE of 100");
+    }
+
+    #[test]
+    fn test_get_recipient_streams_paginated_cursor_beyond_end() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+
+        let recipient = Address::generate(&ctx.env);
+        ctx.client().create_stream(&ctx.sender, &recipient, &1000, &1, &0, &0, &1000);
+
+        // Cursor beyond total count
+        let result = ctx.client().get_recipient_streams_paginated(&recipient, &100, &10);
+        assert_eq!(result.len(), 0, "Should return empty when cursor >= total");
+    }
+
+    #[test]
+    fn test_get_recipient_streams_paginated_zero_limit() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+
+        let recipient = Address::generate(&ctx.env);
+        ctx.client().create_stream(&ctx.sender, &recipient, &1000, &1, &0, &0, &1000);
+
+        let result = ctx.client().get_recipient_streams_paginated(&recipient, &0, &0);
+        assert_eq!(result.len(), 0, "Zero limit should return empty");
+    }
+
+    #[test]
+    fn test_get_recipient_streams_paginated_multiple_recipients() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+
+        let recipient1 = Address::generate(&ctx.env);
+        let recipient2 = Address::generate(&ctx.env);
+
+        // Create 5 streams for recipient1
+        for _ in 0..5 {
+            ctx.client()
+                .create_stream(&ctx.sender, &recipient1, &1000, &1, &0, &0, &1000);
+        }
+
+        // Create 3 streams for recipient2
+        for _ in 0..3 {
+            ctx.client()
+                .create_stream(&ctx.sender, &recipient2, &1000, &1, &0, &0, &1000);
+        }
+
+        // Paginate recipient1
+        let page1 = ctx.client().get_recipient_streams_paginated(&recipient1, &0, &10);
+        assert_eq!(page1.len(), 5);
+
+        // Paginate recipient2
+        let page2 = ctx.client().get_recipient_streams_paginated(&recipient2, &0, &10);
+        assert_eq!(page2.len(), 3);
+    }
+
+    #[test]
+    fn test_get_recipient_streams_paginated_handles_closed_streams() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+
+        let recipient = Address::generate(&ctx.env);
+
+        // Create 5 streams
+        for _ in 0..5 {
+            ctx.client().create_stream(&ctx.sender, &recipient, &1000, &1, &0, &0, &1000);
+        }
+
+        // Close stream 2 (make completed first)
+        ctx.env.ledger().set_timestamp(1001);
+        ctx.client().withdraw(&2);
+        ctx.client().close_completed_stream(&2);
+
+        // Full list should now have 4 items (0,1,3,4)
+        let all = ctx.client().get_recipient_streams(&recipient);
+        assert_eq!(all.len(), 4);
+
+        // Pagination should reflect closed stream
+        let page1 = ctx.client().get_recipient_streams_paginated(&recipient, &0, &2);
+        assert_eq!(page1.len(), 2);
+        assert_eq!(page1.get(0).unwrap(), 0);
+        assert_eq!(page1.get(1).unwrap(), 1);
+
+        // Next page should start with 3 (not 2, which is closed)
+        let page2 = ctx.client().get_recipient_streams_paginated(&recipient, &2, &2);
+        assert_eq!(page2.len(), 2);
+        assert_eq!(page2.get(0).unwrap(), 3);
+        assert_eq!(page2.get(1).unwrap(), 4);
+    }
+
+    #[test]
+    fn test_pagination_full_export_workflow() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+
+        let recipient = Address::generate(&ctx.env);
+
+        // Create 25 streams
+        for _ in 0..25 {
+            ctx.client().create_stream(&ctx.sender, &recipient, &100, &1, &0, &0, &100);
+        }
+
+        // Simulate full export using pagination
+        let mut all_stream_ids = Vec::new(&ctx.env);
+        let mut cursor = 0u64;
+        let page_size = 10u64;
+
+        loop {
+            let page = ctx
+                .client()
+                .get_recipient_streams_paginated(&recipient, &cursor, &page_size);
+            if page.is_empty() {
+                break;
+            }
+            for id in page.iter() {
+                all_stream_ids.push_back(id);
+            }
+            cursor += page.len() as u64;
+        }
+
+        assert_eq!(all_stream_ids.len(), 25, "Should export all 25 streams");
+
+        // Verify sorted order
+        for i in 0..all_stream_ids.len() - 1 {
+            assert!(
+                all_stream_ids.get(i).unwrap() < all_stream_ids.get(i + 1).unwrap(),
+                "Export should maintain sorted order"
+            );
+        }
+    }
+
+    #[test]
+    fn test_get_streams_by_id_range_partial_results() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+
+        // Create 3 streams (IDs 0, 1, 2)
+        for _ in 0..3 {
+            ctx.client().create_stream(
+                &ctx.sender,
+                &ctx.recipient,
+                &1000,
+                &1,
+                &0,
+                &0,
+                &1000,
+            );
+        }
+
+        // Request range [0, 100] with limit 10 - only 3 exist
+        let streams = ctx.client().get_streams_by_id_range(&0, &100, &10);
+        assert_eq!(streams.len(), 3, "Should return only existing streams");
+    }
 }

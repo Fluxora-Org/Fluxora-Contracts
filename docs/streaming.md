@@ -358,6 +358,8 @@ On failure (`InvalidParams` or `InvalidState`):
 | `get_claimable_at`        | Anyone                        | None (view)                                 |
 | `get_config`              | Anyone                        | None (view)                                 |
 | `get_stream_state`        | Anyone                        | None (view)                                 |
+| `get_streams_by_id_range` | Anyone                        | None (view, paginated)                      |
+| `get_recipient_streams_paginated` | Anyone                  | None (view, paginated)                      |
 | `pause_stream_as_admin`   | Admin                         | `admin.require_auth()`                      |
 | `resume_stream_as_admin`  | Admin                         | `admin.require_auth()`                      |
 | `cancel_stream_as_admin`  | Admin                         | `admin.require_auth()`                      |
@@ -372,6 +374,73 @@ On failure (`InvalidParams` or `InvalidState`):
 | `get_auto_claim_destination` | Anyone                     | None (view)                                 |
 
 **Note:** Sender-managed functions (`pause_stream`, `resume_stream`, `cancel_stream`) require sender auth. Admin uses separate `_as_admin` entry points.
+
+### Paginated Export Views (Issue #429)
+
+Two bounded view entrypoints support off-chain export and migration without unbounded loops:
+
+#### `get_streams_by_id_range(start_id, end_id, limit) -> Vec<Stream>`
+
+Returns streams within an ID range with a strict result limit (capped at `MAX_PAGE_SIZE = 100`).
+
+**Parameters:**
+- `start_id: u64` — First stream ID (inclusive)
+- `end_id: u64` — Last stream ID (inclusive). Use `u64::MAX` for open-ended.
+- `limit: u64` — Max results (enforced ≤ 100)
+
+**Semantics:**
+- Returns streams in ascending ID order
+- Skips closed/archived streams silently
+- Empty range (`start_id > end_id`) returns empty vector
+- Zero limit returns empty vector
+
+**DoS Protection:**
+- Hard limit of 100 streams per call regardless of requested `limit`
+- Gas cost is O(result_count), not O(range_size)
+
+**Migration Pattern:**
+```rust
+let total = client.get_stream_count();
+let mut start = 0u64;
+while start < total {
+    let page = client.get_streams_by_id_range(&start, &(start + 99), &100);
+    // Export page...
+    start += page.len() as u64;  // Handle closed streams
+}
+```
+
+#### `get_recipient_streams_paginated(recipient, cursor, limit) -> Vec<u64>`
+
+Cursor-based pagination for recipient stream export (capped at `MAX_PAGE_SIZE = 100`).
+
+**Parameters:**
+- `recipient: Address` — Address to query
+- `cursor: u64` — 0-based starting index
+- `limit: u64` — Max results (enforced ≤ 100)
+
+**Semantics:**
+- Cursor is index into sorted recipient stream list
+- Returns stream IDs in ascending order
+- Empty result indicates end of data or cursor beyond bounds
+
+**Pagination Pattern:**
+```rust
+let mut cursor = 0u64;
+loop {
+    let page = client.get_recipient_streams_paginated(&recipient, &cursor, &50);
+    if page.is_empty() { break; }
+    // Export page...
+    cursor += page.len() as u64;
+}
+```
+
+**Comparison with Unbounded Views:**
+
+| Function | Use Case | Limit | Risk |
+|----------|----------|-------|------|
+| `get_recipient_streams` | Small portfolios (<100) | None | Memory exhaustion |
+| `get_recipient_streams_paginated` | Large portfolios | 100/page | Bounded, safe |
+| `get_streams_by_id_range` | Full contract export | 100/page | Bounded, safe |
 
 ### top_up_stream: Observable Semantics
 

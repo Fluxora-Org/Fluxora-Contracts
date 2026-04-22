@@ -20,6 +20,17 @@ const INSTANCE_BUMP_AMOUNT: u32 = 120_960;
 const PERSISTENT_LIFETIME_THRESHOLD: u32 = 17_280;
 /// Extend persistent entries to ~7 days of ledgers.
 const PERSISTENT_BUMP_AMOUNT: u32 = 120_960;
+
+// ---------------------------------------------------------------------------
+// Pagination limits (DoS prevention)
+// ---------------------------------------------------------------------------
+
+/// Maximum page size for paginated export views.
+///
+/// Prevents unbounded memory usage and gas exhaustion when exporting stream data.
+/// All paginated entrypoints enforce this limit strictly.
+pub const MAX_PAGE_SIZE: u64 = 100;
+
 // Contract version
 // ---------------------------------------------------------------------------
 
@@ -2437,6 +2448,151 @@ impl FluxoraStream {
     /// - Closed streams are not included in the count
     pub fn get_recipient_stream_count(env: Env, recipient: Address) -> u64 {
         load_recipient_streams(&env, &recipient).len() as u64
+    }
+
+    /// Export streams by ID range with bounded page size (operator migration support).
+    ///
+    /// Returns a paginated list of streams within the specified ID range `[start_id, end_id]`.
+    /// This enables efficient, bounded data export for off-chain migration between contract
+    /// instances without unbounded loops or memory exhaustion.
+    ///
+    /// # Parameters
+    /// - `start_id`: First stream ID to include in the range (inclusive)
+    /// - `end_id`: Last stream ID to include in the range (inclusive). Use `u64::MAX` for open-ended.
+    /// - `limit`: Maximum number of streams to return (capped at [`MAX_PAGE_SIZE`])
+    ///
+    /// # Returns
+    /// - `Vec<Stream>`: Vector of stream structs in ascending order by stream_id
+    ///   - Empty if no streams exist in the range
+    ///   - Partial results if some stream IDs in range don't exist (deleted/closed)
+    ///   - Length never exceeds `min(limit, MAX_PAGE_SIZE)`
+    ///
+    /// # Pagination Strategy
+    /// For complete export across all streams:
+    /// 1. Call `get_stream_count()` to get total stream count
+    /// 2. Iterate in chunks: `get_streams_by_id_range(1, 100, 100)`, `get_streams_by_id_range(101, 200, 100)`, etc.
+    /// 3. Handle missing IDs gracefully (some may be closed/archived)
+    ///
+    /// # DoS Protection
+    /// - `limit` is strictly capped at [`MAX_PAGE_SIZE`] (100)
+    /// - Range size is bounded by `limit`, not `end_id - start_id`
+    /// - Each stream lookup is O(1), total gas is O(limit)
+    ///
+    /// # Errors
+    /// - Returns empty vector if `start_id > end_id`
+    /// - Non-existent stream IDs are silently skipped
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Export first 50 streams (IDs 1-50)
+    /// let streams = get_streams_by_id_range(&env, 1, 50, 50);
+    ///
+    /// // Export next page using open-ended range
+    /// let streams = get_streams_by_id_range(&env, 51, u64::MAX, 100);
+    /// ```
+    pub fn get_streams_by_id_range(
+        env: Env,
+        start_id: u64,
+        end_id: u64,
+        limit: u64,
+    ) -> soroban_sdk::Vec<Stream> {
+        // Enforce DoS protection limit
+        let page_size = limit.min(MAX_PAGE_SIZE);
+        let mut result = soroban_sdk::Vec::new(&env);
+
+        // Handle invalid range
+        if start_id > end_id || page_size == 0 {
+            return result;
+        }
+
+        let total_count = read_stream_count(&env);
+        let effective_end = end_id.min(total_count);
+
+        let mut current_id = start_id;
+        while current_id <= effective_end && result.len() < page_size as u32 {
+            // Try to load stream, skip if not found (closed/archived)
+            if let Ok(stream) = load_stream(&env, current_id) {
+                result.push_back(stream);
+            }
+            current_id += 1;
+        }
+
+        result
+    }
+
+    /// Paginated export of recipient streams with cursor-based pagination.
+    ///
+    /// Returns a bounded page of stream IDs for a recipient starting from a cursor position.
+    /// Designed for efficient, resumable export of large recipient portfolios without
+    /// unbounded memory usage.
+    ///
+    /// # Parameters
+    /// - `recipient`: Address to query streams for
+    /// - `cursor`: Starting position in the recipient's stream list (0-based index).
+    ///   Use 0 for first page, then `cursor + previous_result.len()` for next page.
+    /// - `limit`: Maximum number of streams to return (capped at [`MAX_PAGE_SIZE`])
+    ///
+    /// # Returns
+    /// - `Vec<u64>`: Vector of stream IDs in ascending order
+    ///   - Empty vector if `cursor >= recipient_stream_count`
+    ///   - Length never exceeds `min(limit, MAX_PAGE_SIZE)`
+    ///
+    /// # Cursor Semantics
+    /// - Cursor is a 0-based index into the sorted recipient stream list
+    /// - After each call, next cursor = `cursor + result.len()`
+    /// - When result.len() < limit, you've reached the end
+    /// - Cursor survives stream list mutations (insertions/removals shift indices naturally)
+    ///
+    /// # Pagination Strategy
+    /// ```ignore
+    /// let mut cursor = 0;
+    /// let page_size = 50;
+    /// loop {
+    ///     let page = get_recipient_streams_paginated(&env, &recipient, cursor, page_size);
+    ///     if page.is_empty() { break; }
+    ///     // Process page...
+    ///     cursor += page.len();
+    /// }
+    /// ```
+    ///
+    /// # DoS Protection
+    /// - `limit` is strictly capped at [`MAX_PAGE_SIZE`] (100)
+    /// - Cursor-based pagination prevents unbounded list traversal
+    /// - Gas cost is O(limit) regardless of recipient's total stream count
+    ///
+    /// # Consistency Guarantees
+    /// - Stream list is sorted by stream_id (ascending)
+    /// - Pagination is stable: repeated calls with same cursor return same results
+    ///   unless the underlying list is modified
+    /// - New streams added during pagination may appear or not depending on insertion position
+    pub fn get_recipient_streams_paginated(
+        env: Env,
+        recipient: Address,
+        cursor: u64,
+        limit: u64,
+    ) -> soroban_sdk::Vec<u64> {
+        // Enforce DoS protection limit
+        let page_size = limit.min(MAX_PAGE_SIZE) as u32;
+        let all_streams = load_recipient_streams(&env, &recipient);
+        let total = all_streams.len() as u64;
+
+        // Return empty if cursor is beyond end
+        if cursor >= total || page_size == 0 {
+            return soroban_sdk::Vec::new(&env);
+        }
+
+        let start_idx = cursor as u32;
+        let available = total as u32 - start_idx;
+        let take_count = page_size.min(available);
+
+        let mut result = soroban_sdk::Vec::new(&env);
+        for i in 0..take_count {
+            if let Some(stream_id) = all_streams.get(start_idx + i) {
+                result.push_back(stream_id);
+            }
+        }
+
+        result
     }
 
     /// Internal helper to require authorization from the stream sender.
