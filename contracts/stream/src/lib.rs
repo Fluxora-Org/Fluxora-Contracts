@@ -174,6 +174,13 @@ pub struct BatchWithdrawResult {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WithdrawToParam {
+    pub stream_id: u64,
+    pub destination: Address,
+}
+
+#[contracttype]
 #[derive(Clone, Debug)]
 pub struct RateUpdated {
     pub stream_id: u64,
@@ -1606,6 +1613,117 @@ impl FluxoraStream {
 
             results.push_back(BatchWithdrawResult {
                 stream_id,
+                amount: withdrawable,
+            });
+        }
+
+        Ok(results)
+    }
+
+    /// Withdraw accrued tokens from multiple streams and route them to specified destinations.
+    ///
+    /// Similar to `batch_withdraw`, but allows the recipient to specify a distinct
+    /// `destination` address for each stream withdrawal in the batch.
+    ///
+    /// The caller must be the recipient of every stream in `withdrawals`. The operation
+    /// is atomic: if any stream fails (not found, unauthorized, paused, or invalid destination),
+    /// the entire batch reverts.
+    ///
+    /// # Parameters
+    /// - `recipient`: Address that must authorize and must be the recipient of all streams
+    /// - `withdrawals`: List of `WithdrawToParam` (stream_id, destination). Stream IDs must be unique.
+    ///
+    /// # Returns
+    /// - `Vec<BatchWithdrawResult>`: Per-stream `(stream_id, amount)` for each entry.
+    pub fn batch_withdraw_to(
+        env: Env,
+        recipient: Address,
+        withdrawals: soroban_sdk::Vec<WithdrawToParam>,
+    ) -> Result<soroban_sdk::Vec<BatchWithdrawResult>, ContractError> {
+        require_not_globally_paused(&env);
+        recipient.require_auth();
+
+        let n = withdrawals.len();
+        for i in 0..n {
+            let param_a = withdrawals.get(i).unwrap();
+
+            if param_a.destination == env.current_contract_address() {
+                return Err(ContractError::InvalidParams);
+            }
+
+            let mut j = i + 1;
+            while j < n {
+                let param_b = withdrawals.get(j).unwrap();
+                assert!(
+                    param_a.stream_id != param_b.stream_id,
+                    "batch_withdraw_to stream_ids must be unique"
+                );
+                j += 1;
+            }
+        }
+
+        // Fetch initial contract balance and track remaining safety buffer
+        let token_address = get_token(&env)?;
+        let mut contract_balance =
+            token::Client::new(&env, &token_address).balance(&env.current_contract_address());
+
+        let mut results = soroban_sdk::Vec::new(&env);
+
+        for param in withdrawals.iter() {
+            let mut stream = load_stream(&env, param.stream_id)?;
+
+            if stream.recipient != recipient {
+                return Err(ContractError::Unauthorized);
+            }
+
+            if stream.status == StreamStatus::Paused && !is_terminal_state(&env, &stream) {
+                return Err(ContractError::InvalidState);
+            }
+
+            let mut withdrawable = if stream.status == StreamStatus::Completed {
+                0
+            } else {
+                let accrued = Self::calculate_accrued(env.clone(), param.stream_id)?;
+                (accrued - stream.withdrawn_amount).max(0)
+            };
+
+            // Cap by running contract balance for safety
+            withdrawable = withdrawable.min(contract_balance);
+
+            if withdrawable > 0 {
+                contract_balance -= withdrawable;
+                stream.withdrawn_amount += withdrawable;
+
+                let completed_now = (stream.status == StreamStatus::Active
+                    || stream.status == StreamStatus::Paused)
+                    && stream.withdrawn_amount == stream.deposit_amount;
+                if completed_now {
+                    stream.status = StreamStatus::Completed;
+                }
+                save_stream(&env, &stream);
+
+                push_token(&env, &param.destination, withdrawable)?;
+
+                env.events().publish(
+                    (symbol_short!("wdraw_to"), param.stream_id),
+                    WithdrawalTo {
+                        stream_id: param.stream_id,
+                        recipient: stream.recipient.clone(),
+                        destination: param.destination.clone(),
+                        amount: withdrawable,
+                    },
+                );
+
+                if completed_now {
+                    env.events().publish(
+                        (symbol_short!("completed"), param.stream_id),
+                        StreamEvent::StreamCompleted(param.stream_id),
+                    );
+                }
+            }
+
+            results.push_back(BatchWithdrawResult {
+                stream_id: param.stream_id,
                 amount: withdrawable,
             });
         }

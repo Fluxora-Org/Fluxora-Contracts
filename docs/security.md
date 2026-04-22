@@ -60,6 +60,15 @@ Observable contract guarantees for this entrypoint:
 > external transfer and the `save_stream` call, it could have observed a stale
 > `deposit_amount`. The call order has been corrected so state is always persisted first.
 
+
+### `batch_withdraw` and `batch_withdraw_to`
+
+These batch functions process multiple internal transfers. CEI is maintained per-iteration:
+1. Stream state (`withdrawn_amount` and `status`) is updated and saved.
+2. The running `contract_balance` is decremented in memory.
+3. **Only then** is the `push_token` external call made to transfer funds to the recipient (or specified destination).
+This ensures that any reentrancy from the token contract observes the completely updated stream state and bounded remaining contract balance.
+
 ### `shorten_stream_end_time`
 
 Authorization and state gate:
@@ -124,6 +133,7 @@ reentrancy impact — state will already reflect the current operation when the 
 | `withdraw`                | Stream's `recipient`                                    |
 | `withdraw_to`             | Stream's `recipient`                                    |
 | `batch_withdraw`          | Caller supplied as `recipient` (once for batch)         |
+| `batch_withdraw_to`       | Caller supplied as `recipient` (once for batch)         |
 | `update_rate_per_second`  | Stream's `sender`                                       |
 | `shorten_stream_end_time` | Stream's `sender`                                       |
 | `extend_stream_end_time`  | Stream's `sender`                                       |
