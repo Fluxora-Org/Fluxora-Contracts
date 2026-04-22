@@ -17329,3 +17329,147 @@ mod recipient_index_stress {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests — batch_withdraw duplicate stream_id rejection (#405)
+// ---------------------------------------------------------------------------
+
+/// Adjacent duplicate ids must be rejected atomically — no transfers, no events.
+#[test]
+fn test_batch_withdraw_adjacent_duplicates_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let id0 = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(500);
+    let balance_before = ctx.token().balance(&ctx.recipient);
+
+    let result = ctx
+        .client()
+        .try_batch_withdraw(&ctx.recipient, &stream_ids_vec(&ctx.env, &[id0, id0]));
+
+    assert!(result.is_err(), "adjacent duplicates must be rejected");
+    assert_eq!(
+        ctx.token().balance(&ctx.recipient),
+        balance_before,
+        "no transfer must occur on duplicate rejection"
+    );
+    let state = ctx.client().get_stream_state(&id0);
+    assert_eq!(state.withdrawn_amount, 0, "withdrawn_amount must not change");
+    assert_eq!(state.status, StreamStatus::Active);
+}
+
+/// Non-adjacent duplicate ids must also be rejected atomically.
+#[test]
+fn test_batch_withdraw_non_adjacent_duplicates_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let id0 = ctx.create_default_stream();
+    ctx.sac.mint(&ctx.sender, &1000_i128);
+    let id1 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    ctx.env.ledger().set_timestamp(300);
+    let balance_before = ctx.token().balance(&ctx.recipient);
+
+    let result = ctx
+        .client()
+        .try_batch_withdraw(&ctx.recipient, &stream_ids_vec(&ctx.env, &[id0, id1, id0]));
+
+    assert!(result.is_err(), "non-adjacent duplicates must be rejected");
+    assert_eq!(
+        ctx.token().balance(&ctx.recipient),
+        balance_before,
+        "no transfer must occur on duplicate rejection"
+    );
+    assert_eq!(ctx.client().get_stream_state(&id0).withdrawn_amount, 0);
+    assert_eq!(ctx.client().get_stream_state(&id1).withdrawn_amount, 0);
+}
+
+/// Duplicate id where one of the streams is already Completed must still be rejected.
+#[test]
+fn test_batch_withdraw_duplicate_with_completed_stream_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let id0 = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&id0);
+    assert_eq!(
+        ctx.client().get_stream_state(&id0).status,
+        StreamStatus::Completed
+    );
+
+    let balance_before = ctx.token().balance(&ctx.recipient);
+
+    let result = ctx
+        .client()
+        .try_batch_withdraw(&ctx.recipient, &stream_ids_vec(&ctx.env, &[id0, id0]));
+
+    assert!(
+        result.is_err(),
+        "duplicate completed stream_id must be rejected"
+    );
+    assert_eq!(
+        ctx.token().balance(&ctx.recipient),
+        balance_before,
+        "no transfer must occur"
+    );
+}
+
+/// A single id (no duplicates) must still succeed normally.
+#[test]
+fn test_batch_withdraw_single_id_no_false_positive() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let id0 = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(400);
+    let results = ctx
+        .client()
+        .batch_withdraw(&ctx.recipient, &stream_ids_vec(&ctx.env, &[id0]));
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results.get(0).unwrap().amount, 400);
+}
+
+/// All-duplicate list (same id repeated three times) must be rejected.
+#[test]
+fn test_batch_withdraw_all_same_id_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let id0 = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(200);
+    let result = ctx
+        .client()
+        .try_batch_withdraw(&ctx.recipient, &stream_ids_vec(&ctx.env, &[id0, id0, id0]));
+
+    assert!(result.is_err(), "all-same-id list must be rejected");
+    assert_eq!(ctx.client().get_stream_state(&id0).withdrawn_amount, 0);
+}
+
+/// Duplicate rejection must carry the correct error code (DuplicateStreamId = 14).
+#[test]
+fn test_batch_withdraw_duplicate_returns_correct_error_code() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let id0 = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(100);
+    let result = ctx
+        .client()
+        .try_batch_withdraw(&ctx.recipient, &stream_ids_vec(&ctx.env, &[id0, id0]));
+
+    match result {
+        Err(Ok(e)) => assert_eq!(e, crate::ContractError::DuplicateStreamId),
+        other => panic!("expected ContractError::DuplicateStreamId, got {:?}", other),
+    }
+}

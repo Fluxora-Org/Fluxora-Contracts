@@ -120,6 +120,8 @@ pub enum ContractError {
     StreamNotPaused = 12,
     /// Stream is in a terminal state (Completed or Cancelled) and cannot be modified.
     StreamTerminalState = 13,
+    /// Duplicate stream_id detected in a batch operation.
+    DuplicateStreamId = 14,
 }
 
 #[contracttype]
@@ -1498,16 +1500,27 @@ impl FluxoraStream {
         require_not_globally_paused(&env);
         recipient.require_auth();
 
-        let n = stream_ids.len();
-        for i in 0..n {
-            let a = stream_ids.get(i).unwrap();
-            let mut j = i + 1;
-            while j < n {
-                assert!(
-                    stream_ids.get(j).unwrap() != a,
-                    "batch_withdraw stream_ids must be unique"
-                );
-                j += 1;
+        // Reject duplicate stream_ids deterministically before any state changes.
+        // Sort a copy and check adjacent elements — O(n log n), no heap allocation beyond the vec.
+        let mut sorted = stream_ids.clone();
+        let len = sorted.len();
+        for i in 1..len {
+            let mut j = i;
+            while j > 0 {
+                let a = sorted.get(j - 1).unwrap();
+                let b = sorted.get(j).unwrap();
+                if a > b {
+                    sorted.set(j - 1, b);
+                    sorted.set(j, a);
+                    j -= 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        for i in 1..len {
+            if sorted.get(i - 1).unwrap() == sorted.get(i).unwrap() {
+                panic_with_error!(&env, ContractError::DuplicateStreamId);
             }
         }
 
@@ -1515,7 +1528,6 @@ impl FluxoraStream {
         let token_address = get_token(&env)?;
         let mut contract_balance =
             token::Client::new(&env, &token_address).balance(&env.current_contract_address());
-
         let mut results = soroban_sdk::Vec::new(&env);
 
         for stream_id in stream_ids.iter() {
