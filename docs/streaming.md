@@ -97,32 +97,52 @@ Scope boundary and exclusions:
 
 ### Global Pause Semantics (Issue Scope)
 
-This section is the protocol-level contract for the global pause state managed via `set_contract_paused`.
+This section is the protocol-level contract for the global pause state managed via `pause_protocol` and `resume_protocol`.
+
+**Entrypoints:**
+
+| Function | Description |
+|----------|-------------|
+| `pause_protocol(admin, reason)` | Globally pause new stream creation with audit trail (reason, timestamp, admin) |
+| `resume_protocol(admin)` | Globally resume new stream creation, clearing audit trail |
+| `is_paused()` | Query if protocol is currently paused (permissionless) |
+| `get_pause_info()` | Query detailed pause info including audit trail (permissionless) |
 
 Success semantics (observable):
 
 1. Preconditions: Caller must be the authorized contract `admin`.
-2. Storage: The `GlobalPaused` data key is set to `true` or `false` in instance storage.
-3. Event: `ContractPaused(bool)` is emitted with topic `("paused_ctl",)`.
-4. Effect on creation: When paused, `create_stream` and `create_streams` return `ContractError::ContractPaused` and all new stream creation is blocked.
-5. Effect on existing streams: Active streams are intentionally unaffected. Withdrawals, top-ups, pause/resume/cancel operations on individual streams continue to function normally.
+2. Storage on pause:
+   - `GlobalEmergencyPaused` is set to `true` in instance storage
+   - `GlobalPauseReason` stores the provided reason string
+   - `GlobalPauseTimestamp` stores the ledger timestamp
+   - `GlobalPauseAdmin` stores the admin address that paused
+3. Storage on resume: All pause keys are cleared (set to false or removed)
+4. Event on pause: `ProtocolPaused { reason, paused_at }` is emitted with topic `("pr_pause", admin)`.
+5. Event on resume: `ProtocolResumed { resumed_at }` is emitted with topic `("pr_resume", admin)`.
+6. Effect on creation: When paused, `create_stream` and `create_streams` return `ContractError::ContractPaused` and all new stream creation is blocked.
+7. Effect on existing streams: Active streams are intentionally unaffected. Withdrawals, top-ups, pause/resume/cancel operations on individual streams continue to function normally.
+8. Idempotency: Pausing when already paused or resuming when not paused returns `Ok(())` silently with no state changes or events.
 
 Failure semantics (observable):
 
-1. Unauthorized caller on admin path: authorization failure from `admin.require_auth()`.
+1. Unauthorized caller on admin path: `ContractError::Unauthorized`.
 2. Any failure is atomic: no storage mutation, no event emitted.
 
 Role boundaries:
 
-1. `set_contract_paused`: only the contract `admin` can authorize.
+1. `pause_protocol` / `resume_protocol`: only the contract `admin` can authorize.
 2. Senders and recipients cannot pause the global contract. Senders manage individual streams via `pause_stream`.
 
 Invariants when globally paused:
 
 1. No new streams can be persisted (no `created` events, no deposit tokens pulled).
 2. Existing streams do not change status due to a global pause.
+3. Audit trail (reason, timestamp, admin) is queryable via `get_pause_info()`.
 
 Scope boundary: The global pause is strictly an administrative circuit breaker for new liabilities. It does not freeze funds of existing users or prevent recipients from withdrawing their vested entitlement.
+
+**Note on Stream Creation:**
+Stream creation is blocked while the protocol is globally paused. The `create_stream` function returns `ContractError::ContractPaused` if `is_paused()` is true. This applies to both single-stream and batch (`create_streams`) creation.
 
 ```mermaid
 stateDiagram-v2

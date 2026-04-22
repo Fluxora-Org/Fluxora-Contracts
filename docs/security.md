@@ -157,12 +157,85 @@ All arithmetic that could overflow `i128` uses Rust's `checked_*` methods:
 
 ---
 
-## Global pause
+## Global Emergency Pause
 
-`set_contract_paused(true)` causes `create_stream` and `create_streams` to fail with
-`ContractError::ContractPaused`. Existing streams are unaffected — withdrawals,
-cancellations, and other operations continue normally. The pause flag is stored in
-instance storage under `DataKey::GlobalPaused`.
+### Purpose
+
+The global emergency pause allows the protocol admin to immediately halt all new stream
+creation in response to a security incident, critical bug, or other emergency situation.
+This is a circuit-breaker mechanism that protects users from potential exploits while
+allowing existing streams to continue normally.
+
+### Scope
+
+**CREATION-ONLY scope:** The pause blocks `create_stream` and `create_streams` — 
+new stream submission is rejected with `ContractError::ContractPaused`.
+
+**NOT affected:** Existing active streams continue to accrue and can be:
+- Withdrawn from by recipients
+- Cancelled by senders or admin
+- Paused/resumed individually
+- Top-up funded
+- Modified (rate updates, end time changes)
+
+This conservative scope minimizes disruption to existing users while preventing new
+liabilities from being created during an incident.
+
+### Who Can Pause
+
+**Only the designated protocol admin address** can call `pause_protocol` or `resume_protocol`.
+The admin address is stored in `Config.admin` and is set during contract initialization.
+
+Any non-admin caller will receive `ContractError::Unauthorized`.
+
+### Idempotency
+
+Both pause and resume operations are idempotent:
+- **Pausing when already paused:** Returns `Ok(())` silently — no state changes, no events emitted
+- **Resuming when not paused:** Returns `Ok(())` silently — no state changes, no events emitted
+
+This ensures safe retry logic and prevents duplicate events during incident response.
+
+### Audit Trail
+
+When the protocol is paused, the following information is stored on-chain:
+- `GlobalPauseReason`: Human-readable reason string provided by the admin
+- `GlobalPauseTimestamp`: Ledger timestamp when pause was activated
+- `GlobalPauseAdmin`: The admin address that activated the pause
+
+This information is queryable via `get_pause_info()` and is cleared on resume.
+
+### Entrypoints
+
+| Function | Auth Required | Returns | Description |
+|----------|---------------|---------|-------------|
+| `pause_protocol(admin, reason)` | Admin only | `Result<(), ContractError>` | Pauses protocol, stores reason/timestamp/admin |
+| `resume_protocol(admin)` | Admin only | `Result<(), ContractError>` | Resumes protocol, clears audit trail |
+| `is_paused()` | None | `bool` | Quick query for pause state |
+| `get_pause_info()` | None | `PauseInfo` | Detailed query with audit fields |
+
+### Recommended Use
+
+**When to pause:**
+- Suspected security vulnerability discovered
+- Critical bug affecting stream creation
+- Upstream dependency (token contract) compromised
+- Regulatory or legal emergency requiring halt
+
+**Incident Response Checklist:**
+1. Call `pause_protocol(admin, Some("reason"))` to halt new streams
+2. Verify `is_paused()` returns `true`
+3. Confirm `ProtocolPaused` event in ledger
+4. Investigate and remediate underlying issue
+5. Call `resume_protocol(admin)` to restore normal operation
+6. Verify `is_paused()` returns `false`
+7. Run smoke-test transactions to confirm normal operation
+
+### Existing Streams
+
+Per the CREATION-ONLY scope, existing streams are **not affected** by the global pause.
+Recipients can continue to withdraw accrued funds, and senders can manage their streams
+normally. This protects user funds and prevents unfair lock-ups.
 
 ---
 
