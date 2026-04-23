@@ -1,4 +1,5 @@
 #![no_std]
+#![allow(clippy::too_many_arguments)]
 
 mod accrual;
 #[cfg(test)]
@@ -1100,8 +1101,8 @@ impl FluxoraStream {
 #[contract]
 pub struct FluxoraStream;
 
-#[contractimpl]
 #[allow(clippy::too_many_arguments)]
+#[contractimpl]
 impl FluxoraStream {
     /// Initialise the contract with the streaming token and admin address.
     ///
