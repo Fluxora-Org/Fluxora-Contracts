@@ -610,7 +610,7 @@ fn top_up_stream_on_paused_stream_preserves_status_and_schedule() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(450);
-    ctx.client().pause_stream(&stream_id);
+    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
 
     let state_before = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state_before.status, StreamStatus::Paused);
@@ -795,7 +795,7 @@ fn withdraw_from_paused_stream_panics() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(500);
-    ctx.client().pause_stream(&stream_id);
+    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
     let result = ctx.client().try_withdraw(&stream_id);
     assert_eq!(result, Err(Ok(ContractError::InvalidState)));
 }
@@ -1588,7 +1588,7 @@ fn integration_cancel_paused_stream() {
 
     // Advance to 40% and pause
     ctx.env.ledger().set_timestamp(1200);
-    ctx.client().pause_stream(&stream_id);
+    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
@@ -1677,7 +1677,7 @@ fn integration_pause_resume_withdraw_lifecycle() {
     assert_eq!(accrued_at_300, 300);
 
     // Pause stream (sender authorization required)
-    ctx.client().pause_stream(&stream_id);
+    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
@@ -1790,7 +1790,7 @@ fn integration_multiple_pause_resume_cycles() {
 
     // First pause/resume cycle
     ctx.env.ledger().set_timestamp(500);
-    ctx.client().pause_stream(&stream_id);
+    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
 
@@ -1804,7 +1804,7 @@ fn integration_multiple_pause_resume_cycles() {
 
     // Second pause/resume cycle
     ctx.env.ledger().set_timestamp(1500);
-    ctx.client().pause_stream(&stream_id);
+    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
 
@@ -1868,7 +1868,7 @@ fn integration_pause_resume_past_end_time_accrual_capped() {
 
     // Pause at t=300
     ctx.env.ledger().set_timestamp(300);
-    ctx.client().pause_stream(&stream_id);
+    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
 
     // Resume at t=999 (just before end)
     ctx.env.ledger().set_timestamp(999);
@@ -1916,7 +1916,7 @@ fn integration_pause_then_cancel_preserves_accrual() {
 
     // Pause at t=300 (900 tokens accrued)
     ctx.env.ledger().set_timestamp(300);
-    ctx.client().pause_stream(&stream_id);
+    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
@@ -2265,7 +2265,7 @@ fn integration_extend_paused_stream_then_resume_withdraw() {
     );
 
     ctx.env.ledger().set_timestamp(400);
-    ctx.client().pause_stream(&stream_id);
+    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
 
     // Extend while paused
     ctx.client().extend_stream_end_time(&stream_id, &2000u64);
@@ -2836,7 +2836,7 @@ fn integration_set_admin_rotation_flow() {
             sub_invokes: &[],
         },
     }]);
-    ctx.client().pause_stream_as_admin(&stream_id);
+    ctx.client().pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
     assert_eq!(
         ctx.client().get_stream_state(&stream_id).status,
         StreamStatus::Paused
@@ -3097,7 +3097,7 @@ fn integration_test_admin_pause_resume_flow() {
     let stream_id = ctx.create_default_stream();
 
     // Admin pauses
-    ctx.client().pause_stream_as_admin(&stream_id);
+    ctx.client().pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
     assert_eq!(
         ctx.client().get_stream_state(&stream_id).status,
         StreamStatus::Paused
@@ -3131,7 +3131,7 @@ fn integration_test_admin_pause_accrual_integrity() {
     assert_eq!(ctx.client().calculate_accrued(&stream_id), 200);
 
     // Admin pauses at t=100
-    ctx.client().pause_stream_as_admin(&stream_id);
+    ctx.client().pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
 
     // Advance to t=200 while paused
     ctx.env.ledger().set_timestamp(200);
@@ -3154,7 +3154,7 @@ fn integration_test_admin_cancel_from_paused() {
             .create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
 
     ctx.env.ledger().set_timestamp(100);
-    ctx.client().pause_stream_as_admin(&stream_id);
+    ctx.client().pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
 
     // Admin cancels while stream is paused
     // Transitions Paused -> Cancelled
@@ -3184,7 +3184,7 @@ fn integration_test_admin_unauthorized_pause() {
         },
     }]);
 
-    let result = ctx.client().try_pause_stream_as_admin(&stream_id);
+    let result = ctx.client().try_pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
     // Should fail because recipient is not admin
     assert!(result.is_err());
 }
@@ -3749,4 +3749,142 @@ fn test_batch_withdraw_to_contract_address_fails() {
 
     let res = ctx.client().try_batch_withdraw_to(&ctx.recipient, &params);
     assert_eq!(res, Err(Ok(fluxora_stream::ContractError::InvalidParams)));
+}
+
+// ===========================================================================
+// Issue #445 — Pause reason codes in pause events
+// ===========================================================================
+
+use fluxora_stream::{PauseReason, StreamPaused};
+
+/// pause_stream emits StreamPaused with the supplied reason code.
+#[test]
+fn pause_stream_emits_reason_operational() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream();
+
+    let events_before = ctx.env.events().all().len();
+    ctx.client()
+        .pause_stream(&stream_id, &PauseReason::Operational);
+
+    let events = ctx.env.events().all();
+    let evt = events
+        .iter()
+        .skip(events_before as usize)
+        .find(|(contract, topics, _)| {
+            contract == &ctx.contract_id
+                && topics.len() == 2
+                && Symbol::try_from_val(&ctx.env, &topics.get(0).unwrap())
+                    == Ok(Symbol::new(&ctx.env, "paused"))
+        })
+        .expect("paused event must be emitted");
+
+    let payload = StreamPaused::try_from_val(&ctx.env, &evt.2)
+        .expect("event payload must decode as StreamPaused");
+    assert_eq!(payload.stream_id, stream_id);
+    assert_eq!(payload.reason, PauseReason::Operational);
+}
+
+/// pause_stream emits StreamPaused with Emergency reason.
+#[test]
+fn pause_stream_emits_reason_emergency() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream();
+
+    ctx.client()
+        .pause_stream(&stream_id, &PauseReason::Emergency);
+
+    let events = ctx.env.events().all();
+    let last = events.last().unwrap();
+    let payload = StreamPaused::try_from_val(&ctx.env, &last.2).unwrap();
+    assert_eq!(payload.reason, PauseReason::Emergency);
+}
+
+/// pause_stream emits StreamPaused with Compliance reason.
+#[test]
+fn pause_stream_emits_reason_compliance() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream();
+
+    ctx.client()
+        .pause_stream(&stream_id, &PauseReason::Compliance);
+
+    let events = ctx.env.events().all();
+    let last = events.last().unwrap();
+    let payload = StreamPaused::try_from_val(&ctx.env, &last.2).unwrap();
+    assert_eq!(payload.reason, PauseReason::Compliance);
+}
+
+/// pause_stream_as_admin emits StreamPaused with Administrative reason.
+#[test]
+fn pause_stream_as_admin_emits_reason_administrative() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream();
+
+    let events_before = ctx.env.events().all().len();
+    ctx.client()
+        .pause_stream_as_admin(&stream_id, &PauseReason::Administrative);
+
+    let events = ctx.env.events().all();
+    let evt = events
+        .iter()
+        .skip(events_before as usize)
+        .find(|(contract, topics, _)| {
+            contract == &ctx.contract_id
+                && topics.len() == 2
+                && Symbol::try_from_val(&ctx.env, &topics.get(0).unwrap())
+                    == Ok(Symbol::new(&ctx.env, "paused"))
+        })
+        .expect("paused event must be emitted by admin pause");
+
+    let payload = StreamPaused::try_from_val(&ctx.env, &evt.2).unwrap();
+    assert_eq!(payload.stream_id, stream_id);
+    assert_eq!(payload.reason, PauseReason::Administrative);
+}
+
+/// pause_stream_as_admin can use Emergency reason for security incidents.
+#[test]
+fn pause_stream_as_admin_emits_reason_emergency() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream();
+
+    ctx.client()
+        .pause_stream_as_admin(&stream_id, &PauseReason::Emergency);
+
+    let events = ctx.env.events().all();
+    let last = events.last().unwrap();
+    let payload = StreamPaused::try_from_val(&ctx.env, &last.2).unwrap();
+    assert_eq!(payload.reason, PauseReason::Emergency);
+}
+
+/// Reason code does not affect stream status or accrual — only the event payload.
+#[test]
+fn pause_reason_does_not_affect_stream_state_or_accrual() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(300);
+    ctx.client()
+        .pause_stream(&stream_id, &PauseReason::Emergency);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Paused);
+
+    // Accrual continues regardless of reason
+    ctx.env.ledger().set_timestamp(700);
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued, 700, "accrual must continue regardless of pause reason");
+}
+
+/// CONTRACT_VERSION is 3 after the pause reason codes change.
+#[test]
+fn contract_version_is_3_after_pause_reason_bump() {
+    let ctx = TestContext::setup();
+    assert_eq!(ctx.client().version(), 3, "CONTRACT_VERSION must be 3");
 }

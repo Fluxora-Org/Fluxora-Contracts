@@ -15,7 +15,7 @@ Version policy, migration runbook, and audit notes for operators, integrators, a
 ### Current value
 
 ```
-CONTRACT_VERSION = 2
+CONTRACT_VERSION = 3
 ```
 
 ### When to increment
@@ -44,6 +44,13 @@ CONTRACT_VERSION = 2
 - Adding new entry-points that old clients can safely ignore.
 - Changing TTL bump constants (`INSTANCE_BUMP_AMOUNT`, `PERSISTENT_BUMP_AMOUNT`).
 - Changing internal helper functions with no external surface.
+
+> **Note (pause reason codes — v3):** The `"paused"` event data changed from
+> `StreamEvent::Paused(stream_id)` to `StreamPaused { stream_id, reason: PauseReason }`.
+> This is a **breaking event-shape change**. `CONTRACT_VERSION` was bumped to `3`.
+> Indexers must update their pause event parsers. The `pause_stream` and
+> `pause_stream_as_admin` entry-points now require a `reason: PauseReason` parameter.
+> Callers must pass one of: `Operational`, `Emergency`, `Compliance`, or `Administrative`.
 
 ---
 

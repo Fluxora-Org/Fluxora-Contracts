@@ -142,7 +142,7 @@ impl<'a> Ctx<'a> {
                 sub_invokes: &[],
             },
         }]);
-        self.client().pause_stream(&stream_id);
+        self.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
     }
 
     fn total_supply(&self) -> i128 {
@@ -240,7 +240,7 @@ fn adversarial_pause_stream_stranger_rejected_no_side_effects() {
     }]);
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.client().pause_stream(&stream_id);
+        ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
     }));
 
     assert!(result.is_err(), "stranger must not pause stream");
@@ -269,7 +269,7 @@ fn adversarial_pause_stream_recipient_rejected() {
     }]);
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.client().pause_stream(&stream_id);
+        ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
     }));
 
     assert!(result.is_err(), "recipient must not pause stream");
@@ -296,7 +296,7 @@ fn adversarial_pause_stream_admin_cannot_use_sender_path() {
     }]);
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.client().pause_stream(&stream_id);
+        ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
     }));
 
     assert!(result.is_err(), "admin must not use sender-only pause path");
@@ -800,7 +800,7 @@ fn adversarial_pause_as_admin_stranger_rejected_no_side_effects() {
     }]);
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.client().pause_stream_as_admin(&stream_id);
+        ctx.client().pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
     }));
 
     assert!(result.is_err(), "stranger must not pause via admin path");
@@ -828,7 +828,7 @@ fn adversarial_pause_as_admin_sender_rejected() {
     }]);
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.client().pause_stream_as_admin(&stream_id);
+        ctx.client().pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
     }));
 
     assert!(result.is_err(), "sender must not use admin pause path");

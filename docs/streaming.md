@@ -629,6 +629,32 @@ A naive decrease would retroactively lower the recipient's accrued tokens. To pr
 - Recipient entitlement is preserved or increased.
 - Deposit coverage ensures the stream remains fully fundable at the new rate.
 
+### pause_stream: Reason Codes (CONTRACT_VERSION 3)
+
+`pause_stream(stream_id, reason)` and `pause_stream_as_admin(stream_id, reason)` now require
+a `PauseReason` parameter that is embedded in the emitted `StreamPaused` event.
+
+#### PauseReason Enum
+
+| Variant | Value | Intended Use |
+|---------|-------|--------------|
+| `Operational` | 0 | Routine sender-initiated pause (e.g. treasury maintenance) |
+| `Emergency` | 1 | Security-related pause (e.g. suspicious activity detected) |
+| `Compliance` | 2 | Regulatory or compliance hold |
+| `Administrative` | 3 | Admin-initiated pause via `pause_stream_as_admin` |
+
+#### Event Shape Change (Breaking — v3)
+
+The `"paused"` event data changed from `StreamEvent::Paused(stream_id)` to
+`StreamPaused { stream_id, reason }`. Indexers must update their parsers.
+See `docs/events.md` for the full schema.
+
+#### Invariants
+
+- The `reason` code is informational only — it does not affect stream state, accrual, or withdrawal semantics.
+- All existing pause/resume/cancel/withdraw semantics are unchanged.
+- `CONTRACT_VERSION` was bumped to `3` to signal this breaking event-shape change.
+
 ### batch_withdraw: completed stream behavior
 
 `batch_withdraw` processes each stream ID in order. A stream with status `Completed` **does not panic** — it contributes a zero-amount result (`BatchWithdrawResult { stream_id, amount: 0 }`) and is skipped silently. No token transfer and no event are emitted for that entry. This allows callers to pass a mixed list of active and already-completed streams without pre-filtering.

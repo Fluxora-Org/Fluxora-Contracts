@@ -208,7 +208,7 @@ proptest! {
                     let _ = ctx.client().try_resume_stream(&id);
                     paused = false;
                 } else {
-                    let _ = ctx.client().try_pause_stream(&id);
+                    let _ = ctx.client().try_pause_stream(&id, &fluxora_stream::PauseReason::Operational);
                     paused = true;
                 }
             }
@@ -346,7 +346,7 @@ fn invariants_completed_stream() {
 fn invariants_paused_stream() {
     let (ctx, id) = setup_standard(1000);
     ctx.env.ledger().set_timestamp(400);
-    ctx.client().pause_stream(&id);
+    ctx.client().pause_stream(&id, &fluxora_stream::PauseReason::Operational);
     assert_invariants(&ctx, id, "paused t=400");
 }
 
@@ -354,7 +354,7 @@ fn invariants_paused_stream() {
 fn invariants_paused_then_resumed() {
     let (ctx, id) = setup_standard(1000);
     ctx.env.ledger().set_timestamp(400);
-    ctx.client().pause_stream(&id);
+    ctx.client().pause_stream(&id, &fluxora_stream::PauseReason::Operational);
     ctx.env.ledger().set_timestamp(600);
     ctx.client().resume_stream(&id);
     assert_invariants(&ctx, id, "resumed t=600");
@@ -364,7 +364,7 @@ fn invariants_paused_then_resumed() {
 fn invariants_paused_withdraw_then_resume() {
     let (ctx, id) = setup_standard(1000);
     ctx.env.ledger().set_timestamp(400);
-    ctx.client().pause_stream(&id);
+    ctx.client().pause_stream(&id, &fluxora_stream::PauseReason::Operational);
     assert_invariants(&ctx, id, "paused before resume");
     ctx.env.ledger().set_timestamp(600);
     ctx.client().resume_stream(&id);
@@ -466,7 +466,7 @@ fn invariants_multiple_pause_resume_cycles() {
     ] {
         ctx.env.ledger().set_timestamp(t);
         if pause {
-            ctx.client().pause_stream(&id);
+            ctx.client().pause_stream(&id, &fluxora_stream::PauseReason::Operational);
         } else {
             ctx.client().resume_stream(&id);
         }

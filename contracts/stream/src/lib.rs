@@ -82,7 +82,10 @@ pub const MAX_PAGE_SIZE: u64 = 100;
 ///   Code review and CI checks on this constant are the primary safeguard.
 /// Bumped to 2: `Stream` struct gained `checkpointed_amount: i128` and `checkpointed_at: u64`
 /// for safe rate-decrease support (see `decrease_rate_per_second`).
-pub const CONTRACT_VERSION: u32 = 2;
+/// Bumped to 3: `pause_stream` and `pause_stream_as_admin` now emit `StreamPaused { stream_id, reason }`
+/// instead of the bare `StreamEvent::Paused(stream_id)`. This is a breaking event-shape change.
+/// Indexers must update their pause event parsers. See `docs/events.md` for the new schema.
+pub const CONTRACT_VERSION: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -133,6 +136,40 @@ pub enum ContractError {
     StreamTerminalState = 13,
     /// Duplicate stream IDs were supplied to a batch operation.
     DuplicateStreamId = 14,
+}
+
+/// Reason codes for stream-level pause operations.
+///
+/// Carried in the `StreamPaused` event payload so that indexers and dashboards
+/// can distinguish operational pauses from emergency interventions without
+/// querying additional state.
+///
+/// # Versioning note
+/// Adding new variants to this enum is a breaking event-shape change and
+/// requires a `CONTRACT_VERSION` increment.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PauseReason {
+    /// Routine operational pause initiated by the sender (e.g. treasury maintenance).
+    Operational = 0,
+    /// Emergency pause initiated by the sender or admin due to a security concern.
+    Emergency = 1,
+    /// Compliance-related pause (e.g. regulatory hold).
+    Compliance = 2,
+    /// Administrative pause initiated by the contract admin.
+    Administrative = 3,
+}
+
+/// Emitted when a stream is paused via `pause_stream` or `pause_stream_as_admin`.
+///
+/// Replaces the bare `StreamEvent::Paused(stream_id)` payload with a structured
+/// payload that includes the reason code. Indexers must update their parsers to
+/// handle this new shape (see `docs/events.md`).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct StreamPaused {
+    pub stream_id: u64,
+    pub reason: PauseReason,
 }
 
 #[contracttype]
@@ -1424,6 +1461,7 @@ impl FluxoraStream {
     ///
     /// # Parameters
     /// - `stream_id`: Unique identifier of the stream to pause
+    /// - `reason`: Operational reason code for the pause (see `PauseReason`)
     ///
     /// # Authorization
     /// - Requires authorization from the stream's sender (original creator)
@@ -1435,14 +1473,14 @@ impl FluxoraStream {
     /// - If caller is not authorized (not the sender)
     ///
     /// # Events
-    /// - Publishes `Paused(stream_id)` event on success
+    /// - Publishes `("paused", stream_id)` → `StreamPaused { stream_id, reason }` on success
     ///
     /// # Usage Notes
     /// - Pausing does not affect accrual calculations (time-based)
     /// - Recipient cannot withdraw while stream is paused
     /// - Stream can be cancelled while paused
     /// - Use `resume_stream` to reactivate withdrawals
-    pub fn pause_stream(env: Env, stream_id: u64) -> Result<(), ContractError> {
+    pub fn pause_stream(env: Env, stream_id: u64, reason: PauseReason) -> Result<(), ContractError> {
         let mut stream = load_stream(&env, stream_id)?;
 
         Self::require_stream_sender(&stream.sender);
@@ -1464,7 +1502,7 @@ impl FluxoraStream {
 
         env.events().publish(
             (symbol_short!("paused"), stream_id),
-            StreamEvent::Paused(stream_id),
+            StreamPaused { stream_id, reason },
         );
         Ok(())
     }
@@ -3326,6 +3364,7 @@ impl FluxoraStream {
     ///
     /// # Parameters
     /// - `stream_id`: Unique identifier of the stream to pause
+    /// - `reason`: Operational reason code for the pause (see `PauseReason`)
     ///
     /// # Authorization
     /// - Requires authorization from the contract admin (set during `init`)
@@ -3336,13 +3375,13 @@ impl FluxoraStream {
     /// - If caller is not the admin
     ///
     /// # Events
-    /// - Publishes `Paused(stream_id)` event on success
+    /// - Publishes `("paused", stream_id)` → `StreamPaused { stream_id, reason }` on success
     ///
     /// # Usage Notes
     /// - Admin can pause any stream regardless of sender
     /// - Accrual continues based on time (pause doesn't stop time)
     /// - Recipient cannot withdraw while paused
-    pub fn pause_stream_as_admin(env: Env, stream_id: u64) -> Result<(), ContractError> {
+    pub fn pause_stream_as_admin(env: Env, stream_id: u64, reason: PauseReason) -> Result<(), ContractError> {
         get_admin(&env)?.require_auth();
 
         let mut stream = load_stream(&env, stream_id)?;
@@ -3362,7 +3401,7 @@ impl FluxoraStream {
 
         env.events().publish(
             (symbol_short!("paused"), stream_id),
-            StreamEvent::Paused(stream_id),
+            StreamPaused { stream_id, reason },
         );
         Ok(())
     }
