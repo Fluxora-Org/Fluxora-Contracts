@@ -101,7 +101,7 @@ This section is the protocol-level contract for the global pause state managed v
 Success semantics (observable):
 
 1. Preconditions: Caller must be the authorized contract `admin`.
-2. Storage: The `GlobalPaused` data key is set to `true` or `false` in instance storage.
+2. Storage: The `CreationPaused` data key is set to `true` or `false` in instance storage.
 3. Event: `ContractPaused(bool)` is emitted with topic `("paused_ctl",)`.
 4. Effect on creation: When paused, `create_stream` and `create_streams` return `ContractError::ContractPaused` and all new stream creation is blocked.
 5. Effect on existing streams: Active streams are intentionally unaffected. Withdrawals, top-ups, pause/resume/cancel operations on individual streams continue to function normally.

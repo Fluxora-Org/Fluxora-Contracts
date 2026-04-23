@@ -162,7 +162,7 @@ All arithmetic that could overflow `i128` uses Rust's `checked_*` methods:
 `set_contract_paused(true)` causes `create_stream` and `create_streams` to fail with
 `ContractError::ContractPaused`. Existing streams are unaffected — withdrawals,
 cancellations, and other operations continue normally. The pause flag is stored in
-instance storage under `DataKey::GlobalPaused`.
+instance storage under `DataKey::CreationPaused`.
 
 ---
 

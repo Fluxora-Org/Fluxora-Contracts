@@ -17996,3 +17996,22 @@ fn test_batch_withdraw_duplicate_returns_correct_error_code() {
         other => panic!("expected ContractError::DuplicateStreamId, got {:?}", other),
     }
 }
+
+#[test]
+fn test_global_pause_flags_default_to_false() {
+    let ctx = TestContext::setup();
+
+    // By default, both pause flags should be false.
+    let is_emergency_paused = ctx.client().get_global_emergency_paused();
+    assert!(
+        !is_emergency_paused,
+        "Global emergency pause should default to false"
+    );
+
+    // Since there is no public getter for CreationPaused, we read from storage
+    // or test behavior. Testing storage directly:
+    let creation_paused: bool = ctx
+        .env
+        .as_contract(&ctx.contract_id, || crate::is_creation_paused(&ctx.env));
+    assert!(!creation_paused, "Creation pause should default to false");
+}

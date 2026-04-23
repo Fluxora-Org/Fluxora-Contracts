@@ -155,8 +155,8 @@ match client.try_create_stream(&sender, &recipient, &deposit, &rate, &start, &cl
 **Definition**: Global emergency pause is active; non-admin mutations are blocked.
 
 **Trigger Conditions**:
-- Admin called `set_global_emergency_pause(true)`
-- Contract is in emergency pause mode
+- Admin called `set_global_emergency_paused(true)` or `set_contract_paused(true)`
+- Contract is in global emergency pause or creation pause mode
 
 **Affected Roles**:
 | Role | Can Trigger | Notes |
