@@ -17706,7 +17706,7 @@ mod recipient_index_stress {
 
         // Create 5 streams
         let mut ids = Vec::new(&ctx.env);
-        for i in 0..5 {
+        for _i in 0..5 {
             let id = ctx.client().create_stream(
                 &ctx.sender,
                 &ctx.recipient,

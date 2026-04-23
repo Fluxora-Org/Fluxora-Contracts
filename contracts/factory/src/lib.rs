@@ -132,6 +132,7 @@ impl FluxoraFactory {
     }
 
     /// Creates a new stream via the FluxoraStream contract after enforcing treasury policies.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_stream(
         env: Env,
         sender: Address,
@@ -167,11 +168,7 @@ impl FluxoraFactory {
             .instance()
             .get(&DataKey::MinDuration)
             .ok_or(FactoryError::NotInitialized)?;
-        let duration = if end_time > start_time {
-            end_time - start_time
-        } else {
-            0
-        };
+        let duration = end_time.saturating_sub(start_time);
         if duration < min_duration {
             return Err(FactoryError::DurationTooShort);
         }

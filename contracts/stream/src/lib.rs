@@ -80,9 +80,10 @@ pub const MAX_PAGE_SIZE: u64 = 100;
 /// - If an operator forgets to increment this constant before deploying a breaking change,
 ///   integrators will not detect the incompatibility until a runtime failure occurs.
 ///   Code review and CI checks on this constant are the primary safeguard.
-/// Bumped to 2: `Stream` struct gained `checkpointed_amount: i128` and `checkpointed_at: u64`
-/// for safe rate-decrease support (see `decrease_rate_per_second`).
-/// Bumped to 3: added `min_withdrawal: i128` to `Stream` for dust threshold support.
+///   Bumped to 1: initial version.
+///   Bumped to 2: `Stream` struct gained `checkpointed_amount: i128` and `checkpointed_at: u64`
+///   for safe rate-decrease support (see `decrease_rate_per_second`).
+///   Bumped to 3: added `min_withdrawal: i128` to `Stream` for dust threshold support.
 pub const CONTRACT_VERSION: u32 = 3;
 
 // ---------------------------------------------------------------------------
@@ -492,6 +493,7 @@ fn is_protocol_paused(env: &Env) -> bool {
 
 /// Returns `ContractError::ContractPaused` when the protocol is globally paused.
 /// Use this in state-mutating entrypoints to enforce pause scope.
+#[allow(dead_code)]
 fn require_not_paused(env: &Env) -> Result<(), ContractError> {
     if is_protocol_paused(env) {
         return Err(ContractError::ContractPaused);
@@ -637,6 +639,7 @@ fn remove_stream_from_recipient_index(env: &Env, recipient: &Address, stream_id:
 // ---------------------------------------------------------------------------
 
 /// Load the auto-claim destination for a stream, if set.
+#[allow(dead_code)]
 fn load_auto_claim_destination(env: &Env, stream_id: u64) -> Option<Address> {
     let key = DataKey::AutoClaimDestination(stream_id);
     let result: Option<Address> = env.storage().persistent().get(&key);
@@ -651,6 +654,7 @@ fn load_auto_claim_destination(env: &Env, stream_id: u64) -> Option<Address> {
 }
 
 /// Persist the auto-claim destination for a stream.
+#[allow(dead_code)]
 fn save_auto_claim_destination(env: &Env, stream_id: u64, destination: &Address) {
     let key = DataKey::AutoClaimDestination(stream_id);
     env.storage().persistent().set(&key, destination);
@@ -662,6 +666,7 @@ fn save_auto_claim_destination(env: &Env, stream_id: u64, destination: &Address)
 }
 
 /// Remove the auto-claim destination for a stream (opt-out / revoke).
+#[allow(dead_code)]
 fn remove_auto_claim_destination(env: &Env, stream_id: u64) {
     let key = DataKey::AutoClaimDestination(stream_id);
     env.storage().persistent().remove(&key);
@@ -1116,6 +1121,7 @@ impl FluxoraStream {
     ///     &(30 * 86400),        // 30 days duration
     /// )?;
     /// ```
+    #[allow(clippy::too_many_arguments)]
     pub fn create_stream_relative(
         env: Env,
         sender: Address,
@@ -2012,7 +2018,7 @@ impl FluxoraStream {
         recipient: Address,
         withdrawals: soroban_sdk::Vec<WithdrawToParam>,
     ) -> Result<soroban_sdk::Vec<BatchWithdrawResult>, ContractError> {
-        require_not_globally_paused(&env);
+        let _ = require_not_globally_paused(&env);
         recipient.require_auth();
 
         let n = withdrawals.len();
@@ -2545,7 +2551,7 @@ impl FluxoraStream {
         stream_id: u64,
         new_rate_per_second: i128,
     ) -> Result<(), ContractError> {
-        require_not_globally_paused(&env);
+        let _ = require_not_globally_paused(&env);
         let mut stream = load_stream(&env, stream_id)?;
 
         // Sender-only: only the original creator may reduce the rate.

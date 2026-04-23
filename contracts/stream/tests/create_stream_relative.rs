@@ -9,6 +9,7 @@ use soroban_sdk::{
     vec, Address, Env,
 };
 
+#[allow(dead_code)]
 struct TestContext<'a> {
     env: Env,
     contract_id: Address,

@@ -12,6 +12,7 @@
 ///
 /// For multi-epoch accrual (after rate changes), the contract uses the
 /// `calculate_accrued_amount_checkpointed` variant directly.
+#[allow(dead_code)]
 pub fn calculate_accrued_amount(
     start_time: u64,
     cliff_time: u64,
@@ -38,8 +39,8 @@ pub fn calculate_accrued_amount(
 ///
 /// # Parameters
 /// - `_start_time`         – original stream start; reserved for future cliff logic.
-/// - `checkpointed_amount` – tokens accrued under all **previous** rate epochs, locked in
-///                            at `checkpointed_at`. Initialised to `0` at stream creation.
+/// - `checkpointed_amount` – The cumulative total amount that has already been streamed (accrued)
+///   at `checkpointed_at`. Initialised to `0` at stream creation.
 /// - `checkpointed_at`     – timestamp of the last checkpoint (== `start_time` initially).
 /// - `cliff_time`          – no accrual is ever visible before this timestamp.
 /// - `end_time`            – accrual is capped at this timestamp.
@@ -52,6 +53,7 @@ pub fn calculate_accrued_amount(
 /// 2. `accrued(checkpointed_at) == checkpointed_amount` — a rate decrease never reduces
 ///    the visible withdrawable amount.
 /// 3. `accrued(t) <= deposit_amount` for all `t`.
+#[allow(clippy::too_many_arguments)]
 pub fn calculate_accrued_amount_checkpointed(
     _start_time: u64,
     checkpointed_amount: i128,

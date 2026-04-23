@@ -28,7 +28,9 @@ fn setup_env<'a>() -> (
 
     // Deploy native token
     let token_admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract(token_admin.clone());
+    #[allow(deprecated)]
+    let token_id =
+    env.register_stellar_asset_contract(token_admin.clone());
     let token_client = TokenClient::new(&env, &token_id);
     let stellar_asset_client = StellarAssetClient::new(&env, &token_id);
     stellar_asset_client.mint(&sender, &100_000);
@@ -95,7 +97,7 @@ fn test_factory_create_stream_success() {
 
 #[test]
 fn test_factory_enforces_allowlist() {
-    let (_env, factory, _admin, sender, recipient, unauthorized, _, _) = setup_env();
+    let (_env, factory, _admin, sender, recipient, _unauthorized, _, _) = setup_env();
 
     let res =
         factory.try_create_stream(&sender, &recipient, &1_000, &1, &100, &100, &1100, &0_i128);
@@ -125,13 +127,13 @@ fn test_factory_enforces_min_duration() {
 
 #[test]
 fn test_factory_admin_updates() {
-    let (env, factory, _admin, sender, recipient, unauthorized, _, _) = setup_env();
+    let (env, factory, _admin, sender, recipient, _unauthorized, _, _) = setup_env();
 
     // Update allowlist
-    factory.set_allowlist(&unauthorized, &true);
+    factory.set_allowlist(&_unauthorized, &true);
     let id1 = factory.create_stream(
         &sender,
-        &unauthorized,
+        &_unauthorized,
         &1_000,
         &1,
         &100,
