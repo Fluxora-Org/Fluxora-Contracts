@@ -28,6 +28,7 @@ Notes:
 | StreamEndShortened | `["end_shrt", stream_id: u64]` | `StreamEndShortened { stream_id: u64, old_end_time: u64, new_end_time: u64, refund_amount: i128 }`                                                       | When `shorten_stream_end_time` successfully shortens a stream.                                                           |
 | StreamEndExtended | `["end_ext", stream_id: u64]`  | `StreamEndExtended { stream_id: u64, old_end_time: u64, new_end_time: u64 }`                                                                              | When `extend_stream_end_time` successfully extends a stream.                                                             |
 | StreamToppedUp   | `["top_up", stream_id: u64]`    | `StreamToppedUp { stream_id: u64, top_up_amount: i128, new_deposit_amount: i128 }`                                                                        | When `top_up_stream` successfully increases a stream's deposit.                                                          |
+| RecipientUpdated | `["recp_upd", stream_id: u64]` | `RecipientUpdated { stream_id: u64, old_recipient: Address, new_recipient: Address }`                                                                     | When `update_recipient` successfully rotates a stream's receiving address.                                             |
 | AdminUpdated     | `["AdminUpdated"]`              | `(old_admin: Address, new_admin: Address)`                                                                                                                | When the contract admin is rotated via `set_admin`.                                                                     |
 | ContractPaused   | `["paused_ctl"]`                | `bool`                                                                                                                                                    | When the global contract pause state is toggled via `set_contract_paused`.                                              |
 | ProtocolPaused   | `["pr_pause", admin: Address]`  | `ProtocolPaused { reason: String, paused_at: u64 }`                                                                                                       | When `pause_protocol` successfully pauses the protocol. Not emitted on idempotent calls.                               |
@@ -390,6 +391,7 @@ Commit message suggestion: `docs: add event schema and topics for indexers`
 | `set_contract_paused`                                        | `"paused_ctl"`  |
 | `pause_protocol`                                             | `"pr_pause"`    |
 | `resume_protocol`                                            | `"pr_resume"`   |
+| `update_recipient`                                           | `"recp_upd"`    |
 
 If you change event topics or payloads in the contract, update this document and
 include updated example snapshots in the PR.

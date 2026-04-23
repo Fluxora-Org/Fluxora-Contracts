@@ -227,6 +227,15 @@ pub struct WithdrawalTo {
     pub amount: i128,
 }
 
+/// Emitted when a recipient rotates their receiving address for a stream.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecipientUpdated {
+    pub stream_id: u64,
+    pub old_recipient: Address,
+    pub new_recipient: Address,
+}
+
 /// Per-stream result for `batch_withdraw`.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -1909,6 +1918,53 @@ impl FluxoraStream {
         }
 
         Ok(withdrawable)
+    }
+
+    /// Rotate the receiving address for a stream.
+    ///
+    /// This allows the current recipient to transfer their entitlement to a new
+    /// address (e.g. in case of a compromised wallet). Only the current recipient
+    /// may authorize this rotation.
+    ///
+    /// # Parameters
+    /// - `stream_id`: Unique identifier of the stream to update.
+    /// - `new_recipient`: The new address that will receive the remaining streamed tokens.
+    pub fn update_recipient(
+        env: Env,
+        stream_id: u64,
+        new_recipient: Address,
+    ) -> Result<(), ContractError> {
+        require_not_globally_paused(&env)?;
+        let mut stream = load_stream(&env, stream_id)?;
+
+        // Only current recipient can authorize rotation
+        stream.recipient.require_auth();
+
+        if new_recipient == stream.recipient {
+            return Err(ContractError::InvalidParams);
+        }
+
+        let old_recipient = stream.recipient.clone();
+
+        // Update indices atomically
+        remove_stream_from_recipient_index(&env, &old_recipient, stream_id);
+        add_stream_to_recipient_index(&env, &new_recipient, stream_id);
+
+        // Update state
+        stream.recipient = new_recipient.clone();
+        save_stream(&env, &stream);
+
+        // Emit event
+        env.events().publish(
+            (symbol_short!("recp_upd"), stream_id),
+            RecipientUpdated {
+                stream_id,
+                old_recipient,
+                new_recipient,
+            },
+        );
+
+        Ok(())
     }
 
     /// Withdraw accrued tokens from multiple streams in one call (recipient-only).

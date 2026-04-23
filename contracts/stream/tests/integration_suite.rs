@@ -1,8 +1,8 @@
 extern crate std;
 
 use fluxora_stream::{
-    ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamEndShortened,
-    StreamStatus, StreamToppedUp,
+    ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, RecipientUpdated,
+    StreamEndShortened, StreamStatus, StreamToppedUp,
 };
 use soroban_sdk::log;
 use soroban_sdk::{
@@ -6535,4 +6535,196 @@ fn pause_reason_does_not_affect_stream_state_or_accrual() {
 fn contract_version_is_3_after_pause_reason_bump() {
     let ctx = TestContext::setup();
     assert_eq!(ctx.client().version(), 3, "CONTRACT_VERSION must be 3");
+}
+
+/// Recipient Rotation: Basic success scenario.
+#[test]
+fn integration_recipient_rotation_success() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let new_recipient = Address::generate(&ctx.env);
+
+    // Initial state check
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.recipient, ctx.recipient);
+
+    // Rotate recipient
+    ctx.client().update_recipient(&stream_id, &new_recipient);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.recipient, new_recipient);
+
+    // Index consistency: Removed from old
+    let old_streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert!(!old_streams.contains(stream_id));
+
+    // Index consistency: Added to new
+    let new_streams = ctx.client().get_recipient_streams(&new_recipient);
+    assert!(new_streams.contains(stream_id));
+
+    // Verify event
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+    assert_eq!(
+        RecipientUpdated::try_from_val(&ctx.env, &last_event.2).unwrap(),
+        RecipientUpdated {
+            stream_id,
+            old_recipient: ctx.recipient.clone(),
+            new_recipient: new_recipient.clone(),
+        }
+    );
+}
+
+/// Recipient Rotation: Auth failure. Only recipient can rotate.
+#[test]
+fn integration_recipient_rotation_auth_failure() {
+    let ctx = TestContext::setup_strict();
+    let stream_id = ctx.create_default_stream();
+    let new_recipient = Address::generate(&ctx.env);
+
+    // Sender tries to rotate -> Unauthorized
+    ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &ctx.sender,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "update_recipient",
+            args: (stream_id, new_recipient.clone()).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(ctx
+        .client()
+        .try_update_recipient(&stream_id, &new_recipient)
+        .is_err());
+
+    // Admin tries to rotate -> Unauthorized
+    ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &ctx.admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "update_recipient",
+            args: (stream_id, new_recipient.clone()).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(ctx
+        .client()
+        .try_update_recipient(&stream_id, &new_recipient)
+        .is_err());
+}
+
+/// Recipient Rotation: Entitlement preservation. Old recipient cannot withdraw after rotation.
+#[test]
+fn integration_recipient_rotation_entitlement_transfer() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream(); // 1000 tokens, 1000 seconds
+    let new_recipient = Address::generate(&ctx.env);
+
+    // Accrue some tokens (100 seconds = 100 tokens)
+    ctx.env.ledger().set_timestamp(100);
+
+    // Rotate recipient
+    ctx.client().update_recipient(&stream_id, &new_recipient);
+
+    // Old recipient tries to withdraw -> Unauthorized (mock_auths handles the check)
+    // In setup() mock_all_auths() is called, but the contract check is `stream.recipient.require_auth()`.
+    // Since stream.recipient is now new_recipient, the mock_auths will effectively verify new_recipient.
+
+    // To strictly test that old recipient fails, we should use setup_strict().
+    let ctx_s = TestContext::setup_strict();
+    let stream_id_s = ctx_s.create_default_stream();
+    let new_recp_s = Address::generate(&ctx_s.env);
+
+    ctx_s.client().update_recipient(&stream_id_s, &new_recp_s);
+
+    // Old recipient tries to withdraw
+    ctx_s.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &ctx_s.recipient,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &ctx_s.contract_id,
+            fn_name: "withdraw",
+            args: (stream_id_s,).into_val(&ctx_s.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(ctx_s.client().try_withdraw(&stream_id_s).is_err());
+
+    // New recipient can withdraw
+    ctx_s.env.ledger().set_timestamp(100);
+    ctx_s.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &new_recp_s,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &ctx_s.contract_id,
+            fn_name: "withdraw",
+            args: (stream_id_s,).into_val(&ctx_s.env),
+            sub_invokes: &[],
+        },
+    }]);
+    let withdrawn = ctx_s.client().withdraw(&stream_id_s);
+    assert!(withdrawn > 0);
+}
+
+/// Recipient Rotation: After partial withdrawal.
+#[test]
+fn integration_recipient_rotation_after_partial_withdrawal() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let new_recipient = Address::generate(&ctx.env);
+
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().withdraw(&stream_id); // Withdrew 100
+
+    ctx.client().update_recipient(&stream_id, &new_recipient);
+
+    ctx.env.ledger().set_timestamp(200);
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(
+        withdrawn, 100,
+        "New recipient should only withdraw remaining accrued"
+    );
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 200);
+}
+
+/// Recipient Rotation: After cancel.
+#[test]
+fn integration_recipient_rotation_after_cancel() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let new_recipient = Address::generate(&ctx.env);
+
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().cancel_stream(&stream_id); // Frozen at 100
+
+    ctx.client().update_recipient(&stream_id, &new_recipient);
+
+    ctx.env.ledger().set_timestamp(500);
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(
+        withdrawn, 100,
+        "New recipient should withdraw frozen amount even if late"
+    );
+}
+
+/// Recipient Rotation: Index correctness after multiple rotations.
+#[test]
+fn integration_recipient_rotation_multiple_times() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let r1 = Address::generate(&ctx.env);
+    let r2 = Address::generate(&ctx.env);
+
+    ctx.client().update_recipient(&stream_id, &r1);
+    ctx.client().update_recipient(&stream_id, &r2);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.recipient, r2);
+
+    assert!(!ctx
+        .client()
+        .get_recipient_streams(&ctx.recipient)
+        .contains(stream_id));
+    assert!(!ctx.client().get_recipient_streams(&r1).contains(stream_id));
+    assert!(ctx.client().get_recipient_streams(&r2).contains(stream_id));
 }

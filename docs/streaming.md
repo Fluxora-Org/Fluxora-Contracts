@@ -49,6 +49,7 @@ From **CONTRACT_VERSION 3**, integrators can register **relative** schedule skel
 | **Cancellation** | `cancel_stream` / `cancel_stream_as_admin`    | Refunds unstreamed amount; frozen accrued stays for recipient         |
 | **Withdrawal**   | `withdraw` / `withdraw_to` / `batch_withdraw` | Recipient pulls accrued tokens; allowed on Paused if past `end_time`  |
 | **Completion**   | Automatic                                     | When `withdrawn_amount == deposit_amount`, status becomes `Completed` |
+| **Rotation**     | `update_recipient`                            | Recipient transfers entitlement to a new address                      |
 | **Auto-claim**   | `set_auto_claim` / `revoke_auto_claim` / `trigger_auto_claim` | Recipient opts in to permissionless final claim at `end_time` to a chosen destination |
 
 ### State Transitions
@@ -503,6 +504,7 @@ contract.create_streams_relative(&sender, &params)?;
 | `close_completed_stream`  | Anyone                        | None (permissionless terminal cleanup)     |
 | `top_up_stream`           | Funder address                | `funder.require_auth()`                     |
 | `update_rate_per_second`  | Sender                        | `sender.require_auth()`                     |
+| `update_recipient`        | Recipient                     | `recipient.require_auth()`                  |
 | `decrease_rate_per_second`| Sender                        | `sender.require_auth()`                     |
 | `shorten_stream_end_time` | Sender                        | `sender.require_auth()`                     |
 | `extend_stream_end_time`  | Sender                        | `sender.require_auth()`                     |
