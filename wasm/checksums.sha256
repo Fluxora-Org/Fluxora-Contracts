@@ -15,4 +15,4 @@
 #   - Build uses --release with wasm32-unknown-unknown target
 #   - No environment-dependent flags or features beyond the pinned toolchain
 #
-eb03af74eaf31140143b3eb70eee005e58cc9ec5534133659743b92960ffed57  fluxora_stream.wasm
+585123a0dda00d9d0b82ed7c2a3e47f926ba4fbfaf241a0a19322dd5f8bf74bd  fluxora_stream.wasm

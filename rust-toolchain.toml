@@ -8,7 +8,7 @@
 # To update: rustup update stable
 
 [toolchain]
-channel = "1.94.1"
+channel = "stable"
 components = ["rustfmt", "clippy"]
 targets = ["wasm32-unknown-unknown"]
 
