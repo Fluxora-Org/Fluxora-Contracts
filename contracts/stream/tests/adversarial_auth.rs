@@ -128,6 +128,7 @@ impl<'a> Ctx<'a> {
             &0u64,
             &0u64,
             &1000u64,
+            &0_i128,
         )
     }
 
@@ -197,6 +198,7 @@ fn adversarial_create_stream_stranger_cannot_impersonate_sender() {
             &0u64,
             &0u64,
             &1000u64,
+            &0_i128,
         );
     }));
 
@@ -752,6 +754,7 @@ fn adversarial_batch_withdraw_cross_stream_recipient_rejected() {
         &0u64,
         &0u64,
         &1000u64,
+        &0_i128,
     );
 
     ctx.env.ledger().set_timestamp(500);
@@ -1130,6 +1133,7 @@ fn adversarial_set_contract_paused_stranger_rejected() {
         &0u64,
         &0u64,
         &1000u64,
+        &0_i128,
     );
     assert_eq!(
         ctx.client().get_stream_state(&id).status,
@@ -1299,6 +1303,7 @@ fn adversarial_extend_end_time_stranger_rejected_no_side_effects() {
         &0u64,
         &0u64,
         &1000u64,
+        &0_i128,
     );
 
     let stranger = Address::generate(&ctx.env);
@@ -1392,6 +1397,7 @@ fn adversarial_extend_end_time_recipient_rejected() {
         &0u64,
         &0u64,
         &1000u64,
+        &0_i128,
     );
 
     let state_before = ctx.client().get_stream_state(&stream_id);

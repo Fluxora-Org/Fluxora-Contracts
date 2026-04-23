@@ -47,7 +47,7 @@ fn create_stream_emits_correct_event() {
         &0u64,
         &0u64,
         &1000u64,
-    );
+     &0_i128,);
 
     let events = ctx.env.events().all();
     assert!(!events.is_empty(), "must emit StreamCreated event");
@@ -299,7 +299,7 @@ fn withdraw_at_exact_cliff_time_returns_zero() {
         &0u64,
         &500u64, // cliff at 500
         &1000u64,
-    );
+     &0_i128,);
 
     // At exact cliff time, nothing is withdrawable yet
     ctx.env.ledger().set_timestamp(500);
@@ -322,7 +322,7 @@ fn withdraw_one_second_after_cliff_returns_accrued() {
         &0u64,
         &500u64, // cliff at 500
         &1000u64,
-    );
+     &0_i128,);
 
     // One second after cliff, 1 token is accrued
     ctx.env.ledger().set_timestamp(501);
@@ -375,7 +375,7 @@ fn cancel_at_exact_start_time_refunds_full_deposit() {
         &0u64,
         &0u64,
         &1000u64,
-    );
+     &0_i128,);
 
     // At exact start time, nothing is accrued yet
     ctx.env.ledger().set_timestamp(0);
@@ -445,7 +445,7 @@ fn create_stream_max_deposit_fails() {
         &0u64,
         &0u64,
         &1000u64,
-    );
+     &0_i128,);
 
     assert!(
         result.is_err(),
@@ -467,7 +467,7 @@ fn create_stream_max_rate_fails() {
         &0u64,
         &0u64,
         &1000u64,
-    );
+     &0_i128,);
 
     assert!(
         result.is_err(),
@@ -491,7 +491,7 @@ fn create_stream_rate_duration_overflow_fails() {
         &0u64,
         &0u64,
         &1_000_000_000u64,
-    );
+     &0_i128,);
 
     assert!(
         result.is_err(),
@@ -556,7 +556,7 @@ fn shorten_end_time_overflow_fails() {
         &0u64,
         &0u64,
         &1_000_000_000u64,
-    );
+     &0_i128,);
 
     ctx.env.ledger().set_timestamp(100);
 

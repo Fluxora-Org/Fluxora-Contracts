@@ -151,7 +151,7 @@ proptest! {
             &0u64,
             &0u64,
             &duration,
-        );
+         &0_i128,);
         for t in &times {
             ctx.env.ledger().set_timestamp(*t);
             assert_invariants(&ctx, id, &std::format!("active t={t}"));
@@ -174,7 +174,7 @@ proptest! {
             &0u64,
             &0u64,
             &duration,
-        );
+         &0_i128,);
         for t in &times {
             ctx.env.ledger().set_timestamp(*t);
             let _ = ctx.client().withdraw(&id);
@@ -198,7 +198,7 @@ proptest! {
             &0u64,
             &0u64,
             &duration,
-        );
+         &0_i128,);
         let mut paused = false;
         for t in &times {
             ctx.env.ledger().set_timestamp(*t);
@@ -232,7 +232,7 @@ proptest! {
             &0u64,
             &0u64,
             &duration,
-        );
+         &0_i128,);
         ctx.env.ledger().set_timestamp(cancel_at);
         ctx.client().cancel_stream(&id);
         assert_invariants(&ctx, id, "post-cancel");
@@ -256,7 +256,7 @@ proptest! {
             &0u64,
             &0u64,
             &duration,
-        );
+         &0_i128,);
         let mut prev = 0_i128;
         for t in &times {
             ctx.env.ledger().set_timestamp(*t);
@@ -287,6 +287,7 @@ fn setup_standard(deposit: i128) -> (PropCtx, u64) {
         &0u64,
         &0u64,
         &1000u64,
+        &0_i128,
     );
     (ctx, id)
 }
@@ -384,6 +385,7 @@ fn invariants_cancelled_before_cliff() {
         &0u64,
         &500u64,
         &1000u64,
+        &0_i128,
     );
     ctx.env.ledger().set_timestamp(200);
     ctx.client().cancel_stream(&id);
@@ -423,6 +425,7 @@ fn invariants_high_rate_deposit_capped() {
         &0u64,
         &0u64,
         &100u64,
+        &0_i128,
     );
     for t in [0u64, 10, 50, 99, 100, 200] {
         ctx.env.ledger().set_timestamp(t);
@@ -443,6 +446,7 @@ fn invariants_excess_deposit_stream() {
         &0u64,
         &0u64,
         &1000u64,
+        &0_i128,
     );
     for t in [0u64, 500, 1000, 1500] {
         ctx.env.ledger().set_timestamp(t);
