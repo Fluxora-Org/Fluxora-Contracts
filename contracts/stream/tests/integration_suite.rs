@@ -3749,4 +3749,274 @@ fn test_batch_withdraw_to_contract_address_fails() {
 
     let res = ctx.client().try_batch_withdraw_to(&ctx.recipient, &params);
     assert_eq!(res, Err(Ok(fluxora_stream::ContractError::InvalidParams)));
+
+// ---------------------------------------------------------------------------
+// TTL bump regression tests (issue #416)
+// ---------------------------------------------------------------------------
+//
+// Verify that instance storage (Config, NextStreamId) and persistent storage
+// (Stream, RecipientStreams) have their TTL extended correctly on reads and
+// writes, preventing premature expiration under normal usage patterns.
+//
+// TTL constants from lib.rs:
+// - INSTANCE_LIFETIME_THRESHOLD = 17_280 ledgers (~1 day)
+// - INSTANCE_BUMP_AMOUNT = 120_960 ledgers (~7 days)
+// - PERSISTENT_LIFETIME_THRESHOLD = 17_280 ledgers
+// - PERSISTENT_BUMP_AMOUNT = 120_960 ledgers
+
+/// Instance storage (Config, NextStreamId) TTL is extended on every entry-point call.
+#[test]
+fn ttl_instance_storage_bumped_on_reads() {
+    let ctx = TestContext::setup();
+    
+    // Initial TTL after init should be at least INSTANCE_BUMP_AMOUNT
+    let initial_ttl = ctx.env.as_contract(&ctx.contract_id, || {
+        ctx.env.storage().instance().get_ttl()
+    });
+    
+    // Should be bumped to ~120_960 ledgers (allow some tolerance for SDK defaults)
+    assert!(
+        initial_ttl >= 100_000,
+        "Initial instance TTL {initial_ttl} should be >= 100_000"
+    );
+    
+    // Advance ledger by 50_000 ledgers (well below threshold)
+    ctx.env.ledger().with_mut(|li| {
+        li.sequence_number += 50_000;
+    });
+    
+    // Read operation (get_config) should bump TTL
+    let _ = ctx.client().get_config();
+    
+    let ttl_after_read = ctx.env.as_contract(&ctx.contract_id, || {
+        ctx.env.storage().instance().get_ttl()
+    });
+    
+    // TTL should be refreshed to ~120_960 from current ledger
+    assert!(
+        ttl_after_read >= 100_000,
+        "Instance TTL after read {ttl_after_read} should be >= 100_000"
+    );
+}
+
+/// Instance storage TTL is extended even when approaching threshold.
+#[test]
+fn ttl_instance_storage_bumped_near_threshold() {
+    let ctx = TestContext::setup();
+    
+    // Advance ledger to just before threshold (17_280 ledgers)
+    ctx.env.ledger().with_mut(|li| {
+        li.sequence_number += 105_000; // leaves ~15_960 TTL
+    });
+    
+    // Any operation should bump TTL
+    let stream_id = ctx.create_default_stream();
+    
+    let ttl_after_create = ctx.env.as_contract(&ctx.contract_id, || {
+        ctx.env.storage().instance().get_ttl()
+    });
+    
+    // TTL should be refreshed to ~120_960
+    assert!(
+        ttl_after_create >= 100_000,
+        "Instance TTL near threshold {ttl_after_create} should be >= 100_000"
+    );
+    
+    // Verify stream was created successfully
+    assert_eq!(stream_id, 0);
+}
+
+/// Persistent storage (Stream entries) TTL is extended on reads.
+#[test]
+fn ttl_persistent_stream_bumped_on_reads() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    
+    // Initial TTL after creation should be at least PERSISTENT_BUMP_AMOUNT
+    let initial_ttl = ctx.env.as_contract(&ctx.contract_id, || {
+        ctx.env.storage().persistent().get_ttl(&fluxora_stream::DataKey::Stream(stream_id))
+    });
+    
+    assert!(
+        initial_ttl >= 100_000,
+        "Initial stream TTL {initial_ttl} should be >= 100_000"
+    );
+    
+    // Advance ledger by 50_000 ledgers
+    ctx.env.ledger().with_mut(|li| {
+        li.sequence_number += 50_000;
+    });
+    
+    // Read operation (get_stream_state) should bump TTL
+    let _ = ctx.client().get_stream_state(&stream_id);
+    
+    let ttl_after_read = ctx.env.as_contract(&ctx.contract_id, || {
+        ctx.env.storage().persistent().get_ttl(&fluxora_stream::DataKey::Stream(stream_id))
+    });
+    
+    // TTL should be refreshed
+    assert!(
+        ttl_after_read >= 100_000,
+        "Stream TTL after read {ttl_after_read} should be >= 100_000"
+    );
+}
+
+/// Persistent storage (Stream entries) TTL is extended on writes.
+#[test]
+fn ttl_persistent_stream_bumped_on_writes() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    
+    // Advance ledger by 50_000 ledgers
+    ctx.env.ledger().with_mut(|li| {
+        li.sequence_number += 50_000;
+    });
+    
+    // Write operation (pause_stream) should bump TTL
+    ctx.client().pause_stream(&stream_id);
+    
+    let ttl_after_write = ctx.env.as_contract(&ctx.contract_id, || {
+        ctx.env.storage().persistent().get_ttl(&fluxora_stream::DataKey::Stream(stream_id))
+    });
+    
+    assert!(
+        ttl_after_write >= 100_000,
+        "Stream TTL after write {ttl_after_write} should be >= 100_000"
+    );
+}
+
+/// Multiple streams maintain independent TTL.
+#[test]
+fn ttl_multiple_streams_independent() {
+    let ctx = TestContext::setup();
+    let sac = StellarAssetClient::new(&ctx.env, &ctx.token_id);
+    sac.mint(&ctx.sender, &10_000_i128);
+    
+    let stream_0 = ctx.create_default_stream();
+    
+    // Advance ledger before creating second stream
+    ctx.env.ledger().with_mut(|li| {
+        li.sequence_number += 30_000;
+    });
+    
+    let stream_1 = ctx.create_default_stream();
+    
+    let ttl_0 = ctx.env.as_contract(&ctx.contract_id, || {
+        ctx.env.storage().persistent().get_ttl(&fluxora_stream::DataKey::Stream(stream_0))
+    });
+    
+    let ttl_1 = ctx.env.as_contract(&ctx.contract_id, || {
+        ctx.env.storage().persistent().get_ttl(&fluxora_stream::DataKey::Stream(stream_1))
+    });
+    
+    // stream_1 was created 30_000 ledgers later, so its TTL should be ~30_000 higher
+    assert!(
+        ttl_1 > ttl_0 + 20_000,
+        "stream_1 TTL {ttl_1} should be significantly higher than stream_0 TTL {ttl_0}"
+    );
+}
+
+/// RecipientStreams index TTL is extended when accessed.
+#[test]
+fn ttl_recipient_index_bumped_on_access() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    
+    // Initial TTL after creation
+    let initial_ttl = ctx.env.as_contract(&ctx.contract_id, || {
+        ctx.env.storage().persistent().get_ttl(&fluxora_stream::DataKey::RecipientStreams(ctx.recipient.clone()))
+    });
+    
+    assert!(
+        initial_ttl >= 100_000,
+        "Initial recipient index TTL {initial_ttl} should be >= 100_000"
+    );
+    
+    // Advance ledger
+    ctx.env.ledger().with_mut(|li| {
+        li.sequence_number += 50_000;
+    });
+    
+    // Access recipient index via get_recipient_streams
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 1);
+    assert_eq!(streams.get(0).unwrap(), stream_id);
+    
+    let ttl_after_access = ctx.env.as_contract(&ctx.contract_id, || {
+        ctx.env.storage().persistent().get_ttl(&fluxora_stream::DataKey::RecipientStreams(ctx.recipient.clone()))
+    });
+    
+    assert!(
+        ttl_after_access >= 100_000,
+        "Recipient index TTL after access {ttl_after_access} should be >= 100_000"
+    );
+}
+
+/// Periodic reads keep entries alive indefinitely.
+#[test]
+fn ttl_periodic_reads_prevent_expiration() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    
+    // Simulate 10 read cycles, each advancing 15_000 ledgers (below threshold)
+    for _ in 0..10 {
+        ctx.env.ledger().with_mut(|li| {
+            li.sequence_number += 15_000;
+        });
+        
+        // Read keeps TTL fresh
+        let _ = ctx.client().get_stream_state(&stream_id);
+    }
+    
+    // After 150_000 ledgers of periodic reads, entry should still be accessible
+    let final_ttl = ctx.env.as_contract(&ctx.contract_id, || {
+        ctx.env.storage().persistent().get_ttl(&fluxora_stream::DataKey::Stream(stream_id))
+    });
+    
+    assert!(
+        final_ttl >= 100_000,
+        "Stream TTL after periodic reads {final_ttl} should be >= 100_000"
+    );
+    
+    // Verify stream is still accessible
+    let stream = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(stream.stream_id, stream_id);
+}
+
+/// Config remains accessible after many operations.
+#[test]
+fn ttl_config_survives_long_operation_sequence() {
+    let ctx = TestContext::setup();
+    
+    // Simulate a long sequence of operations with ledger advancement
+    for i in 0..5 {
+        ctx.env.ledger().with_mut(|li| {
+            li.sequence_number += 20_000;
+        });
+        
+        // Each operation bumps instance TTL
+        let _ = ctx.client().get_config();
+        let _ = ctx.client().get_stream_count();
+        
+        // Create a stream (also bumps instance TTL)
+        let sac = StellarAssetClient::new(&ctx.env, &ctx.token_id);
+        sac.mint(&ctx.sender, &1_000_i128);
+        let _ = ctx.create_default_stream();
+    }
+    
+    // After 100_000 ledgers, config should still be accessible
+    let config = ctx.client().get_config();
+    assert_eq!(config.token, ctx.token_id);
+    assert_eq!(config.admin, ctx.admin);
+    
+    let final_ttl = ctx.env.as_contract(&ctx.contract_id, || {
+        ctx.env.storage().instance().get_ttl()
+    });
+    
+    assert!(
+        final_ttl >= 100_000,
+        "Instance TTL after long sequence {final_ttl} should be >= 100_000"
+    );
+}
+
 }
