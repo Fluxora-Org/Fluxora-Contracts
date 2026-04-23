@@ -17375,9 +17375,9 @@ mod recipient_index_stress {
         assert_eq!(streams.len(), 3, "Should return 3 streams");
 
         // Verify order and content
-        assert_eq!(streams.get(0).unwrap().id, 1);
-        assert_eq!(streams.get(1).unwrap().id, 2);
-        assert_eq!(streams.get(2).unwrap().id, 3);
+        assert_eq!(streams.get(0).unwrap().stream_id, 1);
+        assert_eq!(streams.get(1).unwrap().stream_id, 2);
+        assert_eq!(streams.get(2).unwrap().stream_id, 3);
     }
 
     #[test]
@@ -17435,15 +17435,8 @@ mod recipient_index_stress {
 
         // Create 5 streams
         for _ in 0..5 {
-            ctx.client().create_stream(
-                &ctx.sender,
-                &ctx.recipient,
-                &1000,
-                &1,
-                &0,
-                &0,
-                &1000,
-            );
+            ctx.client()
+                .create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
         }
 
         // Close stream 2 (make it completed first)
@@ -17454,9 +17447,9 @@ mod recipient_index_stress {
         // Range should return streams 1, 3, 4 (skipping closed stream 2)
         let streams = ctx.client().get_streams_by_id_range(&1, &4, &10);
         assert_eq!(streams.len(), 3, "Should skip closed stream");
-        assert_eq!(streams.get(0).unwrap().id, 1);
-        assert_eq!(streams.get(1).unwrap().id, 3);
-        assert_eq!(streams.get(2).unwrap().id, 4);
+        assert_eq!(streams.get(0).unwrap().stream_id, 1);
+        assert_eq!(streams.get(1).unwrap().stream_id, 3);
+        assert_eq!(streams.get(2).unwrap().stream_id, 4);
     }
 
     #[test]
@@ -17481,8 +17474,8 @@ mod recipient_index_stress {
         let max = u64::MAX;
         let streams = ctx.client().get_streams_by_id_range(&5, &max, &5);
         assert_eq!(streams.len(), 5, "Should return 5 streams from position 5");
-        assert_eq!(streams.get(0).unwrap().id, 5);
-        assert_eq!(streams.get(4).unwrap().id, 9);
+        assert_eq!(streams.get(0).unwrap().stream_id, 5);
+        assert_eq!(streams.get(4).unwrap().stream_id, 9);
     }
 
     #[test]
@@ -17517,30 +17510,40 @@ mod recipient_index_stress {
         }
 
         // Page 1: cursor=0, limit=3
-        let page1 = ctx.client().get_recipient_streams_paginated(&recipient, &0, &3);
+        let page1 = ctx
+            .client()
+            .get_recipient_streams_paginated(&recipient, &0, &3);
         assert_eq!(page1.len(), 3);
         assert_eq!(page1.get(0).unwrap(), 0);
         assert_eq!(page1.get(1).unwrap(), 1);
         assert_eq!(page1.get(2).unwrap(), 2);
 
         // Page 2: cursor=3, limit=3
-        let page2 = ctx.client().get_recipient_streams_paginated(&recipient, &3, &3);
+        let page2 = ctx
+            .client()
+            .get_recipient_streams_paginated(&recipient, &3, &3);
         assert_eq!(page2.len(), 3);
         assert_eq!(page2.get(0).unwrap(), 3);
         assert_eq!(page2.get(1).unwrap(), 4);
         assert_eq!(page2.get(2).unwrap(), 5);
 
         // Page 3: cursor=6, limit=3 (only 4 left)
-        let page3 = ctx.client().get_recipient_streams_paginated(&recipient, &6, &3);
+        let page3 = ctx
+            .client()
+            .get_recipient_streams_paginated(&recipient, &6, &3);
         assert_eq!(page3.len(), 3);
 
         // Page 4: cursor=9, limit=3 (only 1 left)
-        let page4 = ctx.client().get_recipient_streams_paginated(&recipient, &9, &3);
+        let page4 = ctx
+            .client()
+            .get_recipient_streams_paginated(&recipient, &9, &3);
         assert_eq!(page4.len(), 1);
         assert_eq!(page4.get(0).unwrap(), 9);
 
         // Page 5: cursor=10, should be empty (past end)
-        let page5 = ctx.client().get_recipient_streams_paginated(&recipient, &10, &3);
+        let page5 = ctx
+            .client()
+            .get_recipient_streams_paginated(&recipient, &10, &3);
         assert_eq!(page5.len(), 0);
     }
 
@@ -17557,7 +17560,9 @@ mod recipient_index_stress {
         }
 
         // Request 200, should be capped at MAX_PAGE_SIZE (100)
-        let page = ctx.client().get_recipient_streams_paginated(&recipient, &0, &200);
+        let page = ctx
+            .client()
+            .get_recipient_streams_paginated(&recipient, &0, &200);
         assert_eq!(page.len(), 100, "Should respect MAX_PAGE_SIZE of 100");
     }
 
@@ -17570,7 +17575,9 @@ mod recipient_index_stress {
         ctx.client().create_stream(&ctx.sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64 &0_i128,);
 
         // Cursor beyond total count
-        let result = ctx.client().get_recipient_streams_paginated(&recipient, &100, &10);
+        let result = ctx
+            .client()
+            .get_recipient_streams_paginated(&recipient, &100, &10);
         assert_eq!(result.len(), 0, "Should return empty when cursor >= total");
     }
 
@@ -17582,7 +17589,9 @@ mod recipient_index_stress {
         let recipient = Address::generate(&ctx.env);
         ctx.client().create_stream(&ctx.sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64 &0_i128,);
 
-        let result = ctx.client().get_recipient_streams_paginated(&recipient, &0, &0);
+        let result = ctx
+            .client()
+            .get_recipient_streams_paginated(&recipient, &0, &0);
         assert_eq!(result.len(), 0, "Zero limit should return empty");
     }
 
@@ -17607,11 +17616,15 @@ mod recipient_index_stress {
         }
 
         // Paginate recipient1
-        let page1 = ctx.client().get_recipient_streams_paginated(&recipient1, &0, &10);
+        let page1 = ctx
+            .client()
+            .get_recipient_streams_paginated(&recipient1, &0, &10);
         assert_eq!(page1.len(), 5);
 
         // Paginate recipient2
-        let page2 = ctx.client().get_recipient_streams_paginated(&recipient2, &0, &10);
+        let page2 = ctx
+            .client()
+            .get_recipient_streams_paginated(&recipient2, &0, &10);
         assert_eq!(page2.len(), 3);
     }
 
