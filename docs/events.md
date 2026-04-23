@@ -19,7 +19,7 @@ Notes:
 | StreamCreated    | `["created", stream_id: u64]`   | `StreamCreated { stream_id: u64, sender: Address, recipient: Address, deposit_amount: i128, rate_per_second: i128, start_time: u64, cliff_time: u64, end_time: u64, memo: Option<Bytes> }` | After a stream is successfully created and deposit tokens transferred. Not emitted on any validation failure.           |
 | Withdrawal       | `["withdrew", stream_id: u64]`  | `Withdrawal { stream_id: u64, recipient: Address, amount: i128 }`                                                                                         | When a recipient successfully withdraws accrued tokens. Only emitted when `amount > 0`.                                |
 | WithdrawalTo     | `["wdraw_to", stream_id: u64]`  | `WithdrawalTo { stream_id: u64, recipient: Address, destination: Address, amount: i128 }`                                                                 | When a recipient calls `withdraw_to` or `batch_withdraw_to` and `amount > 0`. Destination may differ from recipient.                          |
-| StreamPaused     | `["paused", stream_id: u64]`    | `StreamEvent::Paused(stream_id: u64)`                                                                                                                     | When a stream is paused by the sender (`pause_stream`) or admin (`pause_stream_as_admin`).                              |
+| StreamPaused     | `["paused", stream_id: u64]`    | `StreamPaused { stream_id: u64, reason: PauseReason }`                                                                                                    | When a stream is paused by the sender (`pause_stream`) or admin (`pause_stream_as_admin`). The `reason` field carries the operational context code.         |
 | StreamResumed    | `["resumed", stream_id: u64]`   | `StreamEvent::Resumed(stream_id: u64)`                                                                                                                    | When a paused stream is resumed by the sender (`resume_stream`) or admin (`resume_stream_as_admin`).                    |
 | StreamCancelled  | `["cancelled", stream_id: u64]` | `StreamEvent::StreamCancelled(stream_id: u64)`                                                                                                            | When a stream is cancelled by the sender (`cancel_stream`) or admin (`cancel_stream_as_admin`). `status` is persisted as `Cancelled` and `cancelled_at` is set before this event is emitted. |
 | StreamCompleted  | `["completed", stream_id: u64]` | `StreamEvent::StreamCompleted(stream_id: u64)`                                                                                                            | When `withdrawn_amount` reaches `deposit_amount` during a `withdraw` or `batch_withdraw` call. Emitted after Withdrawal. |
@@ -129,33 +129,42 @@ data:   WithdrawalTo {
 
 ### 4) StreamPaused / StreamResumed / StreamCancelled / StreamCompleted / StreamClosed
 
-These all use the `StreamEvent` enum as their data payload:
+**StreamPaused** uses the new `StreamPaused` struct (introduced in `CONTRACT_VERSION = 3`):
 
 ```rust
 #[contracttype]
-pub enum StreamEvent {
-    Paused(u64),
-    Resumed(u64),
-    StreamCancelled(u64),
-    StreamCompleted(u64),
-    StreamClosed(u64),
+pub struct StreamPaused {
+    pub stream_id: u64,
+    pub reason: PauseReason,
+}
+
+#[contracttype]
+pub enum PauseReason {
+    Operational   = 0,  // Routine sender-initiated pause
+    Emergency     = 1,  // Security-related pause
+    Compliance    = 2,  // Regulatory/compliance hold
+    Administrative = 3, // Admin-initiated pause
 }
 ```
 
-| Function(s)                                                  | Topic         | Data enum variant                  |
+| Function(s)                                                  | Topic         | Data                               |
 | ------------------------------------------------------------ | ------------- | ---------------------------------- |
-| `pause_stream`, `pause_stream_as_admin`                      | `"paused"`    | `StreamEvent::Paused(id)`          |
+| `pause_stream`, `pause_stream_as_admin`                      | `"paused"`    | `StreamPaused { stream_id, reason }` |
 | `resume_stream`, `resume_stream_as_admin`                    | `"resumed"`   | `StreamEvent::Resumed(id)`         |
 | `cancel_stream`, `cancel_stream_as_admin`                    | `"cancelled"` | `StreamEvent::StreamCancelled(id)` |
 | `withdraw`, `batch_withdraw` (final drain on Active streams) | `"completed"` | `StreamEvent::StreamCompleted(id)` |
 | `close_completed_stream`                                     | `"closed"`    | `StreamEvent::StreamClosed(id)`    |
 
-Example (cancelled):
+> **Breaking change (v3):** The `"paused"` event data changed from `StreamEvent::Paused(stream_id)`
+> to `StreamPaused { stream_id, reason }`. Indexers must update their pause event parsers.
+> `CONTRACT_VERSION` was bumped to `3` to signal this incompatibility.
+
+Example (paused with reason):
 
 ```json
 {
-  "topics": ["cancelled", 0],
-  "data": { "StreamCancelled": 0 }
+  "topics": ["paused", 0],
+  "data": { "stream_id": 0, "reason": "Operational" }
 }
 ```
 
