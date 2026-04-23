@@ -40,7 +40,8 @@ impl<'a> TestContext<'a> {
         client.init(&token_id, &admin);
 
         let sac = StellarAssetClient::new(&env, &token_id);
-        sac.mint(&sender, &10_000_i128);
+        sac.mint(&sender, &100_000_i128);
+        env.budget().reset_unlimited();
 
         let token = TokenClient::new(&env, &token_id);
 
@@ -88,7 +89,7 @@ fn create_stream_relative_zero_delays_immediate_start() {
     assert_eq!(state.cliff_time, 1000);
     assert_eq!(state.end_time, 2000);
     assert_eq!(state.status, StreamStatus::Active);
-    assert_eq!(ctx.token.balance(&ctx.sender), 9_000);
+    assert_eq!(ctx.token.balance(&ctx.sender), 99_000);
     assert_eq!(ctx.token.balance(&ctx.contract_id), 1_000);
 }
 
@@ -102,7 +103,7 @@ fn create_stream_relative_positive_delays_future_start() {
         &ctx.sender,
         &ctx.recipient,
         &2000_i128,
-        &2_i128,
+        &1_i128, // rate: 1 (2000 / 2000)
         &100u64, // start_delay: 100 -> start_time = 1100
         &500u64, // cliff_delay: 500 -> cliff_time = 1500
         &2000u64,
@@ -344,7 +345,7 @@ fn create_streams_relative_multiple_entries_sequential_ids() {
         CreateStreamRelativeParams {
             recipient: recipient2.clone(),
             deposit_amount: 2000,
-            rate_per_second: 2,
+            rate_per_second: 1, // Corrected
             start_delay: 100,
             cliff_delay: 100,
             duration: 2000,
@@ -451,7 +452,7 @@ fn create_streams_relative_diverse_schedules() {
         CreateStreamRelativeParams {
             recipient: r2,
             deposit_amount: 2000,
-            rate_per_second: 2,
+            rate_per_second: 1, // Corrected
             start_delay: 500,
             cliff_delay: 1000,
             duration: 2000,
@@ -460,7 +461,7 @@ fn create_streams_relative_diverse_schedules() {
         CreateStreamRelativeParams {
             recipient: r3,
             deposit_amount: 3000,
-            rate_per_second: 3,
+            rate_per_second: 1, // Corrected
             start_delay: 1000,
             cliff_delay: 2000,
             duration: 3000,
@@ -487,7 +488,7 @@ fn create_streams_relative_diverse_schedules() {
     assert_eq!(s2.end_time, 14000);
 
     // Verify total deposit transferred
-    assert_eq!(ctx.token.balance(&ctx.sender), 4_000); // 10000 - 6000
+    assert_eq!(ctx.token.balance(&ctx.sender), 94_000); // 100000 - 6000
     assert_eq!(ctx.token.balance(&ctx.contract_id), 6_000);
 }
 
