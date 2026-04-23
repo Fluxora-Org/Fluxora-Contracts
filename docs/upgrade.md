@@ -3,6 +3,7 @@
 Version policy, migration runbook, and audit notes for operators, integrators, and auditors.
 
 **Source of truth:** `contracts/stream/src/lib.rs` (`CONTRACT_VERSION` constant, `version()` entry-point)
+**ABI stability rules:** [`docs/ABI_STABILITY.md`](./ABI_STABILITY.md) — canonical definition of what counts as a breaking change for entrypoints, error codes, event schemas, and storage discriminants.
 
 ---
 
@@ -46,6 +47,8 @@ CONTRACT_VERSION = 3
 - Any change that causes a correctly-written v1 client to fail or misinterpret a response when talking to the new contract.
 - Storage layout changes that make existing `Stream`, `Config`, or `RecipientStreams` entries unreadable after upgrade.
 - Event shape changes that break indexers parsing `StreamCreated`, `Withdrawal`, `StreamEvent`, etc.
+
+For the exhaustive, category-by-category breakdown see **[`docs/ABI_STABILITY.md §3`](./ABI_STABILITY.md#3-what-counts-as-a-breaking-change)**.
 
 ### What does NOT require an increment
 
