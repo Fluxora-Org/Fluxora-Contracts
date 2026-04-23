@@ -1083,9 +1083,7 @@ impl FluxoraStream {
         memo: Option<soroban_sdk::Bytes>,
     ) -> Result<u64, ContractError> {
         sender.require_auth();
-        if is_global_emergency_paused(&env) || is_creation_paused(&env) {
-            return Err(ContractError::ContractPaused);
-        }
+        require_not_creation_paused(&env)?;
 
         Self::validate_stream_params(
             &env,
@@ -1347,9 +1345,7 @@ impl FluxoraStream {
             return Ok(soroban_sdk::Vec::new(&env));
         }
 
-        if is_global_emergency_paused(&env) || is_creation_paused(&env) {
-            return Err(ContractError::ContractPaused);
-        }
+        require_not_creation_paused(&env)?;
 
         let current_time = env.ledger().timestamp();
         let mut total_deposit: i128 = 0;
@@ -2993,6 +2989,7 @@ impl FluxoraStream {
         funder: Address,
         amount: i128,
     ) -> Result<(), ContractError> {
+        require_not_globally_paused(&env)?;
         // --- Checks ---
         if amount <= 0 {
             return Err(ContractError::InvalidParams);

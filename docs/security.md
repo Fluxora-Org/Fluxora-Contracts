@@ -170,10 +170,18 @@ All arithmetic that could overflow `i128` uses Rust's `checked_*` methods:
 
 ## Global Emergency Pause
 
-`set_contract_paused(true)` causes `create_stream` and `create_streams` to fail with
-`ContractError::ContractPaused`. Existing streams are unaffected — withdrawals,
-cancellations, and other operations continue normally. The pause flag is stored in
-instance storage under `DataKey::CreationPaused`.
+The contract supports two levels of pausing to manage risk:
+
+1. **Creation Pause** (`set_creation_paused(true)`): Causes `create_stream` and `create_streams` to fail with `ContractError::ContractPaused`. Existing streams are unaffected — withdrawals, cancellations, and other operations continue normally. This is stored under `DataKey::CreationPaused`.
+2. **Global Emergency Pause** (`set_contract_paused(true)`): A "circuit breaker" that blocks **all** mutation operations across the entire protocol. This includes creation, withdrawals, cancellations, rate updates, and time adjustments. This is stored under `DataKey::GlobalEmergencyPaused`.
+
+During a Global Emergency Pause:
+- New streams cannot be created.
+- Recipients cannot withdraw accrued funds.
+- Senders cannot cancel streams or recover refunds.
+- All fund-moving entrypoints gated by `require_not_globally_paused` return `ContractError::ContractPaused`.
+
+Read-only operations (`calculate_accrued`, `get_stream_state`) and admin-override functions remain operational so the protocol state can be audited and the pause can be lifted by the admin.
 
 ---
 

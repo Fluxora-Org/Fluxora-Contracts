@@ -15,7 +15,7 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `StreamNotFound` | 1 | The specified stream does not exist | `pause_stream`, `resume_stream`, `cancel_stream`, `withdraw`, `calculate_accrued`, `get_stream_state`, admin overrides |
 | `InvalidState` | 2 | Operation attempted in an invalid state | `cancel_stream`, `withdraw`, `withdraw_to`, `batch_withdraw`, `get_claimable_at`, admin overrides |
 | `InvalidParams` | 3 | Function input parameters are invalid | `create_stream`, `withdraw_to`, `update_rate_per_second`, `top_up_stream`, `extend_stream_end_time`, `shorten_stream_end_time`, `batch_create_streams` |
-| `ContractPaused` | 4 | Global emergency pause is active; mutations are blocked | `create_stream`, `create_streams`, `withdraw`, `withdraw_to`, `batch_withdraw`, `cancel_stream`, `top_up_stream`, `update_rate_per_second`, `shorten_stream_end_time`, `extend_stream_end_time` |
+| `ContractPaused` | 4 | Global emergency pause or creation pause is active | `create_stream`, `create_streams`, `withdraw`, `withdraw_to`, `batch_withdraw`, `cancel_stream`, `top_up_stream`, `update_rate_per_second`, `shorten_stream_end_time`, `extend_stream_end_time`, `update_recipient`, `trigger_auto_claim` |
 | `StartTimeInPast` | 5 | `start_time` is before the current ledger timestamp | `create_stream`, `create_streams` |
 | `ArithmeticOverflow` | 6 | Arithmetic overflow in stream calculations | `create_stream`, `create_streams`, `update_rate_per_second`, `top_up_stream`, `shorten_stream_end_time`, `extend_stream_end_time` |
 | `Unauthorized` | 7 | Caller is not authorized to perform this operation | `init`, `set_admin`, `cancel_stream`, `top_up_stream`, `withdraw` (recipient check) |
@@ -161,9 +161,9 @@ match client.try_create_stream(&sender, &recipient, &deposit, &rate, &start, &cl
 **Affected Roles**:
 | Role | Can Trigger | Notes |
 |------|------------|-------|
-| Sender | Yes | Create streams blocked when paused |
-| Recipient | No | Existing streams unaffected; can still withdraw |
-| Admin | No | Admin operations exempt; admin can always pause/resume |
+| Sender | Yes | `create_stream` blocked if EITHER pause mode is active. `cancel`/`update` blocked ONLY if Global Emergency Pause is active. |
+| Recipient | Yes | `withdraw` blocked ONLY if Global Emergency Pause is active. |
+| Admin | No | Admin operations (pause/resume/init) are never blocked by the pause flag. |
 
 **Client Action**:
 ```rust
@@ -185,10 +185,11 @@ match client.try_create_stream(...) {
 
 **Success Semantics**: Returns `u64` stream_id (when unpaused).
 
-**Integrator Note**: During pause, `calculate_accrued` and `get_stream_state` remain functional.
-Recipients can check their balance and withdraw from existing streams. Only NEW stream
-creation is blocked. Use `is_paused()` for a quick check or `get_pause_info()` for full
-audit trail (reason, timestamp, admin who paused).
+**Integrator Note**: During any pause, `calculate_accrued` and `get_stream_state` remain functional.
+Recipients can always check their balance.
+- If `is_creation_paused()` is true: Only NEW stream creation is blocked.
+- If `is_global_emergency_paused()` is true: All mutations (creation, withdrawal, cancellation) are blocked.
+Use `is_paused()` (checks both) or inspect `get_pause_info()` for full details.
 
 ---
 
