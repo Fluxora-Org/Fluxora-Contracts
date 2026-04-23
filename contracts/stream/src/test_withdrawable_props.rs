@@ -50,7 +50,12 @@ impl PropCtx {
 
         FluxoraStreamClient::new(&env, &contract_id).init(&token_id, &admin);
         StellarAssetClient::new(&env, &token_id).mint(&sender, &deposit);
-        soroban_sdk::token::Client::new(&env, &token_id).approve(&sender, &contract_id, &deposit, &100_000);
+        soroban_sdk::token::Client::new(&env, &token_id).approve(
+            &sender,
+            &contract_id,
+            &deposit,
+            &100_000,
+        );
 
         PropCtx {
             env,

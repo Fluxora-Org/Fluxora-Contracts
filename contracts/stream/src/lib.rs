@@ -679,7 +679,12 @@ fn remove_stream_from_recipient_index(env: &Env, recipient: &Address, stream_id:
 fn pull_token(env: &Env, from: &Address, amount: i128) -> Result<(), ContractError> {
     let token_address = get_token(env)?;
     let token_client = token::Client::new(env, &token_address);
-    token_client.transfer_from(&env.current_contract_address(), from, &env.current_contract_address(), &amount);
+    token_client.transfer_from(
+        &env.current_contract_address(),
+        from,
+        &env.current_contract_address(),
+        &amount,
+    );
     Ok(())
 }
 
@@ -2681,7 +2686,9 @@ impl FluxoraStream {
 
         let old_end_time = stream.end_time;
         let old_deposit = stream.deposit_amount;
-        let refund_amount = old_deposit - new_max_streamable;
+        let refund_amount = old_deposit
+            .checked_sub(new_max_streamable)
+            .ok_or(ContractError::ArithmeticOverflow)?;
 
         stream.end_time = new_end_time;
         stream.deposit_amount = new_max_streamable;

@@ -16364,7 +16364,12 @@ mod i128_boundary_streams {
         client.init(&token_id, &admin);
         let sac = StellarAssetClient::new(&env, &token_id);
         sac.mint(&sender, &balance);
-        soroban_sdk::token::Client::new(&env, &token_id).approve(&sender, &contract_id, &i128::MAX, &100_000);
+        soroban_sdk::token::Client::new(&env, &token_id).approve(
+            &sender,
+            &contract_id,
+            &i128::MAX,
+            &100_000,
+        );
         (env, contract_id, token_id, admin, sender, recipient)
     }
 

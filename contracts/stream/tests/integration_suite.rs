@@ -1916,6 +1916,203 @@ fn integration_shorten_end_time_terminal_states_rejected() {
 }
 
 // ---------------------------------------------------------------------------
+// Integration tests — shorten_stream_end_time: refund boundary tests
+// ---------------------------------------------------------------------------
+
+/// Minimal refund boundary: smallest possible refund (shorten by 1 second).
+#[test]
+fn integration_shorten_end_time_minimal_refund_boundary() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Create stream: deposit=1000, rate=1, end=1000
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    let sender_before = ctx.token.balance(&ctx.sender);
+    let contract_before = ctx.token.balance(&ctx.contract_id);
+
+    // Shorten by minimum amount: new_end_time = 999 (1 second less)
+    // new_max_streamable = 1 * (999 - 0) = 999
+    // refund = 1000 - 999 = 1
+    ctx.client().shorten_stream_end_time(&stream_id, &999u64);
+
+    let sender_after = ctx.token.balance(&ctx.sender);
+    let contract_after = ctx.token.balance(&ctx.contract_id);
+
+    // Minimal refund should occur
+    assert_eq!(sender_after - sender_before, 1);
+    assert_eq!(contract_before - contract_after, 1);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.end_time, 999);
+    assert_eq!(state.deposit_amount, 999);
+
+    let events = ctx.env.events().all();
+    let last = events.last().unwrap();
+    let payload = StreamEndShortened::from_val(&ctx.env, &last.2);
+    assert_eq!(payload.refund_amount, 1);
+}
+
+/// Near i128 limits: large deposit and rate, ensure refund calculation doesn't overflow.
+#[test]
+fn integration_shorten_end_time_near_i128_limits() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Use large values within token balance (10,000)
+    let large_deposit = 9_000_i128;
+    let large_rate = 10_i128;
+    let duration = 900_u64; // large_rate * duration = 9_000
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &large_deposit,
+        &large_rate,
+        &0u64,
+        &0u64,
+        &duration,
+    );
+
+    // Shorten significantly to trigger large refund
+    let new_end_time = 100_u64; // Much shorter
+    let expected_new_max = large_rate * (new_end_time as i128);
+    let expected_refund = large_deposit - expected_new_max;
+
+    let sender_before = ctx.token.balance(&ctx.sender);
+    let contract_before = ctx.token.balance(&ctx.contract_id);
+
+    ctx.client()
+        .shorten_stream_end_time(&stream_id, &new_end_time);
+
+    let sender_after = ctx.token.balance(&ctx.sender);
+    let contract_after = ctx.token.balance(&ctx.contract_id);
+
+    assert_eq!(sender_after - sender_before, expected_refund);
+    assert_eq!(contract_before - contract_after, expected_refund);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.end_time, new_end_time);
+    assert_eq!(state.deposit_amount, expected_new_max);
+}
+
+/// CEI ordering: checks before effects, effects before interactions (token transfer).
+#[test]
+fn integration_shorten_end_time_cei_ordering() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    let sender_before = ctx.token.balance(&ctx.sender);
+    let contract_before = ctx.token.balance(&ctx.contract_id);
+
+    // Shorten to trigger refund
+    ctx.client().shorten_stream_end_time(&stream_id, &500u64);
+
+    let sender_after = ctx.token.balance(&ctx.sender);
+    let contract_after = ctx.token.balance(&ctx.contract_id);
+
+    // Verify refund occurred (effects before interactions)
+    assert_eq!(sender_after - sender_before, 500);
+    assert_eq!(contract_before - contract_after, 500);
+
+    // Verify state updated (effects)
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.end_time, 500);
+    assert_eq!(state.deposit_amount, 500);
+
+    // Verify event emitted (interactions)
+    let events = ctx.env.events().all();
+    let last = events.last().unwrap();
+    let payload = StreamEndShortened::from_val(&ctx.env, &last.2);
+    assert_eq!(payload.refund_amount, 500);
+}
+
+/// Shorten when paused: should succeed and preserve paused state.
+#[test]
+fn integration_shorten_end_time_when_paused_succeeds() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Pause the stream
+    ctx.client().pause_stream(&stream_id);
+    let state_before = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_before.status, StreamStatus::Paused);
+
+    // Shorten while paused
+    ctx.client().shorten_stream_end_time(&stream_id, &700u64);
+
+    let state_after = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_after.status, StreamStatus::Paused); // Still paused
+    assert_eq!(state_after.end_time, 700);
+    assert_eq!(state_after.deposit_amount, 700);
+}
+
+/// Invalid new_end_time gates: various boundary conditions properly rejected.
+#[test]
+fn integration_shorten_end_time_invalid_new_end_time_gates() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    // Now advance time to test future validations
+    ctx.env.ledger().set_timestamp(200);
+
+    // Test various invalid new_end_time values
+    let invalid_times = soroban_sdk::vec![
+        &ctx.env, 200u64,  // == now (not strictly future)
+        199u64,  // < now
+        0u64,    // <= start_time (0)
+        1000u64, // == current end_time
+        1001u64, // > current end_time
+    ];
+
+    for invalid_time in invalid_times.iter() {
+        let result = ctx
+            .client()
+            .try_shorten_stream_end_time(&stream_id, &invalid_time);
+        assert_eq!(
+            result,
+            Err(Ok(ContractError::InvalidParams)),
+            "new_end_time={} should be rejected",
+            invalid_time
+        );
+    }
+
+    // Valid shorten should still work
+    let result = ctx
+        .client()
+        .try_shorten_stream_end_time(&stream_id, &800u64);
+    assert!(result.is_ok(), "Valid new_end_time should succeed");
+}
+
+// ---------------------------------------------------------------------------
 // Integration tests — extend_stream_end_time: deposit sufficiency
 // ---------------------------------------------------------------------------
 
@@ -4607,7 +4804,8 @@ fn close_completed_stream_does_not_affect_other_streams() {
 fn create_stream_with_allowance_success() {
     let ctx = TestContext::setup();
     // Set allowance: sender approves contract for 1000 tokens
-    ctx.token.approve(&ctx.sender, &ctx.contract_id, &1000, &100);
+    ctx.token
+        .approve(&ctx.sender, &ctx.contract_id, &1000, &100);
 
     ctx.env.ledger().set_timestamp(0);
     let stream_id = ctx.client().create_stream(
@@ -4652,7 +4850,8 @@ fn create_stream_insufficient_allowance_fails() {
 fn create_stream_exact_allowance_success() {
     let ctx = TestContext::setup();
     // Set exact allowance
-    ctx.token.approve(&ctx.sender, &ctx.contract_id, &1000, &100);
+    ctx.token
+        .approve(&ctx.sender, &ctx.contract_id, &1000, &100);
 
     ctx.env.ledger().set_timestamp(0);
     ctx.client().create_stream(
@@ -4691,7 +4890,8 @@ fn create_streams_batch_allowance_success() {
     };
 
     // Total required: 3000
-    ctx.token.approve(&ctx.sender, &ctx.contract_id, &3000, &100);
+    ctx.token
+        .approve(&ctx.sender, &ctx.contract_id, &3000, &100);
 
     let streams = vec![&ctx.env, p1, p2];
     ctx.client().create_streams(&ctx.sender, &streams);
@@ -4723,7 +4923,8 @@ fn create_streams_batch_insufficient_allowance_is_atomic() {
     };
 
     // Total required: 3000, but only 2500 approved
-    ctx.token.approve(&ctx.sender, &ctx.contract_id, &2500, &100);
+    ctx.token
+        .approve(&ctx.sender, &ctx.contract_id, &2500, &100);
 
     let streams = vec![&ctx.env, p1, p2];
     let result = ctx.client().try_create_streams(&ctx.sender, &streams);
@@ -4738,9 +4939,10 @@ fn create_streams_batch_insufficient_allowance_is_atomic() {
 #[test]
 fn top_up_with_allowance_success() {
     let ctx = TestContext::setup();
-    
+
     // First, create a stream (needs allowance now because I changed to transfer_from)
-    ctx.token.approve(&ctx.sender, &ctx.contract_id, &1000, &100);
+    ctx.token
+        .approve(&ctx.sender, &ctx.contract_id, &1000, &100);
     let stream_id = ctx.create_default_stream();
 
     // Now top up (needs more allowance)
@@ -4750,4 +4952,188 @@ fn top_up_with_allowance_success() {
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.deposit_amount, 1500);
     assert_eq!(ctx.token.balance(&ctx.contract_id), 1500);
+}
+
+// ---------------------------------------------------------------------------
+// Additional boundary tests — shorten_stream_end_time (#Hardening)
+// ---------------------------------------------------------------------------
+
+/// Refund boundary: even the smallest possible shortening results in a positive refund.
+#[test]
+fn integration_shorten_end_time_smallest_refund_boundary() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    let sender_before = ctx.token.balance(&ctx.sender);
+
+    // Shorten by 1 second at t=0
+    ctx.client().shorten_stream_end_time(&stream_id, &999u64);
+
+    assert_eq!(ctx.token.balance(&ctx.sender) - sender_before, 1);
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.deposit_amount, 999);
+}
+
+/// Near i128 limits: Verify that extremely large rates and deposits don't overflow during shortening.
+#[test]
+fn integration_shorten_end_time_extreme_i128_limits() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Initial balance from setup() is 10,000
+    let initial_balance = ctx.token.balance(&ctx.sender);
+
+    // Use values that result in a deposit close to i128::MAX
+    // i128::MAX is ~1.7e38
+    let extreme_rate = 1_000_000_000_000_000_000_000_000_i128; // 1e24
+    let duration = 100_000_000_u64; // ~3 years
+    let extreme_deposit = extreme_rate * (duration as i128); // 1e32
+
+    // Setup balances
+    ctx.env.mock_all_auths();
+    let sac = StellarAssetClient::new(&ctx.env, &ctx.token_id);
+    sac.mint(&ctx.sender, &extreme_deposit);
+    ctx.token
+        .approve(&ctx.sender, &ctx.contract_id, &extreme_deposit, &100_000);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &extreme_deposit,
+        &extreme_rate,
+        &0u64,
+        &0u64,
+        &duration,
+    );
+
+    // Shorten by half
+    let new_end_time = duration / 2;
+    let expected_refund = extreme_rate * ((duration - new_end_time) as i128);
+
+    ctx.client()
+        .shorten_stream_end_time(&stream_id, &new_end_time);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.deposit_amount, extreme_deposit - expected_refund);
+    // Balance should be initial_balance (10,000) + refund
+    assert_eq!(
+        ctx.token.balance(&ctx.sender),
+        initial_balance + expected_refund
+    );
+}
+
+/// CEI Ordering: Verify state updates before external interactions.
+#[test]
+fn integration_shorten_end_time_verify_cei_state_consistency() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    let sender_before = ctx.token.balance(&ctx.sender);
+
+    // Perform shorten
+    ctx.client().shorten_stream_end_time(&stream_id, &500u64);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.end_time, 500, "State must reflect new end time");
+    assert_eq!(state.deposit_amount, 500, "State must reflect new deposit");
+
+    assert_eq!(
+        ctx.token.balance(&ctx.sender) - sender_before,
+        500,
+        "Refund must be processed"
+    );
+}
+
+/// Shorten when paused: Ensure shortening works correctly while a stream is paused.
+#[test]
+fn integration_shorten_end_time_paused_stream() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.client().pause_stream(&stream_id);
+
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().shorten_stream_end_time(&stream_id, &500u64);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Paused);
+    assert_eq!(state.end_time, 500);
+    assert_eq!(state.deposit_amount, 500);
+}
+
+/// Invalid new_end_time gates: Verify all boundary conditions for new_end_time.
+#[test]
+fn integration_shorten_end_time_invalid_gates_exhaustive() {
+    let ctx = TestContext::setup();
+    let start_time = 100u64;
+    let cliff_time = 150u64;
+    let end_time = 1000u64;
+
+    ctx.env.ledger().set_timestamp(start_time);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &start_time,
+        &cliff_time,
+        &end_time,
+    );
+
+    // 1. new_end_time == now (100) -> Rejected
+    assert_eq!(
+        ctx.client()
+            .try_shorten_stream_end_time(&stream_id, &100u64),
+        Err(Ok(ContractError::InvalidParams))
+    );
+
+    // 2. new_end_time < now (99) -> Rejected
+    assert_eq!(
+        ctx.client().try_shorten_stream_end_time(&stream_id, &99u64),
+        Err(Ok(ContractError::InvalidParams))
+    );
+
+    // 3. new_end_time == start_time (50) -> Rejected
+    assert_eq!(
+        ctx.client().try_shorten_stream_end_time(&stream_id, &50u64),
+        Err(Ok(ContractError::InvalidParams))
+    );
+
+    // 4. new_end_time < cliff_time (149) -> Rejected
+    assert_eq!(
+        ctx.client()
+            .try_shorten_stream_end_time(&stream_id, &149u64),
+        Err(Ok(ContractError::InvalidParams))
+    );
+
+    // 5. new_end_time == old_end_time (1000) -> Rejected
+    assert_eq!(
+        ctx.client()
+            .try_shorten_stream_end_time(&stream_id, &1000u64),
+        Err(Ok(ContractError::InvalidParams))
+    );
+
+    // 6. new_end_time > old_end_time (1001) -> Rejected
+    assert_eq!(
+        ctx.client()
+            .try_shorten_stream_end_time(&stream_id, &1001u64),
+        Err(Ok(ContractError::InvalidParams))
+    );
+
+    // 7. Valid: new_end_time == cliff_time (150) -> OK
+    let result = ctx
+        .client()
+        .try_shorten_stream_end_time(&stream_id, &150u64);
+    assert!(result.is_ok(), "new_end_time == cliff_time should be valid");
 }
