@@ -198,6 +198,7 @@ impl FluxoraFactory {
             &start_time,
             &cliff_time,
             &end_time,
+            &None,
         );
 
         Ok(stream_id)

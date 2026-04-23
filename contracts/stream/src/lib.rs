@@ -82,7 +82,16 @@ pub const MAX_PAGE_SIZE: u64 = 100;
 ///   Code review and CI checks on this constant are the primary safeguard.
 /// Bumped to 2: `Stream` struct gained `checkpointed_amount: i128` and `checkpointed_at: u64`
 /// for safe rate-decrease support (see `decrease_rate_per_second`).
-pub const CONTRACT_VERSION: u32 = 2;
+/// Bumped to 3: `Stream` struct gained `memo: Option<Bytes>` (optional bounded metadata for
+/// indexer correlation, e.g. payroll batch IDs). `StreamCreated` event gained the same field.
+/// `DataKey::StreamMemo(u64)` added at discriminant 10 for separate memo storage.
+pub const CONTRACT_VERSION: u32 = 3;
+
+/// Maximum byte length for an optional stream memo.
+///
+/// Chosen to fit a UUID (36 bytes), a SHA-256 hex string (64 bytes), or a short
+/// human-readable label while keeping per-stream storage overhead bounded.
+pub const MAX_MEMO_BYTES: usize = 64;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -156,6 +165,9 @@ pub struct StreamCreated {
     pub start_time: u64,
     pub cliff_time: u64,
     pub end_time: u64,
+    /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
+    /// `None` when no memo was supplied at creation time.
+    pub memo: Option<soroban_sdk::Bytes>,
 }
 
 #[contracttype]
@@ -323,6 +335,9 @@ pub struct Stream {
     /// Ledger timestamp of the last rate change (or `start_time` on creation).
     /// `calculate_accrued` uses this as the start of the current rate epoch.
     pub checkpointed_at: u64,
+    /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
+    /// Maximum length: `MAX_MEMO_BYTES` (64 bytes). `None` when not supplied.
+    pub memo: Option<soroban_sdk::Bytes>,
 }
 
 #[contracttype]
@@ -340,6 +355,9 @@ pub struct CreateStreamParams {
     pub cliff_time: u64,
     /// Ledger timestamp when accrual stops for this stream entry.
     pub end_time: u64,
+    /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
+    /// Maximum `MAX_MEMO_BYTES` (64) bytes. Pass `None` to omit.
+    pub memo: Option<soroban_sdk::Bytes>,
 }
 
 /// Parameters for creating a payment stream with relative (offset-based) times.
@@ -367,6 +385,9 @@ pub struct CreateStreamRelativeParams {
     pub cliff_delay: u64,
     /// Total duration the stream runs (in seconds) from start_time to end_time.
     pub duration: u64,
+    /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
+    /// Maximum `MAX_MEMO_BYTES` (64) bytes. Pass `None` to omit.
+    pub memo: Option<soroban_sdk::Bytes>,
 }
 
 /// Namespace for all contract storage keys.
@@ -401,6 +422,10 @@ pub struct CreateStreamRelativeParams {
 /// | 4 | `GlobalEmergencyPaused` | Instance | `bool`; appended to avoid shifting earlier discriminants |
 /// | 5 | `CreationPaused` | Instance | `bool`; creation-only circuit breaker |
 /// | 6 | `AutoClaimDestination(u64)` | Persistent | `Address`; recipient-chosen auto-claim destination per stream |
+/// | 7 | `GlobalPauseReason` | Instance | `String`; human-readable pause reason |
+/// | 8 | `GlobalPauseTimestamp` | Instance | `u64`; ledger timestamp of pause activation |
+/// | 9 | `GlobalPauseAdmin` | Instance | `Address`; admin that activated the pause |
+/// | 10 | `StreamMemo(u64)` | Persistent | `Bytes`; optional bounded memo written at stream creation |
 #[contracttype]
 pub enum DataKey {
     Config,                    // Instance storage for global settings (admin/token).
@@ -419,6 +444,9 @@ pub enum DataKey {
     GlobalPauseAdmin,
     /// Auto-claim destination per stream (Address). Set by recipient to redirect withdrawals.
     AutoClaimDestination(u64),
+    /// Optional memo bytes for a stream (Bytes). Written at creation; absent when no memo supplied.
+    /// Discriminant 10 — always append-only; never reorder.
+    StreamMemo(u64),
 }
 
 // ---------------------------------------------------------------------------
@@ -657,6 +685,43 @@ fn remove_auto_claim_destination(env: &Env, stream_id: u64) {
 }
 
 // ---------------------------------------------------------------------------
+// Memo storage helpers
+// ---------------------------------------------------------------------------
+
+/// Persist the memo for a stream (only called when memo is Some).
+fn save_stream_memo(env: &Env, stream_id: u64, memo: &soroban_sdk::Bytes) {
+    let key = DataKey::StreamMemo(stream_id);
+    env.storage().persistent().set(&key, memo);
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+}
+
+/// Load the memo for a stream, if one was stored.
+pub fn load_stream_memo(env: &Env, stream_id: u64) -> Option<soroban_sdk::Bytes> {
+    let key = DataKey::StreamMemo(stream_id);
+    let result: Option<soroban_sdk::Bytes> = env.storage().persistent().get(&key);
+    if result.is_some() {
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+    result
+}
+
+/// Remove the memo for a stream (called by close_completed_stream).
+fn remove_stream_memo(env: &Env, stream_id: u64) {
+    let key = DataKey::StreamMemo(stream_id);
+    if env.storage().persistent().has(&key) {
+        env.storage().persistent().remove(&key);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Token transfer helpers
 // ---------------------------------------------------------------------------
 ///
@@ -795,7 +860,15 @@ impl FluxoraStream {
         start_time: u64,
         cliff_time: u64,
         end_time: u64,
-    ) -> u64 {
+        memo: Option<soroban_sdk::Bytes>,
+    ) -> Result<u64, ContractError> {
+        // Validate memo length before allocating a stream ID.
+        if let Some(ref m) = memo {
+            if m.len() as usize > MAX_MEMO_BYTES {
+                return Err(ContractError::InvalidParams);
+            }
+        }
+
         let stream_id = read_stream_count(env);
         set_stream_count(env, stream_id + 1);
 
@@ -811,13 +884,17 @@ impl FluxoraStream {
             withdrawn_amount: 0,
             status: StreamStatus::Active,
             cancelled_at: None,
-            // Checkpoint initialised to zero accrual at start_time so the
-            // first rate epoch covers [start_time, end_time] at rate_per_second.
             checkpointed_amount: 0,
             checkpointed_at: start_time,
+            memo: memo.clone(),
         };
 
         save_stream(env, &stream);
+
+        // Persist memo in a separate key so it can be read independently.
+        if let Some(ref m) = memo {
+            save_stream_memo(env, stream_id, m);
+        }
 
         // Add stream to recipient's index (maintains sorted order by stream_id)
         add_stream_to_recipient_index(env, &recipient, stream_id);
@@ -833,10 +910,11 @@ impl FluxoraStream {
                 start_time,
                 cliff_time,
                 end_time,
+                memo,
             },
         );
 
-        stream_id
+        Ok(stream_id)
     }
 }
 
@@ -999,6 +1077,7 @@ impl FluxoraStream {
         start_time: u64,
         cliff_time: u64,
         end_time: u64,
+        memo: Option<soroban_sdk::Bytes>,
     ) -> Result<u64, ContractError> {
         sender.require_auth();
         if is_global_emergency_paused(&env) || is_creation_paused(&env) {
@@ -1017,13 +1096,9 @@ impl FluxoraStream {
             end_time,
         )?;
 
-        // Transfer tokens from sender to this contract (#36)
-        // If transfer fails (insufficient balance/allowance), this will panic
-        // and no state will be persisted (atomic transaction)
         pull_token(&env, &sender, deposit_amount)?;
 
-        // Only allocate stream id and persist state AFTER successful transfer
-        Ok(Self::persist_new_stream(
+        Self::persist_new_stream(
             &env,
             sender,
             recipient,
@@ -1032,7 +1107,8 @@ impl FluxoraStream {
             start_time,
             cliff_time,
             end_time,
-        ))
+            memo,
+        )
     }
 
     /// Create a new payment stream with relative (offset-based) timing.
@@ -1107,6 +1183,7 @@ impl FluxoraStream {
         start_delay: u64,
         cliff_delay: u64,
         duration: u64,
+        memo: Option<soroban_sdk::Bytes>,
     ) -> Result<u64, ContractError> {
         let current_time = env.ledger().timestamp();
 
@@ -1131,6 +1208,7 @@ impl FluxoraStream {
             start_time,
             cliff_time,
             end_time,
+            memo,
         )
     }
 
@@ -1306,7 +1384,8 @@ impl FluxoraStream {
                 params.start_time,
                 params.cliff_time,
                 params.end_time,
-            );
+                params.memo,
+            )?;
             created_ids.push_back(stream_id);
         }
 
@@ -1408,6 +1487,7 @@ impl FluxoraStream {
                 start_time,
                 cliff_time,
                 end_time,
+                memo: rel_params.memo,
             };
             absolute_streams.push_back(absolute_params);
         }
@@ -2354,6 +2434,22 @@ impl FluxoraStream {
         load_stream(&env, stream_id)
     }
 
+    /// Return the optional memo stored for a stream.
+    ///
+    /// Returns `None` when no memo was supplied at creation time or after the
+    /// stream has been closed via `close_completed_stream`.
+    ///
+    /// # Errors
+    /// - `ContractError::StreamNotFound` if the stream does not exist.
+    pub fn get_stream_memo(
+        env: Env,
+        stream_id: u64,
+    ) -> Result<Option<soroban_sdk::Bytes>, ContractError> {
+        // Verify the stream exists before returning memo.
+        load_stream(&env, stream_id)?;
+        Ok(load_stream_memo(&env, stream_id))
+    }
+
     /// Return the total number of streams created so far.
     ///
     /// This value is backed by `NextStreamId`, which is incremented exactly once for
@@ -2909,6 +3005,7 @@ impl FluxoraStream {
 
         // Remove stream from recipient's index before deleting the stream
         remove_stream_from_recipient_index(&env, &stream.recipient, stream_id);
+        remove_stream_memo(&env, stream_id);
         remove_stream(&env, stream_id);
 
         Ok(())

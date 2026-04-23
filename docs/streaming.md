@@ -52,6 +52,18 @@ No hidden rules or implementation details are required to understand protocol be
 Terminal states: `Completed`, `Cancelled`. Both may be closed via `close_completed_stream` to reclaim storage and index space. A stream is also considered technically terminal if `ledger.timestamp() >= end_time`.
 In this "time-terminal" state, pause/resume is blocked, but withdrawal is always allowed regardless of previous pause status.
 
+### Optional Stream Memo (Issue #403)
+
+`create_stream` and `create_streams` accept an optional `memo: Option<Bytes>` parameter for indexer correlation (e.g. payroll batch IDs, invoice references).
+
+- **Maximum length:** 64 bytes (`MAX_MEMO_BYTES`). Exceeding this returns `ContractError::InvalidParams`.
+- **Storage:** Stored separately under `DataKey::StreamMemo(stream_id)` (discriminant 10) in persistent storage. Also embedded in the `Stream` struct for convenience.
+- **Event:** The `StreamCreated` event includes the `memo` field (`None` when not supplied).
+- **Query:** `get_stream_memo(stream_id)` returns `Option<Bytes>`. Returns `StreamNotFound` if the stream does not exist.
+- **Cleanup:** `close_completed_stream` removes the `StreamMemo` entry along with the `Stream` entry.
+- **Immutability:** Memo is set at creation and cannot be changed afterwards.
+- **Versioning:** This field was added in `CONTRACT_VERSION = 3`. Indexers reading storage directly must handle the new `StreamMemo` key.
+
 ### Cancellation Semantics (Issue Scope)
 
 This section is the protocol-level contract for `cancel_stream` and `cancel_stream_as_admin`.

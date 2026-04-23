@@ -188,6 +188,7 @@ fn create_stream_relative_start_delay_overflow_rejected() {
         &u64::MAX, // start_delay overflow -> INVALID
         &0u64,
         &1000u64,
+        &None,
     );
 
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
@@ -229,6 +230,7 @@ fn create_stream_relative_never_start_time_in_past() {
         &0u64,
         &0u64,
         &1000u64,
+        &None,
     );
 
     let state = ctx.client().get_stream_state(&stream_id);
@@ -274,6 +276,7 @@ fn create_stream_relative_rejects_self_stream() {
         &0u64,
         &0u64,
         &1000u64,
+        &None,
     );
 
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
@@ -298,6 +301,7 @@ fn create_streams_relative_single_entry() {
             start_delay: 100,
             cliff_delay: 200,
             duration: 1000,
+            memo: None,
         },
     ];
 
@@ -327,6 +331,7 @@ fn create_streams_relative_multiple_entries_sequential_ids() {
             start_delay: 0,
             cliff_delay: 0,
             duration: 1000,
+            memo: None,
         },
         CreateStreamRelativeParams {
             recipient: recipient2,
@@ -335,6 +340,7 @@ fn create_streams_relative_multiple_entries_sequential_ids() {
             start_delay: 100,
             cliff_delay: 100,
             duration: 2000,
+            memo: None,
         },
     ];
 
@@ -390,6 +396,7 @@ fn create_streams_relative_invalid_entry_fails_atomically() {
             start_delay: 0,
             cliff_delay: 0,
             duration: 1000,
+            memo: None,
         },
         CreateStreamRelativeParams {
             recipient: recipient2,
@@ -397,7 +404,8 @@ fn create_streams_relative_invalid_entry_fails_atomically() {
             rate_per_second: 2,
             start_delay: 0,
             cliff_delay: 0,
-            duration: 0, // INVALID: duration = 0
+            duration: 0, // INVALID: duration = 0,
+            memo: None,
         },
     ];
 
@@ -430,6 +438,7 @@ fn create_streams_relative_diverse_schedules() {
             start_delay: 0,
             cliff_delay: 0,
             duration: 1000,
+            memo: None,
         },
         CreateStreamRelativeParams {
             recipient: r2,
@@ -438,6 +447,7 @@ fn create_streams_relative_diverse_schedules() {
             start_delay: 500,
             cliff_delay: 1000,
             duration: 2000,
+            memo: None,
         },
         CreateStreamRelativeParams {
             recipient: r3,
@@ -446,6 +456,7 @@ fn create_streams_relative_diverse_schedules() {
             start_delay: 1000,
             cliff_delay: 2000,
             duration: 3000,
+            memo: None,
         },
     ];
 
@@ -490,6 +501,7 @@ fn create_streams_relative_independent_cliff_times() {
             start_delay: 0,
             cliff_delay: 0, // cliff at current time
             duration: 1000,
+            memo: None,
         },
         CreateStreamRelativeParams {
             recipient: r2,
@@ -498,6 +510,7 @@ fn create_streams_relative_independent_cliff_times() {
             start_delay: 500,
             cliff_delay: 1500, // cliff 500 seconds after start
             duration: 1000,
+            memo: None,
         },
     ];
 
@@ -529,6 +542,7 @@ fn create_streams_relative_batch_overflow_detection() {
             start_delay: u64::MAX, // overflow
             cliff_delay: 0,
             duration: 1000,
+            memo: None,
         },
     ];
 
@@ -556,6 +570,7 @@ fn create_streams_relative_batch_validates_amounts() {
             start_delay: 0,
             cliff_delay: 0,
             duration: 1000,
+            memo: None,
         },
         CreateStreamRelativeParams {
             recipient: r2,
@@ -564,6 +579,7 @@ fn create_streams_relative_batch_validates_amounts() {
             start_delay: 0,
             cliff_delay: 0,
             duration: 1000,
+            memo: None,
         },
     ];
 

@@ -83,6 +83,7 @@ fn test_factory_create_stream_success() {
         &start_time,
         &cliff_time,
         &end_time,
+        &None,
     );
 
     assert_eq!(created_id, 0);
@@ -96,7 +97,9 @@ fn test_factory_create_stream_success() {
 fn test_factory_enforces_allowlist() {
     let (_env, factory, _admin, sender, _recipient, unauthorized, _, _) = setup_env();
 
-    let res = factory.try_create_stream(&sender, &unauthorized, &1_000, &1, &100, &100, &1100);
+    let res = factory.try_create_stream(&sender, &unauthorized, &1_000, &1, &100, &100, &1100,
+        &None
+    );
     assert_eq!(res, Err(Ok(FactoryError::RecipientNotAllowlisted)));
 }
 
@@ -107,6 +110,7 @@ fn test_factory_enforces_max_deposit_cap() {
     let res = factory.try_create_stream(
         &sender, &recipient, &20_000, // max is 10_000
         &20, &100, &100, &1100,
+        &None,
     );
     assert_eq!(res, Err(Ok(FactoryError::DepositExceedsCap)));
 }
@@ -127,17 +131,23 @@ fn test_factory_admin_updates() {
 
     // Update allowlist
     factory.set_allowlist(&unauthorized, &true);
-    let id1 = factory.create_stream(&sender, &unauthorized, &1_000, &1, &100, &100, &1100);
+    let id1 = factory.create_stream(&sender, &unauthorized, &1_000, &1, &100, &100, &1100,
+        &None
+    );
     assert_eq!(id1, 0);
 
     // Update Cap
     factory.set_cap(&500);
-    let res1 = factory.try_create_stream(&sender, &recipient, &1_000, &1, &100, &100, &1100);
+    let res1 = factory.try_create_stream(&sender, &recipient, &1_000, &1, &100, &100, &1100,
+        &None
+    );
     assert_eq!(res1, Err(Ok(FactoryError::DepositExceedsCap)));
 
     // Update Min Duration
     factory.set_min_duration(&2000);
-    let res2 = factory.try_create_stream(&sender, &recipient, &500, &1, &100, &100, &1100);
+    let res2 = factory.try_create_stream(&sender, &recipient, &500, &1, &100, &100, &1100,
+        &None
+    );
     assert_eq!(res2, Err(Ok(FactoryError::DurationTooShort)));
 
     // Update Stream Contract

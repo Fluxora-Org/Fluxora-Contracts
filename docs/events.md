@@ -16,7 +16,7 @@ Notes:
 
 | Event name       | Topic(s)                        | Data (shape & types)                                                                                                                                      | When emitted                                                                                                            |
 |------------------|---------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------|
-| StreamCreated    | `["created", stream_id: u64]`   | `StreamCreated { stream_id: u64, sender: Address, recipient: Address, deposit_amount: i128, rate_per_second: i128, start_time: u64, cliff_time: u64, end_time: u64 }` | After a stream is successfully created and deposit tokens transferred. Not emitted on any validation failure.           |
+| StreamCreated    | `["created", stream_id: u64]`   | `StreamCreated { stream_id: u64, sender: Address, recipient: Address, deposit_amount: i128, rate_per_second: i128, start_time: u64, cliff_time: u64, end_time: u64, memo: Option<Bytes> }` | After a stream is successfully created and deposit tokens transferred. Not emitted on any validation failure.           |
 | Withdrawal       | `["withdrew", stream_id: u64]`  | `Withdrawal { stream_id: u64, recipient: Address, amount: i128 }`                                                                                         | When a recipient successfully withdraws accrued tokens. Only emitted when `amount > 0`.                                |
 | WithdrawalTo     | `["wdraw_to", stream_id: u64]`  | `WithdrawalTo { stream_id: u64, recipient: Address, destination: Address, amount: i128 }`                                                                 | When a recipient calls `withdraw_to` or `batch_withdraw_to` and `amount > 0`. Destination may differ from recipient.                          |
 | StreamPaused     | `["paused", stream_id: u64]`    | `StreamEvent::Paused(stream_id: u64)`                                                                                                                     | When a stream is paused by the sender (`pause_stream`) or admin (`pause_stream_as_admin`).                              |
@@ -66,6 +66,7 @@ data:   StreamCreated {
           start_time:      u64,
           cliff_time:      u64,
           end_time:        u64,
+          memo:            Option<Bytes>,  // None when not supplied; max 64 bytes
         }
 ```
 
