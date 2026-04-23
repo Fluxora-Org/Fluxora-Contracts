@@ -15,7 +15,7 @@ Version policy, migration runbook, and audit notes for operators, integrators, a
 ### Current value
 
 ```
-CONTRACT_VERSION = 2
+CONTRACT_VERSION = 3
 ```
 
 ### When to increment
@@ -131,6 +131,16 @@ Before interacting with any Fluxora contract instance:
 - [ ] Call `get_config()` to confirm the token address matches the expected asset.
 - [ ] Confirm the `CONTRACT_ID` matches the announced deployment.
 - [ ] Subscribe to `StreamCreated` events using the new `CONTRACT_ID` (not the old one).
+
+---
+
+## 6. Version History
+
+| Version | Changes |
+|---|---|
+| 1 | Initial release |
+| 2 | Added rate-decrease support (`checkpointed_amount`, `checkpointed_at`) |
+| 3 | Added withdrawal dust threshold (`min_withdrawal`) |
 
 ---
 

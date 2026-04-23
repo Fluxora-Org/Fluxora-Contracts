@@ -72,7 +72,7 @@ fn test_factory_create_stream_success() {
     let cliff_time: u64 = 100;
     let end_time: u64 = 1100; // Duration 1000 >= min_duration(500)
 
-    let stream_client = fluxora_stream::FluxoraStreamClient::new(&env, &stream_id);
+    let stream_client = fluxora_stream::FluxoraStreamClient::new(&env, min_withdrawal: 0, &stream_id);
     assert_eq!(stream_client.get_stream_count(), 0);
 
     let created_id = factory.create_stream(
@@ -96,7 +96,7 @@ fn test_factory_create_stream_success() {
 fn test_factory_enforces_allowlist() {
     let (_env, factory, _admin, sender, _recipient, unauthorized, _, _) = setup_env();
 
-    let res = factory.try_create_stream(&sender, &unauthorized, &1_000, &1, &100, &100, &1100);
+    let res = factory.try_create_stream(&sender, &unauthorized, &1_000, &1, &100, &100, &1100 &0_i128,);
     assert_eq!(res, Err(Ok(FactoryError::RecipientNotAllowlisted)));
 }
 
@@ -127,17 +127,17 @@ fn test_factory_admin_updates() {
 
     // Update allowlist
     factory.set_allowlist(&unauthorized, &true);
-    let id1 = factory.create_stream(&sender, &unauthorized, &1_000, &1, &100, &100, &1100);
+    let id1 = factory.create_stream(&sender, &unauthorized, &1_000, &1, &100, &100, &1100 &0_i128,);
     assert_eq!(id1, 0);
 
     // Update Cap
     factory.set_cap(&500);
-    let res1 = factory.try_create_stream(&sender, &recipient, &1_000, &1, &100, &100, &1100);
+    let res1 = factory.try_create_stream(&sender, &recipient, &1_000, &1, &100, &100, &1100 &0_i128,);
     assert_eq!(res1, Err(Ok(FactoryError::DepositExceedsCap)));
 
     // Update Min Duration
     factory.set_min_duration(&2000);
-    let res2 = factory.try_create_stream(&sender, &recipient, &500, &1, &100, &100, &1100);
+    let res2 = factory.try_create_stream(&sender, &recipient, &500, &1, &100, &100, &1100 &0_i128,);
     assert_eq!(res2, Err(Ok(FactoryError::DurationTooShort)));
 
     // Update Stream Contract

@@ -231,6 +231,17 @@ sequenceDiagram
     Note over Recipient: Recipient can still withdraw<br/>accrued amount before cancellation
 ```
 
+### 1.5 Withdrawal Dust Threshold (Issue #423)
+
+To reduce fee and event spam, streams may optionally define a `min_withdrawal` threshold.
+
+- **Effect**: `withdraw`, `withdraw_to`, `batch_withdraw`, and `batch_withdraw_to` will revert with `ContractError::BelowDustThreshold` if the currently withdrawable amount is strictly less than `min_withdrawal`.
+- **Bypass (Final Drain)**: The threshold is **ignored** if the stream is in a terminal state. This ensures recipients can always drain the remaining balance. Terminal states include:
+    - Stream `status` is `Cancelled`.
+    - Current time is at or after `end_time` (`ledger.timestamp() >= end_time`).
+- **Default**: A `min_withdrawal` of `0` disables the threshold (standard behavior).
+- **Security**: Senders set this threshold at creation. Recipients should verify the threshold before accepting a stream.
+
 ---
 
 ## 2. Accrual Formula
@@ -742,7 +753,10 @@ When `stream_ids` is an empty vector:
 
 ---
 
-### Auto-claim Opt-in Semantics
+### Auto-claim Opt-in Semantics (Draft/Internal)
+
+> [!WARNING]
+> While storage helpers for auto-claim exist in the contract, the public entry points (`set_auto_claim`, `revoke_auto_claim`, `trigger_auto_claim`) are currently being finalized and are not yet exposed in the public V3 interface. They are documented here for architectural alignment.
 
 `set_auto_claim`, `revoke_auto_claim`, and `trigger_auto_claim` implement a recipient-controlled permissionless claim mechanism.
 
@@ -874,13 +888,14 @@ errors relevant to stream creation and timing.
 | `"overflow calculating total streamable amount"`                        | `create_stream` / `create_streams` | overflow in rate \* duration                  |
 | `"overflow calculating total batch deposit"`                            | `create_streams`                   | overflow in sum of deposits                   |
 | `ContractError::StartTimeInPast`                                        | `create_stream` / `create_streams` | start_time < ledger timestamp                 |
-| `ContractError::StreamAlreadyPaused` (10)                               | `pause_stream`                     | Double pause                                  |
-| `ContractError::StreamNotPaused` (11)                                   | `resume_stream`                    | Resume active stream                          |
-| `ContractError::StreamTerminalState` (12)                               | `pause_stream` / `resume_stream`   | Modification past end_time                    |
+| `ContractError::StreamAlreadyPaused` (11)                               | `pause_stream`                     | Double pause                                  |
+| `ContractError::StreamNotPaused` (12)                                   | `resume_stream`                    | Resume active stream                          |
+| `ContractError::StreamTerminalState` (13)                               | `pause_stream` / `resume_stream`   | Modification past end_time                    |
 | `ContractError::StreamNotFound` (1)                                     | Various                            | Invalid stream_id                             |
-| `ContractError::Unauthorized` (6)                                       | Various                            | Auth check failed                             |
+| `ContractError::Unauthorized` (7)                                       | Various                            | Auth check failed                             |
 | `ContractError::InvalidState` (2)                                       | `withdraw`                         | Withdraw from non-terminal paused             |
 | `ContractError::InvalidState` (2)                                       | `cancel_stream`                    | Cancel completed/cancelled                    |
+| `ContractError::BelowDustThreshold` (15)                                | `withdraw` / `batch_withdraw`      | Withdrawable amount < min_withdrawal          |
 | `"invalid state for stream closure"`                                    | `close_completed_stream`           | Close non-terminal (Active/Paused) stream    |
 | `"contract not initialised: missing config"`                            | Functions requiring config         | Config missing                                |
 
@@ -914,8 +929,7 @@ This documentation is verified against implementation in [protocol-narrative-cod
 
 - ✅ All 20 operations have explicit authorization rules
 - ✅ All 6 valid state transitions documented
-- ✅ All 6 invalid state transitions documented
-- ✅ Accrual formula matches implementation line-by-line
+- ✅ All 6 invalid state transitions documented matches implementation line-by-line
 - ✅ All 7 event types verified
 - ✅ All 8 error codes mapped
 - ✅ Zero contradictions found

@@ -1979,7 +1979,7 @@ fn test_calculate_accrued_paused_at_end_time() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
     let stream_id = ctx.client().create_stream(
-        &ctx.sender,
+        &ctx.sender, min_withdrawal: 0,
         &ctx.recipient,
         &1000_i128,
         &1_i128,
@@ -4628,7 +4628,7 @@ fn test_multiple_streams_independent() {
     let id0 = ctx.create_default_stream();
     let id1 = ctx
         .client()
-        .create_stream(&ctx.sender, &ctx.recipient, &200, &2, &0, &0, &100);
+        .create_stream(&ctx.sender, &ctx.recipient, &200, &2, &0, &0, &100 &0_i128,);
 
     assert_eq!(id0, 0);
     assert_eq!(id1, 1);
@@ -5568,7 +5568,7 @@ fn test_create_stream_cliff_equals_start() {
         &1000_i128,
         &1_i128,
         &100u64,
-        &100u64, // cliff == start (valid)
+        &100u64, // cliff == start (valid &0_i128,)
         &1100u64,
     );
 
@@ -5590,7 +5590,7 @@ fn test_create_stream_cliff_equals_end() {
         &1000_i128,
         &1_i128,
         &0u64,
-        &1000u64, // cliff == end (valid)
+        &1000u64, // cliff == end (valid &0_i128,)
         &1000u64,
     );
 
@@ -8820,7 +8820,7 @@ fn test_create_streams_batch_success() {
         rate_per_second: 1,
         start_time: 0,
         cliff_time: 0,
-        end_time: 1000,
+        end_time: 1000, min_withdrawal: 0,
     };
 
     let params2 = CreateStreamParams {
@@ -8829,7 +8829,7 @@ fn test_create_streams_batch_success() {
         rate_per_second: 2,
         start_time: 100,
         cliff_time: 200,
-        end_time: 1100,
+        end_time: 1100, min_withdrawal: 0,
     };
 
     let params3 = CreateStreamParams {
@@ -8838,7 +8838,7 @@ fn test_create_streams_batch_success() {
         rate_per_second: 3,
         start_time: 500,
         cliff_time: 500,
-        end_time: 1500,
+        end_time: 1500, min_withdrawal: 0,
     };
 
     let streams = vec![&ctx.env, params1.clone(), params2.clone(), params3.clone()];
@@ -8886,7 +8886,7 @@ fn test_create_streams_batch_atomic_failure() {
         rate_per_second: 1,
         start_time: 0,
         cliff_time: 0,
-        end_time: 1000,
+        end_time: 1000, min_withdrawal: 0,
     };
 
     let invalid_params = CreateStreamParams {
@@ -8895,7 +8895,7 @@ fn test_create_streams_batch_atomic_failure() {
         rate_per_second: 1,
         start_time: 0,
         cliff_time: 0,
-        end_time: 1000,
+        end_time: 1000, min_withdrawal: 0,
     };
 
     let streams = vec![&ctx.env, valid_params, invalid_params];
@@ -8942,7 +8942,7 @@ fn test_create_streams_batch_sender_recipient_panic() {
         rate_per_second: 1,
         start_time: 0,
         cliff_time: 0,
-        end_time: 1000,
+        end_time: 1000, min_withdrawal: 0,
     };
 
     let streams = vec![&ctx.env, params];
@@ -8960,7 +8960,7 @@ fn test_create_streams_batch_sender_recipient_has_no_side_effects() {
         rate_per_second: 1,
         start_time: 0,
         cliff_time: 0,
-        end_time: 1000,
+        end_time: 1000, min_withdrawal: 0,
     };
 
     let streams = vec![&ctx.env, params];
@@ -9163,7 +9163,7 @@ fn test_create_streams_batch_strict_auth() {
         rate_per_second: 1,
         start_time: 0,
         cliff_time: 0,
-        end_time: 1000,
+        end_time: 1000, min_withdrawal: 0,
     };
 
     let params2 = CreateStreamParams {
@@ -9172,7 +9172,7 @@ fn test_create_streams_batch_strict_auth() {
         rate_per_second: 1,
         start_time: 0,
         cliff_time: 0,
-        end_time: 2000,
+        end_time: 2000, min_withdrawal: 0,
     };
 
     let streams = vec![&ctx.env, params1.clone(), params2.clone()];
@@ -9211,7 +9211,7 @@ fn test_create_streams_batch_emits_created_events_with_payloads() {
         rate_per_second: 1,
         start_time: 0,
         cliff_time: 0,
-        end_time: 1111,
+        end_time: 1111, min_withdrawal: 0,
     };
     let params2 = CreateStreamParams {
         recipient: Address::generate(&ctx.env),
@@ -9219,7 +9219,7 @@ fn test_create_streams_batch_emits_created_events_with_payloads() {
         rate_per_second: 2,
         start_time: 10,
         cliff_time: 10,
-        end_time: 1121,
+        end_time: 1121, min_withdrawal: 0,
     };
     let streams = vec![&ctx.env, params1.clone(), params2.clone()];
     let events_before = ctx.env.events().all().len();
@@ -9267,7 +9267,7 @@ fn test_create_streams_batch_total_deposit_overflow_has_no_side_effects() {
         rate_per_second: i128::MAX,
         start_time: 0,
         cliff_time: 0,
-        end_time: 1,
+        end_time: 1, min_withdrawal: 0,
     };
     let params2 = CreateStreamParams {
         recipient: Address::generate(&ctx.env),
@@ -9275,7 +9275,7 @@ fn test_create_streams_batch_total_deposit_overflow_has_no_side_effects() {
         rate_per_second: 1,
         start_time: 0,
         cliff_time: 0,
-        end_time: 1,
+        end_time: 1, min_withdrawal: 0,
     };
     let streams = vec![&ctx.env, params1, params2];
 
@@ -9325,7 +9325,7 @@ fn test_create_streams_batch_wrong_auth_fails_without_side_effects() {
         rate_per_second: 1,
         start_time: 0,
         cliff_time: 0,
-        end_time: 1000,
+        end_time: 1000, min_withdrawal: 0,
     };
     let streams = vec![&ctx.env, params.clone()];
     let stream_count_before = ctx.client().get_stream_count();
@@ -10123,7 +10123,7 @@ fn test_update_rate_per_second_before_cliff() {
     sac.mint(&ctx.sender, &2000);
     let stream_id =
         ctx.client()
-            .create_stream(&ctx.sender, &ctx.recipient, &2000, &1, &0, &500, &1000);
+            .create_stream(&ctx.sender, &ctx.recipient, &2000, &1, &0, &500, &1000 &0_i128,);
 
     // Before cliff at t=100, accrued is 0.
     ctx.env.ledger().set_timestamp(100);
@@ -10152,7 +10152,7 @@ fn test_update_rate_per_second_at_cliff() {
     sac.mint(&ctx.sender, &5000);
     let stream_id =
         ctx.client()
-            .create_stream(&ctx.sender, &ctx.recipient, &5000, &1, &0, &500, &1000);
+            .create_stream(&ctx.sender, &ctx.recipient, &5000, &1, &0, &500, &1000 &0_i128,);
 
     // Exactly at cliff time t=500.
     ctx.env.ledger().set_timestamp(500);
@@ -11731,7 +11731,7 @@ fn test_create_streams_batch_contract_paused_returns_structured_error() {
             rate_per_second: 1,
             start_time: 0,
             cliff_time: 0,
-            end_time: 1000,
+            end_time: 1000, min_withdrawal: 0,
         }],
     );
 
@@ -11798,7 +11798,7 @@ fn test_create_streams_batch_start_time_in_past_returns_structured_error() {
             rate_per_second: 1,
             start_time: 500, // < current ledger time (1000)
             cliff_time: 500,
-            end_time: 1500,
+            end_time: 1500, min_withdrawal: 0,
         }],
     );
 
@@ -12088,7 +12088,7 @@ fn test_extend_end_time_deposit_exactly_covers_new_duration() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
 
-    // deposit=2000, rate=1, start=0, end=1000 → deposit covers up to t=2000
+    // deposit=2000, min_withdrawal: 0, rate=1, start=0, end=1000 → deposit covers up to t=2000
     let stream_id = ctx.client().create_stream(
         &ctx.sender,
         &ctx.recipient,
@@ -12552,7 +12552,7 @@ fn test_get_recipient_streams_cancel_after_cliff_frozen_accrual_in_index() {
     );
 }
 
-/// Stream cancelled exactly at end_time: full deposit accrued, frozen, stays in index.
+/// Stream cancelled exactly at end_time: full deposit accrued, min_withdrawal: 0, frozen, stays in index.
 #[test]
 fn test_get_recipient_streams_cancel_at_end_time_full_accrual() {
     let ctx = TestContext::setup();
@@ -12572,7 +12572,7 @@ fn test_get_recipient_streams_cancel_at_end_time_full_accrual() {
     assert_eq!(streams.len(), 1);
 }
 
-/// Stream cancelled past end_time: accrual capped at deposit, stays in index.
+/// Stream cancelled past end_time: accrual capped at deposit, min_withdrawal: 0, stays in index.
 #[test]
 fn test_get_recipient_streams_cancel_past_end_time_capped_accrual() {
     let ctx = TestContext::setup();
@@ -12609,7 +12609,7 @@ fn test_get_recipient_streams_batch_create_updates_index() {
                 rate_per_second: 1,
                 start_time: 0,
                 cliff_time: 0,
-                end_time: 500,
+                end_time: 500, min_withdrawal: 0,
             },
             CreateStreamParams {
                 recipient: ctx.recipient.clone(),
@@ -12617,7 +12617,7 @@ fn test_get_recipient_streams_batch_create_updates_index() {
                 rate_per_second: 1,
                 start_time: 0,
                 cliff_time: 0,
-                end_time: 1000,
+                end_time: 1000, min_withdrawal: 0,
             },
         ],
     );
@@ -12653,7 +12653,7 @@ fn test_get_recipient_streams_batch_create_separate_recipient_indices() {
                 rate_per_second: 1,
                 start_time: 0,
                 cliff_time: 0,
-                end_time: 500,
+                end_time: 500, min_withdrawal: 0,
             },
             CreateStreamParams {
                 recipient: recipient2.clone(),
@@ -12661,7 +12661,7 @@ fn test_get_recipient_streams_batch_create_separate_recipient_indices() {
                 rate_per_second: 1,
                 start_time: 0,
                 cliff_time: 0,
-                end_time: 1000,
+                end_time: 1000, min_withdrawal: 0,
             },
         ],
     );
@@ -13839,7 +13839,7 @@ fn test_withdraw_from_paused_at_end_time() {
     let end_time = 1_000u64;
     let stream_id =
         ctx.client()
-            .create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &end_time);
+            .create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &end_time &0_i128,);
 
     // Pause at t=500
     ctx.env.ledger().set_timestamp(500);
@@ -14548,7 +14548,7 @@ fn regression_missing_config_create_streams_batch_panics() {
         rate_per_second: 1,
         start_time: 0,
         cliff_time: 0,
-        end_time: 1000,
+        end_time: 1000, min_withdrawal: 0,
     };
 
     env.ledger().set_timestamp(0);
@@ -15771,7 +15771,7 @@ fn test_create_streams_batch_recipient_index_consistency() {
                 rate_per_second: 1,
                 start_time: 1000,
                 cliff_time: 1000,
-                end_time: 2000,
+                end_time: 2000, min_withdrawal: 0,
             },
             CreateStreamParams {
                 recipient: recipient2.clone(),
@@ -15779,7 +15779,7 @@ fn test_create_streams_batch_recipient_index_consistency() {
                 rate_per_second: 1,
                 start_time: 1000,
                 cliff_time: 1000,
-                end_time: 3000,
+                end_time: 3000, min_withdrawal: 0,
             },
             CreateStreamParams {
                 recipient: recipient1.clone(),
@@ -15787,7 +15787,7 @@ fn test_create_streams_batch_recipient_index_consistency() {
                 rate_per_second: 1,
                 start_time: 1000,
                 cliff_time: 1000,
-                end_time: 2500,
+                end_time: 2500, min_withdrawal: 0,
             },
             CreateStreamParams {
                 recipient: recipient3.clone(),
@@ -15795,7 +15795,7 @@ fn test_create_streams_batch_recipient_index_consistency() {
                 rate_per_second: 1,
                 start_time: 1000,
                 cliff_time: 1000,
-                end_time: 4000,
+                end_time: 4000, min_withdrawal: 0,
             },
             CreateStreamParams {
                 recipient: recipient2.clone(),
@@ -15803,7 +15803,7 @@ fn test_create_streams_batch_recipient_index_consistency() {
                 rate_per_second: 1,
                 start_time: 1000,
                 cliff_time: 1000,
-                end_time: 3500,
+                end_time: 3500, min_withdrawal: 0,
             },
         ],
     );
@@ -15866,7 +15866,7 @@ fn test_create_streams_batch_recipient_index_consistency() {
             rate_per_second: 1,
             start_time: 0,
             cliff_time: 0,
-            end_time: 500,
+            end_time: 500, min_withdrawal: 0,
         }],
     );
 
@@ -15920,7 +15920,7 @@ fn test_create_streams_batch_deposit_overflow() {
         rate_per_second: 1,
         start_time: 0,
         cliff_time: 0,
-        end_time: 10,
+        end_time: 10, min_withdrawal: 0,
     });
 
     streams.push_back(CreateStreamParams {
@@ -15929,7 +15929,7 @@ fn test_create_streams_batch_deposit_overflow() {
         rate_per_second: 1,
         start_time: 0,
         cliff_time: 0,
-        end_time: 10,
+        end_time: 10, min_withdrawal: 0,
     });
 
     let result = ctx.client().try_create_streams(&ctx.sender, &streams);
@@ -16233,7 +16233,7 @@ fn test_budget_create_streams_batch_5() {
             rate_per_second: 1,
             start_time: 0,
             cliff_time: 0,
-            end_time: 1000,
+            end_time: 1000, min_withdrawal: 0,
         });
     }
 
@@ -16269,7 +16269,7 @@ fn test_create_streams_batch_atomicity_on_invalid_entry() {
         rate_per_second: 1,
         start_time: 0,
         cliff_time: 0,
-        end_time: 1000,
+        end_time: 1000, min_withdrawal: 0,
     };
     // deposit < rate * duration → InsufficientDeposit
     let invalid = CreateStreamParams {
@@ -16278,7 +16278,7 @@ fn test_create_streams_batch_atomicity_on_invalid_entry() {
         rate_per_second: 1,
         start_time: 0,
         cliff_time: 0,
-        end_time: 1000,
+        end_time: 1000, min_withdrawal: 0,
     };
 
     let count_before = ctx.client().get_stream_count();
@@ -16328,7 +16328,7 @@ fn test_create_streams_single_entry_matches_create_stream() {
         rate_per_second: 1,
         start_time: 0,
         cliff_time: 0,
-        end_time: 1000,
+        end_time: 1000, min_withdrawal: 0,
     });
     let ids = ctx.client().create_streams(&ctx.sender, &params);
     let id_batch = ids.get(0).unwrap();
@@ -16365,7 +16365,7 @@ fn test_create_streams_batch_deposit_overflow_is_atomic() {
             rate_per_second: half_max,
             start_time: 0,
             cliff_time: 0,
-            end_time: duration,
+            end_time: duration, min_withdrawal: 0,
         });
     }
 
@@ -17133,7 +17133,7 @@ mod i128_boundary_streams {
                 rate_per_second: rate,
                 start_time: 0,
                 cliff_time: 0,
-                end_time: 1,
+                end_time: 1, min_withdrawal: 0,
             });
         }
 
@@ -17170,7 +17170,7 @@ mod i128_boundary_streams {
             rate_per_second: valid_rate,
             start_time: 0,
             cliff_time: 0,
-            end_time: 1_000,
+            end_time: 1_000, min_withdrawal: 0,
         };
         // Invalid: deposit < rate * duration
         let invalid = CreateStreamParams {
@@ -17179,7 +17179,7 @@ mod i128_boundary_streams {
             rate_per_second: valid_rate,
             start_time: 0,
             cliff_time: 0,
-            end_time: 1_000,
+            end_time: 1_000, min_withdrawal: 0,
         };
 
         let params = soroban_sdk::vec![&env, valid, invalid];
@@ -17254,7 +17254,7 @@ mod recipient_index_stress {
                     rate_per_second: 1,
                     start_time: 100,
                     cliff_time: 100,
-                    end_time: 1100,
+                    end_time: 1100, min_withdrawal: 0,
                 });
             }
             ctx.client().create_streams(&ctx.sender, &streams);
@@ -17302,7 +17302,7 @@ mod recipient_index_stress {
         for _ in 0..10 {
             let id = ctx
                 .client()
-                .create_stream(&ctx.sender, &recipient, &100_i128, &1_i128, &0u64, &0u64, &100u64);
+                .create_stream(&ctx.sender, &recipient, &100_i128, &1_i128, &0u64, &0u64, &100u64 &0_i128,);
             stream_ids.push_back(id);
         }
 
@@ -17513,7 +17513,7 @@ mod recipient_index_stress {
 
         // Create 10 streams for this recipient
         for _ in 0..10 {
-            ctx.client().create_stream(&ctx.sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64);
+            ctx.client().create_stream(&ctx.sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64 &0_i128,);
         }
 
         // Page 1: cursor=0, limit=3
@@ -17553,7 +17553,7 @@ mod recipient_index_stress {
 
         // Create 150 streams
         for _ in 0..150 {
-            ctx.client().create_stream(&ctx.sender, &recipient, &100, &1, &0, &0, &100);
+            ctx.client().create_stream(&ctx.sender, &recipient, &100, &1, &0, &0, &100 &0_i128,);
         }
 
         // Request 200, should be capped at MAX_PAGE_SIZE (100)
@@ -17567,7 +17567,7 @@ mod recipient_index_stress {
         ctx.env.ledger().set_timestamp(0);
 
         let recipient = Address::generate(&ctx.env);
-        ctx.client().create_stream(&ctx.sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64);
+        ctx.client().create_stream(&ctx.sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64 &0_i128,);
 
         // Cursor beyond total count
         let result = ctx.client().get_recipient_streams_paginated(&recipient, &100, &10);
@@ -17580,7 +17580,7 @@ mod recipient_index_stress {
         ctx.env.ledger().set_timestamp(0);
 
         let recipient = Address::generate(&ctx.env);
-        ctx.client().create_stream(&ctx.sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64);
+        ctx.client().create_stream(&ctx.sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64 &0_i128,);
 
         let result = ctx.client().get_recipient_streams_paginated(&recipient, &0, &0);
         assert_eq!(result.len(), 0, "Zero limit should return empty");
@@ -17597,13 +17597,13 @@ mod recipient_index_stress {
         // Create 5 streams for recipient1
         for _ in 0..5 {
             ctx.client()
-                .create_stream(&ctx.sender, &recipient1, &1000_i128, &1_i128, &0u64, &0u64, &1000u64);
+                .create_stream(&ctx.sender, &recipient1, &1000_i128, &1_i128, &0u64, &0u64, &1000u64 &0_i128,);
         }
 
         // Create 3 streams for recipient2
         for _ in 0..3 {
             ctx.client()
-                .create_stream(&ctx.sender, &recipient2, &1000_i128, &1_i128, &0u64, &0u64, &1000u64);
+                .create_stream(&ctx.sender, &recipient2, &1000_i128, &1_i128, &0u64, &0u64, &1000u64 &0_i128,);
         }
 
         // Paginate recipient1
@@ -17624,7 +17624,7 @@ mod recipient_index_stress {
 
         // Create 5 streams
         for _ in 0..5 {
-            ctx.client().create_stream(&ctx.sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64);
+            ctx.client().create_stream(&ctx.sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64 &0_i128,);
         }
 
         // Close stream 2 (make completed first)
@@ -17662,7 +17662,7 @@ mod recipient_index_stress {
 
         // Create 25 streams
         for _ in 0..25 {
-            ctx.client().create_stream(&ctx.sender, &recipient, &100, &1, &0, &0, &100);
+            ctx.client().create_stream(&ctx.sender, &recipient, &100, &1, &0, &0, &100 &0_i128,);
         }
 
         // Simulate full export using pagination
@@ -17783,7 +17783,7 @@ mod structured_error_tests {
                 rate_per_second: 1_i128,
                 start_time: 0u64,
                 cliff_time: 0u64,
-                end_time: half as u64,
+                end_time: half as u64, min_withdrawal: 0,
             },
             CreateStreamParams {
                 recipient: ctx.recipient.clone(),
@@ -17791,7 +17791,7 @@ mod structured_error_tests {
                 rate_per_second: 1_i128,
                 start_time: 0u64,
                 cliff_time: 0u64,
-                end_time: half as u64,
+                end_time: half as u64, min_withdrawal: 0,
             },
         ];
 

@@ -659,4 +659,4 @@ fn authorization_model_documented() {
     // - set_contract_paused: contract admin
     //
     // See docs/security.md for detailed documentation.
-}
+, min_withdrawal: 0 }

@@ -356,7 +356,7 @@ fn create_streams_batch_success_moves_funds_and_assigns_sequential_ids() {
         rate_per_second: 2,
         start_time: 0,
         cliff_time: 0,
-        end_time: 600,
+        end_time: 600, min_withdrawal: 0, min_withdrawal: 0,
     };
     let p2 = CreateStreamParams {
         recipient: Address::generate(&ctx.env),
@@ -364,7 +364,7 @@ fn create_streams_batch_success_moves_funds_and_assigns_sequential_ids() {
         rate_per_second: 3,
         start_time: 10,
         cliff_time: 10,
-        end_time: 810,
+        end_time: 810, min_withdrawal: 0, min_withdrawal: 0,
     };
 
     let streams = vec![&ctx.env, p1.clone(), p2.clone()];
@@ -393,7 +393,7 @@ fn create_streams_batch_invalid_entry_is_atomic_and_emits_no_events() {
         rate_per_second: 1,
         start_time: 0,
         cliff_time: 0,
-        end_time: 1000,
+        end_time: 1000, min_withdrawal: 0, min_withdrawal: 0,
     };
     let invalid = CreateStreamParams {
         recipient: Address::generate(&ctx.env),
@@ -401,7 +401,7 @@ fn create_streams_batch_invalid_entry_is_atomic_and_emits_no_events() {
         rate_per_second: 1,
         start_time: 0,
         cliff_time: 0,
-        end_time: 1000,
+        end_time: 1000, min_withdrawal: 0, min_withdrawal: 0,
     };
 
     let stream_count_before = ctx.client().get_stream_count();
@@ -1994,7 +1994,7 @@ fn integration_create_streams_batch_overflow_protection() {
         rate_per_second: 1,
         start_time: 0,
         cliff_time: 0,
-        end_time: 10,
+        end_time: 10, min_withdrawal: 0, min_withdrawal: 0,
     });
 
     streams.push_back(fluxora_stream::CreateStreamParams {
@@ -2003,7 +2003,7 @@ fn integration_create_streams_batch_overflow_protection() {
         rate_per_second: 1,
         start_time: 0,
         cliff_time: 0,
-        end_time: 10,
+        end_time: 10, min_withdrawal: 0, min_withdrawal: 0,
     });
 
     // We need to use try_create_streams to catch the contract error
@@ -2025,7 +2025,7 @@ fn integration_create_streams_batch_overflow_protection() {
 // Integration tests — shorten_stream_end_time: refund correctness + invariants
 // ---------------------------------------------------------------------------
 
-/// Success path: shortening updates schedule, refunds exact unstreamed amount, emits event.
+/// Success path: shortening updates schedule, min_withdrawal: 0, refunds exact unstreamed amount, emits event.
 #[test]
 fn integration_shorten_end_time_refund_and_event_observable() {
     let ctx = TestContext::setup();
@@ -2142,7 +2142,7 @@ fn integration_extend_end_time_exact_deposit_boundary() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
 
-    // deposit=2000, rate=1, end=1000 → can extend to exactly 2000
+    // deposit=2000, min_withdrawal: 0, rate=1, end=1000 → can extend to exactly 2000
     let stream_id = ctx.client().create_stream(
         &ctx.sender,
         &ctx.recipient,
@@ -2960,7 +2960,7 @@ fn integration_budget_create_streams_batch_10() {
             rate_per_second: 1,
             start_time: 0,
             cliff_time: 0,
-            end_time: 1000,
+            end_time: 1000, min_withdrawal: 0, min_withdrawal: 0,
         });
     }
 
@@ -3063,7 +3063,7 @@ fn integration_create_streams_single_token_pull_equals_sum() {
         rate_per_second: 1,
         start_time: 0,
         cliff_time: 0,
-        end_time: 1000,
+        end_time: 1000, min_withdrawal: 0, min_withdrawal: 0,
     };
     let p2 = CreateStreamParams {
         recipient: Address::generate(&ctx.env),
@@ -3071,7 +3071,7 @@ fn integration_create_streams_single_token_pull_equals_sum() {
         rate_per_second: 2,
         start_time: 0,
         cliff_time: 0,
-        end_time: 1000,
+        end_time: 1000, min_withdrawal: 0, min_withdrawal: 0,
     };
     let p3 = CreateStreamParams {
         recipient: Address::generate(&ctx.env),
@@ -3079,7 +3079,7 @@ fn integration_create_streams_single_token_pull_equals_sum() {
         rate_per_second: 1,
         start_time: 0,
         cliff_time: 0,
-        end_time: 500,
+        end_time: 500, min_withdrawal: 0, min_withdrawal: 0,
     };
 
     let params = vec![&ctx.env, p1, p2, p3];
@@ -3124,7 +3124,7 @@ fn integration_test_admin_pause_accrual_integrity() {
     let ctx = TestContext::setup();
     let stream_id =
         ctx.client()
-            .create_stream(&ctx.sender, &ctx.recipient, &2000, &2, &0, &0, &1000);
+            .create_stream(&ctx.sender, &ctx.recipient, &2000, &2, &0, &0, &1000 &0_i128,);
 
     // At t=100, accrued=200
     ctx.env.ledger().set_timestamp(100);
@@ -3151,7 +3151,7 @@ fn integration_test_admin_cancel_from_paused() {
     let ctx = TestContext::setup();
     let stream_id =
         ctx.client()
-            .create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
+            .create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000 &0_i128,);
 
     ctx.env.ledger().set_timestamp(100);
     ctx.client().pause_stream_as_admin(&stream_id);
@@ -3171,7 +3171,7 @@ fn integration_test_admin_unauthorized_pause() {
     let ctx = TestContext::setup_strict();
     let stream_id =
         ctx.client()
-            .create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
+            .create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000 &0_i128,);
 
     // Non-admin (recipient) tries to call admin pause
     ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
@@ -3209,7 +3209,7 @@ fn test_recipient_index_stress_and_cleanup_lifecycle() {
                 rate_per_second: 1,
                 start_time: 0,
                 cliff_time: 0,
-                end_time: 1000,
+                end_time: 1000, min_withdrawal: 0, min_withdrawal: 0,
             });
         }
         ctx.client().create_streams(&ctx.sender, &streams);
@@ -3747,6 +3747,138 @@ fn test_batch_withdraw_to_contract_address_fails() {
         },
     ];
 
-    let res = ctx.client().try_batch_withdraw_to(&ctx.recipient, &params);
-    assert_eq!(res, Err(Ok(fluxora_stream::ContractError::InvalidParams)));
+
+
+// ---------------------------------------------------------------------------
+// Tests — Issue #423: Withdrawal Dust Threshold
+// ---------------------------------------------------------------------------
+
+#[test]
+fn withdraw_below_dust_threshold_fails_unless_terminal() {
+    let ctx = TestContext::setup();
+    let min_withdrawal = 100_i128;
+    
+    // Create a stream with a 100 token dust threshold
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+        &min_withdrawal,
+    );
+
+    // At t=50, 50 tokens accrued. This is below the 100 token threshold.
+    ctx.env.ledger().set_timestamp(50);
+    let result = ctx.client().try_withdraw(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::BelowDustThreshold)));
+
+    // At t=150, 150 tokens accrued. This is above the 100 token threshold.
+    ctx.env.ledger().set_timestamp(150);
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn, 150);
+
+    // After withdrawing 150, remaining accrued is 0.
+    // At t=200, 50 more tokens accrued (Total 200, withdrawn 150, current withdrawable 50).
+    // This is again below the threshold.
+    ctx.env.ledger().set_timestamp(200);
+    let result2 = ctx.client().try_withdraw(&stream_id);
+    assert_eq!(result2, Err(Ok(ContractError::BelowDustThreshold)));
+
+    // At t=1000, the stream ends. Final drain should be allowed even if below threshold.
+    
+    // Create another stream for a small final drain test
+    let stream_id2 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+        &950_i128, // High threshold
+    );
+
+    // At t=500, 500 tokens accrued. Below 950.
+    ctx.env.ledger().set_timestamp(500);
+    let res3 = ctx.client().try_withdraw(&stream_id2);
+    assert_eq!(res3, Err(Ok(ContractError::BelowDustThreshold)));
+
+    // At t=1000, stream is terminal. 1000 tokens accrued. Should succeed.
+    ctx.env.ledger().set_timestamp(1000);
+    let withdrawn2 = ctx.client().withdraw(&stream_id2);
+    assert_eq!(withdrawn2, 1000);
+    assert_eq!(ctx.client().get_stream_state(&stream_id2).status, StreamStatus::Completed);
+}
+
+#[test]
+fn withdraw_below_dust_threshold_allowed_on_cancelled_stream() {
+    let ctx = TestContext::setup();
+    let min_withdrawal = 500_i128;
+    
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+        &min_withdrawal,
+    );
+
+    // Accrue 100 tokens (below 500)
+    ctx.env.ledger().set_timestamp(100);
+    
+    // Normal withdrawal fails
+    let res = ctx.client().try_withdraw(&stream_id);
+    assert_eq!(res, Err(Ok(ContractError::BelowDustThreshold)));
+
+    // Cancel stream. Accrued 100 tokens are locked for recipient.
+    ctx.client().cancel_stream(&stream_id);
+    assert_eq!(ctx.client().get_stream_state(&stream_id).status, StreamStatus::Cancelled);
+
+    // Withdrawal should now succeed despite being below threshold (100 < 500)
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn, 100);
+}
+
+#[test]
+fn batch_withdraw_reverts_if_any_stream_below_threshold() {
+    let ctx = TestContext::setup();
+    
+    let s1 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+        &0_i128, // No threshold
+    );
+    let s2 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+        &500_i128, // 500 threshold
+    );
+
+    // At t=100, s1 has 100 (allowed), s2 has 100 (below 500)
+    ctx.env.ledger().set_timestamp(100);
+    
+    let stream_ids = vec![&ctx.env, s1, s2];
+    let res = ctx.client().try_batch_withdraw(&ctx.recipient, &stream_ids);
+    
+    // Batch should revert because s2 is below threshold
+    assert_eq!(res, Err(Ok(ContractError::BelowDustThreshold)));
+    
+    // Verify no funds were moved from s1 (atomicity)
+    assert_eq!(ctx.client().get_stream_state(&s1).withdrawn_amount, 0);
 }

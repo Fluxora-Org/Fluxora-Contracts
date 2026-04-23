@@ -141,6 +141,7 @@ impl FluxoraFactory {
         start_time: u64,
         cliff_time: u64,
         end_time: u64,
+        min_withdrawal: i128,
     ) -> Result<u64, FactoryError> {
         // Enforce policies
         let is_allowed: bool = env
@@ -198,6 +199,7 @@ impl FluxoraFactory {
             &start_time,
             &cliff_time,
             &end_time,
+            &min_withdrawal,
         );
 
         Ok(stream_id)

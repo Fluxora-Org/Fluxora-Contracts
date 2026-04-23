@@ -84,7 +84,8 @@ pub const MAX_PAGE_SIZE: u64 = 100;
 ///   Code review and CI checks on this constant are the primary safeguard.
 /// Bumped to 2: `Stream` struct gained `checkpointed_amount: i128` and `checkpointed_at: u64`
 /// for safe rate-decrease support (see `decrease_rate_per_second`).
-pub const CONTRACT_VERSION: u32 = 2;
+/// Bumped to 3: added `min_withdrawal: i128` to `Stream` for dust threshold support.
+pub const CONTRACT_VERSION: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -135,6 +136,8 @@ pub enum ContractError {
     StreamTerminalState = 13,
     /// Duplicate stream IDs were supplied to a batch operation.
     DuplicateStreamId = 14,
+    /// Withdrawal amount is below the stream's minimum withdrawal threshold (dust threshold).
+    BelowDustThreshold = 15,
 }
 
 #[contracttype]
@@ -158,6 +161,7 @@ pub struct StreamCreated {
     pub start_time: u64,
     pub cliff_time: u64,
     pub end_time: u64,
+    pub min_withdrawal: i128,
 }
 
 #[contracttype]
@@ -325,6 +329,9 @@ pub struct Stream {
     /// Ledger timestamp of the last rate change (or `start_time` on creation).
     /// `calculate_accrued` uses this as the start of the current rate epoch.
     pub checkpointed_at: u64,
+    /// Minimum amount (in tokens) required for a withdrawal to be processed.
+    /// Does not apply to the final drain at stream completion or cancellation.
+    pub min_withdrawal: i128,
 }
 
 #[contracttype]
@@ -342,6 +349,8 @@ pub struct CreateStreamParams {
     pub cliff_time: u64,
     /// Ledger timestamp when accrual stops for this stream entry.
     pub end_time: u64,
+    /// Minimum amount required for a withdrawal (optional; 0 for no threshold).
+    pub min_withdrawal: i128,
 }
 
 /// Parameters for creating a payment stream with relative (offset-based) times.
@@ -369,6 +378,8 @@ pub struct CreateStreamRelativeParams {
     pub cliff_delay: u64,
     /// Total duration the stream runs (in seconds) from start_time to end_time.
     pub duration: u64,
+    /// Minimum amount required for a withdrawal (optional; 0 for no threshold).
+    pub min_withdrawal: i128,
 }
 
 /// Namespace for all contract storage keys.
@@ -419,6 +430,8 @@ pub enum DataKey {
     GlobalPauseTimestamp,
     /// Protocol pause admin (Address). The admin address that activated the pause.
     GlobalPauseAdmin,
+    /// Recipient-chosen auto-claim destination per stream.
+    AutoClaimDestination(u64),
 }
 
 // ---------------------------------------------------------------------------
@@ -756,9 +769,10 @@ impl FluxoraStream {
         start_time: u64,
         cliff_time: u64,
         end_time: u64,
+        min_withdrawal: i128,
     ) -> Result<(), ContractError> {
         // Validate positive amounts (#35)
-        if deposit_amount <= 0 || rate_per_second <= 0 {
+        if deposit_amount <= 0 || rate_per_second <= 0 || min_withdrawal < 0 {
             return Err(ContractError::InvalidParams);
         }
 
@@ -801,6 +815,7 @@ impl FluxoraStream {
         start_time: u64,
         cliff_time: u64,
         end_time: u64,
+        min_withdrawal: i128,
     ) -> u64 {
         let stream_id = read_stream_count(env);
         set_stream_count(env, stream_id + 1);
@@ -821,6 +836,7 @@ impl FluxoraStream {
             // first rate epoch covers [start_time, end_time] at rate_per_second.
             checkpointed_amount: 0,
             checkpointed_at: start_time,
+            min_withdrawal,
         };
 
         save_stream(env, &stream);
@@ -839,6 +855,7 @@ impl FluxoraStream {
                 start_time,
                 cliff_time,
                 end_time,
+                min_withdrawal,
             },
         );
 
@@ -1005,6 +1022,7 @@ impl FluxoraStream {
         start_time: u64,
         cliff_time: u64,
         end_time: u64,
+        min_withdrawal: i128,
     ) -> Result<u64, ContractError> {
         sender.require_auth();
         if is_global_emergency_paused(&env) || is_creation_paused(&env) {
@@ -1021,6 +1039,7 @@ impl FluxoraStream {
             start_time,
             cliff_time,
             end_time,
+            min_withdrawal,
         )?;
 
         // Transfer tokens from sender to this contract (#36)
@@ -1038,6 +1057,7 @@ impl FluxoraStream {
             start_time,
             cliff_time,
             end_time,
+            min_withdrawal,
         ))
     }
 
@@ -1113,6 +1133,7 @@ impl FluxoraStream {
         start_delay: u64,
         cliff_delay: u64,
         duration: u64,
+        min_withdrawal: i128,
     ) -> Result<u64, ContractError> {
         let current_time = env.ledger().timestamp();
 
@@ -1137,6 +1158,7 @@ impl FluxoraStream {
             start_time,
             cliff_time,
             end_time,
+            min_withdrawal,
         )
     }
 
@@ -1288,6 +1310,7 @@ impl FluxoraStream {
                 params.start_time,
                 params.cliff_time,
                 params.end_time,
+                params.min_withdrawal,
             )?;
             total_deposit = total_deposit
                 .checked_add(params.deposit_amount)
@@ -1312,6 +1335,7 @@ impl FluxoraStream {
                 params.start_time,
                 params.cliff_time,
                 params.end_time,
+                params.min_withdrawal,
             );
             created_ids.push_back(stream_id);
         }
@@ -1414,6 +1438,7 @@ impl FluxoraStream {
                 start_time,
                 cliff_time,
                 end_time,
+                min_withdrawal: rel_params.min_withdrawal,
             };
             absolute_streams.push_back(absolute_params);
         }
@@ -1673,6 +1698,11 @@ impl FluxoraStream {
             return Ok(0);
         }
 
+        // Enforce dust threshold unless in a terminal state (Completed/Cancelled or reached end_time)
+        if withdrawable < stream.min_withdrawal && !is_terminal_state(&env, &stream) {
+            return Err(ContractError::BelowDustThreshold);
+        }
+
         // CEI: update state before external token transfer to reduce reentrancy risk.
         // Assumption: the token contract does not reenter this contract.
         stream.withdrawn_amount += withdrawable;
@@ -1794,6 +1824,11 @@ impl FluxoraStream {
 
         if withdrawable <= 0 {
             return Ok(0);
+        }
+
+        // Enforce dust threshold unless in a terminal state (Completed/Cancelled or reached end_time)
+        if withdrawable < stream.min_withdrawal && !is_terminal_state(&env, &stream) {
+            return Err(ContractError::BelowDustThreshold);
         }
 
         stream.withdrawn_amount += withdrawable;
@@ -1920,6 +1955,11 @@ impl FluxoraStream {
             withdrawable = withdrawable.min(contract_balance);
 
             if withdrawable > 0 {
+                // Enforce dust threshold unless in a terminal state
+                if withdrawable < stream.min_withdrawal && !is_terminal_state(&env, &stream) {
+                    return Err(ContractError::BelowDustThreshold);
+                }
+
                 // Decrement running balance before the transfer to ensure atomicity
                 contract_balance -= withdrawable;
 
@@ -2031,6 +2071,11 @@ impl FluxoraStream {
             withdrawable = withdrawable.min(contract_balance);
 
             if withdrawable > 0 {
+                // Enforce dust threshold unless in a terminal state
+                if withdrawable < stream.min_withdrawal && !is_terminal_state(&env, &stream) {
+                    return Err(ContractError::BelowDustThreshold);
+                }
+
                 contract_balance -= withdrawable;
                 stream.withdrawn_amount += withdrawable;
 
@@ -2927,7 +2972,7 @@ impl FluxoraStream {
     /// in the WASM binary at compile time.
     ///
     /// # Returns
-    /// - `u32`: The current contract version (currently `1`)
+    /// - `u32`: The current contract version (currently `3`)
     ///
     /// # Authorization
     /// - None required. Any caller (wallet, indexer, script) may call this.
