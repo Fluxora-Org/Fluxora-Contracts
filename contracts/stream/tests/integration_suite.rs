@@ -2709,7 +2709,7 @@ fn integration_uninitialised_version_works() {
     let env = Env::default();
     let contract_id = env.register_contract(None, FluxoraStream);
     let client = FluxoraStreamClient::new(&env, &contract_id);
-    assert_eq!(client.version(), 2);
+    assert_eq!(client.version(), 3);
 }
 
 /// Uninitialised contract: stream count returns 0.
