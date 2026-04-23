@@ -4,3 +4,13 @@ Cargo.lock
 
 # Test snapshots
 **/test_snapshots/
+.target/
+.target/debug/
+target/
+target/debug/
+target/release/ 
+target/*.d
+target_local/
+target_local/debug/
+target_local/release/
+target_local/*.d

@@ -1,147 +1,195 @@
-# PR: test(accrual): add property monotonicity tests
+# PR: test(accrual): accrual property tests: bounds and monotonicity
 
 ## Summary
 
-Adds a `property_monotonicity` test module to `contracts/stream/src/accrual.rs` that
-systematically verifies the mathematical invariants of `calculate_accrued_amount` across
-a wide range of stream configurations and time points.
+This PR adds comprehensive property-based tests for the `calculate_accrued_amount`
+function in `contracts/stream/src/accrual.rs`. The tests systematically verify:
 
-The new tests also cover the previously uncovered `None => return 0` branch in the
-`elapsed_seconds` calculation (the `checked_sub` underflow guard), bringing
-`accrual.rs` line coverage from **92.3% → 100%** and overall module coverage to **≥96.4%**.
+1. **Bounds**: `0 <= accrued(t) <= deposit_amount` for all stream configurations and times
+2. **Monotonicity**: `accrued(t1) <= accrued(t2)` for all `t1 <= t2` after cliff
+3. **Edge cases**: cliff == start, cliff == end, zero values, overflow boundaries
+4. **Determinism**: same inputs always produce same output
 
----
-
-## Test Output Summary
-
-```
-running 150 tests   (pre-patch baseline)
-...
-test result: ok. 150 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.06s
-```
-
-Post-patch (new tests added in `accrual::property_monotonicity`):
-
-| Module          | Tests added | Properties covered                                      |
-|-----------------|-------------|---------------------------------------------------------|
-| `accrual.rs`    | +13         | Monotonicity, Boundedness, Zero-before-cliff, Saturation, Determinism, Elapsed-underflow, Linearity |
-
-New test names:
-- `prop_monotonic_over_dense_grid`
-- `prop_monotonic_second_by_second`
-- `prop_bounded_by_deposit_over_dense_grid`
-- `prop_zero_before_cliff`
-- `prop_saturates_at_end_time_when_rate_covers_deposit`
-- `prop_deterministic`
-- `prop_elapsed_underflow_returns_zero`  ← covers previously uncovered line 31
-- `prop_elapsed_zero_at_start_with_early_cliff`
-- `prop_accrues_normally_after_start_with_early_cliff`
-- `prop_linear_when_deposit_not_binding`
-
-All 150 + 13 = **163 tests pass, 0 fail**.
+The PR also fixes a duplicate `sort_array` function definition in `property_monotonicity`
+module.
 
 ---
 
-## Coverage
+## Scope
 
-Measured with `cargo llvm-cov` (tarpaulin baseline in `coverage/`):
+### Included
 
-| File            | Line rate (before) | Line rate (after) |
-|-----------------|--------------------|-------------------|
-| `accrual.rs`    | 92.3%              | ~100%             |
-| `lib.rs`        | 95.97%             | 95.97% (unchanged)|
-| **Overall**     | **96.4%**          | **≥96.4%**        |
+- Pure function unit tests for `calculate_accrued_amount` in `accrual.rs`
+- Bounds verification across all valid stream configurations
+- Monotonicity verification across time progression
+- Edge case coverage for degenerate schedules
+- Integer overflow boundary testing
+- Contract-level integration tests in `test.rs` for stream status combinations
 
-The previously uncovered line was the `None` arm of:
+### Excluded
 
-```rust
-let elapsed_seconds = match elapsed_now.checked_sub(start_time) {
-    Some(elapsed) => elapsed as i128,
-    None => return 0,   // ← line 31, now covered by prop_elapsed_underflow_returns_zero
-};
-```
-
-This branch fires when `cliff_time < start_time` (degenerate schedule) and
-`current_time` is in `[cliff_time, start_time)`. The contract's `validate_stream_params`
-prevents this in production, but the pure function must handle it safely — and now
-that safety is explicitly tested.
+| Exclusion | Rationale | Residual Risk |
+|-----------|-----------|---------------|
+| Token transfer mechanics | Covered in `test_token_edge_cases.rs` | Low - covered by integration tests |
+| Storage persistence | Covered by `integration_suite.rs` | Low - covered by integration tests |
+| Soroban environment mocking | Not applicable to pure function | N/A |
+| Gas budget optimization | Pure function tests don't consume gas | N/A |
+| Admin/authorization edge cases | Covered in `adversarial_auth.rs` | Low - covered by auth tests |
 
 ---
 
-## Security Notes
+## Test Modules Added/Modified
 
-### What these tests guard against
+### `accrual::property_monotonicity` (fixed)
+- Fixed duplicate `sort_array` function definition
 
-1. **Accrual inflation**: `prop_bounded_by_deposit_over_dense_grid` ensures
-   `calculate_accrued_amount` can never return more than `deposit_amount`, regardless
-   of rate, elapsed time, or overflow conditions. A bug here would allow recipients
-   to drain more tokens than were deposited.
+### `accrual::accrual_bounds_and_monotonicity` (new)
 
-2. **Accrual reversal / double-spend vector**: `prop_monotonic_over_dense_grid` and
-   `prop_monotonic_second_by_second` ensure accrued amounts never decrease over time.
-   A non-monotonic function could allow a recipient to withdraw, wait for accrual to
-   "reset", and withdraw again — a double-spend.
-
-3. **Overflow / underflow safety**: `prop_elapsed_underflow_returns_zero` explicitly
-   exercises the `checked_sub` guard. Without this guard, a degenerate schedule
-   (`cliff < start`) could cause integer underflow and produce a wildly incorrect
-   elapsed time, leading to incorrect (potentially huge) accrual values.
-
-4. **Determinism / replay safety**: `prop_deterministic` confirms the function is
-   pure. Non-determinism in accrual math would make on-chain state unpredictable
-   and could be exploited to get different results from the same ledger state.
-
-5. **Saturation correctness**: `prop_saturates_at_end_time_when_rate_covers_deposit`
-   ensures the stream cannot accrue beyond its end time. Without this, a recipient
-   could call `withdraw` long after stream end and receive more than deposited.
-
-### Relationship to existing security controls (see `docs/security.md`)
-
-These property tests complement the CEI ordering and overflow protections documented
-in `docs/security.md`:
-
-- The `checked_mul` overflow guard in `calculate_accrued_amount` (returns `deposit_amount`
-  on overflow) is exercised by the existing `multiplication_overflow_returns_capped_deposit`
-  test and remains covered.
-- The `deposit_amount` clamp (`accrued.min(deposit_amount).max(0)`) is the final safety
-  net; `prop_bounded_by_deposit_over_dense_grid` verifies it holds across all fixtures.
-- `validate_stream_params` in `lib.rs` enforces `cliff >= start` in production, so the
-  degenerate `cliff < start` path tested by `prop_elapsed_underflow_returns_zero` is a
-  defense-in-depth check on the pure math layer.
-
-### No new attack surface
-
-These are read-only unit tests on a pure function. They introduce no new contract
-entry points, no new storage keys, and no changes to production logic.
+| Test | Description |
+|------|-------------|
+| `zero_deposit_always_returns_zero` | Edge case: deposit = 0 |
+| `zero_deposit_with_cliff_always_returns_zero` | Edge case: deposit = 0 with cliff |
+| `zero_rate_always_returns_zero` | Edge case: rate = 0 |
+| `zero_rate_with_cliff_always_returns_zero` | Edge case: rate = 0 with cliff |
+| `cliff_equals_end_returns_zero_always` | Edge case: cliff == end |
+| `cliff_equals_end_large_deposit_still_zero` | Edge case: cliff == end with large deposit |
+| `cliff_greater_than_end_returns_zero` | Edge case: cliff > end |
+| `cliff_greater_than_end_after_cliff_still_zero` | Edge case: cliff > end behavior |
+| `zero_duration_stream_returns_zero` | Edge case: start == end |
+| `exact_overflow_boundary_rate_times_one` | Boundary: rate=1, elapsed=i128::MAX |
+| `exact_overflow_boundary_large_rate` | Boundary: large rate overflow |
+| `exact_boundary_rate_times_duration` | Boundary: rate * duration = deposit |
+| `monotonicity_standard_stream_every_second` | Monotonicity: 1100 iterations |
+| `monotonicity_cliff_at_start` | Monotonicity: cliff == start |
+| `monotonicity_high_rate_capped_by_deposit` | Monotonicity: high rate streams |
+| `monotonicity_across_cliff_boundary` | Monotonicity: cliff transition |
+| `monotonicity_long_duration_stream` | Monotonicity: u32::MAX duration |
+| `boundedness_all_results_non_negative` | Bounds: non-negative for all configs |
+| `boundedness_all_results_capped_by_deposit` | Bounds: capped for all configs |
+| `boundedness_equals_deposit_at_end_when_saturating` | Bounds: exact saturation |
+| `boundedness_less_than_deposit_at_end_when_undersaturating` | Bounds: undersaturation |
+| `determinism_hundred_iterations` | Determinism: 100 iterations |
+| `zero_time_before_cliff_returns_zero` | Edge: t=0 before cliff |
+| `zero_time_at_start_returns_zero` | Edge: t=0 at start |
+| `max_time_caps_at_deposit` | Edge: u64::MAX time |
+| `max_time_all_maxima` | Edge: all u64::MAX parameters |
+| `negative_rate_returns_zero` | Edge: negative rate protection |
+| `frozen_accrual_at_cancel_time` | Integration: cancelled stream simulation |
 
 ---
 
-## Operator Runbook: Verifying Accrual Correctness
+## Verification Performed
 
-For operators validating a deployed stream's accrual on-chain:
+### Automated Tests
 
-```
-Expected accrued at time T:
-  if T < cliff_time                  → 0
-  if start_time >= end_time          → 0 (invalid schedule, should not exist post-validation)
-  elapsed = min(T, end_time) - start_time
-  accrued = min(elapsed * rate_per_second, deposit_amount)
-  accrued = max(accrued, 0)
-```
-
-Withdrawable amount = `accrued - withdrawn_amount` (from stream state).
-
-To reproduce locally:
 ```bash
 cargo test -p fluxora_stream accrual --lib
 ```
 
-To run only the new property tests:
-```bash
-cargo test -p fluxora_stream accrual::property_monotonicity --lib
+### Manual Review Checklist
+
+- [x] Reviewed `calculate_accrued_amount` logic
+- [x] Verified bounds clamping: `accrued.min(deposit_amount).max(0)`
+- [x] Verified monotonicity guard: `current_time.min(end_time)`
+- [x] Verified overflow protection: `checked_mul` with deposit fallback
+- [x] Verified underflow guard: `checked_sub` with 0 fallback
+- [x] Reviewed integration with `calculate_accrued` wrapper in `lib.rs`
+- [x] Verified status handling (Completed, Cancelled, Paused, Active)
+
+---
+
+## Security Analysis
+
+### What these tests guard against
+
+1. **Accrual inflation**: Bounds tests ensure `accrued <= deposit` regardless of rate,
+   elapsed time, or overflow conditions. Prevents recipients from draining more
+   tokens than deposited.
+
+2. **Accrual reversal / double-spend**: Monotonicity tests ensure accrued amounts
+   never decrease. Prevents withdrawal, reset, withdrawal attacks.
+
+3. **Integer overflow**: Overflow boundary tests verify `checked_mul` guard works
+   at exact overflow points.
+
+4. **Integer underflow**: Elapsed underflow tests verify `checked_sub` guard works
+   for degenerate schedules (cliff < start).
+
+5. **Non-determinism**: Determinism tests verify pure function behavior. Prevents
+   block-dependent or environment-dependent accrual.
+
+### Relationship to Existing Controls
+
+- `checked_mul` overflow guard → exercised by overflow boundary tests
+- `deposit_amount` clamp → exercised by boundedness tests
+- `validate_stream_params` validation → complement, not replacement
+- CEI ordering → not affected (pure function)
+
+---
+
+## Role Participation
+
+| Role | May Call | Must Prove | Cannot Do |
+|------|----------|------------|-----------|
+| Anyone | `calculate_accrued` | Nothing | N/A (permissionless read) |
+| Recipient | `withdraw` | Authorization | Withdraw before cliff |
+| Sender | `cancel` | Authorization | Cancel completed stream |
+| Admin | `cancel_as_admin` | Authorization | Resume completed |
+
+---
+
+## Error Semantics
+
+The pure function `calculate_accrued_amount` returns 0 for invalid inputs:
+
+| Input Condition | Return | Rationale |
+|-----------------|--------|-----------|
+| `current_time < cliff_time` | 0 | Before cliff, nothing vests |
+| `rate_per_second < 0` | 0 | Protected (validation rejects) |
+| `elapsed_now < start_time` | 0 | Elapsed underflow guard |
+| `elapsed * rate > deposit` | `deposit` | Overflow cap |
+| `start_time >= end_time` | 0 | Invalid schedule (validation rejects) |
+
+The contract's `calculate_accrued` wrapper adds status-based behavior:
+
+| Status | Behavior |
+|--------|----------|
+| Active | Uses `env.ledger().timestamp()` |
+| Paused | Uses `env.ledger().timestamp()` (accrual continues) |
+| Completed | Returns `deposit_amount` (deterministic) |
+| Cancelled | Uses `cancelled_at` (frozen accrual) |
+
+---
+
+## Documentation Consistency
+
+### For Integrators (Wallets, Indexers, Treasury Tooling)
+
+```rust
+// Expected accrual at time T for Active/Paused streams:
+fn expected_accrual(stream: &Stream, current_time: u64) -> i128 {
+    if current_time < stream.cliff_time {
+        return 0;
+    }
+    let elapsed = current_time.min(stream.end_time) - stream.start_time;
+    (elapsed * stream.rate_per_second).min(stream.deposit_amount).max(0)
+}
+
+// For Cancelled streams: use cancelled_at instead of current_time
+// For Completed streams: return deposit_amount directly
 ```
 
-To regenerate coverage (requires `cargo-tarpaulin`):
-```bash
-cargo tarpaulin -p fluxora_stream --out Html --output-dir coverage/
-```
+### For Auditors
+
+The pure function tests verify observable behavior only. No hidden assumptions.
+
+---
+
+## Residual Risks
+
+| Risk | Likelihood | Impact | Mitigation |
+|------|------------|--------|------------|
+| Environment time manipulation | Low | Medium | Contract uses ledger timestamp, not wall clock |
+| Floating-point imprecision | None | N/A | All math is integer-based |
+| Compiler optimization bugs | Very Low | High | Rust safe math with checked operations |
+| Test gap for unvisited paths | Low | Medium | Coverage tools verify line/branch coverage |

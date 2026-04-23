@@ -26,7 +26,7 @@ extern crate std;
 
 use fluxora_stream::{ContractError, FluxoraStream, FluxoraStreamClient, StreamStatus};
 use soroban_sdk::{
-    testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke},
+    testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke},
     token::StellarAssetClient,
     Address, Env, IntoVal,
 };
@@ -77,7 +77,15 @@ impl<'a> Ctx<'a> {
         StellarAssetClient::new(&env, &token_id).mint(&sender, &10_000_i128);
 
         let token = soroban_sdk::token::Client::new(&env, &token_id);
-        Self { env, contract_id, token_id, admin, sender, recipient, token }
+        Self {
+            env,
+            contract_id,
+            token_id,
+            admin,
+            sender,
+            recipient,
+            token,
+        }
     }
 
     fn client(&self) -> FluxoraStreamClient<'_> {
@@ -97,22 +105,17 @@ impl<'a> Ctx<'a> {
                 args: (
                     &self.sender,
                     &self.recipient,
-                    &1000_i128,
-                    &1_i128,
-                    &0u64,
-                    &0u64,
-                    &1000u64,
+                    1000_i128,
+                    1_i128,
+                    0u64,
+                    0u64,
+                    1000u64,
                 )
                     .into_val(&self.env),
                 sub_invokes: &[MockAuthInvoke {
                     contract: &self.token_id,
                     fn_name: "transfer",
-                    args: (
-                        &self.sender,
-                        &self.contract_id,
-                        &1000_i128,
-                    )
-                        .into_val(&self.env),
+                    args: (&self.sender, &self.contract_id, 1000_i128).into_val(&self.env),
                     sub_invokes: &[],
                 }],
             },
@@ -174,11 +177,11 @@ fn adversarial_create_stream_stranger_cannot_impersonate_sender() {
             args: (
                 &ctx.sender,
                 &ctx.recipient,
-                &1000_i128,
-                &1_i128,
-                &0u64,
-                &0u64,
-                &1000u64,
+                1000_i128,
+                1_i128,
+                0u64,
+                0u64,
+                1000u64,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[],
@@ -198,9 +201,17 @@ fn adversarial_create_stream_stranger_cannot_impersonate_sender() {
     }));
 
     assert!(result.is_err(), "stranger must not create stream as sender");
-    assert_eq!(ctx.client().get_stream_count(), count_before, "counter must not advance");
+    assert_eq!(
+        ctx.client().get_stream_count(),
+        count_before,
+        "counter must not advance"
+    );
     assert_eq!(ctx.total_supply(), supply_before, "no tokens must move");
-    assert_eq!(ctx.env.events().all().len(), events_before, "no events emitted");
+    assert_eq!(
+        ctx.env.events().all().len(),
+        events_before,
+        "no events emitted"
+    );
 }
 
 // ===========================================================================
@@ -233,7 +244,10 @@ fn adversarial_pause_stream_stranger_rejected_no_side_effects() {
     }));
 
     assert!(result.is_err(), "stranger must not pause stream");
-    assert_eq!(ctx.client().get_stream_state(&stream_id).status, state_before.status);
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).status,
+        state_before.status
+    );
     assert_eq!(ctx.total_supply(), supply_before);
     assert_eq!(ctx.env.events().all().len(), events_before);
 }
@@ -444,7 +458,10 @@ fn adversarial_cancel_stream_admin_cannot_use_sender_path() {
         ctx.client().cancel_stream(&stream_id);
     }));
 
-    assert!(result.is_err(), "admin must not use sender-only cancel path");
+    assert!(
+        result.is_err(),
+        "admin must not use sender-only cancel path"
+    );
     assert_eq!(
         ctx.client().get_stream_state(&stream_id).status,
         StreamStatus::Active
@@ -545,7 +562,10 @@ fn adversarial_withdraw_admin_rejected_no_side_effects() {
         ctx.client().withdraw(&stream_id);
     }));
 
-    assert!(result.is_err(), "admin must not withdraw via recipient path");
+    assert!(
+        result.is_err(),
+        "admin must not withdraw via recipient path"
+    );
     assert_eq!(
         ctx.client().get_stream_state(&stream_id).withdrawn_amount,
         0
@@ -643,7 +663,7 @@ fn adversarial_batch_withdraw_stranger_rejected_no_side_effects() {
         invoke: &MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "batch_withdraw",
-            args: (&stranger, &ids).into_val(&ctx.env),
+            args: (&stranger, ids.clone()).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
@@ -678,7 +698,7 @@ fn adversarial_batch_withdraw_sender_rejected() {
         invoke: &MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "batch_withdraw",
-            args: (&ctx.sender, &ids).into_val(&ctx.env),
+            args: (&ctx.sender, ids.clone()).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
@@ -709,17 +729,17 @@ fn adversarial_batch_withdraw_cross_stream_recipient_rejected() {
             args: (
                 &ctx.sender,
                 &other_recipient,
-                &1000_i128,
-                &1_i128,
-                &0u64,
-                &0u64,
-                &1000u64,
+                1000_i128,
+                1_i128,
+                0u64,
+                0u64,
+                1000u64,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[MockAuthInvoke {
                 contract: &ctx.token_id,
                 fn_name: "transfer",
-                args: (&ctx.sender, &ctx.contract_id, &1000_i128).into_val(&ctx.env),
+                args: (&ctx.sender, &ctx.contract_id, 1000_i128).into_val(&ctx.env),
                 sub_invokes: &[],
             }],
         },
@@ -743,7 +763,7 @@ fn adversarial_batch_withdraw_cross_stream_recipient_rejected() {
         invoke: &MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "batch_withdraw",
-            args: (&ctx.recipient, &ids).into_val(&ctx.env),
+            args: (&ctx.recipient, ids.clone()).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
@@ -961,7 +981,7 @@ fn adversarial_set_admin_stranger_rejected_config_unchanged() {
         invoke: &MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "set_admin",
-            args: (&new_admin,).into_val(&ctx.env),
+            args: (new_admin.clone(),).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
@@ -972,8 +992,14 @@ fn adversarial_set_admin_stranger_rejected_config_unchanged() {
 
     assert!(result.is_err(), "stranger must not rotate admin");
     let config_after = ctx.client().get_config();
-    assert_eq!(config_after.admin, config_before.admin, "admin must be unchanged");
-    assert_eq!(config_after.token, config_before.token, "token must be unchanged");
+    assert_eq!(
+        config_after.admin, config_before.admin,
+        "admin must be unchanged"
+    );
+    assert_eq!(
+        config_after.token, config_before.token,
+        "token must be unchanged"
+    );
     assert_eq!(ctx.env.events().all().len(), events_before);
 }
 
@@ -989,7 +1015,7 @@ fn adversarial_set_admin_sender_rejected_config_unchanged() {
         invoke: &MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "set_admin",
-            args: (&new_admin,).into_val(&ctx.env),
+            args: (new_admin.clone(),).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
@@ -1014,7 +1040,7 @@ fn adversarial_set_admin_old_admin_revoked_after_rotation() {
         invoke: &MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "set_admin",
-            args: (&new_admin,).into_val(&ctx.env),
+            args: (new_admin.clone(),).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
@@ -1028,7 +1054,7 @@ fn adversarial_set_admin_old_admin_revoked_after_rotation() {
         invoke: &MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "set_admin",
-            args: (&another,).into_val(&ctx.env),
+            args: (another.clone(),).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
@@ -1060,7 +1086,7 @@ fn adversarial_set_contract_paused_stranger_rejected() {
         invoke: &MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "set_contract_paused",
-            args: (&true,).into_val(&ctx.env),
+            args: (true,).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
@@ -1081,17 +1107,17 @@ fn adversarial_set_contract_paused_stranger_rejected() {
             args: (
                 &ctx.sender,
                 &ctx.recipient,
-                &1000_i128,
-                &1_i128,
-                &0u64,
-                &0u64,
-                &1000u64,
+                1000_i128,
+                1_i128,
+                0u64,
+                0u64,
+                1000u64,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[MockAuthInvoke {
                 contract: &ctx.token_id,
                 fn_name: "transfer",
-                args: (&ctx.sender, &ctx.contract_id, &1000_i128).into_val(&ctx.env),
+                args: (&ctx.sender, &ctx.contract_id, 1000_i128).into_val(&ctx.env),
                 sub_invokes: &[],
             }],
         },
@@ -1105,7 +1131,10 @@ fn adversarial_set_contract_paused_stranger_rejected() {
         &0u64,
         &1000u64,
     );
-    assert_eq!(ctx.client().get_stream_state(&id).status, StreamStatus::Active);
+    assert_eq!(
+        ctx.client().get_stream_state(&id).status,
+        StreamStatus::Active
+    );
 }
 
 /// The stream sender cannot set the global pause flag.
@@ -1118,7 +1147,7 @@ fn adversarial_set_contract_paused_sender_rejected() {
         invoke: &MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "set_contract_paused",
-            args: (&true,).into_val(&ctx.env),
+            args: (true,).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
@@ -1149,7 +1178,7 @@ fn adversarial_update_rate_stranger_rejected_no_side_effects() {
         invoke: &MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "update_rate_per_second",
-            args: (stream_id, &2_i128).into_val(&ctx.env),
+            args: (stream_id, 2_i128).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
@@ -1180,7 +1209,7 @@ fn adversarial_update_rate_recipient_rejected() {
         invoke: &MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "update_rate_per_second",
-            args: (stream_id, &2_i128).into_val(&ctx.env),
+            args: (stream_id, 2_i128).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
@@ -1216,7 +1245,7 @@ fn adversarial_shorten_end_time_stranger_rejected_no_side_effects() {
         invoke: &MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "shorten_stream_end_time",
-            args: (stream_id, &500u64).into_val(&ctx.env),
+            args: (stream_id, 500u64).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
@@ -1247,17 +1276,17 @@ fn adversarial_extend_end_time_stranger_rejected_no_side_effects() {
             args: (
                 &ctx.sender,
                 &ctx.recipient,
-                &2000_i128,
-                &1_i128,
-                &0u64,
-                &0u64,
-                &1000u64,
+                2000_i128,
+                1_i128,
+                0u64,
+                0u64,
+                1000u64,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[MockAuthInvoke {
                 contract: &ctx.token_id,
                 fn_name: "transfer",
-                args: (&ctx.sender, &ctx.contract_id, &2000_i128).into_val(&ctx.env),
+                args: (&ctx.sender, &ctx.contract_id, 2000_i128).into_val(&ctx.env),
                 sub_invokes: &[],
             }],
         },
@@ -1280,7 +1309,7 @@ fn adversarial_extend_end_time_stranger_rejected_no_side_effects() {
         invoke: &MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "extend_stream_end_time",
-            args: (stream_id, &2000u64).into_val(&ctx.env),
+            args: (stream_id, 2000u64).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
@@ -1293,5 +1322,129 @@ fn adversarial_extend_end_time_stranger_rejected_no_side_effects() {
     assert_eq!(
         ctx.client().get_stream_state(&stream_id).end_time,
         state_before.end_time
+    );
+}
+
+/// The recipient cannot shorten their incoming stream's end time.
+#[test]
+fn adversarial_shorten_end_time_recipient_rejected() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream(); // end_time = 1000
+
+    ctx.env.ledger().set_timestamp(100);
+    let state_before = ctx.client().get_stream_state(&stream_id);
+
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.recipient,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "shorten_stream_end_time",
+            args: (stream_id, 500u64).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().shorten_stream_end_time(&stream_id, &500u64);
+    }));
+
+    assert!(result.is_err(), "recipient must not shorten end time");
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).end_time,
+        state_before.end_time
+    );
+}
+
+/// The recipient cannot extend their incoming stream's end time.
+#[test]
+fn adversarial_extend_end_time_recipient_rejected() {
+    let ctx = Ctx::setup();
+    // deposit=2000 so extension to 2000 is valid if authorized
+    ctx.env.ledger().set_timestamp(0);
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "create_stream",
+            args: (
+                &ctx.sender,
+                &ctx.recipient,
+                2000_i128,
+                1_i128,
+                0u64,
+                0u64,
+                1000u64,
+            )
+                .into_val(&ctx.env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &ctx.token_id,
+                fn_name: "transfer",
+                args: (&ctx.sender, &ctx.contract_id, 2000_i128).into_val(&ctx.env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    let state_before = ctx.client().get_stream_state(&stream_id);
+
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.recipient,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "extend_stream_end_time",
+            args: (stream_id, 2000u64).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().extend_stream_end_time(&stream_id, &2000u64);
+    }));
+
+    assert!(result.is_err(), "recipient must not extend end time");
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).end_time,
+        state_before.end_time
+    );
+}
+
+/// The admin cannot update rate via the sender-only path.
+#[test]
+fn adversarial_update_rate_admin_rejected() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream();
+
+    let state_before = ctx.client().get_stream_state(&stream_id);
+
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.admin,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "update_rate_per_second",
+            args: (stream_id, 2_i128).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().update_rate_per_second(&stream_id, &2_i128);
+    }));
+
+    assert!(
+        result.is_err(),
+        "admin must not update rate via sender path"
+    );
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).rate_per_second,
+        state_before.rate_per_second
     );
 }

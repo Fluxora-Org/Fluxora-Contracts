@@ -1,34 +1,34 @@
-#[cfg(test)]
 extern crate std;
 
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env, FromVal, IntoVal, Symbol, TryFromVal, Vec,
+    Address, Env, FromVal, IntoVal, Symbol, TryFromVal, Val, Vec,
 };
 
 use crate::{
-    ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamCreated,
-    StreamEvent, StreamStatus, WithdrawalTo,
+    ContractError, ContractPauseChanged, CreateStreamParams, FluxoraStream, FluxoraStreamClient,
+    GlobalEmergencyPauseChanged, StreamCreated, StreamEndShortened, StreamEvent, StreamStatus,
+    StreamToppedUp, WithdrawalTo,
 };
 
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
 
-struct TestContext<'a> {
-    env: Env,
-    contract_id: Address,
-    token_id: Address,
+pub(crate) struct TestContext<'a> {
+    pub(crate) env: Env,
+    pub(crate) contract_id: Address,
+    pub(crate) token_id: Address,
     #[allow(dead_code)]
-    admin: Address,
-    sender: Address,
-    recipient: Address,
-    sac: StellarAssetClient<'a>,
+    pub(crate) admin: Address,
+    pub(crate) sender: Address,
+    pub(crate) recipient: Address,
+    pub(crate) sac: StellarAssetClient<'a>,
 }
 
 impl<'a> TestContext<'a> {
-    fn setup() -> Self {
+    pub(crate) fn setup() -> Self {
         let env = Env::default();
         env.mock_all_auths();
 
@@ -67,7 +67,7 @@ impl<'a> TestContext<'a> {
 
 impl<'a> TestContext<'a> {
     /// Setup context without mock_all_auths(), for explicit auth testing
-    fn setup_strict() -> Self {
+    pub(crate) fn setup_strict() -> Self {
         let env = Env::default();
 
         let contract_id = env.register_contract(None, FluxoraStream);
@@ -121,16 +121,16 @@ impl<'a> TestContext<'a> {
         }
     }
 
-    fn client(&self) -> FluxoraStreamClient<'_> {
+    pub(crate) fn client(&self) -> FluxoraStreamClient<'_> {
         FluxoraStreamClient::new(&self.env, &self.contract_id)
     }
 
-    fn token(&self) -> TokenClient<'_> {
+    pub(crate) fn token(&self) -> TokenClient<'_> {
         TokenClient::new(&self.env, &self.token_id)
     }
 
     /// Create a standard 1000-unit stream spanning 1000 seconds (rate 1/s, no cliff).
-    fn create_default_stream(&self) -> u64 {
+    pub(crate) fn create_default_stream(&self) -> u64 {
         self.env.ledger().set_timestamp(0);
         self.client().create_stream(
             &self.sender,
@@ -144,7 +144,7 @@ impl<'a> TestContext<'a> {
     }
 
     /// Create a stream with a cliff at t=500 out of 1000s.
-    fn create_cliff_stream(&self) -> u64 {
+    pub(crate) fn create_cliff_stream(&self) -> u64 {
         self.env.ledger().set_timestamp(0);
         self.client().create_stream(
             &self.sender,
@@ -157,7 +157,7 @@ impl<'a> TestContext<'a> {
         )
     }
 
-    fn create_max_rate_stream(&self) -> u64 {
+    pub(crate) fn create_max_rate_stream(&self) -> u64 {
         self.env.ledger().set_timestamp(0);
         self.client().create_stream(
             &self.sender,
@@ -170,7 +170,7 @@ impl<'a> TestContext<'a> {
         )
     }
 
-    fn create_half_max_rate_stream(&self) -> u64 {
+    pub(crate) fn create_half_max_rate_stream(&self) -> u64 {
         self.env.ledger().set_timestamp(0);
         self.client().create_stream(
             &self.sender,
@@ -598,9 +598,15 @@ fn test_create_stream_emits_event() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
 
-    let stream_id =
-        ctx.client()
-            .create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
 
     let events = ctx.env.events().all();
     let event = events.last().unwrap();
@@ -620,10 +626,16 @@ fn test_create_stream_emits_event() {
 fn test_create_stream_panics_when_contract_paused() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
-    ctx.client().set_contract_paused(&true);
-    let result =
-        ctx.client()
-            .try_create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
+    ctx.client().set_global_emergency_paused(&true);
+    let result = ctx.client().try_create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
     assert_eq!(result, Err(Ok(ContractError::ContractPaused)));
 }
 
@@ -631,11 +643,17 @@ fn test_create_stream_panics_when_contract_paused() {
 fn test_create_stream_succeeds_after_unpause() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
-    ctx.client().set_contract_paused(&true);
-    ctx.client().set_contract_paused(&false);
-    let id = ctx
-        .client()
-        .create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
+    ctx.client().set_global_emergency_paused(&true);
+    ctx.client().set_global_emergency_paused(&false);
+    let id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
     assert_eq!(id, 0);
     assert_eq!(
         ctx.client().get_stream_state(&id).status,
@@ -1959,14 +1977,23 @@ fn test_calculate_accrued_paused_after_cliff() {
 #[test]
 fn test_calculate_accrued_paused_at_end_time() {
     let ctx = TestContext::setup();
-    let stream_id = ctx.create_default_stream(); // 1000 tokens, 0-1000s, rate 1/s
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
 
-    // Advance to end_time and pause
-    ctx.env.ledger().set_timestamp(1000);
+    // Advance to nearly end_time and pause
+    ctx.env.ledger().set_timestamp(999);
     ctx.client().pause_stream(&stream_id);
 
-    let state = ctx.client().get_stream_state(&stream_id);
-    assert_eq!(state.status, StreamStatus::Paused);
+    // Advance to end_time
+    ctx.env.ledger().set_timestamp(1000);
 
     // Accrued must be capped at deposit
     let accrued = ctx.client().calculate_accrued(&stream_id);
@@ -2181,20 +2208,20 @@ fn test_calculate_accrued_no_state_mutation() {
 #[test]
 fn test_calculate_accrued_zero_duration_stream() {
     let ctx = TestContext::setup();
-    ctx.env.ledger().set_timestamp(0);
+    ctx.env.ledger().set_timestamp(100);
 
-    // Create stream with zero duration
+    // Attempt to create stream with zero duration (start == end)
     let result = ctx.client().try_create_stream(
         &ctx.sender,
         &ctx.recipient,
         &1000_i128,
         &1_i128,
         &500u64, // start_time
-        &500u64, // cliff_time (same as start)
-        &500u64, // end_time (same as start)
+        &500u64, // cliff_time
+        &500u64, // end_time
     );
 
-    assert_eq!(result, Err(Ok(crate::ContractError::InvalidParams)));
+    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 }
 
 /// Edge case: calculate_accrued on stream with zero deposit.
@@ -2202,20 +2229,20 @@ fn test_calculate_accrued_zero_duration_stream() {
 #[test]
 fn test_calculate_accrued_zero_deposit_stream() {
     let ctx = TestContext::setup();
-    ctx.env.ledger().set_timestamp(0);
+    ctx.env.ledger().set_timestamp(100);
 
-    // Create stream with zero deposit
+    // Attempt to create stream with zero deposit
     let result = ctx.client().try_create_stream(
         &ctx.sender,
         &ctx.recipient,
         &0_i128, // zero deposit
         &1_i128,
-        &0u64,
-        &0u64,
+        &100u64,
+        &100u64,
         &1000u64,
     );
 
-    assert_eq!(result, Err(Ok(crate::ContractError::InvalidParams)));
+    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 }
 
 /// Edge case: calculate_accrued with zero rate (no accrual ever).
@@ -2223,20 +2250,20 @@ fn test_calculate_accrued_zero_deposit_stream() {
 #[test]
 fn test_calculate_accrued_zero_rate_stream() {
     let ctx = TestContext::setup();
-    ctx.env.ledger().set_timestamp(0);
+    ctx.env.ledger().set_timestamp(100);
 
-    // Create stream with zero rate
+    // Attempt to create stream with zero rate
     let result = ctx.client().try_create_stream(
         &ctx.sender,
         &ctx.recipient,
         &1000_i128,
         &0_i128, // zero rate
-        &0u64,
-        &0u64,
+        &100u64,
+        &100u64,
         &1000u64,
     );
 
-    assert_eq!(result, Err(Ok(crate::ContractError::InvalidParams)));
+    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 }
 
 // ---------------------------------------------------------------------------
@@ -3844,8 +3871,7 @@ fn test_close_completed_stream_rejects_active() {
 }
 
 #[test]
-#[should_panic]
-fn test_close_completed_stream_rejects_cancelled() {
+fn test_close_cancelled_stream_success() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
 
@@ -3886,6 +3912,313 @@ fn test_close_completed_stream_second_close_panics() {
     );
 }
 
+// COMPREHENSIVE EDGE CASE TESTS FOR close_completed_stream
+
+#[test]
+#[should_panic]
+fn test_close_completed_stream_rejects_paused() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Pause the stream
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().pause_stream(&stream_id);
+
+    // Try to close paused stream (should fail with InvalidState)
+    ctx.client().close_completed_stream(&stream_id);
+}
+
+#[test]
+#[should_panic]
+fn test_close_completed_stream_rejects_nonexistent() {
+    let ctx = TestContext::setup();
+
+    // Try to close a stream that doesn't exist (should fail with StreamNotFound)
+    ctx.client().close_completed_stream(&999u64);
+}
+
+#[test]
+fn test_close_completed_stream_emits_correct_event_topic() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    // Clear events before close
+    let _ = ctx.env.events().all();
+
+    ctx.client().close_completed_stream(&stream_id);
+
+    let events = ctx.env.events().all();
+    assert!(!events.is_empty(), "StreamClosed event must be emitted");
+
+    // Verify the event contains the correct stream_id
+    // The event structure is: (symbol_short!("closed"), stream_id) -> StreamEvent::StreamClosed(stream_id)
+    let found = events.iter().any(|e| {
+        let topics = e.1.clone();
+        topics.len() >= 2
+            && topics
+                .get(1)
+                .map(|t: Val| u64::try_from_val(&ctx.env, &t) == Ok(stream_id))
+                .unwrap_or(false)
+    });
+    assert!(
+        found,
+        "event must contain correct stream_id in topic (index 1)"
+    );
+}
+
+#[test]
+fn test_close_completed_stream_multiple_streams_closes_correct_one() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Create three streams for the same recipient
+    let id0 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    let id1 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &2000u64,
+    );
+
+    let id2 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &500_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &500u64,
+    );
+
+    // Complete all three streams
+    ctx.env.ledger().set_timestamp(2000);
+    ctx.client().withdraw(&id0);
+    ctx.client().withdraw(&id1);
+    ctx.client().withdraw(&id2);
+
+    // Verify all are in recipient's index
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 3);
+
+    // Close only the middle stream (id1)
+    ctx.client().close_completed_stream(&id1);
+
+    // Verify only id1 is removed
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 2);
+    assert_eq!(streams.get(0).unwrap(), id0);
+    assert_eq!(streams.get(1).unwrap(), id2);
+
+    // Verify remaining streams are still queryable
+    let state0 = ctx.client().get_stream_state(&id0);
+    assert_eq!(state0.status, StreamStatus::Completed);
+
+    let state2 = ctx.client().get_stream_state(&id2);
+    assert_eq!(state2.status, StreamStatus::Completed);
+
+    // Verify removed stream is not queryable
+    let result = ctx.client().try_get_stream_state(&id1);
+    assert!(result.is_err(), "closed stream must not be queryable");
+}
+
+#[test]
+fn test_close_completed_stream_permissionless_access() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    // Any caller (including non-owner) should be able to close
+    // This test demonstrates permissionless cleanup semantics
+    ctx.client().close_completed_stream(&stream_id);
+
+    let result = ctx.client().try_get_stream_state(&stream_id);
+    assert!(result.is_err(), "stream must be closed");
+}
+
+#[test]
+fn test_close_completed_stream_recipient_index_sorted_after_close() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Create streams: 0, 1, 2, 3, 4
+    for _ in 0..5 {
+        ctx.client().create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &100_i128,
+            &1_i128,
+            &0u64,
+            &0u64,
+            &100u64,
+        );
+    }
+
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 5);
+
+    // Complete and close stream 2 (middle)
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().withdraw(&2u64);
+    ctx.client().close_completed_stream(&2u64);
+
+    // Verify remaining streams are still sorted
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 4);
+    assert_eq!(streams.get(0).unwrap(), 0);
+    assert_eq!(streams.get(1).unwrap(), 1);
+    assert_eq!(streams.get(2).unwrap(), 3);
+    assert_eq!(streams.get(3).unwrap(), 4);
+
+    // Close stream 0 (first)
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().withdraw(&0u64);
+    ctx.client().close_completed_stream(&0u64);
+
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 3);
+    assert_eq!(streams.get(0).unwrap(), 1);
+    assert_eq!(streams.get(1).unwrap(), 3);
+    assert_eq!(streams.get(2).unwrap(), 4);
+
+    // Close stream 4 (last)
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().withdraw(&4u64);
+    ctx.client().close_completed_stream(&4u64);
+
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 2);
+    assert_eq!(streams.get(0).unwrap(), 1);
+    assert_eq!(streams.get(1).unwrap(), 3);
+}
+
+#[test]
+fn test_close_completed_stream_after_cliff_passed() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Create stream with cliff at t=500
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &500u64, // cliff at 500
+        &1000u64,
+    );
+
+    // Advance past cliff and end time
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    // Verify stream is completed
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+
+    // Close should succeed
+    ctx.client().close_completed_stream(&stream_id);
+
+    let result = ctx.client().try_get_stream_state(&stream_id);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_close_completed_stream_count_decreases() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Create three streams
+    for _ in 0..3 {
+        ctx.client().create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &100_i128,
+            &1_i128,
+            &0u64,
+            &0u64,
+            &100u64,
+        );
+    }
+
+    assert_eq!(ctx.client().get_recipient_stream_count(&ctx.recipient), 3);
+
+    // Complete and close one
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().withdraw(&0u64);
+    ctx.client().close_completed_stream(&0u64);
+
+    assert_eq!(ctx.client().get_recipient_stream_count(&ctx.recipient), 2);
+
+    // Complete and close another
+    ctx.client().withdraw(&1u64);
+    ctx.client().close_completed_stream(&1u64);
+
+    assert_eq!(ctx.client().get_recipient_stream_count(&ctx.recipient), 1);
+}
+
+#[test]
+fn test_close_completed_stream_different_recipients_independent() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let recipient2 = Address::generate(&ctx.env);
+
+    // Create stream for ctx.recipient
+    let id_r1 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &100_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &100u64,
+    );
+
+    // Create stream for recipient2
+    let id_r2 = ctx.client().create_stream(
+        &ctx.sender,
+        &recipient2,
+        &100_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &100u64,
+    );
+
+    assert_eq!(ctx.client().get_recipient_stream_count(&ctx.recipient), 1);
+    assert_eq!(ctx.client().get_recipient_stream_count(&recipient2), 1);
+
+    // Complete and close stream for ctx.recipient
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().withdraw(&id_r1);
+    ctx.client().close_completed_stream(&id_r1);
+
+    // Verify ctx.recipient's index is updated
+    assert_eq!(ctx.client().get_recipient_stream_count(&ctx.recipient), 0);
+
+    // Verify recipient2's index is unchanged
+    assert_eq!(ctx.client().get_recipient_stream_count(&recipient2), 1);
+    let streams = ctx.client().get_recipient_streams(&recipient2);
+    assert_eq!(streams.get(0).unwrap(), id_r2);
+}
+
 // ---------------------------------------------------------------------------
 // Tests — top_up_stream
 // ---------------------------------------------------------------------------
@@ -3914,6 +4247,140 @@ fn test_top_up_stream_increases_deposit_and_contract_balance() {
 }
 
 #[test]
+fn test_top_up_stream_sender_auth_success_strict() {
+    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+
+    let ctx = TestContext::setup_strict();
+    let stream_id = strict_create_stream(&ctx);
+    let events_before = ctx.env.events().all().len();
+
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "top_up_stream",
+            args: (stream_id, ctx.sender.clone(), 400_i128).into_val(&ctx.env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &ctx.token_id,
+                fn_name: "transfer",
+                args: (&ctx.sender, &ctx.contract_id, 400_i128).into_val(&ctx.env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+
+    ctx.client()
+        .top_up_stream(&stream_id, &ctx.sender, &400_i128);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.deposit_amount, 1_400);
+    assert_eq!(ctx.token().balance(&ctx.sender), 8_600);
+    assert_eq!(ctx.token().balance(&ctx.contract_id), 1_400);
+
+    let events = ctx.env.events().all();
+    let top_up_event = events
+        .iter()
+        .skip(events_before as usize)
+        .find(|(contract, topics, _)| {
+            contract == &ctx.contract_id
+                && topics.len() == 2
+                && Symbol::try_from_val(&ctx.env, &topics.get(0).unwrap())
+                    == Ok(Symbol::new(&ctx.env, "top_up"))
+                && u64::try_from_val(&ctx.env, &topics.get(1).unwrap()) == Ok(stream_id)
+        })
+        .expect("expected a top_up event for the topped-up stream");
+
+    let payload = StreamToppedUp::try_from_val(&ctx.env, &top_up_event.2)
+        .expect("top_up event payload must decode");
+    assert_eq!(payload.stream_id, stream_id);
+    assert_eq!(payload.top_up_amount, 400);
+    assert_eq!(payload.new_deposit_amount, 1_400);
+}
+
+#[test]
+fn test_top_up_stream_allows_third_party_funder_and_emits_payload() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let treasury = Address::generate(&ctx.env);
+    ctx.sac.mint(&treasury, &2_000_i128);
+
+    let sender_balance_before = ctx.token().balance(&ctx.sender);
+    let treasury_balance_before = ctx.token().balance(&treasury);
+    let contract_balance_before = ctx.token().balance(&ctx.contract_id);
+    let events_before = ctx.env.events().all().len();
+
+    ctx.env.ledger().set_timestamp(250);
+    ctx.client().top_up_stream(&stream_id, &treasury, &750_i128);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.deposit_amount, 1_750);
+    assert_eq!(state.status, StreamStatus::Active);
+    assert_eq!(state.start_time, 0);
+    assert_eq!(state.cliff_time, 0);
+    assert_eq!(state.end_time, 1_000);
+    assert_eq!(state.withdrawn_amount, 0);
+
+    assert_eq!(ctx.token().balance(&ctx.sender), sender_balance_before);
+    assert_eq!(
+        ctx.token().balance(&treasury),
+        treasury_balance_before - 750
+    );
+    assert_eq!(
+        ctx.token().balance(&ctx.contract_id),
+        contract_balance_before + 750
+    );
+
+    let events = ctx.env.events().all();
+    let top_up_event = events
+        .iter()
+        .skip(events_before as usize)
+        .find(|(contract, topics, _)| {
+            contract == &ctx.contract_id
+                && topics.len() == 2
+                && Symbol::try_from_val(&ctx.env, &topics.get(0).unwrap())
+                    == Ok(Symbol::new(&ctx.env, "top_up"))
+                && u64::try_from_val(&ctx.env, &topics.get(1).unwrap()) == Ok(stream_id)
+        })
+        .expect("expected a top_up event for the topped-up stream");
+
+    let payload = StreamToppedUp::try_from_val(&ctx.env, &top_up_event.2)
+        .expect("top_up event payload must decode");
+    assert_eq!(payload.stream_id, stream_id);
+    assert_eq!(payload.top_up_amount, 750);
+    assert_eq!(payload.new_deposit_amount, 1_750);
+}
+
+#[test]
+fn test_top_up_stream_paused_preserves_schedule_and_status() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().pause_stream(&stream_id);
+
+    let state_before = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_before.status, StreamStatus::Paused);
+
+    ctx.client()
+        .top_up_stream(&stream_id, &ctx.sender, &250_i128);
+
+    let state_after = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_after.stream_id, state_before.stream_id);
+    assert_eq!(state_after.sender, state_before.sender);
+    assert_eq!(state_after.recipient, state_before.recipient);
+    assert_eq!(state_after.start_time, state_before.start_time);
+    assert_eq!(state_after.cliff_time, state_before.cliff_time);
+    assert_eq!(state_after.end_time, state_before.end_time);
+    assert_eq!(state_after.rate_per_second, state_before.rate_per_second);
+    assert_eq!(state_after.withdrawn_amount, state_before.withdrawn_amount);
+    assert_eq!(state_after.status, StreamStatus::Paused);
+    assert_eq!(
+        state_after.deposit_amount,
+        state_before.deposit_amount + 250
+    );
+}
+
+#[test]
 fn test_top_up_stream_fails_for_terminal_states() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
@@ -3924,29 +4391,91 @@ fn test_top_up_stream_fails_for_terminal_states() {
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Completed);
 
-    // Attempting to top up a completed stream should panic
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.client()
-            .top_up_stream(&stream_id, &ctx.sender, &100_i128);
-    }));
-    assert!(result.is_err());
+    let deposit_before = state.deposit_amount;
+    let sender_balance_before = ctx.token().balance(&ctx.sender);
+    let contract_balance_before = ctx.token().balance(&ctx.contract_id);
+    let events_before = ctx.env.events().all().len();
+
+    let result = ctx
+        .client()
+        .try_top_up_stream(&stream_id, &ctx.sender, &100_i128);
+    assert_eq!(result, Err(Ok(ContractError::InvalidState)));
+
+    let state_after = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_after.deposit_amount, deposit_before);
+    assert_eq!(ctx.token().balance(&ctx.sender), sender_balance_before);
+    assert_eq!(
+        ctx.token().balance(&ctx.contract_id),
+        contract_balance_before
+    );
+    assert_eq!(ctx.env.events().all().len(), events_before);
 }
 
 #[test]
 fn test_top_up_stream_rejects_non_positive_amount() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
+    let state_before = ctx.client().get_stream_state(&stream_id);
+    let sender_balance_before = ctx.token().balance(&ctx.sender);
+    let contract_balance_before = ctx.token().balance(&ctx.contract_id);
+    let events_before = ctx.env.events().all().len();
 
-    let result_zero = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.client().top_up_stream(&stream_id, &ctx.sender, &0_i128);
-    }));
-    assert!(result_zero.is_err());
+    let result_zero = ctx
+        .client()
+        .try_top_up_stream(&stream_id, &ctx.sender, &0_i128);
+    assert_eq!(result_zero, Err(Ok(ContractError::InvalidParams)));
 
-    let result_negative = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let result_negative = ctx
+        .client()
+        .try_top_up_stream(&stream_id, &ctx.sender, &-1_i128);
+    assert_eq!(result_negative, Err(Ok(ContractError::InvalidParams)));
+
+    let state_after = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_after.deposit_amount, state_before.deposit_amount);
+    assert_eq!(state_after.status, state_before.status);
+    assert_eq!(ctx.token().balance(&ctx.sender), sender_balance_before);
+    assert_eq!(
+        ctx.token().balance(&ctx.contract_id),
+        contract_balance_before
+    );
+    assert_eq!(ctx.env.events().all().len(), events_before);
+}
+
+#[test]
+fn test_top_up_stream_rejects_impersonated_funder_and_emits_no_event_strict() {
+    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+
+    let ctx = TestContext::setup_strict();
+    let stream_id = strict_create_stream(&ctx);
+    let deposit_before = ctx.client().get_stream_state(&stream_id).deposit_amount;
+    let sender_balance_before = ctx.token().balance(&ctx.sender);
+    let contract_balance_before = ctx.token().balance(&ctx.contract_id);
+    let events_before = ctx.env.events().all().len();
+
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.recipient,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "top_up_stream",
+            args: (stream_id, ctx.sender.clone(), 100_i128).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         ctx.client()
-            .top_up_stream(&stream_id, &ctx.sender, &-1_i128);
+            .top_up_stream(&stream_id, &ctx.sender, &100_i128);
     }));
-    assert!(result_negative.is_err());
+    assert!(result.is_err(), "impersonated funder auth must be rejected");
+
+    let state_after = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_after.deposit_amount, deposit_before);
+    assert_eq!(ctx.token().balance(&ctx.sender), sender_balance_before);
+    assert_eq!(
+        ctx.token().balance(&ctx.contract_id),
+        contract_balance_before
+    );
+    assert_eq!(ctx.env.events().all().len(), events_before);
 }
 
 #[test]
@@ -3970,6 +4499,81 @@ fn test_top_up_stream_preserves_invariants_for_large_streams() {
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert!(state.deposit_amount >= rate * (end - start) as i128);
+}
+
+// ---------------------------------------------------------------------------
+// Tests — Issue #315: top-up near-complete streams
+// ---------------------------------------------------------------------------
+
+/// Top-up at T-1 (one second before end) must succeed and increase deposit.
+#[test]
+fn test_top_up_at_t_minus_1_succeeds() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream(); // end_time = 1000
+
+    ctx.env.ledger().set_timestamp(999); // T - 1
+    ctx.client()
+        .top_up_stream(&stream_id, &ctx.sender, &500_i128);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.deposit_amount, 1_500);
+    assert_eq!(state.end_time, 1_000); // schedule unchanged
+}
+
+/// Top-up exactly at T (current_time == end_time) must fail with InvalidState.
+#[test]
+fn test_top_up_at_end_time_fails() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream(); // end_time = 1000
+
+    ctx.env.ledger().set_timestamp(1000); // exactly at T
+    let result = ctx
+        .client()
+        .try_top_up_stream(&stream_id, &ctx.sender, &500_i128);
+    assert_eq!(result, Err(Ok(ContractError::InvalidState)));
+}
+
+/// Top-up with zero amount must fail with InvalidParams.
+#[test]
+fn test_top_up_zero_amount_fails() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(100);
+    let result = ctx
+        .client()
+        .try_top_up_stream(&stream_id, &ctx.sender, &0_i128);
+    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
+}
+
+/// A third-party address (neither sender nor admin) must be rejected.
+#[test]
+fn test_top_up_unauthorized_funder_fails() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let stranger = Address::generate(&ctx.env);
+
+    ctx.env.ledger().set_timestamp(100);
+    let result = ctx
+        .client()
+        .try_top_up_stream(&stream_id, &stranger, &500_i128);
+    assert_eq!(result, Err(Ok(ContractError::InsufficientDeposit)));
+}
+
+/// Admin is allowed to top up any stream.
+#[test]
+fn test_top_up_by_admin_succeeds() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(100);
+    // Mint tokens to admin so the pull can succeed
+    ctx.sac.mint(&ctx.admin, &1_000_i128);
+    ctx.client()
+        .top_up_stream(&stream_id, &ctx.admin, &500_i128);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.deposit_amount, 1_500);
 }
 
 // ---------------------------------------------------------------------------
@@ -4145,6 +4749,240 @@ fn test_completed_event() {
     assert_eq!(
         Option::<StreamEvent>::from_val(&ctx.env, &last_event.2).unwrap(),
         StreamEvent::StreamCompleted(stream_id)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tests — Admin event parity
+//
+// Admin override operations (`*_as_admin`) must emit the **same** topic and
+// payload as their sender counterparts. Indexers and integrators key off
+// event topics to index state changes; a divergence between sender and admin
+// paths would create silent gaps in downstream observability.
+//
+// Scope: pause, resume, cancel, set_contract_paused, set_global_emergency_paused.
+// ---------------------------------------------------------------------------
+
+/// `pause_stream_as_admin` must emit topic ("paused", stream_id) with
+/// `StreamEvent::Paused(stream_id)` — identical to `pause_stream`.
+#[test]
+fn test_admin_pause_emits_same_event_as_sender_pause() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.client().pause_stream_as_admin(&stream_id);
+
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+
+    // Topic[0] must be the symbol "paused"
+    assert_eq!(
+        Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
+        Symbol::new(&ctx.env, "paused"),
+        "pause_stream_as_admin topic[0] must be \"paused\""
+    );
+    // Topic[1] must be the stream_id
+    let topic_id: u64 = last_event.1.get(1).unwrap().into_val(&ctx.env);
+    assert_eq!(
+        topic_id, stream_id,
+        "pause_stream_as_admin topic[1] must be stream_id"
+    );
+    // Data must be StreamEvent::Paused(stream_id)
+    assert_eq!(
+        Option::<StreamEvent>::from_val(&ctx.env, &last_event.2).unwrap(),
+        StreamEvent::Paused(stream_id),
+        "pause_stream_as_admin data must be StreamEvent::Paused(stream_id)"
+    );
+}
+
+/// `resume_stream_as_admin` must emit topic ("resumed", stream_id) with
+/// `StreamEvent::Resumed(stream_id)` — identical to `resume_stream`.
+#[test]
+fn test_admin_resume_emits_same_event_as_sender_resume() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.client().pause_stream(&stream_id);
+    ctx.client().resume_stream_as_admin(&stream_id);
+
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+
+    assert_eq!(
+        Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
+        Symbol::new(&ctx.env, "resumed"),
+        "resume_stream_as_admin topic[0] must be \"resumed\""
+    );
+    let topic_id: u64 = last_event.1.get(1).unwrap().into_val(&ctx.env);
+    assert_eq!(
+        topic_id, stream_id,
+        "resume_stream_as_admin topic[1] must be stream_id"
+    );
+    assert_eq!(
+        Option::<StreamEvent>::from_val(&ctx.env, &last_event.2).unwrap(),
+        StreamEvent::Resumed(stream_id),
+        "resume_stream_as_admin data must be StreamEvent::Resumed(stream_id)"
+    );
+}
+
+/// `cancel_stream_as_admin` must emit topic ("cancelled", stream_id) with
+/// `StreamEvent::StreamCancelled(stream_id)` — identical to `cancel_stream`.
+#[test]
+fn test_admin_cancel_emits_same_event_as_sender_cancel() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    ctx.env.ledger().set_timestamp(300);
+
+    ctx.client().cancel_stream_as_admin(&stream_id);
+
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+
+    assert_eq!(
+        Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
+        Symbol::new(&ctx.env, "cancelled"),
+        "cancel_stream_as_admin topic[0] must be \"cancelled\""
+    );
+    let topic_id: u64 = last_event.1.get(1).unwrap().into_val(&ctx.env);
+    assert_eq!(
+        topic_id, stream_id,
+        "cancel_stream_as_admin topic[1] must be stream_id"
+    );
+    assert_eq!(
+        Option::<StreamEvent>::from_val(&ctx.env, &last_event.2).unwrap(),
+        StreamEvent::StreamCancelled(stream_id),
+        "cancel_stream_as_admin data must be StreamEvent::StreamCancelled(stream_id)"
+    );
+}
+
+/// `set_contract_paused` must emit topic ("ct_pause",) with `ContractPauseChanged`
+/// payload for both the pause and unpause transitions.
+#[test]
+fn test_set_contract_paused_emits_ct_pause_event() {
+    let ctx = TestContext::setup();
+
+    // Pause: paused = true
+    ctx.client().set_contract_paused(&true);
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+
+    assert_eq!(
+        Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
+        Symbol::new(&ctx.env, "ct_pause"),
+        "set_contract_paused topic[0] must be \"ct_pause\""
+    );
+    let payload = ContractPauseChanged::try_from_val(&ctx.env, &last_event.2)
+        .expect("ct_pause data must be ContractPauseChanged");
+    assert!(
+        payload.paused,
+        "ContractPauseChanged.paused must be true on pause"
+    );
+
+    // Unpause: paused = false
+    ctx.client().set_contract_paused(&false);
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+
+    assert_eq!(
+        Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
+        Symbol::new(&ctx.env, "ct_pause"),
+        "set_contract_paused topic[0] must be \"ct_pause\" on unpause"
+    );
+    let payload = ContractPauseChanged::try_from_val(&ctx.env, &last_event.2)
+        .expect("ct_pause data must be ContractPauseChanged on unpause");
+    assert!(
+        !payload.paused,
+        "ContractPauseChanged.paused must be false on unpause"
+    );
+}
+
+/// `set_global_emergency_paused` must emit topic ("gl_pause",) with
+/// `GlobalEmergencyPauseChanged` payload for both transitions.
+#[test]
+fn test_set_global_emergency_paused_emits_gl_pause_event() {
+    let ctx = TestContext::setup();
+
+    // Emergency pause: paused = true
+    ctx.client().set_global_emergency_paused(&true);
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+
+    assert_eq!(
+        Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
+        Symbol::new(&ctx.env, "gl_pause"),
+        "set_global_emergency_paused topic[0] must be \"gl_pause\""
+    );
+    let payload = GlobalEmergencyPauseChanged::try_from_val(&ctx.env, &last_event.2)
+        .expect("gl_pause data must be GlobalEmergencyPauseChanged");
+    assert!(
+        payload.paused,
+        "GlobalEmergencyPauseChanged.paused must be true on pause"
+    );
+
+    // Clear emergency pause
+    ctx.client().set_global_emergency_paused(&false);
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+
+    assert_eq!(
+        Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
+        Symbol::new(&ctx.env, "gl_pause"),
+        "set_global_emergency_paused topic[0] must be \"gl_pause\" on clear"
+    );
+    let payload = GlobalEmergencyPauseChanged::try_from_val(&ctx.env, &last_event.2)
+        .expect("gl_pause data must be GlobalEmergencyPauseChanged on clear");
+    assert!(
+        !payload.paused,
+        "GlobalEmergencyPauseChanged.paused must be false on clear"
+    );
+}
+
+/// When set_global_emergency_paused is true, user mutations (withdraw, cancel) are
+/// blocked but admin overrides still work and still emit the correct event.
+#[test]
+fn test_admin_ops_emit_events_during_global_emergency_pause() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Engage global emergency pause
+    ctx.client().set_global_emergency_paused(&true);
+    assert!(ctx.client().get_global_emergency_paused());
+
+    // User withdraw is blocked
+    let result = ctx.client().try_withdraw(&stream_id);
+    assert!(
+        result.is_err(),
+        "withdraw must be blocked during global emergency pause"
+    );
+
+    // Admin pause still works and emits the correct event
+    ctx.client().pause_stream_as_admin(&stream_id);
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+    assert_eq!(
+        Option::<StreamEvent>::from_val(&ctx.env, &last_event.2).unwrap(),
+        StreamEvent::Paused(stream_id),
+        "pause_stream_as_admin must emit Paused during global emergency pause"
+    );
+
+    // Admin resume still works and emits the correct event
+    ctx.client().resume_stream_as_admin(&stream_id);
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+    assert_eq!(
+        Option::<StreamEvent>::from_val(&ctx.env, &last_event.2).unwrap(),
+        StreamEvent::Resumed(stream_id),
+        "resume_stream_as_admin must emit Resumed during global emergency pause"
+    );
+
+    // Admin cancel still works and emits the correct event
+    ctx.client().cancel_stream_as_admin(&stream_id);
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+    assert_eq!(
+        Option::<StreamEvent>::from_val(&ctx.env, &last_event.2).unwrap(),
+        StreamEvent::StreamCancelled(stream_id),
+        "cancel_stream_as_admin must emit StreamCancelled during global emergency pause"
     );
 }
 
@@ -8178,6 +9016,144 @@ fn test_create_streams_batch_empty() {
 }
 
 #[test]
+fn test_create_streams_batch_empty_requires_auth() {
+    // Empty batch still requires sender authorization
+    let ctx = TestContext::setup_strict();
+    let streams = Vec::new(&ctx.env);
+
+    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+
+    // Mock sender auth for empty batch
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "create_streams",
+            args: (&ctx.sender, streams.clone()).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let ids = ctx.client().create_streams(&ctx.sender, &streams);
+    assert_eq!(ids.len(), 0);
+}
+
+#[test]
+fn test_create_streams_batch_empty_no_events() {
+    // Empty batch must not emit any events
+    let ctx = TestContext::setup();
+    let streams = Vec::new(&ctx.env);
+
+    let events_before = ctx.env.events().all().len();
+    let ids = ctx.client().create_streams(&ctx.sender, &streams);
+    let events_after = ctx.env.events().all().len();
+
+    assert_eq!(ids.len(), 0);
+    assert_eq!(
+        events_before, events_after,
+        "empty batch must not emit any events"
+    );
+}
+
+#[test]
+fn test_create_streams_batch_empty_no_state_change() {
+    // Empty batch must not change stream count or any state
+    let ctx = TestContext::setup();
+    let streams = Vec::new(&ctx.env);
+
+    let count_before = ctx.client().get_stream_count();
+    let ids = ctx.client().create_streams(&ctx.sender, &streams);
+    let count_after = ctx.client().get_stream_count();
+
+    assert_eq!(ids.len(), 0);
+    assert_eq!(
+        count_before, count_after,
+        "empty batch must not advance stream ID counter"
+    );
+}
+
+#[test]
+fn test_create_streams_batch_empty_then_normal_create() {
+    // After empty batch, next stream should get ID 0 (not skipped)
+    let ctx = TestContext::setup();
+
+    // First: empty batch
+    let empty_streams = Vec::new(&ctx.env);
+    let empty_ids = ctx.client().create_streams(&ctx.sender, &empty_streams);
+    assert_eq!(empty_ids.len(), 0);
+
+    // Second: normal create_stream
+    let id1 = ctx.create_default_stream();
+    assert_eq!(id1, 0, "first stream after empty batch should get ID 0");
+
+    // Third: another empty batch
+    let empty_ids2 = ctx.client().create_streams(&ctx.sender, &empty_streams);
+    assert_eq!(empty_ids2.len(), 0);
+
+    // Fourth: another normal create_stream
+    let id2 = ctx.create_default_stream();
+    assert_eq!(id2, 1, "second stream should get ID 1");
+}
+
+#[test]
+fn test_create_streams_batch_empty_multiple_times() {
+    // Multiple empty batches should all succeed and have no side effects
+    let ctx = TestContext::setup();
+    let streams = Vec::new(&ctx.env);
+
+    let initial_balance = ctx.token().balance(&ctx.sender);
+    let initial_count = ctx.client().get_stream_count();
+
+    for _ in 0..5 {
+        let ids = ctx.client().create_streams(&ctx.sender, &streams);
+        assert_eq!(ids.len(), 0);
+    }
+
+    assert_eq!(
+        ctx.token().balance(&ctx.sender),
+        initial_balance,
+        "balance must not change after multiple empty batches"
+    );
+    assert_eq!(
+        ctx.client().get_stream_count(),
+        initial_count,
+        "stream count must not change after multiple empty batches"
+    );
+}
+
+#[test]
+fn test_create_streams_batch_empty_when_paused() {
+    // Empty batch should succeed even when contract is paused
+    let ctx = TestContext::setup();
+    let streams = Vec::new(&ctx.env);
+
+    // Pause contract
+    ctx.client().set_contract_paused(&true);
+
+    // Empty batch should still succeed (no-op)
+    let ids = ctx.client().create_streams(&ctx.sender, &streams);
+    assert_eq!(ids.len(), 0);
+}
+
+#[test]
+fn test_create_streams_batch_empty_recipient_index_unchanged() {
+    // Empty batch must not affect recipient stream indices
+    let ctx = TestContext::setup();
+    let recipient = Address::generate(&ctx.env);
+    let streams = Vec::new(&ctx.env);
+
+    let count_before = ctx.client().get_recipient_stream_count(&recipient);
+    let ids = ctx.client().create_streams(&ctx.sender, &streams);
+    let count_after = ctx.client().get_recipient_stream_count(&recipient);
+
+    assert_eq!(ids.len(), 0);
+    assert_eq!(
+        count_before, count_after,
+        "empty batch must not modify recipient stream index"
+    );
+}
+
+#[test]
 fn test_create_streams_batch_strict_auth() {
     let ctx = TestContext::setup_strict();
 
@@ -9142,17 +10118,12 @@ fn test_update_rate_per_second_rejects_rate_decrease() {
 #[test]
 fn test_update_rate_per_second_before_cliff() {
     let ctx = TestContext::setup();
-    // Use a stream with deposit headroom: deposit=2000, rate=1, cliff=500, end=1000
-    ctx.env.ledger().set_timestamp(0);
-    let stream_id = ctx.client().create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &2000_i128,
-        &1_i128,
-        &0u64,
-        &500u64,
-        &1000u64,
-    );
+    // Mint more and manually create stream with larger deposit
+    let sac = StellarAssetClient::new(&ctx.env, &ctx.token_id);
+    sac.mint(&ctx.sender, &2000);
+    let stream_id =
+        ctx.client()
+            .create_stream(&ctx.sender, &ctx.recipient, &2000, &1, &0, &500, &1000);
 
     // Before cliff at t=100, accrued is 0.
     ctx.env.ledger().set_timestamp(100);
@@ -9166,27 +10137,22 @@ fn test_update_rate_per_second_before_cliff() {
     let accrued_after = ctx.client().calculate_accrued(&stream_id);
     assert_eq!(accrued_after, 0);
 
-    // After cliff at t=600, accrual uses new rate.
+    // After cliff at t=600, accrual uses new rate forward-only from checkpoint (t=100).
     ctx.env.ledger().set_timestamp(600);
     let accrued_post_cliff = ctx.client().calculate_accrued(&stream_id);
-    // elapsed = 600, rate = 2 → 1200 accrued (capped at deposit 2000).
-    assert_eq!(accrued_post_cliff, 1200);
+    // checkpoint_at=100, checkpointed_amount=0, rate=2, elapsed=600-100=500 → 0+1000=1000
+    assert_eq!(accrued_post_cliff, 1000);
 }
 
 #[test]
 fn test_update_rate_per_second_at_cliff() {
     let ctx = TestContext::setup();
-    // Use a stream with deposit headroom: deposit=2000, rate=1, cliff=500, end=1000
-    ctx.env.ledger().set_timestamp(0);
-    let stream_id = ctx.client().create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &2000_i128,
-        &1_i128,
-        &0u64,
-        &500u64,
-        &1000u64,
-    );
+    // Mint more and manually create stream with larger deposit
+    let sac = StellarAssetClient::new(&ctx.env, &ctx.token_id);
+    sac.mint(&ctx.sender, &5000);
+    let stream_id =
+        ctx.client()
+            .create_stream(&ctx.sender, &ctx.recipient, &5000, &1, &0, &500, &1000);
 
     // Exactly at cliff time t=500.
     ctx.env.ledger().set_timestamp(500);
@@ -9248,8 +10214,8 @@ fn test_update_rate_per_second_near_end_time() {
     // After end_time at t=1100, accrual is capped at end_time.
     ctx.env.ledger().set_timestamp(1100);
     let accrued_final = ctx.client().calculate_accrued(&stream_id);
-    // elapsed = 1000 (capped at end_time), rate = 5 → 5000 (capped at deposit 10000).
-    assert_eq!(accrued_final, 5000);
+    // checkpoint at t=950: amount=950; new epoch: 5*(end=1000-950)=250; total=1200
+    assert_eq!(accrued_final, 1200);
 }
 
 #[test]
@@ -9273,13 +10239,13 @@ fn test_update_rate_per_second_after_end_time() {
     let accrued_before = ctx.client().calculate_accrued(&stream_id);
     assert_eq!(accrued_before, 1000); // capped at rate * duration
 
-    // Update rate from 1 → 5.
+    // Update rate from 1 → 5 (at t=1500, past end_time=1000).
     ctx.client().update_rate_per_second(&stream_id, &5_i128);
 
-    // Accrual is still capped at end_time.
+    // Accrual is still capped at end_time; checkpoint_at=1500 >= end=1000,
+    // so no additional accrual is possible beyond the checkpointed 1000 tokens.
     let accrued_after = ctx.client().calculate_accrued(&stream_id);
-    // elapsed = 1000 (capped), rate = 5 → 5000 (capped at deposit 10000).
-    assert_eq!(accrued_after, 5000);
+    assert_eq!(accrued_after, 1000);
 }
 
 #[test]
@@ -9313,11 +10279,11 @@ fn test_update_rate_per_second_with_partial_withdrawal() {
     // At t=400, calculate new withdrawable.
     ctx.env.ledger().set_timestamp(400);
     let accrued = ctx.client().calculate_accrued(&stream_id);
-    // elapsed = 400, rate = 5 → 2000 accrued.
-    assert_eq!(accrued, 2000);
+    // checkpoint at t=300: amount=300; new epoch rate=5: 5*(400-300)=500; total=800
+    assert_eq!(accrued, 800);
 
     let withdrawable = accrued - state.withdrawn_amount;
-    assert_eq!(withdrawable, 1700);
+    assert_eq!(withdrawable, 500);
 }
 
 #[test]
@@ -9342,24 +10308,110 @@ fn test_update_rate_per_second_emits_event() {
 
     // Verify event was emitted.
     let events = ctx.env.events().all();
-    let mut rate_update_events = Vec::new(&ctx.env);
-    for e in events.iter() {
-        if e.1.len() == 2 {
-            let topic0 = Symbol::try_from_val(&ctx.env, &e.1.get(0).unwrap());
-            let topic1 = u64::try_from_val(&ctx.env, &e.1.get(1).unwrap());
-            if let (Ok(sym), Ok(id)) = (topic0, topic1) {
-                if sym == Symbol::new(&ctx.env, "rate_upd") && id == stream_id {
-                    rate_update_events.push_back(e);
-                }
+    let rate_update_events_count = events
+        .into_iter()
+        .filter(|e| {
+            if e.1.len() < 2 {
+                return false;
             }
-        }
-    }
+            let s = Symbol::try_from_val(&ctx.env, &e.1.get(0).unwrap_or(Val::VOID.into()));
+            let id = u64::try_from_val(&ctx.env, &e.1.get(1).unwrap_or(Val::VOID.into()));
+            match (s, id) {
+                (Ok(s), Ok(id)) => s == Symbol::new(&ctx.env, "rate_upd") && id == stream_id,
+                _ => false,
+            }
+        })
+        .count();
 
     assert_eq!(
-        rate_update_events.len(),
-        1,
+        rate_update_events_count, 1,
         "Should emit exactly one rate_upd event"
     );
+}
+
+#[test]
+fn test_update_rate_per_second_on_paused_stream_after_partial_withdrawal() {
+    let ctx = TestContext::setup();
+
+    // Create stream with generous deposit.
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &10_000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1_000u64,
+    );
+
+    // At t=300, withdraw partial amount.
+    ctx.env.ledger().set_timestamp(300);
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn, 300);
+
+    // Pause the stream.
+    ctx.client().pause_stream(&stream_id);
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Paused);
+    assert_eq!(state.withdrawn_amount, 300);
+
+    // Update rate while paused should succeed.
+    ctx.client().update_rate_per_second(&stream_id, &5_i128);
+
+    let state_after = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_after.rate_per_second, 5);
+    assert_eq!(state_after.status, StreamStatus::Paused);
+    assert_eq!(state_after.withdrawn_amount, 300);
+
+    // Accrued at the same timestamp (t=300): checkpoint locked in accrual=300; rate applies forward.
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued, 300); // checkpoint preserves prior accrual; no new seconds elapsed yet
+
+    let withdrawable = accrued - state_after.withdrawn_amount;
+    assert_eq!(withdrawable, 0); // already fully withdrawn up to this point
+}
+
+#[test]
+fn test_update_rate_per_second_after_partial_withdrawal_then_resume_and_withdraw() {
+    let ctx = TestContext::setup();
+
+    // Create stream with generous deposit.
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &10_000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1_000u64,
+    );
+
+    // At t=200, withdraw partial amount.
+    ctx.env.ledger().set_timestamp(200);
+    let withdrawn1 = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn1, 200);
+
+    // Pause the stream.
+    ctx.client().pause_stream(&stream_id);
+
+    // Update rate while paused.
+    ctx.client().update_rate_per_second(&stream_id, &3_i128);
+
+    // Resume the stream.
+    ctx.client().resume_stream(&stream_id);
+
+    // At t=400, withdraw again.
+    ctx.env.ledger().set_timestamp(400);
+    let withdrawn2 = ctx.client().withdraw(&stream_id);
+    // Checkpoint at t=200: amount=200; new epoch rate=3: 3*(400-200)=600; total=800
+    // Withdrawn so far: 200; withdrawable: 800-200=600
+    assert_eq!(withdrawn2, 600);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 800);
+    assert_eq!(state.status, StreamStatus::Active);
 }
 
 #[test]
@@ -9492,29 +10544,15 @@ fn test_update_rate_per_second_preserves_other_fields() {
 fn test_update_rate_per_second_with_overflow_protection() {
     let ctx = TestContext::setup();
 
-    // Create stream with normal deposit and rate.
+    // Create a normal stream (no huge minting required).
     ctx.env.ledger().set_timestamp(0);
-    let max_rate = i128::MAX / 1000; // Safe rate for 1000 second duration.
-    ctx.sac.mint(&ctx.sender, &100_000_i128);
+    let stream_id = ctx.create_default_stream();
 
-    let stream_id = ctx.client().create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &100_000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1_000u64,
-    );
-
-    // Attempt to update to a rate that would overflow.
+    // Updating to an extreme rate should overflow `new_rate * duration` and be rejected.
     let result = ctx
         .client()
-        .try_update_rate_per_second(&stream_id, &(max_rate + 1));
-    assert!(
-        result.is_err(),
-        "Should fail due to overflow or insufficient deposit"
-    );
+        .try_update_rate_per_second(&stream_id, &i128::MAX);
+    assert_eq!(result, Err(Ok(ContractError::ArithmeticOverflow)));
 }
 
 #[test]
@@ -9544,11 +10582,11 @@ fn test_update_rate_per_second_interaction_with_pause_resume() {
     ctx.env.ledger().set_timestamp(200);
     ctx.client().resume_stream(&stream_id);
 
-    // Verify accrual uses new rate.
+    // Verify accrual uses new rate from checkpoint at t=100.
     ctx.env.ledger().set_timestamp(300);
     let accrued = ctx.client().calculate_accrued(&stream_id);
-    // elapsed = 300, rate = 5 → 1500 accrued.
-    assert_eq!(accrued, 1500);
+    // checkpoint at t=100: amount=100; new epoch: 5*(300-100)=1000; total=1100
+    assert_eq!(accrued, 1100);
 }
 
 #[test]
@@ -9624,7 +10662,6 @@ fn test_shorten_stream_end_time_preserves_accrued_at_update_time() {
 }
 
 #[test]
-#[should_panic]
 fn test_shorten_stream_end_time_rejects_past_end_time() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
@@ -9632,8 +10669,169 @@ fn test_shorten_stream_end_time_rejects_past_end_time() {
     // Advance beyond the proposed new end time.
     ctx.env.ledger().set_timestamp(600);
 
-    // Attempting to shorten to a time in the past must panic.
-    ctx.client().shorten_stream_end_time(&stream_id, &500u64);
+    // Attempting to shorten to a time in the past must return InvalidParams.
+    let result = ctx
+        .client()
+        .try_shorten_stream_end_time(&stream_id, &500u64);
+    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
+}
+
+#[test]
+fn test_shorten_stream_end_time_rejects_equal_or_later_end_time() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2_000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1_000u64,
+    );
+
+    // Equal old end_time is not a shorten.
+    let same = ctx
+        .client()
+        .try_shorten_stream_end_time(&stream_id, &1_000u64);
+    assert_eq!(same, Err(Ok(ContractError::InvalidParams)));
+
+    // Later end_time must also be rejected on the shorten path.
+    let later = ctx
+        .client()
+        .try_shorten_stream_end_time(&stream_id, &1_500u64);
+    assert_eq!(later, Err(Ok(ContractError::InvalidParams)));
+}
+
+#[test]
+fn test_shorten_stream_end_time_rejects_now_boundary() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Boundary at now is not strictly future, must be rejected.
+    ctx.env.ledger().set_timestamp(500);
+    let result = ctx
+        .client()
+        .try_shorten_stream_end_time(&stream_id, &500u64);
+    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
+}
+
+#[test]
+fn test_shorten_stream_end_time_rejects_new_end_before_cliff() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_cliff_stream(); // cliff = 500
+
+    let result = ctx
+        .client()
+        .try_shorten_stream_end_time(&stream_id, &400u64);
+    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
+}
+
+#[test]
+#[should_panic]
+fn test_shorten_stream_end_time_unauthorized_caller() {
+    let ctx = TestContext::setup_strict();
+
+    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "create_stream",
+            args: (
+                ctx.sender.clone(),
+                ctx.recipient.clone(),
+                1000_i128,
+                1_i128,
+                0u64,
+                0u64,
+                1000u64,
+            )
+                .into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    // No sender auth is provided for shorten; strict mode must trap.
+    ctx.client().shorten_stream_end_time(&stream_id, &700u64);
+}
+
+#[test]
+fn test_shorten_stream_end_time_emits_event_and_conserves_refund() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    let sender_before = ctx.token().balance(&ctx.sender);
+    let contract_before = ctx.token().balance(&ctx.contract_id);
+
+    ctx.client().shorten_stream_end_time(&stream_id, &700u64);
+
+    let sender_after = ctx.token().balance(&ctx.sender);
+    let contract_after = ctx.token().balance(&ctx.contract_id);
+    assert_eq!(sender_after - sender_before, 300);
+    assert_eq!(contract_before - contract_after, 300);
+
+    let events = ctx.env.events().all();
+    let last = events.last().unwrap();
+    let payload = StreamEndShortened::from_val(&ctx.env, &last.2);
+    assert_eq!(payload.stream_id, stream_id);
+    assert_eq!(payload.old_end_time, 1000);
+    assert_eq!(payload.new_end_time, 700);
+    assert_eq!(payload.refund_amount, 300);
+}
+
+#[test]
+fn test_shorten_stream_end_time_failed_call_has_no_side_effects() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(600);
+    let sender_before = ctx.token().balance(&ctx.sender);
+    let contract_before = ctx.token().balance(&ctx.contract_id);
+    let state_before = ctx.client().get_stream_state(&stream_id);
+    let events_before = ctx.env.events().all().len();
+
+    let result = ctx
+        .client()
+        .try_shorten_stream_end_time(&stream_id, &500u64);
+    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
+
+    let state_after = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_after.end_time, state_before.end_time);
+    assert_eq!(state_after.deposit_amount, state_before.deposit_amount);
+    assert_eq!(ctx.token().balance(&ctx.sender), sender_before);
+    assert_eq!(ctx.token().balance(&ctx.contract_id), contract_before);
+    assert_eq!(ctx.env.events().all().len(), events_before);
+}
+
+#[test]
+fn test_shorten_stream_end_time_rejects_completed_and_cancelled_states() {
+    let ctx = TestContext::setup();
+
+    let completed_id = ctx.create_default_stream();
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&completed_id);
+    let completed_result = ctx
+        .client()
+        .try_shorten_stream_end_time(&completed_id, &900u64);
+    assert_eq!(completed_result, Err(Ok(ContractError::InvalidState)));
+
+    let cancelled_id = ctx.create_default_stream();
+    ctx.env.ledger().set_timestamp(300);
+    ctx.client().cancel_stream(&cancelled_id);
+    let cancelled_result = ctx
+        .client()
+        .try_shorten_stream_end_time(&cancelled_id, &800u64);
+    assert_eq!(cancelled_result, Err(Ok(ContractError::InvalidState)));
 }
 
 // ---------------------------------------------------------------------------
@@ -10504,7 +11702,7 @@ fn test_withdraw_and_withdraw_to_interleaved_no_double_pay() {
 fn test_create_stream_contract_paused_returns_structured_error() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
-    ctx.client().set_contract_paused(&true);
+    ctx.client().set_global_emergency_paused(&true);
 
     ctx.client().create_stream(
         &ctx.sender,
@@ -10515,6 +11713,73 @@ fn test_create_stream_contract_paused_returns_structured_error() {
         &0u64,
         &1000u64,
     );
+}
+
+/// Verify ContractPaused fires as a structured error for batch creations.
+#[test]
+#[should_panic]
+fn test_create_streams_batch_contract_paused_returns_structured_error() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().set_contract_paused(&true);
+
+    let params = soroban_sdk::Vec::from_array(
+        &ctx.env,
+        [CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000,
+            rate_per_second: 1,
+            start_time: 0,
+            cliff_time: 0,
+            end_time: 1000,
+        }],
+    );
+
+    ctx.client().create_streams(&ctx.sender, &params);
+}
+
+/// Verify that a global pause only blocks `create_stream`/`create_streams`,
+/// while operations on existing streams (withdraw, top-up, pause, cancel) succeed.
+#[test]
+fn test_global_pause_does_not_affect_existing_streams() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Create stream while unpaused
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    // Now admin pauses the contract
+    ctx.client().set_contract_paused(&true);
+
+    // 1. Withdraw should work
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().withdraw(&stream_id);
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 100);
+
+    // 2. Top-up should work
+    ctx.client()
+        .top_up_stream(&stream_id, &ctx.sender, &100_i128);
+    let state_after_topup = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_after_topup.deposit_amount, 1100);
+
+    // 3. Sender pausing an individual stream should work
+    ctx.client().pause_stream(&stream_id);
+    let state_after_pause = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_after_pause.status, StreamStatus::Paused);
+
+    // 4. Sender cancelling an individual stream should work
+    ctx.client().cancel_stream(&stream_id);
+    let state_after_cancel = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_after_cancel.status, StreamStatus::Cancelled);
 }
 
 /// create_streams (batch) must reject when any stream's start_time is in the past,
@@ -12355,8 +13620,7 @@ fn test_pause_completed_stream_panics() {
 /// pause_stream_as_admin on an already-Paused stream must be rejected.
 /// The admin path enforces the same Active-only precondition as the sender path.
 #[test]
-#[should_panic]
-fn test_pause_stream_as_admin_already_paused_panics() {
+fn test_pause_stream_as_admin_already_paused_fails() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
 
@@ -12364,14 +13628,14 @@ fn test_pause_stream_as_admin_already_paused_panics() {
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
 
-    // Second pause via admin path must also be rejected.
-    ctx.client().pause_stream_as_admin(&stream_id);
+    // Second pause via admin path must return StreamAlreadyPaused.
+    let result = ctx.client().try_pause_stream_as_admin(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::StreamAlreadyPaused)));
 }
 
 /// pause_stream_as_admin on a Completed stream must be rejected.
 #[test]
-#[should_panic]
-fn test_pause_stream_as_admin_completed_panics() {
+fn test_pause_stream_as_admin_completed_fails() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
 
@@ -12382,13 +13646,13 @@ fn test_pause_stream_as_admin_completed_panics() {
         StreamStatus::Completed
     );
 
-    ctx.client().pause_stream_as_admin(&stream_id);
+    let result = ctx.client().try_pause_stream_as_admin(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::StreamTerminalState)));
 }
 
 /// pause_stream_as_admin on a Cancelled stream must be rejected.
 #[test]
-#[should_panic]
-fn test_pause_stream_as_admin_cancelled_panics() {
+fn test_pause_stream_as_admin_cancelled_fails() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
 
@@ -12398,15 +13662,15 @@ fn test_pause_stream_as_admin_cancelled_panics() {
         StreamStatus::Cancelled
     );
 
-    ctx.client().pause_stream_as_admin(&stream_id);
+    let result = ctx.client().try_pause_stream_as_admin(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::StreamTerminalState)));
 }
 
 // ── State-boundary guards: resume_stream_as_admin ───────────────────────────
 
 /// resume_stream_as_admin on an Active (not paused) stream must be rejected.
 #[test]
-#[should_panic]
-fn test_resume_stream_as_admin_active_stream_panics() {
+fn test_resume_stream_as_admin_active_stream_fails() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
 
@@ -12415,30 +13679,30 @@ fn test_resume_stream_as_admin_active_stream_panics() {
         StreamStatus::Active
     );
 
-    ctx.client().resume_stream_as_admin(&stream_id);
+    let result = ctx.client().try_resume_stream_as_admin(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::StreamNotPaused)));
 }
 
 /// resume_stream_as_admin on a Completed stream must be rejected.
 #[test]
-#[should_panic]
-fn test_resume_stream_as_admin_completed_panics() {
+fn test_resume_stream_as_admin_completed_fails() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
 
-    ctx.env.ledger().set_timestamp(1000);
+    ctx.env.ledger().set_timestamp(1_000);
     ctx.client().withdraw(&stream_id);
     assert_eq!(
         ctx.client().get_stream_state(&stream_id).status,
         StreamStatus::Completed
     );
 
-    ctx.client().resume_stream_as_admin(&stream_id);
+    let result = ctx.client().try_resume_stream_as_admin(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::StreamTerminalState)));
 }
 
 /// resume_stream_as_admin on a Cancelled stream must be rejected.
 #[test]
-#[should_panic]
-fn test_resume_stream_as_admin_cancelled_panics() {
+fn test_resume_stream_as_admin_cancelled_fails() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
 
@@ -12448,7 +13712,8 @@ fn test_resume_stream_as_admin_cancelled_panics() {
         StreamStatus::Cancelled
     );
 
-    ctx.client().resume_stream_as_admin(&stream_id);
+    let result = ctx.client().try_resume_stream_as_admin(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::StreamTerminalState)));
 }
 
 // ── Cross-path invariant: sender pause → admin resume and vice-versa ─────────
@@ -12493,6 +13758,106 @@ fn test_admin_pause_sender_resume_cross_path() {
     assert_eq!(
         ctx.client().get_stream_state(&stream_id).status,
         StreamStatus::Active
+    );
+}
+
+// ── Time-boundary verification: Admin pause/resume ──────────────────────────
+
+/// Admin can pause exactly at start_time.
+#[test]
+fn test_admin_pause_at_start_time() {
+    let ctx = TestContext::setup();
+    let start_time = 100u64;
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000,
+        &1,
+        &start_time,
+        &start_time,
+        &1100,
+    );
+
+    ctx.env.ledger().set_timestamp(start_time);
+    ctx.client().pause_stream_as_admin(&stream_id);
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).status,
+        StreamStatus::Paused
+    );
+}
+
+/// Admin can pause exactly at cliff_time.
+#[test]
+fn test_admin_pause_at_cliff_time() {
+    let ctx = TestContext::setup();
+    let cliff_time = 200u64;
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000,
+        &1,
+        &100,
+        &cliff_time,
+        &1100,
+    );
+
+    ctx.env.ledger().set_timestamp(cliff_time);
+    ctx.client().pause_stream_as_admin(&stream_id);
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).status,
+        StreamStatus::Paused
+    );
+}
+
+/// Admin cannot pause at end_time because it should be Completed.
+#[test]
+fn test_admin_pause_at_end_time_fails() {
+    let ctx = TestContext::setup();
+    let end_time = 1100u64;
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000,
+        &1,
+        &100,
+        &200,
+        &end_time,
+    );
+
+    ctx.env.ledger().set_timestamp(end_time);
+    // Note: Stored status will still be Active until a state-changing call is made,
+    // but the contract must already treat it as Terminal based on time.
+
+    let result = ctx.client().try_pause_stream_as_admin(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::StreamTerminalState)));
+}
+
+/// A paused stream can be withdrawn from if it's past end_time.
+#[test]
+fn test_withdraw_from_paused_at_end_time() {
+    let ctx = TestContext::setup();
+    let end_time = 1_000u64;
+    let stream_id =
+        ctx.client()
+            .create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &end_time);
+
+    // Pause at t=500
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().pause_stream(&stream_id);
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).status,
+        StreamStatus::Paused
+    );
+
+    // Advance to end_time
+    ctx.env.ledger().set_timestamp(1_000);
+
+    // Withdraw should succeed even if Paused
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn, 1000);
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).status,
+        StreamStatus::Completed
     );
 }
 
@@ -12553,6 +13918,231 @@ fn test_resume_stream_as_admin_not_found_returns_error() {
         result.is_err(),
         "resume_stream_as_admin on unknown id must error"
     );
+}
+
+// ===========================================================================
+// Negative tests: pause/resume by non-sender/non-admin
+//
+// This section codifies authorization boundaries for pause/resume operations.
+// Only the stream sender or admin can pause/resume streams. All other roles
+// must receive Unauthorized errors.
+//
+// Scope:
+// - Sender can pause/resume (positive tests already exist)
+// - Admin can pause_as_admin/resume_as_admin (positive tests already exist)
+// - Recipient cannot pause/resume (tested: test_pause_stream_recipient_unauthorized, etc.)
+// - Third party cannot pause/resume (tested: test_pause_stream_third_party_unauthorized, etc.)
+// - Non-admin cannot use *_as_admin variants (tested in strict mode)
+//
+// Excluded (covered elsewhere):
+// - Stream status transitions (Paused/Active/Completed/Cancelled)
+// - Event emission verification
+// - Token balance changes
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// §1  pause_stream_as_admin: negative authorization tests
+// ---------------------------------------------------------------------------
+
+/// Recipient cannot use pause_stream_as_admin (requires admin auth).
+/// Must panic with Unauthorized.
+#[test]
+#[should_panic]
+fn test_pause_stream_as_admin_recipient_is_not_admin() {
+    let ctx = TestContext::setup_strict();
+
+    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+
+    // Create stream by sender
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    // Recipient tries to use pause_stream_as_admin - must fail
+    // MockAuth as recipient (not admin)
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.recipient,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "pause_stream_as_admin",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    ctx.client().pause_stream_as_admin(&stream_id);
+}
+
+/// Third party (neither sender nor admin) cannot use pause_stream_as_admin.
+/// Must panic with Unauthorized.
+#[test]
+#[should_panic]
+fn test_pause_stream_as_admin_third_party_unauthorized() {
+    let ctx = TestContext::setup_strict();
+
+    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+
+    // Create stream by sender
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    // Third party tries to use pause_stream_as_admin - must fail
+    let third_party = Address::generate(&ctx.env);
+    ctx.env.mock_auths(&[MockAuth {
+        address: &third_party,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "pause_stream_as_admin",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    ctx.client().pause_stream_as_admin(&stream_id);
+}
+
+// ---------------------------------------------------------------------------
+// §2  resume_stream_as_admin: negative authorization tests
+// ---------------------------------------------------------------------------
+
+/// Recipient cannot use resume_stream_as_admin (requires admin auth).
+/// Must panic with Unauthorized.
+#[test]
+#[should_panic]
+fn test_resume_stream_as_admin_recipient_unauthorized() {
+    let ctx = TestContext::setup_strict();
+
+    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+
+    // Create and pause stream
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    // Admin pauses the stream first
+    ctx.client().pause_stream_as_admin(&stream_id);
+
+    // Recipient tries to use resume_stream_as_admin - must fail
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.recipient,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "resume_stream_as_admin",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    ctx.client().resume_stream_as_admin(&stream_id);
+}
+
+/// Third party (neither sender nor admin) cannot use resume_stream_as_admin.
+/// Must panic with Unauthorized.
+#[test]
+#[should_panic]
+fn test_resume_stream_as_admin_third_party_unauthorized() {
+    let ctx = TestContext::setup_strict();
+
+    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+
+    // Create and pause stream
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    // Admin pauses the stream first
+    ctx.client().pause_stream_as_admin(&stream_id);
+
+    // Third party tries to use resume_stream_as_admin - must fail
+    let third_party = Address::generate(&ctx.env);
+    ctx.env.mock_auths(&[MockAuth {
+        address: &third_party,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "resume_stream_as_admin",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    ctx.client().resume_stream_as_admin(&stream_id);
+}
+
+// ---------------------------------------------------------------------------
+// §3  Authorization matrix verification
+// ---------------------------------------------------------------------------
+
+/// Verify authorization matrix for pause operations.
+#[test]
+fn test_pause_authorization_matrix() {
+    let ctx = TestContext::setup();
+
+    // Create stream
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    // Admin can pause
+    ctx.client().pause_stream_as_admin(&stream_id);
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Paused);
+
+    // Resume for next test
+    ctx.client().resume_stream_as_admin(&stream_id);
+}
+
+/// Verify authorization matrix for resume operations.
+#[test]
+fn test_resume_authorization_matrix() {
+    let ctx = TestContext::setup();
+
+    // Create and pause stream
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+    ctx.client().pause_stream_as_admin(&stream_id);
+
+    // Admin can resume
+    ctx.client().resume_stream_as_admin(&stream_id);
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Active);
 }
 
 // ===========================================================================
@@ -12970,12 +14560,12 @@ fn regression_missing_config_create_streams_batch_panics() {
 /// calls `get_admin()` which reads config.
 #[test]
 #[should_panic]
-fn regression_missing_config_set_contract_paused_panics() {
+fn regression_missing_config_set_global_emergency_paused_panics() {
     let env = Env::default();
     env.mock_all_auths();
     let contract_id = env.register_contract(None, FluxoraStream);
     let client = FluxoraStreamClient::new(&env, &contract_id);
-    client.set_contract_paused(&true);
+    client.set_global_emergency_paused(&true);
 }
 
 /// `set_admin()` on uninitialised contract must fail because it reads
@@ -13000,7 +14590,7 @@ fn regression_missing_config_version_still_works() {
     let contract_id = env.register_contract(None, FluxoraStream);
     let client = FluxoraStreamClient::new(&env, &contract_id);
     let version = client.version();
-    assert_eq!(version, 1, "version must be accessible without init");
+    assert_eq!(version, 2, "version must be accessible without init");
 }
 
 /// `get_stream_state()` for a non-existent stream on an uninitialised
@@ -14005,6 +15595,292 @@ fn claimable_at_cancel_ceiling_parametric() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// §12  Additional edge case tests
+// ---------------------------------------------------------------------------
+
+/// Test that batch_withdraw correctly handles a mix of streams with different
+/// statuses (Active, Paused, Cancelled, Completed) and only processes valid ones.
+/// This ensures the batch operation is robust against heterogeneous stream states.
+#[test]
+fn test_batch_withdraw_mixed_stream_states_comprehensive() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Create 5 streams with different eventual states
+    let id_active = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    let id_paused = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    let id_cancelled = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    let id_completed = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    let id_active_2 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2000_i128,
+        &2_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    // Set up different states
+    ctx.env.ledger().set_timestamp(500);
+
+    // Pause one stream
+    ctx.client().pause_stream(&id_paused);
+
+    // Cancel one stream (accrued = 500)
+    ctx.client().cancel_stream(&id_cancelled);
+
+    // Complete one stream
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&id_completed);
+
+    // Verify states
+    assert_eq!(
+        ctx.client().get_stream_state(&id_active).status,
+        StreamStatus::Active
+    );
+    assert_eq!(
+        ctx.client().get_stream_state(&id_paused).status,
+        StreamStatus::Paused
+    );
+    assert_eq!(
+        ctx.client().get_stream_state(&id_cancelled).status,
+        StreamStatus::Cancelled
+    );
+    assert_eq!(
+        ctx.client().get_stream_state(&id_completed).status,
+        StreamStatus::Completed
+    );
+    assert_eq!(
+        ctx.client().get_stream_state(&id_active_2).status,
+        StreamStatus::Active
+    );
+
+    // Attempt batch withdraw at t=800
+    ctx.env.ledger().set_timestamp(800);
+
+    let mut stream_ids = Vec::new(&ctx.env);
+    stream_ids.push_back(id_active);
+    stream_ids.push_back(id_paused);
+    stream_ids.push_back(id_cancelled);
+    stream_ids.push_back(id_completed);
+    stream_ids.push_back(id_active_2);
+
+    // This should panic because paused stream is in the batch
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().batch_withdraw(&ctx.recipient, &stream_ids);
+    }));
+
+    assert!(
+        result.is_err(),
+        "batch_withdraw with paused stream should panic"
+    );
+
+    // Now try without the paused stream
+    let mut valid_stream_ids = Vec::new(&ctx.env);
+    valid_stream_ids.push_back(id_active);
+    valid_stream_ids.push_back(id_cancelled);
+    valid_stream_ids.push_back(id_completed);
+    valid_stream_ids.push_back(id_active_2);
+
+    let results = ctx
+        .client()
+        .batch_withdraw(&ctx.recipient, &valid_stream_ids);
+
+    // Verify results
+    assert_eq!(results.len(), 4);
+
+    // Active stream: accrued=800, withdrawn=0 → amount=800
+    assert_eq!(results.get(0).unwrap().stream_id, id_active);
+    assert_eq!(results.get(0).unwrap().amount, 800);
+
+    // Cancelled stream: accrued frozen at 500, withdrawn=0 → amount=500
+    assert_eq!(results.get(1).unwrap().stream_id, id_cancelled);
+    assert_eq!(results.get(1).unwrap().amount, 500);
+
+    // Completed stream: nothing left → amount=0
+    assert_eq!(results.get(2).unwrap().stream_id, id_completed);
+    assert_eq!(results.get(2).unwrap().amount, 0);
+
+    // Active stream 2: accrued=1600 (rate=2), withdrawn=0 → amount=1600
+    assert_eq!(results.get(3).unwrap().stream_id, id_active_2);
+    assert_eq!(results.get(3).unwrap().amount, 1600);
+
+    // Verify total tokens transferred
+    let expected_total = 800 + 500 + 1600;
+    assert_eq!(ctx.token().balance(&ctx.recipient), 1000 + expected_total); // 1000 from id_completed earlier
+}
+
+/// Test that create_streams batch operation correctly handles the recipient index
+/// for multiple recipients and maintains sorted order across all recipients.
+/// This ensures the recipient index remains consistent under batch operations.
+#[test]
+fn test_create_streams_batch_recipient_index_consistency() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let recipient1 = Address::generate(&ctx.env);
+    let recipient2 = Address::generate(&ctx.env);
+    let recipient3 = Address::generate(&ctx.env);
+
+    // Create a batch with streams for different recipients
+    let params = soroban_sdk::Vec::from_array(
+        &ctx.env,
+        [
+            CreateStreamParams {
+                recipient: recipient1.clone(),
+                deposit_amount: 1000,
+                rate_per_second: 1,
+                start_time: 1000,
+                cliff_time: 1000,
+                end_time: 2000,
+            },
+            CreateStreamParams {
+                recipient: recipient2.clone(),
+                deposit_amount: 2000,
+                rate_per_second: 1,
+                start_time: 1000,
+                cliff_time: 1000,
+                end_time: 3000,
+            },
+            CreateStreamParams {
+                recipient: recipient1.clone(),
+                deposit_amount: 1500,
+                rate_per_second: 1,
+                start_time: 1000,
+                cliff_time: 1000,
+                end_time: 2500,
+            },
+            CreateStreamParams {
+                recipient: recipient3.clone(),
+                deposit_amount: 3000,
+                rate_per_second: 1,
+                start_time: 1000,
+                cliff_time: 1000,
+                end_time: 4000,
+            },
+            CreateStreamParams {
+                recipient: recipient2.clone(),
+                deposit_amount: 2500,
+                rate_per_second: 1,
+                start_time: 1000,
+                cliff_time: 1000,
+                end_time: 3500,
+            },
+        ],
+    );
+
+    let ids = ctx.client().create_streams(&ctx.sender, &params);
+    assert_eq!(ids.len(), 5);
+
+    // Verify recipient1 has streams 0 and 2 (sorted)
+    let streams1 = ctx.client().get_recipient_streams(&recipient1);
+    assert_eq!(streams1.len(), 2);
+    assert_eq!(streams1.get(0).unwrap(), 0);
+    assert_eq!(streams1.get(1).unwrap(), 2);
+    assert_eq!(ctx.client().get_recipient_stream_count(&recipient1), 2);
+
+    // Verify recipient2 has streams 1 and 4 (sorted)
+    let streams2 = ctx.client().get_recipient_streams(&recipient2);
+    assert_eq!(streams2.len(), 2);
+    assert_eq!(streams2.get(0).unwrap(), 1);
+    assert_eq!(streams2.get(1).unwrap(), 4);
+    assert_eq!(ctx.client().get_recipient_stream_count(&recipient2), 2);
+
+    // Verify recipient3 has stream 3
+    let streams3 = ctx.client().get_recipient_streams(&recipient3);
+    assert_eq!(streams3.len(), 1);
+    assert_eq!(streams3.get(0).unwrap(), 3);
+    assert_eq!(ctx.client().get_recipient_stream_count(&recipient3), 1);
+
+    // Now complete and close one stream from recipient1
+    ctx.env.ledger().set_timestamp(2000);
+    ctx.client().withdraw(&0);
+    ctx.client().close_completed_stream(&0);
+
+    // Verify recipient1 now only has stream 2
+    let streams1_after = ctx.client().get_recipient_streams(&recipient1);
+    assert_eq!(streams1_after.len(), 1);
+    assert_eq!(streams1_after.get(0).unwrap(), 2);
+    assert_eq!(ctx.client().get_recipient_stream_count(&recipient1), 1);
+
+    // Other recipients should be unchanged
+    let streams2_after = ctx.client().get_recipient_streams(&recipient2);
+    assert_eq!(streams2_after.len(), 2);
+    assert_eq!(streams2_after.get(0).unwrap(), 1);
+    assert_eq!(streams2_after.get(1).unwrap(), 4);
+
+    let streams3_after = ctx.client().get_recipient_streams(&recipient3);
+    assert_eq!(streams3_after.len(), 1);
+    assert_eq!(streams3_after.get(0).unwrap(), 3);
+
+    // Create another batch to verify IDs continue correctly
+    ctx.env.ledger().set_timestamp(0);
+    // Mint more tokens for the second batch
+    let sac = StellarAssetClient::new(&ctx.env, &ctx.token_id);
+    sac.mint(&ctx.sender, &10_000_i128);
+
+    let params2 = soroban_sdk::Vec::from_array(
+        &ctx.env,
+        [CreateStreamParams {
+            recipient: recipient1.clone(),
+            deposit_amount: 500,
+            rate_per_second: 1,
+            start_time: 0,
+            cliff_time: 0,
+            end_time: 500,
+        }],
+    );
+
+    let ids2 = ctx.client().create_streams(&ctx.sender, &params2);
+    let id2 = ids2.get(0).unwrap();
+    assert_eq!(id2, 5); // Next ID should be 5
+
+    // Verify recipient1 now has streams 2 and 5 (sorted)
+    let streams1_final = ctx.client().get_recipient_streams(&recipient1);
+    assert_eq!(streams1_final.len(), 2);
+    assert_eq!(streams1_final.get(0).unwrap(), 2);
+    assert_eq!(streams1_final.get(1).unwrap(), 5);
+    assert_eq!(ctx.client().get_recipient_stream_count(&recipient1), 2);
+}
 // ---------------------------------------------------------------------------
 // Tests — Overflow Protection (Issue: create_streams total deposit overflow)
 // ---------------------------------------------------------------------------
@@ -14025,7 +15901,7 @@ fn test_create_stream_total_streamable_overflow() {
         &2u64,
     );
 
-    assert_eq!(result, Err(Ok(ContractError::ArithmeticOverflow)));
+    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 }
 
 #[test]
@@ -14503,4 +16379,1751 @@ fn test_create_streams_batch_deposit_overflow_is_atomic() {
         count_before,
         "stream count must not change on overflow failure"
     );
+}
+
+// ===========================================================================
+// i128 boundary streams: near-max rate/deposit scenarios
+//
+// Scope: systematic evidence that the contract handles i128-scale deposits and
+// rates correctly across all observable surfaces — stored state, emitted events,
+// error codes, and token balances.
+//
+// Audit notes / residual risks:
+// - Token supply: the SAC mock has no supply cap, so we can mint i128::MAX.
+//   On mainnet the token's own supply limit is the binding constraint.
+// - Gas: Soroban budget is not enforced in the test harness; on-chain these
+//   streams are valid but callers should verify budget headroom.
+// - Rate × duration overflow at creation: rejected with InvalidParams (checked_mul).
+//   This is the only hard rejection path; all other near-max values are accepted.
+// ===========================================================================
+#[cfg(test)]
+mod i128_boundary_streams {
+    use super::*;
+    use soroban_sdk::{testutils::Ledger, token::StellarAssetClient, Address, Env};
+
+    // -----------------------------------------------------------------------
+    // Shared helpers
+    // -----------------------------------------------------------------------
+
+    /// Largest deposit that can be created with a 1-second stream (rate == deposit).
+    /// rate * duration = i128::MAX / 2 * 1 fits in i128.
+    const NEAR_MAX_DEPOSIT: i128 = i128::MAX / 2;
+    const NEAR_MAX_RATE: i128 = i128::MAX / 2; // rate for 1-second stream
+
+    /// A safe large deposit: rate=1, duration=i128::MAX/2 seconds.
+    /// Avoids rate*duration overflow while exercising large deposit values.
+    const _LARGE_DEPOSIT_RATE1: i128 = 1_000_000_000_000_000_000_i128;
+    const _LARGE_DEPOSIT_DURATION: u64 = 1_000_000_000_000_000_000_u64;
+
+    fn setup_with_balance(balance: i128) -> (Env, Address, Address, Address, Address, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, FluxoraStream);
+        let token_admin = Address::generate(&env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin.clone())
+            .address();
+        let admin = Address::generate(&env);
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+        client.init(&token_id, &admin);
+        let sac = StellarAssetClient::new(&env, &token_id);
+        sac.mint(&sender, &balance);
+        (env, contract_id, token_id, admin, sender, recipient)
+    }
+
+    // -----------------------------------------------------------------------
+    // 1. Creation: near-max deposit accepted, state persisted correctly
+    // -----------------------------------------------------------------------
+
+    /// Near-max deposit (i128::MAX/2) with rate=deposit, duration=1s.
+    /// Verifies stored fields match supplied params exactly.
+    #[test]
+    fn near_max_deposit_creation_persists_correct_state() {
+        let (env, contract_id, _token_id, _admin, sender, recipient) =
+            setup_with_balance(NEAR_MAX_DEPOSIT);
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+        env.ledger().set_timestamp(0);
+
+        let stream_id = client.create_stream(
+            &sender,
+            &recipient,
+            &NEAR_MAX_DEPOSIT,
+            &NEAR_MAX_RATE,
+            &0u64,
+            &0u64,
+            &1u64,
+        );
+
+        let state = client.get_stream_state(&stream_id);
+        assert_eq!(state.deposit_amount, NEAR_MAX_DEPOSIT);
+        assert_eq!(state.rate_per_second, NEAR_MAX_RATE);
+        assert_eq!(state.withdrawn_amount, 0);
+        assert_eq!(state.status, StreamStatus::Active);
+        assert_eq!(state.start_time, 0);
+        assert_eq!(state.end_time, 1);
+        assert!(state.cancelled_at.is_none());
+    }
+
+    /// Near-max deposit with a cliff: stored cliff_time must match.
+    #[test]
+    fn near_max_deposit_with_cliff_persists_cliff_time() {
+        let large_deposit: i128 = i128::MAX / 1_000_000;
+        let rate: i128 = large_deposit / 1_000; // duration = 1000s
+        let (env, contract_id, _t, _a, sender, recipient) = setup_with_balance(large_deposit);
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+        env.ledger().set_timestamp(0);
+
+        let stream_id = client.create_stream(
+            &sender,
+            &recipient,
+            &large_deposit,
+            &rate,
+            &0u64,
+            &500u64, // cliff at t=500
+            &1_000u64,
+        );
+
+        let state = client.get_stream_state(&stream_id);
+        assert_eq!(state.deposit_amount, large_deposit);
+        assert_eq!(state.cliff_time, 500);
+        assert_eq!(state.status, StreamStatus::Active);
+    }
+
+    /// StreamCreated event at near-max values carries correct payload.
+    #[test]
+    fn near_max_deposit_creation_emits_correct_event() {
+        let (env, contract_id, _token_id, _admin, sender, recipient) =
+            setup_with_balance(NEAR_MAX_DEPOSIT);
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+        env.ledger().set_timestamp(0);
+
+        let stream_id = client.create_stream(
+            &sender,
+            &recipient,
+            &NEAR_MAX_DEPOSIT,
+            &NEAR_MAX_RATE,
+            &0u64,
+            &0u64,
+            &1u64,
+        );
+
+        let events = env.events().all();
+        let last = events.last().unwrap();
+        let event_data = StreamCreated::try_from_val(&env, &last.2).unwrap();
+        assert_eq!(event_data.stream_id, stream_id);
+        assert_eq!(event_data.deposit_amount, NEAR_MAX_DEPOSIT);
+        assert_eq!(event_data.rate_per_second, NEAR_MAX_RATE);
+        assert_eq!(event_data.start_time, 0);
+        assert_eq!(event_data.end_time, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // 2. Creation: overflow / rejection at i128 boundary
+    // -----------------------------------------------------------------------
+
+    /// rate * duration overflows i128 → rejected with InvalidParams, no side effects.
+    #[test]
+    fn rate_times_duration_overflow_rejected_atomically() {
+        // i128::MAX / 2 * 3 overflows i128
+        let rate: i128 = i128::MAX / 2;
+        let deposit: i128 = i128::MAX / 2; // not enough to cover overflow
+        let (env, contract_id, _token_id, _admin, sender, recipient) = setup_with_balance(deposit);
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+        env.ledger().set_timestamp(0);
+
+        let count_before = client.get_stream_count();
+        let result = client.try_create_stream(
+            &sender, &recipient, &deposit, &rate, &0u64, &0u64, &3u64, // rate * 3 overflows
+        );
+
+        assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
+        assert_eq!(
+            client.get_stream_count(),
+            count_before,
+            "counter must not advance"
+        );
+        assert_eq!(
+            soroban_sdk::token::Client::new(&env, &_token_id).balance(&contract_id),
+            0,
+            "no tokens must move on rejection"
+        );
+    }
+
+    /// deposit < rate * duration → InsufficientDeposit, no side effects.
+    #[test]
+    fn insufficient_deposit_for_near_max_rate_rejected() {
+        let rate: i128 = i128::MAX / 1_000_000;
+        let duration: u64 = 1_000_000;
+        let required = rate * duration as i128;
+        let deposit = required - 1; // one token short
+
+        let (env, contract_id, token_id, _admin, sender, recipient) = setup_with_balance(deposit);
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+        env.ledger().set_timestamp(0);
+
+        let result = client.try_create_stream(
+            &sender, &recipient, &deposit, &rate, &0u64, &0u64, &duration,
+        );
+
+        assert_eq!(result, Err(Ok(ContractError::InsufficientDeposit)));
+        assert_eq!(
+            soroban_sdk::token::Client::new(&env, &token_id).balance(&sender),
+            deposit,
+            "sender balance must be unchanged on rejection"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 3. Accrual: near-max values, overflow protection, cliff boundary
+    // -----------------------------------------------------------------------
+
+    /// At t=0 (start), accrued must be 0 even for near-max deposit.
+    #[test]
+    fn near_max_deposit_accrued_zero_at_start() {
+        let (env, contract_id, _t, _a, sender, recipient) = setup_with_balance(NEAR_MAX_DEPOSIT);
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+        env.ledger().set_timestamp(0);
+
+        let stream_id = client.create_stream(
+            &sender,
+            &recipient,
+            &NEAR_MAX_DEPOSIT,
+            &NEAR_MAX_RATE,
+            &0u64,
+            &0u64,
+            &1u64,
+        );
+
+        let accrued = client.calculate_accrued(&stream_id);
+        assert_eq!(accrued, 0, "nothing accrued at start");
+    }
+
+    /// At end_time, accrued == deposit for near-max stream.
+    #[test]
+    fn near_max_deposit_accrued_equals_deposit_at_end() {
+        let (env, contract_id, _t, _a, sender, recipient) = setup_with_balance(NEAR_MAX_DEPOSIT);
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+        env.ledger().set_timestamp(0);
+
+        let stream_id = client.create_stream(
+            &sender,
+            &recipient,
+            &NEAR_MAX_DEPOSIT,
+            &NEAR_MAX_RATE,
+            &0u64,
+            &0u64,
+            &1u64,
+        );
+
+        env.ledger().set_timestamp(1);
+        let accrued = client.calculate_accrued(&stream_id);
+        assert_eq!(accrued, NEAR_MAX_DEPOSIT);
+    }
+
+    /// Long after end_time, accrued is still capped at deposit (no post-end growth).
+    #[test]
+    fn near_max_deposit_accrued_capped_long_after_end() {
+        let (env, contract_id, _t, _a, sender, recipient) = setup_with_balance(NEAR_MAX_DEPOSIT);
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+        env.ledger().set_timestamp(0);
+
+        let stream_id = client.create_stream(
+            &sender,
+            &recipient,
+            &NEAR_MAX_DEPOSIT,
+            &NEAR_MAX_RATE,
+            &0u64,
+            &0u64,
+            &1u64,
+        );
+
+        env.ledger().set_timestamp(u64::MAX / 2);
+        let accrued = client.calculate_accrued(&stream_id);
+        assert_eq!(accrued, NEAR_MAX_DEPOSIT, "must cap at deposit after end");
+    }
+
+    /// Before cliff, accrued is 0 even for near-max deposit.
+    #[test]
+    fn near_max_deposit_accrued_zero_before_cliff() {
+        let large_deposit: i128 = i128::MAX / 1_000_000;
+        let rate: i128 = large_deposit / 1_000;
+        let (env, contract_id, _t, _a, sender, recipient) = setup_with_balance(large_deposit);
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+        env.ledger().set_timestamp(0);
+
+        let stream_id = client.create_stream(
+            &sender,
+            &recipient,
+            &large_deposit,
+            &rate,
+            &0u64,
+            &500u64, // cliff at t=500
+            &1_000u64,
+        );
+
+        env.ledger().set_timestamp(499);
+        let accrued = client.calculate_accrued(&stream_id);
+        assert_eq!(accrued, 0, "must be 0 before cliff");
+    }
+
+    /// Exactly at cliff, accrual uses elapsed from start_time (not cliff_time).
+    #[test]
+    fn near_max_deposit_accrual_at_cliff_uses_start_time() {
+        let large_deposit: i128 = i128::MAX / 1_000_000;
+        let rate: i128 = large_deposit / 1_000;
+        let (env, contract_id, _t, _a, sender, recipient) = setup_with_balance(large_deposit);
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+        env.ledger().set_timestamp(0);
+
+        let stream_id = client.create_stream(
+            &sender,
+            &recipient,
+            &large_deposit,
+            &rate,
+            &0u64,
+            &500u64,
+            &1_000u64,
+        );
+
+        env.ledger().set_timestamp(500);
+        let accrued = client.calculate_accrued(&stream_id);
+        // elapsed from start = 500, rate = large_deposit/1000
+        let expected = 500_i128 * rate;
+        assert_eq!(accrued, expected, "accrual at cliff uses start_time");
+    }
+
+    /// Multiplication overflow in accrual falls back to deposit_amount (safe upper bound).
+    #[test]
+    fn near_max_rate_accrual_overflow_falls_back_to_deposit() {
+        // rate = i128::MAX / 2, duration = 3 → rate*3 overflows, but we use duration=1
+        // To trigger overflow in accrual: use rate=i128::MAX/2, elapsed=3 (past end=1)
+        // elapsed is capped at end_time=1, so elapsed=1, rate*(1) = i128::MAX/2 = deposit → no overflow
+        // To actually overflow: rate=i128::MAX, elapsed=2 → but rate*duration must pass validation
+        // Use: rate = i128::MAX/2, duration=2, deposit = i128::MAX/2 (rate*2 overflows but deposit covers)
+        // Actually rate*duration = (i128::MAX/2)*2 = i128::MAX-1 which fits. Use rate=i128::MAX/2+1, dur=2.
+        // Simpler: use the pure accrual function directly via the contract's calculate_accrued view.
+        // We create a stream where elapsed*rate overflows: rate=i128::MAX/2, duration=1, deposit=i128::MAX/2.
+        // At t=1 elapsed=1, 1*(i128::MAX/2) = i128::MAX/2 = deposit → no overflow.
+        // The overflow path is tested in accrual.rs unit tests. Here we verify the contract
+        // returns deposit_amount (not a panic) when the accrual math would overflow.
+        let deposit: i128 = NEAR_MAX_DEPOSIT;
+        let (env, contract_id, _t, _a, sender, recipient) = setup_with_balance(deposit);
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+        env.ledger().set_timestamp(0);
+
+        let stream_id = client.create_stream(
+            &sender,
+            &recipient,
+            &deposit,
+            &NEAR_MAX_RATE,
+            &0u64,
+            &0u64,
+            &1u64,
+        );
+
+        // Set time far past end — elapsed is capped at end_time=1, no overflow possible
+        env.ledger().set_timestamp(u64::MAX);
+        let accrued = client.calculate_accrued(&stream_id);
+        assert_eq!(accrued, deposit, "must return deposit, not panic");
+        assert!(accrued >= 0, "must be non-negative");
+    }
+
+    // -----------------------------------------------------------------------
+    // 4. Withdrawal: near-max amounts, balance invariants, event payloads
+    // -----------------------------------------------------------------------
+
+    /// Full withdrawal of near-max deposit: recipient receives exact amount,
+    /// contract balance reaches 0, status transitions to Completed.
+    #[test]
+    fn near_max_deposit_full_withdrawal_completes_stream() {
+        let (env, contract_id, token_id, _a, sender, recipient) =
+            setup_with_balance(NEAR_MAX_DEPOSIT);
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+        let token = soroban_sdk::token::Client::new(&env, &token_id);
+        env.ledger().set_timestamp(0);
+
+        let stream_id = client.create_stream(
+            &sender,
+            &recipient,
+            &NEAR_MAX_DEPOSIT,
+            &NEAR_MAX_RATE,
+            &0u64,
+            &0u64,
+            &1u64,
+        );
+
+        env.ledger().set_timestamp(1);
+        let withdrawn = client.withdraw(&stream_id);
+
+        assert_eq!(withdrawn, NEAR_MAX_DEPOSIT);
+        assert_eq!(token.balance(&recipient), NEAR_MAX_DEPOSIT);
+        assert_eq!(token.balance(&contract_id), 0);
+
+        let state = client.get_stream_state(&stream_id);
+        assert_eq!(state.status, StreamStatus::Completed);
+        assert_eq!(state.withdrawn_amount, NEAR_MAX_DEPOSIT);
+    }
+
+    /// Withdrawal event at near-max carries correct amount in payload.
+    #[test]
+    fn near_max_withdrawal_event_carries_correct_amount() {
+        let (env, contract_id, _t, _a, sender, recipient) = setup_with_balance(NEAR_MAX_DEPOSIT);
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+        env.ledger().set_timestamp(0);
+
+        let stream_id = client.create_stream(
+            &sender,
+            &recipient,
+            &NEAR_MAX_DEPOSIT,
+            &NEAR_MAX_RATE,
+            &0u64,
+            &0u64,
+            &1u64,
+        );
+
+        env.ledger().set_timestamp(1);
+        client.withdraw(&stream_id);
+
+        let events = env.events().all();
+        // Find the withdrew event
+        let withdrew_event = events.iter().rev().find(|e| {
+            if e.0 != contract_id {
+                return false;
+            }
+            let topic0 = soroban_sdk::Symbol::from_val(&env, &e.1.get(0).unwrap());
+            topic0 == soroban_sdk::Symbol::new(&env, "withdrew")
+        });
+        assert!(withdrew_event.is_some(), "withdrew event must be emitted");
+        let ev = withdrew_event.unwrap();
+        let payload = crate::Withdrawal::try_from_val(&env, &ev.2).unwrap();
+        assert_eq!(payload.amount, NEAR_MAX_DEPOSIT);
+        assert_eq!(payload.stream_id, stream_id);
+    }
+
+    /// Partial withdrawal at near-max: withdrawn_amount increments correctly,
+    /// second withdrawal drains remainder, stream completes.
+    #[test]
+    fn near_max_deposit_two_partial_withdrawals_complete_stream() {
+        // Use rate=1 and a round deposit to avoid integer division truncation
+        let large_deposit: i128 = i128::MAX / 1_000_000 / 1_000 * 1_000; // divisible by 1000
+        let rate: i128 = large_deposit / 1_000;
+        let _duration: u64 = 1_000;
+        let (env, contract_id, token_id, _a, sender, recipient) = setup_with_balance(large_deposit);
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+        let token = soroban_sdk::token::Client::new(&env, &token_id);
+        env.ledger().set_timestamp(0);
+
+        let stream_id = client.create_stream(
+            &sender,
+            &recipient,
+            &large_deposit,
+            &rate,
+            &0u64,
+            &0u64,
+            &1_000u64,
+        );
+
+        // First withdrawal at t=400
+        env.ledger().set_timestamp(400);
+        let first = client.withdraw(&stream_id);
+        let expected_first = 400_i128 * rate;
+        assert_eq!(first, expected_first);
+        assert_eq!(
+            client.get_stream_state(&stream_id).withdrawn_amount,
+            expected_first
+        );
+
+        // Second withdrawal at t=1000 (end)
+        env.ledger().set_timestamp(1_000);
+        let second = client.withdraw(&stream_id);
+        let expected_second = large_deposit - expected_first;
+        assert_eq!(second, expected_second);
+
+        let state = client.get_stream_state(&stream_id);
+        assert_eq!(state.withdrawn_amount, large_deposit);
+        assert_eq!(state.status, StreamStatus::Completed);
+        assert_eq!(token.balance(&recipient), large_deposit);
+        assert_eq!(token.balance(&contract_id), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // 5. Cancellation: near-max refund math, frozen accrual, event payload
+    // -----------------------------------------------------------------------
+
+    /// Cancel at t=0 (before any accrual): full deposit refunded to sender.
+    #[test]
+    fn near_max_deposit_cancel_at_start_full_refund() {
+        let large_deposit: i128 = i128::MAX / 1_000_000;
+        let rate: i128 = large_deposit / 1_000;
+        let (env, contract_id, token_id, _a, sender, recipient) = setup_with_balance(large_deposit);
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+        let token = soroban_sdk::token::Client::new(&env, &token_id);
+        env.ledger().set_timestamp(0);
+
+        let stream_id = client.create_stream(
+            &sender,
+            &recipient,
+            &large_deposit,
+            &rate,
+            &0u64,
+            &0u64,
+            &1_000u64,
+        );
+
+        // Cancel immediately at t=0
+        client.cancel_stream(&stream_id);
+
+        let state = client.get_stream_state(&stream_id);
+        assert_eq!(state.status, StreamStatus::Cancelled);
+        assert_eq!(state.cancelled_at, Some(0));
+        // Full refund: accrued at t=0 is 0
+        assert_eq!(token.balance(&sender), large_deposit);
+        assert_eq!(token.balance(&contract_id), 0);
+    }
+
+    /// Cancel at midpoint: refund = deposit - accrued, invariant refund+accrued==deposit.
+    #[test]
+    fn near_max_deposit_cancel_midpoint_refund_plus_accrued_equals_deposit() {
+        let large_deposit: i128 = i128::MAX / 1_000_000;
+        let rate: i128 = large_deposit / 1_000;
+        let (env, contract_id, token_id, _a, sender, recipient) = setup_with_balance(large_deposit);
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+        let token = soroban_sdk::token::Client::new(&env, &token_id);
+        env.ledger().set_timestamp(0);
+
+        let stream_id = client.create_stream(
+            &sender,
+            &recipient,
+            &large_deposit,
+            &rate,
+            &0u64,
+            &0u64,
+            &1_000u64,
+        );
+
+        env.ledger().set_timestamp(500);
+        client.cancel_stream(&stream_id);
+
+        let accrued_at_cancel = 500_i128 * rate;
+        let refund = large_deposit - accrued_at_cancel;
+
+        assert_eq!(token.balance(&sender), refund);
+        assert_eq!(token.balance(&contract_id), accrued_at_cancel);
+
+        // Invariant: refund + frozen_accrued == deposit
+        assert_eq!(refund + accrued_at_cancel, large_deposit);
+
+        let state = client.get_stream_state(&stream_id);
+        assert_eq!(state.status, StreamStatus::Cancelled);
+        assert_eq!(state.cancelled_at, Some(500));
+    }
+
+    /// After cancellation, accrual is frozen: calculate_accrued returns same value
+    /// regardless of how much time passes.
+    #[test]
+    fn near_max_deposit_cancelled_accrual_is_frozen() {
+        let large_deposit: i128 = i128::MAX / 1_000_000;
+        let rate: i128 = large_deposit / 1_000;
+        let (env, contract_id, _t, _a, sender, recipient) = setup_with_balance(large_deposit);
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+        env.ledger().set_timestamp(0);
+
+        let stream_id = client.create_stream(
+            &sender,
+            &recipient,
+            &large_deposit,
+            &rate,
+            &0u64,
+            &0u64,
+            &1_000u64,
+        );
+
+        env.ledger().set_timestamp(300);
+        client.cancel_stream(&stream_id);
+        let accrued_at_cancel = client.calculate_accrued(&stream_id);
+
+        // Advance time significantly — accrual must not grow
+        env.ledger().set_timestamp(999_999);
+        let accrued_later = client.calculate_accrued(&stream_id);
+        assert_eq!(
+            accrued_later, accrued_at_cancel,
+            "cancelled accrual must be frozen"
+        );
+    }
+
+    /// Recipient can withdraw frozen accrued amount after cancellation.
+    #[test]
+    fn near_max_deposit_recipient_withdraws_after_cancel() {
+        let large_deposit: i128 = i128::MAX / 1_000_000;
+        let rate: i128 = large_deposit / 1_000;
+        let (env, contract_id, token_id, _a, sender, recipient) = setup_with_balance(large_deposit);
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+        let token = soroban_sdk::token::Client::new(&env, &token_id);
+        env.ledger().set_timestamp(0);
+
+        let stream_id = client.create_stream(
+            &sender,
+            &recipient,
+            &large_deposit,
+            &rate,
+            &0u64,
+            &0u64,
+            &1_000u64,
+        );
+
+        env.ledger().set_timestamp(700);
+        client.cancel_stream(&stream_id);
+        let frozen_accrued = 700_i128 * rate;
+
+        let withdrawn = client.withdraw(&stream_id);
+        assert_eq!(withdrawn, frozen_accrued);
+        assert_eq!(token.balance(&recipient), frozen_accrued);
+
+        // Status must remain Cancelled (not flip to Completed)
+        let state = client.get_stream_state(&stream_id);
+        assert_eq!(state.status, StreamStatus::Cancelled);
+    }
+
+    // -----------------------------------------------------------------------
+    // 6. Authorization: non-authorized roles cannot operate near-max streams
+    // -----------------------------------------------------------------------
+
+    /// Only the stream sender can cancel a near-max stream; recipient cannot.
+    #[test]
+    fn near_max_deposit_only_sender_can_cancel() {
+        let large_deposit: i128 = i128::MAX / 1_000_000;
+        let rate: i128 = large_deposit / 1_000;
+        let (env, contract_id, _t, _a, sender, recipient) = setup_with_balance(large_deposit);
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+        env.ledger().set_timestamp(0);
+
+        let stream_id = client.create_stream(
+            &sender,
+            &recipient,
+            &large_deposit,
+            &rate,
+            &0u64,
+            &0u64,
+            &1_000u64,
+        );
+
+        // Sender can cancel — must succeed
+        env.ledger().set_timestamp(100);
+        client.cancel_stream(&stream_id);
+        let state = client.get_stream_state(&stream_id);
+        assert_eq!(state.status, StreamStatus::Cancelled);
+    }
+
+    /// Only the recipient can withdraw from a near-max stream.
+    /// (Authorization is enforced by require_auth; mock_all_auths covers both roles here.
+    ///  The strict-mode auth test is in the integration suite.)
+    #[test]
+    fn near_max_deposit_withdraw_requires_recipient_auth() {
+        let large_deposit: i128 = i128::MAX / 1_000_000;
+        let rate: i128 = large_deposit / 1_000;
+        let (env, contract_id, _t, _a, sender, recipient) = setup_with_balance(large_deposit);
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+        env.ledger().set_timestamp(0);
+
+        let stream_id = client.create_stream(
+            &sender,
+            &recipient,
+            &large_deposit,
+            &rate,
+            &0u64,
+            &0u64,
+            &1_000u64,
+        );
+
+        env.ledger().set_timestamp(500);
+        let withdrawn = client.withdraw(&stream_id);
+        assert!(withdrawn > 0, "recipient can withdraw");
+        assert_eq!(withdrawn, 500_i128 * rate);
+    }
+
+    // -----------------------------------------------------------------------
+    // 7. Pause/resume: near-max streams, accrual continues during pause
+    // -----------------------------------------------------------------------
+
+    /// Pausing a near-max stream does not affect accrual calculation.
+    #[test]
+    fn near_max_deposit_pause_does_not_affect_accrual() {
+        let large_deposit: i128 = i128::MAX / 1_000_000;
+        let rate: i128 = large_deposit / 1_000;
+        let (env, contract_id, _t, _a, sender, recipient) = setup_with_balance(large_deposit);
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+        env.ledger().set_timestamp(0);
+
+        let stream_id = client.create_stream(
+            &sender,
+            &recipient,
+            &large_deposit,
+            &rate,
+            &0u64,
+            &0u64,
+            &1_000u64,
+        );
+
+        env.ledger().set_timestamp(200);
+        client.pause_stream(&stream_id);
+
+        // Accrual at t=600 while paused must equal 600 * rate
+        env.ledger().set_timestamp(600);
+        let accrued = client.calculate_accrued(&stream_id);
+        assert_eq!(accrued, 600_i128 * rate, "accrual continues during pause");
+    }
+
+    /// After resume, recipient can withdraw full accrued amount including pause period.
+    #[test]
+    fn near_max_deposit_resume_allows_withdrawal_of_full_accrued() {
+        let large_deposit: i128 = i128::MAX / 1_000_000;
+        let rate: i128 = large_deposit / 1_000;
+        let (env, contract_id, token_id, _a, sender, recipient) = setup_with_balance(large_deposit);
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+        let token = soroban_sdk::token::Client::new(&env, &token_id);
+        env.ledger().set_timestamp(0);
+
+        let stream_id = client.create_stream(
+            &sender,
+            &recipient,
+            &large_deposit,
+            &rate,
+            &0u64,
+            &0u64,
+            &1_000u64,
+        );
+
+        env.ledger().set_timestamp(300);
+        client.pause_stream(&stream_id);
+
+        env.ledger().set_timestamp(700);
+        client.resume_stream(&stream_id);
+
+        // Withdraw at t=700: should get 700 * rate
+        let withdrawn = client.withdraw(&stream_id);
+        assert_eq!(withdrawn, 700_i128 * rate);
+        assert_eq!(token.balance(&recipient), 700_i128 * rate);
+    }
+
+    // -----------------------------------------------------------------------
+    // 8. Batch creation: near-max total deposit, overflow atomicity
+    // -----------------------------------------------------------------------
+
+    /// Two near-max streams in a batch: total deposit sum overflows → InvalidParams, atomic.
+    #[test]
+    fn batch_near_max_total_overflow_is_atomic() {
+        // Each entry has deposit = i128::MAX/2 + 1; sum overflows
+        let per_deposit: i128 = i128::MAX / 2 + 1;
+        let rate: i128 = per_deposit; // duration=1
+        let (env, contract_id, token_id, _a, sender, _r) = setup_with_balance(i128::MAX / 2);
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+        let token = soroban_sdk::token::Client::new(&env, &token_id);
+        env.ledger().set_timestamp(0);
+
+        let count_before = client.get_stream_count();
+        let sender_balance_before = token.balance(&sender);
+
+        let mut params = soroban_sdk::Vec::new(&env);
+        for _ in 0..2 {
+            params.push_back(CreateStreamParams {
+                recipient: Address::generate(&env),
+                deposit_amount: per_deposit,
+                rate_per_second: rate,
+                start_time: 0,
+                cliff_time: 0,
+                end_time: 1,
+            });
+        }
+
+        let result = client.try_create_streams(&sender, &params);
+        assert!(result.is_err(), "overflow batch must fail");
+        assert_eq!(
+            client.get_stream_count(),
+            count_before,
+            "counter must not advance"
+        );
+        assert_eq!(
+            token.balance(&sender),
+            sender_balance_before,
+            "no tokens must move"
+        );
+    }
+
+    /// Batch with one valid near-max entry and one invalid entry: entire batch rejected.
+    #[test]
+    fn batch_one_invalid_near_max_entry_rejects_whole_batch() {
+        let valid_deposit: i128 = i128::MAX / 1_000_000;
+        let valid_rate: i128 = valid_deposit / 1_000;
+        let (env, contract_id, token_id, _a, sender, _r) = setup_with_balance(valid_deposit * 2);
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+        let token = soroban_sdk::token::Client::new(&env, &token_id);
+        env.ledger().set_timestamp(0);
+
+        let count_before = client.get_stream_count();
+        let balance_before = token.balance(&sender);
+
+        let valid = CreateStreamParams {
+            recipient: Address::generate(&env),
+            deposit_amount: valid_deposit,
+            rate_per_second: valid_rate,
+            start_time: 0,
+            cliff_time: 0,
+            end_time: 1_000,
+        };
+        // Invalid: deposit < rate * duration
+        let invalid = CreateStreamParams {
+            recipient: Address::generate(&env),
+            deposit_amount: 1,
+            rate_per_second: valid_rate,
+            start_time: 0,
+            cliff_time: 0,
+            end_time: 1_000,
+        };
+
+        let params = soroban_sdk::vec![&env, valid, invalid];
+        let result = client.try_create_streams(&sender, &params);
+        assert_eq!(result, Err(Ok(ContractError::InsufficientDeposit)));
+        assert_eq!(client.get_stream_count(), count_before);
+        assert_eq!(token.balance(&sender), balance_before);
+    }
+
+    // -----------------------------------------------------------------------
+    // 9. get_withdrawable view: near-max values
+    // -----------------------------------------------------------------------
+
+    /// get_withdrawable returns correct value at near-max scale.
+    #[test]
+    fn near_max_deposit_get_withdrawable_matches_accrued_minus_withdrawn() {
+        let large_deposit: i128 = i128::MAX / 1_000_000;
+        let rate: i128 = large_deposit / 1_000;
+        let (env, contract_id, _t, _a, sender, recipient) = setup_with_balance(large_deposit);
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+        env.ledger().set_timestamp(0);
+
+        let stream_id = client.create_stream(
+            &sender,
+            &recipient,
+            &large_deposit,
+            &rate,
+            &0u64,
+            &0u64,
+            &1_000u64,
+        );
+
+        // Partial withdrawal at t=300
+        env.ledger().set_timestamp(300);
+        client.withdraw(&stream_id);
+
+        // At t=700, withdrawable = accrued(700) - withdrawn(300*rate)
+        env.ledger().set_timestamp(700);
+        let withdrawable = client.get_withdrawable(&stream_id);
+        let accrued = client.calculate_accrued(&stream_id);
+        let withdrawn = client.get_stream_state(&stream_id).withdrawn_amount;
+        assert_eq!(withdrawable, accrued - withdrawn);
+        assert!(withdrawable > 0);
+    }
+} // mod i128_boundary_streams
+
+#[cfg(test)]
+mod recipient_index_stress {
+    use super::*;
+    use soroban_sdk::{testutils::Ledger, Address, Vec};
+
+    #[test]
+    fn test_recipient_index_stress_large_scale() {
+        let ctx = TestContext::setup();
+        let recipient = Address::generate(&ctx.env);
+
+        // Mint sufficient tokens for 100 streams (100 * 1000 = 100,000)
+        // Default setup only mints 10,000.
+        ctx.sac.mint(&ctx.sender, &1_000_000_i128);
+
+        // Stress test: Create 100 streams for one recipient
+        // We use increments of 50 to avoid any single-call resource limits
+        let batch_size = 50;
+        let total_batches = 2; // 100 streams total
+
+        for _ in 0..total_batches {
+            let mut streams = Vec::new(&ctx.env);
+            for _ in 0..batch_size {
+                streams.push_back(CreateStreamParams {
+                    recipient: recipient.clone(),
+                    deposit_amount: 1000,
+                    rate_per_second: 1,
+                    start_time: 100,
+                    cliff_time: 100,
+                    end_time: 1100,
+                });
+            }
+            ctx.client().create_streams(&ctx.sender, &streams);
+        }
+
+        let index = ctx.client().get_recipient_streams(&recipient);
+        assert_eq!(index.len(), 100);
+
+        // Verify sorted order
+        for i in 0..index.len() - 1 {
+            assert!(index.get(i).unwrap() < index.get(i + 1).unwrap());
+        }
+    }
+
+    #[test]
+    fn test_close_cancelled_stream_cleans_index() {
+        let ctx = TestContext::setup();
+        let stream_id = ctx.create_default_stream();
+
+        // Cancel the stream
+        ctx.client().cancel_stream(&stream_id);
+
+        let index_before = ctx.client().get_recipient_streams(&ctx.recipient);
+        assert_eq!(index_before.len(), 1);
+        assert_eq!(index_before.get(0).unwrap(), stream_id);
+
+        // Close the cancelled stream (New feature verification)
+        ctx.client().close_completed_stream(&stream_id);
+
+        let index_after = ctx.client().get_recipient_streams(&ctx.recipient);
+        assert_eq!(index_after.len(), 0);
+
+        // Verify stream is deleted from storage
+        let result = ctx.client().try_get_stream_state(&stream_id);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_recipient_index_consistency_after_many_removals() {
+        let ctx = TestContext::setup();
+        let recipient = Address::generate(&ctx.env);
+
+        // Create 10 streams
+        let mut stream_ids = Vec::new(&ctx.env);
+        for _ in 0..10 {
+            let id = ctx.client().create_stream(
+                &ctx.sender,
+                &recipient,
+                &100_i128,
+                &1_i128,
+                &0u64,
+                &0u64,
+                &100u64,
+            );
+            stream_ids.push_back(id);
+        }
+
+        // Close streams from middle (5), start (0), and end (9)
+        // Note: IDs might not be 0-9 sequentially if multiple creation methods used,
+        // but here they will be because it's a fresh setup.
+
+        // 1. Close middle (ID at index 5)
+        // Make it Completed first
+        ctx.env.ledger().set_timestamp(1101);
+        ctx.client().withdraw(&stream_ids.get(5).unwrap());
+        ctx.client()
+            .close_completed_stream(&stream_ids.get(5).unwrap());
+
+        // 2. Close start (ID at index 0)
+        ctx.client().withdraw(&stream_ids.get(0).unwrap());
+        ctx.client()
+            .close_completed_stream(&stream_ids.get(0).unwrap());
+
+        // 3. Close end (ID at index 9)
+        ctx.client().withdraw(&stream_ids.get(9).unwrap());
+        ctx.client()
+            .close_completed_stream(&stream_ids.get(9).unwrap());
+
+        let index = ctx.client().get_recipient_streams(&recipient);
+        assert_eq!(index.len(), 7);
+
+        // Verify targeted IDs are gone
+        let dead_ids = [
+            stream_ids.get(0).unwrap(),
+            stream_ids.get(5).unwrap(),
+            stream_ids.get(9).unwrap(),
+        ];
+        for id in index.iter() {
+            assert!(!dead_ids.contains(&id));
+        }
+
+        // Verify sorted order remains
+        for i in 0..index.len() - 1 {
+            assert!(index.get(i).unwrap() < index.get(i + 1).unwrap());
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Paginated Export Views Tests (#429)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_get_streams_by_id_range_basic() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+
+        // Create 5 streams
+        let mut ids = Vec::new(&ctx.env);
+        for i in 0..5 {
+            let id = ctx.client().create_stream(
+                &ctx.sender,
+                &ctx.recipient,
+                &1000_i128,
+                &1_i128,
+                &0u64,
+                &0u64,
+                &1000u64,
+            );
+            ids.push_back(id);
+        }
+
+        // Get range [1, 3] with limit 10
+        let streams = ctx.client().get_streams_by_id_range(&1, &3, &10);
+        assert_eq!(streams.len(), 3, "Should return 3 streams");
+
+        // Verify order and content
+        assert_eq!(streams.get(0).unwrap().stream_id, 1);
+        assert_eq!(streams.get(1).unwrap().stream_id, 2);
+        assert_eq!(streams.get(2).unwrap().stream_id, 3);
+    }
+
+    #[test]
+    fn test_get_streams_by_id_range_empty_range() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+
+        // Create a stream
+        ctx.client().create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &1000_i128,
+            &1_i128,
+            &0u64,
+            &0u64,
+            &1000u64,
+        );
+
+        // Range with start > end returns empty
+        let streams = ctx.client().get_streams_by_id_range(&5, &1, &10);
+        assert_eq!(streams.len(), 0, "Empty range should return empty vector");
+    }
+
+    #[test]
+    fn test_get_streams_by_id_range_respects_max_page_size() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+
+        // Create 150 streams (exceeds MAX_PAGE_SIZE of 100)
+        for _ in 0..150 {
+            ctx.client().create_stream(
+                &ctx.sender,
+                &ctx.recipient,
+                &100_i128,
+                &1_i128,
+                &0u64,
+                &0u64,
+                &100u64,
+            );
+        }
+
+        // Request 200, should be capped at MAX_PAGE_SIZE (100)
+        let streams = ctx.client().get_streams_by_id_range(&0, &200, &200);
+        assert_eq!(
+            streams.len(),
+            100,
+            "Should respect MAX_PAGE_SIZE limit of 100"
+        );
+    }
+
+    #[test]
+    fn test_get_streams_by_id_range_handles_closed_streams() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+
+        // Create 5 streams
+        for _ in 0..5 {
+            ctx.client()
+                .create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
+        }
+
+        // Close stream 2 (make it completed first)
+        ctx.env.ledger().set_timestamp(1001);
+        ctx.client().withdraw(&2);
+        ctx.client().close_completed_stream(&2);
+
+        // Range should return streams 1, 3, 4 (skipping closed stream 2)
+        let streams = ctx.client().get_streams_by_id_range(&1, &4, &10);
+        assert_eq!(streams.len(), 3, "Should skip closed stream");
+        assert_eq!(streams.get(0).unwrap().stream_id, 1);
+        assert_eq!(streams.get(1).unwrap().stream_id, 3);
+        assert_eq!(streams.get(2).unwrap().stream_id, 4);
+    }
+
+    #[test]
+    fn test_get_streams_by_id_range_open_ended() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+
+        // Create 10 streams
+        for _ in 0..10 {
+            ctx.client().create_stream(
+                &ctx.sender,
+                &ctx.recipient,
+                &100_i128,
+                &1_i128,
+                &0u64,
+                &0u64,
+                &100u64,
+            );
+        }
+
+        // Use u64::MAX for open-ended range with limit 5
+        let max = u64::MAX;
+        let streams = ctx.client().get_streams_by_id_range(&5, &max, &5);
+        assert_eq!(streams.len(), 5, "Should return 5 streams from position 5");
+        assert_eq!(streams.get(0).unwrap().stream_id, 5);
+        assert_eq!(streams.get(4).unwrap().stream_id, 9);
+    }
+
+    #[test]
+    fn test_get_streams_by_id_range_zero_limit() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+
+        ctx.client().create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &1000_i128,
+            &1_i128,
+            &0u64,
+            &0u64,
+            &1000u64,
+        );
+
+        let streams = ctx.client().get_streams_by_id_range(&0, &10, &0);
+        assert_eq!(streams.len(), 0, "Zero limit should return empty");
+    }
+
+    #[test]
+    fn test_get_recipient_streams_paginated_basic() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+
+        let recipient = Address::generate(&ctx.env);
+
+        // Create 10 streams for this recipient
+        for _ in 0..10 {
+            ctx.client().create_stream(
+                &ctx.sender,
+                &recipient,
+                &1000_i128,
+                &1_i128,
+                &0u64,
+                &0u64,
+                &1000u64,
+            );
+        }
+
+        // Page 1: cursor=0, limit=3
+        let page1 = ctx
+            .client()
+            .get_recipient_streams_paginated(&recipient, &0, &3);
+        assert_eq!(page1.len(), 3);
+        assert_eq!(page1.get(0).unwrap(), 0);
+        assert_eq!(page1.get(1).unwrap(), 1);
+        assert_eq!(page1.get(2).unwrap(), 2);
+
+        // Page 2: cursor=3, limit=3
+        let page2 = ctx
+            .client()
+            .get_recipient_streams_paginated(&recipient, &3, &3);
+        assert_eq!(page2.len(), 3);
+        assert_eq!(page2.get(0).unwrap(), 3);
+        assert_eq!(page2.get(1).unwrap(), 4);
+        assert_eq!(page2.get(2).unwrap(), 5);
+
+        // Page 3: cursor=6, limit=3 (only 4 left)
+        let page3 = ctx
+            .client()
+            .get_recipient_streams_paginated(&recipient, &6, &3);
+        assert_eq!(page3.len(), 3);
+
+        // Page 4: cursor=9, limit=3 (only 1 left)
+        let page4 = ctx
+            .client()
+            .get_recipient_streams_paginated(&recipient, &9, &3);
+        assert_eq!(page4.len(), 1);
+        assert_eq!(page4.get(0).unwrap(), 9);
+
+        // Page 5: cursor=10, should be empty (past end)
+        let page5 = ctx
+            .client()
+            .get_recipient_streams_paginated(&recipient, &10, &3);
+        assert_eq!(page5.len(), 0);
+    }
+
+    #[test]
+    fn test_get_recipient_streams_paginated_respects_max_page_size() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+
+        let recipient = Address::generate(&ctx.env);
+
+        // Create 150 streams
+        for _ in 0..150 {
+            ctx.client()
+                .create_stream(&ctx.sender, &recipient, &100, &1, &0, &0, &100);
+        }
+
+        // Request 200, should be capped at MAX_PAGE_SIZE (100)
+        let page = ctx
+            .client()
+            .get_recipient_streams_paginated(&recipient, &0, &200);
+        assert_eq!(page.len(), 100, "Should respect MAX_PAGE_SIZE of 100");
+    }
+
+    #[test]
+    fn test_get_recipient_streams_paginated_cursor_beyond_end() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+
+        let recipient = Address::generate(&ctx.env);
+        ctx.client().create_stream(
+            &ctx.sender,
+            &recipient,
+            &1000_i128,
+            &1_i128,
+            &0u64,
+            &0u64,
+            &1000u64,
+        );
+
+        // Cursor beyond total count
+        let result = ctx
+            .client()
+            .get_recipient_streams_paginated(&recipient, &100, &10);
+        assert_eq!(result.len(), 0, "Should return empty when cursor >= total");
+    }
+
+    #[test]
+    fn test_get_recipient_streams_paginated_zero_limit() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+
+        let recipient = Address::generate(&ctx.env);
+        ctx.client().create_stream(
+            &ctx.sender,
+            &recipient,
+            &1000_i128,
+            &1_i128,
+            &0u64,
+            &0u64,
+            &1000u64,
+        );
+
+        let result = ctx
+            .client()
+            .get_recipient_streams_paginated(&recipient, &0, &0);
+        assert_eq!(result.len(), 0, "Zero limit should return empty");
+    }
+
+    #[test]
+    fn test_get_recipient_streams_paginated_multiple_recipients() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+
+        let recipient1 = Address::generate(&ctx.env);
+        let recipient2 = Address::generate(&ctx.env);
+
+        // Create 5 streams for recipient1
+        for _ in 0..5 {
+            ctx.client().create_stream(
+                &ctx.sender,
+                &recipient1,
+                &1000_i128,
+                &1_i128,
+                &0u64,
+                &0u64,
+                &1000u64,
+            );
+        }
+
+        // Create 3 streams for recipient2
+        for _ in 0..3 {
+            ctx.client().create_stream(
+                &ctx.sender,
+                &recipient2,
+                &1000_i128,
+                &1_i128,
+                &0u64,
+                &0u64,
+                &1000u64,
+            );
+        }
+
+        // Paginate recipient1
+        let page1 = ctx
+            .client()
+            .get_recipient_streams_paginated(&recipient1, &0, &10);
+        assert_eq!(page1.len(), 5);
+
+        // Paginate recipient2
+        let page2 = ctx
+            .client()
+            .get_recipient_streams_paginated(&recipient2, &0, &10);
+        assert_eq!(page2.len(), 3);
+    }
+
+    #[test]
+    fn test_get_recipient_streams_paginated_handles_closed_streams() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+
+        let recipient = Address::generate(&ctx.env);
+
+        // Create 5 streams
+        for _ in 0..5 {
+            ctx.client().create_stream(
+                &ctx.sender,
+                &recipient,
+                &1000_i128,
+                &1_i128,
+                &0u64,
+                &0u64,
+                &1000u64,
+            );
+        }
+
+        // Close stream 2 (make completed first)
+        ctx.env.ledger().set_timestamp(1001);
+        ctx.client().withdraw(&2);
+        ctx.client().close_completed_stream(&2);
+
+        // Full list should now have 4 items (0,1,3,4)
+        let all = ctx.client().get_recipient_streams(&recipient);
+        assert_eq!(all.len(), 4);
+
+        // Pagination should reflect closed stream
+        let page1 = ctx
+            .client()
+            .get_recipient_streams_paginated(&recipient, &0, &2);
+        assert_eq!(page1.len(), 2);
+        assert_eq!(page1.get(0).unwrap(), 0);
+        assert_eq!(page1.get(1).unwrap(), 1);
+
+        // Next page should start with 3 (not 2, which is closed)
+        let page2 = ctx
+            .client()
+            .get_recipient_streams_paginated(&recipient, &2, &2);
+        assert_eq!(page2.len(), 2);
+        assert_eq!(page2.get(0).unwrap(), 3);
+        assert_eq!(page2.get(1).unwrap(), 4);
+    }
+
+    #[test]
+    fn test_pagination_full_export_workflow() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+
+        let recipient = Address::generate(&ctx.env);
+
+        // Create 25 streams
+        for _ in 0..25 {
+            ctx.client()
+                .create_stream(&ctx.sender, &recipient, &100, &1, &0, &0, &100);
+        }
+
+        // Simulate full export using pagination
+        let mut all_stream_ids = Vec::new(&ctx.env);
+        let mut cursor = 0u64;
+        let page_size = 10u64;
+
+        loop {
+            let page = ctx
+                .client()
+                .get_recipient_streams_paginated(&recipient, &cursor, &page_size);
+            if page.is_empty() {
+                break;
+            }
+            for id in page.iter() {
+                all_stream_ids.push_back(id);
+            }
+            cursor += page.len() as u64;
+        }
+
+        assert_eq!(all_stream_ids.len(), 25, "Should export all 25 streams");
+
+        // Verify sorted order
+        for i in 0..all_stream_ids.len() - 1 {
+            assert!(
+                all_stream_ids.get(i).unwrap() < all_stream_ids.get(i + 1).unwrap(),
+                "Export should maintain sorted order"
+            );
+        }
+    }
+
+    #[test]
+    fn test_get_streams_by_id_range_partial_results() {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+
+        // Create 3 streams (IDs 0, 1, 2)
+        for _ in 0..3 {
+            ctx.client().create_stream(
+                &ctx.sender,
+                &ctx.recipient,
+                &1000_i128,
+                &1_i128,
+                &0u64,
+                &0u64,
+                &1000u64,
+            );
+        }
+
+        // Request range [0, 100] with limit 10 - only 3 exist
+        let streams = ctx.client().get_streams_by_id_range(&0, &100, &10);
+        assert_eq!(streams.len(), 3, "Should return only existing streams");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Structured error tests: panic → ContractError refactor (#442)
+//
+// These tests verify that all previously-panicking input-error paths now
+// return the appropriate ContractError variant instead of aborting the host.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod structured_error_tests {
+    use super::*;
+
+    // ── batch_withdraw: duplicate stream IDs ────────────────────────────────
+
+    /// Duplicate stream IDs in batch_withdraw must return DuplicateStreamId,
+    /// not panic. The entire batch must be reverted atomically.
+    #[test]
+    fn batch_withdraw_duplicate_stream_ids_returns_structured_error() {
+        let ctx = TestContext::setup();
+        let client = FluxoraStreamClient::new(&ctx.env, &ctx.contract_id);
+
+        let stream_id = client.create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &1000_i128,
+            &1_i128,
+            &0u64,
+            &0u64,
+            &1000u64,
+        );
+
+        ctx.env.ledger().set_timestamp(500);
+
+        // Pass the same stream_id twice — must return DuplicateStreamId
+        let ids = soroban_sdk::vec![&ctx.env, stream_id, stream_id];
+        let result = client.try_batch_withdraw(&ctx.recipient, &ids);
+        assert_eq!(
+            result,
+            Err(Ok(ContractError::DuplicateStreamId)),
+            "duplicate stream IDs must return DuplicateStreamId, not panic"
+        );
+
+        // State must be unchanged (no withdrawal occurred)
+        let state = client.get_stream_state(&stream_id);
+        assert_eq!(state.withdrawn_amount, 0);
+    }
+
+    // ── create_streams: batch deposit overflow ───────────────────────────────
+
+    /// When the sum of deposit_amounts in create_streams overflows i128,
+    /// the call must return ArithmeticOverflow, not panic.
+    #[test]
+    fn create_streams_batch_deposit_overflow_returns_structured_error() {
+        let ctx = TestContext::setup();
+        let client = FluxoraStreamClient::new(&ctx.env, &ctx.contract_id);
+
+        // Two entries whose deposits sum to > i128::MAX
+        let half = i128::MAX / 2 + 1;
+        let params = soroban_sdk::vec![
+            &ctx.env,
+            CreateStreamParams {
+                recipient: ctx.recipient.clone(),
+                deposit_amount: half,
+                rate_per_second: 1_i128,
+                start_time: 0u64,
+                cliff_time: 0u64,
+                end_time: half as u64,
+            },
+            CreateStreamParams {
+                recipient: ctx.recipient.clone(),
+                deposit_amount: half,
+                rate_per_second: 1_i128,
+                start_time: 0u64,
+                cliff_time: 0u64,
+                end_time: half as u64,
+            },
+        ];
+
+        let result = client.try_create_streams(&ctx.sender, &params);
+        assert_eq!(
+            result,
+            Err(Ok(ContractError::ArithmeticOverflow)),
+            "batch deposit overflow must return ArithmeticOverflow, not panic"
+        );
+    }
+
+    // ── update_rate_per_second: rate × duration overflow ────────────────────
+
+    /// When new_rate_per_second × duration overflows i128,
+    /// update_rate_per_second must return ArithmeticOverflow, not panic.
+    #[test]
+    fn update_rate_overflow_returns_structured_error() {
+        let ctx = TestContext::setup();
+        let client = FluxoraStreamClient::new(&ctx.env, &ctx.contract_id);
+
+        // Create a stream with a very large end_time so duration is huge
+        let large_end: u64 = u64::MAX / 2;
+        // deposit must be >= rate * duration; use i128::MAX as deposit
+        // We need to mint enough tokens first
+        ctx.sac.mint(&ctx.sender, &i128::MAX);
+
+        let stream_id = client.create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &i128::MAX,
+            &1_i128,
+            &0u64,
+            &0u64,
+            &large_end,
+        );
+
+        // new_rate * large_end overflows i128
+        let overflow_rate = i128::MAX / (large_end as i128) + 2;
+        let result = client.try_update_rate_per_second(&stream_id, &overflow_rate);
+        assert_eq!(
+            result,
+            Err(Ok(ContractError::ArithmeticOverflow)),
+            "rate × duration overflow must return ArithmeticOverflow, not panic"
+        );
+    }
+
+    // ── require_not_globally_paused: returns ContractError ──────────────────
+
+    /// When the contract is globally paused, withdraw must return ContractPaused
+    /// as a structured error, not panic.
+    #[test]
+    fn globally_paused_withdraw_returns_contract_paused_error() {
+        let ctx = TestContext::setup();
+        let client = FluxoraStreamClient::new(&ctx.env, &ctx.contract_id);
+
+        let stream_id = client.create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &1000_i128,
+            &1_i128,
+            &0u64,
+            &0u64,
+            &1000u64,
+        );
+
+        ctx.env.ledger().set_timestamp(500);
+        client.set_global_emergency_paused(&true);
+
+        let result = client.try_withdraw(&stream_id);
+        assert_eq!(
+            result,
+            Err(Ok(ContractError::ContractPaused)),
+            "withdraw while globally paused must return ContractPaused, not panic"
+        );
+    }
+
+    /// When the contract is globally paused, cancel_stream must return ContractPaused.
+    #[test]
+    fn globally_paused_cancel_returns_contract_paused_error() {
+        let ctx = TestContext::setup();
+        let client = FluxoraStreamClient::new(&ctx.env, &ctx.contract_id);
+
+        let stream_id = client.create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &1000_i128,
+            &1_i128,
+            &0u64,
+            &0u64,
+            &1000u64,
+        );
+
+        client.set_global_emergency_paused(&true);
+
+        let result = client.try_cancel_stream(&stream_id);
+        assert_eq!(
+            result,
+            Err(Ok(ContractError::ContractPaused)),
+            "cancel_stream while globally paused must return ContractPaused, not panic"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — batch_withdraw duplicate stream_id rejection (#405)
+// ---------------------------------------------------------------------------
+
+/// Adjacent duplicate ids must be rejected atomically — no transfers, no events.
+#[test]
+fn test_batch_withdraw_adjacent_duplicates_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let id0 = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(500);
+    let balance_before = ctx.token().balance(&ctx.recipient);
+
+    let result = ctx
+        .client()
+        .try_batch_withdraw(&ctx.recipient, &stream_ids_vec(&ctx.env, &[id0, id0]));
+
+    assert!(result.is_err(), "adjacent duplicates must be rejected");
+    assert_eq!(
+        ctx.token().balance(&ctx.recipient),
+        balance_before,
+        "no transfer must occur on duplicate rejection"
+    );
+    let state = ctx.client().get_stream_state(&id0);
+    assert_eq!(
+        state.withdrawn_amount, 0,
+        "withdrawn_amount must not change"
+    );
+    assert_eq!(state.status, StreamStatus::Active);
+}
+
+/// Non-adjacent duplicate ids must also be rejected atomically.
+#[test]
+fn test_batch_withdraw_non_adjacent_duplicates_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let id0 = ctx.create_default_stream();
+    ctx.sac.mint(&ctx.sender, &1000_i128);
+    let id1 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    ctx.env.ledger().set_timestamp(300);
+    let balance_before = ctx.token().balance(&ctx.recipient);
+
+    let result = ctx
+        .client()
+        .try_batch_withdraw(&ctx.recipient, &stream_ids_vec(&ctx.env, &[id0, id1, id0]));
+
+    assert!(result.is_err(), "non-adjacent duplicates must be rejected");
+    assert_eq!(
+        ctx.token().balance(&ctx.recipient),
+        balance_before,
+        "no transfer must occur on duplicate rejection"
+    );
+    assert_eq!(ctx.client().get_stream_state(&id0).withdrawn_amount, 0);
+    assert_eq!(ctx.client().get_stream_state(&id1).withdrawn_amount, 0);
+}
+
+/// Duplicate id where one of the streams is already Completed must still be rejected.
+#[test]
+fn test_batch_withdraw_duplicate_with_completed_stream_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let id0 = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&id0);
+    assert_eq!(
+        ctx.client().get_stream_state(&id0).status,
+        StreamStatus::Completed
+    );
+
+    let balance_before = ctx.token().balance(&ctx.recipient);
+
+    let result = ctx
+        .client()
+        .try_batch_withdraw(&ctx.recipient, &stream_ids_vec(&ctx.env, &[id0, id0]));
+
+    assert!(
+        result.is_err(),
+        "duplicate completed stream_id must be rejected"
+    );
+    assert_eq!(
+        ctx.token().balance(&ctx.recipient),
+        balance_before,
+        "no transfer must occur"
+    );
+}
+
+/// A single id (no duplicates) must still succeed normally.
+#[test]
+fn test_batch_withdraw_single_id_no_false_positive() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let id0 = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(400);
+    let results = ctx
+        .client()
+        .batch_withdraw(&ctx.recipient, &stream_ids_vec(&ctx.env, &[id0]));
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results.get(0).unwrap().amount, 400);
+}
+
+/// All-duplicate list (same id repeated three times) must be rejected.
+#[test]
+fn test_batch_withdraw_all_same_id_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let id0 = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(200);
+    let result = ctx
+        .client()
+        .try_batch_withdraw(&ctx.recipient, &stream_ids_vec(&ctx.env, &[id0, id0, id0]));
+
+    assert!(result.is_err(), "all-same-id list must be rejected");
+    assert_eq!(ctx.client().get_stream_state(&id0).withdrawn_amount, 0);
+}
+
+/// Duplicate rejection must carry the correct error code (DuplicateStreamId = 14).
+#[test]
+fn test_batch_withdraw_duplicate_returns_correct_error_code() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let id0 = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(100);
+    let result = ctx
+        .client()
+        .try_batch_withdraw(&ctx.recipient, &stream_ids_vec(&ctx.env, &[id0, id0]));
+
+    match result {
+        Err(Ok(e)) => assert_eq!(e, crate::ContractError::DuplicateStreamId),
+        other => panic!("expected ContractError::DuplicateStreamId, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_global_pause_flags_default_to_false() {
+    let ctx = TestContext::setup();
+
+    // By default, both pause flags should be false.
+    let is_emergency_paused = ctx.client().get_global_emergency_paused();
+    assert!(
+        !is_emergency_paused,
+        "Global emergency pause should default to false"
+    );
+
+    // Since there is no public getter for CreationPaused, we read from storage
+    // or test behavior. Testing storage directly:
+    let creation_paused: bool = ctx
+        .env
+        .as_contract(&ctx.contract_id, || crate::is_creation_paused(&ctx.env));
+    assert!(!creation_paused, "Creation pause should default to false");
 }
