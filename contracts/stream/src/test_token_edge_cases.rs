@@ -197,7 +197,7 @@ fn non_sender_cannot_pause_stream_strict_auth() {
     let non_sender = Address::generate(&ctx.env);
 
     // Try to pause without proper auth
-    let result = ctx.client().try_pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    let result = ctx.client().try_pause_stream(&stream_id, &crate::PauseReason::Operational);
     assert!(
         result.is_err(),
         "non-sender must not be able to pause stream"

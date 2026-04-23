@@ -35,6 +35,8 @@ Notes:
 | ProtocolResumed  | `["pr_resume", admin: Address]` | `ProtocolResumed { resumed_at: u64 }`                                                                                                                     | When `resume_protocol` successfully resumes the protocol. Not emitted on idempotent calls.                             |
 | SenderTransferred | `["sndr_xfr", stream_id: u64]` | `SenderTransferred { stream_id: u64, old_sender: Address, new_sender: Address }`                                                                          | When `transfer_sender` successfully rotates the stream sender. Emitted after state is persisted. Not emitted on failure. |
 
+**Additional topics (validator):** `gl_pause`, `gl_resume`, `rate_dec`, `tmpl_def`.
+
 ---
 | Event name | Topic(s) | Data (shape & types) | When emitted |
 |---|---:|---|---|

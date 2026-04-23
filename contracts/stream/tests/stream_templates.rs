@@ -1,11 +1,12 @@
 extern crate std;
 
 use fluxora_stream::{
-    ContractError, FluxoraStream, FluxoraStreamClient, StreamScheduleTemplate, MAX_TEMPLATES_PER_OWNER,
+    ContractError, FluxoraStream, FluxoraStreamClient, StreamScheduleTemplate,
+    MAX_TEMPLATES_PER_OWNER,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    token::StellarAssetClient,
+    token::{Client as TokenClient, StellarAssetClient},
     Address, Env,
 };
 
@@ -29,6 +30,7 @@ fn template_register_create_delete_happy_path() {
 
     let sac = StellarAssetClient::new(&env, &token_id);
     sac.mint(&sender, &10_000_i128);
+    TokenClient::new(&env, &token_id).approve(&sender, &contract_id, &i128::MAX, &100_000);
 
     env.ledger().set_timestamp(1_000_000);
 
@@ -41,13 +43,8 @@ fn template_register_create_delete_happy_path() {
     assert_eq!(stored.cliff_delay, 0);
     assert_eq!(stored.duration, 3600);
 
-    let stream_id = client.create_stream_from_template(
-        &sender,
-        &tid,
-        &recipient,
-        &3600_i128,
-        &1_i128,
-    );
+    let stream_id =
+        client.create_stream_from_template(&sender, &tid, &recipient, &3600_i128, &1_i128);
     assert_eq!(stream_id, 0u64);
 
     client.delete_stream_template(&owner, &tid);

@@ -26,6 +26,9 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `StreamNotPaused` | 12 | Stream is not `Paused`; cannot resume an `Active` stream | `resume_stream`, `resume_stream_as_admin` |
 | `StreamTerminalState` | 13 | Stream is `Completed` or `Cancelled`; modification blocked | `pause_stream`, `resume_stream`, admin overrides |
 | `DuplicateStreamId` | 14 | Duplicate stream IDs supplied to a batch operation | `batch_withdraw` |
+| `TemplateNotFound` | 15 | No template exists for the given template id | `get_stream_template`, `create_stream_from_template`, `delete_stream_template` |
+| `TemplateLimitExceeded` | 16 | Template registry limits exceeded | `register_stream_template` |
+| `TemplateUnauthorized` | 17 | Caller is not the template owner | `delete_stream_template` |
 
 ---
 

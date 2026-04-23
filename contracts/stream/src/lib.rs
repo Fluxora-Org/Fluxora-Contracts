@@ -29,6 +29,9 @@ const PERSISTENT_BUMP_AMOUNT: u32 = 120_960;
 /// All paginated entrypoints enforce this limit strictly.
 pub const MAX_PAGE_SIZE: u64 = 100;
 
+/// Maximum memo payload size in bytes (stream metadata for indexers).
+pub const MAX_MEMO_BYTES: usize = 64;
+
 /// Maximum schedule templates a single owner may register (bounds `OwnerTemplateIds` growth).
 pub const MAX_TEMPLATES_PER_OWNER: u32 = 64;
 /// Global bound on stored schedule templates (DoS / storage bloat prevention).
@@ -90,7 +93,8 @@ pub const MAX_GLOBAL_TEMPLATES: u64 = 10_000;
 /// for safe rate-decrease support (see `decrease_rate_per_second`).
 /// Bumped to 3: stream schedule templates (`register_stream_template`, `delete_stream_template`,
 /// `create_stream_from_template`, new `DataKey` variants at the end of the enum).
-pub const CONTRACT_VERSION: u32 = 3;
+/// Bumped to 4: `TotalLiabilities` instance key for escrow accounting.
+pub const CONTRACT_VERSION: u32 = 4;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -177,7 +181,7 @@ pub enum PauseReason {
 /// payload that includes the reason code. Indexers must update their parsers to
 /// handle this new shape (see `docs/events.md`).
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StreamPaused {
     pub stream_id: u64,
     pub reason: PauseReason,
@@ -517,6 +521,8 @@ pub enum DataKey {
     StreamTemplate(u64),
     /// Template ids owned by an address (persistent `Vec<u64>`; length capped).
     OwnerTemplateIds(Address),
+    /// Sum of outstanding deposit liabilities (`i128`, instance storage).
+    TotalLiabilities,
 }
 
 // ---------------------------------------------------------------------------
@@ -566,6 +572,15 @@ fn is_creation_paused(env: &Env) -> bool {
 /// Admin/admin-override entrypoints must not call this so operators can still intervene.
 fn require_not_globally_paused(env: &Env) -> Result<(), ContractError> {
     if is_global_emergency_paused(env) {
+        return Err(ContractError::ContractPaused);
+    }
+    Ok(())
+}
+
+/// Blocks new stream creation when the emergency pause or creation-only pause is active.
+fn require_not_creation_paused(env: &Env) -> Result<(), ContractError> {
+    require_not_globally_paused(env)?;
+    if is_creation_paused(env) {
         return Err(ContractError::ContractPaused);
     }
     Ok(())
@@ -707,6 +722,161 @@ fn remove_stream_from_recipient_index(env: &Env, recipient: &Address, stream_id:
     if let Ok(idx) = streams.binary_search(stream_id) {
         streams.remove(idx);
         save_recipient_streams(env, recipient, &streams);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Liability tracking (total escrow owed to recipients)
+// ---------------------------------------------------------------------------
+
+fn read_total_liabilities(env: &Env) -> i128 {
+    bump_instance_ttl(env);
+    env.storage()
+        .instance()
+        .get(&DataKey::TotalLiabilities)
+        .unwrap_or(0i128)
+}
+
+fn write_total_liabilities(env: &Env, amount: i128) {
+    env.storage()
+        .instance()
+        .set(&DataKey::TotalLiabilities, &amount);
+    bump_instance_ttl(env);
+}
+
+// ---------------------------------------------------------------------------
+// Schedule template registry
+// ---------------------------------------------------------------------------
+
+fn read_next_template_id(env: &Env) -> u64 {
+    bump_instance_ttl(env);
+    env.storage()
+        .instance()
+        .get(&DataKey::NextTemplateId)
+        .unwrap_or(0u64)
+}
+
+fn set_next_template_id(env: &Env, id: u64) {
+    env.storage().instance().set(&DataKey::NextTemplateId, &id);
+    bump_instance_ttl(env);
+}
+
+fn read_active_template_count(env: &Env) -> u64 {
+    bump_instance_ttl(env);
+    env.storage()
+        .instance()
+        .get(&DataKey::ActiveTemplateCount)
+        .unwrap_or(0u64)
+}
+
+fn set_active_template_count(env: &Env, count: u64) {
+    env.storage()
+        .instance()
+        .set(&DataKey::ActiveTemplateCount, &count);
+    bump_instance_ttl(env);
+}
+
+fn validate_template_delays(
+    env: &Env,
+    start_delay: u64,
+    cliff_delay: u64,
+    duration: u64,
+) -> Result<(), ContractError> {
+    if duration == 0 {
+        return Err(ContractError::InvalidParams);
+    }
+    if cliff_delay < start_delay {
+        return Err(ContractError::InvalidParams);
+    }
+    let current = env.ledger().timestamp();
+    let start_time = current
+        .checked_add(start_delay)
+        .ok_or(ContractError::InvalidParams)?;
+    let cliff_time = current
+        .checked_add(cliff_delay)
+        .ok_or(ContractError::InvalidParams)?;
+    let end_time = start_time
+        .checked_add(duration)
+        .ok_or(ContractError::InvalidParams)?;
+    if cliff_time > end_time {
+        return Err(ContractError::InvalidParams);
+    }
+    Ok(())
+}
+
+fn load_owner_template_ids(env: &Env, owner: &Address) -> soroban_sdk::Vec<u64> {
+    let key = DataKey::OwnerTemplateIds(owner.clone());
+    let ids: soroban_sdk::Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+    if !ids.is_empty() {
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+    ids
+}
+
+fn save_owner_template_ids(env: &Env, owner: &Address, ids: &soroban_sdk::Vec<u64>) {
+    let key = DataKey::OwnerTemplateIds(owner.clone());
+    env.storage().persistent().set(&key, ids);
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+}
+
+fn save_stream_template(env: &Env, tpl: &StreamScheduleTemplate) {
+    let key = DataKey::StreamTemplate(tpl.template_id);
+    env.storage().persistent().set(&key, tpl);
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+}
+
+fn load_stream_template(
+    env: &Env,
+    template_id: u64,
+) -> Result<StreamScheduleTemplate, ContractError> {
+    let key = DataKey::StreamTemplate(template_id);
+    let tpl: StreamScheduleTemplate = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .ok_or(ContractError::TemplateNotFound)?;
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+    Ok(tpl)
+}
+
+fn remove_stream_template_storage(env: &Env, template_id: u64) {
+    let key = DataKey::StreamTemplate(template_id);
+    env.storage().persistent().remove(&key);
+}
+
+fn remove_template_id_for_owner(
+    env: &Env,
+    owner: &Address,
+    template_id: u64,
+) -> Result<(), ContractError> {
+    let mut ids = load_owner_template_ids(env, owner);
+    match ids.binary_search(template_id) {
+        Ok(idx) => {
+            ids.remove(idx);
+            save_owner_template_ids(env, owner, &ids);
+            Ok(())
+        }
+        Err(_) => Err(ContractError::TemplateNotFound),
     }
 }
 
@@ -885,11 +1055,6 @@ impl FluxoraStream {
 
         save_stream(env, &stream);
 
-        // Persist memo in a separate key so it can be read independently.
-        if let Some(ref m) = memo {
-            save_stream_memo(env, stream_id, m);
-        }
-
         // Add stream to recipient's index (maintains sorted order by stream_id)
         add_stream_to_recipient_index(env, &recipient, stream_id);
 
@@ -974,8 +1139,15 @@ impl FluxoraStream {
         let config = Config { token, admin };
         env.storage().instance().set(&DataKey::Config, &config);
         env.storage().instance().set(&DataKey::NextStreamId, &0u64);
-        env.storage().instance().set(&DataKey::NextTemplateId, &0u64);
-        env.storage().instance().set(&DataKey::ActiveTemplateCount, &0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::NextTemplateId, &0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::ActiveTemplateCount, &0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalLiabilities, &0i128);
 
         // Ensure instance storage (Config / NextStreamId) doesn't expire quickly
         bump_instance_ttl(&env);
@@ -1212,7 +1384,7 @@ impl FluxoraStream {
             start_time,
             cliff_time,
             end_time,
-            memo,
+            params.memo,
         )
     }
 
@@ -1525,7 +1697,11 @@ impl FluxoraStream {
     /// - Recipient cannot withdraw while stream is paused
     /// - Stream can be cancelled while paused
     /// - Use `resume_stream` to reactivate withdrawals
-    pub fn pause_stream(env: Env, stream_id: u64, reason: PauseReason) -> Result<(), ContractError> {
+    pub fn pause_stream(
+        env: Env,
+        stream_id: u64,
+        reason: PauseReason,
+    ) -> Result<(), ContractError> {
         let mut stream = load_stream(&env, stream_id)?;
 
         Self::require_stream_sender(&stream.sender);
@@ -2515,9 +2691,8 @@ impl FluxoraStream {
         env: Env,
         stream_id: u64,
     ) -> Result<Option<soroban_sdk::Bytes>, ContractError> {
-        // Verify the stream exists before returning memo.
-        load_stream(&env, stream_id)?;
-        Ok(load_stream_memo(&env, stream_id))
+        let stream = load_stream(&env, stream_id)?;
+        Ok(stream.memo)
     }
 
     /// Return the total number of streams created so far.
@@ -3089,13 +3264,14 @@ impl FluxoraStream {
         if stream.status == StreamStatus::Cancelled {
             let cancelled_at = stream.cancelled_at.ok_or(ContractError::InvalidState)?;
             let accrued = accrual::calculate_accrued_amount_checkpointed(
-                stream.start_time,
-                stream.checkpointed_amount,
-                stream.checkpointed_at,
-                stream.cliff_time,
-                stream.end_time,
+                accrual::CheckpointState {
+                    checkpointed_amount: stream.checkpointed_amount,
+                    checkpointed_at: stream.checkpointed_at,
+                    cliff_time: stream.cliff_time,
+                    end_time: stream.end_time,
+                    deposit_amount: stream.deposit_amount,
+                },
                 stream.rate_per_second,
-                stream.deposit_amount,
                 cancelled_at,
             );
             let claimable = accrued.saturating_sub(stream.withdrawn_amount).max(0);
@@ -3111,7 +3287,6 @@ impl FluxoraStream {
 
         // Remove stream from recipient's index before deleting the stream
         remove_stream_from_recipient_index(&env, &stream.recipient, stream_id);
-        remove_stream_memo(&env, stream_id);
         remove_stream(&env, stream_id);
 
         Ok(())
@@ -3188,17 +3363,23 @@ impl FluxoraStream {
         Self::create_stream_relative(
             env,
             sender,
-            recipient,
-            deposit_amount,
-            rate_per_second,
-            tpl.start_delay,
-            tpl.cliff_delay,
-            tpl.duration,
+            CreateStreamRelativeParams {
+                recipient,
+                deposit_amount,
+                rate_per_second,
+                start_delay: tpl.start_delay,
+                cliff_delay: tpl.cliff_delay,
+                duration: tpl.duration,
+                memo: None,
+            },
         )
     }
 
     /// Read a schedule template by id (permissionless view).
-    pub fn get_stream_template(env: Env, template_id: u64) -> Result<StreamScheduleTemplate, ContractError> {
+    pub fn get_stream_template(
+        env: Env,
+        template_id: u64,
+    ) -> Result<StreamScheduleTemplate, ContractError> {
         load_stream_template(&env, template_id)
     }
 
@@ -3638,7 +3819,11 @@ impl FluxoraStream {
     /// - Admin can pause any stream regardless of sender
     /// - Accrual continues based on time (pause doesn't stop time)
     /// - Recipient cannot withdraw while paused
-    pub fn pause_stream_as_admin(env: Env, stream_id: u64, reason: PauseReason) -> Result<(), ContractError> {
+    pub fn pause_stream_as_admin(
+        env: Env,
+        stream_id: u64,
+        reason: PauseReason,
+    ) -> Result<(), ContractError> {
         get_admin(&env)?.require_auth();
 
         let mut stream = load_stream(&env, stream_id)?;

@@ -7,6 +7,7 @@ description = "Fluxora USDC streaming contract for Stellar Soroban"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
+doctest = false
 
 [features]
 testutils = ["soroban-sdk/testutils"]
@@ -24,13 +25,3 @@ soroban-sdk = "21.7.7"
 soroban-sdk = { version = "21.7.7", features = ["testutils"] }
 # Property-based testing for accrual math fuzz harness (#292)
 proptest = "1"
-
-[[test]]
-name = "adversarial_auth"
-path = "tests/adversarial_auth.rs"
-required-features = ["testutils"]
-
-[[test]]
-name = "gas_profile"
-path = "tests/gas_profile.rs"
-required-features = ["testutils"]

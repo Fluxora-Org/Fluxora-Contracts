@@ -14,6 +14,8 @@ Checks three categories:
      -> must appear in docs/error.md
 """
 
+from __future__ import annotations
+
 import os
 import re
 import sys
@@ -36,12 +38,12 @@ MAPPING = {
         "**/stream/src/lib.rs",
     ),
     "EVENTS_SRC": (
-        REPO_ROOT / "contracts" / "core" / "src" / "events.rs",
-        "**/core/src/events.rs",
+        REPO_ROOT / "contracts" / "stream" / "src" / "lib.rs",
+        "**/stream/src/lib.rs",
     ),
     "ERROR_SRC": (
-        REPO_ROOT / "contracts" / "core" / "src" / "error.rs",
-        "**/core/src/error.rs",
+        REPO_ROOT / "contracts" / "stream" / "src" / "lib.rs",
+        "**/stream/src/lib.rs",
     ),
     "DOC_STREAMING": (
         REPO_ROOT / "docs" / "streaming.md",
@@ -59,10 +61,15 @@ MAPPING = {
 
 # pub fn names that are internal helpers or common traits, not ABI entry-points.
 ENTRYPOINT_ALLOWLIST = frozenset({
-    "save_stream", 
-    "require_not_paused", 
-    "require_not_globally_paused"
+    "save_stream",
+    "require_not_paused",
+    "require_not_globally_paused",
 })
+
+# `#[contracterror]`-shaped variants that belong to other enums in the same file.
+ERROR_EXTRACT_EXCLUDE = frozenset(
+    {"Operational", "Administrative", "Compliance", "Emergency"}
+)
 
 # ---------------------------------------------------------------------------
 # Path resolution
@@ -126,7 +133,8 @@ _RE_ENTRYPOINT = re.compile(
 )
 
 _RE_EVENT_SYMBOL = re.compile(
-    r'Symbol::(?:short|new)\s*\(\s*&\w+\s*,\s*"([^"]+)"\s*\)',
+    r'(?:Symbol::(?:short|new)\s*\(\s*&\w+\s*,\s*"([^"]+)"\s*\)'
+    r'|symbol_short!\(\s*"([^"]+)"\s*\))',
     re.MULTILINE,
 )
 
@@ -140,10 +148,16 @@ def extract_entrypoints(source: str) -> set:
     return names - ENTRYPOINT_ALLOWLIST
 
 def extract_event_symbols(source: str) -> set:
-    return set(_RE_EVENT_SYMBOL.findall(source))
+    out: set[str] = set()
+    for a, b in _RE_EVENT_SYMBOL.findall(source):
+        if a:
+            out.add(a)
+        if b:
+            out.add(b)
+    return out
 
 def extract_error_variants(source: str) -> set:
-    return set(_RE_ERROR_VARIANT.findall(source))
+    return set(_RE_ERROR_VARIANT.findall(source)) - ERROR_EXTRACT_EXCLUDE
 
 # ---------------------------------------------------------------------------
 # Validation

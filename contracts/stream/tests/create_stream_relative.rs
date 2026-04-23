@@ -75,12 +75,15 @@ fn create_stream_relative_zero_delays_immediate_start() {
 
     let stream_id = ctx.client().create_stream_relative(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,    // start_delay: 0 -> start_time = 1000
-        &0u64,    // cliff_delay: 0 -> cliff_time = 1000
-        &1000u64, // duration: 1000 -> end_time = 1000 + 1000 = 2000
+        &CreateStreamRelativeParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000,
+            rate_per_second: 1,
+            start_delay: 0,
+            cliff_delay: 0,
+            duration: 1000,
+            memo: None,
+        },
     );
 
     let state = ctx.client().get_stream_state(&stream_id);
@@ -101,12 +104,15 @@ fn create_stream_relative_positive_delays_future_start() {
 
     let stream_id = ctx.client().create_stream_relative(
         &ctx.sender,
-        &ctx.recipient,
-        &4000_i128, // deposit_amount: 4000 (2 * 2000)
-        &2_i128,
-        &100u64,  // start_delay: 100 -> start_time = 1100
-        &500u64,  // cliff_delay: 500 -> cliff_time = 1500
-        &2000u64, // duration: 2000 -> end_time = 1100 + 2000 = 3100
+        &CreateStreamRelativeParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 4000,
+            rate_per_second: 2,
+            start_delay: 100,
+            cliff_delay: 500,
+            duration: 2000,
+            memo: None,
+        },
     );
 
     let state = ctx.client().get_stream_state(&stream_id);
@@ -124,12 +130,15 @@ fn create_stream_relative_zero_duration_rejected() {
 
     let result = ctx.client().try_create_stream_relative(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &100u64, // start_delay
-        &100u64, // cliff_delay
-        &0u64,   // duration: 0 -> INVALID (start_time == end_time)
+        &CreateStreamRelativeParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000,
+            rate_per_second: 1,
+            start_delay: 100,
+            cliff_delay: 100,
+            duration: 0,
+            memo: None,
+        },
     );
 
     // Should fail because end_time would equal start_time
@@ -144,12 +153,15 @@ fn create_stream_relative_cliff_less_than_start_rejected() {
 
     let result = ctx.client().try_create_stream_relative(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &500u64,  // start_delay -> start_time = 1500
-        &100u64,  // cliff_delay -> cliff_time = 1100 (< start_time)
-        &1000u64, // duration
+        &CreateStreamRelativeParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000,
+            rate_per_second: 1,
+            start_delay: 500,
+            cliff_delay: 100,
+            duration: 1000,
+            memo: None,
+        },
     );
 
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
@@ -165,12 +177,15 @@ fn create_stream_relative_cliff_greater_than_end_rejected() {
     // cliff_time = 3000 (> end_time) -> INVALID
     let result = ctx.client().try_create_stream_relative(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &100u64,  // start_delay -> start_time = 1100
-        &2000u64, // cliff_delay -> cliff_time = 3000 (> end_time = 2100)
-        &1000u64, // duration -> end_time = 2100
+        &CreateStreamRelativeParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000,
+            rate_per_second: 1,
+            start_delay: 100,
+            cliff_delay: 2000,
+            duration: 1000,
+            memo: None,
+        },
     );
 
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
@@ -185,13 +200,15 @@ fn create_stream_relative_start_delay_overflow_rejected() {
 
     let result = ctx.client().try_create_stream_relative(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &u64::MAX, // start_delay overflow -> INVALID
-        &0u64,
-        &1000u64,
-        &None,
+        &CreateStreamRelativeParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000,
+            rate_per_second: 1,
+            start_delay: u64::MAX,
+            cliff_delay: 0,
+            duration: 1000,
+            memo: None,
+        },
     );
 
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
@@ -206,12 +223,15 @@ fn create_stream_relative_duration_overflow_rejected() {
 
     let result = ctx.client().try_create_stream_relative(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &(u64::MAX - 500), // start_delay -> start_time near u64::MAX
-        &0u64,
-        &1000u64, // duration overflow -> INVALID
+        &CreateStreamRelativeParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000,
+            rate_per_second: 1,
+            start_delay: u64::MAX - 500,
+            cliff_delay: 0,
+            duration: 1000,
+            memo: None,
+        },
     );
 
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
@@ -227,13 +247,15 @@ fn create_stream_relative_never_start_time_in_past() {
     // Even with zero delays, start_time = current_time (not past)
     let stream_id = ctx.client().create_stream_relative(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &None,
+        &CreateStreamRelativeParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000,
+            rate_per_second: 1,
+            start_delay: 0,
+            cliff_delay: 0,
+            duration: 1000,
+            memo: None,
+        },
     );
 
     let state = ctx.client().get_stream_state(&stream_id);
@@ -254,12 +276,15 @@ fn create_stream_relative_insufficient_deposit_rejected() {
 
     let result = ctx.client().try_create_stream_relative(
         &ctx.sender,
-        &ctx.recipient,
-        &500_i128, // deposit_amount: 500
-        &2_i128,   // rate_per_second: 2
-        &0u64,
-        &0u64,
-        &300u64, // duration: 300 -> streamable = 2 * 300 = 600 > 500
+        &CreateStreamRelativeParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 500,
+            rate_per_second: 2,
+            start_delay: 0,
+            cliff_delay: 0,
+            duration: 300,
+            memo: None,
+        },
     );
 
     assert_eq!(result, Err(Ok(ContractError::InsufficientDeposit)));
@@ -273,13 +298,15 @@ fn create_stream_relative_rejects_self_stream() {
 
     let result = ctx.client().try_create_stream_relative(
         &ctx.sender,
-        &ctx.sender, // invalid: sender == recipient
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &None,
+        &CreateStreamRelativeParams {
+            recipient: ctx.sender.clone(),
+            deposit_amount: 1000,
+            rate_per_second: 1,
+            start_delay: 0,
+            cliff_delay: 0,
+            duration: 1000,
+            memo: None,
+        },
     );
 
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
@@ -441,6 +468,7 @@ fn create_streams_relative_diverse_schedules() {
             start_delay: 0,
             cliff_delay: 0,
             duration: 100,
+            memo: None,
         },
         CreateStreamRelativeParams {
             recipient: r2,
@@ -449,6 +477,7 @@ fn create_streams_relative_diverse_schedules() {
             start_delay: 500,
             cliff_delay: 600,
             duration: 200,
+            memo: None,
         },
         CreateStreamRelativeParams {
             recipient: r3,
@@ -457,6 +486,7 @@ fn create_streams_relative_diverse_schedules() {
             start_delay: 1000,
             cliff_delay: 1200,
             duration: 300,
+            memo: None,
         },
     ];
 
@@ -478,9 +508,9 @@ fn create_streams_relative_diverse_schedules() {
     assert_eq!(s2.cliff_time, 11200);
     assert_eq!(s2.end_time, 11300);
 
-    // Verify total deposit transferred
-    assert_eq!(ctx.token.balance(&ctx.sender), 4_000); // 10000 - 6000
-    assert_eq!(ctx.token.balance(&ctx.contract_id), 6_000);
+    // Verify total deposit transferred (100 + 400 + 900 = 1400)
+    assert_eq!(ctx.token.balance(&ctx.sender), 8_600);
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 1_400);
 }
 
 /// Test that create_streams_relative correctly computes cliff times independently per entry.

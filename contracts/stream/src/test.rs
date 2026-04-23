@@ -8,8 +8,8 @@ use soroban_sdk::{
 
 use crate::{
     ContractError, ContractPauseChanged, CreateStreamParams, FluxoraStream, FluxoraStreamClient,
-    GlobalEmergencyPauseChanged, StreamCreated, StreamEndShortened, StreamEvent, StreamStatus,
-    StreamToppedUp, WithdrawToParam, WithdrawalTo,
+    GlobalEmergencyPauseChanged, StreamCreated, StreamEndShortened, StreamEvent, StreamPaused,
+    StreamStatus, StreamToppedUp, WithdrawToParam, WithdrawalTo,
 };
 
 // ---------------------------------------------------------------------------
@@ -167,6 +167,7 @@ impl<'a> TestContext<'a> {
             &0u64,      // start_time
             &0u64,      // cliff_time (no cliff)
             &1000u64,   // end_time
+            &None,
         )
     }
 
@@ -410,8 +411,7 @@ fn test_init_sets_stream_counter_to_zero() {
 
     env.ledger().set_timestamp(0);
     let stream_id = client2.create_stream(
-        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64,
-        &None,
+        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &None,
     );
 
     assert_eq!(stream_id, 0, "first stream should have id 0");
@@ -596,8 +596,7 @@ fn test_operations_work_after_failed_reinit() {
     // Contract must still accept streams
     env.ledger().set_timestamp(0);
     let stream_id = client.create_stream(
-        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64,
-        &None,
+        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &None,
     );
 
     let state = client.get_stream_state(&stream_id);
@@ -786,6 +785,7 @@ fn test_create_stream_invalid_times_panics() {
         &1000u64,
         &1000u64,
         &500u64, // end before start
+        &None,
     );
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 }
@@ -1041,6 +1041,7 @@ fn test_create_stream_end_equals_start_panics() {
         &500u64,
         &500u64,
         &500u64, // end == start
+        &None,
     );
 }
 
@@ -1058,6 +1059,7 @@ fn test_create_stream_end_before_start_panics() {
         &1000u64,
         &1000u64,
         &999u64, // end < start
+        &None,
     );
 }
 
@@ -1075,6 +1077,7 @@ fn test_create_stream_end_one_less_than_start_panics() {
         &100u64,
         &100u64,
         &99u64, // end = start - 1
+        &None,
     );
 }
 
@@ -1261,6 +1264,7 @@ fn test_create_stream_deposit_one_valid() {
         &0u64,
         &0u64,
         &1u64, // 1 second, so rate * duration = 1 == deposit
+        &None,
     );
     let state = ctx.client().get_stream_state(&id);
     assert_eq!(state.deposit_amount, 1);
@@ -1561,6 +1565,7 @@ fn test_create_stream_cliff_before_start_panics() {
         &100u64,  // start_time
         &50u64,   // cliff_time before start
         &1100u64, // end_time
+        &None,
     );
 }
 
@@ -1634,6 +1639,7 @@ fn test_create_stream_deposit_less_than_total_panics() {
         &0u64,
         &0u64,
         &1000u64, // duration = 1000s, so total = 1000 tokens needed
+        &None,
     );
 }
 
@@ -1649,6 +1655,7 @@ fn test_create_stream_deposit_equals_total_succeeds() {
         &0u64,
         &0u64,
         &1000u64, // duration = 1000s
+        &None,
     );
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.deposit_amount, 1000);
@@ -1666,6 +1673,7 @@ fn test_create_stream_deposit_greater_than_total_succeeds() {
         &0u64,
         &0u64,
         &1000u64, // duration = 1000s, total needed = 1000
+        &None,
     );
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.deposit_amount, 2000);
@@ -1844,6 +1852,7 @@ fn test_create_stream_with_cliff_equals_start_accrues_immediately() {
         &0u64,      // start_time
         &0u64,      // cliff_time (equal to start_time)
         &1000u64,   // end_time
+        &None,
     );
 
     // Advance time past start; since cliff == start, accrual should begin immediately
@@ -2000,11 +2009,13 @@ fn test_calculate_accrued_paused_before_cliff() {
         &0u64,    // start_time
         &500u64,  // cliff_time
         &1000u64, // end_time
+        &None,
     );
 
     // Advance to t=300 (before cliff) and pause
     ctx.env.ledger().set_timestamp(300);
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
@@ -2029,11 +2040,13 @@ fn test_calculate_accrued_paused_after_cliff() {
         &0u64,    // start_time
         &500u64,  // cliff_time
         &1000u64, // end_time
+        &None,
     );
 
     // Advance past cliff and pause
     ctx.env.ledger().set_timestamp(600);
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
@@ -2069,7 +2082,8 @@ fn test_calculate_accrued_paused_at_end_time() {
 
     // Advance to nearly end_time and pause
     ctx.env.ledger().set_timestamp(999);
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 
     // Advance to end_time
     ctx.env.ledger().set_timestamp(1000);
@@ -2104,7 +2118,8 @@ fn test_calculate_accrued_paused_deterministic() {
     assert_eq!(accrued_active, 500);
 
     // Pause the stream
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 
     // At same timestamp, accrued must be identical
     let accrued_paused = ctx.client().calculate_accrued(&stream_id);
@@ -2138,6 +2153,7 @@ fn test_calculate_accrued_cancelled_before_cliff() {
         &0u64,    // start_time
         &500u64,  // cliff_time
         &1000u64, // end_time
+        &None,
     );
 
     // Cancel at t=300 (before cliff)
@@ -2171,6 +2187,7 @@ fn test_calculate_accrued_cancelled_at_cliff() {
         &0u64,    // start_time
         &500u64,  // cliff_time
         &1000u64, // end_time
+        &None,
     );
 
     // Cancel at exact cliff time (t=500)
@@ -2298,6 +2315,7 @@ fn test_calculate_accrued_zero_duration_stream() {
         &500u64, // start_time
         &500u64, // cliff_time
         &500u64, // end_time
+        &None,
     );
 
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
@@ -2372,6 +2390,7 @@ fn test_large_rate_no_overflow() {
         &0u64,
         &0u64,
         &2u64, // Very short duration
+        &None,
     );
 
     ctx.env.ledger().set_timestamp(1);
@@ -2474,6 +2493,7 @@ fn test_boundary_max_rate_per_second() {
         &0u64,
         &0u64,
         &2u64, // Short duration
+        &None,
     );
 
     ctx.env.ledger().set_timestamp(2);
@@ -2499,6 +2519,7 @@ fn test_boundary_min_positive_values() {
         &0u64,
         &0u64,
         &1u64, // Minimum duration
+        &None,
     );
 
     ctx.env.ledger().set_timestamp(1);
@@ -2549,6 +2570,7 @@ fn test_zero_duration_returns_zero() {
         &0u64, // Start at 0
         &0u64, // No cliff
         &0u64, // End at 0 (duration is zero)
+        &None,
     );
 
     assert_eq!(result, Err(Ok(crate::ContractError::InvalidParams)));
@@ -2775,6 +2797,7 @@ fn test_accrued_never_exceeds_deposit_multiple_checks() {
         &0u64,
         &0u64,
         &100u64, // Would accrue 5,000 at end
+        &None,
     );
 
     // Check at multiple time points
@@ -2841,7 +2864,8 @@ fn test_pause_and_resume() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
 
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
 
@@ -2855,7 +2879,8 @@ fn test_admin_can_resume_stream() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
 
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 
     // Auth override test for resume
     ctx.client().resume_stream(&stream_id);
@@ -2868,8 +2893,10 @@ fn test_admin_can_resume_stream() {
 fn test_pause_already_paused_panics() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational); // second pause should panic
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational); // second pause should panic
 }
 
 #[test]
@@ -2909,7 +2936,8 @@ fn test_pause_cancelled_stream_panics() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
     ctx.client().cancel_stream(&stream_id);
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational); // Cancelled — must panic with general message
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational); // Cancelled — must panic with general message
 }
 
 // ---------------------------------------------------------------------------
@@ -3014,7 +3042,8 @@ fn test_cancel_stream_allows_active_or_paused() {
     let active_stream_id = ctx.create_default_stream();
     let paused_stream_id = ctx.create_default_stream();
 
-    ctx.client().pause_stream(&paused_stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&paused_stream_id, &crate::PauseReason::Operational);
 
     ctx.client().cancel_stream(&active_stream_id);
     ctx.client().cancel_stream(&paused_stream_id);
@@ -3127,7 +3156,8 @@ fn test_withdraw_from_paused_stream_completes_if_full() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 
     // This should panic now because withdrawals are blocked while paused
     ctx.client().withdraw(&stream_id);
@@ -3326,6 +3356,7 @@ fn test_withdraw_to_requires_recipient_auth() {
                 0u64,
                 0u64,
                 1000u64,
+                Option::<soroban_sdk::Bytes>::None,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[],
@@ -3539,7 +3570,8 @@ fn test_batch_withdraw_paused_stream_panics() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(500);
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 
     ctx.client()
         .batch_withdraw(&ctx.recipient, &stream_ids_vec(&ctx.env, &[stream_id]));
@@ -3750,6 +3782,7 @@ fn test_withdraw_recipient_success() {
                 0u64,
                 0u64,
                 1000u64,
+                Option::<soroban_sdk::Bytes>::None,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[],
@@ -3807,6 +3840,7 @@ fn test_withdraw_not_recipient_unauthorized() {
                 0u64,
                 0u64,
                 1000u64,
+                Option::<soroban_sdk::Bytes>::None,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[],
@@ -3861,6 +3895,7 @@ fn test_withdraw_not_recipient_unauthorized_has_no_side_effects() {
                 0u64,
                 0u64,
                 1000u64,
+                Option::<soroban_sdk::Bytes>::None,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[],
@@ -3954,6 +3989,7 @@ fn test_close_cancelled_stream_success() {
 
     ctx.env.ledger().set_timestamp(400);
     ctx.client().cancel_stream(&stream_id);
+    let _ = ctx.client().withdraw(&stream_id);
 
     ctx.client().close_completed_stream(&stream_id);
 }
@@ -3999,7 +4035,8 @@ fn test_close_completed_stream_rejects_paused() {
 
     // Pause the stream
     ctx.env.ledger().set_timestamp(500);
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 
     // Try to close paused stream (should fail with InvalidState)
     ctx.client().close_completed_stream(&stream_id);
@@ -4437,7 +4474,8 @@ fn test_top_up_stream_paused_preserves_schedule_and_status() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(400);
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 
     let state_before = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state_before.status, StreamStatus::Paused);
@@ -4673,7 +4711,8 @@ fn test_withdraw_paused_stream_panics() {
     ctx.env.ledger().set_timestamp(500);
 
     // Pause the stream
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
 
@@ -4690,7 +4729,8 @@ fn test_withdraw_after_resume_succeeds() {
     ctx.env.ledger().set_timestamp(500);
 
     // Pause and then resume
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
     ctx.client().resume_stream(&stream_id);
 
     // Withdraw should now succeed
@@ -4709,11 +4749,9 @@ fn test_withdraw_after_resume_succeeds() {
 fn test_multiple_streams_independent() {
     let ctx = TestContext::setup();
     let id0 = ctx.create_default_stream();
-    let id1 = ctx
-        .client()
-        .create_stream(&ctx.sender, &ctx.recipient, &200, &2, &0, &0, &100,
-        &None
-        );
+    let id1 =
+        ctx.client()
+            .create_stream(&ctx.sender, &ctx.recipient, &200, &2, &0, &0, &100, &None);
 
     assert_eq!(id0, 0);
     assert_eq!(id1, 1);
@@ -4742,7 +4780,7 @@ fn test_pause_stream_as_recipient_fails() {
     let env = Env::default();
     let client = FluxoraStreamClient::new(&env, &ctx.contract_id);
 
-    client.pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    client.pause_stream(&stream_id, &crate::PauseReason::Operational);
 }
 
 #[test]
@@ -4762,7 +4800,8 @@ fn test_admin_can_pause_stream() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
 
-    ctx.client().pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
+    ctx.client()
+        .pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
@@ -4775,7 +4814,8 @@ fn test_pause_resume_events() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
 
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 
     let events = ctx.env.events().all();
     let last_event = events.last().unwrap();
@@ -4853,7 +4893,8 @@ fn test_admin_pause_emits_same_event_as_sender_pause() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
 
-    ctx.client().pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
+    ctx.client()
+        .pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
 
     let events = ctx.env.events().all();
     let last_event = events.last().unwrap();
@@ -4872,7 +4913,10 @@ fn test_admin_pause_emits_same_event_as_sender_pause() {
     );
     // Data must be StreamPaused { stream_id, reason }
     let paused_payload = StreamPaused::from_val(&ctx.env, &last_event.2);
-    assert_eq!(paused_payload.stream_id, stream_id, "pause_stream_as_admin data must contain stream_id");
+    assert_eq!(
+        paused_payload.stream_id, stream_id,
+        "pause_stream_as_admin data must contain stream_id"
+    );
 }
 
 /// `resume_stream_as_admin` must emit topic ("resumed", stream_id) with
@@ -4882,7 +4926,8 @@ fn test_admin_resume_emits_same_event_as_sender_resume() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
 
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
     ctx.client().resume_stream_as_admin(&stream_id);
 
     let events = ctx.env.events().all();
@@ -5036,12 +5081,17 @@ fn test_admin_ops_emit_events_during_global_emergency_pause() {
     );
 
     // Admin pause still works and emits the correct event
-    ctx.client().pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
+    ctx.client()
+        .pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
     let events = ctx.env.events().all();
     let last_event = events.last().unwrap();
+    let paused_payload = StreamPaused::from_val(&ctx.env, &last_event.2);
     assert_eq!(
-        Option::<StreamEvent>::from_val(&ctx.env, &last_event.2).unwrap(),
-        StreamPaused { stream_id, reason: fluxora_stream::PauseReason::Administrative },
+        paused_payload,
+        StreamPaused {
+            stream_id,
+            reason: crate::PauseReason::Administrative
+        },
         "pause_stream_as_admin must emit StreamPaused during global emergency pause"
     );
 
@@ -5091,6 +5141,7 @@ fn test_pause_stream_recipient_unauthorized() {
                 0u64,
                 0u64,
                 1000u64,
+                Option::<soroban_sdk::Bytes>::None,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[],
@@ -5115,12 +5166,13 @@ fn test_pause_stream_recipient_unauthorized() {
         invoke: &MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "pause_stream",
-            args: (stream_id,).into_val(&ctx.env),
+            args: (stream_id, crate::PauseReason::Operational).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
 
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 }
 
 #[test]
@@ -5143,6 +5195,7 @@ fn test_pause_stream_third_party_unauthorized() {
                 0u64,
                 0u64,
                 1000u64,
+                Option::<soroban_sdk::Bytes>::None,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[],
@@ -5167,12 +5220,13 @@ fn test_pause_stream_third_party_unauthorized() {
         invoke: &MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "pause_stream",
-            args: (stream_id,).into_val(&ctx.env),
+            args: (stream_id, crate::PauseReason::Operational).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
 
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 }
 
 #[test]
@@ -5194,6 +5248,7 @@ fn test_pause_stream_sender_success() {
                 0u64,
                 0u64,
                 1000u64,
+                Option::<soroban_sdk::Bytes>::None,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[],
@@ -5218,12 +5273,13 @@ fn test_pause_stream_sender_success() {
         invoke: &MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "pause_stream",
-            args: (stream_id,).into_val(&ctx.env),
+            args: (stream_id, crate::PauseReason::Operational).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
 
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
 }
@@ -5248,6 +5304,7 @@ fn test_pause_stream_admin_success() {
                 0u64,
                 0u64,
                 1000u64,
+                Option::<soroban_sdk::Bytes>::None,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[],
@@ -5272,12 +5329,13 @@ fn test_pause_stream_admin_success() {
         invoke: &MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "pause_stream_as_admin",
-            args: (stream_id,).into_val(&ctx.env),
+            args: (stream_id, crate::PauseReason::Administrative).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
 
-    ctx.client().pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
+    ctx.client()
+        .pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
 }
@@ -5303,6 +5361,7 @@ fn test_pause_stream_as_admin_non_admin_unauthorized() {
                 0u64,
                 0u64,
                 1000u64,
+                Option::<soroban_sdk::Bytes>::None,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[],
@@ -5328,12 +5387,13 @@ fn test_pause_stream_as_admin_non_admin_unauthorized() {
         invoke: &MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "pause_stream_as_admin",
-            args: (stream_id,).into_val(&ctx.env),
+            args: (stream_id, crate::PauseReason::Administrative).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
 
-    ctx.client().pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
+    ctx.client()
+        .pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
 }
 
 // Cancel authorization tests
@@ -5358,6 +5418,7 @@ fn test_cancel_stream_recipient_unauthorized() {
                 0u64,
                 0u64,
                 1000u64,
+                Option::<soroban_sdk::Bytes>::None,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[],
@@ -5409,6 +5470,7 @@ fn test_cancel_stream_third_party_unauthorized() {
                 0u64,
                 0u64,
                 1000u64,
+                Option::<soroban_sdk::Bytes>::None,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[],
@@ -5460,6 +5522,7 @@ fn test_cancel_stream_sender_success() {
                 0u64,
                 0u64,
                 1000u64,
+                Option::<soroban_sdk::Bytes>::None,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[],
@@ -5512,6 +5575,7 @@ fn test_cancel_stream_admin_success() {
                 0u64,
                 0u64,
                 1000u64,
+                Option::<soroban_sdk::Bytes>::None,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[],
@@ -5599,6 +5663,7 @@ fn test_create_stream_equal_start_end_times_panics() {
         &500u64,
         &500u64,
         &500u64, // start == end
+        &None,
     );
 }
 
@@ -5857,6 +5922,7 @@ fn test_create_stream_minimum_duration() {
         &0u64,
         &0u64,
         &1u64, // 1 second duration
+        &None,
     );
 
     let state = ctx.client().get_stream_state(&stream_id);
@@ -5944,7 +6010,8 @@ fn test_get_stream_state_all_statuses() {
 
     // 2. Check Paused
     let id_paused = ctx.create_default_stream();
-    ctx.client().pause_stream(&id_paused, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&id_paused, &crate::PauseReason::Operational);
     let state_paused = ctx.client().get_stream_state(&id_paused);
     assert_eq!(state_paused.status, StreamStatus::Paused);
 
@@ -6013,6 +6080,7 @@ fn test_create_stream_invalid_cliff_panics() {
         &100,
         &50,
         &200, // cliff < start
+        &None,
     );
 }
 
@@ -6066,7 +6134,8 @@ fn test_admin_can_pause_via_admin_path() {
     let stream_id = ctx.create_default_stream();
 
     // Verification: Admin can successfully pause via the admin entrypoint
-    ctx.client().pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
+    ctx.client()
+        .pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
@@ -6457,7 +6526,8 @@ fn test_cancel_paused_stream_accrual_continues() {
 
     // Advance to 30% and pause
     ctx.env.ledger().set_timestamp(900);
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 
     // Advance time further (accrual continues even when paused)
     ctx.env.ledger().set_timestamp(1500);
@@ -6686,7 +6756,8 @@ fn test_get_stream_state_pause_stream_cancel() {
         &5000u64,
         &None,
     );
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.stream_id, 0);
@@ -6715,7 +6786,8 @@ fn test_get_stream_state_pause_resume_stream_cancel() {
         &5000u64,
         &None,
     );
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 
     ctx.client().resume_stream(&stream_id);
 
@@ -6747,7 +6819,9 @@ fn test_get_stream_state_non_existence_stream() {
 #[test]
 fn test_pause_stream_not_found() {
     let ctx = TestContext::setup();
-    let result = ctx.client().try_pause_stream(&999, &fluxora_stream::PauseReason::Operational);
+    let result = ctx
+        .client()
+        .try_pause_stream(&999, &crate::PauseReason::Operational);
     assert!(result.is_err());
 }
 
@@ -6789,7 +6863,9 @@ fn test_cancel_stream_as_admin_not_found() {
 #[test]
 fn test_pause_stream_as_admin_not_found() {
     let ctx = TestContext::setup();
-    let result = ctx.client().try_pause_stream_as_admin(&999, &fluxora_stream::PauseReason::Administrative);
+    let result = ctx
+        .client()
+        .try_pause_stream_as_admin(&999, &crate::PauseReason::Administrative);
     assert!(result.is_err());
 }
 
@@ -7199,6 +7275,7 @@ fn test_withdraw_excess_deposit_only_streams_calculated_amount() {
         &0u64,
         &0u64,
         &1000u64, // duration 1000s, so only 1000 will stream
+        &None,
     );
 
     // At end, only 1000 should be withdrawable (rate * duration)
@@ -7248,6 +7325,7 @@ fn test_withdraw_small_rate_no_underflow() {
         &0u64,
         &0u64,
         &100u64, // 100 seconds for 100 tokens total
+        &None,
     );
 
     // At t=50, accrued should be 50 tokens
@@ -7386,7 +7464,8 @@ fn test_pause_stream_sender_transitions_to_paused() {
     assert_eq!(state_before.status, StreamStatus::Active);
 
     // Sender pauses the stream
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 
     // Verify status transitioned to Paused
     let state_after = ctx.client().get_stream_state(&stream_id);
@@ -7412,7 +7491,8 @@ fn test_pause_stream_admin_transitions_to_paused() {
     assert_eq!(state_before.status, StreamStatus::Active);
 
     // Admin pauses the stream using admin-specific entrypoint
-    ctx.client().pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
+    ctx.client()
+        .pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
 
     // Verify status transitioned to Paused
     let state_after = ctx.client().get_stream_state(&stream_id);
@@ -7430,7 +7510,8 @@ fn test_resume_stream_sender_transitions_to_active() {
     let stream_id = ctx.create_default_stream();
 
     // First pause the stream
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
     let state_paused = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state_paused.status, StreamStatus::Paused);
 
@@ -7456,7 +7537,8 @@ fn test_resume_stream_admin_transitions_to_active() {
     let stream_id = ctx.create_default_stream();
 
     // Pause the stream first
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
     let state_paused = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state_paused.status, StreamStatus::Paused);
 
@@ -7480,12 +7562,14 @@ fn test_pause_already_paused_fails_with_error() {
     let stream_id = ctx.create_default_stream();
 
     // First pause succeeds
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
 
     // Second pause on already-paused stream should fail
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 }
 
 /// Test resume when active (not paused) - fails with "stream is active, not paused"
@@ -7510,7 +7594,8 @@ fn test_multiple_pause_resume_cycles() {
     let stream_id = ctx.create_default_stream();
 
     // First cycle: pause → resume
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
 
@@ -7519,7 +7604,8 @@ fn test_multiple_pause_resume_cycles() {
     assert_eq!(state.status, StreamStatus::Active);
 
     // Second cycle: pause → resume
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
 
@@ -7528,7 +7614,8 @@ fn test_multiple_pause_resume_cycles() {
     assert_eq!(state.status, StreamStatus::Active);
 
     // Third cycle: pause → resume
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
 
@@ -7551,7 +7638,8 @@ fn test_resume_enables_withdrawal() {
 
     // Advance time and pause
     ctx.env.ledger().set_timestamp(500);
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 
     // Verify can't withdraw while paused
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -7582,7 +7670,8 @@ fn test_accrual_continues_during_pause() {
     let accrued_before_pause = ctx.client().calculate_accrued(&stream_id);
     assert_eq!(accrued_before_pause, 300);
 
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 
     // Advance time further while paused
     ctx.env.ledger().set_timestamp(700);
@@ -7606,7 +7695,8 @@ fn test_pause_stream_sender_and_admin_can_pause() {
     let stream_id_1 = ctx.create_default_stream();
 
     // Sender pauses stream
-    ctx.client().pause_stream(&stream_id_1, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id_1, &crate::PauseReason::Operational);
     let state = ctx.client().get_stream_state(&stream_id_1);
     assert_eq!(state.status, StreamStatus::Paused);
 
@@ -7614,7 +7704,8 @@ fn test_pause_stream_sender_and_admin_can_pause() {
     let stream_id_2 = ctx.create_default_stream();
 
     // Admin can also pause via admin path
-    ctx.client().pause_stream_as_admin(&stream_id_2, &fluxora_stream::PauseReason::Administrative);
+    ctx.client()
+        .pause_stream_as_admin(&stream_id_2, &crate::PauseReason::Administrative);
     let state = ctx.client().get_stream_state(&stream_id_2);
     assert_eq!(state.status, StreamStatus::Paused);
 }
@@ -7626,7 +7717,8 @@ fn test_resume_stream_sender_and_admin_can_resume() {
 
     // Create first stream for sender test
     let stream_id_1 = ctx.create_default_stream();
-    ctx.client().pause_stream(&stream_id_1, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id_1, &crate::PauseReason::Operational);
 
     // Sender resumes stream
     ctx.client().resume_stream(&stream_id_1);
@@ -7635,7 +7727,8 @@ fn test_resume_stream_sender_and_admin_can_resume() {
 
     // Create second stream for admin test
     let stream_id_2 = ctx.create_default_stream();
-    ctx.client().pause_stream(&stream_id_2, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id_2, &crate::PauseReason::Operational);
 
     // Admin resumes via admin path
     ctx.client().resume_stream_as_admin(&stream_id_2);
@@ -7653,7 +7746,8 @@ fn test_pause_resume_events_published() {
     ctx.env.events().all();
 
     // Pause stream
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 
     let events = ctx.env.events().all();
     let last_event = events.last().unwrap();
@@ -7686,9 +7780,11 @@ fn test_pause_resume_preserves_token_balances() {
     let contract_before = ctx.token().balance(&ctx.contract_id);
 
     // Pause and resume multiple times
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
     ctx.client().resume_stream(&stream_id);
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
     ctx.client().resume_stream(&stream_id);
 
     // Verify token balances unchanged
@@ -7705,7 +7801,8 @@ fn test_pause_resume_with_cliff_before_cliff() {
 
     // Pause before cliff
     ctx.env.ledger().set_timestamp(200);
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
@@ -7729,7 +7826,8 @@ fn test_pause_resume_with_cliff_after_cliff() {
 
     // Advance past cliff and pause
     ctx.env.ledger().set_timestamp(700);
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
@@ -7757,7 +7855,8 @@ fn test_pause_then_cancel() {
 
     // Advance time, pause, then cancel
     ctx.env.ledger().set_timestamp(300);
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
@@ -7826,7 +7925,8 @@ fn test_pause_resume_preserves_withdrawal_state() {
     assert_eq!(state.withdrawn_amount, 300);
 
     // Pause and resume
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
     ctx.client().resume_stream(&stream_id);
 
     // Verify withdrawal state preserved
@@ -8399,7 +8499,8 @@ fn test_stream_id_stability_after_state_changes() {
     );
 
     // Mutate stream 1: pause then cancel
-    ctx.client().pause_stream(&id1, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&id1, &crate::PauseReason::Operational);
     ctx.client().cancel_stream(&id1);
 
     // Stream struct stream_id fields must be unchanged
@@ -8770,7 +8871,8 @@ fn test_cancel_stream_from_paused_state() {
 
     ctx.env.ledger().set_timestamp(500);
 
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
     assert_eq!(
         ctx.client().get_stream_state(&stream_id).status,
         StreamStatus::Paused
@@ -9522,7 +9624,8 @@ fn test_new_admin_can_perform_admin_ops() {
     let stream_id = ctx.create_default_stream();
 
     // New admin should be able to pause as admin
-    ctx.client().pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
+    ctx.client()
+        .pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
@@ -9556,12 +9659,13 @@ fn test_old_admin_loses_privileges_after_rotation() {
         invoke: &soroban_sdk::testutils::MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "pause_stream_as_admin",
-            args: (stream_id,).into_val(&ctx.env),
+            args: (stream_id, crate::PauseReason::Administrative).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
 
-    ctx.client().pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
+    ctx.client()
+        .pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
 }
 
 #[test]
@@ -9835,7 +9939,8 @@ fn test_get_withdrawable_paused_stream_returns_zero() {
     ctx.env.ledger().set_timestamp(500);
 
     // Pause the stream
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 
     // Even though 500 is accrued, pause blocks withdrawals
     let withdrawable = ctx.client().get_withdrawable(&stream_id);
@@ -10173,7 +10278,8 @@ fn test_update_rate_per_second_works_on_paused_stream() {
     );
 
     // Pause the stream.
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
 
@@ -10233,11 +10339,16 @@ fn test_update_rate_per_second_before_cliff() {
     // Mint more and manually create stream with larger deposit
     let sac = StellarAssetClient::new(&ctx.env, &ctx.token_id);
     sac.mint(&ctx.sender, &2000);
-    let stream_id =
-        ctx.client()
-            .create_stream(&ctx.sender, &ctx.recipient, &2000, &1, &0, &500, &1000,
-            &None
-            );
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2000,
+        &1,
+        &0,
+        &500,
+        &1000,
+        &None,
+    );
 
     // Before cliff at t=100, accrued is 0.
     ctx.env.ledger().set_timestamp(100);
@@ -10264,11 +10375,16 @@ fn test_update_rate_per_second_at_cliff() {
     // Mint more and manually create stream with larger deposit
     let sac = StellarAssetClient::new(&ctx.env, &ctx.token_id);
     sac.mint(&ctx.sender, &5000);
-    let stream_id =
-        ctx.client()
-            .create_stream(&ctx.sender, &ctx.recipient, &5000, &1, &0, &500, &1000,
-            &None
-            );
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &5000,
+        &1,
+        &0,
+        &500,
+        &1000,
+        &None,
+    );
 
     // Exactly at cliff time t=500.
     ctx.env.ledger().set_timestamp(500);
@@ -10472,7 +10588,8 @@ fn test_update_rate_per_second_on_paused_stream_after_partial_withdrawal() {
     assert_eq!(withdrawn, 300);
 
     // Pause the stream.
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
     assert_eq!(state.withdrawn_amount, 300);
@@ -10516,7 +10633,8 @@ fn test_update_rate_per_second_after_partial_withdrawal_then_resume_and_withdraw
     assert_eq!(withdrawn1, 200);
 
     // Pause the stream.
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 
     // Update rate while paused.
     ctx.client().update_rate_per_second(&stream_id, &3_i128);
@@ -10556,6 +10674,7 @@ fn test_update_rate_per_second_unauthorized_caller() {
                 0u64,
                 0u64,
                 1_000u64,
+                Option::<soroban_sdk::Bytes>::None,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[],
@@ -10699,7 +10818,8 @@ fn test_update_rate_per_second_interaction_with_pause_resume() {
 
     // Pause at t=100.
     ctx.env.ledger().set_timestamp(100);
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 
     // Update rate while paused.
     ctx.client().update_rate_per_second(&stream_id, &5_i128);
@@ -10873,6 +10993,7 @@ fn test_shorten_stream_end_time_unauthorized_caller() {
                 0u64,
                 0u64,
                 1000u64,
+                Option::<soroban_sdk::Bytes>::None,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[],
@@ -11351,7 +11472,8 @@ fn test_recipient_stream_index_lifecycle_consistency() {
     assert_eq!(streams.len(), 1);
 
     // Pause the stream
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
     let streams = ctx.client().get_recipient_streams(&ctx.recipient);
     assert_eq!(
         streams.len(),
@@ -11805,7 +11927,8 @@ fn test_withdraw_to_panics_on_paused_stream() {
     let destination = Address::generate(&ctx.env);
 
     ctx.env.ledger().set_timestamp(200);
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 
     ctx.client().withdraw_to(&stream_id, &destination);
 }
@@ -11925,7 +12048,8 @@ fn test_global_pause_does_not_affect_existing_streams() {
     assert_eq!(state_after_topup.deposit_amount, 1100);
 
     // 3. Sender pausing an individual stream should work
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
     let state_after_pause = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state_after_pause.status, StreamStatus::Paused);
 
@@ -12172,6 +12296,7 @@ fn test_create_stream_only_sender_auth_required() {
                 0u64,
                 0u64,
                 1000u64,
+                Option::<soroban_sdk::Bytes>::None,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[],
@@ -12307,7 +12432,8 @@ fn test_extend_end_time_paused_stream_succeeds() {
         &None,
     );
 
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
     assert_eq!(
         ctx.client().get_stream_state(&stream_id).status,
         StreamStatus::Paused
@@ -13116,6 +13242,7 @@ fn test_extend_end_time_recipient_unauthorized() {
                 0u64,
                 0u64,
                 1000u64,
+                Option::<soroban_sdk::Bytes>::None,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[],
@@ -13169,6 +13296,7 @@ fn test_extend_end_time_third_party_unauthorized() {
                 0u64,
                 0u64,
                 1000u64,
+                Option::<soroban_sdk::Bytes>::None,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[],
@@ -13221,6 +13349,7 @@ fn test_extend_end_time_sender_authorized() {
                 0u64,
                 0u64,
                 1000u64,
+                Option::<soroban_sdk::Bytes>::None,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[],
@@ -13317,6 +13446,7 @@ fn test_extend_end_time_high_rate_exact_boundary() {
         &0u64,
         &0u64,
         &1u64, // 1 second initially
+        &None,
     );
 
     // Extend to 2 seconds: rate(1_000_000) * 2 = 2_000_000 == deposit — exact boundary
@@ -13499,6 +13629,7 @@ fn strict_create_stream(ctx: &TestContext) -> u64 {
                 0u64,
                 0u64,
                 1000u64,
+                Option::<soroban_sdk::Bytes>::None,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[],
@@ -13527,11 +13658,12 @@ fn strict_pause_as_sender(ctx: &TestContext, stream_id: u64) {
         invoke: &MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "pause_stream",
-            args: (stream_id,).into_val(&ctx.env),
+            args: (stream_id, crate::PauseReason::Operational).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 }
 
 // ── resume_stream: sender authorization (strict mode) ───────────────────────
@@ -13778,7 +13910,8 @@ fn test_pause_completed_stream_panics() {
     assert_eq!(state.status, StreamStatus::Completed);
 
     // Attempting to pause a completed stream must panic.
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 }
 
 // ── State-boundary guards: pause_stream_as_admin ────────────────────────────
@@ -13790,12 +13923,15 @@ fn test_pause_stream_as_admin_already_paused_fails() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
 
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
 
     // Second pause via admin path must return StreamAlreadyPaused.
-    let result = ctx.client().try_pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
+    let result = ctx
+        .client()
+        .try_pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
     assert_eq!(result, Err(Ok(ContractError::StreamAlreadyPaused)));
 }
 
@@ -13812,7 +13948,9 @@ fn test_pause_stream_as_admin_completed_fails() {
         StreamStatus::Completed
     );
 
-    let result = ctx.client().try_pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
+    let result = ctx
+        .client()
+        .try_pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
     assert_eq!(result, Err(Ok(ContractError::StreamTerminalState)));
 }
 
@@ -13828,7 +13966,9 @@ fn test_pause_stream_as_admin_cancelled_fails() {
         StreamStatus::Cancelled
     );
 
-    let result = ctx.client().try_pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
+    let result = ctx
+        .client()
+        .try_pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
     assert_eq!(result, Err(Ok(ContractError::StreamTerminalState)));
 }
 
@@ -13892,7 +14032,8 @@ fn test_sender_pause_admin_resume_cross_path() {
     let stream_id = ctx.create_default_stream();
 
     // Sender pauses.
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
     assert_eq!(
         ctx.client().get_stream_state(&stream_id).status,
         StreamStatus::Paused
@@ -13913,7 +14054,8 @@ fn test_admin_pause_sender_resume_cross_path() {
     let stream_id = ctx.create_default_stream();
 
     // Admin pauses via admin path.
-    ctx.client().pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
+    ctx.client()
+        .pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
     assert_eq!(
         ctx.client().get_stream_state(&stream_id).status,
         StreamStatus::Paused
@@ -13946,7 +14088,8 @@ fn test_admin_pause_at_start_time() {
     );
 
     ctx.env.ledger().set_timestamp(start_time);
-    ctx.client().pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
+    ctx.client()
+        .pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
     assert_eq!(
         ctx.client().get_stream_state(&stream_id).status,
         StreamStatus::Paused
@@ -13970,7 +14113,8 @@ fn test_admin_pause_at_cliff_time() {
     );
 
     ctx.env.ledger().set_timestamp(cliff_time);
-    ctx.client().pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
+    ctx.client()
+        .pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
     assert_eq!(
         ctx.client().get_stream_state(&stream_id).status,
         StreamStatus::Paused
@@ -13997,7 +14141,9 @@ fn test_admin_pause_at_end_time_fails() {
     // Note: Stored status will still be Active until a state-changing call is made,
     // but the contract must already treat it as Terminal based on time.
 
-    let result = ctx.client().try_pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
+    let result = ctx
+        .client()
+        .try_pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
     assert_eq!(result, Err(Ok(ContractError::StreamTerminalState)));
 }
 
@@ -14006,15 +14152,21 @@ fn test_admin_pause_at_end_time_fails() {
 fn test_withdraw_from_paused_at_end_time() {
     let ctx = TestContext::setup();
     let end_time = 1_000u64;
-    let stream_id =
-        ctx.client()
-            .create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &end_time,
-            &None
-            );
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000,
+        &1,
+        &0,
+        &0,
+        &end_time,
+        &None,
+    );
 
     // Pause at t=500
     ctx.env.ledger().set_timestamp(500);
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
     assert_eq!(
         ctx.client().get_stream_state(&stream_id).status,
         StreamStatus::Paused
@@ -14041,13 +14193,18 @@ fn test_pause_stream_as_admin_emits_paused_event() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
 
-    ctx.client().pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
+    ctx.client()
+        .pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
 
     let events = ctx.env.events().all();
     let last = events.last().unwrap();
+    let paused_payload = StreamPaused::from_val(&ctx.env, &last.2);
     assert_eq!(
-        Option::<StreamEvent>::from_val(&ctx.env, &last.2).unwrap(),
-        StreamPaused { stream_id, reason: fluxora_stream::PauseReason::Administrative },
+        paused_payload,
+        StreamPaused {
+            stream_id,
+            reason: crate::PauseReason::Administrative
+        },
         "pause_stream_as_admin must publish StreamPaused event"
     );
 }
@@ -14058,7 +14215,8 @@ fn test_resume_stream_as_admin_emits_resumed_event() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
 
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
     ctx.client().resume_stream_as_admin(&stream_id);
 
     let events = ctx.env.events().all();
@@ -14143,12 +14301,13 @@ fn test_pause_stream_as_admin_recipient_is_not_admin() {
         invoke: &MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "pause_stream_as_admin",
-            args: (stream_id,).into_val(&ctx.env),
+            args: (stream_id, crate::PauseReason::Administrative).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
 
-    ctx.client().pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
+    ctx.client()
+        .pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
 }
 
 /// Third party (neither sender nor admin) cannot use pause_stream_as_admin.
@@ -14179,12 +14338,13 @@ fn test_pause_stream_as_admin_third_party_unauthorized() {
         invoke: &MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "pause_stream_as_admin",
-            args: (stream_id,).into_val(&ctx.env),
+            args: (stream_id, crate::PauseReason::Administrative).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
 
-    ctx.client().pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
+    ctx.client()
+        .pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
 }
 
 // ---------------------------------------------------------------------------
@@ -14213,7 +14373,8 @@ fn test_resume_stream_as_admin_recipient_unauthorized() {
     );
 
     // Admin pauses the stream first
-    ctx.client().pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
+    ctx.client()
+        .pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
 
     // Recipient tries to use resume_stream_as_admin - must fail
     ctx.env.mock_auths(&[MockAuth {
@@ -14251,7 +14412,8 @@ fn test_resume_stream_as_admin_third_party_unauthorized() {
     );
 
     // Admin pauses the stream first
-    ctx.client().pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
+    ctx.client()
+        .pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
 
     // Third party tries to use resume_stream_as_admin - must fail
     let third_party = Address::generate(&ctx.env);
@@ -14290,7 +14452,8 @@ fn test_pause_authorization_matrix() {
     );
 
     // Admin can pause
-    ctx.client().pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
+    ctx.client()
+        .pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
 
@@ -14314,7 +14477,8 @@ fn test_resume_authorization_matrix() {
         &1000u64,
         &None,
     );
-    ctx.client().pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
+    ctx.client()
+        .pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
 
     // Admin can resume
     ctx.client().resume_stream_as_admin(&stream_id);
@@ -14510,8 +14674,7 @@ fn regression_double_init_repeated_attacks_do_not_degrade_contract() {
     // Contract must still work normally — create a stream, withdraw, verify
     env.ledger().set_timestamp(0);
     let stream_id = client.create_stream(
-        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64,
-        &None,
+        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &None,
     );
     assert_eq!(stream_id, 0);
     assert_eq!(client.get_stream_count(), 1);
@@ -14557,8 +14720,7 @@ fn regression_double_init_existing_stream_survives() {
     // Create a stream
     env.ledger().set_timestamp(0);
     let stream_id = client.create_stream(
-        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64,
-        &None,
+        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &None,
     );
 
     // Attempt re-init
@@ -14610,12 +14772,10 @@ fn regression_double_init_counter_continuity() {
     // Create two streams (counter should be 2)
     env.ledger().set_timestamp(0);
     let id0 = client.create_stream(
-        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64,
-        &None,
+        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &None,
     );
     let id1 = client.create_stream(
-        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64,
-        &None,
+        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &None,
     );
     assert_eq!(id0, 0);
     assert_eq!(id1, 1);
@@ -14629,8 +14789,7 @@ fn regression_double_init_counter_continuity() {
     // Counter must still be 2 and next stream must be ID 2
     assert_eq!(client.get_stream_count(), 2);
     let id2 = client.create_stream(
-        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64,
-        &None,
+        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &None,
     );
     assert_eq!(
         id2, 2,
@@ -14712,8 +14871,7 @@ fn regression_missing_config_create_stream_panics() {
 
     env.ledger().set_timestamp(0);
     client.create_stream(
-        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64,
-        &None,
+        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &None,
     );
 }
 
@@ -14777,7 +14935,11 @@ fn regression_missing_config_version_still_works() {
     let contract_id = env.register_contract(None, FluxoraStream);
     let client = FluxoraStreamClient::new(&env, &contract_id);
     let version = client.version();
-    assert_eq!(version, 2, "version must be accessible without init");
+    assert_eq!(
+        version,
+        crate::CONTRACT_VERSION,
+        "version must be accessible without init"
+    );
 }
 
 /// `get_stream_state()` for a non-existent stream on an uninitialised
@@ -14891,7 +15053,7 @@ fn regression_missing_config_pause_stream_as_admin_panics() {
     env.mock_all_auths();
     let contract_id = env.register_contract(None, FluxoraStream);
     let client = FluxoraStreamClient::new(&env, &contract_id);
-    client.pause_stream_as_admin(&0, &fluxora_stream::PauseReason::Administrative);
+    client.pause_stream_as_admin(&0, &crate::PauseReason::Administrative);
 }
 
 /// `resume_stream_as_admin()` on an uninitialised contract must fail.
@@ -14913,7 +15075,7 @@ fn regression_missing_config_pause_stream_panics() {
     let contract_id = env.register_contract(None, FluxoraStream);
     let client = FluxoraStreamClient::new(&env, &contract_id);
 
-    let result = client.try_pause_stream(&0, &fluxora_stream::PauseReason::Operational);
+    let result = client.try_pause_stream(&0, &crate::PauseReason::Operational);
     assert!(
         result.is_err(),
         "pause_stream on uninitialised contract must fail"
@@ -15107,8 +15269,7 @@ fn regression_double_init_interleaved_with_lifecycle() {
     // Phase 1: Create stream, attempt re-init, verify stream
     env.ledger().set_timestamp(0);
     let stream_id = client.create_stream(
-        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64,
-        &None,
+        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &None,
     );
     assert_eq!(stream_id, 0);
 
@@ -15129,7 +15290,7 @@ fn regression_double_init_interleaved_with_lifecycle() {
     assert_eq!(token.balance(&contract_id), 700);
 
     // Phase 3: Pause, attempt re-init, resume, withdraw to completion
-    client.pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    client.pause_stream(&stream_id, &crate::PauseReason::Operational);
     let state = client.get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Paused);
 
@@ -15151,8 +15312,7 @@ fn regression_double_init_interleaved_with_lifecycle() {
     // Phase 4: Create another stream after all the chaos — counter must be correct
     env.ledger().set_timestamp(2000);
     let stream_id2 = client.create_stream(
-        &sender, &recipient, &2000_i128, &1_i128, &2000u64, &2000u64, &4000u64,
-        &None,
+        &sender, &recipient, &2000_i128, &1_i128, &2000u64, &2000u64, &4000u64, &None,
     );
     assert_eq!(stream_id2, 1);
     assert_eq!(client.get_stream_count(), 2);
@@ -15545,7 +15705,8 @@ fn claimable_at_paused_stream_simulates_at_timestamp() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(300);
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 
     // get_claimable_at simulates at requested timestamp, regardless of pause
     assert_eq!(ctx.client().get_claimable_at(&stream_id, &500), 500);
@@ -15561,7 +15722,8 @@ fn claimable_at_paused_after_withdraw() {
 
     ctx.env.ledger().set_timestamp(300);
     ctx.client().withdraw(&stream_id); // withdrawn=300
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
 
     // At t=600: accrued=600, withdrawn=300 → claimable=300
     assert_eq!(ctx.client().get_claimable_at(&stream_id, &600), 300);
@@ -15858,7 +16020,8 @@ fn test_batch_withdraw_mixed_stream_states_comprehensive() {
     ctx.env.ledger().set_timestamp(500);
 
     // Pause one stream
-    ctx.client().pause_stream(&id_paused, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&id_paused, &crate::PauseReason::Operational);
 
     // Cancel one stream (accrued = 500)
     ctx.client().cancel_stream(&id_cancelled);
@@ -16758,6 +16921,7 @@ mod i128_boundary_streams {
         let count_before = client.get_stream_count();
         let result = client.try_create_stream(
             &sender, &recipient, &deposit, &rate, &0u64, &0u64, &3u64, // rate * 3 overflows
+            &None,
         );
 
         assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
@@ -16786,8 +16950,7 @@ mod i128_boundary_streams {
         env.ledger().set_timestamp(0);
 
         let result = client.try_create_stream(
-            &sender, &recipient, &deposit, &rate, &0u64, &0u64, &duration,
-            &None,
+            &sender, &recipient, &deposit, &rate, &0u64, &0u64, &duration, &None,
         );
 
         assert_eq!(result, Err(Ok(ContractError::InsufficientDeposit)));
@@ -17306,7 +17469,7 @@ mod i128_boundary_streams {
         );
 
         env.ledger().set_timestamp(200);
-        client.pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+        client.pause_stream(&stream_id, &crate::PauseReason::Operational);
 
         // Accrual at t=600 while paused must equal 600 * rate
         env.ledger().set_timestamp(600);
@@ -17336,7 +17499,7 @@ mod i128_boundary_streams {
         );
 
         env.ledger().set_timestamp(300);
-        client.pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+        client.pause_stream(&stream_id, &crate::PauseReason::Operational);
 
         env.ledger().set_timestamp(700);
         client.resume_stream(&stream_id);
@@ -17694,10 +17857,16 @@ mod recipient_index_stress {
 
         // Create 5 streams
         for _ in 0..5 {
-            ctx.client()
-                .create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
-                &None
-                );
+            ctx.client().create_stream(
+                &ctx.sender,
+                &ctx.recipient,
+                &1000,
+                &1,
+                &0,
+                &0,
+                &1000,
+                &None,
+            );
         }
 
         // Close stream 2 (make it completed first)
@@ -17832,9 +18001,7 @@ mod recipient_index_stress {
         ctx.sac.mint(&ctx.sender, &5_000_i128);
         for _ in 0..150 {
             ctx.client()
-                .create_stream(&ctx.sender, &recipient, &100, &1, &0, &0, &100,
-                &None
-                );
+                .create_stream(&ctx.sender, &recipient, &100, &1, &0, &0, &100, &None);
         }
 
         // Request 200, should be capped at MAX_PAGE_SIZE (100)
@@ -17997,9 +18164,7 @@ mod recipient_index_stress {
         // Create 25 streams
         for _ in 0..25 {
             ctx.client()
-                .create_stream(&ctx.sender, &recipient, &100, &1, &0, &0, &100,
-                &None
-                );
+                .create_stream(&ctx.sender, &recipient, &100, &1, &0, &0, &100, &None);
         }
 
         // Simulate full export using pagination
@@ -18123,6 +18288,7 @@ mod structured_error_tests {
                 start_time: 0u64,
                 cliff_time: 0u64,
                 end_time: 100u64,
+                memo: None,
             },
             CreateStreamParams {
                 recipient: ctx.recipient.clone(),
@@ -18131,6 +18297,7 @@ mod structured_error_tests {
                 start_time: 0u64,
                 cliff_time: 0u64,
                 end_time: 100u64,
+                memo: None,
             },
         ];
 
@@ -18251,6 +18418,7 @@ mod structured_error_tests {
             &0u64,
             &0u64,
             &1000u64,
+            &None,
         );
 
         ctx.env.ledger().set_timestamp(500);
@@ -18289,6 +18457,7 @@ mod structured_error_tests {
             &0u64,
             &0u64,
             &1_000u64,
+            &None,
         );
 
         client.set_global_emergency_paused(&true);
@@ -18485,11 +18654,12 @@ fn test_withdraw_to_contract_destination_rejected_atomicity() {
     let state_before = ctx.client().get_stream_state(&stream_id);
     let contract_balance_before = ctx.token().balance(&ctx.contract_id);
 
-    let result = ctx
-        .client()
-        .try_withdraw_to(&stream_id, &ctx.contract_id);
+    let result = ctx.client().try_withdraw_to(&stream_id, &ctx.contract_id);
 
-    assert!(result.is_err(), "contract address destination must be rejected");
+    assert!(
+        result.is_err(),
+        "contract address destination must be rejected"
+    );
     // No state mutation
     let state_after = ctx.client().get_stream_state(&stream_id);
     assert_eq!(
@@ -18511,9 +18681,7 @@ fn test_withdraw_to_contract_destination_returns_invalid_params() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(300);
-    let result = ctx
-        .client()
-        .try_withdraw_to(&stream_id, &ctx.contract_id);
+    let result = ctx.client().try_withdraw_to(&stream_id, &ctx.contract_id);
 
     match result {
         Err(Ok(e)) => assert_eq!(e, ContractError::InvalidParams),
@@ -18532,9 +18700,7 @@ fn test_withdraw_to_contract_destination_no_event_emitted() {
     ctx.env.ledger().set_timestamp(400);
     let events_before = ctx.env.events().all().len();
 
-    let _ = ctx
-        .client()
-        .try_withdraw_to(&stream_id, &ctx.contract_id);
+    let _ = ctx.client().try_withdraw_to(&stream_id, &ctx.contract_id);
 
     let events_after = ctx.env.events().all().len();
     assert_eq!(
@@ -18596,9 +18762,7 @@ fn test_withdraw_to_contract_destination_status_unchanged() {
     ctx.env.ledger().set_timestamp(1000); // would complete the stream if allowed
     let status_before = ctx.client().get_stream_state(&stream_id).status;
 
-    let _ = ctx
-        .client()
-        .try_withdraw_to(&stream_id, &ctx.contract_id);
+    let _ = ctx.client().try_withdraw_to(&stream_id, &ctx.contract_id);
 
     let status_after = ctx.client().get_stream_state(&stream_id).status;
     assert_eq!(
@@ -18618,13 +18782,14 @@ fn test_withdraw_to_valid_after_rejected_destination_succeeds() {
     ctx.env.ledger().set_timestamp(500);
 
     // First call: rejected destination
-    let _ = ctx
-        .client()
-        .try_withdraw_to(&stream_id, &ctx.contract_id);
+    let _ = ctx.client().try_withdraw_to(&stream_id, &ctx.contract_id);
 
     // Second call: valid destination — must see full 500 accrued
     let amount = ctx.client().withdraw_to(&stream_id, &valid_dest);
-    assert_eq!(amount, 500, "full accrued amount must be available after rejected call");
+    assert_eq!(
+        amount, 500,
+        "full accrued amount must be available after rejected call"
+    );
     assert_eq!(ctx.token().balance(&valid_dest), 500);
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.withdrawn_amount, 500);

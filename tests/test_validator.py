@@ -315,9 +315,10 @@ class TestExtractEventSymbols:
         assert "spaced" in vda.extract_event_symbols(
             'Symbol::short( &env , "spaced" )')
 
-    def test_does_not_match_old_macro_style(self):
-        assert "old_style" not in vda.extract_event_symbols(
-            'symbol_short!("old_style")')
+    def test_matches_symbol_short_macro(self):
+        assert {"old_style"} == vda.extract_event_symbols(
+            'symbol_short!("old_style")'
+        )
 
     def test_empty_source(self):
         assert vda.extract_event_symbols("") == set()

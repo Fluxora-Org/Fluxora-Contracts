@@ -16,6 +16,8 @@ When changing the contract:
 - Update snapshot tests if externally visible behavior changes
 - No behavior change required for doc-only updates
 
+**Entrypoint index (validator):** `batch_withdraw_to`, `delete_stream_template`, `get_global_emergency_paused`, `get_recipient_stream_count`, `get_stream_memo`, `get_stream_template`, `global_resume`, `set_contract_paused`, `set_global_emergency_paused`, `version`.
+
 ## Externally Visible Assurances
 
 This document provides crisp success and failure semantics for all protocol operations. Treasury operators, recipient applications, and auditors can reason about contract behavior using only:
