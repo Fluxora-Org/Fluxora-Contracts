@@ -17,7 +17,8 @@ pub enum DataKey {
     NextStreamId,              // discriminant 1 — instance
     Stream(u64),               // discriminant 2 — persistent
     RecipientStreams(Address), // discriminant 3 — persistent
-    GlobalPaused,              // discriminant 4 — instance
+    GlobalEmergencyPaused,     // discriminant 4 — instance
+    CreationPaused,            // discriminant 5 — instance
 }
 ```
 
@@ -29,7 +30,8 @@ pub enum DataKey {
 | 1 | `NextStreamId` | Instance | `u64` (monotonic counter) | `init` (→ 0) | `create_stream`, `create_streams` |
 | 2 | `Stream(u64)` | Persistent | `Stream` struct | `create_stream`, `create_streams` | `pause_stream`, `resume_stream`, `cancel_stream`, `withdraw`, `withdraw_to`, `batch_withdraw`, `top_up_stream`, `update_rate_per_second`, `shorten_stream_end_time`, `extend_stream_end_time` |
 | 3 | `RecipientStreams(Address)` | Persistent | `Vec<u64>` (sorted) | `create_stream`, `create_streams` | `close_completed_stream` (removes entry) |
-| 4 | `GlobalPaused` | Instance | `bool` | `set_contract_paused` | `set_contract_paused` |
+| 4 | `GlobalEmergencyPaused` | Instance | `bool` | `set_global_emergency_paused` | `set_global_emergency_paused` |
+| 5 | `CreationPaused` | Instance | `bool` | `set_contract_paused` | `set_contract_paused` |
 
 ---
 
@@ -75,7 +77,8 @@ Used for contract-wide configuration and counters. Shared across all operations,
 |---|---|
 | `Config` | Token address and admin address. Immutable after `init` except for admin rotation via `set_admin`. |
 | `NextStreamId` | Monotonically increasing stream ID counter. Never decremented. |
-| `GlobalPaused` | Emergency pause flag. `true` blocks `create_stream` and `create_streams`. |
+| `GlobalEmergencyPaused` | Emergency pause flag. `true` blocks all operational entrypoints. |
+| `CreationPaused` | Soft creation pause flag. `true` blocks `create_stream` and `create_streams`. |
 
 ### Persistent storage
 
@@ -101,7 +104,7 @@ const PERSISTENT_BUMP_AMOUNT: u32       = 120_960;
 
 ### Instance TTL
 
-Extended via `bump_instance_ttl()` on **every** entry-point that touches instance storage. This means any contract interaction — read or write — keeps `Config`, `NextStreamId`, and `GlobalPaused` alive.
+Extended via `bump_instance_ttl()` on **every** entry-point that touches instance storage. This means any contract interaction — read or write — keeps `Config`, `NextStreamId`, `GlobalEmergencyPaused`, and `CreationPaused` alive.
 
 ### Persistent TTL
 
@@ -157,7 +160,8 @@ Extended on every `load_stream()` (read) and `save_stream()` (write), and on eve
 | `extend_stream_end_time` | `Stream(id)` | Updates `end_time` |
 | `close_completed_stream` | Removes `Stream(id)`, updates `RecipientStreams(addr)` | Permissionless cleanup |
 | `set_admin` | `Config` | Admin key rotation |
-| `set_contract_paused` | `GlobalPaused` | Emergency pause flag |
+| `set_global_emergency_paused` | `GlobalEmergencyPaused` | Global emergency pause flag |
+| `set_contract_paused` | `CreationPaused` | Soft creation pause flag |
 
 ---
 
