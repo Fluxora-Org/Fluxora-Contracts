@@ -22,6 +22,35 @@ env:
   STELLAR_CLI_VERSION: "25.2.0"
 
 jobs:
+  docs-alignment-check:
+    name: Docs Alignment Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/test_validator.py') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: pip install pytest pytest-cov
+
+      - name: Run test suite with coverage
+        run: pytest tests/ --cov=script/ --cov-fail-under=95 -v --tb=short
+
+      - name: Validate doc alignment
+        run: python3 script/validate-doc-alignment.py
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

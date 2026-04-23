@@ -85,6 +85,7 @@ pub const MAX_GLOBAL_TEMPLATES: u64 = 10_000;
 /// - If an operator forgets to increment this constant before deploying a breaking change,
 ///   integrators will not detect the incompatibility until a runtime failure occurs.
 ///   Code review and CI checks on this constant are the primary safeguard.
+///
 /// Bumped to 2: `Stream` struct gained `checkpointed_amount: i128` and `checkpointed_at: u64`
 /// for safe rate-decrease support (see `decrease_rate_per_second`).
 /// Bumped to 3: stream schedule templates (`register_stream_template`, `delete_stream_template`,
@@ -501,15 +502,6 @@ fn is_protocol_paused(env: &Env) -> bool {
     is_global_emergency_paused(env) || is_creation_paused(env)
 }
 
-/// Returns `ContractError::ContractPaused` when the protocol is globally paused.
-/// Use this in state-mutating entrypoints to enforce pause scope.
-fn require_not_paused(env: &Env) -> Result<(), ContractError> {
-    if is_protocol_paused(env) {
-        return Err(ContractError::ContractPaused);
-    }
-    Ok(())
-}
-
 /// Get the stored pause reason, if any.
 fn get_pause_reason(env: &Env) -> Option<soroban_sdk::String> {
     env.storage().instance().get(&DataKey::GlobalPauseReason)
@@ -641,175 +633,6 @@ fn remove_stream_from_recipient_index(env: &Env, recipient: &Address, stream_id:
         streams.remove(idx);
         save_recipient_streams(env, recipient, &streams);
     }
-}
-
-// ---------------------------------------------------------------------------
-// Stream schedule template storage helpers
-// ---------------------------------------------------------------------------
-
-fn validate_template_delays(
-    env: &Env,
-    start_delay: u64,
-    cliff_delay: u64,
-    duration: u64,
-) -> Result<(), ContractError> {
-    if duration == 0 {
-        return Err(ContractError::InvalidParams);
-    }
-    if cliff_delay < start_delay {
-        return Err(ContractError::InvalidParams);
-    }
-    let now = env.ledger().timestamp();
-    let start_time = now
-        .checked_add(start_delay)
-        .ok_or(ContractError::InvalidParams)?;
-    let cliff_time = now
-        .checked_add(cliff_delay)
-        .ok_or(ContractError::InvalidParams)?;
-    let end_time = start_time
-        .checked_add(duration)
-        .ok_or(ContractError::InvalidParams)?;
-    if cliff_time > end_time {
-        return Err(ContractError::InvalidParams);
-    }
-    Ok(())
-}
-
-fn read_next_template_id(env: &Env) -> u64 {
-    bump_instance_ttl(env);
-    env.storage()
-        .instance()
-        .get(&DataKey::NextTemplateId)
-        .unwrap_or(0u64)
-}
-
-fn set_next_template_id(env: &Env, id: u64) {
-    env.storage().instance().set(&DataKey::NextTemplateId, &id);
-    bump_instance_ttl(env);
-}
-
-fn read_active_template_count(env: &Env) -> u64 {
-    bump_instance_ttl(env);
-    env.storage()
-        .instance()
-        .get(&DataKey::ActiveTemplateCount)
-        .unwrap_or(0u64)
-}
-
-fn set_active_template_count(env: &Env, n: u64) {
-    env.storage().instance().set(&DataKey::ActiveTemplateCount, &n);
-    bump_instance_ttl(env);
-}
-
-fn load_owner_template_ids(env: &Env, owner: &Address) -> soroban_sdk::Vec<u64> {
-    let key = DataKey::OwnerTemplateIds(owner.clone());
-    env.storage()
-        .persistent()
-        .get(&key)
-        .unwrap_or_else(|| soroban_sdk::Vec::new(env))
-}
-
-fn save_owner_template_ids(env: &Env, owner: &Address, ids: &soroban_sdk::Vec<u64>) {
-    let key = DataKey::OwnerTemplateIds(owner.clone());
-    env.storage().persistent().set(&key, ids);
-    env.storage().persistent().extend_ttl(
-        &key,
-        PERSISTENT_LIFETIME_THRESHOLD,
-        PERSISTENT_BUMP_AMOUNT,
-    );
-}
-
-fn load_stream_template(
-    env: &Env,
-    template_id: u64,
-) -> Result<StreamScheduleTemplate, ContractError> {
-    let key = DataKey::StreamTemplate(template_id);
-    let t: StreamScheduleTemplate = env
-        .storage()
-        .persistent()
-        .get(&key)
-        .ok_or(ContractError::TemplateNotFound)?;
-    env.storage().persistent().extend_ttl(
-        &key,
-        PERSISTENT_LIFETIME_THRESHOLD,
-        PERSISTENT_BUMP_AMOUNT,
-    );
-    Ok(t)
-}
-
-fn save_stream_template(env: &Env, template: &StreamScheduleTemplate) {
-    let key = DataKey::StreamTemplate(template.template_id);
-    env.storage().persistent().set(&key, template);
-    env.storage().persistent().extend_ttl(
-        &key,
-        PERSISTENT_LIFETIME_THRESHOLD,
-        PERSISTENT_BUMP_AMOUNT,
-    );
-}
-
-fn remove_stream_template_storage(env: &Env, template_id: u64) {
-    let key = DataKey::StreamTemplate(template_id);
-    env.storage().persistent().remove(&key);
-}
-
-fn remove_template_id_for_owner(
-    env: &Env,
-    owner: &Address,
-    template_id: u64,
-) -> Result<(), ContractError> {
-    let ids = load_owner_template_ids(env, owner);
-    let mut out = soroban_sdk::Vec::new(env);
-    let mut found = false;
-    let mut i: u32 = 0;
-    while i < ids.len() {
-        let id = ids.get(i).unwrap();
-        if id == template_id {
-            found = true;
-        } else {
-            out.push_back(id);
-        }
-        i += 1;
-    }
-    if !found {
-        return Err(ContractError::TemplateNotFound);
-    }
-    save_owner_template_ids(env, owner, &out);
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Auto-claim storage helpers
-// ---------------------------------------------------------------------------
-
-/// Load the auto-claim destination for a stream, if set.
-fn load_auto_claim_destination(env: &Env, stream_id: u64) -> Option<Address> {
-    let key = DataKey::AutoClaimDestination(stream_id);
-    let result: Option<Address> = env.storage().persistent().get(&key);
-    if result.is_some() {
-        env.storage().persistent().extend_ttl(
-            &key,
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
-    }
-    result
-}
-
-/// Persist the auto-claim destination for a stream.
-fn save_auto_claim_destination(env: &Env, stream_id: u64, destination: &Address) {
-    let key = DataKey::AutoClaimDestination(stream_id);
-    env.storage().persistent().set(&key, destination);
-    env.storage().persistent().extend_ttl(
-        &key,
-        PERSISTENT_LIFETIME_THRESHOLD,
-        PERSISTENT_BUMP_AMOUNT,
-    );
-}
-
-/// Remove the auto-claim destination for a stream (opt-out / revoke).
-fn remove_auto_claim_destination(env: &Env, stream_id: u64) {
-    let key = DataKey::AutoClaimDestination(stream_id);
-    env.storage().persistent().remove(&key);
 }
 
 // ---------------------------------------------------------------------------
@@ -1259,33 +1082,36 @@ impl FluxoraStream {
     pub fn create_stream_relative(
         env: Env,
         sender: Address,
-        recipient: Address,
-        deposit_amount: i128,
-        rate_per_second: i128,
-        start_delay: u64,
-        cliff_delay: u64,
-        duration: u64,
+        params: CreateStreamRelativeParams,
+    ) -> Result<u64, ContractError> {
+        Self::create_stream_relative_inner(env, sender, params)
+    }
+
+    fn create_stream_relative_inner(
+        env: Env,
+        sender: Address,
+        params: CreateStreamRelativeParams,
     ) -> Result<u64, ContractError> {
         let current_time = env.ledger().timestamp();
 
         // Compute absolute times with overflow checks
         let start_time = current_time
-            .checked_add(start_delay)
+            .checked_add(params.start_delay)
             .ok_or(ContractError::InvalidParams)?;
         let cliff_time = current_time
-            .checked_add(cliff_delay)
+            .checked_add(params.cliff_delay)
             .ok_or(ContractError::InvalidParams)?;
         let end_time = start_time
-            .checked_add(duration)
+            .checked_add(params.duration)
             .ok_or(ContractError::InvalidParams)?;
 
         // Delegate to standard create_stream with computed absolute times
         Self::create_stream(
             env,
             sender,
-            recipient,
-            deposit_amount,
-            rate_per_second,
+            params.recipient,
+            params.deposit_amount,
+            params.rate_per_second,
             start_time,
             cliff_time,
             end_time,
@@ -2132,7 +1958,7 @@ impl FluxoraStream {
         recipient: Address,
         withdrawals: soroban_sdk::Vec<WithdrawToParam>,
     ) -> Result<soroban_sdk::Vec<BatchWithdrawResult>, ContractError> {
-        require_not_globally_paused(&env);
+        require_not_globally_paused(&env)?;
         recipient.require_auth();
 
         let n = withdrawals.len();
@@ -2280,13 +2106,14 @@ impl FluxoraStream {
         };
 
         Ok(accrual::calculate_accrued_amount_checkpointed(
-            stream.start_time,
-            stream.checkpointed_amount,
-            stream.checkpointed_at,
-            stream.cliff_time,
-            stream.end_time,
+            accrual::CheckpointState {
+                checkpointed_amount: stream.checkpointed_amount,
+                checkpointed_at: stream.checkpointed_at,
+                cliff_time: stream.cliff_time,
+                end_time: stream.end_time,
+                deposit_amount: stream.deposit_amount,
+            },
             stream.rate_per_second,
-            stream.deposit_amount,
             now,
         ))
     }
@@ -2377,13 +2204,14 @@ impl FluxoraStream {
         };
 
         let accrued = accrual::calculate_accrued_amount_checkpointed(
-            stream.start_time,
-            stream.checkpointed_amount,
-            stream.checkpointed_at,
-            stream.cliff_time,
-            stream.end_time,
+            accrual::CheckpointState {
+                checkpointed_amount: stream.checkpointed_amount,
+                checkpointed_at: stream.checkpointed_at,
+                cliff_time: stream.cliff_time,
+                end_time: stream.end_time,
+                deposit_amount: stream.deposit_amount,
+            },
             stream.rate_per_second,
-            stream.deposit_amount,
             effective_time,
         );
 
@@ -2581,13 +2409,14 @@ impl FluxoraStream {
         // Checkpoint accrued-to-date so the rate increase applies forward-only.
         let now = env.ledger().timestamp();
         let accrued_now = accrual::calculate_accrued_amount_checkpointed(
-            stream.start_time,
-            stream.checkpointed_amount,
-            stream.checkpointed_at,
-            stream.cliff_time,
-            stream.end_time,
+            accrual::CheckpointState {
+                checkpointed_amount: stream.checkpointed_amount,
+                checkpointed_at: stream.checkpointed_at,
+                cliff_time: stream.cliff_time,
+                end_time: stream.end_time,
+                deposit_amount: stream.deposit_amount,
+            },
             old_rate,
-            stream.deposit_amount,
             now,
         );
         stream.checkpointed_amount = accrued_now;
@@ -2660,7 +2489,7 @@ impl FluxoraStream {
         stream_id: u64,
         new_rate_per_second: i128,
     ) -> Result<(), ContractError> {
-        require_not_globally_paused(&env);
+        require_not_globally_paused(&env)?;
         let mut stream = load_stream(&env, stream_id)?;
 
         // Sender-only: only the original creator may reduce the rate.
@@ -2691,13 +2520,14 @@ impl FluxoraStream {
         // Lock in accrual under the OLD rate at this exact instant.  Any value the
         // recipient could have withdrawn before this call remains reachable after.
         let accrued_now = accrual::calculate_accrued_amount_checkpointed(
-            stream.start_time,
-            stream.checkpointed_amount,
-            stream.checkpointed_at,
-            stream.cliff_time,
-            stream.end_time,
+            accrual::CheckpointState {
+                checkpointed_amount: stream.checkpointed_amount,
+                checkpointed_at: stream.checkpointed_at,
+                cliff_time: stream.cliff_time,
+                end_time: stream.end_time,
+                deposit_amount: stream.deposit_amount,
+            },
             old_rate,
-            stream.deposit_amount,
             now,
         );
 
@@ -3428,13 +3258,14 @@ impl FluxoraStream {
         let now = env.ledger().timestamp();
         // Use checkpoint-aware accrual so rate-decreased streams are cancelled correctly.
         let accrued_at_cancel = accrual::calculate_accrued_amount_checkpointed(
-            stream.start_time,
-            stream.checkpointed_amount,
-            stream.checkpointed_at,
-            stream.cliff_time,
-            stream.end_time,
+            accrual::CheckpointState {
+                checkpointed_amount: stream.checkpointed_amount,
+                checkpointed_at: stream.checkpointed_at,
+                cliff_time: stream.cliff_time,
+                end_time: stream.end_time,
+                deposit_amount: stream.deposit_amount,
+            },
             stream.rate_per_second,
-            stream.deposit_amount,
             now,
         );
 
