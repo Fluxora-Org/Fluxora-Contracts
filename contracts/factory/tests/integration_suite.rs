@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use fluxora_factory::{FactoryError, FluxoraFactory, FluxoraFactoryClient};
+use fluxora_factory::{FactoryError, FluxoraFactory, FluxoraFactoryClient, StreamConfig};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
@@ -27,16 +27,20 @@ fn setup_env<'a>() -> (
     let unauthorized_recipient = Address::generate(&env);
 
     // Deploy native token
-    let token_admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract(token_admin.clone());
-    let token_client = TokenClient::new(&env, &token_id);
-    let stellar_asset_client = StellarAssetClient::new(&env, &token_id);
+    // register_stellar_asset_contract_v2 returns a StellarAssetContract helper struct
+    let sac = env.register_stellar_asset_contract_v2(admin.clone());
+    let token_address = sac.address(); // Extract the Address for use in clients
+
+    let token_client = TokenClient::new(&env, &token_address);
+    let stellar_asset_client = StellarAssetClient::new(&env, &token_address);
     stellar_asset_client.mint(&sender, &100_000);
 
     // Deploy Stream Contract
     let stream_id = env.register_contract(None, fluxora_stream::FluxoraStream {});
     let stream_client = fluxora_stream::FluxoraStreamClient::new(&env, &stream_id);
-    stream_client.init(&token_id, &admin);
+
+    // Initialize stream contract with proper Address types
+    stream_client.init(&token_address, &admin);
 
     // Deploy Factory
     let factory_id = env.register_contract(None, FluxoraFactory {});
@@ -75,16 +79,15 @@ fn test_factory_create_stream_success() {
     let stream_client = fluxora_stream::FluxoraStreamClient::new(&env, &stream_id);
     assert_eq!(stream_client.get_stream_count(), 0);
 
-    let created_id = factory.create_stream(
-        &sender,
-        &recipient,
-        &deposit_amount,
-        &rate_per_second,
-        &start_time,
-        &cliff_time,
-        &end_time,
-        &None,
-    );
+    let created_id = factory.create_stream(&StreamConfig {
+        sender: sender.clone(),
+        recipient: recipient.clone(),
+        deposit_amount,
+        rate_per_second,
+        start_time,
+        cliff_time,
+        end_time,
+    });
 
     assert_eq!(created_id, 0);
     assert_eq!(stream_client.get_stream_count(), 1);
@@ -97,9 +100,15 @@ fn test_factory_create_stream_success() {
 fn test_factory_enforces_allowlist() {
     let (_env, factory, _admin, sender, _recipient, unauthorized, _, _) = setup_env();
 
-    let res = factory.try_create_stream(&sender, &unauthorized, &1_000, &1, &100, &100, &1100,
-        &None
-    );
+    let res = factory.try_create_stream(&StreamConfig {
+        sender: sender.clone(),
+        recipient: unauthorized.clone(),
+        deposit_amount: 1_000,
+        rate_per_second: 1,
+        start_time: 100,
+        cliff_time: 100,
+        end_time: 1100,
+    });
     assert_eq!(res, Err(Ok(FactoryError::RecipientNotAllowlisted)));
 }
 
@@ -107,11 +116,15 @@ fn test_factory_enforces_allowlist() {
 fn test_factory_enforces_max_deposit_cap() {
     let (_env, factory, _admin, sender, recipient, _, _, _) = setup_env();
 
-    let res = factory.try_create_stream(
-        &sender, &recipient, &20_000, // max is 10_000
-        &20, &100, &100, &1100,
-        &None,
-    );
+    let res = factory.try_create_stream(&StreamConfig {
+        sender: sender.clone(),
+        recipient: recipient.clone(),
+        deposit_amount: 20_000, // max is 10_000
+        rate_per_second: 20,
+        start_time: 100,
+        cliff_time: 100,
+        end_time: 1100,
+    });
     assert_eq!(res, Err(Ok(FactoryError::DepositExceedsCap)));
 }
 
@@ -119,9 +132,15 @@ fn test_factory_enforces_max_deposit_cap() {
 fn test_factory_enforces_min_duration() {
     let (_env, factory, _admin, sender, recipient, _, _, _) = setup_env();
 
-    let res = factory.try_create_stream(
-        &sender, &recipient, &1_000, &10, &100, &100, &200, // duration 100 < min 500
-    );
+    let res = factory.try_create_stream(&StreamConfig {
+        sender: sender.clone(),
+        recipient: recipient.clone(),
+        deposit_amount: 1_000,
+        rate_per_second: 10,
+        start_time: 100,
+        cliff_time: 100,
+        end_time: 200, // duration 100 < min 500
+    });
     assert_eq!(res, Err(Ok(FactoryError::DurationTooShort)));
 }
 
@@ -131,29 +150,46 @@ fn test_factory_admin_updates() {
 
     // Update allowlist
     factory.set_allowlist(&unauthorized, &true);
-    let id1 = factory.create_stream(&sender, &unauthorized, &1_000, &1, &100, &100, &1100,
-        &None
-    );
+    let id1 = factory.create_stream(&StreamConfig {
+        sender: sender.clone(),
+        recipient: unauthorized.clone(),
+        deposit_amount: 1_000,
+        rate_per_second: 1,
+        start_time: 100,
+        cliff_time: 100,
+        end_time: 1100,
+    });
     assert_eq!(id1, 0);
 
     // Update Cap
     factory.set_cap(&500);
-    let res1 = factory.try_create_stream(&sender, &recipient, &1_000, &1, &100, &100, &1100,
-        &None
-    );
+    let res1 = factory.try_create_stream(&StreamConfig {
+        sender: sender.clone(),
+        recipient: recipient.clone(),
+        deposit_amount: 1_000,
+        rate_per_second: 1,
+        start_time: 100,
+        cliff_time: 100,
+        end_time: 1100,
+    });
     assert_eq!(res1, Err(Ok(FactoryError::DepositExceedsCap)));
 
     // Update Min Duration
     factory.set_min_duration(&2000);
-    let res2 = factory.try_create_stream(&sender, &recipient, &500, &1, &100, &100, &1100,
-        &None
-    );
+    let res2 = factory.try_create_stream(&StreamConfig {
+        sender: sender.clone(),
+        recipient: recipient.clone(),
+        deposit_amount: 500,
+        rate_per_second: 1,
+        start_time: 100,
+        cliff_time: 100,
+        end_time: 1100,
+    });
     assert_eq!(res2, Err(Ok(FactoryError::DurationTooShort)));
 
     // Update Stream Contract
     let dummy = Address::generate(&env);
     factory.set_stream_contract(&dummy);
-    // Note: Calling create_stream now would fail because `dummy` is not a stream contract.
 
     // Update Admin
     let new_admin = Address::generate(&env);

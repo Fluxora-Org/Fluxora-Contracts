@@ -26,6 +26,14 @@ This document provides crisp success and failure semantics for all protocol oper
 
 No hidden rules or implementation details are required to understand protocol behavior.
 
+### Schedule templates (presets)
+
+From **CONTRACT_VERSION 3**, integrators can register **relative** schedule skeletons (`register_stream_template`) and create streams from them (`create_stream_from_template`). This standardizes recurring payroll windows and trims repeated calldata versus always passing `start_delay` / `cliff_delay` / `duration` through the client for identical shapes.
+
+- **Auth**: registering and deleting templates requires the template `owner` signer. Creating a stream from a template requires the **funding `sender`** to authorize (same as `create_stream_relative`).
+- **Caps**: per-owner and global template counts are bounded; see `MAX_TEMPLATES_PER_OWNER` and `MAX_GLOBAL_TEMPLATES` in `contracts/stream/src/lib.rs`.
+- **Errors**: `TemplateNotFound`, `TemplateLimitExceeded`, `TemplateUnauthorized`.
+
 ---
 
 ## 1. Stream Lifecycle
@@ -52,17 +60,7 @@ No hidden rules or implementation details are required to understand protocol be
 Terminal states: `Completed`, `Cancelled`. Both may be closed via `close_completed_stream` to reclaim storage and index space. A stream is also considered technically terminal if `ledger.timestamp() >= end_time`.
 In this "time-terminal" state, pause/resume is blocked, but withdrawal is always allowed regardless of previous pause status.
 
-### Optional Stream Memo (Issue #403)
-
-`create_stream` and `create_streams` accept an optional `memo: Option<Bytes>` parameter for indexer correlation (e.g. payroll batch IDs, invoice references).
-
-- **Maximum length:** 64 bytes (`MAX_MEMO_BYTES`). Exceeding this returns `ContractError::InvalidParams`.
-- **Storage:** Stored separately under `DataKey::StreamMemo(stream_id)` (discriminant 10) in persistent storage. Also embedded in the `Stream` struct for convenience.
-- **Event:** The `StreamCreated` event includes the `memo` field (`None` when not supplied).
-- **Query:** `get_stream_memo(stream_id)` returns `Option<Bytes>`. Returns `StreamNotFound` if the stream does not exist.
-- **Cleanup:** `close_completed_stream` removes the `StreamMemo` entry along with the `Stream` entry.
-- **Immutability:** Memo is set at creation and cannot be changed afterwards.
-- **Versioning:** This field was added in `CONTRACT_VERSION = 3`. Indexers reading storage directly must handle the new `StreamMemo` key.
+**Cancelled stream closure rule**: A `Cancelled` stream may only be closed after the recipient has fully withdrawn the frozen accrued amount. Attempting to close a `Cancelled` stream with remaining claimable balance returns `ContractError::InvalidState`. This prevents storage cleanup from destroying recipient funds.
 
 ### Cancellation Semantics (Issue Scope)
 
@@ -508,6 +506,7 @@ contract.create_streams_relative(&sender, &params)?;
 | `decrease_rate_per_second`| Sender                        | `sender.require_auth()`                     |
 | `shorten_stream_end_time` | Sender                        | `sender.require_auth()`                     |
 | `extend_stream_end_time`  | Sender                        | `sender.require_auth()`                     |
+| `transfer_sender`         | Current stream sender         | `sender.require_auth()`                     |
 | `set_auto_claim`          | Recipient                     | `recipient.require_auth()`                  |
 | `revoke_auto_claim`       | Recipient                     | `recipient.require_auth()`                  |
 | `trigger_auto_claim`      | Anyone                        | None (permissionless; destination fixed by recipient) |
@@ -641,9 +640,35 @@ A naive decrease would retroactively lower the recipient's accrued tokens. To pr
 - Recipient entitlement is preserved or increased.
 - Deposit coverage ensures the stream remains fully fundable at the new rate.
 
+### transfer_sender: Observable Semantics
+
+`transfer_sender(stream_id, new_sender)` allows the current stream sender to rotate the treasury key for an existing stream.
+
+#### Success Semantics (Observable)
+
+- **Authorization**: Only the current stream `sender` can authorize the call.
+- **State Requirements**: Stream must be in `Active` or `Paused` status (not `Completed` or `Cancelled`).
+- **Parameter Validation**: `new_sender != current_sender` and `new_sender != recipient`.
+- **State Change**: `stream.sender` is updated to `new_sender`. All other fields are unchanged.
+- **Immediate Effect**: `new_sender` gains all sender-role privileges (pause, resume, cancel, rate updates, schedule changes) immediately. `old_sender` loses them immediately.
+- **Recipient Entitlement**: Unchanged. Accrued amounts, `withdrawn_amount`, and schedule are unaffected.
+- **Event**: Emits `("sndr_xfr", stream_id)` with `SenderTransferred { stream_id, old_sender, new_sender }`.
+
+#### Failure Semantics (Observable)
+
+- **StreamNotFound**: Invalid `stream_id`.
+- **Unauthorized**: Caller is not the current stream sender.
+- **InvalidState**: Stream is `Completed` or `Cancelled`.
+- **InvalidParams**: `new_sender == current_sender` or `new_sender == recipient`.
+- **Atomicity**: Any failure reverts the entire transaction with no state changes or events.
+
+#### Use Case
+
+Treasury key rotation: when a treasury wallet is being rotated, the operator calls `transfer_sender` to hand over stream management rights to the new key without disrupting the recipient's accrual or requiring stream recreation.
+
 ### batch_withdraw: completed stream behavior
 
-`batch_withdraw` processes each stream ID in order. A stream with status `Completed` **does not panic** — it contributes a zero-amount result (`BatchWithdrawResult { stream_id, amount: 0 }`) and is skipped silently. No token transfer and no event are emitted for that entry. This allows callers to pass a mixed list of active and already-completed streams without pre-filtering.
+`batch_withdraw` processes each stream ID in order. A stream with status `Completed` **does not error** — it contributes a zero-amount result (`BatchWithdrawResult { stream_id, amount: 0 }`) and is skipped silently. No token transfer and no event are emitted for that entry. This allows callers to pass a mixed list of active and already-completed streams without pre-filtering.
 
 A `Paused` stream **does** return `ContractError::InvalidState` and reverts the entire batch.
 
@@ -719,7 +744,7 @@ These guarantees are limited to `create_streams` creation semantics. They do not
 - Non-recipient calls fail before transfer/state/event side effects.
 - Uniqueness check: `stream_ids` must not contain duplicates; duplicates return `ContractError::DuplicateStreamId` and revert the entire batch.
 - Completed streams: contribute a zero-amount result and are skipped silently (no error, no event).
-- Active/Paused streams: processed normally; `Paused` streams panic and revert the entire batch.
+- Active/Paused streams: processed normally; `Paused` streams return `ContractError::InvalidState` and revert the entire batch.
 - Event ordering on active final drain: `withdrew` is emitted before `completed`.
 
 #### Empty Vector Semantics
@@ -866,6 +891,23 @@ Emitted when a sender successfully updates the streaming rate via `update_rate_p
 
 ---
 
+## `withdraw_to` Destination Rules
+
+`withdraw_to(stream_id, destination)` lets the recipient redirect accrued tokens to any address **except the contract itself**.
+
+| Destination                  | Allowed | Error on rejection      |
+| ---------------------------- | ------- | ----------------------- |
+| Contract address (`env.current_contract_address()`) | ❌ No | `ContractError::InvalidParams` |
+| Recipient address (self-redirect) | ✅ Yes | — |
+| Sender address               | ✅ Yes  | —                       |
+| Any other third-party address | ✅ Yes | —                       |
+
+**Atomicity guarantee:** If the destination check fails, the call returns `InvalidParams` with **no side effects** — `withdrawn_amount` is not incremented, no token transfer occurs, and no event is emitted. The stream state is identical to its state before the call.
+
+**Auth:** `recipient.require_auth()` is always enforced before the destination check.
+
+---
+
 ## 6. Error Behavior (ContractError + Panics)
 
 Errors are surfaced either as `ContractError` variants or as panic/assert messages.
@@ -894,6 +936,7 @@ errors relevant to stream creation and timing.
 | `ContractError::InvalidState` (2)                                       | `withdraw`                         | Withdraw from non-terminal paused             |
 | `ContractError::InvalidState` (2)                                       | `cancel_stream`                    | Cancel completed/cancelled                    |
 | `"invalid state for stream closure"`                                    | `close_completed_stream`           | Close non-terminal (Active/Paused) stream    |
+| `ContractError::InvalidState` (2)                                       | `close_completed_stream`           | Close Cancelled stream with remaining claimable balance |
 | `"contract not initialised: missing config"`                            | Functions requiring config         | Config missing                                |
 
 ## Error Reference
