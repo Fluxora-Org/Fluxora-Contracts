@@ -15,7 +15,7 @@ Version policy, migration runbook, and audit notes for operators, integrators, a
 ### Current value
 
 ```
-CONTRACT_VERSION = 2
+CONTRACT_VERSION = 3
 ```
 
 ### When to increment
@@ -44,6 +44,11 @@ CONTRACT_VERSION = 2
 - Adding new entry-points that old clients can safely ignore.
 - Changing TTL bump constants (`INSTANCE_BUMP_AMOUNT`, `PERSISTENT_BUMP_AMOUNT`).
 - Changing internal helper functions with no external surface.
+
+> **Note (transfer_sender):** The `transfer_sender` entry-point is a purely additive
+> new entry-point. Old clients that do not call it are unaffected. `CONTRACT_VERSION`
+> was incremented conservatively per the policy above. Indexers should subscribe to
+> the new `sndr_xfr` event to track sender rotations.
 
 ---
 

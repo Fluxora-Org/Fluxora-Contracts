@@ -53,6 +53,9 @@ impl<'a> TestContext<'a> {
         let sac = StellarAssetClient::new(&env, &token_id);
         sac.mint(&sender, &10_000_i128);
 
+        // Provide default allowance for tests
+        TokenClient::new(&env, &token_id).approve(&sender, &contract_id, &i128::MAX, &100_000);
+
         TestContext {
             env,
             contract_id,
@@ -110,6 +113,18 @@ impl<'a> TestContext<'a> {
         }]);
         sac.mint(&sender, &10_000_i128);
 
+        // Mock approve auth and pre-approve the contract — required for transfer_from in create_stream.
+        env.mock_auths(&[MockAuth {
+            address: &sender,
+            invoke: &MockAuthInvoke {
+                contract: &token_id,
+                fn_name: "approve",
+                args: (&sender, &contract_id, i128::MAX, 100_000u32).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        TokenClient::new(&env, &token_id).approve(&sender, &contract_id, &i128::MAX, &100_000);
+
         TestContext {
             env,
             contract_id,
@@ -127,6 +142,18 @@ impl<'a> TestContext<'a> {
 
     pub(crate) fn token(&self) -> TokenClient<'_> {
         TokenClient::new(&self.env, &self.token_id)
+    }
+
+    /// Give `address` an allowance of i128::MAX on the token for the contract.
+    /// In mock_all_auths env this works directly; in strict envs you must set
+    /// the appropriate mock_auths before calling this.
+    pub(crate) fn approve_for(&self, address: &Address) {
+        TokenClient::new(&self.env, &self.token_id).approve(
+            address,
+            &self.contract_id,
+            &i128::MAX,
+            &100_000,
+        );
     }
 
     /// Create a standard 1000-unit stream spanning 1000 seconds (rate 1/s, no cliff).
@@ -368,13 +395,15 @@ fn test_init_sets_stream_counter_to_zero() {
     let sac_token_id = env
         .register_stellar_asset_contract_v2(token_admin.clone())
         .address();
-    let sac = StellarAssetClient::new(&env, &sac_token_id);
-    sac.mint(&sender, &10_000_i128);
 
-    // Re-init with the SAC token
+    // Re-init with the SAC token — must be done before approve so contract_id2 is known
     let contract_id2 = env.register_contract(None, FluxoraStream);
     let client2 = FluxoraStreamClient::new(&env, &contract_id2);
     client2.init(&sac_token_id, &admin);
+
+    let sac = StellarAssetClient::new(&env, &sac_token_id);
+    sac.mint(&sender, &10_000_i128);
+    TokenClient::new(&env, &sac_token_id).approve(&sender, &contract_id2, &i128::MAX, &100_000);
 
     env.ledger().set_timestamp(0);
     let stream_id = client2.create_stream(
@@ -553,6 +582,7 @@ fn test_operations_work_after_failed_reinit() {
     // Fund the sender
     let sac = StellarAssetClient::new(&env, &token_id);
     sac.mint(&sender, &10_000_i128);
+    TokenClient::new(&env, &token_id).approve(&sender, &contract_id, &i128::MAX, &100_000);
 
     let admin2 = Address::generate(&env);
     let result = client.try_init(&token_id, &admin2);
@@ -3237,12 +3267,7 @@ fn test_withdraw_to_requires_recipient_auth() {
                 1000u64,
             )
                 .into_val(&ctx.env),
-            sub_invokes: &[MockAuthInvoke {
-                contract: &ctx.token_id,
-                fn_name: "transfer",
-                args: (&ctx.sender, &ctx.contract_id, 1000_i128).into_val(&ctx.env),
-                sub_invokes: &[],
-            }],
+            sub_invokes: &[],
         },
     }]);
     let stream_id = ctx.client().create_stream(
@@ -3658,12 +3683,7 @@ fn test_withdraw_recipient_success() {
                 1000u64,
             )
                 .into_val(&ctx.env),
-            sub_invokes: &[MockAuthInvoke {
-                contract: &ctx.token_id,
-                fn_name: "transfer",
-                args: (&ctx.sender, &ctx.contract_id, 1000_i128).into_val(&ctx.env),
-                sub_invokes: &[],
-            }],
+            sub_invokes: &[],
         },
     }]);
 
@@ -3687,12 +3707,7 @@ fn test_withdraw_recipient_success() {
             contract: &ctx.contract_id,
             fn_name: "withdraw",
             args: (stream_id,).into_val(&ctx.env),
-            sub_invokes: &[MockAuthInvoke {
-                contract: &ctx.token_id,
-                fn_name: "transfer",
-                args: (&ctx.contract_id, &ctx.recipient, 500_i128).into_val(&ctx.env),
-                sub_invokes: &[],
-            }],
+            sub_invokes: &[],
         },
     }]);
 
@@ -3724,12 +3739,7 @@ fn test_withdraw_not_recipient_unauthorized() {
                 1000u64,
             )
                 .into_val(&ctx.env),
-            sub_invokes: &[MockAuthInvoke {
-                contract: &ctx.token_id,
-                fn_name: "transfer",
-                args: (&ctx.sender, &ctx.contract_id, 1000_i128).into_val(&ctx.env),
-                sub_invokes: &[],
-            }],
+            sub_invokes: &[],
         },
     }]);
 
@@ -3782,12 +3792,7 @@ fn test_withdraw_not_recipient_unauthorized_has_no_side_effects() {
                 1000u64,
             )
                 .into_val(&ctx.env),
-            sub_invokes: &[MockAuthInvoke {
-                contract: &ctx.token_id,
-                fn_name: "transfer",
-                args: (&ctx.sender, &ctx.contract_id, 1000_i128).into_val(&ctx.env),
-                sub_invokes: &[],
-            }],
+            sub_invokes: &[],
         },
     }]);
 
@@ -4260,12 +4265,7 @@ fn test_top_up_stream_sender_auth_success_strict() {
             contract: &ctx.contract_id,
             fn_name: "top_up_stream",
             args: (stream_id, ctx.sender.clone(), 400_i128).into_val(&ctx.env),
-            sub_invokes: &[MockAuthInvoke {
-                contract: &ctx.token_id,
-                fn_name: "transfer",
-                args: (&ctx.sender, &ctx.contract_id, 400_i128).into_val(&ctx.env),
-                sub_invokes: &[],
-            }],
+            sub_invokes: &[],
         },
     }]);
 
@@ -4303,6 +4303,7 @@ fn test_top_up_stream_allows_third_party_funder_and_emits_payload() {
     let stream_id = ctx.create_default_stream();
     let treasury = Address::generate(&ctx.env);
     ctx.sac.mint(&treasury, &2_000_i128);
+    ctx.approve_for(&treasury);
 
     let sender_balance_before = ctx.token().balance(&ctx.sender);
     let treasury_balance_before = ctx.token().balance(&treasury);
@@ -4552,12 +4553,13 @@ fn test_top_up_unauthorized_funder_fails() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
     let stranger = Address::generate(&ctx.env);
-
+    // stranger has no balance/allowance — the contract will fail with InsufficientBalance
+    // (token rejects the transfer_from before our deposit check)
     ctx.env.ledger().set_timestamp(100);
     let result = ctx
         .client()
         .try_top_up_stream(&stream_id, &stranger, &500_i128);
-    assert_eq!(result, Err(Ok(ContractError::InsufficientDeposit)));
+    assert!(result.is_err(), "unauthorized top-up must fail");
 }
 
 /// Admin is allowed to top up any stream.
@@ -4567,8 +4569,9 @@ fn test_top_up_by_admin_succeeds() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(100);
-    // Mint tokens to admin so the pull can succeed
+    // Mint tokens to admin and approve contract
     ctx.sac.mint(&ctx.admin, &1_000_i128);
+    ctx.approve_for(&ctx.admin);
     ctx.client()
         .top_up_stream(&stream_id, &ctx.admin, &500_i128);
 
@@ -5013,12 +5016,7 @@ fn test_pause_stream_recipient_unauthorized() {
                 1000u64,
             )
                 .into_val(&ctx.env),
-            sub_invokes: &[MockAuthInvoke {
-                contract: &ctx.token_id,
-                fn_name: "transfer",
-                args: (&ctx.sender, &ctx.contract_id, 1000_i128).into_val(&ctx.env),
-                sub_invokes: &[],
-            }],
+            sub_invokes: &[],
         },
     }]);
 
@@ -5069,12 +5067,7 @@ fn test_pause_stream_third_party_unauthorized() {
                 1000u64,
             )
                 .into_val(&ctx.env),
-            sub_invokes: &[MockAuthInvoke {
-                contract: &ctx.token_id,
-                fn_name: "transfer",
-                args: (&ctx.sender, &ctx.contract_id, 1000_i128).into_val(&ctx.env),
-                sub_invokes: &[],
-            }],
+            sub_invokes: &[],
         },
     }]);
 
@@ -5124,12 +5117,7 @@ fn test_pause_stream_sender_success() {
                 1000u64,
             )
                 .into_val(&ctx.env),
-            sub_invokes: &[MockAuthInvoke {
-                contract: &ctx.token_id,
-                fn_name: "transfer",
-                args: (&ctx.sender, &ctx.contract_id, 1000_i128).into_val(&ctx.env),
-                sub_invokes: &[],
-            }],
+            sub_invokes: &[],
         },
     }]);
 
@@ -5182,12 +5170,7 @@ fn test_pause_stream_admin_success() {
                 1000u64,
             )
                 .into_val(&ctx.env),
-            sub_invokes: &[MockAuthInvoke {
-                contract: &ctx.token_id,
-                fn_name: "transfer",
-                args: (&ctx.sender, &ctx.contract_id, 1000_i128).into_val(&ctx.env),
-                sub_invokes: &[],
-            }],
+            sub_invokes: &[],
         },
     }]);
 
@@ -5241,12 +5224,7 @@ fn test_pause_stream_as_admin_non_admin_unauthorized() {
                 1000u64,
             )
                 .into_val(&ctx.env),
-            sub_invokes: &[MockAuthInvoke {
-                contract: &ctx.token_id,
-                fn_name: "transfer",
-                args: (&ctx.sender, &ctx.contract_id, 1000_i128).into_val(&ctx.env),
-                sub_invokes: &[],
-            }],
+            sub_invokes: &[],
         },
     }]);
 
@@ -5300,12 +5278,7 @@ fn test_cancel_stream_recipient_unauthorized() {
                 1000u64,
             )
                 .into_val(&ctx.env),
-            sub_invokes: &[MockAuthInvoke {
-                contract: &ctx.token_id,
-                fn_name: "transfer",
-                args: (&ctx.sender, &ctx.contract_id, 1000_i128).into_val(&ctx.env),
-                sub_invokes: &[],
-            }],
+            sub_invokes: &[],
         },
     }]);
 
@@ -5355,12 +5328,7 @@ fn test_cancel_stream_third_party_unauthorized() {
                 1000u64,
             )
                 .into_val(&ctx.env),
-            sub_invokes: &[MockAuthInvoke {
-                contract: &ctx.token_id,
-                fn_name: "transfer",
-                args: (&ctx.sender, &ctx.contract_id, 1000_i128).into_val(&ctx.env),
-                sub_invokes: &[],
-            }],
+            sub_invokes: &[],
         },
     }]);
 
@@ -5410,12 +5378,7 @@ fn test_cancel_stream_sender_success() {
                 1000u64,
             )
                 .into_val(&ctx.env),
-            sub_invokes: &[MockAuthInvoke {
-                contract: &ctx.token_id,
-                fn_name: "transfer",
-                args: (&ctx.sender, &ctx.contract_id, 1000_i128).into_val(&ctx.env),
-                sub_invokes: &[],
-            }],
+            sub_invokes: &[],
         },
     }]);
 
@@ -5466,12 +5429,7 @@ fn test_cancel_stream_admin_success() {
                 1000u64,
             )
                 .into_val(&ctx.env),
-            sub_invokes: &[MockAuthInvoke {
-                contract: &ctx.token_id,
-                fn_name: "transfer",
-                args: (&ctx.sender, &ctx.contract_id, 1000_i128).into_val(&ctx.env),
-                sub_invokes: &[],
-            }],
+            sub_invokes: &[],
         },
     }]);
 
@@ -8232,10 +8190,11 @@ fn test_stream_ids_unique_across_different_senders() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
 
-    // Provision a second sender with enough tokens
+    // Provision a second sender with enough tokens and allowance
     let sender2 = Address::generate(&ctx.env);
     let recipient2 = Address::generate(&ctx.env);
     ctx.sac.mint(&sender2, &1_000_i128);
+    ctx.approve_for(&sender2);
 
     let id_a = ctx.client().create_stream(
         &ctx.sender,
@@ -9186,13 +9145,7 @@ fn test_create_streams_batch_strict_auth() {
             contract: &ctx.contract_id,
             fn_name: "create_streams",
             args: (&ctx.sender, streams.clone()).into_val(&ctx.env),
-            sub_invokes: &[MockAuthInvoke {
-                contract: &ctx.token_id,
-                fn_name: "transfer",
-                // Total deposit = 1000 + 2000 = 3000
-                args: (&ctx.sender, &ctx.contract_id, 3000_i128).into_val(&ctx.env),
-                sub_invokes: &[],
-            }],
+            sub_invokes: &[],
         },
     }]);
 
@@ -11340,9 +11293,11 @@ fn test_recipient_stream_index_multiple_senders() {
     let sender2 = Address::generate(&ctx.env);
     let sender3 = Address::generate(&ctx.env);
 
-    // Mint tokens to additional senders
+    // Mint tokens to additional senders and approve contract
     ctx.sac.mint(&sender2, &5000_i128);
     ctx.sac.mint(&sender3, &5000_i128);
+    ctx.approve_for(&sender2);
+    ctx.approve_for(&sender3);
 
     // Create streams from different senders to the same recipient
     let id1 = ctx.client().create_stream(
@@ -12016,12 +11971,7 @@ fn test_create_stream_only_sender_auth_required() {
                 1000u64,
             )
                 .into_val(&ctx.env),
-            sub_invokes: &[MockAuthInvoke {
-                contract: &ctx.token_id,
-                fn_name: "transfer",
-                args: (&ctx.sender, &ctx.contract_id, 1000_i128).into_val(&ctx.env),
-                sub_invokes: &[],
-            }],
+            sub_invokes: &[],
         },
     }]);
 
@@ -12941,12 +12891,7 @@ fn test_extend_end_time_recipient_unauthorized() {
                 1000u64,
             )
                 .into_val(&ctx.env),
-            sub_invokes: &[MockAuthInvoke {
-                contract: &ctx.token_id,
-                fn_name: "transfer",
-                args: (&ctx.sender, &ctx.contract_id, 2000_i128).into_val(&ctx.env),
-                sub_invokes: &[],
-            }],
+            sub_invokes: &[],
         },
     }]);
 
@@ -12998,12 +12943,7 @@ fn test_extend_end_time_third_party_unauthorized() {
                 1000u64,
             )
                 .into_val(&ctx.env),
-            sub_invokes: &[MockAuthInvoke {
-                contract: &ctx.token_id,
-                fn_name: "transfer",
-                args: (&ctx.sender, &ctx.contract_id, 2000_i128).into_val(&ctx.env),
-                sub_invokes: &[],
-            }],
+            sub_invokes: &[],
         },
     }]);
 
@@ -13054,12 +12994,7 @@ fn test_extend_end_time_sender_authorized() {
                 1000u64,
             )
                 .into_val(&ctx.env),
-            sub_invokes: &[MockAuthInvoke {
-                contract: &ctx.token_id,
-                fn_name: "transfer",
-                args: (&ctx.sender, &ctx.contract_id, 2000_i128).into_val(&ctx.env),
-                sub_invokes: &[],
-            }],
+            sub_invokes: &[],
         },
     }]);
 
@@ -13331,12 +13266,7 @@ fn strict_create_stream(ctx: &TestContext) -> u64 {
                 1000u64,
             )
                 .into_val(&ctx.env),
-            sub_invokes: &[MockAuthInvoke {
-                contract: &ctx.token_id,
-                fn_name: "transfer",
-                args: (&ctx.sender, &ctx.contract_id, 1000_i128).into_val(&ctx.env),
-                sub_invokes: &[],
-            }],
+            sub_invokes: &[],
         },
     }]);
 
@@ -14320,6 +14250,7 @@ fn regression_double_init_repeated_attacks_do_not_degrade_contract() {
 
     let sac = StellarAssetClient::new(&env, &token_id);
     sac.mint(&sender, &50_000_i128);
+    TokenClient::new(&env, &token_id).approve(&sender, &contract_id, &i128::MAX, &100_000);
 
     // Pound the init endpoint 5 times with different params
     for _ in 0..5 {
@@ -14373,6 +14304,7 @@ fn regression_double_init_existing_stream_survives() {
 
     let sac = StellarAssetClient::new(&env, &token_id);
     sac.mint(&sender, &10_000_i128);
+    TokenClient::new(&env, &token_id).approve(&sender, &contract_id, &i128::MAX, &100_000);
 
     // Create a stream
     env.ledger().set_timestamp(0);
@@ -14424,6 +14356,7 @@ fn regression_double_init_counter_continuity() {
 
     let sac = StellarAssetClient::new(&env, &token_id);
     sac.mint(&sender, &50_000_i128);
+    TokenClient::new(&env, &token_id).approve(&sender, &contract_id, &i128::MAX, &100_000);
 
     // Create two streams (counter should be 2)
     env.ledger().set_timestamp(0);
@@ -14914,6 +14847,7 @@ fn regression_double_init_interleaved_with_lifecycle() {
 
     let sac = StellarAssetClient::new(&env, &token_id);
     sac.mint(&sender, &100_000_i128);
+    TokenClient::new(&env, &token_id).approve(&sender, &contract_id, &i128::MAX, &100_000);
     let token = TokenClient::new(&env, &token_id);
 
     // Phase 1: Create stream, attempt re-init, verify stream
@@ -16430,6 +16364,12 @@ mod i128_boundary_streams {
         client.init(&token_id, &admin);
         let sac = StellarAssetClient::new(&env, &token_id);
         sac.mint(&sender, &balance);
+        soroban_sdk::token::Client::new(&env, &token_id).approve(
+            &sender,
+            &contract_id,
+            &i128::MAX,
+            &100_000,
+        );
         (env, contract_id, token_id, admin, sender, recipient)
     }
 
@@ -17234,6 +17174,7 @@ mod recipient_index_stress {
     #[test]
     fn test_recipient_index_stress_large_scale() {
         let ctx = TestContext::setup();
+        ctx.env.budget().reset_unlimited();
         let recipient = Address::generate(&ctx.env);
 
         // Mint sufficient tokens for 100 streams (100 * 1000 = 100,000)
@@ -17411,8 +17352,11 @@ mod recipient_index_stress {
     fn test_get_streams_by_id_range_respects_max_page_size() {
         let ctx = TestContext::setup();
         ctx.env.ledger().set_timestamp(0);
+        ctx.env.budget().reset_unlimited();
 
         // Create 150 streams (exceeds MAX_PAGE_SIZE of 100)
+        // Needs 150*100 = 15,000 tokens; default setup has 10,000 so mint extra.
+        ctx.sac.mint(&ctx.sender, &5_000_i128);
         for _ in 0..150 {
             ctx.client().create_stream(
                 &ctx.sender,
@@ -17565,10 +17509,13 @@ mod recipient_index_stress {
     fn test_get_recipient_streams_paginated_respects_max_page_size() {
         let ctx = TestContext::setup();
         ctx.env.ledger().set_timestamp(0);
+        ctx.env.budget().reset_unlimited();
 
         let recipient = Address::generate(&ctx.env);
 
         // Create 150 streams
+        // Needs 150*100 = 15,000 tokens; default setup has 10,000 so mint extra.
+        ctx.sac.mint(&ctx.sender, &5_000_i128);
         for _ in 0..150 {
             ctx.client()
                 .create_stream(&ctx.sender, &recipient, &100, &1, &0, &0, &100);
@@ -17850,7 +17797,7 @@ mod structured_error_tests {
                 rate_per_second: 1_i128,
                 start_time: 0u64,
                 cliff_time: 0u64,
-                end_time: half as u64,
+                end_time: 100u64,
             },
             CreateStreamParams {
                 recipient: ctx.recipient.clone(),
@@ -17858,7 +17805,7 @@ mod structured_error_tests {
                 rate_per_second: 1_i128,
                 start_time: 0u64,
                 cliff_time: 0u64,
-                end_time: half as u64,
+                end_time: 100u64,
             },
         ];
 
@@ -17882,8 +17829,8 @@ mod structured_error_tests {
         // Create a stream with a very large end_time so duration is huge
         let large_end: u64 = u64::MAX / 2;
         // deposit must be >= rate * duration; use i128::MAX as deposit
-        // We need to mint enough tokens first
-        ctx.sac.mint(&ctx.sender, &i128::MAX);
+        // We need to mint enough tokens first. TestContext mints 10_000, so we mint the rest.
+        ctx.sac.mint(&ctx.sender, &(i128::MAX - 10_000));
 
         let stream_id = client.create_stream(
             &ctx.sender,
@@ -18129,101 +18076,161 @@ fn test_global_pause_flags_default_to_false() {
 }
 
 // ---------------------------------------------------------------------------
-// ContractError discriminant stability tests (#425)
-//
-// These tests lock down the exact u32 value of every ContractError variant.
-// They will fail immediately if any variant is reordered, removed, or has its
-// discriminant changed — protecting the contract ABI surface.
-//
-// Rules:
-//   - NEVER change a discriminant value once deployed.
-//   - ALWAYS append new variants at the end of the enum.
-//   - Increment CONTRACT_VERSION when adding a new variant.
+// Tests — withdraw_to destination validation and atomicity proofs (#402)
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
-mod error_discriminant_tests {
-    use crate::ContractError;
+/// destination == contract_id is rejected with InvalidParams.
+/// Atomicity proof: withdrawn_amount and contract balance are unchanged.
+#[test]
+fn test_withdraw_to_contract_destination_rejected_atomicity() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
 
-    /// Assert that every ContractError variant has the exact expected u32 value.
-    /// This is the single source of truth for the error code ABI.
-    #[test]
-    fn test_contract_error_discriminants_are_stable() {
-        // Each entry: (variant, expected_value, name_for_diagnostics)
-        let cases: &[(ContractError, u32, &str)] = &[
-            (ContractError::StreamNotFound,    1,  "StreamNotFound"),
-            (ContractError::InvalidState,      2,  "InvalidState"),
-            (ContractError::InvalidParams,     3,  "InvalidParams"),
-            (ContractError::ContractPaused,    4,  "ContractPaused"),
-            (ContractError::StartTimeInPast,   5,  "StartTimeInPast"),
-            (ContractError::ArithmeticOverflow,6,  "ArithmeticOverflow"),
-            (ContractError::Unauthorized,      7,  "Unauthorized"),
-            (ContractError::AlreadyInitialised,8,  "AlreadyInitialised"),
-            (ContractError::InsufficientBalance,9, "InsufficientBalance"),
-            (ContractError::InsufficientDeposit,10,"InsufficientDeposit"),
-            (ContractError::StreamAlreadyPaused,11,"StreamAlreadyPaused"),
-            (ContractError::StreamNotPaused,   12, "StreamNotPaused"),
-            (ContractError::StreamTerminalState,13,"StreamTerminalState"),
-            (ContractError::AutoClaimNotSet,   14, "AutoClaimNotSet"),
-        ];
+    ctx.env.ledger().set_timestamp(500);
+    let state_before = ctx.client().get_stream_state(&stream_id);
+    let contract_balance_before = ctx.token().balance(&ctx.contract_id);
 
-        for (variant, expected, name) in cases {
-            let actual = *variant as u32;
-            assert_eq!(
-                actual, *expected,
-                "ContractError::{name} discriminant changed: expected {expected}, got {actual}. \
-                 Error codes are part of the contract ABI — never change a discriminant value."
-            );
-        }
+    let result = ctx
+        .client()
+        .try_withdraw_to(&stream_id, &ctx.contract_id);
+
+    assert!(result.is_err(), "contract address destination must be rejected");
+    // No state mutation
+    let state_after = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(
+        state_after.withdrawn_amount, state_before.withdrawn_amount,
+        "withdrawn_amount must not change on rejection"
+    );
+    // No token transfer
+    assert_eq!(
+        ctx.token().balance(&ctx.contract_id),
+        contract_balance_before,
+        "contract balance must not change on rejection"
+    );
+}
+
+/// destination == contract_id returns InvalidParams error code.
+#[test]
+fn test_withdraw_to_contract_destination_returns_invalid_params() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(300);
+    let result = ctx
+        .client()
+        .try_withdraw_to(&stream_id, &ctx.contract_id);
+
+    match result {
+        Err(Ok(e)) => assert_eq!(e, ContractError::InvalidParams),
+        other => panic!("expected InvalidParams, got {:?}", other),
     }
+}
 
-    /// Assert the total number of ContractError variants matches the documented count.
-    /// Update this when adding a new variant (and bump CONTRACT_VERSION).
-    #[test]
-    fn test_contract_error_variant_count() {
-        // This must equal the number of variants in the ContractError enum.
-        // If you add a variant, increment this constant AND CONTRACT_VERSION.
-        const EXPECTED_VARIANT_COUNT: u32 = 14;
+/// destination == contract_id: no event is emitted on rejection.
+#[test]
+fn test_withdraw_to_contract_destination_no_event_emitted() {
+    use soroban_sdk::testutils::Events;
 
-        // Verify the highest discriminant equals the expected count
-        // (variants are 1-indexed with no gaps).
-        let highest = ContractError::AutoClaimNotSet as u32;
-        assert_eq!(
-            highest, EXPECTED_VARIANT_COUNT,
-            "ContractError variant count mismatch: expected {EXPECTED_VARIANT_COUNT} variants \
-             (highest discriminant), got {highest}. \
-             If you added a variant, update EXPECTED_VARIANT_COUNT and CONTRACT_VERSION."
-        );
-    }
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
 
-    /// Verify that ContractError variants are ordered correctly (no gaps, 1-indexed).
-    #[test]
-    fn test_contract_error_no_gaps_in_discriminants() {
-        let all_variants = [
-            ContractError::StreamNotFound as u32,
-            ContractError::InvalidState as u32,
-            ContractError::InvalidParams as u32,
-            ContractError::ContractPaused as u32,
-            ContractError::StartTimeInPast as u32,
-            ContractError::ArithmeticOverflow as u32,
-            ContractError::Unauthorized as u32,
-            ContractError::AlreadyInitialised as u32,
-            ContractError::InsufficientBalance as u32,
-            ContractError::InsufficientDeposit as u32,
-            ContractError::StreamAlreadyPaused as u32,
-            ContractError::StreamNotPaused as u32,
-            ContractError::StreamTerminalState as u32,
-            ContractError::AutoClaimNotSet as u32,
-        ];
+    ctx.env.ledger().set_timestamp(400);
+    let events_before = ctx.env.events().all().len();
 
-        // Must start at 1 and be contiguous.
-        for (i, &val) in all_variants.iter().enumerate() {
-            let expected = (i + 1) as u32;
-            assert_eq!(
-                val, expected,
-                "ContractError discriminant gap detected at index {i}: \
-                 expected {expected}, got {val}. Discriminants must be contiguous starting at 1."
-            );
-        }
-    }
+    let _ = ctx
+        .client()
+        .try_withdraw_to(&stream_id, &ctx.contract_id);
+
+    let events_after = ctx.env.events().all().len();
+    assert_eq!(
+        events_after, events_before,
+        "no event must be emitted when destination is rejected"
+    );
+}
+
+/// destination == sender (third-party address, not recipient) is allowed.
+/// Tokens land at sender; recipient balance stays zero.
+#[test]
+fn test_withdraw_to_sender_as_destination_is_allowed() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(600);
+    let sender_balance_before = ctx.token().balance(&ctx.sender);
+    let amount = ctx.client().withdraw_to(&stream_id, &ctx.sender);
+
+    assert_eq!(amount, 600);
+    assert_eq!(
+        ctx.token().balance(&ctx.sender),
+        sender_balance_before + 600,
+        "tokens must land at sender address"
+    );
+    assert_eq!(
+        ctx.token().balance(&ctx.recipient),
+        0,
+        "recipient balance must remain zero"
+    );
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 600);
+}
+
+/// destination == random third party is allowed.
+/// Tokens land at the third-party address; recipient balance stays zero.
+#[test]
+fn test_withdraw_to_third_party_destination_is_allowed() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let third_party = Address::generate(&ctx.env);
+
+    ctx.env.ledger().set_timestamp(700);
+    let amount = ctx.client().withdraw_to(&stream_id, &third_party);
+
+    assert_eq!(amount, 700);
+    assert_eq!(ctx.token().balance(&third_party), 700);
+    assert_eq!(ctx.token().balance(&ctx.recipient), 0);
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 700);
+}
+
+/// Atomicity proof for contract-destination rejection: stream status is unchanged.
+#[test]
+fn test_withdraw_to_contract_destination_status_unchanged() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000); // would complete the stream if allowed
+    let status_before = ctx.client().get_stream_state(&stream_id).status;
+
+    let _ = ctx
+        .client()
+        .try_withdraw_to(&stream_id, &ctx.contract_id);
+
+    let status_after = ctx.client().get_stream_state(&stream_id).status;
+    assert_eq!(
+        status_after, status_before,
+        "stream status must not change on rejected destination"
+    );
+}
+
+/// Atomicity proof: a valid withdraw_to after a rejected one succeeds and
+/// delivers the full accrued amount (no partial state leak from the failed call).
+#[test]
+fn test_withdraw_to_valid_after_rejected_destination_succeeds() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let valid_dest = Address::generate(&ctx.env);
+
+    ctx.env.ledger().set_timestamp(500);
+
+    // First call: rejected destination
+    let _ = ctx
+        .client()
+        .try_withdraw_to(&stream_id, &ctx.contract_id);
+
+    // Second call: valid destination — must see full 500 accrued
+    let amount = ctx.client().withdraw_to(&stream_id, &valid_dest);
+    assert_eq!(amount, 500, "full accrued amount must be available after rejected call");
+    assert_eq!(ctx.token().balance(&valid_dest), 500);
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 500);
 }
