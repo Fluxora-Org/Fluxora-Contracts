@@ -854,6 +854,23 @@ Emitted when a sender successfully updates the streaming rate via `update_rate_p
 
 ---
 
+## `withdraw_to` Destination Rules
+
+`withdraw_to(stream_id, destination)` lets the recipient redirect accrued tokens to any address **except the contract itself**.
+
+| Destination                  | Allowed | Error on rejection      |
+| ---------------------------- | ------- | ----------------------- |
+| Contract address (`env.current_contract_address()`) | ❌ No | `ContractError::InvalidParams` |
+| Recipient address (self-redirect) | ✅ Yes | — |
+| Sender address               | ✅ Yes  | —                       |
+| Any other third-party address | ✅ Yes | —                       |
+
+**Atomicity guarantee:** If the destination check fails, the call returns `InvalidParams` with **no side effects** — `withdrawn_amount` is not incremented, no token transfer occurs, and no event is emitted. The stream state is identical to its state before the call.
+
+**Auth:** `recipient.require_auth()` is always enforced before the destination check.
+
+---
+
 ## 6. Error Behavior (ContractError + Panics)
 
 Errors are surfaced either as `ContractError` variants or as panic/assert messages.
