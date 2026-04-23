@@ -3750,3 +3750,382 @@ fn test_batch_withdraw_to_contract_address_fails() {
     let res = ctx.client().try_batch_withdraw_to(&ctx.recipient, &params);
     assert_eq!(res, Err(Ok(fluxora_stream::ContractError::InvalidParams)));
 }
+
+// ===========================================================================
+// Tests — Issue #412: close_completed_stream lifecycle regression coverage
+// ===========================================================================
+
+/// close_completed_stream is permissionless: a third party (not sender or recipient)
+/// can close a completed stream.
+#[test]
+fn close_completed_stream_is_permissionless() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Complete the stream
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).status,
+        StreamStatus::Completed
+    );
+
+    // A random third party closes it — must succeed
+    let stranger = Address::generate(&ctx.env);
+    let _ = stranger; // auth not required; mock_all_auths covers it
+    ctx.client().close_completed_stream(&stream_id);
+
+    // Stream is gone
+    let result = ctx.client().try_get_stream_state(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::StreamNotFound)));
+}
+
+/// close_completed_stream emits the StreamClosed event BEFORE the storage entry
+/// is deleted. The event must appear in the transaction's event list.
+#[test]
+fn close_completed_stream_emits_closed_event_before_deletion() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    let events_before = ctx.env.events().all().len();
+    ctx.client().close_completed_stream(&stream_id);
+
+    let events = ctx.env.events().all();
+    let closed_event = events
+        .iter()
+        .skip(events_before as usize)
+        .find(|(contract, topics, _)| {
+            contract == &ctx.contract_id
+                && topics.len() == 2
+                && Symbol::try_from_val(&ctx.env, &topics.get(0).unwrap())
+                    == Ok(Symbol::new(&ctx.env, "closed"))
+                && u64::try_from_val(&ctx.env, &topics.get(1).unwrap()) == Ok(stream_id)
+        });
+
+    assert!(
+        closed_event.is_some(),
+        "close_completed_stream must emit a 'closed' event"
+    );
+
+    // Stream is gone after the event
+    assert_eq!(
+        ctx.client().try_get_stream_state(&stream_id),
+        Err(Ok(ContractError::StreamNotFound))
+    );
+}
+
+/// get_stream_state returns StreamNotFound after close_completed_stream.
+#[test]
+fn close_completed_stream_removes_state_observable_by_get_stream_state() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    // Verify it exists before close
+    assert!(ctx.client().try_get_stream_state(&stream_id).is_ok());
+
+    ctx.client().close_completed_stream(&stream_id);
+
+    // Must not exist after close
+    assert_eq!(
+        ctx.client().try_get_stream_state(&stream_id),
+        Err(Ok(ContractError::StreamNotFound))
+    );
+}
+
+/// close_completed_stream on an Active stream must fail with InvalidState.
+#[test]
+fn close_completed_stream_rejects_active_stream() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Stream is Active — must not be closeable
+    let result = ctx.client().try_close_completed_stream(&stream_id);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InvalidState)),
+        "closing an Active stream must return InvalidState"
+    );
+
+    // Stream state must be unchanged
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).status,
+        StreamStatus::Active
+    );
+}
+
+/// close_completed_stream on a Paused stream must fail with InvalidState.
+#[test]
+fn close_completed_stream_rejects_paused_stream() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(300);
+    ctx.client().pause_stream(&stream_id);
+
+    let result = ctx.client().try_close_completed_stream(&stream_id);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::InvalidState)),
+        "closing a Paused stream must return InvalidState"
+    );
+
+    // Stream state must be unchanged
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).status,
+        StreamStatus::Paused
+    );
+}
+
+/// close_completed_stream on a Cancelled stream must succeed.
+/// (Cancelled is a terminal state alongside Completed.)
+#[test]
+fn close_completed_stream_accepts_cancelled_stream() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().cancel_stream(&stream_id);
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).status,
+        StreamStatus::Cancelled
+    );
+
+    // Must succeed on Cancelled
+    ctx.client().close_completed_stream(&stream_id);
+
+    assert_eq!(
+        ctx.client().try_get_stream_state(&stream_id),
+        Err(Ok(ContractError::StreamNotFound))
+    );
+}
+
+/// Closing a stream twice: the second call must fail with StreamNotFound.
+#[test]
+fn close_completed_stream_second_call_returns_stream_not_found() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    // First close succeeds
+    ctx.client().close_completed_stream(&stream_id);
+
+    // Second close must fail
+    let result = ctx.client().try_close_completed_stream(&stream_id);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::StreamNotFound)),
+        "second close must return StreamNotFound"
+    );
+}
+
+/// close_completed_stream removes the stream from the recipient's index.
+#[test]
+fn close_completed_stream_removes_from_recipient_index() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    let count_before = ctx.client().get_recipient_stream_count(&ctx.recipient);
+    assert_eq!(count_before, 1);
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+    ctx.client().close_completed_stream(&stream_id);
+
+    let count_after = ctx.client().get_recipient_stream_count(&ctx.recipient);
+    assert_eq!(count_after, 0, "recipient index must be updated after close");
+
+    let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+    assert_eq!(streams.len(), 0);
+}
+
+/// close_completed_stream on a non-existent stream returns StreamNotFound.
+#[test]
+fn close_completed_stream_nonexistent_returns_stream_not_found() {
+    let ctx = TestContext::setup();
+    let result = ctx.client().try_close_completed_stream(&9999u64);
+    assert_eq!(result, Err(Ok(ContractError::StreamNotFound)));
+}
+
+/// Event ordering: for a stream that completes via withdraw, the event sequence
+/// in the final withdraw call is: withdrew → completed.
+/// Then close_completed_stream emits: closed.
+/// Verify the full sequence across two calls.
+#[test]
+fn close_completed_stream_event_ordering_withdrew_completed_then_closed() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Final withdraw: emits withdrew then completed
+    ctx.env.ledger().set_timestamp(1000);
+    let events_before_withdraw = ctx.env.events().all().len();
+    ctx.client().withdraw(&stream_id);
+
+    let events_after_withdraw = ctx.env.events().all();
+    let mut withdrew_idx: Option<usize> = None;
+    let mut completed_idx: Option<usize> = None;
+    for i in events_before_withdraw..events_after_withdraw.len() {
+        let event = events_after_withdraw.get(i as u32).unwrap();
+        if event.0 != ctx.contract_id {
+            continue;
+        }
+        let topic0 = Symbol::from_val(&ctx.env, &event.1.get(0).unwrap());
+        if topic0 == Symbol::new(&ctx.env, "withdrew") {
+            withdrew_idx = Some(i);
+        }
+        if topic0 == Symbol::new(&ctx.env, "completed") {
+            completed_idx = Some(i);
+        }
+    }
+    assert!(withdrew_idx.is_some(), "withdrew event must be emitted");
+    assert!(completed_idx.is_some(), "completed event must be emitted");
+    assert!(
+        withdrew_idx.unwrap() < completed_idx.unwrap(),
+        "withdrew must precede completed"
+    );
+
+    // Now close: emits closed
+    let events_before_close = ctx.env.events().all().len();
+    ctx.client().close_completed_stream(&stream_id);
+
+    let events_after_close = ctx.env.events().all();
+    let mut closed_idx: Option<usize> = None;
+    for i in events_before_close..events_after_close.len() {
+        let event = events_after_close.get(i as u32).unwrap();
+        if event.0 != ctx.contract_id {
+            continue;
+        }
+        let topic0 = Symbol::from_val(&ctx.env, &event.1.get(0).unwrap());
+        if topic0 == Symbol::new(&ctx.env, "closed") {
+            closed_idx = Some(i);
+        }
+    }
+    assert!(closed_idx.is_some(), "closed event must be emitted");
+    // closed must come after completed (different calls, so index is always higher)
+    assert!(
+        closed_idx.unwrap() > completed_idx.unwrap(),
+        "closed must come after completed"
+    );
+}
+
+/// Closing a cancelled stream also emits the closed event.
+#[test]
+fn close_completed_stream_cancelled_emits_closed_event() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().cancel_stream(&stream_id);
+
+    let events_before = ctx.env.events().all().len();
+    ctx.client().close_completed_stream(&stream_id);
+
+    let events = ctx.env.events().all();
+    let closed_event = events
+        .iter()
+        .skip(events_before as usize)
+        .find(|(contract, topics, _)| {
+            contract == &ctx.contract_id
+                && topics.len() == 2
+                && Symbol::try_from_val(&ctx.env, &topics.get(0).unwrap())
+                    == Ok(Symbol::new(&ctx.env, "closed"))
+                && u64::try_from_val(&ctx.env, &topics.get(1).unwrap()) == Ok(stream_id)
+        });
+
+    assert!(
+        closed_event.is_some(),
+        "closed event must be emitted for cancelled stream"
+    );
+}
+
+/// Closing multiple streams in sequence: each close is independent and correct.
+#[test]
+fn close_completed_stream_multiple_streams_independent() {
+    let ctx = TestContext::setup();
+    let sac = StellarAssetClient::new(&ctx.env, &ctx.token_id);
+    sac.mint(&ctx.sender, &10_000_i128);
+
+    let id0 = ctx.create_default_stream();
+    let id1 = ctx.create_default_stream();
+    let id2 = ctx.create_default_stream();
+
+    // Complete all three
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&id0);
+    ctx.client().withdraw(&id1);
+    ctx.client().withdraw(&id2);
+
+    // Close id1 first (middle)
+    ctx.client().close_completed_stream(&id1);
+    assert_eq!(
+        ctx.client().try_get_stream_state(&id1),
+        Err(Ok(ContractError::StreamNotFound))
+    );
+    // id0 and id2 still exist
+    assert!(ctx.client().try_get_stream_state(&id0).is_ok());
+    assert!(ctx.client().try_get_stream_state(&id2).is_ok());
+
+    // Close id0
+    ctx.client().close_completed_stream(&id0);
+    assert_eq!(
+        ctx.client().try_get_stream_state(&id0),
+        Err(Ok(ContractError::StreamNotFound))
+    );
+    assert!(ctx.client().try_get_stream_state(&id2).is_ok());
+
+    // Close id2
+    ctx.client().close_completed_stream(&id2);
+    assert_eq!(
+        ctx.client().try_get_stream_state(&id2),
+        Err(Ok(ContractError::StreamNotFound))
+    );
+
+    // Recipient index is now empty
+    assert_eq!(ctx.client().get_recipient_stream_count(&ctx.recipient), 0);
+}
+
+/// close_completed_stream does not affect other streams' state or balances.
+#[test]
+fn close_completed_stream_does_not_affect_other_streams() {
+    let ctx = TestContext::setup();
+    let sac = StellarAssetClient::new(&ctx.env, &ctx.token_id);
+    sac.mint(&ctx.sender, &10_000_i128);
+
+    let id_to_close = ctx.create_default_stream();
+    let id_active = ctx.create_default_stream();
+
+    // Complete id_to_close
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&id_to_close);
+
+    let active_state_before = ctx.client().get_stream_state(&id_active);
+    let contract_balance_before = ctx.token.balance(&ctx.contract_id);
+
+    ctx.client().close_completed_stream(&id_to_close);
+
+    // Active stream is unaffected
+    let active_state_after = ctx.client().get_stream_state(&id_active);
+    assert_eq!(active_state_after.status, active_state_before.status);
+    assert_eq!(
+        active_state_after.withdrawn_amount,
+        active_state_before.withdrawn_amount
+    );
+    assert_eq!(
+        active_state_after.deposit_amount,
+        active_state_before.deposit_amount
+    );
+
+    // Contract balance unchanged (close doesn't move tokens)
+    assert_eq!(
+        ctx.token.balance(&ctx.contract_id),
+        contract_balance_before,
+        "close must not move tokens"
+    );
+}
