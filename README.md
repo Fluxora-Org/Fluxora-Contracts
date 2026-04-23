@@ -203,11 +203,24 @@ After each CI build, the pipeline computes a SHA256 hash of the contract WASM ar
 To verify a deployment:
 
 1. Download the hash artifact from the CI run (GitHub Actions → Artifacts → `fluxora_stream-wasm-hash`).
-2. Compute the SHA256 hash of your local WASM file:
+2. Rebuild locally and verify against the committed reference:
    ```bash
-   sha256sum target/wasm32-unknown-unknown/release/fluxora_stream.wasm
+   bash script/verify-wasm-checksum.sh
    ```
-3. Compare the output to the CI hash file. A match confirms your binary is identical to the tested build.
+3. Or verify existing artifacts without rebuilding:
+   ```bash
+   bash script/verify-wasm-checksum.sh --no-build
+   ```
+
+To update checksums after a source change:
+
+```bash
+bash script/update-wasm-checksums.sh
+git add wasm/checksums.sha256
+git commit -m "chore: update wasm checksums"
+```
+
+See [docs/security.md](docs/security.md#reproducible-wasm-builds) for the full reproducibility contract, auditor verification steps, and residual risks.
 
 ## Related repos
 

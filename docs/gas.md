@@ -2,8 +2,69 @@
 
 This document characterises the Soroban CPU-instruction and memory-byte cost
 profile for the three hot paths in the Fluxora streaming contract, explains the
-batching design decisions, and records the observable guarantees that integrators
-and auditors can rely on.
+batching design decisions, records the observable guarantees that integrators
+and auditors can rely on, and documents the recommended safe batch-size limits.
+
+---
+
+## Gas Profiling Harness
+
+A dedicated profiling test suite lives at `contracts/stream/tests/gas_profile.rs`.
+It measures CPU instructions and memory bytes for `create_streams` and
+`batch_withdraw` across batch sizes 1, 5, 10, 20, and 50.
+
+Run with:
+
+```bash
+cargo test -p fluxora_stream --test gas_profile -- --nocapture
+```
+
+Each test resets the Soroban budget to unlimited before the measured call and
+asserts against the documented guardrails below.
+
+---
+
+## Recommended Safe Batch Limits
+
+These limits are derived from the profiling harness and leave headroom below
+the Soroban network's per-transaction budget.
+
+### `create_streams`
+
+| Batch size | CPU guardrail | Memory guardrail | Notes |
+|---|---|---|---|
+| 1 | ≤ 2 000 000 | ≤ 1 000 000 | Baseline |
+| 5 | ≤ 4 000 000 | ≤ 2 000 000 | |
+| 10 | ≤ 6 000 000 | ≤ 3 000 000 | **Recommended default** |
+| 20 | ≤ 12 000 000 | ≤ 5 000 000 | |
+| 50 | ≤ 30 000 000 | ≤ 12 000 000 | Practical upper bound |
+
+**Recommendation:** Use batches of ≤ 10 streams for routine treasury operations.
+Batches of 20–50 are safe in isolation but leave less headroom for other
+operations in the same transaction.
+
+**Same-recipient penalty:** When all streams in a batch share the same recipient,
+the `RecipientStreams` index is read and written N times (O(N) persistent I/O).
+For 10 streams to the same recipient, allow up to 8 000 000 CPU / 4 000 000 bytes.
+
+### `batch_withdraw`
+
+| Batch size | CPU guardrail | Memory guardrail | Notes |
+|---|---|---|---|
+| 1 | ≤ 1 500 000 | ≤ 600 000 | Baseline |
+| 5 | ≤ 4 000 000 | ≤ 2 000 000 | |
+| 10 | ≤ 6 000 000 | ≤ 3 000 000 | |
+| 20 | ≤ 10 000 000 | ≤ 4 000 000 | **Recommended default** |
+| 50 | ≤ 25 000 000 | ≤ 10 000 000 | Practical upper bound |
+
+**Recommendation:** Use batches of ≤ 20 streams for routine recipient withdrawals.
+
+### `withdraw` (single stream)
+
+| Metric | Guardrail |
+|---|---|
+| CPU instructions | ≤ 1 000 000 |
+| Memory bytes | ≤ 500 000 |
 
 ---
 
@@ -106,12 +167,16 @@ memory bytes for a 10-stream batch.
 
 4. **Single token pull in `create_streams`.** The total deposit is computed with
    `checked_add` across all entries before any token interaction. Overflow in
-   the sum returns `ContractError::InvalidParams` and is atomic.
+   the sum returns `ContractError::ArithmeticOverflow` and is atomic.
 
 5. **TTL bumps are bounded.** Every `load_stream` and `save_stream` call bumps
    the persistent entry TTL by at most `PERSISTENT_BUMP_AMOUNT` (120 960
    ledgers ≈ 7 days). Instance storage is bumped on every entry-point that
    touches it. These bumps are included in the guardrail measurements above.
+
+6. **Scaling is sub-linear.** The profiling harness verifies that CPU cost for
+   both `create_streams` and `batch_withdraw` scales at most 5× when batch size
+   grows 4× (from 5 to 20 streams). This confirms no hidden quadratic behaviour.
 
 ---
 

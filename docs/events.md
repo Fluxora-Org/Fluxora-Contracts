@@ -16,7 +16,7 @@ Notes:
 
 | Event name       | Topic(s)                        | Data (shape & types)                                                                                                                                      | When emitted                                                                                                            |
 |------------------|---------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------|
-| StreamCreated    | `["created", stream_id: u64]`   | `StreamCreated { stream_id: u64, sender: Address, recipient: Address, deposit_amount: i128, rate_per_second: i128, start_time: u64, cliff_time: u64, end_time: u64 }` | After a stream is successfully created and deposit tokens transferred. Not emitted on any validation failure.           |
+| StreamCreated    | `["created", stream_id: u64]`   | `StreamCreated { stream_id: u64, sender: Address, recipient: Address, deposit_amount: i128, rate_per_second: i128, start_time: u64, cliff_time: u64, end_time: u64, memo: Option<Bytes> }` | After a stream is successfully created and deposit tokens transferred. Not emitted on any validation failure.           |
 | Withdrawal       | `["withdrew", stream_id: u64]`  | `Withdrawal { stream_id: u64, recipient: Address, amount: i128 }`                                                                                         | When a recipient successfully withdraws accrued tokens. Only emitted when `amount > 0`.                                |
 | WithdrawalTo     | `["wdraw_to", stream_id: u64]`  | `WithdrawalTo { stream_id: u64, recipient: Address, destination: Address, amount: i128 }`                                                                 | When a recipient calls `withdraw_to` or `batch_withdraw_to` and `amount > 0`. Destination may differ from recipient.                          |
 | StreamPaused     | `["paused", stream_id: u64]`    | `StreamPaused { stream_id: u64, reason: PauseReason }`                                                                                                    | When a stream is paused by the sender (`pause_stream`) or admin (`pause_stream_as_admin`). The `reason` field carries the operational context code.         |
@@ -32,6 +32,7 @@ Notes:
 | ContractPaused   | `["paused_ctl"]`                | `bool`                                                                                                                                                    | When the global contract pause state is toggled via `set_contract_paused`.                                              |
 | ProtocolPaused   | `["pr_pause", admin: Address]`  | `ProtocolPaused { reason: String, paused_at: u64 }`                                                                                                       | When `pause_protocol` successfully pauses the protocol. Not emitted on idempotent calls.                               |
 | ProtocolResumed  | `["pr_resume", admin: Address]` | `ProtocolResumed { resumed_at: u64 }`                                                                                                                     | When `resume_protocol` successfully resumes the protocol. Not emitted on idempotent calls.                             |
+| SenderTransferred | `["sndr_xfr", stream_id: u64]` | `SenderTransferred { stream_id: u64, old_sender: Address, new_sender: Address }`                                                                          | When `transfer_sender` successfully rotates the stream sender. Emitted after state is persisted. Not emitted on failure. |
 
 ---
 | Event name | Topic(s) | Data (shape & types) | When emitted |
@@ -66,6 +67,7 @@ data:   StreamCreated {
           start_time:      u64,
           cliff_time:      u64,
           end_time:        u64,
+          memo:            Option<Bytes>,  // None when not supplied; max 64 bytes
         }
 ```
 
@@ -303,6 +305,35 @@ Example:
 }
 ```
 
+### 12) SenderTransferred
+
+Emitted by `transfer_sender` when the stream sender is successfully rotated.
+
+```
+topics: ["sndr_xfr", <stream_id: u64>]
+data:   SenderTransferred {
+          stream_id:  u64,
+          old_sender: Address,
+          new_sender: Address,
+        }
+```
+
+Example:
+
+```json
+{
+  "topics": ["sndr_xfr", 0],
+  "data": {
+    "stream_id": 0,
+    "old_sender": "G...OLD_SENDER...",
+    "new_sender": "G...NEW_SENDER..."
+  }
+}
+```
+
+Indexers should update their sender reference for the stream on receipt of this event.
+The `old_sender` field allows indexers to correlate the previous treasury key.
+
 ---
 
 ## Parsing recommendations for indexers
@@ -316,6 +347,11 @@ Example:
 - `StreamClosed` signals that the stream's on-chain storage has been removed.
   After this event, `get_stream_state` returns `StreamNotFound` for that ID.
 - `AdminUpdated` has a single-element topic list (no stream_id).
+
+> **See [docs/indexer-derivation.md](./indexer-derivation.md)** for the complete
+> specification of how to derive stream state from events, when to call
+> `get_stream_state`, and worked examples for each lifecycle path (including
+> cancellation, rate changes, and completion).
 
 ---
 

@@ -9,6 +9,7 @@ use soroban_sdk::{
     vec, Address, Env,
 };
 
+#[allow(dead_code)]
 struct TestContext<'a> {
     env: Env,
     contract_id: Address,
@@ -42,6 +43,8 @@ impl<'a> TestContext<'a> {
         sac.mint(&sender, &10_000_i128);
 
         let token = TokenClient::new(&env, &token_id);
+        // Provide sufficient allowance for tests that don't explicitly test allowances.
+        token.approve(&sender, &contract_id, &i128::MAX, &100_000);
 
         Self {
             env,
@@ -99,7 +102,7 @@ fn create_stream_relative_positive_delays_future_start() {
     let stream_id = ctx.client().create_stream_relative(
         &ctx.sender,
         &ctx.recipient,
-        &2000_i128,
+        &4000_i128, // deposit_amount: 4000 (2 * 2000)
         &2_i128,
         &100u64,  // start_delay: 100 -> start_time = 1100
         &500u64,  // cliff_delay: 500 -> cliff_time = 1500
@@ -188,6 +191,7 @@ fn create_stream_relative_start_delay_overflow_rejected() {
         &u64::MAX, // start_delay overflow -> INVALID
         &0u64,
         &1000u64,
+        &None,
     );
 
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
@@ -229,6 +233,7 @@ fn create_stream_relative_never_start_time_in_past() {
         &0u64,
         &0u64,
         &1000u64,
+        &None,
     );
 
     let state = ctx.client().get_stream_state(&stream_id);
@@ -274,6 +279,7 @@ fn create_stream_relative_rejects_self_stream() {
         &0u64,
         &0u64,
         &1000u64,
+        &None,
     );
 
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
@@ -292,12 +298,13 @@ fn create_streams_relative_single_entry() {
     let params = vec![
         &ctx.env,
         CreateStreamRelativeParams {
-            recipient: ctx.recipient,
+            recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
             rate_per_second: 1,
             start_delay: 100,
             cliff_delay: 200,
             duration: 1000,
+            memo: None,
         },
     ];
 
@@ -321,20 +328,22 @@ fn create_streams_relative_multiple_entries_sequential_ids() {
     let params = vec![
         &ctx.env,
         CreateStreamRelativeParams {
-            recipient: ctx.recipient,
+            recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
             rate_per_second: 1,
             start_delay: 0,
             cliff_delay: 0,
             duration: 1000,
+            memo: None,
         },
         CreateStreamRelativeParams {
-            recipient: recipient2,
-            deposit_amount: 2000,
+            recipient: recipient2.clone(),
+            deposit_amount: 4000, // 2 * 2000
             rate_per_second: 2,
             start_delay: 100,
             cliff_delay: 100,
             duration: 2000,
+            memo: None,
         },
     ];
 
@@ -384,20 +393,22 @@ fn create_streams_relative_invalid_entry_fails_atomically() {
     let params = vec![
         &ctx.env,
         CreateStreamRelativeParams {
-            recipient: ctx.recipient,
+            recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
             rate_per_second: 1,
             start_delay: 0,
             cliff_delay: 0,
             duration: 1000,
+            memo: None,
         },
         CreateStreamRelativeParams {
-            recipient: recipient2,
+            recipient: recipient2.clone(),
             deposit_amount: 500,
             rate_per_second: 2,
             start_delay: 0,
             cliff_delay: 0,
-            duration: 0, // INVALID: duration = 0
+            duration: 0, // INVALID: duration = 0,
+            memo: None,
         },
     ];
 
@@ -425,27 +436,27 @@ fn create_streams_relative_diverse_schedules() {
         &ctx.env,
         CreateStreamRelativeParams {
             recipient: r1,
-            deposit_amount: 1000,
+            deposit_amount: 100,
             rate_per_second: 1,
             start_delay: 0,
             cliff_delay: 0,
-            duration: 1000,
+            duration: 100,
         },
         CreateStreamRelativeParams {
             recipient: r2,
-            deposit_amount: 2000,
+            deposit_amount: 400, // 2 * 200
             rate_per_second: 2,
             start_delay: 500,
-            cliff_delay: 1000,
-            duration: 2000,
+            cliff_delay: 600,
+            duration: 200,
         },
         CreateStreamRelativeParams {
             recipient: r3,
-            deposit_amount: 3000,
+            deposit_amount: 900, // 3 * 300
             rate_per_second: 3,
             start_delay: 1000,
-            cliff_delay: 2000,
-            duration: 3000,
+            cliff_delay: 1200,
+            duration: 300,
         },
     ];
 
@@ -455,17 +466,17 @@ fn create_streams_relative_diverse_schedules() {
     // Verify all three streams created with correct schedules
     let s0 = ctx.client().get_stream_state(&ids.get_unchecked(0));
     assert_eq!(s0.start_time, 10000);
-    assert_eq!(s0.end_time, 11000);
+    assert_eq!(s0.end_time, 10100);
 
     let s1 = ctx.client().get_stream_state(&ids.get_unchecked(1));
     assert_eq!(s1.start_time, 10500);
-    assert_eq!(s1.cliff_time, 11000);
-    assert_eq!(s1.end_time, 12500);
+    assert_eq!(s1.cliff_time, 10600);
+    assert_eq!(s1.end_time, 10700);
 
     let s2 = ctx.client().get_stream_state(&ids.get_unchecked(2));
     assert_eq!(s2.start_time, 11000);
-    assert_eq!(s2.cliff_time, 12000);
-    assert_eq!(s2.end_time, 14000);
+    assert_eq!(s2.cliff_time, 11200);
+    assert_eq!(s2.end_time, 11300);
 
     // Verify total deposit transferred
     assert_eq!(ctx.token.balance(&ctx.sender), 4_000); // 10000 - 6000
@@ -490,6 +501,7 @@ fn create_streams_relative_independent_cliff_times() {
             start_delay: 0,
             cliff_delay: 0, // cliff at current time
             duration: 1000,
+            memo: None,
         },
         CreateStreamRelativeParams {
             recipient: r2,
@@ -498,6 +510,7 @@ fn create_streams_relative_independent_cliff_times() {
             start_delay: 500,
             cliff_delay: 1500, // cliff 500 seconds after start
             duration: 1000,
+            memo: None,
         },
     ];
 
@@ -529,6 +542,7 @@ fn create_streams_relative_batch_overflow_detection() {
             start_delay: u64::MAX, // overflow
             cliff_delay: 0,
             duration: 1000,
+            memo: None,
         },
     ];
 
@@ -556,6 +570,7 @@ fn create_streams_relative_batch_validates_amounts() {
             start_delay: 0,
             cliff_delay: 0,
             duration: 1000,
+            memo: None,
         },
         CreateStreamRelativeParams {
             recipient: r2,
@@ -564,6 +579,7 @@ fn create_streams_relative_batch_validates_amounts() {
             start_delay: 0,
             cliff_delay: 0,
             duration: 1000,
+            memo: None,
         },
     ];
 
