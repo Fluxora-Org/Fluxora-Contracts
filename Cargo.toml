@@ -1,5 +1,5 @@
 [workspace]
-members = ["contracts/stream", "contracts/factory"]
+members = ["contracts/stream", "contracts/factory", "contracts/vesting"]
 resolver = "2"
 
 # Issue #205 — token vesting: scaffold branch. Full vesting crate + docs/vesting.md in follow-up commits.

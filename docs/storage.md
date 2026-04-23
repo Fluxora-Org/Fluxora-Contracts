@@ -19,6 +19,11 @@ pub enum DataKey {
     RecipientStreams(Address), // discriminant 3 — persistent
     GlobalEmergencyPaused,     // discriminant 4 — instance
     CreationPaused,            // discriminant 5 — instance
+    GlobalPauseReason,         // discriminant 6 — instance
+    GlobalPauseTimestamp,      // discriminant 7 — instance
+    GlobalPauseAdmin,          // discriminant 8 — instance
+    AutoClaimDestination(u64), // discriminant 9 — persistent
+    StreamMemo(u64),           // discriminant 10 — persistent
 }
 ```
 
@@ -32,6 +37,11 @@ pub enum DataKey {
 | 3 | `RecipientStreams(Address)` | Persistent | `Vec<u64>` (sorted) | `create_stream`, `create_streams` | `close_completed_stream` (removes entry) |
 | 4 | `GlobalEmergencyPaused` | Instance | `bool` | `set_global_emergency_paused` | `set_global_emergency_paused` |
 | 5 | `CreationPaused` | Instance | `bool` | `set_contract_paused` | `set_contract_paused` |
+| 6 | `GlobalPauseReason` | Instance | `String` | `pause_protocol` | `resume_protocol` (removes) |
+| 7 | `GlobalPauseTimestamp` | Instance | `u64` | `pause_protocol` | `resume_protocol` (removes) |
+| 8 | `GlobalPauseAdmin` | Instance | `Address` | `pause_protocol` | `resume_protocol` (removes) |
+| 9 | `AutoClaimDestination(u64)` | Persistent | `Address` | auto-claim opt-in | auto-claim revoke |
+| 10 | `StreamMemo(u64)` | Persistent | `Bytes` (max 64 bytes) | `create_stream`, `create_streams` | `close_completed_stream` (removes) |
 
 ---
 
@@ -123,6 +133,7 @@ Extended on every `load_stream()` (read) and `save_stream()` (write), and on eve
 ### TTL implications for operators
 
 - **Active streams**: TTL refreshed on any interaction.
+- **Cancelled streams**: Remain in persistent storage until the recipient withdraws the frozen accrued amount. `close_completed_stream` is blocked while any claimable balance remains. Operators must ensure recipients are notified to withdraw before TTL expiry.
 - **Inactive streams**: May expire after ~7 days with zero interaction. Operators must ensure recipients are notified before TTL expiry.
 - **Expired entries**: Cannot be recovered. Data is permanently lost.
 - **Contract liveness**: Instance storage stays alive as long as any function is called at least once per 7 days.
@@ -173,3 +184,18 @@ Extended on every `load_stream()` (read) and `save_stream()` (write), and on eve
 - **CEI ordering**: State is always persisted (`save_stream`) before any external token transfer. See `docs/security.md`.
 - **No stale reads**: TTL bumps on reads mean monitoring queries keep data fresh.
 - **Admin rotation**: `set_admin` writes a new `Config` with the updated admin address. The token address is immutable.
+
+---
+
+## 7. Stream schedule templates (CONTRACT_VERSION ≥ 3)
+
+Schedule presets store **only relative offsets** (`start_delay`, `cliff_delay`, `duration`). Token amounts and recipients are supplied when calling `create_stream_from_template`, keeping calldata smaller than repeating three `u64` offsets on every payroll-style run.
+
+| Key | Type | Purpose |
+|-----|------|---------|
+| `NextTemplateId` | Instance `u64` | Monotonic template id counter |
+| `ActiveTemplateCount` | Instance `u64` | Count of stored templates (supports global cap) |
+| `StreamTemplate(template_id)` | Persistent | `StreamScheduleTemplate` body |
+| `OwnerTemplateIds(owner)` | Persistent `Vec<u64>` | Ids registered by `owner` (length capped by `MAX_TEMPLATES_PER_OWNER`) |
+
+Global cap: `MAX_GLOBAL_TEMPLATES`. Per-owner cap: `MAX_TEMPLATES_PER_OWNER`. See `contracts/stream/src/lib.rs`.

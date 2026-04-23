@@ -29,3 +29,8 @@ proptest = "1"
 name = "adversarial_auth"
 path = "tests/adversarial_auth.rs"
 required-features = ["testutils"]
+
+[[test]]
+name = "gas_profile"
+path = "tests/gas_profile.rs"
+required-features = ["testutils"]
