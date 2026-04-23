@@ -1,8 +1,8 @@
 extern crate std;
 
 use fluxora_stream::{
-    ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamEndShortened,
-    StreamStatus, StreamToppedUp,
+    AutoClaimRevoked, AutoClaimSet, AutoClaimTriggered, ContractError, CreateStreamParams,
+    FluxoraStream, FluxoraStreamClient, StreamEndShortened, StreamStatus, StreamToppedUp,
 };
 use soroban_sdk::log;
 use soroban_sdk::{
@@ -2709,7 +2709,7 @@ fn integration_uninitialised_version_works() {
     let env = Env::default();
     let contract_id = env.register_contract(None, FluxoraStream);
     let client = FluxoraStreamClient::new(&env, &contract_id);
-    assert_eq!(client.version(), 1);
+    assert_eq!(client.version(), 2);
 }
 
 /// Uninitialised contract: stream count returns 0.
@@ -3476,4 +3476,277 @@ fn shorten_end_time_one_second_future_accepted() {
         .client()
         .try_shorten_stream_end_time(&stream_id, &501u64);
     assert!(result.is_ok(), "new_end_time = now+1 must be accepted");
+}
+
+// ---------------------------------------------------------------------------
+// Structured error integration tests (#442)
+//
+// Verify that previously-panicking input-error paths now return structured
+// ContractError variants so clients can handle them programmatically.
+// ---------------------------------------------------------------------------
+
+/// batch_withdraw with duplicate stream IDs returns DuplicateStreamId (not panic).
+#[test]
+fn integration_batch_withdraw_duplicate_ids_returns_structured_error() {
+    let ctx = TestContext::setup();
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    ctx.env.ledger().with_mut(|l| l.timestamp = 500);
+
+    let ids = soroban_sdk::vec![&ctx.env, stream_id, stream_id];
+    let result = ctx.client().try_batch_withdraw(&ctx.recipient, &ids);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::DuplicateStreamId)),
+        "duplicate IDs must return DuplicateStreamId"
+    );
+
+    // No state mutation occurred
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 0);
+}
+
+/// Globally paused contract returns ContractPaused from withdraw (not panic).
+#[test]
+fn integration_globally_paused_withdraw_returns_structured_error() {
+    let ctx = TestContext::setup();
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    ctx.env.ledger().with_mut(|l| l.timestamp = 500);
+    ctx.client().set_global_emergency_paused(&true);
+
+    let result = ctx.client().try_withdraw(&stream_id);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::ContractPaused)),
+        "withdraw while globally paused must return ContractPaused"
+    );
+}
+
+/// Globally paused contract returns ContractPaused from update_rate_per_second.
+#[test]
+fn integration_globally_paused_update_rate_returns_structured_error() {
+    let ctx = TestContext::setup();
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    ctx.client().set_global_emergency_paused(&true);
+
+    let result = ctx.client().try_update_rate_per_second(&stream_id, &2_i128);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::ContractPaused)),
+        "update_rate_per_second while globally paused must return ContractPaused"
+    );
+}
+
+// ===========================================================================
+// Tests — batch_withdraw_to
+// ===========================================================================
+
+use fluxora_stream::WithdrawToParam;
+
+#[test]
+fn test_batch_withdraw_to_success() {
+    let ctx = TestContext::setup();
+    let stream_id1 = ctx.create_default_stream();
+    let stream_id2 = ctx.create_default_stream();
+
+    ctx.env.ledger().with_mut(|l| l.timestamp = 500);
+
+    let dest1 = Address::generate(&ctx.env);
+    let dest2 = Address::generate(&ctx.env);
+
+    let params = vec![
+        &ctx.env,
+        WithdrawToParam {
+            stream_id: stream_id1,
+            destination: dest1.clone(),
+        },
+        WithdrawToParam {
+            stream_id: stream_id2,
+            destination: dest2.clone(),
+        },
+    ];
+
+    let results = ctx.client().batch_withdraw_to(&ctx.recipient, &params);
+
+    assert_eq!(results.len(), 2);
+    assert_eq!(results.get(0).unwrap().amount, 500);
+    assert_eq!(results.get(1).unwrap().amount, 500);
+
+    assert_eq!(ctx.token.balance(&dest1), 500);
+    assert_eq!(ctx.token.balance(&dest2), 500);
+}
+
+#[test]
+#[should_panic(expected = "batch_withdraw_to stream_ids must be unique")]
+fn test_batch_withdraw_to_duplicate_ids_panics() {
+    let ctx = TestContext::setup();
+    let stream_id1 = ctx.create_default_stream();
+
+    let dest1 = Address::generate(&ctx.env);
+
+    let params = vec![
+        &ctx.env,
+        WithdrawToParam {
+            stream_id: stream_id1,
+            destination: dest1.clone(),
+        },
+        WithdrawToParam {
+            stream_id: stream_id1,
+            destination: dest1.clone(),
+        },
+    ];
+
+    ctx.client().batch_withdraw_to(&ctx.recipient, &params);
+}
+
+#[test]
+fn test_batch_withdraw_to_zero_amount_emits_no_event() {
+    let ctx = TestContext::setup();
+    let stream_id1 = ctx.create_default_stream();
+
+    // At t=0, withdrawable is 0
+    ctx.env.ledger().with_mut(|l| l.timestamp = 0);
+
+    let dest1 = Address::generate(&ctx.env);
+    let params = vec![
+        &ctx.env,
+        WithdrawToParam {
+            stream_id: stream_id1,
+            destination: dest1.clone(),
+        },
+    ];
+
+    ctx.client().batch_withdraw_to(&ctx.recipient, &params);
+
+    let events = ctx.env.events().all();
+    let withdraw_events: std::vec::Vec<_> = events
+        .into_iter()
+        .filter(|e| {
+            if e.1.len() < 2 {
+                return false;
+            }
+            let s = Symbol::try_from_val(
+                &ctx.env,
+                &e.1.get(0).unwrap_or(soroban_sdk::Val::VOID.into()),
+            );
+            matches!(s, Ok(sym) if sym == Symbol::new(&ctx.env, "wdraw_to"))
+        })
+        .collect();
+
+    assert_eq!(withdraw_events.len(), 0, "Zero amount must emit no event");
+}
+
+#[test]
+fn test_batch_withdraw_to_mixed_status() {
+    let ctx = TestContext::setup();
+
+    // Stream 1: Active
+    let s1 = ctx.create_default_stream();
+
+    // Stream 2: Cancelled (we can withdraw from cancelled streams)
+    let s2 = ctx.create_default_stream();
+    ctx.client().cancel_stream(&s2);
+
+    // Stream 3: Completed
+    let s3 = ctx.create_default_stream();
+    ctx.env.ledger().with_mut(|l| l.timestamp = 1000);
+    ctx.client().withdraw(&s3);
+
+    // Stream 4: Cancelled (fails batch_withdraw_to, so we only test the valid ones)
+    let s4 = ctx.create_default_stream();
+    ctx.client().cancel_stream(&s4);
+
+    ctx.env.ledger().with_mut(|l| l.timestamp = 500);
+
+    let dest = Address::generate(&ctx.env);
+
+    let params = vec![
+        &ctx.env,
+        WithdrawToParam {
+            stream_id: s1,
+            destination: dest.clone(),
+        },
+        WithdrawToParam {
+            stream_id: s2,
+            destination: dest.clone(),
+        },
+        WithdrawToParam {
+            stream_id: s3,
+            destination: dest.clone(),
+        },
+    ];
+
+    let results = ctx.client().batch_withdraw_to(&ctx.recipient, &params);
+
+    assert_eq!(results.len(), 3);
+    assert_eq!(results.get(0).unwrap().amount, 500); // Active
+    assert_eq!(results.get(1).unwrap().amount, 0); // Cancelled at t=0 means 0 accrued
+    assert_eq!(results.get(2).unwrap().amount, 0); // Completed
+
+    assert_eq!(ctx.token.balance(&dest), 500);
+}
+
+#[test]
+fn test_batch_withdraw_to_unauthorized_panics() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    let dest = Address::generate(&ctx.env);
+    let params = vec![
+        &ctx.env,
+        WithdrawToParam {
+            stream_id,
+            destination: dest,
+        },
+    ];
+
+    // Try to withdraw as sender instead of recipient
+    let res = ctx.client().try_batch_withdraw_to(&ctx.sender, &params);
+    assert_eq!(res, Err(Ok(fluxora_stream::ContractError::Unauthorized)));
+}
+
+#[test]
+fn test_batch_withdraw_to_contract_address_fails() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    let params = vec![
+        &ctx.env,
+        WithdrawToParam {
+            stream_id,
+            destination: ctx.contract_id.clone(),
+        },
+    ];
+
+    let res = ctx.client().try_batch_withdraw_to(&ctx.recipient, &params);
+    assert_eq!(res, Err(Ok(fluxora_stream::ContractError::InvalidParams)));
 }

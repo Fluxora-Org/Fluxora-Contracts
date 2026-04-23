@@ -41,6 +41,7 @@ No hidden rules or implementation details are required to understand protocol be
 | **Cancellation** | `cancel_stream` / `cancel_stream_as_admin`    | Refunds unstreamed amount; frozen accrued stays for recipient         |
 | **Withdrawal**   | `withdraw` / `withdraw_to` / `batch_withdraw` | Recipient pulls accrued tokens; allowed on Paused if past `end_time`  |
 | **Completion**   | Automatic                                     | When `withdrawn_amount == deposit_amount`, status becomes `Completed` |
+| **Auto-claim**   | `set_auto_claim` / `revoke_auto_claim` / `trigger_auto_claim` | Recipient opts in to permissionless final claim at `end_time` to a chosen destination |
 
 ### State Transitions
 
@@ -96,32 +97,45 @@ Scope boundary and exclusions:
 
 ### Global Pause Semantics (Issue Scope)
 
-This section is the protocol-level contract for the global pause state managed via `set_contract_paused`.
+This section is the protocol-level contract for the global pause state managed via `pause_protocol` and `resume_protocol`.
+
+**Entrypoints:**
+
+| Function | Description |
+|----------|-------------|
+| `pause_protocol(admin, reason)` | Globally pause new stream creation with audit trail (reason, timestamp, admin) |
+| `resume_protocol(admin)` | Globally resume new stream creation, clearing audit trail |
+| `is_paused()` | Query if protocol is currently paused (permissionless) |
+| `get_pause_info()` | Query detailed pause info including audit trail (permissionless) |
 
 Success semantics (observable):
 
 1. Preconditions: Caller must be the authorized contract `admin`.
-2. Storage: The `GlobalPaused` data key is set to `true` or `false` in instance storage.
+2. Storage: The `CreationPaused` data key is set to `true` or `false` in instance storage.
 3. Event: `ContractPaused(bool)` is emitted with topic `("paused_ctl",)`.
 4. Effect on creation: When paused, `create_stream` and `create_streams` return `ContractError::ContractPaused` and all new stream creation is blocked.
 5. Effect on existing streams: Active streams are intentionally unaffected. Withdrawals, top-ups, pause/resume/cancel operations on individual streams continue to function normally.
 
 Failure semantics (observable):
 
-1. Unauthorized caller on admin path: authorization failure from `admin.require_auth()`.
+1. Unauthorized caller on admin path: `ContractError::Unauthorized`.
 2. Any failure is atomic: no storage mutation, no event emitted.
 
 Role boundaries:
 
-1. `set_contract_paused`: only the contract `admin` can authorize.
+1. `pause_protocol` / `resume_protocol`: only the contract `admin` can authorize.
 2. Senders and recipients cannot pause the global contract. Senders manage individual streams via `pause_stream`.
 
 Invariants when globally paused:
 
 1. No new streams can be persisted (no `created` events, no deposit tokens pulled).
 2. Existing streams do not change status due to a global pause.
+3. Audit trail (reason, timestamp, admin) is queryable via `get_pause_info()`.
 
 Scope boundary: The global pause is strictly an administrative circuit breaker for new liabilities. It does not freeze funds of existing users or prevent recipients from withdrawing their vested entitlement.
+
+**Note on Stream Creation:**
+Stream creation is blocked while the protocol is globally paused. The `create_stream` function returns `ContractError::ContractPaused` if `is_paused()` is true. This applies to both single-stream and batch (`create_streams`) creation.
 
 ```mermaid
 stateDiagram-v2
@@ -337,6 +351,118 @@ On failure (`InvalidParams` or `InvalidState`):
 - Rationale: Accrual math (in `accrual.rs`) is already overflow-safe via `checked_mul` and clamping.
 - Application-specific limits should be handled in the frontend or factory contracts.
 
+### Relative-Time Helpers: `create_stream_relative` and `create_streams_relative`
+
+The contract provides convenience entry points that compute stream times relative to the current ledger timestamp, eliminating off-chain calculation errors that lead to `StartTimeInPast` failures.
+
+#### Motivation
+
+Off-chain applications often construct stream parameters ahead of time, e.g., "start 1 day from now". If there is clock drift between the application server and the Soroban ledger, the calculated `start_time` may already be in the past when the transaction is executed, causing `StartTimeInPast` rejection.
+
+Relative-time helpers avoid this by deferring timestamp computation to the contract itself, which always has the authoritative ledger timestamp.
+
+#### `create_stream_relative`
+
+**Signature:**
+```rust
+pub fn create_stream_relative(
+    env: Env,
+    sender: Address,
+    recipient: Address,
+    deposit_amount: i128,
+    rate_per_second: i128,
+    start_delay: u64,     // Seconds to add to current timestamp
+    cliff_delay: u64,     // Seconds to add to current timestamp
+    duration: u64,        // Total seconds from start_time to end_time
+) -> Result<u64, ContractError>
+```
+
+**Computation:**
+```
+current_time = env.ledger().timestamp()
+start_time   = current_time + start_delay
+cliff_time   = current_time + cliff_delay
+end_time     = start_time + duration
+```
+
+**Validation:**
+- Checks for overflow/underflow in all additions
+- Delegates to `create_stream` with computed absolute times
+- Inherits all validation rules: deposit sufficiency, cliff bounds, etc.
+- **Never produces `StartTimeInPast`** error (computed times are always >= current_time)
+
+**Example:**
+```
+// Create a stream starting in 1 day, cliff in 3 days, running for 30 days
+contract.create_stream_relative(
+    &sender,
+    &recipient,
+    &100_000_000,           // 100M tokens
+    &1_157_407,             // ~1% per day
+    &86400,                 // start_delay: 1 day
+    &259200,                // cliff_delay: 3 days
+    &2_592_000,             // duration: 30 days
+)?;
+```
+
+#### `create_streams_relative`
+
+**Signature:**
+```rust
+pub fn create_streams_relative(
+    env: Env,
+    sender: Address,
+    streams_relative: Vec<CreateStreamRelativeParams>,
+) -> Result<Vec<u64>, ContractError>
+```
+
+**Parameters (per entry):**
+```rust
+pub struct CreateStreamRelativeParams {
+    pub recipient: Address,
+    pub deposit_amount: i128,
+    pub rate_per_second: i128,
+    pub start_delay: u64,
+    pub cliff_delay: u64,
+    pub duration: u64,
+}
+```
+
+**Batch semantics:**
+- Empty batch returns `Ok(Vec::new())` with no side effects
+- All entries are converted to absolute times (overflow checks per entry)
+- Delegates to `create_streams` with converted parameters
+- Atomic: all or nothing (any validation failure aborts entire batch)
+- Single authorization and token transfer for all streams (gas efficient)
+
+**Example:**
+```
+let params = vec![
+    CreateStreamRelativeParams {
+        recipient: alice,
+        deposit_amount: 1000,
+        rate_per_second: 1,
+        start_delay: 0,           // Immediate
+        cliff_delay: 0,           // Immediate
+        duration: 86400,          // 1 day
+    },
+    CreateStreamRelativeParams {
+        recipient: bob,
+        deposit_amount: 2000,
+        rate_per_second: 2,
+        start_delay: 86400,       // 1 day delay
+        cliff_delay: 172800,      // 2 day cliff
+        duration: 2592000,        // 30 days
+    },
+];
+contract.create_streams_relative(&sender, &params)?;
+```
+
+**Error handling:**
+- `InvalidParams`: If any time offset causes u64 overflow, or if other validation fails (rate, deposit, cliff bounds, etc.)
+- `ContractPaused`: If creation is globally paused
+- All other errors: Same as `create_stream` / `create_streams`
+
 ---
 
 ## 4. Access Control
@@ -346,6 +472,8 @@ On failure (`InvalidParams` or `InvalidState`):
 | `init`                    | Bootstrap admin signer (once) | `admin.require_auth()`                      |
 | `create_stream`           | Sender                        | `sender.require_auth()`                     |
 | `create_streams`          | Sender                        | `sender.require_auth()` (once per batch)    |
+| `create_stream_relative`  | Sender                        | `sender.require_auth()`                     |
+| `create_streams_relative` | Sender                        | `sender.require_auth()` (once per batch)    |
 | `pause_stream`            | Sender                        | `sender.require_auth()`                     |
 | `resume_stream`           | Sender                        | `sender.require_auth()`                     |
 | `cancel_stream`           | Sender                        | `sender.require_auth()`                     |
@@ -357,16 +485,90 @@ On failure (`InvalidParams` or `InvalidState`):
 | `get_claimable_at`        | Anyone                        | None (view)                                 |
 | `get_config`              | Anyone                        | None (view)                                 |
 | `get_stream_state`        | Anyone                        | None (view)                                 |
+| `get_streams_by_id_range` | Anyone                        | None (view, paginated)                      |
+| `get_recipient_streams_paginated` | Anyone                  | None (view, paginated)                      |
 | `pause_stream_as_admin`   | Admin                         | `admin.require_auth()`                      |
 | `resume_stream_as_admin`  | Admin                         | `admin.require_auth()`                      |
 | `cancel_stream_as_admin`  | Admin                         | `admin.require_auth()`                      |
 | `close_completed_stream`  | Anyone                        | None (permissionless terminal cleanup)     |
 | `top_up_stream`           | Funder address                | `funder.require_auth()`                     |
 | `update_rate_per_second`  | Sender                        | `sender.require_auth()`                     |
+| `decrease_rate_per_second`| Sender                        | `sender.require_auth()`                     |
 | `shorten_stream_end_time` | Sender                        | `sender.require_auth()`                     |
 | `extend_stream_end_time`  | Sender                        | `sender.require_auth()`                     |
+| `set_auto_claim`          | Recipient                     | `recipient.require_auth()`                  |
+| `revoke_auto_claim`       | Recipient                     | `recipient.require_auth()`                  |
+| `trigger_auto_claim`      | Anyone                        | None (permissionless; destination fixed by recipient) |
+| `get_auto_claim_destination` | Anyone                     | None (view)                                 |
 
 **Note:** Sender-managed functions (`pause_stream`, `resume_stream`, `cancel_stream`) require sender auth. Admin uses separate `_as_admin` entry points.
+
+### Paginated Export Views (Issue #429)
+
+Two bounded view entrypoints support off-chain export and migration without unbounded loops:
+
+#### `get_streams_by_id_range(start_id, end_id, limit) -> Vec<Stream>`
+
+Returns streams within an ID range with a strict result limit (capped at `MAX_PAGE_SIZE = 100`).
+
+**Parameters:**
+- `start_id: u64` — First stream ID (inclusive)
+- `end_id: u64` — Last stream ID (inclusive). Use `u64::MAX` for open-ended.
+- `limit: u64` — Max results (enforced ≤ 100)
+
+**Semantics:**
+- Returns streams in ascending ID order
+- Skips closed/archived streams silently
+- Empty range (`start_id > end_id`) returns empty vector
+- Zero limit returns empty vector
+
+**DoS Protection:**
+- Hard limit of 100 streams per call regardless of requested `limit`
+- Gas cost is O(result_count), not O(range_size)
+
+**Migration Pattern:**
+```rust
+let total = client.get_stream_count();
+let mut start = 0u64;
+while start < total {
+    let page = client.get_streams_by_id_range(&start, &(start + 99), &100);
+    // Export page...
+    start += page.len() as u64;  // Handle closed streams
+}
+```
+
+#### `get_recipient_streams_paginated(recipient, cursor, limit) -> Vec<u64>`
+
+Cursor-based pagination for recipient stream export (capped at `MAX_PAGE_SIZE = 100`).
+
+**Parameters:**
+- `recipient: Address` — Address to query
+- `cursor: u64` — 0-based starting index
+- `limit: u64` — Max results (enforced ≤ 100)
+
+**Semantics:**
+- Cursor is index into sorted recipient stream list
+- Returns stream IDs in ascending order
+- Empty result indicates end of data or cursor beyond bounds
+
+**Pagination Pattern:**
+```rust
+let mut cursor = 0u64;
+loop {
+    let page = client.get_recipient_streams_paginated(&recipient, &cursor, &50);
+    if page.is_empty() { break; }
+    // Export page...
+    cursor += page.len() as u64;
+}
+```
+
+**Comparison with Unbounded Views:**
+
+| Function | Use Case | Limit | Risk |
+|----------|----------|-------|------|
+| `get_recipient_streams` | Small portfolios (<100) | None | Memory exhaustion |
+| `get_recipient_streams_paginated` | Large portfolios | 100/page | Bounded, safe |
+| `get_streams_by_id_range` | Full contract export | 100/page | Bounded, safe |
 
 ### top_up_stream: Observable Semantics
 
@@ -381,6 +583,21 @@ On failure (`InvalidParams` or `InvalidState`):
 - Event semantics: a successful top-up emits exactly one contract event with topics `("top_up", stream_id)` and payload `StreamToppedUp { stream_id, top_up_amount: amount, new_deposit_amount }`.
 
 Treasury policy note: if an application wants to restrict who may fund streams, that policy must be enforced off-chain or in a wrapper contract. The base stream contract intentionally accepts any self-authorizing funder.
+
+### decrease_rate_per_second: Observable Semantics
+
+`decrease_rate_per_second(stream_id, new_rate_per_second)` allows the stream sender to safely reduce the streaming rate.
+A naive decrease would retroactively lower the recipient's accrued tokens. To prevent this, the contract **checkpoints** the stream: it locks in the mathematical accrual up to the current timestamp under the old rate, and applies the new rate only moving forward.
+
+- **Check-Effects-Interactions (CEI)**: Computes accrual, reduces deposit amount, persists stream state, and finally refunds the difference to the sender.
+- **Rate Validation**: `0 < new_rate_per_second < current rate_per_second`.
+- **Refund**: The sender receives a refund of `old_deposit - new_deposit`, where `new_deposit = checkpointed_amount + new_rate * remaining_seconds`.
+
+#### Failures
+- **Unauthorized**: Caller is not the original sender.
+- **InvalidState**: Stream is already expired (`now >= end_time`).
+- **StreamTerminalState**: Stream is Cancelled or Completed.
+- **InvalidParams**: `new_rate_per_second <= 0` or `new_rate_per_second >= old_rate`.
 
 ### update_rate_per_second: Observable Semantics
 
@@ -416,7 +633,7 @@ Treasury policy note: if an application wants to restrict who may fund streams, 
 
 `batch_withdraw` processes each stream ID in order. A stream with status `Completed` **does not error** — it contributes a zero-amount result (`BatchWithdrawResult { stream_id, amount: 0 }`) and is skipped silently. No token transfer and no event are emitted for that entry. This allows callers to pass a mixed list of active and already-completed streams without pre-filtering.
 
-A `Paused` stream returns `ContractError::InvalidState` and reverts the entire batch.
+A `Paused` stream **does** return `ContractError::InvalidState` and reverts the entire batch.
 
 ### One-Shot Init and Immutable Bootstrap
 
@@ -488,7 +705,7 @@ These guarantees are limited to `create_streams` creation semantics. They do not
 
 - Auth boundary: only the stream `recipient` can authorize `batch_withdraw`.
 - Non-recipient calls fail before transfer/state/event side effects.
-- Uniqueness check: `stream_ids` must not contain duplicates; duplicates return `ContractError::InvalidParams` and revert the entire batch.
+- Uniqueness check: `stream_ids` must not contain duplicates; duplicates return `ContractError::DuplicateStreamId` and revert the entire batch.
 - Completed streams: contribute a zero-amount result and are skipped silently (no error, no event).
 - Active/Paused streams: processed normally; `Paused` streams return `ContractError::InvalidState` and revert the entire batch.
 - Event ordering on active final drain: `withdrew` is emitted before `completed`.
@@ -522,6 +739,56 @@ When `stream_ids` is an empty vector:
 - Empty batch is a valid no-op: allows callers to submit conditional batches without special-casing
 - Authorization is still required: maintains consistent auth semantics across all entry points
 - Idempotent: enables safe retry logic in integrators
+
+---
+
+### Auto-claim Opt-in Semantics
+
+`set_auto_claim`, `revoke_auto_claim`, and `trigger_auto_claim` implement a recipient-controlled permissionless claim mechanism.
+
+#### Overview
+
+Recipients may opt in to have their final withdrawal triggered by any third party (keeper, bot, or user) once the stream reaches `end_time`. The destination address is chosen and stored on-chain by the recipient — no caller can redirect funds.
+
+#### `set_auto_claim(stream_id, destination)`
+
+- **Auth**: `recipient.require_auth()` — only the stream recipient may set or change the destination.
+- **Constraints**: stream must exist and not be `Completed` or `Cancelled`; `destination` must not be the contract address.
+- **Idempotent**: calling again with a new address overwrites the previous destination.
+- **Event**: `("ac_set", stream_id)` → `AutoClaimSet { stream_id, destination }`.
+
+#### `revoke_auto_claim(stream_id)`
+
+- **Auth**: `recipient.require_auth()`.
+- **Idempotent**: safe to call even if no destination is set (no error, no event side-effects beyond the revoke event).
+- **Event**: `("ac_revoke", stream_id)` → `AutoClaimRevoked { stream_id }`.
+
+#### `trigger_auto_claim(stream_id)`
+
+- **Auth**: **none** — permissionless. Any account may call this.
+- **Preconditions** (all must hold):
+  1. Stream exists.
+  2. Stream is not `Completed` or `Cancelled`.
+  3. `ledger.timestamp() >= stream.end_time` (time-terminal).
+  4. Auto-claim destination is set (`AutoClaimNotSet` otherwise).
+  5. Contract is not globally paused.
+- **Accounting**: identical to `withdraw_to` — computes `accrued - withdrawn_amount`, caps by contract balance, updates `withdrawn_amount`, may transition to `Completed`.
+- **Destination immutability**: tokens are sent to the address stored by the recipient. The caller cannot influence the destination.
+- **Events**:
+  - `("withdrew", stream_id)` → `Withdrawal { stream_id, recipient, amount }` (indexer compatibility).
+  - `("ac_trig", stream_id)` → `AutoClaimTriggered { stream_id, destination, amount }`.
+  - `("completed", stream_id)` → `StreamEvent::StreamCompleted(stream_id)` if stream transitions to `Completed`.
+
+#### Cancellation interaction
+
+If a stream is cancelled after opt-in, `trigger_auto_claim` returns `InvalidState`. The auto-claim destination entry remains in storage but is inert. Recipients may call `revoke_auto_claim` to clean up storage.
+
+#### Security invariants
+
+1. Only the recipient can set or change the destination (`require_auth` enforced).
+2. The caller of `trigger_auto_claim` has zero influence over where tokens go.
+3. CEI ordering is preserved: stream state is saved before the token transfer.
+4. Global emergency pause blocks `trigger_auto_claim` (same as `withdraw`).
 
 ---
 

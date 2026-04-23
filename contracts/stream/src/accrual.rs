@@ -9,8 +9,53 @@
 /// - Multiplies elapsed seconds by `rate_per_second`, and on multiplication overflow
 ///   returns `deposit_amount` (safe upper bound before final clamping).
 /// - Final result is clamped to `[0, deposit_amount]`.
+///
+/// For multi-epoch accrual (after rate changes), the contract uses the
+/// `calculate_accrued_amount_checkpointed` variant directly.
 pub fn calculate_accrued_amount(
     start_time: u64,
+    cliff_time: u64,
+    end_time: u64,
+    rate_per_second: i128,
+    deposit_amount: i128,
+    current_time: u64,
+) -> i128 {
+    // Delegate to the checkpoint-aware core with the epoch anchored at start_time.
+    calculate_accrued_amount_checkpointed(
+        start_time,
+        0,
+        start_time,
+        cliff_time,
+        end_time,
+        rate_per_second,
+        deposit_amount,
+        current_time,
+    )
+}
+
+/// Checkpoint-aware accrual — the core pure function used by the contract for all
+/// accrual calculations after rate changes.
+///
+/// # Parameters
+/// - `_start_time`         – original stream start; reserved for future cliff logic.
+/// - `checkpointed_amount` – tokens accrued under all **previous** rate epochs, locked in
+///                            at `checkpointed_at`. Initialised to `0` at stream creation.
+/// - `checkpointed_at`     – timestamp of the last checkpoint (== `start_time` initially).
+/// - `cliff_time`          – no accrual is ever visible before this timestamp.
+/// - `end_time`            – accrual is capped at this timestamp.
+/// - `rate_per_second`     – rate for the **current** epoch (`checkpointed_at` ➜ `end_time`).
+/// - `deposit_amount`      – absolute ceiling; result is clamped to `[0, deposit_amount]`.
+/// - `current_time`        – evaluation point.
+///
+/// # Safety invariants
+/// 1. `accrued(t)` is monotonically non-decreasing in `current_time`.
+/// 2. `accrued(checkpointed_at) == checkpointed_amount` — a rate decrease never reduces
+///    the visible withdrawable amount.
+/// 3. `accrued(t) <= deposit_amount` for all `t`.
+pub fn calculate_accrued_amount_checkpointed(
+    _start_time: u64,
+    checkpointed_amount: i128,
+    checkpointed_at: u64,
     cliff_time: u64,
     end_time: u64,
     rate_per_second: i128,
@@ -25,26 +70,32 @@ pub fn calculate_accrued_amount(
         return 0;
     }
 
-    if start_time >= end_time {
-        return 0;
+    if checkpointed_at >= end_time {
+        // Stream already ended; only the checkpointed amount is payable.
+        return checkpointed_amount.min(deposit_amount).max(0);
     }
+
     if deposit_amount <= 0 {
         return 0;
     }
 
     let elapsed_now = current_time.min(end_time);
-    let elapsed_seconds = if elapsed_now < start_time {
+    let elapsed_seconds: i128 = if elapsed_now <= checkpointed_at {
         0
     } else {
-        (elapsed_now - start_time) as i128
+        (elapsed_now - checkpointed_at) as i128
     };
 
-    let accrued = match elapsed_seconds.checked_mul(rate_per_second) {
+    let added = match elapsed_seconds.checked_mul(rate_per_second) {
         Some(amount) => amount,
+        // Multiplication overflow: clamp to deposit ceiling.
         None => deposit_amount,
     };
 
-    accrued.min(deposit_amount).max(0)
+    checkpointed_amount
+        .saturating_add(added)
+        .min(deposit_amount)
+        .max(0)
 }
 
 #[cfg(test)]
