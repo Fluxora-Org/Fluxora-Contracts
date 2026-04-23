@@ -590,6 +590,9 @@ Error handling is verified by tests in `contracts/stream/src/test.rs`:
 | InsufficientBalance | Sender with no tokens |
 | InsufficientDeposit | `deposit < rate * duration` |
 | StreamTerminalState | Pause/complete then modify |
+| AutoClaimNotSet | `try_trigger_auto_claim` without prior `set_auto_claim` |
+
+Discriminant stability is verified by `test_contract_error_discriminants_are_stable` in `contracts/stream/src/test.rs`, which asserts the exact `u32` value of every `ContractError` variant and will fail at compile time if any value is changed.
 
 ---
 
@@ -597,7 +600,7 @@ Error handling is verified by tests in `contracts/stream/src/test.rs`:
 
 ### Included
 
-- All 13 `ContractError` variants
+- All 14 `ContractError` variants
 - Role-based error mapping
 - Success/failure semantics for each operation
 - Time-driven edge cases

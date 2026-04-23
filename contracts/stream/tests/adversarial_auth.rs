@@ -128,6 +128,7 @@ impl<'a> Ctx<'a> {
             &0u64,
             &0u64,
             &1000u64,
+            &None,
         )
     }
 
@@ -142,7 +143,7 @@ impl<'a> Ctx<'a> {
                 sub_invokes: &[],
             },
         }]);
-        self.client().pause_stream(&stream_id);
+        self.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
     }
 
     fn total_supply(&self) -> i128 {
@@ -197,6 +198,7 @@ fn adversarial_create_stream_stranger_cannot_impersonate_sender() {
             &0u64,
             &0u64,
             &1000u64,
+            &None,
         );
     }));
 
@@ -240,7 +242,7 @@ fn adversarial_pause_stream_stranger_rejected_no_side_effects() {
     }]);
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.client().pause_stream(&stream_id);
+        ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
     }));
 
     assert!(result.is_err(), "stranger must not pause stream");
@@ -269,7 +271,7 @@ fn adversarial_pause_stream_recipient_rejected() {
     }]);
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.client().pause_stream(&stream_id);
+        ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
     }));
 
     assert!(result.is_err(), "recipient must not pause stream");
@@ -296,7 +298,7 @@ fn adversarial_pause_stream_admin_cannot_use_sender_path() {
     }]);
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.client().pause_stream(&stream_id);
+        ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
     }));
 
     assert!(result.is_err(), "admin must not use sender-only pause path");
@@ -752,6 +754,7 @@ fn adversarial_batch_withdraw_cross_stream_recipient_rejected() {
         &0u64,
         &0u64,
         &1000u64,
+        &None,
     );
 
     ctx.env.ledger().set_timestamp(500);
@@ -800,7 +803,7 @@ fn adversarial_pause_as_admin_stranger_rejected_no_side_effects() {
     }]);
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.client().pause_stream_as_admin(&stream_id);
+        ctx.client().pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
     }));
 
     assert!(result.is_err(), "stranger must not pause via admin path");
@@ -828,7 +831,7 @@ fn adversarial_pause_as_admin_sender_rejected() {
     }]);
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.client().pause_stream_as_admin(&stream_id);
+        ctx.client().pause_stream_as_admin(&stream_id, &fluxora_stream::PauseReason::Administrative);
     }));
 
     assert!(result.is_err(), "sender must not use admin pause path");
@@ -1130,6 +1133,7 @@ fn adversarial_set_contract_paused_stranger_rejected() {
         &0u64,
         &0u64,
         &1000u64,
+        &None,
     );
     assert_eq!(
         ctx.client().get_stream_state(&id).status,
@@ -1299,6 +1303,7 @@ fn adversarial_extend_end_time_stranger_rejected_no_side_effects() {
         &0u64,
         &0u64,
         &1000u64,
+        &None,
     );
 
     let stranger = Address::generate(&ctx.env);
@@ -1392,6 +1397,7 @@ fn adversarial_extend_end_time_recipient_rejected() {
         &0u64,
         &0u64,
         &1000u64,
+        &None,
     );
 
     let state_before = ctx.client().get_stream_state(&stream_id);

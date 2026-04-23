@@ -18,6 +18,14 @@ Version policy, migration runbook, and audit notes for operators, integrators, a
 CONTRACT_VERSION = 3
 ```
 
+### Version history
+
+| Version | Change summary |
+|---|---|
+| 1 | Initial release |
+| 2 | `Stream` struct gained `checkpointed_amount: i128` and `checkpointed_at: u64` for safe rate-decrease support |
+| 3 | `Stream` struct gained `memo: Option<Bytes>`; `StreamCreated` event gained `memo` field; `DataKey::StreamMemo(u64)` added at discriminant 10; `create_stream`/`create_streams` gained `memo` parameter; `get_stream_memo` entry-point added |
+
 ### When to increment
 
 | Change type | Increment required? |
@@ -44,6 +52,11 @@ CONTRACT_VERSION = 3
 - Adding new entry-points that old clients can safely ignore.
 - Changing TTL bump constants (`INSTANCE_BUMP_AMOUNT`, `PERSISTENT_BUMP_AMOUNT`).
 - Changing internal helper functions with no external surface.
+
+> **Note (transfer_sender):** The `transfer_sender` entry-point is a purely additive
+> new entry-point. Old clients that do not call it are unaffected. `CONTRACT_VERSION`
+> was incremented conservatively per the policy above. Indexers should subscribe to
+> the new `sndr_xfr` event to track sender rotations.
 
 ---
 
