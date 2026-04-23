@@ -10,7 +10,7 @@ Onboarding and integration reference for developers and auditors. Describes stre
 
 When changing the contract:
 
-- Update this doc if you change lifecycle, access control, events, or panic messages
+- Update this doc if you change lifecycle, access control, events, or error semantics
 - Update `protocol-narrative-code-alignment.md` to reflect changes
 - Run `cargo test -p fluxora_stream` before committing
 - Update snapshot tests if externally visible behavior changes
@@ -301,7 +301,7 @@ The same sufficiency check is enforced when extending a stream's `end_time`:
 deposit_amount >= rate_per_second * (new_end_time - start_time)
 ```
 
-If the existing deposit does not cover the extended duration, `extend_stream_end_time` panics with `"deposit_amount must cover total streamable amount for extended schedule"` and no state changes occur. Use `top_up_stream` first to increase the deposit, then extend.
+If the existing deposit does not cover the extended duration, `extend_stream_end_time` returns `ContractError::InsufficientDeposit` and no state changes occur. Use `top_up_stream` first to increase the deposit, then extend.
 
 ### Shorten `end_time` Semantics
 
@@ -414,9 +414,9 @@ Treasury policy note: if an application wants to restrict who may fund streams, 
 
 ### batch_withdraw: completed stream behavior
 
-`batch_withdraw` processes each stream ID in order. A stream with status `Completed` **does not panic** — it contributes a zero-amount result (`BatchWithdrawResult { stream_id, amount: 0 }`) and is skipped silently. No token transfer and no event are emitted for that entry. This allows callers to pass a mixed list of active and already-completed streams without pre-filtering.
+`batch_withdraw` processes each stream ID in order. A stream with status `Completed` **does not error** — it contributes a zero-amount result (`BatchWithdrawResult { stream_id, amount: 0 }`) and is skipped silently. No token transfer and no event are emitted for that entry. This allows callers to pass a mixed list of active and already-completed streams without pre-filtering.
 
-A `Paused` stream **does** panic and reverts the entire batch.
+A `Paused` stream returns `ContractError::InvalidState` and reverts the entire batch.
 
 ### One-Shot Init and Immutable Bootstrap
 
@@ -424,7 +424,7 @@ A `Paused` stream **does** panic and reverts the entire batch.
 
 - One-shot: first successful call writes `Config { token, admin }` and `NextStreamId = 0`.
 - Auth boundary: the supplied `admin` address must authorize the call.
-- Re-init failure: any second call panics with `"already initialised"`.
+- Re-init failure: any second call returns `ContractError::AlreadyInitialised`.
 - Failure atomicity: failed auth or re-init leaves bootstrap storage unchanged.
 - Immutability boundary: `token` is immutable after init; `admin` can rotate only via `set_admin` with current-admin auth.
 
@@ -488,9 +488,9 @@ These guarantees are limited to `create_streams` creation semantics. They do not
 
 - Auth boundary: only the stream `recipient` can authorize `batch_withdraw`.
 - Non-recipient calls fail before transfer/state/event side effects.
-- Uniqueness check: `stream_ids` must not contain duplicates; duplicates panic and revert the entire batch.
+- Uniqueness check: `stream_ids` must not contain duplicates; duplicates return `ContractError::InvalidParams` and revert the entire batch.
 - Completed streams: contribute a zero-amount result and are skipped silently (no error, no event).
-- Active/Paused streams: processed normally; `Paused` streams panic and revert the entire batch.
+- Active/Paused streams: processed normally; `Paused` streams return `ContractError::InvalidState` and revert the entire batch.
 - Event ordering on active final drain: `withdrew` is emitted before `completed`.
 
 #### Empty Vector Semantics
@@ -587,35 +587,28 @@ Emitted when a sender successfully updates the streaming rate via `update_rate_p
 
 ---
 
-## 6. Error Behavior (ContractError + Panics)
+## 6. Error Behavior (ContractError)
 
-Errors are surfaced either as `ContractError` variants or as panic/assert messages.
-Integrators should treat `ContractError` as stable error codes, and panic strings
-as best-effort diagnostics. The table below focuses on creation and lifecycle
-errors relevant to stream creation and timing.
+All user-input failures are surfaced as structured `ContractError` variants. Integrators should treat these as stable ABI-level error codes. The table below maps the most common creation and lifecycle errors.
 
-| Message                                                                 | Function                           | Trigger                                       |
-| ----------------------------------------------------------------------- | ---------------------------------- | --------------------------------------------- |
-| `"already initialised"`                                                 | `init`                             | Re-init attempt                               |
-| authorization failure                                                   | `init`                             | caller did not satisfy `admin.require_auth()` |
-| `"deposit_amount must be positive"`                                     | `create_stream` / `create_streams` | deposit_amount <= 0                           |
-| `"rate_per_second must be positive"`                                    | `create_stream` / `create_streams` | rate_per_second <= 0                          |
-| `"sender and recipient must be different"`                              | `create_stream` / `create_streams` | sender == recipient                           |
-| `"start_time must be before end_time"`                                  | `create_stream` / `create_streams` | start_time >= end_time                        |
-| `"cliff_time must be within [start_time, end_time]"`                    | `create_stream` / `create_streams` | cliff out of range                            |
-| `"deposit_amount must cover total streamable amount (rate * duration)"` | `create_stream` / `create_streams` | underfunded                                   |
-| `"overflow calculating total streamable amount"`                        | `create_stream` / `create_streams` | overflow in rate \* duration                  |
-| `"overflow calculating total batch deposit"`                            | `create_streams`                   | overflow in sum of deposits                   |
-| `ContractError::StartTimeInPast`                                        | `create_stream` / `create_streams` | start_time < ledger timestamp                 |
-| `ContractError::StreamAlreadyPaused` (10)                               | `pause_stream`                     | Double pause                                  |
-| `ContractError::StreamNotPaused` (11)                                   | `resume_stream`                    | Resume active stream                          |
-| `ContractError::StreamTerminalState` (12)                               | `pause_stream` / `resume_stream`   | Modification past end_time                    |
-| `ContractError::StreamNotFound` (1)                                     | Various                            | Invalid stream_id                             |
-| `ContractError::Unauthorized` (6)                                       | Various                            | Auth check failed                             |
-| `ContractError::InvalidState` (2)                                       | `withdraw`                         | Withdraw from non-terminal paused             |
-| `ContractError::InvalidState` (2)                                       | `cancel_stream`                    | Cancel completed/cancelled                    |
-| `"invalid state for stream closure"`                                    | `close_completed_stream`           | Close non-terminal (Active/Paused) stream    |
-| `"contract not initialised: missing config"`                            | Functions requiring config         | Config missing                                |
+| Error | Code | Function | Trigger |
+| ----- | ---- | -------- | ------- |
+| `ContractError::AlreadyInitialised` | 8 | `init` | Re-init attempt |
+| `ContractError::InvalidParams` | 3 | `create_stream` / `create_streams` | `deposit_amount <= 0`, `rate_per_second <= 0`, `sender == recipient`, `start_time >= end_time`, cliff out of range |
+| `ContractError::StartTimeInPast` | 5 | `create_stream` / `create_streams` | `start_time < ledger.timestamp()` |
+| `ContractError::InsufficientDeposit` | 10 | `create_stream` / `create_streams` | `deposit < rate * duration` |
+| `ContractError::ArithmeticOverflow` | 6 | `create_stream` / `create_streams` | overflow in `rate * duration` or batch deposit sum |
+| `ContractError::StreamAlreadyPaused` | 11 | `pause_stream` | Double pause |
+| `ContractError::StreamNotPaused` | 12 | `resume_stream` | Resume active stream |
+| `ContractError::StreamTerminalState` | 13 | `pause_stream` / `resume_stream` | Modification past `end_time` |
+| `ContractError::StreamNotFound` | 1 | Various | Invalid `stream_id` |
+| `ContractError::Unauthorized` | 7 | Various | Auth check failed |
+| `ContractError::InvalidState` | 2 | `withdraw` | Withdraw from non-terminal paused stream |
+| `ContractError::InvalidState` | 2 | `cancel_stream` | Cancel completed/cancelled stream |
+| `ContractError::InvalidState` | 2 | `close_completed_stream` | Close non-terminal (Active/Paused) stream |
+| `ContractError::AutoClaimNotSet` | 14 | `trigger_auto_claim` | No destination set by recipient |
+
+For the complete error catalog with trigger conditions, affected roles, and client action examples, see [error.md](./error.md).
 
 ## Error Reference
 

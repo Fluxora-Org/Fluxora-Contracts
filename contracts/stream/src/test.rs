@@ -17329,3 +17329,103 @@ mod recipient_index_stress {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// ContractError discriminant stability tests (#425)
+//
+// These tests lock down the exact u32 value of every ContractError variant.
+// They will fail immediately if any variant is reordered, removed, or has its
+// discriminant changed — protecting the contract ABI surface.
+//
+// Rules:
+//   - NEVER change a discriminant value once deployed.
+//   - ALWAYS append new variants at the end of the enum.
+//   - Increment CONTRACT_VERSION when adding a new variant.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod error_discriminant_tests {
+    use crate::ContractError;
+
+    /// Assert that every ContractError variant has the exact expected u32 value.
+    /// This is the single source of truth for the error code ABI.
+    #[test]
+    fn test_contract_error_discriminants_are_stable() {
+        // Each entry: (variant, expected_value, name_for_diagnostics)
+        let cases: &[(ContractError, u32, &str)] = &[
+            (ContractError::StreamNotFound,    1,  "StreamNotFound"),
+            (ContractError::InvalidState,      2,  "InvalidState"),
+            (ContractError::InvalidParams,     3,  "InvalidParams"),
+            (ContractError::ContractPaused,    4,  "ContractPaused"),
+            (ContractError::StartTimeInPast,   5,  "StartTimeInPast"),
+            (ContractError::ArithmeticOverflow,6,  "ArithmeticOverflow"),
+            (ContractError::Unauthorized,      7,  "Unauthorized"),
+            (ContractError::AlreadyInitialised,8,  "AlreadyInitialised"),
+            (ContractError::InsufficientBalance,9, "InsufficientBalance"),
+            (ContractError::InsufficientDeposit,10,"InsufficientDeposit"),
+            (ContractError::StreamAlreadyPaused,11,"StreamAlreadyPaused"),
+            (ContractError::StreamNotPaused,   12, "StreamNotPaused"),
+            (ContractError::StreamTerminalState,13,"StreamTerminalState"),
+            (ContractError::AutoClaimNotSet,   14, "AutoClaimNotSet"),
+        ];
+
+        for (variant, expected, name) in cases {
+            let actual = *variant as u32;
+            assert_eq!(
+                actual, *expected,
+                "ContractError::{name} discriminant changed: expected {expected}, got {actual}. \
+                 Error codes are part of the contract ABI — never change a discriminant value."
+            );
+        }
+    }
+
+    /// Assert the total number of ContractError variants matches the documented count.
+    /// Update this when adding a new variant (and bump CONTRACT_VERSION).
+    #[test]
+    fn test_contract_error_variant_count() {
+        // This must equal the number of variants in the ContractError enum.
+        // If you add a variant, increment this constant AND CONTRACT_VERSION.
+        const EXPECTED_VARIANT_COUNT: u32 = 14;
+
+        // Verify the highest discriminant equals the expected count
+        // (variants are 1-indexed with no gaps).
+        let highest = ContractError::AutoClaimNotSet as u32;
+        assert_eq!(
+            highest, EXPECTED_VARIANT_COUNT,
+            "ContractError variant count mismatch: expected {EXPECTED_VARIANT_COUNT} variants \
+             (highest discriminant), got {highest}. \
+             If you added a variant, update EXPECTED_VARIANT_COUNT and CONTRACT_VERSION."
+        );
+    }
+
+    /// Verify that ContractError variants are ordered correctly (no gaps, 1-indexed).
+    #[test]
+    fn test_contract_error_no_gaps_in_discriminants() {
+        let all_variants = [
+            ContractError::StreamNotFound as u32,
+            ContractError::InvalidState as u32,
+            ContractError::InvalidParams as u32,
+            ContractError::ContractPaused as u32,
+            ContractError::StartTimeInPast as u32,
+            ContractError::ArithmeticOverflow as u32,
+            ContractError::Unauthorized as u32,
+            ContractError::AlreadyInitialised as u32,
+            ContractError::InsufficientBalance as u32,
+            ContractError::InsufficientDeposit as u32,
+            ContractError::StreamAlreadyPaused as u32,
+            ContractError::StreamNotPaused as u32,
+            ContractError::StreamTerminalState as u32,
+            ContractError::AutoClaimNotSet as u32,
+        ];
+
+        // Must start at 1 and be contiguous.
+        for (i, &val) in all_variants.iter().enumerate() {
+            let expected = (i + 1) as u32;
+            assert_eq!(
+                val, expected,
+                "ContractError discriminant gap detected at index {i}: \
+                 expected {expected}, got {val}. Discriminants must be contiguous starting at 1."
+            );
+        }
+    }
+}

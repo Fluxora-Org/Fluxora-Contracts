@@ -13,11 +13,11 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | Error Code | Value | Description | Functions Returning It |
 |------------|-------|-------------|------------------------|
 | `StreamNotFound` | 1 | The specified stream does not exist | `pause_stream`, `resume_stream`, `cancel_stream`, `withdraw`, `calculate_accrued`, `get_stream_state`, admin overrides |
-| `InvalidState` | 2 | Operation attempted in an invalid state | `cancel_stream`, `withdraw`, `withdraw_to`, `batch_withdraw`, `get_claimable_at`, admin overrides |
-| `InvalidParams` | 3 | Function input parameters are invalid | `create_stream`, `withdraw_to`, `update_rate_per_second`, `top_up_stream`, `extend_stream_end_time`, `shorten_stream_end_time`, `batch_create_streams` |
-| `ContractPaused` | 4 | Global emergency pause is active; stream creation is blocked | `create_stream`, `create_streams`, `withdraw`, `cancel_stream`, `top_up_stream`, `update_rate_per_second` |
+| `InvalidState` | 2 | Operation attempted in an invalid state | `cancel_stream`, `withdraw`, `withdraw_to`, `batch_withdraw`, `get_claimable_at`, `trigger_auto_claim`, admin overrides |
+| `InvalidParams` | 3 | Function input parameters are invalid | `create_stream`, `withdraw_to`, `update_rate_per_second`, `top_up_stream`, `extend_stream_end_time`, `shorten_stream_end_time`, `batch_create_streams`, `set_auto_claim` |
+| `ContractPaused` | 4 | Global emergency pause is active; mutations are blocked | `create_stream`, `create_streams`, `withdraw`, `withdraw_to`, `batch_withdraw`, `cancel_stream`, `top_up_stream`, `update_rate_per_second`, `shorten_stream_end_time`, `extend_stream_end_time`, `trigger_auto_claim` |
 | `StartTimeInPast` | 5 | `start_time` is before the current ledger timestamp | `create_stream`, `create_streams` |
-| `ArithmeticOverflow` | 6 | Arithmetic overflow in stream calculations | `create_stream`, `create_streams`, `update_rate_per_second`, `top_up_stream`, `batch_create_streams` |
+| `ArithmeticOverflow` | 6 | Arithmetic overflow in stream calculations | `create_stream`, `create_streams`, `update_rate_per_second`, `top_up_stream`, `shorten_stream_end_time`, `extend_stream_end_time` |
 | `Unauthorized` | 7 | Caller is not authorized to perform this operation | `init`, `set_admin`, `cancel_stream`, `top_up_stream`, `withdraw` (recipient check) |
 | `AlreadyInitialised` | 8 | Contract has already been initialized | `init` |
 | `InsufficientBalance` | 9 | Token transfer failed due to insufficient balance or allowance | `create_stream`, `cancel_stream`, `withdraw`, `top_up_stream` |
@@ -25,6 +25,7 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `StreamAlreadyPaused` | 11 | Stream is already in `Paused` state | `pause_stream`, `pause_stream_as_admin` |
 | `StreamNotPaused` | 12 | Stream is not `Paused`; cannot resume an `Active` stream | `resume_stream`, `resume_stream_as_admin` |
 | `StreamTerminalState` | 13 | Stream is `Completed` or `Cancelled`; modification blocked | `pause_stream`, `resume_stream`, admin overrides |
+| `AutoClaimNotSet` | 14 | Auto-claim destination is not set for this stream | `trigger_auto_claim` |
 
 ---
 
@@ -486,13 +487,40 @@ match client.try_pause_stream(&stream_id) {
 
 ---
 
+### AutoClaimNotSet (14)
+
+**Definition**: `trigger_auto_claim` was called but the recipient has not set an auto-claim destination for this stream.
+
+**Trigger Conditions**:
+- `trigger_auto_claim` called on a stream where `set_auto_claim` was never called, or after `revoke_auto_claim` removed the destination.
+
+**Affected Roles**:
+| Role | Can Trigger | Notes |
+|------|------------|-------|
+| Anyone | Yes | `trigger_auto_claim` is permissionless |
+
+**Client Action**:
+```rust
+match client.try_trigger_auto_claim(&stream_id) {
+    Ok(amount) => { /* success */ }
+    Err(ContractError::AutoClaimNotSet) => {
+        // Recipient has not opted in to auto-claim for this stream.
+        // The recipient must call set_auto_claim(stream_id, destination) first.
+    }
+    Err(e) => { /* handle other errors */ }
+}
+```
+
+**Success Semantics**: Returns `i128` amount transferred to the destination.
+
+---
+
 ## Panic Messages (Non-Error Results)
 
-These are runtime panics that should not occur in normal operation:
+These are runtime panics that represent infrastructure-level failures and should not occur in normal operation:
 
 | Panic Message | Cause | Client Action |
 |---------------|-------|---------------|
-| `can only close completed streams` | `close_completed_stream` on non-completed stream | Use `get_stream_state` to check status |
 | `contract not initialised: missing config` | Storage access before `init` | Call `init` first |
 
 ---
@@ -539,6 +567,9 @@ Error handling is verified by tests in `contracts/stream/src/test.rs`:
 | InsufficientBalance | Sender with no tokens |
 | InsufficientDeposit | `deposit < rate * duration` |
 | StreamTerminalState | Pause/complete then modify |
+| AutoClaimNotSet | `try_trigger_auto_claim` without prior `set_auto_claim` |
+
+Discriminant stability is verified by `test_contract_error_discriminants_are_stable` in `contracts/stream/src/test.rs`, which asserts the exact `u32` value of every `ContractError` variant and will fail at compile time if any value is changed.
 
 ---
 
@@ -546,7 +577,7 @@ Error handling is verified by tests in `contracts/stream/src/test.rs`:
 
 ### Included
 
-- All 13 `ContractError` variants
+- All 14 `ContractError` variants
 - Role-based error mapping
 - Success/failure semantics for each operation
 - Time-driven edge cases
