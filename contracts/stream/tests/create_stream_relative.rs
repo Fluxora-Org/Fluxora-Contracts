@@ -42,6 +42,8 @@ impl<'a> TestContext<'a> {
         sac.mint(&sender, &10_000_i128);
 
         let token = TokenClient::new(&env, &token_id);
+        // Provide sufficient allowance for tests that don't explicitly test allowances.
+        token.approve(&sender, &contract_id, &i128::MAX, &100_000);
 
         Self {
             env,
@@ -99,7 +101,7 @@ fn create_stream_relative_positive_delays_future_start() {
     let stream_id = ctx.client().create_stream_relative(
         &ctx.sender,
         &ctx.recipient,
-        &2000_i128,
+        &4000_i128,  // deposit_amount: 4000 (2 * 2000)
         &2_i128,
         &100u64,  // start_delay: 100 -> start_time = 1100
         &500u64,  // cliff_delay: 500 -> cliff_time = 1500
@@ -292,7 +294,7 @@ fn create_streams_relative_single_entry() {
     let params = vec![
         &ctx.env,
         CreateStreamRelativeParams {
-            recipient: ctx.recipient,
+            recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
             rate_per_second: 1,
             start_delay: 100,
@@ -321,7 +323,7 @@ fn create_streams_relative_multiple_entries_sequential_ids() {
     let params = vec![
         &ctx.env,
         CreateStreamRelativeParams {
-            recipient: ctx.recipient,
+            recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
             rate_per_second: 1,
             start_delay: 0,
@@ -329,8 +331,8 @@ fn create_streams_relative_multiple_entries_sequential_ids() {
             duration: 1000,
         },
         CreateStreamRelativeParams {
-            recipient: recipient2,
-            deposit_amount: 2000,
+            recipient: recipient2.clone(),
+            deposit_amount: 4000,  // 2 * 2000
             rate_per_second: 2,
             start_delay: 100,
             cliff_delay: 100,
@@ -384,7 +386,7 @@ fn create_streams_relative_invalid_entry_fails_atomically() {
     let params = vec![
         &ctx.env,
         CreateStreamRelativeParams {
-            recipient: ctx.recipient,
+            recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
             rate_per_second: 1,
             start_delay: 0,
@@ -433,7 +435,7 @@ fn create_streams_relative_diverse_schedules() {
         },
         CreateStreamRelativeParams {
             recipient: r2,
-            deposit_amount: 2000,
+            deposit_amount: 4000,  // 2 * 2000
             rate_per_second: 2,
             start_delay: 500,
             cliff_delay: 1000,
@@ -441,7 +443,7 @@ fn create_streams_relative_diverse_schedules() {
         },
         CreateStreamRelativeParams {
             recipient: r3,
-            deposit_amount: 3000,
+            deposit_amount: 9000,  // 3 * 3000
             rate_per_second: 3,
             start_delay: 1000,
             cliff_delay: 2000,

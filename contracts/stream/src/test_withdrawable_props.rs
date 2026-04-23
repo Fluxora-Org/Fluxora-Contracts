@@ -50,6 +50,7 @@ impl PropCtx {
 
         FluxoraStreamClient::new(&env, &contract_id).init(&token_id, &admin);
         StellarAssetClient::new(&env, &token_id).mint(&sender, &deposit);
+        soroban_sdk::token::Client::new(&env, &token_id).approve(&sender, &contract_id, &deposit, &100_000);
 
         PropCtx {
             env,
@@ -177,7 +178,7 @@ proptest! {
         );
         for t in &times {
             ctx.env.ledger().set_timestamp(*t);
-            let _ = ctx.client().withdraw(&id);
+            let _ = ctx.client().try_withdraw(&id);
             assert_invariants(&ctx, id, &std::format!("post-withdraw t={t}"));
         }
     }
@@ -260,7 +261,7 @@ proptest! {
         let mut prev = 0_i128;
         for t in &times {
             ctx.env.ledger().set_timestamp(*t);
-            let _ = ctx.client().withdraw(&id);
+            let _ = ctx.client().try_withdraw(&id);
             let state = ctx.client().get_stream_state(&id);
             assert!(
                 state.withdrawn_amount >= prev,

@@ -308,6 +308,11 @@ Example:
   After this event, `get_stream_state` returns `StreamNotFound` for that ID.
 - `AdminUpdated` has a single-element topic list (no stream_id).
 
+> **See [docs/indexer-derivation.md](./indexer-derivation.md)** for the complete
+> specification of how to derive stream state from events, when to call
+> `get_stream_state`, and worked examples for each lifecycle path (including
+> cancellation, rate changes, and completion).
+
 ---
 
 ## Keeping this doc in sync
