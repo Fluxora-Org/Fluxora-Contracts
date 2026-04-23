@@ -177,7 +177,7 @@ proptest! {
          &0_i128,);
         for t in &times {
             ctx.env.ledger().set_timestamp(*t);
-            let _ = ctx.client().withdraw(&id);
+            let _ = ctx.client().try_withdraw(&id);
             assert_invariants(&ctx, id, &std::format!("post-withdraw t={t}"));
         }
     }
@@ -234,9 +234,9 @@ proptest! {
             &duration,
          &0_i128,);
         ctx.env.ledger().set_timestamp(cancel_at);
-        ctx.client().cancel_stream(&id);
+        let _ = ctx.client().try_cancel_stream(&id);
         assert_invariants(&ctx, id, "post-cancel");
-        let _ = ctx.client().withdraw(&id);
+        let _ = ctx.client().try_withdraw(&id);
         assert_invariants(&ctx, id, "post-cancel-withdraw");
     }
 
@@ -260,7 +260,7 @@ proptest! {
         let mut prev = 0_i128;
         for t in &times {
             ctx.env.ledger().set_timestamp(*t);
-            let _ = ctx.client().withdraw(&id);
+            let _ = ctx.client().try_withdraw(&id);
             let state = ctx.client().get_stream_state(&id);
             assert!(
                 state.withdrawn_amount >= prev,

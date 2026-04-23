@@ -1298,6 +1298,10 @@ impl FluxoraStream {
 
         // First pass: validate all streams and calculate total deposit required
         for params in streams.iter() {
+            total_deposit = total_deposit
+                .checked_add(params.deposit_amount)
+                .ok_or(ContractError::ArithmeticOverflow)?;
+
             Self::validate_stream_params(
                 &env,
                 &sender,
@@ -1310,9 +1314,6 @@ impl FluxoraStream {
                 params.end_time,
                 params.min_withdrawal,
             )?;
-            total_deposit = total_deposit
-                .checked_add(params.deposit_amount)
-                .ok_or(ContractError::ArithmeticOverflow)?;
         }
 
         // Bulk transfer tokens from sender to this contract atomically to save gas.

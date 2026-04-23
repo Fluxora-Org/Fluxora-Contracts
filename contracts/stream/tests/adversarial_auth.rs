@@ -110,6 +110,7 @@ impl<'a> Ctx<'a> {
                     0u64,
                     0u64,
                     1000u64,
+                    0_i128,
                 )
                     .into_val(&self.env),
                 sub_invokes: &[MockAuthInvoke {
@@ -183,6 +184,7 @@ fn adversarial_create_stream_stranger_cannot_impersonate_sender() {
                 0u64,
                 0u64,
                 1000u64,
+                0_i128,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[],
@@ -736,6 +738,7 @@ fn adversarial_batch_withdraw_cross_stream_recipient_rejected() {
                 0u64,
                 0u64,
                 1000u64,
+                0_i128,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[MockAuthInvoke {
@@ -1115,6 +1118,7 @@ fn adversarial_set_contract_paused_stranger_rejected() {
                 0u64,
                 0u64,
                 1000u64,
+                0_i128,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[MockAuthInvoke {
@@ -1285,6 +1289,7 @@ fn adversarial_extend_end_time_stranger_rejected_no_side_effects() {
                 0u64,
                 0u64,
                 1000u64,
+                0_i128,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[MockAuthInvoke {
@@ -1379,6 +1384,7 @@ fn adversarial_extend_end_time_recipient_rejected() {
                 0u64,
                 0u64,
                 1000u64,
+                0_i128,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[MockAuthInvoke {

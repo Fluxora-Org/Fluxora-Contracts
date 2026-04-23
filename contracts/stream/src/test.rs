@@ -3315,6 +3315,7 @@ fn test_withdraw_to_requires_recipient_auth() {
                 0u64,
                 0u64,
                 1000u64,
+                0_i128,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[MockAuthInvoke {
@@ -3744,6 +3745,7 @@ fn test_withdraw_recipient_success() {
                 0u64,
                 0u64,
                 1000u64,
+                0_i128,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[MockAuthInvoke {
@@ -3811,6 +3813,7 @@ fn test_withdraw_not_recipient_unauthorized() {
                 0u64,
                 0u64,
                 1000u64,
+                0_i128,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[MockAuthInvoke {
@@ -3870,6 +3873,7 @@ fn test_withdraw_not_recipient_unauthorized_has_no_side_effects() {
                 0u64,
                 0u64,
                 1000u64,
+                0_i128,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[MockAuthInvoke {
@@ -5110,6 +5114,7 @@ fn test_pause_stream_recipient_unauthorized() {
                 0u64,
                 0u64,
                 1000u64,
+                0_i128,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[MockAuthInvoke {
@@ -5167,6 +5172,7 @@ fn test_pause_stream_third_party_unauthorized() {
                 0u64,
                 0u64,
                 1000u64,
+                0_i128,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[MockAuthInvoke {
@@ -5223,6 +5229,7 @@ fn test_pause_stream_sender_success() {
                 0u64,
                 0u64,
                 1000u64,
+                0_i128,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[MockAuthInvoke {
@@ -5282,6 +5289,7 @@ fn test_pause_stream_admin_success() {
                 0u64,
                 0u64,
                 1000u64,
+                0_i128,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[MockAuthInvoke {
@@ -5342,6 +5350,7 @@ fn test_pause_stream_as_admin_non_admin_unauthorized() {
                 0u64,
                 0u64,
                 1000u64,
+                0_i128,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[MockAuthInvoke {
@@ -5402,6 +5411,7 @@ fn test_cancel_stream_recipient_unauthorized() {
                 0u64,
                 0u64,
                 1000u64,
+                0_i128,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[MockAuthInvoke {
@@ -5458,6 +5468,7 @@ fn test_cancel_stream_third_party_unauthorized() {
                 0u64,
                 0u64,
                 1000u64,
+                0_i128,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[MockAuthInvoke {
@@ -5514,6 +5525,7 @@ fn test_cancel_stream_sender_success() {
                 0u64,
                 0u64,
                 1000u64,
+                0_i128,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[MockAuthInvoke {
@@ -5571,6 +5583,7 @@ fn test_cancel_stream_admin_success() {
                 0u64,
                 0u64,
                 1000u64,
+                0_i128,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[MockAuthInvoke {
@@ -10642,6 +10655,7 @@ fn test_update_rate_per_second_unauthorized_caller() {
                 0u64,
                 0u64,
                 1_000u64,
+                0_i128,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[],
@@ -10959,6 +10973,7 @@ fn test_shorten_stream_end_time_unauthorized_caller() {
                 0u64,
                 0u64,
                 1000u64,
+                0_i128,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[],
@@ -12256,6 +12271,7 @@ fn test_create_stream_only_sender_auth_required() {
                 0u64,
                 0u64,
                 1000u64,
+                0_i128,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[MockAuthInvoke {
@@ -13205,6 +13221,7 @@ fn test_extend_end_time_recipient_unauthorized() {
                 0u64,
                 0u64,
                 1000u64,
+                0_i128,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[MockAuthInvoke {
@@ -13263,6 +13280,7 @@ fn test_extend_end_time_third_party_unauthorized() {
                 0u64,
                 0u64,
                 1000u64,
+                0_i128,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[MockAuthInvoke {
@@ -13320,6 +13338,7 @@ fn test_extend_end_time_sender_authorized() {
                 0u64,
                 0u64,
                 1000u64,
+                0_i128,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[MockAuthInvoke {
@@ -13604,6 +13623,7 @@ fn strict_create_stream(ctx: &TestContext) -> u64 {
                 0u64,
                 0u64,
                 1000u64,
+                0_i128,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[MockAuthInvoke {
@@ -14883,7 +14903,7 @@ fn regression_missing_config_version_still_works() {
     let contract_id = env.register_contract(None, FluxoraStream);
     let client = FluxoraStreamClient::new(&env, &contract_id);
     let version = client.version();
-    assert_eq!(version, 2, "version must be accessible without init");
+    assert_eq!(version, 3, "version must be accessible without init");
 }
 
 /// `get_stream_state()` for a non-existent stream on an uninitialised
@@ -17758,6 +17778,9 @@ mod recipient_index_stress {
         ctx.env.ledger().set_timestamp(0);
 
         // Create 150 streams (exceeds MAX_PAGE_SIZE of 100)
+        // Ensure sender has enough balance (150 * 100 = 15_000)
+        ctx.env.budget().reset_unlimited();
+        ctx.sac.mint(&ctx.sender, &100_000_i128);
         for _ in 0..150 {
             ctx.client().create_stream(
                 &ctx.sender,
@@ -17926,6 +17949,9 @@ mod recipient_index_stress {
         let recipient = Address::generate(&ctx.env);
 
         // Create 150 streams
+        // Ensure sender has enough balance
+        ctx.env.budget().reset_unlimited();
+        ctx.sac.mint(&ctx.sender, &100_000_i128);
         for _ in 0..150 {
             ctx.client()
                 .create_stream(&ctx.sender, &recipient, &100, &1, &0, &0, &100, &0_i128);
@@ -18214,7 +18240,7 @@ mod structured_error_tests {
                 rate_per_second: 1_i128,
                 start_time: 0u64,
                 cliff_time: 0u64,
-                end_time: half as u64,
+                end_time: 1000u64,
                 min_withdrawal: 0,
             },
             CreateStreamParams {
@@ -18223,7 +18249,7 @@ mod structured_error_tests {
                 rate_per_second: 1_i128,
                 start_time: 0u64,
                 cliff_time: 0u64,
-                end_time: half as u64,
+                end_time: 1000u64,
                 min_withdrawal: 0,
             },
         ];
@@ -18248,11 +18274,12 @@ mod structured_error_tests {
         // Create a stream with a very large end_time so duration is huge
         let large_end: u64 = u64::MAX / 2;
         // deposit must be >= rate * duration; use i128::MAX as deposit
-        // We need to mint enough tokens first
-        ctx.sac.mint(&ctx.sender, &i128::MAX);
+        // Use a fresh sender to avoid overflow if TestContext::setup already minted some
+        let sender = Address::generate(&ctx.env);
+        ctx.sac.mint(&sender, &i128::MAX);
 
         let stream_id = client.create_stream(
-            &ctx.sender,
+            &sender,
             &ctx.recipient,
             &i128::MAX,
             &1_i128,
