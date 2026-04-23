@@ -18074,3 +18074,163 @@ fn test_global_pause_flags_default_to_false() {
         .as_contract(&ctx.contract_id, || crate::is_creation_paused(&ctx.env));
     assert!(!creation_paused, "Creation pause should default to false");
 }
+
+// ---------------------------------------------------------------------------
+// Tests — withdraw_to destination validation and atomicity proofs (#402)
+// ---------------------------------------------------------------------------
+
+/// destination == contract_id is rejected with InvalidParams.
+/// Atomicity proof: withdrawn_amount and contract balance are unchanged.
+#[test]
+fn test_withdraw_to_contract_destination_rejected_atomicity() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(500);
+    let state_before = ctx.client().get_stream_state(&stream_id);
+    let contract_balance_before = ctx.token().balance(&ctx.contract_id);
+
+    let result = ctx
+        .client()
+        .try_withdraw_to(&stream_id, &ctx.contract_id);
+
+    assert!(result.is_err(), "contract address destination must be rejected");
+    // No state mutation
+    let state_after = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(
+        state_after.withdrawn_amount, state_before.withdrawn_amount,
+        "withdrawn_amount must not change on rejection"
+    );
+    // No token transfer
+    assert_eq!(
+        ctx.token().balance(&ctx.contract_id),
+        contract_balance_before,
+        "contract balance must not change on rejection"
+    );
+}
+
+/// destination == contract_id returns InvalidParams error code.
+#[test]
+fn test_withdraw_to_contract_destination_returns_invalid_params() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(300);
+    let result = ctx
+        .client()
+        .try_withdraw_to(&stream_id, &ctx.contract_id);
+
+    match result {
+        Err(Ok(e)) => assert_eq!(e, ContractError::InvalidParams),
+        other => panic!("expected InvalidParams, got {:?}", other),
+    }
+}
+
+/// destination == contract_id: no event is emitted on rejection.
+#[test]
+fn test_withdraw_to_contract_destination_no_event_emitted() {
+    use soroban_sdk::testutils::Events;
+
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(400);
+    let events_before = ctx.env.events().all().len();
+
+    let _ = ctx
+        .client()
+        .try_withdraw_to(&stream_id, &ctx.contract_id);
+
+    let events_after = ctx.env.events().all().len();
+    assert_eq!(
+        events_after, events_before,
+        "no event must be emitted when destination is rejected"
+    );
+}
+
+/// destination == sender (third-party address, not recipient) is allowed.
+/// Tokens land at sender; recipient balance stays zero.
+#[test]
+fn test_withdraw_to_sender_as_destination_is_allowed() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(600);
+    let sender_balance_before = ctx.token().balance(&ctx.sender);
+    let amount = ctx.client().withdraw_to(&stream_id, &ctx.sender);
+
+    assert_eq!(amount, 600);
+    assert_eq!(
+        ctx.token().balance(&ctx.sender),
+        sender_balance_before + 600,
+        "tokens must land at sender address"
+    );
+    assert_eq!(
+        ctx.token().balance(&ctx.recipient),
+        0,
+        "recipient balance must remain zero"
+    );
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 600);
+}
+
+/// destination == random third party is allowed.
+/// Tokens land at the third-party address; recipient balance stays zero.
+#[test]
+fn test_withdraw_to_third_party_destination_is_allowed() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let third_party = Address::generate(&ctx.env);
+
+    ctx.env.ledger().set_timestamp(700);
+    let amount = ctx.client().withdraw_to(&stream_id, &third_party);
+
+    assert_eq!(amount, 700);
+    assert_eq!(ctx.token().balance(&third_party), 700);
+    assert_eq!(ctx.token().balance(&ctx.recipient), 0);
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 700);
+}
+
+/// Atomicity proof for contract-destination rejection: stream status is unchanged.
+#[test]
+fn test_withdraw_to_contract_destination_status_unchanged() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000); // would complete the stream if allowed
+    let status_before = ctx.client().get_stream_state(&stream_id).status;
+
+    let _ = ctx
+        .client()
+        .try_withdraw_to(&stream_id, &ctx.contract_id);
+
+    let status_after = ctx.client().get_stream_state(&stream_id).status;
+    assert_eq!(
+        status_after, status_before,
+        "stream status must not change on rejected destination"
+    );
+}
+
+/// Atomicity proof: a valid withdraw_to after a rejected one succeeds and
+/// delivers the full accrued amount (no partial state leak from the failed call).
+#[test]
+fn test_withdraw_to_valid_after_rejected_destination_succeeds() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let valid_dest = Address::generate(&ctx.env);
+
+    ctx.env.ledger().set_timestamp(500);
+
+    // First call: rejected destination
+    let _ = ctx
+        .client()
+        .try_withdraw_to(&stream_id, &ctx.contract_id);
+
+    // Second call: valid destination — must see full 500 accrued
+    let amount = ctx.client().withdraw_to(&stream_id, &valid_dest);
+    assert_eq!(amount, 500, "full accrued amount must be available after rejected call");
+    assert_eq!(ctx.token().balance(&valid_dest), 500);
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 500);
+}
