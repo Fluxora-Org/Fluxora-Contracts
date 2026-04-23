@@ -41,6 +41,7 @@ No hidden rules or implementation details are required to understand protocol be
 | **Cancellation** | `cancel_stream` / `cancel_stream_as_admin`    | Refunds unstreamed amount; frozen accrued stays for recipient         |
 | **Withdrawal**   | `withdraw` / `withdraw_to` / `batch_withdraw` | Recipient pulls accrued tokens; allowed on Paused if past `end_time`  |
 | **Completion**   | Automatic                                     | When `withdrawn_amount == deposit_amount`, status becomes `Completed` |
+| **Rotation**     | `update_recipient`                            | Recipient transfers entitlement to a new address                      |
 | **Auto-claim**   | `set_auto_claim` / `revoke_auto_claim` / `trigger_auto_claim` | Recipient opts in to permissionless final claim at `end_time` to a chosen destination |
 
 ### State Transitions
@@ -493,6 +494,7 @@ contract.create_streams_relative(&sender, &params)?;
 | `close_completed_stream`  | Anyone                        | None (permissionless terminal cleanup)     |
 | `top_up_stream`           | Funder address                | `funder.require_auth()`                     |
 | `update_rate_per_second`  | Sender                        | `sender.require_auth()`                     |
+| `update_recipient`        | Recipient                     | `recipient.require_auth()`                  |
 | `decrease_rate_per_second`| Sender                        | `sender.require_auth()`                     |
 | `shorten_stream_end_time` | Sender                        | `sender.require_auth()`                     |
 | `extend_stream_end_time`  | Sender                        | `sender.require_auth()`                     |
@@ -628,6 +630,34 @@ A naive decrease would retroactively lower the recipient's accrued tokens. To pr
 - Accrued amounts never decrease due to rate updates.
 - Recipient entitlement is preserved or increased.
 - Deposit coverage ensures the stream remains fully fundable at the new rate.
+
+### update_recipient: Observable Semantics
+
+`update_recipient(stream_id, new_recipient)` allows the current recipient to rotate their receiving address.
+
+#### Success Semantics (Observable)
+
+- **Authorization**: Only the current `recipient` of the stream can authorize the call.
+- **State Requirements**: Works on streams in any status (`Active`, `Paused`, `Cancelled`, `Completed`).
+- **Index Consistency**: Atomic update to the `RecipientStreams` index:
+    - Stream ID is removed from the old recipient's sorted list.
+    - Stream ID is added to the new recipient's sorted list.
+- **Entitlement Preservation**: All accrued-but-not-yet-withdrawn tokens are now only withdrawable by the `new_recipient`.
+- **Event**: Emits `("recp_upd", stream_id)` with `RecipientUpdated` payload containing `old_recipient` and `new_recipient`.
+
+#### Failure Semantics (Observable)
+
+- **StreamNotFound**: Invalid `stream_id`.
+- **Unauthorized**: Caller is not the current stream recipient.
+- **InvalidParams**: `new_recipient` is the same as the current recipient.
+- **ContractPaused**: If the contract is globally emergency paused.
+- **Atomicity**: Any failure reverts the entire transaction with no state changes, index updates, or events.
+
+#### Invariants
+
+- Total streamed amount and schedule remain unchanged.
+- The old recipient loses all access to the stream immediately.
+- The new recipient gains full control over accrued and future funds.
 
 ### batch_withdraw: completed stream behavior
 
