@@ -143,6 +143,7 @@ impl FluxoraFactory {
         start_time: u64,
         cliff_time: u64,
         end_time: u64,
+        withdraw_dust_threshold: i128,
     ) -> Result<u64, FactoryError> {
         // Enforce policies
         let is_allowed: bool = env
@@ -196,6 +197,7 @@ impl FluxoraFactory {
             &start_time,
             &cliff_time,
             &end_time,
+            &withdraw_dust_threshold,
             &None,
         );
 

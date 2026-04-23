@@ -15,7 +15,7 @@ Version policy, migration runbook, and audit notes for operators, integrators, a
 ### Current value
 
 ```
-CONTRACT_VERSION = 3
+CONTRACT_VERSION = 5
 ```
 
 ### Version history
@@ -25,6 +25,8 @@ CONTRACT_VERSION = 3
 | 1 | Initial release |
 | 2 | `Stream` struct gained `checkpointed_amount: i128` and `checkpointed_at: u64` for safe rate-decrease support |
 | 3 | `Stream` struct gained `memo: Option<Bytes>`; `StreamCreated` event gained `memo` field; `DataKey::StreamMemo(u64)` added at discriminant 10; `create_stream`/`create_streams` gained `memo` parameter; `get_stream_memo` entry-point added |
+| 4 | `TotalLiabilities` instance key for escrow accounting |
+| 5 | `withdraw_dust_threshold: i128` added to `Stream` struct and creation params |
 
 ### When to increment
 

@@ -89,12 +89,9 @@ pub const MAX_GLOBAL_TEMPLATES: u64 = 10_000;
 ///   integrators will not detect the incompatibility until a runtime failure occurs.
 ///   Code review and CI checks on this constant are the primary safeguard.
 ///
-/// Bumped to 2: `Stream` struct gained `checkpointed_amount: i128` and `checkpointed_at: u64`
-/// for safe rate-decrease support (see `decrease_rate_per_second`).
-/// Bumped to 3: stream schedule templates (`register_stream_template`, `delete_stream_template`,
-/// `create_stream_from_template`, new `DataKey` variants at the end of the enum).
-/// Bumped to 4: `TotalLiabilities` instance key for escrow accounting.
-pub const CONTRACT_VERSION: u32 = 4;
+/// Bumped to 5: `withdraw_dust_threshold: i128` added to `Stream` struct and creation params
+/// to reduce fee/event spam from tiny withdrawals.
+pub const CONTRACT_VERSION: u32 = 5;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -208,6 +205,9 @@ pub struct StreamCreated {
     pub start_time: u64,
     pub cliff_time: u64,
     pub end_time: u64,
+    /// Optional withdrawal threshold (raw units). Withdrawals below this
+    /// amount are skipped unless they are the final drain or the stream is terminal.
+    pub withdraw_dust_threshold: i128,
     /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
     /// `None` when no memo was supplied at creation time.
     pub memo: Option<soroban_sdk::Bytes>,
@@ -407,6 +407,9 @@ pub struct Stream {
     /// Ledger timestamp of the last rate change (or `start_time` on creation).
     /// `calculate_accrued` uses this as the start of the current rate epoch.
     pub checkpointed_at: u64,
+    /// Optional withdrawal threshold (raw units). Withdrawals below this
+    /// amount are skipped unless they are the final drain or the stream is terminal.
+    pub withdraw_dust_threshold: i128,
     /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
     /// Maximum length: `MAX_MEMO_BYTES` (64 bytes). `None` when not supplied.
     pub memo: Option<soroban_sdk::Bytes>,
@@ -427,6 +430,8 @@ pub struct CreateStreamParams {
     pub cliff_time: u64,
     /// Ledger timestamp when accrual stops for this stream entry.
     pub end_time: u64,
+    /// Optional withdrawal threshold (raw units) to reduce fee spam.
+    pub withdraw_dust_threshold: Option<i128>,
     /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
     /// Maximum `MAX_MEMO_BYTES` (64) bytes. Pass `None` to omit.
     pub memo: Option<soroban_sdk::Bytes>,
@@ -457,6 +462,8 @@ pub struct CreateStreamRelativeParams {
     pub cliff_delay: u64,
     /// Total duration the stream runs (in seconds) from start_time to end_time.
     pub duration: u64,
+    /// Optional withdrawal threshold (raw units) to reduce fee spam.
+    pub withdraw_dust_threshold: Option<i128>,
     /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
     /// Maximum `MAX_MEMO_BYTES` (64) bytes. Pass `None` to omit.
     pub memo: Option<soroban_sdk::Bytes>,
@@ -1024,6 +1031,7 @@ impl FluxoraStream {
         start_time: u64,
         cliff_time: u64,
         end_time: u64,
+        withdraw_dust_threshold: i128,
         memo: Option<soroban_sdk::Bytes>,
     ) -> Result<u64, ContractError> {
         // Validate memo length before allocating a stream ID.
@@ -1050,6 +1058,7 @@ impl FluxoraStream {
             cancelled_at: None,
             checkpointed_amount: 0,
             checkpointed_at: start_time,
+            withdraw_dust_threshold,
             memo: memo.clone(),
         };
 
@@ -1075,6 +1084,7 @@ impl FluxoraStream {
                 start_time,
                 cliff_time,
                 end_time,
+                withdraw_dust_threshold,
                 memo,
             },
         );
@@ -1252,6 +1262,7 @@ impl FluxoraStream {
         start_time: u64,
         cliff_time: u64,
         end_time: u64,
+        withdraw_dust_threshold: i128,
         memo: Option<soroban_sdk::Bytes>,
     ) -> Result<u64, ContractError> {
         sender.require_auth();
@@ -1280,6 +1291,7 @@ impl FluxoraStream {
             start_time,
             cliff_time,
             end_time,
+            withdraw_dust_threshold,
             memo,
         )
     }
@@ -1384,6 +1396,7 @@ impl FluxoraStream {
             start_time,
             cliff_time,
             end_time,
+            params.withdraw_dust_threshold.unwrap_or(0),
             params.memo,
         )
     }
@@ -1558,6 +1571,7 @@ impl FluxoraStream {
                 params.start_time,
                 params.cliff_time,
                 params.end_time,
+                params.withdraw_dust_threshold.unwrap_or(0),
                 params.memo,
             )?;
             created_ids.push_back(stream_id);
@@ -1617,6 +1631,7 @@ impl FluxoraStream {
     ///         start_delay: 86400,      // 1 day
     ///         cliff_delay: 259200,     // 3 days
     ///         duration: 2592000,       // 30 days
+    ///         withdraw_dust_threshold: 0,
     ///     },
     ///     CreateStreamRelativeParams {
     ///         recipient: bob,
@@ -1625,6 +1640,7 @@ impl FluxoraStream {
     ///         start_delay: 0,          // Immediate
     ///         cliff_delay: 0,          // Immediate
     ///         duration: 2592000,       // 30 days
+    ///         withdraw_dust_threshold: 0,
     ///     },
     /// ];
     /// let ids = contract.create_streams_relative(&sender, &params)?;
@@ -1643,27 +1659,27 @@ impl FluxoraStream {
         let mut absolute_streams = soroban_sdk::Vec::new(&env);
 
         // Convert relative parameters to absolute times
-        for rel_params in streams_relative.iter() {
+        for rel in streams_relative.iter() {
             let start_time = current_time
-                .checked_add(rel_params.start_delay)
+                .checked_add(rel.start_delay)
                 .ok_or(ContractError::InvalidParams)?;
             let cliff_time = current_time
-                .checked_add(rel_params.cliff_delay)
+                .checked_add(rel.cliff_delay)
                 .ok_or(ContractError::InvalidParams)?;
             let end_time = start_time
-                .checked_add(rel_params.duration)
+                .checked_add(rel.duration)
                 .ok_or(ContractError::InvalidParams)?;
 
-            let absolute_params = CreateStreamParams {
-                recipient: rel_params.recipient,
-                deposit_amount: rel_params.deposit_amount,
-                rate_per_second: rel_params.rate_per_second,
+            absolute_streams.push_back(CreateStreamParams {
+                recipient: rel.recipient,
+                deposit_amount: rel.deposit_amount,
+                rate_per_second: rel.rate_per_second,
                 start_time,
                 cliff_time,
                 end_time,
-                memo: rel_params.memo,
-            };
-            absolute_streams.push_back(absolute_params);
+                withdraw_dust_threshold: rel.withdraw_dust_threshold,
+                memo: rel.memo,
+            });
         }
 
         // Delegate to standard create_streams with converted absolute times
@@ -1926,6 +1942,22 @@ impl FluxoraStream {
             return Ok(0);
         }
 
+        // Enforce dust threshold unless terminal state or final drain (#423)
+        if withdrawable < stream.withdraw_dust_threshold
+            && !is_terminal_state(&env, &stream)
+            && stream.withdrawn_amount + withdrawable < stream.deposit_amount
+        {
+            return Ok(0);
+        }
+
+        // Enforce dust threshold unless terminal state or final drain (#423)
+        if withdrawable < stream.withdraw_dust_threshold
+            && !is_terminal_state(&env, &stream)
+            && stream.withdrawn_amount + withdrawable < stream.deposit_amount
+        {
+            return Ok(0);
+        }
+
         // CEI: update state before external token transfer to reduce reentrancy risk.
         // Assumption: the token contract does not reenter this contract.
         stream.withdrawn_amount += withdrawable;
@@ -2052,6 +2084,14 @@ impl FluxoraStream {
         withdrawable = withdrawable.min(contract_balance);
 
         if withdrawable <= 0 {
+            return Ok(0);
+        }
+
+        // Enforce dust threshold unless terminal state or final drain (#423)
+        if withdrawable < stream.withdraw_dust_threshold
+            && !is_terminal_state(&env, &stream)
+            && stream.withdrawn_amount + withdrawable < stream.deposit_amount
+        {
             return Ok(0);
         }
 
@@ -2231,6 +2271,15 @@ impl FluxoraStream {
             // Cap by running contract balance for safety
             withdrawable = withdrawable.min(contract_balance);
 
+            // Enforce dust threshold unless terminal state or final drain (#423)
+            if withdrawable > 0
+                && withdrawable < stream.withdraw_dust_threshold
+                && !is_terminal_state(&env, &stream)
+                && stream.withdrawn_amount + withdrawable < stream.deposit_amount
+            {
+                withdrawable = 0;
+            }
+
             if withdrawable > 0 {
                 // Decrement running balance before the transfer to ensure atomicity
                 contract_balance -= withdrawable;
@@ -2347,6 +2396,15 @@ impl FluxoraStream {
 
             // Cap by running contract balance for safety
             withdrawable = withdrawable.min(contract_balance);
+
+            // Enforce dust threshold unless terminal state or final drain (#423)
+            if withdrawable > 0
+                && withdrawable < stream.withdraw_dust_threshold
+                && !is_terminal_state(&env, &stream)
+                && stream.withdrawn_amount + withdrawable < stream.deposit_amount
+            {
+                withdrawable = 0;
+            }
 
             if withdrawable > 0 {
                 contract_balance -= withdrawable;
@@ -3358,6 +3416,8 @@ impl FluxoraStream {
         recipient: Address,
         deposit_amount: i128,
         rate_per_second: i128,
+        withdraw_dust_threshold: i128,
+        memo: Option<soroban_sdk::Bytes>,
     ) -> Result<u64, ContractError> {
         let tpl = load_stream_template(&env, template_id)?;
         Self::create_stream_relative(
@@ -3370,7 +3430,8 @@ impl FluxoraStream {
                 start_delay: tpl.start_delay,
                 cliff_delay: tpl.cliff_delay,
                 duration: tpl.duration,
-                memo: None,
+                withdraw_dust_threshold: Some(withdraw_dust_threshold),
+                memo,
             },
         )
     }
