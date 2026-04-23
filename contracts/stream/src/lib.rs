@@ -1786,7 +1786,6 @@ impl FluxoraStream {
         let token_address = get_token(&env)?;
         let mut contract_balance =
             token::Client::new(&env, &token_address).balance(&env.current_contract_address());
-
         let mut results = soroban_sdk::Vec::new(&env);
 
         for stream_id in stream_ids.iter() {
