@@ -67,6 +67,7 @@ pub struct CheckpointState {
 /// 2. `accrued(checkpointed_at) == checkpointed_amount` — a rate decrease never reduces
 ///    the visible withdrawable amount.
 /// 3. `accrued(t) <= deposit_amount` for all `t`.
+#[allow(clippy::too_many_arguments)]
 pub fn calculate_accrued_amount_checkpointed(
     state: CheckpointState,
     rate_per_second: i128,

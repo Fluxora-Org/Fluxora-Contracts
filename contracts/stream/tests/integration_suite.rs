@@ -5643,3 +5643,476 @@ fn transfer_sender_chained_transfers() {
     ctx.client().transfer_sender(&stream_id, &sender_c);
     assert_eq!(ctx.client().get_stream_state(&stream_id).sender, sender_c);
 }
+
+// ===========================================================================
+// Integration: get_claimable_at status matrix
+//    (Active / Paused / Cancelled / Completed) × boundary timestamps
+//    (before start, at cliff, after end, after cancel, huge timestamp)
+// ===========================================================================
+
+fn create_scheduled_stream(
+    ctx: &TestContext<'_>,
+    start_time: u64,
+    cliff_time: u64,
+    end_time: u64,
+) -> u64 {
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &((end_time - start_time) as i128),
+        &1_i128,
+        &start_time,
+        &cliff_time,
+        &end_time,
+    )
+}
+
+#[test]
+fn claimable_at_matrix_active_before_start_returns_zero() {
+    let ctx = TestContext::setup();
+    let stream_id = create_scheduled_stream(&ctx, 500, 500, 1500);
+
+    for t in [0u64, 100, 499] {
+        let claimable = ctx.client().get_claimable_at(&stream_id, &t);
+        assert_eq!(
+            claimable, 0,
+            "status=Active: claimable at t={t} must be 0 before start, got {claimable}"
+        );
+    }
+}
+
+#[test]
+fn claimable_at_matrix_active_at_cliff_returns_cliff_accrual() {
+    let ctx = TestContext::setup();
+    let stream_id = create_scheduled_stream(&ctx, 0, 500, 1000);
+
+    let claimable_499 = ctx.client().get_claimable_at(&stream_id, &499);
+    assert_eq!(
+        claimable_499, 0,
+        "status=Active: claimable at t=499 must be 0 one second before cliff, got {claimable_499}"
+    );
+
+    let claimable_500 = ctx.client().get_claimable_at(&stream_id, &500);
+    assert_eq!(
+        claimable_500, 500,
+        "status=Active: claimable at t=500 must be 500 at cliff, got {claimable_500}"
+    );
+
+    let claimable_501 = ctx.client().get_claimable_at(&stream_id, &501);
+    assert_eq!(
+        claimable_501, 501,
+        "status=Active: claimable at t=501 must be 501 just after cliff, got {claimable_501}"
+    );
+}
+
+#[test]
+fn claimable_at_matrix_active_after_end_clamped_to_deposit() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    for t in [1000u64, 1001, 2000, 9999, 1_000_000] {
+        let claimable = ctx.client().get_claimable_at(&stream_id, &t);
+        assert_eq!(
+            claimable, 1000,
+            "status=Active: claimable at t={t} must be clamped to deposit=1000 after end, got {claimable}"
+        );
+    }
+}
+
+#[test]
+fn claimable_at_matrix_active_huge_timestamp_clamped_to_deposit() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    let t = u64::MAX;
+    let claimable_max = ctx.client().get_claimable_at(&stream_id, &t);
+    assert_eq!(
+        claimable_max, 1000,
+        "status=Active: claimable at t=u64::MAX must be clamped to deposit=1000, got {claimable_max}"
+    );
+
+    let t = u64::MAX - 1;
+    let claimable_max_minus_1 = ctx.client().get_claimable_at(&stream_id, &t);
+    assert_eq!(
+        claimable_max_minus_1, 1000,
+        "status=Active: claimable at t=u64::MAX-1 must be clamped to deposit=1000, got {claimable_max_minus_1}"
+    );
+}
+
+#[test]
+fn claimable_at_matrix_active_after_partial_withdraw_all_boundaries() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(300);
+    ctx.client().withdraw(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Active);
+
+    let claimable_0 = ctx.client().get_claimable_at(&stream_id, &0);
+    assert_eq!(
+        claimable_0, 0,
+        "status=Active: claimable at t=0 must be 0 after withdrawing 300, got {claimable_0}"
+    );
+
+    let claimable_300 = ctx.client().get_claimable_at(&stream_id, &300);
+    assert_eq!(
+        claimable_300, 0,
+        "status=Active: claimable at t=300 must be 0 after withdrawing 300, got {claimable_300}"
+    );
+
+    let claimable_1000 = ctx.client().get_claimable_at(&stream_id, &1000);
+    assert_eq!(
+        claimable_1000, 700,
+        "status=Active: claimable at t=1000 must be 700 after withdrawing 300, got {claimable_1000}"
+    );
+
+    let t = u64::MAX;
+    let claimable_max = ctx.client().get_claimable_at(&stream_id, &t);
+    assert_eq!(
+        claimable_max, 700,
+        "status=Active: claimable at t=u64::MAX must be 700 after withdrawing 300, got {claimable_max}"
+    );
+}
+
+#[test]
+fn claimable_at_matrix_paused_before_start_returns_zero() {
+    let ctx = TestContext::setup();
+    let stream_id = create_scheduled_stream(&ctx, 500, 500, 1500);
+
+    let state_before_pause = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_before_pause.status, StreamStatus::Active);
+
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().pause_stream(&stream_id);
+
+    let paused_state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(paused_state.status, StreamStatus::Paused);
+
+    for t in [0u64, 200, 499] {
+        let claimable = ctx.client().get_claimable_at(&stream_id, &t);
+        assert_eq!(
+            claimable, 0,
+            "status=Paused: claimable at t={t} must be 0 before start, got {claimable}"
+        );
+    }
+}
+
+#[test]
+fn claimable_at_matrix_paused_at_cliff_returns_cliff_accrual() {
+    let ctx = TestContext::setup();
+    let stream_id = create_scheduled_stream(&ctx, 0, 500, 1000);
+
+    ctx.env.ledger().set_timestamp(300);
+    ctx.client().pause_stream(&stream_id);
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Paused);
+
+    let claimable_499 = ctx.client().get_claimable_at(&stream_id, &499);
+    assert_eq!(
+        claimable_499, 0,
+        "status=Paused: claimable at t=499 must be 0 one second before cliff, got {claimable_499}"
+    );
+
+    let claimable_500 = ctx.client().get_claimable_at(&stream_id, &500);
+    assert_eq!(
+        claimable_500, 500,
+        "status=Paused: claimable at t=500 must be 500 at cliff, got {claimable_500}"
+    );
+
+    let claimable_501 = ctx.client().get_claimable_at(&stream_id, &501);
+    assert_eq!(
+        claimable_501, 501,
+        "status=Paused: claimable at t=501 must be 501 just after cliff, got {claimable_501}"
+    );
+}
+
+#[test]
+fn claimable_at_matrix_paused_after_end_clamped_to_deposit() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(200);
+    ctx.client().pause_stream(&stream_id);
+
+    for t in [1000u64, 1001, 5000, 999_999] {
+        let claimable = ctx.client().get_claimable_at(&stream_id, &t);
+        assert_eq!(
+            claimable, 1000,
+            "status=Paused: claimable at t={t} must be clamped to deposit=1000 after end, got {claimable}"
+        );
+    }
+}
+
+#[test]
+fn claimable_at_matrix_paused_huge_timestamp_clamped_to_deposit() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().pause_stream(&stream_id);
+
+    let t = u64::MAX;
+    let claimable_max = ctx.client().get_claimable_at(&stream_id, &t);
+    assert_eq!(
+        claimable_max, 1000,
+        "status=Paused: claimable at t=u64::MAX must be clamped to deposit=1000, got {claimable_max}"
+    );
+
+    let t = u64::MAX - 1;
+    let claimable_max_minus_1 = ctx.client().get_claimable_at(&stream_id, &t);
+    assert_eq!(
+        claimable_max_minus_1, 1000,
+        "status=Paused: claimable at t=u64::MAX-1 must be clamped to deposit=1000, got {claimable_max_minus_1}"
+    );
+}
+
+#[test]
+fn claimable_at_matrix_paused_after_partial_withdraw_then_pause() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(300);
+    ctx.client().withdraw(&stream_id);
+
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().pause_stream(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Paused);
+
+    let claimable_300 = ctx.client().get_claimable_at(&stream_id, &300);
+    assert_eq!(
+        claimable_300, 0,
+        "status=Paused: claimable at t=300 must be 0 after withdrawing 300, got {claimable_300}"
+    );
+
+    let claimable_800 = ctx.client().get_claimable_at(&stream_id, &800);
+    assert_eq!(
+        claimable_800, 500,
+        "status=Paused: claimable at t=800 must be 500 after withdrawing 300, got {claimable_800}"
+    );
+
+    let claimable_1000 = ctx.client().get_claimable_at(&stream_id, &1000);
+    assert_eq!(
+        claimable_1000, 700,
+        "status=Paused: claimable at t=1000 must be 700 after withdrawing 300, got {claimable_1000}"
+    );
+
+    let t = u64::MAX;
+    let claimable_max = ctx.client().get_claimable_at(&stream_id, &t);
+    assert_eq!(
+        claimable_max, 700,
+        "status=Paused: claimable at t=u64::MAX must be 700 after withdrawing 300, got {claimable_max}"
+    );
+}
+
+#[test]
+fn claimable_at_matrix_cancelled_before_start_is_zero_always() {
+    let ctx = TestContext::setup();
+    let sender_before_create = ctx.token.balance(&ctx.sender);
+    let stream_id = create_scheduled_stream(&ctx, 500, 500, 1500);
+
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().cancel_stream(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+    assert_eq!(state.cancelled_at, Some(0));
+
+    for t in [0u64, 100, 499, 500, 1000, 1500, 9999, u64::MAX] {
+        let claimable = ctx.client().get_claimable_at(&stream_id, &t);
+        assert_eq!(
+            claimable, 0,
+            "status=Cancelled: claimable at t={t} must be 0 when cancelled before start, got {claimable}"
+        );
+    }
+
+    let sender_after_cancel = ctx.token.balance(&ctx.sender);
+    assert_eq!(
+        sender_after_cancel, sender_before_create,
+        "status=Cancelled: sender must be fully refunded when cancelling before start"
+    );
+}
+
+#[test]
+fn claimable_at_matrix_cancelled_at_cliff_freezes_at_cliff_amount() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_stream_with_cliff(500);
+
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().cancel_stream(&stream_id);
+
+    let claimable_499 = ctx.client().get_claimable_at(&stream_id, &499);
+    assert_eq!(
+        claimable_499, 0,
+        "status=Cancelled: claimable at t=499 must be 0 when cancelled at cliff=500, got {claimable_499}"
+    );
+
+    for t in [500u64, 501, 1000, 9999, u64::MAX] {
+        let claimable = ctx.client().get_claimable_at(&stream_id, &t);
+        assert_eq!(
+            claimable, 500,
+            "status=Cancelled: claimable at t={t} must freeze at 500 after cancellation at cliff, got {claimable}"
+        );
+    }
+}
+
+#[test]
+fn claimable_at_matrix_cancelled_after_end_freezes_at_deposit() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().cancel_stream(&stream_id);
+
+    for t in [1000u64, 1001, 5000, u64::MAX] {
+        let claimable = ctx.client().get_claimable_at(&stream_id, &t);
+        assert_eq!(
+            claimable, 1000,
+            "status=Cancelled: claimable at t={t} must freeze at deposit=1000 when cancelled at end, got {claimable}"
+        );
+    }
+}
+
+#[test]
+fn claimable_at_matrix_cancelled_after_cancel_clamped_at_frozen_value() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(600);
+    ctx.client().cancel_stream(&stream_id);
+
+    for t in [600u64, 601, 700, 1000, 5000, 999_999] {
+        let claimable = ctx.client().get_claimable_at(&stream_id, &t);
+        assert_eq!(
+            claimable, 600,
+            "status=Cancelled: claimable at t={t} must stay frozen at 600 after cancellation, got {claimable}"
+        );
+    }
+
+    for t in [0u64, 100, 300, 599] {
+        let claimable = ctx.client().get_claimable_at(&stream_id, &t);
+        assert_eq!(
+            claimable, t as i128,
+            "status=Cancelled: claimable at t={t} must match pre-cancel accrual, got {claimable}"
+        );
+    }
+
+    ctx.client().withdraw(&stream_id);
+
+    for t in [0u64, 100, 600, 601, 999_999, u64::MAX] {
+        let claimable = ctx.client().get_claimable_at(&stream_id, &t);
+        assert_eq!(
+            claimable, 0,
+            "status=Cancelled: claimable at t={t} must be 0 after withdrawing frozen amount, got {claimable}"
+        );
+    }
+}
+
+#[test]
+fn claimable_at_matrix_cancelled_huge_timestamp_stays_frozen() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(250);
+    ctx.client().cancel_stream(&stream_id);
+
+    let t = u64::MAX;
+    let claimable_max = ctx.client().get_claimable_at(&stream_id, &t);
+    assert_eq!(
+        claimable_max, 250,
+        "status=Cancelled: claimable at t=u64::MAX must stay frozen at 250, got {claimable_max}"
+    );
+
+    let t = u64::MAX - 1;
+    let claimable_max_minus_1 = ctx.client().get_claimable_at(&stream_id, &t);
+    assert_eq!(
+        claimable_max_minus_1, 250,
+        "status=Cancelled: claimable at t=u64::MAX-1 must stay frozen at 250, got {claimable_max_minus_1}"
+    );
+}
+
+#[test]
+fn claimable_at_matrix_cancelled_with_prior_partial_withdraw() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(200);
+    ctx.client().withdraw(&stream_id);
+
+    ctx.env.ledger().set_timestamp(700);
+    ctx.client().cancel_stream(&stream_id);
+
+    let claimable_700 = ctx.client().get_claimable_at(&stream_id, &700);
+    assert_eq!(
+        claimable_700, 500,
+        "status=Cancelled: claimable at t=700 must be 500 (accrued=700, withdrawn=200), got {claimable_700}"
+    );
+
+    let claimable_5000 = ctx.client().get_claimable_at(&stream_id, &5000);
+    assert_eq!(
+        claimable_5000, 500,
+        "status=Cancelled: claimable at t=5000 must stay frozen at 500, got {claimable_5000}"
+    );
+
+    let t = u64::MAX;
+    let claimable_max = ctx.client().get_claimable_at(&stream_id, &t);
+    assert_eq!(
+        claimable_max, 500,
+        "status=Cancelled: claimable at t=u64::MAX must stay frozen at 500, got {claimable_max}"
+    );
+
+    let claimable_100 = ctx.client().get_claimable_at(&stream_id, &100);
+    assert_eq!(
+        claimable_100, 0,
+        "status=Cancelled: claimable at t=100 must be clamped to 0 (accrued=100, withdrawn=200), got {claimable_100}"
+    );
+
+    let claimable_300 = ctx.client().get_claimable_at(&stream_id, &300);
+    assert_eq!(
+        claimable_300, 100,
+        "status=Cancelled: claimable at t=300 must be 100 (accrued=300, withdrawn=200), got {claimable_300}"
+    );
+}
+
+#[test]
+fn claimable_at_matrix_completed_returns_zero_for_every_boundary() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+
+    for t in [0u64, 100, 500, 999, 1000, 1001, 9999, u64::MAX] {
+        let claimable = ctx.client().get_claimable_at(&stream_id, &t);
+        assert_eq!(
+            claimable, 0,
+            "status=Completed: claimable at t={t} must be 0 for all timestamps, got {claimable}"
+        );
+    }
+}
+
+#[test]
+fn claimable_at_matrix_completed_after_full_withdraw_pre_end() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+
+    for t in [0u64, u64::MAX] {
+        let claimable = ctx.client().get_claimable_at(&stream_id, &t);
+        assert_eq!(
+            claimable, 0,
+            "status=Completed: claimable at t={t} must be 0 regardless of completion path, got {claimable}"
+        );
+    }
+}

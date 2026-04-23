@@ -858,6 +858,7 @@ impl FluxoraStream {
 pub struct FluxoraStream;
 
 #[contractimpl]
+#[allow(clippy::too_many_arguments)]
 impl FluxoraStream {
     /// Initialise the contract with the streaming token and admin address.
     ///
@@ -1110,6 +1111,7 @@ impl FluxoraStream {
     ///     &(30 * 86400),        // 30 days duration
     /// )?;
     /// ```
+    #[allow(clippy::too_many_arguments)]
     pub fn create_stream_relative(
         env: Env,
         sender: Address,

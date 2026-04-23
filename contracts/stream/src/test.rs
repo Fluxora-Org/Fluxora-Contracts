@@ -9,7 +9,7 @@ use soroban_sdk::{
 use crate::{
     ContractError, ContractPauseChanged, CreateStreamParams, FluxoraStream, FluxoraStreamClient,
     GlobalEmergencyPauseChanged, StreamCreated, StreamEndShortened, StreamEvent, StreamStatus,
-    StreamToppedUp, WithdrawalTo,
+    StreamToppedUp, WithdrawToParam, WithdrawalTo,
 };
 
 // ---------------------------------------------------------------------------
@@ -17304,7 +17304,7 @@ mod recipient_index_stress {
 
         // Create 5 streams
         let mut ids = Vec::new(&ctx.env);
-        for i in 0..5 {
+        for _i in 0..5 {
             let id = ctx.client().create_stream(
                 &ctx.sender,
                 &ctx.recipient,
@@ -17905,6 +17905,72 @@ mod structured_error_tests {
             result,
             Err(Ok(ContractError::ContractPaused)),
             "cancel_stream while globally paused must return ContractPaused, not panic"
+        );
+    }
+
+    /// Regression: `batch_withdraw_to` must honor the global pause and return
+    /// `ContractPaused`, not silently bypass the check (previously missing `?`).
+    #[test]
+    fn test_batch_withdraw_to_returns_contract_paused_when_globally_paused() {
+        let ctx = TestContext::setup();
+        let client = FluxoraStreamClient::new(&ctx.env, &ctx.contract_id);
+
+        let stream_id = client.create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &1000_i128,
+            &1_i128,
+            &0u64,
+            &0u64,
+            &1000u64,
+        );
+
+        ctx.env.ledger().set_timestamp(500);
+        client.set_global_emergency_paused(&true);
+
+        let destination = Address::generate(&ctx.env);
+        let withdrawals = soroban_sdk::vec![
+            &ctx.env,
+            WithdrawToParam {
+                stream_id,
+                destination,
+            },
+        ];
+
+        let result = client.try_batch_withdraw_to(&ctx.recipient, &withdrawals);
+        assert_eq!(
+            result,
+            Err(Ok(ContractError::ContractPaused)),
+            "batch_withdraw_to while globally paused must return ContractPaused, not panic"
+        );
+    }
+
+    /// Regression: `decrease_rate_per_second` must honor the global pause and return
+    /// `ContractPaused`, not silently bypass the check (previously missing `?`).
+    #[test]
+    fn test_decrease_rate_per_second_returns_contract_paused_when_globally_paused() {
+        let ctx = TestContext::setup();
+        let client = FluxoraStreamClient::new(&ctx.env, &ctx.contract_id);
+
+        // Use a generous deposit so the original rate is 5/s and we can decrease to 1/s.
+        let stream_id = client.create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &10_000_i128,
+            &5_i128,
+            &0u64,
+            &0u64,
+            &1_000u64,
+        );
+
+        client.set_global_emergency_paused(&true);
+
+        // new_rate (1) is strictly less than current_rate (5).
+        let result = client.try_decrease_rate_per_second(&stream_id, &1_i128);
+        assert_eq!(
+            result,
+            Err(Ok(ContractError::ContractPaused)),
+            "decrease_rate_per_second while globally paused must return ContractPaused, not panic"
         );
     }
 }
