@@ -3746,8 +3746,10 @@ fn test_batch_withdraw_to_contract_address_fails() {
             destination: ctx.contract_id.clone(),
         },
     ];
-
-
+    // Try to withdraw as sender instead of recipient
+    let res = ctx.client().try_batch_withdraw_to(&ctx.sender, &params);
+    assert_eq!(res, Err(Ok(fluxora_stream::ContractError::Unauthorized)));
+}
 
 // ---------------------------------------------------------------------------
 // Tests — Issue #423: Withdrawal Dust Threshold

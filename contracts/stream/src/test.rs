@@ -1979,13 +1979,14 @@ fn test_calculate_accrued_paused_at_end_time() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
     let stream_id = ctx.client().create_stream(
-        &ctx.sender, min_withdrawal: 0,
+        &ctx.sender,
         &ctx.recipient,
         &1000_i128,
         &1_i128,
         &0u64,
         &0u64,
         &1000u64,
+        &0_i128,
     );
 
     // Advance to nearly end_time and pause
