@@ -3745,6 +3745,56 @@ fn integration_globally_paused_withdraw_returns_structured_error() {
     );
 }
 
+#[test]
+fn integration_global_emergency_pause_blocks_all_mutations() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.client().set_global_emergency_paused(&true);
+
+    // Create blocked
+    let res_create = ctx.client().try_create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
+    assert_eq!(res_create, Err(Ok(ContractError::ContractPaused)));
+
+    // Withdraw blocked
+    let res_withdraw = ctx.client().try_withdraw(&stream_id);
+    assert_eq!(res_withdraw, Err(Ok(ContractError::ContractPaused)));
+
+    // Cancel blocked
+    let res_cancel = ctx.client().try_cancel_stream(&stream_id);
+    assert_eq!(res_cancel, Err(Ok(ContractError::ContractPaused)));
+
+    // Top-up blocked
+    let res_top_up = ctx.client().try_top_up_stream(&stream_id, &ctx.sender, &100);
+    assert_eq!(res_top_up, Err(Ok(ContractError::ContractPaused)));
+
+    // Update rate blocked
+    let res_update = ctx.client().try_update_rate_per_second(&stream_id, &2);
+    assert_eq!(res_update, Err(Ok(ContractError::ContractPaused)));
+}
+
+#[test]
+fn integration_creation_pause_only_blocks_creation() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // set_contract_paused sets CreationPaused
+    ctx.client().set_contract_paused(&true);
+
+    // Create blocked
+    let res_create = ctx.client().try_create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
+    assert_eq!(res_create, Err(Ok(ContractError::ContractPaused)));
+
+    // Withdraw allowed
+    ctx.env.ledger().set_timestamp(100);
+    let res_withdraw = ctx.client().try_withdraw(&stream_id);
+    assert!(res_withdraw.is_ok());
+
+    // Cancel allowed
+    let res_cancel = ctx.client().try_cancel_stream(&stream_id);
+    assert!(res_cancel.is_ok());
+}
+
 /// Globally paused contract returns ContractPaused from update_rate_per_second.
 #[test]
 fn integration_globally_paused_update_rate_returns_structured_error() {

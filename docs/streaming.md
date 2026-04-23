@@ -914,6 +914,30 @@ errors relevant to stream creation and timing.
 | `"invalid state for stream closure"`                                    | `close_completed_stream`           | Close non-terminal (Active/Paused) stream    |
 | `"contract not initialised: missing config"`                            | Functions requiring config         | Config missing                                |
 
+## Protocol-Level Pausing
+
+The protocol supports two distinct pausing modes managed by the contract admin. These modes allow for graduated intervention depending on the situation (e.g., routine maintenance vs. emergency exploit investigation).
+
+### Pause Modes Comparison
+
+| Mode | Flag | Blocked Operations | Allowed Operations |
+|---|---|---|---|
+| **Creation Only** | `CreationPaused` | `create_stream`, `create_streams` | `withdraw`, `cancel_stream`, `top_up_stream`, `update_rate_per_second`, `extend_stream_end_time`, `shorten_stream_end_time` |
+| **Global Emergency** | `GlobalEmergencyPaused` | **ALL** mutation operations (Create, Withdraw, Cancel, Update, etc.) | `get_stream_state`, `calculate_accrued`, `close_completed_stream` (read-only and cleanup) |
+
+### Gating Semantics
+
+1. **Creation Functions**: Blocked if *either* `GlobalEmergencyPaused` or `CreationPaused` is set.
+2. **Mutation Functions**: Blocked ONLY if `GlobalEmergencyPaused` is set.
+3. **Read-Only Functions**: Never blocked; users can always calculate their accrued balance even during a total emergency pause.
+4. **Admin Functions**: Never blocked; admins can always pause/resume the protocol or rotate the admin address.
+
+### Observable Behavior
+
+When an operation is blocked by a protocol-level pause, it returns `ContractError::ContractPaused` (4). No state changes occur, and no tokens are transferred.
+
+---
+
 ## Error Reference
 
 For a full list of contract errors, see [error.md](./error.md).

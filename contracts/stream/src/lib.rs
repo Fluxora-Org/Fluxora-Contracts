@@ -484,19 +484,19 @@ fn require_not_globally_paused(env: &Env) -> Result<(), ContractError> {
     Ok(())
 }
 
-/// Returns whether the protocol is globally paused (checks both GlobalEmergencyPaused and CreationPaused).
-/// Default is false (not paused) if no pause keys are set.
-fn is_protocol_paused(env: &Env) -> bool {
-    is_global_emergency_paused(env) || is_creation_paused(env)
-}
-
-/// Returns `ContractError::ContractPaused` when the protocol is globally paused.
-/// Use this in state-mutating entrypoints to enforce pause scope.
-fn require_not_paused(env: &Env) -> Result<(), ContractError> {
+/// Returns `Err(ContractError::ContractPaused)` when either [`is_global_emergency_paused`]
+/// or [`is_creation_paused`] is true.
+fn require_not_creation_paused(env: &Env) -> Result<(), ContractError> {
     if is_protocol_paused(env) {
         return Err(ContractError::ContractPaused);
     }
     Ok(())
+}
+
+/// Returns whether the protocol is globally paused (checks both GlobalEmergencyPaused and CreationPaused).
+/// Default is false (not paused) if no pause keys are set.
+fn is_protocol_paused(env: &Env) -> bool {
+    is_global_emergency_paused(env) || is_creation_paused(env)
 }
 
 /// Get the stored pause reason, if any.
@@ -1017,9 +1017,7 @@ impl FluxoraStream {
         end_time: u64,
     ) -> Result<u64, ContractError> {
         sender.require_auth();
-        if is_global_emergency_paused(&env) || is_creation_paused(&env) {
-            return Err(ContractError::ContractPaused);
-        }
+        require_not_creation_paused(&env)?;
 
         Self::validate_stream_params(
             &env,
@@ -1279,9 +1277,7 @@ impl FluxoraStream {
             return Ok(soroban_sdk::Vec::new(&env));
         }
 
-        if is_global_emergency_paused(&env) || is_creation_paused(&env) {
-            return Err(ContractError::ContractPaused);
-        }
+        require_not_creation_paused(&env)?;
 
         let current_time = env.ledger().timestamp();
         let mut total_deposit: i128 = 0;
@@ -2879,6 +2875,7 @@ impl FluxoraStream {
         funder: Address,
         amount: i128,
     ) -> Result<(), ContractError> {
+        require_not_globally_paused(&env)?;
         // --- Checks ---
         if amount <= 0 {
             return Err(ContractError::InvalidParams);
