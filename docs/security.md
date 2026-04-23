@@ -306,7 +306,7 @@ The CI pipeline verifies that the WASM artifact produced by `cargo build --relea
 
 | Factor                     | How it is pinned                                                |
 |---------------------------|-----------------------------------------------------------------|
-| Rust toolchain            | `rust-toolchain.toml` — `channel = "stable"`, targets pinned    |
+| Rust toolchain            | `rust-toolchain.toml` — channel and targets pinned              |
 | soroban-sdk version       | `contracts/stream/Cargo.toml` — `21.7.7` exact version          |
 | Build profile             | `--release` with `wasm32-unknown-unknown` target                |
 | Feature flags             | Only default features during WASM build (`testutils` is test-only) |
@@ -314,10 +314,22 @@ The CI pipeline verifies that the WASM artifact produced by `cargo build --relea
 
 ### CI verification flow
 
-1. Build WASM with pinned toolchain
-2. Compute `sha256sum` of the artifact
-3. Compare against `wasm/checksums.sha256`
-4. Fail with actionable error if mismatch detected
+1. Build WASM with pinned toolchain (`cargo build --release --target wasm32-unknown-unknown`)
+2. Run `bash script/verify-wasm-checksum.sh --no-build` — compares each artifact against `wasm/checksums.sha256`
+3. Fail with actionable error message if any checksum mismatches
+4. Upload raw and optimized WASM + hash files as CI artifacts (30-day retention)
+
+### Local verification
+
+To verify a build locally before deployment:
+
+```bash
+# Rebuild and verify in one step
+bash script/verify-wasm-checksum.sh
+
+# Verify existing artifacts without rebuilding
+bash script/verify-wasm-checksum.sh --no-build
+```
 
 ### Updating checksums
 
@@ -326,8 +338,21 @@ When the contract source changes intentionally:
 ```bash
 bash script/update-wasm-checksums.sh
 git add wasm/checksums.sha256
-git commit -m "chore: update wasm checksums"
+git commit -m "chore: update wasm checksums after <describe change>"
 ```
+
+The script also accepts `--dry-run` to preview the new hashes without writing:
+
+```bash
+bash script/update-wasm-checksums.sh --dry-run
+```
+
+### Auditor verification steps
+
+1. Clone the repository at the commit tagged for audit.
+2. Confirm `rust-toolchain.toml` channel matches the CI build.
+3. Run `bash script/verify-wasm-checksum.sh` — all entries must print `OK`.
+4. Compare the passing hash against the on-chain contract hash via `stellar contract inspect`.
 
 ### Residual risks
 
