@@ -43,8 +43,8 @@ fn template_register_create_delete_happy_path() {
     assert_eq!(stored.cliff_delay, 0);
     assert_eq!(stored.duration, 3600);
 
-    let stream_id =
-        client.create_stream_from_template(&sender, &tid, &recipient, &3600_i128, &1_i128);
+    let stream_id = client
+        .create_stream_from_template(&sender, &tid, &recipient, &3600_i128, &1_i128, &0, &None);
     assert_eq!(stream_id, 0u64);
 
     client.delete_stream_template(&owner, &tid);

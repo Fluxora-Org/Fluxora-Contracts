@@ -287,6 +287,16 @@ return min(accrued, deposit_amount).max(0)
 withdrawable = accrued - withdrawn_amount
 ```
 
+### Withdrawal Dust Threshold (#423)
+
+From **CONTRACT_VERSION 5**, senders can optionally set a `withdraw_dust_threshold` per stream to reduce fee and event spam from tiny micro-withdrawals.
+
+- **Enforcement**: If `withdrawable < withdraw_dust_threshold`, the withdrawal returns `0` (no transfer, no event).
+- **Exceptions (Threshold Ignored)**:
+    - **Terminal State**: Once the stream reaches `end_time` or is `Cancelled`, the threshold is ignored to ensure the recipient can pull all remaining funds.
+    - **Final Drain**: If the withdrawal would result in `withdrawn_amount == deposit_amount` (completing the stream), it is allowed even if the amount is below the threshold.
+- **Default**: The threshold defaults to `0` if not specified at creation.
+
 ### Frontend: get_claimable_at (simulation)
 
 `get_claimable_at(stream_id, timestamp)` is a read-only view that returns the amount that would be claimable (withdrawable) at an arbitrary timestamp. Use it for:
