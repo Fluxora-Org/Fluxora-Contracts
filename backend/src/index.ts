@@ -4,6 +4,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import { AppDataSource } from './config/database';
 import userRoutes from './routes/users.routes';
+import streamRoutes from './routes/streams';
 import logger from './utils/logger';
 
 const app = express();
@@ -16,7 +17,8 @@ app.use(helmet());
 app.use(cors({
   origin: process.env.CORS_ORIGIN || '*',
   methods: ['GET', 'POST', 'PATCH', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key', 'X-Correlation-Id'],
+  exposedHeaders: ['X-Correlation-Id']
 }));
 
 // Body parsing
@@ -30,6 +32,7 @@ app.get('/health', (req, res) => {
 
 // API routes
 app.use('/api/v1/users', userRoutes);
+app.use('/api/v1/streams', streamRoutes);
 
 // 404 handler
 app.use((req, res) => {
