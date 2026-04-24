@@ -20,6 +20,9 @@ const INSTANCE_BUMP_AMOUNT: u32 = 120_960;
 const PERSISTENT_LIFETIME_THRESHOLD: u32 = 17_280;
 /// Extend persistent entries to ~7 days of ledgers.
 const PERSISTENT_BUMP_AMOUNT: u32 = 120_960;
+/// Maximum number of stream IDs to return in a single paginated request
+/// Prevents unbounded responses and supports efficient indexer pagination
+const RECIPIENT_STREAMS_PAGE_LIMIT: u32 = 1000;
 // Contract version
 // ---------------------------------------------------------------------------
 
@@ -252,6 +255,16 @@ pub struct Stream {
     pub cancelled_at: Option<u64>,
 }
 
+
+/// Pagination result for recipient stream listing
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Page {
+    /// Stream IDs for this page (sorted ascending)
+    pub stream_ids: soroban_sdk::Vec<u64>,
+    /// Next cursor for pagination (0 if no more pages)
+    pub next_cursor: u64,
+}
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct CreateStreamParams {
@@ -2575,10 +2588,68 @@ impl FluxoraStream {
     /// - Paginate: fetch first N IDs, then call `get_stream_state` for each
     /// - Filter by status: fetch all IDs, then check status of each via `get_stream_state`
     pub fn get_recipient_streams(env: Env, recipient: Address) -> soroban_sdk::Vec<u64> {
-        load_recipient_streams(&env, &recipient)
-    }
 
-    /// Count the total number of streams for a recipient.
+    /// Paginated version of get_recipient_streams to prevent unbounded returns.
+    /// 
+    /// # Parameters
+    /// - `env`: Contract environment
+    /// - `recipient`: Address to query streams for
+    /// - `cursor`: Pagination cursor (stream_id to start after, 0 for beginning)
+    /// - `limit`: Maximum number of stream IDs to return (capped at RECIPIENT_STREAMS_PAGE_LIMIT)
+    /// 
+    /// # Returns
+    /// - `Page`: Contains stream IDs slice and next cursor for pagination
+    /// 
+    /// # Behavior
+    /// - Returns streams in ascending order by stream_id
+    /// - If cursor is 0, starts from the beginning
+    /// - If cursor matches a stream ID, starts after that stream
+    /// - Limit is capped at RECIPIENT_STREAMS_PAGE_LIMIT for safety
+    /// - Returns empty slice when no more streams are available
+    /// - Next cursor is 0 when no more pages exist
+    /// - No authorization required (public information)
+    /// - Extends TTL on the recipient's index to prevent expiration
+    pub fn get_recipient_streams_paginated(
+        env: Env,
+        recipient: Address,
+        cursor: u64,
+        limit: u32,
+    ) -> Page {
+        let streams = load_recipient_streams(&env, &recipient);
+        let total = streams.len();
+        
+        // Apply limit cap
+        let effective_limit = limit.min(RECIPIENT_STREAMS_PAGE_LIMIT);
+        
+        // Find starting position
+        let start_idx = if cursor == 0 {
+            0
+        } else {
+            match streams.binary_search(&cursor) {
+                Ok(pos) => pos + 1,  # Start after the cursor
+                Err(pos) => pos,     # Insert position if not found
+            }
+        };
+        
+        // Calculate end position
+        let end_idx = (start_idx as u32 + effective_limit).min(total as u32) as usize;
+        
+        #[allow(unused_assignments)]
+        let mut next_cursor = 0;
+        if end_idx < total {
+            next_cursor = streams.get(end_idx as usize).unwrap();
+        }
+        
+        #[allow(unused_assignments)]
+        let mut page_streams = soroban_sdk::Vec::new(&env);
+        for i in start_idx..end_idx {
+            page_streams.push_back(streams.get(i).unwrap());
+        }
+        
+         Page { stream_ids: page_streams, next_cursor }
+     }
+
+     /// Count the total number of streams for a recipient.
     ///
     /// Returns the count of streams where the recipient is the stream's recipient address.
     /// This is a convenience function that avoids fetching the full vector when only
