@@ -527,3 +527,47 @@ class TestMain:
         monkeypatch.setattr(vda, "MAPPING", _fake_mapping(tmp_path, files))
         monkeypatch.setattr(vda, "REPO_ROOT", tmp_path)
         assert vda.main() == 1
+
+
+# ---------------------------------------------------------------------------
+# Additional coverage
+# ---------------------------------------------------------------------------
+
+class TestExtractErrorVariantsExcludeList:
+    """ERROR_EXTRACT_EXCLUDE variants must be silently dropped."""
+
+    def test_excluded_variants_not_returned(self):
+        # All four names in ERROR_EXTRACT_EXCLUDE should be filtered out even
+        # when they match the CamelCase = <int> pattern.
+        src = (
+            "    Operational = 1,\n"
+            "    Administrative = 2,\n"
+            "    Compliance = 3,\n"
+            "    Emergency = 4,\n"
+        )
+        assert vda.extract_error_variants(src) == set()
+
+    def test_excluded_and_real_variants_mixed(self):
+        # Real variants survive; excluded ones are stripped.
+        src = (
+            "    Operational = 1,\n"
+            "    StreamNotFound = 2,\n"
+            "    Emergency = 3,\n"
+            "    InvalidState = 4,\n"
+        )
+        result = vda.extract_error_variants(src)
+        assert result == {"StreamNotFound", "InvalidState"}
+
+
+class TestEntrypointAllowlistFullCoverage:
+    """Every name in ENTRYPOINT_ALLOWLIST must be suppressed."""
+
+    def test_require_not_paused_excluded(self):
+        assert "require_not_paused" not in vda.extract_entrypoints(
+            "pub fn require_not_paused(env: &Env) {}"
+        )
+
+    def test_require_not_globally_paused_excluded(self):
+        assert "require_not_globally_paused" not in vda.extract_entrypoints(
+            "pub fn require_not_globally_paused(env: &Env) {}"
+        )
