@@ -29,9 +29,9 @@ When changing the contract:
 | **Pause**        | `pause_stream` / `pause_stream_as_admin`   | Stops withdrawals; accrual continues by time                            |
 | **Resume**       | `resume_stream` / `resume_stream_as_admin` | Restores withdrawals                                                    |
 | **Cancellation** | `cancel_stream` / `cancel_stream_as_admin` | Refunds unstreamed amount to sender; accrued amount stays for recipient |
-| **Withdrawal**   | `withdraw`                                 | Recipient pulls accrued tokens                                          |
+| **Withdrawal**   | `withdraw` / `withdraw_to` / `batch_withdraw` / `delegated_withdraw` | Recipient pulls accrued tokens (directly or via relayer) |
 | **Completion**   | Automatic                                  | When `withdrawn_amount == deposit_amount`, status becomes `Completed`   |
-| **Withdrawal**   | `withdraw`                                 | Recipient pulls accrued tokens                                          |
+| **Withdrawal**   | `withdraw` / `withdraw_to` / `batch_withdraw` / `delegated_withdraw` | Recipient pulls accrued tokens (directly or via relayer) |
 | **Completion**   | Automatic                                  | When `withdrawn_amount == deposit_amount`, status becomes `Completed`   |
 
 ### State Transitions
@@ -427,3 +427,44 @@ errors relevant to stream creation and timing.
 ## Error Reference
 
 For a full list of contract errors, see [error.md](./error.md).
+
+---
+
+## Delegated Withdraw (Relayer Support)
+
+`delegated_withdraw` lets a relayer submit a withdrawal on behalf of a recipient.
+The recipient signs an authorization off-chain; the relayer submits it on-chain and
+pays the transaction fee. Tokens are sent to the `destination` address specified in
+the signature.
+
+### Parameters
+
+| Parameter   | Type         | Description |
+|-------------|--------------|-------------|
+| `stream_id` | `u64`        | Stream to withdraw from |
+| `relayer`   | `Address`    | Transaction submitter (pays fees; must `require_auth`) |
+| `destination` | `Address`  | Where tokens are sent (bound in signature) |
+| `nonce`     | `u64`        | Must equal `get_withdraw_nonce(recipient)` |
+| `deadline`  | `u64`        | Ledger timestamp after which signature is invalid |
+| `signature` | `BytesN<64>` | Ed25519 signature from the stream's recipient |
+
+### Behavior
+
+- Same accrual and completion logic as `withdraw`.
+- Returns `0` (without consuming the nonce) if nothing has accrued yet.
+- Emits `("dlg_wdraw", stream_id)` → `DelegatedWithdrawal { stream_id, recipient, relayer, destination, amount, nonce }`.
+- Emits `("completed", stream_id)` if the stream is fully drained.
+
+### Error codes
+
+| Error | Condition |
+|-------|-----------|
+| `SignatureDeadlineExpired` | `ledger.timestamp() > deadline` |
+| `InvalidParams` | nonce mismatch, or destination == contract address |
+| `InvalidSignature` (host trap) | signature fails `ed25519_verify` |
+| `InvalidState` | stream is `Completed` or `Paused` |
+| `StreamNotFound` | stream does not exist |
+
+### View: `get_withdraw_nonce(recipient)`
+
+Returns the current nonce for a recipient (`0` if never used). Permissionless.

@@ -2,7 +2,10 @@
 
 mod accrual;
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, symbol_short, token, xdr::ToXdr, Address, Bytes,
+    BytesN, Env,
+};
 
 // ---------------------------------------------------------------------------
 // TTL constants
@@ -64,6 +67,10 @@ pub enum ContractError {
     InsufficientBalance = 8,
     /// Deposit amount does not cover the total streamable amount.
     InsufficientDeposit = 9,
+    /// The signature deadline has passed (current ledger time > deadline).
+    SignatureDeadlineExpired = 10,
+    /// The provided signature does not match the expected signer.
+    InvalidSignature = 11,
 }
 
 #[contracttype]
@@ -107,7 +114,19 @@ pub struct WithdrawalTo {
     pub amount: i128,
 }
 
-/// Per-stream result for `batch_withdraw`.
+/// Emitted when a relayer executes a recipient-signed delegated withdrawal.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DelegatedWithdrawal {
+    pub stream_id: u64,
+    pub recipient: Address,
+    pub relayer: Address,
+    pub destination: Address,
+    pub amount: i128,
+    pub nonce: u64,
+}
+
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct BatchWithdrawResult {
@@ -192,6 +211,9 @@ pub enum DataKey {
     RecipientStreams(Address), // Persistent storage for recipient stream index (sorted by stream_id).
     /// Emergency pause flag (bool). Appended to avoid shifting existing key discriminants.
     GlobalPaused,
+    /// Per-recipient nonce counter for delegated-withdraw replay protection.
+    /// Appended last to preserve existing discriminant values.
+    WithdrawNonce(Address),
 }
 
 // ---------------------------------------------------------------------------
@@ -241,6 +263,31 @@ fn read_global_paused(env: &Env) -> bool {
         .instance()
         .get(&DataKey::GlobalPaused)
         .unwrap_or(false)
+}
+
+// ---------------------------------------------------------------------------
+// Delegated-withdraw nonce helpers
+// ---------------------------------------------------------------------------
+
+/// Read the current nonce for a recipient (0 if never used).
+fn read_withdraw_nonce(env: &Env, recipient: &Address) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::WithdrawNonce(recipient.clone()))
+        .unwrap_or(0u64)
+}
+
+/// Increment and persist the nonce for a recipient.
+fn increment_withdraw_nonce(env: &Env, recipient: &Address) -> u64 {
+    let next = read_withdraw_nonce(env, recipient) + 1;
+    let key = DataKey::WithdrawNonce(recipient.clone());
+    env.storage().persistent().set(&key, &next);
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+    next
 }
 
 fn load_stream(env: &Env, stream_id: u64) -> Result<Stream, ContractError> {
@@ -2153,6 +2200,213 @@ impl FluxoraStream {
             StreamEvent::Resumed(stream_id),
         );
         Ok(())
+    }
+
+    /// Execute a recipient-signed delegated withdrawal (relayer support).
+    ///
+    /// Allows a relayer to withdraw accrued tokens on behalf of a recipient, provided the
+    /// recipient has signed an authorization message. The signature covers the stream ID,
+    /// destination address, nonce, and deadline, preventing replay and expiry attacks.
+    ///
+    /// # Signature Scheme
+    ///
+    /// The message that the recipient must sign is the SHA-256 hash of the following
+    /// concatenated bytes:
+    ///
+    /// ```text
+    /// "fluxora_delegated_withdraw" (UTF-8, no null terminator)
+    /// || contract_address_xdr  (XDR-encoded)
+    /// || destination_xdr       (XDR-encoded)
+    /// || stream_id             (8 bytes, u64 big-endian)
+    /// || nonce                 (8 bytes, u64 big-endian)
+    /// || deadline              (8 bytes, u64 big-endian)
+    /// ```
+    ///
+    /// The resulting 32-byte hash is verified against `signature` using the recipient's
+    /// Ed25519 public key via `env.crypto().ed25519_verify`.
+    ///
+    /// # Parameters
+    /// - `stream_id`: Unique identifier of the stream to withdraw from.
+    /// - `relayer`: Address submitting the transaction (pays fees; receives no tokens).
+    /// - `destination`: Address that will receive the withdrawn tokens.
+    /// - `nonce`: Must equal the recipient's current nonce (monotonically increasing).
+    /// - `deadline`: Ledger timestamp after which the signature is invalid.
+    /// - `signature`: 64-byte Ed25519 signature produced by the recipient.
+    ///
+    /// # Returns
+    /// - `i128`: Amount of tokens transferred to `destination` (0 if nothing to withdraw).
+    ///
+    /// # Authorization
+    /// - Requires authorization from `relayer` (pays the transaction fee).
+    /// - The recipient does **not** need to be the transaction submitter; their intent is
+    ///   expressed via the off-chain signature.
+    ///
+    /// # Replay Protection
+    /// - `nonce` must equal `get_withdraw_nonce(recipient)` exactly; any other value is rejected.
+    /// - On success the nonce is incremented, invalidating the used signature.
+    /// - Nonces are per-recipient and strictly monotonic (no skipping).
+    ///
+    /// # Expiry
+    /// - `deadline` must be `>= env.ledger().timestamp()` at execution time.
+    /// - Expired signatures are rejected with `SignatureDeadlineExpired`.
+    ///
+    /// # Destination Constraints
+    /// - `destination` must not equal `env.current_contract_address()`.
+    ///
+    /// # CEI Ordering
+    /// 1. Checks (deadline, nonce, signature, stream status, withdrawable amount).
+    /// 2. Effects (increment nonce, update `withdrawn_amount`, optionally set `Completed`).
+    /// 3. Interactions (token transfer, events).
+    ///
+    /// # Events
+    /// - Publishes `("dlg_wdraw", stream_id)` → `DelegatedWithdrawal { ... }` when `amount > 0`.
+    /// - Publishes `("completed", stream_id)` → `StreamEvent::StreamCompleted` if stream drains.
+    ///
+    /// # Errors
+    /// - `SignatureDeadlineExpired` — `deadline < current ledger timestamp`.
+    /// - `InvalidParams` — nonce mismatch or destination is the contract address.
+    /// - `InvalidSignature` — signature does not verify against recipient's key.
+    /// - `StreamNotFound` — stream does not exist.
+    /// - `InvalidState` — stream is `Completed` or `Paused`.
+    pub fn delegated_withdraw(
+        env: Env,
+        stream_id: u64,
+        relayer: Address,
+        destination: Address,
+        nonce: u64,
+        deadline: u64,
+        signature: BytesN<64>,
+    ) -> Result<i128, ContractError> {
+        // Relayer pays the transaction fee.
+        relayer.require_auth();
+
+        // 1. Deadline check.
+        if env.ledger().timestamp() > deadline {
+            return Err(ContractError::SignatureDeadlineExpired);
+        }
+
+        // 2. Destination guard.
+        if destination == env.current_contract_address() {
+            return Err(ContractError::InvalidParams);
+        }
+
+        // 3. Load stream and check status.
+        let mut stream = load_stream(&env, stream_id)?;
+
+        if stream.status == StreamStatus::Completed {
+            return Err(ContractError::InvalidState);
+        }
+        if stream.status == StreamStatus::Paused {
+            return Err(ContractError::InvalidState);
+        }
+
+        // 4. Nonce check (replay protection).
+        let current_nonce = read_withdraw_nonce(&env, &stream.recipient);
+        if nonce != current_nonce {
+            return Err(ContractError::InvalidParams);
+        }
+
+        // 5. Reconstruct and verify signature.
+        //
+        // Message = SHA-256(
+        //   "fluxora_delegated_withdraw"
+        //   || contract_address_xdr
+        //   || destination_xdr
+        //   || stream_id  (8 bytes, big-endian)
+        //   || nonce      (8 bytes, big-endian)
+        //   || deadline   (8 bytes, big-endian)
+        // )
+        let contract_addr_bytes = env.current_contract_address().to_xdr(&env);
+        let dest_bytes = destination.clone().to_xdr(&env);
+
+        let mut msg = Bytes::new(&env);
+        msg.extend_from_array(b"fluxora_delegated_withdraw");
+        msg.append(&contract_addr_bytes);
+        msg.append(&dest_bytes);
+        msg.extend_from_array(&stream_id.to_be_bytes());
+        msg.extend_from_array(&nonce.to_be_bytes());
+        msg.extend_from_array(&deadline.to_be_bytes());
+
+        let msg_hash: BytesN<32> = env.crypto().sha256(&msg).into();
+
+        // Derive the recipient's Ed25519 public key from their XDR-encoded address.
+        // A Stellar G-address XDR encodes as: 4-byte type + 4-byte discriminant + 32-byte key.
+        let recipient_xdr = stream.recipient.clone().to_xdr(&env);
+        let xdr_len = recipient_xdr.len();
+        if xdr_len < 32 {
+            return Err(ContractError::InvalidSignature);
+        }
+        let key_offset = xdr_len - 32;
+        let mut pk_arr = [0u8; 32];
+        for i in 0..32u32 {
+            pk_arr[i as usize] = recipient_xdr.get(key_offset + i).unwrap_or(0);
+        }
+        let public_key: BytesN<32> = BytesN::from_array(&env, &pk_arr);
+
+        // ed25519_verify panics on invalid signature — map to InvalidSignature.
+        // We use a try-pattern via the SDK's verify which panics on failure.
+        // Callers with a bad signature will get a host trap (transaction reverted).
+        env.crypto()
+            .ed25519_verify(&public_key, &msg_hash.into(), &signature);
+
+        // 6. Compute withdrawable amount.
+        let accrued = Self::calculate_accrued(env.clone(), stream_id)?;
+        let withdrawable = accrued - stream.withdrawn_amount;
+
+        if withdrawable == 0 {
+            // Nonce is NOT consumed when there is nothing to withdraw.
+            return Ok(0);
+        }
+
+        // 7. Effects: increment nonce, update stream state (CEI).
+        increment_withdraw_nonce(&env, &stream.recipient);
+
+        stream.withdrawn_amount += withdrawable;
+        let completed_now = stream.status == StreamStatus::Active
+            && stream.withdrawn_amount == stream.deposit_amount;
+        if completed_now {
+            stream.status = StreamStatus::Completed;
+        }
+        save_stream(&env, &stream);
+
+        // 8. Interactions: token transfer then events.
+        push_token(&env, &destination, withdrawable)?;
+
+        env.events().publish(
+            (symbol_short!("dlg_wdraw"), stream_id),
+            DelegatedWithdrawal {
+                stream_id,
+                recipient: stream.recipient.clone(),
+                relayer,
+                destination,
+                amount: withdrawable,
+                nonce,
+            },
+        );
+
+        if completed_now {
+            env.events().publish(
+                (symbol_short!("completed"), stream_id),
+                StreamEvent::StreamCompleted(stream_id),
+            );
+        }
+
+        Ok(withdrawable)
+    }
+
+    /// Return the current delegated-withdraw nonce for a recipient.
+    ///
+    /// The nonce must be included in the signature payload and must match exactly
+    /// when `delegated_withdraw` is called. It is incremented on every successful
+    /// delegated withdrawal that moves tokens.
+    ///
+    /// # Parameters
+    /// - `recipient`: Address to query the nonce for.
+    ///
+    /// # Returns
+    /// - `u64`: Current nonce (0 if no delegated withdrawal has ever been executed).
+    pub fn get_withdraw_nonce(env: Env, recipient: Address) -> u64 {
+        read_withdraw_nonce(&env, &recipient)
     }
 }
 

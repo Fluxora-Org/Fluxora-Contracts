@@ -2982,3 +2982,498 @@ fn neg_resume_as_admin_sender_rejected() {
     assert!(result.is_err(), "sender must not use admin resume path");
     assert_eq!(ctx.client().get_stream_state(&stream_id).status, StreamStatus::Paused);
 }
+
+// ===========================================================================
+// Delegated Withdraw Tests (#419)
+// ===========================================================================
+
+mod delegated_withdraw {
+    extern crate std;
+
+    use ed25519_dalek::{Signer, SigningKey};
+    use fluxora_stream::{ContractError, FluxoraStream, FluxoraStreamClient, StreamStatus};
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger},
+        token::{Client as TokenClient, StellarAssetClient},
+        xdr::{AccountId, PublicKey, ScAddress, ToXdr, Uint256},
+        Address, Bytes, BytesN, Env, TryIntoVal,
+    };
+
+    // -----------------------------------------------------------------------
+    // Test helpers
+    // -----------------------------------------------------------------------
+
+    /// A keypair whose address can be used as a stream recipient.
+    struct RecipientKeypair {
+        signing_key: SigningKey,
+        address: Address,
+    }
+
+    impl RecipientKeypair {
+        /// Create a deterministic keypair from a 32-byte seed.
+        fn from_seed(env: &Env, seed: [u8; 32]) -> Self {
+            let signing_key = SigningKey::from_bytes(&seed);
+            let verifying_key = signing_key.verifying_key();
+            let pk_bytes = verifying_key.to_bytes();
+
+            // Build a Stellar AccountId from the raw Ed25519 public key bytes.
+            let account_id = AccountId(PublicKey::PublicKeyTypeEd25519(Uint256(pk_bytes)));
+            let sc_address = ScAddress::Account(account_id);
+            let address: Address = sc_address.try_into_val(env).unwrap();
+
+            Self {
+                signing_key,
+                address,
+            }
+        }
+
+        /// Build and sign the delegated-withdraw message, returning a 64-byte signature.
+        ///
+        /// Replicates the exact message construction in `delegated_withdraw`:
+        ///   SHA-256("fluxora_delegated_withdraw" || contract_xdr || dest_xdr
+        ///           || stream_id_be || nonce_be || deadline_be)
+        fn sign_withdraw(
+            &self,
+            env: &Env,
+            contract_id: &Address,
+            stream_id: u64,
+            destination: &Address,
+            nonce: u64,
+            deadline: u64,
+        ) -> BytesN<64> {
+            // Build the raw message (same as contract).
+            let contract_xdr = contract_id.clone().to_xdr(env);
+            let dest_xdr = destination.clone().to_xdr(env);
+
+            let mut msg = Bytes::new(env);
+            msg.extend_from_array(b"fluxora_delegated_withdraw");
+            msg.append(&contract_xdr);
+            msg.append(&dest_xdr);
+            msg.extend_from_array(&stream_id.to_be_bytes());
+            msg.extend_from_array(&nonce.to_be_bytes());
+            msg.extend_from_array(&deadline.to_be_bytes());
+
+            // SHA-256 hash (matches what the contract passes to ed25519_verify).
+            let msg_hash: BytesN<32> = env.crypto().sha256(&msg).into();
+
+            // Sign the 32-byte hash with Ed25519.
+            let hash_bytes: [u8; 32] = msg_hash.to_array();
+            let sig = self.signing_key.sign(&hash_bytes);
+            BytesN::from_array(env, &sig.to_bytes())
+        }
+    }
+
+    struct Ctx<'a> {
+        env: Env,
+        contract_id: Address,
+        token_id: Address,
+        sender: Address,
+        relayer: Address,
+        recipient_kp: RecipientKeypair,
+        token: TokenClient<'a>,
+    }
+
+    impl<'a> Ctx<'a> {
+        fn setup() -> Self {
+            let env = Env::default();
+            env.mock_all_auths();
+
+            let contract_id = env.register_contract(None, FluxoraStream);
+
+            let token_admin = Address::generate(&env);
+            let token_id = env
+                .register_stellar_asset_contract_v2(token_admin)
+                .address();
+
+            let admin = Address::generate(&env);
+            let sender = Address::generate(&env);
+            let relayer = Address::generate(&env);
+
+            // Deterministic recipient keypair (seed = all-0x01 bytes).
+            let recipient_kp = RecipientKeypair::from_seed(&env, [0x01u8; 32]);
+
+            let client = FluxoraStreamClient::new(&env, &contract_id);
+            client.init(&token_id, &admin);
+
+            let sac = StellarAssetClient::new(&env, &token_id);
+            sac.mint(&sender, &10_000_i128);
+
+            let token = TokenClient::new(&env, &token_id);
+
+            Self {
+                env,
+                contract_id,
+                token_id,
+                sender,
+                relayer,
+                recipient_kp,
+                token,
+            }
+        }
+
+        fn client(&self) -> FluxoraStreamClient<'_> {
+            FluxoraStreamClient::new(&self.env, &self.contract_id)
+        }
+
+        /// Create a default 1000-token stream (rate=1, 0..1000s) to the keypair recipient.
+        fn create_stream(&self) -> u64 {
+            self.env.ledger().set_timestamp(0);
+            self.client().create_stream(
+                &self.sender,
+                &self.recipient_kp.address,
+                &1000_i128,
+                &1_i128,
+                &0u64,
+                &0u64,
+                &1000u64,
+            )
+        }
+
+        fn sign(
+            &self,
+            stream_id: u64,
+            destination: &Address,
+            nonce: u64,
+            deadline: u64,
+        ) -> BytesN<64> {
+            self.recipient_kp.sign_withdraw(
+                &self.env,
+                &self.contract_id,
+                stream_id,
+                destination,
+                nonce,
+                deadline,
+            )
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Happy-path tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn delegated_withdraw_transfers_accrued_to_destination() {
+        let ctx = Ctx::setup();
+        let stream_id = ctx.create_stream();
+        let destination = Address::generate(&ctx.env);
+
+        ctx.env.ledger().set_timestamp(400);
+        let nonce = ctx.client().get_withdraw_nonce(&ctx.recipient_kp.address);
+        assert_eq!(nonce, 0);
+
+        let deadline = 9999u64;
+        let sig = ctx.sign(stream_id, &destination, nonce, deadline);
+
+        let amount = ctx
+            .client()
+            .delegated_withdraw(&stream_id, &ctx.relayer, &destination, &nonce, &deadline, &sig);
+
+        assert_eq!(amount, 400);
+        assert_eq!(ctx.token.balance(&destination), 400);
+        assert_eq!(ctx.token.balance(&ctx.contract_id), 600);
+
+        // Nonce must be incremented.
+        assert_eq!(ctx.client().get_withdraw_nonce(&ctx.recipient_kp.address), 1);
+    }
+
+    #[test]
+    fn delegated_withdraw_completes_stream_when_fully_drained() {
+        let ctx = Ctx::setup();
+        let stream_id = ctx.create_stream();
+        let destination = Address::generate(&ctx.env);
+
+        ctx.env.ledger().set_timestamp(1000);
+        let nonce = 0u64;
+        let deadline = 9999u64;
+        let sig = ctx.sign(stream_id, &destination, nonce, deadline);
+
+        let amount = ctx
+            .client()
+            .delegated_withdraw(&stream_id, &ctx.relayer, &destination, &nonce, &deadline, &sig);
+
+        assert_eq!(amount, 1000);
+        assert_eq!(
+            ctx.client().get_stream_state(&stream_id).status,
+            StreamStatus::Completed
+        );
+        assert_eq!(ctx.token.balance(&destination), 1000);
+    }
+
+    #[test]
+    fn delegated_withdraw_nonce_increments_sequentially() {
+        let ctx = Ctx::setup();
+        let stream_id = ctx.create_stream();
+        let destination = Address::generate(&ctx.env);
+
+        // First withdrawal at t=300.
+        ctx.env.ledger().set_timestamp(300);
+        let sig0 = ctx.sign(stream_id, &destination, 0, 9999);
+        ctx.client()
+            .delegated_withdraw(&stream_id, &ctx.relayer, &destination, &0, &9999, &sig0);
+        assert_eq!(ctx.client().get_withdraw_nonce(&ctx.recipient_kp.address), 1);
+
+        // Second withdrawal at t=700.
+        ctx.env.ledger().set_timestamp(700);
+        let sig1 = ctx.sign(stream_id, &destination, 1, 9999);
+        let amount = ctx
+            .client()
+            .delegated_withdraw(&stream_id, &ctx.relayer, &destination, &1, &9999, &sig1);
+        assert_eq!(amount, 400); // 700 - 300 already withdrawn
+        assert_eq!(ctx.client().get_withdraw_nonce(&ctx.recipient_kp.address), 2);
+    }
+
+    #[test]
+    fn delegated_withdraw_returns_zero_when_nothing_to_withdraw() {
+        let ctx = Ctx::setup();
+        let stream_id = ctx.create_stream();
+        let destination = Address::generate(&ctx.env);
+
+        // Before cliff (cliff = 0, but at t=0 nothing has accrued yet since start=0).
+        // Actually at t=0 accrued = 0 * rate = 0.
+        ctx.env.ledger().set_timestamp(0);
+        let sig = ctx.sign(stream_id, &destination, 0, 9999);
+        let amount = ctx
+            .client()
+            .delegated_withdraw(&stream_id, &ctx.relayer, &destination, &0, &9999, &sig);
+
+        assert_eq!(amount, 0);
+        // Nonce must NOT be consumed when nothing is withdrawn.
+        assert_eq!(ctx.client().get_withdraw_nonce(&ctx.recipient_kp.address), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Replay protection tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn delegated_withdraw_replay_rejected_with_same_nonce() {
+        let ctx = Ctx::setup();
+        let stream_id = ctx.create_stream();
+        let destination = Address::generate(&ctx.env);
+
+        ctx.env.ledger().set_timestamp(300);
+        let sig = ctx.sign(stream_id, &destination, 0, 9999);
+
+        // First call succeeds.
+        ctx.client()
+            .delegated_withdraw(&stream_id, &ctx.relayer, &destination, &0, &9999, &sig);
+
+        // Replay with the same nonce must fail.
+        ctx.env.ledger().set_timestamp(600);
+        let result = ctx.client().try_delegated_withdraw(
+            &stream_id,
+            &ctx.relayer,
+            &destination,
+            &0, // stale nonce
+            &9999,
+            &sig,
+        );
+        assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
+    }
+
+    #[test]
+    fn delegated_withdraw_nonce_skipping_rejected() {
+        let ctx = Ctx::setup();
+        let stream_id = ctx.create_stream();
+        let destination = Address::generate(&ctx.env);
+
+        ctx.env.ledger().set_timestamp(300);
+        // Nonce is 0 but we supply 1 (skip).
+        let sig = ctx.sign(stream_id, &destination, 1, 9999);
+        let result = ctx.client().try_delegated_withdraw(
+            &stream_id,
+            &ctx.relayer,
+            &destination,
+            &1,
+            &9999,
+            &sig,
+        );
+        assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Deadline / expiry tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn delegated_withdraw_expired_deadline_rejected() {
+        let ctx = Ctx::setup();
+        let stream_id = ctx.create_stream();
+        let destination = Address::generate(&ctx.env);
+
+        // Ledger is at t=500, deadline is 499 (already expired).
+        ctx.env.ledger().set_timestamp(500);
+        let sig = ctx.sign(stream_id, &destination, 0, 499);
+        let result = ctx.client().try_delegated_withdraw(
+            &stream_id,
+            &ctx.relayer,
+            &destination,
+            &0,
+            &499,
+            &sig,
+        );
+        assert_eq!(result, Err(Ok(ContractError::SignatureDeadlineExpired)));
+    }
+
+    #[test]
+    fn delegated_withdraw_deadline_at_current_time_accepted() {
+        let ctx = Ctx::setup();
+        let stream_id = ctx.create_stream();
+        let destination = Address::generate(&ctx.env);
+
+        ctx.env.ledger().set_timestamp(400);
+        // deadline == current timestamp is valid (not expired).
+        let sig = ctx.sign(stream_id, &destination, 0, 400);
+        let amount = ctx
+            .client()
+            .delegated_withdraw(&stream_id, &ctx.relayer, &destination, &0, &400, &sig);
+        assert_eq!(amount, 400);
+    }
+
+    // -----------------------------------------------------------------------
+    // Wrong signer tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn delegated_withdraw_wrong_signer_rejected() {
+        let ctx = Ctx::setup();
+        let stream_id = ctx.create_stream();
+        let destination = Address::generate(&ctx.env);
+
+        ctx.env.ledger().set_timestamp(400);
+
+        // Sign with a different keypair (attacker).
+        let attacker_kp = RecipientKeypair::from_seed(&ctx.env, [0xFFu8; 32]);
+        let bad_sig =
+            attacker_kp.sign_withdraw(&ctx.env, &ctx.contract_id, stream_id, &destination, 0, 9999);
+
+        // The contract should panic (host trap) because ed25519_verify fails.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ctx.client().delegated_withdraw(
+                &stream_id,
+                &ctx.relayer,
+                &destination,
+                &0,
+                &9999,
+                &bad_sig,
+            );
+        }));
+        assert!(result.is_err(), "wrong signer must be rejected");
+
+        // No state change: nonce unchanged, no tokens moved.
+        assert_eq!(ctx.client().get_withdraw_nonce(&ctx.recipient_kp.address), 0);
+        assert_eq!(ctx.token.balance(&destination), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Stream state guard tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn delegated_withdraw_paused_stream_rejected() {
+        let ctx = Ctx::setup();
+        let stream_id = ctx.create_stream();
+        let destination = Address::generate(&ctx.env);
+
+        ctx.env.ledger().set_timestamp(200);
+        ctx.client().pause_stream(&stream_id);
+
+        let sig = ctx.sign(stream_id, &destination, 0, 9999);
+        let result = ctx.client().try_delegated_withdraw(
+            &stream_id,
+            &ctx.relayer,
+            &destination,
+            &0,
+            &9999,
+            &sig,
+        );
+        assert_eq!(result, Err(Ok(ContractError::InvalidState)));
+    }
+
+    #[test]
+    fn delegated_withdraw_completed_stream_rejected() {
+        let ctx = Ctx::setup();
+        let stream_id = ctx.create_stream();
+        let destination = Address::generate(&ctx.env);
+
+        // Drain the stream via delegated withdraw first (avoids trustline issue).
+        ctx.env.ledger().set_timestamp(1000);
+        let sig = ctx.sign(stream_id, &destination, 0, 9999);
+        ctx.client()
+            .delegated_withdraw(&stream_id, &ctx.relayer, &destination, &0, &9999, &sig);
+        assert_eq!(
+            ctx.client().get_stream_state(&stream_id).status,
+            StreamStatus::Completed
+        );
+
+        // Now try another delegated withdraw on the completed stream.
+        let sig2 = ctx.sign(stream_id, &destination, 1, 9999);
+        let result = ctx.client().try_delegated_withdraw(
+            &stream_id,
+            &ctx.relayer,
+            &destination,
+            &1,
+            &9999,
+            &sig2,
+        );
+        assert_eq!(result, Err(Ok(ContractError::InvalidState)));
+    }
+
+    #[test]
+    fn delegated_withdraw_destination_is_contract_rejected() {
+        let ctx = Ctx::setup();
+        let stream_id = ctx.create_stream();
+
+        ctx.env.ledger().set_timestamp(400);
+        // Destination = contract address (forbidden).
+        let bad_dest = ctx.contract_id.clone();
+        let sig = ctx.sign(stream_id, &bad_dest, 0, 9999);
+        let result = ctx.client().try_delegated_withdraw(
+            &stream_id,
+            &ctx.relayer,
+            &bad_dest,
+            &0,
+            &9999,
+            &sig,
+        );
+        assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Direct-withdraw security: delegated path must not weaken it
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn direct_withdraw_still_works_alongside_delegated() {
+        let ctx = Ctx::setup();
+        let stream_id = ctx.create_stream();
+        let destination = Address::generate(&ctx.env);
+
+        // Delegated withdraw at t=300.
+        ctx.env.ledger().set_timestamp(300);
+        let sig = ctx.sign(stream_id, &destination, 0, 9999);
+        ctx.client()
+            .delegated_withdraw(&stream_id, &ctx.relayer, &destination, &0, &9999, &sig);
+
+        // Direct withdraw at t=700 — recipient calls withdraw_to a contract address
+        // (avoids trustline requirement for keypair-derived Stellar accounts).
+        ctx.env.ledger().set_timestamp(700);
+        let direct_dest = Address::generate(&ctx.env);
+        let direct_amount = ctx.client().withdraw_to(&stream_id, &direct_dest);
+        assert_eq!(direct_amount, 400); // 700 - 300 already withdrawn
+        assert_eq!(ctx.token.balance(&direct_dest), 400);
+    }
+
+    // -----------------------------------------------------------------------
+    // get_withdraw_nonce view
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn get_withdraw_nonce_returns_zero_before_any_delegated_withdraw() {
+        let ctx = Ctx::setup();
+        assert_eq!(
+            ctx.client().get_withdraw_nonce(&ctx.recipient_kp.address),
+            0
+        );
+    }
+}
