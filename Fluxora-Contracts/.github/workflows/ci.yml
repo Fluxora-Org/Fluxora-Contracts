@@ -1,0 +1,438 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+    inputs:
+      deploy_target:
+        description: "Deployment target"
+        required: true
+        default: "testnet"
+        type: choice
+        options:
+          - testnet
+          - mainnet
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  STELLAR_CLI_VERSION: "25.2.0"
+
+jobs:
+  docs-alignment-check:
+    name: Docs Alignment Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/test_validator.py') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: pip install pytest pytest-cov
+
+      - name: Run test suite with coverage
+        run: pytest tests/ --cov=script/ --cov-fail-under=95 -v --tb=short
+
+      - name: Validate doc alignment
+        run: python3 script/validate-doc-alignment.py
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-lint-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-build-
+
+      - name: Build release (native)
+        run: cargo build --release -p fluxora_stream
+
+      - name: Build WASM
+        run: cargo build --release -p fluxora_stream --target wasm32-unknown-unknown
+
+      - name: Install Stellar CLI (pinned)
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          ARCHIVE="stellar-cli-${STELLAR_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          URL="https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/${ARCHIVE}"
+          curl -sSfL "$URL" -o "$ARCHIVE"
+          tar -xzf "$ARCHIVE"
+          mv stellar "$HOME/.local/bin/stellar"
+          chmod +x "$HOME/.local/bin/stellar"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          stellar --version
+
+      - name: Optimize WASM
+        run: |
+          stellar contract optimize --wasm target/wasm32-unknown-unknown/release/fluxora_stream.wasm
+        continue-on-error: true
+
+      - name: Compute WASM SHA256 hash
+        run: |
+          sha256sum target/wasm32-unknown-unknown/release/fluxora_stream.wasm > target/wasm32-unknown-unknown/release/fluxora_stream.wasm.sha256
+          if [ -f target/wasm32-unknown-unknown/release/fluxora_stream.optimized.wasm ]; then
+            sha256sum target/wasm32-unknown-unknown/release/fluxora_stream.optimized.wasm > target/wasm32-unknown-unknown/release/fluxora_stream.optimized.wasm.sha256
+          fi
+
+      - name: Verify WASM build reproducibility
+        run: bash script/verify-wasm-checksum.sh --no-build
+        continue-on-error: true
+
+      - name: Upload WASM hash artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fluxora_stream-wasm-hash
+          path: |
+            target/wasm32-unknown-unknown/release/fluxora_stream.wasm.sha256
+            target/wasm32-unknown-unknown/release/fluxora_stream.optimized.wasm.sha256
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Upload WASM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fluxora_stream-wasm
+          path: |
+            target/wasm32-unknown-unknown/release/fluxora_stream.wasm
+            target/wasm32-unknown-unknown/release/fluxora_stream.optimized.wasm
+          retention-days: 30
+          if-no-files-found: warn
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-
+
+      - name: Run tests with snapshot validation
+        run: cargo test -p fluxora_stream --features testutils -- --nocapture
+        env:
+          # Ensure snapshots are validated, not updated
+          SOROBAN_SNAPSHOT_UPDATE: ""
+
+      - name: Run tests (all packages)
+        run: cargo test --all --features testutils
+
+      - name: Verify snapshot files exist
+        run: |
+          SNAPSHOT_COUNT=$(find contracts/stream/test_snapshots/test -name "*.json" | wc -l)
+          echo "Found $SNAPSHOT_COUNT snapshot files"
+          if [ "$SNAPSHOT_COUNT" -lt 30 ]; then
+            echo "::warning::Expected at least 30 snapshot files, found $SNAPSHOT_COUNT"
+          fi
+          echo "snapshot_count=$SNAPSHOT_COUNT" >> $GITHUB_OUTPUT
+        id: snapshot_check
+
+      - name: Upload snapshot validation report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshot-validation-failure
+          path: |
+            contracts/stream/test_snapshots/
+          retention-days: 7
+          if-no-files-found: warn
+
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-coverage-
+
+      - name: Cache cargo-tarpaulin binary
+        id: cache-tarpaulin
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-tarpaulin
+          key: ${{ runner.os }}-cargo-tarpaulin-0.31
+
+      - name: Install cargo-tarpaulin
+        if: steps.cache-tarpaulin.outputs.cache-hit != 'true'
+        run: cargo install cargo-tarpaulin --version 0.31 --locked
+
+      - name: Generate coverage report
+        run: |
+          cargo tarpaulin \
+            --features testutils \
+            --out Xml \
+            --out Html \
+            --output-dir coverage \
+            --ignore-tests \
+            --skip-clean \
+            -p fluxora_stream
+
+      - name: Enforce 95% coverage gate
+        run: |
+          set -euo pipefail
+          XML="coverage/cobertura.xml"
+          if [ ! -f "$XML" ]; then
+            echo "::error::Coverage report not found at $XML"
+            exit 1
+          fi
+          # Extract line-rate attribute from the root <coverage> element (value is 0.0–1.0)
+          LINE_RATE=$(grep -oP '(?<=<coverage )[^>]*' "$XML" | grep -oP 'line-rate="\K[0-9.]+')
+          if [ -z "$LINE_RATE" ]; then
+            echo "::error::Could not parse line-rate from $XML"
+            exit 1
+          fi
+          # Convert to integer percentage (e.g. 0.9640 → 96)
+          PCT=$(awk "BEGIN { printf \"%d\", $LINE_RATE * 100 }")
+          echo "Contract line coverage: ${PCT}% (threshold: 95%)"
+          echo "coverage_pct=${PCT}" >> "$GITHUB_OUTPUT"
+          if [ "$PCT" -lt 95 ]; then
+            echo "::error::Coverage ${PCT}% is below the required 95% threshold. Add tests to cover the missing lines."
+            exit 1
+          fi
+          echo "::notice::Coverage gate passed: ${PCT}% >= 95%"
+        id: coverage_gate
+
+      - name: Post coverage summary
+        if: always()
+        run: |
+          PCT="${{ steps.coverage_gate.outputs.coverage_pct }}"
+          if [ -n "$PCT" ]; then
+            echo "## Coverage Report" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Metric | Value |" >> "$GITHUB_STEP_SUMMARY"
+            echo "|--------|-------|" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Line coverage | ${PCT}% |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Threshold | 95% |" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$PCT" -ge 95 ]; then
+              echo "| Status | ✅ Passed |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "| Status | ❌ Failed |" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage/cobertura.xml
+          fail_ci_if_error: false
+          verbose: true
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 14
+          if-no-files-found: warn
+
+  deploy-testnet:
+    name: Deploy to Testnet
+    runs-on: ubuntu-latest
+    needs: [build, test]
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_target == 'testnet')
+    environment: testnet
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download WASM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: fluxora_stream-wasm
+          path: ./artifacts
+
+      - name: Install Stellar CLI (pinned)
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          ARCHIVE="stellar-cli-${STELLAR_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          URL="https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/${ARCHIVE}"
+          curl -sSfL "$URL" -o "$ARCHIVE"
+          tar -xzf "$ARCHIVE"
+          mv stellar "$HOME/.local/bin/stellar"
+          chmod +x "$HOME/.local/bin/stellar"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          stellar --version
+
+      - name: Configure testnet identity
+        env:
+          STELLAR_SECRET_KEY: ${{ secrets.STELLAR_TESTNET_SECRET_KEY }}
+        run: |
+          if [ -n "$STELLAR_SECRET_KEY" ]; then
+            echo "$STELLAR_SECRET_KEY" | stellar keys add deployer --secret-key
+          else
+            echo "::warning::No STELLAR_TESTNET_SECRET_KEY secret configured. Skipping deployment."
+            exit 0
+          fi
+
+      - name: Deploy to testnet
+        env:
+          STELLAR_SECRET_KEY: ${{ secrets.STELLAR_TESTNET_SECRET_KEY }}
+        run: |
+          if [ -z "$STELLAR_SECRET_KEY" ]; then
+            echo "::warning::Skipping deployment - no secret key configured"
+            exit 0
+          fi
+
+          WASM_FILE="./artifacts/fluxora_stream.optimized.wasm"
+          if [ ! -f "$WASM_FILE" ]; then
+            WASM_FILE="./artifacts/fluxora_stream.wasm"
+          fi
+
+          echo "Deploying WASM: $WASM_FILE"
+          stellar contract deploy \
+            --wasm "$WASM_FILE" \
+            --source deployer \
+            --network testnet \
+            || echo "::warning::Deployment failed or skipped"
+
+  deploy-mainnet:
+    name: Deploy to Mainnet
+    runs-on: ubuntu-latest
+    needs: [build, test]
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_target == 'mainnet'
+    environment:
+      name: mainnet
+      url: https://stellar.expert
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download WASM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: fluxora_stream-wasm
+          path: ./artifacts
+
+      - name: Install Stellar CLI (pinned)
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          ARCHIVE="stellar-cli-${STELLAR_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          URL="https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/${ARCHIVE}"
+          curl -sSfL "$URL" -o "$ARCHIVE"
+          tar -xzf "$ARCHIVE"
+          mv stellar "$HOME/.local/bin/stellar"
+          chmod +x "$HOME/.local/bin/stellar"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          stellar --version
+
+      - name: Configure mainnet identity
+        env:
+          STELLAR_SECRET_KEY: ${{ secrets.STELLAR_MAINNET_SECRET_KEY }}
+        run: |
+          if [ -n "$STELLAR_SECRET_KEY" ]; then
+            echo "$STELLAR_SECRET_KEY" | stellar keys add deployer --secret-key
+          else
+            echo "::error::No STELLAR_MAINNET_SECRET_KEY secret configured."
+            exit 1
+          fi
+
+      - name: Deploy to mainnet
+        env:
+          STELLAR_SECRET_KEY: ${{ secrets.STELLAR_MAINNET_SECRET_KEY }}
+        run: |
+          WASM_FILE="./artifacts/fluxora_stream.optimized.wasm"
+          if [ ! -f "$WASM_FILE" ]; then
+            WASM_FILE="./artifacts/fluxora_stream.wasm"
+          fi
+
+          echo "Deploying WASM to mainnet: $WASM_FILE"
+          stellar contract deploy \
+            --wasm "$WASM_FILE" \
+            --source deployer \
+            --network mainnet
+
+      - name: Output deployment info
+        run: |
+          echo "## Mainnet Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "Contract deployed to Stellar mainnet" >> $GITHUB_STEP_SUMMARY

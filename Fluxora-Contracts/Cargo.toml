@@ -1,0 +1,3 @@
+[workspace]
+members = ["contracts/stream", "contracts/factory"]
+resolver = "2"
