@@ -15,8 +15,16 @@ Version policy, migration runbook, and audit notes for operators, integrators, a
 ### Current value
 
 ```
-CONTRACT_VERSION = 1
+CONTRACT_VERSION = 3
 ```
+
+### Version history
+
+| Version | Change summary |
+|---|---|
+| 1 | Initial release |
+| 2 | `Stream` struct gained `checkpointed_amount: i128` and `checkpointed_at: u64` for safe rate-decrease support |
+| 3 | `Stream` struct gained `memo: Option<Bytes>`; `StreamCreated` event gained `memo` field; `DataKey::StreamMemo(u64)` added at discriminant 10; `create_stream`/`create_streams` gained `memo` parameter; `get_stream_memo` entry-point added |
 
 ### When to increment
 
@@ -44,6 +52,11 @@ CONTRACT_VERSION = 1
 - Adding new entry-points that old clients can safely ignore.
 - Changing TTL bump constants (`INSTANCE_BUMP_AMOUNT`, `PERSISTENT_BUMP_AMOUNT`).
 - Changing internal helper functions with no external surface.
+
+> **Note (transfer_sender):** The `transfer_sender` entry-point is a purely additive
+> new entry-point. Old clients that do not call it are unaffected. `CONTRACT_VERSION`
+> was incremented conservatively per the policy above. Indexers should subscribe to
+> the new `sndr_xfr` event to track sender rotations.
 
 ---
 
@@ -145,3 +158,120 @@ Before interacting with any Fluxora contract instance:
 4. **Admin key continuity.** The admin address is set at `init` time and is immutable via `init`. Use `set_admin` to rotate the admin key before migrating to a new instance, and call `init` on the new instance with the new admin address.
 
 5. **Token address immutability.** The token is fixed at `init` time. A new contract version that needs a different token requires a new `init` call with the new token address — existing streams on the old instance are unaffected.
+
+---
+
+## 6. Paginated Export Views (Issue #429)
+
+Bounded, paginated view entrypoints support off-chain export and migration between contract instances without unbounded loops or memory usage.
+
+### Motivation
+
+Operators need to export stream data for:
+- Migration between contract versions (no on-chain upgrade path exists)
+- Off-chain analytics and reporting
+- Backup and audit trails
+- Integration with external systems
+
+Without pagination, `get_recipient_streams` returns **all** streams unbounded, which can exhaust memory or hit gas limits with large portfolios.
+
+### Entrypoints
+
+#### `get_streams_by_id_range(start_id, end_id, limit) -> Vec<Stream>`
+
+Returns streams within an ID range `[start_id, end_id]` with a strict result limit.
+
+**Parameters:**
+- `start_id: u64` — First stream ID to include (inclusive)
+- `end_id: u64` — Last stream ID to include (inclusive). Use `u64::MAX` for open-ended.
+- `limit: u64` — Maximum streams to return (capped at `MAX_PAGE_SIZE = 100`)
+
+**Returns:**
+- `Vec<Stream>` — Stream structs in ascending ID order
+- Empty vector if `start_id > end_id` or no streams exist in range
+- Closed/archived stream IDs are silently skipped
+
+**DoS Protection:**
+- `limit` is capped at `MAX_PAGE_SIZE` (100) regardless of input
+- Gas cost is O(min(limit, actual_results)), not O(range_size)
+- Each stream lookup is O(1)
+
+**Migration Pattern:**
+```rust
+let total = client.get_stream_count();
+let mut start = 0u64;
+while start < total {
+    let page = client.get_streams_by_id_range(&start, &(start + 99), &100);
+    // Export page...
+    start += 100;
+}
+```
+
+#### `get_recipient_streams_paginated(recipient, cursor, limit) -> Vec<u64>`
+
+Cursor-based pagination for recipient stream export.
+
+**Parameters:**
+- `recipient: Address` — Address to query
+- `cursor: u64` — 0-based starting index in the recipient's stream list
+- `limit: u64` — Maximum streams to return (capped at `MAX_PAGE_SIZE = 100`)
+
+**Returns:**
+- `Vec<u64>` — Stream IDs in ascending order
+- Empty vector if `cursor >= recipient_stream_count`
+
+**Cursor Semantics:**
+- Cursor is a 0-based index into the sorted recipient stream list
+- After each call: `next_cursor = cursor + result.len()`
+- When `result.len() < limit`, you've reached the end
+- List mutations (insertions/removals) shift indices naturally
+
+**DoS Protection:**
+- `limit` is capped at `MAX_PAGE_SIZE` (100)
+- Only loads the requested page, not the entire recipient list
+- Gas cost is O(limit), not O(total_recipient_streams)
+
+**Full Export Pattern:**
+```rust
+let mut cursor = 0u64;
+loop {
+    let page = client.get_recipient_streams_paginated(&recipient, &cursor, &50);
+    if page.is_empty() { break; }
+    // Export page...
+    cursor += page.len() as u64;
+}
+```
+
+### Safety Limits
+
+| Constant | Value | Purpose |
+|----------|-------|---------|
+| `MAX_PAGE_SIZE` | 100 | Maximum results per paginated query |
+
+These limits prevent:
+- Memory exhaustion from unbounded vector returns
+- Gas limit violations from excessive storage reads
+- DoS via intentionally large limit parameters
+
+### Comparison: Old vs New
+
+| Scenario | Old Approach | New Approach |
+|----------|--------------|--------------|
+| Export 1000 streams | `get_recipient_streams` → unbounded, may fail | `get_streams_by_id_range` with pagination → reliable |
+| Large portfolio query | Risk of gas/memory exhaustion | Bounded pages, predictable gas |
+| Migration script | Complex retry logic | Simple cursor iteration |
+
+### Testing Requirements
+
+All paginated views are tested for:
+- ✅ Basic pagination (correct items, order)
+- ✅ Empty ranges/cursors return empty
+- ✅ `MAX_PAGE_SIZE` enforcement (requests > 100 capped)
+- ✅ Closed stream handling (gracefully skipped)
+- ✅ Open-ended ranges (`u64::MAX`)
+- ✅ Zero limit returns empty
+- ✅ Cursor beyond end returns empty
+- ✅ Multiple recipient isolation
+- ✅ Full export workflow (accumulate all pages)
+
+See `contracts/stream/src/test.rs` for the complete test suite.

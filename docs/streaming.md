@@ -10,11 +10,13 @@ Onboarding and integration reference for developers and auditors. Describes stre
 
 When changing the contract:
 
-- Update this doc if you change lifecycle, access control, events, or panic messages
+- Update this doc if you change lifecycle, access control, events, or error semantics
 - Update `protocol-narrative-code-alignment.md` to reflect changes
 - Run `cargo test -p fluxora_stream` before committing
 - Update snapshot tests if externally visible behavior changes
 - No behavior change required for doc-only updates
+
+**Entrypoint index (validator):** `batch_withdraw_to`, `delete_stream_template`, `get_global_emergency_paused`, `get_recipient_stream_count`, `get_stream_memo`, `get_stream_template`, `global_resume`, `set_contract_paused`, `set_global_emergency_paused`, `version`.
 
 ## Externally Visible Assurances
 
@@ -25,6 +27,14 @@ This document provides crisp success and failure semantics for all protocol oper
 3. **Error classifications**: Structured `ContractError` variants
 
 No hidden rules or implementation details are required to understand protocol behavior.
+
+### Schedule templates (presets)
+
+From **CONTRACT_VERSION 3**, integrators can register **relative** schedule skeletons (`register_stream_template`) and create streams from them (`create_stream_from_template`). This standardizes recurring payroll windows and trims repeated calldata versus always passing `start_delay` / `cliff_delay` / `duration` through the client for identical shapes.
+
+- **Auth**: registering and deleting templates requires the template `owner` signer. Creating a stream from a template requires the **funding `sender`** to authorize (same as `create_stream_relative`).
+- **Caps**: per-owner and global template counts are bounded; see `MAX_TEMPLATES_PER_OWNER` and `MAX_GLOBAL_TEMPLATES` in `contracts/stream/src/lib.rs`.
+- **Errors**: `TemplateNotFound`, `TemplateLimitExceeded`, `TemplateUnauthorized`.
 
 ---
 
@@ -41,6 +51,8 @@ No hidden rules or implementation details are required to understand protocol be
 | **Cancellation** | `cancel_stream` / `cancel_stream_as_admin`    | Refunds unstreamed amount; frozen accrued stays for recipient         |
 | **Withdrawal**   | `withdraw` / `withdraw_to` / `batch_withdraw` | Recipient pulls accrued tokens; allowed on Paused if past `end_time`  |
 | **Completion**   | Automatic                                     | When `withdrawn_amount == deposit_amount`, status becomes `Completed` |
+| **Rotation**     | `update_recipient`                            | Recipient transfers entitlement to a new address                      |
+| **Auto-claim**   | `set_auto_claim` / `revoke_auto_claim` / `trigger_auto_claim` | Recipient opts in to permissionless final claim at `end_time` to a chosen destination |
 
 ### State Transitions
 
@@ -50,6 +62,8 @@ No hidden rules or implementation details are required to understand protocol be
 
 Terminal states: `Completed`, `Cancelled`. Both may be closed via `close_completed_stream` to reclaim storage and index space. A stream is also considered technically terminal if `ledger.timestamp() >= end_time`.
 In this "time-terminal" state, pause/resume is blocked, but withdrawal is always allowed regardless of previous pause status.
+
+**Cancelled stream closure rule**: A `Cancelled` stream may only be closed after the recipient has fully withdrawn the frozen accrued amount. Attempting to close a `Cancelled` stream with remaining claimable balance returns `ContractError::InvalidState`. This prevents storage cleanup from destroying recipient funds.
 
 ### Cancellation Semantics (Issue Scope)
 
@@ -96,32 +110,45 @@ Scope boundary and exclusions:
 
 ### Global Pause Semantics (Issue Scope)
 
-This section is the protocol-level contract for the global pause state managed via `set_contract_paused`.
+This section is the protocol-level contract for the global pause state managed via `pause_protocol` and `resume_protocol`.
+
+**Entrypoints:**
+
+| Function | Description |
+|----------|-------------|
+| `pause_protocol(admin, reason)` | Globally pause new stream creation with audit trail (reason, timestamp, admin) |
+| `resume_protocol(admin)` | Globally resume new stream creation, clearing audit trail |
+| `is_paused()` | Query if protocol is currently paused (permissionless) |
+| `get_pause_info()` | Query detailed pause info including audit trail (permissionless) |
 
 Success semantics (observable):
 
 1. Preconditions: Caller must be the authorized contract `admin`.
-2. Storage: The `GlobalPaused` data key is set to `true` or `false` in instance storage.
+2. Storage: The `CreationPaused` data key is set to `true` or `false` in instance storage.
 3. Event: `ContractPaused(bool)` is emitted with topic `("paused_ctl",)`.
 4. Effect on creation: When paused, `create_stream` and `create_streams` return `ContractError::ContractPaused` and all new stream creation is blocked.
 5. Effect on existing streams: Active streams are intentionally unaffected. Withdrawals, top-ups, pause/resume/cancel operations on individual streams continue to function normally.
 
 Failure semantics (observable):
 
-1. Unauthorized caller on admin path: authorization failure from `admin.require_auth()`.
+1. Unauthorized caller on admin path: `ContractError::Unauthorized`.
 2. Any failure is atomic: no storage mutation, no event emitted.
 
 Role boundaries:
 
-1. `set_contract_paused`: only the contract `admin` can authorize.
+1. `pause_protocol` / `resume_protocol`: only the contract `admin` can authorize.
 2. Senders and recipients cannot pause the global contract. Senders manage individual streams via `pause_stream`.
 
 Invariants when globally paused:
 
 1. No new streams can be persisted (no `created` events, no deposit tokens pulled).
 2. Existing streams do not change status due to a global pause.
+3. Audit trail (reason, timestamp, admin) is queryable via `get_pause_info()`.
 
 Scope boundary: The global pause is strictly an administrative circuit breaker for new liabilities. It does not freeze funds of existing users or prevent recipients from withdrawing their vested entitlement.
+
+**Note on Stream Creation:**
+Stream creation is blocked while the protocol is globally paused. The `create_stream` function returns `ContractError::ContractPaused` if `is_paused()` is true. This applies to both single-stream and batch (`create_streams`) creation.
 
 ```mermaid
 stateDiagram-v2
@@ -301,7 +328,7 @@ The same sufficiency check is enforced when extending a stream's `end_time`:
 deposit_amount >= rate_per_second * (new_end_time - start_time)
 ```
 
-If the existing deposit does not cover the extended duration, `extend_stream_end_time` panics with `"deposit_amount must cover total streamable amount for extended schedule"` and no state changes occur. Use `top_up_stream` first to increase the deposit, then extend.
+If the existing deposit does not cover the extended duration, `extend_stream_end_time` returns `ContractError::InsufficientDeposit` and no state changes occur. Use `top_up_stream` first to increase the deposit, then extend.
 
 ### Shorten `end_time` Semantics
 
@@ -471,16 +498,92 @@ contract.create_streams_relative(&sender, &params)?;
 | `get_claimable_at`        | Anyone                        | None (view)                                 |
 | `get_config`              | Anyone                        | None (view)                                 |
 | `get_stream_state`        | Anyone                        | None (view)                                 |
+| `get_streams_by_id_range` | Anyone                        | None (view, paginated)                      |
+| `get_recipient_streams_paginated` | Anyone                  | None (view, paginated)                      |
 | `pause_stream_as_admin`   | Admin                         | `admin.require_auth()`                      |
 | `resume_stream_as_admin`  | Admin                         | `admin.require_auth()`                      |
 | `cancel_stream_as_admin`  | Admin                         | `admin.require_auth()`                      |
 | `close_completed_stream`  | Anyone                        | None (permissionless terminal cleanup)     |
 | `top_up_stream`           | Funder address                | `funder.require_auth()`                     |
 | `update_rate_per_second`  | Sender                        | `sender.require_auth()`                     |
+| `update_recipient`        | Recipient                     | `recipient.require_auth()`                  |
+| `decrease_rate_per_second`| Sender                        | `sender.require_auth()`                     |
 | `shorten_stream_end_time` | Sender                        | `sender.require_auth()`                     |
 | `extend_stream_end_time`  | Sender                        | `sender.require_auth()`                     |
+| `transfer_sender`         | Current stream sender         | `sender.require_auth()`                     |
+| `set_auto_claim`          | Recipient                     | `recipient.require_auth()`                  |
+| `revoke_auto_claim`       | Recipient                     | `recipient.require_auth()`                  |
+| `trigger_auto_claim`      | Anyone                        | None (permissionless; destination fixed by recipient) |
+| `get_auto_claim_destination` | Anyone                     | None (view)                                 |
 
 **Note:** Sender-managed functions (`pause_stream`, `resume_stream`, `cancel_stream`) require sender auth. Admin uses separate `_as_admin` entry points.
+
+### Paginated Export Views (Issue #429)
+
+Two bounded view entrypoints support off-chain export and migration without unbounded loops:
+
+#### `get_streams_by_id_range(start_id, end_id, limit) -> Vec<Stream>`
+
+Returns streams within an ID range with a strict result limit (capped at `MAX_PAGE_SIZE = 100`).
+
+**Parameters:**
+- `start_id: u64` — First stream ID (inclusive)
+- `end_id: u64` — Last stream ID (inclusive). Use `u64::MAX` for open-ended.
+- `limit: u64` — Max results (enforced ≤ 100)
+
+**Semantics:**
+- Returns streams in ascending ID order
+- Skips closed/archived streams silently
+- Empty range (`start_id > end_id`) returns empty vector
+- Zero limit returns empty vector
+
+**DoS Protection:**
+- Hard limit of 100 streams per call regardless of requested `limit`
+- Gas cost is O(result_count), not O(range_size)
+
+**Migration Pattern:**
+```rust
+let total = client.get_stream_count();
+let mut start = 0u64;
+while start < total {
+    let page = client.get_streams_by_id_range(&start, &(start + 99), &100);
+    // Export page...
+    start += page.len() as u64;  // Handle closed streams
+}
+```
+
+#### `get_recipient_streams_paginated(recipient, cursor, limit) -> Vec<u64>`
+
+Cursor-based pagination for recipient stream export (capped at `MAX_PAGE_SIZE = 100`).
+
+**Parameters:**
+- `recipient: Address` — Address to query
+- `cursor: u64` — 0-based starting index
+- `limit: u64` — Max results (enforced ≤ 100)
+
+**Semantics:**
+- Cursor is index into sorted recipient stream list
+- Returns stream IDs in ascending order
+- Empty result indicates end of data or cursor beyond bounds
+
+**Pagination Pattern:**
+```rust
+let mut cursor = 0u64;
+loop {
+    let page = client.get_recipient_streams_paginated(&recipient, &cursor, &50);
+    if page.is_empty() { break; }
+    // Export page...
+    cursor += page.len() as u64;
+}
+```
+
+**Comparison with Unbounded Views:**
+
+| Function | Use Case | Limit | Risk |
+|----------|----------|-------|------|
+| `get_recipient_streams` | Small portfolios (<100) | None | Memory exhaustion |
+| `get_recipient_streams_paginated` | Large portfolios | 100/page | Bounded, safe |
+| `get_streams_by_id_range` | Full contract export | 100/page | Bounded, safe |
 
 ### top_up_stream: Observable Semantics
 
@@ -495,6 +598,21 @@ contract.create_streams_relative(&sender, &params)?;
 - Event semantics: a successful top-up emits exactly one contract event with topics `("top_up", stream_id)` and payload `StreamToppedUp { stream_id, top_up_amount: amount, new_deposit_amount }`.
 
 Treasury policy note: if an application wants to restrict who may fund streams, that policy must be enforced off-chain or in a wrapper contract. The base stream contract intentionally accepts any self-authorizing funder.
+
+### decrease_rate_per_second: Observable Semantics
+
+`decrease_rate_per_second(stream_id, new_rate_per_second)` allows the stream sender to safely reduce the streaming rate.
+A naive decrease would retroactively lower the recipient's accrued tokens. To prevent this, the contract **checkpoints** the stream: it locks in the mathematical accrual up to the current timestamp under the old rate, and applies the new rate only moving forward.
+
+- **Check-Effects-Interactions (CEI)**: Computes accrual, reduces deposit amount, persists stream state, and finally refunds the difference to the sender.
+- **Rate Validation**: `0 < new_rate_per_second < current rate_per_second`.
+- **Refund**: The sender receives a refund of `old_deposit - new_deposit`, where `new_deposit = checkpointed_amount + new_rate * remaining_seconds`.
+
+#### Failures
+- **Unauthorized**: Caller is not the original sender.
+- **InvalidState**: Stream is already expired (`now >= end_time`).
+- **StreamTerminalState**: Stream is Cancelled or Completed.
+- **InvalidParams**: `new_rate_per_second <= 0` or `new_rate_per_second >= old_rate`.
 
 ### update_rate_per_second: Observable Semantics
 
@@ -526,11 +644,37 @@ Treasury policy note: if an application wants to restrict who may fund streams, 
 - Recipient entitlement is preserved or increased.
 - Deposit coverage ensures the stream remains fully fundable at the new rate.
 
+### transfer_sender: Observable Semantics
+
+`transfer_sender(stream_id, new_sender)` allows the current stream sender to rotate the treasury key for an existing stream.
+
+#### Success Semantics (Observable)
+
+- **Authorization**: Only the current stream `sender` can authorize the call.
+- **State Requirements**: Stream must be in `Active` or `Paused` status (not `Completed` or `Cancelled`).
+- **Parameter Validation**: `new_sender != current_sender` and `new_sender != recipient`.
+- **State Change**: `stream.sender` is updated to `new_sender`. All other fields are unchanged.
+- **Immediate Effect**: `new_sender` gains all sender-role privileges (pause, resume, cancel, rate updates, schedule changes) immediately. `old_sender` loses them immediately.
+- **Recipient Entitlement**: Unchanged. Accrued amounts, `withdrawn_amount`, and schedule are unaffected.
+- **Event**: Emits `("sndr_xfr", stream_id)` with `SenderTransferred { stream_id, old_sender, new_sender }`.
+
+#### Failure Semantics (Observable)
+
+- **StreamNotFound**: Invalid `stream_id`.
+- **Unauthorized**: Caller is not the current stream sender.
+- **InvalidState**: Stream is `Completed` or `Cancelled`.
+- **InvalidParams**: `new_sender == current_sender` or `new_sender == recipient`.
+- **Atomicity**: Any failure reverts the entire transaction with no state changes or events.
+
+#### Use Case
+
+Treasury key rotation: when a treasury wallet is being rotated, the operator calls `transfer_sender` to hand over stream management rights to the new key without disrupting the recipient's accrual or requiring stream recreation.
+
 ### batch_withdraw: completed stream behavior
 
-`batch_withdraw` processes each stream ID in order. A stream with status `Completed` **does not panic** — it contributes a zero-amount result (`BatchWithdrawResult { stream_id, amount: 0 }`) and is skipped silently. No token transfer and no event are emitted for that entry. This allows callers to pass a mixed list of active and already-completed streams without pre-filtering.
+`batch_withdraw` processes each stream ID in order. A stream with status `Completed` **does not error** — it contributes a zero-amount result (`BatchWithdrawResult { stream_id, amount: 0 }`) and is skipped silently. No token transfer and no event are emitted for that entry. This allows callers to pass a mixed list of active and already-completed streams without pre-filtering.
 
-A `Paused` stream **does** panic and reverts the entire batch.
+A `Paused` stream **does** return `ContractError::InvalidState` and reverts the entire batch.
 
 ### One-Shot Init and Immutable Bootstrap
 
@@ -538,7 +682,7 @@ A `Paused` stream **does** panic and reverts the entire batch.
 
 - One-shot: first successful call writes `Config { token, admin }` and `NextStreamId = 0`.
 - Auth boundary: the supplied `admin` address must authorize the call.
-- Re-init failure: any second call panics with `"already initialised"`.
+- Re-init failure: any second call returns `ContractError::AlreadyInitialised`.
 - Failure atomicity: failed auth or re-init leaves bootstrap storage unchanged.
 - Immutability boundary: `token` is immutable after init; `admin` can rotate only via `set_admin` with current-admin auth.
 
@@ -602,9 +746,9 @@ These guarantees are limited to `create_streams` creation semantics. They do not
 
 - Auth boundary: only the stream `recipient` can authorize `batch_withdraw`.
 - Non-recipient calls fail before transfer/state/event side effects.
-- Uniqueness check: `stream_ids` must not contain duplicates; duplicates panic and revert the entire batch.
+- Uniqueness check: `stream_ids` must not contain duplicates; duplicates return `ContractError::DuplicateStreamId` and revert the entire batch.
 - Completed streams: contribute a zero-amount result and are skipped silently (no error, no event).
-- Active/Paused streams: processed normally; `Paused` streams panic and revert the entire batch.
+- Active/Paused streams: processed normally; `Paused` streams return `ContractError::InvalidState` and revert the entire batch.
 - Event ordering on active final drain: `withdrew` is emitted before `completed`.
 
 #### Empty Vector Semantics
@@ -636,6 +780,56 @@ When `stream_ids` is an empty vector:
 - Empty batch is a valid no-op: allows callers to submit conditional batches without special-casing
 - Authorization is still required: maintains consistent auth semantics across all entry points
 - Idempotent: enables safe retry logic in integrators
+
+---
+
+### Auto-claim Opt-in Semantics
+
+`set_auto_claim`, `revoke_auto_claim`, and `trigger_auto_claim` implement a recipient-controlled permissionless claim mechanism.
+
+#### Overview
+
+Recipients may opt in to have their final withdrawal triggered by any third party (keeper, bot, or user) once the stream reaches `end_time`. The destination address is chosen and stored on-chain by the recipient — no caller can redirect funds.
+
+#### `set_auto_claim(stream_id, destination)`
+
+- **Auth**: `recipient.require_auth()` — only the stream recipient may set or change the destination.
+- **Constraints**: stream must exist and not be `Completed` or `Cancelled`; `destination` must not be the contract address.
+- **Idempotent**: calling again with a new address overwrites the previous destination.
+- **Event**: `("ac_set", stream_id)` → `AutoClaimSet { stream_id, destination }`.
+
+#### `revoke_auto_claim(stream_id)`
+
+- **Auth**: `recipient.require_auth()`.
+- **Idempotent**: safe to call even if no destination is set (no error, no event side-effects beyond the revoke event).
+- **Event**: `("ac_revoke", stream_id)` → `AutoClaimRevoked { stream_id }`.
+
+#### `trigger_auto_claim(stream_id)`
+
+- **Auth**: **none** — permissionless. Any account may call this.
+- **Preconditions** (all must hold):
+  1. Stream exists.
+  2. Stream is not `Completed` or `Cancelled`.
+  3. `ledger.timestamp() >= stream.end_time` (time-terminal).
+  4. Auto-claim destination is set (`AutoClaimNotSet` otherwise).
+  5. Contract is not globally paused.
+- **Accounting**: identical to `withdraw_to` — computes `accrued - withdrawn_amount`, caps by contract balance, updates `withdrawn_amount`, may transition to `Completed`.
+- **Destination immutability**: tokens are sent to the address stored by the recipient. The caller cannot influence the destination.
+- **Events**:
+  - `("withdrew", stream_id)` → `Withdrawal { stream_id, recipient, amount }` (indexer compatibility).
+  - `("ac_trig", stream_id)` → `AutoClaimTriggered { stream_id, destination, amount }`.
+  - `("completed", stream_id)` → `StreamEvent::StreamCompleted(stream_id)` if stream transitions to `Completed`.
+
+#### Cancellation interaction
+
+If a stream is cancelled after opt-in, `trigger_auto_claim` returns `InvalidState`. The auto-claim destination entry remains in storage but is inert. Recipients may call `revoke_auto_claim` to clean up storage.
+
+#### Security invariants
+
+1. Only the recipient can set or change the destination (`require_auth` enforced).
+2. The caller of `trigger_auto_claim` has zero influence over where tokens go.
+3. CEI ordering is preserved: stream state is saved before the token transfer.
+4. Global emergency pause blocks `trigger_auto_claim` (same as `withdraw`).
 
 ---
 
@@ -701,6 +895,23 @@ Emitted when a sender successfully updates the streaming rate via `update_rate_p
 
 ---
 
+## `withdraw_to` Destination Rules
+
+`withdraw_to(stream_id, destination)` lets the recipient redirect accrued tokens to any address **except the contract itself**.
+
+| Destination                  | Allowed | Error on rejection      |
+| ---------------------------- | ------- | ----------------------- |
+| Contract address (`env.current_contract_address()`) | ❌ No | `ContractError::InvalidParams` |
+| Recipient address (self-redirect) | ✅ Yes | — |
+| Sender address               | ✅ Yes  | —                       |
+| Any other third-party address | ✅ Yes | —                       |
+
+**Atomicity guarantee:** If the destination check fails, the call returns `InvalidParams` with **no side effects** — `withdrawn_amount` is not incremented, no token transfer occurs, and no event is emitted. The stream state is identical to its state before the call.
+
+**Auth:** `recipient.require_auth()` is always enforced before the destination check.
+
+---
+
 ## 6. Error Behavior (ContractError + Panics)
 
 Errors are surfaced either as `ContractError` variants or as panic/assert messages.
@@ -729,7 +940,32 @@ errors relevant to stream creation and timing.
 | `ContractError::InvalidState` (2)                                       | `withdraw`                         | Withdraw from non-terminal paused             |
 | `ContractError::InvalidState` (2)                                       | `cancel_stream`                    | Cancel completed/cancelled                    |
 | `"invalid state for stream closure"`                                    | `close_completed_stream`           | Close non-terminal (Active/Paused) stream    |
+| `ContractError::InvalidState` (2)                                       | `close_completed_stream`           | Close Cancelled stream with remaining claimable balance |
 | `"contract not initialised: missing config"`                            | Functions requiring config         | Config missing                                |
+
+## Protocol-Level Pausing
+
+The protocol supports two distinct pausing modes managed by the contract admin. These modes allow for graduated intervention depending on the situation (e.g., routine maintenance vs. emergency exploit investigation).
+
+### Pause Modes Comparison
+
+| Mode | Flag | Blocked Operations | Allowed Operations |
+|---|---|---|---|
+| **Creation Only** | `CreationPaused` | `create_stream`, `create_streams` | `withdraw`, `cancel_stream`, `top_up_stream`, `update_rate_per_second`, `extend_stream_end_time`, `shorten_stream_end_time` |
+| **Global Emergency** | `GlobalEmergencyPaused` | **ALL** mutation operations (Create, Withdraw, Cancel, Update, etc.) | `get_stream_state`, `calculate_accrued`, `close_completed_stream` (read-only and cleanup) |
+
+### Gating Semantics
+
+1. **Creation Functions**: Blocked if *either* `GlobalEmergencyPaused` or `CreationPaused` is set.
+2. **Mutation Functions**: Blocked ONLY if `GlobalEmergencyPaused` is set.
+3. **Read-Only Functions**: Never blocked; users can always calculate their accrued balance even during a total emergency pause.
+4. **Admin Functions**: Never blocked; admins can always pause/resume the protocol or rotate the admin address.
+
+### Observable Behavior
+
+When an operation is blocked by a protocol-level pause, it returns `ContractError::ContractPaused` (4). No state changes occur, and no tokens are transferred.
+
+---
 
 ## Error Reference
 

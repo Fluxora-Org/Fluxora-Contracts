@@ -15,9 +15,9 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `StreamNotFound` | 1 | The specified stream does not exist | `pause_stream`, `resume_stream`, `cancel_stream`, `withdraw`, `calculate_accrued`, `get_stream_state`, admin overrides |
 | `InvalidState` | 2 | Operation attempted in an invalid state | `cancel_stream`, `withdraw`, `withdraw_to`, `batch_withdraw`, `get_claimable_at`, admin overrides |
 | `InvalidParams` | 3 | Function input parameters are invalid | `create_stream`, `withdraw_to`, `update_rate_per_second`, `top_up_stream`, `extend_stream_end_time`, `shorten_stream_end_time`, `batch_create_streams` |
-| `ContractPaused` | 4 | Global emergency pause is active; stream creation is blocked | `create_stream`, `create_streams`, `withdraw`, `cancel_stream`, `top_up_stream`, `update_rate_per_second` |
+| `ContractPaused` | 4 | Global emergency pause or creation pause is active | `create_stream`, `create_streams`, `withdraw`, `withdraw_to`, `batch_withdraw`, `cancel_stream`, `top_up_stream`, `update_rate_per_second`, `shorten_stream_end_time`, `extend_stream_end_time`, `update_recipient`, `trigger_auto_claim` |
 | `StartTimeInPast` | 5 | `start_time` is before the current ledger timestamp | `create_stream`, `create_streams` |
-| `ArithmeticOverflow` | 6 | Arithmetic overflow in stream calculations | `create_stream`, `create_streams`, `update_rate_per_second`, `top_up_stream`, `batch_create_streams` |
+| `ArithmeticOverflow` | 6 | Arithmetic overflow in stream calculations | `create_stream`, `create_streams`, `update_rate_per_second`, `top_up_stream`, `shorten_stream_end_time`, `extend_stream_end_time` |
 | `Unauthorized` | 7 | Caller is not authorized to perform this operation | `init`, `set_admin`, `cancel_stream`, `top_up_stream`, `withdraw` (recipient check) |
 | `AlreadyInitialised` | 8 | Contract has already been initialized | `init` |
 | `InsufficientBalance` | 9 | Token transfer failed due to insufficient balance or allowance | `create_stream`, `cancel_stream`, `withdraw`, `top_up_stream` |
@@ -25,6 +25,10 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `StreamAlreadyPaused` | 11 | Stream is already in `Paused` state | `pause_stream`, `pause_stream_as_admin` |
 | `StreamNotPaused` | 12 | Stream is not `Paused`; cannot resume an `Active` stream | `resume_stream`, `resume_stream_as_admin` |
 | `StreamTerminalState` | 13 | Stream is `Completed` or `Cancelled`; modification blocked | `pause_stream`, `resume_stream`, admin overrides |
+| `DuplicateStreamId` | 14 | Duplicate stream IDs supplied to a batch operation | `batch_withdraw` |
+| `TemplateNotFound` | 15 | No template exists for the given template id | `get_stream_template`, `create_stream_from_template`, `delete_stream_template` |
+| `TemplateLimitExceeded` | 16 | Template registry limits exceeded | `register_stream_template` |
+| `TemplateUnauthorized` | 17 | Caller is not the template owner | `delete_stream_template` |
 
 ---
 
@@ -151,27 +155,32 @@ match client.try_create_stream(&sender, &recipient, &deposit, &rate, &start, &cl
 
 ### ContractPaused (4)
 
-**Definition**: Global emergency pause is active; non-admin mutations are blocked.
+**Definition**: The protocol is globally paused. No new streams may be created.
 
 **Trigger Conditions**:
-- Admin called `set_global_emergency_pause(true)`
-- Contract is in emergency pause mode
+- Admin called `set_global_emergency_paused(true)` or `set_contract_paused(true)`
+- Contract is in global emergency pause or creation pause mode
 
 **Affected Roles**:
 | Role | Can Trigger | Notes |
 |------|------------|-------|
-| Sender | Yes | Create/modify streams blocked |
-| Recipient | Yes | `withdraw` blocked (use `calculate_accrued` to check balance) |
-| Admin | No | Admin operations exempt |
+| Sender | Yes | `create_stream` blocked if EITHER pause mode is active. `cancel`/`update` blocked ONLY if Global Emergency Pause is active. |
+| Recipient | Yes | `withdraw` blocked ONLY if Global Emergency Pause is active. |
+| Admin | No | Admin operations (pause/resume/init) are never blocked by the pause flag. |
 
 **Client Action**:
 ```rust
 match client.try_create_stream(...) {
     Ok(stream_id) => { /* success */ }
     Err(ContractError::ContractPaused) => {
-        // Notify user: "Contract temporarily paused"
-        // Check `get_config` for pause status
+        // Notify user: "Protocol temporarily paused"
+        // Check `is_paused()` for current status
+        // Check `get_pause_info()` for reason and timestamp
         // Retry later or contact admin
+        let info = client.get_pause_info();
+        if let Some(ref reason) = info.reason {
+            println!("Pause reason: {}", reason);
+        }
     }
     Err(e) => { /* handle other errors */ }
 }
@@ -179,8 +188,11 @@ match client.try_create_stream(...) {
 
 **Success Semantics**: Returns `u64` stream_id (when unpaused).
 
-**Integrator Note**: During pause, `calculate_accrued` and `get_stream_state` remain functional.
-Recipients can check their balance but cannot withdraw.
+**Integrator Note**: During any pause, `calculate_accrued` and `get_stream_state` remain functional.
+Recipients can always check their balance.
+- If `is_creation_paused()` is true: Only NEW stream creation is blocked.
+- If `is_global_emergency_paused()` is true: All mutations (creation, withdrawal, cancellation) are blocked.
+Use `is_paused()` (checks both) or inspect `get_pause_info()` for full details.
 
 ---
 
@@ -486,13 +498,55 @@ match client.try_pause_stream(&stream_id) {
 
 ---
 
+### DuplicateStreamId (14)
+
+**Definition**: Duplicate stream IDs were supplied to a batch operation.
+
+**Trigger Conditions**:
+- `batch_withdraw` called with a `stream_ids` vector containing the same ID more than once
+
+**Affected Roles**:
+| Role | Can Trigger | Notes |
+|------|------------|-------|
+| Recipient | Yes | `batch_withdraw` with repeated IDs |
+
+**Client Action**:
+```rust
+match client.try_batch_withdraw(&recipient, &stream_ids) {
+    Ok(results) => { /* success */ }
+    Err(ContractError::DuplicateStreamId) => {
+        // Deduplicate stream_ids before retrying
+        // Use a set to ensure uniqueness
+    }
+    Err(e) => { /* handle other errors */ }
+}
+```
+
+**Success Semantics**: Returns `Vec<BatchWithdrawResult>` with unique entries.
+
+---
+
+## Previously Panicking Paths (Now Structured Errors)
+
+The following input-error paths previously caused a host-level panic. They now return
+structured `ContractError` variants so clients can handle them programmatically:
+
+| Former Panic | Now Returns | Functions |
+|---|---|---|
+| `panic_with_error!(ContractPaused)` in `require_not_globally_paused` | `ContractError::ContractPaused` | `withdraw`, `withdraw_to`, `batch_withdraw`, `cancel_stream`, `update_rate_per_second`, `shorten_stream_end_time`, `extend_stream_end_time` |
+| `panic_with_error!(ArithmeticOverflow)` in batch deposit sum | `ContractError::ArithmeticOverflow` | `create_streams` |
+| `panic_with_error!(ArithmeticOverflow)` in rate × duration | `ContractError::ArithmeticOverflow` | `update_rate_per_second`, `shorten_stream_end_time`, `extend_stream_end_time` |
+| `assert!("batch_withdraw stream_ids must be unique")` | `ContractError::DuplicateStreamId` | `batch_withdraw` |
+
+---
+
 ## Panic Messages (Non-Error Results)
 
-These are runtime panics that should not occur in normal operation:
+These are runtime panics that should not occur in normal operation and represent
+infrastructure-level failures (not user input errors):
 
 | Panic Message | Cause | Client Action |
 |---------------|-------|---------------|
-| `can only close completed streams` | `close_completed_stream` on non-completed stream | Use `get_stream_state` to check status |
 | `contract not initialised: missing config` | Storage access before `init` | Call `init` first |
 
 ---
@@ -539,6 +593,9 @@ Error handling is verified by tests in `contracts/stream/src/test.rs`:
 | InsufficientBalance | Sender with no tokens |
 | InsufficientDeposit | `deposit < rate * duration` |
 | StreamTerminalState | Pause/complete then modify |
+| AutoClaimNotSet | `try_trigger_auto_claim` without prior `set_auto_claim` |
+
+Discriminant stability is verified by `test_contract_error_discriminants_are_stable` in `contracts/stream/src/test.rs`, which asserts the exact `u32` value of every `ContractError` variant and will fail at compile time if any value is changed.
 
 ---
 
@@ -546,7 +603,7 @@ Error handling is verified by tests in `contracts/stream/src/test.rs`:
 
 ### Included
 
-- All 13 `ContractError` variants
+- All 14 `ContractError` variants
 - Role-based error mapping
 - Success/failure semantics for each operation
 - Time-driven edge cases

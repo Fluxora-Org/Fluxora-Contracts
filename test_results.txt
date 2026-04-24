@@ -1,0 +1,332 @@
+
+running 738 tests
+test accrual::accrual_bounds_and_monotonicity::boundedness_less_than_deposit_at_end_when_undersaturating ... ok
+test accrual::accrual_bounds_and_monotonicity::cliff_equals_end_large_deposit_still_zero ... ok
+test accrual::accrual_bounds_and_monotonicity::cliff_greater_than_end_after_cliff_still_zero ... ok
+test accrual::accrual_bounds_and_monotonicity::boundedness_all_results_capped_by_deposit ... ok
+test accrual::accrual_bounds_and_monotonicity::boundedness_all_results_non_negative ... ok
+test accrual::accrual_bounds_and_monotonicity::boundedness_equals_deposit_at_end_when_saturating ... ok
+test accrual::accrual_bounds_and_monotonicity::cliff_equals_end_returns_zero_always ... ok
+test accrual::accrual_bounds_and_monotonicity::cliff_greater_than_end_returns_zero ... ok
+test accrual::accrual_bounds_and_monotonicity::determinism_hundred_iterations ... ok
+test accrual::accrual_bounds_and_monotonicity::exact_boundary_rate_times_duration ... ok
+test accrual::accrual_bounds_and_monotonicity::exact_overflow_boundary_large_rate ... ok
+test accrual::accrual_bounds_and_monotonicity::exact_overflow_boundary_rate_times_one ... ok
+test accrual::accrual_bounds_and_monotonicity::frozen_accrual_at_cancel_time ... ok
+test accrual::accrual_bounds_and_monotonicity::max_time_all_maxima ... ok
+test accrual::accrual_bounds_and_monotonicity::max_time_caps_at_deposit ... ok
+test accrual::accrual_bounds_and_monotonicity::monotonicity_across_cliff_boundary ... ok
+test accrual::accrual_bounds_and_monotonicity::monotonicity_long_duration_stream ... ok
+test accrual::accrual_bounds_and_monotonicity::monotonicity_high_rate_capped_by_deposit ... ok
+test accrual::accrual_bounds_and_monotonicity::monotonicity_cliff_at_start ... ok
+test accrual::accrual_bounds_and_monotonicity::negative_rate_returns_zero ... ok
+test accrual::accrual_bounds_and_monotonicity::zero_deposit_always_returns_zero ... ok
+test accrual::accrual_bounds_and_monotonicity::monotonicity_standard_stream_every_second ... ok
+test accrual::accrual_bounds_and_monotonicity::zero_deposit_with_cliff_always_returns_zero ... ok
+test accrual::accrual_bounds_and_monotonicity::zero_duration_stream_returns_zero ... ok
+test accrual::accrual_bounds_and_monotonicity::zero_rate_always_returns_zero ... ok
+test accrual::accrual_bounds_and_monotonicity::zero_rate_with_cliff_always_returns_zero ... ok
+test accrual::accrual_bounds_and_monotonicity::zero_time_at_start_returns_zero ... ok
+test accrual::accrual_bounds_and_monotonicity::zero_time_before_cliff_returns_zero ... ok
+test accrual::accrued_after_end_time::at_start_time_accrues_zero ... ok
+test accrual::accrued_after_end_time::cap_matches_issue_formula ... ok
+test accrual::accrued_after_end_time::exactly_at_end_time_equals_deposit ... ok
+test accrual::accrued_after_end_time::high_rate_caps_at_deposit_at_end_time ... ok
+test accrual::accrued_after_end_time::high_rate_long_after_end_still_caps_at_deposit ... ok
+test accrual::accrued_after_end_time::long_after_end_time_still_capped ... ok
+test accrual::accrued_after_end_time::max_time_does_not_overflow ... ok
+test accrual::accrued_after_end_time::midway_accrues_half_deposit ... ok
+test accrual::accrued_after_end_time::one_second_after_end_time_still_capped ... ok
+test accrual::accrued_after_end_time::one_second_before_end_time_less_than_deposit ... ok
+test accrual::accrued_after_end_time::past_end_but_before_cliff_returns_zero ... ok
+test accrual::accrued_after_end_time::pure_function_same_result_on_repeat_calls ... ok
+test accrual::i128_boundary::max_rate_overflow_returns_deposit ... ok
+test accrual::i128_boundary::near_max_deposit_at_cliff_uses_start_time ... ok
+test accrual::i128_boundary::near_max_deposit_bounded_at_all_times ... ok
+test accrual::i128_boundary::near_max_deposit_capped_long_after_end ... ok
+test accrual::i128_boundary::near_max_deposit_deterministic ... ok
+test accrual::i128_boundary::near_max_deposit_equals_deposit_at_end ... ok
+test accrual::i128_boundary::near_max_deposit_excess_deposit_caps_at_total_streamable ... ok
+test accrual::i128_boundary::near_max_deposit_monotonic_over_time_grid ... ok
+test accrual::i128_boundary::near_max_deposit_zero_at_start ... ok
+test accrual::i128_boundary::near_max_deposit_zero_before_cliff ... ok
+test accrual::i128_boundary::overflow_in_multiplication_returns_deposit ... ok
+test accrual::invariants::accrued_is_monotonic_in_time_after_cliff ... ok
+test accrual::invariants::accrued_non_negative_and_bounded_by_deposit ... ok
+test accrual::property_monotonicity::prop_accrues_normally_after_start_with_early_cliff ... ok
+test accrual::property_monotonicity::prop_bounded_by_deposit_over_dense_grid ... ok
+test accrual::property_monotonicity::prop_deterministic ... ok
+test accrual::property_monotonicity::prop_elapsed_underflow_returns_zero ... ok
+test accrual::property_monotonicity::prop_elapsed_zero_at_start_with_early_cliff ... ok
+test accrual::property_monotonicity::prop_linear_when_deposit_not_binding ... ok
+test accrual::property_monotonicity::prop_monotonic_over_dense_grid ... ok
+test accrual::property_monotonicity::prop_monotonic_second_by_second ... ok
+test accrual::property_monotonicity::prop_saturates_at_end_time_when_rate_covers_deposit ... ok
+test accrual::property_monotonicity::prop_zero_before_cliff ... ok
+test accrual::tests::accrues_from_start_at_cliff ... ok
+test accrual::tests::caps_at_end_time_and_deposit ... ok
+test accrual::tests::multiplication_overflow_returns_capped_deposit ... ok
+test accrual::tests::returns_zero_before_cliff ... ok
+test accrual::tests::returns_zero_for_invalid_schedule ... ok
+test accrual::tests::returns_zero_for_negative_rate ... ok
+test checksum::tests::checksum_module_compiles ... ok
+test test::claimable_at_cancel_at_end_time_equals_deposit ... ok
+test test::claimable_at_before_withdrawn_returns_zero ... ok
+test test::claimable_at_cancel_before_cancel_time_follows_schedule ... ok
+test test::claimable_at_cancel_at_start_always_zero ... ok
+test test::claimable_at_cancel_at_cliff_boundary ... ok
+test test::claimable_at_admin_cancel_clamped ... ok
+test test::claimable_at_cancel_after_cliff ... ok
+test test::claimable_at_after_multiple_withdrawals ... ok
+test test::claimable_at_cancel_after_full_accrual_withdraw ... ok
+test test::claimable_at_cancel_after_partial_withdraw ... ok
+test test::claimable_at_capped_beyond_end ... ok
+test test::claimable_at_cliff_boundary_detailed ... ok
+test test::claimable_at_cancel_before_cliff ... ok
+test test::claimable_at_cliff_after_withdraw ... ok
+test test::claimable_at_cancel_clamped_at_all_future_times ... ok
+test test::claimable_at_deducts_withdrawn ... ok
+test test::claimable_at_equals_withdrawable_after_withdraw ... ok
+test test::claimable_at_completed_always_zero ... ok
+test test::claimable_at_cancel_never_exceeds_frozen_accrual ... ok
+test test::claimable_at_exact_withdrawn_returns_zero ... ok
+test test::claimable_at_equals_withdrawable_cancelled ... ok
+test test::claimable_at_idempotent ... ok
+test test::claimable_at_equals_withdrawable_at_current_time ... ok
+test test::claimable_at_linearly_proportional ... ok
+test test::claimable_at_one_second_in ... ok
+test test::claimable_at_uninitialised_returns_stream_not_found ... ok
+test test::claimable_at_stream_not_found ... ok
+test test::claimable_at_monotonic_active_no_withdraw ... ok
+test test::i128_boundary_streams::insufficient_deposit_for_near_max_rate_rejected ... ok
+test test::claimable_at_paused_after_withdraw ... ok
+test test::claimable_at_start_time_returns_zero ... ok
+test test::claimable_at_paused_stream_simulates_at_timestamp ... ok
+test test::i128_boundary_streams::batch_near_max_total_overflow_is_atomic ... ok
+test test::claimable_at_monotonic_cancelled ... ok
+test test::i128_boundary_streams::batch_one_invalid_near_max_entry_rejects_whole_batch ... ok
+test test::i128_boundary_streams::near_max_deposit_accrual_at_cliff_uses_start_time ... ok
+test test::i128_boundary_streams::near_max_deposit_accrued_equals_deposit_at_end ... ok
+test test::i128_boundary_streams::near_max_deposit_accrued_capped_long_after_end ... ok
+test test::i128_boundary_streams::near_max_deposit_accrued_zero_at_start ... ok
+test test::i128_boundary_streams::near_max_deposit_accrued_zero_before_cliff ... ok
+test test::claimable_at_cancel_ceiling_parametric ... ok
+test test::i128_boundary_streams::near_max_deposit_creation_emits_correct_event ... ok
+test test::i128_boundary_streams::near_max_deposit_cancelled_accrual_is_frozen ... ok
+test test::i128_boundary_streams::near_max_deposit_cancel_midpoint_refund_plus_accrued_equals_deposit ... ok
+test test::i128_boundary_streams::near_max_deposit_cancel_at_start_full_refund ... ok
+test test::i128_boundary_streams::near_max_deposit_creation_persists_correct_state ... ok
+test test::i128_boundary_streams::near_max_deposit_pause_does_not_affect_accrual ... ok
+test test::i128_boundary_streams::near_max_deposit_only_sender_can_cancel ... ok
+test test::i128_boundary_streams::near_max_deposit_full_withdrawal_completes_stream ... ok
+test test::i128_boundary_streams::near_max_deposit_get_withdrawable_matches_accrued_minus_withdrawn ... ok
+test test::i128_boundary_streams::near_max_deposit_with_cliff_persists_cliff_time ... ok
+test test::i128_boundary_streams::near_max_deposit_recipient_withdraws_after_cancel ... ok
+test test::i128_boundary_streams::near_max_deposit_resume_allows_withdrawal_of_full_accrued ... ok
+test test::i128_boundary_streams::near_max_deposit_withdraw_requires_recipient_auth ... ok
+test test::i128_boundary_streams::near_max_rate_accrual_overflow_falls_back_to_deposit ... ok
+test test::i128_boundary_streams::near_max_deposit_two_partial_withdrawals_complete_stream ... ok
+test test::i128_boundary_streams::rate_times_duration_overflow_rejected_atomically ... ok
+test test::i128_boundary_streams::near_max_withdrawal_event_carries_correct_amount ... ok
+test test::recipient_index_stress::test_close_cancelled_stream_cleans_index ... ok
+test test::recipient_index_stress::test_get_recipient_streams_paginated_cursor_beyond_end ... ok
+test test::recipient_index_stress::test_get_recipient_streams_paginated_zero_limit ... ok
+test test::recipient_index_stress::test_get_streams_by_id_range_empty_range ... ok
+test test::recipient_index_stress::test_get_recipient_streams_paginated_handles_closed_streams ... ok
+
+thread 'test::recipient_index_stress::test_get_recipient_streams_paginated_respects_max_page_size' (2113268) panicked at /Users/victor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-env-host-21.2.1/src/host.rs:768:9:
+HostError: Error(Budget, ExceededLimit)
+
+Event log (newest first):
+   0: [Diagnostic Event] topics:[error, Error(Budget, ExceededLimit)], data:"escalating error to panic"
+   1: [Diagnostic Event] topics:[error, Error(Budget, ExceededLimit)], data:["contract call failed", create_stream, [CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM, 100, 1, 0, 0, 100]]
+   2: [Diagnostic Event] contract:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, topics:[error, Error(Budget, ExceededLimit)], data:"caught error from function"
+   3: [Diagnostic Event] contract:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, topics:[error, Error(Budget, ExceededLimit)], data:"escalating error to panic"
+   4: [Diagnostic Event] contract:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, topics:[error, Error(Budget, ExceededLimit)], data:["contract call failed", transfer_from, [CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, 100]]
+   5: [Diagnostic Event] contract:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, topics:[fn_call, Bytes(692c360a04a982db02db346a106cbf008ad9e058c384bdaaf77bc0c48799b3a4), transfer_from], data:[CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, 100]
+   6: [Diagnostic Event] topics:[fn_call, Bytes(0000000000000000000000000000000000000000000000000000000000000001), create_stream], data:[CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM, 100, 1, 0, 0, 100]
+   7: [Diagnostic Event] contract:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, topics:[fn_return, create_stream], data:138
+   8: [Contract Event] contract:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, topics:[created, 138], data:{cliff_time: 0, deposit_amount: 100, end_time: 100, rate_per_second: 1, recipient: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM, sender: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM, start_time: 0, stream_id: 138}
+   9: [Diagnostic Event] contract:CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF, topics:[fn_return, transfer_from], data:Void
+   10: [Contract Event] contract:CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF, topics:[transfer, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, "aaa:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGO6V"], data:100
+   11: [Diagnostic Event] contract:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, topics:[fn_call, Bytes(692c360a04a982db02db346a106cbf008ad9e058c384bdaaf77bc0c48799b3a4), transfer_from], data:[CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, 100]
+   12: [Diagnostic Event] topics:[fn_call, Bytes(0000000000000000000000000000000000000000000000000000000000000001), create_stream], data:[CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM, 100, 1, 0, 0, 100]
+   13: [Diagnostic Event] contract:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, topics:[fn_return, create_stream], data:137
+   14: [Contract Event] contract:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, topics:[created, 137], data:{cliff_time: 0, deposit_amount: 100, end_time: 100, rate_per_second: 1, recipient: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM, sender: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM, start_time: 0, stream_id: 137}
+   15: [Diagnostic Event] contract:CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF, topics:[fn_return, transfer_from], data:Void
+   16: [Contract Event] contract:CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF, topics:[transfer, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, "aaa:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGO6V"], data:100
+   17: [Diagnostic Event] contract:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, topics:[fn_call, Bytes(692c360a04a982db02db346a106cbf008ad9e058c384bdaaf77bc0c48799b3a4), transfer_from], data:[CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, 100]
+   18: [Diagnostic Event] topics:[fn_call, Bytes(0000000000000000000000000000000000000000000000000000000000000001), create_stream], data:[CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM, 100, 1, 0, 0, 100]
+   19: [Diagnostic Event] contract:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, topics:[fn_return, create_stream], data:136
+   20: [Contract Event] contract:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, topics:[created, 136], data:{cliff_time: 0, deposit_amount: 100, end_time: 100, rate_per_second: 1, recipient: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM, sender: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM, start_time: 0, stream_id: 136}
+   21: [Diagnostic Event] contract:CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF, topics:[fn_return, transfer_from], data:Void
+   22: [Contract Event] contract:CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF, topics:[transfer, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, "aaa:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGO6V"], data:100
+   23: [Diagnostic Event] contract:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, topics:[fn_call, Bytes(692c360a04a982db02db346a106cbf008ad9e058c384bdaaf77bc0c48799b3a4), transfer_from], data:[CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM, 100]
+   24: [Diagnostic Event] topics:[fn_call, Bytes(0000000000000000000000000000000000000000000000000000000000000001), create_stream], data:[CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM, CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM, 100, 1, 0, 0, 100]
+   25: ... 832 events elided ...
+
+Backtrace (newest first):
+   0: backtrace::backtrace::libunwind::trace
+             at /Users/victor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/backtrace/libunwind.rs:117:9
+      backtrace::backtrace::trace_unsynchronized
+             at /Users/victor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/backtrace/mod.rs:66:14
+   1: backtrace::backtrace::trace
+             at /Users/victor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/backtrace/mod.rs:53:14
+   2: backtrace::capture::Backtrace::create
+             at /Users/victor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/capture.rs:294:9
+   3: backtrace::capture::Backtrace::new_unresolved
+             at /Users/victor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/capture.rs:289:9
+   4: soroban_env_host::host::error::<impl soroban_env_host::host::Host>::maybe_get_debug_info::{{closure}}
+             at /Users/victor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-env-host-21.2.1/src/host/error.rs:293:37
+   5: soroban_env_host::budget::Budget::with_shadow_mode
+             at /Users/victor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-env-host-21.2.1/src/budget.rs:972:21
+   6: soroban_env_host::host::Host::with_debug_mode
+             at /Users/victor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-env-host-21.2.1/src/host.rs:615:42
+   7: soroban_env_host::host::error::<impl soroban_env_host::host::Host>::maybe_get_debug_info
+             at /Users/victor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-env-host-21.2.1/src/host/error.rs:290:18
+   8: soroban_env_host::host::error::<impl soroban_env_host::host::Host>::error::{{closure}}
+             at /Users/victor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-env-host-21.2.1/src/host/error.rs:274:28
+   9: soroban_env_host::budget::Budget::with_shadow_mode
+             at /Users/victor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-env-host-21.2.1/src/budget.rs:972:21
+  10: soroban_env_host::host::Host::with_debug_mode
+             at /Users/victor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-env-host-21.2.1/src/host.rs:615:42
+  11: soroban_env_host::host::error::<impl soroban_env_host::host::Host>::error
+             at /Users/victor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-env-host-21.2.1/src/host/error.rs:261:14
+  12: <soroban_env_host::host::Host as soroban_env_common::env::EnvBase>::escalate_error_to_panic
+             at /Users/victor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-env-host-21.2.1/src/host.rs:767:31
+  13: soroban_sdk::env::internal::reject_err::{{closure}}
+             at /Users/victor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-sdk-21.7.7/src/env.rs:52:27
+  14: core::result::Result<T,E>::map_err
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/core/src/result.rs:968:27
+  15: soroban_sdk::env::internal::reject_err
+             at /Users/victor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-sdk-21.7.7/src/env.rs:52:11
+  16: <soroban_sdk::env::Env as soroban_env_common::env::Env>::call
+             at /Users/victor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-sdk-21.7.7/src/env.rs:1667:13
+  17: soroban_sdk::env::Env::invoke_contract
+             at /Users/victor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-sdk-21.7.7/src/env.rs:379:18
+  18: fluxora_stream::FluxoraStreamClient::create_stream
+             at src/lib.rs:850:1
+  19: fluxora_stream::test::recipient_index_stress::test_get_recipient_streams_paginated_respects_max_page_size
+             at src/test.rs:17513:18
+  20: fluxora_stream::test::recipient_index_stress::test_get_recipient_streams_paginated_respects_max_page_size::{{closure}}
+             at src/test.rs:17502:69
+  21: core::ops::function::FnOnce::call_once
+             at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/core/src/ops/function.rs:250:5
+
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'test::recipient_index_stress::test_get_recipient_streams_paginated_respects_max_page_size' (2113268) panicked at /Users/victor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-sdk-21.7.7/src/env.rs:1344:54:
+called `Result::unwrap()` on an `Err` value: HostError: Error(Budget, ExceededLimit)
+DebugInfo not available
+
+stack backtrace:
+   0:        0x10162243c - std::backtrace_rs::backtrace::libunwind::trace::h8c709fedfe3e7579
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/../../backtrace/src/backtrace/libunwind.rs:117:9
+   1:        0x10162243c - std::backtrace_rs::backtrace::trace_unsynchronized::h301468dd5f873f07
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/../../backtrace/src/backtrace/mod.rs:66:14
+   2:        0x10162243c - std::sys::backtrace::_print_fmt::hd8f2dd111008fb09
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/sys/backtrace.rs:74:9
+   3:        0x10162243c - <std::sys::backtrace::BacktraceLock::print::DisplayBacktrace as core::fmt::Display>::fmt::hbeea7a819b623c65
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/sys/backtrace.rs:44:26
+   4:        0x101630954 - core::fmt::rt::Argument::fmt::h6d78f21e4a415442
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/core/src/fmt/rt.rs:152:76
+   5:        0x101630954 - core::fmt::write::hedd53bdb9e87b4cf
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/core/src/fmt/mod.rs:1686:22
+   6:        0x1015fd8fc - std::io::default_write_fmt::h2b47e339780a45b8
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/io/mod.rs:639:11
+   7:        0x1015fd8fc - std::io::Write::write_fmt::h551617a333346f25
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/io/mod.rs:1994:13
+   8:        0x101608e9c - std::sys::backtrace::BacktraceLock::print::h0afc5f4839e5c28e
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/sys/backtrace.rs:47:25
+   9:        0x101608e9c - std::panicking::default_hook::{{closure}}::hb13fd44d9edf00c4
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/panicking.rs:292:27
+  10:        0x101608d48 - std::panicking::default_hook::h3b3b0d3cdb46d087
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/panicking.rs:316:9
+  11:        0x100ffd820 - <alloc::boxed::Box<F,A> as core::ops::function::Fn<Args>>::call::h4a194cec32ed9035
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/alloc/src/boxed.rs:2220:9
+  12:        0x100ffd820 - test::test_main_with_exit_callback::{{closure}}::hd188f4d346f326fe
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/test/src/lib.rs:145:21
+  13:        0x10124c77c - <alloc::boxed::Box<F,A> as core::ops::function::Fn<Args>>::call::hbb4071f9f924a836
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/alloc/src/boxed.rs:2220:9
+  14:        0x1012675dc - soroban_env_host::testutils::call_with_suppressed_panic_hook::{{closure}}::{{closure}}::hfd7d7c9a6b8a3be5
+                               at /Users/victor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-env-host-21.2.1/src/testutils.rs:46:17
+  15:        0x1016092d0 - <alloc::boxed::Box<F,A> as core::ops::function::Fn<Args>>::call::h21e5ac2990050c81
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/alloc/src/boxed.rs:2220:9
+  16:        0x1016092d0 - std::panicking::panic_with_hook::h657ee82e431041f8
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/panicking.rs:833:13
+  17:        0x101608f48 - std::panicking::panic_handler::{{closure}}::hd0ef6f87b4fd1427
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/panicking.rs:698:13
+  18:        0x101605da0 - std::sys::backtrace::__rust_end_short_backtrace::hbd8bf96e4ee54567
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/sys/backtrace.rs:182:18
+  19:        0x1015f6534 - __rustc[16f1505adc47261a]::rust_begin_unwind
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/panicking.rs:689:5
+  20:        0x10164248c - core::panicking::panic_fmt::ha09fb24313daf262
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/core/src/panicking.rs:80:14
+  21:        0x1016420a0 - core::result::unwrap_failed::hfd1628134417d023
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/core/src/result.rs:1867:5
+  22:        0x1010ad27c - core::result::Result<T,E>::unwrap::hc22a4169a66db7e8
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/core/src/result.rs:1233:23
+  23:        0x1010ad27c - soroban_sdk::env::Env::to_ledger_snapshot::ha58faef0d48c2e20
+                               at /Users/victor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-sdk-21.7.7/src/env.rs:1344:54
+  24:        0x1010ab764 - soroban_sdk::env::Env::to_snapshot::h89495fdbf739b902
+                               at /Users/victor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-sdk-21.7.7/src/env.rs:1298:26
+  25:        0x1010ad3ac - soroban_sdk::env::Env::to_test_snapshot_file::h5aeb5d710dc0c61c
+                               at /Users/victor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-sdk-21.7.7/src/env.rs:1422:29
+  26:        0x1010b0354 - <soroban_sdk::env::Env as core::ops::drop::Drop>::drop::hb70bc7d32807a564
+                               at /Users/victor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-sdk-21.7.7/src/env.rs:1385:18
+  27:        0x1010a61b8 - core::ptr::drop_in_place<soroban_sdk::env::Env>::h962ca26b8ec1c795
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/core/src/ptr/mod.rs:805:1
+  28:        0x1010a64a8 - core::ptr::drop_in_place<soroban_sdk::address::Address>::h171d244718f0459a
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/core/src/ptr/mod.rs:805:1
+  29:        0x100f571dc - core::ptr::drop_in_place<soroban_sdk::token::StellarAssetClient>::h7620b4dce3483f52
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/core/src/ptr/mod.rs:805:1
+  30:        0x100f57084 - core::ptr::drop_in_place<fluxora_stream::test::TestContext>::h1e6307f1df6e9a9b
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/core/src/ptr/mod.rs:805:1
+  31:        0x100fccecc - fluxora_stream::test::recipient_index_stress::test_get_recipient_streams_paginated_respects_max_page_size::h063adb3f26894334
+                               at /Users/victor/Desktop/Fluxora-Contracts/contracts/stream/src/test.rs:17521:5
+  32:        0x100f1dca8 - fluxora_stream::test::recipient_index_stress::test_get_recipient_streams_paginated_respects_max_page_size::{{closure}}::h6bde23fdf9e6eff7
+                               at /Users/victor/Desktop/Fluxora-Contracts/contracts/stream/src/test.rs:17502:69
+  33:        0x100f553bc - core::ops::function::FnOnce::call_once::hfa49c88ca1621cb0
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/core/src/ops/function.rs:250:5
+  34:        0x100ffd6e4 - core::ops::function::FnOnce::call_once::h280858ab01dec877
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/core/src/ops/function.rs:250:5
+  35:        0x100ffd6e4 - test::__rust_begin_short_backtrace::hd0279290016132c5
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/test/src/lib.rs:663:18
+  36:        0x10100c748 - test::run_test_in_process::{{closure}}::h42e8d9c874a8c145
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/test/src/lib.rs:686:74
+  37:        0x10100c748 - <core::panic::unwind_safe::AssertUnwindSafe<F> as core::ops::function::FnOnce<()>>::call_once::hae6fc5496c339ac8
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/core/src/panic/unwind_safe.rs:274:9
+  38:        0x10100c748 - std::panicking::catch_unwind::do_call::h036525c6141c2fe9
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/panicking.rs:581:40
+  39:        0x10100c748 - std::panicking::catch_unwind::hca24efa9e58ca112
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/panicking.rs:544:19
+  40:        0x10100c748 - std::panic::catch_unwind::h7b064f46e2e2154c
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/panic.rs:359:14
+  41:        0x10100c748 - test::run_test_in_process::h118ba25609859eff
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/test/src/lib.rs:686:27
+  42:        0x10100c748 - test::run_test::{{closure}}::h062407bf6f63f0a3
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/test/src/lib.rs:607:43
+  43:        0x100fedba0 - test::run_test::{{closure}}::h4359a91f5575c249
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/test/src/lib.rs:637:41
+  44:        0x100fedba0 - std::sys::backtrace::__rust_begin_short_backtrace::h48fd78fa1412cb07
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/sys/backtrace.rs:166:18
+  45:        0x100ff0bdc - std::thread::lifecycle::spawn_unchecked::{{closure}}::{{closure}}::h12995cc2a5b41e08
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/thread/lifecycle.rs:91:13
+  46:        0x100ff0bdc - <core::panic::unwind_safe::AssertUnwindSafe<F> as core::ops::function::FnOnce<()>>::call_once::hbd813c1a7f23ed43
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/core/src/panic/unwind_safe.rs:274:9
+  47:        0x100ff0bdc - std::panicking::catch_unwind::do_call::h24dcbee2aa75e6d7
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/panicking.rs:581:40
+  48:        0x100ff0bdc - std::panicking::catch_unwind::hff609de66bc4d699
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/panicking.rs:544:19
+  49:        0x100ff0bdc - std::panic::catch_unwind::hcb7b3a90451ec218
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/panic.rs:359:14
+  50:        0x100ff0bdc - std::thread::lifecycle::spawn_unchecked::{{closure}}::h058f0d04f84b9a25
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/thread/lifecycle.rs:89:26
+  51:        0x100ff0bdc - core::ops::function::FnOnce::call_once{{vtable.shim}}::he3ba8664fbedafa9
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/core/src/ops/function.rs:250:5
+  52:        0x1016032f8 - <alloc::boxed::Box<F,A> as core::ops::function::FnOnce<Args>>::call_once::he1dbc97d8b345840
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/alloc/src/boxed.rs:2206:9
+  53:        0x1016032f8 - std::sys::thread::unix::Thread::new::thread_start::h7cf39b7a7f135f48
+                               at /rustc/e408947bfd200af42db322daf0fadfe7e26d3bd1/library/std/src/sys/thread/unix.rs:130:17
+  54:        0x18b89dc08 - __pthread_cond_wait

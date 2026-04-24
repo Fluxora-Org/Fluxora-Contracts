@@ -160,13 +160,14 @@ All active streams for a recipient are in the index:
 
 ### Recipient Updates
 
-If recipient updates are supported in the future (e.g., stream transfer), the index must be updated atomically:
+Recipient updates are supported via `update_recipient(stream_id, new_recipient)`. This operation is atomic and ensures the recipient index remains consistent:
 
-1. Remove stream from old recipient's index
-2. Add stream to new recipient's index
-3. Update stream's recipient field
+1. **Authorization**: Only the current recipient of the stream can authorize the update.
+2. **Remove**: The stream ID is removed from the old recipient's index.
+3. **Add**: The stream ID is added to the new recipient's index (maintaining sorted order).
+4. **State Update**: The stream's `recipient` field is updated in storage.
 
-This ensures consistency across all indices.
+This ensures that the stream correctly appears in the new recipient's portfolio and is removed from the old one's.
 
 ## Protocol Semantics & Audit Notes
 

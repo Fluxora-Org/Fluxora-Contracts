@@ -17,7 +17,13 @@ pub enum DataKey {
     NextStreamId,              // discriminant 1 — instance
     Stream(u64),               // discriminant 2 — persistent
     RecipientStreams(Address), // discriminant 3 — persistent
-    GlobalPaused,              // discriminant 4 — instance
+    GlobalEmergencyPaused,     // discriminant 4 — instance
+    CreationPaused,            // discriminant 5 — instance
+    GlobalPauseReason,         // discriminant 6 — instance
+    GlobalPauseTimestamp,      // discriminant 7 — instance
+    GlobalPauseAdmin,          // discriminant 8 — instance
+    AutoClaimDestination(u64), // discriminant 9 — persistent
+    StreamMemo(u64),           // discriminant 10 — persistent
 }
 ```
 
@@ -29,7 +35,13 @@ pub enum DataKey {
 | 1 | `NextStreamId` | Instance | `u64` (monotonic counter) | `init` (→ 0) | `create_stream`, `create_streams` |
 | 2 | `Stream(u64)` | Persistent | `Stream` struct | `create_stream`, `create_streams` | `pause_stream`, `resume_stream`, `cancel_stream`, `withdraw`, `withdraw_to`, `batch_withdraw`, `top_up_stream`, `update_rate_per_second`, `shorten_stream_end_time`, `extend_stream_end_time` |
 | 3 | `RecipientStreams(Address)` | Persistent | `Vec<u64>` (sorted) | `create_stream`, `create_streams` | `close_completed_stream` (removes entry) |
-| 4 | `GlobalPaused` | Instance | `bool` | `set_contract_paused` | `set_contract_paused` |
+| 4 | `GlobalEmergencyPaused` | Instance | `bool` | `set_global_emergency_paused` | `set_global_emergency_paused` |
+| 5 | `CreationPaused` | Instance | `bool` | `set_contract_paused` | `set_contract_paused` |
+| 6 | `GlobalPauseReason` | Instance | `String` | `pause_protocol` | `resume_protocol` (removes) |
+| 7 | `GlobalPauseTimestamp` | Instance | `u64` | `pause_protocol` | `resume_protocol` (removes) |
+| 8 | `GlobalPauseAdmin` | Instance | `Address` | `pause_protocol` | `resume_protocol` (removes) |
+| 9 | `AutoClaimDestination(u64)` | Persistent | `Address` | auto-claim opt-in | auto-claim revoke |
+| 10 | `StreamMemo(u64)` | Persistent | `Bytes` (max 64 bytes) | `create_stream`, `create_streams` | `close_completed_stream` (removes) |
 
 ---
 
@@ -75,7 +87,8 @@ Used for contract-wide configuration and counters. Shared across all operations,
 |---|---|
 | `Config` | Token address and admin address. Immutable after `init` except for admin rotation via `set_admin`. |
 | `NextStreamId` | Monotonically increasing stream ID counter. Never decremented. |
-| `GlobalPaused` | Emergency pause flag. `true` blocks `create_stream` and `create_streams`. |
+| `GlobalEmergencyPaused` | Emergency pause flag. `true` blocks all operational entrypoints. |
+| `CreationPaused` | Soft creation pause flag. `true` blocks `create_stream` and `create_streams`. |
 
 ### Persistent storage
 
@@ -85,6 +98,7 @@ Used for per-stream data and per-recipient indexes. Grows linearly with stream c
 |---|---|
 | `Stream(stream_id)` | Complete stream state: participants, amounts, timing, status, `cancelled_at`. One entry per stream. |
 | `RecipientStreams(address)` | Sorted `Vec<u64>` of stream IDs where `address` is the recipient. Maintained in ascending order. |
+| `AutoClaimDestination(stream_id)` | Recipient-chosen destination `Address` for permissionless auto-claim. Absent when not opted in. Removed by `revoke_auto_claim`. |
 
 ---
 
@@ -101,7 +115,7 @@ const PERSISTENT_BUMP_AMOUNT: u32       = 120_960;
 
 ### Instance TTL
 
-Extended via `bump_instance_ttl()` on **every** entry-point that touches instance storage. This means any contract interaction — read or write — keeps `Config`, `NextStreamId`, and `GlobalPaused` alive.
+Extended via `bump_instance_ttl()` on **every** entry-point that touches instance storage. This means any contract interaction — read or write — keeps `Config`, `NextStreamId`, `GlobalEmergencyPaused`, and `CreationPaused` alive.
 
 ### Persistent TTL
 
@@ -119,6 +133,7 @@ Extended on every `load_stream()` (read) and `save_stream()` (write), and on eve
 ### TTL implications for operators
 
 - **Active streams**: TTL refreshed on any interaction.
+- **Cancelled streams**: Remain in persistent storage until the recipient withdraws the frozen accrued amount. `close_completed_stream` is blocked while any claimable balance remains. Operators must ensure recipients are notified to withdraw before TTL expiry.
 - **Inactive streams**: May expire after ~7 days with zero interaction. Operators must ensure recipients are notified before TTL expiry.
 - **Expired entries**: Cannot be recovered. Data is permanently lost.
 - **Contract liveness**: Instance storage stays alive as long as any function is called at least once per 7 days.
@@ -157,7 +172,8 @@ Extended on every `load_stream()` (read) and `save_stream()` (write), and on eve
 | `extend_stream_end_time` | `Stream(id)` | Updates `end_time` |
 | `close_completed_stream` | Removes `Stream(id)`, updates `RecipientStreams(addr)` | Permissionless cleanup |
 | `set_admin` | `Config` | Admin key rotation |
-| `set_contract_paused` | `GlobalPaused` | Emergency pause flag |
+| `set_global_emergency_paused` | `GlobalEmergencyPaused` | Global emergency pause flag |
+| `set_contract_paused` | `CreationPaused` | Soft creation pause flag |
 
 ---
 
@@ -168,3 +184,18 @@ Extended on every `load_stream()` (read) and `save_stream()` (write), and on eve
 - **CEI ordering**: State is always persisted (`save_stream`) before any external token transfer. See `docs/security.md`.
 - **No stale reads**: TTL bumps on reads mean monitoring queries keep data fresh.
 - **Admin rotation**: `set_admin` writes a new `Config` with the updated admin address. The token address is immutable.
+
+---
+
+## 7. Stream schedule templates (CONTRACT_VERSION ≥ 3)
+
+Schedule presets store **only relative offsets** (`start_delay`, `cliff_delay`, `duration`). Token amounts and recipients are supplied when calling `create_stream_from_template`, keeping calldata smaller than repeating three `u64` offsets on every payroll-style run.
+
+| Key | Type | Purpose |
+|-----|------|---------|
+| `NextTemplateId` | Instance `u64` | Monotonic template id counter |
+| `ActiveTemplateCount` | Instance `u64` | Count of stored templates (supports global cap) |
+| `StreamTemplate(template_id)` | Persistent | `StreamScheduleTemplate` body |
+| `OwnerTemplateIds(owner)` | Persistent `Vec<u64>` | Ids registered by `owner` (length capped by `MAX_TEMPLATES_PER_OWNER`) |
+
+Global cap: `MAX_GLOBAL_TEMPLATES`. Per-owner cap: `MAX_TEMPLATES_PER_OWNER`. See `contracts/stream/src/lib.rs`.

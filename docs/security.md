@@ -60,6 +60,15 @@ Observable contract guarantees for this entrypoint:
 > external transfer and the `save_stream` call, it could have observed a stale
 > `deposit_amount`. The call order has been corrected so state is always persisted first.
 
+
+### `batch_withdraw` and `batch_withdraw_to`
+
+These batch functions process multiple internal transfers. CEI is maintained per-iteration:
+1. Stream state (`withdrawn_amount` and `status`) is updated and saved.
+2. The running `contract_balance` is decremented in memory.
+3. **Only then** is the `push_token` external call made to transfer funds to the recipient (or specified destination).
+This ensures that any reentrancy from the token contract observes the completely updated stream state and bounded remaining contract balance.
+
 ### `shorten_stream_end_time`
 
 Authorization and state gate:
@@ -124,6 +133,7 @@ reentrancy impact — state will already reflect the current operation when the 
 | `withdraw`                | Stream's `recipient`                                    |
 | `withdraw_to`             | Stream's `recipient`                                    |
 | `batch_withdraw`          | Caller supplied as `recipient` (once for batch)         |
+| `batch_withdraw_to`       | Caller supplied as `recipient` (once for batch)         |
 | `update_rate_per_second`  | Stream's `sender`                                       |
 | `shorten_stream_end_time` | Stream's `sender`                                       |
 | `extend_stream_end_time`  | Stream's `sender`                                       |
@@ -131,6 +141,7 @@ reentrancy impact — state will already reflect the current operation when the 
 | `close_completed_stream`  | Permissionless (any caller)                             |
 | `set_admin`               | Current contract admin                                  |
 | `set_contract_paused`     | Contract admin                                          |
+| `transfer_sender`         | Current stream sender                                   |
 
 Cancellation-specific boundary checks:
 
@@ -157,12 +168,20 @@ All arithmetic that could overflow `i128` uses Rust's `checked_*` methods:
 
 ---
 
-## Global pause
+## Global Emergency Pause
 
-`set_contract_paused(true)` causes `create_stream` and `create_streams` to fail with
-`ContractError::ContractPaused`. Existing streams are unaffected — withdrawals,
-cancellations, and other operations continue normally. The pause flag is stored in
-instance storage under `DataKey::GlobalPaused`.
+The contract supports two levels of pausing to manage risk:
+
+1. **Creation Pause** (`set_creation_paused(true)`): Causes `create_stream` and `create_streams` to fail with `ContractError::ContractPaused`. Existing streams are unaffected — withdrawals, cancellations, and other operations continue normally. This is stored under `DataKey::CreationPaused`.
+2. **Global Emergency Pause** (`set_contract_paused(true)`): A "circuit breaker" that blocks **all** mutation operations across the entire protocol. This includes creation, withdrawals, cancellations, rate updates, and time adjustments. This is stored under `DataKey::GlobalEmergencyPaused`.
+
+During a Global Emergency Pause:
+- New streams cannot be created.
+- Recipients cannot withdraw accrued funds.
+- Senders cannot cancel streams or recover refunds.
+- All fund-moving entrypoints gated by `require_not_globally_paused` return `ContractError::ContractPaused`.
+
+Read-only operations (`calculate_accrued`, `get_stream_state`) and admin-override functions remain operational so the protocol state can be audited and the pause can be lifted by the admin.
 
 ---
 
@@ -296,7 +315,7 @@ The CI pipeline verifies that the WASM artifact produced by `cargo build --relea
 
 | Factor                     | How it is pinned                                                |
 |---------------------------|-----------------------------------------------------------------|
-| Rust toolchain            | `rust-toolchain.toml` — `channel = "stable"`, targets pinned    |
+| Rust toolchain            | `rust-toolchain.toml` — channel and targets pinned              |
 | soroban-sdk version       | `contracts/stream/Cargo.toml` — `21.7.7` exact version          |
 | Build profile             | `--release` with `wasm32-unknown-unknown` target                |
 | Feature flags             | Only default features during WASM build (`testutils` is test-only) |
@@ -304,10 +323,22 @@ The CI pipeline verifies that the WASM artifact produced by `cargo build --relea
 
 ### CI verification flow
 
-1. Build WASM with pinned toolchain
-2. Compute `sha256sum` of the artifact
-3. Compare against `wasm/checksums.sha256`
-4. Fail with actionable error if mismatch detected
+1. Build WASM with pinned toolchain (`cargo build --release --target wasm32-unknown-unknown`)
+2. Run `bash script/verify-wasm-checksum.sh --no-build` — compares each artifact against `wasm/checksums.sha256`
+3. Fail with actionable error message if any checksum mismatches
+4. Upload raw and optimized WASM + hash files as CI artifacts (30-day retention)
+
+### Local verification
+
+To verify a build locally before deployment:
+
+```bash
+# Rebuild and verify in one step
+bash script/verify-wasm-checksum.sh
+
+# Verify existing artifacts without rebuilding
+bash script/verify-wasm-checksum.sh --no-build
+```
 
 ### Updating checksums
 
@@ -316,8 +347,21 @@ When the contract source changes intentionally:
 ```bash
 bash script/update-wasm-checksums.sh
 git add wasm/checksums.sha256
-git commit -m "chore: update wasm checksums"
+git commit -m "chore: update wasm checksums after <describe change>"
 ```
+
+The script also accepts `--dry-run` to preview the new hashes without writing:
+
+```bash
+bash script/update-wasm-checksums.sh --dry-run
+```
+
+### Auditor verification steps
+
+1. Clone the repository at the commit tagged for audit.
+2. Confirm `rust-toolchain.toml` channel matches the CI build.
+3. Run `bash script/verify-wasm-checksum.sh` — all entries must print `OK`.
+4. Compare the passing hash against the on-chain contract hash via `stellar contract inspect`.
 
 ### Residual risks
 
@@ -371,3 +415,39 @@ PROPTEST_CASES=10000 cargo test -p fluxora_stream accrual_fuzz
 No new bugs were found during initial harness development. The existing overflow
 fallback (`None => deposit_amount` in `checked_mul`) was confirmed correct by
 `prop_no_panic_on_extreme_inputs` and `prop_bounded_by_deposit`.
+
+---
+
+## Auto-claim Opt-in: Security Model
+
+The auto-claim feature (`set_auto_claim` / `revoke_auto_claim` / `trigger_auto_claim`) introduces a permissionless trigger path. The following invariants ensure funds cannot be redirected or stolen.
+
+### Destination immutability
+
+The destination address is written to persistent storage by the recipient via `set_auto_claim`, which requires `recipient.require_auth()`. The caller of `trigger_auto_claim` supplies no destination parameter — the contract reads it from storage. There is no code path through which a third-party caller can influence where tokens are sent.
+
+### CEI ordering in `trigger_auto_claim`
+
+The function follows the same CEI pattern as `withdraw`:
+
+1. All checks (stream exists, not Completed/Cancelled, time-terminal, destination set, not globally paused).
+2. Compute withdrawable amount.
+3. Update `stream.withdrawn_amount` and optionally set `status = Completed`.
+4. Call `save_stream` to persist state.
+5. **Only then** call `push_token` to transfer to destination.
+
+### Global pause coverage
+
+`trigger_auto_claim` calls `require_not_globally_paused` at entry, consistent with all other fund-moving entry points. During a global emergency pause, auto-claim triggers are blocked.
+
+### Cancellation safety
+
+If a stream is cancelled after opt-in, `trigger_auto_claim` returns `ContractError::InvalidState`. The stored destination entry is inert and does not affect the cancelled stream's accounting. Recipients may call `revoke_auto_claim` to reclaim the storage slot.
+
+### No auth escalation
+
+`trigger_auto_claim` does not call `require_auth` on any address. It is purely permissionless. The only privileged operation in the auto-claim flow is `set_auto_claim` (recipient auth) and `revoke_auto_claim` (recipient auth).
+
+### Storage key isolation
+
+Auto-claim destinations are stored under `DataKey::AutoClaimDestination(stream_id)` (discriminant 6), a separate persistent key from `DataKey::Stream(stream_id)` (discriminant 2). There is no cross-stream interference.
