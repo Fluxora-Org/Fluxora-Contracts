@@ -25,3 +25,6 @@ soroban-sdk = "21.7.7"
 soroban-sdk = { version = "21.7.7", features = ["testutils"] }
 # Property-based testing for accrual math fuzz harness (#292)
 proptest = "1"
+# Required for constructing Ed25519 keypairs in delegated-withdraw tests
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+rand = "0.8"

@@ -207,6 +207,69 @@ address or replacing the admin through `init`.
 
 ---
 
+## Delegated withdraw (relayer support)
+
+`delegated_withdraw` allows a relayer to execute a withdrawal on behalf of a recipient
+using an off-chain Ed25519 signature. The design preserves all existing security
+properties of `withdraw` while adding replay and expiry protection.
+
+### Signature scheme
+
+The recipient signs the SHA-256 hash of the following concatenated bytes:
+
+```
+"fluxora_delegated_withdraw"  (UTF-8, no null terminator)
+|| contract_address_xdr        (XDR-encoded ScAddress)
+|| destination_xdr             (XDR-encoded ScAddress)
+|| stream_id                   (8 bytes, u64 big-endian)
+|| nonce                       (8 bytes, u64 big-endian)
+|| deadline                    (8 bytes, u64 big-endian)
+```
+
+The 32-byte SHA-256 hash is verified on-chain via `env.crypto().ed25519_verify`.
+Including the contract address in the message prevents cross-contract replay.
+Including the destination prevents a relayer from redirecting funds.
+
+### Replay protection (nonce)
+
+- Each recipient has a per-address nonce stored under `DataKey::WithdrawNonce(recipient)`
+  in persistent storage.
+- The supplied `nonce` must equal the current stored nonce exactly — no skipping allowed.
+- On a successful withdrawal that moves tokens, the nonce is incremented atomically
+  before the token transfer (CEI-compliant).
+- If `withdrawable == 0` the nonce is **not** consumed, preserving the signature for
+  a future call when tokens have accrued.
+
+### Expiry (deadline)
+
+- `deadline` is a ledger timestamp. The call is rejected with `SignatureDeadlineExpired`
+  if `env.ledger().timestamp() > deadline`.
+- A deadline equal to the current timestamp is accepted (not yet expired).
+
+### CEI ordering for `delegated_withdraw`
+
+1. **Checks**: deadline, destination guard, stream status, nonce match, signature verify.
+2. **Effects**: increment nonce, update `withdrawn_amount`, optionally set `Completed`,
+   call `save_stream`.
+3. **Interactions**: `push_token` to destination, emit `dlg_wdraw` event (and optionally
+   `completed` event).
+
+### Authorization table addition
+
+| Operation             | Authorized callers                                        |
+|-----------------------|-----------------------------------------------------------|
+| `delegated_withdraw`  | `relayer` (any address; recipient intent via signature)   |
+| `get_withdraw_nonce`  | Permissionless (view function)                            |
+
+### Security invariants
+
+- A used signature cannot be replayed (nonce incremented on success).
+- An expired signature is rejected before any state change.
+- A signature from the wrong key is rejected by `ed25519_verify` (host trap).
+- The destination is bound in the signed message — a relayer cannot redirect funds.
+- The contract address is bound in the signed message — signatures are chain/contract-specific.
+- Direct `withdraw` / `withdraw_to` / `batch_withdraw` are unaffected; their auth paths
+  remain unchanged.
 ## Malicious Token Assumptions and Non-Goals
 
 The streaming contract makes explicit assumptions about token behavior and defines clear non-goals for malicious token scenarios. These are documented in detail in [`token-assumptions.md`](token-assumptions.md).
