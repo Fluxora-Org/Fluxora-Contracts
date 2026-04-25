@@ -411,6 +411,25 @@ pub struct Page {
     /// Next cursor for pagination (0 if no more pages)
     pub next_cursor: u64,
 }
+
+/// Reason code for pausing a stream.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PauseReason {
+    /// Operational pause initiated by the stream sender.
+    Operational = 0,
+    /// Administrative pause initiated by the contract admin.
+    Administrative = 1,
+}
+
+/// Emitted when a stream is paused.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamPaused {
+    pub stream_id: u64,
+    pub reason: PauseReason,
+}
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct CreateStreamParams {
@@ -3539,73 +3558,10 @@ impl FluxoraStream {
     /// - Paginate: fetch first N IDs, then call `get_stream_state` for each
     /// - Filter by status: fetch all IDs, then check status of each via `get_stream_state`
     pub fn get_recipient_streams(env: Env, recipient: Address) -> soroban_sdk::Vec<u64> {
+        load_recipient_streams(&env, &recipient)
+    }
 
-    /// Paginated version of get_recipient_streams to prevent unbounded returns.
-    /// 
-    /// # Parameters
-    /// - `env`: Contract environment
-    /// - `recipient`: Address to query streams for
-    /// - `cursor`: Pagination cursor (stream_id to start after, 0 for beginning)
-    /// - `limit`: Maximum number of stream IDs to return (capped at RECIPIENT_STREAMS_PAGE_LIMIT)
-    /// 
-    /// # Returns
-    /// - `Page`: Contains stream IDs slice and next cursor for pagination
-    /// 
-    /// # Behavior
-    /// - Returns streams in ascending order by stream_id
-    /// - If cursor is 0, starts from the beginning
-    /// - If cursor matches a stream ID, starts after that stream
-    /// - Limit is capped at RECIPIENT_STREAMS_PAGE_LIMIT for safety
-    /// - Returns empty slice when no more streams are available
-    /// - Next cursor is 0 when no more pages exist
-    /// - No authorization required (public information)
-    /// - Extends TTL on the recipient's index to prevent expiration
-    pub fn get_recipient_streams_paginated(
-        env: Env,
-        recipient: Address,
-        cursor: u64,
-        limit: u32,
-    ) -> Page {
-        let streams = load_recipient_streams(&env, &recipient);
-        let total = streams.len();
-        
-        // Apply limit cap
-        let effective_limit = limit.min(RECIPIENT_STREAMS_PAGE_LIMIT);
-        
-        // Find starting position
-        let start_idx = if cursor == 0 {
-            0
-        } else {
-            match streams.binary_search(&cursor) {
-                Ok(pos) => pos + 1,  // Start after the cursor
-                Err(pos) => pos,     // Insert position if not found
-            }
-        };
-        
-        // Calculate end position
-        let end_idx = (start_idx as u32 + effective_limit).min(total as u32) as usize;
-        
-        #[allow(unused_assignments)]
-        let mut next_cursor = 0;
-        if end_idx < total {
-            next_cursor = streams.get(end_idx as usize).unwrap();
-        }
-        
-        #[allow(unused_assignments)]
-        let mut page_streams = soroban_sdk::Vec::new(&env);
-        for i in start_idx..end_idx {
-            page_streams.push_back(streams.get(i).unwrap());
-        }
-        
-         Page { stream_ids: page_streams, next_cursor }
-     }
-
-     /// Count the total number of streams for a recipient.
-    ///
-    /// Returns the count of streams where the recipient is the stream's recipient address.
-    /// This is a convenience function that avoids fetching the full vector when only
-    /// the count is needed.
-    ///
+    /// Count the total number of streams for a recipient.
     /// # Parameters
     /// - `recipient`: Address to query stream count for
     ///
@@ -3886,10 +3842,7 @@ impl FluxoraStream {
 
         Ok(())
     }
-}
 
-#[contractimpl]
-impl FluxoraStream {
     /// Cancel a payment stream as the contract admin.
     ///
     /// Administrative override to cancel any stream, bypassing sender authorization.
@@ -4247,177 +4200,6 @@ impl FluxoraStream {
     }
 
     /// Set or clear the **global emergency pause** flag (admin only).
-    ///
-    /// When `paused == true`, routine user-facing mutations revert with
-    /// `"contract is globally paused"`. Admin override entrypoints
-    /// (`*_as_admin`, this function) and read-only views are not blocked.
-    ///
-    /// # Authorization
-    /// - Requires authorization from the contract admin.
-    ///
-    /// # Events
-    /// - Publishes topic `gl_pause` with [`GlobalEmergencyPauseChanged`] data.
-    pub fn set_global_emergency_paused(env: Env, paused: bool) {
-        let admin = get_admin(&env).unwrap();
-        admin.require_auth();
-
-        env.storage()
-            .instance()
-            .set(&DataKey::GlobalEmergencyPaused, &paused);
-        bump_instance_ttl(&env);
-
-        env.events().publish(
-            (symbol_short!("gl_pause"),),
-            GlobalEmergencyPauseChanged { paused },
-        );
-    }
-
-    /// Explicitly clear the **global emergency pause** and restore normal contract behaviour.
-    pub fn global_resume(env: Env) -> Result<(), ContractError> {
-        let admin = get_admin(&env)?;
-        admin.require_auth();
-
-        if !is_global_emergency_paused(&env) {
-            return Err(ContractError::InvalidState);
-        }
-
-        env.storage()
-            .instance()
-            .set(&DataKey::GlobalEmergencyPaused, &false);
-        bump_instance_ttl(&env);
-
-        env.events().publish(
-            (symbol_short!("gl_resume"),),
-            GlobalResumed {
-                resumed_at: env.ledger().timestamp(),
-            },
-        );
-
-        Ok(())
-    }
-
-    /// Toggle the **contract pause** flag to prevent/restore stream creation.
-    pub fn set_contract_paused(env: Env, paused: bool) -> Result<(), ContractError> {
-        get_admin(&env)?.require_auth();
-
-        env.storage()
-            .instance()
-            .set(&DataKey::CreationPaused, &paused);
-        bump_instance_ttl(&env);
-
-        env.events().publish(
-            (symbol_short!("ct_pause"),),
-            ContractPauseChanged { paused },
-        );
-
-        Ok(())
-    }
-
-    /// Globally pause the protocol to block new stream creation.
-    pub fn pause_protocol(
-        env: Env,
-        admin: Address,
-        reason: Option<soroban_sdk::String>,
-    ) -> Result<(), ContractError> {
-        admin.require_auth();
-
-        let stored_admin = get_admin(&env)?;
-        if admin != stored_admin {
-            return Err(ContractError::Unauthorized);
-        }
-
-        if is_protocol_paused(&env) {
-            return Ok(());
-        }
-
-        env.storage()
-            .instance()
-            .set(&DataKey::GlobalEmergencyPaused, &true);
-
-        let reason_str = reason.unwrap_or_else(|| soroban_sdk::String::from_str(&env, ""));
-        env.storage()
-            .instance()
-            .set(&DataKey::GlobalPauseReason, &reason_str);
-
-        let now = env.ledger().timestamp();
-        env.storage()
-            .instance()
-            .set(&DataKey::GlobalPauseTimestamp, &now);
-        env.storage()
-            .instance()
-            .set(&DataKey::GlobalPauseAdmin, &admin);
-
-        bump_instance_ttl(&env);
-
-        env.events().publish(
-            (symbol_short!("pr_pause"), admin.clone()),
-            ProtocolPaused {
-                reason: reason_str,
-                paused_at: now,
-            },
-        );
-
-        Ok(())
-    }
-
-    /// Globally resume the protocol to allow new stream creation.
-    pub fn resume_protocol(env: Env, admin: Address) -> Result<(), ContractError> {
-        admin.require_auth();
-
-        let stored_admin = get_admin(&env)?;
-        if admin != stored_admin {
-            return Err(ContractError::Unauthorized);
-        }
-
-        if !is_protocol_paused(&env) {
-            return Ok(());
-        }
-
-        env.storage()
-            .instance()
-            .set(&DataKey::GlobalEmergencyPaused, &false);
-        env.storage().instance().remove(&DataKey::GlobalPauseReason);
-        env.storage()
-            .instance()
-            .remove(&DataKey::GlobalPauseTimestamp);
-        env.storage().instance().remove(&DataKey::GlobalPauseAdmin);
-
-        bump_instance_ttl(&env);
-
-        let now = env.ledger().timestamp();
-        env.events().publish(
-            (symbol_short!("pr_resume"), admin),
-            ProtocolResumed { resumed_at: now },
-        );
-
-        Ok(())
-    }
-
-    /// Query whether the protocol is currently paused.
-    pub fn is_paused(env: Env) -> bool {
-        is_protocol_paused(&env)
-    }
-
-    /// Query detailed pause information including reason, timestamp, and admin.
-    pub fn get_pause_info(env: Env) -> PauseInfo {
-        let is_paused = is_protocol_paused(&env);
-        if is_paused {
-            PauseInfo {
-                is_paused: true,
-                reason: get_pause_reason(&env),
-                paused_at: get_pause_timestamp(&env),
-                paused_by: get_pause_admin(&env),
-            }
-        } else {
-            PauseInfo {
-                is_paused: false,
-                reason: None,
-                paused_at: None,
-                paused_by: None,
-            }
-        }
-    }
-}
     ///
     /// When `paused == true`, routine user-facing mutations revert with
     /// `"contract is globally paused"`. Admin override entrypoints
