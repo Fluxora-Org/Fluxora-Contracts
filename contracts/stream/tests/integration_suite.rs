@@ -1,15 +1,74 @@
 extern crate std;
 
 use fluxora_stream::{
-    AutoClaimRevoked, AutoClaimSet, AutoClaimTriggered, ContractError, CreateStreamParams,
-    FluxoraStream, FluxoraStreamClient, StreamEndShortened, StreamStatus, StreamToppedUp,
+    ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamEndShortened,
+    StreamStatus, StreamToppedUp,
 };
 use soroban_sdk::log;
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    vec, Address, Env, FromVal, IntoVal, Symbol, TryFromVal,
+    vec, Address, Env, Error as SorobanError, FromVal, IntoVal, InvokeError, Symbol, TryFromVal,
 };
+
+struct CompatClient<'a>(FluxoraStreamClient<'a>);
+
+impl<'a> core::ops::Deref for CompatClient<'a> {
+    type Target = FluxoraStreamClient<'a>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl CompatClient<'_> {
+    #[allow(clippy::too_many_arguments)]
+    fn create_stream(
+        &self,
+        sender: &Address,
+        recipient: &Address,
+        deposit_amount: &i128,
+        rate_per_second: &i128,
+        start_time: &u64,
+        cliff_time: &u64,
+        end_time: &u64,
+        cancellation_fee_bps: &u32,
+    ) -> u64 {
+        self.0.create_stream(
+            sender,
+            recipient,
+            deposit_amount,
+            rate_per_second,
+            start_time,
+            cliff_time,
+            end_time,
+            cancellation_fee_bps,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_create_stream(
+        &self,
+        sender: &Address,
+        recipient: &Address,
+        deposit_amount: &i128,
+        rate_per_second: &i128,
+        start_time: &u64,
+        cliff_time: &u64,
+        end_time: &u64,
+        cancellation_fee_bps: &u32,
+    ) -> Result<Result<u64, SorobanError>, Result<ContractError, InvokeError>> {
+        self.0.try_create_stream(
+            sender,
+            recipient,
+            deposit_amount,
+            rate_per_second,
+            start_time,
+            cliff_time,
+            end_time,
+            cancellation_fee_bps,
+        )
+    }
+}
 
 struct TestContext<'a> {
     env: Env,
@@ -102,8 +161,8 @@ impl<'a> TestContext<'a> {
         }
     }
 
-    fn client(&self) -> FluxoraStreamClient<'_> {
-        FluxoraStreamClient::new(&self.env, &self.contract_id)
+    fn client(&self) -> CompatClient<'_> {
+        CompatClient(FluxoraStreamClient::new(&self.env, &self.contract_id))
     }
 
     fn create_default_stream(&self) -> u64 {
@@ -116,6 +175,7 @@ impl<'a> TestContext<'a> {
             &0u64,
             &0u64,
             &1000u64,
+            &0u32,
         )
     }
 
@@ -129,6 +189,41 @@ impl<'a> TestContext<'a> {
             &0u64,
             &cliff_time,
             &1000u64,
+            &0u32,
+        )
+    }
+
+    fn create_stream_with_cancel_fee(&self, cancel_fee_bps: u32) -> u64 {
+        self.env.ledger().set_timestamp(0);
+        self.client().create_stream(
+            &self.sender,
+            &self.recipient,
+            &1000_i128,
+            &1_i128,
+            &0u64,
+            &0u64,
+            &1000u64,
+            &cancel_fee_bps,
+        )
+    }
+
+    fn create_stream_with_params(
+        &self,
+        deposit: i128,
+        rate: i128,
+        end_time: u64,
+        cancel_fee_bps: u32,
+    ) -> u64 {
+        self.env.ledger().set_timestamp(0);
+        self.client().create_stream(
+            &self.sender,
+            &self.recipient,
+            &deposit,
+            &rate,
+            &0u64,
+            &0u64,
+            &end_time,
+            &cancel_fee_bps,
         )
     }
 }
@@ -270,6 +365,7 @@ fn stream_counter_unaffected_by_reinit_attempt() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
     );
     assert_eq!(
         id1, 1,
@@ -317,6 +413,7 @@ fn create_stream_rejects_self_stream_without_side_effects() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
     );
 
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
@@ -357,6 +454,7 @@ fn create_streams_batch_success_moves_funds_and_assigns_sequential_ids() {
         start_time: 0,
         cliff_time: 0,
         end_time: 600,
+        cancellation_fee_bps: 0,
     };
     let p2 = CreateStreamParams {
         recipient: Address::generate(&ctx.env),
@@ -365,6 +463,7 @@ fn create_streams_batch_success_moves_funds_and_assigns_sequential_ids() {
         start_time: 10,
         cliff_time: 10,
         end_time: 810,
+        cancellation_fee_bps: 0,
     };
 
     let streams = vec![&ctx.env, p1.clone(), p2.clone()];
@@ -394,6 +493,7 @@ fn create_streams_batch_invalid_entry_is_atomic_and_emits_no_events() {
         start_time: 0,
         cliff_time: 0,
         end_time: 1000,
+        cancellation_fee_bps: 0,
     };
     let invalid = CreateStreamParams {
         recipient: Address::generate(&ctx.env),
@@ -402,6 +502,7 @@ fn create_streams_batch_invalid_entry_is_atomic_and_emits_no_events() {
         start_time: 0,
         cliff_time: 0,
         end_time: 1000,
+        cancellation_fee_bps: 0,
     };
 
     let stream_count_before = ctx.client().get_stream_count();
@@ -518,6 +619,7 @@ fn create_stream_rejects_underfunded_deposit() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
     );
 
     assert_eq!(result, Err(Ok(ContractError::InsufficientDeposit)));
@@ -865,6 +967,7 @@ fn integration_full_flow_multiple_withdraws_to_completed() {
         &1000u64,
         &1000u64,
         &6000u64,
+        &0u32,
     );
 
     // Verify stream created and deposit transferred
@@ -950,6 +1053,7 @@ fn integration_withdraw_beyond_end_time() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
     );
 
     // Withdraw at 25%
@@ -1004,6 +1108,7 @@ fn integration_cancel_immediately_full_refund() {
         &1000u64,
         &1000u64,
         &4000u64,
+        &0u32,
     );
 
     // Verify deposit transferred
@@ -1049,6 +1154,7 @@ fn integration_cancel_partial_accrual_partial_refund() {
         &0u64,
         &0u64,
         &5000u64,
+        &0u32,
     );
 
     // Verify initial state after creation
@@ -1107,6 +1213,7 @@ fn integration_cancel_refund_plus_frozen_accrued_equals_deposit() {
         &0u64,
         &0u64,
         &3000u64,
+        &0u32,
     );
 
     // Cancel at t=1200
@@ -1152,6 +1259,7 @@ fn integration_cancel_fully_accrued_no_refund() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
     );
 
     // Verify initial balances
@@ -1211,6 +1319,7 @@ fn integration_cancel_after_partial_withdrawal() {
         &0u64,
         &0u64,
         &4000u64,
+        &0u32,
     );
 
     // Verify initial balances
@@ -1279,6 +1388,7 @@ fn integration_cancel_after_multiple_partial_withdrawals() {
         &0u64,
         &0u64,
         &5000u64,
+        &0u32,
     );
 
     // Verify initial balances
@@ -1365,6 +1475,7 @@ fn integration_cancel_before_cliff_full_refund() {
         &0u64,
         &1500u64, // cliff at 50%
         &3000u64,
+        &0u32,
     );
 
     // Verify initial balances
@@ -1478,6 +1589,7 @@ fn integration_stream_ids_are_unique_and_sequential() {
             &0u64,
             &0u64,
             &100u64,
+        &0u32,
         );
 
         // Returned id must be sequential
@@ -1527,6 +1639,7 @@ fn integration_failed_creation_does_not_advance_counter() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
     );
     assert_eq!(id0, 0, "first stream must be id 0");
 
@@ -1539,6 +1652,7 @@ fn integration_failed_creation_does_not_advance_counter() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
     );
     assert_eq!(result, Err(Ok(ContractError::InsufficientDeposit)));
 
@@ -1551,6 +1665,7 @@ fn integration_failed_creation_does_not_advance_counter() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
     );
     assert_eq!(
         id1, 1,
@@ -1584,6 +1699,7 @@ fn integration_cancel_paused_stream() {
         &0u64,
         &0u64,
         &3000u64,
+        &0u32,
     );
 
     // Advance to 40% and pause
@@ -1654,6 +1770,7 @@ fn integration_pause_resume_withdraw_lifecycle() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
     );
 
     let state = ctx.client().get_stream_state(&stream_id);
@@ -1786,6 +1903,7 @@ fn integration_multiple_pause_resume_cycles() {
         &0u64,
         &0u64,
         &2000u64,
+        &0u32,
     );
 
     // First pause/resume cycle
@@ -1864,6 +1982,7 @@ fn integration_pause_resume_past_end_time_accrual_capped() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
     );
 
     // Pause at t=300
@@ -1909,6 +2028,7 @@ fn integration_pause_then_cancel_preserves_accrual() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
     );
 
     assert_eq!(ctx.token.balance(&ctx.sender), 7_000);
@@ -1995,6 +2115,7 @@ fn integration_create_streams_batch_overflow_protection() {
         start_time: 0,
         cliff_time: 0,
         end_time: 10,
+        cancellation_fee_bps: 0,
     });
 
     streams.push_back(fluxora_stream::CreateStreamParams {
@@ -2004,6 +2125,7 @@ fn integration_create_streams_batch_overflow_protection() {
         start_time: 0,
         cliff_time: 0,
         end_time: 10,
+        cancellation_fee_bps: 0,
     });
 
     // We need to use try_create_streams to catch the contract error
@@ -2151,6 +2273,7 @@ fn integration_extend_end_time_exact_deposit_boundary() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
     );
 
     ctx.client().extend_stream_end_time(&stream_id, &2000u64);
@@ -2185,6 +2308,7 @@ fn integration_extend_end_time_insufficient_deposit_rejected_no_side_effects() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
     );
 
     let sender_before = ctx.token.balance(&ctx.sender);
@@ -2222,6 +2346,7 @@ fn integration_top_up_then_extend_full_withdrawal() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
     );
 
     // Top up 500 tokens
@@ -2262,6 +2387,7 @@ fn integration_extend_paused_stream_then_resume_withdraw() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
     );
 
     ctx.env.ledger().set_timestamp(400);
@@ -2305,6 +2431,7 @@ fn integration_extend_end_time_balance_conservation() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
     );
 
     ctx.client().extend_stream_end_time(&stream_id, &2000u64);
@@ -2342,6 +2469,7 @@ fn integration_batch_withdraw_completed_streams_yield_zero() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
     ); // active
     let id2 = ctx.client().create_stream(
         &ctx.sender,
@@ -2351,6 +2479,7 @@ fn integration_batch_withdraw_completed_streams_yield_zero() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
     ); // will be completed
 
     // Complete id0 and id2
@@ -2657,6 +2786,7 @@ fn integration_stream_counter_continuous_after_reinit() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
     );
     assert_eq!(id1, 1, "second stream must get ID 1");
     assert_eq!(ctx.client().get_stream_count(), 2);
@@ -2688,7 +2818,7 @@ fn integration_uninitialised_create_stream_panics() {
     let recipient = Address::generate(&env);
     env.ledger().set_timestamp(0);
     client.create_stream(
-        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64,
+        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &0u32,
     );
 }
 
@@ -2778,7 +2908,7 @@ fn integration_init_unblocks_all_paths() {
 
     env.ledger().set_timestamp(0);
     let stream_id = client.create_stream(
-        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64,
+        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &0u32,
     );
     assert_eq!(stream_id, 0);
     assert_eq!(client.get_stream_count(), 1);
@@ -2917,6 +3047,7 @@ fn integration_budget_batch_withdraw_20_streams() {
             &0u64,
             &0u64,
             &1000u64,
+        &0u32,
         );
         ids.push_back(id);
     }
@@ -2961,6 +3092,7 @@ fn integration_budget_create_streams_batch_10() {
             start_time: 0,
             cliff_time: 0,
             end_time: 1000,
+            cancellation_fee_bps: 0,
         });
     }
 
@@ -3032,6 +3164,7 @@ fn integration_batch_withdraw_wrong_recipient_unauthorized() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
     );
 
     ctx.env.ledger().set_timestamp(500);
@@ -3064,6 +3197,7 @@ fn integration_create_streams_single_token_pull_equals_sum() {
         start_time: 0,
         cliff_time: 0,
         end_time: 1000,
+        cancellation_fee_bps: 0,
     };
     let p2 = CreateStreamParams {
         recipient: Address::generate(&ctx.env),
@@ -3072,6 +3206,7 @@ fn integration_create_streams_single_token_pull_equals_sum() {
         start_time: 0,
         cliff_time: 0,
         end_time: 1000,
+        cancellation_fee_bps: 0,
     };
     let p3 = CreateStreamParams {
         recipient: Address::generate(&ctx.env),
@@ -3080,6 +3215,7 @@ fn integration_create_streams_single_token_pull_equals_sum() {
         start_time: 0,
         cliff_time: 0,
         end_time: 500,
+        cancellation_fee_bps: 0,
     };
 
     let params = vec![&ctx.env, p1, p2, p3];
@@ -3124,7 +3260,7 @@ fn integration_test_admin_pause_accrual_integrity() {
     let ctx = TestContext::setup();
     let stream_id =
         ctx.client()
-            .create_stream(&ctx.sender, &ctx.recipient, &2000, &2, &0, &0, &1000);
+            .create_stream(&ctx.sender, &ctx.recipient, &2000, &2, &0, &0, &1000, &0u32);
 
     // At t=100, accrued=200
     ctx.env.ledger().set_timestamp(100);
@@ -3151,7 +3287,7 @@ fn integration_test_admin_cancel_from_paused() {
     let ctx = TestContext::setup();
     let stream_id =
         ctx.client()
-            .create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
+            .create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000, &0u32);
 
     ctx.env.ledger().set_timestamp(100);
     ctx.client().pause_stream_as_admin(&stream_id);
@@ -3171,7 +3307,7 @@ fn integration_test_admin_unauthorized_pause() {
     let ctx = TestContext::setup_strict();
     let stream_id =
         ctx.client()
-            .create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
+            .create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000, &0u32);
 
     // Non-admin (recipient) tries to call admin pause
     ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
@@ -3210,6 +3346,7 @@ fn test_recipient_index_stress_and_cleanup_lifecycle() {
                 start_time: 0,
                 cliff_time: 0,
                 end_time: 1000,
+                cancellation_fee_bps: 0,
             });
         }
         ctx.client().create_streams(&ctx.sender, &streams);
@@ -3415,6 +3552,7 @@ fn create_stream_start_time_equals_now_succeeds() {
         &100u64,
         &100u64,
         &1100u64,
+        &0u32,
     );
     assert!(
         result.is_ok(),
@@ -3498,6 +3636,7 @@ fn integration_batch_withdraw_duplicate_ids_returns_structured_error() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
     );
 
     ctx.env.ledger().with_mut(|l| l.timestamp = 500);
@@ -3528,6 +3667,7 @@ fn integration_globally_paused_withdraw_returns_structured_error() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
     );
 
     ctx.env.ledger().with_mut(|l| l.timestamp = 500);
@@ -3554,6 +3694,7 @@ fn integration_globally_paused_update_rate_returns_structured_error() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
     );
 
     ctx.client().set_global_emergency_paused(&true);
@@ -3749,4 +3890,254 @@ fn test_batch_withdraw_to_contract_address_fails() {
 
     let res = ctx.client().try_batch_withdraw_to(&ctx.recipient, &params);
     assert_eq!(res, Err(Ok(fluxora_stream::ContractError::InvalidParams)));
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Cancellation Fee Tests
+// ──────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn cancel_stream_with_fee_zero_bps_no_deduction() {
+    // Verify that 0 BPS (0%) fee means no deduction from refund
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_stream_with_cancel_fee(0); // 0% fee
+    
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().cancel_stream(&stream_id);
+    
+    // With 0% fee: refund = deposit - accrued = 1000 - 500 = 500
+    assert_eq!(ctx.token.balance(&ctx.sender), 9_500);
+    assert_eq!(ctx.token.balance(&ctx.recipient), 0); // No withdrawal yet
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 500); // Accrued retained
+}
+
+#[test]
+fn cancel_stream_with_fee_1000_bps_100_percent_deduction() {
+    // Verify that 10000 BPS (100%) fee means entire refund is deducted
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_stream_with_cancel_fee(10000); // 100% fee
+    
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().cancel_stream(&stream_id);
+    
+    // With 100% fee: refund_gross = 500, fee = 500, refund_net = 0
+    // Sender gets 0 tokens refunded, contract retains 500 accrued for recipient
+    assert_eq!(ctx.token.balance(&ctx.sender), 10_000); // No refund
+    assert_eq!(ctx.token.balance(&ctx.recipient), 0);
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 500);
+}
+
+#[test]
+fn cancel_stream_with_fee_5000_bps_50_percent_deduction() {
+    // Verify 50% fee calculation
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_stream_with_cancel_fee(5000); // 50% fee (5000 bps)
+    
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().cancel_stream(&stream_id);
+    
+    // refund_gross = 500, fee = (500 * 5000) / 10000 = 250
+    // refund_net = 500 - 250 = 250
+    assert_eq!(ctx.token.balance(&ctx.sender), 9_750); // 10000 - 250 refund
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 500); // Accrued retained
+}
+
+#[test]
+fn cancel_stream_with_fee_1000_bps_10_percent_deduction() {
+    // Verify 10% fee calculation
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_stream_with_cancel_fee(1000); // 10% fee (1000 bps)
+    
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().cancel_stream(&stream_id);
+    
+    // refund_gross = 500, fee = (500 * 1000) / 10000 = 50
+    // refund_net = 500 - 50 = 450
+    assert_eq!(ctx.token.balance(&ctx.sender), 9_450); // 10000 - 450 refund
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 500);
+}
+
+#[test]
+fn cancel_stream_with_fee_before_cliff() {
+    // Verify fee is applied correctly even when cancelled before cliff
+    // At cliff=100, before cliff timestamp, accrued=0
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &100u64,  // cliff at 100
+        &1000u64,
+        &5000u32, // 50% fee
+    );
+    
+    // Cancel before cliff: accrued = 0, refund_gross = 1000
+    ctx.env.ledger().set_timestamp(50);
+    ctx.client().cancel_stream(&stream_id);
+    
+    // fee = (1000 * 5000) / 10000 = 500
+    // refund_net = 1000 - 500 = 500
+    assert_eq!(ctx.token.balance(&ctx.sender), 9_500);
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 1000);
+}
+
+#[test]
+fn cancel_stream_with_fee_recipient_accrued_never_reduced() {
+    // CRITICAL INVARIANT: Recipient's frozen accrued never reduced by fee
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_stream_with_cancel_fee(5000); // 50% fee
+    
+    // At t=600: accrued = 600
+    ctx.env.ledger().set_timestamp(600);
+    
+    // Before cancellation: verify accrued amount
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued, 600);
+    
+    // Cancel stream with fee
+    ctx.client().cancel_stream(&stream_id);
+    
+    // Get stream state
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+    
+    // Recipient withdraws accrued: should get full 600, not reduced by fee
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn, 600);
+    assert_eq!(ctx.token.balance(&ctx.recipient), 600);
+}
+
+#[test]
+fn cancel_stream_with_fee_fully_accrued_no_refund() {
+    // When stream is fully accrued, no refund, so no fee taken
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_stream_with_cancel_fee(10000); // 100% fee
+    
+    // At end time: fully accrued
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().cancel_stream(&stream_id);
+    
+    // refund_gross = 1000 - 1000 = 0, so no fee applies
+    assert_eq!(ctx.token.balance(&ctx.sender), 10_000); // No refund (as expected when fully accrued)
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 1000); // Full deposit retained for recipient
+}
+
+#[test]
+fn cancel_stream_with_fee_rounding_truncates_down() {
+    // Verify fee rounding: (amount * fee_bps) / 10000 truncates down
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_stream_with_params(1000, 1, 1000, 3333); // 33.33% fee (3333 bps)
+    
+    ctx.env.ledger().set_timestamp(333);
+    ctx.client().cancel_stream(&stream_id);
+    
+    // accrued = 333
+    // refund_gross = 1000 - 333 = 667
+    // fee = (667 * 3333) / 10000 = 2223111 / 10000 = 222 (truncated down)
+    // refund_net = 667 - 222 = 445
+    assert_eq!(ctx.token.balance(&ctx.sender), 9_445);
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 333); // accrued for recipient
+}
+
+#[test]
+fn cancel_stream_with_fee_when_refund_is_zero() {
+    // If refund is zero, fee should not apply (zero times any percentage is zero)
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_stream_with_cancel_fee(10000); // 100% fee
+    
+    // Cancel at end time (fully accrued, no refund)
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().cancel_stream(&stream_id);
+    
+    // refund_gross = 0, so no fee, no refund
+    assert_eq!(ctx.token.balance(&ctx.sender), 10_000);
+}
+
+#[test]
+fn cancel_stream_as_admin_with_fee() {
+    // Verify admin cancel also applies fee correctly
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_stream_with_cancel_fee(5000); // 50% fee
+    
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().cancel_stream_as_admin(&stream_id);
+    
+    // fee = (500 * 5000) / 10000 = 250
+    // refund_net = 500 - 250 = 250
+    assert_eq!(ctx.token.balance(&ctx.sender), 9_750);
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 500);
+}
+
+#[test]
+fn create_stream_with_invalid_fee_bps_above_10000_fails() {
+    // Verify validation: fee_bps > 10000 is rejected
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    
+    let result = ctx.client().try_create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+        &10001u32, // Invalid: > 10000
+    );
+    
+    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
+}
+
+#[test]
+fn cancel_stream_with_small_refund_and_fee_calculation() {
+    // Edge case: small refund with fee should round down correctly
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_stream_with_params(100, 1, 100, 3333); // 33.33% fee
+    
+    ctx.env.ledger().set_timestamp(99);
+    ctx.client().cancel_stream(&stream_id);
+    
+    // accrued = 99
+    // refund_gross = 100 - 99 = 1
+    // fee = (1 * 3333) / 10000 = 0 (truncated down from 0.3333)
+    // refund_net = 1 - 0 = 1
+    assert_eq!(ctx.token.balance(&ctx.sender), 9_901); // 10000 - 99 original - 0 used by stream + 1 refund
+}
+
+#[test]
+fn cancel_stream_with_fee_preserves_stream_state() {
+    // Verify CEI: state persisted before transfer with fee applied
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_stream_with_cancel_fee(5000);
+    
+    ctx.env.ledger().set_timestamp(300);
+    ctx.client().cancel_stream(&stream_id);
+    
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+    assert_eq!(state.cancelled_at, Some(300));
+    assert_eq!(state.withdrawn_amount, 0); // No withdrawal yet
+}
+
+#[test]
+fn cancel_stream_with_fee_recipient_can_still_withdraw_full_accrued() {
+    // Recipient withdraws and gets full accrued amount despite cancellation fee
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_stream_with_cancel_fee(7500); // 75% fee
+    
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().cancel_stream(&stream_id);
+    
+    // accrued at cancel = 400
+    // refund_gross = 600, fee = 450, refund_net = 150
+    let sender_after_cancel = ctx.token.balance(&ctx.sender);
+    assert_eq!(sender_after_cancel, 9_850); // 10000 - 150 refund
+    
+    // Recipient can still withdraw full accrued amount
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn, 400);
+    assert_eq!(ctx.token.balance(&ctx.recipient), 400);
 }

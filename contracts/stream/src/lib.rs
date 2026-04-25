@@ -82,7 +82,7 @@ pub const MAX_PAGE_SIZE: u64 = 100;
 ///   Code review and CI checks on this constant are the primary safeguard.
 /// Bumped to 2: `Stream` struct gained `checkpointed_amount: i128` and `checkpointed_at: u64`
 /// for safe rate-decrease support (see `decrease_rate_per_second`).
-pub const CONTRACT_VERSION: u32 = 2;
+pub const CONTRACT_VERSION: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -323,6 +323,9 @@ pub struct Stream {
     /// Ledger timestamp of the last rate change (or `start_time` on creation).
     /// `calculate_accrued` uses this as the start of the current rate epoch.
     pub checkpointed_at: u64,
+    /// Optional cancellation fee in basis points (1 bps = 0.01%, max 10000 = 100%).
+    /// Applied only to the unstreamed refund on cancellation. 0 means no fee.
+    pub cancellation_fee_bps: u32,
 }
 
 #[contracttype]
@@ -340,6 +343,9 @@ pub struct CreateStreamParams {
     pub cliff_time: u64,
     /// Ledger timestamp when accrual stops for this stream entry.
     pub end_time: u64,
+    /// Optional cancellation fee in basis points (1 bps = 0.01%, max 10000 = 100%).
+    /// Applied only to the unstreamed refund on cancellation. 0 means no fee.
+    pub cancellation_fee_bps: u32,
 }
 
 /// Parameters for creating a payment stream with relative (offset-based) times.
@@ -367,6 +373,9 @@ pub struct CreateStreamRelativeParams {
     pub cliff_delay: u64,
     /// Total duration the stream runs (in seconds) from start_time to end_time.
     pub duration: u64,
+    /// Optional cancellation fee in basis points (1 bps = 0.01%, max 10000 = 100%).
+    /// Applied only to the unstreamed refund on cancellation. 0 means no fee.
+    pub cancellation_fee_bps: u32,
 }
 
 /// Namespace for all contract storage keys.
@@ -750,6 +759,7 @@ impl FluxoraStream {
         start_time: u64,
         cliff_time: u64,
         end_time: u64,
+        cancellation_fee_bps: u32,
     ) -> Result<(), ContractError> {
         // Validate positive amounts (#35)
         if deposit_amount <= 0 || rate_per_second <= 0 {
@@ -782,6 +792,10 @@ impl FluxoraStream {
             return Err(ContractError::InsufficientDeposit);
         }
 
+        if cancellation_fee_bps > 10000 {
+            return Err(ContractError::InvalidParams);
+        }
+
         Ok(())
     }
 
@@ -795,6 +809,7 @@ impl FluxoraStream {
         start_time: u64,
         cliff_time: u64,
         end_time: u64,
+        cancellation_fee_bps: u32,
     ) -> u64 {
         let stream_id = read_stream_count(env);
         set_stream_count(env, stream_id + 1);
@@ -815,6 +830,7 @@ impl FluxoraStream {
             // first rate epoch covers [start_time, end_time] at rate_per_second.
             checkpointed_amount: 0,
             checkpointed_at: start_time,
+            cancellation_fee_bps,
         };
 
         save_stream(env, &stream);
@@ -999,6 +1015,7 @@ impl FluxoraStream {
         start_time: u64,
         cliff_time: u64,
         end_time: u64,
+        cancellation_fee_bps: u32,
     ) -> Result<u64, ContractError> {
         sender.require_auth();
         if is_global_emergency_paused(&env) || is_creation_paused(&env) {
@@ -1015,6 +1032,7 @@ impl FluxoraStream {
             start_time,
             cliff_time,
             end_time,
+            cancellation_fee_bps,
         )?;
 
         // Transfer tokens from sender to this contract (#36)
@@ -1032,6 +1050,7 @@ impl FluxoraStream {
             start_time,
             cliff_time,
             end_time,
+            cancellation_fee_bps,
         ))
     }
 
@@ -1107,6 +1126,7 @@ impl FluxoraStream {
         start_delay: u64,
         cliff_delay: u64,
         duration: u64,
+        cancellation_fee_bps: u32,
     ) -> Result<u64, ContractError> {
         let current_time = env.ledger().timestamp();
 
@@ -1131,6 +1151,7 @@ impl FluxoraStream {
             start_time,
             cliff_time,
             end_time,
+            cancellation_fee_bps,
         )
     }
 
@@ -1282,6 +1303,7 @@ impl FluxoraStream {
                 params.start_time,
                 params.cliff_time,
                 params.end_time,
+                params.cancellation_fee_bps,
             )?;
             total_deposit = total_deposit
                 .checked_add(params.deposit_amount)
@@ -1306,6 +1328,7 @@ impl FluxoraStream {
                 params.start_time,
                 params.cliff_time,
                 params.end_time,
+                params.cancellation_fee_bps,
             );
             created_ids.push_back(stream_id);
         }
@@ -1408,6 +1431,7 @@ impl FluxoraStream {
                 start_time,
                 cliff_time,
                 end_time,
+                cancellation_fee_bps: rel_params.cancellation_fee_bps,
             };
             absolute_streams.push_back(absolute_params);
         }
@@ -3195,18 +3219,29 @@ impl FluxoraStream {
             now,
         );
 
-        let refund_amount = stream
+        let refund_gross = stream
             .deposit_amount
             .checked_sub(accrued_at_cancel)
             .ok_or(ContractError::InvalidState)?;
+
+        // Apply optional cancellation fee (only from unstreamed refund, never from accrued).
+        let fee = if refund_gross > 0 && stream.cancellation_fee_bps > 0 {
+            ((refund_gross as i128)
+                .checked_mul(stream.cancellation_fee_bps as i128)
+                .unwrap_or(0)
+                / 10000) as i128
+        } else {
+            0
+        };
+        let refund_net = refund_gross.saturating_sub(fee);
 
         // CEI: persist terminal state before external token transfer.
         stream.status = StreamStatus::Cancelled;
         stream.cancelled_at = Some(now);
         save_stream(env, stream);
 
-        if refund_amount > 0 {
-            push_token(env, &stream.sender, refund_amount)?;
+        if refund_net > 0 {
+            push_token(env, &stream.sender, refund_net)?;
         }
 
         env.events().publish(

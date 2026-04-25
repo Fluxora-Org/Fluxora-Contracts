@@ -39,6 +39,31 @@ Refund invariant for reviewers:
 
 where `accrued_at(cancelled_at)` is frozen for all future reads after cancellation.
 
+#### Optional Cancellation Fee (Security Properties)
+
+If `cancellation_fee_bps > 0`, the protocol applies a fee only to the unstreamed refund:
+
+1. Fee calculation: `fee = (refund_amount × cancellation_fee_bps) / 10000` (truncated down)
+2. Sender refund: `refund_amount - fee`
+3. **CRITICAL INVARIANT**: The recipient's accrued amount is **never** affected by the fee.
+   - The recipient always receives `calculate_accrued(cancelled_at)` tokens, regardless of the fee.
+   - Accrued tokens remain in the contract until the recipient calls `withdraw()`.
+
+Security properties:
+- **Fee only from unstreamed**: Fee is deducted from `sender_refund`, not from `recipient_accrued`.
+- **Recipient safety**: `fee_bps` parameter cannot reduce the recipient's withdrawable balance.
+- **No accrued truncation**: Accrual is independent of fee; `calculate_accrued` always returns the same value before and after cancellation.
+- **Atomicity**: Fee is applied before any token transfer (CEI ordering).
+- **Rounding safety**: Fee truncates down to prevent dust accumulation and ensure sender never receives more than allowed.
+- **Validation**: `fee_bps` is validated to be in range `[0, 10000]`; values outside this range are rejected with `InvalidParams`.
+
+Auditor checklist:
+- [ ] Confirm `fee = (refund × fee_bps) / 10000` truncates down (no rounding up).
+- [ ] Verify accrued calculation is independent of `cancellation_fee_bps`.
+- [ ] Confirm recipient's `withdraw` receives full accrued, not reduced by fee.
+- [ ] Check that fee is never applied to accrued amount.
+- [ ] Verify state is persisted before token transfers (CEI).
+
 ### `top_up_stream`
 
 After authorization and amount validation, the contract:
