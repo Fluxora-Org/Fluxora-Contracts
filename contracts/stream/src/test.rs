@@ -10759,15 +10759,6 @@ fn test_update_rate_per_second_emits_event() {
 
     // Verify event was emitted.
     let events = ctx.env.events().all();
-    let rate_update_events: std::vec::Vec<_> = events
-        .iter()
-        .filter(|e| {
-            if e.0 != ctx.contract_id { return false; }
-            let topics = &e.1;
-            if topics.len() < 2 { return false; }
-            let t0 = Symbol::from_val(&ctx.env, &topics.get(0).unwrap());
-            let t1: u64 = topics.get(1).unwrap().into_val(&ctx.env);
-            t0 == Symbol::new(&ctx.env, "rate_upd") && t1 == stream_id
     let rate_update_events_count = events
         .into_iter()
         .filter(|e| {
@@ -17125,7 +17116,7 @@ mod negative_pause_resume_auth {
         let ctx = TestContext::setup();
         ctx.env.ledger().set_timestamp(0);
         let stream_id = ctx.client().create_stream(
-            &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+            &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000, &0, &None,
         );
         (ctx, stream_id)
     }
@@ -17170,7 +17161,7 @@ mod negative_pause_resume_auth {
         }]);
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            ctx.client().pause_stream(&stream_id);
+            ctx.client().pause_stream(&stream_id, &crate::PauseReason::Operational);
         }));
         assert!(result.is_err(), "recipient must not be able to pause");
         assert_no_side_effects(&ctx, stream_id, StreamStatus::Active, events_before);
@@ -17197,7 +17188,7 @@ mod negative_pause_resume_auth {
         }]);
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            ctx.client().pause_stream(&stream_id);
+            ctx.client().pause_stream(&stream_id, &crate::PauseReason::Operational);
         }));
         assert!(result.is_err(), "third party must not be able to pause");
         assert_no_side_effects(&ctx, stream_id, StreamStatus::Active, events_before);
@@ -17224,7 +17215,7 @@ mod negative_pause_resume_auth {
         }]);
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            ctx.client().pause_stream(&stream_id);
+            ctx.client().pause_stream(&stream_id, &crate::PauseReason::Operational);
         }));
         assert!(result.is_err(), "admin must not use sender pause path");
         assert_no_side_effects(&ctx, stream_id, StreamStatus::Active, events_before);
@@ -17240,7 +17231,7 @@ mod negative_pause_resume_auth {
         // First pause the stream as sender
         ctx.env.mock_all_auths();
         ctx.env.ledger().set_timestamp(100);
-        ctx.client().pause_stream(&stream_id);
+        ctx.client().pause_stream(&stream_id, &crate::PauseReason::Operational);
         let events_before = ctx.env.events().all().len();
 
         ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
@@ -17269,7 +17260,7 @@ mod negative_pause_resume_auth {
         let (ctx, stream_id) = setup_active_stream();
         ctx.env.mock_all_auths();
         ctx.env.ledger().set_timestamp(100);
-        ctx.client().pause_stream(&stream_id);
+        ctx.client().pause_stream(&stream_id, &crate::PauseReason::Operational);
         let events_before = ctx.env.events().all().len();
 
         let third_party = soroban_sdk::Address::generate(&ctx.env);
@@ -17299,7 +17290,7 @@ mod negative_pause_resume_auth {
         let (ctx, stream_id) = setup_active_stream();
         ctx.env.mock_all_auths();
         ctx.env.ledger().set_timestamp(100);
-        ctx.client().pause_stream(&stream_id);
+        ctx.client().pause_stream(&stream_id, &crate::PauseReason::Operational);
         let events_before = ctx.env.events().all().len();
 
         ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
@@ -17339,7 +17330,7 @@ mod negative_pause_resume_auth {
         }]);
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            ctx.client().pause_stream_as_admin(&stream_id);
+            ctx.client().pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
         }));
         assert!(result.is_err(), "sender must not use admin pause path");
         assert_no_side_effects(&ctx, stream_id, StreamStatus::Active, events_before);
@@ -17365,7 +17356,7 @@ mod negative_pause_resume_auth {
         }]);
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            ctx.client().pause_stream_as_admin(&stream_id);
+            ctx.client().pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
         }));
         assert!(result.is_err(), "recipient must not use admin pause path");
         assert_no_side_effects(&ctx, stream_id, StreamStatus::Active, events_before);
@@ -17380,7 +17371,7 @@ mod negative_pause_resume_auth {
         let (ctx, stream_id) = setup_active_stream();
         ctx.env.mock_all_auths();
         ctx.env.ledger().set_timestamp(100);
-        ctx.client().pause_stream(&stream_id);
+        ctx.client().pause_stream(&stream_id, &crate::PauseReason::Operational);
         let events_before = ctx.env.events().all().len();
 
         ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
@@ -17409,7 +17400,7 @@ mod negative_pause_resume_auth {
         let (ctx, stream_id) = setup_active_stream();
         ctx.env.mock_all_auths();
         ctx.env.ledger().set_timestamp(100);
-        ctx.client().pause_stream(&stream_id);
+        ctx.client().pause_stream(&stream_id, &crate::PauseReason::Operational);
         let events_before = ctx.env.events().all().len();
 
         ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
@@ -17438,7 +17429,7 @@ mod negative_pause_resume_auth {
         let (ctx, stream_id) = setup_active_stream();
         ctx.env.mock_all_auths();
         ctx.env.ledger().set_timestamp(100);
-        ctx.client().pause_stream(&stream_id);
+        ctx.client().pause_stream(&stream_id, &crate::PauseReason::Operational);
         assert_eq!(ctx.client().get_stream_state(&stream_id).status, StreamStatus::Paused);
         ctx.client().resume_stream(&stream_id);
         assert_eq!(ctx.client().get_stream_state(&stream_id).status, StreamStatus::Active);
@@ -17448,14 +17439,14 @@ mod negative_pause_resume_auth {
     fn admin_can_pause_and_resume_via_admin_paths() {
         let (ctx, stream_id) = setup_active_stream();
         ctx.env.mock_all_auths();
-        ctx.client().pause_stream_as_admin(&stream_id);
+        ctx.client().pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
         assert_eq!(ctx.client().get_stream_state(&stream_id).status, StreamStatus::Paused);
         ctx.client().resume_stream_as_admin(&stream_id);
         assert_eq!(ctx.client().get_stream_state(&stream_id).status, StreamStatus::Active);
     }
 
 } // mod negative_pause_resume_auth
-=======
+
 // i128 boundary streams: near-max rate/deposit scenarios
 //
 // Scope: systematic evidence that the contract handles i128-scale deposits and
@@ -19557,4 +19548,365 @@ fn test_withdraw_to_valid_after_rejected_destination_succeeds() {
     assert_eq!(ctx.token().balance(&valid_dest), 500);
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.withdrawn_amount, 500);
+}
+
+// ---------------------------------------------------------------------------
+// Tests — time-terminal gating for pause/resume (ledger.timestamp >= end_time)
+//
+// Covers all four entrypoints across Active and Paused streams at the three
+// critical boundary timestamps:
+//   T = end_time - 1  → still live, pause/resume must succeed
+//   T = end_time      → time-terminal, pause/resume must return StreamTerminalState
+//   T = end_time + 1  → past end, pause/resume must return StreamTerminalState
+//
+// Withdrawal is verified to remain allowed at/past end_time regardless of
+// stored status (Active or Paused).
+// ---------------------------------------------------------------------------
+
+// Helper: create a stream with start=0, end=1000, rate=1, deposit=1000.
+fn make_stream_end_1000(ctx: &TestContext) -> u64 {
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+        &0,
+        &None,
+    )
+}
+
+// ── pause_stream: Active stream ──────────────────────────────────────────────
+
+/// T = end_time - 1: Active stream is still live; pause must succeed.
+#[test]
+fn test_pause_active_one_before_end_time_succeeds() {
+    let ctx = TestContext::setup();
+    let stream_id = make_stream_end_1000(&ctx);
+
+    ctx.env.ledger().set_timestamp(999); // end_time - 1
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
+
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).status,
+        StreamStatus::Paused,
+        "pause at end_time-1 must succeed"
+    );
+}
+
+/// T = end_time: Active stream is time-terminal; pause must return StreamTerminalState.
+#[test]
+fn test_pause_active_at_end_time_returns_terminal_state() {
+    let ctx = TestContext::setup();
+    let stream_id = make_stream_end_1000(&ctx);
+
+    ctx.env.ledger().set_timestamp(1000); // end_time
+    let result = ctx
+        .client()
+        .try_pause_stream(&stream_id, &crate::PauseReason::Operational);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::StreamTerminalState)),
+        "pause at end_time must return StreamTerminalState"
+    );
+}
+
+/// T = end_time + 1: Active stream is past end; pause must return StreamTerminalState.
+#[test]
+fn test_pause_active_one_after_end_time_returns_terminal_state() {
+    let ctx = TestContext::setup();
+    let stream_id = make_stream_end_1000(&ctx);
+
+    ctx.env.ledger().set_timestamp(1001); // end_time + 1
+    let result = ctx
+        .client()
+        .try_pause_stream(&stream_id, &crate::PauseReason::Operational);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::StreamTerminalState)),
+        "pause at end_time+1 must return StreamTerminalState"
+    );
+}
+
+// ── resume_stream: Paused stream ─────────────────────────────────────────────
+
+/// T = end_time - 1: Paused stream is still live; resume must succeed.
+#[test]
+fn test_resume_paused_one_before_end_time_succeeds() {
+    let ctx = TestContext::setup();
+    let stream_id = make_stream_end_1000(&ctx);
+
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
+
+    ctx.env.ledger().set_timestamp(999); // end_time - 1
+    ctx.client().resume_stream(&stream_id);
+
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).status,
+        StreamStatus::Active,
+        "resume at end_time-1 must succeed"
+    );
+}
+
+/// T = end_time: Paused stream is time-terminal; resume must return StreamTerminalState.
+#[test]
+fn test_resume_paused_at_end_time_returns_terminal_state() {
+    let ctx = TestContext::setup();
+    let stream_id = make_stream_end_1000(&ctx);
+
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
+
+    ctx.env.ledger().set_timestamp(1000); // end_time
+    let result = ctx.client().try_resume_stream(&stream_id);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::StreamTerminalState)),
+        "resume at end_time must return StreamTerminalState"
+    );
+}
+
+/// T = end_time + 1: Paused stream is past end; resume must return StreamTerminalState.
+#[test]
+fn test_resume_paused_one_after_end_time_returns_terminal_state() {
+    let ctx = TestContext::setup();
+    let stream_id = make_stream_end_1000(&ctx);
+
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
+
+    ctx.env.ledger().set_timestamp(1001); // end_time + 1
+    let result = ctx.client().try_resume_stream(&stream_id);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::StreamTerminalState)),
+        "resume at end_time+1 must return StreamTerminalState"
+    );
+}
+
+// ── pause_stream_as_admin: Active stream ─────────────────────────────────────
+
+/// T = end_time - 1: Admin pause on Active stream must succeed.
+#[test]
+fn test_admin_pause_active_one_before_end_time_succeeds() {
+    let ctx = TestContext::setup();
+    let stream_id = make_stream_end_1000(&ctx);
+
+    ctx.env.ledger().set_timestamp(999); // end_time - 1
+    ctx.client()
+        .pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
+
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).status,
+        StreamStatus::Paused,
+        "admin pause at end_time-1 must succeed"
+    );
+}
+
+/// T = end_time: Admin pause on Active stream must return StreamTerminalState.
+#[test]
+fn test_admin_pause_active_at_end_time_returns_terminal_state() {
+    let ctx = TestContext::setup();
+    let stream_id = make_stream_end_1000(&ctx);
+
+    ctx.env.ledger().set_timestamp(1000); // end_time
+    let result = ctx
+        .client()
+        .try_pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::StreamTerminalState)),
+        "admin pause at end_time must return StreamTerminalState"
+    );
+}
+
+/// T = end_time + 1: Admin pause on Active stream must return StreamTerminalState.
+#[test]
+fn test_admin_pause_active_one_after_end_time_returns_terminal_state() {
+    let ctx = TestContext::setup();
+    let stream_id = make_stream_end_1000(&ctx);
+
+    ctx.env.ledger().set_timestamp(1001); // end_time + 1
+    let result = ctx
+        .client()
+        .try_pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::StreamTerminalState)),
+        "admin pause at end_time+1 must return StreamTerminalState"
+    );
+}
+
+// ── resume_stream_as_admin: Paused stream ────────────────────────────────────
+
+/// T = end_time - 1: Admin resume on Paused stream must succeed.
+#[test]
+fn test_admin_resume_paused_one_before_end_time_succeeds() {
+    let ctx = TestContext::setup();
+    let stream_id = make_stream_end_1000(&ctx);
+
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
+
+    ctx.env.ledger().set_timestamp(999); // end_time - 1
+    ctx.client().resume_stream_as_admin(&stream_id);
+
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).status,
+        StreamStatus::Active,
+        "admin resume at end_time-1 must succeed"
+    );
+}
+
+/// T = end_time: Admin resume on Paused stream must return StreamTerminalState.
+#[test]
+fn test_admin_resume_paused_at_end_time_returns_terminal_state() {
+    let ctx = TestContext::setup();
+    let stream_id = make_stream_end_1000(&ctx);
+
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
+
+    ctx.env.ledger().set_timestamp(1000); // end_time
+    let result = ctx.client().try_resume_stream_as_admin(&stream_id);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::StreamTerminalState)),
+        "admin resume at end_time must return StreamTerminalState"
+    );
+}
+
+/// T = end_time + 1: Admin resume on Paused stream must return StreamTerminalState.
+#[test]
+fn test_admin_resume_paused_one_after_end_time_returns_terminal_state() {
+    let ctx = TestContext::setup();
+    let stream_id = make_stream_end_1000(&ctx);
+
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
+
+    ctx.env.ledger().set_timestamp(1001); // end_time + 1
+    let result = ctx.client().try_resume_stream_as_admin(&stream_id);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::StreamTerminalState)),
+        "admin resume at end_time+1 must return StreamTerminalState"
+    );
+}
+
+// ── Withdrawal remains allowed at/past end_time ──────────────────────────────
+
+/// Active stream at end_time: withdrawal must succeed (time-terminal allows withdrawal).
+#[test]
+fn test_withdraw_active_at_end_time_succeeds() {
+    let ctx = TestContext::setup();
+    let stream_id = make_stream_end_1000(&ctx);
+
+    ctx.env.ledger().set_timestamp(1000); // end_time
+    let amount = ctx.client().withdraw(&stream_id);
+    assert_eq!(amount, 1000, "full deposit must be withdrawable at end_time");
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).status,
+        StreamStatus::Completed
+    );
+}
+
+/// Paused stream at end_time: withdrawal must succeed despite Paused status.
+#[test]
+fn test_withdraw_paused_at_end_time_succeeds() {
+    let ctx = TestContext::setup();
+    let stream_id = make_stream_end_1000(&ctx);
+
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
+
+    ctx.env.ledger().set_timestamp(1000); // end_time
+    let amount = ctx.client().withdraw(&stream_id);
+    assert_eq!(
+        amount, 1000,
+        "paused stream at end_time must allow full withdrawal"
+    );
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).status,
+        StreamStatus::Completed
+    );
+}
+
+/// Paused stream past end_time: withdrawal must succeed.
+#[test]
+fn test_withdraw_paused_past_end_time_succeeds() {
+    let ctx = TestContext::setup();
+    let stream_id = make_stream_end_1000(&ctx);
+
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
+
+    ctx.env.ledger().set_timestamp(1001); // end_time + 1
+    let amount = ctx.client().withdraw(&stream_id);
+    assert_eq!(
+        amount, 1000,
+        "paused stream past end_time must allow full withdrawal"
+    );
+}
+
+// ── No state mutation on rejected pause/resume ───────────────────────────────
+
+/// A rejected pause at end_time must leave stream state unchanged.
+#[test]
+fn test_pause_at_end_time_leaves_state_unchanged() {
+    let ctx = TestContext::setup();
+    let stream_id = make_stream_end_1000(&ctx);
+
+    ctx.env.ledger().set_timestamp(500);
+    let state_before = ctx.client().get_stream_state(&stream_id);
+
+    ctx.env.ledger().set_timestamp(1000);
+    let _ = ctx
+        .client()
+        .try_pause_stream(&stream_id, &crate::PauseReason::Operational);
+
+    // Status must still be Active (unchanged)
+    let state_after = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(
+        state_after.status, state_before.status,
+        "failed pause must not mutate stream status"
+    );
+    assert_eq!(
+        state_after.end_time, state_before.end_time,
+        "failed pause must not mutate end_time"
+    );
+}
+
+/// A rejected resume at end_time must leave stream state unchanged.
+#[test]
+fn test_resume_at_end_time_leaves_state_unchanged() {
+    let ctx = TestContext::setup();
+    let stream_id = make_stream_end_1000(&ctx);
+
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client()
+        .pause_stream(&stream_id, &crate::PauseReason::Operational);
+
+    ctx.env.ledger().set_timestamp(1000);
+    let _ = ctx.client().try_resume_stream(&stream_id);
+
+    // Status must still be Paused (unchanged)
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).status,
+        StreamStatus::Paused,
+        "failed resume must not mutate stream status"
+    );
 }
