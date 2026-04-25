@@ -13,6 +13,19 @@ All storage keys are defined in the `DataKey` enum:
 ```rust
 #[contracttype]
 pub enum DataKey {
+    Config,                    // Instance storage for global settings (admin/token).
+    NextStreamId,              // Instance storage for the auto-incrementing ID counter.
+    Stream(u64),               // Persistent storage for individual stream data (O(1) lookup).
+    RecipientStreams(Address), // Persistent storage for recipient stream index (sorted by stream_id).
+    GlobalPaused,              // Instance storage: emergency pause flag (bool).
+    WithdrawNonce(Address),    // Persistent storage: per-recipient nonce for delegated-withdraw replay protection.
+}
+```
+
+> **Append-only rule**: new variants are always appended at the end to avoid shifting
+> existing discriminant values, which would corrupt live storage on mainnet.
+
+## Storage Types and Usage
     Config,                    // discriminant 0 — instance
     NextStreamId,              // discriminant 1 — instance
     Stream(u64),               // discriminant 2 — persistent
@@ -51,6 +64,13 @@ pub enum DataKey {
 
 ### Rules (must be followed on every PR that touches `DataKey`)
 
+Persistent storage is used for individual stream records and per-recipient nonces:
+
+| Key Pattern | Type | Description | Set By | Modified By |
+|-------------|------|-------------|--------|-------------|
+| `Stream(stream_id)` | `Stream` struct | Complete stream state including participants, amounts, timing, and status | `create_stream()` | `pause_stream()`, `resume_stream()`, `cancel_stream()`, `withdraw()` |
+| `RecipientStreams(address)` | `Vec<u64>` | Sorted list of stream IDs for a recipient | `create_stream()` | `close_completed_stream()` |
+| `WithdrawNonce(address)` | `u64` | Monotonically increasing nonce for delegated-withdraw replay protection | `delegated_withdraw()` (first call) | `delegated_withdraw()` (incremented on each successful withdrawal that moves tokens) |
 1. **Never reorder** existing variants. The discriminant table above is immutable for the lifetime of any deployed instance.
 2. **Never remove** a variant that has ever been written to a live network. Mark it `#[deprecated]` in a doc comment and stop writing to it; do not delete it.
 3. **Always append** new variants at the end of the enum.
