@@ -47,6 +47,7 @@ fn create_stream_emits_correct_event() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
     );
 
     let events = ctx.env.events().all();
@@ -375,6 +376,7 @@ fn cancel_at_exact_start_time_refunds_full_deposit() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
     );
 
     // At exact start time, nothing is accrued yet
@@ -445,6 +447,8 @@ fn create_stream_max_deposit_fails() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
+        &0u32,
     );
 
     assert!(
@@ -467,6 +471,8 @@ fn create_stream_max_rate_fails() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
+        &0u32,
     );
 
     assert!(

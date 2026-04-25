@@ -6,8 +6,65 @@ use fluxora_stream::{
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    vec, Address, Env,
+    vec, Address, Env, Error as SorobanError, InvokeError,
 };
+
+struct CompatClient<'a>(FluxoraStreamClient<'a>);
+
+impl<'a> core::ops::Deref for CompatClient<'a> {
+    type Target = FluxoraStreamClient<'a>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl CompatClient<'_> {
+    #[allow(clippy::too_many_arguments)]
+    fn create_stream_relative(
+        &self,
+        sender: &Address,
+        recipient: &Address,
+        deposit_amount: &i128,
+        rate_per_second: &i128,
+        start_delay: &u64,
+        cliff_delay: &u64,
+        duration: &u64,
+    ) -> u64 {
+        self.0.create_stream_relative(
+            sender,
+            recipient,
+            deposit_amount,
+            rate_per_second,
+            start_delay,
+            cliff_delay,
+            duration,
+            &0u32,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_create_stream_relative(
+        &self,
+        sender: &Address,
+        recipient: &Address,
+        deposit_amount: &i128,
+        rate_per_second: &i128,
+        start_delay: &u64,
+        cliff_delay: &u64,
+        duration: &u64,
+    ) -> Result<Result<u64, SorobanError>, Result<ContractError, InvokeError>> {
+        self.0.try_create_stream_relative(
+            sender,
+            recipient,
+            deposit_amount,
+            rate_per_second,
+            start_delay,
+            cliff_delay,
+            duration,
+            &0u32,
+        )
+    }
+}
 
 struct TestContext<'a> {
     env: Env,
@@ -54,8 +111,8 @@ impl<'a> TestContext<'a> {
         }
     }
 
-    fn client(&self) -> FluxoraStreamClient<'_> {
-        FluxoraStreamClient::new(&self.env, &self.contract_id)
+    fn client(&self) -> CompatClient<'_> {
+        CompatClient(FluxoraStreamClient::new(&self.env, &self.contract_id))
     }
 }
 
@@ -292,12 +349,13 @@ fn create_streams_relative_single_entry() {
     let params = vec![
         &ctx.env,
         CreateStreamRelativeParams {
-            recipient: ctx.recipient,
+            recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
             rate_per_second: 1,
             start_delay: 100,
             cliff_delay: 200,
             duration: 1000,
+            cancellation_fee_bps: 0,
         },
     ];
 
@@ -321,20 +379,22 @@ fn create_streams_relative_multiple_entries_sequential_ids() {
     let params = vec![
         &ctx.env,
         CreateStreamRelativeParams {
-            recipient: ctx.recipient,
+            recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
             rate_per_second: 1,
             start_delay: 0,
             cliff_delay: 0,
             duration: 1000,
+            cancellation_fee_bps: 0,
         },
         CreateStreamRelativeParams {
-            recipient: recipient2,
+            recipient: recipient2.clone(),
             deposit_amount: 2000,
             rate_per_second: 2,
             start_delay: 100,
             cliff_delay: 100,
             duration: 2000,
+            cancellation_fee_bps: 0,
         },
     ];
 
@@ -384,20 +444,22 @@ fn create_streams_relative_invalid_entry_fails_atomically() {
     let params = vec![
         &ctx.env,
         CreateStreamRelativeParams {
-            recipient: ctx.recipient,
+            recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
             rate_per_second: 1,
             start_delay: 0,
             cliff_delay: 0,
             duration: 1000,
+            cancellation_fee_bps: 0,
         },
         CreateStreamRelativeParams {
-            recipient: recipient2,
+            recipient: recipient2.clone(),
             deposit_amount: 500,
             rate_per_second: 2,
             start_delay: 0,
             cliff_delay: 0,
             duration: 0, // INVALID: duration = 0
+            cancellation_fee_bps: 0,
         },
     ];
 
@@ -430,6 +492,7 @@ fn create_streams_relative_diverse_schedules() {
             start_delay: 0,
             cliff_delay: 0,
             duration: 1000,
+            cancellation_fee_bps: 0,
         },
         CreateStreamRelativeParams {
             recipient: r2,
@@ -438,6 +501,7 @@ fn create_streams_relative_diverse_schedules() {
             start_delay: 500,
             cliff_delay: 1000,
             duration: 2000,
+            cancellation_fee_bps: 0,
         },
         CreateStreamRelativeParams {
             recipient: r3,
@@ -446,6 +510,7 @@ fn create_streams_relative_diverse_schedules() {
             start_delay: 1000,
             cliff_delay: 2000,
             duration: 3000,
+            cancellation_fee_bps: 0,
         },
     ];
 
@@ -490,6 +555,7 @@ fn create_streams_relative_independent_cliff_times() {
             start_delay: 0,
             cliff_delay: 0, // cliff at current time
             duration: 1000,
+            cancellation_fee_bps: 0,
         },
         CreateStreamRelativeParams {
             recipient: r2,
@@ -498,6 +564,7 @@ fn create_streams_relative_independent_cliff_times() {
             start_delay: 500,
             cliff_delay: 1500, // cliff 500 seconds after start
             duration: 1000,
+            cancellation_fee_bps: 0,
         },
     ];
 
@@ -529,6 +596,7 @@ fn create_streams_relative_batch_overflow_detection() {
             start_delay: u64::MAX, // overflow
             cliff_delay: 0,
             duration: 1000,
+            cancellation_fee_bps: 0,
         },
     ];
 
@@ -556,6 +624,7 @@ fn create_streams_relative_batch_validates_amounts() {
             start_delay: 0,
             cliff_delay: 0,
             duration: 1000,
+            cancellation_fee_bps: 0,
         },
         CreateStreamRelativeParams {
             recipient: r2,
@@ -564,6 +633,7 @@ fn create_streams_relative_batch_validates_amounts() {
             start_delay: 0,
             cliff_delay: 0,
             duration: 1000,
+            cancellation_fee_bps: 0,
         },
     ];
 

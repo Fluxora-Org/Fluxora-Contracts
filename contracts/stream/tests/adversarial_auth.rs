@@ -31,6 +31,45 @@ use soroban_sdk::{
     Address, Env, IntoVal,
 };
 
+trait CreateStreamCompat {
+    #[allow(clippy::too_many_arguments)]
+    fn create_stream(
+        &self,
+        sender: &Address,
+        recipient: &Address,
+        deposit_amount: &i128,
+        rate_per_second: &i128,
+        start_time: &u64,
+        cliff_time: &u64,
+        end_time: &u64,
+    ) -> u64;
+}
+
+impl CreateStreamCompat for FluxoraStreamClient<'_> {
+    fn create_stream(
+        &self,
+        sender: &Address,
+        recipient: &Address,
+        deposit_amount: &i128,
+        rate_per_second: &i128,
+        start_time: &u64,
+        cliff_time: &u64,
+        end_time: &u64,
+    ) -> u64 {
+        FluxoraStreamClient::create_stream(
+            self,
+            sender,
+            recipient,
+            deposit_amount,
+            rate_per_second,
+            start_time,
+            cliff_time,
+            end_time,
+            &0u32,
+        )
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Shared test harness (strict — no mock_all_auths)
 // ---------------------------------------------------------------------------
@@ -128,6 +167,7 @@ impl<'a> Ctx<'a> {
             &0u64,
             &0u64,
             &1000u64,
+        &0u32,
         )
     }
 
@@ -197,6 +237,7 @@ fn adversarial_create_stream_stranger_cannot_impersonate_sender() {
             &0u64,
             &0u64,
             &1000u64,
+        &0u32,
         );
     }));
 
@@ -752,6 +793,7 @@ fn adversarial_batch_withdraw_cross_stream_recipient_rejected() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
     );
 
     ctx.env.ledger().set_timestamp(500);
@@ -1130,6 +1172,7 @@ fn adversarial_set_contract_paused_stranger_rejected() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
     );
     assert_eq!(
         ctx.client().get_stream_state(&id).status,
@@ -1299,6 +1342,7 @@ fn adversarial_extend_end_time_stranger_rejected_no_side_effects() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
     );
 
     let stranger = Address::generate(&ctx.env);
@@ -1392,6 +1436,7 @@ fn adversarial_extend_end_time_recipient_rejected() {
         &0u64,
         &0u64,
         &1000u64,
+        &0u32,
     );
 
     let state_before = ctx.client().get_stream_state(&stream_id);
