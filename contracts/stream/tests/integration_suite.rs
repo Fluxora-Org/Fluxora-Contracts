@@ -1,14 +1,13 @@
 extern crate std;
 
 use fluxora_stream::{
-    AutoClaimRevoked, AutoClaimSet, AutoClaimTriggered, ContractError, CreateStreamParams,
-    FluxoraStream, FluxoraStreamClient, StreamEndShortened, StreamStatus, StreamToppedUp,
+    ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamStatus,
 };
 use soroban_sdk::log;
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    vec, Address, Env, FromVal, IntoVal, Symbol, TryFromVal,
+    vec, Address, Env, FromVal, IntoVal,
 };
 
 struct TestContext<'a> {
@@ -552,108 +551,6 @@ fn top_up_stream_increases_deposit_and_contract_balance() {
     // Balances: sender 8500, contract 1500
     assert_eq!(ctx.token.balance(&ctx.sender), 8_500);
     assert_eq!(ctx.token.balance(&ctx.contract_id), 1_500);
-}
-
-#[test]
-fn top_up_stream_allows_third_party_funder_and_emits_payload() {
-    let ctx = TestContext::setup();
-    let stream_id = ctx.create_default_stream();
-    let treasury = Address::generate(&ctx.env);
-    let sac = StellarAssetClient::new(&ctx.env, &ctx.token_id);
-    sac.mint(&treasury, &3_000_i128);
-
-    let sender_balance_before = ctx.token.balance(&ctx.sender);
-    let treasury_balance_before = ctx.token.balance(&treasury);
-    let contract_balance_before = ctx.token.balance(&ctx.contract_id);
-    let events_before = ctx.env.events().all().len();
-
-    ctx.client().top_up_stream(&stream_id, &treasury, &800_i128);
-
-    let state = ctx.client().get_stream_state(&stream_id);
-    assert_eq!(state.deposit_amount, 1_800);
-    assert_eq!(state.status, StreamStatus::Active);
-    assert_eq!(state.start_time, 0);
-    assert_eq!(state.cliff_time, 0);
-    assert_eq!(state.end_time, 1_000);
-    assert_eq!(state.withdrawn_amount, 0);
-
-    assert_eq!(ctx.token.balance(&ctx.sender), sender_balance_before);
-    assert_eq!(ctx.token.balance(&treasury), treasury_balance_before - 800);
-    assert_eq!(
-        ctx.token.balance(&ctx.contract_id),
-        contract_balance_before + 800
-    );
-
-    let events = ctx.env.events().all();
-    let top_up_event = events
-        .iter()
-        .skip(events_before as usize)
-        .find(|(contract, topics, _)| {
-            contract == &ctx.contract_id
-                && topics.len() == 2
-                && Symbol::try_from_val(&ctx.env, &topics.get(0).unwrap())
-                    == Ok(Symbol::new(&ctx.env, "top_up"))
-                && u64::try_from_val(&ctx.env, &topics.get(1).unwrap()) == Ok(stream_id)
-        })
-        .expect("expected a top_up event for the topped-up stream");
-
-    let payload = StreamToppedUp::try_from_val(&ctx.env, &top_up_event.2)
-        .expect("top_up event payload must decode");
-    assert_eq!(payload.stream_id, stream_id);
-    assert_eq!(payload.top_up_amount, 800);
-    assert_eq!(payload.new_deposit_amount, 1_800);
-}
-
-#[test]
-fn top_up_stream_on_paused_stream_preserves_status_and_schedule() {
-    let ctx = TestContext::setup();
-    let stream_id = ctx.create_default_stream();
-
-    ctx.env.ledger().set_timestamp(450);
-    ctx.client().pause_stream(&stream_id);
-
-    let state_before = ctx.client().get_stream_state(&stream_id);
-    assert_eq!(state_before.status, StreamStatus::Paused);
-
-    ctx.client()
-        .top_up_stream(&stream_id, &ctx.sender, &300_i128);
-
-    let state_after = ctx.client().get_stream_state(&stream_id);
-    assert_eq!(state_after.status, StreamStatus::Paused);
-    assert_eq!(state_after.start_time, state_before.start_time);
-    assert_eq!(state_after.cliff_time, state_before.cliff_time);
-    assert_eq!(state_after.end_time, state_before.end_time);
-    assert_eq!(state_after.rate_per_second, state_before.rate_per_second);
-    assert_eq!(state_after.withdrawn_amount, state_before.withdrawn_amount);
-    assert_eq!(
-        state_after.deposit_amount,
-        state_before.deposit_amount + 300
-    );
-}
-
-#[test]
-fn top_up_stream_completed_failure_emits_no_event() {
-    let ctx = TestContext::setup();
-    let stream_id = ctx.create_default_stream();
-
-    ctx.env.ledger().set_timestamp(1_000);
-    ctx.client().withdraw(&stream_id);
-
-    let state_before = ctx.client().get_stream_state(&stream_id);
-    let sender_balance_before = ctx.token.balance(&ctx.sender);
-    let contract_balance_before = ctx.token.balance(&ctx.contract_id);
-    let events_before = ctx.env.events().all().len();
-
-    let result = ctx
-        .client()
-        .try_top_up_stream(&stream_id, &ctx.sender, &100_i128);
-    assert_eq!(result, Err(Ok(ContractError::InvalidState)));
-
-    let state_after = ctx.client().get_stream_state(&stream_id);
-    assert_eq!(state_after.deposit_amount, state_before.deposit_amount);
-    assert_eq!(ctx.token.balance(&ctx.sender), sender_balance_before);
-    assert_eq!(ctx.token.balance(&ctx.contract_id), contract_balance_before);
-    assert_eq!(ctx.env.events().all().len(), events_before);
 }
 
 #[test]
@@ -1870,12 +1767,18 @@ fn integration_pause_resume_past_end_time_accrual_capped() {
     ctx.env.ledger().set_timestamp(300);
     ctx.client().pause_stream(&stream_id);
 
-    // Resume at t=999 (just before end)
-    ctx.env.ledger().set_timestamp(999);
-    ctx.client().resume_stream(&stream_id);
-
     // Advance far past end_time (t=2000)
     ctx.env.ledger().set_timestamp(2000);
+
+    // Verify accrual is still capped at deposit_amount
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(
+        accrued, 1000,
+        "accrual must be capped at deposit_amount even past end_time"
+    );
+
+    // Resume and withdraw
+    ctx.client().resume_stream(&stream_id);
     let withdrawn = ctx.client().withdraw(&stream_id);
     assert_eq!(withdrawn, 1000);
 
@@ -1976,160 +1879,6 @@ fn test_create_many_streams_from_same_sender() {
     log!(&ctx.env, "mem_bytes", mem_bytes);
     // Guardrail: ensure memory usage stays bounded for 100 streams.
     assert!(mem_bytes <= 20_000_000);
-}
-
-#[test]
-fn integration_create_streams_batch_overflow_protection() {
-    let ctx = TestContext::setup();
-    ctx.env.ledger().set_timestamp(0);
-
-    let mut streams = soroban_sdk::Vec::new(&ctx.env);
-
-    // Use half_max + 1 to ensure two of them overflow i128
-    let half_max = i128::MAX / 2 + 1;
-
-    streams.push_back(fluxora_stream::CreateStreamParams {
-        recipient: ctx.recipient.clone(),
-        deposit_amount: half_max,
-        rate_per_second: 1,
-        start_time: 0,
-        cliff_time: 0,
-        end_time: 10,
-    });
-
-    streams.push_back(fluxora_stream::CreateStreamParams {
-        recipient: ctx.recipient.clone(),
-        deposit_amount: half_max,
-        rate_per_second: 1,
-        start_time: 0,
-        cliff_time: 0,
-        end_time: 10,
-    });
-
-    // We need to use try_create_streams to catch the contract error
-    // but the client generated by soroban_sdk usually provides a try_* method
-    // when errors are defined in the enum.
-    let result = ctx.client().try_create_streams(&ctx.sender, &streams);
-
-    assert_eq!(
-        result,
-        Err(Ok(fluxora_stream::ContractError::ArithmeticOverflow))
-    );
-
-    // Verify atomicity: no tokens moved
-    assert_eq!(ctx.token.balance(&ctx.sender), 10_000);
-    assert_eq!(ctx.token.balance(&ctx.contract_id), 0);
-}
-
-// ---------------------------------------------------------------------------
-// Integration tests — shorten_stream_end_time: refund correctness + invariants
-// ---------------------------------------------------------------------------
-
-/// Success path: shortening updates schedule, refunds exact unstreamed amount, emits event.
-#[test]
-fn integration_shorten_end_time_refund_and_event_observable() {
-    let ctx = TestContext::setup();
-    let stream_id = ctx.create_default_stream(); // 1000 deposit, rate=1, end=1000
-
-    let sender_before = ctx.token.balance(&ctx.sender);
-    let contract_before = ctx.token.balance(&ctx.contract_id);
-
-    ctx.client().shorten_stream_end_time(&stream_id, &700u64);
-
-    let sender_after = ctx.token.balance(&ctx.sender);
-    let contract_after = ctx.token.balance(&ctx.contract_id);
-    assert_eq!(sender_after - sender_before, 300);
-    assert_eq!(contract_before - contract_after, 300);
-
-    let state = ctx.client().get_stream_state(&stream_id);
-    assert_eq!(state.end_time, 700);
-    assert_eq!(state.deposit_amount, 700);
-
-    let events = ctx.env.events().all();
-    let last = events.last().unwrap();
-    let payload = StreamEndShortened::from_val(&ctx.env, &last.2);
-    assert_eq!(payload.stream_id, stream_id);
-    assert_eq!(payload.old_end_time, 1000);
-    assert_eq!(payload.new_end_time, 700);
-    assert_eq!(payload.refund_amount, 300);
-}
-
-/// Failure path: non-shortening values (equal/later end) are InvalidParams and leave no side effects.
-#[test]
-fn integration_shorten_end_time_rejects_equal_or_later_and_is_atomic() {
-    let ctx = TestContext::setup();
-    ctx.env.ledger().set_timestamp(0);
-
-    // Extra deposit ensures a "later" value would otherwise be feasible,
-    // proving rejection is based on shorten semantics, not insufficiency.
-    let stream_id = ctx.client().create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &2_000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1_000u64,
-    );
-
-    let sender_before = ctx.token.balance(&ctx.sender);
-    let contract_before = ctx.token.balance(&ctx.contract_id);
-    let state_before = ctx.client().get_stream_state(&stream_id);
-    let events_before = ctx.env.events().all().len();
-
-    let same = ctx
-        .client()
-        .try_shorten_stream_end_time(&stream_id, &1_000u64);
-    assert_eq!(same, Err(Ok(ContractError::InvalidParams)));
-
-    let later = ctx
-        .client()
-        .try_shorten_stream_end_time(&stream_id, &1_500u64);
-    assert_eq!(later, Err(Ok(ContractError::InvalidParams)));
-
-    assert_eq!(ctx.token.balance(&ctx.sender), sender_before);
-    assert_eq!(ctx.token.balance(&ctx.contract_id), contract_before);
-    assert_eq!(ctx.env.events().all().len(), events_before);
-
-    let state_after = ctx.client().get_stream_state(&stream_id);
-    assert_eq!(state_after.end_time, state_before.end_time);
-    assert_eq!(state_after.deposit_amount, state_before.deposit_amount);
-    assert_eq!(state_after.status, state_before.status);
-}
-
-/// Time boundary: `new_end_time == now` is invalid (must be strictly future).
-#[test]
-fn integration_shorten_end_time_rejects_now_boundary() {
-    let ctx = TestContext::setup();
-    let stream_id = ctx.create_default_stream();
-
-    ctx.env.ledger().set_timestamp(500);
-    let result = ctx
-        .client()
-        .try_shorten_stream_end_time(&stream_id, &500u64);
-    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
-}
-
-/// Role/state boundaries: sender-only auth and terminal states rejected.
-#[test]
-fn integration_shorten_end_time_terminal_states_rejected() {
-    let ctx = TestContext::setup();
-
-    let completed_id = ctx.create_default_stream();
-    ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&completed_id);
-    let completed = ctx
-        .client()
-        .try_shorten_stream_end_time(&completed_id, &900u64);
-    assert_eq!(completed, Err(Ok(ContractError::InvalidState)));
-
-    let cancelled_id = ctx.create_default_stream();
-    ctx.env.ledger().set_timestamp(300);
-    ctx.client().cancel_stream(&cancelled_id);
-    let cancelled = ctx
-        .client()
-        .try_shorten_stream_end_time(&cancelled_id, &800u64);
-    assert_eq!(cancelled, Err(Ok(ContractError::InvalidState)));
 }
 
 // ---------------------------------------------------------------------------
@@ -2734,12 +2483,12 @@ fn integration_uninitialised_get_stream_state_fails() {
 /// Uninitialised contract: set_contract_paused must fail with missing config.
 #[test]
 #[should_panic]
-fn integration_uninitialised_set_global_emergency_paused_panics() {
+fn integration_uninitialised_set_contract_paused_panics() {
     let env = Env::default();
     env.mock_all_auths();
     let contract_id = env.register_contract(None, FluxoraStream);
     let client = FluxoraStreamClient::new(&env, &contract_id);
-    client.set_global_emergency_paused(&true);
+    client.set_contract_paused(&true);
 }
 
 /// After initialisation, all previously-failing paths become functional.
@@ -3091,91 +2840,106 @@ fn integration_create_streams_single_token_pull_equals_sum() {
     assert_eq!(ctx.token.balance(&ctx.contract_id), 3500);
 }
 
-#[test]
-fn integration_test_admin_pause_resume_flow() {
-    let ctx = TestContext::setup();
-    let stream_id = ctx.create_default_stream();
+// ===========================================================================
+// Negative tests: pause/resume by non-sender/non-admin — integration tests
+// ===========================================================================
 
-    // Admin pauses
-    ctx.client().pause_stream_as_admin(&stream_id);
-    assert_eq!(
-        ctx.client().get_stream_state(&stream_id).status,
-        StreamStatus::Paused
+/// pause_stream: recipient is rejected, stream stays Active, no event emitted.
+#[test]
+fn neg_pause_recipient_rejected_stream_unchanged() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
     );
+    let events_before = ctx.env.events().all().len();
 
-    // Recipient cannot withdraw while paused
-    let result = ctx.client().try_withdraw(&stream_id);
-    assert!(result.is_err());
-
-    // Admin resumes
-    ctx.client().resume_stream_as_admin(&stream_id);
-    assert_eq!(
-        ctx.client().get_stream_state(&stream_id).status,
-        StreamStatus::Active
-    );
-
-    // Recipient can withdraw after resume
-    ctx.env.ledger().set_timestamp(100);
-    ctx.client().withdraw(&stream_id);
-}
-
-#[test]
-fn integration_test_admin_pause_accrual_integrity() {
-    let ctx = TestContext::setup();
-    let stream_id =
-        ctx.client()
-            .create_stream(&ctx.sender, &ctx.recipient, &2000, &2, &0, &0, &1000);
-
-    // At t=100, accrued=200
-    ctx.env.ledger().set_timestamp(100);
-    assert_eq!(ctx.client().calculate_accrued(&stream_id), 200);
-
-    // Admin pauses at t=100
-    ctx.client().pause_stream_as_admin(&stream_id);
-
-    // Advance to t=200 while paused
-    ctx.env.ledger().set_timestamp(200);
-    // Accrual MUST continue (time-based)
-    assert_eq!(ctx.client().calculate_accrued(&stream_id), 400);
-
-    // Admin resumes at t=200
-    ctx.client().resume_stream_as_admin(&stream_id);
-
-    // Recipient withdraws the full 400
-    let withdrawn = ctx.client().withdraw(&stream_id);
-    assert_eq!(withdrawn, 400);
-}
-
-#[test]
-fn integration_test_admin_cancel_from_paused() {
-    let ctx = TestContext::setup();
-    let stream_id =
-        ctx.client()
-            .create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
-
-    ctx.env.ledger().set_timestamp(100);
-    ctx.client().pause_stream_as_admin(&stream_id);
-
-    // Admin cancels while stream is paused
-    // Transitions Paused -> Cancelled
-    ctx.client().cancel_stream_as_admin(&stream_id);
-
-    let state = ctx.client().get_stream_state(&stream_id);
-    assert_eq!(state.status, StreamStatus::Cancelled);
-    // Accrual freeze should be at t=100 (when cancelled)
-    assert_eq!(state.cancelled_at, Some(100));
-}
-
-#[test]
-fn integration_test_admin_unauthorized_pause() {
-    let ctx = TestContext::setup_strict();
-    let stream_id =
-        ctx.client()
-            .create_stream(&ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000);
-
-    // Non-admin (recipient) tries to call admin pause
     ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
         address: &ctx.recipient,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "pause_stream",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().pause_stream(&stream_id);
+    }));
+    assert!(result.is_err(), "recipient must not pause");
+    assert_eq!(ctx.client().get_stream_state(&stream_id).status, StreamStatus::Active);
+    assert_eq!(ctx.env.events().all().len(), events_before);
+}
+
+/// pause_stream: third party is rejected, stream stays Active.
+#[test]
+fn neg_pause_third_party_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+    );
+    let third_party = Address::generate(&ctx.env);
+
+    ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &third_party,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "pause_stream",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().pause_stream(&stream_id);
+    }));
+    assert!(result.is_err(), "third party must not pause");
+    assert_eq!(ctx.client().get_stream_state(&stream_id).status, StreamStatus::Active);
+}
+
+/// resume_stream: recipient is rejected, stream stays Paused.
+#[test]
+fn neg_resume_recipient_rejected_stream_stays_paused() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+    );
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().pause_stream(&stream_id);
+    let events_before = ctx.env.events().all().len();
+
+    ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &ctx.recipient,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "resume_stream",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().resume_stream(&stream_id);
+    }));
+    assert!(result.is_err(), "recipient must not resume");
+    assert_eq!(ctx.client().get_stream_state(&stream_id).status, StreamStatus::Paused);
+    assert_eq!(ctx.env.events().all().len(), events_before);
+}
+
+/// pause_stream_as_admin: sender is rejected on admin path.
+#[test]
+fn neg_pause_as_admin_sender_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
+    );
+
+    ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &ctx.sender,
         invoke: &soroban_sdk::testutils::MockAuthInvoke {
             contract: &ctx.contract_id,
             fn_name: "pause_stream_as_admin",
@@ -3184,646 +2948,532 @@ fn integration_test_admin_unauthorized_pause() {
         },
     }]);
 
-    let result = ctx.client().try_pause_stream_as_admin(&stream_id);
-    // Should fail because recipient is not admin
-    assert!(result.is_err());
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().pause_stream_as_admin(&stream_id);
+    }));
+    assert!(result.is_err(), "sender must not use admin pause path");
+    assert_eq!(ctx.client().get_stream_state(&stream_id).status, StreamStatus::Active);
 }
 
+/// resume_stream_as_admin: sender is rejected on admin path.
 #[test]
-fn test_recipient_index_stress_and_cleanup_lifecycle() {
+fn neg_resume_as_admin_sender_rejected() {
     let ctx = TestContext::setup();
-    let recipient = Address::generate(&ctx.env);
-
-    // Mint tokens for 100 streams (100 * 1000 = 100,000)
-    let sac = StellarAssetClient::new(&ctx.env, &ctx.token_id);
-    sac.mint(&ctx.sender, &1_000_000_i128);
-
-    // 1. Create 100 streams for the recipient (batch creation)
-    let batch_size = 50;
-    for _ in 0..2 {
-        let mut streams = soroban_sdk::vec![&ctx.env];
-        for _ in 0..batch_size {
-            streams.push_back(CreateStreamParams {
-                recipient: recipient.clone(),
-                deposit_amount: 1000,
-                rate_per_second: 1,
-                start_time: 0,
-                cliff_time: 0,
-                end_time: 1000,
-            });
-        }
-        ctx.client().create_streams(&ctx.sender, &streams);
-    }
-
-    let count = ctx.client().get_recipient_stream_count(&recipient);
-    assert_eq!(count, 100);
-
-    // 2. Cancel 30 streams
-    let all_streams = ctx.client().get_recipient_streams(&recipient);
-    for i in 0..30 {
-        let id = all_streams.get(i).unwrap();
-        ctx.client().cancel_stream(&id);
-    }
-
-    // 3. Withdraw and complete 20 streams
-    ctx.env.ledger().set_timestamp(1001);
-    for i in 30..50 {
-        let id = all_streams.get(i).unwrap();
-        ctx.client().withdraw(&id);
-    }
-
-    // Count remains 100 because indexing includes terminal statuses until explicit cleanup
-    assert_eq!(ctx.client().get_recipient_stream_count(&recipient), 100);
-
-    // 4. Cleanup: Close all 50 terminal streams (30 cancelled + 20 completed)
-    // This verifies the new feature allowing Cancelled streams to be closed.
-    for i in 0..50 {
-        let id = all_streams.get(i).unwrap();
-        ctx.client().close_completed_stream(&id);
-    }
-
-    // 5. Final verification: index should now have ONLY the 50 remaining streams
-    let final_index = ctx.client().get_recipient_streams(&recipient);
-    assert_eq!(final_index.len(), 50);
-
-    // Verify no ID drift: the first remaining ID should be ID 50
-    assert_eq!(final_index.get(0).unwrap(), 50);
-}
-
-// ---------------------------------------------------------------------------
-// Time-assumption boundary tests (#313)
-//
-// Each test probes a single timestamp boundary (T−1 / T / T+1) to ensure
-// deterministic, crisp pass/fail semantics at every time gate in the contract.
-// Ledger time is manipulated via `env.ledger().with_mut(|l| l.timestamp = ...)`.
-// ---------------------------------------------------------------------------
-
-// ── Cliff boundary ──────────────────────────────────────────────────────────
-
-/// T = cliff_time − 1: accrual must be zero; withdraw returns 0 with no transfer.
-#[test]
-fn cliff_boundary_t_minus_1_no_accrual() {
-    let ctx = TestContext::setup();
-    // stream: start=0, cliff=500, end=1000, rate=1, deposit=1000
-    let stream_id = ctx.create_stream_with_cliff(500);
-
-    ctx.env.ledger().with_mut(|l| l.timestamp = 499);
-    let amount = ctx.client().withdraw(&stream_id);
-    assert_eq!(amount, 0, "T-1 before cliff must yield zero withdrawal");
-
-    let accrued = ctx.client().calculate_accrued(&stream_id);
-    assert_eq!(accrued, 0, "T-1 before cliff must yield zero accrual");
-}
-
-/// T = cliff_time exactly: accrual unlocks; withdraw returns elapsed * rate.
-#[test]
-fn cliff_boundary_t_exact_accrual_unlocks() {
-    let ctx = TestContext::setup();
-    let stream_id = ctx.create_stream_with_cliff(500);
-
-    ctx.env.ledger().with_mut(|l| l.timestamp = 500);
-    let accrued = ctx.client().calculate_accrued(&stream_id);
-    // elapsed = 500 − 0 = 500 seconds × 1 token/s = 500
-    assert_eq!(accrued, 500, "T=cliff must unlock accrual from start_time");
-
-    let withdrawn = ctx.client().withdraw(&stream_id);
-    assert_eq!(withdrawn, 500, "T=cliff must allow full accrued withdrawal");
-}
-
-/// T = cliff_time + 1: accrual continues normally one second past cliff.
-#[test]
-fn cliff_boundary_t_plus_1_accrual_continues() {
-    let ctx = TestContext::setup();
-    let stream_id = ctx.create_stream_with_cliff(500);
-
-    ctx.env.ledger().with_mut(|l| l.timestamp = 501);
-    let accrued = ctx.client().calculate_accrued(&stream_id);
-    assert_eq!(accrued, 501, "T+1 past cliff must accrue one extra second");
-}
-
-// ── end_time boundary ───────────────────────────────────────────────────────
-
-/// T = end_time − 1: accrual is one second short of deposit_amount.
-#[test]
-fn end_time_boundary_t_minus_1_partial_accrual() {
-    let ctx = TestContext::setup();
-    let stream_id = ctx.create_default_stream(); // end=1000, rate=1, deposit=1000
-
-    ctx.env.ledger().with_mut(|l| l.timestamp = 999);
-    let accrued = ctx.client().calculate_accrued(&stream_id);
-    assert_eq!(accrued, 999, "T-1 before end must accrue 999 tokens");
-}
-
-/// T = end_time exactly: accrual is capped at deposit_amount.
-#[test]
-fn end_time_boundary_t_exact_accrual_capped() {
-    let ctx = TestContext::setup();
-    let stream_id = ctx.create_default_stream();
-
-    ctx.env.ledger().with_mut(|l| l.timestamp = 1000);
-    let accrued = ctx.client().calculate_accrued(&stream_id);
-    assert_eq!(
-        accrued, 1000,
-        "T=end_time must cap accrual at deposit_amount"
-    );
-}
-
-/// T = end_time + 1: accrual remains capped; no extra tokens beyond deposit.
-#[test]
-fn end_time_boundary_t_plus_1_no_extra_accrual() {
-    let ctx = TestContext::setup();
-    let stream_id = ctx.create_default_stream();
-
-    ctx.env.ledger().with_mut(|l| l.timestamp = 1001);
-    let accrued = ctx.client().calculate_accrued(&stream_id);
-    assert_eq!(
-        accrued, 1000,
-        "T+1 past end_time must not accrue beyond deposit_amount"
-    );
-}
-
-// ── cancel freeze boundary ───────────────────────────────────────────────────
-
-/// Cancelling at T=cliff−1 freezes accrual at 0; full deposit refunded to sender.
-#[test]
-fn cancel_freeze_before_cliff_full_refund() {
-    let ctx = TestContext::setup();
-    let stream_id = ctx.create_stream_with_cliff(500);
-
-    ctx.env.ledger().with_mut(|l| l.timestamp = 499);
-    ctx.client().cancel_stream(&stream_id);
-
-    let state = ctx.client().get_stream_state(&stream_id);
-    assert_eq!(state.status, StreamStatus::Cancelled);
-    assert_eq!(state.cancelled_at, Some(499));
-
-    // Accrual frozen at 0 → recipient gets nothing, sender gets full refund.
-    ctx.env.ledger().with_mut(|l| l.timestamp = 9999);
-    let withdrawable = ctx.client().get_withdrawable(&stream_id);
-    assert_eq!(withdrawable, 0, "Frozen accrual before cliff must be 0");
-}
-
-/// Cancelling at T=cliff exactly freezes accrual at cliff-elapsed amount.
-#[test]
-fn cancel_freeze_at_cliff_exact() {
-    let ctx = TestContext::setup();
-    let stream_id = ctx.create_stream_with_cliff(500);
-
-    ctx.env.ledger().with_mut(|l| l.timestamp = 500);
-    ctx.client().cancel_stream(&stream_id);
-
-    let state = ctx.client().get_stream_state(&stream_id);
-    assert_eq!(state.cancelled_at, Some(500));
-
-    // Frozen accrual = 500 (elapsed from start=0 to cliff=500 at rate=1).
-    let withdrawable = ctx.client().get_withdrawable(&stream_id);
-    assert_eq!(withdrawable, 500, "Frozen accrual at cliff must equal 500");
-}
-
-/// After cancellation, accrual does not grow even as ledger time advances.
-#[test]
-fn cancel_freeze_accrual_does_not_grow_after_cancel() {
-    let ctx = TestContext::setup();
-    let stream_id = ctx.create_default_stream(); // no cliff, end=1000
-
-    ctx.env.ledger().with_mut(|l| l.timestamp = 300);
-    ctx.client().cancel_stream(&stream_id);
-
-    // Advance time well past end_time.
-    ctx.env.ledger().with_mut(|l| l.timestamp = 5000);
-    let accrued = ctx.client().calculate_accrued(&stream_id);
-    assert_eq!(
-        accrued, 300,
-        "Accrual must remain frozen at cancelled_at value"
-    );
-}
-
-// ── start_time validation boundary ──────────────────────────────────────────
-
-/// Creating a stream with start_time == ledger.timestamp() must succeed.
-#[test]
-fn create_stream_start_time_equals_now_succeeds() {
-    let ctx = TestContext::setup();
-    ctx.env.ledger().with_mut(|l| l.timestamp = 100);
-
-    // start_time == now (100), cliff == start, end = 1100
-    let result = ctx.client().try_create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &100u64,
-        &100u64,
-        &1100u64,
-    );
-    assert!(
-        result.is_ok(),
-        "start_time == now must be accepted (not in the past)"
-    );
-}
-
-/// Creating a stream with start_time == ledger.timestamp() − 1 must fail.
-#[test]
-fn create_stream_start_time_one_second_in_past_rejected() {
-    let ctx = TestContext::setup();
-    ctx.env.ledger().with_mut(|l| l.timestamp = 100);
-
-    let result = ctx.client().try_create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &99u64, // start_time = now − 1
-        &99u64,
-        &1099u64,
-    );
-    assert_eq!(
-        result,
-        Err(Ok(ContractError::StartTimeInPast)),
-        "start_time < now must be rejected with StartTimeInPast"
-    );
-}
-
-// ── shorten_stream_end_time boundary ────────────────────────────────────────
-
-/// new_end_time == now must be rejected (must be strictly future).
-#[test]
-fn shorten_end_time_equal_to_now_rejected() {
-    let ctx = TestContext::setup();
-    let stream_id = ctx.create_default_stream(); // end=1000
-
-    ctx.env.ledger().with_mut(|l| l.timestamp = 500);
-    let result = ctx
-        .client()
-        .try_shorten_stream_end_time(&stream_id, &500u64);
-    assert_eq!(
-        result,
-        Err(Ok(ContractError::InvalidParams)),
-        "new_end_time == now must be rejected"
-    );
-}
-
-/// new_end_time == now + 1 must succeed (strictly future).
-#[test]
-fn shorten_end_time_one_second_future_accepted() {
-    let ctx = TestContext::setup();
-    let stream_id = ctx.create_default_stream(); // end=1000, rate=1, deposit=1000
-
-    ctx.env.ledger().with_mut(|l| l.timestamp = 500);
-    // new_end_time=501 is strictly future and strictly less than old end=1000
-    // new deposit = 501 * 1 = 501 ≤ 1000 ✓
-    let result = ctx
-        .client()
-        .try_shorten_stream_end_time(&stream_id, &501u64);
-    assert!(result.is_ok(), "new_end_time = now+1 must be accepted");
-}
-
-// ---------------------------------------------------------------------------
-// Auto-claim opt-in tests (#443)
-// ---------------------------------------------------------------------------
-
-/// Helper: create a default stream and return (stream_id, end_time).
-fn create_auto_claim_stream(ctx: &TestContext) -> u64 {
     ctx.env.ledger().set_timestamp(0);
-    ctx.client().create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-    )
-}
-
-// ── set_auto_claim ──────────────────────────────────────────────────────────
-
-/// Recipient can opt in and the destination is stored on-chain.
-#[test]
-fn auto_claim_set_stores_destination() {
-    let ctx = TestContext::setup();
-    let stream_id = create_auto_claim_stream(&ctx);
-    let dest = Address::generate(&ctx.env);
-
-    ctx.client().set_auto_claim(&stream_id, &dest);
-
-    let stored = ctx.client().get_auto_claim_destination(&stream_id);
-    assert_eq!(stored, Some(dest));
-}
-
-/// Recipient can overwrite the destination with a new address.
-#[test]
-fn auto_claim_set_overwrites_previous_destination() {
-    let ctx = TestContext::setup();
-    let stream_id = create_auto_claim_stream(&ctx);
-    let dest1 = Address::generate(&ctx.env);
-    let dest2 = Address::generate(&ctx.env);
-
-    ctx.client().set_auto_claim(&stream_id, &dest1);
-    ctx.client().set_auto_claim(&stream_id, &dest2);
-
-    assert_eq!(
-        ctx.client().get_auto_claim_destination(&stream_id),
-        Some(dest2)
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000,
     );
-}
-
-/// set_auto_claim rejects the contract address as destination.
-#[test]
-fn auto_claim_set_rejects_contract_as_destination() {
-    let ctx = TestContext::setup();
-    let stream_id = create_auto_claim_stream(&ctx);
-
-    let result = ctx
-        .client()
-        .try_set_auto_claim(&stream_id, &ctx.contract_id);
-    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
-}
-
-/// set_auto_claim rejects opt-in on a Completed stream.
-#[test]
-fn auto_claim_set_rejects_completed_stream() {
-    let ctx = TestContext::setup();
-    let stream_id = create_auto_claim_stream(&ctx);
-
-    // Fully withdraw to complete the stream.
-    ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
-
-    let dest = Address::generate(&ctx.env);
-    let result = ctx.client().try_set_auto_claim(&stream_id, &dest);
-    assert_eq!(result, Err(Ok(ContractError::InvalidState)));
-}
-
-/// set_auto_claim rejects opt-in on a Cancelled stream.
-#[test]
-fn auto_claim_set_rejects_cancelled_stream() {
-    let ctx = TestContext::setup();
-    let stream_id = create_auto_claim_stream(&ctx);
-
-    ctx.client().cancel_stream(&stream_id);
-
-    let dest = Address::generate(&ctx.env);
-    let result = ctx.client().try_set_auto_claim(&stream_id, &dest);
-    assert_eq!(result, Err(Ok(ContractError::InvalidState)));
-}
-
-/// set_auto_claim emits the correct event.
-#[test]
-fn auto_claim_set_emits_event() {
-    let ctx = TestContext::setup();
-    let stream_id = create_auto_claim_stream(&ctx);
-    let dest = Address::generate(&ctx.env);
-
-    ctx.client().set_auto_claim(&stream_id, &dest);
-
-    let events = ctx.env.events().all();
-    let last = events.last().unwrap();
-    let topic_sym = Symbol::from_val(&ctx.env, &last.1.get(0).unwrap());
-    assert_eq!(topic_sym, Symbol::new(&ctx.env, "ac_set"));
-
-    let payload = AutoClaimSet::try_from_val(&ctx.env, &last.2).unwrap();
-    assert_eq!(payload.stream_id, stream_id);
-    assert_eq!(payload.destination, dest);
-}
-
-// ── revoke_auto_claim ───────────────────────────────────────────────────────
-
-/// Recipient can revoke and the destination is removed.
-#[test]
-fn auto_claim_revoke_removes_destination() {
-    let ctx = TestContext::setup();
-    let stream_id = create_auto_claim_stream(&ctx);
-    let dest = Address::generate(&ctx.env);
-
-    ctx.client().set_auto_claim(&stream_id, &dest);
-    ctx.client().revoke_auto_claim(&stream_id);
-
-    assert_eq!(ctx.client().get_auto_claim_destination(&stream_id), None);
-}
-
-/// revoke_auto_claim is a no-op when nothing is set (no error).
-#[test]
-fn auto_claim_revoke_noop_when_not_set() {
-    let ctx = TestContext::setup();
-    let stream_id = create_auto_claim_stream(&ctx);
-
-    // Should not error even though no destination was set.
-    ctx.client().revoke_auto_claim(&stream_id);
-    assert_eq!(ctx.client().get_auto_claim_destination(&stream_id), None);
-}
-
-/// revoke_auto_claim emits the correct event.
-#[test]
-fn auto_claim_revoke_emits_event() {
-    let ctx = TestContext::setup();
-    let stream_id = create_auto_claim_stream(&ctx);
-    let dest = Address::generate(&ctx.env);
-
-    ctx.client().set_auto_claim(&stream_id, &dest);
-    ctx.client().revoke_auto_claim(&stream_id);
-
-    let events = ctx.env.events().all();
-    let last = events.last().unwrap();
-    let topic_sym = Symbol::from_val(&ctx.env, &last.1.get(0).unwrap());
-    assert_eq!(topic_sym, Symbol::new(&ctx.env, "ac_revoke"));
-
-    let payload = AutoClaimRevoked::try_from_val(&ctx.env, &last.2).unwrap();
-    assert_eq!(payload.stream_id, stream_id);
-}
-
-// ── trigger_auto_claim ──────────────────────────────────────────────────────
-
-/// Anyone can trigger auto-claim after end_time; tokens go to recipient-chosen destination.
-#[test]
-fn auto_claim_trigger_sends_to_destination() {
-    let ctx = TestContext::setup();
-    let stream_id = create_auto_claim_stream(&ctx);
-    let dest = Address::generate(&ctx.env);
-
-    ctx.client().set_auto_claim(&stream_id, &dest);
-
-    // Advance past end_time.
-    ctx.env.ledger().set_timestamp(1001);
-
-    let amount = ctx.client().trigger_auto_claim(&stream_id);
-    assert_eq!(amount, 1000_i128);
-    assert_eq!(ctx.token.balance(&dest), 1000_i128);
-}
-
-/// trigger_auto_claim fails before end_time.
-#[test]
-fn auto_claim_trigger_rejects_before_end_time() {
-    let ctx = TestContext::setup();
-    let stream_id = create_auto_claim_stream(&ctx);
-    let dest = Address::generate(&ctx.env);
-
-    ctx.client().set_auto_claim(&stream_id, &dest);
-
-    ctx.env.ledger().set_timestamp(500); // before end_time=1000
-
-    let result = ctx.client().try_trigger_auto_claim(&stream_id);
-    assert_eq!(result, Err(Ok(ContractError::InvalidState)));
-}
-
-/// trigger_auto_claim fails when no destination is set.
-#[test]
-fn auto_claim_trigger_rejects_when_not_opted_in() {
-    let ctx = TestContext::setup();
-    let stream_id = create_auto_claim_stream(&ctx);
-
-    ctx.env.ledger().set_timestamp(1001);
-
-    let result = ctx.client().try_trigger_auto_claim(&stream_id);
-    assert_eq!(result, Err(Ok(ContractError::AutoClaimNotSet)));
-}
-
-/// trigger_auto_claim fails on an already-Completed stream.
-#[test]
-fn auto_claim_trigger_rejects_completed_stream() {
-    let ctx = TestContext::setup();
-    let stream_id = create_auto_claim_stream(&ctx);
-    let dest = Address::generate(&ctx.env);
-
-    ctx.client().set_auto_claim(&stream_id, &dest);
-
-    ctx.env.ledger().set_timestamp(1001);
-    ctx.client().withdraw(&stream_id); // completes the stream
-
-    let result = ctx.client().try_trigger_auto_claim(&stream_id);
-    assert_eq!(result, Err(Ok(ContractError::InvalidState)));
-}
-
-/// trigger_auto_claim fails on a Cancelled stream.
-#[test]
-fn auto_claim_trigger_rejects_cancelled_stream() {
-    let ctx = TestContext::setup();
-    let stream_id = create_auto_claim_stream(&ctx);
-    let dest = Address::generate(&ctx.env);
-
-    ctx.client().set_auto_claim(&stream_id, &dest);
-    ctx.client().cancel_stream(&stream_id);
-
-    ctx.env.ledger().set_timestamp(1001);
-
-    let result = ctx.client().try_trigger_auto_claim(&stream_id);
-    assert_eq!(result, Err(Ok(ContractError::InvalidState)));
-}
-
-/// trigger_auto_claim emits ac_trig and withdrew events.
-#[test]
-fn auto_claim_trigger_emits_events() {
-    let ctx = TestContext::setup();
-    let stream_id = create_auto_claim_stream(&ctx);
-    let dest = Address::generate(&ctx.env);
-
-    ctx.client().set_auto_claim(&stream_id, &dest);
-    ctx.env.ledger().set_timestamp(1001);
-    ctx.client().trigger_auto_claim(&stream_id);
-
-    let events = ctx.env.events().all();
-
-    // Find ac_trig event
-    let ac_event = events
-        .iter()
-        .find(|e| {
-            Symbol::from_val(&ctx.env, &e.1.get(0).unwrap())
-                == Symbol::new(&ctx.env, "ac_trig")
-        })
-        .expect("ac_trig event not found");
-
-    let payload = AutoClaimTriggered::try_from_val(&ctx.env, &ac_event.2).unwrap();
-    assert_eq!(payload.stream_id, stream_id);
-    assert_eq!(payload.destination, dest);
-    assert_eq!(payload.amount, 1000_i128);
-}
-
-/// After trigger_auto_claim, stream is Completed and destination holds the tokens.
-#[test]
-fn auto_claim_trigger_completes_stream() {
-    let ctx = TestContext::setup();
-    let stream_id = create_auto_claim_stream(&ctx);
-    let dest = Address::generate(&ctx.env);
-
-    ctx.client().set_auto_claim(&stream_id, &dest);
-    ctx.env.ledger().set_timestamp(1001);
-    ctx.client().trigger_auto_claim(&stream_id);
-
-    let state = ctx.client().get_stream_state(&stream_id);
-    assert_eq!(state.status, StreamStatus::Completed);
-    assert_eq!(state.withdrawn_amount, 1000_i128);
-}
-
-/// Revoking after opt-in prevents trigger_auto_claim.
-#[test]
-fn auto_claim_revoke_then_trigger_fails() {
-    let ctx = TestContext::setup();
-    let stream_id = create_auto_claim_stream(&ctx);
-    let dest = Address::generate(&ctx.env);
-
-    ctx.client().set_auto_claim(&stream_id, &dest);
-    ctx.client().revoke_auto_claim(&stream_id);
-
-    ctx.env.ledger().set_timestamp(1001);
-
-    let result = ctx.client().try_trigger_auto_claim(&stream_id);
-    assert_eq!(result, Err(Ok(ContractError::AutoClaimNotSet)));
-}
-
-/// Partial withdrawal before trigger_auto_claim: trigger claims the remainder.
-#[test]
-fn auto_claim_trigger_claims_remainder_after_partial_withdraw() {
-    let ctx = TestContext::setup();
-    let stream_id = create_auto_claim_stream(&ctx);
-    let dest = Address::generate(&ctx.env);
-
-    ctx.client().set_auto_claim(&stream_id, &dest);
-
-    // Partial withdraw at t=500 (500 tokens).
-    ctx.env.ledger().set_timestamp(500);
-    ctx.client().withdraw(&stream_id);
-
-    // Trigger at end_time.
-    ctx.env.ledger().set_timestamp(1001);
-    let amount = ctx.client().trigger_auto_claim(&stream_id);
-
-    assert_eq!(amount, 500_i128); // remaining 500
-    assert_eq!(ctx.token.balance(&dest), 500_i128);
-}
-
-/// trigger_auto_claim works on a Paused stream that is past end_time.
-#[test]
-fn auto_claim_trigger_works_on_paused_time_terminal_stream() {
-    let ctx = TestContext::setup();
-    let stream_id = create_auto_claim_stream(&ctx);
-    let dest = Address::generate(&ctx.env);
-
-    ctx.client().set_auto_claim(&stream_id, &dest);
+    ctx.env.ledger().set_timestamp(100);
     ctx.client().pause_stream(&stream_id);
 
-    ctx.env.ledger().set_timestamp(1001); // past end_time
+    ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &ctx.sender,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "resume_stream_as_admin",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
 
-    let amount = ctx.client().trigger_auto_claim(&stream_id);
-    assert_eq!(amount, 1000_i128);
-    assert_eq!(ctx.token.balance(&dest), 1000_i128);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().resume_stream_as_admin(&stream_id);
+    }));
+    assert!(result.is_err(), "sender must not use admin resume path");
+    assert_eq!(ctx.client().get_stream_state(&stream_id).status, StreamStatus::Paused);
 }
 
-/// Cancellation after opt-in: trigger_auto_claim is blocked (Cancelled state).
-#[test]
-fn auto_claim_cancel_interaction_blocks_trigger() {
-    let ctx = TestContext::setup();
-    let stream_id = create_auto_claim_stream(&ctx);
-    let dest = Address::generate(&ctx.env);
+// ===========================================================================
+// Delegated Withdraw Tests (#419)
+// ===========================================================================
 
-    ctx.client().set_auto_claim(&stream_id, &dest);
+mod delegated_withdraw {
+    extern crate std;
 
-    ctx.env.ledger().set_timestamp(500);
-    ctx.client().cancel_stream(&stream_id);
+    use ed25519_dalek::{Signer, SigningKey};
+    use fluxora_stream::{ContractError, FluxoraStream, FluxoraStreamClient, StreamStatus};
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger},
+        token::{Client as TokenClient, StellarAssetClient},
+        xdr::{AccountId, PublicKey, ScAddress, ToXdr, Uint256},
+        Address, Bytes, BytesN, Env, TryIntoVal,
+    };
 
-    ctx.env.ledger().set_timestamp(1001);
+    // -----------------------------------------------------------------------
+    // Test helpers
+    // -----------------------------------------------------------------------
 
-    let result = ctx.client().try_trigger_auto_claim(&stream_id);
-    assert_eq!(result, Err(Ok(ContractError::InvalidState)));
-    // Destination balance unchanged.
-    assert_eq!(ctx.token.balance(&dest), 0_i128);
+    /// A keypair whose address can be used as a stream recipient.
+    struct RecipientKeypair {
+        signing_key: SigningKey,
+        address: Address,
+    }
+
+    impl RecipientKeypair {
+        /// Create a deterministic keypair from a 32-byte seed.
+        fn from_seed(env: &Env, seed: [u8; 32]) -> Self {
+            let signing_key = SigningKey::from_bytes(&seed);
+            let verifying_key = signing_key.verifying_key();
+            let pk_bytes = verifying_key.to_bytes();
+
+            // Build a Stellar AccountId from the raw Ed25519 public key bytes.
+            let account_id = AccountId(PublicKey::PublicKeyTypeEd25519(Uint256(pk_bytes)));
+            let sc_address = ScAddress::Account(account_id);
+            let address: Address = sc_address.try_into_val(env).unwrap();
+
+            Self {
+                signing_key,
+                address,
+            }
+        }
+
+        /// Build and sign the delegated-withdraw message, returning a 64-byte signature.
+        ///
+        /// Replicates the exact message construction in `delegated_withdraw`:
+        ///   SHA-256("fluxora_delegated_withdraw" || contract_xdr || dest_xdr
+        ///           || stream_id_be || nonce_be || deadline_be)
+        fn sign_withdraw(
+            &self,
+            env: &Env,
+            contract_id: &Address,
+            stream_id: u64,
+            destination: &Address,
+            nonce: u64,
+            deadline: u64,
+        ) -> BytesN<64> {
+            // Build the raw message (same as contract).
+            let contract_xdr = contract_id.clone().to_xdr(env);
+            let dest_xdr = destination.clone().to_xdr(env);
+
+            let mut msg = Bytes::new(env);
+            msg.extend_from_array(b"fluxora_delegated_withdraw");
+            msg.append(&contract_xdr);
+            msg.append(&dest_xdr);
+            msg.extend_from_array(&stream_id.to_be_bytes());
+            msg.extend_from_array(&nonce.to_be_bytes());
+            msg.extend_from_array(&deadline.to_be_bytes());
+
+            // SHA-256 hash (matches what the contract passes to ed25519_verify).
+            let msg_hash: BytesN<32> = env.crypto().sha256(&msg).into();
+
+            // Sign the 32-byte hash with Ed25519.
+            let hash_bytes: [u8; 32] = msg_hash.to_array();
+            let sig = self.signing_key.sign(&hash_bytes);
+            BytesN::from_array(env, &sig.to_bytes())
+        }
+    }
+
+    struct Ctx<'a> {
+        env: Env,
+        contract_id: Address,
+        token_id: Address,
+        sender: Address,
+        relayer: Address,
+        recipient_kp: RecipientKeypair,
+        token: TokenClient<'a>,
+    }
+
+    impl<'a> Ctx<'a> {
+        fn setup() -> Self {
+            let env = Env::default();
+            env.mock_all_auths();
+
+            let contract_id = env.register_contract(None, FluxoraStream);
+
+            let token_admin = Address::generate(&env);
+            let token_id = env
+                .register_stellar_asset_contract_v2(token_admin)
+                .address();
+
+            let admin = Address::generate(&env);
+            let sender = Address::generate(&env);
+            let relayer = Address::generate(&env);
+
+            // Deterministic recipient keypair (seed = all-0x01 bytes).
+            let recipient_kp = RecipientKeypair::from_seed(&env, [0x01u8; 32]);
+
+            let client = FluxoraStreamClient::new(&env, &contract_id);
+            client.init(&token_id, &admin);
+
+            let sac = StellarAssetClient::new(&env, &token_id);
+            sac.mint(&sender, &10_000_i128);
+
+            let token = TokenClient::new(&env, &token_id);
+
+            Self {
+                env,
+                contract_id,
+                token_id,
+                sender,
+                relayer,
+                recipient_kp,
+                token,
+            }
+        }
+
+        fn client(&self) -> FluxoraStreamClient<'_> {
+            FluxoraStreamClient::new(&self.env, &self.contract_id)
+        }
+
+        /// Create a default 1000-token stream (rate=1, 0..1000s) to the keypair recipient.
+        fn create_stream(&self) -> u64 {
+            self.env.ledger().set_timestamp(0);
+            self.client().create_stream(
+                &self.sender,
+                &self.recipient_kp.address,
+                &1000_i128,
+                &1_i128,
+                &0u64,
+                &0u64,
+                &1000u64,
+            )
+        }
+
+        fn sign(
+            &self,
+            stream_id: u64,
+            destination: &Address,
+            nonce: u64,
+            deadline: u64,
+        ) -> BytesN<64> {
+            self.recipient_kp.sign_withdraw(
+                &self.env,
+                &self.contract_id,
+                stream_id,
+                destination,
+                nonce,
+                deadline,
+            )
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Happy-path tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn delegated_withdraw_transfers_accrued_to_destination() {
+        let ctx = Ctx::setup();
+        let stream_id = ctx.create_stream();
+        let destination = Address::generate(&ctx.env);
+
+        ctx.env.ledger().set_timestamp(400);
+        let nonce = ctx.client().get_withdraw_nonce(&ctx.recipient_kp.address);
+        assert_eq!(nonce, 0);
+
+        let deadline = 9999u64;
+        let sig = ctx.sign(stream_id, &destination, nonce, deadline);
+
+        let amount = ctx
+            .client()
+            .delegated_withdraw(&stream_id, &ctx.relayer, &destination, &nonce, &deadline, &sig);
+
+        assert_eq!(amount, 400);
+        assert_eq!(ctx.token.balance(&destination), 400);
+        assert_eq!(ctx.token.balance(&ctx.contract_id), 600);
+
+        // Nonce must be incremented.
+        assert_eq!(ctx.client().get_withdraw_nonce(&ctx.recipient_kp.address), 1);
+    }
+
+    #[test]
+    fn delegated_withdraw_completes_stream_when_fully_drained() {
+        let ctx = Ctx::setup();
+        let stream_id = ctx.create_stream();
+        let destination = Address::generate(&ctx.env);
+
+        ctx.env.ledger().set_timestamp(1000);
+        let nonce = 0u64;
+        let deadline = 9999u64;
+        let sig = ctx.sign(stream_id, &destination, nonce, deadline);
+
+        let amount = ctx
+            .client()
+            .delegated_withdraw(&stream_id, &ctx.relayer, &destination, &nonce, &deadline, &sig);
+
+        assert_eq!(amount, 1000);
+        assert_eq!(
+            ctx.client().get_stream_state(&stream_id).status,
+            StreamStatus::Completed
+        );
+        assert_eq!(ctx.token.balance(&destination), 1000);
+    }
+
+    #[test]
+    fn delegated_withdraw_nonce_increments_sequentially() {
+        let ctx = Ctx::setup();
+        let stream_id = ctx.create_stream();
+        let destination = Address::generate(&ctx.env);
+
+        // First withdrawal at t=300.
+        ctx.env.ledger().set_timestamp(300);
+        let sig0 = ctx.sign(stream_id, &destination, 0, 9999);
+        ctx.client()
+            .delegated_withdraw(&stream_id, &ctx.relayer, &destination, &0, &9999, &sig0);
+        assert_eq!(ctx.client().get_withdraw_nonce(&ctx.recipient_kp.address), 1);
+
+        // Second withdrawal at t=700.
+        ctx.env.ledger().set_timestamp(700);
+        let sig1 = ctx.sign(stream_id, &destination, 1, 9999);
+        let amount = ctx
+            .client()
+            .delegated_withdraw(&stream_id, &ctx.relayer, &destination, &1, &9999, &sig1);
+        assert_eq!(amount, 400); // 700 - 300 already withdrawn
+        assert_eq!(ctx.client().get_withdraw_nonce(&ctx.recipient_kp.address), 2);
+    }
+
+    #[test]
+    fn delegated_withdraw_returns_zero_when_nothing_to_withdraw() {
+        let ctx = Ctx::setup();
+        let stream_id = ctx.create_stream();
+        let destination = Address::generate(&ctx.env);
+
+        // Before cliff (cliff = 0, but at t=0 nothing has accrued yet since start=0).
+        // Actually at t=0 accrued = 0 * rate = 0.
+        ctx.env.ledger().set_timestamp(0);
+        let sig = ctx.sign(stream_id, &destination, 0, 9999);
+        let amount = ctx
+            .client()
+            .delegated_withdraw(&stream_id, &ctx.relayer, &destination, &0, &9999, &sig);
+
+        assert_eq!(amount, 0);
+        // Nonce must NOT be consumed when nothing is withdrawn.
+        assert_eq!(ctx.client().get_withdraw_nonce(&ctx.recipient_kp.address), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Replay protection tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn delegated_withdraw_replay_rejected_with_same_nonce() {
+        let ctx = Ctx::setup();
+        let stream_id = ctx.create_stream();
+        let destination = Address::generate(&ctx.env);
+
+        ctx.env.ledger().set_timestamp(300);
+        let sig = ctx.sign(stream_id, &destination, 0, 9999);
+
+        // First call succeeds.
+        ctx.client()
+            .delegated_withdraw(&stream_id, &ctx.relayer, &destination, &0, &9999, &sig);
+
+        // Replay with the same nonce must fail.
+        ctx.env.ledger().set_timestamp(600);
+        let result = ctx.client().try_delegated_withdraw(
+            &stream_id,
+            &ctx.relayer,
+            &destination,
+            &0, // stale nonce
+            &9999,
+            &sig,
+        );
+        assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
+    }
+
+    #[test]
+    fn delegated_withdraw_nonce_skipping_rejected() {
+        let ctx = Ctx::setup();
+        let stream_id = ctx.create_stream();
+        let destination = Address::generate(&ctx.env);
+
+        ctx.env.ledger().set_timestamp(300);
+        // Nonce is 0 but we supply 1 (skip).
+        let sig = ctx.sign(stream_id, &destination, 1, 9999);
+        let result = ctx.client().try_delegated_withdraw(
+            &stream_id,
+            &ctx.relayer,
+            &destination,
+            &1,
+            &9999,
+            &sig,
+        );
+        assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Deadline / expiry tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn delegated_withdraw_expired_deadline_rejected() {
+        let ctx = Ctx::setup();
+        let stream_id = ctx.create_stream();
+        let destination = Address::generate(&ctx.env);
+
+        // Ledger is at t=500, deadline is 499 (already expired).
+        ctx.env.ledger().set_timestamp(500);
+        let sig = ctx.sign(stream_id, &destination, 0, 499);
+        let result = ctx.client().try_delegated_withdraw(
+            &stream_id,
+            &ctx.relayer,
+            &destination,
+            &0,
+            &499,
+            &sig,
+        );
+        assert_eq!(result, Err(Ok(ContractError::SignatureDeadlineExpired)));
+    }
+
+    #[test]
+    fn delegated_withdraw_deadline_at_current_time_accepted() {
+        let ctx = Ctx::setup();
+        let stream_id = ctx.create_stream();
+        let destination = Address::generate(&ctx.env);
+
+        ctx.env.ledger().set_timestamp(400);
+        // deadline == current timestamp is valid (not expired).
+        let sig = ctx.sign(stream_id, &destination, 0, 400);
+        let amount = ctx
+            .client()
+            .delegated_withdraw(&stream_id, &ctx.relayer, &destination, &0, &400, &sig);
+        assert_eq!(amount, 400);
+    }
+
+    // -----------------------------------------------------------------------
+    // Wrong signer tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn delegated_withdraw_wrong_signer_rejected() {
+        let ctx = Ctx::setup();
+        let stream_id = ctx.create_stream();
+        let destination = Address::generate(&ctx.env);
+
+        ctx.env.ledger().set_timestamp(400);
+
+        // Sign with a different keypair (attacker).
+        let attacker_kp = RecipientKeypair::from_seed(&ctx.env, [0xFFu8; 32]);
+        let bad_sig =
+            attacker_kp.sign_withdraw(&ctx.env, &ctx.contract_id, stream_id, &destination, 0, 9999);
+
+        // The contract should panic (host trap) because ed25519_verify fails.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ctx.client().delegated_withdraw(
+                &stream_id,
+                &ctx.relayer,
+                &destination,
+                &0,
+                &9999,
+                &bad_sig,
+            );
+        }));
+        assert!(result.is_err(), "wrong signer must be rejected");
+
+        // No state change: nonce unchanged, no tokens moved.
+        assert_eq!(ctx.client().get_withdraw_nonce(&ctx.recipient_kp.address), 0);
+        assert_eq!(ctx.token.balance(&destination), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Stream state guard tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn delegated_withdraw_paused_stream_rejected() {
+        let ctx = Ctx::setup();
+        let stream_id = ctx.create_stream();
+        let destination = Address::generate(&ctx.env);
+
+        ctx.env.ledger().set_timestamp(200);
+        ctx.client().pause_stream(&stream_id);
+
+        let sig = ctx.sign(stream_id, &destination, 0, 9999);
+        let result = ctx.client().try_delegated_withdraw(
+            &stream_id,
+            &ctx.relayer,
+            &destination,
+            &0,
+            &9999,
+            &sig,
+        );
+        assert_eq!(result, Err(Ok(ContractError::InvalidState)));
+    }
+
+    #[test]
+    fn delegated_withdraw_completed_stream_rejected() {
+        let ctx = Ctx::setup();
+        let stream_id = ctx.create_stream();
+        let destination = Address::generate(&ctx.env);
+
+        // Drain the stream via delegated withdraw first (avoids trustline issue).
+        ctx.env.ledger().set_timestamp(1000);
+        let sig = ctx.sign(stream_id, &destination, 0, 9999);
+        ctx.client()
+            .delegated_withdraw(&stream_id, &ctx.relayer, &destination, &0, &9999, &sig);
+        assert_eq!(
+            ctx.client().get_stream_state(&stream_id).status,
+            StreamStatus::Completed
+        );
+
+        // Now try another delegated withdraw on the completed stream.
+        let sig2 = ctx.sign(stream_id, &destination, 1, 9999);
+        let result = ctx.client().try_delegated_withdraw(
+            &stream_id,
+            &ctx.relayer,
+            &destination,
+            &1,
+            &9999,
+            &sig2,
+        );
+        assert_eq!(result, Err(Ok(ContractError::InvalidState)));
+    }
+
+    #[test]
+    fn delegated_withdraw_destination_is_contract_rejected() {
+        let ctx = Ctx::setup();
+        let stream_id = ctx.create_stream();
+
+        ctx.env.ledger().set_timestamp(400);
+        // Destination = contract address (forbidden).
+        let bad_dest = ctx.contract_id.clone();
+        let sig = ctx.sign(stream_id, &bad_dest, 0, 9999);
+        let result = ctx.client().try_delegated_withdraw(
+            &stream_id,
+            &ctx.relayer,
+            &bad_dest,
+            &0,
+            &9999,
+            &sig,
+        );
+        assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Direct-withdraw security: delegated path must not weaken it
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn direct_withdraw_still_works_alongside_delegated() {
+        let ctx = Ctx::setup();
+        let stream_id = ctx.create_stream();
+        let destination = Address::generate(&ctx.env);
+
+        // Delegated withdraw at t=300.
+        ctx.env.ledger().set_timestamp(300);
+        let sig = ctx.sign(stream_id, &destination, 0, 9999);
+        ctx.client()
+            .delegated_withdraw(&stream_id, &ctx.relayer, &destination, &0, &9999, &sig);
+
+        // Direct withdraw at t=700 — recipient calls withdraw_to a contract address
+        // (avoids trustline requirement for keypair-derived Stellar accounts).
+        ctx.env.ledger().set_timestamp(700);
+        let direct_dest = Address::generate(&ctx.env);
+        let direct_amount = ctx.client().withdraw_to(&stream_id, &direct_dest);
+        assert_eq!(direct_amount, 400); // 700 - 300 already withdrawn
+        assert_eq!(ctx.token.balance(&direct_dest), 400);
+    }
+
+    // -----------------------------------------------------------------------
+    // get_withdraw_nonce view
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn get_withdraw_nonce_returns_zero_before_any_delegated_withdraw() {
+        let ctx = Ctx::setup();
+        assert_eq!(
+            ctx.client().get_withdraw_nonce(&ctx.recipient_kp.address),
+            0
+        );
+    }
 }

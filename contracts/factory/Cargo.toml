@@ -1,0 +1,18 @@
+[package]
+name = "fluxora_factory"
+version = "0.1.0"
+edition = "2021"
+description = "Fluxora Treasury Factory Policy Wrapper"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+testutils = ["soroban-sdk/testutils", "fluxora_stream/testutils"]
+
+[dependencies]
+soroban-sdk = "21.7.7"
+fluxora_stream = { path = "../stream" }
+
+[dev-dependencies]
+soroban-sdk = { version = "21.7.7", features = ["testutils"] }

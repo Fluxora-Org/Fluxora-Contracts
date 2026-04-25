@@ -3,6 +3,7 @@
 Version policy, migration runbook, and audit notes for operators, integrators, and auditors.
 
 **Source of truth:** `contracts/stream/src/lib.rs` (`CONTRACT_VERSION` constant, `version()` entry-point)
+**ABI stability rules:** [`docs/ABI_STABILITY.md`](./ABI_STABILITY.md) — canonical definition of what counts as a breaking change for entrypoints, error codes, event schemas, and storage discriminants.
 
 ---
 
@@ -15,8 +16,18 @@ Version policy, migration runbook, and audit notes for operators, integrators, a
 ### Current value
 
 ```
-CONTRACT_VERSION = 1
+CONTRACT_VERSION = 5
 ```
+
+### Version history
+
+| Version | Change summary |
+|---|---|
+| 1 | Initial release |
+| 2 | `Stream` struct gained `checkpointed_amount: i128` and `checkpointed_at: u64` for safe rate-decrease support |
+| 3 | `Stream` struct gained `memo: Option<Bytes>`; `StreamCreated` event gained `memo` field; `DataKey::StreamMemo(u64)` added at discriminant 10; `create_stream`/`create_streams` gained `memo` parameter; `get_stream_memo` entry-point added |
+| 4 | `TotalLiabilities` instance key for escrow accounting |
+| 5 | `withdraw_dust_threshold: i128` added to `Stream` struct and creation params |
 
 ### When to increment
 
@@ -39,11 +50,18 @@ CONTRACT_VERSION = 1
 - Storage layout changes that make existing `Stream`, `Config`, or `RecipientStreams` entries unreadable after upgrade.
 - Event shape changes that break indexers parsing `StreamCreated`, `Withdrawal`, `StreamEvent`, etc.
 
+For the exhaustive, category-by-category breakdown see **[`docs/ABI_STABILITY.md §3`](./ABI_STABILITY.md#3-what-counts-as-a-breaking-change)**.
+
 ### What does NOT require an increment
 
 - Adding new entry-points that old clients can safely ignore.
 - Changing TTL bump constants (`INSTANCE_BUMP_AMOUNT`, `PERSISTENT_BUMP_AMOUNT`).
 - Changing internal helper functions with no external surface.
+
+> **Note (transfer_sender):** The `transfer_sender` entry-point is a purely additive
+> new entry-point. Old clients that do not call it are unaffected. `CONTRACT_VERSION`
+> was incremented conservatively per the policy above. Indexers should subscribe to
+> the new `sndr_xfr` event to track sender rotations.
 
 ---
 

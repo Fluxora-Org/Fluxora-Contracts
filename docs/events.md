@@ -16,10 +16,10 @@ Notes:
 
 | Event name       | Topic(s)                        | Data (shape & types)                                                                                                                                      | When emitted                                                                                                            |
 |------------------|---------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------|
-| StreamCreated    | `["created", stream_id: u64]`   | `StreamCreated { stream_id: u64, sender: Address, recipient: Address, deposit_amount: i128, rate_per_second: i128, start_time: u64, cliff_time: u64, end_time: u64 }` | After a stream is successfully created and deposit tokens transferred. Not emitted on any validation failure.           |
+| StreamCreated    | `["created", stream_id: u64]`   | `StreamCreated { stream_id: u64, sender: Address, recipient: Address, deposit_amount: i128, rate_per_second: i128, start_time: u64, cliff_time: u64, end_time: u64, memo: Option<Bytes> }` | After a stream is successfully created and deposit tokens transferred. Not emitted on any validation failure.           |
 | Withdrawal       | `["withdrew", stream_id: u64]`  | `Withdrawal { stream_id: u64, recipient: Address, amount: i128 }`                                                                                         | When a recipient successfully withdraws accrued tokens. Only emitted when `amount > 0`.                                |
-| WithdrawalTo     | `["wdraw_to", stream_id: u64]`  | `WithdrawalTo { stream_id: u64, recipient: Address, destination: Address, amount: i128 }`                                                                 | When a recipient calls `withdraw_to` and `amount > 0`. Destination may differ from recipient.                          |
-| StreamPaused     | `["paused", stream_id: u64]`    | `StreamEvent::Paused(stream_id: u64)`                                                                                                                     | When a stream is paused by the sender (`pause_stream`) or admin (`pause_stream_as_admin`).                              |
+| WithdrawalTo     | `["wdraw_to", stream_id: u64]`  | `WithdrawalTo { stream_id: u64, recipient: Address, destination: Address, amount: i128 }`                                                                 | When a recipient calls `withdraw_to` or `batch_withdraw_to` and `amount > 0`. Destination may differ from recipient.                          |
+| StreamPaused     | `["paused", stream_id: u64]`    | `StreamPaused { stream_id: u64, reason: PauseReason }`                                                                                                    | When a stream is paused by the sender (`pause_stream`) or admin (`pause_stream_as_admin`). The `reason` field carries the operational context code.         |
 | StreamResumed    | `["resumed", stream_id: u64]`   | `StreamEvent::Resumed(stream_id: u64)`                                                                                                                    | When a paused stream is resumed by the sender (`resume_stream`) or admin (`resume_stream_as_admin`).                    |
 | StreamCancelled  | `["cancelled", stream_id: u64]` | `StreamEvent::StreamCancelled(stream_id: u64)`                                                                                                            | When a stream is cancelled by the sender (`cancel_stream`) or admin (`cancel_stream_as_admin`). `status` is persisted as `Cancelled` and `cancelled_at` is set before this event is emitted. |
 | StreamCompleted  | `["completed", stream_id: u64]` | `StreamEvent::StreamCompleted(stream_id: u64)`                                                                                                            | When `withdrawn_amount` reaches `deposit_amount` during a `withdraw` or `batch_withdraw` call. Emitted after Withdrawal. |
@@ -28,10 +28,17 @@ Notes:
 | StreamEndShortened | `["end_shrt", stream_id: u64]` | `StreamEndShortened { stream_id: u64, old_end_time: u64, new_end_time: u64, refund_amount: i128 }`                                                       | When `shorten_stream_end_time` successfully shortens a stream.                                                           |
 | StreamEndExtended | `["end_ext", stream_id: u64]`  | `StreamEndExtended { stream_id: u64, old_end_time: u64, new_end_time: u64 }`                                                                              | When `extend_stream_end_time` successfully extends a stream.                                                             |
 | StreamToppedUp   | `["top_up", stream_id: u64]`    | `StreamToppedUp { stream_id: u64, top_up_amount: i128, new_deposit_amount: i128 }`                                                                        | When `top_up_stream` successfully increases a stream's deposit.                                                          |
+| RecipientUpdated | `["recp_upd", stream_id: u64]` | `RecipientUpdated { stream_id: u64, old_recipient: Address, new_recipient: Address }`                                                                     | When `update_recipient` successfully rotates a stream's receiving address.                                             |
 | AdminUpdated     | `["AdminUpdated"]`              | `(old_admin: Address, new_admin: Address)`                                                                                                                | When the contract admin is rotated via `set_admin`.                                                                     |
 | ContractPaused   | `["paused_ctl"]`                | `bool`                                                                                                                                                    | When the global contract pause state is toggled via `set_contract_paused`.                                              |
 | ProtocolPaused   | `["pr_pause", admin: Address]`  | `ProtocolPaused { reason: String, paused_at: u64 }`                                                                                                       | When `pause_protocol` successfully pauses the protocol. Not emitted on idempotent calls.                               |
 | ProtocolResumed  | `["pr_resume", admin: Address]` | `ProtocolResumed { resumed_at: u64 }`                                                                                                                     | When `resume_protocol` successfully resumes the protocol. Not emitted on idempotent calls.                             |
+<<<<<<< HEAD
+=======
+| SenderTransferred | `["sndr_xfr", stream_id: u64]` | `SenderTransferred { stream_id: u64, old_sender: Address, new_sender: Address }`                                                                          | When `transfer_sender` successfully rotates the stream sender. Emitted after state is persisted. Not emitted on failure. |
+
+**Additional topics (validator):** `gl_pause`, `gl_resume`, `rate_dec`, `tmpl_def`.
+>>>>>>> upstream/main
 
 ---
 | Event name | Topic(s) | Data (shape & types) | When emitted |
@@ -66,6 +73,7 @@ data:   StreamCreated {
           start_time:      u64,
           cliff_time:      u64,
           end_time:        u64,
+          memo:            Option<Bytes>,  // None when not supplied; max 64 bytes
         }
 ```
 
@@ -127,33 +135,42 @@ data:   WithdrawalTo {
 
 ### 4) StreamPaused / StreamResumed / StreamCancelled / StreamCompleted / StreamClosed
 
-These all use the `StreamEvent` enum as their data payload:
+**StreamPaused** uses the new `StreamPaused` struct (introduced in `CONTRACT_VERSION = 3`):
 
 ```rust
 #[contracttype]
-pub enum StreamEvent {
-    Paused(u64),
-    Resumed(u64),
-    StreamCancelled(u64),
-    StreamCompleted(u64),
-    StreamClosed(u64),
+pub struct StreamPaused {
+    pub stream_id: u64,
+    pub reason: PauseReason,
+}
+
+#[contracttype]
+pub enum PauseReason {
+    Operational   = 0,  // Routine sender-initiated pause
+    Emergency     = 1,  // Security-related pause
+    Compliance    = 2,  // Regulatory/compliance hold
+    Administrative = 3, // Admin-initiated pause
 }
 ```
 
-| Function(s)                                                  | Topic         | Data enum variant                  |
+| Function(s)                                                  | Topic         | Data                               |
 | ------------------------------------------------------------ | ------------- | ---------------------------------- |
-| `pause_stream`, `pause_stream_as_admin`                      | `"paused"`    | `StreamEvent::Paused(id)`          |
+| `pause_stream`, `pause_stream_as_admin`                      | `"paused"`    | `StreamPaused { stream_id, reason }` |
 | `resume_stream`, `resume_stream_as_admin`                    | `"resumed"`   | `StreamEvent::Resumed(id)`         |
 | `cancel_stream`, `cancel_stream_as_admin`                    | `"cancelled"` | `StreamEvent::StreamCancelled(id)` |
 | `withdraw`, `batch_withdraw` (final drain on Active streams) | `"completed"` | `StreamEvent::StreamCompleted(id)` |
 | `close_completed_stream`                                     | `"closed"`    | `StreamEvent::StreamClosed(id)`    |
 
-Example (cancelled):
+> **Breaking change (v3):** The `"paused"` event data changed from `StreamEvent::Paused(stream_id)`
+> to `StreamPaused { stream_id, reason }`. Indexers must update their pause event parsers.
+> `CONTRACT_VERSION` was bumped to `3` to signal this incompatibility.
+
+Example (paused with reason):
 
 ```json
 {
-  "topics": ["cancelled", 0],
-  "data": { "StreamCancelled": 0 }
+  "topics": ["paused", 0],
+  "data": { "stream_id": 0, "reason": "Operational" }
 }
 ```
 
@@ -294,6 +311,38 @@ Example:
 }
 ```
 
+<<<<<<< HEAD
+=======
+### 12) SenderTransferred
+
+Emitted by `transfer_sender` when the stream sender is successfully rotated.
+
+```
+topics: ["sndr_xfr", <stream_id: u64>]
+data:   SenderTransferred {
+          stream_id:  u64,
+          old_sender: Address,
+          new_sender: Address,
+        }
+```
+
+Example:
+
+```json
+{
+  "topics": ["sndr_xfr", 0],
+  "data": {
+    "stream_id": 0,
+    "old_sender": "G...OLD_SENDER...",
+    "new_sender": "G...NEW_SENDER..."
+  }
+}
+```
+
+Indexers should update their sender reference for the stream on receipt of this event.
+The `old_sender` field allows indexers to correlate the previous treasury key.
+
+>>>>>>> upstream/main
 ---
 
 ## Parsing recommendations for indexers
@@ -307,6 +356,11 @@ Example:
 - `StreamClosed` signals that the stream's on-chain storage has been removed.
   After this event, `get_stream_state` returns `StreamNotFound` for that ID.
 - `AdminUpdated` has a single-element topic list (no stream_id).
+
+> **See [docs/indexer-derivation.md](./indexer-derivation.md)** for the complete
+> specification of how to derive stream state from events, when to call
+> `get_stream_state`, and worked examples for each lifecycle path (including
+> cancellation, rate changes, and completion).
 
 ---
 
@@ -331,8 +385,8 @@ Commit message suggestion: `docs: add event schema and topics for indexers`
 |--------------------------------------------------------------|-----------------|
 | `persist_new_stream`                                         | `"created"`     |
 | `withdraw`, `batch_withdraw`                                 | `"withdrew"`    |
-| `withdraw_to`                                                | `"wdraw_to"`    |
-| `withdraw`, `batch_withdraw` (completion)                    | `"completed"`   |
+| `withdraw_to`, `batch_withdraw_to`                           | `"wdraw_to"`    |
+| `withdraw`, `batch_withdraw`, `batch_withdraw_to` (completion) | `"completed"`   |
 | `pause_stream`, `pause_stream_as_admin`                      | `"paused"`      |
 | `resume_stream`, `resume_stream_as_admin`                    | `"resumed"`     |
 | `cancel_stream`, `cancel_stream_as_admin`                    | `"cancelled"`   |
@@ -345,6 +399,10 @@ Commit message suggestion: `docs: add event schema and topics for indexers`
 | `set_contract_paused`                                        | `"paused_ctl"`  |
 | `pause_protocol`                                             | `"pr_pause"`    |
 | `resume_protocol`                                            | `"pr_resume"`   |
+<<<<<<< HEAD
+=======
+| `update_recipient`                                           | `"recp_upd"`    |
+>>>>>>> upstream/main
 
 If you change event topics or payloads in the contract, update this document and
 include updated example snapshots in the PR.
