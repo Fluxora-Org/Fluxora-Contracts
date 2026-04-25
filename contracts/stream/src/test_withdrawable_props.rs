@@ -22,45 +22,6 @@ use soroban_sdk::{
 
 use crate::{FluxoraStream, FluxoraStreamClient, StreamStatus};
 
-trait CreateStreamCompat {
-    #[allow(clippy::too_many_arguments)]
-    fn create_stream(
-        &self,
-        sender: &Address,
-        recipient: &Address,
-        deposit_amount: &i128,
-        rate_per_second: &i128,
-        start_time: &u64,
-        cliff_time: &u64,
-        end_time: &u64,
-    ) -> u64;
-}
-
-impl CreateStreamCompat for FluxoraStreamClient<'_> {
-    fn create_stream(
-        &self,
-        sender: &Address,
-        recipient: &Address,
-        deposit_amount: &i128,
-        rate_per_second: &i128,
-        start_time: &u64,
-        cliff_time: &u64,
-        end_time: &u64,
-    ) -> u64 {
-        FluxoraStreamClient::create_stream(
-            self,
-            sender,
-            recipient,
-            deposit_amount,
-            rate_per_second,
-            start_time,
-            cliff_time,
-            end_time,
-            &0u32,
-        )
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Minimal isolated test harness
 // ---------------------------------------------------------------------------
@@ -89,6 +50,12 @@ impl PropCtx {
 
         FluxoraStreamClient::new(&env, &contract_id).init(&token_id, &admin);
         StellarAssetClient::new(&env, &token_id).mint(&sender, &deposit);
+        soroban_sdk::token::Client::new(&env, &token_id).approve(
+            &sender,
+            &contract_id,
+            &deposit,
+            &100_000,
+        );
 
         PropCtx {
             env,
@@ -190,8 +157,8 @@ proptest! {
             &0u64,
             &0u64,
             &duration,
-            &0u32,
-            );
+            &0, &None,
+        );
         for t in &times {
             ctx.env.ledger().set_timestamp(*t);
             assert_invariants(&ctx, id, &std::format!("active t={t}"));
@@ -214,11 +181,11 @@ proptest! {
             &0u64,
             &0u64,
             &duration,
-            &0u32,
-            );
+            &0, &None,
+        );
         for t in &times {
             ctx.env.ledger().set_timestamp(*t);
-            let _ = ctx.client().withdraw(&id);
+            let _ = ctx.client().try_withdraw(&id);
             assert_invariants(&ctx, id, &std::format!("post-withdraw t={t}"));
         }
     }
@@ -239,8 +206,8 @@ proptest! {
             &0u64,
             &0u64,
             &duration,
-            &0u32,
-            );
+            &0, &None,
+        );
         let mut paused = false;
         for t in &times {
             ctx.env.ledger().set_timestamp(*t);
@@ -250,7 +217,7 @@ proptest! {
                     let _ = ctx.client().try_resume_stream(&id);
                     paused = false;
                 } else {
-                    let _ = ctx.client().try_pause_stream(&id);
+                    let _ = ctx.client().try_pause_stream(&id, &crate::PauseReason::Operational);
                     paused = true;
                 }
             }
@@ -274,8 +241,8 @@ proptest! {
             &0u64,
             &0u64,
             &duration,
-            &0u32,
-            );
+            &0, &None,
+        );
         ctx.env.ledger().set_timestamp(cancel_at);
         ctx.client().cancel_stream(&id);
         assert_invariants(&ctx, id, "post-cancel");
@@ -299,12 +266,12 @@ proptest! {
             &0u64,
             &0u64,
             &duration,
-            &0u32,
-            );
+            &0, &None,
+        );
         let mut prev = 0_i128;
         for t in &times {
             ctx.env.ledger().set_timestamp(*t);
-            let _ = ctx.client().withdraw(&id);
+            let _ = ctx.client().try_withdraw(&id);
             let state = ctx.client().get_stream_state(&id);
             assert!(
                 state.withdrawn_amount >= prev,
@@ -331,7 +298,8 @@ fn setup_standard(deposit: i128) -> (PropCtx, u64) {
         &0u64,
         &0u64,
         &1000u64,
-        &0u32,
+        &0,
+        &None,
     );
     (ctx, id)
 }
@@ -391,7 +359,8 @@ fn invariants_completed_stream() {
 fn invariants_paused_stream() {
     let (ctx, id) = setup_standard(1000);
     ctx.env.ledger().set_timestamp(400);
-    ctx.client().pause_stream(&id);
+    ctx.client()
+        .pause_stream(&id, &crate::PauseReason::Operational);
     assert_invariants(&ctx, id, "paused t=400");
 }
 
@@ -399,7 +368,8 @@ fn invariants_paused_stream() {
 fn invariants_paused_then_resumed() {
     let (ctx, id) = setup_standard(1000);
     ctx.env.ledger().set_timestamp(400);
-    ctx.client().pause_stream(&id);
+    ctx.client()
+        .pause_stream(&id, &crate::PauseReason::Operational);
     ctx.env.ledger().set_timestamp(600);
     ctx.client().resume_stream(&id);
     assert_invariants(&ctx, id, "resumed t=600");
@@ -409,7 +379,8 @@ fn invariants_paused_then_resumed() {
 fn invariants_paused_withdraw_then_resume() {
     let (ctx, id) = setup_standard(1000);
     ctx.env.ledger().set_timestamp(400);
-    ctx.client().pause_stream(&id);
+    ctx.client()
+        .pause_stream(&id, &crate::PauseReason::Operational);
     assert_invariants(&ctx, id, "paused before resume");
     ctx.env.ledger().set_timestamp(600);
     ctx.client().resume_stream(&id);
@@ -429,7 +400,8 @@ fn invariants_cancelled_before_cliff() {
         &0u64,
         &500u64,
         &1000u64,
-        &0u32,
+        &0,
+        &None,
     );
     ctx.env.ledger().set_timestamp(200);
     ctx.client().cancel_stream(&id);
@@ -469,7 +441,8 @@ fn invariants_high_rate_deposit_capped() {
         &0u64,
         &0u64,
         &100u64,
-        &0u32,
+        &0,
+        &None,
     );
     for t in [0u64, 10, 50, 99, 100, 200] {
         ctx.env.ledger().set_timestamp(t);
@@ -490,7 +463,8 @@ fn invariants_excess_deposit_stream() {
         &0u64,
         &0u64,
         &1000u64,
-        &0u32,
+        &0,
+        &None,
     );
     for t in [0u64, 500, 1000, 1500] {
         ctx.env.ledger().set_timestamp(t);
@@ -514,7 +488,8 @@ fn invariants_multiple_pause_resume_cycles() {
     ] {
         ctx.env.ledger().set_timestamp(t);
         if pause {
-            ctx.client().pause_stream(&id);
+            ctx.client()
+                .pause_stream(&id, &crate::PauseReason::Operational);
         } else {
             ctx.client().resume_stream(&id);
         }

@@ -15,10 +15,17 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `StreamNotFound` | 1 | The specified stream does not exist | `pause_stream`, `resume_stream`, `cancel_stream`, `withdraw`, `calculate_accrued`, `get_stream_state`, admin overrides |
 | `InvalidState` | 2 | Operation attempted in an invalid state | `cancel_stream`, `withdraw`, `withdraw_to`, `batch_withdraw`, `get_claimable_at`, admin overrides |
 | `InvalidParams` | 3 | Function input parameters are invalid | `create_stream`, `withdraw_to`, `update_rate_per_second`, `top_up_stream`, `extend_stream_end_time`, `shorten_stream_end_time`, `batch_create_streams` |
-| `ContractPaused` | 4 | Global emergency pause is active; mutations are blocked | `create_stream`, `create_streams`, `withdraw`, `withdraw_to`, `batch_withdraw`, `cancel_stream`, `top_up_stream`, `update_rate_per_second`, `shorten_stream_end_time`, `extend_stream_end_time` |
+<<<<<<< HEAD
+| `ContractPaused` | 4 | The protocol is globally paused; no new streams may be created | `create_stream`, `create_streams` (creation blocked; existing streams unaffected) |
+| `StartTimeInPast` | 5 | `start_time` is before the current ledger timestamp | `create_stream`, `create_streams` |
+| `ArithmeticOverflow` | 6 | Arithmetic overflow in stream calculations | `create_stream`, `create_streams`, `update_rate_per_second`, `top_up_stream`, `batch_create_streams` |
+| `Unauthorized` | 7 | Caller is not authorized to perform this operation | `init`, `set_admin`, `pause_protocol`, `resume_protocol`, `cancel_stream`, `top_up_stream`, `withdraw` (recipient check) |
+=======
+| `ContractPaused` | 4 | Global emergency pause or creation pause is active | `create_stream`, `create_streams`, `withdraw`, `withdraw_to`, `batch_withdraw`, `cancel_stream`, `top_up_stream`, `update_rate_per_second`, `shorten_stream_end_time`, `extend_stream_end_time`, `update_recipient`, `trigger_auto_claim` |
 | `StartTimeInPast` | 5 | `start_time` is before the current ledger timestamp | `create_stream`, `create_streams` |
 | `ArithmeticOverflow` | 6 | Arithmetic overflow in stream calculations | `create_stream`, `create_streams`, `update_rate_per_second`, `top_up_stream`, `shorten_stream_end_time`, `extend_stream_end_time` |
 | `Unauthorized` | 7 | Caller is not authorized to perform this operation | `init`, `set_admin`, `cancel_stream`, `top_up_stream`, `withdraw` (recipient check) |
+>>>>>>> upstream/main
 | `AlreadyInitialised` | 8 | Contract has already been initialized | `init` |
 | `InsufficientBalance` | 9 | Token transfer failed due to insufficient balance or allowance | `create_stream`, `cancel_stream`, `withdraw`, `top_up_stream` |
 | `InsufficientDeposit` | 10 | Deposit amount does not cover the planned duration at the specified rate | `create_stream`, `create_streams`, `update_rate_per_second`, `extend_stream_end_time` |
@@ -26,6 +33,9 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `StreamNotPaused` | 12 | Stream is not `Paused`; cannot resume an `Active` stream | `resume_stream`, `resume_stream_as_admin` |
 | `StreamTerminalState` | 13 | Stream is `Completed` or `Cancelled`; modification blocked | `pause_stream`, `resume_stream`, admin overrides |
 | `DuplicateStreamId` | 14 | Duplicate stream IDs supplied to a batch operation | `batch_withdraw` |
+| `TemplateNotFound` | 15 | No template exists for the given template id | `get_stream_template`, `create_stream_from_template`, `delete_stream_template` |
+| `TemplateLimitExceeded` | 16 | Template registry limits exceeded | `register_stream_template` |
+| `TemplateUnauthorized` | 17 | Caller is not the template owner | `delete_stream_template` |
 
 ---
 
@@ -155,15 +165,39 @@ match client.try_create_stream(&sender, &recipient, &deposit, &rate, &start, &cl
 **Definition**: The protocol is globally paused. No new streams may be created.
 
 **Trigger Conditions**:
+<<<<<<< HEAD
+- Admin called `pause_protocol(admin, reason)` — global emergency pause activated
+- Contract is in emergency pause mode (CREATION-ONLY scope)
+
+**Affected Operations**:
+- `create_stream` — blocked, returns `ContractPaused`
+- `create_streams` — blocked, returns `ContractPaused`
+
+**NOT Affected** (existing streams continue normally):
+- `withdraw` / `withdraw_to` / `batch_withdraw` — recipients can withdraw
+- `cancel_stream` / `cancel_stream_as_admin` — streams can be cancelled
+- `pause_stream` / `resume_stream` — individual stream pause/resume works
+- `top_up_stream` — streams can be topped up
+- View functions (`get_stream_state`, `calculate_accrued`, etc.) — all functional
+
+**Resolution**: Resume the protocol via the admin `resume_protocol(admin)` entrypoint.
+=======
 - Admin called `set_global_emergency_paused(true)` or `set_contract_paused(true)`
 - Contract is in global emergency pause or creation pause mode
+>>>>>>> upstream/main
 
 **Affected Roles**:
 | Role | Can Trigger | Notes |
 |------|------------|-------|
+<<<<<<< HEAD
 | Sender | Yes | Create streams blocked when paused |
 | Recipient | No | Existing streams unaffected; can still withdraw |
 | Admin | No | Admin operations exempt; admin can always pause/resume |
+=======
+| Sender | Yes | `create_stream` blocked if EITHER pause mode is active. `cancel`/`update` blocked ONLY if Global Emergency Pause is active. |
+| Recipient | Yes | `withdraw` blocked ONLY if Global Emergency Pause is active. |
+| Admin | No | Admin operations (pause/resume/init) are never blocked by the pause flag. |
+>>>>>>> upstream/main
 
 **Client Action**:
 ```rust
@@ -185,10 +219,18 @@ match client.try_create_stream(...) {
 
 **Success Semantics**: Returns `u64` stream_id (when unpaused).
 
+<<<<<<< HEAD
 **Integrator Note**: During pause, `calculate_accrued` and `get_stream_state` remain functional.
 Recipients can check their balance and withdraw from existing streams. Only NEW stream
 creation is blocked. Use `is_paused()` for a quick check or `get_pause_info()` for full
 audit trail (reason, timestamp, admin who paused).
+=======
+**Integrator Note**: During any pause, `calculate_accrued` and `get_stream_state` remain functional.
+Recipients can always check their balance.
+- If `is_creation_paused()` is true: Only NEW stream creation is blocked.
+- If `is_global_emergency_paused()` is true: All mutations (creation, withdrawal, cancellation) are blocked.
+Use `is_paused()` (checks both) or inspect `get_pause_info()` for full details.
+>>>>>>> upstream/main
 
 ---
 
@@ -589,6 +631,9 @@ Error handling is verified by tests in `contracts/stream/src/test.rs`:
 | InsufficientBalance | Sender with no tokens |
 | InsufficientDeposit | `deposit < rate * duration` |
 | StreamTerminalState | Pause/complete then modify |
+| AutoClaimNotSet | `try_trigger_auto_claim` without prior `set_auto_claim` |
+
+Discriminant stability is verified by `test_contract_error_discriminants_are_stable` in `contracts/stream/src/test.rs`, which asserts the exact `u32` value of every `ContractError` variant and will fail at compile time if any value is changed.
 
 ---
 
@@ -596,7 +641,7 @@ Error handling is verified by tests in `contracts/stream/src/test.rs`:
 
 ### Included
 
-- All 13 `ContractError` variants
+- All 14 `ContractError` variants
 - Role-based error mapping
 - Success/failure semantics for each operation
 - Time-driven edge cases

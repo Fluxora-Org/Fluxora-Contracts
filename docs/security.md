@@ -166,6 +166,7 @@ reentrancy impact — state will already reflect the current operation when the 
 | `close_completed_stream`  | Permissionless (any caller)                             |
 | `set_admin`               | Current contract admin                                  |
 | `set_contract_paused`     | Contract admin                                          |
+| `transfer_sender`         | Current stream sender                                   |
 
 Cancellation-specific boundary checks:
 
@@ -194,10 +195,98 @@ All arithmetic that could overflow `i128` uses Rust's `checked_*` methods:
 
 ## Global Emergency Pause
 
-`set_contract_paused(true)` causes `create_stream` and `create_streams` to fail with
-`ContractError::ContractPaused`. Existing streams are unaffected — withdrawals,
-cancellations, and other operations continue normally. The pause flag is stored in
-instance storage under `DataKey::CreationPaused`.
+<<<<<<< HEAD
+### Purpose
+
+The global emergency pause allows the protocol admin to immediately halt all new stream
+creation in response to a security incident, critical bug, or other emergency situation.
+This is a circuit-breaker mechanism that protects users from potential exploits while
+allowing existing streams to continue normally.
+
+### Scope
+
+**CREATION-ONLY scope:** The pause blocks `create_stream` and `create_streams` — 
+new stream submission is rejected with `ContractError::ContractPaused`.
+
+**NOT affected:** Existing active streams continue to accrue and can be:
+- Withdrawn from by recipients
+- Cancelled by senders or admin
+- Paused/resumed individually
+- Top-up funded
+- Modified (rate updates, end time changes)
+
+This conservative scope minimizes disruption to existing users while preventing new
+liabilities from being created during an incident.
+
+### Who Can Pause
+
+**Only the designated protocol admin address** can call `pause_protocol` or `resume_protocol`.
+The admin address is stored in `Config.admin` and is set during contract initialization.
+
+Any non-admin caller will receive `ContractError::Unauthorized`.
+
+### Idempotency
+
+Both pause and resume operations are idempotent:
+- **Pausing when already paused:** Returns `Ok(())` silently — no state changes, no events emitted
+- **Resuming when not paused:** Returns `Ok(())` silently — no state changes, no events emitted
+
+This ensures safe retry logic and prevents duplicate events during incident response.
+
+### Audit Trail
+
+When the protocol is paused, the following information is stored on-chain:
+- `GlobalPauseReason`: Human-readable reason string provided by the admin
+- `GlobalPauseTimestamp`: Ledger timestamp when pause was activated
+- `GlobalPauseAdmin`: The admin address that activated the pause
+
+This information is queryable via `get_pause_info()` and is cleared on resume.
+
+### Entrypoints
+
+| Function | Auth Required | Returns | Description |
+|----------|---------------|---------|-------------|
+| `pause_protocol(admin, reason)` | Admin only | `Result<(), ContractError>` | Pauses protocol, stores reason/timestamp/admin |
+| `resume_protocol(admin)` | Admin only | `Result<(), ContractError>` | Resumes protocol, clears audit trail |
+| `is_paused()` | None | `bool` | Quick query for pause state |
+| `get_pause_info()` | None | `PauseInfo` | Detailed query with audit fields |
+
+### Recommended Use
+
+**When to pause:**
+- Suspected security vulnerability discovered
+- Critical bug affecting stream creation
+- Upstream dependency (token contract) compromised
+- Regulatory or legal emergency requiring halt
+
+**Incident Response Checklist:**
+1. Call `pause_protocol(admin, Some("reason"))` to halt new streams
+2. Verify `is_paused()` returns `true`
+3. Confirm `ProtocolPaused` event in ledger
+4. Investigate and remediate underlying issue
+5. Call `resume_protocol(admin)` to restore normal operation
+6. Verify `is_paused()` returns `false`
+7. Run smoke-test transactions to confirm normal operation
+
+### Existing Streams
+
+Per the CREATION-ONLY scope, existing streams are **not affected** by the global pause.
+Recipients can continue to withdraw accrued funds, and senders can manage their streams
+normally. This protects user funds and prevents unfair lock-ups.
+=======
+The contract supports two levels of pausing to manage risk:
+
+1. **Creation Pause** (`set_creation_paused(true)`): Causes `create_stream` and `create_streams` to fail with `ContractError::ContractPaused`. Existing streams are unaffected — withdrawals, cancellations, and other operations continue normally. This is stored under `DataKey::CreationPaused`.
+2. **Global Emergency Pause** (`set_contract_paused(true)`): A "circuit breaker" that blocks **all** mutation operations across the entire protocol. This includes creation, withdrawals, cancellations, rate updates, and time adjustments. This is stored under `DataKey::GlobalEmergencyPaused`.
+
+During a Global Emergency Pause:
+- New streams cannot be created.
+- Recipients cannot withdraw accrued funds.
+- Senders cannot cancel streams or recover refunds.
+- All fund-moving entrypoints gated by `require_not_globally_paused` return `ContractError::ContractPaused`.
+
+Read-only operations (`calculate_accrued`, `get_stream_state`) and admin-override functions remain operational so the protocol state can be audited and the pause can be lifted by the admin.
+>>>>>>> upstream/main
 
 ---
 
@@ -223,6 +312,69 @@ address or replacing the admin through `init`.
 
 ---
 
+## Delegated withdraw (relayer support)
+
+`delegated_withdraw` allows a relayer to execute a withdrawal on behalf of a recipient
+using an off-chain Ed25519 signature. The design preserves all existing security
+properties of `withdraw` while adding replay and expiry protection.
+
+### Signature scheme
+
+The recipient signs the SHA-256 hash of the following concatenated bytes:
+
+```
+"fluxora_delegated_withdraw"  (UTF-8, no null terminator)
+|| contract_address_xdr        (XDR-encoded ScAddress)
+|| destination_xdr             (XDR-encoded ScAddress)
+|| stream_id                   (8 bytes, u64 big-endian)
+|| nonce                       (8 bytes, u64 big-endian)
+|| deadline                    (8 bytes, u64 big-endian)
+```
+
+The 32-byte SHA-256 hash is verified on-chain via `env.crypto().ed25519_verify`.
+Including the contract address in the message prevents cross-contract replay.
+Including the destination prevents a relayer from redirecting funds.
+
+### Replay protection (nonce)
+
+- Each recipient has a per-address nonce stored under `DataKey::WithdrawNonce(recipient)`
+  in persistent storage.
+- The supplied `nonce` must equal the current stored nonce exactly — no skipping allowed.
+- On a successful withdrawal that moves tokens, the nonce is incremented atomically
+  before the token transfer (CEI-compliant).
+- If `withdrawable == 0` the nonce is **not** consumed, preserving the signature for
+  a future call when tokens have accrued.
+
+### Expiry (deadline)
+
+- `deadline` is a ledger timestamp. The call is rejected with `SignatureDeadlineExpired`
+  if `env.ledger().timestamp() > deadline`.
+- A deadline equal to the current timestamp is accepted (not yet expired).
+
+### CEI ordering for `delegated_withdraw`
+
+1. **Checks**: deadline, destination guard, stream status, nonce match, signature verify.
+2. **Effects**: increment nonce, update `withdrawn_amount`, optionally set `Completed`,
+   call `save_stream`.
+3. **Interactions**: `push_token` to destination, emit `dlg_wdraw` event (and optionally
+   `completed` event).
+
+### Authorization table addition
+
+| Operation             | Authorized callers                                        |
+|-----------------------|-----------------------------------------------------------|
+| `delegated_withdraw`  | `relayer` (any address; recipient intent via signature)   |
+| `get_withdraw_nonce`  | Permissionless (view function)                            |
+
+### Security invariants
+
+- A used signature cannot be replayed (nonce incremented on success).
+- An expired signature is rejected before any state change.
+- A signature from the wrong key is rejected by `ed25519_verify` (host trap).
+- The destination is bound in the signed message — a relayer cannot redirect funds.
+- The contract address is bound in the signed message — signatures are chain/contract-specific.
+- Direct `withdraw` / `withdraw_to` / `batch_withdraw` are unaffected; their auth paths
+  remain unchanged.
 ## Malicious Token Assumptions and Non-Goals
 
 The streaming contract makes explicit assumptions about token behavior and defines clear non-goals for malicious token scenarios. These are documented in detail in [`token-assumptions.md`](token-assumptions.md).
@@ -331,7 +483,7 @@ The CI pipeline verifies that the WASM artifact produced by `cargo build --relea
 
 | Factor                     | How it is pinned                                                |
 |---------------------------|-----------------------------------------------------------------|
-| Rust toolchain            | `rust-toolchain.toml` — `channel = "stable"`, targets pinned    |
+| Rust toolchain            | `rust-toolchain.toml` — channel and targets pinned              |
 | soroban-sdk version       | `contracts/stream/Cargo.toml` — `21.7.7` exact version          |
 | Build profile             | `--release` with `wasm32-unknown-unknown` target                |
 | Feature flags             | Only default features during WASM build (`testutils` is test-only) |
@@ -339,10 +491,22 @@ The CI pipeline verifies that the WASM artifact produced by `cargo build --relea
 
 ### CI verification flow
 
-1. Build WASM with pinned toolchain
-2. Compute `sha256sum` of the artifact
-3. Compare against `wasm/checksums.sha256`
-4. Fail with actionable error if mismatch detected
+1. Build WASM with pinned toolchain (`cargo build --release --target wasm32-unknown-unknown`)
+2. Run `bash script/verify-wasm-checksum.sh --no-build` — compares each artifact against `wasm/checksums.sha256`
+3. Fail with actionable error message if any checksum mismatches
+4. Upload raw and optimized WASM + hash files as CI artifacts (30-day retention)
+
+### Local verification
+
+To verify a build locally before deployment:
+
+```bash
+# Rebuild and verify in one step
+bash script/verify-wasm-checksum.sh
+
+# Verify existing artifacts without rebuilding
+bash script/verify-wasm-checksum.sh --no-build
+```
 
 ### Updating checksums
 
@@ -351,8 +515,21 @@ When the contract source changes intentionally:
 ```bash
 bash script/update-wasm-checksums.sh
 git add wasm/checksums.sha256
-git commit -m "chore: update wasm checksums"
+git commit -m "chore: update wasm checksums after <describe change>"
 ```
+
+The script also accepts `--dry-run` to preview the new hashes without writing:
+
+```bash
+bash script/update-wasm-checksums.sh --dry-run
+```
+
+### Auditor verification steps
+
+1. Clone the repository at the commit tagged for audit.
+2. Confirm `rust-toolchain.toml` channel matches the CI build.
+3. Run `bash script/verify-wasm-checksum.sh` — all entries must print `OK`.
+4. Compare the passing hash against the on-chain contract hash via `stellar contract inspect`.
 
 ### Residual risks
 
