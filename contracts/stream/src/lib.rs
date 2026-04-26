@@ -33,6 +33,8 @@ const PERSISTENT_BUMP_AMOUNT: u32 = 120_960;
 /// All paginated entrypoints enforce this limit strictly.
 pub const MAX_PAGE_SIZE: u64 = 100;
 
+<<<<<<< HEAD
+=======
 /// Maximum memo payload size in bytes (stream metadata for indexers).
 pub const MAX_MEMO_BYTES: usize = 64;
 
@@ -41,6 +43,7 @@ pub const MAX_TEMPLATES_PER_OWNER: u32 = 64;
 /// Global bound on stored schedule templates (DoS / storage bloat prevention).
 pub const MAX_GLOBAL_TEMPLATES: u64 = 10_000;
 
+>>>>>>> upstream/main
 // Contract version
 // ---------------------------------------------------------------------------
 

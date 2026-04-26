@@ -33,9 +33,12 @@ Notes:
 | ContractPaused   | `["paused_ctl"]`                | `bool`                                                                                                                                                    | When the global contract pause state is toggled via `set_contract_paused`.                                              |
 | ProtocolPaused   | `["pr_pause", admin: Address]`  | `ProtocolPaused { reason: String, paused_at: u64 }`                                                                                                       | When `pause_protocol` successfully pauses the protocol. Not emitted on idempotent calls.                               |
 | ProtocolResumed  | `["pr_resume", admin: Address]` | `ProtocolResumed { resumed_at: u64 }`                                                                                                                     | When `resume_protocol` successfully resumes the protocol. Not emitted on idempotent calls.                             |
+<<<<<<< HEAD
+=======
 | SenderTransferred | `["sndr_xfr", stream_id: u64]` | `SenderTransferred { stream_id: u64, old_sender: Address, new_sender: Address }`                                                                          | When `transfer_sender` successfully rotates the stream sender. Emitted after state is persisted. Not emitted on failure. |
 
 **Additional topics (validator):** `gl_pause`, `gl_resume`, `rate_dec`, `tmpl_def`.
+>>>>>>> upstream/main
 
 ---
 | Event name | Topic(s) | Data (shape & types) | When emitted |
@@ -308,6 +311,8 @@ Example:
 }
 ```
 
+<<<<<<< HEAD
+=======
 ### 12) SenderTransferred
 
 Emitted by `transfer_sender` when the stream sender is successfully rotated.
@@ -337,6 +342,7 @@ Example:
 Indexers should update their sender reference for the stream on receipt of this event.
 The `old_sender` field allows indexers to correlate the previous treasury key.
 
+>>>>>>> upstream/main
 ---
 
 ## Parsing recommendations for indexers
@@ -393,7 +399,10 @@ Commit message suggestion: `docs: add event schema and topics for indexers`
 | `set_contract_paused`                                        | `"paused_ctl"`  |
 | `pause_protocol`                                             | `"pr_pause"`    |
 | `resume_protocol`                                            | `"pr_resume"`   |
+<<<<<<< HEAD
+=======
 | `update_recipient`                                           | `"recp_upd"`    |
+>>>>>>> upstream/main
 
 If you change event topics or payloads in the contract, update this document and
 include updated example snapshots in the PR.

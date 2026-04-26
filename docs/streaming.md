@@ -89,9 +89,15 @@ Success semantics (observable):
 1. Preconditions: stream status is `Active` or `Paused`.
 2. `cancelled_at` is set to current ledger timestamp.
 3. Accrued amount is frozen at `cancelled_at` (no post-cancel time growth).
-4. Refund is `deposit_amount - accrued_at_cancelled_at`.
-5. Stream transitions to terminal `Cancelled` state.
-6. `StreamCancelled` event is emitted with topic `("cancelled", stream_id)`.
+4. Optional cancellation fee is applied only to the unstreamed refund:
+   - `refund_gross = deposit_amount - accrued_at_cancelled_at`
+   - If `cancellation_fee_bps > 0`:
+     - `fee = (refund_gross × cancellation_fee_bps) / 10000` (rounded down)
+     - `refund_net = refund_gross - fee`
+   - Else: `refund_net = refund_gross`
+5. **CRITICAL**: The recipient's frozen accrued amount is **never** affected by the cancellation fee
+6. Stream transitions to terminal `Cancelled` state.
+7. `StreamCancelled` event is emitted with topic `("cancelled", stream_id)`.
 
 Failure semantics (observable):
 
@@ -113,15 +119,26 @@ Role boundaries:
 Invariants after successful cancellation:
 
 1. `status == Cancelled` and `cancelled_at.is_some()`.
-2. `calculate_accrued(stream_id)` always returns accrued at `cancelled_at`.
-3. `refund + frozen_accrued == deposit_amount`.
-4. Recipient may withdraw only frozen accrued remainder (`frozen_accrued - withdrawn_amount`).
+2. `calculate_accrued(stream_id)` always returns accrued at `cancelled_at`, unaffected by any fee.
+3. `refund_net + frozen_accrued == deposit_amount - fee` (fee is burned or retained by contract)
+4. `refund_net + frozen_accrued + fee == deposit_amount`.
+5. Recipient may withdraw only frozen accrued remainder (`frozen_accrued - withdrawn_amount`), which is never reduced by the fee.
+
+Cancellation Fee Guarantees:
+
+- **Recipient protection**: The fee is always deducted from the sender's refund, never from the recipient's accrued balance.
+- **Fee validation**: Valid range is 0–10000 basis points (0–100%). Creation with `cancellation_fee_bps > 10000` is rejected.
+- **Fee rounding**: Calculated as `(amount × fee_bps) / 10000`, truncated down (integer division). This ensures no accidentally inflated refund.
+- **Zero refund edge case**: If `refund_gross = 0` (stream fully accrued), then `fee = 0`, and sender gets no refund (as before any fee feature).
 
 Scope boundary and exclusions:
 
-1. In scope: refund math, `cancelled_at` persistence/freeze semantics, cancel auth paths, cancel event consistency.
-2. Out of scope: token-level trust assumptions beyond documented model, off-chain indexer liveness, and economic policy choices (for example who should bear operational costs).
+1. In scope: refund math with optional fee, `cancelled_at` persistence/freeze semantics, cancel auth paths, cancel event consistency, recipient safety guarantee.
+2. Out of scope: token-level trust assumptions beyond documented model, off-chain indexer liveness, and economic policy choices (for example who should bear operational costs or where fee proceeds go).
 3. Residual risk: if a non-standard token violates SEP-41 expectations, transfer behavior may diverge; CEI ordering reduces but cannot fully eliminate external token risk.
+4. Backward compat: All existing streams created with `cancellation_fee_bps = 0` behave identically to pre-fee versions.
+
+
 
 ### Global Pause Semantics (Issue Scope)
 
@@ -139,10 +156,24 @@ This section is the protocol-level contract for the global pause state managed v
 Success semantics (observable):
 
 1. Preconditions: Caller must be the authorized contract `admin`.
+<<<<<<< HEAD
+2. Storage on pause:
+   - `GlobalEmergencyPaused` is set to `true` in instance storage
+   - `GlobalPauseReason` stores the provided reason string
+   - `GlobalPauseTimestamp` stores the ledger timestamp
+   - `GlobalPauseAdmin` stores the admin address that paused
+3. Storage on resume: All pause keys are cleared (set to false or removed)
+4. Event on pause: `ProtocolPaused { reason, paused_at }` is emitted with topic `("pr_pause", admin)`.
+5. Event on resume: `ProtocolResumed { resumed_at }` is emitted with topic `("pr_resume", admin)`.
+6. Effect on creation: When paused, `create_stream` and `create_streams` return `ContractError::ContractPaused` and all new stream creation is blocked.
+7. Effect on existing streams: Active streams are intentionally unaffected. Withdrawals, top-ups, pause/resume/cancel operations on individual streams continue to function normally.
+8. Idempotency: Pausing when already paused or resuming when not paused returns `Ok(())` silently with no state changes or events.
+=======
 2. Storage: The `CreationPaused` data key is set to `true` or `false` in instance storage.
 3. Event: `ContractPaused(bool)` is emitted with topic `("paused_ctl",)`.
 4. Effect on creation: When paused, `create_stream` and `create_streams` return `ContractError::ContractPaused` and all new stream creation is blocked.
 5. Effect on existing streams: Active streams are intentionally unaffected. Withdrawals, top-ups, pause/resume/cancel operations on individual streams continue to function normally.
+>>>>>>> upstream/main
 
 Failure semantics (observable):
 
