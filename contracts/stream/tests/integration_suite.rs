@@ -3642,3 +3642,311 @@ mod delegated_withdraw {
         );
     }
 }
+
+// ===========================================================================
+// TTL bump regression tests — Issue #416
+//
+// Verify that instance storage (Config, NextStreamId) and persistent stream
+// entries stay alive under periodic reads and near-threshold access patterns.
+//
+// Strategy: use `env.ledger().set_sequence_number()` to simulate ledger
+// advancement.  TTL is measured in ledgers, not seconds.  The constants are:
+//   INSTANCE_LIFETIME_THRESHOLD  = 17_280  (~1 day)
+//   INSTANCE_BUMP_AMOUNT         = 120_960 (~7 days)
+//   PERSISTENT_LIFETIME_THRESHOLD = 17_280
+//   PERSISTENT_BUMP_AMOUNT        = 120_960
+//
+// Because the Soroban test environment does not expose a `get_ttl()` helper,
+// we verify TTL behaviour indirectly: if a bump did NOT happen the entry would
+// be inaccessible (the host would panic / return an error); if it DID happen
+// the entry is still readable.  We advance the sequence number to just past
+// the threshold and confirm the entry survives.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Instance TTL — config and counters stay alive under reads
+// ---------------------------------------------------------------------------
+
+/// A single `get_config` call bumps instance TTL.
+/// Advance the sequence number to INSTANCE_BUMP_AMOUNT − 1 (still within the
+/// bumped window) and confirm config is still readable.
+#[test]
+fn ttl_instance_config_survives_read_near_bump_window_end() {
+    let ctx = TestContext::setup();
+
+    // Simulate a read at ledger 1 (initial state after init).
+    ctx.env.ledger().set_sequence_number(1);
+    let cfg = ctx.client().get_config();
+    assert_eq!(cfg.token, ctx.token_id);
+
+    // Advance to just before the bumped window expires.
+    // After the bump at ledger 1, the entry lives until ledger 1 + BUMP_AMOUNT = 120_961.
+    ctx.env.ledger().set_sequence_number(120_960);
+    let cfg2 = ctx.client().get_config();
+    assert_eq!(cfg2.token, ctx.token_id, "config must survive near end of bump window");
+}
+
+/// `get_stream_count` (reads NextStreamId) also bumps instance TTL.
+#[test]
+fn ttl_instance_stream_count_survives_periodic_reads() {
+    let ctx = TestContext::setup();
+
+    // Create a stream so the counter is non-zero.
+    ctx.env.ledger().set_sequence_number(1);
+    ctx.env.ledger().set_timestamp(0);
+    ctx.create_default_stream();
+
+    // Simulate periodic reads every ~1 day (17_280 ledgers).
+    for step in 1u32..=5 {
+        ctx.env.ledger().set_sequence_number(step * 17_280);
+        let count = ctx.client().get_stream_count();
+        assert_eq!(count, 1, "stream count must be readable at ledger {}", step * 17_280);
+    }
+}
+
+/// `version()` bumps instance TTL even though it reads no config key.
+/// Confirm the instance entry survives a long gap between calls.
+#[test]
+fn ttl_instance_version_call_keeps_instance_alive() {
+    let ctx = TestContext::setup();
+
+    ctx.env.ledger().set_sequence_number(1);
+    assert_eq!(ctx.client().version(), 2);
+
+    // Advance well into the bump window and call version again.
+    ctx.env.ledger().set_sequence_number(60_000);
+    assert_eq!(ctx.client().version(), 2, "version must be readable mid-bump-window");
+
+    // One more bump; advance to near the new window end.
+    ctx.env.ledger().set_sequence_number(180_000);
+    assert_eq!(ctx.client().version(), 2, "version must survive after re-bump");
+}
+
+// ---------------------------------------------------------------------------
+// Persistent TTL — active stream entries stay alive under reads
+// ---------------------------------------------------------------------------
+
+/// `get_stream_state` bumps the persistent TTL of the stream entry.
+/// Advance the sequence number to just before the bump window expires and
+/// confirm the stream is still readable.
+#[test]
+fn ttl_persistent_stream_survives_read_near_bump_window_end() {
+    let ctx = TestContext::setup();
+
+    ctx.env.ledger().set_sequence_number(1);
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream();
+
+    // Read bumps TTL; entry lives until ledger 1 + 120_960 = 120_961.
+    ctx.env.ledger().set_sequence_number(120_960);
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.stream_id, stream_id, "stream must survive near end of bump window");
+    assert_eq!(state.status, StreamStatus::Active);
+}
+
+/// Periodic reads (every ~1 day) keep a stream entry alive indefinitely.
+#[test]
+fn ttl_persistent_stream_survives_periodic_reads() {
+    let ctx = TestContext::setup();
+
+    ctx.env.ledger().set_sequence_number(1);
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream();
+
+    // Simulate 7 daily reads; each read re-bumps the TTL by BUMP_AMOUNT.
+    for day in 1u32..=7 {
+        ctx.env.ledger().set_sequence_number(day * 17_280);
+        let state = ctx.client().get_stream_state(&stream_id);
+        assert_eq!(state.stream_id, stream_id, "stream must survive at day {day}");
+    }
+}
+
+/// `calculate_accrued` also bumps persistent TTL (it calls `load_stream`).
+#[test]
+fn ttl_persistent_stream_survives_accrual_reads() {
+    let ctx = TestContext::setup();
+
+    ctx.env.ledger().set_sequence_number(1);
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream();
+
+    // Advance to threshold − 1 and read via calculate_accrued.
+    ctx.env.ledger().set_sequence_number(17_279);
+    ctx.env.ledger().set_timestamp(100);
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued, 100);
+
+    // After the bump the entry lives until 17_279 + 120_960 = 138_239.
+    ctx.env.ledger().set_sequence_number(138_238);
+    ctx.env.ledger().set_timestamp(200);
+    let accrued2 = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued2, 200, "stream must survive after re-bump via calculate_accrued");
+}
+
+/// `get_withdrawable` bumps persistent TTL.
+#[test]
+fn ttl_persistent_stream_survives_get_withdrawable_reads() {
+    let ctx = TestContext::setup();
+
+    ctx.env.ledger().set_sequence_number(1);
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_sequence_number(17_279);
+    ctx.env.ledger().set_timestamp(500);
+    let w = ctx.client().get_withdrawable(&stream_id);
+    assert_eq!(w, 500);
+
+    ctx.env.ledger().set_sequence_number(138_238);
+    ctx.env.ledger().set_timestamp(600);
+    let w2 = ctx.client().get_withdrawable(&stream_id);
+    assert_eq!(w2, 600, "stream must survive after re-bump via get_withdrawable");
+}
+
+// ---------------------------------------------------------------------------
+// Persistent TTL — recipient index stays alive under reads
+// ---------------------------------------------------------------------------
+
+/// `get_recipient_streams` bumps the persistent TTL of the recipient index
+/// when the index is non-empty.
+#[test]
+fn ttl_persistent_recipient_index_survives_periodic_reads() {
+    let ctx = TestContext::setup();
+
+    ctx.env.ledger().set_sequence_number(1);
+    ctx.env.ledger().set_timestamp(0);
+    ctx.create_default_stream();
+
+    for day in 1u32..=5 {
+        ctx.env.ledger().set_sequence_number(day * 17_280);
+        let streams = ctx.client().get_recipient_streams(&ctx.recipient);
+        assert_eq!(streams.len(), 1, "recipient index must survive at day {day}");
+    }
+}
+
+/// `get_recipient_stream_count` also bumps the recipient index TTL.
+#[test]
+fn ttl_persistent_recipient_count_survives_near_threshold_read() {
+    let ctx = TestContext::setup();
+
+    ctx.env.ledger().set_sequence_number(1);
+    ctx.env.ledger().set_timestamp(0);
+    ctx.create_default_stream();
+
+    // Read right at the threshold boundary.
+    ctx.env.ledger().set_sequence_number(17_280);
+    let count = ctx.client().get_recipient_stream_count(&ctx.recipient);
+    assert_eq!(count, 1);
+
+    // After the bump, advance to near the new window end.
+    ctx.env.ledger().set_sequence_number(17_280 + 120_959);
+    let count2 = ctx.client().get_recipient_stream_count(&ctx.recipient);
+    assert_eq!(count2, 1, "recipient count must survive after re-bump");
+}
+
+// ---------------------------------------------------------------------------
+// Multiple streams — all entries bumped independently
+// ---------------------------------------------------------------------------
+
+/// Creating multiple streams and reading each one bumps each entry's TTL
+/// independently.  All streams must remain accessible after staggered reads.
+#[test]
+fn ttl_persistent_multiple_streams_all_survive_staggered_reads() {
+    let ctx = TestContext::setup();
+    let sac = StellarAssetClient::new(&ctx.env, &ctx.token_id);
+    sac.mint(&ctx.sender, &10_000_i128);
+
+    ctx.env.ledger().set_sequence_number(1);
+    ctx.env.ledger().set_timestamp(0);
+
+    let id0 = ctx.create_default_stream();
+    let id1 = ctx.create_default_stream();
+    let id2 = ctx.create_default_stream();
+
+    // Read id0 at ledger 17_280 (threshold) — bumps id0 to 17_280 + 120_960.
+    ctx.env.ledger().set_sequence_number(17_280);
+    let s0 = ctx.client().get_stream_state(&id0);
+    assert_eq!(s0.stream_id, id0);
+
+    // Read id1 at ledger 50_000 — bumps id1 to 50_000 + 120_960.
+    ctx.env.ledger().set_sequence_number(50_000);
+    let s1 = ctx.client().get_stream_state(&id1);
+    assert_eq!(s1.stream_id, id1);
+
+    // Read id2 at ledger 100_000 — bumps id2 to 100_000 + 120_960.
+    ctx.env.ledger().set_sequence_number(100_000);
+    let s2 = ctx.client().get_stream_state(&id2);
+    assert_eq!(s2.stream_id, id2);
+
+    // All three must still be readable at ledger 138_239 (within all bump windows).
+    ctx.env.ledger().set_sequence_number(138_239);
+    assert_eq!(ctx.client().get_stream_state(&id0).stream_id, id0);
+    assert_eq!(ctx.client().get_stream_state(&id1).stream_id, id1);
+    assert_eq!(ctx.client().get_stream_state(&id2).stream_id, id2);
+}
+
+// ---------------------------------------------------------------------------
+// Write-path TTL — mutations also bump persistent TTL
+// ---------------------------------------------------------------------------
+
+/// `withdraw` (calls `load_stream` + `save_stream`) bumps persistent TTL.
+#[test]
+fn ttl_persistent_stream_survives_after_withdraw_bump() {
+    let ctx = TestContext::setup();
+
+    ctx.env.ledger().set_sequence_number(1);
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream();
+
+    // Advance to threshold and withdraw — save_stream re-bumps TTL.
+    ctx.env.ledger().set_sequence_number(17_280);
+    ctx.env.ledger().set_timestamp(300);
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn, 300);
+
+    // Entry now lives until 17_280 + 120_960 = 138_240.
+    ctx.env.ledger().set_sequence_number(138_239);
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 300, "stream must survive after withdraw bump");
+}
+
+/// `cancel_stream` (calls `load_stream` + `save_stream`) bumps persistent TTL.
+#[test]
+fn ttl_persistent_stream_survives_after_cancel_bump() {
+    let ctx = TestContext::setup();
+
+    ctx.env.ledger().set_sequence_number(1);
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_sequence_number(17_280);
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().cancel_stream(&stream_id);
+
+    // Entry lives until 17_280 + 120_960 = 138_240.
+    ctx.env.ledger().set_sequence_number(138_239);
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled, "cancelled stream must survive after bump");
+    assert_eq!(state.cancelled_at, Some(400));
+}
+
+// ---------------------------------------------------------------------------
+// Instance TTL — every entry-point bumps instance storage
+// ---------------------------------------------------------------------------
+
+/// `create_stream` bumps instance TTL (writes NextStreamId).
+/// Config must remain readable well into the bump window after creation.
+#[test]
+fn ttl_instance_survives_after_create_stream_bump() {
+    let ctx = TestContext::setup();
+
+    ctx.env.ledger().set_sequence_number(17_279);
+    ctx.env.ledger().set_timestamp(0);
+    ctx.create_default_stream();
+
+    // After the bump at ledger 17_279, instance lives until 17_279 + 120_960 = 138_239.
+    ctx.env.ledger().set_sequence_number(138_238);
+    let cfg = ctx.client().get_config();
+    assert_eq!(cfg.token, ctx.token_id, "config must survive after create_stream bump");
+    assert_eq!(ctx.client().get_stream_count(), 1);
+}
