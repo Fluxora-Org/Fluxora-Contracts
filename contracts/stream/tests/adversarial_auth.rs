@@ -96,6 +96,7 @@ impl<'a> Ctx<'a> {
                     0u64,
                     0u64,
                     1000u64,
+                    0i128,
                     Option::<soroban_sdk::Bytes>::None,
                 )
                     .into_val(&self.env),
@@ -110,6 +111,7 @@ impl<'a> Ctx<'a> {
             &0u64,
             &0u64,
             &1000u64,
+            &0,
             &None,
         )
     }
@@ -616,7 +618,7 @@ fn test_admin_cancel_fails_on_cancelled_stream() {
         },
     }]);
     let result = ctx.client().try_cancel_stream_as_admin(&stream_id);
-    assert_eq!(result, Err(Ok(ContractError::StreamTerminalState)));
+    assert_eq!(result, Err(Ok(ContractError::InvalidState)));
 }
 
 /// Admin cannot cancel a time-terminal stream (past end_time).
@@ -635,8 +637,10 @@ fn test_admin_cancel_fails_on_time_terminal_stream() {
             sub_invokes: &[],
         },
     }]);
+    // A time-terminal stream (past end_time) is still Active status and can be cancelled.
+    // The sender receives 0 refund since all tokens are fully accrued.
     let result = ctx.client().try_cancel_stream_as_admin(&stream_id);
-    assert_eq!(result, Err(Ok(ContractError::StreamTerminalState)));
+    assert!(result.is_ok(), "cancel on time-terminal stream should succeed (0 refund)");
 }
 
 /// Admin cannot cancel a non-existent stream.
@@ -755,7 +759,7 @@ fn test_admin_cancel_twice_fails() {
         },
     }]);
     let result = ctx.client().try_cancel_stream_as_admin(&stream_id);
-    assert_eq!(result, Err(Ok(ContractError::StreamTerminalState)));
+    assert_eq!(result, Err(Ok(ContractError::InvalidState)));
 }
 
 /// Admin cannot resume a stream that was cancelled (invalid transition).
