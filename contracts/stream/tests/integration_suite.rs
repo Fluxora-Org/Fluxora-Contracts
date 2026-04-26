@@ -2141,6 +2141,73 @@ fn integration_extend_end_time_balance_conservation() {
 }
 
 // ---------------------------------------------------------------------------
+// Integration tests — batch_withdraw: empty vector semantics
+// ---------------------------------------------------------------------------
+
+/// Empty batch requires recipient auth — calling without auth must panic.
+#[test]
+#[should_panic]
+fn integration_batch_withdraw_empty_requires_auth() {
+    let env = Env::default();
+    // No mock_all_auths — auth is NOT mocked.
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    let admin = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+    client.init(&token_id, &admin);
+
+    // Empty batch with no auth — must panic (auth required even for empty batch).
+    let empty: soroban_sdk::Vec<u64> = soroban_sdk::Vec::new(&env);
+    client.batch_withdraw(&recipient, &empty);
+}
+
+/// Empty batch is a no-op: returns empty results, no token transfer, no events.
+#[test]
+fn integration_batch_withdraw_empty_is_noop() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let sender_before = ctx.token.balance(&ctx.sender);
+    let recipient_before = ctx.token.balance(&ctx.recipient);
+    let contract_before = ctx.token.balance(&ctx.contract_id);
+    let events_before = ctx.env.events().all().len();
+
+    let empty: soroban_sdk::Vec<u64> = soroban_sdk::Vec::new(&ctx.env);
+    let results = ctx.client().batch_withdraw(&ctx.recipient, &empty);
+
+    assert_eq!(results.len(), 0, "empty batch must return empty results");
+    assert_eq!(ctx.token.balance(&ctx.sender), sender_before, "sender balance unchanged");
+    assert_eq!(ctx.token.balance(&ctx.recipient), recipient_before, "recipient balance unchanged");
+    assert_eq!(ctx.token.balance(&ctx.contract_id), contract_before, "contract balance unchanged");
+    assert_eq!(
+        ctx.env.events().all().len(),
+        events_before,
+        "empty batch must emit no events"
+    );
+}
+
+/// Empty batch leaves stream state unchanged.
+#[test]
+fn integration_batch_withdraw_empty_no_state_change() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream();
+
+    let state_before = ctx.client().get_stream_state(&stream_id);
+
+    let empty: soroban_sdk::Vec<u64> = soroban_sdk::Vec::new(&ctx.env);
+    ctx.client().batch_withdraw(&ctx.recipient, &empty);
+
+    let state_after = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_before.withdrawn_amount, state_after.withdrawn_amount, "withdrawn_amount unchanged");
+    assert_eq!(state_before.status, state_after.status, "status unchanged");
+}
+
+// ---------------------------------------------------------------------------
 // Integration tests — batch_withdraw: completed streams yield zero amounts
 // ---------------------------------------------------------------------------
 
