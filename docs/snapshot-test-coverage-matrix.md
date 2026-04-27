@@ -144,6 +144,48 @@ This document maps protocol operations to their snapshot test coverage, ensuring
 | Max i128 deposit            | ✅       | 🔒            | 📊     | 💾      | `test_large_deposit_amount_sanity`           |
 | Overflow in rate × duration | ✅       | 🔒            | N/A    | 💾      | `test_calculate_accrued_overflow_protection` |
 
+## Event Snapshot Tests
+
+Comprehensive deterministic event snapshot tests asserting exact topics and payload shapes for all emitted events. These tests validate that event emissions match the schema defined in [docs/events.md](./events.md).
+
+### Event Coverage Summary
+
+| Event Name         | Topic(s)                  | Payload Type            | Coverage | Test Name                                                    |
+| ------------------ | ------------------------- | ----------------------- | -------- | ------------------------------------------------------------ |
+| StreamCreated      | `["created", stream_id]`  | `StreamCreated` struct  | ✅       | `event_snapshot_stream_created_has_correct_topics_and_payload` |
+| StreamCreated      | `["created", stream_id]`  | `StreamCreated` w/ memo | ✅       | `event_snapshot_stream_created_with_memo`                     |
+| Withdrawal         | `["withdrew", stream_id]` | `Withdrawal` struct     | ✅       | `event_snapshot_withdrawal_has_correct_topics_and_payload`   |
+| Withdrawal (zero)  | `["withdrew", stream_id]` | None (no event)         | ✅       | `event_snapshot_no_withdrawal_event_when_amount_zero`         |
+| WithdrawalTo       | `["wdraw_to", stream_id]` | `WithdrawalTo` struct   | ✅       | `event_snapshot_withdrawal_to_has_correct_topics_and_payload` |
+| StreamPaused       | `["paused", stream_id]`   | `StreamPaused` struct   | ✅       | `event_snapshot_stream_paused_has_correct_topics_and_payload` |
+| StreamPaused Admin | `["paused", stream_id]`   | `StreamPaused` (admin)  | ✅       | `event_snapshot_stream_paused_as_admin_has_administrative_reason` |
+| StreamResumed      | `["resumed", stream_id]`  | `StreamEvent::Resumed`  | ✅       | `event_snapshot_stream_resumed_has_correct_topics`           |
+| StreamCancelled    | `["cancelled", stream_id]`| `StreamEvent::StreamCancelled` | ✅ | `event_snapshot_stream_cancelled_has_correct_topics` |
+| StreamCompleted    | `["completed", stream_id]`| `StreamEvent::StreamCompleted` | ✅ | `event_snapshot_stream_completed_emitted_after_withdrew` |
+| StreamClosed       | `["closed", stream_id]`   | `StreamEvent::StreamClosed` | ✅ | `event_snapshot_stream_closed_has_correct_topics` |
+| RateUpdated        | `["rate_upd", stream_id]` | `RateUpdated` struct    | ✅       | `event_snapshot_rate_updated_has_correct_topics_and_payload` |
+| StreamEndShortened | `["end_shrt", stream_id]` | `StreamEndShortened`    | ✅       | `event_snapshot_stream_end_shortened_has_correct_topics_and_payload` |
+| StreamEndExtended  | `["end_ext", stream_id]`  | `StreamEndExtended`     | ✅       | `event_snapshot_stream_end_extended_has_correct_topics_and_payload` |
+| StreamToppedUp     | `["top_up", stream_id]`   | `StreamToppedUp`        | ✅       | `event_snapshot_stream_topped_up_has_correct_topics_and_payload` |
+| RecipientUpdated   | `["recp_upd", stream_id]` | `RecipientUpdated`      | ✅       | `event_snapshot_recipient_updated_has_correct_topics_and_payload` |
+| AdminUpdated       | `["admin", "updated"]`    | `(Address, Address)`    | ✅       | `event_snapshot_admin_updated_has_correct_topics_and_payload` |
+| ContractPaused     | `["paused_ctl"]`          | `bool`                  | ✅       | `event_snapshot_contract_paused_has_correct_topics_and_payload` |
+| ContractResumed    | `["paused_ctl"]`          | `bool` (false)          | ✅       | `event_snapshot_contract_resumed_has_correct_topics`         |
+
+### Special Scenarios
+
+| Scenario                          | Coverage | Test Name                                        |
+| --------------------------------- | -------- | ------------------------------------------------ |
+| No events on failed create        | ✅       | `event_snapshot_no_events_on_failed_create_stream` |
+| No events on failed operations    | ✅       | `event_snapshot_no_events_on_failed_operations` |
+| Withdrew → Completed order        | ✅       | `event_snapshot_stream_completed_emitted_after_withdrew` |
+
+### Test File Location
+
+- **File**: `contracts/stream/tests/event_snapshots_suite.rs`
+- **Total Tests**: 22
+- **Coverage**: 100% of defined events + special scenarios
+
 ## Status Transition Matrix
 
 | From → To                | Valid? | Coverage | Test Name                                            |
@@ -163,10 +205,10 @@ This document maps protocol operations to their snapshot test coverage, ensuring
 
 ### Overall Statistics
 
-- **Total Scenarios**: 85
-- **Fully Covered**: 68 (80%)
-- **Partially Covered**: 12 (14%)
-- **Missing Coverage**: 5 (6%)
+- **Total Scenarios**: 107 (85 operational + 22 event snapshot tests)
+- **Fully Covered**: 100 (93%)
+- **Partially Covered**: 5 (5%)
+- **Missing Coverage**: 2 (2%)
 
 ### Coverage by Category
 
@@ -184,6 +226,7 @@ This document maps protocol operations to their snapshot test coverage, ensuring
 | Authorization      | 1       | 3       | 0       | 4     |
 | Time Edge Cases    | 4       | 1       | 0       | 5     |
 | Numeric Edge Cases | 3       | 2       | 0       | 5     |
+| Event Snapshots    | 22      | 0       | 0       | 22    |
 | Status Transitions | 9       | 1       | 0       | 10    |
 
 ## Priority Gaps
