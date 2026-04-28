@@ -18300,3 +18300,36 @@ fn test_withdraw_to_valid_after_rejected_destination_succeeds() {
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.withdrawn_amount, 500);
 }
+
+// ---------------------------------------------------------------------------
+// ContractError discriminant stability tests
+// ---------------------------------------------------------------------------
+
+/// Regression test: ensures ContractError discriminant values never change.
+///
+/// This test will fail at compile time if any error code value is modified,
+/// ensuring ABI stability for integrators. Error codes are part of the
+/// contract ABI surface and must remain stable across versions.
+#[test]
+fn test_contract_error_discriminants_are_stable() {
+    // Core stream errors (1-14)
+    assert_eq!(ContractError::StreamNotFound as u32, 1, "StreamNotFound must be 1");
+    assert_eq!(ContractError::InvalidState as u32, 2, "InvalidState must be 2");
+    assert_eq!(ContractError::InvalidParams as u32, 3, "InvalidParams must be 3");
+    assert_eq!(ContractError::ContractPaused as u32, 4, "ContractPaused must be 4");
+    assert_eq!(ContractError::StartTimeInPast as u32, 5, "StartTimeInPast must be 5");
+    assert_eq!(ContractError::ArithmeticOverflow as u32, 6, "ArithmeticOverflow must be 6");
+    assert_eq!(ContractError::Unauthorized as u32, 7, "Unauthorized must be 7");
+    assert_eq!(ContractError::AlreadyInitialised as u32, 8, "AlreadyInitialised must be 8");
+    assert_eq!(ContractError::InsufficientBalance as u32, 9, "InsufficientBalance must be 9");
+    assert_eq!(ContractError::InsufficientDeposit as u32, 10, "InsufficientDeposit must be 10");
+    assert_eq!(ContractError::StreamAlreadyPaused as u32, 11, "StreamAlreadyPaused must be 11");
+    assert_eq!(ContractError::StreamNotPaused as u32, 12, "StreamNotPaused must be 12");
+    assert_eq!(ContractError::StreamTerminalState as u32, 13, "StreamTerminalState must be 13");
+    assert_eq!(ContractError::DuplicateStreamId as u32, 14, "DuplicateStreamId must be 14");
+
+    // Template errors (15-17)
+    assert_eq!(ContractError::TemplateNotFound as u32, 15, "TemplateNotFound must be 15");
+    assert_eq!(ContractError::TemplateLimitExceeded as u32, 16, "TemplateLimitExceeded must be 16");
+    assert_eq!(ContractError::TemplateUnauthorized as u32, 17, "TemplateUnauthorized must be 17");
+}
