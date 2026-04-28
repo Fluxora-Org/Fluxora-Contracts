@@ -13,12 +13,30 @@ All storage keys are defined in the `DataKey` enum:
 ```rust
 #[contracttype]
 pub enum DataKey {
+    Config,                    // Instance storage for global settings (admin/token).
+    NextStreamId,              // Instance storage for the auto-incrementing ID counter.
+    Stream(u64),               // Persistent storage for individual stream data (O(1) lookup).
+    RecipientStreams(Address), // Persistent storage for recipient stream index (sorted by stream_id).
+    GlobalPaused,              // Instance storage: emergency pause flag (bool).
+    WithdrawNonce(Address),    // Persistent storage: per-recipient nonce for delegated-withdraw replay protection.
+}
+```
+
+> **Append-only rule**: new variants are always appended at the end to avoid shifting
+> existing discriminant values, which would corrupt live storage on mainnet.
+
+## Storage Types and Usage
     Config,                    // discriminant 0 — instance
     NextStreamId,              // discriminant 1 — instance
     Stream(u64),               // discriminant 2 — persistent
     RecipientStreams(Address), // discriminant 3 — persistent
     GlobalEmergencyPaused,     // discriminant 4 — instance
     CreationPaused,            // discriminant 5 — instance
+    GlobalPauseReason,         // discriminant 6 — instance
+    GlobalPauseTimestamp,      // discriminant 7 — instance
+    GlobalPauseAdmin,          // discriminant 8 — instance
+    AutoClaimDestination(u64), // discriminant 9 — persistent
+    StreamMemo(u64),           // discriminant 10 — persistent
 }
 ```
 
@@ -32,6 +50,11 @@ pub enum DataKey {
 | 3 | `RecipientStreams(Address)` | Persistent | `Vec<u64>` (sorted) | `create_stream`, `create_streams` | `close_completed_stream` (removes entry) |
 | 4 | `GlobalEmergencyPaused` | Instance | `bool` | `set_global_emergency_paused` | `set_global_emergency_paused` |
 | 5 | `CreationPaused` | Instance | `bool` | `set_contract_paused` | `set_contract_paused` |
+| 6 | `GlobalPauseReason` | Instance | `String` | `pause_protocol` | `resume_protocol` (removes) |
+| 7 | `GlobalPauseTimestamp` | Instance | `u64` | `pause_protocol` | `resume_protocol` (removes) |
+| 8 | `GlobalPauseAdmin` | Instance | `Address` | `pause_protocol` | `resume_protocol` (removes) |
+| 9 | `AutoClaimDestination(u64)` | Persistent | `Address` | auto-claim opt-in | auto-claim revoke |
+| 10 | `StreamMemo(u64)` | Persistent | `Bytes` (max 64 bytes) | `create_stream`, `create_streams` | `close_completed_stream` (removes) |
 
 ---
 
@@ -41,6 +64,13 @@ pub enum DataKey {
 
 ### Rules (must be followed on every PR that touches `DataKey`)
 
+Persistent storage is used for individual stream records and per-recipient nonces:
+
+| Key Pattern | Type | Description | Set By | Modified By |
+|-------------|------|-------------|--------|-------------|
+| `Stream(stream_id)` | `Stream` struct | Complete stream state including participants, amounts, timing, and status | `create_stream()` | `pause_stream()`, `resume_stream()`, `cancel_stream()`, `withdraw()` |
+| `RecipientStreams(address)` | `Vec<u64>` | Sorted list of stream IDs for a recipient | `create_stream()` | `close_completed_stream()` |
+| `WithdrawNonce(address)` | `u64` | Monotonically increasing nonce for delegated-withdraw replay protection | `delegated_withdraw()` (first call) | `delegated_withdraw()` (incremented on each successful withdrawal that moves tokens) |
 1. **Never reorder** existing variants. The discriminant table above is immutable for the lifetime of any deployed instance.
 2. **Never remove** a variant that has ever been written to a live network. Mark it `#[deprecated]` in a doc comment and stop writing to it; do not delete it.
 3. **Always append** new variants at the end of the enum.
