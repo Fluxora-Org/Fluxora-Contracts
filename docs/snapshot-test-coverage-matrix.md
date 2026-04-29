@@ -115,6 +115,14 @@ This document maps protocol operations to their snapshot test coverage, ensuring
 | Recipient index tracking     | ⚠️       | N/A           | N/A    | 💾      | Needs dedicated test                |
 | Recipient index after cancel | ⚠️       | N/A           | N/A    | 💾      | Needs dedicated test                |
 
+## Administrative Operations
+
+| Scenario                      | Coverage | Authorization | Events | Storage | Test Name                            |
+| ----------------------------- | -------- | ------------- | ------ | ------- | ------------------------------------ |
+| Rotate admin (set_admin)      | ✅       | 🔒            | 📊     | 💾      | `snapshot_event_admin_and_pause_ctl` |
+| Pause contract (global)       | ✅       | 🔒            | 📊     | 💾      | `snapshot_event_admin_and_pause_ctl` |
+| Unpause contract (global)     | ✅       | 🔒            | 📊     | 💾      | `test_create_stream_succeeds_after_unpause` |
+
 ## Authorization Edge Cases
 
 | Scenario                      | Coverage | Authorization | Events | Storage | Test Name                                        |
@@ -122,7 +130,7 @@ This document maps protocol operations to their snapshot test coverage, ensuring
 | Non-sender cannot pause       | ⚠️       | 🔒            | N/A    | 💾      | Needs dedicated test                             |
 | Non-sender cannot cancel      | ⚠️       | 🔒            | N/A    | 💾      | Needs dedicated test                             |
 | Non-recipient cannot withdraw | ✅       | 🔒            | N/A    | 💾      | `test_withdraw_requires_recipient_authorization` |
-| Non-admin cannot set admin    | ⚠️       | 🔒            | N/A    | 💾      | Needs dedicated test                             |
+| Non-admin cannot set admin    | ✅       | 🔒            | 📊     | 💾      | `snapshot_event_admin_and_pause_ctl`             |
 
 ## Time-Based Edge Cases
 
