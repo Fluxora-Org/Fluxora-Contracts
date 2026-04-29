@@ -98,7 +98,7 @@ pub const MAX_GLOBAL_TEMPLATES: u64 = 10_000;
 ///
 /// Bumped to 5: `withdraw_dust_threshold: i128` added to `Stream` struct and creation params
 /// to reduce fee/event spam from tiny withdrawals.
-pub const CONTRACT_VERSION: u32 = 5;
+pub const CONTRACT_VERSION: u32 = 6;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -2741,7 +2741,7 @@ impl FluxoraStream {
 
         // Emit event with old and new admin addresses
         env.events()
-            .publish((symbol_short!("AdminUpd"),), (old_admin, new_admin));
+            .publish((soroban_sdk::Symbol::new(&env, "AdminUpdated"),), (old_admin, new_admin));
 
         Ok(())
     }
@@ -4304,7 +4304,7 @@ impl FluxoraStream {
         bump_instance_ttl(&env);
 
         env.events().publish(
-            (symbol_short!("ct_pause"),),
+            (soroban_sdk::Symbol::new(&env, "paused_ctl"),),
             ContractPauseChanged { paused },
         );
 
