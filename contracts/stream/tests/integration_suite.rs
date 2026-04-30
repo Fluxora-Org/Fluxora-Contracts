@@ -1,7 +1,8 @@
 extern crate std;
 
 use fluxora_stream::{
-    ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamStatus,
+    ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, PauseReason,
+    StreamStatus,
 };
 use soroban_sdk::log;
 use soroban_sdk::{
@@ -2718,7 +2719,7 @@ fn integration_set_admin_rotation_flow() {
     assert_eq!(last_event.0, ctx.contract_id);
     assert_eq!(
         soroban_sdk::Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
-        soroban_sdk::Symbol::new(&ctx.env, "AdminUpd")
+        soroban_sdk::Symbol::new(&ctx.env, "AdminUpdated")
     );
     let data: (Address, Address) = last_event.2.into_val(&ctx.env);
     assert_eq!(data.0, ctx.admin); // old admin
@@ -3950,3 +3951,223 @@ fn ttl_instance_survives_after_create_stream_bump() {
     assert_eq!(cfg.token, ctx.token_id, "config must survive after create_stream bump");
     assert_eq!(ctx.client().get_stream_count(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// Event Snapshot Tests (Issue #404)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn snapshot_event_lifecycle_created_withdrew_completed_closed() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // 1. created
+    let stream_id = ctx.create_default_stream();
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+    assert_eq!(last_event.0, ctx.contract_id);
+    assert_eq!(
+        soroban_sdk::Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
+        soroban_sdk::symbol_short!("created")
+    );
+    assert_eq!(last_event.1.get(1).unwrap(), stream_id.into_val(&ctx.env));
+    
+    // 2. withdrew & completed
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+    let events = ctx.env.events().all();
+    
+    // Last two events should be withdrew and completed
+    let completed_event = events.get(events.len() - 1).unwrap();
+    let withdrew_event = events.get(events.len() - 2).unwrap();
+    
+    assert_eq!(
+        soroban_sdk::Symbol::from_val(&ctx.env, &withdrew_event.1.get(0).unwrap()),
+        soroban_sdk::symbol_short!("withdrew")
+    );
+    assert_eq!(withdrew_event.1.get(1).unwrap(), stream_id.into_val(&ctx.env));
+    
+    assert_eq!(
+        soroban_sdk::Symbol::from_val(&ctx.env, &completed_event.1.get(0).unwrap()),
+        soroban_sdk::symbol_short!("completed")
+    );
+    assert_eq!(completed_event.1.get(1).unwrap(), stream_id.into_val(&ctx.env));
+
+    // 3. closed
+    ctx.client().close_completed_stream(&stream_id);
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+    assert_eq!(
+        soroban_sdk::Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
+        soroban_sdk::symbol_short!("closed")
+    );
+    assert_eq!(last_event.1.get(1).unwrap(), stream_id.into_val(&ctx.env));
+}
+
+#[test]
+fn snapshot_event_withdraw_to() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream();
+    let destination = Address::generate(&ctx.env);
+
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().withdraw_to(&stream_id, &destination);
+    
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+    assert_eq!(
+        soroban_sdk::Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
+        soroban_sdk::symbol_short!("wdraw_to")
+    );
+    assert_eq!(last_event.1.get(1).unwrap(), stream_id.into_val(&ctx.env));
+}
+
+#[test]
+fn snapshot_event_paused_resumed_cancelled() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream();
+
+    // 1. paused
+    ctx.client().pause_stream(&stream_id, &PauseReason::Operational);
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+    assert_eq!(
+        soroban_sdk::Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
+        soroban_sdk::symbol_short!("paused")
+    );
+    assert_eq!(last_event.1.get(1).unwrap(), stream_id.into_val(&ctx.env));
+
+    // 2. resumed
+    ctx.client().resume_stream(&stream_id);
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+    assert_eq!(
+        soroban_sdk::Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
+        soroban_sdk::symbol_short!("resumed")
+    );
+    assert_eq!(last_event.1.get(1).unwrap(), stream_id.into_val(&ctx.env));
+
+    // 3. cancelled
+    ctx.client().cancel_stream(&stream_id);
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+    assert_eq!(
+        soroban_sdk::Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
+        soroban_sdk::symbol_short!("cancelled")
+    );
+    assert_eq!(last_event.1.get(1).unwrap(), stream_id.into_val(&ctx.env));
+}
+
+#[test]
+fn snapshot_event_rate_end_topup_recp() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream();
+
+    // 1. rate_upd
+    ctx.client().update_rate_per_second(&stream_id, &2_i128);
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+    assert_eq!(
+        soroban_sdk::Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
+        soroban_sdk::symbol_short!("rate_upd")
+    );
+
+    // 2. end_shrt
+    ctx.client().shorten_stream_end_time(&stream_id, &500u64);
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+    assert_eq!(
+        soroban_sdk::Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
+        soroban_sdk::symbol_short!("end_shrt")
+    );
+
+    // 3. end_ext
+    ctx.client().extend_stream_end_time(&stream_id, &800u64);
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+    assert_eq!(
+        soroban_sdk::Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
+        soroban_sdk::symbol_short!("end_ext")
+    );
+
+    // 4. top_up
+    ctx.client().top_up_stream(&stream_id, &ctx.sender, &500_i128);
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+    assert_eq!(
+        soroban_sdk::Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
+        soroban_sdk::symbol_short!("top_up")
+    );
+
+    // 5. recp_upd
+    let new_recipient = Address::generate(&ctx.env);
+    ctx.client().update_recipient(&stream_id, &new_recipient);
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+    assert_eq!(
+        soroban_sdk::Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
+        soroban_sdk::symbol_short!("recp_upd")
+    );
+}
+
+#[test]
+fn snapshot_event_admin_and_pause_ctl() {
+    let ctx = TestContext::setup();
+    
+    // 1. AdminUpdated
+    let new_admin = Address::generate(&ctx.env);
+    ctx.client().set_admin(&new_admin);
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+    assert_eq!(
+        soroban_sdk::Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
+        soroban_sdk::Symbol::new(&ctx.env, "AdminUpdated")
+    );
+
+    // 2. paused_ctl
+    ctx.client().set_contract_paused(&true);
+    let events = ctx.env.events().all();
+    let last_event = events.last().unwrap();
+    assert_eq!(
+        soroban_sdk::Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
+        soroban_sdk::Symbol::new(&ctx.env, "paused_ctl")
+    );
+}
+
+#[test]
+fn snapshot_no_event_on_revert() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let events_before = ctx.env.events().all().len();
+
+    // Reverting call (insufficient deposit)
+    let result = ctx.client().try_create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &10_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+        &0,
+        &None,
+    );
+    assert!(result.is_err());
+    assert_eq!(ctx.env.events().all().len(), events_before);
+}
+
+#[test]
+fn snapshot_no_withdraw_event_when_amount_zero() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream();
+    let events_before = ctx.env.events().all().len();
+
+    // Withdraw at t=0 (nothing accrued)
+    ctx.client().withdraw(&stream_id);
+    assert_eq!(ctx.env.events().all().len(), events_before);
+}
+
