@@ -183,3 +183,27 @@ fn test_withdraw_dust_threshold_ignored_past_end_time() {
         "should allow withdrawal past end_time even if below threshold"
     );
 }
+
+#[test]
+fn test_create_stream_rejects_excessive_dust_threshold() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Try to create stream with threshold (1100) > deposit (1000)
+    let res = ctx.client().try_create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+        &1100_i128, // threshold > deposit
+        &None,
+    );
+
+    match res {
+        Err(Ok(fluxora_stream::ContractError::InvalidDustThreshold)) => {}
+        _ => panic!("Expected InvalidDustThreshold error, got {:?}", res),
+    }
+}

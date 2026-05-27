@@ -324,6 +324,7 @@ withdrawable = accrued - withdrawn_amount
 From **CONTRACT_VERSION 5**, senders can optionally set a `withdraw_dust_threshold` per stream to reduce fee and event spam from tiny micro-withdrawals.
 
 - **Enforcement**: If `withdrawable < withdraw_dust_threshold`, the withdrawal returns `0` (no transfer, no event).
+- **Validation**: At creation time, `withdraw_dust_threshold` must not exceed `deposit_amount`. If it does, the creation is rejected with `ContractError::InvalidDustThreshold` (20).
 - **Exceptions (Threshold Ignored)**:
     - **Terminal State**: Once the stream reaches `end_time` or is `Cancelled`, the threshold is ignored to ensure the recipient can pull all remaining funds.
     - **Final Drain**: If the withdrawal would result in `withdrawn_amount == deposit_amount` (completing the stream), it is allowed even if the amount is below the threshold.
@@ -977,8 +978,9 @@ errors relevant to stream creation and timing.
 | `ContractError::StreamAlreadyPaused` (10)                               | `pause_stream`                     | Double pause                                  |
 | `ContractError::StreamNotPaused` (11)                                   | `resume_stream`                    | Resume active stream                          |
 | `ContractError::StreamTerminalState` (12)                               | `pause_stream` / `resume_stream`   | Modification past end_time                    |
-| `ContractError::StreamNotFound` (1)                                     | Various                            | Invalid stream_id                             |
-| `ContractError::Unauthorized` (6)                                       | Various                            | Auth check failed                             |
+| `ContractError::StreamNotFound` (1) | Various | Invalid stream_id |
+| `ContractError::InvalidDustThreshold` (20) | `create_stream` | `dust_threshold > deposit_amount` |
+| `ContractError::Unauthorized` (6) | Various | Auth check failed |
 | `ContractError::InvalidState` (2)                                       | `withdraw`                         | Withdraw from non-terminal paused             |
 | `ContractError::InvalidState` (2)                                       | `cancel_stream`                    | Cancel completed/cancelled                    |
 | `"invalid state for stream closure"`                                    | `close_completed_stream`           | Close non-terminal (Active/Paused) stream    |
