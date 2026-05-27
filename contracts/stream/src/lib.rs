@@ -603,6 +603,12 @@ pub enum DataKey {
     PauseState,
     /// Reentrancy guard flag (bool) to prevent recursive token transfers.
     ReentrancyLock,
+    /// Paged recipient stream index (page number → Vec<u64> of stream IDs).
+    RecipientStreamPage(Address, u32),
+    /// Number of pages in a recipient's paged stream index.
+    RecipientStreamPageCount(Address),
+    /// Pending recipient update proposal for a stream (sender-initiated, recipient-accepted).
+    PendingRecipientUpdate(u64),
 }
 
 // ---------------------------------------------------------------------------
@@ -5013,6 +5019,106 @@ impl FluxoraStream {
                 paused_by: None,
             }
         }
+    }
+
+    /// Sweep excess tokens from the contract to a specified recipient.
+    ///
+    /// When streams are cancelled or the deposit sum exceeds cumulative accrual
+    /// (e.g., due to rate decreases via `decrease_rate_per_second`), residual USDC
+    /// can become trapped in the contract. This function allows the admin to recover
+    /// those excess tokens by calculating the difference between the contract's token
+    /// balance and the sum of all outstanding obligations (tracked liabilities).
+    ///
+    /// # Parameters
+    /// - `recipient`: Address to receive the excess tokens
+    ///
+    /// # Authorization
+    /// - Requires authorization from the contract admin
+    ///
+    /// # Returns
+    /// - `i128`: Amount of excess tokens swept (0 if no excess exists)
+    ///
+    /// # Errors
+    /// - `ContractError::InvalidState`: If contract is not initialized
+    /// - `ContractError::Unauthorized`: If caller is not the admin
+    /// - `ContractError::InvalidParams`: If recipient address is invalid
+    ///
+    /// # Events
+    /// - Publishes `ExcessSwept { to, amount }` event on success
+    ///
+    /// # Security
+    /// - Only callable by admin to prevent unauthorized fund extraction
+    /// - Uses tracked liabilities (`TotalLiabilities`) to ensure recipient funds are protected
+    /// - CEI pattern: calculates excess, updates state, then transfers tokens
+    /// - Reentrancy protected via `acquire_reentrancy_lock`
+    ///
+    /// # Calculation
+    /// ```text
+    /// excess = contract_token_balance - total_liabilities
+    /// ```
+    ///
+    /// Where `total_liabilities` is the sum of all active stream deposits that haven't
+    /// been withdrawn or refunded yet.
+    ///
+    /// # Usage Notes
+    /// - Safe to call even when no excess exists (returns 0, no transfer)
+    /// - Does not affect active streams or recipient entitlements
+    /// - Useful for recovering funds after mass cancellations or rate decreases
+    /// - Should be called periodically by operators to maintain clean accounting
+    ///
+    /// # Example Scenarios
+    /// 1. Stream cancelled at 50% completion → 50% refunded to sender, but if sender
+    ///    address is lost, those tokens become excess
+    /// 2. Rate decreased from 100/s to 50/s → excess deposit refunded, but if refund
+    ///    fails, tokens remain in contract
+    /// 3. Rounding errors accumulate over many streams → small excess builds up
+    pub fn sweep_excess(env: Env, recipient: Address) -> Result<i128, ContractError> {
+        // Only admin can sweep excess tokens
+        let admin = get_admin(&env)?;
+        admin.require_auth();
+
+        // Validate recipient address
+        recipient.require_valid();
+
+        // Get contract's token balance
+        let token_address = get_token(&env)?;
+        let token_client = token::Client::new(&env, &token_address);
+        let contract_balance = token_client.balance(&env.current_contract_address());
+
+        // Get total outstanding liabilities (sum of all active stream deposits)
+        let total_liabilities = read_total_liabilities(&env);
+
+        // Calculate excess: balance - liabilities
+        // If liabilities exceed balance, there's no excess (should not happen in normal operation)
+        let excess = contract_balance.saturating_sub(total_liabilities);
+
+        // If no excess, return early (no transfer needed)
+        if excess <= 0 {
+            return Ok(0);
+        }
+
+        // CEI pattern: Emit event before transfer
+        env.events().publish(
+            (symbol_short!("ex_swept"), recipient.clone()),
+            ExcessSwept {
+                to: recipient.clone(),
+                amount: excess,
+            },
+        );
+
+        // Acquire reentrancy lock before token transfer
+        acquire_reentrancy_lock(&env)?;
+
+        // Transfer excess tokens to recipient
+        let transfer_result = push_token(&env, &recipient, excess);
+
+        // Release reentrancy lock
+        release_reentrancy_lock(&env);
+
+        // Propagate any transfer errors
+        transfer_result?;
+
+        Ok(excess)
     }
 }
 
