@@ -37,8 +37,9 @@ Notes:
 | ProtocolResumed  | `["pr_resume", admin: Address]` | `ProtocolResumed { resumed_at: u64 }`                                                                                                                     | When `resume_protocol` successfully resumes the protocol. Not emitted on idempotent calls.                             |
 | SenderTransferred | `["sndr_xfr", stream_id: u64]` | `SenderTransferred { stream_id: u64, old_sender: Address, new_sender: Address }`                                                                          | When `transfer_sender` successfully rotates the stream sender. Emitted after state is persisted. Not emitted on failure. |
 | DelegatedWithdrawal | `["dlg_wdraw", stream_id: u64]` | `DelegatedWithdrawal { stream_id: u64, recipient: Address, destination: Address, relayer: Address, amount: i128 }` | When a relayer successfully executes a recipient-signed delegated withdrawal via `delegated_withdraw_to`. Only emitted when `amount > 0`. |
+| StreamHealthChanged | `["hlth_chg", stream_id: u64]` | `StreamHealthChanged { stream_id: u64, is_underfunded: bool, remaining_balance: i128, seconds_remaining: u64 }` | When a stream transitions between adequately funded and underfunded. Emitted by `decrease_rate_per_second`, `shorten_stream_end_time`, `top_up_stream`, and `cancel_stream`. Only emitted on actual health transitions, not on every mutation. |
 
-**Additional topics (validator):** `gl_pause`, `gl_resume`, `rate_dec`, `tmpl_def`.
+**Additional topics (validator):** `gl_pause`, `gl_resume`, `rate_dec`, `tmpl_def`, `hlth_chg`.
 
 ---
 | Event name | Topic(s) | Data (shape & types) | When emitted |
@@ -340,6 +341,58 @@ Example:
 Indexers should update their sender reference for the stream on receipt of this event.
 The `old_sender` field allows indexers to correlate the previous treasury key.
 
+### 14) StreamHealthChanged
+
+Emitted by `decrease_rate_per_second`, `shorten_stream_end_time`, `top_up_stream`,
+and `cancel_stream` when the stream's funding health status transitions between
+adequately funded and underfunded.
+
+A stream is **underfunded** when `remaining_balance < rate_per_second × seconds_remaining`.
+Terminal streams (`Completed`, `Cancelled`) have `seconds_remaining = 0` and are never underfunded.
+
+This event is only emitted when the `is_underfunded` flag actually changes, not on every mutation.
+
+```
+topics: ["hlth_chg", <stream_id: u64>]
+data:   StreamHealthChanged {
+          stream_id:         u64,
+          is_underfunded:    bool,
+          remaining_balance: i128,
+          seconds_remaining: u64,
+        }
+```
+
+Example (stream became underfunded after rate decrease):
+
+```json
+{
+  "topics": ["hlth_chg", 0],
+  "data": {
+    "stream_id": 0,
+    "is_underfunded": true,
+    "remaining_balance": 500,
+    "seconds_remaining": 800
+  }
+}
+```
+
+Example (stream became adequately funded after top-up):
+
+```json
+{
+  "topics": ["hlth_chg", 0],
+  "data": {
+    "stream_id": 0,
+    "is_underfunded": false,
+    "remaining_balance": 1200,
+    "seconds_remaining": 800
+  }
+}
+```
+
+Indexers should use this event to surface underfunded streams proactively.
+The `remaining_balance` and `seconds_remaining` fields allow precise monitoring dashboards.
+
 ---
 
 ## Parsing recommendations for indexers
@@ -397,6 +450,7 @@ Commit message suggestion: `docs: add event schema and topics for indexers`
 | `pause_protocol`                                             | `"pr_pause"`    |
 | `resume_protocol`                                            | `"pr_resume"`   |
 | `update_recipient`                                           | `"recp_upd"`    |
+| `decrease_rate_per_second`, `shorten_stream_end_time`, `top_up_stream`, `cancel_stream` | `"hlth_chg"` |
 
 If you change event topics or payloads in the contract, update this document and
 include updated example snapshots in the PR.
