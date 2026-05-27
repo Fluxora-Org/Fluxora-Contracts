@@ -330,6 +330,8 @@ From **CONTRACT_VERSION 5**, senders can optionally set a `withdraw_dust_thresho
     - **Final Drain**: If the withdrawal would result in `withdrawn_amount == deposit_amount` (completing the stream), it is allowed even if the amount is below the threshold.
 - **Default**: The threshold defaults to `0` if not specified at creation.
 
+> **See also:** [dust-threshold.md](./dust-threshold.md) — formula for choosing a safe threshold value, worked USDC examples, a validation table, and guidance for template authors.
+
 ### Frontend: get_claimable_at (simulation)
 
 `get_claimable_at(stream_id, timestamp)` is a read-only view that returns the amount that would be claimable (withdrawable) at an arbitrary timestamp. Use it for:

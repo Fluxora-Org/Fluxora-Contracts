@@ -445,8 +445,38 @@ pub struct Stream {
     /// Ledger timestamp of the last rate change (or `start_time` on creation).
     /// `calculate_accrued` uses this as the start of the current rate epoch.
     pub checkpointed_at: u64,
-    /// Optional withdrawal threshold (raw units). Withdrawals below this
-    /// amount are skipped unless they are the final drain or the stream is terminal.
+    /// Minimum withdrawal amount in raw token units (dust filter).
+    ///
+    /// When `withdrawable < withdraw_dust_threshold`, `withdraw`, `withdraw_to`, and
+    /// `batch_withdraw` return `0` without transferring tokens or emitting events.
+    /// This prevents fee and event spam from micro-withdrawals on high-frequency streams.
+    ///
+    /// # Bypass conditions (threshold is ignored)
+    /// - **Terminal state**: `status == Cancelled` or `ledger.timestamp() >= end_time`.
+    ///   The recipient can always pull the final balance regardless of threshold.
+    /// - **Final drain**: `withdrawn_amount + withdrawable == deposit_amount`.
+    ///   The last withdrawal that completes the stream is never blocked.
+    ///
+    /// # Choosing a value (USDC, 7 decimals — 1 USDC = 10_000_000 raw units)
+    /// - `0` — no filter; every micro-withdrawal is allowed (default).
+    /// - `100_000` (0.01 USDC) — blocks sub-cent withdrawals; suitable for high-rate streams.
+    /// - `1_000_000` (0.1 USDC) — blocks sub-dime withdrawals; good for payroll streams.
+    /// - `10_000_000` (1 USDC) — blocks sub-dollar withdrawals; conservative for slow streams.
+    ///
+    /// # Safety constraint
+    /// `withdraw_dust_threshold` must not exceed `deposit_amount`. A threshold equal to or
+    /// greater than the deposit would permanently block all non-terminal withdrawals, locking
+    /// the recipient's funds. Creation is rejected with `ContractError::InvalidDustThreshold`
+    /// if this constraint is violated.
+    ///
+    /// # Formula for safe threshold selection
+    /// A safe upper bound is: `threshold ≤ rate_per_second × minimum_acceptable_interval`
+    /// where `minimum_acceptable_interval` is the shortest withdrawal cadence you expect.
+    /// For example, a stream at 1_000 raw/s with daily withdrawals:
+    ///   `threshold ≤ 1_000 × 86_400 = 86_400_000` (8.64 USDC for a 7-decimal token).
+    ///
+    /// See [`docs/dust-threshold.md`](../../docs/dust-threshold.md) for worked USDC examples,
+    /// a validation table, and guidance for template authors.
     pub withdraw_dust_threshold: i128,
     /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
     /// Maximum length: `MAX_MEMO_BYTES` (64 bytes). `None` when not supplied.
