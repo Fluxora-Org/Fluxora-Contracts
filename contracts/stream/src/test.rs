@@ -646,11 +646,8 @@ fn test_create_stream_emits_event() {
         &0u64,
         &0u64,
         &1000u64,
-<<<<<<< HEAD
-=======
         &0,
         &None,
->>>>>>> upstream/main
     );
 
     let events = ctx.env.events().all();
@@ -680,11 +677,8 @@ fn test_create_stream_panics_when_contract_paused() {
         &0u64,
         &0u64,
         &1000u64,
-<<<<<<< HEAD
-=======
         &0,
         &None,
->>>>>>> upstream/main
     );
     assert_eq!(result, Err(Ok(ContractError::ContractPaused)));
 }
@@ -703,11 +697,8 @@ fn test_create_stream_succeeds_after_unpause() {
         &0u64,
         &0u64,
         &1000u64,
-<<<<<<< HEAD
-=======
         &0,
         &None,
->>>>>>> upstream/main
     );
     assert_eq!(id, 0);
     assert_eq!(
@@ -5113,8 +5104,8 @@ fn test_set_contract_paused_emits_ct_pause_event() {
 
     assert_eq!(
         Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
-        Symbol::new(&ctx.env, "ct_pause"),
-        "set_contract_paused topic[0] must be \"ct_pause\""
+        Symbol::new(&ctx.env, "paused_ctl"),
+        "set_contract_paused topic[0] must be \"paused_ctl\""
     );
     let payload = ContractPauseChanged::try_from_val(&ctx.env, &last_event.2)
         .expect("ct_pause data must be ContractPauseChanged");
@@ -5130,11 +5121,11 @@ fn test_set_contract_paused_emits_ct_pause_event() {
 
     assert_eq!(
         Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
-        Symbol::new(&ctx.env, "ct_pause"),
-        "set_contract_paused topic[0] must be \"ct_pause\" on unpause"
+        Symbol::new(&ctx.env, "paused_ctl"),
+        "set_contract_paused topic[0] must be \"paused_ctl\" on unpause"
     );
     let payload = ContractPauseChanged::try_from_val(&ctx.env, &last_event.2)
-        .expect("ct_pause data must be ContractPauseChanged on unpause");
+        .expect("paused_ctl data must be ContractPauseChanged on unpause");
     assert!(
         !payload.paused,
         "ContractPauseChanged.paused must be false on unpause"
@@ -9781,11 +9772,11 @@ fn test_set_admin_emits_event() {
     let events = ctx.env.events().all();
     let last_event = events.last().expect("expected at least one event");
 
-    // Check event topic: (Symbol::new(&env, "AdminUpd"),)
+    // Check event topic: (Symbol::new(&env, "AdminUpdated"),)
     assert_eq!(last_event.0, ctx.contract_id);
     assert_eq!(
         Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
-        Symbol::new(&ctx.env, "AdminUpd")
+        Symbol::new(&ctx.env, "AdminUpdated")
     );
 
     // Check event data: (old_admin, new_admin)
@@ -9891,7 +9882,7 @@ fn test_set_admin_same_address_succeeds() {
     assert_eq!(last_event.0, ctx.contract_id);
     assert_eq!(
         Symbol::from_val(&ctx.env, &last_event.1.get(0).unwrap()),
-        Symbol::new(&ctx.env, "AdminUpd")
+        Symbol::new(&ctx.env, "AdminUpdated")
     );
     let data: (Address, Address) = last_event.2.into_val(&ctx.env);
     assert_eq!(data.0, old_admin);
@@ -17125,7 +17116,15 @@ mod negative_pause_resume_auth {
         let ctx = TestContext::setup();
         ctx.env.ledger().set_timestamp(0);
         let stream_id = ctx.client().create_stream(
-            &ctx.sender, &ctx.recipient, &1000, &1, &0, &0, &1000, &0, &None,
+            &ctx.sender,
+            &ctx.recipient,
+            &1000,
+            &1,
+            &0,
+            &0,
+            &1000,
+            &0,
+            &None,
         );
         (ctx, stream_id)
     }
@@ -17170,7 +17169,8 @@ mod negative_pause_resume_auth {
         }]);
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            ctx.client().pause_stream(&stream_id, &crate::PauseReason::Operational);
+            ctx.client()
+                .pause_stream(&stream_id, &crate::PauseReason::Operational);
         }));
         assert!(result.is_err(), "recipient must not be able to pause");
         assert_no_side_effects(&ctx, stream_id, StreamStatus::Active, events_before);
@@ -17197,7 +17197,8 @@ mod negative_pause_resume_auth {
         }]);
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            ctx.client().pause_stream(&stream_id, &crate::PauseReason::Operational);
+            ctx.client()
+                .pause_stream(&stream_id, &crate::PauseReason::Operational);
         }));
         assert!(result.is_err(), "third party must not be able to pause");
         assert_no_side_effects(&ctx, stream_id, StreamStatus::Active, events_before);
@@ -17224,7 +17225,8 @@ mod negative_pause_resume_auth {
         }]);
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            ctx.client().pause_stream(&stream_id, &crate::PauseReason::Operational);
+            ctx.client()
+                .pause_stream(&stream_id, &crate::PauseReason::Operational);
         }));
         assert!(result.is_err(), "admin must not use sender pause path");
         assert_no_side_effects(&ctx, stream_id, StreamStatus::Active, events_before);
@@ -17240,7 +17242,8 @@ mod negative_pause_resume_auth {
         // First pause the stream as sender
         ctx.env.mock_all_auths();
         ctx.env.ledger().set_timestamp(100);
-        ctx.client().pause_stream(&stream_id, &crate::PauseReason::Operational);
+        ctx.client()
+            .pause_stream(&stream_id, &crate::PauseReason::Operational);
         let events_before = ctx.env.events().all().len();
 
         ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
@@ -17269,7 +17272,8 @@ mod negative_pause_resume_auth {
         let (ctx, stream_id) = setup_active_stream();
         ctx.env.mock_all_auths();
         ctx.env.ledger().set_timestamp(100);
-        ctx.client().pause_stream(&stream_id, &crate::PauseReason::Operational);
+        ctx.client()
+            .pause_stream(&stream_id, &crate::PauseReason::Operational);
         let events_before = ctx.env.events().all().len();
 
         let third_party = soroban_sdk::Address::generate(&ctx.env);
@@ -17299,7 +17303,8 @@ mod negative_pause_resume_auth {
         let (ctx, stream_id) = setup_active_stream();
         ctx.env.mock_all_auths();
         ctx.env.ledger().set_timestamp(100);
-        ctx.client().pause_stream(&stream_id, &crate::PauseReason::Operational);
+        ctx.client()
+            .pause_stream(&stream_id, &crate::PauseReason::Operational);
         let events_before = ctx.env.events().all().len();
 
         ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
@@ -17339,7 +17344,8 @@ mod negative_pause_resume_auth {
         }]);
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            ctx.client().pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
+            ctx.client()
+                .pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
         }));
         assert!(result.is_err(), "sender must not use admin pause path");
         assert_no_side_effects(&ctx, stream_id, StreamStatus::Active, events_before);
@@ -17365,7 +17371,8 @@ mod negative_pause_resume_auth {
         }]);
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            ctx.client().pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
+            ctx.client()
+                .pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
         }));
         assert!(result.is_err(), "recipient must not use admin pause path");
         assert_no_side_effects(&ctx, stream_id, StreamStatus::Active, events_before);
@@ -17380,7 +17387,8 @@ mod negative_pause_resume_auth {
         let (ctx, stream_id) = setup_active_stream();
         ctx.env.mock_all_auths();
         ctx.env.ledger().set_timestamp(100);
-        ctx.client().pause_stream(&stream_id, &crate::PauseReason::Operational);
+        ctx.client()
+            .pause_stream(&stream_id, &crate::PauseReason::Operational);
         let events_before = ctx.env.events().all().len();
 
         ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
@@ -17409,7 +17417,8 @@ mod negative_pause_resume_auth {
         let (ctx, stream_id) = setup_active_stream();
         ctx.env.mock_all_auths();
         ctx.env.ledger().set_timestamp(100);
-        ctx.client().pause_stream(&stream_id, &crate::PauseReason::Operational);
+        ctx.client()
+            .pause_stream(&stream_id, &crate::PauseReason::Operational);
         let events_before = ctx.env.events().all().len();
 
         ctx.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
@@ -17438,22 +17447,35 @@ mod negative_pause_resume_auth {
         let (ctx, stream_id) = setup_active_stream();
         ctx.env.mock_all_auths();
         ctx.env.ledger().set_timestamp(100);
-        ctx.client().pause_stream(&stream_id, &crate::PauseReason::Operational);
-        assert_eq!(ctx.client().get_stream_state(&stream_id).status, StreamStatus::Paused);
+        ctx.client()
+            .pause_stream(&stream_id, &crate::PauseReason::Operational);
+        assert_eq!(
+            ctx.client().get_stream_state(&stream_id).status,
+            StreamStatus::Paused
+        );
         ctx.client().resume_stream(&stream_id);
-        assert_eq!(ctx.client().get_stream_state(&stream_id).status, StreamStatus::Active);
+        assert_eq!(
+            ctx.client().get_stream_state(&stream_id).status,
+            StreamStatus::Active
+        );
     }
 
     #[test]
     fn admin_can_pause_and_resume_via_admin_paths() {
         let (ctx, stream_id) = setup_active_stream();
         ctx.env.mock_all_auths();
-        ctx.client().pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
-        assert_eq!(ctx.client().get_stream_state(&stream_id).status, StreamStatus::Paused);
+        ctx.client()
+            .pause_stream_as_admin(&stream_id, &crate::PauseReason::Administrative);
+        assert_eq!(
+            ctx.client().get_stream_state(&stream_id).status,
+            StreamStatus::Paused
+        );
         ctx.client().resume_stream_as_admin(&stream_id);
-        assert_eq!(ctx.client().get_stream_state(&stream_id).status, StreamStatus::Active);
+        assert_eq!(
+            ctx.client().get_stream_state(&stream_id).status,
+            StreamStatus::Active
+        );
     }
-
 } // mod negative_pause_resume_auth
 
 // i128 boundary streams: near-max rate/deposit scenarios
@@ -18432,11 +18454,6 @@ mod recipient_index_stress {
         // Create 10 streams
         let mut stream_ids = Vec::new(&ctx.env);
         for _ in 0..10 {
-<<<<<<< HEAD
-            let id = ctx
-                .client()
-                .create_stream(&ctx.sender, &recipient, &100_i128, &1_i128, &0u64, &0u64, &100u64);
-=======
             let id = ctx.client().create_stream(
                 &ctx.sender,
                 &recipient,
@@ -18448,7 +18465,6 @@ mod recipient_index_stress {
                 &0,
                 &None,
             );
->>>>>>> upstream/main
             stream_ids.push_back(id);
         }
 
@@ -18503,11 +18519,7 @@ mod recipient_index_stress {
 
         // Create 5 streams
         let mut ids = Vec::new(&ctx.env);
-<<<<<<< HEAD
-        for i in 0..5 {
-=======
         for _i in 0..5 {
->>>>>>> upstream/main
             let id = ctx.client().create_stream(
                 &ctx.sender,
                 &ctx.recipient,
@@ -18516,11 +18528,8 @@ mod recipient_index_stress {
                 &0u64,
                 &0u64,
                 &1000u64,
-<<<<<<< HEAD
-=======
                 &0,
                 &None,
->>>>>>> upstream/main
             );
             ids.push_back(id);
         }
@@ -18530,15 +18539,9 @@ mod recipient_index_stress {
         assert_eq!(streams.len(), 3, "Should return 3 streams");
 
         // Verify order and content
-<<<<<<< HEAD
-        assert_eq!(streams.get(0).unwrap().id, 1);
-        assert_eq!(streams.get(1).unwrap().id, 2);
-        assert_eq!(streams.get(2).unwrap().id, 3);
-=======
         assert_eq!(streams.get(0).unwrap().stream_id, 1);
         assert_eq!(streams.get(1).unwrap().stream_id, 2);
         assert_eq!(streams.get(2).unwrap().stream_id, 3);
->>>>>>> upstream/main
     }
 
     #[test]
@@ -18555,11 +18558,8 @@ mod recipient_index_stress {
             &0u64,
             &0u64,
             &1000u64,
-<<<<<<< HEAD
-=======
             &0,
             &None,
->>>>>>> upstream/main
         );
 
         // Range with start > end returns empty
@@ -18571,16 +18571,11 @@ mod recipient_index_stress {
     fn test_get_streams_by_id_range_respects_max_page_size() {
         let ctx = TestContext::setup();
         ctx.env.ledger().set_timestamp(0);
-<<<<<<< HEAD
-
-        // Create 150 streams (exceeds MAX_PAGE_SIZE of 100)
-=======
         ctx.env.budget().reset_unlimited();
 
         // Create 150 streams (exceeds MAX_PAGE_SIZE of 100)
         // Needs 150*100 = 15,000 tokens; default setup has 10,000 so mint extra.
         ctx.sac.mint(&ctx.sender, &5_000_i128);
->>>>>>> upstream/main
         for _ in 0..150 {
             ctx.client().create_stream(
                 &ctx.sender,
@@ -18590,11 +18585,8 @@ mod recipient_index_stress {
                 &0u64,
                 &0u64,
                 &100u64,
-<<<<<<< HEAD
-=======
                 &0,
                 &None,
->>>>>>> upstream/main
             );
         }
 
@@ -18622,11 +18614,8 @@ mod recipient_index_stress {
                 &0,
                 &0,
                 &1000,
-<<<<<<< HEAD
-=======
                 &0,
                 &None,
->>>>>>> upstream/main
             );
         }
 
@@ -18638,15 +18627,9 @@ mod recipient_index_stress {
         // Range should return streams 1, 3, 4 (skipping closed stream 2)
         let streams = ctx.client().get_streams_by_id_range(&1, &4, &10);
         assert_eq!(streams.len(), 3, "Should skip closed stream");
-<<<<<<< HEAD
-        assert_eq!(streams.get(0).unwrap().id, 1);
-        assert_eq!(streams.get(1).unwrap().id, 3);
-        assert_eq!(streams.get(2).unwrap().id, 4);
-=======
         assert_eq!(streams.get(0).unwrap().stream_id, 1);
         assert_eq!(streams.get(1).unwrap().stream_id, 3);
         assert_eq!(streams.get(2).unwrap().stream_id, 4);
->>>>>>> upstream/main
     }
 
     #[test]
@@ -18664,11 +18647,8 @@ mod recipient_index_stress {
                 &0u64,
                 &0u64,
                 &100u64,
-<<<<<<< HEAD
-=======
                 &0,
                 &None,
->>>>>>> upstream/main
             );
         }
 
@@ -18676,13 +18656,8 @@ mod recipient_index_stress {
         let max = u64::MAX;
         let streams = ctx.client().get_streams_by_id_range(&5, &max, &5);
         assert_eq!(streams.len(), 5, "Should return 5 streams from position 5");
-<<<<<<< HEAD
-        assert_eq!(streams.get(0).unwrap().id, 5);
-        assert_eq!(streams.get(4).unwrap().id, 9);
-=======
         assert_eq!(streams.get(0).unwrap().stream_id, 5);
         assert_eq!(streams.get(4).unwrap().stream_id, 9);
->>>>>>> upstream/main
     }
 
     #[test]
@@ -18698,11 +18673,8 @@ mod recipient_index_stress {
             &0u64,
             &0u64,
             &1000u64,
-<<<<<<< HEAD
-=======
             &0,
             &None,
->>>>>>> upstream/main
         );
 
         let streams = ctx.client().get_streams_by_id_range(&0, &10, &0);
@@ -18718,13 +18690,6 @@ mod recipient_index_stress {
 
         // Create 10 streams for this recipient
         for _ in 0..10 {
-<<<<<<< HEAD
-            ctx.client().create_stream(&ctx.sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64);
-        }
-
-        // Page 1: cursor=0, limit=3
-        let page1 = ctx.client().get_recipient_streams_paginated(&recipient, &0, &3);
-=======
             ctx.client().create_stream(
                 &ctx.sender,
                 &recipient,
@@ -18742,33 +18707,21 @@ mod recipient_index_stress {
         let page1 = ctx
             .client()
             .get_recipient_streams_paginated(&recipient, &0, &3);
->>>>>>> upstream/main
         assert_eq!(page1.len(), 3);
         assert_eq!(page1.get(0).unwrap(), 0);
         assert_eq!(page1.get(1).unwrap(), 1);
         assert_eq!(page1.get(2).unwrap(), 2);
 
         // Page 2: cursor=3, limit=3
-<<<<<<< HEAD
-        let page2 = ctx.client().get_recipient_streams_paginated(&recipient, &3, &3);
-=======
         let page2 = ctx
             .client()
             .get_recipient_streams_paginated(&recipient, &3, &3);
->>>>>>> upstream/main
         assert_eq!(page2.len(), 3);
         assert_eq!(page2.get(0).unwrap(), 3);
         assert_eq!(page2.get(1).unwrap(), 4);
         assert_eq!(page2.get(2).unwrap(), 5);
 
         // Page 3: cursor=6, limit=3 (only 4 left)
-<<<<<<< HEAD
-        let page3 = ctx.client().get_recipient_streams_paginated(&recipient, &6, &3);
-        assert_eq!(page3.len(), 3);
-
-        // Page 4: cursor=9, limit=3 (only 1 left)
-        let page4 = ctx.client().get_recipient_streams_paginated(&recipient, &9, &3);
-=======
         let page3 = ctx
             .client()
             .get_recipient_streams_paginated(&recipient, &6, &3);
@@ -18778,18 +18731,13 @@ mod recipient_index_stress {
         let page4 = ctx
             .client()
             .get_recipient_streams_paginated(&recipient, &9, &3);
->>>>>>> upstream/main
         assert_eq!(page4.len(), 1);
         assert_eq!(page4.get(0).unwrap(), 9);
 
         // Page 5: cursor=10, should be empty (past end)
-<<<<<<< HEAD
-        let page5 = ctx.client().get_recipient_streams_paginated(&recipient, &10, &3);
-=======
         let page5 = ctx
             .client()
             .get_recipient_streams_paginated(&recipient, &10, &3);
->>>>>>> upstream/main
         assert_eq!(page5.len(), 0);
     }
 
@@ -18797,22 +18745,11 @@ mod recipient_index_stress {
     fn test_get_recipient_streams_paginated_respects_max_page_size() {
         let ctx = TestContext::setup();
         ctx.env.ledger().set_timestamp(0);
-<<<<<<< HEAD
-=======
         ctx.env.budget().reset_unlimited();
->>>>>>> upstream/main
 
         let recipient = Address::generate(&ctx.env);
 
         // Create 150 streams
-<<<<<<< HEAD
-        for _ in 0..150 {
-            ctx.client().create_stream(&ctx.sender, &recipient, &100, &1, &0, &0, &100);
-        }
-
-        // Request 200, should be capped at MAX_PAGE_SIZE (100)
-        let page = ctx.client().get_recipient_streams_paginated(&recipient, &0, &200);
-=======
         // Needs 150*100 = 15,000 tokens; default setup has 10,000 so mint extra.
         ctx.sac.mint(&ctx.sender, &5_000_i128);
         for _ in 0..150 {
@@ -18833,7 +18770,6 @@ mod recipient_index_stress {
         let page = ctx
             .client()
             .get_recipient_streams_paginated(&recipient, &0, &200);
->>>>>>> upstream/main
         assert_eq!(page.len(), 100, "Should respect MAX_PAGE_SIZE of 100");
     }
 
@@ -18843,12 +18779,6 @@ mod recipient_index_stress {
         ctx.env.ledger().set_timestamp(0);
 
         let recipient = Address::generate(&ctx.env);
-<<<<<<< HEAD
-        ctx.client().create_stream(&ctx.sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64);
-
-        // Cursor beyond total count
-        let result = ctx.client().get_recipient_streams_paginated(&recipient, &100, &10);
-=======
         ctx.client().create_stream(
             &ctx.sender,
             &recipient,
@@ -18865,7 +18795,6 @@ mod recipient_index_stress {
         let result = ctx
             .client()
             .get_recipient_streams_paginated(&recipient, &100, &10);
->>>>>>> upstream/main
         assert_eq!(result.len(), 0, "Should return empty when cursor >= total");
     }
 
@@ -18875,11 +18804,6 @@ mod recipient_index_stress {
         ctx.env.ledger().set_timestamp(0);
 
         let recipient = Address::generate(&ctx.env);
-<<<<<<< HEAD
-        ctx.client().create_stream(&ctx.sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64);
-
-        let result = ctx.client().get_recipient_streams_paginated(&recipient, &0, &0);
-=======
         ctx.client().create_stream(
             &ctx.sender,
             &recipient,
@@ -18895,7 +18819,6 @@ mod recipient_index_stress {
         let result = ctx
             .client()
             .get_recipient_streams_paginated(&recipient, &0, &0);
->>>>>>> upstream/main
         assert_eq!(result.len(), 0, "Zero limit should return empty");
     }
 
@@ -18909,10 +18832,6 @@ mod recipient_index_stress {
 
         // Create 5 streams for recipient1
         for _ in 0..5 {
-<<<<<<< HEAD
-            ctx.client()
-                .create_stream(&ctx.sender, &recipient1, &1000_i128, &1_i128, &0u64, &0u64, &1000u64);
-=======
             ctx.client().create_stream(
                 &ctx.sender,
                 &recipient1,
@@ -18924,23 +18843,10 @@ mod recipient_index_stress {
                 &0,
                 &None,
             );
->>>>>>> upstream/main
         }
 
         // Create 3 streams for recipient2
         for _ in 0..3 {
-<<<<<<< HEAD
-            ctx.client()
-                .create_stream(&ctx.sender, &recipient2, &1000_i128, &1_i128, &0u64, &0u64, &1000u64);
-        }
-
-        // Paginate recipient1
-        let page1 = ctx.client().get_recipient_streams_paginated(&recipient1, &0, &10);
-        assert_eq!(page1.len(), 5);
-
-        // Paginate recipient2
-        let page2 = ctx.client().get_recipient_streams_paginated(&recipient2, &0, &10);
-=======
             ctx.client().create_stream(
                 &ctx.sender,
                 &recipient2,
@@ -18964,7 +18870,6 @@ mod recipient_index_stress {
         let page2 = ctx
             .client()
             .get_recipient_streams_paginated(&recipient2, &0, &10);
->>>>>>> upstream/main
         assert_eq!(page2.len(), 3);
     }
 
@@ -18977,9 +18882,6 @@ mod recipient_index_stress {
 
         // Create 5 streams
         for _ in 0..5 {
-<<<<<<< HEAD
-            ctx.client().create_stream(&ctx.sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64);
-=======
             ctx.client().create_stream(
                 &ctx.sender,
                 &recipient,
@@ -18991,7 +18893,6 @@ mod recipient_index_stress {
                 &0,
                 &None,
             );
->>>>>>> upstream/main
         }
 
         // Close stream 2 (make completed first)
@@ -19029,9 +18930,6 @@ mod recipient_index_stress {
 
         // Create 25 streams
         for _ in 0..25 {
-<<<<<<< HEAD
-            ctx.client().create_stream(&ctx.sender, &recipient, &100, &1, &0, &0, &100);
-=======
             ctx.client().create_stream(
                 &ctx.sender,
                 &recipient,
@@ -19043,7 +18941,6 @@ mod recipient_index_stress {
                 &0,
                 &None,
             );
->>>>>>> upstream/main
         }
 
         // Simulate full export using pagination
@@ -19090,11 +18987,8 @@ mod recipient_index_stress {
                 &0u64,
                 &0u64,
                 &1000u64,
-<<<<<<< HEAD
-=======
                 &0,
                 &None,
->>>>>>> upstream/main
             );
         }
 
@@ -19105,199 +18999,6 @@ mod recipient_index_stress {
 }
 
 // ---------------------------------------------------------------------------
-<<<<<<< HEAD
-// Protocol Pause/Resume Tests - Global Emergency Pause Semantics (#399)
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod protocol_pause_tests {
-    use super::*;
-    use crate::{ContractError, PauseInfo, ProtocolPaused, ProtocolResumed};
-    use soroban_sdk::{testutils::Events, Symbol, TryFromVal};
-
-    // -----------------------------------------------------------------------
-    // Basic pause/resume success tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_pause_protocol_success() {
-        let ctx = TestContext::setup();
-        ctx.env.ledger().set_timestamp(1000);
-
-        // Pause with a reason
-        let reason = soroban_sdk::String::from_str(&ctx.env, "security incident");
-        ctx.client()
-            .pause_protocol(&ctx.admin, &Some(reason.clone()));
-
-        // Verify is_paused returns true
-        assert!(ctx.client().is_paused(), "Protocol should be paused");
-
-        // Verify get_pause_info returns correct data
-        let info = ctx.client().get_pause_info();
-        assert!(info.is_paused);
-        assert_eq!(info.reason, Some(reason));
-        assert_eq!(info.paused_at, Some(1000));
-        assert_eq!(info.paused_by, Some(ctx.admin.clone()));
-    }
-
-    #[test]
-    fn test_resume_protocol_success() {
-        let ctx = TestContext::setup();
-        ctx.env.ledger().set_timestamp(1000);
-
-        // First pause
-        let reason = soroban_sdk::String::from_str(&ctx.env, "test reason");
-        ctx.client()
-            .pause_protocol(&ctx.admin, &Some(reason.clone()));
-        assert!(ctx.client().is_paused());
-
-        // Advance time and resume
-        ctx.env.ledger().set_timestamp(2000);
-        ctx.client().resume_protocol(&ctx.admin);
-
-        // Verify not paused
-        assert!(!ctx.client().is_paused(), "Protocol should not be paused");
-
-        // Verify get_pause_info cleared
-        let info = ctx.client().get_pause_info();
-        assert!(!info.is_paused);
-        assert_eq!(info.reason, None);
-        assert_eq!(info.paused_at, None);
-        assert_eq!(info.paused_by, None);
-    }
-
-    #[test]
-    fn test_pause_without_reason() {
-        let ctx = TestContext::setup();
-        ctx.env.ledger().set_timestamp(1000);
-
-        // Pause with None reason
-        ctx.client().pause_protocol(&ctx.admin, &None);
-
-        // Verify is_paused and info
-        assert!(ctx.client().is_paused());
-        let info = ctx.client().get_pause_info();
-        assert!(info.is_paused);
-        // Reason should be empty string when None provided
-        assert_eq!(info.reason, Some(soroban_sdk::String::from_str(&ctx.env, "")));
-    }
-
-    // -----------------------------------------------------------------------
-    // Idempotency tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_pause_when_already_paused_is_noop() {
-        let ctx = TestContext::setup();
-        ctx.env.ledger().set_timestamp(1000);
-
-        // First pause
-        let reason1 = soroban_sdk::String::from_str(&ctx.env, "first pause");
-        ctx.client()
-            .pause_protocol(&ctx.admin, &Some(reason1.clone()));
-
-        // Get events count after first pause
-        let events_after_first = ctx.env.events().all().len();
-
-        // Advance time
-        ctx.env.ledger().set_timestamp(2000);
-
-        // Second pause (should be idempotent)
-        let reason2 = soroban_sdk::String::from_str(&ctx.env, "second pause");
-        let result = ctx.client().try_pause_protocol(&ctx.admin, &Some(reason2));
-        assert_eq!(result, Ok(()), "Second pause should succeed as no-op");
-
-        // Verify no new events emitted
-        let events_after_second = ctx.env.events().all().len();
-        assert_eq!(
-            events_after_second, events_after_first,
-            "No events should be emitted on idempotent pause"
-        );
-
-        // Verify original pause info unchanged
-        let info = ctx.client().get_pause_info();
-        assert_eq!(info.paused_at, Some(1000), "Timestamp should be from first pause");
-        assert_eq!(info.reason, Some(reason1), "Reason should be from first pause");
-    }
-
-    #[test]
-    fn test_resume_when_not_paused_is_noop() {
-        let ctx = TestContext::setup();
-
-        // Never paused - try to resume
-        let events_before = ctx.env.events().all().len();
-        let result = ctx.client().try_resume_protocol(&ctx.admin);
-
-        // Should succeed silently
-        assert_eq!(result, Ok(()), "Resume when not paused should be no-op");
-
-        // Verify no events emitted
-        let events_after = ctx.env.events().all().len();
-        assert_eq!(
-            events_after, events_before,
-            "No events should be emitted on idempotent resume"
-        );
-
-        // Verify still not paused
-        assert!(!ctx.client().is_paused());
-    }
-
-    // -----------------------------------------------------------------------
-    // Auth failure tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_pause_by_non_admin_fails() {
-        let ctx = TestContext::setup();
-        let non_admin = Address::generate(&ctx.env);
-
-        // Attempt pause as non-admin
-        let reason = soroban_sdk::String::from_str(&ctx.env, "test");
-        let result = ctx.client().try_pause_protocol(&non_admin, &Some(reason));
-
-        // Should fail with Unauthorized
-        assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
-
-        // Verify not paused
-        assert!(!ctx.client().is_paused());
-    }
-
-    #[test]
-    fn test_resume_by_non_admin_fails() {
-        let ctx = TestContext::setup();
-        let non_admin = Address::generate(&ctx.env);
-
-        // First pause as admin
-        ctx.client()
-            .pause_protocol(&ctx.admin, &Some(soroban_sdk::String::from_str(&ctx.env, "test")));
-        assert!(ctx.client().is_paused());
-
-        // Attempt resume as non-admin
-        let result = ctx.client().try_resume_protocol(&non_admin);
-
-        // Should fail with Unauthorized
-        assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
-
-        // Verify still paused
-        assert!(ctx.client().is_paused());
-    }
-
-    // -----------------------------------------------------------------------
-    // Scope enforcement tests - creation-only pause
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_create_stream_blocked_when_paused() {
-        let ctx = TestContext::setup();
-        ctx.env.ledger().set_timestamp(0);
-
-        // Pause the protocol
-        ctx.client()
-            .pause_protocol(&ctx.admin, &Some(soroban_sdk::String::from_str(&ctx.env, "test")));
-
-        // Attempt to create stream should fail
-        let result = ctx.client().try_create_stream(
-=======
 // Structured error tests: panic → ContractError refactor (#442)
 //
 // These tests verify that all previously-panicking input-error paths now
@@ -19318,7 +19019,6 @@ mod structured_error_tests {
         let client = FluxoraStreamClient::new(&ctx.env, &ctx.contract_id);
 
         let stream_id = client.create_stream(
->>>>>>> upstream/main
             &ctx.sender,
             &ctx.recipient,
             &1000_i128,
@@ -19326,54 +19026,6 @@ mod structured_error_tests {
             &0u64,
             &0u64,
             &1000u64,
-<<<<<<< HEAD
-        );
-        assert_eq!(result, Err(Ok(ContractError::ContractPaused)));
-    }
-
-    #[test]
-    fn test_create_stream_succeeds_when_not_paused() {
-        let ctx = TestContext::setup();
-        ctx.env.ledger().set_timestamp(0);
-
-        // Do NOT pause - create stream should succeed
-        let stream_id = ctx.client().create_stream(
-            &ctx.sender,
-            &ctx.recipient,
-            &1000_i128,
-            &1_i128,
-            &0u64,
-            &0u64,
-            &1000u64,
-        );
-        assert_eq!(stream_id, 0);
-
-        let state = ctx.client().get_stream_state(&stream_id);
-        assert_eq!(state.status, StreamStatus::Active);
-    }
-
-    #[test]
-    fn test_existing_stream_operations_when_paused() {
-        let ctx = TestContext::setup();
-        ctx.env.ledger().set_timestamp(0);
-
-        // Create stream before pausing
-        let stream_id = ctx.create_default_stream();
-
-        // Pause the protocol
-        ctx.client()
-            .pause_protocol(&ctx.admin, &Some(soroban_sdk::String::from_str(&ctx.env, "test")));
-
-        // Advance time
-        ctx.env.ledger().set_timestamp(500);
-
-        // Withdraw should still work (scope is creation-only)
-        let withdrawn = ctx.client().withdraw(&stream_id);
-        assert_eq!(withdrawn, 500, "Withdraw should work when paused (creation-only scope)");
-
-        // Cancel should still work
-        let stream_id2 = ctx.client().create_stream(
-=======
             &0,
             &None,
         );
@@ -19484,164 +19136,10 @@ mod structured_error_tests {
         let client = FluxoraStreamClient::new(&ctx.env, &ctx.contract_id);
 
         let stream_id = client.create_stream(
->>>>>>> upstream/main
             &ctx.sender,
             &ctx.recipient,
             &1000_i128,
             &1_i128,
-<<<<<<< HEAD
-            &500u64,
-            &500u64,
-            &1000u64,
-        );
-        ctx.client().cancel_stream(&stream_id2);
-        let state = ctx.client().get_stream_state(&stream_id2);
-        assert_eq!(state.status, StreamStatus::Cancelled);
-    }
-
-    // -----------------------------------------------------------------------
-    // Query tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_is_paused_returns_correct_state() {
-        let ctx = TestContext::setup();
-
-        // Before pause: should be false
-        assert!(!ctx.client().is_paused(), "is_paused should be false before pause");
-
-        // After pause: should be true
-        ctx.client()
-            .pause_protocol(&ctx.admin, &Some(soroban_sdk::String::from_str(&ctx.env, "test")));
-        assert!(ctx.client().is_paused(), "is_paused should be true after pause");
-
-        // After resume: should be false
-        ctx.client().resume_protocol(&ctx.admin);
-        assert!(!ctx.client().is_paused(), "is_paused should be false after resume");
-    }
-
-    #[test]
-    fn test_get_pause_info_fields() {
-        let ctx = TestContext::setup();
-        ctx.env.ledger().set_timestamp(1234);
-
-        let reason = soroban_sdk::String::from_str(&ctx.env, "test reason");
-        ctx.client().pause_protocol(&ctx.admin, &Some(reason.clone()));
-
-        let info = ctx.client().get_pause_info();
-        assert_eq!(info.is_paused, true);
-        assert_eq!(info.reason, Some(reason));
-        assert_eq!(info.paused_at, Some(1234));
-        assert_eq!(info.paused_by, Some(ctx.admin.clone()));
-
-        // After resume, all cleared
-        ctx.client().resume_protocol(&ctx.admin);
-        let info = ctx.client().get_pause_info();
-        assert_eq!(info.is_paused, false);
-        assert_eq!(info.reason, None);
-        assert_eq!(info.paused_at, None);
-        assert_eq!(info.paused_by, None);
-    }
-
-    // -----------------------------------------------------------------------
-    // Event payload validation tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_pause_event_payload_matches_spec() {
-        let ctx = TestContext::setup();
-        ctx.env.ledger().set_timestamp(5678);
-
-        let reason = soroban_sdk::String::from_str(&ctx.env, "security incident");
-        ctx.client()
-            .pause_protocol(&ctx.admin, &Some(reason.clone()));
-
-        // Find the ProtocolPaused event
-        let events = ctx.env.events().all();
-        let pause_event = events
-            .iter()
-            .find(|(_, topics, _)| {
-                topics.len() == 2
-                    && Symbol::try_from_val(&ctx.env, &topics.get(0).unwrap())
-                        == Ok(Symbol::new(&ctx.env, "pr_pause"))
-            })
-            .expect("ProtocolPaused event should exist");
-
-        // Verify topic[1] is admin address
-        let topic1 = pause_event.1.get(1).unwrap();
-        let topic1_addr = Address::try_from_val(&ctx.env, &topic1).unwrap();
-        assert_eq!(topic1_addr, ctx.admin);
-
-        // Verify payload
-        let payload = ProtocolPaused::try_from_val(&ctx.env, &pause_event.2)
-            .expect("Payload should decode as ProtocolPaused");
-        assert_eq!(payload.reason, reason);
-        assert_eq!(payload.paused_at, 5678);
-    }
-
-    #[test]
-    fn test_resume_event_payload_matches_spec() {
-        let ctx = TestContext::setup();
-
-        // First pause
-        ctx.client()
-            .pause_protocol(&ctx.admin, &Some(soroban_sdk::String::from_str(&ctx.env, "test")));
-
-        // Clear events to isolate resume event
-        let _ = ctx.env.events().all(); // Consume events
-
-        ctx.env.ledger().set_timestamp(9999);
-        ctx.client().resume_protocol(&ctx.admin);
-
-        // Find the ProtocolResumed event
-        let events = ctx.env.events().all();
-        let resume_event = events
-            .iter()
-            .find(|(_, topics, _)| {
-                topics.len() == 2
-                    && Symbol::try_from_val(&ctx.env, &topics.get(0).unwrap())
-                        == Ok(Symbol::new(&ctx.env, "pr_resume"))
-            })
-            .expect("ProtocolResumed event should exist");
-
-        // Verify topic[1] is admin address
-        let topic1 = resume_event.1.get(1).unwrap();
-        let topic1_addr = Address::try_from_val(&ctx.env, &topic1).unwrap();
-        assert_eq!(topic1_addr, ctx.admin);
-
-        // Verify payload
-        let payload = ProtocolResumed::try_from_val(&ctx.env, &resume_event.2)
-            .expect("Payload should decode as ProtocolResumed");
-        assert_eq!(payload.resumed_at, 9999);
-    }
-
-    // -----------------------------------------------------------------------
-    // Batch creation blocked when paused
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_create_streams_blocked_when_paused() {
-        let ctx = TestContext::setup();
-        ctx.env.ledger().set_timestamp(0);
-
-        // Pause the protocol
-        ctx.client()
-            .pause_protocol(&ctx.admin, &Some(soroban_sdk::String::from_str(&ctx.env, "test")));
-
-        // Attempt batch create should fail
-        let params = CreateStreamParams {
-            recipient: ctx.recipient.clone(),
-            deposit_amount: 1000,
-            rate_per_second: 1,
-            start_time: 0,
-            cliff_time: 0,
-            end_time: 1000,
-        };
-        let streams = soroban_sdk::Vec::from_array(&ctx.env, [params]);
-        let result = ctx.client().try_create_streams(&ctx.sender, &streams);
-        assert_eq!(result, Err(Ok(ContractError::ContractPaused)));
-    }
-=======
             &0u64,
             &0u64,
             &1000u64,
@@ -20081,7 +19579,6 @@ fn test_withdraw_to_valid_after_rejected_destination_succeeds() {
     assert_eq!(ctx.token().balance(&valid_dest), 500);
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.withdrawn_amount, 500);
->>>>>>> upstream/main
 }
 
 // ---------------------------------------------------------------------------
@@ -20349,7 +19846,10 @@ fn test_withdraw_active_at_end_time_succeeds() {
 
     ctx.env.ledger().set_timestamp(1000); // end_time
     let amount = ctx.client().withdraw(&stream_id);
-    assert_eq!(amount, 1000, "full deposit must be withdrawable at end_time");
+    assert_eq!(
+        amount, 1000,
+        "full deposit must be withdrawable at end_time"
+    );
     assert_eq!(
         ctx.client().get_stream_state(&stream_id).status,
         StreamStatus::Completed
@@ -20442,5 +19942,106 @@ fn test_resume_at_end_time_leaves_state_unchanged() {
         ctx.client().get_stream_state(&stream_id).status,
         StreamStatus::Paused,
         "failed resume must not mutate stream status"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ContractError discriminant stability tests
+// ---------------------------------------------------------------------------
+
+/// Regression test: ensures ContractError discriminant values never change.
+///
+/// This test will fail at compile time if any error code value is modified,
+/// ensuring ABI stability for integrators. Error codes are part of the
+/// contract ABI surface and must remain stable across versions.
+#[test]
+fn test_contract_error_discriminants_are_stable() {
+    // Core stream errors (1-14)
+    assert_eq!(
+        ContractError::StreamNotFound as u32,
+        1,
+        "StreamNotFound must be 1"
+    );
+    assert_eq!(
+        ContractError::InvalidState as u32,
+        2,
+        "InvalidState must be 2"
+    );
+    assert_eq!(
+        ContractError::InvalidParams as u32,
+        3,
+        "InvalidParams must be 3"
+    );
+    assert_eq!(
+        ContractError::ContractPaused as u32,
+        4,
+        "ContractPaused must be 4"
+    );
+    assert_eq!(
+        ContractError::StartTimeInPast as u32,
+        5,
+        "StartTimeInPast must be 5"
+    );
+    assert_eq!(
+        ContractError::ArithmeticOverflow as u32,
+        6,
+        "ArithmeticOverflow must be 6"
+    );
+    assert_eq!(
+        ContractError::Unauthorized as u32,
+        7,
+        "Unauthorized must be 7"
+    );
+    assert_eq!(
+        ContractError::AlreadyInitialised as u32,
+        8,
+        "AlreadyInitialised must be 8"
+    );
+    assert_eq!(
+        ContractError::InsufficientBalance as u32,
+        9,
+        "InsufficientBalance must be 9"
+    );
+    assert_eq!(
+        ContractError::InsufficientDeposit as u32,
+        10,
+        "InsufficientDeposit must be 10"
+    );
+    assert_eq!(
+        ContractError::StreamAlreadyPaused as u32,
+        11,
+        "StreamAlreadyPaused must be 11"
+    );
+    assert_eq!(
+        ContractError::StreamNotPaused as u32,
+        12,
+        "StreamNotPaused must be 12"
+    );
+    assert_eq!(
+        ContractError::StreamTerminalState as u32,
+        13,
+        "StreamTerminalState must be 13"
+    );
+    assert_eq!(
+        ContractError::DuplicateStreamId as u32,
+        14,
+        "DuplicateStreamId must be 14"
+    );
+
+    // Template errors (15-17)
+    assert_eq!(
+        ContractError::TemplateNotFound as u32,
+        15,
+        "TemplateNotFound must be 15"
+    );
+    assert_eq!(
+        ContractError::TemplateLimitExceeded as u32,
+        16,
+        "TemplateLimitExceeded must be 16"
+    );
+    assert_eq!(
+        ContractError::TemplateUnauthorized as u32,
+        17,
+        "TemplateUnauthorized must be 17"
     );
 }

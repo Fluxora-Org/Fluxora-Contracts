@@ -1,6 +1,8 @@
 extern crate std;
 
-use fluxora_stream::{ContractError, FluxoraStream, FluxoraStreamClient, PauseReason, StreamStatus};
+use fluxora_stream::{
+    ContractError, FluxoraStream, FluxoraStreamClient, PauseReason, StreamStatus,
+};
 use soroban_sdk::{
     testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke},
     token::{Client as TokenClient, StellarAssetClient},
@@ -14,6 +16,7 @@ use soroban_sdk::{
 struct Ctx<'a> {
     env: Env,
     contract_id: Address,
+    #[allow(dead_code)]
     token_id: Address,
     admin: Address,
     sender: Address,
@@ -73,7 +76,15 @@ impl<'a> Ctx<'a> {
         }]);
         TokenClient::new(&env, &token_id).approve(&sender, &contract_id, &i128::MAX, &100_000);
 
-        Ctx { env, contract_id, token_id, admin, sender, recipient, sac }
+        Ctx {
+            env,
+            contract_id,
+            token_id,
+            admin,
+            sender,
+            recipient,
+            sac,
+        }
     }
 
     fn client(&self) -> FluxoraStreamClient<'_> {
@@ -127,7 +138,8 @@ impl<'a> Ctx<'a> {
                 sub_invokes: &[],
             },
         }]);
-        self.client().pause_stream(&stream_id, &PauseReason::Operational);
+        self.client()
+            .pause_stream(&stream_id, &PauseReason::Operational);
     }
 
     /// Cancel a stream as the sender (helper to reach Cancelled state).
@@ -169,7 +181,8 @@ fn test_admin_pause_active_stream_succeeds() {
             sub_invokes: &[],
         },
     }]);
-    ctx.client().pause_stream_as_admin(&stream_id, &PauseReason::Administrative);
+    ctx.client()
+        .pause_stream_as_admin(&stream_id, &PauseReason::Administrative);
 
     assert_eq!(
         ctx.client().get_stream_state(&stream_id).status,
@@ -194,7 +207,8 @@ fn test_admin_pause_rejects_non_admin() {
             sub_invokes: &[],
         },
     }]);
-    ctx.client().pause_stream_as_admin(&stream_id, &PauseReason::Administrative);
+    ctx.client()
+        .pause_stream_as_admin(&stream_id, &PauseReason::Administrative);
 }
 
 /// Stream sender is not the admin; using the admin entrypoint must be rejected.
@@ -213,7 +227,8 @@ fn test_admin_pause_rejects_sender_as_caller() {
             sub_invokes: &[],
         },
     }]);
-    ctx.client().pause_stream_as_admin(&stream_id, &PauseReason::Administrative);
+    ctx.client()
+        .pause_stream_as_admin(&stream_id, &PauseReason::Administrative);
 }
 
 /// Recipient must not be able to call pause_stream_as_admin.
@@ -232,7 +247,8 @@ fn test_admin_pause_rejects_recipient_as_caller() {
             sub_invokes: &[],
         },
     }]);
-    ctx.client().pause_stream_as_admin(&stream_id, &PauseReason::Administrative);
+    ctx.client()
+        .pause_stream_as_admin(&stream_id, &PauseReason::Administrative);
 }
 
 // ---------------------------------------------------------------------------
@@ -255,7 +271,9 @@ fn test_admin_pause_fails_on_paused_stream() {
             sub_invokes: &[],
         },
     }]);
-    let result = ctx.client().try_pause_stream_as_admin(&stream_id, &PauseReason::Administrative);
+    let result = ctx
+        .client()
+        .try_pause_stream_as_admin(&stream_id, &PauseReason::Administrative);
     assert_eq!(result, Err(Ok(ContractError::StreamAlreadyPaused)));
 }
 
@@ -275,7 +293,9 @@ fn test_admin_pause_fails_on_cancelled_stream() {
             sub_invokes: &[],
         },
     }]);
-    let result = ctx.client().try_pause_stream_as_admin(&stream_id, &PauseReason::Administrative);
+    let result = ctx
+        .client()
+        .try_pause_stream_as_admin(&stream_id, &PauseReason::Administrative);
     assert_eq!(result, Err(Ok(ContractError::StreamTerminalState)));
 }
 
@@ -295,7 +315,9 @@ fn test_admin_pause_fails_on_time_terminal_stream() {
             sub_invokes: &[],
         },
     }]);
-    let result = ctx.client().try_pause_stream_as_admin(&stream_id, &PauseReason::Administrative);
+    let result = ctx
+        .client()
+        .try_pause_stream_as_admin(&stream_id, &PauseReason::Administrative);
     assert_eq!(result, Err(Ok(ContractError::StreamTerminalState)));
 }
 
@@ -313,7 +335,9 @@ fn test_admin_pause_fails_on_nonexistent_stream() {
             sub_invokes: &[],
         },
     }]);
-    let result = ctx.client().try_pause_stream_as_admin(&999u64, &PauseReason::Administrative);
+    let result = ctx
+        .client()
+        .try_pause_stream_as_admin(&999u64, &PauseReason::Administrative);
     assert_eq!(result, Err(Ok(ContractError::StreamNotFound)));
 }
 
@@ -640,7 +664,10 @@ fn test_admin_cancel_fails_on_time_terminal_stream() {
     // A time-terminal stream (past end_time) is still Active status and can be cancelled.
     // The sender receives 0 refund since all tokens are fully accrued.
     let result = ctx.client().try_cancel_stream_as_admin(&stream_id);
-    assert!(result.is_ok(), "cancel on time-terminal stream should succeed (0 refund)");
+    assert!(
+        result.is_ok(),
+        "cancel on time-terminal stream should succeed (0 refund)"
+    );
 }
 
 /// Admin cannot cancel a non-existent stream.
@@ -681,7 +708,8 @@ fn test_admin_pause_twice_fails() {
             sub_invokes: &[],
         },
     }]);
-    ctx.client().pause_stream_as_admin(&stream_id, &PauseReason::Administrative);
+    ctx.client()
+        .pause_stream_as_admin(&stream_id, &PauseReason::Administrative);
 
     // Second pause — must fail.
     ctx.env.mock_auths(&[MockAuth {
@@ -693,7 +721,9 @@ fn test_admin_pause_twice_fails() {
             sub_invokes: &[],
         },
     }]);
-    let result = ctx.client().try_pause_stream_as_admin(&stream_id, &PauseReason::Administrative);
+    let result = ctx
+        .client()
+        .try_pause_stream_as_admin(&stream_id, &PauseReason::Administrative);
     assert_eq!(result, Err(Ok(ContractError::StreamAlreadyPaused)));
 }
 
@@ -798,6 +828,8 @@ fn test_admin_pause_fails_after_cancel() {
             sub_invokes: &[],
         },
     }]);
-    let result = ctx.client().try_pause_stream_as_admin(&stream_id, &PauseReason::Administrative);
+    let result = ctx
+        .client()
+        .try_pause_stream_as_admin(&stream_id, &PauseReason::Administrative);
     assert_eq!(result, Err(Ok(ContractError::StreamTerminalState)));
 }

@@ -156,24 +156,10 @@ This section is the protocol-level contract for the global pause state managed v
 Success semantics (observable):
 
 1. Preconditions: Caller must be the authorized contract `admin`.
-<<<<<<< HEAD
-2. Storage on pause:
-   - `GlobalEmergencyPaused` is set to `true` in instance storage
-   - `GlobalPauseReason` stores the provided reason string
-   - `GlobalPauseTimestamp` stores the ledger timestamp
-   - `GlobalPauseAdmin` stores the admin address that paused
-3. Storage on resume: All pause keys are cleared (set to false or removed)
-4. Event on pause: `ProtocolPaused { reason, paused_at }` is emitted with topic `("pr_pause", admin)`.
-5. Event on resume: `ProtocolResumed { resumed_at }` is emitted with topic `("pr_resume", admin)`.
-6. Effect on creation: When paused, `create_stream` and `create_streams` return `ContractError::ContractPaused` and all new stream creation is blocked.
-7. Effect on existing streams: Active streams are intentionally unaffected. Withdrawals, top-ups, pause/resume/cancel operations on individual streams continue to function normally.
-8. Idempotency: Pausing when already paused or resuming when not paused returns `Ok(())` silently with no state changes or events.
-=======
 2. Storage: The `CreationPaused` data key is set to `true` or `false` in instance storage.
 3. Event: `ContractPaused(bool)` is emitted with topic `("paused_ctl",)`.
 4. Effect on creation: When paused, `create_stream` and `create_streams` return `ContractError::ContractPaused` and all new stream creation is blocked.
 5. Effect on existing streams: Active streams are intentionally unaffected. Withdrawals, top-ups, pause/resume/cancel operations on individual streams continue to function normally.
->>>>>>> upstream/main
 
 Failure semantics (observable):
 
@@ -691,6 +677,7 @@ A naive decrease would retroactively lower the recipient's accrued tokens. To pr
 - **Unauthorized**: Caller is not the stream sender.
 - **InvalidState**: Stream is `Completed` or `Cancelled`.
 - **InvalidParams**: `new_rate_per_second <= 0` or `new_rate_per_second <= old_rate`.
+  - This includes the boundary cases where the proposed rate is equal to the current rate or zero.
 - **InsufficientDeposit**: `deposit_amount < new_rate_per_second * (end_time - start_time)`.
 - **Atomicity**: Any failure reverts the entire transaction with no state changes or events.
 

@@ -17,8 +17,9 @@ pub enum DataKey {
     NextStreamId,              // Instance storage for the auto-incrementing ID counter.
     Stream(u64),               // Persistent storage for individual stream data (O(1) lookup).
     RecipientStreams(Address), // Persistent storage for recipient stream index (sorted by stream_id).
-    GlobalPaused,              // Instance storage: emergency pause flag (bool).
+    PauseState,                // Instance storage: protocol-wide pause state (enum).
     WithdrawNonce(Address),    // Persistent storage: per-recipient nonce for delegated-withdraw replay protection.
+    ReentrancyLock,            // Instance storage: reentrancy guard flag (bool).
 }
 ```
 
@@ -30,13 +31,15 @@ pub enum DataKey {
     NextStreamId,              // discriminant 1 — instance
     Stream(u64),               // discriminant 2 — persistent
     RecipientStreams(Address), // discriminant 3 — persistent
-    GlobalEmergencyPaused,     // discriminant 4 — instance
-    CreationPaused,            // discriminant 5 — instance
+    GlobalEmergencyPaused,     // discriminant 4 — instance (DEPRECATED)
+    CreationPaused,            // discriminant 5 — instance (DEPRECATED)
     GlobalPauseReason,         // discriminant 6 — instance
     GlobalPauseTimestamp,      // discriminant 7 — instance
     GlobalPauseAdmin,          // discriminant 8 — instance
     AutoClaimDestination(u64), // discriminant 9 — persistent
     StreamMemo(u64),           // discriminant 10 — persistent
+    PauseState,                // discriminant 11 — instance
+    ReentrancyLock,            // discriminant 12 — instance
 }
 ```
 
@@ -48,13 +51,15 @@ pub enum DataKey {
 | 1 | `NextStreamId` | Instance | `u64` (monotonic counter) | `init` (→ 0) | `create_stream`, `create_streams` |
 | 2 | `Stream(u64)` | Persistent | `Stream` struct | `create_stream`, `create_streams` | `pause_stream`, `resume_stream`, `cancel_stream`, `withdraw`, `withdraw_to`, `batch_withdraw`, `top_up_stream`, `update_rate_per_second`, `shorten_stream_end_time`, `extend_stream_end_time` |
 | 3 | `RecipientStreams(Address)` | Persistent | `Vec<u64>` (sorted) | `create_stream`, `create_streams` | `close_completed_stream` (removes entry) |
-| 4 | `GlobalEmergencyPaused` | Instance | `bool` | `set_global_emergency_paused` | `set_global_emergency_paused` |
-| 5 | `CreationPaused` | Instance | `bool` | `set_contract_paused` | `set_contract_paused` |
+| 4 | `GlobalEmergencyPaused` | Instance | `bool` | `set_global_emergency_paused` | (DEPRECATED) |
+| 5 | `CreationPaused` | Instance | `bool` | `set_contract_paused` | (DEPRECATED) |
 | 6 | `GlobalPauseReason` | Instance | `String` | `pause_protocol` | `resume_protocol` (removes) |
 | 7 | `GlobalPauseTimestamp` | Instance | `u64` | `pause_protocol` | `resume_protocol` (removes) |
 | 8 | `GlobalPauseAdmin` | Instance | `Address` | `pause_protocol` | `resume_protocol` (removes) |
 | 9 | `AutoClaimDestination(u64)` | Persistent | `Address` | auto-claim opt-in | auto-claim revoke |
 | 10 | `StreamMemo(u64)` | Persistent | `Bytes` (max 64 bytes) | `create_stream`, `create_streams` | `close_completed_stream` (removes) |
+| 11 | `PauseState` | Instance | `PauseState` enum | `set_global_emergency_paused`, `set_contract_paused`, `pause_protocol` | `resume_protocol` (Active) |
+| 12 | `ReentrancyLock` | Instance | `bool` | `acquire_reentrancy_lock` | `release_reentrancy_lock` |
 
 ---
 

@@ -263,21 +263,22 @@ all existing persistent storage entries.
 
 ---
 
-## 8. Global Pause Flags
+## 8. Global Pause State
 
-Two independent pause mechanisms exist. Understand which operations each blocks.
+A unified pause mechanism exists via the `PauseState` enum.
 
-| Flag                    | `DataKey`                        | Blocks                                                                                 | Does NOT block                                                               |
-| ----------------------- | -------------------------------- | -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `CreationPaused`        | `DataKey::CreationPaused`        | `create_stream`, `create_streams`                                                      | Everything else                                                              |
-| `GlobalEmergencyPaused` | `DataKey::GlobalEmergencyPaused` | All user mutations (withdraw, cancel, pause, resume, rate updates, top-up, auto-claim) | Admin overrides (`*_as_admin`), views, `close_completed_stream`, `set_admin` |
+| State | Blocks | Does NOT block |
+|---|---|---|
+| `Active` | Nothing | Everything |
+| `CreationPaused` | `create_stream`, `create_streams` | Everything else |
+| `GlobalEmergencyPaused` | All user mutations (withdraw, cancel, pause, resume, rate updates, top-up, auto-claim) | Admin overrides (`*_as_admin`), views, `close_completed_stream`, `set_admin` |
 
 - [ ] `require_not_globally_paused` is called at the top of every user-facing mutation entrypoint
-- [ ] `require_not_paused` (creation gate) is called in `create_stream` and `create_streams`
+- [ ] `require_creation_allowed` (creation gate) is called in `create_stream` and `create_streams`
 - [ ] Admin entrypoints (`*_as_admin`, `set_global_emergency_paused`, `set_admin`) do **not** call `require_not_globally_paused`
 - [ ] `close_completed_stream` does **not** call `require_not_globally_paused` (permissionless cleanup must remain available)
-- [ ] `set_admin` is not blocked by `GlobalEmergencyPaused` (admin rotation must work under full freeze)
-- [ ] `get_pause_info()` returns accurate state for both flags
+- [ ] `set_admin` is not blocked by any pause state (admin rotation must work under full freeze)
+- [ ] `get_pause_info()` returns accurate state including the current `PauseState`
 
 ---
 

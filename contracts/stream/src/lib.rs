@@ -6,8 +6,8 @@ mod accrual;
 mod checksum;
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, token, xdr::ToXdr, Address, Bytes,
-    BytesN, Env,
+    contract, contractimpl, contracttype, symbol_short, token, xdr::ToXdr, Address, Bytes, BytesN,
+    Env,
 };
 
 // ---------------------------------------------------------------------------
@@ -33,8 +33,6 @@ const PERSISTENT_BUMP_AMOUNT: u32 = 120_960;
 /// All paginated entrypoints enforce this limit strictly.
 pub const MAX_PAGE_SIZE: u64 = 100;
 
-<<<<<<< HEAD
-=======
 /// Maximum memo payload size in bytes (stream metadata for indexers).
 pub const MAX_MEMO_BYTES: usize = 64;
 
@@ -43,7 +41,7 @@ pub const MAX_TEMPLATES_PER_OWNER: u32 = 64;
 /// Global bound on stored schedule templates (DoS / storage bloat prevention).
 pub const MAX_GLOBAL_TEMPLATES: u64 = 10_000;
 
->>>>>>> upstream/main
+// ---------------------------------------------------------------------------
 // Contract version
 // ---------------------------------------------------------------------------
 
@@ -98,7 +96,7 @@ pub const MAX_GLOBAL_TEMPLATES: u64 = 10_000;
 ///
 /// Bumped to 5: `withdraw_dust_threshold: i128` added to `Stream` struct and creation params
 /// to reduce fee/event spam from tiny withdrawals.
-pub const CONTRACT_VERSION: u32 = 5;
+pub const CONTRACT_VERSION: u32 = 6;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -119,6 +117,14 @@ pub enum StreamStatus {
     Paused = 1,
     Completed = 2,
     Cancelled = 3,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PauseState {
+    Active = 0,
+    CreationPaused = 1,
+    GlobalEmergencyPaused = 2,
 }
 #[soroban_sdk::contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -369,6 +375,7 @@ pub struct ProtocolResumed {
 #[derive(Clone, Debug)]
 pub struct PauseInfo {
     pub is_paused: bool,
+    pub state: PauseState,
     pub reason: Option<soroban_sdk::String>,
     pub paused_at: Option<u64>,
     pub paused_by: Option<Address>,
@@ -403,7 +410,6 @@ pub struct Stream {
     /// Maximum length: `MAX_MEMO_BYTES` (64 bytes). `None` when not supplied.
     pub memo: Option<soroban_sdk::Bytes>,
 }
-
 
 /// Pagination result for recipient stream listing
 #[contracttype]
@@ -551,6 +557,8 @@ pub enum DataKey {
     /// Per-recipient nonce counter for delegated-withdraw replay protection.
     /// Appended last to preserve existing discriminant values.
     WithdrawNonce(Address),
+    /// Current protocol-wide pause state (Active, CreationPaused, or GlobalEmergencyPaused).
+    PauseState,
     /// Reentrancy guard flag (bool) to prevent recursive token transfers.
     ReentrancyLock,
 }
@@ -583,19 +591,21 @@ fn get_admin(env: &Env) -> Result<Address, ContractError> {
     get_config(env).map(|c| c.admin)
 }
 
-/// Returns whether the contract is in **global emergency pause** (default `false` if unset).
-fn is_global_emergency_paused(env: &Env) -> bool {
+/// Returns the current protocol-wide pause state.
+fn get_pause_state(env: &Env) -> PauseState {
     env.storage()
         .instance()
-        .get(&DataKey::GlobalEmergencyPaused)
-        .unwrap_or(false)
+        .get(&DataKey::PauseState)
+        .unwrap_or(PauseState::Active)
+}
+
+/// Returns whether the contract is in **global emergency pause**.
+fn is_global_emergency_paused(env: &Env) -> bool {
+    matches!(get_pause_state(env), PauseState::GlobalEmergencyPaused)
 }
 
 fn is_creation_paused(env: &Env) -> bool {
-    env.storage()
-        .instance()
-        .get(&DataKey::CreationPaused)
-        .unwrap_or(false)
+    matches!(get_pause_state(env), PauseState::CreationPaused)
 }
 
 /// Returns `Err(ContractError::ContractPaused)` when [`is_global_emergency_paused`] is true.
@@ -609,17 +619,30 @@ fn require_not_globally_paused(env: &Env) -> Result<(), ContractError> {
 
 /// Blocks new stream creation when the emergency pause or creation-only pause is active.
 fn require_not_creation_paused(env: &Env) -> Result<(), ContractError> {
-    require_not_globally_paused(env)?;
-    if is_creation_paused(env) {
-        return Err(ContractError::ContractPaused);
+    match get_pause_state(env) {
+        PauseState::GlobalEmergencyPaused | PauseState::CreationPaused => {
+            Err(ContractError::ContractPaused)
+        }
+        PauseState::Active => Ok(()),
     }
-    Ok(())
 }
 
 /// Returns whether the protocol is globally paused (checks both GlobalEmergencyPaused and CreationPaused).
 /// Default is false (not paused) if no pause keys are set.
 fn is_protocol_paused(env: &Env) -> bool {
-    is_global_emergency_paused(env) || is_creation_paused(env)
+    !matches!(get_pause_state(env), PauseState::Active)
+}
+
+macro_rules! require_not_globally_paused {
+    ($env:expr) => {
+        require_not_globally_paused(&$env)?;
+    };
+}
+
+macro_rules! require_creation_allowed {
+    ($env:expr) => {
+        require_not_creation_paused(&$env)?;
+    };
 }
 
 /// Get the stored pause reason, if any.
@@ -2604,6 +2627,7 @@ impl FluxoraStream {
     /// There is no further accrual possible. Returning `deposit_amount` is the
     /// deterministic, timestamp-independent answer for any UI or downstream caller.
     pub fn calculate_accrued(env: Env, stream_id: u64) -> Result<i128, ContractError> {
+        bump_instance_ttl(&env);
         let stream = load_stream(&env, stream_id)?;
 
         if stream.status == StreamStatus::Completed {
@@ -2647,6 +2671,7 @@ impl FluxoraStream {
     /// # Errors
     /// - Returns `ContractError::StreamNotFound` if the stream does not exist.
     pub fn get_withdrawable(env: Env, stream_id: u64) -> Result<i128, ContractError> {
+        bump_instance_ttl(&env);
         let stream = load_stream(&env, stream_id)?;
 
         // If the stream is completed or paused, withdrawals are not allowed.
@@ -2807,8 +2832,10 @@ impl FluxoraStream {
         bump_instance_ttl(&env);
 
         // Emit event with old and new admin addresses
-        env.events()
-            .publish((symbol_short!("AdminUpd"),), (old_admin, new_admin));
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "AdminUpdated"),),
+            (old_admin, new_admin),
+        );
 
         Ok(())
     }
@@ -2848,6 +2875,7 @@ impl FluxoraStream {
     ///   - `Completed`: All tokens withdrawn, terminal state
     ///   - `Cancelled`: Terminated early, unstreamed tokens refunded, terminal state
     pub fn get_stream_state(env: Env, stream_id: u64) -> Result<Stream, ContractError> {
+        bump_instance_ttl(&env);
         load_stream(&env, stream_id)
     }
 
@@ -3583,8 +3611,11 @@ impl FluxoraStream {
     /// This allows pre-flight version checks during deployment pipelines.
     ///
     /// # Gas
-    /// Minimal — no storage reads, no token interactions.
-    pub fn version(_env: Env) -> u32 {
+    /// Minimal — only bumps instance TTL so the contract entry stays alive on read.
+    pub fn version(env: Env) -> u32 {
+        // Bump instance TTL so a contract that is only being polled for `version()`
+        // does not have its instance entry archived.
+        bump_instance_ttl(&env);
         CONTRACT_VERSION
     }
 
@@ -3628,6 +3659,7 @@ impl FluxoraStream {
     /// - Paginate: fetch first N IDs, then call `get_stream_state` for each
     /// - Filter by status: fetch all IDs, then check status of each via `get_stream_state`
     pub fn get_recipient_streams(env: Env, recipient: Address) -> soroban_sdk::Vec<u64> {
+        bump_instance_ttl(&env);
         load_recipient_streams(&env, &recipient)
     }
 
@@ -3649,6 +3681,7 @@ impl FluxoraStream {
     /// - Combine with `get_recipient_streams` for pagination
     /// - Closed streams are not included in the count
     pub fn get_recipient_stream_count(env: Env, recipient: Address) -> u64 {
+        bump_instance_ttl(&env);
         load_recipient_streams(&env, &recipient).len() as u64
     }
 
@@ -4289,9 +4322,13 @@ impl FluxoraStream {
         let admin = get_admin(&env).unwrap();
         admin.require_auth();
 
-        env.storage()
-            .instance()
-            .set(&DataKey::GlobalEmergencyPaused, &paused);
+        let state = if paused {
+            PauseState::GlobalEmergencyPaused
+        } else {
+            PauseState::Active
+        };
+
+        env.storage().instance().set(&DataKey::PauseState, &state);
         bump_instance_ttl(&env);
 
         env.events().publish(
@@ -4315,7 +4352,7 @@ impl FluxoraStream {
     ///   emergency pause (prevents spurious resume events and double-resume confusion).
     ///
     /// # State Changes
-    /// - Clears `DataKey::GlobalEmergencyPaused` (sets it to `false`).
+    /// - Clears `DataKey::PauseState` (sets it to `Active`).
     /// - All user-facing mutations that were blocked by the emergency pause are immediately
     ///   re-enabled: `create_stream`, `create_streams`, `withdraw`, `withdraw_to`,
     ///   `batch_withdraw`, `cancel_stream`, `update_rate_per_second`,
@@ -4342,7 +4379,7 @@ impl FluxoraStream {
 
         env.storage()
             .instance()
-            .set(&DataKey::GlobalEmergencyPaused, &false);
+            .set(&DataKey::PauseState, &PauseState::Active);
         bump_instance_ttl(&env);
 
         env.events().publish(
@@ -4370,13 +4407,17 @@ impl FluxoraStream {
     pub fn set_contract_paused(env: Env, paused: bool) -> Result<(), ContractError> {
         get_admin(&env)?.require_auth();
 
-        env.storage()
-            .instance()
-            .set(&DataKey::CreationPaused, &paused);
+        let state = if paused {
+            PauseState::CreationPaused
+        } else {
+            PauseState::Active
+        };
+
+        env.storage().instance().set(&DataKey::PauseState, &state);
         bump_instance_ttl(&env);
 
         env.events().publish(
-            (symbol_short!("ct_pause"),),
+            (soroban_sdk::Symbol::new(&env, "paused_ctl"),),
             ContractPauseChanged { paused },
         );
 
@@ -4419,10 +4460,10 @@ impl FluxoraStream {
             return Ok(());
         }
 
-        // Set the global emergency pause flag
+        // Set the global emergency pause state
         env.storage()
             .instance()
-            .set(&DataKey::GlobalEmergencyPaused, &true);
+            .set(&DataKey::PauseState, &PauseState::GlobalEmergencyPaused);
 
         // Store audit trail information
         let reason_str = reason.unwrap_or_else(|| soroban_sdk::String::from_str(&env, ""));
@@ -4487,7 +4528,7 @@ impl FluxoraStream {
         // Clear all pause-related storage
         env.storage()
             .instance()
-            .set(&DataKey::GlobalEmergencyPaused, &false);
+            .set(&DataKey::PauseState, &PauseState::Active);
         env.storage().instance().remove(&DataKey::GlobalPauseReason);
         env.storage()
             .instance()
@@ -4527,10 +4568,12 @@ impl FluxoraStream {
     /// - `PauseInfo` struct with `is_paused`, `reason`, `paused_at`, `paused_by` fields.
     /// - All optional fields are `None` when not paused.
     pub fn get_pause_info(env: Env) -> PauseInfo {
-        let is_paused = is_protocol_paused(&env);
+        let state = get_pause_state(&env);
+        let is_paused = !matches!(state, PauseState::Active);
         if is_paused {
             PauseInfo {
                 is_paused: true,
+                state,
                 reason: get_pause_reason(&env),
                 paused_at: get_pause_timestamp(&env),
                 paused_by: get_pause_admin(&env),
@@ -4538,6 +4581,7 @@ impl FluxoraStream {
         } else {
             PauseInfo {
                 is_paused: false,
+                state: PauseState::Active,
                 reason: None,
                 paused_at: None,
                 paused_by: None,
