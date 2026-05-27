@@ -1310,7 +1310,9 @@ fn acquire_reentrancy_lock(env: &Env) -> Result<(), ContractError> {
         return Err(ContractError::InvalidState);
     }
 
-    env.storage().instance().set(&DataKey::ReentrancyLock, &true);
+    env.storage()
+        .instance()
+        .set(&DataKey::ReentrancyLock, &true);
     bump_instance_ttl(env);
     Ok(())
 }
@@ -1325,7 +1327,9 @@ fn acquire_reentrancy_lock(env: &Env) -> Result<(), ContractError> {
 /// - Even if the transfer panics, the lock is released on function exit (not auto-release due to transaction rollback).
 /// - Since transactions are atomic, a panic will rollback the lock flag anyway.
 fn release_reentrancy_lock(env: &Env) {
-    env.storage().instance().set(&DataKey::ReentrancyLock, &false);
+    env.storage()
+        .instance()
+        .set(&DataKey::ReentrancyLock, &false);
     bump_instance_ttl(env);
 }
 

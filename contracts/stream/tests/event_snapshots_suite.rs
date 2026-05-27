@@ -29,9 +29,9 @@
 extern crate std;
 
 use fluxora_stream::{
-    ContractPauseChanged, FluxoraStream, FluxoraStreamClient, PauseReason, RateUpdated,
-    RecipientUpdated, StreamCreated, StreamEndExtended, StreamEndShortened, StreamPaused,
-    StreamToppedUp, Withdrawal, WithdrawalTo,
+    ContractPauseChanged, FluxoraStream, FluxoraStreamClient, PauseReason, RateCapEnforced,
+    RateUpdated, RecipientUpdated, StreamCreated, StreamEndExtended, StreamEndShortened,
+    StreamPaused, StreamToppedUp, Withdrawal, WithdrawalTo,
 };
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},

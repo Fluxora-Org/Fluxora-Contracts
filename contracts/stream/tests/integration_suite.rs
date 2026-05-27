@@ -4395,14 +4395,10 @@ fn update_rate_rejects_equal_and_zero_rates() {
     ctx.env.ledger().set_timestamp(0);
     let stream_id = ctx.create_default_stream();
 
-    let equal_rate_result = ctx
-        .client()
-        .try_update_rate_per_second(&stream_id, &1_i128);
+    let equal_rate_result = ctx.client().try_update_rate_per_second(&stream_id, &1_i128);
     assert_eq!(equal_rate_result, Err(Ok(ContractError::InvalidParams)));
 
-    let zero_rate_result = ctx
-        .client()
-        .try_update_rate_per_second(&stream_id, &0_i128);
+    let zero_rate_result = ctx.client().try_update_rate_per_second(&stream_id, &0_i128);
     assert_eq!(zero_rate_result, Err(Ok(ContractError::InvalidParams)));
 }
 
@@ -4451,9 +4447,7 @@ fn update_rate_rejected_on_cancelled_stream() {
     let stream_id = ctx.create_default_stream();
 
     ctx.client().cancel_stream(&stream_id);
-    let result = ctx
-        .client()
-        .try_update_rate_per_second(&stream_id, &2_i128);
+    let result = ctx.client().try_update_rate_per_second(&stream_id, &2_i128);
     assert_eq!(result, Err(Ok(ContractError::InvalidState)));
 }
 
@@ -4587,7 +4581,10 @@ fn test_accrual_none_checkpoint_returns_zero() {
 
     // At start_time the elapsed seconds are 0 → accrued must be 0.
     let accrued = ctx.client().calculate_accrued(&stream_id);
-    assert_eq!(accrued, 0, "accrued at start_time must be 0 (no checkpoint)");
+    assert_eq!(
+        accrued, 0,
+        "accrued at start_time must be 0 (no checkpoint)"
+    );
 }
 
 /// Same scenario but with cliff_time > start_time.

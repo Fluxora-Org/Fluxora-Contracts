@@ -149,6 +149,8 @@ pub enum ContractError {
     TemplateLimitExceeded = 16,
     /// Caller is not the template owner for a protected template operation.
     TemplateUnauthorized = 17,
+    /// Rate exceeds the governance-controlled maximum rate per second.
+    RateCapExceeded = 18,
 }
 
 /// Reason codes for stream-level pause operations.
@@ -276,6 +278,19 @@ pub struct RateUpdated {
     pub new_rate_per_second: i128,
     /// Ledger timestamp when the rate update became effective.
     pub effective_time: u64,
+}
+
+/// Emitted when the sender safely decreases the streaming rate via `decrease_rate_per_second`.
+///
+/// The `checkpointed_amount` field records how many tokens were mathematically
+
+/// Event emitted when a rate update is rejected due to exceeding the governance cap.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RateCapEnforced {
+    pub stream_id: u64,
+    pub attempted_rate: i128,
+    pub max_rate_per_second: i128,
 }
 
 /// Emitted when the sender safely decreases the streaming rate via `decrease_rate_per_second`.
@@ -553,6 +568,8 @@ pub enum DataKey {
     OwnerTemplateIds(Address),
     /// Sum of outstanding deposit liabilities (`i128`, instance storage).
     TotalLiabilities,
+    /// Maximum rate per second allowed by governance (`i128`, instance storage).
+    MaxRatePerSecond,
 }
 
 // ---------------------------------------------------------------------------
@@ -635,6 +652,22 @@ fn get_pause_timestamp(env: &Env) -> Option<u64> {
 /// Get the stored pause admin address, if any.
 fn get_pause_admin(env: &Env) -> Option<Address> {
     env.storage().instance().get(&DataKey::GlobalPauseAdmin)
+}
+
+/// Get the governance-controlled maximum rate per second (default: i128::MAX if unset).
+fn get_max_rate_per_second(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&DataKey::MaxRatePerSecond)
+        .unwrap_or(i128::MAX)
+}
+
+/// Set the governance-controlled maximum rate per second.
+fn set_max_rate_per_second(env: &Env, max_rate: i128) {
+    env.storage()
+        .instance()
+        .set(&DataKey::MaxRatePerSecond, &max_rate);
+    env.storage().instance().extend_ttl(100, 518400); // 60 days
 }
 
 fn read_stream_count(env: &Env) -> u64 {
@@ -1000,7 +1033,7 @@ fn push_token(env: &Env, to: &Address, amount: i128) -> Result<(), ContractError
 impl FluxoraStream {
     #[allow(clippy::too_many_arguments)]
     fn validate_stream_params(
-        _env: &Env,
+        env: &Env,
         sender: &Address,
         recipient: &Address,
         deposit_amount: i128,
@@ -1013,6 +1046,12 @@ impl FluxoraStream {
         // Validate positive amounts (#35)
         if deposit_amount <= 0 || rate_per_second <= 0 {
             return Err(ContractError::InvalidParams);
+        }
+
+        // Enforce governance-controlled maximum rate per second cap
+        let max_rate = get_max_rate_per_second(env);
+        if rate_per_second > max_rate {
+            return Err(ContractError::RateCapExceeded);
         }
 
         // Validate sender != recipient (#35)
@@ -2816,6 +2855,48 @@ impl FluxoraStream {
         Ok(())
     }
 
+    /// Set the governance-controlled maximum rate per second.
+    ///
+    /// This administrative function allows the contract admin to set an upper bound
+    /// on the rate_per_second parameter for all streams. This prevents senders from
+    /// setting astronomically high rates that could cause overflow in accrual
+    /// calculations or drain entire deposits in a single ledger.
+    ///
+    /// # Parameters
+    /// - `max_rate`: Maximum allowed rate per second (must be > 0)
+    ///
+    /// # Authorization
+    /// - Requires authorization from the current contract admin
+    ///
+    /// # Behavior
+    /// - Sets the global maximum rate per second cap
+    /// - Applies to all future `update_rate_per_second` calls
+    /// - Does not affect existing streams (only future rate updates)
+    /// - Default value is `i128::MAX` (effectively no limit) if never set
+    ///
+    /// # Returns
+    /// - `Ok(())` on success
+    /// - `Err(Unauthorized)` if caller is not the admin
+    /// - `Err(InvalidParams)` if `max_rate <= 0`
+    ///
+    /// # Security Notes
+    /// - This is a governance parameter that should be set carefully
+    /// - Setting too low may prevent legitimate high-value streams
+    /// - Setting too high defeats the overflow protection purpose
+    ///
+    pub fn set_max_rate_per_second(env: Env, max_rate: i128) -> Result<(), ContractError> {
+        // Only admin can set governance parameters
+        get_admin(&env)?.require_auth();
+
+        if max_rate <= 0 {
+            return Err(ContractError::InvalidParams);
+        }
+
+        set_max_rate_per_second(&env, max_rate);
+
+        Ok(())
+    }
+
     /// Retrieve the complete state of a payment stream.
     ///
     /// Returns all stored information about a stream including participants, amounts,
@@ -2923,6 +3004,21 @@ impl FluxoraStream {
         // Forward-only semantics: disallow decreases (use decrease_rate_per_second for that).
         if new_rate_per_second <= old_rate {
             return Err(ContractError::InvalidParams);
+        }
+
+        // Enforce governance-controlled maximum rate per second cap.
+        let max_rate = get_max_rate_per_second(&env);
+        if new_rate_per_second > max_rate {
+            // Emit event when cap is enforced
+            env.events().publish(
+                (symbol_short!("rate_cap"), stream_id),
+                RateCapEnforced {
+                    stream_id,
+                    attempted_rate: new_rate_per_second,
+                    max_rate_per_second: max_rate,
+                },
+            );
+            return Err(ContractError::RateCapExceeded);
         }
 
         // Validate that the existing deposit still covers the new total streamable amount.
