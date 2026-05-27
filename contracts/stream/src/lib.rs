@@ -82,7 +82,7 @@ pub const MAX_PAGE_SIZE: u64 = 100;
 ///   Code review and CI checks on this constant are the primary safeguard.
 /// Bumped to 2: `Stream` struct gained `checkpointed_amount: i128` and `checkpointed_at: u64`
 /// for safe rate-decrease support (see `decrease_rate_per_second`).
-pub const CONTRACT_VERSION: u32 = 2;
+pub const CONTRACT_VERSION: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -94,6 +94,16 @@ pub const CONTRACT_VERSION: u32 = 2;
 pub struct Config {
     pub token: Address,
     pub admin: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtocolStats {
+    pub total_streams: u64,
+    pub total_deposited: u128,
+    pub total_withdrawn: u128,
+    pub active_count: u32,
+    pub paused_count: u32,
 }
 
 #[contracttype]
@@ -419,6 +429,8 @@ pub enum DataKey {
     GlobalPauseAdmin,
     /// Auto-claim destination per stream (Address). Set by recipient to redirect withdrawals.
     AutoClaimDestination(u64),
+    /// Aggregate protocol stats snapshot stored in instance storage.
+    ProtocolStats,
 }
 
 // ---------------------------------------------------------------------------
@@ -654,6 +666,24 @@ fn save_auto_claim_destination(env: &Env, stream_id: u64, destination: &Address)
 fn remove_auto_claim_destination(env: &Env, stream_id: u64) {
     let key = DataKey::AutoClaimDestination(stream_id);
     env.storage().persistent().remove(&key);
+}
+
+fn load_protocol_stats(env: &Env) -> ProtocolStats {
+    env.storage()
+        .instance()
+        .get(&DataKey::ProtocolStats)
+        .unwrap_or(ProtocolStats {
+            total_streams: 0,
+            total_deposited: 0,
+            total_withdrawn: 0,
+            active_count: 0,
+            paused_count: 0,
+        })
+}
+
+fn save_protocol_stats(env: &Env, stats: &ProtocolStats) {
+    env.storage().instance().set(&DataKey::ProtocolStats, stats);
+    bump_instance_ttl(env);
 }
 
 // ---------------------------------------------------------------------------
