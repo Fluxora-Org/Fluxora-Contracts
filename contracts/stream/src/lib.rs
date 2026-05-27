@@ -772,8 +772,8 @@ pub fn save_stream(env: &Env, stream: &Stream) {
 /// A stream is underfunded when the remaining deposit balance cannot cover
 /// the remaining streaming schedule at the current rate.
 fn compute_stream_health(stream: &Stream, now: u64) -> (bool, i128, u64) {
-    let is_terminal = stream.status == StreamStatus::Completed
-        || stream.status == StreamStatus::Cancelled;
+    let is_terminal =
+        stream.status == StreamStatus::Completed || stream.status == StreamStatus::Cancelled;
 
     let seconds_remaining = if is_terminal || now >= stream.end_time {
         0u64
@@ -795,14 +795,8 @@ fn compute_stream_health(stream: &Stream, now: u64) -> (bool, i128, u64) {
 }
 
 /// Emit a `StreamHealthChanged` event if the health status has transitioned.
-fn maybe_emit_health_changed(
-    env: &Env,
-    stream: &Stream,
-    was_underfunded: bool,
-    now: u64,
-) {
-    let (is_underfunded, remaining_balance, seconds_remaining) =
-        compute_stream_health(stream, now);
+fn maybe_emit_health_changed(env: &Env, stream: &Stream, was_underfunded: bool, now: u64) {
+    let (is_underfunded, remaining_balance, seconds_remaining) = compute_stream_health(stream, now);
     if is_underfunded != was_underfunded {
         env.events().publish(
             (symbol_short!("hlth_chg"), stream.stream_id),

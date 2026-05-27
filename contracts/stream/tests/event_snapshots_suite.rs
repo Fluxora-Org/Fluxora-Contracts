@@ -1369,8 +1369,7 @@ fn event_snapshot_health_changed_shorten_heals_underfunded_stream() {
     // new_max_streamable = 1 * 500 = 500.
     // deposit becomes 500. remaining_balance = 500. remaining_time = 400. 500 >= 400 (funded).
     let events_before = ctx.env.events().all().len();
-    ctx.client()
-        .shorten_stream_end_time(&stream_id, &500u64);
+    ctx.client().shorten_stream_end_time(&stream_id, &500u64);
 
     let health = find_health_changed_event(&ctx, events_before)
         .expect("StreamHealthChanged event must be emitted when shorten heals");
@@ -1413,8 +1412,7 @@ fn event_snapshot_health_changed_decrease_rate_heals_underfunded_stream() {
     // new deposit = 1900. remaining_balance = 1900. remaining_time = 900. required = 900.
     // 1900 >= 900 (funded).
     let events_before = ctx.env.events().all().len();
-    ctx.client()
-        .decrease_rate_per_second(&stream_id, &1_i128);
+    ctx.client().decrease_rate_per_second(&stream_id, &1_i128);
 
     let health = find_health_changed_event(&ctx, events_before)
         .expect("StreamHealthChanged event must be emitted when decreasing rate heals");
@@ -1459,7 +1457,10 @@ fn event_snapshot_health_changed_cancel_heals_underfunded_stream() {
         .expect("StreamHealthChanged event must be emitted when cancel heals");
 
     assert_eq!(health.stream_id, stream_id);
-    assert_eq!(health.is_underfunded, false, "Terminal stream is never underfunded");
+    assert_eq!(
+        health.is_underfunded, false,
+        "Terminal stream is never underfunded"
+    );
     assert_eq!(health.seconds_remaining, 0);
 }
 
