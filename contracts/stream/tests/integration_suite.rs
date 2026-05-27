@@ -4,6 +4,7 @@ use fluxora_stream::{
     ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, PauseReason,
     StreamStatus,
 };
+use proptest::prelude::*;
 use soroban_sdk::log;
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},

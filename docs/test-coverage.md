@@ -143,7 +143,6 @@ a misleading coverage number.
 | File | Line(s) | Reason |
 |------|---------|--------|
 | `accrual.rs` | 31 | `None` branch of `checked_sub` — requires `current_time < checkpointed_at`, which the contract prevents at call sites |
-| `lib.rs` | 316–317 | Arithmetic overflow path in batch deposit accumulation |
 | `lib.rs` | 1042, 1047 | Template limit exceeded branches (global cap) |
 | `lib.rs` | 1126, 1130 | Template registry edge cases |
 | `lib.rs` | 1768 | Unreachable branch in stream-close guard |
@@ -161,6 +160,10 @@ know they are not forgotten.
    exercises the missing branch.
 3. Re-run coverage locally to confirm the line turns green.
 4. Open a PR — CI will verify the threshold is still met.
+
+#### Recent Coverage Improvements
+
+- **Batch deposit overflow (lib.rs:316-317)**: Added property-based tests in `integration_suite.rs` that generate batches with cumulative deposits exceeding `i128::MAX`. Tests verify that `ContractError::ArithmeticOverflow` is returned and no partial state is written on overflow. Includes both fuzzing via proptest and exact boundary condition tests.
 
 ---
 
