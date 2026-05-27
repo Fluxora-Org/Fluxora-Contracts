@@ -800,6 +800,21 @@ Discriminant stability is verified by `test_contract_error_discriminants_are_sta
 
 ---
 
+## FactoryError Reference
+
+The factory contract (`contracts/factory`) uses a separate `FactoryError` enum.
+
+| Error | Description |
+|-------|-------------|
+| `AlreadyInitialized` | Factory has already been initialized; `init` may only be called once |
+| `NotInitialized` | Factory has not been initialized; call `init` first |
+| `Unauthorized` | Caller is not the factory admin |
+| `RecipientNotAllowlisted` | Recipient address is not on the factory allowlist |
+| `DepositExceedsCap` | Requested deposit exceeds the per-stream cap configured in the factory |
+| `DurationTooShort` | Stream duration is below the factory-enforced minimum |
+
+---
+
 ## Scope
 
 ### Included

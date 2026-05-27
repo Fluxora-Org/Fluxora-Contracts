@@ -4378,9 +4378,10 @@ fn snapshot_event_rate_end_topup_recp() {
         soroban_sdk::symbol_short!("end_ext")
     );
 
-    // 5. recp_upd
+    // 5. recp_upd — propose then accept to emit the recp_upd event
     let new_recipient = Address::generate(&ctx.env);
     ctx.client().update_recipient(&stream_id, &new_recipient);
+    ctx.client().accept_recipient_update(&stream_id);
     let events = ctx.env.events().all();
     let last_event = events.last().unwrap();
     assert_eq!(
@@ -4411,6 +4412,10 @@ fn update_rate_accepts_maximum_i128_rate() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
 
+    // Mint enough tokens to cover the i128::MAX deposit (setup already minted 10_000).
+    StellarAssetClient::new(&ctx.env, &ctx.token_id)
+        .mint(&ctx.sender, &(i128::MAX - 10_000));
+
     let stream_id = ctx.client().create_stream(
         &ctx.sender,
         &ctx.recipient,
@@ -4433,7 +4438,19 @@ fn update_rate_accepts_maximum_i128_rate() {
 fn update_rate_on_paused_stream_is_allowed() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
-    let stream_id = ctx.create_default_stream();
+
+    // Create a stream with deposit=2000 so rate can be doubled to 2 (2 * 1000s = 2000).
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+        &0,
+        &None,
+    );
 
     ctx.client()
         .pause_stream(&stream_id, &PauseReason::Operational);
