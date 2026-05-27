@@ -425,7 +425,23 @@ pub struct PauseInfo {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Stream {
+pub struct PauseRecord {
+    pub actor: Address,
+    pub timestamp: u64,
+    pub reason: soroban_sdk::String,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PauseKind {
+    GlobalEmergency = 0,
+    Protocol = 1,
+    Stream = 2,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Stream {
     pub stream_id: u64,
     pub sender: Address,
     pub recipient: Address,
@@ -603,6 +619,8 @@ pub enum DataKey {
     PauseState,
     /// Reentrancy guard flag (bool) to prevent recursive token transfers.
     ReentrancyLock,
+    /// Last pause audit record per kind.
+    LastPauseRecord(PauseKind),
 }
 
 // ---------------------------------------------------------------------------
@@ -4454,7 +4472,8 @@ impl FluxoraStream {
         stream_id: u64,
         reason: PauseReason,
     ) -> Result<(), ContractError> {
-        get_admin(&env)?.require_auth();
+        let admin = get_admin(&env)?;
+        admin.require_auth();
 
         let mut stream = load_stream(&env, stream_id)?;
 
@@ -4470,6 +4489,19 @@ impl FluxoraStream {
 
         stream.status = StreamStatus::Paused;
         save_stream(&env, &stream);
+
+        let reason_str = match reason {
+            PauseReason::Operational => soroban_sdk::String::from_str(&env, "Operational"),
+            PauseReason::Administrative => soroban_sdk::String::from_str(&env, "Administrative"),
+        };
+        let record = PauseRecord {
+            actor: admin,
+            timestamp: env.ledger().timestamp(),
+            reason: reason_str,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::LastPauseRecord(PauseKind::Stream), &record);
 
         env.events().publish(
             (symbol_short!("paused"), stream_id),
@@ -4749,6 +4781,15 @@ impl FluxoraStream {
         admin.require_auth();
 
         let state = if paused {
+            let record = PauseRecord {
+                actor: admin.clone(),
+                timestamp: env.ledger().timestamp(),
+                reason: soroban_sdk::String::from_str(&env, "Global emergency pause"),
+            };
+            env.storage()
+                .instance()
+                .set(&DataKey::LastPauseRecord(PauseKind::GlobalEmergency), &record);
+
             PauseState::GlobalEmergencyPaused
         } else {
             PauseState::Active
@@ -4905,6 +4946,15 @@ impl FluxoraStream {
             .instance()
             .set(&DataKey::GlobalPauseAdmin, &admin);
 
+        let record = PauseRecord {
+            actor: admin.clone(),
+            timestamp: now,
+            reason: reason_str.clone(),
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::LastPauseRecord(PauseKind::Protocol), &record);
+
         bump_instance_ttl(&env);
 
         // Emit ProtocolPaused event AFTER storage is written
@@ -5013,6 +5063,26 @@ impl FluxoraStream {
                 paused_by: None,
             }
         }
+    }
+
+    /// Retrieve the last pause record for a specific pause kind.
+    ///
+    /// Provides an on-chain audit trail of who triggered the last pause of a given kind,
+    /// when it happened, and the reason provided.
+    ///
+    /// # Parameters
+    /// - `kind`: The type of pause to query (GlobalEmergency, Protocol, or Stream).
+    ///
+    /// # Authorization
+    /// - None required (read-only query).
+    ///
+    /// # Returns
+    /// - `Some(PauseRecord)` if a pause of the specified kind has occurred.
+    /// - `None` if no pause of that kind has ever been recorded.
+    pub fn get_last_pause_record(env: Env, kind: PauseKind) -> Option<PauseRecord> {
+        env.storage()
+            .instance()
+            .get(&DataKey::LastPauseRecord(kind))
     }
 }
 

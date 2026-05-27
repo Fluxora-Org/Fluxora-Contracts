@@ -324,7 +324,7 @@ data:   SenderTransferred {
         }
 ```
 
-Example:
+Example JSON:
 
 ```json
 {
@@ -337,12 +337,30 @@ Example:
 }
 ```
 
-Indexers should update their sender reference for the stream on receipt of this event.
-The `old_sender` field allows indexers to correlate the previous treasury key.
+## On-chain Pause Audit Trail
+
+In addition to events, the contract maintains an on-chain audit trail of the last pause action for each pause kind. This is queryable via `get_last_pause_record(kind: PauseKind)`.
+
+### PauseKind
+
+- `GlobalEmergency`: Toggled via `set_global_emergency_paused`.
+- `Protocol`: Toggled via `pause_protocol`.
+- `Stream`: Toggled via `pause_stream_as_admin`.
+
+### PauseRecord
+
+```rust
+pub struct PauseRecord {
+    pub actor: Address,
+    pub timestamp: u64,
+    pub reason: String,
+}
+```
 
 ---
 
 ## Parsing recommendations for indexers
+
 
 - Use `topics[0]` to filter by event type; use `topics[1]` to get the `stream_id`
   for all stream-level events.
