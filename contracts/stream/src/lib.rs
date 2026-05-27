@@ -132,6 +132,16 @@ pub enum PauseState {
     CreationPaused = 1,
     GlobalEmergencyPaused = 2,
 }
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamHealth {
+    pub is_underfunded: bool,
+    pub is_expired: bool,
+    pub accrued_to_date: u128,
+    pub remaining_deposit: u128,
+    pub seconds_until_depletion: Option<u64>,
+}
 #[soroban_sdk::contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -3244,6 +3254,65 @@ impl FluxoraStream {
     pub fn get_stream_state(env: Env, stream_id: u64) -> Result<Stream, ContractError> {
         bump_instance_ttl(&env);
         load_stream(&env, stream_id)
+    }
+
+    /// Returns a structured health summary for a stream.
+    ///
+    /// This view function provides off-chain clients with a unified summary of the stream's
+    /// status, including whether it is underfunded (will run out of funds before `end_time`),
+    /// expired (past `end_time` but not yet fully withdrawn), real-time accrual, and
+    /// remaining deposit.
+    ///
+    /// # Parameters
+    /// - `stream_id`: Unique identifier of the stream.
+    ///
+    /// # Returns
+    /// A `StreamHealth` struct containing the computed state.
+    pub fn get_stream_health(env: Env, stream_id: u64) -> Result<StreamHealth, ContractError> {
+        bump_instance_ttl(&env);
+        let stream = load_stream(&env, stream_id)?;
+        let current_time = env.ledger().timestamp();
+
+        let accrued_to_date_i128 = Self::calculate_accrued(env.clone(), stream_id)?;
+        let accrued_to_date = accrued_to_date_i128 as u128;
+
+        let remaining_deposit = stream.deposit_amount.saturating_sub(stream.withdrawn_amount) as u128;
+
+        let is_expired = current_time >= stream.end_time
+            && stream.status != StreamStatus::Completed
+            && stream.status != StreamStatus::Cancelled;
+
+        // Underfunded check: will it run out before end_time?
+        let duration = stream.end_time.saturating_sub(stream.checkpointed_at) as i128;
+        let potential_additional = stream.rate_per_second.checked_mul(duration);
+        let is_underfunded = match potential_additional {
+            Some(added) => stream.checkpointed_amount.saturating_add(added) > stream.deposit_amount,
+            None => true, // Overflow means it definitely exceeds deposit
+        };
+
+        // Seconds until depletion logic
+        let mut seconds_until_depletion = None;
+        if stream.rate_per_second > 0 {
+            let total_to_accrue = stream.deposit_amount.saturating_sub(stream.checkpointed_amount);
+            let seconds_to_deplete = (total_to_accrue / stream.rate_per_second) as u64;
+            let depletion_time = stream.checkpointed_at.saturating_add(seconds_to_deplete);
+
+            if depletion_time < stream.end_time {
+                seconds_until_depletion = Some(depletion_time.saturating_sub(current_time));
+            } else {
+                seconds_until_depletion = Some(stream.end_time.saturating_sub(current_time));
+            }
+        } else if stream.checkpointed_amount >= stream.deposit_amount {
+            seconds_until_depletion = Some(0);
+        }
+
+        Ok(StreamHealth {
+            is_underfunded,
+            is_expired,
+            accrued_to_date,
+            remaining_deposit,
+            seconds_until_depletion,
+        })
     }
 
     /// Return the optional memo stored for a stream.
