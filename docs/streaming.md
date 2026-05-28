@@ -297,6 +297,8 @@ From **CONTRACT_VERSION 5**, senders can optionally set a `withdraw_dust_thresho
     - **Final Drain**: If the withdrawal would result in `withdrawn_amount == deposit_amount` (completing the stream), it is allowed even if the amount is below the threshold.
 - **Default**: The threshold defaults to `0` if not specified at creation.
 
+> **See also:** [dust-threshold.md](./dust-threshold.md) — formula for choosing a safe threshold value, worked USDC examples, a validation table, and guidance for template authors.
+
 ### Frontend: get_claimable_at (simulation)
 
 `get_claimable_at(stream_id, timestamp)` is a read-only view that returns the amount that would be claimable (withdrawable) at an arbitrary timestamp. Use it for:
@@ -1063,3 +1065,162 @@ This documentation is verified against implementation in [protocol-narrative-cod
 - ✅ Zero contradictions found
 
 Last verified: 2026-03-27
+
+
+---
+
+## Admin Recovery: sweep_excess
+
+### Overview
+
+The `sweep_excess` function allows the contract admin to recover trapped tokens that exceed the sum of all outstanding stream liabilities. This addresses scenarios where tokens become stranded in the contract due to:
+
+1. **Stream cancellations** where refunds fail or sender addresses are lost
+2. **Rate decreases** via `decrease_rate_per_second` where excess deposits are refunded but the refund fails
+3. **Rounding errors** that accumulate over many stream operations
+4. **Failed refund transfers** during any operation that returns tokens to senders
+
+### Function Signature
+
+```rust
+pub fn sweep_excess(env: Env, recipient: Address) -> Result<i128, ContractError>
+```
+
+### Parameters
+
+- `recipient`: Address to receive the excess tokens
+
+### Authorization
+
+- **Required**: Contract admin must authorize the call via `admin.require_auth()`
+- **Unauthorized callers**: Returns `ContractError::Unauthorized`
+
+### Calculation
+
+```text
+excess = contract_token_balance - total_liabilities
+```
+
+Where:
+- `contract_token_balance`: Current token balance of the contract (queried from token contract)
+- `total_liabilities`: Sum of all outstanding stream deposits tracked in `DataKey::TotalLiabilities`
+
+### Success Semantics (Observable)
+
+1. **Preconditions**: Caller must be the authorized contract admin
+2. **Calculation**: Computes `excess = balance - liabilities`
+3. **Early return**: If `excess <= 0`, returns `Ok(0)` with no transfer or event
+4. **Event**: Emits `ExcessSwept { to, amount }` with topic `("ex_swept", recipient)`
+5. **Transfer**: Transfers `excess` tokens from contract to `recipient`
+6. **Return**: Returns the amount swept (`excess`)
+
+### Failure Semantics (Observable)
+
+1. **Unauthorized**: If caller is not admin → `ContractError::Unauthorized`
+2. **Invalid state**: If contract not initialized → `ContractError::InvalidState`
+3. **Transfer failure**: If token transfer fails → propagates token contract error
+4. **Reentrancy**: If reentrancy lock is held → `ContractError::InvalidState`
+
+### Safety Guarantees
+
+1. **Recipient protection**: Never sweeps tokens that are owed to stream recipients
+2. **Liability tracking**: Uses `TotalLiabilities` counter to ensure all active stream deposits are protected
+3. **CEI pattern**: Emits event before token transfer to reduce reentrancy risk
+4. **Reentrancy guard**: Acquires lock before transfer, releases after
+5. **Idempotent**: Safe to call multiple times; returns 0 when no excess exists
+
+### Invariants
+
+1. After successful sweep: `contract_balance == total_liabilities`
+2. Active stream deposits are never affected
+3. Recipient entitlements remain unchanged
+4. No state mutation if `excess <= 0`
+
+### Usage Notes
+
+- **Permissionless query**: Anyone can calculate potential excess by comparing `token.balance(contract)` with the sum of all active stream `deposit_amount - withdrawn_amount` values
+- **Operational hygiene**: Should be called periodically by operators to maintain clean accounting
+- **No impact on streams**: Does not affect any stream state, accrual, or withdrawal operations
+- **Multiple calls**: Can be called multiple times as excess accumulates
+
+### Example Scenarios
+
+#### Scenario 1: Stream Cancellation with Lost Sender
+
+```text
+1. Stream created: 1000 tokens deposited
+2. Stream cancelled at 50% completion
+3. 500 tokens should be refunded to sender
+4. Sender address is compromised/lost
+5. 500 tokens remain trapped in contract
+6. Admin calls sweep_excess to recover the 500 tokens
+```
+
+#### Scenario 2: Rate Decrease
+
+```text
+1. Stream created: 1000 tokens, 10 tokens/sec, 100 seconds
+2. Rate decreased at t=50 to 5 tokens/sec
+3. New total needed: 500 (accrued) + 250 (remaining) = 750
+4. 250 tokens refunded to sender
+5. If refund fails, 250 tokens trapped
+6. Admin calls sweep_excess to recover the 250 tokens
+```
+
+#### Scenario 3: Multiple Streams with Accumulated Excess
+
+```text
+1. 100 streams created and cancelled over time
+2. Small rounding errors accumulate (1-2 tokens per stream)
+3. Total excess: ~150 tokens
+4. Admin calls sweep_excess to recover accumulated excess
+```
+
+### Access Control Table Entry
+
+| Function        | Authorized Caller | Auth Check              |
+| --------------- | ----------------- | ----------------------- |
+| `sweep_excess`  | Admin             | `admin.require_auth()`  |
+
+### Event
+
+```rust
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ExcessSwept {
+    pub to: Address,
+    pub amount: i128,
+}
+```
+
+**Topic**: `("ex_swept", recipient)`
+
+### Error Codes
+
+- `ContractError::Unauthorized` (7): Caller is not the admin
+- `ContractError::InvalidState` (2): Contract not initialized or reentrancy detected
+- Token transfer errors: Propagated from token contract
+
+### Security Considerations
+
+1. **Admin trust**: This function requires trusting the admin not to abuse it. The admin could theoretically call it with their own address to extract excess funds.
+2. **Liability tracking accuracy**: The safety of this function depends on accurate `TotalLiabilities` tracking. Any bug in liability accounting could allow sweeping of recipient funds.
+3. **Audit trail**: All sweeps are logged via `ExcessSwept` events for transparency and auditing.
+4. **No emergency pause bypass**: This function does not bypass global emergency pause (if implemented in future versions).
+
+### Testing
+
+Comprehensive test coverage includes:
+
+- ✅ Returns 0 when no excess exists
+- ✅ Sweeps correct amount after stream cancellation
+- ✅ Sweeps correct amount after rate decrease
+- ✅ Requires admin authorization
+- ✅ Emits `ExcessSwept` event
+- ✅ Protects recipient funds (never sweeps liabilities)
+- ✅ Can be called multiple times
+- ✅ Works correctly with multiple streams
+- ✅ Handles edge cases (completed streams, paused streams, etc.)
+
+See `contracts/stream/tests/integration_suite.rs` for full test suite.
+

@@ -145,8 +145,6 @@ a misleading coverage number.
 | File | Line(s) | Reason |
 |------|---------|--------|
 | `accrual.rs` | 31 | `None` branch of `checked_sub` — requires `current_time < checkpointed_at`, which the contract prevents at call sites |
-| `lib.rs` | 1042, 1047 | Template limit exceeded branches (global cap) |
-| `lib.rs` | 1126, 1130 | Template registry edge cases |
 | `lib.rs` | 1768 | Unreachable branch in stream-close guard |
 | `lib.rs` | 1867–1868 | Defensive panic in recipient-index cleanup |
 | `lib.rs` | 2003 | Overflow guard in `shorten_stream_end_time` |
@@ -166,6 +164,16 @@ know they are not forgotten.
 #### Recent Coverage Improvements
 
 - **Batch deposit overflow (lib.rs:316-317)**: Added property-based tests in `integration_suite.rs` that generate batches with cumulative deposits exceeding `i128::MAX`. Tests verify that `ContractError::ArithmeticOverflow` is returned and no partial state is written on overflow. Includes both fuzzing via proptest and exact boundary condition tests.
+
+- **Template cap branches (lib.rs owner-cap and global-cap guards, #521)**: Added
+  `test_owner_template_cap_exceeded` and `test_global_template_cap_exceeded` in
+  `contracts/stream/tests/stream_templates.rs`.
+  - `test_owner_template_cap_exceeded` registers exactly 64 templates for one owner
+    and asserts `TemplateLimitExceeded` on the 65th.  It then deletes one template
+    and confirms re-registration succeeds (counter decrement verified).
+  - `test_global_template_cap_exceeded` fills the 10 000-template global cap using
+    156 owners × 64 templates + 16 remainder, asserts `TemplateLimitExceeded` on the
+    next call, deletes one template, and confirms the freed slot allows registration.
 
 ---
 

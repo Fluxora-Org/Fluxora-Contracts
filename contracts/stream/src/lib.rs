@@ -4,6 +4,9 @@
 mod accrual;
 #[cfg(test)]
 mod checksum;
+pub(crate) mod delegation;
+
+use delegation::validate_delegation_params;
 
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env};
 
@@ -104,6 +107,16 @@ pub const CONTRACT_VERSION: u32 = 5;
 pub struct Config {
     pub token: Address,
     pub admin: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtocolStats {
+    pub total_streams: u64,
+    pub total_deposited: u128,
+    pub total_withdrawn: u128,
+    pub active_count: u32,
+    pub paused_count: u32,
 }
 
 #[contracttype]
@@ -435,8 +448,38 @@ pub struct Stream {
     /// Ledger timestamp of the last rate change (or `start_time` on creation).
     /// `calculate_accrued` uses this as the start of the current rate epoch.
     pub checkpointed_at: u64,
-    /// Optional withdrawal threshold (raw units). Withdrawals below this
-    /// amount are skipped unless they are the final drain or the stream is terminal.
+    /// Minimum withdrawal amount in raw token units (dust filter).
+    ///
+    /// When `withdrawable < withdraw_dust_threshold`, `withdraw`, `withdraw_to`, and
+    /// `batch_withdraw` return `0` without transferring tokens or emitting events.
+    /// This prevents fee and event spam from micro-withdrawals on high-frequency streams.
+    ///
+    /// # Bypass conditions (threshold is ignored)
+    /// - **Terminal state**: `status == Cancelled` or `ledger.timestamp() >= end_time`.
+    ///   The recipient can always pull the final balance regardless of threshold.
+    /// - **Final drain**: `withdrawn_amount + withdrawable == deposit_amount`.
+    ///   The last withdrawal that completes the stream is never blocked.
+    ///
+    /// # Choosing a value (USDC, 7 decimals — 1 USDC = 10_000_000 raw units)
+    /// - `0` — no filter; every micro-withdrawal is allowed (default).
+    /// - `100_000` (0.01 USDC) — blocks sub-cent withdrawals; suitable for high-rate streams.
+    /// - `1_000_000` (0.1 USDC) — blocks sub-dime withdrawals; good for payroll streams.
+    /// - `10_000_000` (1 USDC) — blocks sub-dollar withdrawals; conservative for slow streams.
+    ///
+    /// # Safety constraint
+    /// `withdraw_dust_threshold` must not exceed `deposit_amount`. A threshold equal to or
+    /// greater than the deposit would permanently block all non-terminal withdrawals, locking
+    /// the recipient's funds. Creation is rejected with `ContractError::InvalidDustThreshold`
+    /// if this constraint is violated.
+    ///
+    /// # Formula for safe threshold selection
+    /// A safe upper bound is: `threshold ≤ rate_per_second × minimum_acceptable_interval`
+    /// where `minimum_acceptable_interval` is the shortest withdrawal cadence you expect.
+    /// For example, a stream at 1_000 raw/s with daily withdrawals:
+    ///   `threshold ≤ 1_000 × 86_400 = 86_400_000` (8.64 USDC for a 7-decimal token).
+    ///
+    /// See [`docs/dust-threshold.md`](../../docs/dust-threshold.md) for worked USDC examples,
+    /// a validation table, and guidance for template authors.
     pub withdraw_dust_threshold: i128,
     /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
     /// Maximum length: `MAX_MEMO_BYTES` (64 bytes). `None` when not supplied.
@@ -4496,6 +4539,106 @@ impl FluxoraStream {
                 paused_by: None,
             }
         }
+    }
+
+    /// Sweep excess tokens from the contract to a specified recipient.
+    ///
+    /// When streams are cancelled or the deposit sum exceeds cumulative accrual
+    /// (e.g., due to rate decreases via `decrease_rate_per_second`), residual USDC
+    /// can become trapped in the contract. This function allows the admin to recover
+    /// those excess tokens by calculating the difference between the contract's token
+    /// balance and the sum of all outstanding obligations (tracked liabilities).
+    ///
+    /// # Parameters
+    /// - `recipient`: Address to receive the excess tokens
+    ///
+    /// # Authorization
+    /// - Requires authorization from the contract admin
+    ///
+    /// # Returns
+    /// - `i128`: Amount of excess tokens swept (0 if no excess exists)
+    ///
+    /// # Errors
+    /// - `ContractError::InvalidState`: If contract is not initialized
+    /// - `ContractError::Unauthorized`: If caller is not the admin
+    /// - `ContractError::InvalidParams`: If recipient address is invalid
+    ///
+    /// # Events
+    /// - Publishes `ExcessSwept { to, amount }` event on success
+    ///
+    /// # Security
+    /// - Only callable by admin to prevent unauthorized fund extraction
+    /// - Uses tracked liabilities (`TotalLiabilities`) to ensure recipient funds are protected
+    /// - CEI pattern: calculates excess, updates state, then transfers tokens
+    /// - Reentrancy protected via `acquire_reentrancy_lock`
+    ///
+    /// # Calculation
+    /// ```text
+    /// excess = contract_token_balance - total_liabilities
+    /// ```
+    ///
+    /// Where `total_liabilities` is the sum of all active stream deposits that haven't
+    /// been withdrawn or refunded yet.
+    ///
+    /// # Usage Notes
+    /// - Safe to call even when no excess exists (returns 0, no transfer)
+    /// - Does not affect active streams or recipient entitlements
+    /// - Useful for recovering funds after mass cancellations or rate decreases
+    /// - Should be called periodically by operators to maintain clean accounting
+    ///
+    /// # Example Scenarios
+    /// 1. Stream cancelled at 50% completion → 50% refunded to sender, but if sender
+    ///    address is lost, those tokens become excess
+    /// 2. Rate decreased from 100/s to 50/s → excess deposit refunded, but if refund
+    ///    fails, tokens remain in contract
+    /// 3. Rounding errors accumulate over many streams → small excess builds up
+    pub fn sweep_excess(env: Env, recipient: Address) -> Result<i128, ContractError> {
+        // Only admin can sweep excess tokens
+        let admin = get_admin(&env)?;
+        admin.require_auth();
+
+        // Validate recipient address
+        recipient.require_valid();
+
+        // Get contract's token balance
+        let token_address = get_token(&env)?;
+        let token_client = token::Client::new(&env, &token_address);
+        let contract_balance = token_client.balance(&env.current_contract_address());
+
+        // Get total outstanding liabilities (sum of all active stream deposits)
+        let total_liabilities = read_total_liabilities(&env);
+
+        // Calculate excess: balance - liabilities
+        // If liabilities exceed balance, there's no excess (should not happen in normal operation)
+        let excess = contract_balance.saturating_sub(total_liabilities);
+
+        // If no excess, return early (no transfer needed)
+        if excess <= 0 {
+            return Ok(0);
+        }
+
+        // CEI pattern: Emit event before transfer
+        env.events().publish(
+            (symbol_short!("ex_swept"), recipient.clone()),
+            ExcessSwept {
+                to: recipient.clone(),
+                amount: excess,
+            },
+        );
+
+        // Acquire reentrancy lock before token transfer
+        acquire_reentrancy_lock(&env)?;
+
+        // Transfer excess tokens to recipient
+        let transfer_result = push_token(&env, &recipient, excess);
+
+        // Release reentrancy lock
+        release_reentrancy_lock(&env);
+
+        // Propagate any transfer errors
+        transfer_result?;
+
+        Ok(excess)
     }
 }
 
