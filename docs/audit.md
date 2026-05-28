@@ -88,7 +88,11 @@ Auditors can use these as a checklist; the implementation is intended to preserv
 - Refund paid to sender is exactly `deposit_amount - accrued_at(cancelled_at)`.
 - `cancel_stream` and `cancel_stream_as_admin` must produce identical state/event semantics except for the required authorizer.
 
-11. **Contract balance consistency**  
+13. **Reentrancy Guard**
+
+All token-transfer paths (`withdraw`, `withdraw_to`, `batch_withdraw`, `cancel_stream`) are protected by an explicit `DataKey::ReentrancyLock` guard. If a cross-contract callback (e.g., via a custom token hook) attempts to re-enter any of these functions while a transfer is in progress, the call will revert with `ContractError::InvalidState`.
+
+14. **Contract balance consistency**  
     Deposit is pulled in `create_stream`; refunds and withdrawals only move amounts derived from that deposit (unstreamed to sender, accrued to recipient). No minting or arbitrary transfers.
 
 ---

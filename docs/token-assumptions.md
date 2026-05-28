@@ -126,9 +126,17 @@ The current design:
 
 **Rationale**: Allowance management is the responsibility of the sender (or their wallet/tooling). The contract:
 
-- Uses `transfer_from` to pull tokens from the sender
-- Assumes the sender has approved the contract for the required amount
-- Fails explicitly if allowance is insufficient (token contract panics)
+- Uses `transfer_from` to pull tokens from the sender.
+- Assumes the sender has approved the contract for at least the `deposit_amount` (for `create_stream`) or the top-up amount (for `top_up_stream`).
+- Fails explicitly if allowance is insufficient (the token contract will panic or return an error).
+- Standard wallet flow: `token.approve(contract, amount)` followed by `contract.create_stream(...)`.
+
+**Observable behavior on failure**:
+- If `allowance < amount`, the transaction reverts before any state is changed.
+- If allowance is valid but expires before the transaction, it reverts.
+
+**Batch operations**:
+- In `create_streams` (batch), the total allowance must cover the sum of all `deposit_amount` values in the batch. If any single pull fails due to insufficient allowance, the entire batch reverts (atomicity).
 
 **Residual risk**: Senders must ensure sufficient allowance before calling `create_stream` or `top_up_stream`. Wallets and tooling should handle allowance management transparently.
 
@@ -283,3 +291,4 @@ The following scenarios cannot be automatically tested and require manual audit:
 - **CEI Pattern**: Checks-Effects-Interactions pattern for reentrancy risk reduction
 - **Security Documentation**: [`security.md`](security.md) for detailed security patterns
 - **Streaming Documentation**: [`streaming.md`](streaming.md) for stream lifecycle and semantics
+- **Dust Threshold**: [`dust-threshold.md`](dust-threshold.md) for `withdraw_dust_threshold` configuration, USDC examples, and template guidance

@@ -298,6 +298,53 @@ This forces a fresh WASM upload and new contract deployment.
 | **Deploy** | `bash script/deploy-testnet.sh` |
 | **Verify** | `stellar contract invoke --id $(cat .contract_id) -- get_config` |
 | **Test stream** | `stellar contract invoke --id $(cat .contract_id) -- create_stream ...` |
+| **Approve tokens** | `stellar contract invoke --id $TOKEN_ID -- approve --from $USER --spender $CONTRACT --amount $AMT --expiration_ledger $EXP` |
+
+---
+
+## Token Pulls & Allowances
+
+Fluxora uses an **allowance-based model** (via `transfer_from`) to pull tokens from your wallet when creating or topping up a stream. This means you must explicitly approve the contract to spend tokens on your behalf.
+
+### 1. Check current allowance
+
+Before creating a stream, you can check if you've already approved the contract:
+
+```bash
+# Replace <TOKEN_ID>, <SENDER_ADDRESS>, and <CONTRACT_ID>
+stellar contract invoke \
+  --id "<TOKEN_ID>" \
+  --network testnet \
+  --source "$STELLAR_SECRET_KEY" \
+  -- allowance \
+    --from "<SENDER_ADDRESS>" \
+    --spender "<CONTRACT_ID>"
+```
+
+### 2. Grant approval
+
+If the allowance is insufficient, grant approval to the contract. Note that you must specify an **expiration ledger**.
+
+```bash
+# Approve contract to spend 1,000,000 tokens (e.g. 1 USDC if 6 decimals)
+# Expiration ledger should be sufficiently far in the future (e.g. current + 10,000)
+stellar contract invoke \
+  --id "<TOKEN_ID>" \
+  --network testnet \
+  --source "$STELLAR_SECRET_KEY" \
+  -- approve \
+    --from "<SENDER_ADDRESS>" \
+    --spender "<CONTRACT_ID>" \
+    --amount 1000000 \
+    --expiration_ledger 1000000
+```
+
+### 3. Create stream
+
+Once approved, you can call `create_stream` normally. The contract will pull the exact `deposit_amount` and the allowance will be consumed accordingly.
+
+> [!TIP]
+> Most modern Soroban wallets (like Freighter) handle this two-step process automatically by prepending an `approve` operation to your transaction bundle.
 
 ---
 

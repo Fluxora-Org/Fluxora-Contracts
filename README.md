@@ -5,6 +5,7 @@ Soroban smart contracts for the Fluxora treasury streaming protocol on Stellar. 
 ## Documentation
 
 - **[Stream contract](docs/streaming.md)** — Lifecycle, accrual formula, cliff/end_time, access control, events, and error codes.
+- **[Dust threshold](docs/dust-threshold.md)** — `withdraw_dust_threshold` formula, USDC examples, validation table, and template guidance.
 - **[Security](docs/security.md)** — CEI ordering, token trust model, authorization paths, overflow protection.
 - **[Upgrade strategy](docs/upgrade.md)** — CONTRACT_VERSION policy, breaking-change classification, migration runbook.
 - **[Deployment](docs/DEPLOYMENT.md)** — Step-by-step testnet deployment checklist.
@@ -203,11 +204,24 @@ After each CI build, the pipeline computes a SHA256 hash of the contract WASM ar
 To verify a deployment:
 
 1. Download the hash artifact from the CI run (GitHub Actions → Artifacts → `fluxora_stream-wasm-hash`).
-2. Compute the SHA256 hash of your local WASM file:
+2. Rebuild locally and verify against the committed reference:
    ```bash
-   sha256sum target/wasm32-unknown-unknown/release/fluxora_stream.wasm
+   bash script/verify-wasm-checksum.sh
    ```
-3. Compare the output to the CI hash file. A match confirms your binary is identical to the tested build.
+3. Or verify existing artifacts without rebuilding:
+   ```bash
+   bash script/verify-wasm-checksum.sh --no-build
+   ```
+
+To update checksums after a source change:
+
+```bash
+bash script/update-wasm-checksums.sh
+git add wasm/checksums.sha256
+git commit -m "chore: update wasm checksums"
+```
+
+See [docs/security.md](docs/security.md#reproducible-wasm-builds) for the full reproducibility contract, auditor verification steps, and residual risks.
 
 ## Related repos
 

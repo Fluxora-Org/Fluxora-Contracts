@@ -1,4 +1,5 @@
 #![no_std]
+#![allow(clippy::too_many_arguments)]
 
 use fluxora_stream::FluxoraStreamClient;
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env};
@@ -27,6 +28,7 @@ pub enum DataKey {
 pub struct FluxoraFactory;
 
 #[contractimpl]
+#[allow(clippy::too_many_arguments)]
 impl FluxoraFactory {
     /// Initialize the factory with admin, stream contract, and policies.
     pub fn init(
@@ -132,6 +134,7 @@ impl FluxoraFactory {
     }
 
     /// Creates a new stream via the FluxoraStream contract after enforcing treasury policies.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_stream(
         env: Env,
         sender: Address,
@@ -141,6 +144,7 @@ impl FluxoraFactory {
         start_time: u64,
         cliff_time: u64,
         end_time: u64,
+        withdraw_dust_threshold: i128,
     ) -> Result<u64, FactoryError> {
         // Enforce policies
         let is_allowed: bool = env
@@ -166,11 +170,7 @@ impl FluxoraFactory {
             .instance()
             .get(&DataKey::MinDuration)
             .ok_or(FactoryError::NotInitialized)?;
-        let duration = if end_time > start_time {
-            end_time - start_time
-        } else {
-            0
-        };
+        let duration = end_time.saturating_sub(start_time);
         if duration < min_duration {
             return Err(FactoryError::DurationTooShort);
         }
@@ -198,6 +198,8 @@ impl FluxoraFactory {
             &start_time,
             &cliff_time,
             &end_time,
+            &withdraw_dust_threshold,
+            &None,
         );
 
         Ok(stream_id)

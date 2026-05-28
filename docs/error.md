@@ -15,7 +15,7 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `StreamNotFound` | 1 | The specified stream does not exist | `pause_stream`, `resume_stream`, `cancel_stream`, `withdraw`, `calculate_accrued`, `get_stream_state`, admin overrides |
 | `InvalidState` | 2 | Operation attempted in an invalid state | `cancel_stream`, `withdraw`, `withdraw_to`, `batch_withdraw`, `get_claimable_at`, admin overrides |
 | `InvalidParams` | 3 | Function input parameters are invalid | `create_stream`, `withdraw_to`, `update_rate_per_second`, `top_up_stream`, `extend_stream_end_time`, `shorten_stream_end_time`, `batch_create_streams` |
-| `ContractPaused` | 4 | Global emergency pause is active; mutations are blocked | `create_stream`, `create_streams`, `withdraw`, `withdraw_to`, `batch_withdraw`, `cancel_stream`, `top_up_stream`, `update_rate_per_second`, `shorten_stream_end_time`, `extend_stream_end_time` |
+| `ContractPaused` | 4 | Global emergency pause or creation pause is active | `create_stream`, `create_streams`, `withdraw`, `withdraw_to`, `batch_withdraw`, `cancel_stream`, `top_up_stream`, `update_rate_per_second`, `shorten_stream_end_time`, `extend_stream_end_time`, `update_recipient`, `trigger_auto_claim` |
 | `StartTimeInPast` | 5 | `start_time` is before the current ledger timestamp | `create_stream`, `create_streams` |
 | `ArithmeticOverflow` | 6 | Arithmetic overflow in stream calculations | `create_stream`, `create_streams`, `update_rate_per_second`, `top_up_stream`, `shorten_stream_end_time`, `extend_stream_end_time` |
 | `Unauthorized` | 7 | Caller is not authorized to perform this operation | `init`, `set_admin`, `cancel_stream`, `top_up_stream`, `withdraw` (recipient check) |
@@ -26,6 +26,14 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `StreamNotPaused` | 12 | Stream is not `Paused`; cannot resume an `Active` stream | `resume_stream`, `resume_stream_as_admin` |
 | `StreamTerminalState` | 13 | Stream is `Completed` or `Cancelled`; modification blocked | `pause_stream`, `resume_stream`, admin overrides |
 | `DuplicateStreamId` | 14 | Duplicate stream IDs supplied to a batch operation | `batch_withdraw` |
+| `TemplateNotFound` | 15 | No template exists for the given template id | `get_stream_template`, `create_stream_from_template`, `delete_stream_template` |
+| `TemplateLimitExceeded` | 16 | Template registry limits exceeded | `register_stream_template` |
+| `TemplateUnauthorized` | 17 | Caller is not the template owner | `delete_stream_template` |
+| `SignatureDeadlineExpired` | 18 | Delegated-withdrawal signature deadline has passed | `delegated_withdraw_to` |
+| `InvalidSignature` | 19 | Delegated-withdrawal signature does not verify against the recipient's key | `delegated_withdraw_to` |
+| `InvalidDustThreshold` | 20 | `withdraw_dust_threshold` exceeds `deposit_amount` | `create_stream`, `create_streams`, `create_stream_from_template`, and relative variants |
+| `NoPendingRecipientUpdate` | 21 | No recipient update proposal exists for the given stream | `accept_recipient_update`, `cancel_recipient_update` |
+| `PendingRecipientUpdateExists` | 22 | A recipient update proposal is already pending for this stream | `update_recipient` |
 
 ---
 
@@ -161,9 +169,9 @@ match client.try_create_stream(&sender, &recipient, &deposit, &rate, &start, &cl
 **Affected Roles**:
 | Role | Can Trigger | Notes |
 |------|------------|-------|
-| Sender | Yes | Create streams blocked when paused |
-| Recipient | No | Existing streams unaffected; can still withdraw |
-| Admin | No | Admin operations exempt; admin can always pause/resume |
+| Sender | Yes | `create_stream` blocked if EITHER pause mode is active. `cancel`/`update` blocked ONLY if Global Emergency Pause is active. |
+| Recipient | Yes | `withdraw` blocked ONLY if Global Emergency Pause is active. |
+| Admin | No | Admin operations (pause/resume/init) are never blocked by the pause flag. |
 
 **Client Action**:
 ```rust
@@ -185,10 +193,11 @@ match client.try_create_stream(...) {
 
 **Success Semantics**: Returns `u64` stream_id (when unpaused).
 
-**Integrator Note**: During pause, `calculate_accrued` and `get_stream_state` remain functional.
-Recipients can check their balance and withdraw from existing streams. Only NEW stream
-creation is blocked. Use `is_paused()` for a quick check or `get_pause_info()` for full
-audit trail (reason, timestamp, admin who paused).
+**Integrator Note**: During any pause, `calculate_accrued` and `get_stream_state` remain functional.
+Recipients can always check their balance.
+- If `is_creation_paused()` is true: Only NEW stream creation is blocked.
+- If `is_global_emergency_paused()` is true: All mutations (creation, withdrawal, cancellation) are blocked.
+Use `is_paused()` (checks both) or inspect `get_pause_info()` for full details.
 
 ---
 
@@ -522,6 +531,197 @@ match client.try_batch_withdraw(&recipient, &stream_ids) {
 
 ---
 
+### TemplateNotFound (15)
+
+**Definition**: No template exists for the given template id.
+
+**Trigger Conditions**:
+- `create_stream_from_template` called with a non-existent template_id
+- `delete_stream_template` called with a non-existent template_id
+
+**Affected Roles**:
+| Role | Can Trigger | Notes |
+|------|------------|-------|
+| Sender | Yes | `create_stream_from_template` with invalid template |
+| Template Owner | Yes | `delete_stream_template` with invalid template |
+
+**Client Action**:
+```rust
+match client.try_create_stream_from_template(&sender, &template_id, &deposit) {
+    Ok(stream_id) => { /* success */ }
+    Err(ContractError::TemplateNotFound) => {
+        // Template doesn't exist - list available templates
+        // Or register a new template first
+    }
+    Err(e) => { /* handle other errors */ }
+}
+```
+
+**Success Semantics**: Returns `u64` stream_id.
+
+---
+
+### TemplateLimitExceeded (16)
+
+**Definition**: Template registry limits exceeded (per-owner or global cap).
+
+**Trigger Conditions**:
+| Condition | Limit |
+|-----------|-------|
+| Per-owner templates | `MAX_TEMPLATES_PER_OWNER` (64) |
+| Global templates | `MAX_GLOBAL_TEMPLATES` (10,000) |
+
+**Affected Roles**:
+| Role | Can Trigger | Notes |
+|------|------------|-------|
+| Template Owner | Yes | `register_stream_template` when at limit |
+
+**Client Action**:
+```rust
+match client.try_register_stream_template(&owner, &name, &params) {
+    Ok(template_id) => { /* success */ }
+    Err(ContractError::TemplateLimitExceeded) => {
+        // Delete unused templates first
+        // Or use a different owner account
+    }
+    Err(e) => { /* handle other errors */ }
+}
+```
+
+**Success Semantics**: Returns `u64` template_id.
+
+---
+
+### TemplateUnauthorized (17)
+
+**Definition**: Caller is not the template owner for a protected template operation.
+
+**Trigger Conditions**:
+- `delete_stream_template` called by non-owner
+
+**Affected Roles**:
+| Role | Can Trigger | Notes |
+|------|------------|-------|
+| Non-owner | Yes | Attempting to delete another owner's template |
+
+**Client Action**:
+```rust
+match client.try_delete_stream_template(&template_id) {
+    Ok(()) => { /* success */ }
+    Err(ContractError::TemplateUnauthorized) => {
+        // Only the template owner can delete
+        // Check ownership before attempting
+    }
+    Err(e) => { /* handle other errors */ }
+}
+```
+
+**Success Semantics**: Returns `()`.
+
+---
+
+### SignatureDeadlineExpired (18)
+
+**Definition**: The delegated-withdrawal signature deadline has passed.
+
+**Trigger Conditions**:
+- `deadline < env.ledger().timestamp()` in `delegated_withdraw_to`
+
+**Affected Roles**:
+| Role | Can Trigger | Notes |
+|------|------------|-------|
+| Recipient | Yes | If they sign a deadline that expires before submission |
+| Relayer | Yes | If they submit too late |
+
+**Client Action**:
+- Recipient should sign a new authorization with a later deadline.
+
+**Success Semantics**: Returns positive `i128` amount.
+
+---
+
+### InvalidSignature (19)
+
+**Definition**: The provided signature does not verify against the recipient's public key.
+
+**Trigger Conditions**:
+- Signature fails Ed25519 verification in `delegated_withdraw_to`
+- Signed message does not match current contract, stream_id, destination, or nonce
+
+**Affected Roles**:
+| Role | Can Trigger | Notes |
+|------|------------|-------|
+| Anyone | Yes | Malicious or malformed signature submission |
+
+**Client Action**:
+- Verify signature construction logic off-chain.
+- Ensure all parameters (nonce, contract_id, etc.) match exactly.
+
+**Success Semantics**: Returns positive `i128` amount.
+
+---
+
+### InvalidDustThreshold (20)
+
+**Definition**: `withdraw_dust_threshold` exceeds `deposit_amount`.
+
+**Trigger Conditions**:
+- `withdraw_dust_threshold > deposit_amount` during stream creation
+
+**Affected Roles**:
+| Role | Can Trigger | Notes |
+|------|------------|-------|
+| Sender | Yes | `create_stream`, `create_streams`, `create_stream_from_template`, and relative variants |
+
+**Client Action**:
+- Ensure `withdraw_dust_threshold <= deposit_amount`.
+- Usually, dust threshold is a small fraction of the deposit.
+
+**Success Semantics**: Returns `u64` stream_id.
+
+---
+
+### NoPendingRecipientUpdate (21)
+
+**Definition**: No recipient update proposal exists for the given stream ID.
+
+**Trigger Conditions**:
+- `accept_recipient_update` or `cancel_recipient_update` called when no proposal is pending in storage.
+
+**Affected Roles**:
+| Role | Can Trigger | Notes |
+|------|------------|-------|
+| Recipient | Yes | If they try to accept a proposal that doesn't exist or was already cancelled |
+| Sender | Yes | If they try to cancel a proposal that doesn't exist |
+
+**Client Action**:
+- Confirm the stream ID.
+- Check `get_pending_recipient_update` to verify if a proposal exists.
+
+**Success Semantics**: Returns `()`.
+
+---
+
+### PendingRecipientUpdateExists (22)
+
+**Definition**: A recipient update proposal is already pending for this stream.
+
+**Trigger Conditions**:
+- `update_recipient` called when a proposal already exists for the stream.
+
+**Affected Roles**:
+| Role | Can Trigger | Notes |
+|------|------------|-------|
+| Sender | Yes | If they try to propose a second rotation before the first is accepted/cancelled |
+
+**Client Action**:
+- Wait for the current recipient to accept.
+- Or call `cancel_recipient_update` first to clear the pending proposal.
+
+**Success Semantics**: Returns `()`.
+
+---
+
 ## Previously Panicking Paths (Now Structured Errors)
 
 The following input-error paths previously caused a host-level panic. They now return
@@ -559,6 +759,9 @@ infrastructure-level failures (not user input errors):
 | `top_up_stream` | - | StreamNotFound, Unauthorized, InvalidParams, InvalidState, ArithmeticOverflow | StreamNotFound | - |
 | `calculate_accrued` | StreamNotFound | StreamNotFound | StreamNotFound | StreamNotFound |
 | `get_stream_state` | StreamNotFound | StreamNotFound | StreamNotFound | StreamNotFound |
+| `register_stream_template` | - | TemplateLimitExceeded | - | - |
+| `create_stream_from_template` | - | StreamNotFound, TemplateNotFound | - | - |
+| `delete_stream_template` | - | TemplateNotFound, TemplateUnauthorized | - | - |
 
 ---
 
@@ -589,6 +792,11 @@ Error handling is verified by tests in `contracts/stream/src/test.rs`:
 | InsufficientBalance | Sender with no tokens |
 | InsufficientDeposit | `deposit < rate * duration` |
 | StreamTerminalState | Pause/complete then modify |
+| TemplateNotFound | `create_stream_from_template` with invalid ID |
+| TemplateLimitExceeded | Register more than `MAX_TEMPLATES_PER_OWNER` templates |
+| TemplateUnauthorized | Delete another owner's template |
+
+Discriminant stability is verified by `test_contract_error_discriminants_are_stable` in `contracts/stream/src/test.rs`, which asserts the exact `u32` value of every `ContractError` variant and will fail at compile time if any value is changed.
 
 ---
 
@@ -596,7 +804,7 @@ Error handling is verified by tests in `contracts/stream/src/test.rs`:
 
 ### Included
 
-- All 13 `ContractError` variants
+- All 17 `ContractError` variants (1-17)
 - Role-based error mapping
 - Success/failure semantics for each operation
 - Time-driven edge cases
