@@ -184,3 +184,21 @@ know they are not forgotten.
 - [Property-based accrual tests](./pr-accrual-property-tests.md)
 - [Security guidelines](./security.md)
 - [Audit preparation](./audit.md)
+
+## Factory Policy Enforcement Tests (issue #525)
+
+`contracts/stream/tests/factory_policy.rs` covers all six `FactoryError` variants:
+
+| Test | Error variant |
+|---|---|
+| `test_factory_already_initialized` | `AlreadyInitialized` |
+| `test_set_admin_requires_existing_admin` | `Unauthorized` |
+| `test_create_stream_recipient_not_allowlisted` | `RecipientNotAllowlisted` |
+| `test_create_stream_deposit_exceeds_cap` | `DepositExceedsCap` |
+| `test_create_stream_duration_too_short` | `DurationTooShort` |
+| `test_factory_not_initialized_returns_error` | `NotInitialized` |
+| `test_create_stream_deposit_at_cap_ok` | boundary: cap accepted |
+| `test_create_stream_duration_at_minimum_ok` | boundary: min duration accepted |
+| `test_set_cap_enforced` | dynamic cap update enforced |
+| `test_set_min_duration_enforced` | dynamic min_duration update enforced |
+| `test_set_allowlist_remove_enforced` | allowlist removal enforced |
