@@ -184,3 +184,29 @@ know they are not forgotten.
 - [Property-based accrual tests](./pr-accrual-property-tests.md)
 - [Security guidelines](./security.md)
 - [Audit preparation](./audit.md)
+
+## Close Guard and Index Cleanup Paths (issue #522)
+
+`contracts/stream/tests/close_guard_paths.rs` covers two previously-unreachable paths:
+
+### Close guard (`close_completed_stream`)
+
+| Test | Scenario | Expected |
+|---|---|---|
+| `test_close_non_completed_stream_rejected` | Active stream | `InvalidState` |
+| `test_close_paused_stream_rejected` | Paused stream | `InvalidState` |
+| `test_close_completed_stream_ok` | Fully withdrawn | Success, stream removed |
+| `test_close_cancelled_zero_claimable_ok` | Cancelled, no accrual | Success |
+| `test_close_cancelled_with_claimable_rejected` | Cancelled, accrual > 0 | `InvalidState` |
+| `test_close_nonexistent_stream` | Bad stream_id | `StreamNotFound` |
+
+### Recipient-index cleanup path
+
+`remove_stream_from_recipient_index` silently skips missing entries (no panic).
+This is the correct behavior for a permissionless cleanup function — a missing
+index entry should not block storage reclamation.
+
+| Test | Scenario |
+|---|---|
+| `test_recipient_index_cleanup_graceful_on_missing_entry` | Index entry present → removed cleanly |
+| `test_close_removes_only_target_from_index` | Other streams in index are unaffected |
