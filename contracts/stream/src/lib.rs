@@ -1892,6 +1892,10 @@ impl FluxoraStream {
             token::Client::new(&env, &token_address).balance(&env.current_contract_address());
         let mut results = soroban_sdk::Vec::new(&env);
 
+        // Cache ledger timestamp once — it is constant within a single transaction.
+        // Avoids a redundant host-function call on every loop iteration (#515).
+        let now = env.ledger().timestamp();
+
         for stream_id in stream_ids.iter() {
             let mut stream = load_stream(&env, stream_id)?;
 
@@ -1906,7 +1910,22 @@ impl FluxoraStream {
             let mut withdrawable = if stream.status == StreamStatus::Completed {
                 0
             } else {
-                let accrued = Self::calculate_accrued(env.clone(), stream_id)?;
+                // Use cached `now` instead of calling env.ledger().timestamp() per stream.
+                let effective_now = if stream.status == StreamStatus::Cancelled {
+                    stream.cancelled_at.ok_or(ContractError::InvalidState)?
+                } else {
+                    now
+                };
+                let accrued = accrual::calculate_accrued_amount_checkpointed(
+                    stream.start_time,
+                    stream.checkpointed_amount,
+                    stream.checkpointed_at,
+                    stream.cliff_time,
+                    stream.end_time,
+                    stream.rate_per_second,
+                    stream.deposit_amount,
+                    effective_now,
+                );
                 (accrued - stream.withdrawn_amount).max(0)
             };
 
@@ -2003,6 +2022,9 @@ impl FluxoraStream {
 
         let mut results = soroban_sdk::Vec::new(&env);
 
+        // Cache ledger timestamp once — constant within a single transaction (#515).
+        let now = env.ledger().timestamp();
+
         for param in withdrawals.iter() {
             let mut stream = load_stream(&env, param.stream_id)?;
 
@@ -2017,7 +2039,21 @@ impl FluxoraStream {
             let mut withdrawable = if stream.status == StreamStatus::Completed {
                 0
             } else {
-                let accrued = Self::calculate_accrued(env.clone(), param.stream_id)?;
+                let effective_now = if stream.status == StreamStatus::Cancelled {
+                    stream.cancelled_at.ok_or(ContractError::InvalidState)?
+                } else {
+                    now
+                };
+                let accrued = accrual::calculate_accrued_amount_checkpointed(
+                    stream.start_time,
+                    stream.checkpointed_amount,
+                    stream.checkpointed_at,
+                    stream.cliff_time,
+                    stream.end_time,
+                    stream.rate_per_second,
+                    stream.deposit_amount,
+                    effective_now,
+                );
                 (accrued - stream.withdrawn_amount).max(0)
             };
 

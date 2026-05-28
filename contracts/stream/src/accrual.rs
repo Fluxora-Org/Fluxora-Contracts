@@ -45,10 +45,14 @@ pub fn calculate_accrued_amount(
 /// - `end_time`            – accrual is capped at this timestamp.
 /// - `rate_per_second`     – rate for the **current** epoch (`checkpointed_at` ➜ `end_time`).
 /// - `deposit_amount`      – absolute ceiling; result is clamped to `[0, deposit_amount]`.
-/// - `current_time`        – evaluation point.
+/// - `now`                 – evaluation point (caller-supplied; constant within a transaction).
+///
+/// Accepting `now` explicitly rather than reading `env.ledger().timestamp()` inside the
+/// function eliminates redundant host-function calls when the same timestamp is used for
+/// multiple streams in a single transaction (e.g. `batch_withdraw`).
 ///
 /// # Safety invariants
-/// 1. `accrued(t)` is monotonically non-decreasing in `current_time`.
+/// 1. `accrued(t)` is monotonically non-decreasing in `now`.
 /// 2. `accrued(checkpointed_at) == checkpointed_amount` — a rate decrease never reduces
 ///    the visible withdrawable amount.
 /// 3. `accrued(t) <= deposit_amount` for all `t`.
@@ -60,9 +64,9 @@ pub fn calculate_accrued_amount_checkpointed(
     end_time: u64,
     rate_per_second: i128,
     deposit_amount: i128,
-    current_time: u64,
+    now: u64,
 ) -> i128 {
-    if current_time < cliff_time {
+    if now < cliff_time {
         return 0;
     }
 
@@ -79,7 +83,7 @@ pub fn calculate_accrued_amount_checkpointed(
         return 0;
     }
 
-    let elapsed_now = current_time.min(end_time);
+    let elapsed_now = now.min(end_time);
     let elapsed_seconds: i128 = if elapsed_now <= checkpointed_at {
         0
     } else {
