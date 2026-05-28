@@ -70,6 +70,7 @@ Every entrypoint that moves tokens must follow this strict ordering:
 | `pause_protocol` / `resume_protocol`               |        |           |           ✅            |                     |
 | `set_admin`                                        |        |           | ✅ (current admin only) |                     |
 | `close_completed_stream`                           |        |           |                         | ✅ (permissionless) |
+| `get_last_pause_record`                            |        |           |                         | ✅ (read-only)      |
 | All `get_*` / `calculate_*` / `version`            |        |           |                         |   ✅ (read-only)    |
 
 ### 2.2 Auth boundary checklist

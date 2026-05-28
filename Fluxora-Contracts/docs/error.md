@@ -29,6 +29,7 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `TemplateNotFound` | 15 | No template exists for the given template id | `get_stream_template`, `create_stream_from_template`, `delete_stream_template` |
 | `TemplateLimitExceeded` | 16 | Template registry limits exceeded | `register_stream_template` |
 | `TemplateUnauthorized` | 17 | Caller is not the template owner | `delete_stream_template` |
+| `RateCapExceeded` | 18 | Rate exceeds the governance-controlled maximum rate per second | `create_stream`, `create_streams`, `create_stream_relative`, `update_rate_per_second` |
 
 ---
 

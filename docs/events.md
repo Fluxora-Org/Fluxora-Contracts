@@ -25,12 +25,11 @@ Notes:
 | StreamCompleted  | `["completed", stream_id: u64]` | `StreamEvent::StreamCompleted(stream_id: u64)`                                                                                                            | When `withdrawn_amount` reaches `deposit_amount` during a `withdraw` or `batch_withdraw` call. Emitted after Withdrawal. |
 | StreamClosed     | `["closed", stream_id: u64]`    | `StreamEvent::StreamClosed(stream_id: u64)`                                                                                                               | When a completed stream's storage is removed via `close_completed_stream`. Emitted before the storage entry is deleted.  |
 | RateUpdated      | `["rate_upd", stream_id: u64]`  | `RateUpdated { stream_id: u64, old_rate_per_second: i128, new_rate_per_second: i128, effective_time: u64 }`                                               | When `update_rate_per_second` successfully changes a stream's rate.                                                     |
+| RateCapEnforced  | `["rate_cap", stream_id: u64]`  | `RateCapEnforced { stream_id: u64, attempted_rate: i128, max_rate_per_second: i128 }`                                                                     | When a rate update is rejected due to exceeding the governance-controlled maximum rate per second cap.                 |
 | StreamEndShortened | `["end_shrt", stream_id: u64]` | `StreamEndShortened { stream_id: u64, old_end_time: u64, new_end_time: u64, refund_amount: i128 }`                                                       | When `shorten_stream_end_time` successfully shortens a stream.                                                           |
 | StreamEndExtended | `["end_ext", stream_id: u64]`  | `StreamEndExtended { stream_id: u64, old_end_time: u64, new_end_time: u64 }`                                                                              | When `extend_stream_end_time` successfully extends a stream.                                                             |
 | StreamToppedUp   | `["top_up", stream_id: u64]`    | `StreamToppedUp { stream_id: u64, top_up_amount: i128, new_deposit_amount: i128 }`                                                                        | When `top_up_stream` successfully increases a stream's deposit.                                                          |
-| RecipientUpdateProposed | `["recp_prp", stream_id: u64]` | `RecipientUpdateProposed { stream_id: u64, current_recipient: Address, proposed_recipient: Address, proposed_at: u64 }` | When `update_recipient` successfully proposes a recipient rotation.                                               |
-| RecipientUpdated | `["recp_upd", stream_id: u64]` | `RecipientUpdated { stream_id: u64, old_recipient: Address, new_recipient: Address }`                                                                     | When `accept_recipient_update` successfully rotates a stream's receiving address.                                             |
-| RecipientUpdateCancelled | `["recp_cxl", stream_id: u64]` | `RecipientUpdateCancelled { stream_id: u64 }` | When `cancel_recipient_update` successfully withdraws a proposal.                                             |
+| RecipientUpdated | `["recp_upd", stream_id: u64]` | `RecipientUpdated { stream_id: u64, old_recipient: Address, new_recipient: Address }`                                                                     | When `update_recipient` successfully rotates a stream's receiving address.                                             |
 | AdminUpdated     | `["AdminUpdated"]`              | `(old_admin: Address, new_admin: Address)`                                                                                                                | When the contract admin is rotated via `set_admin`.                                                                     |
 | ContractPaused   | `["paused_ctl"]`                | `bool`                                                                                                                                                    | When the global contract pause state is toggled via `set_contract_paused`.                                              |
 | ProtocolPaused   | `["pr_pause", admin: Address]`  | `ProtocolPaused { reason: String, paused_at: u64 }`                                                                                                       | When `pause_protocol` successfully pauses the protocol. Not emitted on idempotent calls.                               |
@@ -61,7 +60,7 @@ Soroban events are represented as JSON in test snapshots; the general shape is:
 
 ### 1) StreamCreated
 
-Emitted by `persist_new_stream` after a successful `create_stream` or `create_streams` call.
+Emitted by `persist_new_stream` after a successful `create_stream`, `create_streams`, or `create_streams_partial` call.
 
 ```
 topics: ["created", <stream_id: u64>]
@@ -325,7 +324,7 @@ data:   SenderTransferred {
         }
 ```
 
-Example:
+Example JSON:
 
 ```json
 {
@@ -338,8 +337,25 @@ Example:
 }
 ```
 
-Indexers should update their sender reference for the stream on receipt of this event.
-The `old_sender` field allows indexers to correlate the previous treasury key.
+## On-chain Pause Audit Trail
+
+In addition to events, the contract maintains an on-chain audit trail of the last pause action for each pause kind. This is queryable via `get_last_pause_record(kind: PauseKind)`.
+
+### PauseKind
+
+- `GlobalEmergency`: Toggled via `set_global_emergency_paused`.
+- `Protocol`: Toggled via `pause_protocol`.
+- `Stream`: Toggled via `pause_stream_as_admin`.
+
+### PauseRecord
+
+```rust
+pub struct PauseRecord {
+    pub actor: Address,
+    pub timestamp: u64,
+    pub reason: String,
+}
+```
 
 ### 14) StreamHealthChanged
 
@@ -396,6 +412,7 @@ The `remaining_balance` and `seconds_remaining` fields allow precise monitoring 
 ---
 
 ## Parsing recommendations for indexers
+
 
 - Use `topics[0]` to filter by event type; use `topics[1]` to get the `stream_id`
   for all stream-level events.
