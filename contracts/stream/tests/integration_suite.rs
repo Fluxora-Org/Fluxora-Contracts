@@ -3750,3 +3750,23 @@ fn test_batch_withdraw_to_contract_address_fails() {
     let res = ctx.client().try_batch_withdraw_to(&ctx.recipient, &params);
     assert_eq!(res, Err(Ok(fluxora_stream::ContractError::InvalidParams)));
 }
+
+// ---------------------------------------------------------------------------
+// Issue #532: migration_v5_to_v6 stub
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_migration_v5_to_v6_admin_succeeds() {
+    let ctx = TestContext::setup();
+    // Admin can call the migration stub without error.
+    ctx.client().migration_v5_to_v6(&ctx.admin);
+}
+
+#[test]
+fn test_migration_v5_to_v6_non_admin_rejected() {
+    let ctx = TestContext::setup();
+    let stranger = soroban_sdk::Address::generate(&ctx.env);
+    let result = ctx.client().try_migration_v5_to_v6(&stranger);
+    // Should fail auth (host trap or Unauthorized).
+    assert!(result.is_err(), "non-admin must not call migration_v5_to_v6");
+}

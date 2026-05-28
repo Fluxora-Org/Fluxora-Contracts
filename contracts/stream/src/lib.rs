@@ -2945,6 +2945,32 @@ impl FluxoraStream {
         CONTRACT_VERSION
     }
 
+    /// Migration stub: V5 → V6 (admin-only, no-op).
+    ///
+    /// V6 adds only new entrypoints and a new DataKey (`DelegatedWithdrawNonce`).
+    /// No existing storage entries were modified or removed, so no on-chain state
+    /// transformation is required. This entrypoint exists as a deployment checkpoint:
+    /// calling it confirms the admin has reviewed the V5→V6 changes and that the
+    /// new instance is correctly initialised.
+    ///
+    /// If future versions require actual state transformation (e.g. backfilling a
+    /// new field on existing `Stream` entries), the logic should be added here.
+    ///
+    /// See `docs/DEPLOYMENT.md#v5--v6-migration-playbook` for the full runbook.
+    pub fn migration_v5_to_v6(env: Env, admin: Address) -> Result<(), ContractError> {
+        get_admin(&env)?.require_auth();
+        if admin != get_admin(&env)? {
+            return Err(ContractError::Unauthorized);
+        }
+        // No state transformation needed for V5→V6.
+        // Emit an event so the migration is auditable on-chain.
+        env.events().publish(
+            (symbol_short!("migrated"),),
+            (5u32, 6u32, env.ledger().timestamp()),
+        );
+        Ok(())
+    }
+
     /// Retrieve all stream IDs for a given recipient (sorted by stream_id).
     ///
     /// Returns a vector of stream IDs where the recipient is the stream's recipient address.

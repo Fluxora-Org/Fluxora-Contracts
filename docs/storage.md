@@ -173,3 +173,17 @@ Extended on every `load_stream()` (read) and `save_stream()` (write), and on eve
 - **CEI ordering**: State is always persisted (`save_stream`) before any external token transfer. See `docs/security.md`.
 - **No stale reads**: TTL bumps on reads mean monitoring queries keep data fresh.
 - **Admin rotation**: `set_admin` writes a new `Config` with the updated admin address. The token address is immutable.
+
+---
+
+## 7. Version History
+
+For a full description of what changed between contract versions and how to migrate, see [DEPLOYMENT.md — Version Migration](./DEPLOYMENT.md#version-migration).
+
+### V5 → V6 DataKey additions
+
+| Discriminant | Variant | Added in | Notes |
+|---|---|---|---|
+| 10 | `DelegatedWithdrawNonce(Address)` | V6 | Per-recipient nonce for `delegated_withdraw` replay protection. Absent until first use. |
+
+No entries were removed or reordered between V5 and V6. All V5 persistent entries remain readable on a V6 instance.
