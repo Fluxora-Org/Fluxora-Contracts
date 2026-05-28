@@ -291,3 +291,4 @@ The following scenarios cannot be automatically tested and require manual audit:
 - **CEI Pattern**: Checks-Effects-Interactions pattern for reentrancy risk reduction
 - **Security Documentation**: [`security.md`](security.md) for detailed security patterns
 - **Streaming Documentation**: [`streaming.md`](streaming.md) for stream lifecycle and semantics
+- **Dust Threshold**: [`dust-threshold.md`](dust-threshold.md) for `withdraw_dust_threshold` configuration, USDC examples, and template guidance
