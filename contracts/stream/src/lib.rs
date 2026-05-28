@@ -142,10 +142,9 @@ pub const MAX_GLOBAL_TEMPLATES: u64 = 10_000;
 /// - If an operator forgets to increment this constant before deploying a breaking change,
 ///   integrators will not detect the incompatibility until a runtime failure occurs.
 ///   Code review and CI checks on this constant are the primary safeguard.
-///
-/// Bumped to 5: `withdraw_dust_threshold: i128` added to `Stream` struct and creation params
-/// to reduce fee/event spam from tiny withdrawals.
-pub const CONTRACT_VERSION: u32 = 6;
+/// Bumped to 2: `Stream` struct gained `checkpointed_amount: i128` and `checkpointed_at: u64`
+/// for safe rate-decrease support (see `decrease_rate_per_second`).
+pub const CONTRACT_VERSION: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -157,6 +156,16 @@ pub const CONTRACT_VERSION: u32 = 6;
 pub struct Config {
     pub token: Address,
     pub admin: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtocolStats {
+    pub total_streams: u64,
+    pub total_deposited: u128,
+    pub total_withdrawn: u128,
+    pub active_count: u32,
+    pub paused_count: u32,
 }
 
 #[contracttype]
@@ -659,29 +668,8 @@ pub enum DataKey {
     GlobalPauseAdmin,
     /// Auto-claim destination per stream (Address). Set by recipient to redirect withdrawals.
     AutoClaimDestination(u64),
-    /// Monotonic template id counter (`u64`, instance storage).
-    NextTemplateId,
-    /// Number of templates currently stored (`u64`, instance storage).
-    ActiveTemplateCount,
-    /// Registered relative schedule template (persistent).
-    StreamTemplate(u64),
-    /// Template ids owned by an address (persistent `Vec<u64>`; length capped).
-    OwnerTemplateIds(Address),
-    /// Sum of outstanding deposit liabilities (`i128`, instance storage).
-    TotalLiabilities,
-    /// Per-recipient nonce counter for delegated-withdraw replay protection.
-    /// Appended last to preserve existing discriminant values.
-    WithdrawNonce(Address),
-    /// Current protocol-wide pause state (Active, CreationPaused, or GlobalEmergencyPaused).
-    PauseState,
-    /// Reentrancy guard flag (bool) to prevent recursive token transfers.
-    ReentrancyLock,
-    /// Paged recipient stream index (page number → Vec<u64> of stream IDs).
-    RecipientStreamPage(Address, u32),
-    /// Number of pages in a recipient's paged stream index.
-    RecipientStreamPageCount(Address),
-    /// Pending recipient update proposal for a stream (sender-initiated, recipient-accepted).
-    PendingRecipientUpdate(u64),
+    /// Aggregate protocol stats snapshot stored in instance storage.
+    ProtocolStats,
 }
 
 // ---------------------------------------------------------------------------
@@ -1115,6 +1103,24 @@ fn save_pending_recipient_update(env: &Env, stream_id: u64, update: &PendingReci
 fn remove_pending_recipient_update(env: &Env, stream_id: u64) {
     let key = DataKey::PendingRecipientUpdate(stream_id);
     env.storage().persistent().remove(&key);
+}
+
+fn load_protocol_stats(env: &Env) -> ProtocolStats {
+    env.storage()
+        .instance()
+        .get(&DataKey::ProtocolStats)
+        .unwrap_or(ProtocolStats {
+            total_streams: 0,
+            total_deposited: 0,
+            total_withdrawn: 0,
+            active_count: 0,
+            paused_count: 0,
+        })
+}
+
+fn save_protocol_stats(env: &Env, stats: &ProtocolStats) {
+    env.storage().instance().set(&DataKey::ProtocolStats, stats);
+    bump_instance_ttl(env);
 }
 
 // ---------------------------------------------------------------------------
