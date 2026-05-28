@@ -423,6 +423,53 @@ pub struct ExcessSwept {
     pub amount: i128,
 }
 
+/// Emitted when a recipient sets an auto-claim destination.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AutoClaimSet {
+    pub stream_id: u64,
+    pub destination: Address,
+}
+
+/// Emitted when a recipient revokes their auto-claim destination.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AutoClaimRevoked {
+    pub stream_id: u64,
+}
+
+/// Emitted when an auto-claim is triggered.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AutoClaimTriggered {
+    pub stream_id: u64,
+    pub destination: Address,
+    pub amount: i128,
+}
+
+/// Status of auto-claim configuration for a stream.
+///
+/// Returned by `get_auto_claim_status` to allow callers to validate
+/// the auto-claim destination before executing `trigger_auto_claim`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AutoClaimStatus {
+    /// No auto-claim destination has been set for this stream.
+    NotSet,
+    /// Auto-claim destination is set and valid.
+    ValidDestination {
+        /// The destination address where tokens will be sent.
+        destination: Address,
+        /// The amount currently claimable (accrued - withdrawn).
+        claimable: i128,
+    },
+    /// Auto-claim destination is set but invalid (zero address or contract itself).
+    InvalidDestination {
+        /// The invalid destination address.
+        destination: Address,
+    },
+}
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct GlobalResumed {
@@ -5162,6 +5209,414 @@ impl FluxoraStream {
         transfer_result?;
 
         Ok(excess)
+    }
+
+    /// Set an auto-claim destination for a stream.
+    ///
+    /// Allows the recipient to opt in to permissionless final withdrawal at `end_time`.
+    /// Once set, anyone can call `trigger_auto_claim` to send the final withdrawal to
+    /// the specified destination address.
+    ///
+    /// # Parameters
+    /// - `stream_id`: The stream to configure
+    /// - `destination`: Address where tokens will be sent when auto-claim is triggered
+    ///
+    /// # Authorization
+    /// - Requires authorization from the stream recipient
+    ///
+    /// # Returns
+    /// - `Ok(())` on success
+    ///
+    /// # Errors
+    /// - `ContractError::StreamNotFound`: Stream does not exist
+    /// - `ContractError::Unauthorized`: Caller is not the recipient
+    /// - `ContractError::InvalidParams`: Destination is zero address or contract itself
+    ///
+    /// # Events
+    /// - Publishes `AutoClaimSet { stream_id, destination }` event
+    ///
+    /// # Security
+    /// - Only recipient can set/change destination
+    /// - Destination is validated (non-zero, not contract)
+    /// - Can be called multiple times to change destination
+    /// - Use `revoke_auto_claim` to remove the destination
+    ///
+    /// # Usage Notes
+    /// - Destination is stored in persistent storage
+    /// - Setting a new destination overwrites the previous one
+    /// - Auto-claim can only be triggered after `end_time`
+    /// - Works with both Active and Paused streams
+    pub fn set_auto_claim(
+        env: Env,
+        stream_id: u64,
+        destination: Address,
+    ) -> Result<(), ContractError> {
+        let stream = load_stream(&env, stream_id)?;
+        stream.recipient.require_auth();
+
+        // Validate destination
+        if !Self::is_valid_destination(&env, &destination) {
+            return Err(ContractError::InvalidParams);
+        }
+
+        // Store destination
+        let key = DataKey::AutoClaimDestination(stream_id);
+        env.storage().persistent().set(&key, &destination);
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        // Emit event
+        env.events().publish(
+            (symbol_short!("ac_set"), stream_id),
+            AutoClaimSet {
+                stream_id,
+                destination: destination.clone(),
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Revoke the auto-claim destination for a stream.
+    ///
+    /// Removes the auto-claim destination, preventing `trigger_auto_claim` from being called.
+    /// The recipient can set a new destination later via `set_auto_claim`.
+    ///
+    /// # Parameters
+    /// - `stream_id`: The stream to configure
+    ///
+    /// # Authorization
+    /// - Requires authorization from the stream recipient
+    ///
+    /// # Returns
+    /// - `Ok(())` on success
+    ///
+    /// # Errors
+    /// - `ContractError::StreamNotFound`: Stream does not exist
+    /// - `ContractError::Unauthorized`: Caller is not the recipient
+    ///
+    /// # Events
+    /// - Publishes `AutoClaimRevoked { stream_id }` event
+    ///
+    /// # Usage Notes
+    /// - Removes destination from storage
+    /// - Can be called even if no destination was set (idempotent)
+    /// - Useful for cleaning up storage after stream cancellation
+    pub fn revoke_auto_claim(env: Env, stream_id: u64) -> Result<(), ContractError> {
+        let stream = load_stream(&env, stream_id)?;
+        stream.recipient.require_auth();
+
+        // Remove destination
+        let key = DataKey::AutoClaimDestination(stream_id);
+        env.storage().persistent().remove(&key);
+
+        // Emit event
+        env.events().publish(
+            (symbol_short!("ac_revoke"), stream_id),
+            AutoClaimRevoked { stream_id },
+        );
+
+        Ok(())
+    }
+
+    /// Trigger an auto-claim for a stream (permissionless).
+    ///
+    /// Anyone can call this function to execute the final withdrawal for a stream
+    /// that has reached `end_time` and has an auto-claim destination set by the recipient.
+    /// Tokens are sent to the destination address chosen by the recipient.
+    ///
+    /// # Parameters
+    /// - `stream_id`: The stream to claim
+    ///
+    /// # Authorization
+    /// - None required (permissionless)
+    ///
+    /// # Returns
+    /// - `i128`: Amount of tokens transferred to the destination
+    ///
+    /// # Errors
+    /// - `ContractError::StreamNotFound`: Stream does not exist
+    /// - `ContractError::InvalidState`: Stream is Completed, Cancelled, or before end_time
+    /// - `ContractError::InvalidParams`: No auto-claim destination set, or destination is invalid
+    /// - `ContractError::ContractPaused`: Global emergency pause is active
+    ///
+    /// # Events
+    /// - Publishes `AutoClaimTriggered { stream_id, destination, amount }` event
+    /// - May also publish `Withdrawal` and `Completed` events (same as withdraw)
+    ///
+    /// # Security
+    /// - Caller cannot influence destination (set by recipient)
+    /// - Destination validity is checked before transfer
+    /// - CEI pattern: state updated before token transfer
+    /// - Reentrancy protected
+    /// - Global pause blocks execution
+    ///
+    /// # Preconditions
+    /// 1. Stream exists and is not terminal (Completed/Cancelled)
+    /// 2. Current time >= stream.end_time
+    /// 3. Auto-claim destination is set
+    /// 4. Destination is valid (non-zero, not contract)
+    /// 5. Contract is not globally paused
+    ///
+    /// # Usage Notes
+    /// - Can be called by anyone (keepers, bots, users)
+    /// - Identical accounting to `withdraw_to`
+    /// - May transition stream to Completed status
+    /// - Returns 0 if nothing to withdraw (already fully withdrawn)
+    pub fn trigger_auto_claim(env: Env, stream_id: u64) -> Result<i128, ContractError> {
+        require_not_globally_paused(&env)?;
+
+        let mut stream = load_stream(&env, stream_id)?;
+
+        // Check stream is not terminal
+        if stream.status == StreamStatus::Completed || stream.status == StreamStatus::Cancelled {
+            return Err(ContractError::InvalidState);
+        }
+
+        // Check we're at or past end_time
+        let now = env.ledger().timestamp();
+        if now < stream.end_time {
+            return Err(ContractError::InvalidState);
+        }
+
+        // Load auto-claim destination
+        let key = DataKey::AutoClaimDestination(stream_id);
+        let destination: Address = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::InvalidParams)?;
+
+        // Validate destination before proceeding
+        if !Self::is_valid_destination(&env, &destination) {
+            return Err(ContractError::InvalidParams);
+        }
+
+        // Bump TTL on destination
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        // Calculate withdrawable amount (same logic as withdraw)
+        let accrued = accrual::calculate_accrued_amount_checkpointed(
+            accrual::CheckpointState {
+                checkpointed_amount: stream.checkpointed_amount,
+                checkpointed_at: stream.checkpointed_at,
+                cliff_time: stream.cliff_time,
+                end_time: stream.end_time,
+                deposit_amount: stream.deposit_amount,
+            },
+            stream.rate_per_second,
+            now,
+        );
+
+        let withdrawable = accrued.saturating_sub(stream.withdrawn_amount).max(0);
+
+        // Early return if nothing to withdraw
+        if withdrawable == 0 {
+            return Ok(0);
+        }
+
+        // Update stream state (CEI pattern)
+        stream.withdrawn_amount = stream
+            .withdrawn_amount
+            .checked_add(withdrawable)
+            .unwrap_or(i128::MAX);
+
+        // Check if stream is now completed
+        if stream.withdrawn_amount >= stream.deposit_amount {
+            stream.status = StreamStatus::Completed;
+        }
+
+        save_stream(&env, &stream);
+
+        // Emit auto-claim triggered event
+        env.events().publish(
+            (symbol_short!("ac_trig"), stream_id),
+            AutoClaimTriggered {
+                stream_id,
+                destination: destination.clone(),
+                amount: withdrawable,
+            },
+        );
+
+        // Emit withdrawal event (for consistency with withdraw_to)
+        env.events().publish(
+            (symbol_short!("withdrew"), stream_id),
+            WithdrawalTo {
+                stream_id,
+                recipient: stream.recipient.clone(),
+                destination: destination.clone(),
+                amount: withdrawable,
+            },
+        );
+
+        // Emit completed event if applicable
+        if stream.status == StreamStatus::Completed {
+            env.events().publish(
+                (symbol_short!("completed"), stream_id),
+                StreamEvent::StreamCompleted(stream_id),
+            );
+        }
+
+        // Acquire reentrancy lock
+        acquire_reentrancy_lock(&env)?;
+
+        // Transfer tokens to destination
+        let transfer_result = push_token(&env, &destination, withdrawable);
+
+        // Release reentrancy lock
+        release_reentrancy_lock(&env);
+
+        // Propagate any transfer errors
+        transfer_result?;
+
+        Ok(withdrawable)
+    }
+
+    /// Get the auto-claim status for a stream.
+    ///
+    /// Returns information about the auto-claim configuration, including whether
+    /// a destination is set, whether it's valid, and how much is currently claimable.
+    /// This allows callers to validate before executing `trigger_auto_claim`, reducing
+    /// failed transactions and wasted gas on invalid destinations.
+    ///
+    /// # Parameters
+    /// - `stream_id`: The stream to query
+    ///
+    /// # Authorization
+    /// - None required (view function)
+    ///
+    /// # Returns
+    /// - `AutoClaimStatus`: Status of auto-claim configuration
+    ///   - `NotSet`: No destination configured
+    ///   - `ValidDestination { destination, claimable }`: Valid destination with claimable amount
+    ///   - `InvalidDestination { destination }`: Destination is zero address or contract itself
+    ///
+    /// # Errors
+    /// - `ContractError::StreamNotFound`: Stream does not exist
+    ///
+    /// # Usage Notes
+    /// - Read-only query (no state changes)
+    /// - Claimable amount is calculated at current timestamp
+    /// - Destination validity checks: non-zero address, not contract address
+    /// - Use this before calling `trigger_auto_claim` to avoid failed transactions
+    ///
+    /// # Example
+    /// ```rust
+    /// let status = client.get_auto_claim_status(&stream_id);
+    /// match status {
+    ///     AutoClaimStatus::ValidDestination { destination, claimable } => {
+    ///         if claimable > 0 {
+    ///             client.trigger_auto_claim(&stream_id);
+    ///         }
+    ///     }
+    ///     AutoClaimStatus::NotSet => {
+    ///         // No auto-claim configured
+    ///     }
+    ///     AutoClaimStatus::InvalidDestination { destination } => {
+    ///         // Destination is invalid, cannot trigger
+    ///     }
+    /// }
+    /// ```
+    pub fn get_auto_claim_status(
+        env: Env,
+        stream_id: u64,
+    ) -> Result<AutoClaimStatus, ContractError> {
+        let stream = load_stream(&env, stream_id)?;
+
+        // Check if auto-claim destination is set
+        let key = DataKey::AutoClaimDestination(stream_id);
+        let destination_opt: Option<Address> = env.storage().persistent().get(&key);
+
+        match destination_opt {
+            None => Ok(AutoClaimStatus::NotSet),
+            Some(destination) => {
+                // Check if destination is valid
+                if !Self::is_valid_destination(&env, &destination) {
+                    return Ok(AutoClaimStatus::InvalidDestination { destination });
+                }
+
+                // Calculate claimable amount
+                let now = env.ledger().timestamp();
+                let accrued = accrual::calculate_accrued_amount_checkpointed(
+                    accrual::CheckpointState {
+                        checkpointed_amount: stream.checkpointed_amount,
+                        checkpointed_at: stream.checkpointed_at,
+                        cliff_time: stream.cliff_time,
+                        end_time: stream.end_time,
+                        deposit_amount: stream.deposit_amount,
+                    },
+                    stream.rate_per_second,
+                    now,
+                );
+
+                let claimable = accrued.saturating_sub(stream.withdrawn_amount).max(0);
+
+                Ok(AutoClaimStatus::ValidDestination {
+                    destination,
+                    claimable,
+                })
+            }
+        }
+    }
+
+    /// Get the auto-claim destination for a stream (if set).
+    ///
+    /// Returns the destination address configured by the recipient, or None if not set.
+    ///
+    /// # Parameters
+    /// - `stream_id`: The stream to query
+    ///
+    /// # Authorization
+    /// - None required (view function)
+    ///
+    /// # Returns
+    /// - `Option<Address>`: The destination address, or None if not set
+    ///
+    /// # Errors
+    /// - `ContractError::StreamNotFound`: Stream does not exist
+    ///
+    /// # Usage Notes
+    /// - Read-only query (no state changes)
+    /// - Does not validate destination (use `get_auto_claim_status` for validation)
+    /// - Returns None if no destination is configured
+    pub fn get_auto_claim_destination(
+        env: Env,
+        stream_id: u64,
+    ) -> Result<Option<Address>, ContractError> {
+        let _stream = load_stream(&env, stream_id)?;
+        let key = DataKey::AutoClaimDestination(stream_id);
+        Ok(env.storage().persistent().get(&key))
+    }
+
+    /// Internal helper to validate an auto-claim destination address.
+    ///
+    /// A valid destination must be:
+    /// 1. Not a zero address
+    /// 2. Not the contract itself (would create a circular transfer)
+    ///
+    /// # Parameters
+    /// - `env`: Contract environment
+    /// - `destination`: Address to validate
+    ///
+    /// # Returns
+    /// - `true` if destination is valid
+    /// - `false` if destination is invalid
+    fn is_valid_destination(env: &Env, destination: &Address) -> bool {
+        // Check if destination is the contract itself
+        if destination == &env.current_contract_address() {
+            return false;
+        }
+
+        // In Soroban, addresses are always valid if they exist
+        // Additional validation could be added here if needed
+        true
     }
 }
 

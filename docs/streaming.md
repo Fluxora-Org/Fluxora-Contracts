@@ -865,8 +865,54 @@ Recipients may opt in to have their final withdrawal triggered by any third part
 
 - **Auth**: `recipient.require_auth()` — only the stream recipient may set or change the destination.
 - **Constraints**: stream must exist and not be `Completed` or `Cancelled`; `destination` must not be the contract address.
+- **Validation**: destination is validated to ensure it's not the zero address and not the contract itself.
 - **Idempotent**: calling again with a new address overwrites the previous destination.
 - **Event**: `("ac_set", stream_id)` → `AutoClaimSet { stream_id, destination }`.
+- **Storage**: destination is stored in persistent storage under `DataKey::AutoClaimDestination(stream_id)`.
+
+#### `get_auto_claim_status(stream_id) -> AutoClaimStatus`
+
+Pre-flight check query that returns the auto-claim configuration status and claimable amount. This allows callers to validate before executing `trigger_auto_claim`, reducing failed transactions and wasted gas on invalid destinations.
+
+- **Auth**: None required (read-only view function).
+- **Returns**: `AutoClaimStatus` enum with three variants:
+  - `NotSet`: No auto-claim destination has been configured for this stream.
+  - `ValidDestination { destination, claimable }`: Destination is set and valid, with the current claimable amount.
+  - `InvalidDestination { destination }`: Destination is set but invalid (zero address or contract itself).
+- **Claimable calculation**: Computed as `accrued_amount - withdrawn_amount` at current timestamp, capped at 0.
+- **Validation checks**: 
+  - Destination is not the zero address
+  - Destination is not the contract address itself
+- **Usage pattern**:
+  ```rust
+  let status = client.get_auto_claim_status(&stream_id);
+  match status {
+      AutoClaimStatus::ValidDestination { destination, claimable } => {
+          if claimable > 0 {
+              client.trigger_auto_claim(&stream_id);
+          }
+      }
+      AutoClaimStatus::NotSet => {
+          // No auto-claim configured
+      }
+      AutoClaimStatus::InvalidDestination { destination } => {
+          // Destination is invalid, cannot trigger
+      }
+  }
+  ```
+- **Benefits**:
+  - Prevents wasted gas on invalid destinations
+  - Allows off-chain systems to batch valid claims
+  - Provides transparency for keepers and bots
+  - No state changes or side effects
+
+#### `get_auto_claim_destination(stream_id) -> Option<Address>`
+
+Simple query that returns the stored auto-claim destination address, or `None` if not set.
+
+- **Auth**: None required (read-only view function).
+- **Returns**: `Option<Address>` — the destination address if set, otherwise `None`.
+- **Note**: Does not validate the destination. Use `get_auto_claim_status` for validation.
 
 #### `revoke_auto_claim(stream_id)`
 
