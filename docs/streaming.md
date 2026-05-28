@@ -500,6 +500,8 @@ contract.create_streams_relative(&sender, &params)?;
 | `revoke_auto_claim`       | Recipient                     | `recipient.require_auth()`                  |
 | `trigger_auto_claim`      | Anyone                        | None (permissionless; destination fixed by recipient) |
 | `get_auto_claim_destination` | Anyone                     | None (view)                                 |
+| `delegated_withdraw`         | Relayer (ed25519 sig from recipient) | `relayer.require_auth()` + ed25519 sig |
+| `get_delegated_nonce`        | Anyone                     | None (view)                                 |
 
 **Note:** Sender-managed functions (`pause_stream`, `resume_stream`, `cancel_stream`) require sender auth. Admin uses separate `_as_admin` entry points.
 
@@ -789,6 +791,42 @@ If a stream is cancelled after opt-in, `trigger_auto_claim` returns `InvalidStat
 2. The caller of `trigger_auto_claim` has zero influence over where tokens go.
 3. CEI ordering is preserved: stream state is saved before the token transfer.
 4. Global emergency pause blocks `trigger_auto_claim` (same as `withdraw`).
+
+---
+
+### delegated_withdraw: Relayer-Submitted Withdrawal with Minimum Amount Guard
+
+`delegated_withdraw` allows a relayer (keeper, bot, or any third party) to submit a withdrawal on behalf of a recipient without requiring the recipient to sign a Soroban transaction themselves. The recipient instead signs an off-chain ed25519 message committing to the exact parameters of the withdrawal.
+
+#### Signed message format
+
+```
+message = stream_id            (u64,  8 bytes, big-endian)
+        | nonce                (u64,  8 bytes, big-endian)
+        | deadline             (u64,  8 bytes, big-endian)
+        | expected_minimum_amount (i128, 16 bytes, big-endian)
+```
+
+Total: 40 bytes.
+
+#### `expected_minimum_amount` — front-running protection
+
+Without this field, a relayer could delay the transaction until the accrued amount is much smaller than the recipient expected (e.g. after a rate decrease or near stream end), constituting a griefing vector. By committing to a minimum, the call reverts with `BelowMinimumAmount` (16) if `withdrawable < expected_minimum_amount`. Pass `0` to accept any positive amount.
+
+#### Nonce — replay protection
+
+Each recipient has a per-address nonce stored in `DataKey::DelegatedWithdrawNonce(recipient)`. The nonce starts at 0 and is incremented on every successful `delegated_withdraw`. Replaying a used signature returns `InvalidSignature` (15). Query the current nonce via `get_delegated_nonce(recipient)`.
+
+#### Failure semantics
+
+| Condition | Error |
+|-----------|-------|
+| `ledger.timestamp() > deadline` | `InvalidSignature` (15) |
+| `nonce != stored_nonce` | `InvalidSignature` (15) |
+| ed25519 signature invalid | host trap (panic) |
+| `withdrawable < expected_minimum_amount` | `BelowMinimumAmount` (16) |
+| Stream paused (non-terminal) | `InvalidState` (2) |
+| Stream completed | `InvalidState` (2) |
 
 ---
 

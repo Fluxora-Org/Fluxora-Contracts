@@ -82,7 +82,9 @@ pub const MAX_PAGE_SIZE: u64 = 100;
 ///   Code review and CI checks on this constant are the primary safeguard.
 /// Bumped to 2: `Stream` struct gained `checkpointed_amount: i128` and `checkpointed_at: u64`
 /// for safe rate-decrease support (see `decrease_rate_per_second`).
-pub const CONTRACT_VERSION: u32 = 2;
+/// Bumped to 3: `delegated_withdraw` signature payload now commits to
+/// `expected_minimum_amount` to close the relayer front-running griefing vector.
+pub const CONTRACT_VERSION: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -133,6 +135,10 @@ pub enum ContractError {
     StreamTerminalState = 13,
     /// Duplicate stream IDs were supplied to a batch operation.
     DuplicateStreamId = 14,
+    /// Delegated withdrawal signature is invalid or expired.
+    InvalidSignature = 15,
+    /// Accrued amount is below the expected minimum specified in the signed payload.
+    BelowMinimumAmount = 16,
 }
 
 #[contracttype]
@@ -419,6 +425,9 @@ pub enum DataKey {
     GlobalPauseAdmin,
     /// Auto-claim destination per stream (Address). Set by recipient to redirect withdrawals.
     AutoClaimDestination(u64),
+    /// Per-recipient nonce for delegated_withdraw replay protection.
+    /// Discriminant 10 — always append; never reorder.
+    DelegatedWithdrawNonce(Address),
 }
 
 // ---------------------------------------------------------------------------
@@ -654,6 +663,30 @@ fn save_auto_claim_destination(env: &Env, stream_id: u64, destination: &Address)
 fn remove_auto_claim_destination(env: &Env, stream_id: u64) {
     let key = DataKey::AutoClaimDestination(stream_id);
     env.storage().persistent().remove(&key);
+}
+
+// ---------------------------------------------------------------------------
+// Delegated-withdraw nonce helpers
+// ---------------------------------------------------------------------------
+
+/// Load the current nonce for a recipient (0 if never used).
+fn load_delegated_nonce(env: &Env, recipient: &Address) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::DelegatedWithdrawNonce(recipient.clone()))
+        .unwrap_or(0u64)
+}
+
+/// Increment and persist the nonce for a recipient.
+fn increment_delegated_nonce(env: &Env, recipient: &Address) {
+    let next = load_delegated_nonce(env, recipient) + 1;
+    let key = DataKey::DelegatedWithdrawNonce(recipient.clone());
+    env.storage().persistent().set(&key, &next);
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2063,6 +2096,154 @@ impl FluxoraStream {
         }
 
         Ok(results)
+    }
+
+    /// Withdraw accrued tokens on behalf of a recipient using an ed25519 signature.
+    ///
+    /// A relayer (keeper, bot, or any third party) may call this entrypoint to
+    /// trigger a withdrawal without requiring the recipient to submit a transaction
+    /// themselves. The recipient signs a message committing to:
+    ///
+    /// ```text
+    /// message = stream_id (u64, big-endian)
+    ///         | nonce     (u64, big-endian)
+    ///         | deadline  (u64, big-endian)
+    ///         | expected_minimum_amount (i128, big-endian)
+    /// ```
+    ///
+    /// The `expected_minimum_amount` field closes the relayer front-running griefing
+    /// vector: a relayer cannot delay the transaction until the accrued amount is
+    /// smaller than the recipient expected, because the call will revert with
+    /// `BelowMinimumAmount` if `withdrawable < expected_minimum_amount`.
+    ///
+    /// # Parameters
+    /// - `stream_id`: Stream to withdraw from.
+    /// - `relayer`: Address submitting the transaction (pays fees; no special privilege).
+    /// - `recipient_public_key`: Raw 32-byte ed25519 public key of the recipient.
+    /// - `nonce`: Replay-protection counter; must equal the stored nonce for this recipient.
+    /// - `deadline`: Ledger timestamp after which the signature is rejected.
+    /// - `expected_minimum_amount`: Minimum withdrawable amount the recipient accepts.
+    ///   Pass `0` to accept any positive amount.
+    /// - `signature`: 64-byte ed25519 signature over the message above.
+    ///
+    /// # Returns
+    /// - `i128`: Amount transferred to the recipient.
+    ///
+    /// # Errors
+    /// - `InvalidSignature` (15): Signature verification failed, deadline passed, or nonce mismatch.
+    /// - `BelowMinimumAmount` (16): Withdrawable amount is below `expected_minimum_amount`.
+    /// - `InvalidState`: Stream is paused (non-terminal) or completed.
+    /// - `StreamNotFound`: `stream_id` does not exist.
+    pub fn delegated_withdraw(
+        env: Env,
+        stream_id: u64,
+        relayer: Address,
+        recipient_public_key: soroban_sdk::Bytes,
+        nonce: u64,
+        deadline: u64,
+        expected_minimum_amount: i128,
+        signature: soroban_sdk::Bytes,
+    ) -> Result<i128, ContractError> {
+        require_not_globally_paused(&env)?;
+
+        // The relayer authorizes the transaction (pays fees); recipient auth is
+        // replaced by the ed25519 signature check below.
+        relayer.require_auth();
+
+        // 1. Deadline check — reject stale signatures.
+        if env.ledger().timestamp() > deadline {
+            return Err(ContractError::InvalidSignature);
+        }
+
+        // 2. Load stream.
+        let mut stream = load_stream(&env, stream_id)?;
+
+        // 3. Nonce check — replay protection.
+        let stored_nonce = load_delegated_nonce(&env, &stream.recipient);
+        if nonce != stored_nonce {
+            return Err(ContractError::InvalidSignature);
+        }
+
+        // 4. Build the signed message:
+        //    stream_id (8 bytes) | nonce (8 bytes) | deadline (8 bytes) | expected_minimum_amount (16 bytes)
+        let mut msg = soroban_sdk::Bytes::new(&env);
+        msg.extend_from_array(&stream_id.to_be_bytes());
+        msg.extend_from_array(&nonce.to_be_bytes());
+        msg.extend_from_array(&deadline.to_be_bytes());
+        msg.extend_from_array(&expected_minimum_amount.to_be_bytes());
+
+        // 5. Verify ed25519 signature — panics on failure (Soroban host trap).
+        env.crypto()
+            .ed25519_verify(&recipient_public_key, &msg, &signature);
+
+        // 6. State checks (same as withdraw).
+        if stream.status == StreamStatus::Completed {
+            return Err(ContractError::InvalidState);
+        }
+        if stream.status == StreamStatus::Paused && !is_terminal_state(&env, &stream) {
+            return Err(ContractError::InvalidState);
+        }
+
+        // 7. Compute withdrawable amount.
+        let accrued = Self::calculate_accrued(env.clone(), stream_id)?;
+        let mut withdrawable = accrued - stream.withdrawn_amount;
+
+        // Cap by contract balance for safety.
+        let token_address = get_token(&env)?;
+        let contract_balance =
+            token::Client::new(&env, &token_address).balance(&env.current_contract_address());
+        withdrawable = withdrawable.min(contract_balance);
+
+        // 8. Enforce minimum amount guard — closes the front-running griefing vector.
+        if withdrawable < expected_minimum_amount {
+            return Err(ContractError::BelowMinimumAmount);
+        }
+
+        if withdrawable <= 0 {
+            return Ok(0);
+        }
+
+        // 9. CEI: update state before external token transfer.
+        stream.withdrawn_amount += withdrawable;
+        let completed_now = (stream.status == StreamStatus::Active
+            || stream.status == StreamStatus::Paused)
+            && stream.withdrawn_amount == stream.deposit_amount;
+        if completed_now {
+            stream.status = StreamStatus::Completed;
+        }
+        save_stream(&env, &stream);
+
+        // 10. Increment nonce to prevent replay.
+        increment_delegated_nonce(&env, &stream.recipient);
+
+        // 11. Transfer tokens to recipient.
+        push_token(&env, &stream.recipient, withdrawable)?;
+
+        env.events().publish(
+            (symbol_short!("withdrew"), stream_id),
+            Withdrawal {
+                stream_id,
+                recipient: stream.recipient.clone(),
+                amount: withdrawable,
+            },
+        );
+
+        if completed_now {
+            env.events().publish(
+                (symbol_short!("completed"), stream_id),
+                StreamEvent::StreamCompleted(stream_id),
+            );
+        }
+
+        Ok(withdrawable)
+    }
+
+    /// Return the current delegated-withdraw nonce for a recipient.
+    ///
+    /// Relayers must include this value in the signed message to prevent replay attacks.
+    /// The nonce is incremented on every successful `delegated_withdraw` call.
+    pub fn get_delegated_nonce(env: Env, recipient: Address) -> u64 {
+        load_delegated_nonce(&env, &recipient)
     }
 
     /// Calculate the total amount accrued to the recipient at the current time.
