@@ -8,7 +8,7 @@ pub(crate) mod delegation;
 
 use delegation::validate_delegation_params;
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env, Map};
 
 // ---------------------------------------------------------------------------
 // TTL constants
@@ -1283,6 +1283,79 @@ impl FluxoraStream {
 
         Ok(stream_id)
     }
+
+    /// Like `persist_new_stream` but skips the per-call recipient index update.
+    ///
+    /// Used by `create_streams` to batch index writes: the caller collects all
+    /// (recipient → stream_ids) pairs and flushes them once per unique recipient,
+    /// reducing ledger I/O from O(n) to O(1) per recipient.
+    #[allow(clippy::too_many_arguments)]
+    fn persist_new_stream_skip_index(
+        env: &Env,
+        sender: Address,
+        recipient: Address,
+        deposit_amount: i128,
+        rate_per_second: i128,
+        start_time: u64,
+        cliff_time: u64,
+        end_time: u64,
+        withdraw_dust_threshold: i128,
+        memo: Option<soroban_sdk::Bytes>,
+    ) -> Result<u64, ContractError> {
+        if let Some(ref m) = memo {
+            if m.len() as usize > MAX_MEMO_BYTES {
+                return Err(ContractError::InvalidParams);
+            }
+        }
+
+        let stream_id = read_stream_count(env);
+        set_stream_count(env, stream_id + 1);
+
+        let stream = Stream {
+            stream_id,
+            sender: sender.clone(),
+            recipient: recipient.clone(),
+            deposit_amount,
+            rate_per_second,
+            start_time,
+            cliff_time,
+            end_time,
+            withdrawn_amount: 0,
+            status: StreamStatus::Active,
+            cancelled_at: None,
+            checkpointed_amount: 0,
+            checkpointed_at: start_time,
+            withdraw_dust_threshold,
+            memo: memo.clone(),
+        };
+
+        save_stream(env, &stream);
+
+        // Index update is intentionally skipped here; caller must flush the cache.
+
+        let liabilities = read_total_liabilities(env)
+            .checked_add(deposit_amount)
+            .unwrap_or(i128::MAX);
+        write_total_liabilities(env, liabilities);
+
+        env.events().publish(
+            (symbol_short!("created"), stream_id),
+            StreamCreated {
+                stream_id,
+                sender,
+                recipient,
+                deposit_amount,
+                rate_per_second,
+                start_time,
+                cliff_time,
+                end_time,
+                withdraw_dust_threshold,
+                memo,
+            },
+        );
+
+        Ok(stream_id)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1751,13 +1824,19 @@ impl FluxoraStream {
             pull_token(&env, &sender, total_deposit)?;
         }
 
-        // Second pass: generate IDs, persist state, and emit events iteratively
+        // Second pass: generate IDs, persist state, and emit events iteratively.
+        // Cache recipient → [stream_ids] to flush the index once per unique recipient
+        // instead of once per stream, reducing ledger reads from O(n) to O(1) per recipient.
         let mut created_ids = soroban_sdk::Vec::new(&env);
+        // recipient_cache maps each recipient to the new stream IDs created for them in this batch.
+        let mut recipient_cache: soroban_sdk::Map<Address, soroban_sdk::Vec<u64>> =
+            soroban_sdk::Map::new(&env);
+
         for params in streams.iter() {
-            let stream_id = Self::persist_new_stream(
+            let stream_id = Self::persist_new_stream_skip_index(
                 &env,
                 sender.clone(),
-                params.recipient,
+                params.recipient.clone(),
                 params.deposit_amount,
                 params.rate_per_second,
                 params.start_time,
@@ -1767,6 +1846,26 @@ impl FluxoraStream {
                 params.memo,
             )?;
             created_ids.push_back(stream_id);
+
+            // Accumulate stream_id into the cache for this recipient.
+            let mut ids = recipient_cache
+                .get(params.recipient.clone())
+                .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+            ids.push_back(stream_id);
+            recipient_cache.set(params.recipient, ids);
+        }
+
+        // Flush: one read + one write per unique recipient.
+        for (recipient, new_ids) in recipient_cache.iter() {
+            let mut existing = load_recipient_streams(&env, &recipient);
+            for id in new_ids.iter() {
+                let insert_pos = match existing.binary_search(id) {
+                    Ok(pos) => pos,
+                    Err(pos) => pos,
+                };
+                existing.insert(insert_pos, id);
+            }
+            save_recipient_streams(&env, &recipient, &existing);
         }
 
         Ok(created_ids)

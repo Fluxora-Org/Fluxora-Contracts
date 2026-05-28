@@ -276,3 +276,14 @@ The paged index provides DoS protection by bounding per-operation costs:
 - **Cursor-based pagination**: Prevents unbounded list traversal
 
 See [recipient-stream-index.md](./recipient-stream-index.md) for detailed performance characteristics, worked examples with soroban-cli, and indexer integration guidance.
+
+## Batch Recipient Index Caching (issue #514)
+
+`create_streams` now caches recipient index updates in a local
+`Map<Address, Vec<u64>>` for the duration of the batch and flushes once per
+unique recipient after the loop. This reduces ledger I/O from O(n) reads to
+O(k) reads where k is the number of unique recipients (k ≤ n).
+
+For a batch of 10 streams all going to the same recipient, this eliminates 9
+redundant ledger reads and 9 redundant ledger writes. See
+[recipient-stream-index.md](./recipient-stream-index.md) for full details.
