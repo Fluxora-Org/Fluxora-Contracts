@@ -5,6 +5,7 @@ Soroban smart contracts for the Fluxora treasury streaming protocol on Stellar. 
 ## Documentation
 
 - **[Stream contract](docs/streaming.md)** — Lifecycle, accrual formula, cliff/end_time, access control, events, and error codes.
+- **[Dust threshold](docs/dust-threshold.md)** — `withdraw_dust_threshold` formula, USDC examples, validation table, and template guidance.
 - **[Security](docs/security.md)** — CEI ordering, token trust model, authorization paths, overflow protection.
 - **[Upgrade strategy](docs/upgrade.md)** — CONTRACT_VERSION policy, breaking-change classification, migration runbook.
 - **[Deployment](docs/DEPLOYMENT.md)** — Step-by-step testnet deployment checklist.

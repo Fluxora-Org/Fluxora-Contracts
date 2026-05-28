@@ -856,6 +856,42 @@ If a stream is cancelled after opt-in, `trigger_auto_claim` returns `InvalidStat
 
 ---
 
+## 4.1. Governance Controls
+
+### Maximum Rate Per Second Cap
+
+The contract admin can set a governance-controlled maximum rate per second to prevent overflow attacks and ensure system stability.
+
+#### Admin Functions
+
+| Function | Authorization | Purpose |
+|----------|---------------|---------|
+| `set_max_rate_per_second(max_rate)` | Admin only | Set the global maximum allowed rate per second |
+
+#### Behavior
+
+- **Default**: `i128::MAX` (effectively unlimited) if never set
+- **Validation**: Applied to all `create_stream*` and `update_rate_per_second` calls
+- **Error**: Returns `RateCapExceeded` when attempted rate exceeds the cap
+- **Event**: Emits `RateCapEnforced` when a rate update is rejected due to the cap
+- **Existing streams**: Not affected by cap changes (only future rate updates)
+
+#### Security Properties
+
+1. **Overflow protection**: Prevents astronomically high rates that could cause arithmetic overflow in `calculate_accrued_amount_checkpointed`
+2. **Economic protection**: Prevents rates that could drain entire deposits in a single ledger
+3. **Governance flexibility**: Admin can adjust the cap based on economic conditions and system requirements
+4. **Transparency**: All cap enforcement is logged via events for auditability
+
+#### Event Schema
+
+**RateCapEnforced**
+- **Topic:** `("rate_cap", stream_id)`
+- **Payload:** `RateCapEnforced { stream_id, attempted_rate, max_rate_per_second }`
+- **When emitted:** Rate update rejected due to exceeding governance cap
+
+---
+
 ## 5. Events
 
 ### Event Schema

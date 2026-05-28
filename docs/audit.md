@@ -98,3 +98,36 @@ All token-transfer paths (`withdraw`, `withdraw_to`, `batch_withdraw`, `cancel_s
 ---
 
 For security patterns (e.g. CEI, reentrancy) see [docs/security.md](security.md).
+
+---
+
+## Delegation helper (`contracts/stream/src/delegation.rs`)
+
+`delegated_withdraw` delegates its deadline and nonce validation to
+`validate_delegation_params(env, stream_id, nonce, deadline)` in
+`src/delegation.rs`.  Auditors reviewing the delegated-withdraw auth path
+should start there.
+
+### What the helper checks
+
+| Check | Error on failure |
+|---|---|
+| `env.ledger().timestamp() > deadline` | `SignatureDeadlineExpired` |
+| `nonce != stored_nonce(stream.recipient)` | `InvalidParams` |
+| `stream_id` does not exist | `StreamNotFound` |
+
+### What the helper does NOT check
+
+The following checks remain in `delegated_withdraw` itself (after the helper returns `Ok`):
+
+- `destination == env.current_contract_address()` → `InvalidParams`
+- `stream.status == Completed` → `InvalidState`
+- `stream.status == Paused` → `InvalidState`
+- Ed25519 signature verification → `InvalidSignature` (or host trap)
+
+### Nonce storage
+
+Nonces are stored under `DataKey::WithdrawNonce(recipient_address)` in persistent
+storage.  The nonce is incremented by `increment_withdraw_nonce` only after all
+checks pass and a non-zero amount is transferred.  A zero-amount call does not
+consume the nonce.
