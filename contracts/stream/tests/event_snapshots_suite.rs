@@ -29,9 +29,9 @@
 extern crate std;
 
 use fluxora_stream::{
-    ContractPauseChanged, FluxoraStream, FluxoraStreamClient, PauseReason, RateUpdated,
-    RecipientUpdated, StreamCreated, StreamEndExtended, StreamEndShortened, StreamPaused,
-    StreamToppedUp, Withdrawal, WithdrawalTo,
+    ContractPauseChanged, FluxoraStream, FluxoraStreamClient, PauseReason, RateCapEnforced,
+    RateUpdated, RecipientUpdated, StreamCreated, StreamEndExtended, StreamEndShortened,
+    StreamPaused, StreamToppedUp, Withdrawal, WithdrawalTo,
 };
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
@@ -998,7 +998,12 @@ fn event_snapshot_recipient_updated_has_correct_topics_and_payload() {
     let new_recipient = Address::generate(&ctx.env);
     let events_before = ctx.env.events().all().len();
 
+    // Propose (sender) then accept (current recipient) to trigger the recp_upd event.
     ctx.client().update_recipient(&stream_id, &new_recipient);
+    ctx.client().accept_recipient_update(&stream_id);
+
+    let events = ctx.env.events().all();
+    let mut found_recipient_updated = false;
 
     let events = ctx.env.events().all();
     let mut found_recipient_updated = false;
