@@ -29,6 +29,14 @@ const PERSISTENT_BUMP_AMOUNT: u32 = 120_960;
 /// All paginated entrypoints enforce this limit strictly.
 pub const MAX_PAGE_SIZE: u64 = 100;
 
+/// Maximum byte length for pause-reason strings passed to `pause_stream`,
+/// `pause_stream_as_admin`, and `pause_protocol`.
+///
+/// Analogous to `MAX_MEMO_BYTES = 64` in the Stellar protocol. Prevents
+/// unbounded ledger-entry growth from arbitrarily long reason strings.
+/// Enforced at the entrypoint level; callers must truncate before submitting.
+pub const MAX_PAUSE_REASON_BYTES: u32 = 256;
+
 // Contract version
 // ---------------------------------------------------------------------------
 
@@ -133,6 +141,14 @@ pub enum ContractError {
     StreamTerminalState = 13,
     /// Duplicate stream IDs were supplied to a batch operation.
     DuplicateStreamId = 14,
+    /// Delegated withdrawal signature is invalid or expired.
+    InvalidSignature = 15,
+    /// Accrued amount is below the expected minimum specified in the signed payload.
+    BelowMinimumAmount = 16,
+    /// Auto-claim destination address is zero / invalid.
+    InvalidAutoClaimDestination = 17,
+    /// Pause reason string exceeds MAX_PAUSE_REASON_BYTES (256 bytes).
+    PauseReasonTooLong = 18,
 }
 
 #[contracttype]
@@ -3567,6 +3583,10 @@ impl FluxoraStream {
 
         // Store audit trail information
         let reason_str = reason.unwrap_or_else(|| soroban_sdk::String::from_str(&env, ""));
+        // Enforce MAX_PAUSE_REASON_BYTES to prevent unbounded ledger-entry growth.
+        if reason_str.len() > MAX_PAUSE_REASON_BYTES {
+            return Err(ContractError::PauseReasonTooLong);
+        }
         env.storage()
             .instance()
             .set(&DataKey::GlobalPauseReason, &reason_str);
@@ -3684,6 +3704,139 @@ impl FluxoraStream {
                 paused_by: None,
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Auto-claim entrypoints (Issue #513)
+    // -----------------------------------------------------------------------
+
+    /// Set the auto-claim destination for a stream.
+    ///
+    /// The recipient opts in to permissionless final-claim by registering a
+    /// destination address. Any caller may then invoke `trigger_auto_claim`
+    /// once the stream reaches `end_time`.
+    ///
+    /// # Validation
+    /// - `destination` must not be the zero address (`InvalidAutoClaimDestination`).
+    /// - `destination` must not be the contract address (`InvalidParams`).
+    /// - Stream must exist and not be in a terminal state.
+    pub fn set_auto_claim(
+        env: Env,
+        stream_id: u64,
+        destination: Address,
+    ) -> Result<(), ContractError> {
+        let stream = load_stream(&env, stream_id)?;
+        stream.recipient.require_auth();
+
+        if destination == env.current_contract_address() {
+            return Err(ContractError::InvalidParams);
+        }
+
+        // Reject zero/default address — data-integrity guard (Issue #513).
+        if destination
+            == Address::from_str(
+                &env,
+                "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+            )
+        {
+            return Err(ContractError::InvalidAutoClaimDestination);
+        }
+
+        if stream.status == StreamStatus::Completed || stream.status == StreamStatus::Cancelled {
+            return Err(ContractError::InvalidState);
+        }
+
+        save_auto_claim_destination(&env, stream_id, &destination);
+
+        env.events().publish(
+            (symbol_short!("ac_set"), stream_id),
+            (stream_id, destination),
+        );
+        Ok(())
+    }
+
+    /// Revoke the auto-claim destination for a stream (opt-out).
+    ///
+    /// Safe to call even if no destination is set (idempotent).
+    pub fn revoke_auto_claim(env: Env, stream_id: u64) -> Result<(), ContractError> {
+        let stream = load_stream(&env, stream_id)?;
+        stream.recipient.require_auth();
+
+        remove_auto_claim_destination(&env, stream_id);
+
+        env.events().publish(
+            (symbol_short!("ac_rev"), stream_id),
+            stream_id,
+        );
+        Ok(())
+    }
+
+    /// Trigger the auto-claim for a stream (permissionless).
+    ///
+    /// Any caller may invoke this once `ledger.timestamp() >= stream.end_time`
+    /// and an auto-claim destination has been set by the recipient.
+    /// Tokens are sent to the stored destination — the caller cannot redirect them.
+    pub fn trigger_auto_claim(env: Env, stream_id: u64) -> Result<i128, ContractError> {
+        require_not_globally_paused(&env)?;
+        let mut stream = load_stream(&env, stream_id)?;
+
+        if stream.status == StreamStatus::Completed || stream.status == StreamStatus::Cancelled {
+            return Err(ContractError::InvalidState);
+        }
+
+        if env.ledger().timestamp() < stream.end_time {
+            return Err(ContractError::InvalidState);
+        }
+
+        let destination = load_auto_claim_destination(&env, stream_id)
+            .ok_or(ContractError::InvalidState)?;
+
+        let accrued = Self::calculate_accrued(env.clone(), stream_id)?;
+        let mut withdrawable = accrued - stream.withdrawn_amount;
+
+        let token_address = get_token(&env)?;
+        let contract_balance =
+            token::Client::new(&env, &token_address).balance(&env.current_contract_address());
+        withdrawable = withdrawable.min(contract_balance);
+
+        if withdrawable <= 0 {
+            return Ok(0);
+        }
+
+        stream.withdrawn_amount += withdrawable;
+        let completed_now = stream.withdrawn_amount == stream.deposit_amount;
+        if completed_now {
+            stream.status = StreamStatus::Completed;
+        }
+        save_stream(&env, &stream);
+
+        push_token(&env, &destination, withdrawable)?;
+
+        env.events().publish(
+            (symbol_short!("withdrew"), stream_id),
+            Withdrawal {
+                stream_id,
+                recipient: stream.recipient.clone(),
+                amount: withdrawable,
+            },
+        );
+        env.events().publish(
+            (symbol_short!("ac_trig"), stream_id),
+            (stream_id, destination, withdrawable),
+        );
+        if completed_now {
+            env.events().publish(
+                (symbol_short!("completed"), stream_id),
+                StreamEvent::StreamCompleted(stream_id),
+            );
+        }
+
+        Ok(withdrawable)
+    }
+
+    /// Return the auto-claim destination for a stream, if set.
+    pub fn get_auto_claim_destination(env: Env, stream_id: u64) -> Option<Address> {
+        load_auto_claim_destination(&env, stream_id)
     }
 }
 

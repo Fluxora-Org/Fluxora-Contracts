@@ -3750,3 +3750,111 @@ fn test_batch_withdraw_to_contract_address_fails() {
     let res = ctx.client().try_batch_withdraw_to(&ctx.recipient, &params);
     assert_eq!(res, Err(Ok(fluxora_stream::ContractError::InvalidParams)));
 }
+
+// ---------------------------------------------------------------------------
+// Issue #513: set_auto_claim destination validation + MAX_PAUSE_REASON_BYTES
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_set_auto_claim_zero_address_rejected() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // The Stellar "zero" account (all A's) must be rejected.
+    let zero_addr = soroban_sdk::Address::from_str(
+        &ctx.env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    );
+
+    let result = ctx
+        .client()
+        .try_set_auto_claim(&stream_id, &zero_addr);
+
+    assert_eq!(
+        result,
+        Err(Ok(fluxora_stream::ContractError::InvalidAutoClaimDestination)),
+        "zero address must be rejected with InvalidAutoClaimDestination"
+    );
+}
+
+#[test]
+fn test_set_auto_claim_contract_address_rejected() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    let result = ctx
+        .client()
+        .try_set_auto_claim(&stream_id, &ctx.contract_id);
+
+    assert_eq!(
+        result,
+        Err(Ok(fluxora_stream::ContractError::InvalidParams)),
+        "contract address must be rejected with InvalidParams"
+    );
+}
+
+#[test]
+fn test_set_auto_claim_valid_destination_accepted() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    let dest = soroban_sdk::Address::generate(&ctx.env);
+    ctx.client().set_auto_claim(&stream_id, &dest);
+
+    assert_eq!(
+        ctx.client().get_auto_claim_destination(&stream_id),
+        Some(dest),
+        "valid destination must be stored"
+    );
+}
+
+#[test]
+fn test_revoke_auto_claim_clears_destination() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    let dest = soroban_sdk::Address::generate(&ctx.env);
+    ctx.client().set_auto_claim(&stream_id, &dest);
+    ctx.client().revoke_auto_claim(&stream_id);
+
+    assert_eq!(
+        ctx.client().get_auto_claim_destination(&stream_id),
+        None,
+        "destination must be cleared after revoke"
+    );
+}
+
+#[test]
+fn test_pause_reason_too_long_rejected() {
+    let ctx = TestContext::setup();
+
+    // Build a 257-byte string (one over the limit).
+    let long_reason = soroban_sdk::String::from_str(
+        &ctx.env,
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    ); // 257 chars
+
+    let result = ctx
+        .client()
+        .try_pause_protocol(&ctx.admin, &Some(long_reason));
+
+    assert_eq!(
+        result,
+        Err(Ok(fluxora_stream::ContractError::PauseReasonTooLong)),
+        "reason > 256 bytes must return PauseReasonTooLong"
+    );
+}
+
+#[test]
+fn test_pause_reason_at_limit_accepted() {
+    let ctx = TestContext::setup();
+
+    // Exactly 256 bytes — must be accepted.
+    let ok_reason = soroban_sdk::String::from_str(
+        &ctx.env,
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    ); // 256 chars
+
+    ctx.client().pause_protocol(&ctx.admin, &Some(ok_reason));
+    assert!(ctx.client().is_paused(), "protocol must be paused");
+}

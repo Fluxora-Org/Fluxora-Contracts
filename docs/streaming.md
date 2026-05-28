@@ -108,6 +108,8 @@ This section is the protocol-level contract for the global pause state managed v
 | `is_paused()` | Query if protocol is currently paused (permissionless) |
 | `get_pause_info()` | Query detailed pause info including audit trail (permissionless) |
 
+**Pause reason length:** The `reason` string passed to `pause_protocol` is bounded by `MAX_PAUSE_REASON_BYTES = 256`. Strings longer than 256 bytes return `PauseReasonTooLong` (18). This prevents unbounded ledger-entry growth (Issue #513).
+
 Success semantics (observable):
 
 1. Preconditions: Caller must be the authorized contract `admin`.
@@ -753,7 +755,7 @@ Recipients may opt in to have their final withdrawal triggered by any third part
 #### `set_auto_claim(stream_id, destination)`
 
 - **Auth**: `recipient.require_auth()` — only the stream recipient may set or change the destination.
-- **Constraints**: stream must exist and not be `Completed` or `Cancelled`; `destination` must not be the contract address.
+- **Constraints**: stream must exist and not be `Completed` or `Cancelled`; `destination` must not be the contract address (`InvalidParams`); `destination` must not be the zero address (`InvalidAutoClaimDestination` — Issue #513).
 - **Idempotent**: calling again with a new address overwrites the previous destination.
 - **Event**: `("ac_set", stream_id)` → `AutoClaimSet { stream_id, destination }`.
 
