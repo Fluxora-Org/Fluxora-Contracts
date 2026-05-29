@@ -224,3 +224,38 @@ Schedule presets store **only relative offsets** (`start_delay`, `cliff_delay`, 
 | `OwnerTemplateIds(owner)` | Persistent `Vec<u64>` | Ids registered by `owner` (length capped by `MAX_TEMPLATES_PER_OWNER`) |
 
 Global cap: `MAX_GLOBAL_TEMPLATES`. Per-owner cap: `MAX_TEMPLATES_PER_OWNER`. See `contracts/stream/src/lib.rs`.
+
+## Adaptive TTL Policy (issue #516)
+
+### Constants
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `LEDGER_CLOSE_TIME` | 5 s | Approximate Stellar ledger close time |
+| `BUFFER_LEDGERS` | 17 280 | ~1 day buffer added after stream end_time |
+| `MAX_TTL` | 6 307 200 | Hard cap (~1 year at 5 s/ledger) |
+| `PERSISTENT_BUMP_AMOUNT` | 120 960 | Static floor (~7 days) |
+
+### Formula
+
+```
+adaptive_ttl = min(MAX_TTL, (end_time - now) / LEDGER_CLOSE_TIME + BUFFER_LEDGERS)
+             .max(PERSISTENT_BUMP_AMOUNT)
+```
+
+- `now >= end_time` → bump = `BUFFER_LEDGERS` (floor ensures recipient can still withdraw)
+- Short stream → bump ≥ `PERSISTENT_BUMP_AMOUNT` (7-day floor)
+- Long stream → bump scales linearly up to `MAX_TTL`
+
+### Applied to
+
+| Key | On read | On write |
+|---|---|---|
+| `DataKey::Stream(id)` | adaptive (uses stream.end_time) | adaptive |
+| `DataKey::RecipientStreams(addr)` | static (end_time unknown) | adaptive (when end_time provided) |
+
+### Security notes
+
+- The formula uses `saturating_sub` / `saturating_add` — no overflow possible.
+- The `MAX_TTL` cap prevents paying for more than ~1 year of rent on any single entry.
+- The `PERSISTENT_BUMP_AMOUNT` floor prevents under-bumping short-lived streams.

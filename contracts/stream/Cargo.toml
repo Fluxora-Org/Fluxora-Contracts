@@ -23,6 +23,8 @@ soroban-sdk = "21.7.7"
 [dev-dependencies]
 # Required for simulating ledger environment and testing time dependencies
 soroban-sdk = { version = "21.7.7", features = ["testutils"] }
+# Factory policy enforcement tests (#525)
+fluxora_factory = { path = "../factory", features = ["testutils"] }
 # Property-based testing for accrual math fuzz harness (#292)
 proptest = "1"
 # Required for constructing Ed25519 keypairs in delegated-withdraw tests
