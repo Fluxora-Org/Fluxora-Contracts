@@ -36,7 +36,33 @@ invariant and to remain safe if the token contract ever makes a cross-contract c
 
 ---
 
-## 3. Token Trust Model
+## 3. Explicit Reentrancy Guard (Issue #512)
+
+While CEI provides the primary defense, an explicit `ReentrancyLock` is used as a
+defense-in-depth layer for all token-transfer paths. This prevents recursive calls
+even if a malicious custom token contract attempts to re-enter `FluxoraStream`
+during a `transfer` call.
+
+### 3.1 Protected Paths
+
+The following entrypoints are wrapped in `acquire_reentrancy_lock` / `release_reentrancy_lock`:
+
+- `withdraw`
+- `withdraw_to`
+- `batch_withdraw`
+- `cancel_stream`
+- `cancel_stream_as_admin`
+
+### 3.2 Behavior
+
+If the lock is already held (storage key `DataKey::ReentrancyLock` is `true`), the call
+reverts with `ContractError::InvalidState`. The lock is released only after the
+external `push_token` call completes, ensuring that no re-entrant call can succeed
+during the interaction phase.
+
+---
+
+## 4. Token Trust Model
 
 ### 3.1 Single trusted token
 
