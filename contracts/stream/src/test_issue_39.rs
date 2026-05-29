@@ -115,12 +115,28 @@ fn test_batch_withdraw_running_balance_cap() {
     let ctx = TestContext::setup();
 
     // Create two streams with 500 each
-    let id1 = ctx
-        .client()
-        .create_stream(&ctx.sender, &ctx.recipient, &500, &1, &0, &0, &500);
-    let id2 = ctx
-        .client()
-        .create_stream(&ctx.sender, &ctx.recipient, &500, &1, &0, &0, &500);
+    let id1 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &500,
+        &1,
+        &0,
+        &500,
+        &500,
+        &0,
+        &None,
+    );
+    let id2 = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &500,
+        &1,
+        &0,
+        &500,
+        &500,
+        &0,
+        &None,
+    );
 
     ctx.env.ledger().set_timestamp(500); // both fully accrued
 

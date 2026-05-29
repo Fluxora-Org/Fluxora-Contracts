@@ -430,3 +430,84 @@ When changing the contract:
 5. Document any new residual risks
 
 Last verified: 2026-03-27
+
+---
+
+## Local Validation
+
+Run the alignment script directly from the repository root to check for
+documentation drift before pushing:
+
+```bash
+python3 script/validate-doc-alignment.py
+```
+
+A passing run prints:
+
+```
+OK: all contract identifiers are present in documentation.
+```
+
+Any undocumented identifier prints a clear error and exits with code 1:
+
+```
+MISSING DOC: 'new_function' (entrypoint) found in code but not in 'docs/streaming.md'
+```
+
+To also run the full test suite with coverage locally:
+
+```bash
+pip install pytest pytest-cov
+pytest tests/ --cov=script/ --cov-fail-under=95 -v
+```
+
+---
+
+## Doc Alignment CI Check
+
+The script `script/validate-doc-alignment.py` enforces that every public
+entrypoint, event symbol, and `ContractError` variant defined in
+`contracts/stream/src/lib.rs` is mentioned in the corresponding documentation
+file. It runs automatically on every pull request and push to `main` via the
+`docs-check` CI job.
+
+### Running locally
+
+```bash
+python3 script/validate-doc-alignment.py
+```
+
+A clean run prints:
+
+```
+OK: all contract identifiers are present in documentation.
+```
+
+Any drift prints one line per missing identifier and exits with code 1:
+
+```
+MISSING DOC: 'ErrorRateLimit' (error variant) found in code but not in 'docs/error.md'
+```
+
+### Running the test suite
+
+```bash
+pip install pytest
+pytest script/tests/test_validate_doc_alignment.py -v
+```
+
+### What is checked
+
+| Source file | Extracted identifiers | Target doc |
+|---|---|---|
+| `contracts/stream/src/lib.rs` | `pub fn <name>` (entrypoints) | `docs/streaming.md` |
+| `contracts/stream/src/lib.rs` | `symbol_short!("<topic>")` (events) | `docs/events.md` |
+| `contracts/stream/src/lib.rs` | `ContractError` enum variants | `docs/error.md` |
+
+### Fixing drift
+
+1. If you added a new entrypoint, event, or error variant, add a description
+   for it in the relevant doc file.
+2. Re-run the script locally to confirm it passes before pushing.
+3. The CI `docs-check` job will fail with a non-zero exit code if any
+   identifier is undocumented, blocking the PR from merging.
