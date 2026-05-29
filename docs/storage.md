@@ -212,50 +212,14 @@ Extended on every `load_stream()` (read) and `save_stream()` (write), and on eve
 
 ---
 
-## 7. Stream schedule templates (CONTRACT_VERSION ≥ 3)
+## 7. Version History
 
-Schedule presets store **only relative offsets** (`start_delay`, `cliff_delay`, `duration`). Token amounts and recipients are supplied when calling `create_stream_from_template`, keeping calldata smaller than repeating three `u64` offsets on every payroll-style run.
+For a full description of what changed between contract versions and how to migrate, see [DEPLOYMENT.md — Version Migration](./DEPLOYMENT.md#version-migration).
 
-| Key | Type | Purpose |
-|-----|------|---------|
-| `NextTemplateId` | Instance `u64` | Monotonic template id counter |
-| `ActiveTemplateCount` | Instance `u64` | Count of stored templates (supports global cap) |
-| `StreamTemplate(template_id)` | Persistent | `StreamScheduleTemplate` body |
-| `OwnerTemplateIds(owner)` | Persistent `Vec<u64>` | Ids registered by `owner` (length capped by `MAX_TEMPLATES_PER_OWNER`) |
+### V5 → V6 DataKey additions
 
-Global cap: `MAX_GLOBAL_TEMPLATES`. Per-owner cap: `MAX_TEMPLATES_PER_OWNER`. See `contracts/stream/src/lib.rs`.
+| Discriminant | Variant | Added in | Notes |
+|---|---|---|---|
+| 10 | `DelegatedWithdrawNonce(Address)` | V6 | Per-recipient nonce for `delegated_withdraw` replay protection. Absent until first use. |
 
-## Adaptive TTL Policy (issue #516)
-
-### Constants
-
-| Constant | Value | Purpose |
-|---|---|---|
-| `LEDGER_CLOSE_TIME` | 5 s | Approximate Stellar ledger close time |
-| `BUFFER_LEDGERS` | 17 280 | ~1 day buffer added after stream end_time |
-| `MAX_TTL` | 6 307 200 | Hard cap (~1 year at 5 s/ledger) |
-| `PERSISTENT_BUMP_AMOUNT` | 120 960 | Static floor (~7 days) |
-
-### Formula
-
-```
-adaptive_ttl = min(MAX_TTL, (end_time - now) / LEDGER_CLOSE_TIME + BUFFER_LEDGERS)
-             .max(PERSISTENT_BUMP_AMOUNT)
-```
-
-- `now >= end_time` → bump = `BUFFER_LEDGERS` (floor ensures recipient can still withdraw)
-- Short stream → bump ≥ `PERSISTENT_BUMP_AMOUNT` (7-day floor)
-- Long stream → bump scales linearly up to `MAX_TTL`
-
-### Applied to
-
-| Key | On read | On write |
-|---|---|---|
-| `DataKey::Stream(id)` | adaptive (uses stream.end_time) | adaptive |
-| `DataKey::RecipientStreams(addr)` | static (end_time unknown) | adaptive (when end_time provided) |
-
-### Security notes
-
-- The formula uses `saturating_sub` / `saturating_add` — no overflow possible.
-- The `MAX_TTL` cap prevents paying for more than ~1 year of rent on any single entry.
-- The `PERSISTENT_BUMP_AMOUNT` floor prevents under-bumping short-lived streams.
+No entries were removed or reordered between V5 and V6. All V5 persistent entries remain readable on a V6 instance.
