@@ -76,10 +76,18 @@ fn integration_close_multiple_completed_streams_selective() {
 
     // Create 4 streams
     let ids = vec![
-        ctx.client().create_stream(&ctx.sender, &ctx.recipient, &100_i128, &1_i128, &0u64, &0u64, &100u64),
-        ctx.client().create_stream(&ctx.sender, &ctx.recipient, &200_i128, &1_i128, &100u64, &100u64, &300u64),
-        ctx.client().create_stream(&ctx.sender, &ctx.recipient, &150_i128, &1_i128, &0u64, &0u64, &150u64),
-        ctx.client().create_stream(&ctx.sender, &ctx.recipient, &250_i128, &1_i128, &0u64, &0u64, &250u64),
+        ctx.client().create_stream(&ctx.sender, &ctx.recipient, &100_i128, &1_i128, &0u64, &0u64, &100u64,
+            &None
+        ),
+        ctx.client().create_stream(&ctx.sender, &ctx.recipient, &200_i128, &1_i128, &100u64, &100u64, &300u64,
+            &None
+        ),
+        ctx.client().create_stream(&ctx.sender, &ctx.recipient, &150_i128, &1_i128, &0u64, &0u64, &150u64,
+            &None
+        ),
+        ctx.client().create_stream(&ctx.sender, &ctx.recipient, &250_i128, &1_i128, &0u64, &0u64, &250u64,
+            &None
+        ),
     ];
 
     // Verify all 4 are in the index
@@ -142,9 +150,15 @@ fn integration_close_completed_stream_per_recipient_isolation() {
     let recipient3 = Address::generate(&ctx.env);
 
     // Create streams for different recipients
-    let id_r1 = ctx.client().create_stream(&ctx.sender, &ctx.recipient, &500_i128, &1_i128, &0u64, &0u64, &500u64);
-    let id_r2 = ctx.client().create_stream(&ctx.sender, &recipient2, &600_i128, &1_i128, &0u64, &0u64, &600u64);
-    let id_r3 = ctx.client().create_stream(&ctx.sender, &recipient3, &400_i128, &1_i128, &0u64, &0u64, &400u64);
+    let id_r1 = ctx.client().create_stream(&ctx.sender, &ctx.recipient, &500_i128, &1_i128, &0u64, &0u64, &500u64,
+        &None
+    );
+    let id_r2 = ctx.client().create_stream(&ctx.sender, &recipient2, &600_i128, &1_i128, &0u64, &0u64, &600u64,
+        &None
+    );
+    let id_r3 = ctx.client().create_stream(&ctx.sender, &recipient3, &400_i128, &1_i128, &0u64, &0u64, &400u64,
+        &None
+    );
 
     // Verify each recipient has 1 stream
     assert_eq!(ctx.client().get_recipient_stream_count(&ctx.recipient), 1);
@@ -186,7 +200,9 @@ fn integration_close_completed_stream_rejects_invalid_states() {
     assert!(result.is_err(), "cannot close Active stream");
 
     // Test 2: Paused stream cannot be closed
-    let id_paused = ctx.client().create_stream(&ctx.sender, &ctx.recipient, &500_i128, &1_i128, &0u64, &0u64, &500u64);
+    let id_paused = ctx.client().create_stream(&ctx.sender, &ctx.recipient, &500_i128, &1_i128, &0u64, &0u64, &500u64,
+        &None
+    );
     ctx.env.ledger().set_timestamp(250);
     ctx.client().pause_stream(&id_paused);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -195,7 +211,9 @@ fn integration_close_completed_stream_rejects_invalid_states() {
     assert!(result.is_err(), "cannot close Paused stream");
 
     // Test 3: Cancelled stream cannot be closed
-    let id_cancelled = ctx.client().create_stream(&ctx.sender, &ctx.recipient, &500_i128, &1_i128, &0u64, &0u64, &500u64);
+    let id_cancelled = ctx.client().create_stream(&ctx.sender, &ctx.recipient, &500_i128, &1_i128, &0u64, &0u64, &500u64,
+        &None
+    );
     ctx.env.ledger().set_timestamp(250);
     ctx.client().cancel_stream(&id_cancelled);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -210,7 +228,9 @@ fn integration_close_completed_stream_rejects_invalid_states() {
     assert!(result.is_err(), "cannot close non-existent stream");
 
     // Test 5: Only Completed streams can be closed
-    let id_completable = ctx.client().create_stream(&ctx.sender, &ctx.recipient, &500_i128, &1_i128, &0u64, &0u64, &500u64);
+    let id_completable = ctx.client().create_stream(&ctx.sender, &ctx.recipient, &500_i128, &1_i128, &0u64, &0u64, &500u64,
+        &None
+    );
     ctx.env.ledger().set_timestamp(500);
     ctx.client().withdraw(&id_completable);
 
