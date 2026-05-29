@@ -16,7 +16,7 @@ When changing the contract:
 - Update snapshot tests if externally visible behavior changes
 - No behavior change required for doc-only updates
 
-**Entrypoint index (validator):** `batch_withdraw_to`, `delete_stream_template`, `get_global_emergency_paused`, `get_recipient_stream_count`, `get_stream_memo`, `get_stream_template`, `global_resume`, `set_contract_paused`, `set_global_emergency_paused`, `version`.
+**Entrypoint index (validator):** `batch_withdraw_to`, `delete_stream_template`, `get_global_emergency_paused`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `global_resume`, `set_contract_paused`, `set_global_emergency_paused`, `version`.
 
 ## Externally Visible Assurances
 
@@ -42,24 +42,9 @@ From **CONTRACT_VERSION 3**, integrators can register **relative** schedule skel
 
 ### Phases
 
-| Phase            | Action                                     | Notes                                                                   |
-| ---------------- | ------------------------------------------ | ----------------------------------------------------------------------- |
-| **Creation**     | `create_stream`                            | Sender deposits tokens; stream starts as `Active`                       |
-| **Pause**        | `pause_stream` / `pause_stream_as_admin`   | Stops withdrawals; accrual continues by time                            |
-| **Resume**       | `resume_stream` / `resume_stream_as_admin` | Restores withdrawals                                                    |
-| Phase            | Action                                     | Notes                                                                   |
-| ---------------- | ------------------------------------------ | ----------------------------------------------------------------------- |
-| **Creation**     | `create_stream`                            | Sender deposits tokens; stream starts as `Active`                       |
-| **Pause**        | `pause_stream` / `pause_stream_as_admin`   | Stops withdrawals; accrual continues by time                            |
-| **Resume**       | `resume_stream` / `resume_stream_as_admin` | Restores withdrawals                                                    |
-| **Cancellation** | `cancel_stream` / `cancel_stream_as_admin` | Refunds unstreamed amount to sender; accrued amount stays for recipient |
-| **Withdrawal**   | `withdraw` / `withdraw_to` / `batch_withdraw` / `delegated_withdraw` | Recipient pulls accrued tokens (directly or via relayer) |
-| **Completion**   | Automatic                                  | When `withdrawn_amount == deposit_amount`, status becomes `Completed`   |
-| **Withdrawal**   | `withdraw` / `withdraw_to` / `batch_withdraw` / `delegated_withdraw` | Recipient pulls accrued tokens (directly or via relayer) |
-| **Completion**   | Automatic                                  | When `withdrawn_amount == deposit_amount`, status becomes `Completed`   |
 | Phase            | Action                                        | Notes                                                                 |
 | ---------------- | --------------------------------------------- | --------------------------------------------------------------------- |
-| **Creation**     | `create_stream`                               | Sender deposits tokens; stream starts as `Active`                     |
+| **Creation**     | `create_stream` / `create_streams_partial` | Sender deposits tokens; stream starts as `Active`                     |
 | **Top-up**       | `top_up_stream`                               | Extra deposit locked (sender or admin only); schedule unchanged       |
 | **Pause**        | `pause_stream` / `pause_stream_as_admin`      | Stops withdrawals; accrual continues by time                          |
 | **Resume**       | `resume_stream` / `resume_stream_as_admin`    | Restores withdrawals; blocked if past `end_time` (Terminal)           |
@@ -89,15 +74,9 @@ Success semantics (observable):
 1. Preconditions: stream status is `Active` or `Paused`.
 2. `cancelled_at` is set to current ledger timestamp.
 3. Accrued amount is frozen at `cancelled_at` (no post-cancel time growth).
-4. Optional cancellation fee is applied only to the unstreamed refund:
-   - `refund_gross = deposit_amount - accrued_at_cancelled_at`
-   - If `cancellation_fee_bps > 0`:
-     - `fee = (refund_gross × cancellation_fee_bps) / 10000` (rounded down)
-     - `refund_net = refund_gross - fee`
-   - Else: `refund_net = refund_gross`
-5. **CRITICAL**: The recipient's frozen accrued amount is **never** affected by the cancellation fee
-6. Stream transitions to terminal `Cancelled` state.
-7. `StreamCancelled` event is emitted with topic `("cancelled", stream_id)`.
+4. Refund is `deposit_amount - accrued_at_cancelled_at`.
+5. Stream transitions to terminal `Cancelled` state.
+6. `StreamCancelled` event is emitted with topic `("cancelled", stream_id)`.
 
 Failure semantics (observable):
 
@@ -119,26 +98,15 @@ Role boundaries:
 Invariants after successful cancellation:
 
 1. `status == Cancelled` and `cancelled_at.is_some()`.
-2. `calculate_accrued(stream_id)` always returns accrued at `cancelled_at`, unaffected by any fee.
-3. `refund_net + frozen_accrued == deposit_amount - fee` (fee is burned or retained by contract)
-4. `refund_net + frozen_accrued + fee == deposit_amount`.
-5. Recipient may withdraw only frozen accrued remainder (`frozen_accrued - withdrawn_amount`), which is never reduced by the fee.
-
-Cancellation Fee Guarantees:
-
-- **Recipient protection**: The fee is always deducted from the sender's refund, never from the recipient's accrued balance.
-- **Fee validation**: Valid range is 0–10000 basis points (0–100%). Creation with `cancellation_fee_bps > 10000` is rejected.
-- **Fee rounding**: Calculated as `(amount × fee_bps) / 10000`, truncated down (integer division). This ensures no accidentally inflated refund.
-- **Zero refund edge case**: If `refund_gross = 0` (stream fully accrued), then `fee = 0`, and sender gets no refund (as before any fee feature).
+2. `calculate_accrued(stream_id)` always returns accrued at `cancelled_at`.
+3. `refund + frozen_accrued == deposit_amount`.
+4. Recipient may withdraw only frozen accrued remainder (`frozen_accrued - withdrawn_amount`).
 
 Scope boundary and exclusions:
 
-1. In scope: refund math with optional fee, `cancelled_at` persistence/freeze semantics, cancel auth paths, cancel event consistency, recipient safety guarantee.
-2. Out of scope: token-level trust assumptions beyond documented model, off-chain indexer liveness, and economic policy choices (for example who should bear operational costs or where fee proceeds go).
+1. In scope: refund math, `cancelled_at` persistence/freeze semantics, cancel auth paths, cancel event consistency.
+2. Out of scope: token-level trust assumptions beyond documented model, off-chain indexer liveness, and economic policy choices (for example who should bear operational costs).
 3. Residual risk: if a non-standard token violates SEP-41 expectations, transfer behavior may diverge; CEI ordering reduces but cannot fully eliminate external token risk.
-4. Backward compat: All existing streams created with `cancellation_fee_bps = 0` behave identically to pre-fee versions.
-
-
 
 ### Global Pause Semantics (Issue Scope)
 
@@ -152,6 +120,8 @@ This section is the protocol-level contract for the global pause state managed v
 | `resume_protocol(admin)` | Globally resume new stream creation, clearing audit trail |
 | `is_paused()` | Query if protocol is currently paused (permissionless) |
 | `get_pause_info()` | Query detailed pause info including audit trail (permissionless) |
+
+**Pause reason length:** The `reason` string passed to `pause_protocol` is bounded by `MAX_PAUSE_REASON_BYTES = 256`. Strings longer than 256 bytes return `PauseReasonTooLong` (18). This prevents unbounded ledger-entry growth (Issue #513).
 
 Success semantics (observable):
 
@@ -324,11 +294,12 @@ withdrawable = accrued - withdrawn_amount
 From **CONTRACT_VERSION 5**, senders can optionally set a `withdraw_dust_threshold` per stream to reduce fee and event spam from tiny micro-withdrawals.
 
 - **Enforcement**: If `withdrawable < withdraw_dust_threshold`, the withdrawal returns `0` (no transfer, no event).
-- **Validation**: At creation time, `withdraw_dust_threshold` must not exceed `deposit_amount`. If it does, the creation is rejected with `ContractError::InvalidDustThreshold` (20).
 - **Exceptions (Threshold Ignored)**:
     - **Terminal State**: Once the stream reaches `end_time` or is `Cancelled`, the threshold is ignored to ensure the recipient can pull all remaining funds.
     - **Final Drain**: If the withdrawal would result in `withdrawn_amount == deposit_amount` (completing the stream), it is allowed even if the amount is below the threshold.
 - **Default**: The threshold defaults to `0` if not specified at creation.
+
+> **See also:** [dust-threshold.md](./dust-threshold.md) — formula for choosing a safe threshold value, worked USDC examples, a validation table, and guidance for template authors.
 
 ### Frontend: get_claimable_at (simulation)
 
@@ -339,6 +310,18 @@ From **CONTRACT_VERSION 5**, senders can optionally set a `withdraw_dust_thresho
 - **Consistency:** For the current ledger time, result matches `get_withdrawable(stream_id)`.
 
 Behaviour: Active/Paused streams use the given `timestamp` (clamped to schedule); Cancelled streams use `min(timestamp, cancelled_at)` so accrual is frozen at cancellation. Completed streams return 0.
+
+### Frontend: get_stream_health (view summary)
+
+`get_stream_health(stream_id)` returns a structured health summary for a stream.
+
+- **is_underfunded**: `true` if the current `deposit_amount` is insufficient to cover the total tokens that will accrue by `end_time` at the current `rate_per_second`.
+- **is_expired**: `true` if `ledger.timestamp() >= end_time` and the stream is not yet `Completed` or `Cancelled`.
+- **accrued_to_date**: Real-time total tokens accrued since `start_time`.
+- **remaining_deposit**: `deposit_amount - withdrawn_amount`.
+- **seconds_until_depletion**: Estimated seconds until the stream's deposit is fully exhausted by accrual. Capped at `end_time`.
+
+Use this to show real-time health indicators in UIs, alert senders of underfunding, or notify recipients of expired streams ready for final withdrawal.
 
 ---
 
@@ -432,6 +415,19 @@ pub fn create_stream_relative(
     duration: u64,        // Total seconds from start_time to end_time
 ) -> Result<u64, ContractError>
 ```
+
+#### `create_streams_partial` (#411)
+
+From **CONTRACT_VERSION 5**, the contract provides an opt-in partial batch creation entrypoint that allows creating multiple streams in a single transaction with **failure isolation**.
+
+- **Non-Atomic**: Unlike `create_streams`, which reverts the entire transaction if any single stream fails, `create_streams_partial` attempts to create each stream independently.
+- **Per-Entry Results**: Returns a `Vec<CreateStreamResult>` where each entry contains:
+    - `success: bool`: True if the stream was created.
+    - `stream_id: Option<u64>`: The ID of the created stream (if success is true).
+    - `error: Option<u32>`: The error code (if success is false).
+- **Ordering**: Results are returned in the exact same order as the input parameters.
+- **Failures Handled**: Validation errors (e.g. `InvalidParams`) and token transfer failures (e.g. `InsufficientBalance`) for one entry do not block subsequent entries in the same batch.
+- **Auth**: Requires the funding `sender` to authorize the call.
 
 **Computation:**
 ```
@@ -541,19 +537,16 @@ contract.create_streams_relative(&sender, &params)?;
 | `get_claimable_at`        | Anyone                        | None (view)                                 |
 | `get_config`              | Anyone                        | None (view)                                 |
 | `get_stream_state`        | Anyone                        | None (view)                                 |
+| `get_stream_health`       | Anyone                        | None (view)                                 |
 | `get_streams_by_id_range` | Anyone                        | None (view, paginated)                      |
 | `get_recipient_streams_paginated` | Anyone                  | None (view, paginated)                      |
-| `get_pending_recipient_update` | Anyone                     | None (view)                                 |
 | `pause_stream_as_admin`   | Admin                         | `admin.require_auth()`                      |
 | `resume_stream_as_admin`  | Admin                         | `admin.require_auth()`                      |
 | `cancel_stream_as_admin`  | Admin                         | `admin.require_auth()`                      |
-| `migrate_recipient_index` | Admin                         | `admin.require_auth()`                      |
 | `close_completed_stream`  | Anyone                        | None (permissionless terminal cleanup)     |
 | `top_up_stream`           | Funder address                | `funder.require_auth()`                     |
 | `update_rate_per_second`  | Sender                        | `sender.require_auth()`                     |
-| `update_recipient`        | Sender                        | `sender.require_auth()` (propose)           |
-| `accept_recipient_update` | Current Recipient             | `recipient.require_auth()` (accept)        |
-| `cancel_recipient_update` | Sender                        | `sender.require_auth()` (withdraw proposal) |
+| `update_recipient`        | Recipient                     | `recipient.require_auth()`                  |
 | `decrease_rate_per_second`| Sender                        | `sender.require_auth()`                     |
 | `shorten_stream_end_time` | Sender                        | `sender.require_auth()`                     |
 | `extend_stream_end_time`  | Sender                        | `sender.require_auth()`                     |
@@ -562,6 +555,8 @@ contract.create_streams_relative(&sender, &params)?;
 | `revoke_auto_claim`       | Recipient                     | `recipient.require_auth()`                  |
 | `trigger_auto_claim`      | Anyone                        | None (permissionless; destination fixed by recipient) |
 | `get_auto_claim_destination` | Anyone                     | None (view)                                 |
+| `delegated_withdraw`         | Relayer (ed25519 sig from recipient) | `relayer.require_auth()` + ed25519 sig |
+| `get_delegated_nonce`        | Anyone                     | None (view)                                 |
 
 **Note:** Sender-managed functions (`pause_stream`, `resume_stream`, `cancel_stream`) require sender auth. Admin uses separate `_as_admin` entry points.
 
@@ -632,10 +627,6 @@ loop {
 | `get_recipient_streams_paginated` | Large portfolios | 100/page | Bounded, safe |
 | `get_streams_by_id_range` | Full contract export | 100/page | Bounded, safe |
 
-#### Recipient Index Migration (#519)
-
-Administrators can migrate a recipient's legacy flat stream list to a segmented paged index via `migrate_recipient_index(recipient)`. This bounds per-operation I/O at $O(1)$ and is recommended for high-volume recipients to prevent memory exhaustion during mutations.
-
 ### top_up_stream: Observable Semantics
 
 `top_up_stream(stream_id, funder, amount)` is a deposit-only mutation for existing streams.
@@ -686,7 +677,6 @@ A naive decrease would retroactively lower the recipient's accrued tokens. To pr
 - **Unauthorized**: Caller is not the stream sender.
 - **InvalidState**: Stream is `Completed` or `Cancelled`.
 - **InvalidParams**: `new_rate_per_second <= 0` or `new_rate_per_second <= old_rate`.
-  - This includes the boundary cases where the proposed rate is equal to the current rate or zero.
 - **InsufficientDeposit**: `deposit_amount < new_rate_per_second * (end_time - start_time)`.
 - **Atomicity**: Any failure reverts the entire transaction with no state changes or events.
 
@@ -695,24 +685,6 @@ A naive decrease would retroactively lower the recipient's accrued tokens. To pr
 - Accrued amounts never decrease due to rate updates.
 - Recipient entitlement is preserved or increased.
 - Deposit coverage ensures the stream remains fully fundable at the new rate.
-
-### Recipient Rotation (Propose-and-Accept)
-
-From **CONTRACT_VERSION 6**, the stream recipient is rotated via a two-step propose-and-accept pattern. This provides a "veto" window for the current recipient to detect unauthorized changes and take protective action.
-
-- **Propose**: The sender calls `update_recipient(stream_id, new_recipient)`. This stores a pending proposal and emits `RecipientUpdateProposed`.
-- **Accept**: The **current recipient** must call `accept_recipient_update(stream_id)` to finalize the rotation. This emits `RecipientUpdated`.
-- **Cancel**: The sender can withdraw the proposal at any time via `cancel_recipient_update(stream_id)`. This emits `RecipientUpdateCancelled`.
-
-#### Rules:
-- Only the sender can propose an update.
-- Only the current recipient can accept an update.
-- If a proposal is already pending, `update_recipient` fails with `PendingRecipientUpdateExists`.
-- Attempting to accept or cancel when no proposal exists returns `NoPendingRecipientUpdate`.
-
-#### `get_pending_recipient_update(stream_id) -> Option<PendingRecipientUpdate>`
-
-View function to check if a recipient rotation is currently proposed for a stream. Returns the proposed recipient address and timestamp if pending.
 
 ### transfer_sender: Observable Semantics
 
@@ -949,6 +921,42 @@ If a stream is cancelled after opt-in, `trigger_auto_claim` returns `InvalidStat
 
 ---
 
+### delegated_withdraw: Relayer-Submitted Withdrawal with Minimum Amount Guard
+
+`delegated_withdraw` allows a relayer (keeper, bot, or any third party) to submit a withdrawal on behalf of a recipient without requiring the recipient to sign a Soroban transaction themselves. The recipient instead signs an off-chain ed25519 message committing to the exact parameters of the withdrawal.
+
+#### Signed message format
+
+```
+message = stream_id            (u64,  8 bytes, big-endian)
+        | nonce                (u64,  8 bytes, big-endian)
+        | deadline             (u64,  8 bytes, big-endian)
+        | expected_minimum_amount (i128, 16 bytes, big-endian)
+```
+
+Total: 40 bytes.
+
+#### `expected_minimum_amount` — front-running protection
+
+Without this field, a relayer could delay the transaction until the accrued amount is much smaller than the recipient expected (e.g. after a rate decrease or near stream end), constituting a griefing vector. By committing to a minimum, the call reverts with `BelowMinimumAmount` (16) if `withdrawable < expected_minimum_amount`. Pass `0` to accept any positive amount.
+
+#### Nonce — replay protection
+
+Each recipient has a per-address nonce stored in `DataKey::DelegatedWithdrawNonce(recipient)`. The nonce starts at 0 and is incremented on every successful `delegated_withdraw`. Replaying a used signature returns `InvalidSignature` (15). Query the current nonce via `get_delegated_nonce(recipient)`.
+
+#### Failure semantics
+
+| Condition | Error |
+|-----------|-------|
+| `ledger.timestamp() > deadline` | `InvalidSignature` (15) |
+| `nonce != stored_nonce` | `InvalidSignature` (15) |
+| ed25519 signature invalid | host trap (panic) |
+| `withdrawable < expected_minimum_amount` | `BelowMinimumAmount` (16) |
+| Stream paused (non-terminal) | `InvalidState` (2) |
+| Stream completed | `InvalidState` (2) |
+
+---
+
 ## 5. Events
 
 ### Event Schema
@@ -1051,9 +1059,8 @@ errors relevant to stream creation and timing.
 | `ContractError::StreamAlreadyPaused` (10)                               | `pause_stream`                     | Double pause                                  |
 | `ContractError::StreamNotPaused` (11)                                   | `resume_stream`                    | Resume active stream                          |
 | `ContractError::StreamTerminalState` (12)                               | `pause_stream` / `resume_stream`   | Modification past end_time                    |
-| `ContractError::StreamNotFound` (1) | Various | Invalid stream_id |
-| `ContractError::InvalidDustThreshold` (20) | `create_stream` | `dust_threshold > deposit_amount` |
-| `ContractError::Unauthorized` (6) | Various | Auth check failed |
+| `ContractError::StreamNotFound` (1)                                     | Various                            | Invalid stream_id                             |
+| `ContractError::Unauthorized` (6)                                       | Various                            | Auth check failed                             |
 | `ContractError::InvalidState` (2)                                       | `withdraw`                         | Withdraw from non-terminal paused             |
 | `ContractError::InvalidState` (2)                                       | `cancel_stream`                    | Cancel completed/cancelled                    |
 | `"invalid state for stream closure"`                                    | `close_completed_stream`           | Close non-terminal (Active/Paused) stream    |
@@ -1090,44 +1097,6 @@ For a full list of contract errors, see [error.md](./error.md).
 
 ---
 
-## Delegated Withdraw (Relayer Support)
-
-`delegated_withdraw` lets a relayer submit a withdrawal on behalf of a recipient.
-The recipient signs an authorization off-chain; the relayer submits it on-chain and
-pays the transaction fee. Tokens are sent to the `destination` address specified in
-the signature.
-
-### Parameters
-
-| Parameter   | Type         | Description |
-|-------------|--------------|-------------|
-| `stream_id` | `u64`        | Stream to withdraw from |
-| `relayer`   | `Address`    | Transaction submitter (pays fees; must `require_auth`) |
-| `destination` | `Address`  | Where tokens are sent (bound in signature) |
-| `nonce`     | `u64`        | Must equal `get_withdraw_nonce(recipient)` |
-| `deadline`  | `u64`        | Ledger timestamp after which signature is invalid |
-| `signature` | `BytesN<64>` | Ed25519 signature from the stream's recipient |
-
-### Behavior
-
-- Same accrual and completion logic as `withdraw`.
-- Returns `0` (without consuming the nonce) if nothing has accrued yet.
-- Emits `("dlg_wdraw", stream_id)` → `DelegatedWithdrawal { stream_id, recipient, relayer, destination, amount, nonce }`.
-- Emits `("completed", stream_id)` if the stream is fully drained.
-
-### Error codes
-
-| Error | Condition |
-|-------|-----------|
-| `SignatureDeadlineExpired` | `ledger.timestamp() > deadline` |
-| `InvalidParams` | nonce mismatch, or destination == contract address |
-| `InvalidSignature` (host trap) | signature fails `ed25519_verify` |
-| `InvalidState` | stream is `Completed` or `Paused` |
-| `StreamNotFound` | stream does not exist |
-
-### View: `get_withdraw_nonce(recipient)`
-
-Returns the current nonce for a recipient (`0` if never used). Permissionless.
 ## Cross-References
 
 ### Related Documentation

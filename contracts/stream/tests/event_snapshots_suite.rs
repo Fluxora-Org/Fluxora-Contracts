@@ -29,9 +29,9 @@
 extern crate std;
 
 use fluxora_stream::{
-    ContractPauseChanged, FluxoraStream, FluxoraStreamClient, PauseReason, RateUpdated,
-    RecipientUpdated, StreamCreated, StreamEndExtended, StreamEndShortened, StreamPaused,
-    StreamToppedUp, Withdrawal, WithdrawalTo,
+    ContractPauseChanged, DataKey, FluxoraStream, FluxoraStreamClient, PauseReason, RateUpdated,
+    RecipientUpdated, Stream, StreamCreated, StreamEndExtended, StreamEndShortened,
+    StreamHealthChanged, StreamPaused, StreamToppedUp, Withdrawal, WithdrawalTo,
 };
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
@@ -997,8 +997,8 @@ fn event_snapshot_recipient_updated_has_correct_topics_and_payload() {
 
     let new_recipient = Address::generate(&ctx.env);
     let events_before = ctx.env.events().all().len();
-
     ctx.client().update_recipient(&stream_id, &new_recipient);
+    ctx.client().accept_recipient_update(&stream_id);
 
     let events = ctx.env.events().all();
     let mut found_recipient_updated = false;
@@ -1255,5 +1255,242 @@ fn event_snapshot_no_events_on_failed_operations() {
     assert!(
         !saw_new_paused,
         "No new pause event should be emitted on failed pause operation"
+    );
+}
+
+// =====================================================================
+// Event Snapshot Tests: StreamHealthChanged
+// =====================================================================
+
+/// Helper: find the last StreamHealthChanged event emitted after `events_before`.
+fn find_health_changed_event(
+    ctx: &EventTestContext,
+    events_before: u32,
+) -> Option<StreamHealthChanged> {
+    let events = ctx.env.events().all();
+    let mut result: Option<StreamHealthChanged> = None;
+    for i in events_before..events.len() {
+        let event = events.get(i).unwrap();
+        if event.0 != ctx.contract_id {
+            continue;
+        }
+        if let Some(sym) = ctx.get_first_topic_symbol(&event) {
+            if sym == "hlth_chg" {
+                if let Some(data) = ctx.get_event_data(&event) {
+                    result = Some(
+                        StreamHealthChanged::try_from_val(&ctx.env, &data)
+                            .expect("Data must deserialize to StreamHealthChanged"),
+                    );
+                }
+            }
+        }
+    }
+    result
+}
+
+/// Helper: manually sets the deposit amount of a stream in persistent storage.
+fn set_stream_deposit_in_storage(ctx: &EventTestContext, stream_id: u64, amount: i128) {
+    ctx.env.as_contract(&ctx.contract_id, || {
+        let key = DataKey::Stream(stream_id);
+        let mut stream: Stream = ctx.env.storage().persistent().get(&key).unwrap();
+        stream.deposit_amount = amount;
+        ctx.env.storage().persistent().set(&key, &stream);
+    });
+}
+
+/// Top-up heals an underfunded stream: health transitions from underfunded → funded.
+#[test]
+fn event_snapshot_health_changed_top_up_heals_underfunded_stream() {
+    let ctx = EventTestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Create a stream: deposit=1000, rate=1/s, duration=1000s.
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+        &0,
+        &None,
+    );
+
+    // Advance to t=100.
+    ctx.env.ledger().set_timestamp(100);
+
+    // Manually lower deposit to 500 in storage to make it underfunded.
+    // remaining_balance = 500. remaining_time = 900. 500 < 900.
+    set_stream_deposit_in_storage(&ctx, stream_id, 500);
+
+    // Top up to heal the stream by adding 600 tokens.
+    // new deposit = 1100. remaining_balance = 1100. 1100 >= 900. Funded!
+    let events_before = ctx.env.events().all().len();
+    ctx.client()
+        .top_up_stream(&stream_id, &ctx.sender, &600_i128);
+
+    let health = find_health_changed_event(&ctx, events_before)
+        .expect("StreamHealthChanged event must be emitted when healing");
+
+    assert_eq!(health.stream_id, stream_id);
+    assert_eq!(health.is_underfunded, false, "Stream should now be funded");
+    assert_eq!(health.remaining_balance, 1100);
+    assert_eq!(health.seconds_remaining, 900);
+}
+
+/// Shorten heals an underfunded stream: health transitions from underfunded → funded.
+#[test]
+fn event_snapshot_health_changed_shorten_heals_underfunded_stream() {
+    let ctx = EventTestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Create stream: deposit=1000, rate=1/s, duration=1000s. Funded.
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+        &0,
+        &None,
+    );
+
+    // Advance to t=100.
+    ctx.env.ledger().set_timestamp(100);
+
+    // Set deposit to 500.
+    // remaining_balance = 500. remaining_time = 900. 500 < 900 (underfunded).
+    set_stream_deposit_in_storage(&ctx, stream_id, 500);
+
+    // Shorten end_time to 500.
+    // new_max_streamable = 1 * 500 = 500.
+    // deposit becomes 500. remaining_balance = 500. remaining_time = 400. 500 >= 400 (funded).
+    let events_before = ctx.env.events().all().len();
+    ctx.client().shorten_stream_end_time(&stream_id, &500u64);
+
+    let health = find_health_changed_event(&ctx, events_before)
+        .expect("StreamHealthChanged event must be emitted when shorten heals");
+
+    assert_eq!(health.stream_id, stream_id);
+    assert_eq!(health.is_underfunded, false, "Stream should now be funded");
+    assert_eq!(health.seconds_remaining, 400);
+    assert_eq!(health.remaining_balance, 500);
+}
+
+/// Decrease rate heals an underfunded stream: health transitions from underfunded → funded.
+#[test]
+fn event_snapshot_health_changed_decrease_rate_heals_underfunded_stream() {
+    let ctx = EventTestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Create stream: deposit=10000, rate=10/s, duration=1000s. Funded.
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &10000_i128,
+        &10_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+        &0,
+        &None,
+    );
+
+    // Advance to t=100.
+    ctx.env.ledger().set_timestamp(100);
+
+    // Set deposit to 2000 in storage.
+    // remaining_balance = 2000. remaining_time = 900. required = 10 * 900 = 9000.
+    // 2000 < 9000 (underfunded).
+    set_stream_deposit_in_storage(&ctx, stream_id, 2000);
+
+    // Decrease rate from 10 to 1.
+    // accrued_now = 1000. remaining_seconds = 900. future_accrual = 1 * 900 = 900.
+    // new deposit = 1900. remaining_balance = 1900. remaining_time = 900. required = 900.
+    // 1900 >= 900 (funded).
+    let events_before = ctx.env.events().all().len();
+    ctx.client().decrease_rate_per_second(&stream_id, &1_i128);
+
+    let health = find_health_changed_event(&ctx, events_before)
+        .expect("StreamHealthChanged event must be emitted when decreasing rate heals");
+
+    assert_eq!(health.stream_id, stream_id);
+    assert_eq!(health.is_underfunded, false, "Stream should now be funded");
+    assert_eq!(health.remaining_balance, 1900);
+    assert_eq!(health.seconds_remaining, 900);
+}
+
+/// Cancel heals an underfunded stream: terminal state → not underfunded.
+#[test]
+fn event_snapshot_health_changed_cancel_heals_underfunded_stream() {
+    let ctx = EventTestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Create stream: deposit=1000, rate=1/s, duration=1000s.
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+        &0,
+        &None,
+    );
+
+    // Advance to t=100.
+    ctx.env.ledger().set_timestamp(100);
+
+    // Set deposit to 500.
+    // remaining_balance = 500. remaining_time = 900. 500 < 900 (underfunded).
+    set_stream_deposit_in_storage(&ctx, stream_id, 500);
+
+    // Cancel: terminal → seconds_remaining=0, required=0, never underfunded.
+    let events_before = ctx.env.events().all().len();
+    ctx.client().cancel_stream(&stream_id);
+
+    let health = find_health_changed_event(&ctx, events_before)
+        .expect("StreamHealthChanged event must be emitted when cancel heals");
+
+    assert_eq!(health.stream_id, stream_id);
+    assert_eq!(
+        health.is_underfunded, false,
+        "Terminal stream is never underfunded"
+    );
+    assert_eq!(health.seconds_remaining, 0);
+}
+
+/// No health event emitted when health status does not change (stays funded).
+#[test]
+fn event_snapshot_health_changed_not_emitted_when_no_transition() {
+    let ctx = EventTestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Create stream: deposit=1000, rate=1/s, duration=1000s. Funded.
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+        &0,
+        &None,
+    );
+
+    // Top up an already-funded stream. Health stays funded → no event.
+    let events_before = ctx.env.events().all().len();
+    ctx.client()
+        .top_up_stream(&stream_id, &ctx.sender, &500_i128);
+
+    let health = find_health_changed_event(&ctx, events_before);
+    assert!(
+        health.is_none(),
+        "StreamHealthChanged must NOT be emitted when health doesn't change"
     );
 }

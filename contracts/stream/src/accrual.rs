@@ -58,12 +58,22 @@ pub struct CheckpointState {
 /// accrual calculations after rate changes.
 ///
 /// # Parameters
-/// - `state`           – snapshot of the stream's checkpoint fields (see [`CheckpointState`]).
-/// - `rate_per_second` – rate for the **current** epoch (`checkpointed_at` ➜ `end_time`).
-/// - `current_time`    – evaluation point.
+/// - `_start_time`         – original stream start; reserved for future cliff logic.
+/// - `checkpointed_amount` – tokens accrued under all **previous** rate epochs, locked in
+///                            at `checkpointed_at`. Initialised to `0` at stream creation.
+/// - `checkpointed_at`     – timestamp of the last checkpoint (== `start_time` initially).
+/// - `cliff_time`          – no accrual is ever visible before this timestamp.
+/// - `end_time`            – accrual is capped at this timestamp.
+/// - `rate_per_second`     – rate for the **current** epoch (`checkpointed_at` ➜ `end_time`).
+/// - `deposit_amount`      – absolute ceiling; result is clamped to `[0, deposit_amount]`.
+/// - `now`                 – evaluation point (caller-supplied; constant within a transaction).
+///
+/// Accepting `now` explicitly rather than reading `env.ledger().timestamp()` inside the
+/// function eliminates redundant host-function calls when the same timestamp is used for
+/// multiple streams in a single transaction (e.g. `batch_withdraw`).
 ///
 /// # Safety invariants
-/// 1. `accrued(t)` is monotonically non-decreasing in `current_time`.
+/// 1. `accrued(t)` is monotonically non-decreasing in `now`.
 /// 2. `accrued(checkpointed_at) == checkpointed_amount` — a rate decrease never reduces
 ///    the visible withdrawable amount.
 /// 3. `accrued(t) <= deposit_amount` for all `t`.
@@ -71,9 +81,10 @@ pub struct CheckpointState {
 pub fn calculate_accrued_amount_checkpointed(
     state: CheckpointState,
     rate_per_second: i128,
-    current_time: u64,
+    deposit_amount: i128,
+    now: u64,
 ) -> i128 {
-    if current_time < state.cliff_time {
+    if now < cliff_time {
         return 0;
     }
 
@@ -90,8 +101,8 @@ pub fn calculate_accrued_amount_checkpointed(
         return 0;
     }
 
-    let elapsed_now = current_time.min(state.end_time);
-    let elapsed_seconds: i128 = if elapsed_now <= state.checkpointed_at {
+    let elapsed_now = now.min(end_time);
+    let elapsed_seconds: i128 = if elapsed_now <= checkpointed_at {
         0
     } else {
         (elapsed_now - state.checkpointed_at) as i128

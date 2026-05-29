@@ -2,156 +2,55 @@
 
 ## Overview
 
-The recipient stream index is a secondary data structure that enables efficient enumeration of all streams for a given recipient address. This feature is essential for recipient portals and withdraw workflows where users need to see all their incoming streams.
+Each recipient address has a persistent sorted list of stream IDs stored under
+`DataKey::RecipientStreams(recipient)`. This index powers `get_recipient_streams`
+and `get_recipient_stream_count` without scanning all streams.
 
-**Key characteristics:**
-
-- **Sorted by stream_id**: All streams for a recipient are maintained in ascending order by stream_id (see [stream-id-monotonicity-uniqueness.md](./stream-id-monotonicity-uniqueness.md) for stream ID semantics)
-- **Deterministic**: Same recipient always returns streams in the same order
-- **Lifecycle-aware**: Streams are added on creation, removed on close
-- **Separate per recipient**: Each recipient has an independent index
-- **Efficient**: O(log n) insertion/removal, O(1) lookup by recipient
-
-## Data Structure
-
-### Storage Keys
-
-```rust
-DataKey::RecipientStreams(Address)      // Legacy flat list (Vec<u64>)
-DataKey::RecipientStreamPage(Address, u32) // Paged index entry (fixed-size Vec<u64>)
-DataKey::RecipientStreamPageCount(Address) // Number of pages for a recipient
-```
-
-### Paged Index (#519)
-
-From **CONTRACT_VERSION 6**, the contract supports a segmented paged index to bound read/write costs for recipients with many streams.
-
-- **MAX_RECIPIENT_PAGE_SIZE**: 100 entries per page.
-- **Dense Pages**: Only the last page can be partially full. When a stream is removed, the last element of the last page is moved to the gap to maintain density.
-- **Migration**: A legacy flat list can be migrated to the paged format via `migrate_recipient_index(recipient)`.
-- **Complexity**: Paged index bounds per-operation I/O at O(1) regardless of history, as only one or two pages (each capped at 100 IDs) are touched per mutation.
-
-### Invariants
-
-1. **Sorted order**: `streams[i] < streams[i+1]` for all valid indices
-2. **Uniqueness**: No duplicate stream IDs in a recipient's index
-3. **Completeness**: All active streams for a recipient are in the index
-4. **Consistency**: Index is updated atomically with stream creation/closure
-
-## API Reference
-
-### Query Functions
-
-#### `get_recipient_streams(recipient: Address) -> Vec<u64>`
-
-Retrieve all stream IDs for a given recipient in sorted ascending order.
-
-**Parameters:**
-
-- `recipient`: Address to query streams for
-
-**Returns:**
-
-- `Vec<u64>`: Vector of stream IDs (sorted ascending by stream_id)
-  - Empty vector if the recipient has no streams
-  - Includes streams in all statuses (Active, Paused, Completed, Cancelled)
-  - Does not include closed streams (removed via `close_completed_stream` or `close_stream` alias)
-
-**Behavior:**
-
-- This is a view function (read-only, no state changes)
-- No authorization required (public information)
-- Extends TTL on the recipient's index to prevent expiration
-- Useful for recipient portals to enumerate all streams
-
-**Usage:**
-
-```rust
-// Get all streams for a recipient
-let streams = client.get_recipient_streams(&recipient_address);
-
-// Iterate through streams
-for stream_id in streams.iter() {
-    let state = client.get_stream_state(&stream_id);
-    // Process stream...
-}
-```
-
-#### `get_recipient_stream_count(recipient: Address) -> u64`
-
-Count the total number of streams for a recipient.
-
-**Parameters:**
-
-- `recipient`: Address to query stream count for
-
-**Returns:**
-
-- `u64`: Number of streams for the recipient (0 if none)
-
-**Behavior:**
-
-- This is a view function (read-only, no state changes)
-- No authorization required (public information)
-- Extends TTL on the recipient's index to prevent expiration
-- More gas-efficient than `get_recipient_streams` when only count is needed
-
-**Usage:**
-
-```rust
-// Get stream count for UI display
-let count = client.get_recipient_stream_count(&recipient_address);
-println!("You have {} active streams", count);
-```
-
-## Lifecycle Management
-
-### Stream Creation
-
-When a stream is created via `create_stream` or `create_streams`:
-
-1. Stream is persisted in `DataKey::Stream(stream_id)`
-2. Stream ID is added to recipient's index in sorted order
-3. TTL is extended on the recipient's index
-
-**Example:**
+## Storage key
 
 ```
-Before: recipient has streams [0, 2, 5]
-Create stream 3
-After: recipient has streams [0, 2, 3, 5]  (sorted)
+DataKey::RecipientStreams(Address) → Vec<u64>  (persistent, sorted ascending)
 ```
 
-### Stream Closure
+## Batch-create caching (issue #514)
 
-When a terminal stream (Completed or Cancelled) is closed via `close_completed_stream`:
+### Problem
 
-1. Stream is removed from recipient's index
-2. Stream data is deleted from persistent storage
-3. TTL is extended on the recipient's index
+`create_streams` previously called `add_stream_to_recipient_index` once per
+stream inside the second pass. Each call independently read and rewrote the
+recipient's full stream list from ledger storage, causing **O(n) ledger reads**
+for a batch of n streams to the same recipient.
 
-**Example:**
+### Solution
 
-```
-Before: recipient has streams [0, 2, 3, 5]
-Close stream 3
-After: recipient has streams [0, 2, 5]
-```
+`create_streams` now uses a local `Map<Address, Vec<u64>>` cache:
 
-### Stream Status Changes
+1. **Second pass** — calls `persist_new_stream_skip_index` (identical to
+   `persist_new_stream` but omits the index write) and accumulates each
+   `(recipient, stream_id)` pair into the cache.
+2. **Flush pass** — iterates the cache once, performing **one read + one write
+   per unique recipient** regardless of how many streams were created for them.
 
-Status changes (pause, resume, cancel, withdraw) do **not** affect the index:
+### Complexity
 
-- **Pause/Resume**: Stream remains in index
-- **Cancel**: Stream remains in index until explicitly closed (to reclaim index space)
-- **Withdraw**: Stream remains in index (even when completed)
-- **Close**: Stream is removed from index
+| Scenario | Before | After |
+|---|---|---|
+| n streams, 1 recipient | O(n) reads, O(n) writes | O(1) read, O(1) write |
+| n streams, n recipients | O(n) reads, O(n) writes | O(n) reads, O(n) writes |
+| n streams, k recipients | O(n) reads, O(n) writes | O(k) reads, O(k) writes |
 
-## Consistency Guarantees
+### Security notes
 
-### Sorted Order
+- The cache is a local in-memory `Map` scoped to the transaction; it is never
+  persisted and cannot be observed or manipulated by other callers.
+- The flush inserts IDs in sorted order using binary search, preserving the
+  invariant that `RecipientStreams` is always sorted ascending.
+- `create_stream` (single-stream path) is unchanged and still calls
+  `add_stream_to_recipient_index` directly.
+- `create_streams_relative` delegates to `create_streams` and inherits the
+  optimisation automatically.
 
-The index is always maintained in ascending order by stream_id. This enables:
+## TTL policy
 
 - **Deterministic pagination**: Same recipient always returns streams in the same order
 - **Efficient binary search**: O(log n) lookup for insertion point
