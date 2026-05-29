@@ -185,20 +185,28 @@ know they are not forgotten.
 - [Security guidelines](./security.md)
 - [Audit preparation](./audit.md)
 
-## Factory Policy Enforcement Tests (issue #525)
+## Close Guard and Index Cleanup Paths (issue #522)
 
-`contracts/stream/tests/factory_policy.rs` covers all six `FactoryError` variants:
+`contracts/stream/tests/close_guard_paths.rs` covers two previously-unreachable paths:
 
-| Test | Error variant |
+### Close guard (`close_completed_stream`)
+
+| Test | Scenario | Expected |
+|---|---|---|
+| `test_close_non_completed_stream_rejected` | Active stream | `InvalidState` |
+| `test_close_paused_stream_rejected` | Paused stream | `InvalidState` |
+| `test_close_completed_stream_ok` | Fully withdrawn | Success, stream removed |
+| `test_close_cancelled_zero_claimable_ok` | Cancelled, no accrual | Success |
+| `test_close_cancelled_with_claimable_rejected` | Cancelled, accrual > 0 | `InvalidState` |
+| `test_close_nonexistent_stream` | Bad stream_id | `StreamNotFound` |
+
+### Recipient-index cleanup path
+
+`remove_stream_from_recipient_index` silently skips missing entries (no panic).
+This is the correct behavior for a permissionless cleanup function — a missing
+index entry should not block storage reclamation.
+
+| Test | Scenario |
 |---|---|
-| `test_factory_already_initialized` | `AlreadyInitialized` |
-| `test_set_admin_requires_existing_admin` | `Unauthorized` |
-| `test_create_stream_recipient_not_allowlisted` | `RecipientNotAllowlisted` |
-| `test_create_stream_deposit_exceeds_cap` | `DepositExceedsCap` |
-| `test_create_stream_duration_too_short` | `DurationTooShort` |
-| `test_factory_not_initialized_returns_error` | `NotInitialized` |
-| `test_create_stream_deposit_at_cap_ok` | boundary: cap accepted |
-| `test_create_stream_duration_at_minimum_ok` | boundary: min duration accepted |
-| `test_set_cap_enforced` | dynamic cap update enforced |
-| `test_set_min_duration_enforced` | dynamic min_duration update enforced |
-| `test_set_allowlist_remove_enforced` | allowlist removal enforced |
+| `test_recipient_index_cleanup_graceful_on_missing_entry` | Index entry present → removed cleanly |
+| `test_close_removes_only_target_from_index` | Other streams in index are unaffected |
