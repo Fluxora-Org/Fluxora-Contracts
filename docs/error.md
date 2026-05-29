@@ -26,15 +26,8 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `StreamNotPaused` | 12 | Stream is not `Paused`; cannot resume an `Active` stream | `resume_stream`, `resume_stream_as_admin` |
 | `StreamTerminalState` | 13 | Stream is `Completed` or `Cancelled`; modification blocked | `pause_stream`, `resume_stream`, admin overrides |
 | `DuplicateStreamId` | 14 | Duplicate stream IDs supplied to a batch operation | `batch_withdraw` |
-| `TemplateNotFound` | 15 | No template exists for the given template id | `get_stream_template`, `create_stream_from_template`, `delete_stream_template` |
-| `TemplateLimitExceeded` | 16 | Template registry limits exceeded | `register_stream_template` |
-| `TemplateUnauthorized` | 17 | Caller is not the template owner | `delete_stream_template` |
-| `RateCapExceeded` | 18 | Rate exceeds the governance-controlled maximum rate per second | `create_stream`, `create_streams`, `create_stream_relative`, `update_rate_per_second` |
-
 | `InvalidSignature` | 15 | Delegated withdrawal signature is invalid, expired, or nonce mismatch | `delegated_withdraw` |
 | `BelowMinimumAmount` | 16 | Withdrawable amount is below the `expected_minimum_amount` committed in the signature | `delegated_withdraw` |
-| `InvalidAutoClaimDestination` | 17 | Auto-claim destination is the zero address | `set_auto_claim` |
-| `PauseReasonTooLong` | 18 | Pause reason string exceeds `MAX_PAUSE_REASON_BYTES` (256 bytes) | `pause_protocol` |
 
 ---
 
@@ -532,6 +525,71 @@ match client.try_batch_withdraw(&recipient, &stream_ids) {
 
 ---
 
+### InvalidSignature (15)
+
+**Definition**: Delegated withdrawal signature is invalid, expired, or nonce mismatch.
+
+**Trigger Conditions**:
+- `delegated_withdraw` called with an invalid ed25519 signature
+- Signature has expired (timestamp check failed)
+- Nonce mismatch (replay protection)
+- Signature does not match the expected payload structure
+
+**Affected Roles**:
+| Role | Can Trigger | Notes |
+|------|------------|-------|
+| Relayer | Yes | Invalid signature from recipient |
+| Recipient | Yes | Expired or replayed signature |
+
+**Client Action**:
+```rust
+match client.try_delegated_withdraw(&relayer, &stream_id, &signature, &nonce, &expected_minimum) {
+    Ok(amount) => { /* success */ }
+    Err(ContractError::InvalidSignature) => {
+        // Signature validation failed
+        // Check: signature is valid ed25519, nonce is current, not expired
+        // Request new signature from recipient
+    }
+    Err(e) => { /* handle other errors */ }
+}
+```
+
+**Success Semantics**: Returns positive `i128` amount withdrawn.
+
+---
+
+### BelowMinimumAmount (16)
+
+**Definition**: Withdrawable amount is below the `expected_minimum_amount` committed in the signature.
+
+**Trigger Conditions**:
+- `delegated_withdraw` called when accrued amount is less than the `expected_minimum_amount` specified in the signed payload
+- Protects recipient from relayer front-running or timing issues
+
+**Affected Roles**:
+| Role | Can Trigger | Notes |
+|------|------------|-------|
+| Relayer | Yes | Attempting withdrawal before sufficient accrual |
+| Recipient | No | Recipient sets the minimum in signature |
+
+**Client Action**:
+```rust
+match client.try_delegated_withdraw(&relayer, &stream_id, &signature, &nonce, &expected_minimum) {
+    Ok(amount) => { /* success */ }
+    Err(ContractError::BelowMinimumAmount) => {
+        // Accrued amount is below expected minimum
+        // Wait for more accrual or request new signature with lower minimum
+        let current_accrued = client.calculate_accrued(&stream_id)?;
+        // Retry when current_accrued >= expected_minimum
+    }
+    Err(e) => { /* handle other errors */ }
+}
+```
+
+**Success Semantics**: Returns positive `i128` amount withdrawn (>= expected_minimum).
+
+---
+
 ## Previously Panicking Paths (Now Structured Errors)
 
 The following input-error paths previously caused a host-level panic. They now return
@@ -566,6 +624,7 @@ infrastructure-level failures (not user input errors):
 | `resume_stream` | - | StreamNotFound, Unauthorized, StreamNotPaused, StreamTerminalState | Same + StreamNotFound | StreamNotFound |
 | `cancel_stream` | - | StreamNotFound, Unauthorized, InvalidState | StreamNotFound, Unauthorized | - |
 | `withdraw` | StreamNotFound, Unauthorized, InvalidState | - | - | - |
+| `delegated_withdraw` | - | - | - | InvalidSignature, BelowMinimumAmount, StreamNotFound, InvalidState |
 | `top_up_stream` | - | StreamNotFound, Unauthorized, InvalidParams, InvalidState, ArithmeticOverflow | StreamNotFound | - |
 | `calculate_accrued` | StreamNotFound | StreamNotFound | StreamNotFound | StreamNotFound |
 | `get_stream_state` | StreamNotFound | StreamNotFound | StreamNotFound | StreamNotFound |
@@ -599,7 +658,9 @@ Error handling is verified by tests in `contracts/stream/src/test.rs`:
 | InsufficientBalance | Sender with no tokens |
 | InsufficientDeposit | `deposit < rate * duration` |
 | StreamTerminalState | Pause/complete then modify |
-| AutoClaimNotSet | `try_trigger_auto_claim` without prior `set_auto_claim` |
+| DuplicateStreamId | `batch_withdraw` with repeated stream IDs |
+| InvalidSignature | `delegated_withdraw` with invalid or expired signature |
+| BelowMinimumAmount | `delegated_withdraw` when accrued < expected_minimum |
 
 Discriminant stability is verified by `test_contract_error_discriminants_are_stable` in `contracts/stream/src/test.rs`, which asserts the exact `u32` value of every `ContractError` variant and will fail at compile time if any value is changed.
 

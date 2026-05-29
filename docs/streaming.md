@@ -34,7 +34,7 @@ From **CONTRACT_VERSION 3**, integrators can register **relative** schedule skel
 
 - **Auth**: registering and deleting templates requires the template `owner` signer. Creating a stream from a template requires the **funding `sender`** to authorize (same as `create_stream_relative`).
 - **Caps**: per-owner and global template counts are bounded; see `MAX_TEMPLATES_PER_OWNER` and `MAX_GLOBAL_TEMPLATES` in `contracts/stream/src/lib.rs`.
-- **Errors**: `TemplateNotFound`, `TemplateLimitExceeded`, `TemplateUnauthorized`.
+- **Note**: Template-specific errors are not yet implemented in the ContractError enum. Template operations currently use generic errors like `InvalidParams` and `Unauthorized`.
 
 ---
 
@@ -121,7 +121,7 @@ This section is the protocol-level contract for the global pause state managed v
 | `is_paused()` | Query if protocol is currently paused (permissionless) |
 | `get_pause_info()` | Query detailed pause info including audit trail (permissionless) |
 
-**Pause reason length:** The `reason` string passed to `pause_protocol` is bounded by `MAX_PAUSE_REASON_BYTES = 256`. Strings longer than 256 bytes return `PauseReasonTooLong` (18). This prevents unbounded ledger-entry growth (Issue #513).
+**Pause reason length:** The `reason` string passed to `pause_protocol` is bounded by `MAX_PAUSE_REASON_BYTES = 256`. Strings longer than 256 bytes are rejected with `ContractError::InvalidParams`. This prevents unbounded ledger-entry growth (Issue #513).
 
 Success semantics (observable):
 

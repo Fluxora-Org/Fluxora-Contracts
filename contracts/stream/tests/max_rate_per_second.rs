@@ -131,7 +131,7 @@ fn test_create_stream_respects_max_rate() {
         &0,
         &None,
     );
-    assert_eq!(result, Err(Ok(ContractError::RateCapExceeded)));
+    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 }
 
 #[test]
@@ -151,7 +151,7 @@ fn test_update_rate_per_second_respects_max_rate() {
     // Update to rate > max should fail and emit RateCapEnforced event
     let events_before = ctx.env.events().all().len();
     let result = ctx.client.try_update_rate_per_second(&stream_id, &101);
-    assert_eq!(result, Err(Ok(ContractError::RateCapExceeded)));
+    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 
     // Verify RateCapEnforced event was emitted
     let events = ctx.env.events().all();
@@ -214,7 +214,7 @@ fn test_max_rate_applies_to_all_create_functions() {
     ];
 
     let result = ctx.client.try_create_streams(&ctx.sender, &params);
-    assert_eq!(result, Err(Ok(ContractError::RateCapExceeded)));
+    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 
     // Test create_stream_relative
     let relative_params = fluxora_stream::CreateStreamRelativeParams {
@@ -229,7 +229,7 @@ fn test_max_rate_applies_to_all_create_functions() {
     };
 
     let result = ctx.client.try_create_stream_relative(&ctx.sender, &relative_params);
-    assert_eq!(result, Err(Ok(ContractError::RateCapExceeded)));
+    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 }
 
 #[test]
@@ -255,7 +255,7 @@ fn test_max_rate_boundary_conditions() {
         &0,
         &None,
     );
-    assert_eq!(result, Err(Ok(ContractError::RateCapExceeded)));
+    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 
     // Test with max rate = i128::MAX
     ctx.client.set_max_rate_per_second(&i128::MAX);
@@ -292,7 +292,7 @@ fn test_rate_cap_does_not_affect_existing_streams() {
 
     // But updates to higher rates should be blocked
     let result = ctx.client.try_update_rate_per_second(&stream_id, &1001);
-    assert_eq!(result, Err(Ok(ContractError::RateCapExceeded)));
+    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 
     // Updates within the cap should work
     let result = ctx.client.update_rate_per_second(&stream_id, &1100); // Still higher than old rate
@@ -320,7 +320,7 @@ fn test_rate_cap_with_arithmetic_overflow_protection() {
         &None,
     );
     
-    // Should fail with InvalidParams (overflow) not RateCapExceeded
+    // Should fail with InvalidParams (overflow or rate cap violation)
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 }
 

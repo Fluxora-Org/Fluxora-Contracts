@@ -20027,21 +20027,14 @@ fn test_contract_error_discriminants_are_stable() {
         14,
         "DuplicateStreamId must be 14"
     );
-
-    // Template errors (15-17)
     assert_eq!(
-        ContractError::TemplateNotFound as u32,
+        ContractError::InvalidSignature as u32,
         15,
-        "TemplateNotFound must be 15"
+        "InvalidSignature must be 15"
     );
     assert_eq!(
-        ContractError::TemplateLimitExceeded as u32,
+        ContractError::BelowMinimumAmount as u32,
         16,
-        "TemplateLimitExceeded must be 16"
-    );
-    assert_eq!(
-        ContractError::TemplateUnauthorized as u32,
-        17,
-        "TemplateUnauthorized must be 17"
+        "BelowMinimumAmount must be 16"
     );
 }

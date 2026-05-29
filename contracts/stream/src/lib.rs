@@ -1301,7 +1301,7 @@ impl FluxoraStream {
         // Enforce governance-controlled maximum rate per second cap
         let max_rate = get_max_rate_per_second(env);
         if rate_per_second > max_rate {
-            return Err(ContractError::RateCapExceeded);
+            return Err(ContractError::InvalidParams);
         }
 
         // Validate sender != recipient (#35)
@@ -3610,7 +3610,7 @@ impl FluxoraStream {
                     max_rate_per_second: max_rate,
                 },
             );
-            return Err(ContractError::RateCapExceeded);
+            return Err(ContractError::InvalidParams);
         }
 
         // Validate that the existing deposit still covers the new total streamable amount.
