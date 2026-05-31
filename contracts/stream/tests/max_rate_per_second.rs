@@ -355,6 +355,9 @@ fn test_multiple_rate_cap_enforced_events() {
         let rate_cap_enforced = RateCapEnforced::try_from_val(&ctx.env, &event.1)
             .expect("Event data must deserialize to RateCapEnforced");
         assert_eq!(rate_cap_enforced.max_rate_per_second, 100);
-        assert_eq!(rate_cap_enforced.attempted_rate, 101 + i as i128);
+        assert_eq!(
+            rate_cap_enforced.attempted_rate,
+            101 + i as i128
+        );
     }
 }
