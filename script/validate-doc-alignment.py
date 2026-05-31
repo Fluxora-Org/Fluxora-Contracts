@@ -68,7 +68,7 @@ ENTRYPOINT_ALLOWLIST = frozenset({
 
 # `#[contracterror]`-shaped variants that belong to other enums in the same file.
 ERROR_EXTRACT_EXCLUDE = frozenset(
-    {"Operational", "Administrative", "Compliance", "Emergency"}
+    {"Operational", "Administrative", "Compliance", "Emergency", "GlobalEmergency"}
 )
 
 # ---------------------------------------------------------------------------

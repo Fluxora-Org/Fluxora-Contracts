@@ -120,6 +120,8 @@ This section is the protocol-level contract for the global pause state managed v
 | `resume_protocol(admin)` | Globally resume new stream creation, clearing audit trail |
 | `is_paused()` | Query if protocol is currently paused (permissionless) |
 | `get_pause_info()` | Query detailed pause info including audit trail (permissionless) |
+| `set_max_rate_per_second(max_rate)` | Admin-only governance entrypoint that sets the maximum allowed stream rate for future rate updates |
+| `migration_v5_to_v6(admin)` | Admin-only deployment checkpoint that emits a `migrated` audit event; no storage transformation is required |
 
 **Pause reason length:** The `reason` string passed to `pause_protocol` is bounded by `MAX_PAUSE_REASON_BYTES = 256`. Strings longer than 256 bytes are rejected with `ContractError::InvalidParams`. This prevents unbounded ledger-entry growth (Issue #513).
 

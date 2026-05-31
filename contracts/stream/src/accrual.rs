@@ -18,10 +18,7 @@ pub fn assert_ledger_time_monotonic(
         }
     }
 
-    debug_assert!(
-        current_ts >= prev_ts,
-        "retrograde ledger timestamp"
-    );
+    debug_assert!(current_ts >= prev_ts, "retrograde ledger timestamp");
 
     Ok(())
 }
