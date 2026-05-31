@@ -187,8 +187,12 @@ jobs:
           # Ensure snapshots are validated, not updated
           SOROBAN_SNAPSHOT_UPDATE: ""
 
+      - name: Gas Regression Check
+        run: python3 script/validate_gas.py
+
       - name: Run tests (all packages)
         run: cargo test --all --features testutils
+
 
       - name: Verify snapshot files exist
         run: |
