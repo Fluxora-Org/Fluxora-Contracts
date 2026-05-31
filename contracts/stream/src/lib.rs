@@ -97,6 +97,16 @@ pub const MAX_PAGE_SIZE: u64 = 100;
 /// See `DataKey::RecipientStreamPage` and `migrate_recipient_index`.
 pub const MAX_RECIPIENT_PAGE_SIZE: u32 = 100;
 
+/// Minimum interval (in ledgers) between successive pause/resume operations.
+///
+/// Prevents rapid-toggle DoS attacks where a malicious sender repeatedly pauses
+/// and resumes a stream to manipulate accrual accounting or increase gas costs
+/// for observers replaying the event log.
+///
+/// At ~5 seconds per ledger, 17 ledgers ≈ 85 seconds of cooldown per operation.
+/// This matches Stellar's default pause-time precedent (see `docs/cancel-stream-semantics.md`).
+const MIN_PAUSE_INTERVAL_LEDGERS: u32 = 17;
+
 // Contract version
 // ---------------------------------------------------------------------------
 
@@ -217,6 +227,8 @@ pub enum ContractError {
     InvalidSignature = 15,
     /// Accrued amount is below the expected minimum specified in the signed payload.
     BelowMinimumAmount = 16,
+    /// Pause/resume cooldown is still active; minimum interval not elapsed.
+    PauseCooldownActive = 17,
 }
 
 #[contracttype]
@@ -584,6 +596,11 @@ pub enum Stream {
     /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
     /// Maximum length: `MAX_MEMO_BYTES` (64 bytes). `None` when not supplied.
     pub memo: Option<soroban_sdk::Bytes>,
+    /// Ledger number of the last pause or resume operation.
+    /// Used to enforce the pause/resume cooldown interval (`MIN_PAUSE_INTERVAL_LEDGERS`)
+    /// and prevent rapid-toggle DoS attacks.
+    /// Initialized to the stream creation ledger at creation time.
+    pub last_pause_toggle_ledger: u32,
 }
 
 
@@ -1372,6 +1389,7 @@ impl FluxoraStream {
             checkpointed_at: start_time,
             withdraw_dust_threshold,
             memo: memo.clone(),
+            last_pause_toggle_ledger: env.ledger().sequence(),
         };
 
         save_stream(env, &stream);
@@ -1447,6 +1465,7 @@ impl FluxoraStream {
             checkpointed_at: start_time,
             withdraw_dust_threshold,
             memo: memo.clone(),
+            last_pause_toggle_ledger: env.ledger().sequence(),
         };
 
         save_stream(env, &stream);
@@ -2238,7 +2257,15 @@ impl FluxoraStream {
             return Err(ContractError::InvalidState);
         }
 
+        // Check pause/resume cooldown to prevent rapid-toggle DoS
+        let current_ledger = env.ledger().sequence();
+        let ledgers_since_last_toggle = current_ledger.saturating_sub(stream.last_pause_toggle_ledger);
+        if ledgers_since_last_toggle < MIN_PAUSE_INTERVAL_LEDGERS {
+            return Err(ContractError::PauseCooldownActive);
+        }
+
         stream.status = StreamStatus::Paused;
+        stream.last_pause_toggle_ledger = current_ledger;
         save_stream(&env, &stream);
 
         env.events().publish(
@@ -2289,7 +2316,15 @@ impl FluxoraStream {
             return Err(ContractError::StreamNotPaused);
         }
 
+        // Check pause/resume cooldown to prevent rapid-toggle DoS
+        let current_ledger = env.ledger().sequence();
+        let ledgers_since_last_toggle = current_ledger.saturating_sub(stream.last_pause_toggle_ledger);
+        if ledgers_since_last_toggle < MIN_PAUSE_INTERVAL_LEDGERS {
+            return Err(ContractError::PauseCooldownActive);
+        }
+
         stream.status = StreamStatus::Active;
+        stream.last_pause_toggle_ledger = current_ledger;
         save_stream(&env, &stream);
 
         env.events().publish(
@@ -4809,7 +4844,15 @@ impl FluxoraStream {
             return Err(ContractError::InvalidState);
         }
 
+        // Check pause/resume cooldown to prevent rapid-toggle DoS
+        let current_ledger = env.ledger().sequence();
+        let ledgers_since_last_toggle = current_ledger.saturating_sub(stream.last_pause_toggle_ledger);
+        if ledgers_since_last_toggle < MIN_PAUSE_INTERVAL_LEDGERS {
+            return Err(ContractError::PauseCooldownActive);
+        }
+
         stream.status = StreamStatus::Paused;
+        stream.last_pause_toggle_ledger = current_ledger;
         save_stream(&env, &stream);
 
         let reason_str = match reason {
@@ -4870,7 +4913,15 @@ impl FluxoraStream {
             return Err(ContractError::StreamNotPaused);
         }
 
+        // Check pause/resume cooldown to prevent rapid-toggle DoS
+        let current_ledger = env.ledger().sequence();
+        let ledgers_since_last_toggle = current_ledger.saturating_sub(stream.last_pause_toggle_ledger);
+        if ledgers_since_last_toggle < MIN_PAUSE_INTERVAL_LEDGERS {
+            return Err(ContractError::PauseCooldownActive);
+        }
+
         stream.status = StreamStatus::Active;
+        stream.last_pause_toggle_ledger = current_ledger;
         save_stream(&env, &stream);
 
         env.events().publish(
