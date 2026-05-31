@@ -123,8 +123,9 @@ impl<'a> Ctx<'a> {
             &0u64,
             &1000u64,
             &0,
-            &None,
-        )
+            &None,,
+            &fluxora_stream::StreamKind::Linear,
+            )
     }
 
     /// Pause a stream as the sender (helper to reach Paused state).
@@ -1081,8 +1082,9 @@ mod delegated_withdraw_adversarial {
                 &0u64,
                 &1000u64,
                 &0,
-                &None,
-            )
+                &None,,
+                &fluxora_stream::StreamKind::Linear,
+                )
         }
 
         fn sign(&self, stream_id: u64, dest: &Address, nonce: u64, deadline: u64) -> BytesN<64> {

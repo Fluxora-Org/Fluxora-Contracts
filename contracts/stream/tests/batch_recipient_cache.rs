@@ -43,6 +43,7 @@ impl<'a> Ctx<'a> {
     }
 
     fn make_params(&self, recipient: &Address, deposit: i128, duration: u64) -> CreateStreamParams {
+        kind: fluxora_stream::StreamKind::Linear,
         let now = self.env.ledger().timestamp();
         CreateStreamParams {
             recipient: recipient.clone(),
@@ -127,8 +128,9 @@ fn test_batch_index_matches_sequential_creation() {
         &p1.cliff_time,
         &p1.end_time,
         &0,
-        &None,
-    );
+        &None,,
+        &fluxora_stream::StreamKind::Linear,
+        );
     ctx1.client.create_stream(
         &ctx1.sender,
         &p2.recipient,
@@ -138,8 +140,9 @@ fn test_batch_index_matches_sequential_creation() {
         &p2.cliff_time,
         &p2.end_time,
         &0,
-        &None,
-    );
+        &None,,
+        &fluxora_stream::StreamKind::Linear,
+        );
     let seq_index = ctx1.client.get_recipient_streams(&recipient1, &None, &None);
 
     // Batch: create both streams in one call

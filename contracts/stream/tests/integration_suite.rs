@@ -163,8 +163,9 @@ fn sweep_excess_after_rate_decrease() {
         &0u64,
         &100u64,
         &0,
-        &None,
-    );
+        &None,,
+        &fluxora_stream::StreamKind::Linear,
+        );
     
     assert_eq!(ctx.token.balance(&ctx.contract_id), 1_000);
     
@@ -305,8 +306,9 @@ fn sweep_excess_with_multiple_streams_complex_scenario() {
         &0u64,
         &1000u64,
         &0,
-        &None,
-    );
+        &None,,
+        &fluxora_stream::StreamKind::Linear,
+        );
     
     // Create second stream: 2000 tokens
     let recipient_2 = Address::generate(&ctx.env);
@@ -319,8 +321,9 @@ fn sweep_excess_with_multiple_streams_complex_scenario() {
         &0u64,
         &1000u64,
         &0,
-        &None,
-    );
+        &None,,
+        &fluxora_stream::StreamKind::Linear,
+        );
     
     // Contract has 3000 tokens, 3000 liabilities
     assert_eq!(ctx.token.balance(&ctx.contract_id), 3_000);
@@ -454,8 +457,9 @@ fn get_stream_health_returns_correct_summary_underfunded() {
         &0u64,
         &1000u64,
         &0,
-        &None,
-    );
+        &None,,
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     ctx.env.ledger().set_timestamp(300);
     let health = ctx.client().get_stream_health(&stream_id);
@@ -565,8 +569,9 @@ fn snapshot_event_rate_end_topup_recp() {
         &0u64,
         &1000u64,
         &0,
-        &None,
-    );
+        &None,,
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     // 1. rate_upd
     ctx.client().update_rate_per_second(&stream_id, &2_i128);
@@ -643,8 +648,9 @@ fn update_rate_accepts_maximum_i128_rate() {
         &0u64,
         &1u64,
         &0,
-        &None,
-    );
+        &None,,
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     ctx.client().update_rate_per_second(&stream_id, &i128::MAX);
     let state = ctx.client().get_stream_state(&stream_id);
@@ -701,8 +707,9 @@ proptest::proptest! {
             &0u64,
             &duration,
             &0,
-            &None,
-        );
+            &None,,
+            &fluxora_stream::StreamKind::Linear,
+            );
 
         for &next_rate in rates.iter().skip(1) {
             ctx.client().update_rate_per_second(&stream_id, &next_rate);
@@ -753,8 +760,9 @@ fn snapshot_no_event_on_revert() {
         &0u64,
         &1000u64,
         &0,
-        &None,
-    );
+        &None,,
+        &fluxora_stream::StreamKind::Linear,
+        );
     assert!(result.is_err());
     assert_eq!(ctx.env.events().all().len(), events_before);
 }
@@ -803,8 +811,9 @@ fn test_accrual_none_checkpoint_returns_zero() {
         &100u64,
         &1100u64,
         &0,
-        &None,
-    );
+        &None,,
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     // At start_time the elapsed seconds are 0 → accrued must be 0.
     let accrued = ctx.client().calculate_accrued(&stream_id);
@@ -834,8 +843,9 @@ fn test_accrual_none_checkpoint_before_cliff_returns_zero() {
         &500u64,
         &1000u64,
         &0,
-        &None,
-    );
+        &None,,
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     // Before cliff → 0, regardless of checkpoint state.
     let accrued = ctx.client().calculate_accrued(&stream_id);
@@ -916,8 +926,9 @@ fn sweep_excess_after_rate_decrease() {
         &0u64,
         &100u64,
         &0,
-        &None,
-    );
+        &None,,
+        &fluxora_stream::StreamKind::Linear,
+        );
     
     assert_eq!(ctx.token.balance(&ctx.contract_id), 1_000);
     
@@ -1058,8 +1069,9 @@ fn sweep_excess_with_multiple_streams_complex_scenario() {
         &0u64,
         &1000u64,
         &0,
-        &None,
-    );
+        &None,,
+        &fluxora_stream::StreamKind::Linear,
+        );
     
     // Create second stream: 2000 tokens
     let recipient_2 = Address::generate(&ctx.env);
@@ -1072,8 +1084,9 @@ fn sweep_excess_with_multiple_streams_complex_scenario() {
         &0u64,
         &1000u64,
         &0,
-        &None,
-    );
+        &None,,
+        &fluxora_stream::StreamKind::Linear,
+        );
     
     // Contract has 3000 tokens, 3000 liabilities
     assert_eq!(ctx.token.balance(&ctx.contract_id), 3_000);

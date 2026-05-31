@@ -1,3 +1,5 @@
+use crate::StreamKind;
+
 /// Computes accrued stream amount without relying on Soroban environment state.
 ///
 /// This helper is intentionally pure to make the core vesting math easy to unit test.
@@ -29,6 +31,7 @@ pub fn calculate_accrued_amount(
             cliff_time,
             end_time,
             deposit_amount,
+            kind: StreamKind::Linear,
         },
         rate_per_second,
         current_time,
@@ -52,20 +55,16 @@ pub struct CheckpointState {
     pub end_time: u64,
     /// Absolute ceiling; result is clamped to `[0, deposit_amount]`.
     pub deposit_amount: i128,
+    /// The kind of stream (Linear or CliffOnly).
+    pub kind: StreamKind,
 }
 
 /// Checkpoint-aware accrual — the core pure function used by the contract for all
 /// accrual calculations after rate changes.
 ///
 /// # Parameters
-/// - `_start_time`         – original stream start; reserved for future cliff logic.
-/// - `checkpointed_amount` – tokens accrued under all **previous** rate epochs, locked in
-///                            at `checkpointed_at`. Initialised to `0` at stream creation.
-/// - `checkpointed_at`     – timestamp of the last checkpoint (== `start_time` initially).
-/// - `cliff_time`          – no accrual is ever visible before this timestamp.
-/// - `end_time`            – accrual is capped at this timestamp.
+/// - `state`               – snapshot of the stream's checkpoint state.
 /// - `rate_per_second`     – rate for the **current** epoch (`checkpointed_at` ➜ `end_time`).
-/// - `deposit_amount`      – absolute ceiling; result is clamped to `[0, deposit_amount]`.
 /// - `now`                 – evaluation point (caller-supplied; constant within a transaction).
 ///
 /// Accepting `now` explicitly rather than reading `env.ledger().timestamp()` inside the
@@ -77,47 +76,57 @@ pub struct CheckpointState {
 /// 2. `accrued(checkpointed_at) == checkpointed_amount` — a rate decrease never reduces
 ///    the visible withdrawable amount.
 /// 3. `accrued(t) <= deposit_amount` for all `t`.
-#[allow(clippy::too_many_arguments)]
 pub fn calculate_accrued_amount_checkpointed(
     state: CheckpointState,
     rate_per_second: i128,
-    deposit_amount: i128,
     now: u64,
 ) -> i128 {
+    let CheckpointState {
+        checkpointed_amount,
+        checkpointed_at,
+        cliff_time,
+        end_time,
+        deposit_amount,
+        kind,
+    } = state;
+
     if now < cliff_time {
         return 0;
+    }
+
+    if deposit_amount <= 0 {
+        return 0;
+    }
+
+    if kind == StreamKind::CliffOnly {
+        return deposit_amount;
     }
 
     if rate_per_second < 0 {
         return 0;
     }
 
-    if state.checkpointed_at >= state.end_time {
+    if checkpointed_at >= end_time {
         // Stream already ended; only the checkpointed amount is payable.
-        return state.checkpointed_amount.min(state.deposit_amount).max(0);
-    }
-
-    if state.deposit_amount <= 0 {
-        return 0;
+        return checkpointed_amount.min(deposit_amount).max(0);
     }
 
     let elapsed_now = now.min(end_time);
     let elapsed_seconds: i128 = if elapsed_now <= checkpointed_at {
         0
     } else {
-        (elapsed_now - state.checkpointed_at) as i128
+        (elapsed_now - checkpointed_at) as i128
     };
 
     let added = match elapsed_seconds.checked_mul(rate_per_second) {
         Some(amount) => amount,
         // Multiplication overflow: clamp to deposit ceiling.
-        None => state.deposit_amount,
+        None => deposit_amount,
     };
 
-    state
-        .checkpointed_amount
+    checkpointed_amount
         .saturating_add(added)
-        .min(state.deposit_amount)
+        .min(deposit_amount)
         .max(0)
 }
 

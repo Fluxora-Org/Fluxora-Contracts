@@ -28,6 +28,7 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `DuplicateStreamId` | 14 | Duplicate stream IDs supplied to a batch operation | `batch_withdraw` |
 | `InvalidSignature` | 15 | Delegated withdrawal signature is invalid, expired, or nonce mismatch | `delegated_withdraw` |
 | `BelowMinimumAmount` | 16 | Withdrawable amount is below the `expected_minimum_amount` committed in the signature | `delegated_withdraw` |
+| `UnsupportedStreamKind` | 17 | Mutating operation attempted on a stream kind that does not support it (e.g. CliffOnly) | `update_rate_per_second`, `decrease_rate_per_second`, `shorten_stream_end_time`, `extend_stream_end_time`, `top_up_stream` |
 
 ---
 
@@ -590,6 +591,28 @@ match client.try_delegated_withdraw(&relayer, &stream_id, &signature, &nonce, &e
 
 ---
 
+### UnsupportedStreamKind (17)
+
+**Definition**: Mutating operation attempted on a stream kind that does not support it (specifically `CliffOnly` streams).
+
+**Trigger Conditions**:
+- Calling `update_rate_per_second`, `decrease_rate_per_second`, `shorten_stream_end_time`, `extend_stream_end_time`, or `top_up_stream` on a stream configured as `StreamKind::CliffOnly`.
+
+**Affected Roles**:
+| Role | Can Trigger | Notes |
+|------|------------|-------|
+| Sender | Yes | Attempting to mutate a CliffOnly stream |
+
+**Client Action**:
+```rust
+// Notify the user that CliffOnly streams are immutable post-creation.
+// Mutation operations like rate updates, top-ups, and end-time adjustments are not supported.
+```
+
+**Success Semantics**: N/A (always fails with `UnsupportedStreamKind`).
+
+---
+
 ## Previously Panicking Paths (Now Structured Errors)
 
 The following input-error paths previously caused a host-level panic. They now return
@@ -625,7 +648,7 @@ infrastructure-level failures (not user input errors):
 | `cancel_stream` | - | StreamNotFound, Unauthorized, InvalidState | StreamNotFound, Unauthorized | - |
 | `withdraw` | StreamNotFound, Unauthorized, InvalidState | - | - | - |
 | `delegated_withdraw` | - | - | - | InvalidSignature, BelowMinimumAmount, StreamNotFound, InvalidState |
-| `top_up_stream` | - | StreamNotFound, Unauthorized, InvalidParams, InvalidState, ArithmeticOverflow | StreamNotFound | - |
+| `top_up_stream` | - | StreamNotFound, Unauthorized, InvalidParams, InvalidState, ArithmeticOverflow, UnsupportedStreamKind | StreamNotFound | - |
 | `calculate_accrued` | StreamNotFound | StreamNotFound | StreamNotFound | StreamNotFound |
 | `get_stream_state` | StreamNotFound | StreamNotFound | StreamNotFound | StreamNotFound |
 
@@ -661,6 +684,7 @@ Error handling is verified by tests in `contracts/stream/src/test.rs`:
 | DuplicateStreamId | `batch_withdraw` with repeated stream IDs |
 | InvalidSignature | `delegated_withdraw` with invalid or expired signature |
 | BelowMinimumAmount | `delegated_withdraw` when accrued < expected_minimum |
+| UnsupportedStreamKind | Mutating a `CliffOnly` stream |
 
 Discriminant stability is verified by `test_contract_error_discriminants_are_stable` in `contracts/stream/src/test.rs`, which asserts the exact `u32` value of every `ContractError` variant and will fail at compile time if any value is changed.
 

@@ -36,6 +36,16 @@ From **CONTRACT_VERSION 3**, integrators can register **relative** schedule skel
 - **Caps**: per-owner and global template counts are bounded; see `MAX_TEMPLATES_PER_OWNER` and `MAX_GLOBAL_TEMPLATES` in `contracts/stream/src/lib.rs`.
 - **Note**: Template-specific errors are not yet implemented in the ContractError enum. Template operations currently use generic errors like `InvalidParams` and `Unauthorized`.
 
+### Stream Kinds (Linear vs. Cliff-Only)
+
+From **CONTRACT_VERSION 4**, the contract supports distinct streaming styles, governed by the `StreamKind` field on the stream configuration:
+
+- **Linear** (Default/Legacy): Accrues tokens continuously and linearly over time at `rate_per_second` once the stream has started, subject to a standard cliff window (during which nothing can be withdrawn).
+- **CliffOnly**: A one-shot, instant unlock stream variant. Tokens do not accrue continuously over time. Instead:
+  - Before the `cliff_time`, `0` tokens are accrued/withdrawable (all funds are locked).
+  - At or after the `cliff_time`, the total `deposit_amount` is immediately and fully unlocked and made claimable by the recipient.
+  - To enforce the single-unlock model, `rate_per_second` is forced to `0` during creation and all subsequent mutation/adjustment requests are rejected.
+
 ---
 
 ## 1. Stream Lifecycle
@@ -252,6 +262,9 @@ sequenceDiagram
 
 **Location:** `contracts/stream/src/accrual.rs`
 
+The mathematical accrual behavior branches on the stream's `StreamKind`:
+
+### Linear Streams
 ```text
 if current_time < cliff_time           → return 0
 if start_time >= end_time or rate < 0  → return 0
@@ -260,6 +273,12 @@ elapsed_now = min(current_time, end_time)
 elapsed_seconds = elapsed_now - start_time   // 0 if underflow
 accrued = elapsed_seconds * rate_per_second  // on overflow → deposit_amount
 return min(accrued, deposit_amount).max(0)
+```
+
+### Cliff-Only Streams
+```text
+if current_time < cliff_time  → return 0
+else                         → return deposit_amount
 ```
 
 ### Rules
@@ -355,6 +374,18 @@ deposit_amount >= rate_per_second * (new_end_time - start_time)
 ```
 
 If the existing deposit does not cover the extended duration, `extend_stream_end_time` returns `ContractError::InsufficientDeposit` and no state changes occur. Use `top_up_stream` first to increase the deposit, then extend.
+
+### Mutation Restrictions on Cliff-Only Streams
+
+To preserve the absolute one-shot unlock nature of a `CliffOnly` stream variant and guarantee its immutability post-creation, **all mutating endpoints are strictly blocked**. Attempting to call any of the following functions on a `CliffOnly` stream will return `ContractError::UnsupportedStreamKind` and revert all state changes:
+
+- `top_up_stream`
+- `update_rate_per_second`
+- `decrease_rate_per_second`
+- `shorten_stream_end_time`
+- `extend_stream_end_time`
+
+Any such attempt is atomic: no balances are transferred, no state is updated, and no events are emitted.
 
 ### Shorten `end_time` Semantics
 

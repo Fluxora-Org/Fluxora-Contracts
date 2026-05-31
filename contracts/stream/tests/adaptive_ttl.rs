@@ -46,6 +46,7 @@ impl<'a> Ctx<'a> {
             &soroban_sdk::vec![
                 &self.env,
                 CreateStreamParams {
+        kind: fluxora_stream::StreamKind::Linear,
                     recipient: recipient.clone(),
                     deposit_amount: duration as i128,
                     rate_per_second: 1,
