@@ -22,9 +22,7 @@ impl<'a> TestContext<'a> {
 
         let contract_id = env.register_contract(None, FluxoraStream);
         let token_admin = Address::generate(&env);
-        let token_id = env
-            .register_stellar_asset_contract_v2(token_admin)
-            .address();
+        let token_id = env.register_stellar_asset_contract_v2(token_admin).address();
 
         let admin = Address::generate(&env);
         let sender = Address::generate(&env);

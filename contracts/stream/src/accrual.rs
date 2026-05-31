@@ -7,10 +7,7 @@ use crate::ContractError;
 /// non-decreasing timestamps. This guard catches test harnesses, migrations, or
 /// future environments that violate that assumption before withdrawable math can
 /// be evaluated at a retrograde timestamp.
-pub fn assert_ledger_time_monotonic(
-    prev_ts: u64,
-    current_ts: u64,
-) -> Result<(), ContractError> {
+pub fn assert_ledger_time_monotonic(prev_ts: u64, current_ts: u64) -> Result<(), ContractError> {
     #[cfg(any(test, debug_assertions))]
     {
         if current_ts < prev_ts {
