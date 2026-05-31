@@ -81,10 +81,10 @@ pub struct CheckpointState {
 pub fn calculate_accrued_amount_checkpointed(
     state: CheckpointState,
     rate_per_second: i128,
-    deposit_amount: i128,
+    _deposit_amount: i128,
     now: u64,
 ) -> i128 {
-    if now < cliff_time {
+    if now < state.cliff_time {
         return 0;
     }
 
@@ -101,8 +101,8 @@ pub fn calculate_accrued_amount_checkpointed(
         return 0;
     }
 
-    let elapsed_now = now.min(end_time);
-    let elapsed_seconds: i128 = if elapsed_now <= checkpointed_at {
+    let elapsed_now = now.min(state.end_time);
+    let elapsed_seconds: i128 = if elapsed_now <= state.checkpointed_at {
         0
     } else {
         (elapsed_now - state.checkpointed_at) as i128
