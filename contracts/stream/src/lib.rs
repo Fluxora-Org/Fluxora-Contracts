@@ -47,6 +47,18 @@ const MAX_TTL: u32 = 6_307_200;
 /// All paginated entrypoints enforce this limit strictly.
 pub const MAX_PAGE_SIZE: u64 = 100;
 
+/// Minimum ledger interval between withdrawals (anti-spam).
+///
+/// Enforces a minimum gap of ledgers between consecutive withdrawals on the same stream
+/// to prevent excessive ledger entry generation and I/O costs from high-frequency polling.
+/// Approximately 1 minute at ~5 seconds per ledger close (subject to network conditions).
+///
+/// This is a fixed constant in the current implementation. Future versions may support
+/// per-stream or governance-controlled configurability.
+///
+/// TODO: Consider making this configurable per-stream or via governance in a future version.
+pub const MIN_WITHDRAW_INTERVAL_LEDGERS: u32 = 17;
+
 /// Maximum byte length for pause-reason strings passed to `pause_stream`,
 /// `pause_stream_as_admin`, and `pause_protocol`.
 ///
@@ -217,6 +229,8 @@ pub enum ContractError {
     InvalidSignature = 15,
     /// Accrued amount is below the expected minimum specified in the signed payload.
     BelowMinimumAmount = 16,
+    /// Withdrawal attempted before minimum ledger interval has elapsed.
+    WithdrawalTooFrequent = 17,
 }
 
 #[contracttype]
@@ -584,6 +598,15 @@ pub enum Stream {
     /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
     /// Maximum length: `MAX_MEMO_BYTES` (64 bytes). `None` when not supplied.
     pub memo: Option<soroban_sdk::Bytes>,
+    /// Ledger sequence number of the last successful withdrawal.
+    ///
+    /// Enforces `MIN_WITHDRAW_INTERVAL_LEDGERS` between consecutive withdrawals to prevent
+    /// excessive ledger entry generation and I/O costs from high-frequency polling.
+    /// Initialized to 0 at stream creation (first withdrawal always succeeds).
+    /// Updated to `env.ledger().sequence()` after each successful withdrawal.
+    ///
+    /// Invariant: `last_withdraw_ledger <= current_ledger_sequence` (monotonic ledger progression).
+    pub last_withdraw_ledger: u32,
 }
 
 
@@ -1372,6 +1395,7 @@ impl FluxoraStream {
             checkpointed_at: start_time,
             withdraw_dust_threshold,
             memo: memo.clone(),
+            last_withdraw_ledger: 0,
         };
 
         save_stream(env, &stream);
@@ -1447,6 +1471,7 @@ impl FluxoraStream {
             checkpointed_at: start_time,
             withdraw_dust_threshold,
             memo: memo.clone(),
+            last_withdraw_ledger: 0,
         };
 
         save_stream(env, &stream);
@@ -2425,6 +2450,14 @@ impl FluxoraStream {
         // Enforce recipient-only authorization
         stream.recipient.require_auth();
 
+        // Enforce withdrawal frequency limit to prevent excessive ledger I/O.
+        // Invariant: current_ledger >= last_withdraw_ledger (monotonic ledger progression).
+        // First withdrawal (last_withdraw_ledger == 0) always succeeds.
+        let current_ledger = env.ledger().sequence();
+        if current_ledger - stream.last_withdraw_ledger < MIN_WITHDRAW_INTERVAL_LEDGERS {
+            return Err(ContractError::WithdrawalTooFrequent);
+        }
+
         if stream.status == StreamStatus::Completed {
             return Err(ContractError::InvalidState);
         }
@@ -2465,6 +2498,7 @@ impl FluxoraStream {
         // CEI: update state before external token transfer to reduce reentrancy risk.
         // Assumption: the token contract does not reenter this contract.
         stream.withdrawn_amount += withdrawable;
+        stream.last_withdraw_ledger = current_ledger; // Update withdrawal timestamp
         let completed_now = (stream.status == StreamStatus::Active
             || stream.status == StreamStatus::Paused)
             && stream.withdrawn_amount == stream.deposit_amount;
@@ -2757,12 +2791,20 @@ impl FluxoraStream {
         // Cache ledger timestamp once — it is constant within a single transaction.
         // Avoids a redundant host-function call on every loop iteration (#515).
         let now = env.ledger().timestamp();
+        let current_ledger = env.ledger().sequence();
 
         for stream_id in stream_ids.iter() {
             let mut stream = load_stream(&env, stream_id)?;
 
             if stream.recipient != recipient {
                 return Err(ContractError::Unauthorized);
+            }
+
+            // Enforce withdrawal frequency limit per stream in the batch.
+            // Each stream must respect its own last_withdraw_ledger independently.
+            // Invariant: current_ledger >= last_withdraw_ledger (monotonic ledger progression).
+            if current_ledger - stream.last_withdraw_ledger < MIN_WITHDRAW_INTERVAL_LEDGERS {
+                return Err(ContractError::WithdrawalTooFrequent);
             }
 
             if stream.status == StreamStatus::Paused && !is_terminal_state(&env, &stream) {
@@ -2808,6 +2850,7 @@ impl FluxoraStream {
                 contract_balance -= withdrawable;
 
                 stream.withdrawn_amount += withdrawable;
+                stream.last_withdraw_ledger = current_ledger; // Update withdrawal timestamp
                 let completed_now = (stream.status == StreamStatus::Active
                     || stream.status == StreamStatus::Paused)
                     && stream.withdrawn_amount == stream.deposit_amount;
@@ -3047,13 +3090,21 @@ impl FluxoraStream {
         // 2. Load stream.
         let mut stream = load_stream(&env, stream_id)?;
 
-        // 3. Nonce check — replay protection.
+        // 3. Enforce withdrawal frequency limit to prevent excessive ledger I/O.
+        // Invariant: current_ledger >= last_withdraw_ledger (monotonic ledger progression).
+        // First withdrawal (last_withdraw_ledger == 0) always succeeds.
+        let current_ledger = env.ledger().sequence();
+        if current_ledger - stream.last_withdraw_ledger < MIN_WITHDRAW_INTERVAL_LEDGERS {
+            return Err(ContractError::WithdrawalTooFrequent);
+        }
+
+        // 4. Nonce check — replay protection.
         let stored_nonce = load_delegated_nonce(&env, &stream.recipient);
         if nonce != stored_nonce {
             return Err(ContractError::InvalidSignature);
         }
 
-        // 4. Build the signed message:
+        // 5. Build the signed message:
         //    stream_id (8 bytes) | nonce (8 bytes) | deadline (8 bytes) | expected_minimum_amount (16 bytes)
         let mut msg = soroban_sdk::Bytes::new(&env);
         msg.extend_from_array(&stream_id.to_be_bytes());
@@ -3061,11 +3112,11 @@ impl FluxoraStream {
         msg.extend_from_array(&deadline.to_be_bytes());
         msg.extend_from_array(&expected_minimum_amount.to_be_bytes());
 
-        // 5. Verify ed25519 signature — panics on failure (Soroban host trap).
+        // 6. Verify ed25519 signature — panics on failure (Soroban host trap).
         env.crypto()
             .ed25519_verify(&recipient_public_key, &msg, &signature);
 
-        // 6. State checks (same as withdraw).
+        // 7. State checks (same as withdraw).
         if stream.status == StreamStatus::Completed {
             return Err(ContractError::InvalidState);
         }
@@ -3094,6 +3145,7 @@ impl FluxoraStream {
 
         // 9. CEI: update state before external token transfer.
         stream.withdrawn_amount += withdrawable;
+        stream.last_withdraw_ledger = current_ledger; // Update withdrawal timestamp
         let completed_now = (stream.status == StreamStatus::Active
             || stream.status == StreamStatus::Paused)
             && stream.withdrawn_amount == stream.deposit_amount;

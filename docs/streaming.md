@@ -301,6 +301,23 @@ From **CONTRACT_VERSION 5**, senders can optionally set a `withdraw_dust_thresho
 
 > **See also:** [dust-threshold.md](./dust-threshold.md) — formula for choosing a safe threshold value, worked USDC examples, a validation table, and guidance for template authors.
 
+### Withdrawal Frequency Limit (#574)
+
+From **CONTRACT_VERSION 6**, all withdrawal operations enforce a minimum ledger interval between consecutive withdrawals on the same stream to prevent excessive ledger entry generation and I/O costs from high-frequency polling.
+
+- **Constant**: `MIN_WITHDRAW_INTERVAL_LEDGERS = 17` (approximately 1 minute at ~5 seconds per ledger close, subject to network conditions)
+- **Enforcement**: `withdraw`, `delegated_withdraw`, and `batch_withdraw` all enforce `current_ledger - last_withdraw_ledger >= MIN_WITHDRAW_INTERVAL_LEDGERS`
+- **Error**: Returns `ContractError::WithdrawalTooFrequent` (error code 17) if the interval check fails
+- **Atomicity**: For `batch_withdraw`, if any stream in the batch violates the rate limit, the entire batch reverts
+- **Per-Stream**: Each stream tracks its own `last_withdraw_ledger` independently
+- **First Withdrawal**: Always succeeds (`last_withdraw_ledger` is initialized to 0 at stream creation)
+- **State Update**: `last_withdraw_ledger` is updated to `env.ledger().sequence()` only after a successful withdrawal (withdrawable > 0)
+- **Zero Withdrawable**: If a withdrawal returns 0 (before cliff, dust threshold, etc.), `last_withdraw_ledger` is not updated
+
+**Invariant**: `current_ledger >= last_withdraw_ledger` at all times (guaranteed by monotonic ledger progression).
+
+**Example**: If a withdrawal succeeds at ledger 100, the next withdrawal can occur at ledger 117 or later (100 + 17 = 117).
+
 ### Frontend: get_claimable_at (simulation)
 
 `get_claimable_at(stream_id, timestamp)` is a read-only view that returns the amount that would be claimable (withdrawable) at an arbitrary timestamp. Use it for:
