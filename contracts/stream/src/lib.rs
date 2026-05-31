@@ -532,7 +532,7 @@ pub enum PauseKind {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Stream {
+pub struct Stream {
     pub stream_id: u64,
     pub sender: Address,
     pub recipient: Address,
@@ -589,7 +589,6 @@ pub enum Stream {
     /// Maximum length: `MAX_MEMO_BYTES` (64 bytes). `None` when not supplied.
     pub memo: Option<soroban_sdk::Bytes>,
 }
-
 
 /// Pagination result for recipient stream listing
 #[contracttype]
@@ -898,11 +897,9 @@ fn load_stream(env: &Env, stream_id: u64) -> Result<Stream, ContractError> {
     // Adaptive TTL bump on read: keep the entry alive proportional to remaining stream lifetime.
     let now = env.ledger().timestamp();
     let bump = compute_adaptive_ttl(now, stream.end_time);
-    env.storage().persistent().extend_ttl(
-        &key,
-        PERSISTENT_LIFETIME_THRESHOLD,
-        bump,
-    );
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, bump);
 
     Ok(stream)
 }
@@ -913,11 +910,9 @@ pub fn save_stream(env: &Env, stream: &Stream) {
     // Adaptive TTL bump on write: scale to remaining stream lifetime.
     let now = env.ledger().timestamp();
     let bump = compute_adaptive_ttl(now, stream.end_time);
-    env.storage().persistent().extend_ttl(
-        &key,
-        PERSISTENT_LIFETIME_THRESHOLD,
-        bump,
-    );
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, bump);
 }
 
 /// Compute the funding health of a stream at a given timestamp.
@@ -1006,7 +1001,12 @@ fn load_recipient_streams(env: &Env, recipient: &Address) -> soroban_sdk::Vec<u6
 ///
 /// `end_time`: when provided, the TTL bump is scaled to the stream's remaining
 /// lifetime via `compute_adaptive_ttl`; otherwise falls back to `PERSISTENT_BUMP_AMOUNT`.
-fn save_recipient_streams(env: &Env, recipient: &Address, streams: &soroban_sdk::Vec<u64>, end_time: Option<u64>) {
+fn save_recipient_streams(
+    env: &Env,
+    recipient: &Address,
+    streams: &soroban_sdk::Vec<u64>,
+    end_time: Option<u64>,
+) {
     let key = DataKey::RecipientStreams(recipient.clone());
     env.storage().persistent().set(&key, streams);
 
@@ -1015,16 +1015,19 @@ fn save_recipient_streams(env: &Env, recipient: &Address, streams: &soroban_sdk:
     let bump = end_time
         .map(|et| compute_adaptive_ttl(env.ledger().timestamp(), et))
         .unwrap_or(PERSISTENT_BUMP_AMOUNT);
-    env.storage().persistent().extend_ttl(
-        &key,
-        PERSISTENT_LIFETIME_THRESHOLD,
-        bump,
-    );
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, bump);
 }
 
 /// Add a stream ID to a recipient's index (maintains sorted order).
 /// Assumes stream_id is not already in the list.
-fn add_stream_to_recipient_index(env: &Env, recipient: &Address, stream_id: u64, end_time: Option<u64>) {
+fn add_stream_to_recipient_index(
+    env: &Env,
+    recipient: &Address,
+    stream_id: u64,
+    end_time: Option<u64>,
+) {
     let mut streams = load_recipient_streams(env, recipient);
 
     // Insert in sorted order (binary search for insertion point)
@@ -3524,7 +3527,9 @@ impl FluxoraStream {
         let accrued_to_date_i128 = Self::calculate_accrued(env.clone(), stream_id)?;
         let accrued_to_date = accrued_to_date_i128 as u128;
 
-        let remaining_deposit = stream.deposit_amount.saturating_sub(stream.withdrawn_amount) as u128;
+        let remaining_deposit = stream
+            .deposit_amount
+            .saturating_sub(stream.withdrawn_amount) as u128;
 
         let is_expired = current_time >= stream.end_time
             && stream.status != StreamStatus::Completed
@@ -3541,7 +3546,9 @@ impl FluxoraStream {
         // Seconds until depletion logic
         let mut seconds_until_depletion = None;
         if stream.rate_per_second > 0 {
-            let total_to_accrue = stream.deposit_amount.saturating_sub(stream.checkpointed_amount);
+            let total_to_accrue = stream
+                .deposit_amount
+                .saturating_sub(stream.checkpointed_amount);
             let seconds_to_deplete = (total_to_accrue / stream.rate_per_second) as u64;
             let depletion_time = stream.checkpointed_at.saturating_add(seconds_to_deplete);
 
@@ -4397,18 +4404,20 @@ impl FluxoraStream {
     /// - Paginate: fetch first N IDs, then call `get_stream_state` for each
     /// - Filter by status: fetch all IDs, then check status of each via `get_stream_state`
     pub fn get_recipient_streams(env: Env, recipient: Address) -> soroban_sdk::Vec<u64> {
+        load_recipient_streams(&env, &recipient)
+    }
 
     /// Paginated version of get_recipient_streams to prevent unbounded returns.
-    /// 
+    ///
     /// # Parameters
     /// - `env`: Contract environment
     /// - `recipient`: Address to query streams for
     /// - `cursor`: Pagination cursor (stream_id to start after, 0 for beginning)
     /// - `limit`: Maximum number of stream IDs to return (capped at RECIPIENT_STREAMS_PAGE_LIMIT)
-    /// 
+    ///
     /// # Returns
     /// - `Page`: Contains stream IDs slice and next cursor for pagination
-    /// 
+    ///
     /// # Behavior
     /// - Returns streams in ascending order by stream_id
     /// - If cursor is 0, starts from the beginning
@@ -4426,39 +4435,41 @@ impl FluxoraStream {
     ) -> Page {
         let streams = load_recipient_streams(&env, &recipient);
         let total = streams.len();
-        
+
         // Apply limit cap
-        let effective_limit = limit.min(RECIPIENT_STREAMS_PAGE_LIMIT);
-        
+        let effective_limit = limit.min(MAX_RECIPIENT_PAGE_SIZE);
+
         // Find starting position
         let start_idx = if cursor == 0 {
             0
         } else {
-            match streams.binary_search(&cursor) {
-                Ok(pos) => pos + 1,  # Start after the cursor
-                Err(pos) => pos,     # Insert position if not found
+            match streams.binary_search(cursor) {
+                Ok(pos) => pos + 1,
+                Err(pos) => pos,
             }
         };
-        
+
         // Calculate end position
-        let end_idx = (start_idx as u32 + effective_limit).min(total as u32) as usize;
-        
-        #[allow(unused_assignments)]
-        let mut next_cursor = 0;
-        if end_idx < total {
-            next_cursor = streams.get(end_idx as usize).unwrap();
-        }
-        
-        #[allow(unused_assignments)]
+        let end_idx = start_idx.saturating_add(effective_limit).min(total);
+
+        let next_cursor = if end_idx < total {
+            streams.get(end_idx).unwrap()
+        } else {
+            0
+        };
+
         let mut page_streams = soroban_sdk::Vec::new(&env);
         for i in start_idx..end_idx {
             page_streams.push_back(streams.get(i).unwrap());
         }
-        
-         Page { stream_ids: page_streams, next_cursor }
-     }
 
-     /// Count the total number of streams for a recipient.
+        Page {
+            stream_ids: page_streams,
+            next_cursor,
+        }
+    }
+
+    /// Count the total number of streams for a recipient.
     ///
     /// Returns the count of streams where the recipient is the stream's recipient address.
     /// This is a convenience function that avoids fetching the full vector when only

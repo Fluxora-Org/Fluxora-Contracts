@@ -35,7 +35,9 @@ impl<'a> Ctx<'a> {
 
         // Token setup
         let token_admin = Address::generate(&env);
-        let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone()).address();
+        let token_contract_id = env
+            .register_stellar_asset_contract_v2(token_admin.clone())
+            .address();
         let token = TokenClient::new(&env, &token_contract_id);
         let stellar_asset = StellarAssetClient::new(&env, &token_contract_id);
 
@@ -49,7 +51,14 @@ impl<'a> Ctx<'a> {
         // Init factory: max_deposit=10_000, min_duration=100
         factory.init(&admin, &stream_id, &10_000, &100);
 
-        Self { env, factory, stream, admin, sender, token }
+        Self {
+            env,
+            factory,
+            stream,
+            admin,
+            sender,
+            token,
+        }
     }
 
     fn now(&self) -> u64 {
@@ -64,7 +73,9 @@ impl<'a> Ctx<'a> {
 #[test]
 fn test_factory_already_initialized() {
     let ctx = Ctx::setup();
-    let result = ctx.factory.try_init(&ctx.admin, &Address::generate(&ctx.env), &1_000, &10);
+    let result = ctx
+        .factory
+        .try_init(&ctx.admin, &Address::generate(&ctx.env), &1_000, &10);
     assert_eq!(result, Err(Ok(FactoryError::AlreadyInitialized)));
 }
 
@@ -113,9 +124,13 @@ fn test_create_stream_recipient_not_allowlisted() {
     let now = ctx.now();
 
     let result = ctx.factory.try_create_stream(
-        &ctx.sender, &recipient,
-        &1_000, &1,
-        &now, &now, &(now + 200),
+        &ctx.sender,
+        &recipient,
+        &1_000,
+        &1,
+        &now,
+        &now,
+        &(now + 200),
         &0,
     );
     assert_eq!(result, Err(Ok(FactoryError::RecipientNotAllowlisted)));
@@ -133,9 +148,13 @@ fn test_create_stream_deposit_exceeds_cap() {
     let now = ctx.now();
 
     let result = ctx.factory.try_create_stream(
-        &ctx.sender, &recipient,
-        &10_001, &1,          // exceeds max_deposit=10_000
-        &now, &now, &(now + 200),
+        &ctx.sender,
+        &recipient,
+        &10_001,
+        &1, // exceeds max_deposit=10_000
+        &now,
+        &now,
+        &(now + 200),
         &0,
     );
     assert_eq!(result, Err(Ok(FactoryError::DepositExceedsCap)));
@@ -150,9 +169,13 @@ fn test_create_stream_deposit_at_cap_ok() {
     let now = ctx.now();
 
     let result = ctx.factory.try_create_stream(
-        &ctx.sender, &recipient,
-        &10_000, &1,          // exactly at cap
-        &now, &now, &(now + 10_000),
+        &ctx.sender,
+        &recipient,
+        &10_000,
+        &1, // exactly at cap
+        &now,
+        &now,
+        &(now + 10_000),
         &0,
     );
     // May fail for stream-contract reasons (e.g. token transfer) but not DepositExceedsCap
@@ -171,9 +194,13 @@ fn test_create_stream_duration_too_short() {
     let now = ctx.now();
 
     let result = ctx.factory.try_create_stream(
-        &ctx.sender, &recipient,
-        &1_000, &1,
-        &now, &now, &(now + 50), // duration=50 < min_duration=100
+        &ctx.sender,
+        &recipient,
+        &1_000,
+        &1,
+        &now,
+        &now,
+        &(now + 50), // duration=50 < min_duration=100
         &0,
     );
     assert_eq!(result, Err(Ok(FactoryError::DurationTooShort)));
@@ -188,9 +215,13 @@ fn test_create_stream_duration_at_minimum_ok() {
     let now = ctx.now();
 
     let result = ctx.factory.try_create_stream(
-        &ctx.sender, &recipient,
-        &100, &1,
-        &now, &now, &(now + 100), // duration=100 == min_duration
+        &ctx.sender,
+        &recipient,
+        &100,
+        &1,
+        &now,
+        &now,
+        &(now + 100), // duration=100 == min_duration
         &0,
     );
     assert_ne!(result, Err(Ok(FactoryError::DurationTooShort)));
@@ -212,9 +243,13 @@ fn test_factory_not_initialized_returns_error() {
 
     // No init called — create_stream should return NotInitialized
     let result = factory.try_create_stream(
-        &sender, &recipient,
-        &1_000, &1,
-        &now, &now, &(now + 200),
+        &sender,
+        &recipient,
+        &1_000,
+        &1,
+        &now,
+        &now,
+        &(now + 200),
         &0,
     );
     assert_eq!(result, Err(Ok(FactoryError::NotInitialized)));
@@ -234,9 +269,13 @@ fn test_set_cap_enforced() {
     let now = ctx.now();
 
     let result = ctx.factory.try_create_stream(
-        &ctx.sender, &recipient,
-        &6_000, &1,
-        &now, &now, &(now + 200),
+        &ctx.sender,
+        &recipient,
+        &6_000,
+        &1,
+        &now,
+        &now,
+        &(now + 200),
         &0,
     );
     assert_eq!(result, Err(Ok(FactoryError::DepositExceedsCap)));
@@ -252,9 +291,13 @@ fn test_set_min_duration_enforced() {
     let now = ctx.now();
 
     let result = ctx.factory.try_create_stream(
-        &ctx.sender, &recipient,
-        &200, &1,
-        &now, &now, &(now + 200), // duration=200 < new min=500
+        &ctx.sender,
+        &recipient,
+        &200,
+        &1,
+        &now,
+        &now,
+        &(now + 200), // duration=200 < new min=500
         &0,
     );
     assert_eq!(result, Err(Ok(FactoryError::DurationTooShort)));
@@ -270,9 +313,13 @@ fn test_set_allowlist_remove_enforced() {
     let now = ctx.now();
 
     let result = ctx.factory.try_create_stream(
-        &ctx.sender, &recipient,
-        &1_000, &1,
-        &now, &now, &(now + 200),
+        &ctx.sender,
+        &recipient,
+        &1_000,
+        &1,
+        &now,
+        &now,
+        &(now + 200),
         &0,
     );
     assert_eq!(result, Err(Ok(FactoryError::RecipientNotAllowlisted)));

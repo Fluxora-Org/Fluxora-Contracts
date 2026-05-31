@@ -27,7 +27,9 @@ impl<'a> Ctx<'a> {
         let client = FluxoraStreamClient::new(&env, &contract_id);
 
         let token_admin = Address::generate(&env);
-        let token_id = env.register_stellar_asset_contract_v2(token_admin.clone()).address();
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin.clone())
+            .address();
         let token = TokenClient::new(&env, &token_id);
         let stellar_asset = soroban_sdk::token::StellarAssetClient::new(&env, &token_id);
 
@@ -39,7 +41,12 @@ impl<'a> Ctx<'a> {
 
         client.init(&token_id, &admin);
 
-        Self { env, client, sender, token }
+        Self {
+            env,
+            client,
+            sender,
+            token,
+        }
     }
 
     fn make_params(&self, recipient: &Address, deposit: i128, duration: u64) -> CreateStreamParams {
@@ -147,7 +154,8 @@ fn test_batch_index_matches_sequential_creation() {
     let recipient2 = Address::generate(&ctx2.env);
     let q1 = ctx2.make_params(&recipient2, 1_000, 1_000);
     let q2 = ctx2.make_params(&recipient2, 2_000, 2_000);
-    ctx2.client.create_streams(&ctx2.sender, &vec![&ctx2.env, q1, q2]);
+    ctx2.client
+        .create_streams(&ctx2.sender, &vec![&ctx2.env, q1, q2]);
     let batch_index = ctx2.client.get_recipient_streams(&recipient2, &None, &None);
 
     // Both should have 2 streams
@@ -175,7 +183,9 @@ fn test_batch_single_entry_same_as_create_stream() {
     let recipient = Address::generate(&ctx.env);
     let params = ctx.make_params(&recipient, 5_000, 5_000);
 
-    let ids = ctx.client.create_streams(&ctx.sender, &vec![&ctx.env, params]);
+    let ids = ctx
+        .client
+        .create_streams(&ctx.sender, &vec![&ctx.env, params]);
     assert_eq!(ids.len(), 1);
 
     let index = ctx.client.get_recipient_streams(&recipient, &None, &None);
