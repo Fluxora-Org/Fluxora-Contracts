@@ -1,3 +1,31 @@
+use crate::ContractError;
+
+/// Assert that ledger-backed accrual time has not moved backwards.
+///
+/// # Security
+/// Stellar production ledgers are expected to provide monotonically
+/// non-decreasing timestamps. This guard catches test harnesses, migrations, or
+/// future environments that violate that assumption before withdrawable math can
+/// be evaluated at a retrograde timestamp.
+pub fn assert_ledger_time_monotonic(
+    prev_ts: u64,
+    current_ts: u64,
+) -> Result<(), ContractError> {
+    #[cfg(any(test, debug_assertions))]
+    {
+        if current_ts < prev_ts {
+            return Err(ContractError::ClockRegression);
+        }
+    }
+
+    debug_assert!(
+        current_ts >= prev_ts,
+        "retrograde ledger timestamp"
+    );
+
+    Ok(())
+}
+
 /// Computes accrued stream amount without relying on Soroban environment state.
 ///
 /// This helper is intentionally pure to make the core vesting math easy to unit test.
@@ -81,10 +109,9 @@ pub struct CheckpointState {
 pub fn calculate_accrued_amount_checkpointed(
     state: CheckpointState,
     rate_per_second: i128,
-    deposit_amount: i128,
     now: u64,
 ) -> i128 {
-    if now < cliff_time {
+    if now < state.cliff_time {
         return 0;
     }
 
@@ -101,8 +128,8 @@ pub fn calculate_accrued_amount_checkpointed(
         return 0;
     }
 
-    let elapsed_now = now.min(end_time);
-    let elapsed_seconds: i128 = if elapsed_now <= checkpointed_at {
+    let elapsed_now = now.min(state.end_time);
+    let elapsed_seconds: i128 = if elapsed_now <= state.checkpointed_at {
         0
     } else {
         (elapsed_now - state.checkpointed_at) as i128

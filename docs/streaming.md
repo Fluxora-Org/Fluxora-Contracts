@@ -254,12 +254,12 @@ sequenceDiagram
 
 ```text
 if current_time < cliff_time           → return 0
-if start_time >= end_time or rate < 0  → return 0
+if checkpointed_at >= end_time or rate < 0 → return checkpointed_amount or 0
 
 elapsed_now = min(current_time, end_time)
-elapsed_seconds = elapsed_now - start_time   // 0 if underflow
-accrued = elapsed_seconds * rate_per_second  // on overflow → deposit_amount
-return min(accrued, deposit_amount).max(0)
+elapsed_seconds = elapsed_now - checkpointed_at   // 0 if underflow
+added = elapsed_seconds * rate_per_second         // on overflow → deposit_amount
+return min(checkpointed_amount + added, deposit_amount).max(0)
 ```
 
 ### Rules
@@ -273,6 +273,14 @@ return min(accrued, deposit_amount).max(0)
 - **Paused streams:** Accrual computed using current ledger timestamp (same as Active; pause only blocks withdrawals, not accrual)
 - **Completed:** `calculate_accrued` returns `deposit_amount` (deterministic final value, timestamp-independent)
 - **Cancelled:** `calculate_accrued` is frozen at `cancelled_at` (no post-cancel growth)
+
+### Ledger-Time Monotonicity Guard
+
+Ledger-backed accrual paths cache the last observed accrual timestamp in instance storage and compare each later ledger timestamp against it before evaluating withdrawable math. The guard is intentionally global and short-lived: it catches non-monotonic test harness setup, migration mistakes, or future environment changes without adding per-stream storage.
+
+`accrual.rs` also contains a `debug_assert!(current_ts >= prev_ts, "retrograde ledger timestamp")`. In test/debug builds, the same condition returns `ContractError::ClockRegression` instead of allowing a retrograde timestamp to reduce computed accrual. Production Stellar ledgers are still assumed to be monotonically non-decreasing by protocol.
+
+`get_claimable_at(stream_id, timestamp)` is exempt because the timestamp is caller-supplied simulation input rather than `ledger().timestamp()`.
 
 ### Status-Specific Behavior Matrix
 
@@ -1056,6 +1064,7 @@ errors relevant to stream creation and timing.
 | `"overflow calculating total streamable amount"`                        | `create_stream` / `create_streams` | overflow in rate \* duration                  |
 | `"overflow calculating total batch deposit"`                            | `create_streams`                   | overflow in sum of deposits                   |
 | `ContractError::StartTimeInPast`                                        | `create_stream` / `create_streams` | start_time < ledger timestamp                 |
+| `ContractError::ClockRegression` (17)                                   | Ledger-backed accrual paths        | ledger timestamp < previous accrual timestamp |
 | `ContractError::StreamAlreadyPaused` (10)                               | `pause_stream`                     | Double pause                                  |
 | `ContractError::StreamNotPaused` (11)                                   | `resume_stream`                    | Resume active stream                          |
 | `ContractError::StreamTerminalState` (12)                               | `pause_stream` / `resume_stream`   | Modification past end_time                    |
@@ -1286,4 +1295,3 @@ Comprehensive test coverage includes:
 - ✅ Handles edge cases (completed streams, paused streams, etc.)
 
 See `contracts/stream/tests/integration_suite.rs` for full test suite.
-

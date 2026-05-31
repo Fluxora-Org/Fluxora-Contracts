@@ -28,6 +28,7 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `DuplicateStreamId` | 14 | Duplicate stream IDs supplied to a batch operation | `batch_withdraw` |
 | `InvalidSignature` | 15 | Delegated withdrawal signature is invalid, expired, or nonce mismatch | `delegated_withdraw` |
 | `BelowMinimumAmount` | 16 | Withdrawable amount is below the `expected_minimum_amount` committed in the signature | `delegated_withdraw` |
+| `ClockRegression` | 17 | Ledger-backed accrual observed a timestamp lower than the previous accrual timestamp | `calculate_accrued`, `get_withdrawable`, `withdraw`, `withdraw_to`, `batch_withdraw`, `batch_withdraw_to`, rate changes, `cancel_stream`, auto-claim paths |
 
 ---
 
@@ -590,6 +591,20 @@ match client.try_delegated_withdraw(&relayer, &stream_id, &signature, &nonce, &e
 
 ---
 
+### ClockRegression (17)
+
+**Definition**: Ledger-backed accrual observed a ledger timestamp lower than the previous accrual timestamp stored for the contract instance.
+
+**Trigger Conditions**:
+- Test harness sets `ledger().timestamp()` backwards after a prior accrual calculation
+- Migration or environment change provides retrograde timestamps to accrual paths
+
+**Client Action**: Treat as an infrastructure or test-environment failure. Do not retry at the lower timestamp; restore monotonic ledger time and rerun the transaction.
+
+**Success Semantics**: No stream state is changed when the guard returns this error before withdrawable math.
+
+---
+
 ## Previously Panicking Paths (Now Structured Errors)
 
 The following input-error paths previously caused a host-level panic. They now return
@@ -642,6 +657,7 @@ infrastructure-level failures (not user input errors):
 | Future start_time | Success | Stream created but no accrual yet |
 | Cancel before cliff | Success | Full refund (accrued = 0) |
 | Cancel after end_time | InvalidState | No refund (accrued = deposit) |
+| Retrograde ledger timestamp | ClockRegression | `ledger().timestamp()` < previous accrual timestamp in test/debug builds |
 
 ---
 
@@ -661,6 +677,7 @@ Error handling is verified by tests in `contracts/stream/src/test.rs`:
 | DuplicateStreamId | `batch_withdraw` with repeated stream IDs |
 | InvalidSignature | `delegated_withdraw` with invalid or expired signature |
 | BelowMinimumAmount | `delegated_withdraw` when accrued < expected_minimum |
+| ClockRegression | `clock_monotonicity.rs` seeds non-monotonic ledger timestamps |
 
 Discriminant stability is verified by `test_contract_error_discriminants_are_stable` in `contracts/stream/src/test.rs`, which asserts the exact `u32` value of every `ContractError` variant and will fail at compile time if any value is changed.
 

@@ -20037,4 +20037,9 @@ fn test_contract_error_discriminants_are_stable() {
         16,
         "BelowMinimumAmount must be 16"
     );
+    assert_eq!(
+        ContractError::ClockRegression as u32,
+        17,
+        "ClockRegression must be 17"
+    );
 }

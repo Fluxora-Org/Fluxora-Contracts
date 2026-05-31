@@ -152,7 +152,9 @@ pub const MAX_RECIPIENT_PAGE_SIZE: u32 = 100;
 /// for safe rate-decrease support (see `decrease_rate_per_second`).
 /// Bumped to 3: `delegated_withdraw` signature payload now commits to
 /// `expected_minimum_amount` to close the relayer front-running griefing vector.
-pub const CONTRACT_VERSION: u32 = 3;
+/// Bumped to 4: accrual paths track the last ledger timestamp they observed in
+/// instance storage to detect retrograde test clocks and migration regressions.
+pub const CONTRACT_VERSION: u32 = 4;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -217,6 +219,8 @@ pub enum ContractError {
     InvalidSignature = 15,
     /// Accrued amount is below the expected minimum specified in the signed payload.
     BelowMinimumAmount = 16,
+    /// Ledger-backed accrual observed a timestamp lower than the previous accrual timestamp.
+    ClockRegression = 17,
 }
 
 #[contracttype]
@@ -724,6 +728,12 @@ pub enum DataKey {
     RecipientStreamPageCount(Address),
     /// Pending recipient update proposal for a stream (sender-initiated, recipient-accepted).
     PendingRecipientUpdate(u64),
+    /// Last ledger timestamp observed by ledger-backed accrual paths (`u64`, instance storage).
+    ///
+    /// Appended last to preserve existing storage discriminants. This guard is intentionally
+    /// short-lived instance state: it verifies the environment clock assumption without adding
+    /// per-stream storage overhead.
+    LastAccrualLedgerTimestamp,
 }
 
 // ---------------------------------------------------------------------------
@@ -736,6 +746,30 @@ fn bump_instance_ttl(env: &Env) {
     env.storage()
         .instance()
         .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+}
+
+/// Return the current ledger timestamp after verifying ledger-backed accrual time
+/// has not regressed since the previous accrual calculation.
+///
+/// # Errors
+/// - `ContractError::ClockRegression` in test/debug builds when `ledger().timestamp()`
+///   is lower than the last accrual timestamp observed by this contract instance.
+///
+/// # Security
+/// Accrual math assumes ledger timestamps are monotonically non-decreasing. Stellar
+/// enforces this on production ledgers; the stored timestamp is a low-cost tripwire
+/// for test harnesses, migrations, or future environments that violate the assumption.
+fn current_accrual_timestamp(env: &Env) -> Result<u64, ContractError> {
+    let now = env.ledger().timestamp();
+    let key = DataKey::LastAccrualLedgerTimestamp;
+
+    if let Some(prev) = env.storage().instance().get::<_, u64>(&key) {
+        accrual::assert_ledger_time_monotonic(prev, now)?;
+    }
+
+    env.storage().instance().set(&key, &now);
+    bump_instance_ttl(env);
+    Ok(now)
 }
 
 /// Compute an adaptive TTL bump amount proportional to a stream's remaining lifetime.
@@ -2756,7 +2790,7 @@ impl FluxoraStream {
 
         // Cache ledger timestamp once — it is constant within a single transaction.
         // Avoids a redundant host-function call on every loop iteration (#515).
-        let now = env.ledger().timestamp();
+        let now = current_accrual_timestamp(&env)?;
 
         for stream_id in stream_ids.iter() {
             let mut stream = load_stream(&env, stream_id)?;
@@ -2779,13 +2813,14 @@ impl FluxoraStream {
                     now
                 };
                 let accrued = accrual::calculate_accrued_amount_checkpointed(
-                    stream.start_time,
-                    stream.checkpointed_amount,
-                    stream.checkpointed_at,
-                    stream.cliff_time,
-                    stream.end_time,
+                    accrual::CheckpointState {
+                        checkpointed_amount: stream.checkpointed_amount,
+                        checkpointed_at: stream.checkpointed_at,
+                        cliff_time: stream.cliff_time,
+                        end_time: stream.end_time,
+                        deposit_amount: stream.deposit_amount,
+                    },
                     stream.rate_per_second,
-                    stream.deposit_amount,
                     effective_now,
                 );
                 (accrued - stream.withdrawn_amount).max(0)
@@ -2900,7 +2935,7 @@ impl FluxoraStream {
         let mut results = soroban_sdk::Vec::new(&env);
 
         // Cache ledger timestamp once — constant within a single transaction (#515).
-        let now = env.ledger().timestamp();
+        let now = current_accrual_timestamp(&env)?;
 
         for param in withdrawals.iter() {
             let mut stream = load_stream(&env, param.stream_id)?;
@@ -2922,13 +2957,14 @@ impl FluxoraStream {
                     now
                 };
                 let accrued = accrual::calculate_accrued_amount_checkpointed(
-                    stream.start_time,
-                    stream.checkpointed_amount,
-                    stream.checkpointed_at,
-                    stream.cliff_time,
-                    stream.end_time,
+                    accrual::CheckpointState {
+                        checkpointed_amount: stream.checkpointed_amount,
+                        checkpointed_at: stream.checkpointed_at,
+                        cliff_time: stream.cliff_time,
+                        end_time: stream.end_time,
+                        deposit_amount: stream.deposit_amount,
+                    },
                     stream.rate_per_second,
-                    stream.deposit_amount,
                     effective_now,
                 );
                 (accrued - stream.withdrawn_amount).max(0)
@@ -3188,7 +3224,7 @@ impl FluxoraStream {
         let now = if stream.status == StreamStatus::Cancelled {
             stream.cancelled_at.ok_or(ContractError::InvalidState)?
         } else {
-            env.ledger().timestamp()
+            current_accrual_timestamp(&env)?
         };
 
         Ok(accrual::calculate_accrued_amount_checkpointed(
@@ -3624,7 +3660,7 @@ impl FluxoraStream {
         }
 
         // Checkpoint accrued-to-date so the rate increase applies forward-only.
-        let now = env.ledger().timestamp();
+        let now = current_accrual_timestamp(&env)?;
         let accrued_now = accrual::calculate_accrued_amount_checkpointed(
             accrual::CheckpointState {
                 checkpointed_amount: stream.checkpointed_amount,
@@ -3718,7 +3754,7 @@ impl FluxoraStream {
         }
 
         // Reject once the stream has expired; remaining duration would be zero.
-        let now = env.ledger().timestamp();
+        let now = current_accrual_timestamp(&env)?;
         if now >= stream.end_time {
             return Err(ContractError::InvalidState);
         }
@@ -3845,7 +3881,7 @@ impl FluxoraStream {
         // Only non-terminal streams may be shortened.
         Self::require_cancellable_status(stream.status)?;
 
-        let now = env.ledger().timestamp();
+        let now = current_accrual_timestamp(&env)?;
 
         // New end time must move strictly earlier and remain strictly in the future.
         if new_end_time <= now
@@ -3946,7 +3982,7 @@ impl FluxoraStream {
         // Only non-terminal streams may be extended.
         Self::require_cancellable_status(stream.status)?;
 
-        let now = env.ledger().timestamp();
+        let now = current_accrual_timestamp(&env)?;
 
         // Must move end_time forward in time.
         if new_end_time <= stream.end_time
@@ -4051,7 +4087,7 @@ impl FluxoraStream {
         // Reject top-ups on expired streams to prevent zombie fund lock-up.
         // Even if submitted in the same block as expiry, no seconds remain to
         // stream the new funds, so the deposit would be permanently unclaimable.
-        let now = env.ledger().timestamp();
+        let now = current_accrual_timestamp(&env)?;
         if now >= stream.end_time {
             return Err(ContractError::InvalidState);
         }
@@ -4616,7 +4652,7 @@ impl FluxoraStream {
     fn cancel_stream_internal(env: &Env, stream: &mut Stream) -> Result<(), ContractError> {
         Self::require_cancellable_status(stream.status)?;
 
-        let now = env.ledger().timestamp();
+        let now = current_accrual_timestamp(&env)?;
         // Use checkpoint-aware accrual so rate-decreased streams are cancelled correctly.
         let accrued_at_cancel = accrual::calculate_accrued_amount_checkpointed(
             accrual::CheckpointState {
@@ -5430,7 +5466,7 @@ impl FluxoraStream {
         }
 
         // Check we're at or past end_time
-        let now = env.ledger().timestamp();
+        let now = current_accrual_timestamp(&env)?;
         if now < stream.end_time {
             return Err(ContractError::InvalidState);
         }
@@ -5596,7 +5632,7 @@ impl FluxoraStream {
                 }
 
                 // Calculate claimable amount
-                let now = env.ledger().timestamp();
+                let now = current_accrual_timestamp(&env)?;
                 let accrued = accrual::calculate_accrued_amount_checkpointed(
                     accrual::CheckpointState {
                         checkpointed_amount: stream.checkpointed_amount,
