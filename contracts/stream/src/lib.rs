@@ -248,6 +248,34 @@ pub struct StreamCreated {
     pub memo: Option<soroban_sdk::Bytes>,
 }
 
+/// Emitted when a stream is cloned via `clone_stream`.
+///
+/// Carries both the source stream ID (for audit trail) and the full parameters
+/// of the newly created stream so indexers can correlate the two without a
+/// separate `get_stream_state` call.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct StreamCloned {
+    /// The newly created stream's ID.
+    pub new_stream_id: u64,
+    /// The source stream that was cloned.
+    pub source_stream_id: u64,
+    /// Sender of the new stream (same as the caller / original sender).
+    pub sender: Address,
+    /// Recipient of the new stream (may differ from the source stream's recipient).
+    pub recipient: Address,
+    /// Deposit amount locked into the new stream.
+    pub deposit_amount: i128,
+    /// Rate per second inherited from the source stream.
+    pub rate_per_second: i128,
+    /// Absolute start time of the new stream.
+    pub start_time: u64,
+    /// Cliff time of the new stream (preserves the source cliff offset).
+    pub cliff_time: u64,
+    /// End time of the new stream.
+    pub end_time: u64,
+}
+
 /// Result of a single stream creation attempt in a partial batch.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -5646,6 +5674,180 @@ impl FluxoraStream {
         let _stream = load_stream(&env, stream_id)?;
         let key = DataKey::AutoClaimDestination(stream_id);
         Ok(env.storage().persistent().get(&key))
+    }
+
+    /// Clone an existing stream into a new stream with a different recipient and timing.
+    ///
+    /// Copies `rate_per_second`, the cliff offset (relative to `start_time`), the
+    /// `StreamKind` (via `withdraw_dust_threshold` and `memo`), and the source stream's
+    /// `sender` identity from the source stream, while accepting a fresh `new_recipient`,
+    /// `start_time`, `end_time`, and `deposit` for the new stream.
+    ///
+    /// This is the primary entry-point for recurring payment obligations (e.g. monthly
+    /// salary streams): operators no longer need to reconstruct the full parameter set
+    /// for each new period — they clone the previous stream and supply only what changes.
+    ///
+    /// # Parameters
+    /// - `stream_id`: Source stream to clone from.
+    /// - `new_recipient`: Recipient of the new stream (may equal the source recipient).
+    /// - `start_time`: Absolute start timestamp for the new stream.
+    /// - `end_time`: Absolute end timestamp for the new stream.
+    /// - `deposit`: Deposit amount for the new stream.
+    ///   Must satisfy `deposit >= rate_per_second × (end_time − start_time)`.
+    /// - `force`: When `true`, allows cloning a source stream whose `withdraw_dust_threshold`
+    ///   is set to the sentinel value `i128::MAX` (used internally to mark `CliffOnly`-style
+    ///   streams). When `false` (the default), such streams are rejected with `InvalidParams`
+    ///   to prevent accidental cloning of degenerate configurations.
+    ///
+    /// # Authorization
+    /// - Requires authorization from the **source stream's sender**.
+    ///   The admin can clone streams they created (admin == sender).
+    ///   Third parties and the source stream's recipient cannot clone.
+    ///
+    /// # Inherited fields (copied from source stream)
+    /// | Field | Behaviour |
+    /// |---|---|
+    /// | `rate_per_second` | Copied verbatim |
+    /// | cliff offset | `cliff_time = start_time + (source.cliff_time − source.start_time)` |
+    /// | `withdraw_dust_threshold` | Copied verbatim |
+    /// | `memo` | Copied verbatim |
+    ///
+    /// # Source stream state requirements
+    /// The source stream must be in one of the following states:
+    /// - `Completed` — natural end of a previous period.
+    /// - `Cancelled` — early termination of a previous period.
+    /// - `Active` or `Paused` — allowed when the caller is the original sender or admin
+    ///   (enables pre-scheduling the next period before the current one ends).
+    ///
+    /// # Returns
+    /// - `u64`: The new stream's ID.
+    ///
+    /// # Errors
+    /// - `StreamNotFound` (1): `stream_id` does not exist.
+    /// - `InvalidParams` (3): `force == false` and the source stream has a `CliffOnly`
+    ///   sentinel threshold (`i128::MAX`), or any parameter fails `validate_stream_params`.
+    /// - `ContractPaused` (4): Creation is globally paused.
+    /// - `StartTimeInPast` (5): `start_time < ledger.timestamp()`.
+    /// - `InsufficientDeposit` (10): `deposit < rate_per_second × (end_time − start_time)`.
+    /// - `ArithmeticOverflow` (6): Cliff offset calculation overflows `u64`.
+    ///
+    /// # Events
+    /// - Emits `("created", new_stream_id) → StreamCreated { ... }` (standard creation event).
+    /// - Emits `("cloned", new_stream_id) → StreamCloned { new_stream_id, source_stream_id, ... }`
+    ///   for indexers that need to correlate the clone relationship.
+    ///
+    /// # Security notes
+    /// - The caller must hold the source sender's auth key; a recipient or third party
+    ///   cannot clone a stream they do not own.
+    /// - Cloning an `Active` stream is intentionally allowed so operators can pre-schedule
+    ///   the next period. The source stream continues running independently.
+    /// - The `force` flag is a deliberate opt-in for unusual configurations; the default
+    ///   (`false`) is the safe path.
+    /// - CEI ordering is preserved: state is persisted before the token pull.
+    ///
+    /// # Example — recurring monthly salary
+    /// ```ignore
+    /// // Month 1 stream just completed (stream_id = 42).
+    /// // Clone it for month 2 with the same recipient and rate.
+    /// let month2_id = contract.clone_stream(
+    ///     &42,                    // source stream
+    ///     &employee_address,      // same recipient
+    ///     &month2_start,          // new start_time
+    ///     &month2_end,            // new end_time
+    ///     &monthly_salary,        // deposit
+    ///     &false,                 // force (not a CliffOnly stream)
+    /// )?;
+    /// ```
+    pub fn clone_stream(
+        env: Env,
+        stream_id: u64,
+        new_recipient: Address,
+        start_time: u64,
+        end_time: u64,
+        deposit: i128,
+        force: bool,
+    ) -> Result<u64, ContractError> {
+        // ── 1. Pause guard ────────────────────────────────────────────────────
+        require_not_creation_paused(&env)?;
+
+        // ── 2. Load source stream ─────────────────────────────────────────────
+        let source = load_stream(&env, stream_id)?;
+
+        // ── 3. Authorization: source sender ──────────────────────────────────
+        // Only the source stream's original sender may clone it.
+        // The contract admin can clone streams they created (admin == sender).
+        // For streams created by others, the admin must coordinate with the sender
+        // out-of-band; there is no admin-override path for clone_stream to prevent
+        // privilege escalation (an admin should not be able to spend a sender's tokens).
+        source.sender.require_auth();
+
+        // ── 4. CliffOnly guard ────────────────────────────────────────────────
+        // Streams with withdraw_dust_threshold == i128::MAX are treated as
+        // "CliffOnly" sentinel streams. Cloning them without explicit opt-in
+        // would silently propagate a degenerate configuration.
+        if source.withdraw_dust_threshold == i128::MAX && !force {
+            return Err(ContractError::InvalidParams);
+        }
+
+        // ── 5. Compute inherited cliff offset ─────────────────────────────────
+        // Preserve the relative cliff position: cliff_offset = source.cliff_time - source.start_time.
+        // Apply it to the new start_time.
+        let cliff_offset = source
+            .cliff_time
+            .checked_sub(source.start_time)
+            .unwrap_or(0); // if cliff < start (degenerate), treat as no cliff
+        let new_cliff_time = start_time
+            .checked_add(cliff_offset)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+
+        // ── 6. Validate new stream parameters ────────────────────────────────
+        let current_time = env.ledger().timestamp();
+        Self::validate_stream_params(
+            &env,
+            &source.sender,
+            &new_recipient,
+            deposit,
+            source.rate_per_second,
+            current_time,
+            start_time,
+            new_cliff_time,
+            end_time,
+        )?;
+
+        // ── 7. Pull deposit tokens from sender ────────────────────────────────
+        pull_token(&env, &source.sender, deposit)?;
+
+        // ── 8. Persist the new stream ─────────────────────────────────────────
+        let new_stream_id = Self::persist_new_stream(
+            &env,
+            source.sender.clone(),
+            new_recipient.clone(),
+            deposit,
+            source.rate_per_second,
+            start_time,
+            new_cliff_time,
+            end_time,
+            source.withdraw_dust_threshold,
+            source.memo.clone(),
+        )?;
+
+        // ── 9. Emit clone-specific event for indexer correlation ──────────────
+        env.events().publish(
+            (symbol_short!("cloned"), new_stream_id),
+            StreamCloned {
+                new_stream_id,
+                source_stream_id: stream_id,
+                sender: source.sender.clone(),
+                recipient: new_recipient,
+                deposit_amount: deposit,
+                rate_per_second: source.rate_per_second,
+                start_time,
+                cliff_time: new_cliff_time,
+                end_time,
+            },
+        );
+
+        Ok(new_stream_id)
     }
 
     /// Internal helper to validate an auto-claim destination address.
