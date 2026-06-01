@@ -43,7 +43,6 @@ impl<'a> Ctx<'a> {
     }
 
     fn make_params(&self, recipient: &Address, deposit: i128, duration: u64) -> CreateStreamParams {
-        kind: fluxora_stream::StreamKind::Linear,
         let now = self.env.ledger().timestamp();
         CreateStreamParams {
             recipient: recipient.clone(),
@@ -54,6 +53,7 @@ impl<'a> Ctx<'a> {
             end_time: now + duration,
             withdraw_dust_threshold: None,
             memo: None,
+            kind: fluxora_stream::StreamKind::Linear,
         }
     }
 }

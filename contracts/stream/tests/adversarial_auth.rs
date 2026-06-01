@@ -1106,7 +1106,13 @@ mod delegated_withdraw_adversarial {
         let sig = ctx.sign(stream_id, &dest, 0, deadline);
 
         let result = ctx.client().try_delegated_withdraw(
-            &stream_id, &ctx.relayer, &dest, &0, &deadline, &sig,
+            &stream_id,
+            &ctx.relayer,
+            &dest,
+            &0,
+            &deadline,
+            &0i128,
+            &sig,
         );
         assert_eq!(result, Err(Ok(ContractError::SignatureDeadlineExpired)));
     }
@@ -1121,13 +1127,26 @@ mod delegated_withdraw_adversarial {
         // First withdrawal consumes nonce 0.
         ctx.env.ledger().set_timestamp(300);
         let sig0 = ctx.sign(stream_id, &dest, 0, 9999);
-        ctx.client()
-            .delegated_withdraw(&stream_id, &ctx.relayer, &dest, &0, &9999, &sig0);
+        ctx.client().delegated_withdraw(
+            &stream_id,
+            &ctx.relayer,
+            &dest,
+            &0,
+            &9999,
+            &0i128,
+            &sig0,
+        );
 
         // Replay with nonce 0 must fail.
         ctx.env.ledger().set_timestamp(600);
         let result = ctx.client().try_delegated_withdraw(
-            &stream_id, &ctx.relayer, &dest, &0, &9999, &sig0,
+            &stream_id,
+            &ctx.relayer,
+            &dest,
+            &0,
+            &9999,
+            &0i128,
+            &sig0,
         );
         assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
     }
@@ -1142,7 +1161,13 @@ mod delegated_withdraw_adversarial {
         ctx.env.ledger().set_timestamp(300);
         let sig = ctx.sign(stream_id, &dest, 1, 9999); // nonce 1 but stored is 0
         let result = ctx.client().try_delegated_withdraw(
-            &stream_id, &ctx.relayer, &dest, &1, &9999, &sig,
+            &stream_id,
+            &ctx.relayer,
+            &dest,
+            &1,
+            &9999,
+            &0i128,
+            &sig,
         );
         assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
     }
@@ -1156,7 +1181,13 @@ mod delegated_withdraw_adversarial {
 
         let dummy_sig = BytesN::from_array(&ctx.env, &[0u8; 64]);
         let result = ctx.client().try_delegated_withdraw(
-            &999u64, &ctx.relayer, &dest, &0, &9999, &dummy_sig,
+            &999u64,
+            &ctx.relayer,
+            &dest,
+            &0,
+            &9999,
+            &0i128,
+            &dummy_sig,
         );
         assert_eq!(result, Err(Ok(ContractError::StreamNotFound)));
     }
@@ -1171,7 +1202,13 @@ mod delegated_withdraw_adversarial {
         let dest = ctx.contract_id.clone();
         let sig = ctx.sign(stream_id, &dest, 0, 9999);
         let result = ctx.client().try_delegated_withdraw(
-            &stream_id, &ctx.relayer, &dest, &0, &9999, &sig,
+            &stream_id,
+            &ctx.relayer,
+            &dest,
+            &0,
+            &9999,
+            &0i128,
+            &sig,
         );
         assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
     }
@@ -1200,7 +1237,13 @@ mod delegated_withdraw_adversarial {
         ctx.env.ledger().set_timestamp(300);
         let sig = ctx.sign(stream_id, &dest, 0, 9999);
         let result = ctx.client().try_delegated_withdraw(
-            &stream_id, &ctx.relayer, &dest, &0, &9999, &sig,
+            &stream_id,
+            &ctx.relayer,
+            &dest,
+            &0,
+            &9999,
+            &0i128,
+            &sig,
         );
         assert_eq!(result, Err(Ok(ContractError::InvalidState)));
     }
@@ -1214,14 +1257,26 @@ mod delegated_withdraw_adversarial {
 
         // Drain the stream to Completed.
         ctx.env.ledger().set_timestamp(1000);
-        let sig0 = ctx.sign(stream_id, &dest, 0, 9999);
-        ctx.client()
-            .delegated_withdraw(&stream_id, &ctx.relayer, &dest, &0, &9999, &sig0);
+        ctx.client().delegated_withdraw(
+            &stream_id,
+            &ctx.relayer,
+            &dest,
+            &0,
+            &9999,
+            &0i128,
+            &sig0,
+        );
 
         // Second attempt on a Completed stream must fail.
         let sig1 = ctx.sign(stream_id, &dest, 1, 9999);
         let result = ctx.client().try_delegated_withdraw(
-            &stream_id, &ctx.relayer, &dest, &1, &9999, &sig1,
+            &stream_id,
+            &ctx.relayer,
+            &dest,
+            &1,
+            &9999,
+            &0i128,
+            &sig1,
         );
         assert_eq!(result, Err(Ok(ContractError::InvalidState)));
     }

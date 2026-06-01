@@ -4468,6 +4468,8 @@ impl FluxoraStream {
     /// - Paginate: fetch first N IDs, then call `get_stream_state` for each
     /// - Filter by status: fetch all IDs, then check status of each via `get_stream_state`
     pub fn get_recipient_streams(env: Env, recipient: Address) -> soroban_sdk::Vec<u64> {
+        load_recipient_streams(&env, &recipient)
+    }
 
     /// Paginated version of get_recipient_streams to prevent unbounded returns.
     /// 
