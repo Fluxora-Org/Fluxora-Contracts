@@ -6,17 +6,20 @@
 use fluxora_factory::{FactoryError, FluxoraFactory, FluxoraFactoryClient};
 use fluxora_stream::{FluxoraStream, FluxoraStreamClient};
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
+    testutils::Address as _,
     token::{Client as TokenClient, StellarAssetClient},
     Address, Env,
 };
+use std::panic::AssertUnwindSafe;
 
 struct Ctx<'a> {
     env: Env,
     factory: FluxoraFactoryClient<'a>,
+    #[allow(dead_code)]
     stream: FluxoraStreamClient<'a>,
     admin: Address,
     sender: Address,
+    #[allow(dead_code)]
     token: TokenClient<'a>,
 }
 
@@ -97,9 +100,9 @@ fn test_set_admin_requires_existing_admin() {
     factory.init(&admin, &stream_contract, &10_000, &100);
 
     // set_admin without admin auth should panic (require_auth fails)
-    let result = std::panic::catch_unwind(|| {
+    let _result = std::panic::catch_unwind(AssertUnwindSafe(|| {
         factory.set_admin(&new_admin);
-    });
+    }));
     // In Soroban testutils, unauthorized calls panic
     // We verify the happy path instead: with mock_all_auths it succeeds
     let env2 = Env::default();

@@ -1334,7 +1334,7 @@ fn event_snapshot_health_changed_top_up_heals_underfunded_stream() {
         .expect("StreamHealthChanged event must be emitted when healing");
 
     assert_eq!(health.stream_id, stream_id);
-    assert_eq!(health.is_underfunded, false, "Stream should now be funded");
+    assert!(!health.is_underfunded, "Stream should now be funded");
     assert_eq!(health.remaining_balance, 1100);
     assert_eq!(health.seconds_remaining, 900);
 }
@@ -1375,7 +1375,7 @@ fn event_snapshot_health_changed_shorten_heals_underfunded_stream() {
         .expect("StreamHealthChanged event must be emitted when shorten heals");
 
     assert_eq!(health.stream_id, stream_id);
-    assert_eq!(health.is_underfunded, false, "Stream should now be funded");
+    assert!(!health.is_underfunded, "Stream should now be funded");
     assert_eq!(health.seconds_remaining, 400);
     assert_eq!(health.remaining_balance, 500);
 }
@@ -1418,7 +1418,7 @@ fn event_snapshot_health_changed_decrease_rate_heals_underfunded_stream() {
         .expect("StreamHealthChanged event must be emitted when decreasing rate heals");
 
     assert_eq!(health.stream_id, stream_id);
-    assert_eq!(health.is_underfunded, false, "Stream should now be funded");
+    assert!(!health.is_underfunded, "Stream should now be funded");
     assert_eq!(health.remaining_balance, 1900);
     assert_eq!(health.seconds_remaining, 900);
 }
@@ -1457,8 +1457,8 @@ fn event_snapshot_health_changed_cancel_heals_underfunded_stream() {
         .expect("StreamHealthChanged event must be emitted when cancel heals");
 
     assert_eq!(health.stream_id, stream_id);
-    assert_eq!(
-        health.is_underfunded, false,
+    assert!(
+        !health.is_underfunded,
         "Terminal stream is never underfunded"
     );
     assert_eq!(health.seconds_remaining, 0);

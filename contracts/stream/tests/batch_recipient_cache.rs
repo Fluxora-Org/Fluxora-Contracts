@@ -4,17 +4,14 @@
 //! same index state as creating them one-by-one, and that the O(1)-per-recipient
 //! flush path is correct for mixed-recipient batches.
 
-use fluxora_stream::{ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient};
-use soroban_sdk::{
-    testutils::{Address as _, Ledger},
-    token::{Client as TokenClient, StellarAssetClient},
-    vec, Address, Env,
-};
+use fluxora_stream::{CreateStreamParams, FluxoraStream, FluxoraStreamClient};
+use soroban_sdk::{testutils::Address as _, token::Client as TokenClient, vec, Address, Env};
 
 struct Ctx<'a> {
     env: Env,
     client: FluxoraStreamClient<'a>,
     sender: Address,
+    #[allow(dead_code)]
     token: TokenClient<'a>,
 }
 
@@ -81,10 +78,10 @@ fn test_batch_same_recipient_index_correct() {
     assert_eq!(ids.len(), 3);
 
     // All three IDs must appear in the recipient's index
-    let index = ctx.client.get_recipient_streams(&recipient, &None, &None);
+    let index = ctx.client.get_recipient_streams(&recipient);
     assert_eq!(index.len(), 3);
     for id in ids.iter() {
-        assert!(index.contains(&id));
+        assert!(index.contains(id));
     }
 }
 
@@ -105,16 +102,16 @@ fn test_batch_distinct_recipients_index_correct() {
     let ids = ctx.client.create_streams(&ctx.sender, &params);
     assert_eq!(ids.len(), 3);
 
-    let alice_index = ctx.client.get_recipient_streams(&alice, &None, &None);
-    let bob_index = ctx.client.get_recipient_streams(&bob, &None, &None);
+    let alice_index = ctx.client.get_recipient_streams(&alice);
+    let bob_index = ctx.client.get_recipient_streams(&bob);
 
     assert_eq!(alice_index.len(), 2);
     assert_eq!(bob_index.len(), 1);
 
     // Alice gets stream 0 and 2, Bob gets stream 1
-    assert!(alice_index.contains(&ids.get(0).unwrap()));
-    assert!(alice_index.contains(&ids.get(2).unwrap()));
-    assert!(bob_index.contains(&ids.get(1).unwrap()));
+    assert!(alice_index.contains(ids.get(0).unwrap()));
+    assert!(alice_index.contains(ids.get(2).unwrap()));
+    assert!(bob_index.contains(ids.get(1).unwrap()));
 }
 
 /// Cached batch result matches sequential single-stream creation for the same recipient.
@@ -147,7 +144,7 @@ fn test_batch_index_matches_sequential_creation() {
         &0,
         &None,
     );
-    let seq_index = ctx1.client.get_recipient_streams(&recipient1, &None, &None);
+    let seq_index = ctx1.client.get_recipient_streams(&recipient1);
 
     // Batch: create both streams in one call
     let ctx2 = Ctx::setup();
@@ -156,7 +153,7 @@ fn test_batch_index_matches_sequential_creation() {
     let q2 = ctx2.make_params(&recipient2, 2_000, 2_000);
     ctx2.client
         .create_streams(&ctx2.sender, &vec![&ctx2.env, q1, q2]);
-    let batch_index = ctx2.client.get_recipient_streams(&recipient2, &None, &None);
+    let batch_index = ctx2.client.get_recipient_streams(&recipient2);
 
     // Both should have 2 streams
     assert_eq!(seq_index.len(), batch_index.len());
@@ -172,7 +169,7 @@ fn test_batch_empty_no_index_change() {
     let result = ctx.client.create_streams(&ctx.sender, &vec![&ctx.env]);
     assert_eq!(result.len(), 0);
 
-    let index = ctx.client.get_recipient_streams(&recipient, &None, &None);
+    let index = ctx.client.get_recipient_streams(&recipient);
     assert_eq!(index.len(), 0);
 }
 
@@ -188,7 +185,7 @@ fn test_batch_single_entry_same_as_create_stream() {
         .create_streams(&ctx.sender, &vec![&ctx.env, params]);
     assert_eq!(ids.len(), 1);
 
-    let index = ctx.client.get_recipient_streams(&recipient, &None, &None);
+    let index = ctx.client.get_recipient_streams(&recipient);
     assert_eq!(index.len(), 1);
     assert_eq!(index.get(0).unwrap(), ids.get(0).unwrap());
 }
@@ -208,7 +205,7 @@ fn test_batch_index_sorted_order() {
     ];
 
     let ids = ctx.client.create_streams(&ctx.sender, &params);
-    let index = ctx.client.get_recipient_streams(&recipient, &None, &None);
+    let index = ctx.client.get_recipient_streams(&recipient);
 
     assert_eq!(index.len(), 4);
     // Verify sorted order
@@ -217,7 +214,7 @@ fn test_batch_index_sorted_order() {
     }
     // All created IDs present
     for id in ids.iter() {
-        assert!(index.contains(&id));
+        assert!(index.contains(id));
     }
 }
 

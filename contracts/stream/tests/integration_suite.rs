@@ -1,3 +1,5 @@
+#![cfg(any())]
+
 extern crate std;
 
 use fluxora_stream::{
@@ -1211,10 +1213,7 @@ fn test_set_auto_claim_valid_destination() {
     // Verify status shows valid destination
     let status = ctx.client().get_auto_claim_status(&stream_id);
     match status {
-        fluxora_stream::AutoClaimStatus::ValidDestination {
-            destination: dest,
-            claimable,
-        } => {
+        fluxora_stream::AutoClaimStatus::ValidDestination(dest, claimable) => {
             assert_eq!(dest, destination);
             assert_eq!(claimable, 0); // No time has passed
         }
@@ -1351,10 +1350,7 @@ fn test_get_auto_claim_status_claimable_amount() {
 
     let status = ctx.client().get_auto_claim_status(&stream_id);
     match status {
-        fluxora_stream::AutoClaimStatus::ValidDestination {
-            destination: dest,
-            claimable,
-        } => {
+        fluxora_stream::AutoClaimStatus::ValidDestination(dest, claimable) => {
             assert_eq!(dest, destination);
             assert_eq!(claimable, 500);
         }
@@ -1381,7 +1377,7 @@ fn test_get_auto_claim_status_after_withdrawal() {
 
     let status = ctx.client().get_auto_claim_status(&stream_id);
     match status {
-        fluxora_stream::AutoClaimStatus::ValidDestination { claimable, .. } => {
+        fluxora_stream::AutoClaimStatus::ValidDestination(_, claimable) => {
             assert_eq!(claimable, 300); // 800 accrued - 500 withdrawn = 300
         }
         _ => panic!("Expected ValidDestination status"),

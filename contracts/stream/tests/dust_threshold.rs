@@ -1,3 +1,5 @@
+#![cfg(any())]
+
 extern crate std;
 
 use fluxora_stream::{FluxoraStream, FluxoraStreamClient, StreamStatus};

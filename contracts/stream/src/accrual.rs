@@ -82,7 +82,7 @@ pub struct CheckpointState {
 /// # Parameters
 /// - `_start_time`         – original stream start; reserved for future cliff logic.
 /// - `checkpointed_amount` – tokens accrued under all **previous** rate epochs, locked in
-///                            at `checkpointed_at`. Initialised to `0` at stream creation.
+///   at `checkpointed_at`. Initialised to `0` at stream creation.
 /// - `checkpointed_at`     – timestamp of the last checkpoint (== `start_time` initially).
 /// - `cliff_time`          – no accrual is ever visible before this timestamp.
 /// - `end_time`            – accrual is capped at this timestamp.

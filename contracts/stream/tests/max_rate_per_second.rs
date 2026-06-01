@@ -1,22 +1,22 @@
 #![cfg(test)]
 extern crate std;
 
-use fluxora_stream::{
-    ContractError, FluxoraStream, FluxoraStreamClient, RateCapEnforced, RateUpdated,
-};
+use fluxora_stream::{ContractError, FluxoraStream, FluxoraStreamClient, RateCapEnforced};
 use soroban_sdk::{
     symbol_short,
-    testutils::{Address as _, Events, Ledger},
-    token::Client as TokenClient,
-    vec, Address, Env,
+    testutils::{Address as _, Events},
+    token::{Client as TokenClient, StellarAssetClient},
+    vec, Address, Env, IntoVal, Symbol, TryFromVal,
 };
 
 struct TestContext {
     env: Env,
     client: FluxoraStreamClient<'static>,
+    #[allow(dead_code)]
     admin: Address,
     sender: Address,
     recipient: Address,
+    #[allow(dead_code)]
     token: TokenClient<'static>,
 }
 
@@ -33,6 +33,7 @@ impl TestContext {
             .register_stellar_asset_contract_v2(token_admin)
             .address();
         let token = TokenClient::new(&env, &token_id);
+        let token_asset = StellarAssetClient::new(&env, &token_id);
 
         let admin = Address::generate(&env);
         let sender = Address::generate(&env);
@@ -41,7 +42,7 @@ impl TestContext {
         client.init(&token_id, &admin);
 
         // Mint tokens to sender
-        token.mint(&sender, &1_000_000_000);
+        token_asset.mint(&sender, &1_000_000_000);
 
         Self {
             env,
@@ -54,7 +55,7 @@ impl TestContext {
     }
 
     fn create_stream(&self, rate_per_second: i128) -> Result<u64, ContractError> {
-        self.client.create_stream(
+        Ok(self.client.create_stream(
             &self.sender,
             &self.recipient,
             &1000,
@@ -64,7 +65,7 @@ impl TestContext {
             &1000,
             &0,
             &None,
-        )
+        ))
     }
 }
 
@@ -73,8 +74,7 @@ fn test_set_max_rate_per_second_admin_only() {
     let ctx = TestContext::setup();
 
     // Admin can set max rate
-    let result = ctx.client.set_max_rate_per_second(&1000);
-    assert!(result.is_ok());
+    ctx.client.set_max_rate_per_second(&1000);
 
     // Non-admin cannot set max rate
     let non_admin = Address::generate(&ctx.env);
@@ -150,8 +150,7 @@ fn test_update_rate_per_second_respects_max_rate() {
     ctx.client.set_max_rate_per_second(&100);
 
     // Update to rate <= max should succeed
-    let result = ctx.client.update_rate_per_second(&stream_id, &100);
-    assert!(result.is_ok());
+    ctx.client.update_rate_per_second(&stream_id, &100);
 
     // Update to rate > max should fail and emit RateCapEnforced event
     let events_before = ctx.env.events().all().len();
@@ -162,16 +161,18 @@ fn test_update_rate_per_second_respects_max_rate() {
     let events = ctx.env.events().all();
     assert_eq!(events.len(), events_before + 1);
 
-    let rate_cap_event = events
-        .iter()
-        .find(|e| e.0 == (symbol_short!("rate_cap"), stream_id));
+    let rate_cap_event = events.iter().find(|e| {
+        e.1.get(0)
+            .map(|topic| Symbol::try_from_val(&ctx.env, &topic).unwrap())
+            == Some(symbol_short!("rate_cap"))
+    });
     assert!(
         rate_cap_event.is_some(),
         "RateCapEnforced event must be emitted"
     );
 
     if let Some(event) = rate_cap_event {
-        let rate_cap_enforced = RateCapEnforced::try_from_val(&ctx.env, &event.1)
+        let rate_cap_enforced = RateCapEnforced::try_from_val(&ctx.env, &event.2)
             .expect("Event data must deserialize to RateCapEnforced");
         assert_eq!(rate_cap_enforced.stream_id, stream_id);
         assert_eq!(rate_cap_enforced.attempted_rate, 101);
@@ -305,8 +306,7 @@ fn test_rate_cap_does_not_affect_existing_streams() {
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 
     // Updates within the cap should work
-    let result = ctx.client.update_rate_per_second(&stream_id, &1100); // Still higher than old rate
-    assert!(result.is_ok());
+    ctx.client.update_rate_per_second(&stream_id, &1100); // Still higher than old rate
 }
 
 #[test]
@@ -325,7 +325,7 @@ fn test_rate_cap_with_arithmetic_overflow_protection() {
         &1_000_000,
         &0,
         &0,
-        &i64::MAX as u64, // Very long duration
+        &(i64::MAX as u64), // Very long duration
         &0,
         &None,
     );
@@ -345,8 +345,6 @@ fn test_multiple_rate_cap_enforced_events() {
     // Set max rate
     ctx.client.set_max_rate_per_second(&100);
 
-    let events_before = ctx.env.events().all().len();
-
     // Try to update both streams beyond the cap
     let _ = ctx.client.try_update_rate_per_second(&stream_id1, &101);
     let _ = ctx.client.try_update_rate_per_second(&stream_id2, &102);
@@ -355,14 +353,18 @@ fn test_multiple_rate_cap_enforced_events() {
     let events = ctx.env.events().all();
     let rate_cap_events: Vec<_> = events
         .iter()
-        .filter(|e| e.0 .0 == symbol_short!("rate_cap"))
+        .filter(|e| {
+            e.1.get(0)
+                .map(|topic| Symbol::try_from_val(&ctx.env, &topic).unwrap())
+                == Some(symbol_short!("rate_cap"))
+        })
         .collect();
 
     assert_eq!(rate_cap_events.len(), 2);
 
     // Verify event details
     for (i, event) in rate_cap_events.iter().enumerate() {
-        let rate_cap_enforced = RateCapEnforced::try_from_val(&ctx.env, &event.1)
+        let rate_cap_enforced = RateCapEnforced::try_from_val(&ctx.env, &event.2)
             .expect("Event data must deserialize to RateCapEnforced");
         assert_eq!(rate_cap_enforced.max_rate_per_second, 100);
         assert_eq!(rate_cap_enforced.attempted_rate, 101 + i as i128);

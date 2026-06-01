@@ -6,10 +6,12 @@
 //!    closing a completed stream succeeds gracefully even when the recipient
 //!    index entry is absent (no panic, no partial state left behind).
 
-use fluxora_stream::{ContractError, FluxoraStream, FluxoraStreamClient, StreamStatus};
+use fluxora_stream::{
+    ContractError, FluxoraStream, FluxoraStreamClient, PauseReason, StreamStatus,
+};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    token::{Client as TokenClient, StellarAssetClient},
+    token::Client as TokenClient,
     Address, Env,
 };
 
@@ -18,6 +20,7 @@ struct Ctx<'a> {
     client: FluxoraStreamClient<'a>,
     sender: Address,
     recipient: Address,
+    #[allow(dead_code)]
     token: TokenClient<'a>,
 }
 
@@ -85,7 +88,8 @@ fn test_close_non_completed_stream_rejected() {
 fn test_close_paused_stream_rejected() {
     let ctx = Ctx::setup();
     let stream_id = ctx.create_stream(10_000);
-    ctx.client.pause_stream(&stream_id);
+    ctx.client
+        .pause_stream(&stream_id, &PauseReason::Operational);
     assert_eq!(
         ctx.client.get_stream_state(&stream_id).status,
         StreamStatus::Paused
@@ -172,20 +176,16 @@ fn test_recipient_index_cleanup_graceful_on_missing_entry() {
     ctx.env.ledger().with_mut(|l| l.timestamp += 101);
     ctx.client.withdraw(&stream_id);
 
-    let index_before = ctx
-        .client
-        .get_recipient_streams(&ctx.recipient, &None, &None);
-    assert!(index_before.contains(&stream_id));
+    let index_before = ctx.client.get_recipient_streams(&ctx.recipient);
+    assert!(index_before.contains(stream_id));
 
     ctx.client.close_completed_stream(&stream_id);
 
     // Stream removed from storage
     assert!(ctx.client.try_get_stream_state(&stream_id).is_err());
     // Stream removed from index — no panic, no partial state
-    let index_after = ctx
-        .client
-        .get_recipient_streams(&ctx.recipient, &None, &None);
-    assert!(!index_after.contains(&stream_id));
+    let index_after = ctx.client.get_recipient_streams(&ctx.recipient);
+    assert!(!index_after.contains(stream_id));
 }
 
 /// Closing one stream leaves other streams in the recipient index intact.
@@ -199,9 +199,7 @@ fn test_close_removes_only_target_from_index() {
     ctx.client.withdraw(&id_a);
     ctx.client.close_completed_stream(&id_a);
 
-    let index = ctx
-        .client
-        .get_recipient_streams(&ctx.recipient, &None, &None);
-    assert!(!index.contains(&id_a));
-    assert!(index.contains(&id_b));
+    let index = ctx.client.get_recipient_streams(&ctx.recipient);
+    assert!(!index.contains(id_a));
+    assert!(index.contains(id_b));
 }

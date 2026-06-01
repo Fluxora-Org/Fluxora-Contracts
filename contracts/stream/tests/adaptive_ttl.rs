@@ -6,7 +6,7 @@
 use fluxora_stream::{CreateStreamParams, FluxoraStream, FluxoraStreamClient};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    token::{Client as TokenClient, StellarAssetClient},
+    token::Client as TokenClient,
     Address, Env,
 };
 
@@ -14,6 +14,7 @@ struct Ctx<'a> {
     env: Env,
     client: FluxoraStreamClient<'a>,
     sender: Address,
+    #[allow(dead_code)]
     token: TokenClient<'a>,
 }
 
@@ -134,7 +135,7 @@ fn test_recipient_index_readable_after_adaptive_ttl_write() {
     ctx.create_stream_with_duration(&recipient, 86_400);
     ctx.create_stream_with_duration(&recipient, 31_536_000);
 
-    let index = ctx.client.get_recipient_streams(&recipient, &None, &None);
+    let index = ctx.client.get_recipient_streams(&recipient);
     assert_eq!(index.len(), 2);
 }
 

@@ -11914,10 +11914,10 @@ fn test_recipient_index_binary_search_edge_cases() {
         assert_eq!(streams.len(), 0);
 
         // Add elements out of order to ensure binary search insertions happen correctly
-        crate::add_stream_to_recipient_index(&env, &recipient, 10);
-        crate::add_stream_to_recipient_index(&env, &recipient, 5);
-        crate::add_stream_to_recipient_index(&env, &recipient, 15);
-        crate::add_stream_to_recipient_index(&env, &recipient, 1);
+        crate::add_stream_to_recipient_index(&env, &recipient, 10, None);
+        crate::add_stream_to_recipient_index(&env, &recipient, 5, None);
+        crate::add_stream_to_recipient_index(&env, &recipient, 15, None);
+        crate::add_stream_to_recipient_index(&env, &recipient, 1, None);
 
         // Verify ordering
         let streams1 = crate::load_recipient_streams(&env, &recipient);
@@ -11928,7 +11928,7 @@ fn test_recipient_index_binary_search_edge_cases() {
         assert_eq!(streams1.get(3).unwrap(), 15);
 
         // Test duplicate insertion (handles Ok(pos) branch)
-        crate::add_stream_to_recipient_index(&env, &recipient, 10);
+        crate::add_stream_to_recipient_index(&env, &recipient, 10, None);
         let streams2 = crate::load_recipient_streams(&env, &recipient);
         assert_eq!(streams2.len(), 5);
         assert_eq!(streams2.get(2).unwrap(), 10);
