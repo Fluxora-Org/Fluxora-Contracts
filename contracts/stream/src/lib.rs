@@ -186,10 +186,13 @@ pub enum StreamStatus {
     Cancelled = 3,
 }
 
+/// The architectural style of the stream (Linear or CliffOnly).
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StreamKind {
+    /// Vesting/payment stream that accrues linearly over time.
     Linear = 0,
+    /// Stream that unlocks its full deposit at the cliff time in a one-shot event.
     CliffOnly = 1,
 }
 
@@ -595,6 +598,7 @@ pub struct Stream {
     /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
     /// Maximum length: `MAX_MEMO_BYTES` (64 bytes). `None` when not supplied.
     pub memo: Option<soroban_sdk::Bytes>,
+    /// The architectural style of the stream (Linear or CliffOnly).
     pub kind: StreamKind,
 }
 
@@ -628,6 +632,7 @@ pub struct CreateStreamParams {
     /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
     /// Maximum `MAX_MEMO_BYTES` (64) bytes. Pass `None` to omit.
     pub memo: Option<soroban_sdk::Bytes>,
+    /// The architectural style of the stream (Linear or CliffOnly).
     pub kind: StreamKind,
 }
 
@@ -661,6 +666,7 @@ pub struct CreateStreamRelativeParams {
     /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
     /// Maximum `MAX_MEMO_BYTES` (64) bytes. Pass `None` to omit.
     pub memo: Option<soroban_sdk::Bytes>,
+    /// The architectural style of the stream (Linear or CliffOnly).
     pub kind: StreamKind,
 }
 
