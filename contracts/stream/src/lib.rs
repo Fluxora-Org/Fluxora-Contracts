@@ -154,6 +154,30 @@ pub const MAX_RECIPIENT_PAGE_SIZE: u32 = 100;
 /// `expected_minimum_amount` to close the relayer front-running griefing vector.
 pub const CONTRACT_VERSION: u32 = 3;
 
+
+// Rate bounds constants (dust-attack prevention — issue #576)
+// ---------------------------------------------------------------------------
+
+/// Minimum allowed streaming rate in tokens per second.
+///
+/// Prevents dust-attack streams that accrue at 1 stroop/second for years,
+/// bloating ledger state and complicating recipient index queries.
+///
+/// # Rationale for 100 stroops/second
+///
+/// At 100 stroops/second (~0.00001 USDC/sec at 7 decimals):
+/// - 1 day accrual = 8,640,000 stroops = 0.864 USDC
+/// - 1 year accrual = ~3,154,000,000 stroops = ~315 USDC
+///
+/// This is low enough for legitimate micro-streams while high enough to
+/// prevent state-bloat attacks.
+///
+/// # Security
+/// - Blocks streams with rate_per_second < MIN_RATE_PER_SECOND
+/// - Returns ContractError::RateTooLow on violation
+/// - Applies to all creation entrypoints
+pub const MIN_RATE_PER_SECOND: i128 = 100;
+
 // ---------------------------------------------------------------------------
 // Data types
 // ---------------------------------------------------------------------------
@@ -217,6 +241,17 @@ pub enum ContractError {
     InvalidSignature = 15,
     /// Accrued amount is below the expected minimum specified in the signed payload.
     BelowMinimumAmount = 16,
+        /// Streaming rate is below the minimum threshold (dust-attack prevention).
+    ///
+    /// # Rationale
+    /// Streams with rate_per_second < MIN_RATE_PER_SECOND (100 stroops/sec)
+    /// accrue imperceptibly slowly while occupying ledger storage indefinitely.
+    /// Such dust streams bloat the recipient index, increase query costs,
+    /// and may be used for griefing attacks.
+    ///
+    /// # Fix
+    /// Increase rate_per_second to at least MIN_RATE_PER_SECOND (100).
+    RateTooLow = 17,
 }
 
 #[contracttype]
@@ -1293,9 +1328,14 @@ impl FluxoraStream {
         cliff_time: u64,
         end_time: u64,
     ) -> Result<(), ContractError> {
-        // Validate positive amounts (#35)
-        if deposit_amount <= 0 || rate_per_second <= 0 {
+                // Validate positive amounts
+        if deposit_amount <= 0 {
             return Err(ContractError::InvalidParams);
+        }
+
+        // Enforce minimum rate per second (dust-attack prevention, issue #576)
+        if rate_per_second < MIN_RATE_PER_SECOND {
+            return Err(ContractError::RateTooLow);
         }
 
         // Enforce governance-controlled maximum rate per second cap
