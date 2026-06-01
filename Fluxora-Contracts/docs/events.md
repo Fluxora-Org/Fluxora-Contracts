@@ -359,6 +359,100 @@ The `old_sender` field allows indexers to correlate the previous treasury key.
 
 ---
 
+## Additional Events
+
+The following events have been added to the contract and are documented here for indexers and integrators.
+
+| Event name | Topic(s) | Data (shape & types) | When emitted |
+|---|---:|---|---|
+| StreamHealthChanged | `["hlth_chg", stream_id: u64]` | `StreamHealthChanged { stream_id: u64, is_underfunded: bool, remaining_balance: i128, seconds_remaining: u64 }` | When a stream's health status changes |
+| AutoClaimSet | `[`"ac_set"`, stream_id: u64]` | `AutoClaimSet { stream_id: u64, enabled: bool }` | When auto-claim is enabled/disabled on a stream |
+| AutoClaimTriggered | `[`"ac_trig"`, stream_id: u64]` | `AutoClaimTriggered { stream_id: u64, amount: i128 }` | When an auto-claim withdrawal is triggered |
+| ExcessWithdrawn | `[`"ex_swept"`, stream_id: u64]` | `ExcessWithdrawn { stream_id: u64, excess_amount: i128 }` | When excess funds are swept from a stream |
+| StreamMigrated | `[`"migrated"`, stream_id: u64]` | `StreamMigrated { stream_id: u64, new_contract: Address }` | When a stream is migrated to a new contract |
+
+### AutoClaimSet (`ac_set`)
+
+Emitted when auto-claim is toggled for a stream. This indicates that the sender or admin has enabled or disabled automatic claiming of accrued funds on behalf of the recipient.
+
+```
+topics: ["ac_set", <stream_id: u64>]
+data: AutoClaimSet { stream_id: u64, enabled: bool }
+```
+
+Example JSON:
+
+```json
+{
+  "topics": ["ac_set", 42],
+  "data": { "stream_id": 42, "enabled": true }
+}
+```
+
+**When emitted**: on successful `set_auto_claim(stream_id, enabled)` or admin equivalent. Not emitted on unauthorized or failed calls.
+
+### AutoClaimTriggered (`ac_trig`)
+
+Emitted when an auto-claim mechanism triggers a withdrawal on behalf of the recipient. This event records the stream and amount moved.
+
+```
+topics: ["ac_trig", <stream_id: u64>]
+data: AutoClaimTriggered { stream_id: u64, amount: i128 }
+```
+
+Example JSON:
+
+```json
+{
+  "topics": ["ac_trig", 42],
+  "data": { "stream_id": 42, "amount": 150 }
+}
+```
+
+**When emitted**: when scheduled or conditional auto-claim logic executes and successfully moves funds.
+
+### ExcessWithdrawn (`ex_swept`)
+
+Emitted when excess funds are swept from a stream (e.g., after shortening or refund calculation). This event helps indexers reconcile contract-held balances and reported liabilities.
+
+```
+topics: ["ex_swept", <stream_id: u64>]
+data: ExcessWithdrawn { stream_id: u64, excess_amount: i128 }
+```
+
+Example JSON:
+
+```json
+{
+  "topics": ["ex_swept", 42],
+  "data": { "stream_id": 42, "excess_amount": 500 }
+}
+```
+
+**When emitted**: after a successful `sweep_excess` or an operation that calculates and removes excess funds from a stream.
+
+### StreamMigrated (`migrated`)
+
+Emitted when a stream is migrated from this contract instance to another contract instance. The event includes the target contract address so indexers can follow-up and query the new instance.
+
+```
+topics: ["migrated", <stream_id: u64>]
+data: StreamMigrated { stream_id: u64, new_contract: Address }
+```
+
+Example JSON:
+
+```json
+{
+  "topics": ["migrated", 42],
+  "data": { "stream_id": 42, "new_contract": "G...TARGET_CONTRACT..." }
+}
+```
+
+**When emitted**: after a successful `migrate_stream(stream_id, new_contract)` call. The stream storage in the source contract may be invalidated after migration — indexers should follow the `new_contract` address to continue tracking the stream state.
+
+---
+
 ## Keeping this doc in sync
 
 This file is derived from `contracts/stream/src/lib.rs` emit calls:
