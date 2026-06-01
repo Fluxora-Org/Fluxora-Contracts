@@ -4472,16 +4472,16 @@ impl FluxoraStream {
     }
 
     /// Paginated version of get_recipient_streams to prevent unbounded returns.
-    /// 
+    ///
     /// # Parameters
     /// - `env`: Contract environment
     /// - `recipient`: Address to query streams for
     /// - `cursor`: Pagination cursor (stream_id to start after, 0 for beginning)
     /// - `limit`: Maximum number of stream IDs to return (capped at RECIPIENT_STREAMS_PAGE_LIMIT)
-    /// 
+    ///
     /// # Returns
     /// - `Page`: Contains stream IDs slice and next cursor for pagination
-    /// 
+    ///
     /// # Behavior
     /// - Returns streams in ascending order by stream_id
     /// - If cursor is 0, starts from the beginning
@@ -4499,10 +4499,10 @@ impl FluxoraStream {
     ) -> Page {
         let streams = load_recipient_streams(&env, &recipient);
         let total = streams.len();
-        
+
         // Apply limit cap
         let effective_limit = limit.min(RECIPIENT_STREAMS_PAGE_LIMIT);
-        
+
         // Find starting position
         let start_idx = if cursor == 0 {
             0
@@ -4512,22 +4512,22 @@ impl FluxoraStream {
                 Err(pos) => pos,     # Insert position if not found
             }
         };
-        
+
         // Calculate end position
         let end_idx = (start_idx as u32 + effective_limit).min(total as u32) as usize;
-        
+
         #[allow(unused_assignments)]
         let mut next_cursor = 0;
         if end_idx < total {
             next_cursor = streams.get(end_idx as usize).unwrap();
         }
-        
+
         #[allow(unused_assignments)]
         let mut page_streams = soroban_sdk::Vec::new(&env);
         for i in start_idx..end_idx {
             page_streams.push_back(streams.get(i).unwrap());
         }
-        
+
          Page { stream_ids: page_streams, next_cursor }
      }
 
