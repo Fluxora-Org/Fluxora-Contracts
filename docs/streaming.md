@@ -1287,3 +1287,27 @@ Comprehensive test coverage includes:
 
 See `contracts/stream/tests/integration_suite.rs` for full test suite.
 
+
+# Bulk Cancel Streams API
+
+## Overview
+
+The `bulk_cancel_streams` entrypoint provides gas-efficient, atomic batch cancellation for senders managing large portfolios. Instead of issuing one `cancel_stream` transaction per stream, senders can cancel up to `MAX_PAGE_SIZE` (100) streams in a single call with a single aggregate refund.
+
+## Motivation
+
+Senders managing large portfolios (up to 100 streams) who need to off-board a recipient or close a project previously had to issue one `cancel_stream` transaction per stream. This was:
+- **Gas-inefficient**: N auth checks, N token transfers for refunds
+- **Operationally complex**: Requires orchestrating multiple transactions
+- **Non-atomic**: Partial failures leave some streams active
+
+`bulk_cancel_streams` solves all three problems.
+
+## API Specification
+
+```rust
+pub fn bulk_cancel_streams(
+    env: Env,
+    sender: Address,
+    stream_ids: Vec&lt;u64&gt;,
+) -&gt; Result&lt;(), ContractError&gt;
