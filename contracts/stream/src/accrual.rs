@@ -121,6 +121,131 @@ pub fn calculate_accrued_amount_checkpointed(
         .max(0)
 }
 
+// Kani formal proofs (bounded model checking harnesses).
+// These are compiled only when the `kani` cfg is active and are intended
+// to provide machine-checked guarantees about arithmetic and clamping.
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+    // Kani provides `kani::any` and `kani::assume` helpers in the harness
+    // environment. The proofs below bound inputs to reasonable ranges to
+    // keep the state space tractable while covering relevant edge cases.
+
+    // Prove that the function never panics and always returns a value in [0, deposit_amount].
+    #[kani::proof]
+    fn proof_result_in_bounds() {
+        let checkpointed_amount: i128 = kani::any();
+        let checkpointed_at: u64 = kani::any();
+        let cliff_time: u64 = kani::any();
+        let end_time: u64 = kani::any();
+        let deposit_amount: i128 = kani::any();
+        let rate_per_second: i128 = kani::any();
+        let now: u64 = kani::any();
+
+        // Bound values for tractability
+        kani::assume(deposit_amount >= 0);
+        kani::assume(deposit_amount <= 1_000_000_000_000_000_000_i128); // 1e18-ish
+        kani::assume(rate_per_second >= -1_000_000_000_000_000_000_i128);
+        kani::assume(rate_per_second <= 1_000_000_000_000_000_000_i128);
+        kani::assume(checkpointed_amount >= 0);
+        kani::assume(checkpointed_amount <= deposit_amount);
+        kani::assume(checkpointed_at <= end_time);
+
+        let state = CheckpointState {
+            checkpointed_amount,
+            checkpointed_at,
+            cliff_time,
+            end_time,
+            deposit_amount,
+        };
+
+        // Call the function under test. Kani will flag panics or UB.
+        let out = calculate_accrued_amount_checkpointed(state, rate_per_second, deposit_amount, now);
+
+        // Assert bounds: non-negative and <= deposit_amount
+        kani::assert!(out >= 0);
+        kani::assert!(out <= deposit_amount);
+    }
+
+    // Prove monotonicity: for t1 <= t2 (both >= cliff and <= end), accrued(t1) <= accrued(t2)
+    #[kani::proof]
+    fn proof_monotonicity_after_cliff() {
+        let checkpointed_amount: i128 = kani::any();
+        let checkpointed_at: u64 = kani::any();
+        let cliff_time: u64 = kani::any();
+        let end_time: u64 = kani::any();
+        let deposit_amount: i128 = kani::any();
+        let rate_per_second: i128 = kani::any();
+        let t1: u64 = kani::any();
+        let t2: u64 = kani::any();
+
+        kani::assume(deposit_amount >= 0);
+        kani::assume(deposit_amount <= 1_000_000_000_000_000_000_i128);
+        kani::assume(rate_per_second >= 0); // non-negative rates for monotonicity
+        kani::assume(rate_per_second <= 1_000_000_000_000_000_000_i128);
+        kani::assume(checkpointed_amount >= 0 && checkpointed_amount <= deposit_amount);
+        kani::assume(checkpointed_at <= end_time);
+
+        // constrain t1 <= t2 and both in [cliff, end]
+        kani::assume(cliff_time <= end_time);
+        kani::assume(t1 >= cliff_time && t1 <= end_time);
+        kani::assume(t2 >= t1 && t2 <= end_time);
+
+        let state = CheckpointState {
+            checkpointed_amount,
+            checkpointed_at,
+            cliff_time,
+            end_time,
+            deposit_amount,
+        };
+
+        let a = calculate_accrued_amount_checkpointed(state, rate_per_second, deposit_amount, t1);
+        let b = calculate_accrued_amount_checkpointed(state, rate_per_second, deposit_amount, t2);
+
+        kani::assert!(a <= b);
+    }
+
+    // Prove clamping at cliff and end: before cliff => 0, at or after end => <= deposit
+    #[kani::proof]
+    fn proof_clamping_cliff_end() {
+        let checkpointed_amount: i128 = kani::any();
+        let checkpointed_at: u64 = kani::any();
+        let cliff_time: u64 = kani::any();
+        let end_time: u64 = kani::any();
+        let deposit_amount: i128 = kani::any();
+        let rate_per_second: i128 = kani::any();
+        let now_before: u64 = kani::any();
+        let now_after: u64 = kani::any();
+
+        kani::assume(deposit_amount >= 0);
+        kani::assume(deposit_amount <= 1_000_000_000_000_000_000_i128);
+        kani::assume(rate_per_second >= -1_000_000_000_000_000_000_i128);
+        kani::assume(checkpointed_amount >= 0 && checkpointed_amount <= deposit_amount);
+        kani::assume(checkpointed_at <= end_time);
+        kani::assume(cliff_time <= end_time);
+
+        // before cliff
+        kani::assume(now_before < cliff_time);
+
+        let state = CheckpointState {
+            checkpointed_amount,
+            checkpointed_at,
+            cliff_time,
+            end_time,
+            deposit_amount,
+        };
+
+        let out_before = calculate_accrued_amount_checkpointed(state, rate_per_second, deposit_amount, now_before);
+        kani::assert!(out_before == 0);
+
+        // at or after end
+        kani::assume(now_after >= end_time);
+        let out_after = calculate_accrued_amount_checkpointed(state, rate_per_second, deposit_amount, now_after);
+        kani::assert!(out_after >= 0);
+        kani::assert!(out_after <= deposit_amount);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::calculate_accrued_amount;
