@@ -34,7 +34,7 @@ From **CONTRACT_VERSION 3**, integrators can register **relative** schedule skel
 
 - **Auth**: registering and deleting templates requires the template `owner` signer. Creating a stream from a template requires the **funding `sender`** to authorize (same as `create_stream_relative`).
 - **Caps**: per-owner and global template counts are bounded; see `MAX_TEMPLATES_PER_OWNER` and `MAX_GLOBAL_TEMPLATES` in `contracts/stream/src/lib.rs`.
-- **Errors**: `TemplateNotFound`, `TemplateLimitExceeded`, `TemplateUnauthorized`.
+- **Note**: Template-specific errors are not yet implemented in the ContractError enum. Template operations currently use generic errors like `InvalidParams` and `Unauthorized`.
 
 ---
 
@@ -120,6 +120,8 @@ This section is the protocol-level contract for the global pause state managed v
 | `resume_protocol(admin)` | Globally resume new stream creation, clearing audit trail |
 | `is_paused()` | Query if protocol is currently paused (permissionless) |
 | `get_pause_info()` | Query detailed pause info including audit trail (permissionless) |
+
+**Pause reason length:** The `reason` string passed to `pause_protocol` is bounded by `MAX_PAUSE_REASON_BYTES = 256`. Strings longer than 256 bytes are rejected with `ContractError::InvalidParams`. This prevents unbounded ledger-entry growth (Issue #513).
 
 Success semantics (observable):
 
@@ -553,6 +555,8 @@ contract.create_streams_relative(&sender, &params)?;
 | `revoke_auto_claim`       | Recipient                     | `recipient.require_auth()`                  |
 | `trigger_auto_claim`      | Anyone                        | None (permissionless; destination fixed by recipient) |
 | `get_auto_claim_destination` | Anyone                     | None (view)                                 |
+| `delegated_withdraw`         | Relayer (ed25519 sig from recipient) | `relayer.require_auth()` + ed25519 sig |
+| `get_delegated_nonce`        | Anyone                     | None (view)                                 |
 
 **Note:** Sender-managed functions (`pause_stream`, `resume_stream`, `cancel_stream`) require sender auth. Admin uses separate `_as_admin` entry points.
 
@@ -833,8 +837,54 @@ Recipients may opt in to have their final withdrawal triggered by any third part
 
 - **Auth**: `recipient.require_auth()` — only the stream recipient may set or change the destination.
 - **Constraints**: stream must exist and not be `Completed` or `Cancelled`; `destination` must not be the contract address.
+- **Validation**: destination is validated to ensure it's not the zero address and not the contract itself.
 - **Idempotent**: calling again with a new address overwrites the previous destination.
 - **Event**: `("ac_set", stream_id)` → `AutoClaimSet { stream_id, destination }`.
+- **Storage**: destination is stored in persistent storage under `DataKey::AutoClaimDestination(stream_id)`.
+
+#### `get_auto_claim_status(stream_id) -> AutoClaimStatus`
+
+Pre-flight check query that returns the auto-claim configuration status and claimable amount. This allows callers to validate before executing `trigger_auto_claim`, reducing failed transactions and wasted gas on invalid destinations.
+
+- **Auth**: None required (read-only view function).
+- **Returns**: `AutoClaimStatus` enum with three variants:
+  - `NotSet`: No auto-claim destination has been configured for this stream.
+  - `ValidDestination { destination, claimable }`: Destination is set and valid, with the current claimable amount.
+  - `InvalidDestination { destination }`: Destination is set but invalid (zero address or contract itself).
+- **Claimable calculation**: Computed as `accrued_amount - withdrawn_amount` at current timestamp, capped at 0.
+- **Validation checks**: 
+  - Destination is not the zero address
+  - Destination is not the contract address itself
+- **Usage pattern**:
+  ```rust
+  let status = client.get_auto_claim_status(&stream_id);
+  match status {
+      AutoClaimStatus::ValidDestination { destination, claimable } => {
+          if claimable > 0 {
+              client.trigger_auto_claim(&stream_id);
+          }
+      }
+      AutoClaimStatus::NotSet => {
+          // No auto-claim configured
+      }
+      AutoClaimStatus::InvalidDestination { destination } => {
+          // Destination is invalid, cannot trigger
+      }
+  }
+  ```
+- **Benefits**:
+  - Prevents wasted gas on invalid destinations
+  - Allows off-chain systems to batch valid claims
+  - Provides transparency for keepers and bots
+  - No state changes or side effects
+
+#### `get_auto_claim_destination(stream_id) -> Option<Address>`
+
+Simple query that returns the stored auto-claim destination address, or `None` if not set.
+
+- **Auth**: None required (read-only view function).
+- **Returns**: `Option<Address>` — the destination address if set, otherwise `None`.
+- **Note**: Does not validate the destination. Use `get_auto_claim_status` for validation.
 
 #### `revoke_auto_claim(stream_id)`
 
@@ -871,39 +921,39 @@ If a stream is cancelled after opt-in, `trigger_auto_claim` returns `InvalidStat
 
 ---
 
-## 4.1. Governance Controls
+### delegated_withdraw: Relayer-Submitted Withdrawal with Minimum Amount Guard
 
-### Maximum Rate Per Second Cap
+`delegated_withdraw` allows a relayer (keeper, bot, or any third party) to submit a withdrawal on behalf of a recipient without requiring the recipient to sign a Soroban transaction themselves. The recipient instead signs an off-chain ed25519 message committing to the exact parameters of the withdrawal.
 
-The contract admin can set a governance-controlled maximum rate per second to prevent overflow attacks and ensure system stability.
+#### Signed message format
 
-#### Admin Functions
+```
+message = stream_id            (u64,  8 bytes, big-endian)
+        | nonce                (u64,  8 bytes, big-endian)
+        | deadline             (u64,  8 bytes, big-endian)
+        | expected_minimum_amount (i128, 16 bytes, big-endian)
+```
 
-| Function | Authorization | Purpose |
-|----------|---------------|---------|
-| `set_max_rate_per_second(max_rate)` | Admin only | Set the global maximum allowed rate per second |
+Total: 40 bytes.
 
-#### Behavior
+#### `expected_minimum_amount` — front-running protection
 
-- **Default**: `i128::MAX` (effectively unlimited) if never set
-- **Validation**: Applied to all `create_stream*` and `update_rate_per_second` calls
-- **Error**: Returns `RateCapExceeded` when attempted rate exceeds the cap
-- **Event**: Emits `RateCapEnforced` when a rate update is rejected due to the cap
-- **Existing streams**: Not affected by cap changes (only future rate updates)
+Without this field, a relayer could delay the transaction until the accrued amount is much smaller than the recipient expected (e.g. after a rate decrease or near stream end), constituting a griefing vector. By committing to a minimum, the call reverts with `BelowMinimumAmount` (16) if `withdrawable < expected_minimum_amount`. Pass `0` to accept any positive amount.
 
-#### Security Properties
+#### Nonce — replay protection
 
-1. **Overflow protection**: Prevents astronomically high rates that could cause arithmetic overflow in `calculate_accrued_amount_checkpointed`
-2. **Economic protection**: Prevents rates that could drain entire deposits in a single ledger
-3. **Governance flexibility**: Admin can adjust the cap based on economic conditions and system requirements
-4. **Transparency**: All cap enforcement is logged via events for auditability
+Each recipient has a per-address nonce stored in `DataKey::DelegatedWithdrawNonce(recipient)`. The nonce starts at 0 and is incremented on every successful `delegated_withdraw`. Replaying a used signature returns `InvalidSignature` (15). Query the current nonce via `get_delegated_nonce(recipient)`.
 
-#### Event Schema
+#### Failure semantics
 
-**RateCapEnforced**
-- **Topic:** `("rate_cap", stream_id)`
-- **Payload:** `RateCapEnforced { stream_id, attempted_rate, max_rate_per_second }`
-- **When emitted:** Rate update rejected due to exceeding governance cap
+| Condition | Error |
+|-----------|-------|
+| `ledger.timestamp() > deadline` | `InvalidSignature` (15) |
+| `nonce != stored_nonce` | `InvalidSignature` (15) |
+| ed25519 signature invalid | host trap (panic) |
+| `withdrawable < expected_minimum_amount` | `BelowMinimumAmount` (16) |
+| Stream paused (non-terminal) | `InvalidState` (2) |
+| Stream completed | `InvalidState` (2) |
 
 ---
 

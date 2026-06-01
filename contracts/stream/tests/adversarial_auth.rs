@@ -1251,3 +1251,178 @@ mod delegated_withdraw_adversarial {
         assert_eq!(result, Err(Ok(ContractError::InvalidState)));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Issue #510: delegated_withdraw — adversarial tests
+// ---------------------------------------------------------------------------
+
+/// Helper: build the 40-byte message that the recipient must sign.
+fn build_delegated_msg(
+    env: &Env,
+    stream_id: u64,
+    nonce: u64,
+    deadline: u64,
+    expected_minimum_amount: i128,
+) -> soroban_sdk::Bytes {
+    let mut msg = soroban_sdk::Bytes::new(env);
+    msg.extend_from_array(&stream_id.to_be_bytes());
+    msg.extend_from_array(&nonce.to_be_bytes());
+    msg.extend_from_array(&deadline.to_be_bytes());
+    msg.extend_from_array(&expected_minimum_amount.to_be_bytes());
+    msg
+}
+
+#[test]
+fn delegated_withdraw_expired_deadline_rejected() {
+    let ctx = Ctx::setup();
+    ctx.env.mock_all_auths();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_stream();
+
+    // Advance time past deadline
+    ctx.env.ledger().set_timestamp(2000);
+
+    let relayer = Address::generate(&ctx.env);
+    let fake_key = soroban_sdk::Bytes::from_array(&ctx.env, &[0u8; 32]);
+    let fake_sig = soroban_sdk::Bytes::from_array(&ctx.env, &[0u8; 64]);
+
+    let result = ctx.client().try_delegated_withdraw(
+        &stream_id,
+        &relayer,
+        &fake_key,
+        &0u64,
+        &500u64, // deadline in the past
+        &0i128,
+        &fake_sig,
+    );
+
+    assert_eq!(
+        result,
+        Err(Ok(fluxora_stream::ContractError::InvalidSignature)),
+        "expired deadline must return InvalidSignature"
+    );
+}
+
+#[test]
+fn delegated_withdraw_wrong_nonce_rejected() {
+    let ctx = Ctx::setup();
+    ctx.env.mock_all_auths();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_stream();
+
+    let relayer = Address::generate(&ctx.env);
+    let fake_key = soroban_sdk::Bytes::from_array(&ctx.env, &[0u8; 32]);
+    let fake_sig = soroban_sdk::Bytes::from_array(&ctx.env, &[0u8; 64]);
+
+    // Stored nonce is 0; supply nonce=1 (wrong)
+    let result = ctx.client().try_delegated_withdraw(
+        &stream_id,
+        &relayer,
+        &fake_key,
+        &1u64, // wrong nonce
+        &9999u64,
+        &0i128,
+        &fake_sig,
+    );
+
+    assert_eq!(
+        result,
+        Err(Ok(fluxora_stream::ContractError::InvalidSignature)),
+        "wrong nonce must return InvalidSignature"
+    );
+}
+
+#[test]
+fn delegated_withdraw_below_minimum_rejected() {
+    use soroban_sdk::testutils::ed25519::Sign;
+
+    let ctx = Ctx::setup();
+    ctx.env.mock_all_auths();
+    ctx.env.ledger().set_timestamp(500); // mid-stream
+    let stream_id = ctx.create_stream();
+
+    // Generate a real ed25519 keypair for the recipient
+    let keypair = soroban_sdk::testutils::ed25519::generate(&ctx.env);
+    let pub_key = soroban_sdk::Bytes::from_slice(&ctx.env, keypair.public.as_bytes());
+
+    let nonce = 0u64;
+    let deadline = 9999u64;
+    let expected_minimum = 999i128; // demand 999 but only ~500 accrued
+
+    let msg = build_delegated_msg(&ctx.env, stream_id, nonce, deadline, expected_minimum);
+    let sig_bytes = keypair.sign(msg.clone());
+    let sig = soroban_sdk::Bytes::from_slice(&ctx.env, &sig_bytes);
+
+    let relayer = Address::generate(&ctx.env);
+
+    let result = ctx.client().try_delegated_withdraw(
+        &stream_id,
+        &relayer,
+        &pub_key,
+        &nonce,
+        &deadline,
+        &expected_minimum,
+        &sig,
+    );
+
+    assert_eq!(
+        result,
+        Err(Ok(fluxora_stream::ContractError::BelowMinimumAmount)),
+        "withdrawable below minimum must return BelowMinimumAmount"
+    );
+}
+
+#[test]
+fn delegated_withdraw_nonce_increments_preventing_replay() {
+    use soroban_sdk::testutils::ed25519::Sign;
+
+    let ctx = Ctx::setup();
+    ctx.env.mock_all_auths();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_stream();
+
+    // Advance to mid-stream so there's something to withdraw
+    ctx.env.ledger().set_timestamp(500);
+
+    let keypair = soroban_sdk::testutils::ed25519::generate(&ctx.env);
+    let pub_key = soroban_sdk::Bytes::from_slice(&ctx.env, keypair.public.as_bytes());
+
+    let nonce = 0u64;
+    let deadline = 9999u64;
+    let min_amount = 0i128;
+
+    let msg = build_delegated_msg(&ctx.env, stream_id, nonce, deadline, min_amount);
+    let sig_bytes = keypair.sign(msg.clone());
+    let sig = soroban_sdk::Bytes::from_slice(&ctx.env, &sig_bytes);
+
+    let relayer = Address::generate(&ctx.env);
+
+    // First call succeeds
+    let amount = ctx
+        .client()
+        .delegated_withdraw(&stream_id, &relayer, &pub_key, &nonce, &deadline, &min_amount, &sig);
+    assert!(amount > 0, "first delegated_withdraw must transfer tokens");
+
+    // Nonce is now 1; replaying nonce=0 must fail
+    let replay = ctx.client().try_delegated_withdraw(
+        &stream_id,
+        &relayer,
+        &pub_key,
+        &nonce, // stale nonce
+        &deadline,
+        &min_amount,
+        &sig,
+    );
+    assert_eq!(
+        replay,
+        Err(Ok(fluxora_stream::ContractError::InvalidSignature)),
+        "replayed nonce must be rejected"
+    );
+
+    // get_delegated_nonce must return 1
+    assert_eq!(
+        ctx.client().get_delegated_nonce(&ctx.recipient),
+        1u64,
+        "nonce must be 1 after one successful delegated_withdraw"
+    );
+}

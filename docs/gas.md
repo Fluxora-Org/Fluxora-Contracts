@@ -103,6 +103,10 @@ transaction.
 - Authorization is paid **once** for the entire batch instead of once per stream.
 - The Soroban auth overhead (signature verification, sub-invocation tree) is the
   dominant fixed cost per transaction; batching amortises it across all streams.
+- `env.ledger().timestamp()` is called **once** before the loop and cached in
+  `let now = env.ledger().timestamp()`. The cached value is threaded into
+  `calculate_accrued_amount_checkpointed` for every stream, eliminating one
+  host-function call per stream iteration (Issue #515).
 
 **Work done per stream entry:**
 - 1× persistent storage read (`load_stream`)

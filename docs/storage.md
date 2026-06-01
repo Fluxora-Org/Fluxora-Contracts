@@ -212,15 +212,14 @@ Extended on every `load_stream()` (read) and `save_stream()` (write), and on eve
 
 ---
 
-## 7. Stream schedule templates (CONTRACT_VERSION ≥ 3)
+## 7. Version History
 
-Schedule presets store **only relative offsets** (`start_delay`, `cliff_delay`, `duration`). Token amounts and recipients are supplied when calling `create_stream_from_template`, keeping calldata smaller than repeating three `u64` offsets on every payroll-style run.
+For a full description of what changed between contract versions and how to migrate, see [DEPLOYMENT.md — Version Migration](./DEPLOYMENT.md#version-migration).
 
-| Key | Type | Purpose |
-|-----|------|---------|
-| `NextTemplateId` | Instance `u64` | Monotonic template id counter |
-| `ActiveTemplateCount` | Instance `u64` | Count of stored templates (supports global cap) |
-| `StreamTemplate(template_id)` | Persistent | `StreamScheduleTemplate` body |
-| `OwnerTemplateIds(owner)` | Persistent `Vec<u64>` | Ids registered by `owner` (length capped by `MAX_TEMPLATES_PER_OWNER`) |
+### V5 → V6 DataKey additions
 
-Global cap: `MAX_GLOBAL_TEMPLATES`. Per-owner cap: `MAX_TEMPLATES_PER_OWNER`. See `contracts/stream/src/lib.rs`.
+| Discriminant | Variant | Added in | Notes |
+|---|---|---|---|
+| 10 | `DelegatedWithdrawNonce(Address)` | V6 | Per-recipient nonce for `delegated_withdraw` replay protection. Absent until first use. |
+
+No entries were removed or reordered between V5 and V6. All V5 persistent entries remain readable on a V6 instance.
