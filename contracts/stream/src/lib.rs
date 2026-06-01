@@ -241,7 +241,7 @@ pub enum ContractError {
     InvalidSignature = 15,
     /// Accrued amount is below the expected minimum specified in the signed payload.
     BelowMinimumAmount = 16,
-        /// Streaming rate is below the minimum threshold (dust-attack prevention).
+    /// Streaming rate is below the minimum threshold (dust-attack prevention).
     ///
     /// # Rationale
     /// Streams with rate_per_second < MIN_RATE_PER_SECOND (100 stroops/sec)

@@ -27,7 +27,8 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `StreamTerminalState` | 13 | Stream is `Completed` or `Cancelled`; modification blocked | `pause_stream`, `resume_stream`, admin overrides |
 | `DuplicateStreamId` | 14 | Duplicate stream IDs supplied to a batch operation | `batch_withdraw` |
 | `InvalidSignature` | 15 | Delegated withdrawal signature is invalid, expired, or nonce mismatch | `delegated_withdraw` |
-| `BelowMinimumAmount` | 16 | Withdrawable amount is below the `expected_minimum_amount` committed in the signature | `delegated_withdraw` | `RateTooLow` | 17 | rate_per_second < MIN_RATE_PER_SECOND (dust-attack prevention) | create_stream, create_streams, create_stream_relative, create_streams_relative, create_stream_from_template |
+| `BelowMinimumAmount` | 16 | Withdrawable amount is below the `expected_minimum_amount` committed in the signature | `delegated_withdraw` |
+| `RateTooLow` | 17 | rate_per_second < MIN_RATE_PER_SECOND (dust-attack prevention) | `create_stream`, `create_streams`, `create_stream_relative`, `create_streams_relative`, `create_stream_from_template` |
 
 ---
 
