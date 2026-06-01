@@ -130,6 +130,59 @@ The recipient's ability to withdraw accrued funds is **completely independent** 
 - Sender receives: 0 tokens
 - Recipient can withdraw: 1000 tokens
 
+## Keeper-initiated cancellation (`keeper_cancel`)
+
+### Purpose
+
+Streams that have passed their `end_time` but whose sender never calls `cancel_stream` leave
+unclaimed deposits locked in contract storage indefinitely, contributing to state bloat.
+`keeper_cancel` allows any caller (a permissionless keeper) to cancel such a stream once a
+configurable grace period has elapsed, returning funds to their rightful owners and paying a
+small incentive to the keeper.
+
+### Eligibility
+
+A stream is eligible for keeper cancellation when:
+
+1. Its status is `Active` or `Paused` (not already `Completed` or `Cancelled`).
+2. `current_timestamp >= end_time + KEEPER_GRACE_PERIOD_SECONDS` (default: 7 days = 604 800 s).
+
+### Token distribution
+
+```
+accrued         = calculate_accrued_at(end_time)          -- capped at deposit_amount
+recipient_amount = accrued - withdrawn_amount              -- outstanding claimable balance
+sender_refund_gross = deposit_amount - accrued             -- unstreamed portion
+keeper_fee       = sender_refund_gross × KEEPER_FEE_BPS / 10 000   -- default: 0.5 %
+sender_refund    = sender_refund_gross - keeper_fee
+```
+
+All three parties receive their tokens in a single transaction.
+
+### Security invariants
+
+1. **Recipient is never penalised**: `keeper_fee` is taken from `sender_refund_gross`, never from
+   `recipient_amount`. The recipient always receives the full outstanding accrued balance.
+2. **CEI ordering**: the stream is marked `Cancelled` in persistent storage before any token
+   transfer. A re-entrant token cannot observe an inconsistent state.
+3. **Keeper must sign (`keeper.require_auth()`)**: prevents a third party from redirecting the fee
+   to an arbitrary address by supplying a different keeper address in the call.
+4. **Terminal streams are rejected early**: if the stream is already `Completed` or `Cancelled`,
+   the call fails with `ContractError::InvalidState` before any state change.
+
+### Event
+
+Topic: `("kp_cncl", stream_id)`
+
+Payload: `KeeperCancelled { stream_id, keeper, keeper_fee, recipient_amount, sender_refund }`
+
+### Constants
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `KEEPER_GRACE_PERIOD_SECONDS` | 604 800 (7 days) | Minimum seconds past `end_time` for eligibility |
+| `KEEPER_FEE_BPS` | 50 (0.5 %) | Keeper fee as basis points of the sender gross refund |
+
 ## Residual assumptions and risks
 
 1. Token trust model: cancellation depends on configured token contract transfer behavior.
