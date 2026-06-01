@@ -159,9 +159,7 @@ fn test_update_rate_per_second_respects_max_rate() {
     let events = ctx.env.events().all();
     assert_eq!(events.len(), events_before + 1);
 
-    let rate_cap_event = events
-        .iter()
-        .find(|e| e.0 == (symbol_short!("rate_cap"), stream_id));
+    let rate_cap_event = events.iter().find(|e| e.0 == (symbol_short!("rate_cap"), stream_id));
     assert!(rate_cap_event.is_some(), "RateCapEnforced event must be emitted");
 
     if let Some(event) = rate_cap_event {
@@ -351,10 +349,7 @@ fn test_multiple_rate_cap_enforced_events() {
 
     // Should have two RateCapEnforced events
     let events = ctx.env.events().all();
-    let rate_cap_events: Vec<_> = events
-        .iter()
-        .filter(|e| e.0.0 == symbol_short!("rate_cap"))
-        .collect();
+    let rate_cap_events: Vec<_> = events.iter().filter(|e| e.0.0 == symbol_short!("rate_cap")).collect();
 
     assert_eq!(rate_cap_events.len(), 2);
 

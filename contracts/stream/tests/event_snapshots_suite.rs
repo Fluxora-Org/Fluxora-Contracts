@@ -233,18 +233,8 @@ fn event_snapshot_stream_created_with_memo() {
     let memo = Some(soroban_sdk::Bytes::from_slice(&ctx.env, b"payroll-2024-q1"));
     let events_before = ctx.env.events().all().len();
 
-    let _stream_id = ctx.client().create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &5000_i128,
-        &2_i128,
-        &0u64,
-        &100u64,
-        &2500u64,
-        &0,
-        &memo,,
-        &fluxora_stream::StreamKind::Linear,
-        );
+    let _stream_id = ctx.client().create_stream(&ctx.sender, &ctx.recipient, &5000_i128, &2_i128, &0u64, &100u64, &2500u64, &0, &memo, &fluxora_stream::StreamKind::Linear);
+
 
     let events = ctx.env.events().all();
     let mut found = false;

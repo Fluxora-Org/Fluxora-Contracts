@@ -514,8 +514,7 @@ fn snapshot_event_paused_resumed_cancelled() {
     let stream_id = ctx.create_default_stream();
 
     // 1. paused
-    ctx.client()
-        .pause_stream(&stream_id, &PauseReason::Operational);
+    ctx.client().pause_stream(&stream_id, &PauseReason::Operational);
     let events = ctx.env.events().all();
     let last_event = events.last().unwrap();
     assert_eq!(
@@ -592,8 +591,7 @@ fn snapshot_event_rate_end_topup_recp() {
     );
 
     // 3. top_up — refill the deposit so we can subsequently extend the schedule.
-    ctx.client()
-        .top_up_stream(&stream_id, &ctx.sender, &1000_i128);
+    ctx.client().top_up_stream(&stream_id, &ctx.sender, &1000_i128);
     let events = ctx.env.events().all();
     let last_event = events.last().unwrap();
     assert_eq!(
@@ -664,8 +662,7 @@ fn update_rate_on_paused_stream_is_allowed() {
     ctx.env.ledger().set_timestamp(0);
     let stream_id = ctx.create_default_stream();
 
-    ctx.client()
-        .pause_stream(&stream_id, &PauseReason::Operational);
+    ctx.client().pause_stream(&stream_id, &PauseReason::Operational);
     ctx.client().update_rate_per_second(&stream_id, &2_i128);
 
     let state = ctx.client().get_stream_state(&stream_id);

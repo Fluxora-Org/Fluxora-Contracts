@@ -4508,8 +4508,8 @@ impl FluxoraStream {
             0
         } else {
             match streams.binary_search(&cursor) {
-                Ok(pos) => pos + 1,  # Start after the cursor
-                Err(pos) => pos,     # Insert position if not found
+                Ok(pos) => pos + 1,  // Start after the cursor
+                Err(pos) => pos,     // Insert position if not found
             }
         };
 

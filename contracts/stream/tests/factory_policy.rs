@@ -112,12 +112,7 @@ fn test_create_stream_recipient_not_allowlisted() {
     let recipient = Address::generate(&ctx.env);
     let now = ctx.now();
 
-    let result = ctx.factory.try_create_stream(
-        &ctx.sender, &recipient,
-        &1_000, &1,
-        &now, &now, &(now + 200),
-        &0,
-    );
+    let result = ctx.factory.try_create_stream(&ctx.sender, &recipient, &1_000, &1, &now, &now, &(now + 200), &0);
     assert_eq!(result, Err(Ok(FactoryError::RecipientNotAllowlisted)));
 }
 
@@ -132,12 +127,7 @@ fn test_create_stream_deposit_exceeds_cap() {
     ctx.factory.set_allowlist(&recipient, &true);
     let now = ctx.now();
 
-    let result = ctx.factory.try_create_stream(
-        &ctx.sender, &recipient,
-        &10_001, &1,          // exceeds max_deposit=10_000
-        &now, &now, &(now + 200),
-        &0,
-    );
+    let result = ctx.factory.try_create_stream(&ctx.sender, &recipient, &10_001, &1, &now, &now, &(now + 200), &0);
     assert_eq!(result, Err(Ok(FactoryError::DepositExceedsCap)));
 }
 
@@ -149,12 +139,7 @@ fn test_create_stream_deposit_at_cap_ok() {
     ctx.factory.set_allowlist(&recipient, &true);
     let now = ctx.now();
 
-    let result = ctx.factory.try_create_stream(
-        &ctx.sender, &recipient,
-        &10_000, &1,          // exactly at cap
-        &now, &now, &(now + 10_000),
-        &0,
-    );
+    let result = ctx.factory.try_create_stream(&ctx.sender, &recipient, &10_000, &1, &now, &now, &(now + 10_000), &0);
     // May fail for stream-contract reasons (e.g. token transfer) but not DepositExceedsCap
     assert_ne!(result, Err(Ok(FactoryError::DepositExceedsCap)));
 }
@@ -170,12 +155,7 @@ fn test_create_stream_duration_too_short() {
     ctx.factory.set_allowlist(&recipient, &true);
     let now = ctx.now();
 
-    let result = ctx.factory.try_create_stream(
-        &ctx.sender, &recipient,
-        &1_000, &1,
-        &now, &now, &(now + 50), // duration=50 < min_duration=100
-        &0,
-    );
+    let result = ctx.factory.try_create_stream(&ctx.sender, &recipient, &1_000, &1, &now, &now, &(now + 50), &0);
     assert_eq!(result, Err(Ok(FactoryError::DurationTooShort)));
 }
 
@@ -187,12 +167,7 @@ fn test_create_stream_duration_at_minimum_ok() {
     ctx.factory.set_allowlist(&recipient, &true);
     let now = ctx.now();
 
-    let result = ctx.factory.try_create_stream(
-        &ctx.sender, &recipient,
-        &100, &1,
-        &now, &now, &(now + 100), // duration=100 == min_duration
-        &0,
-    );
+    let result = ctx.factory.try_create_stream(&ctx.sender, &recipient, &100, &1, &now, &now, &(now + 100), &0);
     assert_ne!(result, Err(Ok(FactoryError::DurationTooShort)));
 }
 
@@ -211,12 +186,7 @@ fn test_factory_not_initialized_returns_error() {
     let now = env.ledger().timestamp();
 
     // No init called — create_stream should return NotInitialized
-    let result = factory.try_create_stream(
-        &sender, &recipient,
-        &1_000, &1,
-        &now, &now, &(now + 200),
-        &0,
-    );
+    let result = factory.try_create_stream(&sender, &recipient, &1_000, &1, &now, &now, &(now + 200), &0);
     assert_eq!(result, Err(Ok(FactoryError::NotInitialized)));
 }
 
@@ -233,12 +203,7 @@ fn test_set_cap_enforced() {
     ctx.factory.set_allowlist(&recipient, &true);
     let now = ctx.now();
 
-    let result = ctx.factory.try_create_stream(
-        &ctx.sender, &recipient,
-        &6_000, &1,
-        &now, &now, &(now + 200),
-        &0,
-    );
+    let result = ctx.factory.try_create_stream(&ctx.sender, &recipient, &6_000, &1, &now, &now, &(now + 200), &0);
     assert_eq!(result, Err(Ok(FactoryError::DepositExceedsCap)));
 }
 
@@ -251,12 +216,7 @@ fn test_set_min_duration_enforced() {
     ctx.factory.set_allowlist(&recipient, &true);
     let now = ctx.now();
 
-    let result = ctx.factory.try_create_stream(
-        &ctx.sender, &recipient,
-        &200, &1,
-        &now, &now, &(now + 200), // duration=200 < new min=500
-        &0,
-    );
+    let result = ctx.factory.try_create_stream(&ctx.sender, &recipient, &200, &1, &now, &now, &(now + 200), &0);
     assert_eq!(result, Err(Ok(FactoryError::DurationTooShort)));
 }
 
@@ -269,11 +229,6 @@ fn test_set_allowlist_remove_enforced() {
     ctx.factory.set_allowlist(&recipient, &false); // remove
     let now = ctx.now();
 
-    let result = ctx.factory.try_create_stream(
-        &ctx.sender, &recipient,
-        &1_000, &1,
-        &now, &now, &(now + 200),
-        &0,
-    );
+    let result = ctx.factory.try_create_stream(&ctx.sender, &recipient, &1_000, &1, &now, &now, &(now + 200), &0);
     assert_eq!(result, Err(Ok(FactoryError::RecipientNotAllowlisted)));
 }
