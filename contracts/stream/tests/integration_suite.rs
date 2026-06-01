@@ -163,7 +163,7 @@ fn sweep_excess_after_rate_decrease() {
         &0u64,
         &100u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
     
@@ -306,7 +306,7 @@ fn sweep_excess_with_multiple_streams_complex_scenario() {
         &0u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
     
@@ -321,7 +321,7 @@ fn sweep_excess_with_multiple_streams_complex_scenario() {
         &0u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
     
@@ -457,7 +457,7 @@ fn get_stream_health_returns_correct_summary_underfunded() {
         &0u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -569,7 +569,7 @@ fn snapshot_event_rate_end_topup_recp() {
         &0u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -648,7 +648,7 @@ fn update_rate_accepts_maximum_i128_rate() {
         &0u64,
         &1u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -707,7 +707,7 @@ proptest::proptest! {
             &0u64,
             &duration,
             &0,
-            &None,,
+            &None,
             &fluxora_stream::StreamKind::Linear,
             );
 
@@ -760,7 +760,7 @@ fn snapshot_no_event_on_revert() {
         &0u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
     assert!(result.is_err());
@@ -811,7 +811,7 @@ fn test_accrual_none_checkpoint_returns_zero() {
         &100u64,
         &1100u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -843,7 +843,7 @@ fn test_accrual_none_checkpoint_before_cliff_returns_zero() {
         &500u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -926,7 +926,7 @@ fn sweep_excess_after_rate_decrease() {
         &0u64,
         &100u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
     
@@ -1069,7 +1069,7 @@ fn sweep_excess_with_multiple_streams_complex_scenario() {
         &0u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
     
@@ -1084,7 +1084,7 @@ fn sweep_excess_with_multiple_streams_complex_scenario() {
         &0u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
     

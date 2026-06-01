@@ -64,7 +64,7 @@ fn test_recipient_index_migration() {
             &0,
             &1000,
             &0,
-            &None,,
+            &None,
             &fluxora_stream::StreamKind::Linear,
             );
     }
@@ -90,7 +90,7 @@ fn test_recipient_index_migration() {
         &0,
         &1000,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -115,7 +115,7 @@ fn test_paged_index_pagination() {
             &0,
             &100,
             &0,
-            &None,,
+            &None,
             &fluxora_stream::StreamKind::Linear,
             );
     }
@@ -165,7 +165,7 @@ fn test_remove_from_paged_index() {
         &0,
         &100,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
     let id2 = ctx.client.create_stream(
@@ -177,7 +177,7 @@ fn test_remove_from_paged_index() {
         &0,
         &100,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
     let id3 = ctx.client.create_stream(
@@ -189,7 +189,7 @@ fn test_remove_from_paged_index() {
         &0,
         &100,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 

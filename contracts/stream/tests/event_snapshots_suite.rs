@@ -168,7 +168,7 @@ fn event_snapshot_stream_created_has_correct_topics_and_payload() {
         &0u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -295,7 +295,7 @@ fn event_snapshot_withdrawal_has_correct_topics_and_payload() {
         &0u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -355,7 +355,7 @@ fn event_snapshot_no_withdrawal_event_when_amount_zero() {
         &500u64, // Cliff at 500
         &1000u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -402,7 +402,7 @@ fn event_snapshot_withdrawal_to_has_correct_topics_and_payload() {
         &0u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -467,7 +467,7 @@ fn event_snapshot_stream_paused_has_correct_topics_and_payload() {
         &0u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -523,7 +523,7 @@ fn event_snapshot_stream_paused_as_admin_has_administrative_reason() {
         &0u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -573,7 +573,7 @@ fn event_snapshot_stream_resumed_has_correct_topics() {
         &0u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -619,7 +619,7 @@ fn event_snapshot_stream_cancelled_has_correct_topics() {
         &0u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -667,7 +667,7 @@ fn event_snapshot_stream_completed_emitted_after_withdrew() {
         &0u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -721,7 +721,7 @@ fn event_snapshot_stream_closed_has_correct_topics() {
         &0u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -773,7 +773,7 @@ fn event_snapshot_rate_updated_has_correct_topics_and_payload() {
         &0u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -832,7 +832,7 @@ fn event_snapshot_stream_end_shortened_has_correct_topics_and_payload() {
         &0u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -890,7 +890,7 @@ fn event_snapshot_stream_end_extended_has_correct_topics_and_payload() {
         &0u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -950,7 +950,7 @@ fn event_snapshot_stream_topped_up_has_correct_topics_and_payload() {
         &0u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -1007,7 +1007,7 @@ fn event_snapshot_recipient_updated_has_correct_topics_and_payload() {
         &0u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -1194,7 +1194,7 @@ fn event_snapshot_no_events_on_failed_create_stream() {
         &0u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -1239,7 +1239,7 @@ fn event_snapshot_no_events_on_failed_operations() {
         &0u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -1332,7 +1332,7 @@ fn event_snapshot_health_changed_top_up_heals_underfunded_stream() {
         &0u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -1374,7 +1374,7 @@ fn event_snapshot_health_changed_shorten_heals_underfunded_stream() {
         &0u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -1416,7 +1416,7 @@ fn event_snapshot_health_changed_decrease_rate_heals_underfunded_stream() {
         &0u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -1460,7 +1460,7 @@ fn event_snapshot_health_changed_cancel_heals_underfunded_stream() {
         &0u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -1502,7 +1502,7 @@ fn event_snapshot_health_changed_not_emitted_when_no_transition() {
         &0u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 

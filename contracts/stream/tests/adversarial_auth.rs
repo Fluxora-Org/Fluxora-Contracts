@@ -123,7 +123,7 @@ impl<'a> Ctx<'a> {
             &0u64,
             &1000u64,
             &0,
-            &None,,
+            &None,
             &fluxora_stream::StreamKind::Linear,
             )
     }
@@ -1082,7 +1082,7 @@ mod delegated_withdraw_adversarial {
                 &0u64,
                 &1000u64,
                 &0,
-                &None,,
+                &None,
                 &fluxora_stream::StreamKind::Linear,
                 )
         }

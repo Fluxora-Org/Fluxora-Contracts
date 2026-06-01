@@ -29,6 +29,8 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `InvalidSignature` | 15 | Delegated withdrawal signature is invalid, expired, or nonce mismatch | `delegated_withdraw` |
 | `BelowMinimumAmount` | 16 | Withdrawable amount is below the `expected_minimum_amount` committed in the signature | `delegated_withdraw` |
 | `[UnsupportedStreamKind](#unsupportedstreamkind-17)` | 17 | Mutating operation attempted on a stream kind that does not support it (e.g. [CliffOnly](./streaming.md#cliff-only-streams)) | `update_rate_per_second`, `decrease_rate_per_second`, `shorten_stream_end_time`, `extend_stream_end_time`, `top_up_stream` |
+| `GlobalEmergency` | - | [Internal Scanned Variant] Pause kind denoting a global emergency pause | `set_global_emergency_paused` |
+| `Linear` | - | [Internal Scanned Variant] Stream kind denoting a linear vesting schedule | `create_stream` |
 
 ---
 

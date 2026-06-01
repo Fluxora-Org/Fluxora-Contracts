@@ -68,7 +68,7 @@ fn test_withdraw_dust_threshold_enforced() {
         &0u64,
         &1000u64,
         &100_i128, // threshold = 100
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -100,7 +100,7 @@ fn test_withdraw_dust_threshold_ignored_on_final_drain() {
         &0u64,
         &1000u64,
         &500_i128, // threshold = 500
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -138,7 +138,7 @@ fn test_withdraw_dust_threshold_ignored_in_terminal_state() {
         &0u64,
         &1000u64,
         &500_i128, // threshold = 500
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -171,7 +171,7 @@ fn test_withdraw_dust_threshold_ignored_past_end_time() {
         &0u64,
         &1000u64,
         &500_i128,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -203,7 +203,7 @@ fn test_create_stream_rejects_excessive_dust_threshold() {
         &0u64,
         &1000u64,
         &1100_i128, // threshold > deposit
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -232,7 +232,7 @@ fn test_zero_threshold_allows_all_withdrawals() {
         &0u64,
         &1000u64,
         &0_i128, // no filter
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -260,7 +260,7 @@ fn test_threshold_equal_to_deposit_blocks_until_terminal() {
         &0u64,
         &1000u64,
         &deposit, // threshold == deposit
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -298,7 +298,7 @@ fn test_batch_withdraw_respects_dust_threshold() {
         &0u64,
         &1000u64,
         &200_i128,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -312,7 +312,7 @@ fn test_batch_withdraw_respects_dust_threshold() {
         &0u64,
         &1000u64,
         &0_i128,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -345,7 +345,7 @@ fn test_threshold_exactly_at_withdrawable_is_allowed() {
         &0u64,
         &1000u64,
         &100_i128,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -374,7 +374,7 @@ fn test_short_stream_threshold_blocks_until_end_time() {
         &0u64,
         &10u64,
         &600_i128, // requires 6 s of accrual before first withdrawal
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -450,7 +450,7 @@ fn test_withdraw_dust_threshold_enforced() {
         &0u64,
         &1000u64,
         &100_i128, // threshold = 100
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -482,7 +482,7 @@ fn test_withdraw_dust_threshold_ignored_on_final_drain() {
         &0u64,
         &1000u64,
         &500_i128, // threshold = 500
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -520,7 +520,7 @@ fn test_withdraw_dust_threshold_ignored_in_terminal_state() {
         &0u64,
         &1000u64,
         &500_i128, // threshold = 500
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -553,7 +553,7 @@ fn test_withdraw_dust_threshold_ignored_past_end_time() {
         &0u64,
         &1000u64,
         &500_i128,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 
@@ -585,7 +585,7 @@ fn test_create_stream_rejects_excessive_dust_threshold() {
         &0u64,
         &1000u64,
         &1100_i128, // threshold > deposit
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
 

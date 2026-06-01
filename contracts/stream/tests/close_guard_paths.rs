@@ -45,7 +45,7 @@ impl<'a> Ctx<'a> {
             &self.sender, &self.recipient,
             &(duration as i128), &1,
             &now, &now, &(now + duration),
-            &0, &None,,
+            &0, &None,
             &fluxora_stream::StreamKind::Linear,
             )
     }
@@ -98,7 +98,7 @@ fn test_close_cancelled_zero_claimable_ok() {
         &ctx.sender, &ctx.recipient,
         &1_000, &1,
         &(now + 1_000), &(now + 1_000), &(now + 2_000),
-        &0, &None,,
+        &0, &None,
         &fluxora_stream::StreamKind::Linear,
         );
     ctx.client.cancel_stream(&stream_id);

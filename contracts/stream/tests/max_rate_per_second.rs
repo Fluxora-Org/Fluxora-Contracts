@@ -61,7 +61,7 @@ impl TestContext {
             &0,
             &1000,
             &0,
-            &None,,
+            &None,
             &fluxora_stream::StreamKind::Linear,
             )
     }
@@ -130,7 +130,7 @@ fn test_create_stream_respects_max_rate() {
         &0,
         &1000,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
@@ -188,7 +188,7 @@ fn test_default_max_rate_is_unlimited() {
         &0,
         &1, // 1 second duration to avoid overflow
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
     assert!(result.is_ok(), "High rates should be allowed by default");
@@ -258,7 +258,7 @@ fn test_max_rate_boundary_conditions() {
         &0,
         &1000,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
@@ -277,7 +277,7 @@ fn test_max_rate_boundary_conditions() {
         &0,
         &1,
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
     assert!(result.is_ok());
@@ -324,7 +324,7 @@ fn test_rate_cap_with_arithmetic_overflow_protection() {
         &0,
         &i64::MAX as u64, // Very long duration
         &0,
-        &None,,
+        &None,
         &fluxora_stream::StreamKind::Linear,
         );
     
