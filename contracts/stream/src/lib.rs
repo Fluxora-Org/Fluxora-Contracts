@@ -121,10 +121,92 @@ pub struct ProtocolStats {
 
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Operational status of a stream, determining which operations are allowed.
+///
+/// The status controls the stream's lifecycle and affects both accrual calculation
+/// and operation availability. Status transitions follow strict rules to maintain
+/// system integrity and prevent unauthorized state changes.
+///
+/// ## State Transition Rules
+///
+/// ```text
+/// Active ↔ Paused    (via pause_stream/resume_stream)
+/// Active → Cancelled (via cancel_stream, terminal)
+/// Paused → Cancelled (via cancel_stream, terminal)
+/// Active → Completed (via withdraw when withdrawn_amount == deposit_amount, terminal)
+/// ```
+///
+/// Terminal states (`Completed`, `Cancelled`) cannot transition to other states.
+///
+/// ## Time-Terminal Behavior
+///
+/// When `current_time >= end_time`, the stream is considered "time-terminal":
+/// - Pause/resume operations are blocked (`StreamTerminalState` error)
+/// - Withdrawals are always allowed regardless of `Paused` status
+/// - This ensures recipients can always claim their full entitlement
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StreamStatus {
+    /// Stream is operating normally.
+    ///
+    /// **Allowed operations:**
+    /// - Withdrawals (if past `cliff_time`)
+    /// - Pause/resume (if before `end_time`)
+    /// - Rate updates and schedule changes
+    /// - Cancellation
+    /// - Top-ups
+    ///
+    /// **Accrual behavior:** Tokens accrue normally based on elapsed time.
     Active = 0,
+
+    /// Stream is temporarily suspended by the sender.
+    ///
+    /// **Blocked operations:**
+    /// - Withdrawals (unless past `end_time` - time-terminal override)
+    ///
+    /// **Allowed operations:**
+    /// - Resume (if before `end_time`)
+    /// - Rate updates and schedule changes
+    /// - Cancellation
+    /// - Top-ups
+    ///
+    /// **Accrual behavior:** Tokens continue to accrue normally. Pause only
+    /// blocks withdrawals, not the mathematical accrual of entitlements.
+    ///
+    /// **Time-terminal override:** If `current_time >= end_time`, withdrawals
+    /// are allowed even in `Paused` status to ensure recipient access to funds.
     Paused = 1,
+
+    /// Stream has been fully withdrawn (terminal state).
+    ///
+    /// **Trigger:** Automatically set when `withdrawn_amount == deposit_amount`
+    ///
+    /// **Allowed operations:**
+    /// - `close_completed_stream` (storage cleanup)
+    /// - Read-only queries
+    ///
+    /// **Blocked operations:** All mutation operations
+    ///
+    /// **Accrual behavior:** Returns `deposit_amount` (deterministic, timestamp-independent)
     Completed = 2,
+
+    /// Stream was terminated early by sender or admin (terminal state).
+    ///
+    /// **Trigger:** Set by `cancel_stream` or `cancel_stream_as_admin`
+    ///
+    /// **Effects:**
+    /// - Accrual is frozen at `cancelled_at` timestamp
+    /// - Unstreamed portion is refunded to sender
+    /// - Recipient can still withdraw accrued amount up to cancellation
+    ///
+    /// **Allowed operations:**
+    /// - Withdrawals (of frozen accrued amount only)
+    /// - `close_completed_stream` (after full recipient withdrawal)
+    /// - Read-only queries
+    ///
+    /// **Blocked operations:** All other mutation operations
+    ///
+    /// **Accrual behavior:** Frozen at `cancelled_at` - no post-cancellation growth
     Cancelled = 3,
 }
 #[soroban_sdk::contracterror]
@@ -459,67 +541,6 @@ pub enum PauseKind {
     Protocol = 1,
     Stream = 2,
 }
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Stream {
-    pub stream_id: u64,
-    pub sender: Address,
-    pub recipient: Address,
-    pub deposit_amount: i128,
-    pub rate_per_second: i128,
-    pub start_time: u64,
-    pub cliff_time: u64,
-    pub end_time: u64,
-    pub withdrawn_amount: i128,
-    pub status: StreamStatus,
-    pub cancelled_at: Option<u64>,
-    /// Total tokens mathematically accrued up to `checkpointed_at` under all
-    /// previous rates. Updated by `decrease_rate_per_second` (and by
-    /// `update_rate_per_second` for symmetry) so that the new rate applies only
-    /// from `checkpointed_at` forward. Initialised to 0 at stream creation.
-    pub checkpointed_amount: i128,
-    /// Ledger timestamp of the last rate change (or `start_time` on creation).
-    /// `calculate_accrued` uses this as the start of the current rate epoch.
-    pub checkpointed_at: u64,
-    /// Minimum withdrawal amount in raw token units (dust filter).
-    ///
-    /// When `withdrawable < withdraw_dust_threshold`, `withdraw`, `withdraw_to`, and
-    /// `batch_withdraw` return `0` without transferring tokens or emitting events.
-    /// This prevents fee and event spam from micro-withdrawals on high-frequency streams.
-    ///
-    /// # Bypass conditions (threshold is ignored)
-    /// - **Terminal state**: `status == Cancelled` or `ledger.timestamp() >= end_time`.
-    ///   The recipient can always pull the final balance regardless of threshold.
-    /// - **Final drain**: `withdrawn_amount + withdrawable == deposit_amount`.
-    ///   The last withdrawal that completes the stream is never blocked.
-    ///
-    /// # Choosing a value (USDC, 7 decimals — 1 USDC = 10_000_000 raw units)
-    /// - `0` — no filter; every micro-withdrawal is allowed (default).
-    /// - `100_000` (0.01 USDC) — blocks sub-cent withdrawals; suitable for high-rate streams.
-    /// - `1_000_000` (0.1 USDC) — blocks sub-dime withdrawals; good for payroll streams.
-    /// - `10_000_000` (1 USDC) — blocks sub-dollar withdrawals; conservative for slow streams.
-    ///
-    /// # Safety constraint
-    /// `withdraw_dust_threshold` must not exceed `deposit_amount`. A threshold equal to or
-    /// greater than the deposit would permanently block all non-terminal withdrawals, locking
-    /// the recipient's funds. Creation is rejected with `ContractError::InvalidDustThreshold`
-    /// if this constraint is violated.
-    ///
-    /// # Formula for safe threshold selection
-    /// A safe upper bound is: `threshold ≤ rate_per_second × minimum_acceptable_interval`
-    /// where `minimum_acceptable_interval` is the shortest withdrawal cadence you expect.
-    /// For example, a stream at 1_000 raw/s with daily withdrawals:
-    ///   `threshold ≤ 1_000 × 86_400 = 86_400_000` (8.64 USDC for a 7-decimal token).
-    ///
-    /// See [`docs/dust-threshold.md`](../../docs/dust-threshold.md) for worked USDC examples,
-    /// a validation table, and guidance for template authors.
-    pub withdraw_dust_threshold: i128,
-    /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
-    /// Maximum length: `MAX_MEMO_BYTES` (64 bytes). `None` when not supplied.
-    pub memo: Option<soroban_sdk::Bytes>,
-}
-
 
 /// Pagination result for recipient stream listing
 #[contracttype]
@@ -3085,7 +3106,9 @@ impl FluxoraStream {
         let accrued_to_date_i128 = Self::calculate_accrued(env.clone(), stream_id)?;
         let accrued_to_date = accrued_to_date_i128 as u128;
 
-        let remaining_deposit = stream.deposit_amount.saturating_sub(stream.withdrawn_amount) as u128;
+        let remaining_deposit = stream
+            .deposit_amount
+            .saturating_sub(stream.withdrawn_amount) as u128;
 
         let is_expired = current_time >= stream.end_time
             && stream.status != StreamStatus::Completed
@@ -3102,7 +3125,9 @@ impl FluxoraStream {
         // Seconds until depletion logic
         let mut seconds_until_depletion = None;
         if stream.rate_per_second > 0 {
-            let total_to_accrue = stream.deposit_amount.saturating_sub(stream.checkpointed_amount);
+            let total_to_accrue = stream
+                .deposit_amount
+                .saturating_sub(stream.checkpointed_amount);
             let seconds_to_deplete = (total_to_accrue / stream.rate_per_second) as u64;
             let depletion_time = stream.checkpointed_at.saturating_add(seconds_to_deplete);
 
@@ -3932,18 +3957,20 @@ impl FluxoraStream {
     /// - Paginate: fetch first N IDs, then call `get_stream_state` for each
     /// - Filter by status: fetch all IDs, then check status of each via `get_stream_state`
     pub fn get_recipient_streams(env: Env, recipient: Address) -> soroban_sdk::Vec<u64> {
+        load_recipient_streams(&env, &recipient)
+    }
 
     /// Paginated version of get_recipient_streams to prevent unbounded returns.
-    /// 
+    ///
     /// # Parameters
     /// - `env`: Contract environment
     /// - `recipient`: Address to query streams for
     /// - `cursor`: Pagination cursor (stream_id to start after, 0 for beginning)
     /// - `limit`: Maximum number of stream IDs to return (capped at RECIPIENT_STREAMS_PAGE_LIMIT)
-    /// 
+    ///
     /// # Returns
     /// - `Page`: Contains stream IDs slice and next cursor for pagination
-    /// 
+    ///
     /// # Behavior
     /// - Returns streams in ascending order by stream_id
     /// - If cursor is 0, starts from the beginning
@@ -3961,39 +3988,42 @@ impl FluxoraStream {
     ) -> Page {
         let streams = load_recipient_streams(&env, &recipient);
         let total = streams.len();
-        
+
         // Apply limit cap
         let effective_limit = limit.min(RECIPIENT_STREAMS_PAGE_LIMIT);
-        
+
         // Find starting position
         let start_idx = if cursor == 0 {
             0
         } else {
             match streams.binary_search(&cursor) {
-                Ok(pos) => pos + 1,  # Start after the cursor
-                Err(pos) => pos,     # Insert position if not found
+                Ok(pos) => pos + 1, // Start after the cursor
+                Err(pos) => pos,    // Insert position if not found
             }
         };
-        
+
         // Calculate end position
         let end_idx = (start_idx as u32 + effective_limit).min(total as u32) as usize;
-        
+
         #[allow(unused_assignments)]
         let mut next_cursor = 0;
         if end_idx < total {
             next_cursor = streams.get(end_idx as usize).unwrap();
         }
-        
+
         #[allow(unused_assignments)]
         let mut page_streams = soroban_sdk::Vec::new(&env);
         for i in start_idx..end_idx {
             page_streams.push_back(streams.get(i).unwrap());
         }
-        
-         Page { stream_ids: page_streams, next_cursor }
-     }
 
-     /// Count the total number of streams for a recipient.
+        Page {
+            stream_ids: page_streams,
+            next_cursor,
+        }
+    }
+
+    /// Count the total number of streams for a recipient.
     ///
     /// Returns the count of streams where the recipient is the stream's recipient address.
     /// This is a convenience function that avoids fetching the full vector when only
