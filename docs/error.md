@@ -640,7 +640,7 @@ infrastructure-level failures (not user input errors):
 | `cancel_stream` | - | StreamNotFound, Unauthorized, InvalidState | StreamNotFound, Unauthorized | - |
 | `withdraw` | StreamNotFound, Unauthorized, InvalidState | - | - | - |
 | `delegated_withdraw` | - | - | - | InvalidSignature, BelowMinimumAmount, StreamNotFound, InvalidState |
-| `top_up_stream` | - | StreamNotFound, Unauthorized, InvalidParams, InvalidState, ArithmeticOverflow | StreamNotFound | - |
+| `top_up_stream` | - | StreamNotFound, Unauthorized, InvalidParams, InvalidState, ArithmeticOverflow, `[UnsupportedStreamKind](#unsupportedstreamkind-17)` | StreamNotFound | - |
 | `calculate_accrued` | StreamNotFound | StreamNotFound | StreamNotFound | StreamNotFound |
 | `get_stream_state` | StreamNotFound | StreamNotFound | StreamNotFound | StreamNotFound |
 
@@ -707,6 +707,7 @@ The factory contract (`contracts/factory`) uses a separate `FactoryError` enum.
 - Success/failure semantics for each operation
 - Time-driven edge cases
 - Client action recommendations
+- Dust-attack prevention guidance
 
 ### Excluded
 
@@ -724,4 +725,4 @@ The factory contract (`contracts/factory`) uses a separate `FactoryError` enum.
 |------|------------|--------|------------|
 | Error code changes | Low | High | Versioning in client SDKs |
 | Missing error cases | Low | Medium | Comprehensive test coverage |
-| Client mishandling | Medium | Medium | This documentation |
+| Client mishandling | Medium | Medium | This documentation | Dust-attack bypass | Very Low |	High | MIN_RATE_PER_SECOND enforced at validation layer

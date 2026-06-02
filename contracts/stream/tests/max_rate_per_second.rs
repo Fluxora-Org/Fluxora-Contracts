@@ -1,4 +1,4 @@
-#![cfg(test)]
+﻿#![cfg(test)]
 extern crate std;
 
 use fluxora_stream::{ContractError, FluxoraStream, FluxoraStreamClient, RateCapEnforced};
@@ -135,7 +135,8 @@ fn test_create_stream_respects_max_rate() {
         &1000,
         &0,
         &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 }
 
@@ -196,7 +197,8 @@ fn test_default_max_rate_is_unlimited() {
         &1, // 1 second duration to avoid overflow
         &0,
         &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
     assert!(result.is_ok(), "High rates should be allowed by default");
 }
 
@@ -211,6 +213,7 @@ fn test_max_rate_applies_to_all_create_functions() {
     let params = vec![
         &ctx.env,
         fluxora_stream::CreateStreamParams {
+        kind: fluxora_stream::StreamKind::Linear,
             recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
             rate_per_second: 101, // Exceeds max
@@ -219,6 +222,7 @@ fn test_max_rate_applies_to_all_create_functions() {
             end_time: 1000,
             withdraw_dust_threshold: Some(0),
             memo: None,
+            metadata: None,
         },
     ];
 
@@ -227,6 +231,7 @@ fn test_max_rate_applies_to_all_create_functions() {
 
     // Test create_stream_relative
     let relative_params = fluxora_stream::CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
         recipient: ctx.recipient.clone(),
         deposit_amount: 1000,
         rate_per_second: 101, // Exceeds max
@@ -235,6 +240,7 @@ fn test_max_rate_applies_to_all_create_functions() {
         duration: 1000,
         withdraw_dust_threshold: Some(0),
         memo: None,
+        metadata: None,
     };
 
     let result = ctx
@@ -265,7 +271,8 @@ fn test_max_rate_boundary_conditions() {
         &1000,
         &0,
         &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 
     // Test with max rate = i128::MAX
@@ -283,7 +290,8 @@ fn test_max_rate_boundary_conditions() {
         &1,
         &0,
         &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
     assert!(result.is_ok());
 }
 

@@ -472,6 +472,11 @@ Commit message suggestion: `docs: add event schema and topics for indexers`
 | `pause_protocol`                                             | `"pr_pause"`    |
 | `resume_protocol`                                            | `"pr_resume"`   |
 | `update_recipient`                                           | `"recp_upd"`    |
+| `revoke_auto_claim`                                         | `"ac_revoke"`   |
+| `set_auto_claim`                                             | `"ac_set"`      |
+| `trigger_auto_claim`                                         | `"ac_trig"`     |
+| `sweep_excess`                                               | `"ex_swept"`    |
+| `migrate_recipient_index`                                    | `"migrated"`    |
 | `decrease_rate_per_second`, `shorten_stream_end_time`, `top_up_stream`, `cancel_stream` | `"hlth_chg"` |
 
 If you change event topics or payloads in the contract, update this document and
