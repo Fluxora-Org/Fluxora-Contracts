@@ -9,7 +9,7 @@ use fluxora_stream::{
 use proptest::prelude::*;
 use soroban_sdk::log;
 use soroban_sdk::{
-    testutils::{Address as _, Events, Ledger},
+    contract, contractimpl, testutils::{Address as _, Events, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
     vec, Address, Env, FromVal, IntoVal,
 };
@@ -1583,6 +1583,66 @@ fn test_trigger_auto_claim_paused_stream_fails() {
     // The stream is still Active (just paused), not Completed or Cancelled
     let amount = ctx.client().trigger_auto_claim(&stream_id);
     assert!(amount >= 0); // Should succeed
+}
+
+#[contract]
+pub struct NonConformingToken;
+
+#[contractimpl]
+impl NonConformingToken {
+    pub fn balance(_env: Env, _who: Address) -> i128 {
+        0
+    }
+
+    pub fn transfer(_env: Env, _from: Address, _to: Address, _amount: i128) {
+        panic!("token transfer panicked")
+    }
+
+    pub fn transfer_from(
+        _env: Env,
+        _invoker: Address,
+        _from: Address,
+        _to: Address,
+        _amount: i128,
+    ) {
+        panic!("token transfer_from panicked")
+    }
+
+    pub fn approve(_env: Env, _spender: Address, _owner: Address, _amount: i128) {}
+}
+
+#[test]
+fn init_accepts_valid_sep41_token() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin).address();
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+
+    assert_eq!(client.init(&token_id, &admin), Ok(()));
+}
+
+#[test]
+fn init_rejects_non_sep41_token() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let token_id = env.register_contract(None, NonConformingToken).address();
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+
+    let init_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.init(&token_id, &admin)
+    }));
+
+    assert!(
+        matches!(init_result, Err(_) | Ok(Err(_))),
+        "init must reject a non-SEP-41 token implementation"
+    );
 }
 
 /// Test get_auto_claim_status for non-existent stream

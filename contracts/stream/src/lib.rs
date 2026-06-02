@@ -2,9 +2,11 @@
 #![allow(clippy::too_many_arguments)]
 
 mod accrual;
+mod token_check;
 #[cfg(test)]
 mod checksum;
 
+use token_check::verify_token_behavior;
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env};
 
 // ---------------------------------------------------------------------------
@@ -263,6 +265,8 @@ pub enum ContractError {
     Unauthorized = 7,
     /// Contract is already initialized.
     AlreadyInitialised = 8,
+    /// The token contract did not expose the expected SEP-41 interface during init.
+    TokenVerificationFailed = 23,
     /// Token balance or allowance is insufficient (emulated check if possible, otherwise caught by token client).
     InsufficientBalance = 9,
     /// Deposit amount does not cover the total streamable amount.
@@ -1747,8 +1751,11 @@ impl FluxoraStream {
     /// - Does not silently fail (panics or returns an error on insufficient balance)
     /// - Implements the standard Soroban token interface
     ///
-    /// **Operators are responsible for verifying token behavior before initialization.**
-    /// If a malicious token is used, the contract's behavior may become unpredictable.
+    /// **The contract performs an on-chain SEP-41 smoke-test during initialization.**
+    /// It verifies that the token contract exposes `balance` and a no-op `transfer`
+    /// on the contract address before persisting configuration.
+    ///
+    /// If the token does not expose the expected interface, initialization reverts.
     ///
     /// See [`token-assumptions.md`](../../docs/token-assumptions.md) for complete token trust model.
     pub fn init(env: Env, token: Address, admin: Address) -> Result<(), ContractError> {
@@ -1756,6 +1763,7 @@ impl FluxoraStream {
         if env.storage().instance().has(&DataKey::Config) {
             return Err(ContractError::AlreadyInitialised);
         }
+        verify_token_behavior(&env, &token)?;
         let config = Config { token, admin };
         env.storage().instance().set(&DataKey::Config, &config);
         env.storage().instance().set(&DataKey::NextStreamId, &0u64);

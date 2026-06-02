@@ -20,6 +20,8 @@ The Fluxora streaming contract interacts with exactly one token contract, fixed 
 4. **Deterministic behavior**: Token operations produce consistent, predictable results given the same inputs and contract state.
 5. **Standard SEP-41 interface**: The token implements the standard Soroban token interface (`transfer`, `transfer_from`, `balance`, `approve`, `allowance`).
 
+- The streaming contract performs an init-time smoke test on the selected token by querying `balance` and exercising a no-op `transfer` to the contract itself. If the token does not expose the expected interface, `init()` reverts.
+
 ### Why This Assumption Matters
 
 The streaming contract's security model depends on these token behaviors:
