@@ -1,4 +1,4 @@
-//! Tests for issue #514: recipient stream index caching in `create_streams`.
+﻿//! Tests for issue #514: recipient stream index caching in `create_streams`.
 //!
 //! Verifies that batching multiple streams to the same recipient produces the
 //! same index state as creating them one-by-one, and that the O(1)-per-recipient
@@ -53,6 +53,7 @@ impl<'a> Ctx<'a> {
             end_time: now + duration,
             withdraw_dust_threshold: None,
             memo: None,
+            metadata: None,
         }
     }
 }
@@ -128,6 +129,7 @@ fn test_batch_index_matches_sequential_creation() {
         &p1.end_time,
         &0,
         &None,
+        &None,
     );
     ctx1.client.create_stream(
         &ctx1.sender,
@@ -138,6 +140,7 @@ fn test_batch_index_matches_sequential_creation() {
         &p2.cliff_time,
         &p2.end_time,
         &0,
+        &None,
         &None,
     );
     let seq_index = ctx1.client.get_recipient_streams(&recipient1, &None, &None);

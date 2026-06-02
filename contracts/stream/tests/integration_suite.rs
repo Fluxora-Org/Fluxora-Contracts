@@ -1,4 +1,4 @@
-extern crate std;
+﻿extern crate std;
 
 use fluxora_stream::{
     ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, PauseReason,
@@ -174,6 +174,7 @@ fn sweep_excess_after_rate_decrease() {
         &100u64,
         &0,
         &None,
+        &None,
     );
 
     assert_eq!(ctx.token.balance(&ctx.contract_id), 1_000);
@@ -316,6 +317,7 @@ fn sweep_excess_with_multiple_streams_complex_scenario() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     // Create second stream: 2000 tokens
@@ -329,6 +331,7 @@ fn sweep_excess_with_multiple_streams_complex_scenario() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -465,6 +468,7 @@ fn get_stream_health_returns_correct_summary_underfunded() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     ctx.env.ledger().set_timestamp(300);
@@ -576,6 +580,7 @@ fn snapshot_event_rate_end_topup_recp() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     // 1. rate_upd
@@ -654,6 +659,7 @@ fn update_rate_accepts_maximum_i128_rate() {
         &1u64,
         &0,
         &None,
+        &None,
     );
 
     ctx.client().update_rate_per_second(&stream_id, &i128::MAX);
@@ -712,6 +718,7 @@ proptest::proptest! {
             &duration,
             &0,
             &None,
+            &None,
         );
 
         for &next_rate in rates.iter().skip(1) {
@@ -764,6 +771,7 @@ fn snapshot_no_event_on_revert() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
     assert!(result.is_err());
     assert_eq!(ctx.env.events().all().len(), events_before);
@@ -814,6 +822,7 @@ fn test_accrual_none_checkpoint_returns_zero() {
         &1100u64,
         &0,
         &None,
+        &None,
     );
 
     // At start_time the elapsed seconds are 0 → accrued must be 0.
@@ -844,6 +853,7 @@ fn test_accrual_none_checkpoint_before_cliff_returns_zero() {
         &500u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -926,6 +936,7 @@ fn sweep_excess_after_rate_decrease() {
         &0u64,
         &100u64,
         &0,
+        &None,
         &None,
     );
     
@@ -1069,6 +1080,7 @@ fn sweep_excess_with_multiple_streams_complex_scenario() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
     
     // Create second stream: 2000 tokens
@@ -1082,6 +1094,7 @@ fn sweep_excess_with_multiple_streams_complex_scenario() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
     

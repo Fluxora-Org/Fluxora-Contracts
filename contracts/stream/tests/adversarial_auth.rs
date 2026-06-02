@@ -1,4 +1,4 @@
-extern crate std;
+﻿extern crate std;
 
 use fluxora_stream::{
     ContractError, FluxoraStream, FluxoraStreamClient, PauseReason, StreamStatus,
@@ -123,6 +123,7 @@ impl<'a> Ctx<'a> {
             &0u64,
             &1000u64,
             &0,
+            &None,
             &None,
         )
     }
@@ -1091,6 +1092,7 @@ mod delegated_withdraw_adversarial {
                 &0u64,
                 &1000u64,
                 &0,
+                &None,
                 &None,
             )
         }

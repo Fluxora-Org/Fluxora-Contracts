@@ -1,3 +1,4 @@
+use soroban_sdk::{contracterror, contracttype, Env, Symbol};
 /// Computes accrued stream amount without relying on Soroban environment state.
 ///
 /// This helper is intentionally pure to make the core vesting math easy to unit test.
@@ -68,6 +69,17 @@ pub fn calculate_accrued_amount(
 /// Groups the six stream fields that are always read together, reducing the
 /// argument count of `calculate_accrued_amount_checkpointed` below the
 /// Clippy `too_many_arguments` threshold.
+///
+/// # Balance Conservation Context
+///
+/// When `decrease_rate_per_second` is called, the contract:
+/// 1. Computes `accrued_now` using the OLD rate from `checkpointed_at` to `now`
+/// 2. Sets `checkpointed_amount = accrued_now` and `checkpointed_at = now`
+/// 3. Applies the NEW rate only from `checkpointed_at` forward
+///
+/// This ensures the recipient's already-accrued entitlement is **never reduced**
+/// by a rate decrease, preserving the invariant that `withdrawn_amount` only
+/// increases and `deposit_amount` adjustments only refund *unstreamed* tokens.
 #[derive(Clone, Copy)]
 pub struct CheckpointState {
     /// Tokens accrued under all previous rate epochs, locked in at `checkpointed_at`.
@@ -183,6 +195,197 @@ pub fn calculate_accrued_amount_checkpointed(
         .saturating_add(added)
         .min(state.deposit_amount)
         .max(0)
+}
+
+/// Error type for accrual calculation failures.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum AccrualError {
+    /// The rate per second is negative or zero.
+    InvalidRate = 1,
+    /// The schedule is invalid (start >= end).
+    InvalidSchedule = 2,
+    /// The deposit amount is negative or zero.
+    InvalidDeposit = 3,
+    /// Overflow occurred during accrual calculation.
+    Overflow = 4,
+}
+
+// Result type for accrual calculations.
+pub type AccrualResult<T> = Result<T, AccrualError>;
+
+/// Validates stream parameters before accrual calculation.
+///
+/// Returns `Ok(())` if all parameters are valid, or `Err(AccrualError)` otherwise.
+///
+/// # Validation Rules
+/// - `rate_per_second` must be > 0
+/// - `start_time` must be < `end_time`
+/// - `deposit_amount` must be > 0
+/// - `cliff_time` must be in `[start_time, end_time]`
+pub fn validate_stream_params(
+    start_time: u64,
+    cliff_time: u64,
+    end_time: u64,
+    rate_per_second: i128,
+    deposit_amount: i128,
+) -> AccrualResult<()> {
+    if rate_per_second <= 0 {
+        return Err(AccrualError::InvalidRate);
+    }
+    if start_time >= end_time {
+        return Err(AccrualError::InvalidSchedule);
+    }
+    if deposit_amount <= 0 {
+        return Err(AccrualError::InvalidDeposit);
+    }
+    if cliff_time < start_time || cliff_time > end_time {
+        return Err(AccrualError::InvalidSchedule);
+    }
+    Ok(())
+}
+
+/// Calculates the maximum possible accrued amount for a stream.
+///
+/// This is the theoretical maximum if the stream runs to completion:
+/// ```text
+/// max_accrued = rate_per_second * (end_time - start_time)
+/// ```
+///
+/// # Balance Conservation Note
+/// The actual `deposit_amount` may exceed `max_accrued` (excess deposit).
+/// In this case, the excess is sweepable by the admin and does not affect
+/// the recipient's entitlement. The invariant still holds because:
+/// ```text
+/// deposit_amount = max_accrued + excess
+///                  = (rate * duration) + excess
+/// ```
+pub fn calculate_max_accrued(
+    start_time: u64,
+    end_time: u64,
+    rate_per_second: i128,
+) -> AccrualResult<i128> {
+    if start_time >= end_time {
+        return Err(AccrualError::InvalidSchedule);
+    }
+    if rate_per_second <= 0 {
+        return Err(AccrualError::InvalidRate);
+    }
+
+    let duration = (end_time - start_time) as i128;
+    duration
+        .checked_mul(rate_per_second)
+        .ok_or(AccrualError::Overflow)
+}
+
+
+/// Calculates the refund amount on cancel.
+///
+/// When a stream is cancelled, the sender receives back all unstreamed tokens:
+/// ```text
+/// refund = deposit_amount - accrued_at_cancel_time
+/// ```
+///
+/// # Balance Conservation
+/// This ensures the total token accounting is preserved:
+/// ```text
+/// tokens_out = refund (to sender) + withdrawn (to recipient)
+/// tokens_remaining = accrued_at_cancel - withdrawn
+/// total = refund + withdrawn + tokens_remaining
+///       = (deposit - accrued) + withdrawn + (accrued - withdrawn)
+///       = deposit  ✓
+/// ```
+pub fn calculate_cancel_refund(
+    deposit_amount: i128,
+    accrued_at_cancel: i128,
+) -> AccrualResult<i128> {
+    if accrued_at_cancel > deposit_amount {
+        // This should never happen due to clamping in calculate_accrued_amount_checkpointed,
+        // but we handle it defensively.
+        return Ok(0);
+    }
+    Ok(deposit_amount - accrued_at_cancel)
+}
+
+/// Calculates the refund amount on shorten.
+///
+/// When a stream's end time is shortened, the sender receives back tokens
+/// that would have been streamed after the new end time:
+/// ```text
+/// refund = old_deposit - new_deposit
+/// new_deposit = rate_per_second * (new_end - start_time)
+/// ```
+///
+/// # Balance Conservation
+/// The recipient's already-accrued entitlement is unchanged. Only future
+/// unstreamed tokens are refunded.
+pub fn calculate_shorten_refund(
+    start_time: u64,
+    old_end: u64,
+    new_end: u64,
+    rate_per_second: i128,
+    old_deposit: i128,
+) -> AccrualResult<i128> {
+    if new_end <= start_time || new_end >= old_end {
+        return Err(AccrualError::InvalidSchedule);
+    }
+    if rate_per_second <= 0 {
+        return Err(AccrualError::InvalidRate);
+    }
+
+    let new_duration = (new_end - start_time) as i128;
+    let new_deposit = new_duration
+        .checked_mul(rate_per_second)
+        .ok_or(AccrualError::Overflow)?;
+
+    if new_deposit > old_deposit {
+        // This should not happen if parameters are valid
+        return Ok(0);
+    }
+
+    Ok(old_deposit - new_deposit)
+}
+
+/// Calculates the new deposit and refund on rate decrease.
+///
+/// When the rate is decreased, the contract:
+/// 1. Locks in already-accrued amount as `checkpointed_amount`
+/// 2. Computes new deposit: `checkpointed + new_rate * remaining_duration`
+/// 3. Refunds: `old_deposit - new_deposit`
+///
+/// # Balance Conservation
+/// The recipient's entitlement up to the checkpoint time is preserved.
+/// Only future unstreamed tokens at the old rate are affected.
+pub fn calculate_rate_decrease_refund(
+    checkpointed_amount: i128,
+    checkpointed_at: u64,
+    end_time: u64,
+    old_rate: i128,
+    new_rate: i128,
+    old_deposit: i128,
+) -> AccrualResult<(i128, i128)> {
+    if new_rate >= old_rate || new_rate <= 0 {
+        return Err(AccrualError::InvalidRate);
+    }
+    if checkpointed_at >= end_time {
+        return Err(AccrualError::InvalidSchedule);
+    }
+
+    let remaining_duration = (end_time - checkpointed_at) as i128;
+    let new_future_deposit = remaining_duration
+        .checked_mul(new_rate)
+        .ok_or(AccrualError::Overflow)?;
+
+    let new_deposit = checkpointed_amount
+        .checked_add(new_future_deposit)
+        .ok_or(AccrualError::Overflow)?;
+
+    // Clamp to old_deposit (should not exceed it)
+    let new_deposit = new_deposit.min(old_deposit);
+    let refund = old_deposit - new_deposit;
+
+    Ok((new_deposit, refund))
 }
 
 #[cfg(test)]
@@ -329,9 +532,9 @@ mod invariants {
 mod accrued_after_end_time {
     use crate::accrual::calculate_accrued_amount;
 
-    // -----------------------------------------------------------------------
+    
     // Helpers
-    // -----------------------------------------------------------------------
+    
 
     /// A standard stream used across tests:
     ///   start=1000, cliff=1000, end=2000, rate=1/s, deposit=1000
