@@ -1,4 +1,4 @@
-//! Tests for issue #516: adaptive TTL thresholds for stream ledger entries.
+﻿//! Tests for issue #516: adaptive TTL thresholds for stream ledger entries.
 //!
 //! Verifies that `compute_adaptive_ttl` scales correctly with remaining stream
 //! lifetime and that the floor/cap invariants hold.
@@ -54,6 +54,7 @@ impl<'a> Ctx<'a> {
                     end_time: now + duration,
                     withdraw_dust_threshold: None,
                     memo: None,
+                    metadata: None,
                 }
             ],
         );

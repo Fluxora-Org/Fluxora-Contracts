@@ -1,0 +1,19 @@
+[package]
+name = "fluxora_governance"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal timelock governance contract for Fluxora protocol parameter changes"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+doctest = false
+
+[features]
+testutils = ["soroban-sdk/testutils"]
+
+[dependencies]
+soroban-sdk = "21.7.7"
+
+[dev-dependencies]
+soroban-sdk = { version = "21.7.7", features = ["testutils"] }
+fluxora_factory = { path = "../factory", features = ["testutils"] }
