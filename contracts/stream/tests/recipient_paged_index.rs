@@ -1,4 +1,4 @@
-extern crate std;
+﻿extern crate std;
 
 use fluxora_stream::{FluxoraStream, FluxoraStreamClient, MAX_RECIPIENT_PAGE_SIZE};
 use soroban_sdk::{
@@ -65,6 +65,7 @@ fn test_recipient_index_migration() {
             &1000,
             &0,
             &None,
+            &None,
         );
     }
 
@@ -90,6 +91,7 @@ fn test_recipient_index_migration() {
         &1000,
         &0,
         &None,
+        &None,
     );
 
     let streams_final = ctx.client.get_recipient_streams(&ctx.recipient);
@@ -113,6 +115,7 @@ fn test_paged_index_pagination() {
             &0,
             &100,
             &0,
+            &None,
             &None,
         );
     }
@@ -163,6 +166,7 @@ fn test_remove_from_paged_index() {
         &100,
         &0,
         &None,
+        &None,
     );
     let id2 = ctx.client.create_stream(
         &ctx.sender,
@@ -174,6 +178,7 @@ fn test_remove_from_paged_index() {
         &100,
         &0,
         &None,
+        &None,
     );
     let id3 = ctx.client.create_stream(
         &ctx.sender,
@@ -184,6 +189,7 @@ fn test_remove_from_paged_index() {
         &0,
         &100,
         &0,
+        &None,
         &None,
     );
 

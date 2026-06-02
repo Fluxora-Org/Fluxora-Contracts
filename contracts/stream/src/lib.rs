@@ -42,6 +42,41 @@ pub const MAX_GLOBAL_TEMPLATES: u64 = 10_000;
 /// Prevents unbounded storage growth while maintaining compliance audit trail.
 pub const MAX_ROTATION_HISTORY: u32 = 256;
 
+/// Maximum memo payload size in bytes (stream metadata for indexers).
+pub const MAX_MEMO_BYTES: usize = 64;
+
+/// Maximum byte length for pause-reason strings passed to `pause_stream`,
+/// `pause_stream_as_admin`, and `pause_protocol`.
+pub const MAX_PAUSE_REASON_BYTES: u32 = 256;
+
+/// Maximum schedule templates a single owner may register (bounds `OwnerTemplateIds` growth).
+pub const MAX_TEMPLATES_PER_OWNER: u32 = 64;
+/// Global bound on stored schedule templates (DoS / storage bloat prevention).
+pub const MAX_GLOBAL_TEMPLATES: u64 = 10_000;
+
+// ---------------------------------------------------------------------------
+// Per-stream metadata (TLV key-value extension, issue #580)
+// ---------------------------------------------------------------------------
+
+/// Maximum number of key-value pairs in the per-stream metadata map.
+///
+/// Prevents unbounded map growth and keeps the storage entry under the
+/// practical Soroban per-entry size limit (~64 KB).
+pub const MAX_METADATA_KEYS: u32 = 8;
+
+/// Maximum aggregate byte size of all metadata keys + values combined (512 bytes).
+///
+/// Even at 8 keys × (32-byte key + 128-byte value) the sum is 1 280 bytes, so
+/// this cap is the binding limit and ensures the metadata block stays well within
+/// the Soroban storage ceiling.
+pub const MAX_METADATA_BYTES: u32 = 512;
+
+/// Maximum byte length of a single metadata key.
+pub const MAX_METADATA_KEY_BYTES: u32 = 32;
+
+/// Maximum byte length of a single metadata value.
+pub const MAX_METADATA_VALUE_BYTES: u32 = 128;
+
 // Contract version
 // ---------------------------------------------------------------------------
 
@@ -112,10 +147,92 @@ pub struct Config {
 
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Operational status of a stream, determining which operations are allowed.
+///
+/// The status controls the stream's lifecycle and affects both accrual calculation
+/// and operation availability. Status transitions follow strict rules to maintain
+/// system integrity and prevent unauthorized state changes.
+///
+/// ## State Transition Rules
+///
+/// ```text
+/// Active ↔ Paused    (via pause_stream/resume_stream)
+/// Active → Cancelled (via cancel_stream, terminal)
+/// Paused → Cancelled (via cancel_stream, terminal)
+/// Active → Completed (via withdraw when withdrawn_amount == deposit_amount, terminal)
+/// ```
+///
+/// Terminal states (`Completed`, `Cancelled`) cannot transition to other states.
+///
+/// ## Time-Terminal Behavior
+///
+/// When `current_time >= end_time`, the stream is considered "time-terminal":
+/// - Pause/resume operations are blocked (`StreamTerminalState` error)
+/// - Withdrawals are always allowed regardless of `Paused` status
+/// - This ensures recipients can always claim their full entitlement
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StreamStatus {
+    /// Stream is operating normally.
+    ///
+    /// **Allowed operations:**
+    /// - Withdrawals (if past `cliff_time`)
+    /// - Pause/resume (if before `end_time`)
+    /// - Rate updates and schedule changes
+    /// - Cancellation
+    /// - Top-ups
+    ///
+    /// **Accrual behavior:** Tokens accrue normally based on elapsed time.
     Active = 0,
+
+    /// Stream is temporarily suspended by the sender.
+    ///
+    /// **Blocked operations:**
+    /// - Withdrawals (unless past `end_time` - time-terminal override)
+    ///
+    /// **Allowed operations:**
+    /// - Resume (if before `end_time`)
+    /// - Rate updates and schedule changes
+    /// - Cancellation
+    /// - Top-ups
+    ///
+    /// **Accrual behavior:** Tokens continue to accrue normally. Pause only
+    /// blocks withdrawals, not the mathematical accrual of entitlements.
+    ///
+    /// **Time-terminal override:** If `current_time >= end_time`, withdrawals
+    /// are allowed even in `Paused` status to ensure recipient access to funds.
     Paused = 1,
+
+    /// Stream has been fully withdrawn (terminal state).
+    ///
+    /// **Trigger:** Automatically set when `withdrawn_amount == deposit_amount`
+    ///
+    /// **Allowed operations:**
+    /// - `close_completed_stream` (storage cleanup)
+    /// - Read-only queries
+    ///
+    /// **Blocked operations:** All mutation operations
+    ///
+    /// **Accrual behavior:** Returns `deposit_amount` (deterministic, timestamp-independent)
     Completed = 2,
+
+    /// Stream was terminated early by sender or admin (terminal state).
+    ///
+    /// **Trigger:** Set by `cancel_stream` or `cancel_stream_as_admin`
+    ///
+    /// **Effects:**
+    /// - Accrual is frozen at `cancelled_at` timestamp
+    /// - Unstreamed portion is refunded to sender
+    /// - Recipient can still withdraw accrued amount up to cancellation
+    ///
+    /// **Allowed operations:**
+    /// - Withdrawals (of frozen accrued amount only)
+    /// - `close_completed_stream` (after full recipient withdrawal)
+    /// - Read-only queries
+    ///
+    /// **Blocked operations:** All other mutation operations
+    ///
+    /// **Accrual behavior:** Frozen at `cancelled_at` - no post-cancellation growth
     Cancelled = 3,
 }
 #[soroban_sdk::contracterror]
@@ -218,6 +335,9 @@ pub struct StreamCreated {
     /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
     /// `None` when no memo was supplied at creation time.
     pub memo: Option<soroban_sdk::Bytes>,
+    /// Optional structured metadata emitted for indexer consumption.
+    /// Mirrors the validated `metadata` field stored on the stream.
+    pub metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
 }
 
 /// Result of a single stream creation attempt in a partial batch.
@@ -496,6 +616,12 @@ pub struct CreateStreamParams {
     /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
     /// Maximum `MAX_MEMO_BYTES` (64) bytes. Pass `None` to omit.
     pub memo: Option<soroban_sdk::Bytes>,
+    /// Optional structured key-value metadata (TLV extension, issue #580).
+    ///
+    /// Validated at creation: ≤`MAX_METADATA_KEYS` entries, each key ≤`MAX_METADATA_KEY_BYTES`
+    /// bytes, each value ≤`MAX_METADATA_VALUE_BYTES` bytes, total ≤`MAX_METADATA_BYTES` bytes.
+    /// Immutable post-creation. Pass `None` to omit.
+    pub metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
 }
 
 /// Parameters for creating a payment stream with relative (offset-based) times.
@@ -528,6 +654,12 @@ pub struct CreateStreamRelativeParams {
     /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
     /// Maximum `MAX_MEMO_BYTES` (64) bytes. Pass `None` to omit.
     pub memo: Option<soroban_sdk::Bytes>,
+    /// Optional structured key-value metadata (TLV extension, issue #580).
+    ///
+    /// Validated at creation: ≤`MAX_METADATA_KEYS` entries, each key ≤`MAX_METADATA_KEY_BYTES`
+    /// bytes, each value ≤`MAX_METADATA_VALUE_BYTES` bytes, total ≤`MAX_METADATA_BYTES` bytes.
+    /// Immutable post-creation. Pass `None` to omit.
+    pub metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
 }
 
 /// Reusable relative schedule (offsets only). Amounts are supplied when creating a stream.
@@ -1084,6 +1216,57 @@ fn push_token(env: &Env, to: &Address, amount: i128) -> Result<(), ContractError
 }
 
 // ---------------------------------------------------------------------------
+// Metadata validation (issue #580)
+// ---------------------------------------------------------------------------
+
+/// Validate an optional per-stream metadata map against all size bounds.
+///
+/// Called from `persist_new_stream` / `persist_new_stream_skip_index` before any
+/// state is written, so a violation never allocates a stream ID.
+///
+/// # Invariants checked
+/// - `metadata.len() <= MAX_METADATA_KEYS`
+/// - each key length <= `MAX_METADATA_KEY_BYTES`
+/// - each value length <= `MAX_METADATA_VALUE_BYTES`
+/// - aggregate (sum of all key lengths + all value lengths) <= `MAX_METADATA_BYTES`
+///
+/// # Errors
+/// Returns `ContractError::MetadataTooLarge` on any bound violation.
+fn validate_metadata(
+    metadata: &Map<soroban_sdk::Bytes, soroban_sdk::Bytes>,
+) -> Result<(), ContractError> {
+    if metadata.len() > MAX_METADATA_KEYS {
+        return Err(ContractError::MetadataTooLarge);
+    }
+
+    let mut total_bytes: u32 = 0;
+    for (key, value) in metadata.iter() {
+        let key_len = key.len();
+        let val_len = value.len();
+
+        if key_len > MAX_METADATA_KEY_BYTES {
+            return Err(ContractError::MetadataTooLarge);
+        }
+        if val_len > MAX_METADATA_VALUE_BYTES {
+            return Err(ContractError::MetadataTooLarge);
+        }
+
+        // Use saturating addition to avoid overflow on adversarial input; the
+        // subsequent aggregate check catches any wrapped values safely.
+        total_bytes = total_bytes
+            .checked_add(key_len)
+            .and_then(|t| t.checked_add(val_len))
+            .ok_or(ContractError::MetadataTooLarge)?;
+
+        if total_bytes > MAX_METADATA_BYTES {
+            return Err(ContractError::MetadataTooLarge);
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Internal Helpers
 // ---------------------------------------------------------------------------
 
@@ -1152,12 +1335,18 @@ impl FluxoraStream {
         end_time: u64,
         withdraw_dust_threshold: i128,
         memo: Option<soroban_sdk::Bytes>,
+        metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
     ) -> Result<u64, ContractError> {
         // Validate memo length before allocating a stream ID.
         if let Some(ref m) = memo {
             if m.len() as usize > MAX_MEMO_BYTES {
                 return Err(ContractError::InvalidParams);
             }
+        }
+
+        // Validate metadata bounds before allocating a stream ID.
+        if let Some(ref md) = metadata {
+            validate_metadata(md)?;
         }
 
         let stream_id = read_stream_count(env);
@@ -1179,6 +1368,7 @@ impl FluxoraStream {
             checkpointed_at: start_time,
             withdraw_dust_threshold,
             memo: memo.clone(),
+            metadata: metadata.clone(),
         };
 
         save_stream(env, &stream);
@@ -1205,6 +1395,7 @@ impl FluxoraStream {
                 end_time,
                 withdraw_dust_threshold,
                 memo,
+                metadata,
             },
         );
 
@@ -1383,6 +1574,7 @@ impl FluxoraStream {
         end_time: u64,
         withdraw_dust_threshold: i128,
         memo: Option<soroban_sdk::Bytes>,
+        metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
     ) -> Result<u64, ContractError> {
         sender.require_auth();
         require_not_creation_paused(&env)?;
@@ -1412,6 +1604,7 @@ impl FluxoraStream {
             end_time,
             withdraw_dust_threshold,
             memo,
+            metadata,
         )
     }
 
@@ -1517,6 +1710,7 @@ impl FluxoraStream {
             end_time,
             params.withdraw_dust_threshold.unwrap_or(0),
             params.memo,
+            params.metadata,
         )
     }
 
@@ -1692,6 +1886,7 @@ impl FluxoraStream {
                 params.end_time,
                 params.withdraw_dust_threshold.unwrap_or(0),
                 params.memo,
+                params.metadata,
             )?;
             created_ids.push_back(stream_id);
         }
@@ -1798,6 +1993,7 @@ impl FluxoraStream {
                 end_time,
                 withdraw_dust_threshold: rel.withdraw_dust_threshold,
                 memo: rel.memo,
+                metadata: rel.metadata,
             });
         }
 
@@ -1879,6 +2075,7 @@ impl FluxoraStream {
                 params.end_time,
                 params.withdraw_dust_threshold.unwrap_or(0),
                 params.memo,
+                params.metadata,
             );
 
             match stream_id {
@@ -3022,6 +3219,31 @@ impl FluxoraStream {
         Ok(stream.memo)
     }
 
+    /// Return the structured metadata map attached at stream creation, if any.
+    ///
+    /// The metadata field is **immutable** post-creation; this function is a
+    /// pure read that cannot be used to modify stream state.
+    ///
+    /// # Parameters
+    /// - `stream_id`: Unique identifier of the stream.
+    ///
+    /// # Returns
+    /// - `Some(Map<Bytes, Bytes>)` when metadata was supplied at creation time.
+    /// - `None` when no metadata was supplied.
+    ///
+    /// # Authorization
+    /// None required. Any caller (indexer, wallet, integrator) may call this.
+    ///
+    /// # Errors
+    /// - `ContractError::StreamNotFound` if the stream does not exist.
+    pub fn get_stream_metadata(
+        env: Env,
+        stream_id: u64,
+    ) -> Result<Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>, ContractError> {
+        let stream = load_stream(&env, stream_id)?;
+        Ok(stream.metadata)
+    }
+
     /// Return the total number of streams created so far.
     ///
     /// This value is backed by `NextStreamId`, which is incremented exactly once for
@@ -3705,6 +3927,7 @@ impl FluxoraStream {
         rate_per_second: i128,
         withdraw_dust_threshold: i128,
         memo: Option<soroban_sdk::Bytes>,
+        metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
     ) -> Result<u64, ContractError> {
         let tpl = load_stream_template(&env, template_id)?;
         Self::create_stream_relative(
@@ -3719,6 +3942,7 @@ impl FluxoraStream {
                 duration: tpl.duration,
                 withdraw_dust_threshold: Some(withdraw_dust_threshold),
                 memo,
+                metadata,
             },
         )
     }
@@ -3806,16 +4030,16 @@ impl FluxoraStream {
     }
 
     /// Paginated version of get_recipient_streams to prevent unbounded returns.
-    /// 
+    ///
     /// # Parameters
     /// - `env`: Contract environment
     /// - `recipient`: Address to query streams for
     /// - `cursor`: Pagination cursor (stream_id to start after, 0 for beginning)
     /// - `limit`: Maximum number of stream IDs to return (capped at RECIPIENT_STREAMS_PAGE_LIMIT)
-    /// 
+    ///
     /// # Returns
     /// - `Page`: Contains stream IDs slice and next cursor for pagination
-    /// 
+    ///
     /// # Behavior
     /// - Returns streams in ascending order by stream_id
     /// - If cursor is 0, starts from the beginning
@@ -3846,7 +4070,7 @@ impl FluxoraStream {
                 Err(pos) => pos as u32,     // Insert position if not found
             }
         };
-        
+
         // Calculate end position
         let end_idx = (start_idx + effective_limit).min(total);
         
@@ -3855,7 +4079,7 @@ impl FluxoraStream {
         if end_idx < total {
             next_cursor = streams.get(end_idx).unwrap();
         }
-        
+
         #[allow(unused_assignments)]
         let mut page_streams = soroban_sdk::Vec::new(&env);
         for i in start_idx..end_idx {
@@ -4537,3 +4761,180 @@ mod test;
 mod test_issue_39;
 #[cfg(test)]
 mod test_withdrawable_props;
+
+    /// Atomically cancel multiple streams owned by the caller and refund the aggregate
+    /// unstreamed balance in a single token transfer.
+    ///
+    /// This is the batch counterpart to `cancel_stream`. It provides gas-efficient
+    /// off-boarding for senders managing large portfolios (up to `MAX_PAGE_SIZE` streams).
+    ///
+    /// # Two-phase execution
+    /// 1. **Validation phase**: Every `stream_id` is loaded and verified:
+    ///    - Stream must exist (`StreamNotFound` otherwise).
+    ///    - Caller must be the stream sender (`Unauthorized` otherwise).
+    ///    - Stream must be in `Active` or `Paused` state (`InvalidState` otherwise).
+    ///    - Duplicate `stream_id`s are rejected (`DuplicateStreamId`).
+    /// 2. **Execution phase**: Only after all validations pass:
+    ///    - Per-stream accrued amount is computed.
+    ///    - Recipient is paid their accrued entitlement (individual transfers).
+    ///    - Stream is marked `Cancelled` with `cancelled_at` timestamp.
+    ///    - `StreamCancelled` event is emitted per stream.
+    ///    - Aggregate refund is computed and sent to the sender in **one** token transfer.
+    ///
+    /// # Parameters
+    /// - `stream_ids`: Vector of stream IDs to cancel. Must be unique. Max length is
+    ///   bounded by the caller's transaction resources; the contract enforces no hard
+    ///   limit beyond Soroban's own VM limits, but `MAX_PAGE_SIZE = 100` is the
+    ///   recommended batch size for gas predictability.
+    ///
+    /// # Authorization
+    /// - Requires authorization from the caller (who must be the sender of every stream).
+    ///
+    /// # Returns
+    /// - `Ok(())` on success.
+    ///
+    /// # Errors
+    /// - `ContractError::DuplicateStreamId` (14): Duplicate IDs in `stream_ids`.
+    /// - `ContractError::StreamNotFound` (1): A stream ID does not exist.
+    /// - `ContractError::Unauthorized` (7): Caller is not the sender of a stream.
+    /// - `ContractError::InvalidState` (2): A stream is not `Active` or `Paused`.
+    /// - `ContractError::ContractPaused` (4): Global emergency pause is active.
+    ///
+    /// # Gas efficiency
+    /// - One auth check for the entire batch.
+    /// - One token transfer for the aggregate refund (vs. N transfers for N individual
+    ///   `cancel_stream` calls).
+    /// - Per-stream recipient transfers are still individual (required for correct
+    ///   accounting and event emission), but the sender refund is batched.
+    ///
+    /// # Events
+    /// - One `StreamCancelled` event per successfully cancelled stream.
+    /// - One `cancelled` topic event per stream (same shape as `cancel_stream`).
+    ///
+    /// # Security
+    /// - Atomic: any failure in validation or execution reverts the entire batch.
+    /// - CEI pattern: state is persisted before every external token transfer.
+    /// - Liabilities are reduced per-stream before the aggregate refund.
+    pub fn bulk_cancel_streams(
+        env: Env,
+        sender: Address,
+        stream_ids: soroban_sdk::Vec<u64>,
+    ) -> Result<(), ContractError> {
+        require_not_globally_paused(&env)?;
+        sender.require_auth();
+
+        let n = stream_ids.len();
+        if n == 0 {
+            return Ok(());
+        }
+
+        // ── Phase 1: Validate all stream IDs and ownership ────────────────────
+        let mut streams = soroban_sdk::Vec::<Stream>::new(&env);
+
+        for i in 0..n {
+            let id = stream_ids.get(i).unwrap();
+
+            // Duplicate detection
+            let mut j = i + 1;
+            while j < n {
+                if stream_ids.get(j).unwrap() == id {
+                    return Err(ContractError::DuplicateStreamId);
+                }
+                j += 1;
+            }
+
+            let stream = load_stream(&env, id)?;
+
+            if stream.sender != sender {
+                return Err(ContractError::Unauthorized);
+            }
+
+            Self::require_cancellable_status(stream.status)?;
+
+            streams.push_back(stream);
+        }
+
+        // ── Phase 2: Execute cancellations ────────────────────────────────────
+        let now = env.ledger().timestamp();
+        let mut aggregate_refund: i128 = 0;
+
+        for i in 0..n {
+            let mut stream = streams.get(i).unwrap();
+            let stream_id = stream.stream_id;
+
+            let accrued_at_cancel = accrual::calculate_accrued_amount_checkpointed(
+                accrual::CheckpointState {
+                    checkpointed_amount: stream.checkpointed_amount,
+                    checkpointed_at: stream.checkpointed_at,
+                    cliff_time: stream.cliff_time,
+                    end_time: stream.end_time,
+                    deposit_amount: stream.deposit_amount,
+                },
+                stream.rate_per_second,
+                now,
+            );
+
+            let refund_amount = stream
+                .deposit_amount
+                .checked_sub(accrued_at_cancel)
+                .ok_or(ContractError::InvalidState)?;
+
+            let (was_underfunded, _, _) = compute_stream_health(&stream, now);
+
+            // ── Pay recipient their accrued entitlement first ─────────────────
+            let recipient_accrual = accrued_at_cancel.saturating_sub(stream.withdrawn_amount).max(0);
+            if recipient_accrual > 0 {
+                stream.withdrawn_amount = stream
+                    .withdrawn_amount
+                    .checked_add(recipient_accrual)
+                    .unwrap_or(i128::MAX);
+
+                let liabilities = read_total_liabilities(&env)
+                    .checked_sub(recipient_accrual)
+                    .unwrap_or(0);
+                write_total_liabilities(&env, liabilities);
+
+                push_token(&env, &stream.recipient, recipient_accrual)?;
+
+                env.events().publish(
+                    (symbol_short!("withdrew"), stream_id),
+                    Withdrawal {
+                        stream_id,
+                        recipient: stream.recipient.clone(),
+                        amount: recipient_accrual,
+                    },
+                );
+            }
+
+            // ── Mark stream as cancelled ──────────────────────────────────────
+            stream.status = StreamStatus::Cancelled;
+            stream.cancelled_at = Some(now);
+            save_stream(&env, &stream);
+
+            // ── Accumulate sender refund ──────────────────────────────────────
+            if refund_amount > 0 {
+                aggregate_refund = aggregate_refund
+                    .checked_add(refund_amount)
+                    .ok_or(ContractError::ArithmeticOverflow)?;
+
+                let liabilities = read_total_liabilities(&env)
+                    .checked_sub(refund_amount)
+                    .unwrap_or(0);
+                write_total_liabilities(&env, liabilities);
+            }
+
+            env.events().publish(
+                (symbol_short!("cancelled"), stream_id),
+                StreamEvent::StreamCancelled(stream_id),
+            );
+
+            maybe_emit_health_changed(&env, &stream, was_underfunded, now);
+        }
+
+        // ── Single aggregate refund to sender ─────────────────────────────────
+        if aggregate_refund > 0 {
+            push_token(&env, &sender, aggregate_refund)?;
+        }
+
+        Ok(())
+    }

@@ -1,4 +1,4 @@
-//! Tests for issue #522: close guard and recipient-index cleanup paths.
+﻿//! Tests for issue #522: close guard and recipient-index cleanup paths.
 //!
 //! 1. `test_close_non_completed_stream_rejected` — exercises the guard that
 //!    rejects Active/Paused streams passed to `close_completed_stream`.
@@ -45,7 +45,7 @@ impl<'a> Ctx<'a> {
             &self.sender, &self.recipient,
             &(duration as i128), &1,
             &now, &now, &(now + duration),
-            &0, &None,
+            &0, &None, &None,
         )
     }
 }
@@ -97,7 +97,7 @@ fn test_close_cancelled_zero_claimable_ok() {
         &ctx.sender, &ctx.recipient,
         &1_000, &1,
         &(now + 1_000), &(now + 1_000), &(now + 2_000),
-        &0, &None,
+        &0, &None, &None,
     );
     ctx.client.cancel_stream(&stream_id);
     assert_eq!(ctx.client.get_stream_state(&stream_id).status, StreamStatus::Cancelled);
