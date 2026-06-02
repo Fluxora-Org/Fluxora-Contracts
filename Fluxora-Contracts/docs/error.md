@@ -30,6 +30,7 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `TemplateLimitExceeded` | 16 | Template registry limits exceeded | `register_stream_template` |
 | `TemplateUnauthorized` | 17 | Caller is not the template owner | `delete_stream_template` |
 | `RateCapExceeded` | 18 | Rate exceeds the governance-controlled maximum rate per second | `create_stream`, `create_streams`, `create_stream_relative`, `update_rate_per_second` |
+| `GlobalEmergency` | 19 | Global emergency pause is active; no operations permitted | `set_global_emergency_paused`, `pause_all_streams_on_emergency` |
 
 ---
 
@@ -194,6 +195,38 @@ Recipients can always check their balance.
 - If `is_creation_paused()` is true: Only NEW stream creation is blocked.
 - If `is_global_emergency_paused()` is true: All mutations (creation, withdrawal, cancellation) are blocked.
 Use `is_paused()` (checks both) or inspect `get_pause_info()` for full details.
+
+---
+
+### GlobalEmergency (19)
+
+**Definition**: A global emergency pause has been activated, blocking all protocol operations.
+
+**Trigger Conditions**:
+- Admin called `set_global_emergency_paused(true)`
+- Emergency pause cannot be lifted without admin intervention
+
+**Affected Roles**:
+| Role | Can Trigger | Notes |
+|------|------------|-------|
+| Sender | Yes | `create_stream`, `cancel_stream`, `update_rate_per_second` blocked |
+| Recipient | Yes | `withdraw` blocked |
+| Admin | No | Admin operations bypass this check |
+
+**Client Action**:
+```rust
+match client.try_withdraw(&stream_id) {
+    Ok(amount) => { /* success */ }
+    Err(ContractError::GlobalEmergency) => {
+        // Global emergency pause is active - no operations possible
+        // Notify user and wait for admin to lift emergency
+        // Contact support for status updates
+    }
+    Err(e) => { /* handle other errors */ }
+}
+```
+
+**Success Semantics**: Returns operation result when emergency is not active.
 
 ---
 
