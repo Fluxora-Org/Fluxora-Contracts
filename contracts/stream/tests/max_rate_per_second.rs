@@ -1,4 +1,4 @@
-#![cfg(test)]
+﻿#![cfg(test)]
 extern crate std;
 
 use fluxora_stream::{
@@ -7,8 +7,8 @@ use fluxora_stream::{
 use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Events, Ledger},
-    vec, Address, Env,
     token::Client as TokenClient,
+    vec, Address, Env,
 };
 
 struct TestContext {
@@ -29,7 +29,9 @@ impl TestContext {
         let client = FluxoraStreamClient::new(&env, &contract_id);
 
         let token_admin = Address::generate(&env);
-        let token_id = env.register_stellar_asset_contract_v2(token_admin).address();
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
         let token = TokenClient::new(&env, &token_id);
 
         let admin = Address::generate(&env);
@@ -62,6 +64,7 @@ impl TestContext {
             &1000,
             &0,
             &None,
+            &None,
         )
     }
 }
@@ -89,7 +92,10 @@ fn test_set_max_rate_per_second_admin_only() {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         ctx.client.set_max_rate_per_second(&1000);
     }));
-    assert!(result.is_err(), "Non-admin should not be able to set max rate");
+    assert!(
+        result.is_err(),
+        "Non-admin should not be able to set max rate"
+    );
 }
 
 #[test]
@@ -130,6 +136,7 @@ fn test_create_stream_respects_max_rate() {
         &1000,
         &0,
         &None,
+        &None,
     );
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 }
@@ -160,7 +167,10 @@ fn test_update_rate_per_second_respects_max_rate() {
     let rate_cap_event = events
         .iter()
         .find(|e| e.0 == (symbol_short!("rate_cap"), stream_id));
-    assert!(rate_cap_event.is_some(), "RateCapEnforced event must be emitted");
+    assert!(
+        rate_cap_event.is_some(),
+        "RateCapEnforced event must be emitted"
+    );
 
     if let Some(event) = rate_cap_event {
         let rate_cap_enforced = RateCapEnforced::try_from_val(&ctx.env, &event.1)
@@ -187,6 +197,7 @@ fn test_default_max_rate_is_unlimited() {
         &1, // 1 second duration to avoid overflow
         &0,
         &None,
+        &None,
     );
     assert!(result.is_ok(), "High rates should be allowed by default");
 }
@@ -210,6 +221,7 @@ fn test_max_rate_applies_to_all_create_functions() {
             end_time: 1000,
             withdraw_dust_threshold: Some(0),
             memo: None,
+            metadata: None,
         },
     ];
 
@@ -226,6 +238,7 @@ fn test_max_rate_applies_to_all_create_functions() {
         duration: 1000,
         withdraw_dust_threshold: Some(0),
         memo: None,
+        metadata: None,
     };
 
     let result = ctx.client.try_create_stream_relative(&ctx.sender, &relative_params);
@@ -254,6 +267,7 @@ fn test_max_rate_boundary_conditions() {
         &1000,
         &0,
         &None,
+        &None,
     );
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 
@@ -271,6 +285,7 @@ fn test_max_rate_boundary_conditions() {
         &0,
         &1,
         &0,
+        &None,
         &None,
     );
     assert!(result.is_ok());
@@ -318,6 +333,7 @@ fn test_rate_cap_with_arithmetic_overflow_protection() {
         &i64::MAX as u64, // Very long duration
         &0,
         &None,
+        &None,
     );
     
     // Should fail with InvalidParams (overflow or rate cap violation)
@@ -345,7 +361,7 @@ fn test_multiple_rate_cap_enforced_events() {
     let events = ctx.env.events().all();
     let rate_cap_events: Vec<_> = events
         .iter()
-        .filter(|e| e.0.0 == symbol_short!("rate_cap"))
+        .filter(|e| e.0 .0 == symbol_short!("rate_cap"))
         .collect();
 
     assert_eq!(rate_cap_events.len(), 2);

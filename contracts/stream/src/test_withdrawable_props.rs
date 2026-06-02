@@ -1,4 +1,4 @@
-//! Property-based tests for withdrawable arithmetic invariants.
+﻿//! Property-based tests for withdrawable arithmetic invariants.
 //!
 //! Proves that across every status transition (Active → Paused → Resumed →
 //! Cancelled / Completed) the following invariants always hold:
@@ -157,7 +157,7 @@ proptest! {
             &0u64,
             &0u64,
             &duration,
-            &0, &None,
+            &0, &None, &None,
         );
         for t in &times {
             ctx.env.ledger().set_timestamp(*t);
@@ -181,7 +181,7 @@ proptest! {
             &0u64,
             &0u64,
             &duration,
-            &0, &None,
+            &0, &None, &None,
         );
         for t in &times {
             ctx.env.ledger().set_timestamp(*t);
@@ -206,7 +206,7 @@ proptest! {
             &0u64,
             &0u64,
             &duration,
-            &0, &None,
+            &0, &None, &None,
         );
         let mut paused = false;
         for t in &times {
@@ -241,7 +241,7 @@ proptest! {
             &0u64,
             &0u64,
             &duration,
-            &0, &None,
+            &0, &None, &None,
         );
         ctx.env.ledger().set_timestamp(cancel_at);
         ctx.client().cancel_stream(&id);
@@ -266,7 +266,7 @@ proptest! {
             &0u64,
             &0u64,
             &duration,
-            &0, &None,
+            &0, &None, &None,
         );
         let mut prev = 0_i128;
         for t in &times {
@@ -299,6 +299,7 @@ fn setup_standard(deposit: i128) -> (PropCtx, u64) {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
     (ctx, id)
@@ -402,6 +403,7 @@ fn invariants_cancelled_before_cliff() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
     ctx.env.ledger().set_timestamp(200);
     ctx.client().cancel_stream(&id);
@@ -443,6 +445,7 @@ fn invariants_high_rate_deposit_capped() {
         &100u64,
         &0,
         &None,
+        &None,
     );
     for t in [0u64, 10, 50, 99, 100, 200] {
         ctx.env.ledger().set_timestamp(t);
@@ -464,6 +467,7 @@ fn invariants_excess_deposit_stream() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
     for t in [0u64, 500, 1000, 1500] {

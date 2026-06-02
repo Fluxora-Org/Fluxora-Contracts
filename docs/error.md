@@ -28,6 +28,7 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `DuplicateStreamId` | 14 | Duplicate stream IDs supplied to a batch operation | `batch_withdraw` |
 | `InvalidSignature` | 15 | Delegated withdrawal signature is invalid, expired, or nonce mismatch | `delegated_withdraw` |
 | `BelowMinimumAmount` | 16 | Withdrawable amount is below the `expected_minimum_amount` committed in the signature | `delegated_withdraw` |
+| `RateTooLow` | 17 | rate_per_second < MIN_RATE_PER_SECOND (dust-attack prevention) | `create_stream`, `create_streams`, `create_stream_relative`, `create_streams_relative`, `create_stream_from_template` |
 
 ---
 
@@ -590,6 +591,165 @@ match client.try_delegated_withdraw(&relayer, &stream_id, &signature, &nonce, &e
 
 ---
 
+### RateTooLow (17) — Dust-Attack Prevention
+Introduced: Issue #576
+Discriminant: 17
+Affected entrypoints: All stream creation functions
+
+Trigger
+    `rate_per_second < MIN_RATE_PER_SECOND  // MIN_RATE_PER_SECOND = 100`
+
+   ## Rationale
+Streams with very low rate_per_second (e.g. 1 stroop/second) accrue imperceptibly slowly while occupying persistent ledger storage for years. This creates several problems:
+1 Ledger bloat: Each stream consumes a persistent storage entry (~200+ bytes) that must be kept alive via TTL bumps.
+2 Recipient index pollution: Low-value streams inflate RecipientStreams indices, increasing query costs for legitimate users.
+3 Griefing vector: An attacker could create thousands of 1-stroop streams to a victim's address, making their recipient index unusable.
+4 Indexer overhead: Indexers must track and process these streams indefinitely.
+
+`MIN_RATE_PER_SECOND = 100`
+
+At 100 stroops/second (~0.00001 USDC/sec at 7 decimals):
+1 day accrual = 8,640,000 stroops = 0.864 USDC
+1 year accrual = ~3,154,000,000 stroops = ~315 USDC
+This is low enough for legitimate micro-streams (testnet faucets, small grants) while high enough to prevent state-bloat attacks.
+
+## Fix
+Increase rate_per_second to at least 100:
+
+// Before (fails with RateTooLow)
+rate_per_second: 1,
+
+// After (succeeds)
+rate_per_second: 100,  // At minimum threshold
+
+## Integration Notes
+- Frontends should validate rate_per_second >= 100 client-side before submitting transactions.
+- Treasury tools should reject stream proposals with - rates below the minimum.
+- The minimum is a compile-time constant; changing it requires a contract redeployment.
+- Spikes in RateTooLow errors in logs may indicate a dust-attack attempt.
+
+## Detailed Error Semantics
+StreamNotFound (1)
+Definition: The requested stream ID does not exist in contract storage.
+Trigger Conditions:
+stream_id is 0 or exceeds the current stream counter
+Stream was never created
+Stream was closed via close_completed_stream
+
+# Client Action:
+`match client.try_get_stream_state(&stream_id) {
+    Ok(state) => { /* stream exists, use state */ }
+    Err(ContractError::StreamNotFound) => {
+        // Stream doesn't exist - check stream_id validity
+        // Notify user or refresh stream list
+    }
+    Err(e) => { /* handle other errors */ }
+}`
+
+InvalidState (2)
+Definition: Operation attempted in a state where it is not allowed.
+Trigger Conditions:
+| Scenario                                 | Description                    |
+| ---------------------------------------- | ------------------------------ |
+| Withdraw from Completed stream           | All funds already withdrawn    |
+| Withdraw from non-terminal Paused stream | Must resume first              |
+| Cancel Completed stream                  | Already terminal               |
+| Top-up Completed/Cancelled stream        | Cannot modify terminal streams |
+
+InvalidParams (3)
+Definition: One or more input parameters are invalid.
+Trigger Conditions:
+| Parameter                         | Invalid When                                                |
+| --------------------------------- | ----------------------------------------------------------- |
+| `sender == recipient`             | Sender and recipient addresses are identical                |
+| `deposit_amount <= 0`             | Deposit must be positive                                    |
+| `rate_per_second <= 0`            | Rate must be positive (caught by RateTooLow first if < 100) |
+| `start_time >= end_time`          | Start must be before end                                    |
+| `cliff_time < start_time`         | Cliff cannot precede start                                  |
+| `cliff_time > end_time`           | Cliff cannot follow end                                     |
+| `destination == contract_address` | Cannot withdraw to contract                                 |
+| `new_rate_per_second <= old_rate` | Rate can only increase                                      |
+| `top_up_amount <= 0`              | Top-up must be positive                                     |
+
+ContractPaused (4)
+Definition: The protocol is globally paused. No new streams may be created.
+Trigger Conditions:
+Admin called set_global_emergency_paused(true) or set_contract_paused(true)
+
+# Client Action:
+match client.try_create_stream(...) {
+    Ok(stream_id) => { /* success */ }
+    Err(ContractError::ContractPaused) => {
+        let info = client.get_pause_info();
+        if let Some(ref reason) = info.reason {
+            println!("Pause reason: {}", reason);
+        }
+        // Retry later or contact admin
+    }
+    Err(e) => { /* handle other errors */ }
+}
+
+StartTimeInPast (5)
+Definition: start_time is before the current ledger timestamp.
+Fix: Use current_time + delay or create_stream_relative for offset-based timing.
+
+ArithmeticOverflow (6)
+Definition: Arithmetic overflow in stream calculations.
+Trigger Conditions:
+| Calculation                 | Overflow Condition         |
+| --------------------------- | -------------------------- |
+| `rate * duration`           | Result exceeds `i128::MAX` |
+| `deposit + amount` (top-up) | Result exceeds `i128::MAX` |
+
+Unauthorized (7)
+Definition: Caller is not authorized to perform this operation.
+Trigger Conditions:
+| Operation       | Authorization Requirement |
+| --------------- | ------------------------- |
+| `cancel_stream` | Caller is sender or admin |
+| `top_up_stream` | Caller is sender or admin |
+| `withdraw`      | Caller is recipient       |
+| `set_admin`     | Current admin only        |
+
+AlreadyInitialised (8)
+Definition: Contract has already been initialized.
+Fix: Call get_config to verify existing configuration.
+
+InsufficientBalance (9)
+Definition: Token transfer failed due to insufficient balance or allowance.
+Fix: Check token balance and increase allowance before retrying.
+
+InsufficientDeposit (10)
+Definition: Deposit amount does not cover the planned duration at the specified rate.
+Formula: deposit >= rate_per_second * (end_time - start_time)
+Fix: Increase deposit, reduce rate, or shorten duration.
+
+StreamAlreadyPaused (11)
+Definition: Stream is already in Paused state.
+Fix: Check get_stream_state before calling pause_stream.
+
+StreamNotPaused (12)
+Definition: Stream is not in Paused state.
+Fix: Check get_stream_state before calling resume_stream.
+
+StreamTerminalState (13)
+Definition: Stream is in a terminal state (Completed or Cancelled).
+Blocked Operations: pause_stream, resume_stream, cancel_stream, top_up_stream, update_rate_per_second
+DuplicateStreamId (14)
+
+Definition: Duplicate stream IDs were supplied to a batch operation.
+Fix: Deduplicate stream_ids before calling batch_withdraw.
+
+InvalidSignature (15)
+Definition: Delegated withdrawal signature is invalid, expired, or nonce mismatch.
+Fix: Request a fresh signature from the recipient with the current nonce.
+
+BelowMinimumAmount (16)
+Definition: Withdrawable amount is below the expected_minimum_amount committed in the signature.
+Fix: Wait for more accrual or request a new signature with a lower minimum.
+
+
+
 ## Previously Panicking Paths (Now Structured Errors)
 
 The following input-error paths previously caused a host-level panic. They now return
@@ -690,6 +850,7 @@ The factory contract (`contracts/factory`) uses a separate `FactoryError` enum.
 - Success/failure semantics for each operation
 - Time-driven edge cases
 - Client action recommendations
+- Dust-attack prevention guidance
 
 ### Excluded
 
@@ -707,4 +868,4 @@ The factory contract (`contracts/factory`) uses a separate `FactoryError` enum.
 |------|------------|--------|------------|
 | Error code changes | Low | High | Versioning in client SDKs |
 | Missing error cases | Low | Medium | Comprehensive test coverage |
-| Client mishandling | Medium | Medium | This documentation |
+| Client mishandling | Medium | Medium | This documentation | Dust-attack bypass | Very Low |	High | MIN_RATE_PER_SECOND enforced at validation layer
