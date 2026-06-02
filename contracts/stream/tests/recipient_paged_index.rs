@@ -1,4 +1,4 @@
-extern crate std;
+﻿extern crate std;
 
 use fluxora_stream::{FluxoraStream, FluxoraStreamClient, MAX_RECIPIENT_PAGE_SIZE};
 use soroban_sdk::{
@@ -10,9 +10,11 @@ use soroban_sdk::{
 struct TestContext {
     env: Env,
     client: FluxoraStreamClient<'static>,
+    #[allow(dead_code)]
     admin: Address,
     sender: Address,
     recipient: Address,
+    #[allow(dead_code)]
     token: TokenClient<'static>,
 }
 
@@ -26,7 +28,9 @@ impl TestContext {
         let recipient = Address::generate(&env);
 
         let token_admin = Address::generate(&env);
-        let token_id = env.register_stellar_asset_contract(token_admin.clone());
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin.clone())
+            .address();
         let token = TokenClient::new(&env, &token_id);
         let token_asset = StellarAssetClient::new(&env, &token_id);
         token_asset.mint(&sender, &1_000_000_000);
@@ -65,7 +69,8 @@ fn test_recipient_index_migration() {
             &1000,
             &0,
             &None,
-        );
+            &fluxora_stream::StreamKind::Linear,
+            );
     }
 
     let streams = ctx.client.get_recipient_streams(&ctx.recipient);
@@ -90,7 +95,8 @@ fn test_recipient_index_migration() {
         &1000,
         &0,
         &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     let streams_final = ctx.client.get_recipient_streams(&ctx.recipient);
     assert_eq!(streams_final.len(), 6);
@@ -114,7 +120,8 @@ fn test_paged_index_pagination() {
             &100,
             &0,
             &None,
-        );
+            &fluxora_stream::StreamKind::Linear,
+            );
     }
 
     // Migrate to paged index
@@ -163,7 +170,8 @@ fn test_remove_from_paged_index() {
         &100,
         &0,
         &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
     let id2 = ctx.client.create_stream(
         &ctx.sender,
         &ctx.recipient,
@@ -174,7 +182,8 @@ fn test_remove_from_paged_index() {
         &100,
         &0,
         &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
     let id3 = ctx.client.create_stream(
         &ctx.sender,
         &ctx.recipient,
@@ -185,7 +194,8 @@ fn test_remove_from_paged_index() {
         &100,
         &0,
         &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     ctx.client.migrate_recipient_index(&ctx.recipient);
 

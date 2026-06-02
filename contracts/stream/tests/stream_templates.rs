@@ -155,9 +155,7 @@ fn test_owner_template_cap_exceeded() {
     assert_eq!(err, Err(Ok(ContractError::TemplateLimitExceeded)));
 
     // After deleting one template the owner can register again.
-    let first_tid = client
-        .get_stream_template(&0u64)
-        .template_id;
+    let first_tid = client.get_stream_template(&0u64).template_id;
     client.delete_stream_template(&owner, &first_tid);
     let new_tid = client.register_stream_template(&owner, &0u64, &0u64, &9999u64);
     assert!(client.try_get_stream_template(&new_tid).is_ok());

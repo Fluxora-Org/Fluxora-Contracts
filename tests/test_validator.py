@@ -537,13 +537,14 @@ class TestExtractErrorVariantsExcludeList:
     """ERROR_EXTRACT_EXCLUDE variants must be silently dropped."""
 
     def test_excluded_variants_not_returned(self):
-        # All four names in ERROR_EXTRACT_EXCLUDE should be filtered out even
+        # All names in ERROR_EXTRACT_EXCLUDE should be filtered out even
         # when they match the CamelCase = <int> pattern.
         src = (
             "    Operational = 1,\n"
             "    Administrative = 2,\n"
             "    Compliance = 3,\n"
             "    Emergency = 4,\n"
+            "    GlobalEmergency = 5,\n"
         )
         assert vda.extract_error_variants(src) == set()
 
@@ -553,7 +554,8 @@ class TestExtractErrorVariantsExcludeList:
             "    Operational = 1,\n"
             "    StreamNotFound = 2,\n"
             "    Emergency = 3,\n"
-            "    InvalidState = 4,\n"
+            "    GlobalEmergency = 4,\n"
+            "    InvalidState = 5,\n"
         )
         result = vda.extract_error_variants(src)
         assert result == {"StreamNotFound", "InvalidState"}
