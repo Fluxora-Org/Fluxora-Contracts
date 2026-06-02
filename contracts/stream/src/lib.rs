@@ -158,6 +158,29 @@ pub const CONTRACT_VERSION: u32 = 5;
 pub const MIN_RATE_PER_SECOND: i128 = 100;
 
 // ---------------------------------------------------------------------------
+// Stream template registry caps
+// ---------------------------------------------------------------------------
+
+/// Maximum number of templates a single owner address may register.
+pub const MAX_TEMPLATES_PER_OWNER: u32 = 50;
+/// Maximum number of templates stored across all owners.
+pub const MAX_GLOBAL_TEMPLATES: u64 = 1_000;
+/// Maximum byte length for pause-reason strings.
+pub const MAX_PAUSE_REASON_BYTES: u32 = 256;
+
+// ---------------------------------------------------------------------------
+// Keeper constants (issue #582)
+// ---------------------------------------------------------------------------
+
+/// Seconds past a stream's `end_time` before a permissionless keeper may cancel it.
+/// Set to 7 days to give the sender adequate time to cancel normally.
+const KEEPER_GRACE_PERIOD_SECONDS: u64 = 604_800;
+
+/// Basis points of the unstreamed sender-refund allocated as keeper incentive.
+/// 50 bps = 0.5 percent; taken only from the sender's refund, never from the recipient.
+const KEEPER_FEE_BPS: u32 = 50;
+
+// ---------------------------------------------------------------------------
 // Data types
 // ---------------------------------------------------------------------------
 
@@ -292,17 +315,14 @@ pub enum ContractError {
     InvalidSignature = 15,
     /// Accrued amount is below the expected minimum specified in the signed payload.
     BelowMinimumAmount = 16,
-    /// Streaming rate is below the minimum threshold (dust-attack prevention).
-    ///
-    /// # Rationale
-    /// Streams with rate_per_second < MIN_RATE_PER_SECOND (100 stroops/sec)
-    /// accrue imperceptibly slowly while occupying ledger storage indefinitely.
-    /// Such dust streams bloat the recipient index, increase query costs,
-    /// and may be used for griefing attacks.
-    ///
-    /// # Fix
-    /// Increase rate_per_second to at least MIN_RATE_PER_SECOND (100).
-    RateTooLow = 17,
+    /// Template owner has reached the per-address template cap.
+    TemplateLimitExceeded = 17,
+    /// The requested stream template does not exist.
+    TemplateNotFound = 18,
+    /// Pause reason string exceeds MAX_PAUSE_REASON_BYTES.
+    PauseReasonTooLong = 19,
+    /// Keeper called keeper_cancel before the grace period elapsed past end_time.
+    KeeperGracePeriodNotElapsed = 20,
 }
 
 #[contracttype]
@@ -490,6 +510,68 @@ pub struct GlobalEmergencyPauseChanged {
 pub struct ExcessSwept {
     pub to: Address,
     pub amount: i128,
+}
+
+/// Emitted when a recipient sets an auto-claim destination.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AutoClaimSet {
+    pub stream_id: u64,
+    pub destination: Address,
+}
+
+/// Emitted when a recipient revokes their auto-claim destination.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AutoClaimRevoked {
+    pub stream_id: u64,
+}
+
+/// Emitted when an auto-claim is triggered.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AutoClaimTriggered {
+    pub stream_id: u64,
+    pub destination: Address,
+    pub amount: i128,
+}
+
+/// Emitted when a permissionless keeper cancels an expired stream via `keeper_cancel`.
+///
+/// The keeper receives `keeper_fee` tokens taken from the sender's gross refund.
+/// The recipient receives their full accrued-but-not-yet-withdrawn amount directly.
+/// The sender receives the remaining unstreamed deposit after the fee deduction.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct KeeperCancelled {
+    pub stream_id: u64,
+    pub keeper: Address,
+    pub keeper_fee: i128,
+    pub recipient_amount: i128,
+    pub sender_refund: i128,
+}
+
+/// Status of auto-claim configuration for a stream.
+///
+/// Returned by `get_auto_claim_status` to allow callers to validate
+/// the auto-claim destination before executing `trigger_auto_claim`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AutoClaimStatus {
+    /// No auto-claim destination has been set for this stream.
+    NotSet,
+    /// Auto-claim destination is set and valid.
+    ValidDestination {
+        /// The destination address where tokens will be sent.
+        destination: Address,
+        /// The amount currently claimable (accrued - withdrawn).
+        claimable: i128,
+    },
+    /// Auto-claim destination is set but invalid (zero address or contract itself).
+    InvalidDestination {
+        /// The invalid destination address.
+        destination: Address,
+    },
 }
 
 #[contracttype]
@@ -720,10 +802,23 @@ pub enum DataKey {
     OwnerTemplateIds(Address),
     /// Sum of outstanding deposit liabilities (`i128`, instance storage).
     TotalLiabilities,
-    /// Maximum rate per second allowed by governance (`i128`, instance storage).
+    /// Per-recipient nonce counter for delegated-withdraw replay protection.
+    /// Appended last to preserve existing discriminant values.
+    WithdrawNonce(Address),
+    /// Current protocol-wide pause state (Active, CreationPaused, or GlobalEmergencyPaused).
+    PauseState,
+    /// Reentrancy guard flag (bool) to prevent recursive token transfers.
+    ReentrancyLock,
+    /// Paged recipient stream index (page number → Vec<u64> of stream IDs).
+    RecipientStreamPage(Address, u32),
+    /// Number of pages in a recipient's paged stream index.
+    RecipientStreamPageCount(Address),
+    /// Pending recipient update proposal for a stream (sender-initiated, recipient-accepted).
+    PendingRecipientUpdate(u64),
+    /// Governance-controlled maximum rate per second cap (`i128`, instance storage).
     MaxRatePerSecond,
-    /// Rotation history for a stream.
-    RotationHistory(u64),
+    /// Last pause audit record per pause kind (persistent).
+    LastPauseRecord(PauseKind),
 }
 
 // ---------------------------------------------------------------------------
@@ -4380,6 +4475,157 @@ impl FluxoraStream {
         let mut stream = load_stream(&env, stream_id)?;
 
         Self::cancel_stream_internal(&env, &mut stream)
+    }
+
+    /// Permissionless keeper entrypoint to cancel a stream that has expired and been
+    /// abandoned by its sender.
+    ///
+    /// Any caller (keeper bot, liquidator, or end user) may invoke this once the stream
+    /// is at least `KEEPER_GRACE_PERIOD_SECONDS` (7 days) past its `end_time`. This
+    /// prevents unclaimed deposits from remaining locked in contract storage indefinitely.
+    ///
+    /// # Parameters
+    /// - `stream_id`: The stream to cancel.
+    /// - `keeper`: Address of the caller; receives the keeper incentive fee.
+    ///
+    /// # Authorization
+    /// - `keeper.require_auth()`: The keeper must sign the transaction to prevent fee
+    ///   redirection to an arbitrary address by a third party.
+    ///
+    /// # Returns
+    /// - `Ok(())` on success.
+    ///
+    /// # Errors
+    /// - `ContractError::StreamNotFound`: Stream does not exist.
+    /// - `ContractError::InvalidState`: Stream is already in a terminal state.
+    /// - `ContractError::KeeperGracePeriodNotElapsed`: Stream is not yet eligible
+    ///   (`now < end_time + KEEPER_GRACE_PERIOD_SECONDS`).
+    /// - `ContractError::ArithmeticOverflow`: Overflow in fee arithmetic (should not occur
+    ///   in practice for amounts within i128 range).
+    ///
+    /// # Token distribution (CEI order: persist then transfer)
+    ///
+    /// 1. `recipient_amount = accrued - withdrawn_amount` → transferred to stream recipient.
+    /// 2. `sender_refund_gross = deposit_amount - accrued` (unstreamed portion).
+    /// 3. `keeper_fee = sender_refund_gross × KEEPER_FEE_BPS / 10_000` → transferred to keeper.
+    /// 4. `sender_refund = sender_refund_gross - keeper_fee` → transferred to stream sender.
+    ///
+    /// If `sender_refund_gross == 0` (stream is fully accrued), the keeper receives no fee
+    /// and only the recipient payout occurs.
+    ///
+    /// # Events
+    /// - Publishes `("kp_cncl", stream_id)` → `KeeperCancelled { stream_id, keeper,
+    ///   keeper_fee, recipient_amount, sender_refund }`.
+    ///
+    /// # Security
+    /// - CEI pattern: stream is marked Cancelled before any token transfer.
+    /// - Keeper fee is deducted from the sender's unstreamed refund, never from the recipient.
+    /// - Reentrancy is mitigated by the terminal-state write preceding all transfers.
+    pub fn keeper_cancel(
+        env: Env,
+        stream_id: u64,
+        keeper: Address,
+    ) -> Result<(), ContractError> {
+        keeper.require_auth();
+
+        let mut stream = load_stream(&env, stream_id)?;
+
+        // Reject streams already in a terminal state.
+        Self::require_cancellable_status(stream.status)?;
+
+        let now = env.ledger().timestamp();
+
+        // Grace period must have elapsed past end_time.
+        let eligible_at = stream
+            .end_time
+            .checked_add(KEEPER_GRACE_PERIOD_SECONDS)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        if now < eligible_at {
+            return Err(ContractError::KeeperGracePeriodNotElapsed);
+        }
+
+        // Compute accrued amount at the moment of keeper cancellation.
+        // Since now >= end_time, this is capped at deposit_amount.
+        let accrued = accrual::calculate_accrued_amount_checkpointed(
+            accrual::CheckpointState {
+                checkpointed_amount: stream.checkpointed_amount,
+                checkpointed_at: stream.checkpointed_at,
+                cliff_time: stream.cliff_time,
+                end_time: stream.end_time,
+                deposit_amount: stream.deposit_amount,
+            },
+            stream.rate_per_second,
+            now,
+        );
+
+        // Recipient's outstanding claimable balance (accrued minus prior withdrawals).
+        let recipient_amount = accrued.saturating_sub(stream.withdrawn_amount).max(0);
+
+        // Unstreamed portion of the deposit; this is where the keeper fee is taken from.
+        let sender_refund_gross = stream
+            .deposit_amount
+            .checked_sub(accrued)
+            .ok_or(ContractError::InvalidState)?
+            .max(0);
+
+        // Keeper fee: KEEPER_FEE_BPS basis points of the gross sender refund.
+        let keeper_fee = sender_refund_gross
+            .checked_mul(KEEPER_FEE_BPS as i128)
+            .ok_or(ContractError::ArithmeticOverflow)?
+            / 10_000;
+
+        let sender_refund = sender_refund_gross
+            .checked_sub(keeper_fee)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+
+        // Capture pre-mutation health for transition detection.
+        let (was_underfunded, _, _) = compute_stream_health(&stream, now);
+
+        // CEI: write terminal state before any external token transfer.
+        stream.status = StreamStatus::Cancelled;
+        stream.cancelled_at = Some(now);
+        save_stream(&env, &stream);
+
+        // Reduce liabilities by the total outstanding balance (recipient + sender portions).
+        let total_outstanding = recipient_amount
+            .checked_add(sender_refund_gross)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        if total_outstanding > 0 {
+            let liabilities = read_total_liabilities(&env)
+                .checked_sub(total_outstanding)
+                .unwrap_or(0);
+            write_total_liabilities(&env, liabilities);
+        }
+
+        // Transfer accrued portion directly to the recipient.
+        if recipient_amount > 0 {
+            push_token(&env, &stream.recipient, recipient_amount)?;
+        }
+
+        // Transfer sender refund (net of keeper fee).
+        if sender_refund > 0 {
+            push_token(&env, &stream.sender, sender_refund)?;
+        }
+
+        // Transfer keeper incentive.
+        if keeper_fee > 0 {
+            push_token(&env, &keeper, keeper_fee)?;
+        }
+
+        env.events().publish(
+            (symbol_short!("kp_cncl"), stream.stream_id),
+            KeeperCancelled {
+                stream_id: stream.stream_id,
+                keeper,
+                keeper_fee,
+                recipient_amount,
+                sender_refund,
+            },
+        );
+
+        maybe_emit_health_changed(&env, &stream, was_underfunded, now);
+
+        Ok(())
     }
 
     /// Pause a payment stream as the contract admin.
