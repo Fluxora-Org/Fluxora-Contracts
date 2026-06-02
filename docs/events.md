@@ -37,8 +37,13 @@ Notes:
 | SenderTransferred | `["sndr_xfr", stream_id: u64]` | `SenderTransferred { stream_id: u64, old_sender: Address, new_sender: Address }`                                                                          | When `transfer_sender` successfully rotates the stream sender. Emitted after state is persisted. Not emitted on failure. |
 | DelegatedWithdrawal | `["dlg_wdraw", stream_id: u64]` | `DelegatedWithdrawal { stream_id: u64, recipient: Address, destination: Address, relayer: Address, amount: i128 }` | When a relayer successfully executes a recipient-signed delegated withdrawal via `delegated_withdraw_to`. Only emitted when `amount > 0`. |
 | StreamHealthChanged | `["hlth_chg", stream_id: u64]` | `StreamHealthChanged { stream_id: u64, is_underfunded: bool, remaining_balance: i128, seconds_remaining: u64 }` | When a stream transitions between adequately funded and underfunded. Emitted by `decrease_rate_per_second`, `shorten_stream_end_time`, `top_up_stream`, and `cancel_stream`. Only emitted on actual health transitions, not on every mutation. |
+| ExcessSwept | `["ex_swept", recipient: Address]` | `ExcessSwept { to: Address, amount: i128 }` | When the admin recovers tokens that exceed total stream liabilities via `sweep_excess`. |
+| AutoClaimSet | `["ac_set", stream_id: u64]` | `AutoClaimSet { stream_id: u64, destination: Address }` | When a recipient configures or changes a permissionless final-claim destination via `set_auto_claim`. |
+| AutoClaimRevoked | `["ac_revoke", stream_id: u64]` | `AutoClaimRevoked { stream_id: u64 }` | When a recipient revokes auto-claim configuration via `revoke_auto_claim`. |
+| AutoClaimTriggered | `["ac_trig", stream_id: u64]` | `AutoClaimTriggered { stream_id: u64, destination: Address, amount: i128 }` | When a third party successfully executes a configured final claim via `trigger_auto_claim`. |
+| MigrationCheckpoint | `["migrated"]` | `(from_version: u32, to_version: u32, timestamp: u64)` | When `migration_v5_to_v6` is called as an auditable deployment checkpoint. |
 
-**Additional topics (validator):** `gl_pause`, `gl_resume`, `rate_dec`, `tmpl_def`, `hlth_chg`.
+**Additional topics (validator):** `gl_pause`, `gl_resume`, `rate_dec`, `tmpl_def`, `hlth_chg`, `ex_swept`, `ac_set`, `ac_revoke`, `ac_trig`, `migrated`.
 
 ---
 | Event name | Topic(s) | Data (shape & types) | When emitted |
@@ -467,6 +472,11 @@ Commit message suggestion: `docs: add event schema and topics for indexers`
 | `pause_protocol`                                             | `"pr_pause"`    |
 | `resume_protocol`                                            | `"pr_resume"`   |
 | `update_recipient`                                           | `"recp_upd"`    |
+| `revoke_auto_claim`                                         | `"ac_revoke"`   |
+| `set_auto_claim`                                             | `"ac_set"`      |
+| `trigger_auto_claim`                                         | `"ac_trig"`     |
+| `sweep_excess`                                               | `"ex_swept"`    |
+| `migrate_recipient_index`                                    | `"migrated"`    |
 | `decrease_rate_per_second`, `shorten_stream_end_time`, `top_up_stream`, `cancel_stream` | `"hlth_chg"` |
 
 If you change event topics or payloads in the contract, update this document and

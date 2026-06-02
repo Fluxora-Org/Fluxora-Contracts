@@ -200,6 +200,7 @@ impl FluxoraFactory {
             &end_time,
             &withdraw_dust_threshold,
             &None,
+            &fluxora_stream::StreamKind::Linear,
         );
 
         Ok(stream_id)

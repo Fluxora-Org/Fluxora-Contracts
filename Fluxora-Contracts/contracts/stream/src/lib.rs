@@ -38,6 +38,16 @@ pub const MAX_TEMPLATES_PER_OWNER: u32 = 64;
 /// Global bound on stored schedule templates (DoS / storage bloat prevention).
 pub const MAX_GLOBAL_TEMPLATES: u64 = 10_000;
 
+/// Minimum interval (in ledgers) between successive pause/resume operations.
+///
+/// Prevents rapid-toggle DoS attacks where a malicious sender repeatedly pauses
+/// and resumes a stream to manipulate accrual accounting or increase gas costs
+/// for observers replaying the event log.
+///
+/// At ~5 seconds per ledger, 17 ledgers ≈ 85 seconds of cooldown per operation.
+/// This matches Stellar's default pause-time precedent (see `docs/cancel-stream-semantics.md`).
+const MIN_PAUSE_INTERVAL_LEDGERS: u32 = 17;
+
 // Contract version
 // ---------------------------------------------------------------------------
 
@@ -108,11 +118,200 @@ pub struct Config {
 
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum StreamStatus {
-    Active = 0,
-    Paused = 1,
-    Completed = 2,
-    Cancelled = 3,
+/// Core stream data structure representing a token streaming agreement.
+///
+/// A stream defines a linear vesting schedule where tokens are released at a constant
+/// rate from `start_time` to `end_time`, with an optional cliff period before withdrawals
+/// are allowed. The stream maintains checkpointing state to support rate changes while
+/// preserving recipient entitlements.
+///
+/// ## Invariants
+///
+/// The following mathematical invariant MUST hold at all times:
+/// ```text
+/// checkpointed_amount <= withdrawn_amount <= deposit_amount
+/// ```
+///
+/// This ensures that:
+/// - Recipients cannot withdraw more than they've accrued
+/// - Accrued amounts are monotonically non-decreasing
+/// - The contract maintains sufficient funds for all obligations
+///
+/// ## Cross-References
+///
+/// - **Accrual calculation**: See `contracts/stream/src/accrual.rs` for mathematical formulas
+/// - **Lifecycle documentation**: See `docs/streaming.md` for complete stream lifecycle
+/// - **Storage architecture**: See `docs/storage.md` for persistence details
+///
+/// ## Rate Change Mechanics
+///
+/// When `decrease_rate_per_second` is called, the stream is "checkpointed":
+/// - `checkpointed_amount` is set to the accrued amount at the current timestamp
+/// - `checkpointed_at` is set to the current timestamp
+/// - Future accrual uses the new rate from `checkpointed_at` forward
+/// - This prevents retroactive reduction of recipient entitlements
+#[contracttype]
+pub struct Stream {
+    /// Unique identifier for this stream within the contract.
+    ///
+    /// Stream IDs are assigned sequentially starting from 0 and are never reused,
+    /// even after stream closure. This ensures stable references for indexers
+    /// and prevents confusion between different streams.
+    pub stream_id: u64,
+
+    /// Address that created and funded this stream.
+    ///
+    /// The sender has exclusive rights to:
+    /// - Pause and resume the stream
+    /// - Cancel the stream (receiving unstreamed funds as refund)
+    /// - Update the streaming rate (increase only, unless using decrease_rate_per_second)
+    /// - Modify the schedule (extend/shorten end_time)
+    /// - Transfer sender rights to another address
+    ///
+    /// The sender role can be transferred via `transfer_sender`.
+    pub sender: Address,
+
+    /// Address that receives the streamed tokens.
+    ///
+    /// The recipient has exclusive rights to:
+    /// - Withdraw accrued tokens at any time after cliff_time
+    /// - Set up auto-claim for permissionless final withdrawal
+    /// - Transfer recipient rights to another address
+    ///
+    /// The recipient role can be transferred via `update_recipient`.
+    pub recipient: Address,
+
+    /// Total amount of tokens escrowed for this stream.
+    ///
+    /// This represents the maximum amount that can ever be withdrawn from this stream.
+    /// The deposit must satisfy: `deposit_amount >= rate_per_second * (end_time - start_time)`
+    ///
+    /// The deposit can be increased via `top_up_stream` but never decreased directly.
+    /// When `shorten_stream_end_time` is called, excess deposit is refunded to the sender.
+    pub deposit_amount: i128,
+
+    /// Streaming rate in tokens per second.
+    ///
+    /// This determines how quickly tokens accrue to the recipient. The rate can be:
+    /// - Increased at any time via `update_rate_per_second` (subject to deposit sufficiency)
+    /// - Decreased via `decrease_rate_per_second` (with checkpointing to preserve accrued amounts)
+    ///
+    /// Rate changes are subject to governance-controlled maximum limits set by the admin.
+    pub rate_per_second: i128,
+
+    /// Ledger timestamp when token accrual begins.
+    ///
+    /// Before this time, `calculate_accrued` returns 0 regardless of elapsed time.
+    /// Must be >= current ledger timestamp at stream creation to prevent backdating.
+    ///
+    /// Note: Accrual starts at `start_time`, not `cliff_time`. The cliff only affects
+    /// when withdrawals are allowed, not when tokens begin accruing.
+    pub start_time: u64,
+
+    /// Ledger timestamp when withdrawals become allowed (vesting cliff).
+    ///
+    /// Before this time, `withdraw` calls return 0 even if tokens have accrued.
+    /// Must satisfy: `start_time <= cliff_time <= end_time`
+    ///
+    /// Set `cliff_time = start_time` for immediate withdrawal eligibility.
+    /// Set `cliff_time = end_time` for a cliff that lasts the entire stream duration.
+    pub cliff_time: u64,
+
+    /// Ledger timestamp when token accrual stops.
+    ///
+    /// After this time, no additional tokens accrue regardless of elapsed time.
+    /// The stream is considered "time-terminal" and certain operations (pause/resume)
+    /// are blocked, though withdrawals remain available.
+    ///
+    /// Must satisfy: `start_time < end_time`
+    pub end_time: u64,
+
+    /// Total amount of tokens already withdrawn by the recipient.
+    ///
+    /// This value is monotonically increasing and can never exceed `deposit_amount`.
+    /// Used to calculate withdrawable amount: `accrued - withdrawn_amount`
+    ///
+    /// When `withdrawn_amount == deposit_amount`, the stream transitions to `Completed` status.
+    pub withdrawn_amount: i128,
+
+    /// Current operational status of the stream.
+    ///
+    /// Determines which operations are allowed:
+    /// - `Active`: Normal operation, withdrawals allowed after cliff_time
+    /// - `Paused`: Withdrawals blocked (unless past end_time), accrual continues
+    /// - `Completed`: All funds withdrawn, stream is terminal
+    /// - `Cancelled`: Stream terminated early, refund issued to sender
+    pub status: StreamStatus,
+
+    /// Ledger timestamp when the stream was cancelled, if applicable.
+    ///
+    /// Set to `Some(timestamp)` when `cancel_stream` is called, `None` otherwise.
+    /// When present, accrual is frozen at this timestamp - no additional tokens
+    /// accrue beyond the cancellation time.
+    ///
+    /// Only meaningful when `status == StreamStatus::Cancelled`.
+    pub cancelled_at: Option<u64>,
+
+    /// Total tokens mathematically accrued up to `checkpointed_at` under all previous rates.
+    ///
+    /// This field implements checkpointing for rate decreases. When `decrease_rate_per_second`
+    /// is called, this value is set to the accrued amount at the current timestamp, and
+    /// `checkpointed_at` is set to the current timestamp. Future accrual calculations
+    /// use this as a base amount plus accrual from `checkpointed_at` forward at the new rate.
+    ///
+    /// ## Checkpointing Example
+    ///
+    /// 1. Stream created: `checkpointed_amount = 0`, `checkpointed_at = start_time`
+    /// 2. Rate decreased at T=100: `checkpointed_amount = 50`, `checkpointed_at = 100`
+    /// 3. Future accrual: `checkpointed_amount + (new_rate * (current_time - 100))`
+    ///
+    /// This ensures recipients never lose accrued entitlements due to rate changes.
+    ///
+    /// **Invariant**: `checkpointed_amount <= withdrawn_amount <= deposit_amount`
+    pub checkpointed_amount: i128,
+
+    /// Ledger timestamp of the last rate change (or `start_time` on creation).
+    ///
+    /// This timestamp marks the beginning of the current rate epoch. The accrual
+    /// calculation uses this as the start time for applying the current `rate_per_second`.
+    ///
+    /// ## Usage in Accrual Calculation
+    ///
+    /// ```text
+    /// total_accrued = checkpointed_amount + (rate_per_second * (current_time - checkpointed_at))
+    /// ```
+    ///
+    /// Updated by:
+    /// - Stream creation: Set to `start_time`
+    /// - `decrease_rate_per_second`: Set to current timestamp
+    /// - `update_rate_per_second`: Set to current timestamp (for symmetry)
+    ///
+    /// **Invariant**: `start_time <= checkpointed_at <= current_time`
+    pub checkpointed_at: u64,
+
+    /// Optional withdrawal threshold to reduce fee spam from micro-withdrawals.
+    ///
+    /// If set to a value > 0, withdrawals below this amount are skipped (return 0)
+    /// unless one of the following exceptions applies:
+    /// - Stream is past `end_time` (time-terminal)
+    /// - Stream is `Cancelled`
+    /// - Withdrawal would complete the stream (`withdrawn_amount == deposit_amount`)
+    ///
+    /// This helps recipients avoid paying transaction fees for tiny amounts while
+    /// ensuring they can always claim their full entitlement eventually.
+    ///
+    /// Set to 0 to disable threshold checking (allow all withdrawal amounts).
+    pub withdraw_dust_threshold: i128,
+
+    /// Optional bounded memo for indexer correlation and metadata.
+    ///
+    /// Maximum length: `MAX_MEMO_BYTES` (64 bytes). Common use cases:
+    /// - Payroll batch ID for treasury correlation
+    /// - Invoice number or reference ID
+    /// - Human-readable description
+    ///
+    /// Set to `None` when no memo is needed. The memo is immutable after stream creation.
+    pub memo: Option<soroban_sdk::Bytes>,
 }
 #[soroban_sdk::contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -151,6 +350,8 @@ pub enum ContractError {
     TemplateUnauthorized = 17,
     /// Rate exceeds the governance-controlled maximum rate per second.
     RateCapExceeded = 18,
+    /// Pause/resume cooldown is still active; minimum interval not elapsed.
+    PauseCooldownActive = 19,
 }
 
 /// Reason codes for stream-level pause operations.
@@ -441,6 +642,11 @@ pub struct Stream {
     /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
     /// Maximum length: `MAX_MEMO_BYTES` (64 bytes). `None` when not supplied.
     pub memo: Option<soroban_sdk::Bytes>,
+    /// Ledger number of the last pause or resume operation.
+    /// Used to enforce the pause/resume cooldown interval (`MIN_PAUSE_INTERVAL_LEDGERS`)
+    /// and prevent rapid-toggle DoS attacks.
+    /// Initialized to the stream creation ledger at creation time.
+    pub last_pause_toggle_ledger: u32,
 }
 
 
@@ -1122,6 +1328,7 @@ impl FluxoraStream {
             checkpointed_at: start_time,
             withdraw_dust_threshold,
             memo: memo.clone(),
+            last_pause_toggle_ledger: env.ledger().sequence(),
         };
 
         save_stream(env, &stream);
@@ -1889,7 +2096,15 @@ impl FluxoraStream {
             return Err(ContractError::InvalidState);
         }
 
+        // Check pause/resume cooldown to prevent rapid-toggle DoS
+        let current_ledger = env.ledger().sequence();
+        let ledgers_since_last_toggle = current_ledger.saturating_sub(stream.last_pause_toggle_ledger);
+        if ledgers_since_last_toggle < MIN_PAUSE_INTERVAL_LEDGERS {
+            return Err(ContractError::PauseCooldownActive);
+        }
+
         stream.status = StreamStatus::Paused;
+        stream.last_pause_toggle_ledger = current_ledger;
         save_stream(&env, &stream);
 
         env.events().publish(
@@ -1940,7 +2155,15 @@ impl FluxoraStream {
             return Err(ContractError::StreamNotPaused);
         }
 
+        // Check pause/resume cooldown to prevent rapid-toggle DoS
+        let current_ledger = env.ledger().sequence();
+        let ledgers_since_last_toggle = current_ledger.saturating_sub(stream.last_pause_toggle_ledger);
+        if ledgers_since_last_toggle < MIN_PAUSE_INTERVAL_LEDGERS {
+            return Err(ContractError::PauseCooldownActive);
+        }
+
         stream.status = StreamStatus::Active;
+        stream.last_pause_toggle_ledger = current_ledger;
         save_stream(&env, &stream);
 
         env.events().publish(
@@ -4169,7 +4392,15 @@ impl FluxoraStream {
             return Err(ContractError::InvalidState);
         }
 
+        // Check pause/resume cooldown to prevent rapid-toggle DoS
+        let current_ledger = env.ledger().sequence();
+        let ledgers_since_last_toggle = current_ledger.saturating_sub(stream.last_pause_toggle_ledger);
+        if ledgers_since_last_toggle < MIN_PAUSE_INTERVAL_LEDGERS {
+            return Err(ContractError::PauseCooldownActive);
+        }
+
         stream.status = StreamStatus::Paused;
+        stream.last_pause_toggle_ledger = current_ledger;
         save_stream(&env, &stream);
 
         env.events().publish(
@@ -4217,7 +4448,15 @@ impl FluxoraStream {
             return Err(ContractError::StreamNotPaused);
         }
 
+        // Check pause/resume cooldown to prevent rapid-toggle DoS
+        let current_ledger = env.ledger().sequence();
+        let ledgers_since_last_toggle = current_ledger.saturating_sub(stream.last_pause_toggle_ledger);
+        if ledgers_since_last_toggle < MIN_PAUSE_INTERVAL_LEDGERS {
+            return Err(ContractError::PauseCooldownActive);
+        }
+
         stream.status = StreamStatus::Active;
+        stream.last_pause_toggle_ledger = current_ledger;
         save_stream(&env, &stream);
 
         env.events().publish(

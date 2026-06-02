@@ -1,4 +1,4 @@
-extern crate std;
+﻿extern crate std;
 
 use fluxora_stream::{
     ContractError, CreateStreamRelativeParams, FluxoraStream, FluxoraStreamClient, StreamStatus,
@@ -76,6 +76,7 @@ fn create_stream_relative_zero_delays_immediate_start() {
     let stream_id = ctx.client().create_stream_relative(
         &ctx.sender,
         &CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
@@ -84,6 +85,7 @@ fn create_stream_relative_zero_delays_immediate_start() {
             cliff_delay: 0,
             duration: 1000,
             memo: None,
+            metadata: None,
         },
     );
 
@@ -106,6 +108,7 @@ fn create_stream_relative_positive_delays_future_start() {
     let stream_id = ctx.client().create_stream_relative(
         &ctx.sender,
         &CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: ctx.recipient.clone(),
             deposit_amount: 4000,
@@ -114,6 +117,7 @@ fn create_stream_relative_positive_delays_future_start() {
             cliff_delay: 500,
             duration: 2000,
             memo: None,
+            metadata: None,
         },
     );
 
@@ -133,6 +137,7 @@ fn create_stream_relative_zero_duration_rejected() {
     let result = ctx.client().try_create_stream_relative(
         &ctx.sender,
         &CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
@@ -141,6 +146,7 @@ fn create_stream_relative_zero_duration_rejected() {
             cliff_delay: 100,
             duration: 0,
             memo: None,
+            metadata: None,
         },
     );
 
@@ -157,6 +163,7 @@ fn create_stream_relative_cliff_less_than_start_rejected() {
     let result = ctx.client().try_create_stream_relative(
         &ctx.sender,
         &CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
@@ -165,6 +172,7 @@ fn create_stream_relative_cliff_less_than_start_rejected() {
             cliff_delay: 100,
             duration: 1000,
             memo: None,
+            metadata: None,
         },
     );
 
@@ -182,6 +190,7 @@ fn create_stream_relative_cliff_greater_than_end_rejected() {
     let result = ctx.client().try_create_stream_relative(
         &ctx.sender,
         &CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
@@ -190,6 +199,7 @@ fn create_stream_relative_cliff_greater_than_end_rejected() {
             cliff_delay: 2000,
             duration: 1000,
             memo: None,
+            metadata: None,
         },
     );
 
@@ -206,6 +216,7 @@ fn create_stream_relative_start_delay_overflow_rejected() {
     let result = ctx.client().try_create_stream_relative(
         &ctx.sender,
         &CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
@@ -214,6 +225,7 @@ fn create_stream_relative_start_delay_overflow_rejected() {
             cliff_delay: 0,
             duration: 1000,
             memo: None,
+            metadata: None,
         },
     );
 
@@ -230,6 +242,7 @@ fn create_stream_relative_duration_overflow_rejected() {
     let result = ctx.client().try_create_stream_relative(
         &ctx.sender,
         &CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
@@ -238,6 +251,7 @@ fn create_stream_relative_duration_overflow_rejected() {
             cliff_delay: 0,
             duration: 1000,
             memo: None,
+            metadata: None,
         },
     );
 
@@ -255,6 +269,7 @@ fn create_stream_relative_never_start_time_in_past() {
     let stream_id = ctx.client().create_stream_relative(
         &ctx.sender,
         &CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
@@ -263,6 +278,7 @@ fn create_stream_relative_never_start_time_in_past() {
             cliff_delay: 0,
             duration: 1000,
             memo: None,
+            metadata: None,
         },
     );
 
@@ -285,6 +301,7 @@ fn create_stream_relative_insufficient_deposit_rejected() {
     let result = ctx.client().try_create_stream_relative(
         &ctx.sender,
         &CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: ctx.recipient.clone(),
             deposit_amount: 500,
@@ -293,6 +310,7 @@ fn create_stream_relative_insufficient_deposit_rejected() {
             cliff_delay: 0,
             duration: 300,
             memo: None,
+            metadata: None,
         },
     );
 
@@ -308,6 +326,7 @@ fn create_stream_relative_rejects_self_stream() {
     let result = ctx.client().try_create_stream_relative(
         &ctx.sender,
         &CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: ctx.sender.clone(),
             deposit_amount: 1000,
@@ -316,6 +335,7 @@ fn create_stream_relative_rejects_self_stream() {
             cliff_delay: 0,
             duration: 1000,
             memo: None,
+            metadata: None,
         },
     );
 
@@ -335,6 +355,7 @@ fn create_streams_relative_single_entry() {
     let params = vec![
         &ctx.env,
         CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
@@ -343,6 +364,7 @@ fn create_streams_relative_single_entry() {
             cliff_delay: 200,
             duration: 1000,
             memo: None,
+            metadata: None,
         },
     ];
 
@@ -366,6 +388,7 @@ fn create_streams_relative_multiple_entries_sequential_ids() {
     let params = vec![
         &ctx.env,
         CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
@@ -374,8 +397,10 @@ fn create_streams_relative_multiple_entries_sequential_ids() {
             cliff_delay: 0,
             duration: 1000,
             memo: None,
+            metadata: None,
         },
         CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: recipient2.clone(),
             deposit_amount: 4000, // 2 * 2000
@@ -384,6 +409,7 @@ fn create_streams_relative_multiple_entries_sequential_ids() {
             cliff_delay: 100,
             duration: 2000,
             memo: None,
+            metadata: None,
         },
     ];
 
@@ -433,6 +459,7 @@ fn create_streams_relative_invalid_entry_fails_atomically() {
     let params = vec![
         &ctx.env,
         CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
@@ -441,8 +468,10 @@ fn create_streams_relative_invalid_entry_fails_atomically() {
             cliff_delay: 0,
             duration: 1000,
             memo: None,
+            metadata: None,
         },
         CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: recipient2.clone(),
             deposit_amount: 500,
@@ -451,6 +480,7 @@ fn create_streams_relative_invalid_entry_fails_atomically() {
             cliff_delay: 0,
             duration: 0, // INVALID: duration = 0,
             memo: None,
+            metadata: None,
         },
     ];
 
@@ -477,6 +507,7 @@ fn create_streams_relative_diverse_schedules() {
     let params = vec![
         &ctx.env,
         CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: r1,
             deposit_amount: 100,
@@ -485,8 +516,10 @@ fn create_streams_relative_diverse_schedules() {
             cliff_delay: 0,
             duration: 100,
             memo: None,
+            metadata: None,
         },
         CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: r2,
             deposit_amount: 400, // 2 * 200
@@ -495,8 +528,10 @@ fn create_streams_relative_diverse_schedules() {
             cliff_delay: 600,
             duration: 200,
             memo: None,
+            metadata: None,
         },
         CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: r3,
             deposit_amount: 900, // 3 * 300
@@ -505,6 +540,7 @@ fn create_streams_relative_diverse_schedules() {
             cliff_delay: 1200,
             duration: 300,
             memo: None,
+            metadata: None,
         },
     ];
 
@@ -543,6 +579,7 @@ fn create_streams_relative_independent_cliff_times() {
     let params = vec![
         &ctx.env,
         CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: r1,
             deposit_amount: 1000,
@@ -551,8 +588,10 @@ fn create_streams_relative_independent_cliff_times() {
             cliff_delay: 0, // cliff at current time
             duration: 1000,
             memo: None,
+            metadata: None,
         },
         CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: r2,
             deposit_amount: 2000,
@@ -561,6 +600,7 @@ fn create_streams_relative_independent_cliff_times() {
             cliff_delay: 1500, // cliff 500 seconds after start
             duration: 1000,
             memo: None,
+            metadata: None,
         },
     ];
 
@@ -586,6 +626,7 @@ fn create_streams_relative_batch_overflow_detection() {
     let params = vec![
         &ctx.env,
         CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: r1,
             deposit_amount: 1000,
@@ -594,6 +635,7 @@ fn create_streams_relative_batch_overflow_detection() {
             cliff_delay: 0,
             duration: 1000,
             memo: None,
+            metadata: None,
         },
     ];
 
@@ -615,6 +657,7 @@ fn create_streams_relative_batch_validates_amounts() {
     let params = vec![
         &ctx.env,
         CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: r1,
             deposit_amount: 1000,
@@ -623,8 +666,10 @@ fn create_streams_relative_batch_validates_amounts() {
             cliff_delay: 0,
             duration: 1000,
             memo: None,
+            metadata: None,
         },
         CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: r2,
             deposit_amount: -100, // Invalid: negative amount
@@ -633,6 +678,7 @@ fn create_streams_relative_batch_validates_amounts() {
             cliff_delay: 0,
             duration: 1000,
             memo: None,
+            metadata: None,
         },
     ];
 

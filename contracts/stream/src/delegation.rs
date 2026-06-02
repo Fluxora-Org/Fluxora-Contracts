@@ -39,6 +39,7 @@ use crate::{load_stream, load_delegated_nonce, ContractError};
 /// - `Err(ContractError::SignatureDeadlineExpired)` if `deadline < current timestamp`.
 /// - `Err(ContractError::InvalidParams)` if `nonce` does not match.
 /// - `Err(ContractError::StreamNotFound)` if `stream_id` does not exist.
+#[allow(dead_code)]
 pub(crate) fn validate_delegation_params(
     env: &Env,
     stream_id: u64,

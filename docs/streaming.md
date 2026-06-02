@@ -16,7 +16,7 @@ When changing the contract:
 - Update snapshot tests if externally visible behavior changes
 - No behavior change required for doc-only updates
 
-**Entrypoint index (validator):** `batch_withdraw_to`, `delete_stream_template`, `get_global_emergency_paused`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `global_resume`, `set_contract_paused`, `set_global_emergency_paused`, `version`.
+**Entrypoint index (validator):** `batch_withdraw_to`, `delete_stream_template`, `get_global_emergency_paused`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `global_resume`, `set_contract_paused`, `set_global_emergency_paused`, `version`, `migration_v5_to_v6`, `set_max_rate_per_second`.
 
 ## Externally Visible Assurances
 
@@ -28,13 +28,76 @@ This document provides crisp success and failure semantics for all protocol oper
 
 No hidden rules or implementation details are required to understand protocol behavior.
 
+### Per-stream metadata (TLV extension, CONTRACT_VERSION 4)
+
+From **CONTRACT_VERSION 4**, every stream may carry an optional bounded key-value map
+(`metadata: Option<Map<Bytes, Bytes>>`) for rich integration data such as invoice IDs,
+project codes, and external reference URIs.
+
+#### API
+
+| Entrypoint | Description |
+|---|---|
+| `create_stream(…, metadata)` | Pass `Some(map)` to attach metadata at creation, or `None` to omit. |
+| `get_stream_metadata(stream_id)` | Returns `Option<Map<Bytes, Bytes>>`. Permissionless read. |
+
+Metadata is also propagated through `create_streams`, `create_streams_relative`,
+`create_streams_partial`, and `create_stream_from_template` via the `metadata` field on
+`CreateStreamParams` / `CreateStreamRelativeParams`.
+
+#### Bounds (enforced at `create_stream` time — `ContractError::MetadataTooLarge` on violation)
+
+| Bound | Constant | Value |
+|---|---|---|
+| Maximum key-value pair count | `MAX_METADATA_KEYS` | 8 |
+| Maximum aggregate (all keys + values) bytes | `MAX_METADATA_BYTES` | 512 |
+| Maximum single key length | `MAX_METADATA_KEY_BYTES` | 32 |
+| Maximum single value length | `MAX_METADATA_VALUE_BYTES` | 128 |
+
+#### Invariants
+
+- Validated entirely at creation time; **immutable post-creation**.
+- Stream ID is **not allocated** if metadata validation fails (no partial state written).
+- No token movement occurs if metadata validation fails.
+- `StreamCreated` event includes the `metadata` field for indexer consumption.
+
+#### Example (Rust client)
+
+```rust
+let mut meta = Map::new(&env);
+meta.set(Bytes::from_slice(&env, b"invoice_id"), Bytes::from_slice(&env, b"INV-2026-001"));
+meta.set(Bytes::from_slice(&env, b"project"),    Bytes::from_slice(&env, b"PROJ-42"));
+
+let stream_id = client.create_stream(
+    &sender, &recipient,
+    &deposit, &rate,
+    &start, &cliff, &end,
+    &0_i128, // dust threshold
+    &None,   // memo
+    &Some(meta),
+);
+
+// Later — permissionless read
+let stored_meta = client.get_stream_metadata(&stream_id);
+```
+
 ### Schedule templates (presets)
 
 From **CONTRACT_VERSION 3**, integrators can register **relative** schedule skeletons (`register_stream_template`) and create streams from them (`create_stream_from_template`). This standardizes recurring payroll windows and trims repeated calldata versus always passing `start_delay` / `cliff_delay` / `duration` through the client for identical shapes.
 
 - **Auth**: registering and deleting templates requires the template `owner` signer. Creating a stream from a template requires the **funding `sender`** to authorize (same as `create_stream_relative`).
 - **Caps**: per-owner and global template counts are bounded; see `MAX_TEMPLATES_PER_OWNER` and `MAX_GLOBAL_TEMPLATES` in `contracts/stream/src/lib.rs`.
-- **Note**: Template-specific errors are not yet implemented in the ContractError enum. Template operations currently use generic errors like `InvalidParams` and `Unauthorized`.
+- **Errors**: `TemplateNotFound`, `TemplateLimitExceeded`, `TemplateUnauthorized`.
+
+### Stream Kinds (Linear vs. Cliff-Only)
+
+From **CONTRACT_VERSION 4**, the contract supports distinct streaming styles, governed by the `StreamKind` field on the stream configuration:
+
+- **Linear** (Default/Legacy): Accrues tokens continuously and linearly over time at `rate_per_second` once the stream has started, subject to a standard cliff window (during which nothing can be withdrawn).
+- **[CliffOnly](#cliff-only-streams)**: A one-shot, instant unlock stream variant. Tokens do not accrue continuously over time. Instead:
+  - Before the `cliff_time`, `0` tokens are accrued/withdrawable (all funds are locked).
+  - At or after the `cliff_time`, the total `deposit_amount` is immediately and fully unlocked and made claimable by the recipient.
+  - To enforce the single-unlock model, `rate_per_second` is forced to `0` during creation and all subsequent mutation/adjustment requests are rejected.
 
 ### ID pre-allocation (`reserve_stream_ids`) — issue #584
 
@@ -69,6 +132,7 @@ Off-chain orchestrators and indexers that build payment batches often need to kn
 | Phase            | Action                                        | Notes                                                                 |
 | ---------------- | --------------------------------------------- | --------------------------------------------------------------------- |
 | **Creation**     | `create_stream` / `create_streams_partial` | Sender deposits tokens; stream starts as `Active`                     |
+| **Clone**        | `clone_stream`                                | Copies rate, cliff offset, threshold, and memo from a source stream; accepts new recipient and timing |
 | **Top-up**       | `top_up_stream`                               | Extra deposit locked (sender or admin only); schedule unchanged       |
 | **Pause**        | `pause_stream` / `pause_stream_as_admin`      | Stops withdrawals; accrual continues by time                          |
 | **Resume**       | `resume_stream` / `resume_stream_as_admin`    | Restores withdrawals; blocked if past `end_time` (Terminal)           |
@@ -144,6 +208,8 @@ This section is the protocol-level contract for the global pause state managed v
 | `resume_protocol(admin)` | Globally resume new stream creation, clearing audit trail |
 | `is_paused()` | Query if protocol is currently paused (permissionless) |
 | `get_pause_info()` | Query detailed pause info including audit trail (permissionless) |
+| `set_max_rate_per_second(max_rate)` | Admin-only governance entrypoint that sets the maximum allowed stream rate for future rate updates |
+| `migration_v5_to_v6(admin)` | Admin-only deployment checkpoint that emits a `migrated` audit event; no storage transformation is required |
 
 **Pause reason length:** The `reason` string passed to `pause_protocol` is bounded by `MAX_PAUSE_REASON_BYTES = 256`. Strings longer than 256 bytes are rejected with `ContractError::InvalidParams`. This prevents unbounded ledger-entry growth (Issue #513).
 
@@ -276,14 +342,23 @@ sequenceDiagram
 
 **Location:** `contracts/stream/src/accrual.rs`
 
+The mathematical accrual behavior branches on the stream's `StreamKind`:
+
+### Linear Streams
 ```text
 if current_time < cliff_time           → return 0
-if start_time >= end_time or rate < 0  → return 0
+if checkpointed_at >= end_time or rate < 0 → return checkpointed_amount or 0
 
 elapsed_now = min(current_time, end_time)
-elapsed_seconds = elapsed_now - start_time   // 0 if underflow
-accrued = elapsed_seconds * rate_per_second  // on overflow → deposit_amount
-return min(accrued, deposit_amount).max(0)
+elapsed_seconds = elapsed_now - checkpointed_at   // 0 if underflow
+added = elapsed_seconds * rate_per_second         // on overflow → deposit_amount
+return min(checkpointed_amount + added, deposit_amount).max(0)
+```
+
+### Cliff-Only Streams
+```text
+if current_time < cliff_time  → return 0
+else                         → return deposit_amount
 ```
 
 ### Rules
@@ -297,6 +372,14 @@ return min(accrued, deposit_amount).max(0)
 - **Paused streams:** Accrual computed using current ledger timestamp (same as Active; pause only blocks withdrawals, not accrual)
 - **Completed:** `calculate_accrued` returns `deposit_amount` (deterministic final value, timestamp-independent)
 - **Cancelled:** `calculate_accrued` is frozen at `cancelled_at` (no post-cancel growth)
+
+### Ledger-Time Monotonicity Guard
+
+Ledger-backed accrual paths cache the last observed accrual timestamp in instance storage and compare each later ledger timestamp against it before evaluating withdrawable math. The guard is intentionally global and short-lived: it catches non-monotonic test harness setup, migration mistakes, or future environment changes without adding per-stream storage.
+
+`accrual.rs` also contains a `debug_assert!(current_ts >= prev_ts, "retrograde ledger timestamp")`. In test/debug builds, the same condition returns `ContractError::ClockRegression` instead of allowing a retrograde timestamp to reduce computed accrual. Production Stellar ledgers are still assumed to be monotonically non-decreasing by protocol.
+
+`get_claimable_at(stream_id, timestamp)` is exempt because the timestamp is caller-supplied simulation input rather than `ledger().timestamp()`.
 
 ### Status-Specific Behavior Matrix
 
@@ -324,6 +407,23 @@ From **CONTRACT_VERSION 5**, senders can optionally set a `withdraw_dust_thresho
 - **Default**: The threshold defaults to `0` if not specified at creation.
 
 > **See also:** [dust-threshold.md](./dust-threshold.md) — formula for choosing a safe threshold value, worked USDC examples, a validation table, and guidance for template authors.
+
+### Withdrawal Frequency Limit (#574)
+
+From **CONTRACT_VERSION 6**, all withdrawal operations enforce a minimum ledger interval between consecutive withdrawals on the same stream to prevent excessive ledger entry generation and I/O costs from high-frequency polling.
+
+- **Constant**: `MIN_WITHDRAW_INTERVAL_LEDGERS = 17` (approximately 1 minute at ~5 seconds per ledger close, subject to network conditions)
+- **Enforcement**: `withdraw`, `delegated_withdraw`, and `batch_withdraw` all enforce `current_ledger - last_withdraw_ledger >= MIN_WITHDRAW_INTERVAL_LEDGERS`
+- **Error**: Returns `ContractError::WithdrawalTooFrequent` (error code 17) if the interval check fails
+- **Atomicity**: For `batch_withdraw`, if any stream in the batch violates the rate limit, the entire batch reverts
+- **Per-Stream**: Each stream tracks its own `last_withdraw_ledger` independently
+- **First Withdrawal**: Always succeeds (`last_withdraw_ledger` is initialized to 0 at stream creation)
+- **State Update**: `last_withdraw_ledger` is updated to `env.ledger().sequence()` only after a successful withdrawal (withdrawable > 0)
+- **Zero Withdrawable**: If a withdrawal returns 0 (before cliff, dust threshold, etc.), `last_withdraw_ledger` is not updated
+
+**Invariant**: `current_ledger >= last_withdraw_ledger` at all times (guaranteed by monotonic ledger progression).
+
+**Example**: If a withdrawal succeeds at ledger 100, the next withdrawal can occur at ledger 117 or later (100 + 17 = 117).
 
 ### Frontend: get_claimable_at (simulation)
 
@@ -379,6 +479,18 @@ deposit_amount >= rate_per_second * (new_end_time - start_time)
 ```
 
 If the existing deposit does not cover the extended duration, `extend_stream_end_time` returns `ContractError::InsufficientDeposit` and no state changes occur. Use `top_up_stream` first to increase the deposit, then extend.
+
+### Mutation Restrictions on Cliff-Only Streams
+
+To preserve the absolute one-shot unlock nature of a `[CliffOnly](#cliff-only-streams)` stream variant and guarantee its immutability post-creation, **all mutating endpoints are strictly blocked**. Attempting to call any of the following functions on a `[CliffOnly](#cliff-only-streams)` stream will return `[ContractError::UnsupportedStreamKind](./error.md#unsupportedstreamkind-17)` and revert all state changes:
+
+- `top_up_stream`
+- `update_rate_per_second`
+- `decrease_rate_per_second`
+- `shorten_stream_end_time`
+- `extend_stream_end_time`
+
+Any such attempt is atomic: no balances are transferred, no state is updated, and no events are emitted.
 
 ### Shorten `end_time` Semantics
 
@@ -547,6 +659,7 @@ contract.create_streams_relative(&sender, &params)?;
 | ------------------------- | ----------------------------- | ------------------------------------------- |
 | `init`                    | Bootstrap admin signer (once) | `admin.require_auth()`                      |
 | `create_stream`           | Sender                        | `sender.require_auth()`                     |
+| `clone_stream`            | Source stream's sender        | `source.sender.require_auth()`              |
 | `create_streams`          | Sender                        | `sender.require_auth()` (once per batch)    |
 | `create_stream_relative`  | Sender                        | `sender.require_auth()`                     |
 | `create_streams_relative` | Sender                        | `sender.require_auth()` (once per batch)    |
@@ -876,7 +989,7 @@ Pre-flight check query that returns the auto-claim configuration status and clai
   - `ValidDestination { destination, claimable }`: Destination is set and valid, with the current claimable amount.
   - `InvalidDestination { destination }`: Destination is set but invalid (zero address or contract itself).
 - **Claimable calculation**: Computed as `accrued_amount - withdrawn_amount` at current timestamp, capped at 0.
-- **Validation checks**: 
+- **Validation checks**:
   - Destination is not the zero address
   - Destination is not the contract address itself
 - **Usage pattern**:
@@ -1032,6 +1145,7 @@ Emitted when a sender successfully updates the streaming rate via `update_rate_p
 | Topic                      | Payload                                       | When Emitted                                       |
 | -------------------------- | --------------------------------------------- | -------------------------------------------------- |
 | `("created", stream_id)`   | `StreamCreated` (struct payload)              | `create_stream` / `create_streams`                 |
+| `("cloned", stream_id)`    | `StreamCloned` (struct payload)               | `clone_stream` — carries `source_stream_id` for indexer correlation |
 | `("paused", stream_id)`    | `StreamEvent::Paused(stream_id)`              | `pause_stream` / `pause_stream_as_admin`           |
 | `("resumed", stream_id)`   | `StreamEvent::Resumed(stream_id)`             | `resume_stream` / `resume_stream_as_admin`         |
 | `("cancelled", stream_id)` | `StreamEvent::StreamCancelled(stream_id)`     | `cancel_stream` / `cancel_stream_as_admin`         |
@@ -1080,10 +1194,12 @@ errors relevant to stream creation and timing.
 | `"overflow calculating total streamable amount"`                        | `create_stream` / `create_streams` | overflow in rate \* duration                  |
 | `"overflow calculating total batch deposit"`                            | `create_streams`                   | overflow in sum of deposits                   |
 | `ContractError::StartTimeInPast`                                        | `create_stream` / `create_streams` | start_time < ledger timestamp                 |
+| `ContractError::ClockRegression` (17)                                   | Ledger-backed accrual paths        | ledger timestamp < previous accrual timestamp |
 | `ContractError::StreamAlreadyPaused` (10)                               | `pause_stream`                     | Double pause                                  |
 | `ContractError::StreamNotPaused` (11)                                   | `resume_stream`                    | Resume active stream                          |
 | `ContractError::StreamTerminalState` (12)                               | `pause_stream` / `resume_stream`   | Modification past end_time                    |
 | `ContractError::StreamNotFound` (1)                                     | Various                            | Invalid stream_id                             |
+| `[ContractError::UnsupportedStreamKind](./error.md#unsupportedstreamkind-17)` (17) | Mutating functions                 | Attempting to mutate a [CliffOnly](#cliff-only-streams) stream       |
 | `ContractError::Unauthorized` (6)                                       | Various                            | Auth check failed                             |
 | `ContractError::InvalidState` (2)                                       | `withdraw`                         | Withdraw from non-terminal paused             |
 | `ContractError::InvalidState` (2)                                       | `cancel_stream`                    | Cancel completed/cancelled                    |
