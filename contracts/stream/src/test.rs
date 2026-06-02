@@ -1,4 +1,4 @@
-extern crate std;
+﻿extern crate std;
 
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
@@ -169,6 +169,7 @@ impl<'a> TestContext<'a> {
             &1000u64,   // end_time
             &0,
             &None,
+            &None,
         )
     }
 
@@ -185,6 +186,7 @@ impl<'a> TestContext<'a> {
             &1000u64,
             &0,
             &None,
+            &None,
         )
     }
 
@@ -200,6 +202,7 @@ impl<'a> TestContext<'a> {
             &3,
             &0,
             &None,
+            &None,
         )
     }
 
@@ -214,6 +217,7 @@ impl<'a> TestContext<'a> {
             &0u64,
             &100,
             &0,
+            &None,
             &None,
         )
     }
@@ -415,7 +419,7 @@ fn test_init_sets_stream_counter_to_zero() {
 
     env.ledger().set_timestamp(0);
     let stream_id = client2.create_stream(
-        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &0, &None,
+        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &0, &None, &None,
     );
 
     assert_eq!(stream_id, 0, "first stream should have id 0");
@@ -449,6 +453,7 @@ fn test_get_stream_count_tracks_successful_creates() {
         &0u64,
         &1_000u64,
         &0,
+        &None,
         &None,
     );
     assert_eq!(id1, 1);
@@ -601,7 +606,7 @@ fn test_operations_work_after_failed_reinit() {
     // Contract must still accept streams
     env.ledger().set_timestamp(0);
     let stream_id = client.create_stream(
-        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &0, &None,
+        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &0, &None, &None,
     );
 
     let state = client.get_stream_state(&stream_id);
@@ -648,6 +653,7 @@ fn test_create_stream_emits_event() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     let events = ctx.env.events().all();
@@ -679,6 +685,7 @@ fn test_create_stream_panics_when_contract_paused() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
     assert_eq!(result, Err(Ok(ContractError::ContractPaused)));
 }
@@ -698,6 +705,7 @@ fn test_create_stream_succeeds_after_unpause() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
     assert_eq!(id, 0);
@@ -778,6 +786,7 @@ fn test_create_stream_zero_deposit_panics() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 }
@@ -795,6 +804,7 @@ fn test_create_stream_invalid_times_panics() {
         &1000u64,
         &500u64, // end before start
         &0,
+        &None,
         &None,
     );
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
@@ -814,6 +824,7 @@ fn test_create_stream_multiple() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     let stream_id_2 = ctx.client().create_stream(
@@ -825,6 +836,7 @@ fn test_create_stream_multiple() {
         &1000u64, // cliff equals end
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -838,6 +850,7 @@ fn test_create_stream_multiple() {
         &500u64,
         &0,
         &None,
+        &None,
     );
 
     let stream_id_4 = ctx.client().create_stream(
@@ -850,6 +863,7 @@ fn test_create_stream_multiple() {
         &4000u64,
         &0,
         &None,
+        &None,
     );
 
     let stream_id_5 = ctx.client().create_stream(
@@ -861,6 +875,7 @@ fn test_create_stream_multiple() {
         &0u64, // cliff equals end
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -897,6 +912,7 @@ fn test_create_stream_multiple_loop() {
             &0u64, // cliff equals end
             &10u64,
             &0,
+            &None,
             &None,
         );
 
@@ -957,6 +973,7 @@ fn test_create_stream_large_deposit_accepted() {
         &duration,
         &0,
         &None,
+        &None,
     );
 
     let state = ctx.client().get_stream_state(&stream_id);
@@ -990,6 +1007,7 @@ fn test_create_stream_long_duration_accepted() {
         &duration,
         &0,
         &None,
+        &None,
     );
 
     let state = ctx.client().get_stream_state(&stream_id);
@@ -1022,6 +1040,7 @@ fn test_large_deposit_amount_sanity() {
         &0u64,
         &duration,
         &0,
+        &None,
         &None,
     );
 
@@ -1062,6 +1081,7 @@ fn test_create_stream_end_equals_start_panics() {
         &500u64, // end == start
         &0,
         &None,
+        &None,
     );
 }
 
@@ -1081,6 +1101,7 @@ fn test_create_stream_end_before_start_panics() {
         &999u64, // end < start
         &0,
         &None,
+        &None,
     );
 }
 
@@ -1099,6 +1120,7 @@ fn test_create_stream_end_one_less_than_start_panics() {
         &100u64,
         &99u64, // end = start - 1
         &0,
+        &None,
         &None,
     );
 }
@@ -1121,6 +1143,7 @@ fn test_create_stream_cliff_one_before_start_panics() {
         &1100u64,
         &0,
         &None,
+        &None,
     );
 }
 
@@ -1139,6 +1162,7 @@ fn test_create_stream_cliff_one_after_end_panics() {
         &1001u64, // cliff = end + 1
         &1000u64,
         &0,
+        &None,
         &None,
     );
 }
@@ -1159,6 +1183,7 @@ fn test_create_stream_cliff_far_before_start_panics() {
         &1500u64,
         &0,
         &None,
+        &None,
     );
 }
 
@@ -1178,6 +1203,7 @@ fn test_create_stream_cliff_far_after_end_panics() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 }
 
@@ -1195,6 +1221,7 @@ fn test_create_stream_cliff_at_start_valid() {
         &100u64, // cliff == start
         &1100u64,
         &0,
+        &None,
         &None,
     );
     let state = ctx.client().get_stream_state(&id);
@@ -1216,6 +1243,7 @@ fn test_create_stream_cliff_at_end_valid() {
         &1000u64, // cliff == end
         &1000u64,
         &0,
+        &None,
         &None,
     );
     let state = ctx.client().get_stream_state(&id);
@@ -1241,6 +1269,7 @@ fn test_create_stream_deposit_zero_panics() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 }
 
@@ -1259,6 +1288,7 @@ fn test_create_stream_deposit_minus_one_panics() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 }
@@ -1279,6 +1309,7 @@ fn test_create_stream_deposit_i128_min_panics() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 }
 
@@ -1296,6 +1327,7 @@ fn test_create_stream_deposit_one_valid() {
         &0u64,
         &1u64, // 1 second, so rate * duration = 1 == deposit
         &0,
+        &None,
         &None,
     );
     let state = ctx.client().get_stream_state(&id);
@@ -1320,6 +1352,7 @@ fn test_create_stream_rate_zero_panics() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 }
 
@@ -1338,6 +1371,7 @@ fn test_create_stream_rate_minus_one_panics() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 }
@@ -1358,6 +1392,7 @@ fn test_create_stream_rate_i128_min_panics() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 }
 
@@ -1375,6 +1410,7 @@ fn test_create_stream_rate_one_valid() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
     let state = ctx.client().get_stream_state(&id);
@@ -1400,6 +1436,7 @@ fn test_create_stream_deposit_one_less_than_required_panics() {
         &500u64,
         &0,
         &None,
+        &None,
     );
 }
 
@@ -1418,6 +1455,7 @@ fn test_create_stream_deposit_exactly_required_valid() {
         &0u64,
         &500u64,
         &0,
+        &None,
         &None,
     );
     let state = ctx.client().get_stream_state(&id);
@@ -1441,6 +1479,7 @@ fn test_create_stream_deposit_far_below_required_panics() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 }
 
@@ -1458,6 +1497,7 @@ fn test_create_stream_deposit_above_required_valid() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
     let state = ctx.client().get_stream_state(&id);
@@ -1483,6 +1523,7 @@ fn test_create_stream_sender_is_recipient_panics() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 }
 
@@ -1507,6 +1548,7 @@ fn test_create_stream_sender_equals_recipient_has_no_side_effects() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -1548,6 +1590,7 @@ fn test_create_stream_different_sender_recipient_valid() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
     let state = ctx.client().get_stream_state(&id);
     assert_ne!(state.sender, state.recipient);
@@ -1572,6 +1615,7 @@ fn test_create_stream_zero_rate_panics() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 }
 
@@ -1589,6 +1633,7 @@ fn test_create_stream_sender_equals_recipient_panics() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 }
@@ -1612,6 +1657,7 @@ fn test_create_stream_cliff_before_start_panics() {
         &1100u64, // end_time
         &0,
         &None,
+        &None,
     );
 }
 
@@ -1630,6 +1676,7 @@ fn test_create_stream_cliff_after_end_panics() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 }
 
@@ -1646,6 +1693,7 @@ fn test_create_stream_cliff_equals_start_succeeds() {
         &0u64, // cliff equals start
         &1000u64,
         &0,
+        &None,
         &None,
     );
     let state = ctx.client().get_stream_state(&stream_id);
@@ -1665,6 +1713,7 @@ fn test_create_stream_cliff_equals_end_succeeds() {
         &1000u64, // cliff equals end
         &1000u64,
         &0,
+        &None,
         &None,
     );
     let state = ctx.client().get_stream_state(&stream_id);
@@ -1690,6 +1739,7 @@ fn test_create_stream_deposit_less_than_total_panics() {
         &1000u64, // duration = 1000s, so total = 1000 tokens needed
         &0,
         &None,
+        &None,
     );
 }
 
@@ -1706,6 +1756,7 @@ fn test_create_stream_deposit_equals_total_succeeds() {
         &0u64,
         &1000u64, // duration = 1000s
         &0,
+        &None,
         &None,
     );
     let state = ctx.client().get_stream_state(&stream_id);
@@ -1725,6 +1776,7 @@ fn test_create_stream_deposit_greater_than_total_succeeds() {
         &0u64,
         &1000u64, // duration = 1000s, total needed = 1000
         &0,
+        &None,
         &None,
     );
     let state = ctx.client().get_stream_state(&stream_id);
@@ -1751,6 +1803,7 @@ fn test_create_stream_insufficient_balance_panics() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 }
 
@@ -1770,6 +1823,7 @@ fn test_create_stream_transfer_failure_no_state_change() {
             &0u64,
             &1000u64,
             &0,
+            &None,
             &None,
         )
     }));
@@ -1811,6 +1865,7 @@ fn test_calculate_accrued_before_cliff() {
         &500u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
     ctx.env.ledger().set_timestamp(300);
@@ -1876,6 +1931,7 @@ fn test_accrued_after_cliff_before_end() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     ctx.env.ledger().set_timestamp(500);
@@ -1909,6 +1965,7 @@ fn test_create_stream_with_cliff_equals_start_accrues_immediately() {
         &0u64,      // cliff_time (equal to start_time)
         &1000u64,   // end_time
         &0,
+        &None,
         &None,
     );
 
@@ -2068,6 +2125,7 @@ fn test_calculate_accrued_paused_before_cliff() {
         &1000u64, // end_time
         &0,
         &None,
+        &None,
     );
 
     // Advance to t=300 (before cliff) and pause
@@ -2099,6 +2157,7 @@ fn test_calculate_accrued_paused_after_cliff() {
         &500u64,  // cliff_time
         &1000u64, // end_time
         &0,
+        &None,
         &None,
     );
 
@@ -2137,6 +2196,7 @@ fn test_calculate_accrued_paused_at_end_time() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -2215,6 +2275,7 @@ fn test_calculate_accrued_cancelled_before_cliff() {
         &1000u64, // end_time
         &0,
         &None,
+        &None,
     );
 
     // Cancel at t=300 (before cliff)
@@ -2249,6 +2310,7 @@ fn test_calculate_accrued_cancelled_at_cliff() {
         &500u64,  // cliff_time
         &1000u64, // end_time
         &0,
+        &None,
         &None,
     );
 
@@ -2379,6 +2441,7 @@ fn test_calculate_accrued_zero_duration_stream() {
         &500u64, // end_time
         &0,
         &None,
+        &None,
     );
 
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
@@ -2402,6 +2465,7 @@ fn test_calculate_accrued_zero_deposit_stream() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
@@ -2424,6 +2488,7 @@ fn test_calculate_accrued_zero_rate_stream() {
         &100u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -2457,6 +2522,7 @@ fn test_large_rate_no_overflow() {
         &2u64, // Very short duration
         &0,
         &None,
+        &None,
     );
 
     ctx.env.ledger().set_timestamp(1);
@@ -2489,6 +2555,7 @@ fn test_large_duration_no_overflow() {
         &0u64,
         &duration,
         &0,
+        &None,
         &None,
     );
 
@@ -2530,6 +2597,7 @@ fn test_combined_large_rate_and_duration() {
         &duration,
         &0,
         &None,
+        &None,
     );
 
     // Set time to cause potential overflow in multiplication
@@ -2563,6 +2631,7 @@ fn test_boundary_max_rate_per_second() {
         &2u64, // Short duration
         &0,
         &None,
+        &None,
     );
 
     ctx.env.ledger().set_timestamp(2);
@@ -2590,6 +2659,7 @@ fn test_boundary_min_positive_values() {
         &1u64, // Minimum duration
         &0,
         &None,
+        &None,
     );
 
     ctx.env.ledger().set_timestamp(1);
@@ -2615,6 +2685,7 @@ fn test_zero_rate_returns_zero() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -2643,6 +2714,7 @@ fn test_zero_duration_returns_zero() {
         &0u64,
         &0, // End at 0 (duration is zero)
         &None,
+        &None,
     );
 
     assert_eq!(result, Err(Ok(crate::ContractError::InvalidParams)));
@@ -2669,6 +2741,7 @@ fn test_result_capping_at_deposit() {
         &0u64,
         &duration,
         &0,
+        &None,
         &None,
     );
 
@@ -2708,6 +2781,7 @@ fn test_result_capping_with_overflow() {
         &duration,
         &0,
         &None,
+        &None,
     );
 
     ctx.env.ledger().set_timestamp(1);
@@ -2744,6 +2818,7 @@ fn test_no_panic_on_extreme_inputs() {
         &duration,
         &0,
         &None,
+        &None,
     );
 
     // Test at various timestamps
@@ -2778,6 +2853,7 @@ fn test_no_underflow_negative_result() {
         &2000u64,
         &0,
         &None,
+        &None,
     );
 
     // Query before start (though this shouldn't happen in practice)
@@ -2803,6 +2879,7 @@ fn test_elapsed_time_checked_subtraction() {
         &1000u64,
         &2000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -2842,6 +2919,7 @@ fn test_rate_times_duration_overflow_caps() {
         &duration,
         &0,
         &None,
+        &None,
     );
 
     ctx.env.ledger().set_timestamp(5);
@@ -2876,6 +2954,7 @@ fn test_accrued_never_exceeds_deposit_multiple_checks() {
         &0u64,
         &100u64, // Would accrue 5,000 at end
         &0,
+        &None,
         &None,
     );
 
@@ -2920,6 +2999,7 @@ fn test_cliff_with_overflow_scenario() {
         &50u64, // Cliff at 50
         &100u64,
         &0,
+        &None,
         &None,
     );
 
@@ -3453,6 +3533,7 @@ fn test_withdraw_to_requires_recipient_auth() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     ctx.env.ledger().set_timestamp(500);
@@ -3535,6 +3616,7 @@ fn test_batch_withdraw_mixed_active_and_completed() {
         &1000u64,
         &0,
         &None,
+        &None,
     ); // will be completed
     let id2 = ctx.client().create_stream(
         &ctx.sender,
@@ -3545,6 +3627,7 @@ fn test_batch_withdraw_mixed_active_and_completed() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     ); // active
 
@@ -3588,6 +3671,7 @@ fn test_batch_withdraw_all_completed_all_zero() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -3706,6 +3790,7 @@ fn test_batch_withdraw_multiple_streams() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
     ctx.env.ledger().set_timestamp(0);
     let id2 = ctx.client().create_stream(
@@ -3717,6 +3802,7 @@ fn test_batch_withdraw_multiple_streams() {
         &0u64,
         &500u64,
         &0,
+        &None,
         &None,
     );
 
@@ -3750,6 +3836,7 @@ fn test_batch_withdraw_mixed_state_some_zero() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -3839,6 +3926,7 @@ fn test_batch_withdraw_emits_events_per_stream() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     ctx.env.ledger().set_timestamp(250);
@@ -3889,6 +3977,7 @@ fn test_withdraw_recipient_success() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -3950,6 +4039,7 @@ fn test_withdraw_not_recipient_unauthorized() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     ctx.env.ledger().set_timestamp(500);
@@ -4006,6 +4096,7 @@ fn test_withdraw_not_recipient_unauthorized_has_no_side_effects() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -4194,6 +4285,7 @@ fn test_close_completed_stream_multiple_streams_closes_correct_one() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     let id1 = ctx.client().create_stream(
@@ -4206,6 +4298,7 @@ fn test_close_completed_stream_multiple_streams_closes_correct_one() {
         &2000u64,
         &0,
         &None,
+        &None,
     );
 
     let id2 = ctx.client().create_stream(
@@ -4217,6 +4310,7 @@ fn test_close_completed_stream_multiple_streams_closes_correct_one() {
         &0u64,
         &500u64,
         &0,
+        &None,
         &None,
     );
 
@@ -4284,6 +4378,7 @@ fn test_close_completed_stream_recipient_index_sorted_after_close() {
             &100u64,
             &0,
             &None,
+            &None,
         );
     }
 
@@ -4341,6 +4436,7 @@ fn test_close_completed_stream_after_cliff_passed() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     // Advance past cliff and end time
@@ -4374,6 +4470,7 @@ fn test_close_completed_stream_count_decreases() {
             &0u64,
             &100u64,
             &0,
+            &None,
             &None,
         );
     }
@@ -4412,6 +4509,7 @@ fn test_close_completed_stream_different_recipients_independent() {
         &100u64,
         &0,
         &None,
+        &None,
     );
 
     // Create stream for recipient2
@@ -4424,6 +4522,7 @@ fn test_close_completed_stream_different_recipients_independent() {
         &0u64,
         &100u64,
         &0,
+        &None,
         &None,
     );
 
@@ -4862,6 +4961,7 @@ fn test_multiple_streams_independent() {
         &100,
         &0,
         &None,
+        &None,
     );
 
     assert_eq!(id0, 0);
@@ -5271,6 +5371,7 @@ fn test_pause_stream_recipient_unauthorized() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     // Recipient attempts to pause (should be unauthorized)
@@ -5327,6 +5428,7 @@ fn test_pause_stream_third_party_unauthorized() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     let other = Address::generate(&ctx.env);
@@ -5381,6 +5483,7 @@ fn test_pause_stream_sender_success() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -5439,6 +5542,7 @@ fn test_pause_stream_admin_success() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -5499,6 +5603,7 @@ fn test_pause_stream_as_admin_non_admin_unauthorized() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     // A non-admin cannot use the admin override entrypoint.
@@ -5558,6 +5663,7 @@ fn test_cancel_stream_recipient_unauthorized() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     ctx.env.mock_auths(&[MockAuth {
@@ -5612,6 +5718,7 @@ fn test_cancel_stream_third_party_unauthorized() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     let other = Address::generate(&ctx.env);
@@ -5665,6 +5772,7 @@ fn test_cancel_stream_sender_success() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -5721,6 +5829,7 @@ fn test_cancel_stream_admin_success() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     ctx.env.mock_auths(&[MockAuth {
@@ -5758,6 +5867,7 @@ fn test_create_stream_negative_deposit_panics() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 }
 
@@ -5776,6 +5886,7 @@ fn test_create_stream_negative_rate_panics() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 }
@@ -5796,6 +5907,7 @@ fn test_create_stream_equal_start_end_times_panics() {
         &500u64, // start == end
         &0,
         &None,
+        &None,
     );
 }
 
@@ -5814,6 +5926,7 @@ fn test_create_stream_cliff_equals_start() {
         &100u64, // cliff == start (valid)
         &1100u64,
         &0,
+        &None,
         &None,
     );
 
@@ -5839,6 +5952,7 @@ fn test_create_stream_cliff_equals_end() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     let state = ctx.client().get_stream_state(&stream_id);
@@ -5863,6 +5977,7 @@ fn test_create_stream_increments_id_correctly() {
         &100u64,
         &0,
         &None,
+        &None,
     );
 
     let id1 = ctx.client().create_stream(
@@ -5875,6 +5990,7 @@ fn test_create_stream_increments_id_correctly() {
         &200u64,
         &0,
         &None,
+        &None,
     );
 
     let id2 = ctx.client().create_stream(
@@ -5886,6 +6002,7 @@ fn test_create_stream_increments_id_correctly() {
         &0u64,
         &300u64,
         &0,
+        &None,
         &None,
     );
 
@@ -5924,6 +6041,7 @@ fn test_create_stream_large_deposit() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     let state = ctx.client().get_stream_state(&stream_id);
@@ -5951,6 +6069,7 @@ fn test_create_stream_high_rate() {
         &duration,
         &0,
         &None,
+        &None,
     );
 
     let state = ctx.client().get_stream_state(&stream_id);
@@ -5977,6 +6096,7 @@ fn test_create_stream_different_addresses() {
         &500u64,
         &0,
         &None,
+        &None,
     );
 
     let state = ctx.client().get_stream_state(&stream_id);
@@ -5999,6 +6119,7 @@ fn test_create_stream_future_start_time() {
         &1000u64,
         &2000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -6028,6 +6149,7 @@ fn test_create_stream_token_balances() {
         &0u64,
         &500u64,
         &0,
+        &None,
         &None,
     );
 
@@ -6066,6 +6188,7 @@ fn test_create_stream_minimum_duration() {
         &1u64, // 1 second duration
         &0,
         &None,
+        &None,
     );
 
     let state = ctx.client().get_stream_state(&stream_id);
@@ -6094,6 +6217,7 @@ fn test_create_stream_all_fields_correct() {
         &cliff,
         &end,
         &0,
+        &None,
         &None,
     );
 
@@ -6128,6 +6252,7 @@ fn test_create_stream_self_stream_panics() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 }
@@ -6227,6 +6352,7 @@ fn test_create_stream_invalid_cliff_panics() {
         &200, // cliff < start
         &0,
         &None,
+        &None,
     );
 }
 
@@ -6245,6 +6371,7 @@ fn test_create_stream_edge_cliffs() {
         &1100,
         &0,
         &None,
+        &None,
     );
     assert_eq!(ctx.client().get_stream_state(&id1).cliff_time, 100);
 
@@ -6258,6 +6385,7 @@ fn test_create_stream_edge_cliffs() {
         &1100,
         &1100,
         &0,
+        &None,
         &None,
     );
     assert_eq!(ctx.client().get_stream_state(&id2).cliff_time, 1100);
@@ -6327,6 +6455,7 @@ fn test_cancel_at_start_full_refund_and_status() {
         &2000u64,
         &0,
         &None,
+        &None,
     );
 
     // Verify deposit transferred
@@ -6377,6 +6506,7 @@ fn test_cancel_at_25_percent_partial_refund_recipient_withdraws() {
         &0u64,
         &4000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -6445,6 +6575,7 @@ fn test_cancel_at_50_percent_exact_refund_calculation() {
         &3000u64,
         &0,
         &None,
+        &None,
     );
 
     let sender_before_cancel = ctx.token().balance(&ctx.sender);
@@ -6493,6 +6624,7 @@ fn test_cancel_at_75_percent_recipient_can_withdraw_accrued() {
         &4000u64,
         &0,
         &None,
+        &None,
     );
 
     // Advance to 75% completion (3000 seconds)
@@ -6538,6 +6670,7 @@ fn test_cancel_after_partial_withdrawal_correct_refund() {
         &0u64,
         &5000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -6588,6 +6721,7 @@ fn test_cancel_before_cliff_full_refund() {
         &3000u64,
         &0,
         &None,
+        &None,
     );
 
     let sender_before_cancel = ctx.token().balance(&ctx.sender);
@@ -6630,6 +6764,7 @@ fn test_cancel_after_cliff_partial_refund() {
         &2000u64, // cliff at 50%
         &4000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -6677,6 +6812,7 @@ fn test_cancel_paused_stream_accrual_continues() {
         &0u64,
         &3000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -6729,6 +6865,7 @@ fn test_cancel_balance_consistency() {
         &0u64,
         &7000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -6796,6 +6933,7 @@ fn test_get_stream_state_create_stream() {
         &5000u64,
         &0,
         &None,
+        &None,
     );
 
     let state = ctx.client().get_stream_state(&stream_id);
@@ -6824,6 +6962,7 @@ fn test_get_stream_state_create_stream_withdraw_during_cliff() {
         &1000u64, // cliff equals start
         &5000u64,
         &0,
+        &None,
         &None,
     );
     ctx.env.ledger().set_timestamp(1000);
@@ -6856,6 +6995,7 @@ fn test_get_stream_state_create_stream_withdraw() {
         &5000u64,
         &0,
         &None,
+        &None,
     );
     ctx.env.ledger().set_timestamp(6000);
     ctx.client().withdraw(&stream_id);
@@ -6887,6 +7027,7 @@ fn test_get_stream_state_create_stream_cancel() {
         &5000u64,
         &0,
         &None,
+        &None,
     );
     ctx.client().cancel_stream(&stream_id);
 
@@ -6916,6 +7057,7 @@ fn test_get_stream_state_pause_stream_cancel() {
         &1000u64, // cliff equals start
         &5000u64,
         &0,
+        &None,
         &None,
     );
     ctx.client()
@@ -6947,6 +7089,7 @@ fn test_get_stream_state_pause_resume_stream_cancel() {
         &1000u64, // cliff equals start
         &5000u64,
         &0,
+        &None,
         &None,
     );
     ctx.client()
@@ -7440,6 +7583,7 @@ fn test_withdraw_excess_deposit_only_streams_calculated_amount() {
         &1000u64, // duration 1000s, so only 1000 will stream
         &0,
         &None,
+        &None,
     );
 
     // At end, only 1000 should be withdrawable (rate * duration)
@@ -7490,6 +7634,7 @@ fn test_withdraw_small_rate_no_underflow() {
         &0u64,
         &100u64, // 100 seconds for 100 tokens total
         &0,
+        &None,
         &None,
     );
 
@@ -8127,6 +8272,7 @@ fn test_stream_id_first_stream_is_zero() {
         &100u64,
         &0,
         &None,
+        &None,
     );
 
     assert_eq!(id, 0, "first stream_id must be 0");
@@ -8154,6 +8300,7 @@ fn test_stream_id_increments_by_one() {
         &100u64,
         &0,
         &None,
+        &None,
     );
     let id1 = ctx.client().create_stream(
         &ctx.sender,
@@ -8165,6 +8312,7 @@ fn test_stream_id_increments_by_one() {
         &100u64,
         &0,
         &None,
+        &None,
     );
     let id2 = ctx.client().create_stream(
         &ctx.sender,
@@ -8175,6 +8323,7 @@ fn test_stream_id_increments_by_one() {
         &0u64,
         &100u64,
         &0,
+        &None,
         &None,
     );
 
@@ -8200,6 +8349,7 @@ fn test_create_stream_returned_id_matches_stored_id() {
             &0u64,
             &100u64,
             &0,
+            &None,
             &None,
         );
         let stored = ctx.client().get_stream_state(&returned_id);
@@ -8510,6 +8660,7 @@ fn test_stream_ids_are_unique_no_gaps() {
             &10u64,
             &0,
             &None,
+            &None,
         );
         assert_eq!(id, expected, "stream {expected} must have id {expected}");
         ids.push_back(id);
@@ -8546,6 +8697,7 @@ fn test_failed_create_stream_does_not_advance_counter() {
         &100u64,
         &0,
         &None,
+        &None,
     );
     assert_eq!(id0, 0);
 
@@ -8560,6 +8712,7 @@ fn test_failed_create_stream_does_not_advance_counter() {
         &100u64,
         &0,
         &None,
+        &None,
     );
     assert_eq!(result, Err(Ok(ContractError::InsufficientDeposit)));
 
@@ -8573,6 +8726,7 @@ fn test_failed_create_stream_does_not_advance_counter() {
         &0u64,
         &100u64,
         &0,
+        &None,
         &None,
     );
     assert_eq!(
@@ -8604,6 +8758,7 @@ fn test_stream_ids_unique_across_different_senders() {
         &100u64,
         &0,
         &None,
+        &None,
     );
     let id_b = ctx.client().create_stream(
         &sender2,
@@ -8615,6 +8770,7 @@ fn test_stream_ids_unique_across_different_senders() {
         &100u64,
         &0,
         &None,
+        &None,
     );
     let id_c = ctx.client().create_stream(
         &ctx.sender,
@@ -8625,6 +8781,7 @@ fn test_stream_ids_unique_across_different_senders() {
         &0u64,
         &100u64,
         &0,
+        &None,
         &None,
     );
 
@@ -8654,6 +8811,7 @@ fn test_stream_id_stability_after_state_changes() {
         &100u64,
         &0,
         &None,
+        &None,
     );
     let id1 = ctx.client().create_stream(
         &ctx.sender,
@@ -8665,6 +8823,7 @@ fn test_stream_id_stability_after_state_changes() {
         &100u64,
         &0,
         &None,
+        &None,
     );
     let id2 = ctx.client().create_stream(
         &ctx.sender,
@@ -8675,6 +8834,7 @@ fn test_stream_id_stability_after_state_changes() {
         &0u64,
         &100u64,
         &0,
+        &None,
         &None,
     );
 
@@ -8698,6 +8858,7 @@ fn test_stream_id_stability_after_state_changes() {
         &0u64,
         &100u64,
         &0,
+        &None,
         &None,
     );
     assert_eq!(
@@ -9102,6 +9263,7 @@ fn test_create_stream_large_rate_overflow_in_accrual() {
         &end_time,
         &0,
         &None,
+        &None,
     );
 
     ctx.env.ledger().set_timestamp(end_time);
@@ -9135,6 +9297,7 @@ fn test_accrual_capped_at_exact_total() {
         &end_time,
         &0,
         &None,
+        &None,
     );
 
     ctx.env.ledger().set_timestamp(end_time);
@@ -9167,6 +9330,7 @@ fn test_accrual_capped_when_deposit_exceeds_total() {
         &cliff_time,
         &end_time,
         &0,
+        &None,
         &None,
     );
 
@@ -9202,6 +9366,7 @@ fn test_create_streams_batch_success() {
         cliff_time: 0,
         end_time: 1000,
         memo: None,
+        metadata: None,
     };
 
     let params2 = CreateStreamParams {
@@ -9213,6 +9378,7 @@ fn test_create_streams_batch_success() {
         cliff_time: 200,
         end_time: 1100,
         memo: None,
+        metadata: None,
     };
 
     let params3 = CreateStreamParams {
@@ -9224,6 +9390,7 @@ fn test_create_streams_batch_success() {
         cliff_time: 500,
         end_time: 1500,
         memo: None,
+        metadata: None,
     };
 
     let streams = vec![&ctx.env, params1.clone(), params2.clone(), params3.clone()];
@@ -9274,6 +9441,7 @@ fn test_create_streams_batch_atomic_failure() {
         cliff_time: 0,
         end_time: 1000,
         memo: None,
+        metadata: None,
     };
 
     let invalid_params = CreateStreamParams {
@@ -9285,6 +9453,7 @@ fn test_create_streams_batch_atomic_failure() {
         cliff_time: 0,
         end_time: 1000,
         memo: None,
+        metadata: None,
     };
 
     let streams = vec![&ctx.env, valid_params, invalid_params];
@@ -9334,6 +9503,7 @@ fn test_create_streams_batch_sender_recipient_panic() {
         cliff_time: 0,
         end_time: 1000,
         memo: None,
+        metadata: None,
     };
 
     let streams = vec![&ctx.env, params];
@@ -9354,6 +9524,7 @@ fn test_create_streams_batch_sender_recipient_has_no_side_effects() {
         cliff_time: 0,
         end_time: 1000,
         memo: None,
+        metadata: None,
     };
 
     let streams = vec![&ctx.env, params];
@@ -9559,6 +9730,7 @@ fn test_create_streams_batch_strict_auth() {
         cliff_time: 0,
         end_time: 1000,
         memo: None,
+        metadata: None,
     };
 
     let params2 = CreateStreamParams {
@@ -9570,6 +9742,7 @@ fn test_create_streams_batch_strict_auth() {
         cliff_time: 0,
         end_time: 2000,
         memo: None,
+        metadata: None,
     };
 
     let streams = vec![&ctx.env, params1.clone(), params2.clone()];
@@ -9605,6 +9778,7 @@ fn test_create_streams_batch_emits_created_events_with_payloads() {
         cliff_time: 0,
         end_time: 1111,
         memo: None,
+        metadata: None,
     };
     let params2 = CreateStreamParams {
         withdraw_dust_threshold: None,
@@ -9615,6 +9789,7 @@ fn test_create_streams_batch_emits_created_events_with_payloads() {
         cliff_time: 10,
         end_time: 1121,
         memo: None,
+        metadata: None,
     };
     let streams = vec![&ctx.env, params1.clone(), params2.clone()];
     let events_before = ctx.env.events().all().len();
@@ -9665,6 +9840,7 @@ fn test_create_streams_batch_total_deposit_overflow_has_no_side_effects() {
         cliff_time: 0,
         end_time: 1,
         memo: None,
+        metadata: None,
     };
     let params2 = CreateStreamParams {
         withdraw_dust_threshold: None,
@@ -9675,6 +9851,7 @@ fn test_create_streams_batch_total_deposit_overflow_has_no_side_effects() {
         cliff_time: 0,
         end_time: 1,
         memo: None,
+        metadata: None,
     };
     let streams = vec![&ctx.env, params1, params2];
 
@@ -9727,6 +9904,7 @@ fn test_create_streams_batch_wrong_auth_fails_without_side_effects() {
         cliff_time: 0,
         end_time: 1000,
         memo: None,
+        metadata: None,
     };
     let streams = vec![&ctx.env, params.clone()];
     let stream_count_before = ctx.client().get_stream_count();
@@ -9908,6 +10086,7 @@ fn test_create_stream_start_time_in_past_panics() {
         &1999u64,
         &0,
         &None,
+        &None,
     );
     assert_eq!(result, Err(Ok(ContractError::StartTimeInPast)));
 }
@@ -9926,6 +10105,7 @@ fn test_create_stream_start_time_one_second_before_now_panics() {
         &499u64,
         &1499u64,
         &0,
+        &None,
         &None,
     );
     assert_eq!(result, Err(Ok(ContractError::StartTimeInPast)));
@@ -9946,6 +10126,7 @@ fn test_create_stream_start_time_far_in_past_panics() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
     assert_eq!(result, Err(Ok(ContractError::StartTimeInPast)));
 }
@@ -9964,6 +10145,7 @@ fn test_create_stream_start_time_equals_now_succeeds() {
         &500u64,
         &1500u64,
         &0,
+        &None,
         &None,
     );
     let state = ctx.client().get_stream_state(&stream_id);
@@ -9986,6 +10168,7 @@ fn test_create_stream_start_time_one_second_in_future_succeeds() {
         &1501u64,
         &0,
         &None,
+        &None,
     );
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.start_time, 501);
@@ -10006,6 +10189,7 @@ fn test_create_stream_start_time_future_succeeds() {
         &5000u64,
         &6000u64,
         &0,
+        &None,
         &None,
     );
     let state = ctx.client().get_stream_state(&stream_id);
@@ -10029,6 +10213,7 @@ fn test_create_stream_start_time_zero_at_genesis_succeeds() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
     let state = ctx.client().get_stream_state(&stream_id);
@@ -10057,6 +10242,7 @@ fn test_create_stream_past_start_no_token_transfer() {
         &500u64,
         &1500u64,
         &0,
+        &None,
         &None,
     );
     assert_eq!(result, Err(Ok(ContractError::StartTimeInPast)));
@@ -10389,6 +10575,7 @@ fn test_update_rate_per_second_increases_rate_and_preserves_accrual() {
         &1_000u64,
         &0,
         &None,
+        &None,
     );
 
     // Mid-stream, record accrued with the original rate.
@@ -10483,6 +10670,7 @@ fn test_update_rate_per_second_works_on_paused_stream() {
         &1_000u64,
         &0,
         &None,
+        &None,
     );
 
     // Pause the stream.
@@ -10536,6 +10724,7 @@ fn test_update_rate_per_second_rejects_rate_decrease() {
         &1_000u64,
         &0,
         &None,
+        &None,
     );
 
     // Attempting to decrease rate from 5 → 3 must panic.
@@ -10557,6 +10746,7 @@ fn test_update_rate_per_second_before_cliff() {
         &500,
         &1000,
         &0,
+        &None,
         &None,
     );
 
@@ -10594,6 +10784,7 @@ fn test_update_rate_per_second_at_cliff() {
         &500,
         &1000,
         &0,
+        &None,
         &None,
     );
 
@@ -10642,6 +10833,7 @@ fn test_update_rate_per_second_near_end_time() {
         &1_000u64,
         &0,
         &None,
+        &None,
     );
 
     // Near end at t=950.
@@ -10679,6 +10871,7 @@ fn test_update_rate_per_second_after_end_time() {
         &1_000u64,
         &0,
         &None,
+        &None,
     );
 
     // After end_time at t=1500.
@@ -10710,6 +10903,7 @@ fn test_update_rate_per_second_with_partial_withdrawal() {
         &0u64,
         &1_000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -10750,6 +10944,7 @@ fn test_update_rate_per_second_emits_event() {
         &0u64,
         &1_000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -10796,6 +10991,7 @@ fn test_update_rate_per_second_on_paused_stream_after_partial_withdrawal() {
         &1_000u64,
         &0,
         &None,
+        &None,
     );
 
     // At t=300, withdraw partial amount.
@@ -10841,6 +11037,7 @@ fn test_update_rate_per_second_after_partial_withdrawal_then_resume_and_withdraw
         &0u64,
         &1_000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -10908,6 +11105,7 @@ fn test_update_rate_per_second_unauthorized_caller() {
         &1_000u64,
         &0,
         &None,
+        &None,
     );
 
     // Attempt to update rate as recipient (not sender) without proper auth.
@@ -10940,6 +11138,7 @@ fn test_update_rate_per_second_multiple_times() {
         &0u64,
         &1_000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -10980,6 +11179,7 @@ fn test_update_rate_per_second_preserves_other_fields() {
         &200u64,
         &1_000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -11035,6 +11235,7 @@ fn test_update_rate_per_second_interaction_with_pause_resume() {
         &1_000u64,
         &0,
         &None,
+        &None,
     );
 
     // Pause at t=100.
@@ -11071,6 +11272,7 @@ fn test_update_rate_per_second_exact_deposit_coverage() {
         &0u64,
         &1_000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -11158,6 +11360,7 @@ fn test_shorten_stream_end_time_rejects_equal_or_later_end_time() {
         &1_000u64,
         &0,
         &None,
+        &None,
     );
 
     // Equal old end_time is not a shorten.
@@ -11232,6 +11435,7 @@ fn test_shorten_stream_end_time_unauthorized_caller() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -11328,6 +11532,7 @@ fn test_extend_stream_end_time_preserves_accrued_and_allows_longer_accrual() {
         &1_000u64,
         &0,
         &None,
+        &None,
     );
 
     // At t=800, accrued should be 800.
@@ -11402,6 +11607,7 @@ fn test_recipient_stream_index_sorted_order() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     let id2 = ctx.client().create_stream(
@@ -11414,6 +11620,7 @@ fn test_recipient_stream_index_sorted_order() {
         &2000u64,
         &0,
         &None,
+        &None,
     );
 
     let id3 = ctx.client().create_stream(
@@ -11425,6 +11632,7 @@ fn test_recipient_stream_index_sorted_order() {
         &0u64,
         &500u64,
         &0,
+        &None,
         &None,
     );
 
@@ -11465,6 +11673,7 @@ fn test_recipient_stream_count() {
         &2000u64,
         &0,
         &None,
+        &None,
     );
     assert_eq!(ctx.client().get_recipient_stream_count(&ctx.recipient), 2);
 
@@ -11478,6 +11687,7 @@ fn test_recipient_stream_count() {
         &0u64,
         &500u64,
         &0,
+        &None,
         &None,
     );
     assert_eq!(ctx.client().get_recipient_stream_count(&ctx.recipient), 3);
@@ -11503,6 +11713,7 @@ fn test_recipient_stream_index_separate_per_recipient() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     let id2 = ctx.client().create_stream(
@@ -11514,6 +11725,7 @@ fn test_recipient_stream_index_separate_per_recipient() {
         &0u64,
         &2000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -11527,6 +11739,7 @@ fn test_recipient_stream_index_separate_per_recipient() {
         &500u64,
         &0,
         &None,
+        &None,
     );
 
     let id4 = ctx.client().create_stream(
@@ -11538,6 +11751,7 @@ fn test_recipient_stream_index_separate_per_recipient() {
         &0u64,
         &3000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -11602,6 +11816,7 @@ fn test_recipient_stream_index_sorted_after_operations() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     let id1 = ctx.client().create_stream(
@@ -11614,6 +11829,7 @@ fn test_recipient_stream_index_sorted_after_operations() {
         &2000u64,
         &0,
         &None,
+        &None,
     );
 
     let _id2 = ctx.client().create_stream(
@@ -11625,6 +11841,7 @@ fn test_recipient_stream_index_sorted_after_operations() {
         &0u64,
         &500u64,
         &0,
+        &None,
         &None,
     );
 
@@ -11665,6 +11882,7 @@ fn test_recipient_stream_index_with_batch_withdraw() {
         &2000u64,
         &0,
         &None,
+        &None,
     );
     let id2 = ctx.client().create_stream(
         &ctx.sender,
@@ -11675,6 +11893,7 @@ fn test_recipient_stream_index_with_batch_withdraw() {
         &0u64,
         &500u64,
         &0,
+        &None,
         &None,
     );
 
@@ -11804,6 +12023,7 @@ fn test_recipient_stream_index_many_streams() {
             &100u64,
             &0,
             &None,
+            &None,
         );
     }
 
@@ -11864,6 +12084,7 @@ fn test_recipient_stream_index_multiple_senders() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     let id2 = ctx.client().create_stream(
@@ -11876,6 +12097,7 @@ fn test_recipient_stream_index_multiple_senders() {
         &2000u64,
         &0,
         &None,
+        &None,
     );
 
     let id3 = ctx.client().create_stream(
@@ -11887,6 +12109,7 @@ fn test_recipient_stream_index_multiple_senders() {
         &0u64,
         &500u64,
         &0,
+        &None,
         &None,
     );
 
@@ -12230,6 +12453,7 @@ fn test_create_stream_contract_paused_returns_structured_error() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 }
 
@@ -12252,6 +12476,7 @@ fn test_create_streams_batch_contract_paused_returns_structured_error() {
             cliff_time: 0,
             end_time: 1000,
             memo: None,
+            metadata: None,
         }],
     );
 
@@ -12275,6 +12500,7 @@ fn test_global_pause_does_not_affect_existing_streams() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -12324,6 +12550,7 @@ fn test_create_streams_batch_start_time_in_past_returns_structured_error() {
             cliff_time: 500,
             end_time: 1500,
             memo: None,
+            metadata: None,
         }],
     );
 
@@ -12369,6 +12596,7 @@ fn test_create_stream_rate_times_duration_overflow_panics_no_state_change() {
             &start,
             &end,
             &0,
+            &None,
             &None,
         )
     }));
@@ -12417,6 +12645,7 @@ fn test_create_stream_event_payload_matches_events_md_schema() {
         &end,
         &0,
         &None,
+        &None,
     );
 
     // The last event must be the StreamCreated event.
@@ -12456,6 +12685,7 @@ fn test_create_stream_past_start_emits_no_events() {
         &1400u64,
         &0,
         &None,
+        &None,
     );
     assert!(result.is_err());
 
@@ -12487,6 +12717,7 @@ fn test_create_stream_exact_minimum_deposit_stored_fields_are_exact() {
         &0u64,
         &duration,
         &0,
+        &None,
         &None,
     );
 
@@ -12565,6 +12796,7 @@ fn test_create_stream_only_sender_auth_required() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     let state = ctx.client().get_stream_state(&stream_id);
@@ -12631,6 +12863,7 @@ fn test_extend_end_time_deposit_exactly_covers_new_duration() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     // Extend to 2000: rate(1) * new_duration(2000) == deposit(2000) — exact boundary
@@ -12660,6 +12893,7 @@ fn test_extend_end_time_deposit_exceeds_new_duration_requirement() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     // Extend to 3000: rate(1) * 3000 = 3000 < deposit(5000) — surplus remains
@@ -12685,6 +12919,7 @@ fn test_extend_end_time_paused_stream_succeeds() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -12722,6 +12957,7 @@ fn test_extend_end_time_accrual_unchanged_at_extension_time() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     ctx.env.ledger().set_timestamp(600);
@@ -12753,6 +12989,7 @@ fn test_extend_end_time_accrual_continues_to_new_end() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -12792,6 +13029,7 @@ fn test_extend_end_time_recipient_can_withdraw_extended_accrual() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -12835,6 +13073,7 @@ fn test_extend_end_time_after_top_up_succeeds() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     // Extension to 1500 would need 1500 tokens — currently blocked
@@ -12874,6 +13113,7 @@ fn test_extend_end_time_emits_correct_event() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     ctx.client().extend_stream_end_time(&stream_id, &2000u64);
@@ -12904,6 +13144,7 @@ fn test_extend_end_time_no_token_transfer() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -12936,6 +13177,7 @@ fn test_extend_end_time_deposit_one_short_rejected() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     // Extending to 1001 requires 1001 tokens; deposit is only 1000
@@ -12959,6 +13201,7 @@ fn test_extend_end_time_deposit_far_below_new_requirement_rejected() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -12984,6 +13227,7 @@ fn test_extend_end_time_completed_stream_rejected() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -13014,6 +13258,7 @@ fn test_extend_end_time_cancelled_stream_rejected() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -13171,6 +13416,7 @@ fn test_get_recipient_streams_batch_create_updates_index() {
                 cliff_time: 0,
                 end_time: 500,
                 memo: None,
+                metadata: None,
             },
             CreateStreamParams {
                 withdraw_dust_threshold: None,
@@ -13181,6 +13427,7 @@ fn test_get_recipient_streams_batch_create_updates_index() {
                 cliff_time: 0,
                 end_time: 1000,
                 memo: None,
+                metadata: None,
             },
         ],
     );
@@ -13219,6 +13466,7 @@ fn test_get_recipient_streams_batch_create_separate_recipient_indices() {
                 cliff_time: 0,
                 end_time: 500,
                 memo: None,
+                metadata: None,
             },
             CreateStreamParams {
                 withdraw_dust_threshold: None,
@@ -13229,6 +13477,7 @@ fn test_get_recipient_streams_batch_create_separate_recipient_indices() {
                 cliff_time: 0,
                 end_time: 1000,
                 memo: None,
+                metadata: None,
             },
         ],
     );
@@ -13263,6 +13512,7 @@ fn test_get_recipient_streams_sorted_after_interleaved_close() {
             &0u64,
             &1000u64,
             &0,
+            &None,
             &None,
         );
     }
@@ -13309,6 +13559,7 @@ fn test_get_recipient_stream_count_matches_list_len() {
             &0u64,
             &1000u64,
             &0,
+            &None,
             &None,
         );
     }
@@ -13362,6 +13613,7 @@ fn test_get_recipient_streams_ids_resolve_to_correct_recipient() {
             &1000u64,
             &0,
             &None,
+            &None,
         );
     }
 
@@ -13396,6 +13648,7 @@ fn test_get_recipient_streams_single_second_stream() {
         &0u64,
         &1u64,
         &0,
+        &None,
         &None,
     );
 
@@ -13469,6 +13722,7 @@ fn test_extend_end_time_same_end_time_rejected() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     // Same end_time — not an extension
@@ -13491,6 +13745,7 @@ fn test_extend_end_time_shorter_end_time_rejected() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -13536,6 +13791,7 @@ fn test_extend_end_time_recipient_unauthorized() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -13593,6 +13849,7 @@ fn test_extend_end_time_third_party_unauthorized() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     let other = Address::generate(&ctx.env);
@@ -13648,6 +13905,7 @@ fn test_extend_end_time_sender_authorized() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     ctx.env.mock_auths(&[MockAuth {
@@ -13688,6 +13946,7 @@ fn test_extend_end_time_overflow_panics_no_state_change() {
         &0u64,
         &1u64,
         &0,
+        &None,
         &None,
     );
 
@@ -13731,6 +13990,7 @@ fn test_extend_end_time_high_rate_exact_boundary() {
         &1u64, // 1 second initially
         &0,
         &None,
+        &None,
     );
 
     // Extend to 2 seconds: rate(1_000_000) * 2 = 2_000_000 == deposit — exact boundary
@@ -13758,6 +14018,7 @@ fn test_extend_end_time_failed_leaves_state_unchanged() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -13791,6 +14052,7 @@ fn test_extend_end_time_failed_emits_no_event() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -13826,6 +14088,7 @@ fn test_extend_end_time_cliff_preserved() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     ctx.client().extend_stream_end_time(&stream_id, &3000u64);
@@ -13860,6 +14123,7 @@ fn test_extend_end_time_integration_full_withdrawal() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -13935,6 +14199,7 @@ fn strict_create_stream(ctx: &TestContext) -> u64 {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     )
 }
@@ -14376,6 +14641,7 @@ fn test_admin_pause_at_start_time() {
         &1100,
         &0,
         &None,
+        &None,
     );
 
     ctx.env.ledger().set_timestamp(start_time);
@@ -14401,6 +14667,7 @@ fn test_admin_pause_at_cliff_time() {
         &cliff_time,
         &1100,
         &0,
+        &None,
         &None,
     );
 
@@ -14428,6 +14695,7 @@ fn test_admin_pause_at_end_time_fails() {
         &end_time,
         &0,
         &None,
+        &None,
     );
 
     ctx.env.ledger().set_timestamp(end_time);
@@ -14454,6 +14722,7 @@ fn test_withdraw_from_paused_at_end_time() {
         &0,
         &end_time,
         &0,
+        &None,
         &None,
     );
 
@@ -14587,6 +14856,7 @@ fn test_pause_stream_as_admin_recipient_is_not_admin() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     // Recipient tries to use pause_stream_as_admin - must fail
@@ -14624,6 +14894,7 @@ fn test_pause_stream_as_admin_third_party_unauthorized() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -14667,6 +14938,7 @@ fn test_resume_stream_as_admin_recipient_unauthorized() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     // Admin pauses the stream first
@@ -14706,6 +14978,7 @@ fn test_resume_stream_as_admin_third_party_unauthorized() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -14748,6 +15021,7 @@ fn test_pause_authorization_matrix() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     // Admin can pause
@@ -14775,6 +15049,7 @@ fn test_resume_authorization_matrix() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
     ctx.client()
@@ -14974,7 +15249,7 @@ fn regression_double_init_repeated_attacks_do_not_degrade_contract() {
     // Contract must still work normally — create a stream, withdraw, verify
     env.ledger().set_timestamp(0);
     let stream_id = client.create_stream(
-        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &0, &None,
+        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &0, &None, &None,
     );
     assert_eq!(stream_id, 0);
     assert_eq!(client.get_stream_count(), 1);
@@ -15020,7 +15295,7 @@ fn regression_double_init_existing_stream_survives() {
     // Create a stream
     env.ledger().set_timestamp(0);
     let stream_id = client.create_stream(
-        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &0, &None,
+        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &0, &None, &None,
     );
 
     // Attempt re-init
@@ -15072,10 +15347,10 @@ fn regression_double_init_counter_continuity() {
     // Create two streams (counter should be 2)
     env.ledger().set_timestamp(0);
     let id0 = client.create_stream(
-        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &0, &None,
+        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &0, &None, &None,
     );
     let id1 = client.create_stream(
-        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &0, &None,
+        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &0, &None, &None,
     );
     assert_eq!(id0, 0);
     assert_eq!(id1, 1);
@@ -15089,7 +15364,7 @@ fn regression_double_init_counter_continuity() {
     // Counter must still be 2 and next stream must be ID 2
     assert_eq!(client.get_stream_count(), 2);
     let id2 = client.create_stream(
-        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &0, &None,
+        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &0, &None, &None,
     );
     assert_eq!(
         id2, 2,
@@ -15171,7 +15446,7 @@ fn regression_missing_config_create_stream_panics() {
 
     env.ledger().set_timestamp(0);
     client.create_stream(
-        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &0, &None,
+        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &0, &None, &None,
     );
 }
 
@@ -15195,6 +15470,7 @@ fn regression_missing_config_create_streams_batch_panics() {
         cliff_time: 0,
         end_time: 1000,
         memo: None,
+        metadata: None,
     };
 
     env.ledger().set_timestamp(0);
@@ -15570,7 +15846,7 @@ fn regression_double_init_interleaved_with_lifecycle() {
     // Phase 1: Create stream, attempt re-init, verify stream
     env.ledger().set_timestamp(0);
     let stream_id = client.create_stream(
-        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &0, &None,
+        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &0, &None, &None,
     );
     assert_eq!(stream_id, 0);
 
@@ -15613,7 +15889,7 @@ fn regression_double_init_interleaved_with_lifecycle() {
     // Phase 4: Create another stream after all the chaos — counter must be correct
     env.ledger().set_timestamp(2000);
     let stream_id2 = client.create_stream(
-        &sender, &recipient, &2000_i128, &1_i128, &2000u64, &2000u64, &4000u64, &0, &None,
+        &sender, &recipient, &2000_i128, &1_i128, &2000u64, &2000u64, &4000u64, &0, &None, &None,
     );
     assert_eq!(stream_id2, 1);
     assert_eq!(client.get_stream_count(), 2);
@@ -16272,6 +16548,7 @@ fn test_batch_withdraw_mixed_stream_states_comprehensive() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     let id_paused = ctx.client().create_stream(
@@ -16283,6 +16560,7 @@ fn test_batch_withdraw_mixed_stream_states_comprehensive() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -16296,6 +16574,7 @@ fn test_batch_withdraw_mixed_stream_states_comprehensive() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     let id_completed = ctx.client().create_stream(
@@ -16308,6 +16587,7 @@ fn test_batch_withdraw_mixed_stream_states_comprehensive() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     let id_active_2 = ctx.client().create_stream(
@@ -16319,6 +16599,7 @@ fn test_batch_withdraw_mixed_stream_states_comprehensive() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -16438,6 +16719,7 @@ fn test_create_streams_batch_recipient_index_consistency() {
                 cliff_time: 1000,
                 end_time: 2000,
                 memo: None,
+                metadata: None,
             },
             CreateStreamParams {
                 withdraw_dust_threshold: None,
@@ -16448,6 +16730,7 @@ fn test_create_streams_batch_recipient_index_consistency() {
                 cliff_time: 1000,
                 end_time: 3000,
                 memo: None,
+                metadata: None,
             },
             CreateStreamParams {
                 withdraw_dust_threshold: None,
@@ -16458,6 +16741,7 @@ fn test_create_streams_batch_recipient_index_consistency() {
                 cliff_time: 1000,
                 end_time: 2500,
                 memo: None,
+                metadata: None,
             },
             CreateStreamParams {
                 withdraw_dust_threshold: None,
@@ -16468,6 +16752,7 @@ fn test_create_streams_batch_recipient_index_consistency() {
                 cliff_time: 1000,
                 end_time: 4000,
                 memo: None,
+                metadata: None,
             },
             CreateStreamParams {
                 withdraw_dust_threshold: None,
@@ -16478,6 +16763,7 @@ fn test_create_streams_batch_recipient_index_consistency() {
                 cliff_time: 1000,
                 end_time: 3500,
                 memo: None,
+                metadata: None,
             },
         ],
     );
@@ -16543,6 +16829,7 @@ fn test_create_streams_batch_recipient_index_consistency() {
             cliff_time: 0,
             end_time: 500,
             memo: None,
+            metadata: None,
         }],
     );
 
@@ -16577,6 +16864,7 @@ fn test_create_stream_total_streamable_overflow() {
         &2u64,
         &0,
         &None,
+        &None,
     );
 
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
@@ -16601,6 +16889,7 @@ fn test_create_streams_batch_deposit_overflow() {
         cliff_time: 0,
         end_time: 10,
         memo: None,
+        metadata: None,
     });
 
     streams.push_back(CreateStreamParams {
@@ -16612,6 +16901,7 @@ fn test_create_streams_batch_deposit_overflow() {
         cliff_time: 0,
         end_time: 10,
         memo: None,
+        metadata: None,
     });
 
     let result = ctx.client().try_create_streams(&ctx.sender, &streams);
@@ -16638,6 +16928,7 @@ fn test_top_up_stream_overflow() {
         &0,
         &10,
         &0,
+        &None,
         &None,
     );
 
@@ -16749,6 +17040,7 @@ fn test_budget_batch_withdraw_10_streams() {
             &1000u64,
             &0,
             &None,
+            &None,
         );
         ids.push_back(id);
     }
@@ -16795,6 +17087,7 @@ fn test_budget_batch_withdraw_cheaper_than_n_singles() {
             &0u64,
             &1000u64,
             &0,
+            &None,
             &None,
         );
         ids.push_back(id);
@@ -16924,6 +17217,7 @@ fn test_budget_create_streams_batch_5() {
             cliff_time: 0,
             end_time: 1000,
             memo: None,
+            metadata: None,
         });
     }
 
@@ -16962,6 +17256,7 @@ fn test_create_streams_batch_atomicity_on_invalid_entry() {
         cliff_time: 0,
         end_time: 1000,
         memo: None,
+        metadata: None,
     };
     // deposit < rate * duration → InsufficientDeposit
     let invalid = CreateStreamParams {
@@ -16973,6 +17268,7 @@ fn test_create_streams_batch_atomicity_on_invalid_entry() {
         cliff_time: 0,
         end_time: 1000,
         memo: None,
+        metadata: None,
     };
 
     let count_before = ctx.client().get_stream_count();
@@ -17014,6 +17310,7 @@ fn test_create_streams_single_entry_matches_create_stream() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     // Single-entry create_streams
@@ -17027,6 +17324,7 @@ fn test_create_streams_single_entry_matches_create_stream() {
         cliff_time: 0,
         end_time: 1000,
         memo: None,
+        metadata: None,
     });
     let ids = ctx.client().create_streams(&ctx.sender, &params);
     let id_batch = ids.get(0).unwrap();
@@ -17066,6 +17364,7 @@ fn test_create_streams_batch_deposit_overflow_is_atomic() {
             cliff_time: 0,
             end_time: duration,
             memo: None,
+            metadata: None,
         });
     }
 
@@ -17124,6 +17423,7 @@ mod negative_pause_resume_auth {
             &0,
             &1000,
             &0,
+            &None,
             &None,
         );
         (ctx, stream_id)
@@ -17558,6 +17858,7 @@ mod i128_boundary_streams {
             &1u64,
             &0,
             &None,
+            &None,
         );
 
         let state = client.get_stream_state(&stream_id);
@@ -17589,6 +17890,7 @@ mod i128_boundary_streams {
             &1_000u64,
             &0,
             &None,
+            &None,
         );
 
         let state = client.get_stream_state(&stream_id);
@@ -17614,6 +17916,7 @@ mod i128_boundary_streams {
             &0u64,
             &1u64,
             &0,
+            &None,
             &None,
         );
 
@@ -17644,7 +17947,7 @@ mod i128_boundary_streams {
         let count_before = client.get_stream_count();
         let result = client.try_create_stream(
             &sender, &recipient, &deposit, &rate, &0u64, &0u64, &3u64, // rate * 3 overflows
-            &0, &None,
+            &0, &None, &None,
         );
 
         assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
@@ -17673,7 +17976,7 @@ mod i128_boundary_streams {
         env.ledger().set_timestamp(0);
 
         let result = client.try_create_stream(
-            &sender, &recipient, &deposit, &rate, &0u64, &0u64, &duration, &0, &None,
+            &sender, &recipient, &deposit, &rate, &0u64, &0u64, &duration, &0, &None, &None,
         );
 
         assert_eq!(result, Err(Ok(ContractError::InsufficientDeposit)));
@@ -17705,6 +18008,7 @@ mod i128_boundary_streams {
             &1u64,
             &0,
             &None,
+            &None,
         );
 
         let accrued = client.calculate_accrued(&stream_id);
@@ -17727,6 +18031,7 @@ mod i128_boundary_streams {
             &0u64,
             &1u64,
             &0,
+            &None,
             &None,
         );
 
@@ -17751,6 +18056,7 @@ mod i128_boundary_streams {
             &0u64,
             &1u64,
             &0,
+            &None,
             &None,
         );
 
@@ -17778,6 +18084,7 @@ mod i128_boundary_streams {
             &1_000u64,
             &0,
             &None,
+            &None,
         );
 
         env.ledger().set_timestamp(499);
@@ -17803,6 +18110,7 @@ mod i128_boundary_streams {
             &500u64,
             &1_000u64,
             &0,
+            &None,
             &None,
         );
 
@@ -17842,6 +18150,7 @@ mod i128_boundary_streams {
             &1u64,
             &0,
             &None,
+            &None,
         );
 
         // Set time far past end — elapsed is capped at end_time=1, no overflow possible
@@ -17875,6 +18184,7 @@ mod i128_boundary_streams {
             &1u64,
             &0,
             &None,
+            &None,
         );
 
         env.ledger().set_timestamp(1);
@@ -17905,6 +18215,7 @@ mod i128_boundary_streams {
             &0u64,
             &1u64,
             &0,
+            &None,
             &None,
         );
 
@@ -17949,6 +18260,7 @@ mod i128_boundary_streams {
             &0u64,
             &1_000u64,
             &0,
+            &None,
             &None,
         );
 
@@ -17999,6 +18311,7 @@ mod i128_boundary_streams {
             &1_000u64,
             &0,
             &None,
+            &None,
         );
 
         // Cancel immediately at t=0
@@ -18031,6 +18344,7 @@ mod i128_boundary_streams {
             &0u64,
             &1_000u64,
             &0,
+            &None,
             &None,
         );
 
@@ -18071,6 +18385,7 @@ mod i128_boundary_streams {
             &1_000u64,
             &0,
             &None,
+            &None,
         );
 
         env.ledger().set_timestamp(300);
@@ -18105,6 +18420,7 @@ mod i128_boundary_streams {
             &0u64,
             &1_000u64,
             &0,
+            &None,
             &None,
         );
 
@@ -18144,6 +18460,7 @@ mod i128_boundary_streams {
             &1_000u64,
             &0,
             &None,
+            &None,
         );
 
         // Sender can cancel — must succeed
@@ -18173,6 +18490,7 @@ mod i128_boundary_streams {
             &0u64,
             &1_000u64,
             &0,
+            &None,
             &None,
         );
 
@@ -18205,6 +18523,7 @@ mod i128_boundary_streams {
             &1_000u64,
             &0,
             &None,
+            &None,
         );
 
         env.ledger().set_timestamp(200);
@@ -18235,6 +18554,7 @@ mod i128_boundary_streams {
             &0u64,
             &1_000u64,
             &0,
+            &None,
             &None,
         );
 
@@ -18279,6 +18599,7 @@ mod i128_boundary_streams {
                 cliff_time: 0,
                 end_time: 1,
                 memo: None,
+                metadata: None,
             });
         }
 
@@ -18318,6 +18639,7 @@ mod i128_boundary_streams {
             cliff_time: 0,
             end_time: 1_000,
             memo: None,
+            metadata: None,
         };
         // Invalid: deposit < rate * duration
         let invalid = CreateStreamParams {
@@ -18329,6 +18651,7 @@ mod i128_boundary_streams {
             cliff_time: 0,
             end_time: 1_000,
             memo: None,
+            metadata: None,
         };
 
         let params = soroban_sdk::vec![&env, valid, invalid];
@@ -18360,6 +18683,7 @@ mod i128_boundary_streams {
             &0u64,
             &1_000u64,
             &0,
+            &None,
             &None,
         );
 
@@ -18409,6 +18733,7 @@ mod recipient_index_stress {
                     cliff_time: 100,
                     end_time: 1100,
                     memo: None,
+                    metadata: None,
                 });
             }
             ctx.client().create_streams(&ctx.sender, &streams);
@@ -18463,6 +18788,7 @@ mod recipient_index_stress {
                 &0u64,
                 &100u64,
                 &0,
+                &None,
                 &None,
             );
             stream_ids.push_back(id);
@@ -18530,6 +18856,7 @@ mod recipient_index_stress {
                 &1000u64,
                 &0,
                 &None,
+                &None,
             );
             ids.push_back(id);
         }
@@ -18560,6 +18887,7 @@ mod recipient_index_stress {
             &1000u64,
             &0,
             &None,
+            &None,
         );
 
         // Range with start > end returns empty
@@ -18586,6 +18914,7 @@ mod recipient_index_stress {
                 &0u64,
                 &100u64,
                 &0,
+                &None,
                 &None,
             );
         }
@@ -18615,6 +18944,7 @@ mod recipient_index_stress {
                 &0,
                 &1000,
                 &0,
+                &None,
                 &None,
             );
         }
@@ -18649,6 +18979,7 @@ mod recipient_index_stress {
                 &100u64,
                 &0,
                 &None,
+                &None,
             );
         }
 
@@ -18675,6 +19006,7 @@ mod recipient_index_stress {
             &1000u64,
             &0,
             &None,
+            &None,
         );
 
         let streams = ctx.client().get_streams_by_id_range(&0, &10, &0);
@@ -18699,6 +19031,7 @@ mod recipient_index_stress {
                 &0u64,
                 &1000u64,
                 &0,
+                &None,
                 &None,
             );
         }
@@ -18763,6 +19096,7 @@ mod recipient_index_stress {
                 &100,
                 &0,
                 &None,
+                &None,
             );
         }
 
@@ -18789,6 +19123,7 @@ mod recipient_index_stress {
             &1000u64,
             &0,
             &None,
+            &None,
         );
 
         // Cursor beyond total count
@@ -18813,6 +19148,7 @@ mod recipient_index_stress {
             &0u64,
             &1000u64,
             &0,
+            &None,
             &None,
         );
 
@@ -18842,6 +19178,7 @@ mod recipient_index_stress {
                 &1000u64,
                 &0,
                 &None,
+                &None,
             );
         }
 
@@ -18856,6 +19193,7 @@ mod recipient_index_stress {
                 &0u64,
                 &1000u64,
                 &0,
+                &None,
                 &None,
             );
         }
@@ -18891,6 +19229,7 @@ mod recipient_index_stress {
                 &0u64,
                 &1000u64,
                 &0,
+                &None,
                 &None,
             );
         }
@@ -18939,6 +19278,7 @@ mod recipient_index_stress {
                 &100,
                 &100,
                 &0,
+                &None,
                 &None,
             );
         }
@@ -18989,6 +19329,7 @@ mod recipient_index_stress {
                 &1000u64,
                 &0,
                 &None,
+                &None,
             );
         }
 
@@ -19027,6 +19368,7 @@ mod structured_error_tests {
             &0u64,
             &1000u64,
             &0,
+            &None,
             &None,
         );
 
@@ -19068,6 +19410,7 @@ mod structured_error_tests {
                 cliff_time: 0u64,
                 end_time: 100u64,
                 memo: None,
+                metadata: None,
             },
             CreateStreamParams {
                 withdraw_dust_threshold: None,
@@ -19078,6 +19421,7 @@ mod structured_error_tests {
                 cliff_time: 0u64,
                 end_time: 100u64,
                 memo: None,
+                metadata: None,
             },
         ];
 
@@ -19114,6 +19458,7 @@ mod structured_error_tests {
             &large_end,
             &0,
             &None,
+            &None,
         );
 
         // new_rate * large_end overflows i128
@@ -19145,6 +19490,7 @@ mod structured_error_tests {
             &1000u64,
             &0,
             &None,
+            &None,
         );
 
         ctx.env.ledger().set_timestamp(500);
@@ -19174,6 +19520,7 @@ mod structured_error_tests {
             &1000u64,
             &0,
             &None,
+            &None,
         );
 
         client.set_global_emergency_paused(&true);
@@ -19202,6 +19549,7 @@ mod structured_error_tests {
             &0u64,
             &1000u64,
             &0,
+            &None,
             &None,
         );
 
@@ -19242,6 +19590,7 @@ mod structured_error_tests {
             &0u64,
             &1_000u64,
             &0,
+            &None,
             &None,
         );
 
@@ -19305,6 +19654,7 @@ fn test_batch_withdraw_non_adjacent_duplicates_rejected() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -19606,6 +19956,7 @@ fn make_stream_end_1000(ctx: &TestContext) -> u64 {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     )
 }

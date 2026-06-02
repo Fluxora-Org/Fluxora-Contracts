@@ -16,7 +16,7 @@ When changing the contract:
 - Update snapshot tests if externally visible behavior changes
 - No behavior change required for doc-only updates
 
-**Entrypoint index (validator):** `batch_withdraw_to`, `delete_stream_template`, `get_global_emergency_paused`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `global_resume`, `set_contract_paused`, `set_global_emergency_paused`, `version`.
+**Entrypoint index (validator):** `batch_withdraw_to`, `clone_stream`, `delete_stream_template`, `get_global_emergency_paused`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `global_resume`, `set_contract_paused`, `set_global_emergency_paused`, `version`.
 
 ## Externally Visible Assurances
 
@@ -28,13 +28,66 @@ This document provides crisp success and failure semantics for all protocol oper
 
 No hidden rules or implementation details are required to understand protocol behavior.
 
+### Per-stream metadata (TLV extension, CONTRACT_VERSION 4)
+
+From **CONTRACT_VERSION 4**, every stream may carry an optional bounded key-value map
+(`metadata: Option<Map<Bytes, Bytes>>`) for rich integration data such as invoice IDs,
+project codes, and external reference URIs.
+
+#### API
+
+| Entrypoint | Description |
+|---|---|
+| `create_stream(…, metadata)` | Pass `Some(map)` to attach metadata at creation, or `None` to omit. |
+| `get_stream_metadata(stream_id)` | Returns `Option<Map<Bytes, Bytes>>`. Permissionless read. |
+
+Metadata is also propagated through `create_streams`, `create_streams_relative`,
+`create_streams_partial`, and `create_stream_from_template` via the `metadata` field on
+`CreateStreamParams` / `CreateStreamRelativeParams`.
+
+#### Bounds (enforced at `create_stream` time — `ContractError::MetadataTooLarge` on violation)
+
+| Bound | Constant | Value |
+|---|---|---|
+| Maximum key-value pair count | `MAX_METADATA_KEYS` | 8 |
+| Maximum aggregate (all keys + values) bytes | `MAX_METADATA_BYTES` | 512 |
+| Maximum single key length | `MAX_METADATA_KEY_BYTES` | 32 |
+| Maximum single value length | `MAX_METADATA_VALUE_BYTES` | 128 |
+
+#### Invariants
+
+- Validated entirely at creation time; **immutable post-creation**.
+- Stream ID is **not allocated** if metadata validation fails (no partial state written).
+- No token movement occurs if metadata validation fails.
+- `StreamCreated` event includes the `metadata` field for indexer consumption.
+
+#### Example (Rust client)
+
+```rust
+let mut meta = Map::new(&env);
+meta.set(Bytes::from_slice(&env, b"invoice_id"), Bytes::from_slice(&env, b"INV-2026-001"));
+meta.set(Bytes::from_slice(&env, b"project"),    Bytes::from_slice(&env, b"PROJ-42"));
+
+let stream_id = client.create_stream(
+    &sender, &recipient,
+    &deposit, &rate,
+    &start, &cliff, &end,
+    &0_i128, // dust threshold
+    &None,   // memo
+    &Some(meta),
+);
+
+// Later — permissionless read
+let stored_meta = client.get_stream_metadata(&stream_id);
+```
+
 ### Schedule templates (presets)
 
 From **CONTRACT_VERSION 3**, integrators can register **relative** schedule skeletons (`register_stream_template`) and create streams from them (`create_stream_from_template`). This standardizes recurring payroll windows and trims repeated calldata versus always passing `start_delay` / `cliff_delay` / `duration` through the client for identical shapes.
 
 - **Auth**: registering and deleting templates requires the template `owner` signer. Creating a stream from a template requires the **funding `sender`** to authorize (same as `create_stream_relative`).
 - **Caps**: per-owner and global template counts are bounded; see `MAX_TEMPLATES_PER_OWNER` and `MAX_GLOBAL_TEMPLATES` in `contracts/stream/src/lib.rs`.
-- **Note**: Template-specific errors are not yet implemented in the ContractError enum. Template operations currently use generic errors like `InvalidParams` and `Unauthorized`.
+- **Errors**: `TemplateNotFound`, `TemplateLimitExceeded`, `TemplateUnauthorized`.
 
 ---
 
@@ -45,6 +98,7 @@ From **CONTRACT_VERSION 3**, integrators can register **relative** schedule skel
 | Phase            | Action                                        | Notes                                                                 |
 | ---------------- | --------------------------------------------- | --------------------------------------------------------------------- |
 | **Creation**     | `create_stream` / `create_streams_partial` | Sender deposits tokens; stream starts as `Active`                     |
+| **Clone**        | `clone_stream`                                | Copies rate, cliff offset, threshold, and memo from a source stream; accepts new recipient and timing |
 | **Top-up**       | `top_up_stream`                               | Extra deposit locked (sender or admin only); schedule unchanged       |
 | **Pause**        | `pause_stream` / `pause_stream_as_admin`      | Stops withdrawals; accrual continues by time                          |
 | **Resume**       | `resume_stream` / `resume_stream_as_admin`    | Restores withdrawals; blocked if past `end_time` (Terminal)           |
@@ -540,6 +594,7 @@ contract.create_streams_relative(&sender, &params)?;
 | ------------------------- | ----------------------------- | ------------------------------------------- |
 | `init`                    | Bootstrap admin signer (once) | `admin.require_auth()`                      |
 | `create_stream`           | Sender                        | `sender.require_auth()`                     |
+| `clone_stream`            | Source stream's sender        | `source.sender.require_auth()`              |
 | `create_streams`          | Sender                        | `sender.require_auth()` (once per batch)    |
 | `create_stream_relative`  | Sender                        | `sender.require_auth()`                     |
 | `create_streams_relative` | Sender                        | `sender.require_auth()` (once per batch)    |
@@ -1025,6 +1080,7 @@ Emitted when a sender successfully updates the streaming rate via `update_rate_p
 | Topic                      | Payload                                       | When Emitted                                       |
 | -------------------------- | --------------------------------------------- | -------------------------------------------------- |
 | `("created", stream_id)`   | `StreamCreated` (struct payload)              | `create_stream` / `create_streams`                 |
+| `("cloned", stream_id)`    | `StreamCloned` (struct payload)               | `clone_stream` — carries `source_stream_id` for indexer correlation |
 | `("paused", stream_id)`    | `StreamEvent::Paused(stream_id)`              | `pause_stream` / `pause_stream_as_admin`           |
 | `("resumed", stream_id)`   | `StreamEvent::Resumed(stream_id)`             | `resume_stream` / `resume_stream_as_admin`         |
 | `("cancelled", stream_id)` | `StreamEvent::StreamCancelled(stream_id)`     | `cancel_stream` / `cancel_stream_as_admin`         |
@@ -1304,3 +1360,158 @@ Comprehensive test coverage includes:
 
 See `contracts/stream/tests/integration_suite.rs` for full test suite.
 
+
+---
+
+## `clone_stream`: Recurring Payment Streams
+
+### Overview
+
+`clone_stream(stream_id, new_recipient, start_time, end_time, deposit, force)` creates a new stream by copying the scheduling DNA of an existing source stream — its `rate_per_second`, cliff offset, `withdraw_dust_threshold`, and `memo` — while accepting a fresh recipient address, timing window, and deposit amount.
+
+This is the primary entry-point for **recurring payment obligations** such as monthly salary streams. Operators no longer need to reconstruct the full parameter set for each new period; they clone the previous stream and supply only what changes.
+
+### Signature
+
+```rust
+pub fn clone_stream(
+    env: Env,
+    stream_id: u64,          // source stream to copy from
+    new_recipient: Address,  // recipient of the new stream
+    start_time: u64,         // absolute start timestamp
+    end_time: u64,           // absolute end timestamp
+    deposit: i128,           // deposit for the new stream
+    force: bool,             // opt-in to clone CliffOnly-sentinel streams
+) -> Result<u64, ContractError>
+```
+
+### Inherited fields
+
+| Field | Behaviour |
+|---|---|
+| `rate_per_second` | Copied verbatim from source |
+| cliff offset | `new_cliff_time = start_time + (source.cliff_time − source.start_time)` |
+| `withdraw_dust_threshold` | Copied verbatim from source |
+| `memo` | Copied verbatim from source |
+
+All other fields (`sender`, `deposit_amount`, `start_time`, `end_time`, `recipient`) are supplied by the caller.
+
+### Source stream state requirements
+
+`clone_stream` accepts a source stream in **any** status:
+
+| Source status | Allowed? | Notes |
+|---|---|---|
+| `Completed` | ✅ Yes | Natural end of a previous period — the primary use case |
+| `Cancelled` | ✅ Yes | Early termination; operator can still start the next period |
+| `Active` | ✅ Yes | Pre-scheduling the next period before the current one ends |
+| `Paused` | ✅ Yes | Same as Active; source stream continues independently |
+
+### Authorization
+
+Only the **source stream's original sender** may call `clone_stream`. The admin can clone streams they created (admin == sender). The source stream's recipient and third parties are rejected.
+
+```
+source.sender.require_auth()
+```
+
+> **Security note**: There is intentionally no admin-override path for `clone_stream`. An admin should not be able to spend a sender's tokens without the sender's explicit authorization. This prevents privilege escalation.
+
+### CliffOnly guard (`force` parameter)
+
+Streams with `withdraw_dust_threshold == i128::MAX` are treated as **CliffOnly sentinel** streams — a degenerate configuration where no withdrawal is ever allowed below the maximum threshold. Cloning such a stream without explicit opt-in would silently propagate the degenerate configuration.
+
+- `force = false` (default): rejects source streams with `withdraw_dust_threshold == i128::MAX` → `ContractError::InvalidParams`
+- `force = true`: allows cloning; the sentinel threshold is inherited by the new stream
+
+### Success semantics (observable)
+
+1. Pause guard checked: `require_not_creation_paused()`.
+2. Source stream loaded; `StreamNotFound` if absent.
+3. `source.sender.require_auth()` enforced.
+4. CliffOnly guard checked (see above).
+5. Cliff offset computed: `new_cliff = start_time + (source.cliff_time − source.start_time)`.
+6. All parameters validated via `validate_stream_params` (same rules as `create_stream`).
+7. `deposit` tokens pulled from `source.sender` into the contract.
+8. New stream persisted with `status = Active`, `withdrawn_amount = 0`.
+9. New stream added to recipient's stream index.
+10. Two events emitted:
+    - `("created", new_stream_id) → StreamCreated { ... }` — standard creation event for indexers that track all streams.
+    - `("cloned", new_stream_id) → StreamCloned { new_stream_id, source_stream_id, ... }` — clone-specific event for indexers that need to correlate the clone relationship.
+11. Returns `new_stream_id`.
+
+### Failure semantics (observable)
+
+| Error | Condition |
+|---|---|
+| `StreamNotFound` (1) | `stream_id` does not exist |
+| `InvalidParams` (3) | `force == false` and source has CliffOnly sentinel threshold; or any `validate_stream_params` failure |
+| `ContractPaused` (4) | Global emergency pause or creation pause is active |
+| `StartTimeInPast` (5) | `start_time < ledger.timestamp()` |
+| `InsufficientDeposit` (10) | `deposit < rate_per_second × (end_time − start_time)` |
+| `ArithmeticOverflow` (6) | Cliff offset addition overflows `u64` |
+| host trap (panic) | Caller is not `source.sender` (Soroban auth failure) |
+
+Any failure is **atomic**: no stream is created, no tokens move, no events are emitted.
+
+### Events
+
+#### `StreamCloned`
+
+```
+topics: ["cloned", <new_stream_id: u64>]
+data:   StreamCloned {
+          new_stream_id:     u64,
+          source_stream_id:  u64,
+          sender:            Address,
+          recipient:         Address,
+          deposit_amount:    i128,
+          rate_per_second:   i128,
+          start_time:        u64,
+          cliff_time:        u64,
+          end_time:          u64,
+        }
+```
+
+The `source_stream_id` field lets indexers build a clone lineage graph without additional storage queries.
+
+### Example — recurring monthly salary
+
+```rust
+// Month 1 stream just completed (stream_id = 42).
+// Clone it for month 2 with the same recipient and rate.
+let month2_id = contract.clone_stream(
+    &42,                 // source stream
+    &employee_address,   // same recipient
+    &month2_start,       // new start_time
+    &month2_end,         // new end_time
+    &monthly_salary,     // deposit (may differ from month 1)
+    &false,              // force (not a CliffOnly stream)
+)?;
+```
+
+### Security invariants
+
+1. **Sender-only auth**: only the address that created the source stream can clone it. Recipients and third parties cannot.
+2. **Source stream is read-only**: cloning never mutates the source stream's state, status, or balances.
+3. **CEI ordering**: the new stream is persisted before the token pull, consistent with the rest of the contract.
+4. **CliffOnly guard**: the `force` flag prevents silent propagation of degenerate configurations.
+5. **Independent lifecycle**: the new stream and the source stream are completely independent after creation.
+
+### Testing
+
+Comprehensive test coverage is in `contracts/stream/tests/clone_stream.rs`:
+
+| Category | Tests |
+|---|---|
+| Happy-path | Clone from Completed, Cancelled, Active, Paused source |
+| Inherited fields | rate_per_second, cliff offset, dust threshold, memo, different recipient |
+| Authorization | Sender succeeds (strict mode), recipient rejected, third-party rejected |
+| CliffOnly guard | force=false rejects sentinel, force=true allows it, normal streams unaffected |
+| Parameter validation | start_time in past, insufficient deposit, deposit at boundary, sender==recipient |
+| Global/creation pause | Both pause modes block clone_stream |
+| Source not found | StreamNotFound returned |
+| Events | "created" + "cloned" emitted with correct payloads; no events on failure |
+| Token balances | Sender decreases by deposit, recipient unchanged, source stream unaffected |
+| Recurring pattern | Three sequential monthly clones, cliff offset preserved across generations |
+| Edge cases | cliff==end, large deposit, no memo, zero withdrawn_amount on new stream |

@@ -1,4 +1,4 @@
-/// Event Snapshot Tests
+﻿/// Event Snapshot Tests
 ///
 /// This module contains comprehensive deterministic snapshot tests that assert exact event
 /// topics and payload shapes for all emitted events. Each test captures event data at
@@ -169,6 +169,7 @@ fn event_snapshot_stream_created_has_correct_topics_and_payload() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     let events = ctx.env.events().all();
@@ -294,6 +295,7 @@ fn event_snapshot_withdrawal_has_correct_topics_and_payload() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     ctx.env.ledger().set_timestamp(500);
@@ -353,6 +355,7 @@ fn event_snapshot_no_withdrawal_event_when_amount_zero() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     // Try to withdraw before cliff - amount should be 0
@@ -398,6 +401,7 @@ fn event_snapshot_withdrawal_to_has_correct_topics_and_payload() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -463,6 +467,7 @@ fn event_snapshot_stream_paused_has_correct_topics_and_payload() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     let events_before = ctx.env.events().all().len();
@@ -518,6 +523,7 @@ fn event_snapshot_stream_paused_as_admin_has_administrative_reason() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     let events_before = ctx.env.events().all().len();
@@ -567,6 +573,7 @@ fn event_snapshot_stream_resumed_has_correct_topics() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     ctx.client()
@@ -611,6 +618,7 @@ fn event_snapshot_stream_cancelled_has_correct_topics() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -658,6 +666,7 @@ fn event_snapshot_stream_completed_emitted_after_withdrew() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -712,6 +721,7 @@ fn event_snapshot_stream_closed_has_correct_topics() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     // Complete the stream
@@ -762,6 +772,7 @@ fn event_snapshot_rate_updated_has_correct_topics_and_payload() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -821,6 +832,7 @@ fn event_snapshot_stream_end_shortened_has_correct_topics_and_payload() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     let events_before = ctx.env.events().all().len();
@@ -877,6 +889,7 @@ fn event_snapshot_stream_end_extended_has_correct_topics_and_payload() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -937,6 +950,7 @@ fn event_snapshot_stream_topped_up_has_correct_topics_and_payload() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     let events_before = ctx.env.events().all().len();
@@ -992,6 +1006,7 @@ fn event_snapshot_recipient_updated_has_correct_topics_and_payload() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -1179,6 +1194,7 @@ fn event_snapshot_no_events_on_failed_create_stream() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     assert!(
@@ -1222,6 +1238,7 @@ fn event_snapshot_no_events_on_failed_operations() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -1315,6 +1332,7 @@ fn event_snapshot_health_changed_top_up_heals_underfunded_stream() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     // Advance to t=100.
@@ -1356,6 +1374,7 @@ fn event_snapshot_health_changed_shorten_heals_underfunded_stream() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     // Advance to t=100.
@@ -1396,6 +1415,7 @@ fn event_snapshot_health_changed_decrease_rate_heals_underfunded_stream() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
@@ -1440,6 +1460,7 @@ fn event_snapshot_health_changed_cancel_heals_underfunded_stream() {
         &1000u64,
         &0,
         &None,
+        &None,
     );
 
     // Advance to t=100.
@@ -1480,6 +1501,7 @@ fn event_snapshot_health_changed_not_emitted_when_no_transition() {
         &0u64,
         &1000u64,
         &0,
+        &None,
         &None,
     );
 
