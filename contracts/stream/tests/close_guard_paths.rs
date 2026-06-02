@@ -1,4 +1,4 @@
-//! Tests for issue #522: close guard and recipient-index cleanup paths.
+﻿//! Tests for issue #522: close guard and recipient-index cleanup paths.
 //!
 //! 1. `test_close_non_completed_stream_rejected` — exercises the guard that
 //!    rejects Active/Paused streams passed to `close_completed_stream`.

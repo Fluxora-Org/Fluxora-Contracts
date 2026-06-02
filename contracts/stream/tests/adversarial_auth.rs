@@ -1,4 +1,4 @@
-extern crate std;
+﻿extern crate std;
 
 use fluxora_stream::{
     ContractError, FluxoraStream, FluxoraStreamClient, PauseReason, StreamStatus,
@@ -1007,7 +1007,10 @@ mod delegated_withdraw_adversarial {
             let pk_bytes = signing_key.verifying_key().to_bytes();
             let account_id = AccountId(PublicKey::PublicKeyTypeEd25519(Uint256(pk_bytes)));
             let address: Address = ScAddress::Account(account_id).try_into_val(env).unwrap();
-            Self { signing_key, address }
+            Self {
+                signing_key,
+                address,
+            }
         }
 
         fn sign(
@@ -1064,7 +1067,14 @@ mod delegated_withdraw_adversarial {
             let token = TokenClient::new(&env, &token_id);
             token.approve(&sender, &contract_id, &i128::MAX, &100_000);
 
-            Ctx { env, contract_id, sender, relayer, recipient_kp, token }
+            Ctx {
+                env,
+                contract_id,
+                sender,
+                relayer,
+                recipient_kp,
+                token,
+            }
         }
 
         fn client(&self) -> FluxoraStreamClient<'_> {
@@ -1088,8 +1098,14 @@ mod delegated_withdraw_adversarial {
         }
 
         fn sign(&self, stream_id: u64, dest: &Address, nonce: u64, deadline: u64) -> BytesN<64> {
-            self.recipient_kp
-                .sign(&self.env, &self.contract_id, stream_id, dest, nonce, deadline)
+            self.recipient_kp.sign(
+                &self.env,
+                &self.contract_id,
+                stream_id,
+                dest,
+                nonce,
+                deadline,
+            )
         }
     }
 
@@ -1222,7 +1238,8 @@ mod delegated_withdraw_adversarial {
                 sub_invokes: &[],
             },
         }]);
-        ctx.client().pause_stream(&stream_id, &PauseReason::Operational);
+        ctx.client()
+            .pause_stream(&stream_id, &PauseReason::Operational);
 
         // Restore blanket auth so relayer.require_auth() in delegated_withdraw passes.
         ctx.env.mock_all_auths();

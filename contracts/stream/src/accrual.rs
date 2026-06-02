@@ -40,20 +40,95 @@ pub fn calculate_accrued_amount(
 
 /// Snapshot of a stream's checkpoint state, passed to the accrual function.
 ///
+/// Checkpoint state for accrual calculations with rate change support.
+///
+/// This structure encapsulates all the parameters needed to calculate accrued amounts
+/// for streams that may have undergone rate changes. It supports the checkpointing
+/// mechanism that preserves recipient entitlements when rates are decreased.
+///
+/// ## Usage Context
+///
+/// Used by `calculate_accrued_amount_checkpointed` to compute accrued amounts for:
+/// - Streams with rate changes (via `decrease_rate_per_second`)
+/// - Cancelled streams (frozen accrual at cancellation time)
+/// - Regular streams (where `checkpointed_amount = 0`, `checkpointed_at = start_time`)
+///
+/// ## Checkpointing Mechanics
+///
+/// When a stream's rate is decreased:
+/// 1. Current accrued amount is calculated and stored in `checkpointed_amount`
+/// 2. Current timestamp is stored in `checkpointed_at`
+/// 3. Future accrual = `checkpointed_amount + (new_rate * (time - checkpointed_at))`
+///
+/// This ensures recipients never lose previously accrued entitlements.
+///
+/// ## Cross-References
+///
+/// - **Stream struct**: See `contracts/stream/src/lib.rs` for the main Stream definition
+/// - **Documentation**: See `docs/streaming.md` for complete accrual formula explanation
+/// - **Rate changes**: See `decrease_rate_per_second` function for checkpointing logic
+///
 /// Groups the six stream fields that are always read together, reducing the
 /// argument count of `calculate_accrued_amount_checkpointed` below the
 /// Clippy `too_many_arguments` threshold.
+///
+/// # Balance Conservation Context
+///
+/// When `decrease_rate_per_second` is called, the contract:
+/// 1. Computes `accrued_now` using the OLD rate from `checkpointed_at` to `now`
+/// 2. Sets `checkpointed_amount = accrued_now` and `checkpointed_at = now`
+/// 3. Applies the NEW rate only from `checkpointed_at` forward
+///
+/// This ensures the recipient's already-accrued entitlement is **never reduced**
+/// by a rate decrease, preserving the invariant that `withdrawn_amount` only
+/// increases and `deposit_amount` adjustments only refund *unstreamed* tokens.
 #[derive(Clone, Copy)]
 pub struct CheckpointState {
     /// Tokens accrued under all previous rate epochs, locked in at `checkpointed_at`.
+    ///
+    /// This represents the "base" accrued amount that was earned under previous rates
+    /// before the most recent rate change. For streams that have never had their rate
+    /// changed, this value is 0.
+    ///
+    /// **Invariant**: `checkpointed_amount <= deposit_amount`
     pub checkpointed_amount: i128,
+
     /// Timestamp of the last checkpoint (== `start_time` on creation).
+    ///
+    /// This marks the beginning of the current rate epoch. Accrual calculations
+    /// use this as the starting point for applying the current rate:
+    ///
+    /// ```text
+    /// current_epoch_accrual = rate_per_second * (current_time - checkpointed_at)
+    /// total_accrual = checkpointed_amount + current_epoch_accrual
+    /// ```
+    ///
+    /// **Invariant**: `start_time <= checkpointed_at <= current_time`
     pub checkpointed_at: u64,
+
     /// No accrual is visible before this timestamp.
+    ///
+    /// Even if `start_time < cliff_time`, tokens begin accruing at `start_time`.
+    /// However, the cliff prevents withdrawals until this timestamp is reached.
+    ///
+    /// **Invariant**: `start_time <= cliff_time <= end_time`
     pub cliff_time: u64,
+
     /// Accrual is capped at this timestamp.
+    ///
+    /// No additional tokens accrue beyond this point, regardless of elapsed time.
+    /// For cancelled streams, this is effectively replaced by `cancelled_at`.
+    ///
+    /// **Invariant**: `start_time < end_time`
     pub end_time: u64,
+
     /// Absolute ceiling; result is clamped to `[0, deposit_amount]`.
+    ///
+    /// The maximum amount that can ever be accrued for this stream, regardless
+    /// of rate or time calculations. Provides overflow protection and ensures
+    /// the contract never owes more than was deposited.
+    ///
+    /// **Invariant**: `deposit_amount >= rate_per_second * (end_time - start_time)`
     pub deposit_amount: i128,
     /// The kind of stream (Linear or CliffOnly).
     pub kind: StreamKind,
@@ -111,8 +186,8 @@ pub fn calculate_accrued_amount_checkpointed(
         return checkpointed_amount.min(deposit_amount).max(0);
     }
 
-    let elapsed_now = now.min(end_time);
-    let elapsed_seconds: i128 = if elapsed_now <= checkpointed_at {
+    let elapsed_now = now.min(state.end_time);
+    let elapsed_seconds: i128 = if elapsed_now <= state.checkpointed_at {
         0
     } else {
         (elapsed_now - checkpointed_at) as i128
@@ -128,6 +203,131 @@ pub fn calculate_accrued_amount_checkpointed(
         .saturating_add(added)
         .min(deposit_amount)
         .max(0)
+}
+
+// Kani formal proofs (bounded model checking harnesses).
+// These are compiled only when the `kani` cfg is active and are intended
+// to provide machine-checked guarantees about arithmetic and clamping.
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+    // Kani provides `kani::any` and `kani::assume` helpers in the harness
+    // environment. The proofs below bound inputs to reasonable ranges to
+    // keep the state space tractable while covering relevant edge cases.
+
+    // Prove that the function never panics and always returns a value in [0, deposit_amount].
+    #[kani::proof]
+    fn proof_result_in_bounds() {
+        let checkpointed_amount: i128 = kani::any();
+        let checkpointed_at: u64 = kani::any();
+        let cliff_time: u64 = kani::any();
+        let end_time: u64 = kani::any();
+        let deposit_amount: i128 = kani::any();
+        let rate_per_second: i128 = kani::any();
+        let now: u64 = kani::any();
+
+        // Bound values for tractability
+        kani::assume(deposit_amount >= 0);
+        kani::assume(deposit_amount <= 1_000_000_000_000_000_000_i128); // 1e18-ish
+        kani::assume(rate_per_second >= -1_000_000_000_000_000_000_i128);
+        kani::assume(rate_per_second <= 1_000_000_000_000_000_000_i128);
+        kani::assume(checkpointed_amount >= 0);
+        kani::assume(checkpointed_amount <= deposit_amount);
+        kani::assume(checkpointed_at <= end_time);
+
+        let state = CheckpointState {
+            checkpointed_amount,
+            checkpointed_at,
+            cliff_time,
+            end_time,
+            deposit_amount,
+        };
+
+        // Call the function under test. Kani will flag panics or UB.
+        let out = calculate_accrued_amount_checkpointed(state, rate_per_second, deposit_amount, now);
+
+        // Assert bounds: non-negative and <= deposit_amount
+        kani::assert!(out >= 0);
+        kani::assert!(out <= deposit_amount);
+    }
+
+    // Prove monotonicity: for t1 <= t2 (both >= cliff and <= end), accrued(t1) <= accrued(t2)
+    #[kani::proof]
+    fn proof_monotonicity_after_cliff() {
+        let checkpointed_amount: i128 = kani::any();
+        let checkpointed_at: u64 = kani::any();
+        let cliff_time: u64 = kani::any();
+        let end_time: u64 = kani::any();
+        let deposit_amount: i128 = kani::any();
+        let rate_per_second: i128 = kani::any();
+        let t1: u64 = kani::any();
+        let t2: u64 = kani::any();
+
+        kani::assume(deposit_amount >= 0);
+        kani::assume(deposit_amount <= 1_000_000_000_000_000_000_i128);
+        kani::assume(rate_per_second >= 0); // non-negative rates for monotonicity
+        kani::assume(rate_per_second <= 1_000_000_000_000_000_000_i128);
+        kani::assume(checkpointed_amount >= 0 && checkpointed_amount <= deposit_amount);
+        kani::assume(checkpointed_at <= end_time);
+
+        // constrain t1 <= t2 and both in [cliff, end]
+        kani::assume(cliff_time <= end_time);
+        kani::assume(t1 >= cliff_time && t1 <= end_time);
+        kani::assume(t2 >= t1 && t2 <= end_time);
+
+        let state = CheckpointState {
+            checkpointed_amount,
+            checkpointed_at,
+            cliff_time,
+            end_time,
+            deposit_amount,
+        };
+
+        let a = calculate_accrued_amount_checkpointed(state, rate_per_second, deposit_amount, t1);
+        let b = calculate_accrued_amount_checkpointed(state, rate_per_second, deposit_amount, t2);
+
+        kani::assert!(a <= b);
+    }
+
+    // Prove clamping at cliff and end: before cliff => 0, at or after end => <= deposit
+    #[kani::proof]
+    fn proof_clamping_cliff_end() {
+        let checkpointed_amount: i128 = kani::any();
+        let checkpointed_at: u64 = kani::any();
+        let cliff_time: u64 = kani::any();
+        let end_time: u64 = kani::any();
+        let deposit_amount: i128 = kani::any();
+        let rate_per_second: i128 = kani::any();
+        let now_before: u64 = kani::any();
+        let now_after: u64 = kani::any();
+
+        kani::assume(deposit_amount >= 0);
+        kani::assume(deposit_amount <= 1_000_000_000_000_000_000_i128);
+        kani::assume(rate_per_second >= -1_000_000_000_000_000_000_i128);
+        kani::assume(checkpointed_amount >= 0 && checkpointed_amount <= deposit_amount);
+        kani::assume(checkpointed_at <= end_time);
+        kani::assume(cliff_time <= end_time);
+
+        // before cliff
+        kani::assume(now_before < cliff_time);
+
+        let state = CheckpointState {
+            checkpointed_amount,
+            checkpointed_at,
+            cliff_time,
+            end_time,
+            deposit_amount,
+        };
+
+        let out_before = calculate_accrued_amount_checkpointed(state, rate_per_second, deposit_amount, now_before);
+        kani::assert!(out_before == 0);
+
+        // at or after end
+        kani::assume(now_after >= end_time);
+        let out_after = calculate_accrued_amount_checkpointed(state, rate_per_second, deposit_amount, now_after);
+        kani::assert!(out_after >= 0);
+        kani::assert!(out_after <= deposit_amount);
+    }
 }
 
 #[cfg(test)]
@@ -274,9 +474,9 @@ mod invariants {
 mod accrued_after_end_time {
     use crate::accrual::calculate_accrued_amount;
 
-    // -----------------------------------------------------------------------
+    
     // Helpers
-    // -----------------------------------------------------------------------
+    
 
     /// A standard stream used across tests:
     ///   start=1000, cliff=1000, end=2000, rate=1/s, deposit=1000

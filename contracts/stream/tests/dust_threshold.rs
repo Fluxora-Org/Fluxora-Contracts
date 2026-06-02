@@ -1,4 +1,4 @@
-extern crate std;
+﻿extern crate std;
 
 use fluxora_stream::{FluxoraStream, FluxoraStreamClient, StreamStatus};
 use soroban_sdk::{

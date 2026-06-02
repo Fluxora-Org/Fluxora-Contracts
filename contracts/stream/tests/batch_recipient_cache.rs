@@ -1,4 +1,4 @@
-//! Tests for issue #514: recipient stream index caching in `create_streams`.
+﻿//! Tests for issue #514: recipient stream index caching in `create_streams`.
 //!
 //! Verifies that batching multiple streams to the same recipient produces the
 //! same index state as creating them one-by-one, and that the O(1)-per-recipient

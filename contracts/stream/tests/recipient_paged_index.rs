@@ -1,4 +1,4 @@
-extern crate std;
+﻿extern crate std;
 
 use fluxora_stream::{FluxoraStream, FluxoraStreamClient, MAX_RECIPIENT_PAGE_SIZE};
 use soroban_sdk::{

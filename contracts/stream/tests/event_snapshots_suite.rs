@@ -1,4 +1,4 @@
-/// Event Snapshot Tests
+﻿/// Event Snapshot Tests
 ///
 /// This module contains comprehensive deterministic snapshot tests that assert exact event
 /// topics and payload shapes for all emitted events. Each test captures event data at

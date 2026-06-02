@@ -1,4 +1,4 @@
-#![cfg(test)]
+﻿#![cfg(test)]
 extern crate std;
 
 use fluxora_stream::{
@@ -7,8 +7,8 @@ use fluxora_stream::{
 use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Events, Ledger},
-    vec, Address, Env,
     token::Client as TokenClient,
+    vec, Address, Env,
 };
 
 struct TestContext {
@@ -29,7 +29,9 @@ impl TestContext {
         let client = FluxoraStreamClient::new(&env, &contract_id);
 
         let token_admin = Address::generate(&env);
-        let token_id = env.register_stellar_asset_contract_v2(token_admin).address();
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
         let token = TokenClient::new(&env, &token_id);
 
         let admin = Address::generate(&env);
@@ -90,7 +92,10 @@ fn test_set_max_rate_per_second_admin_only() {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         ctx.client.set_max_rate_per_second(&1000);
     }));
-    assert!(result.is_err(), "Non-admin should not be able to set max rate");
+    assert!(
+        result.is_err(),
+        "Non-admin should not be able to set max rate"
+    );
 }
 
 #[test]
@@ -212,6 +217,7 @@ fn test_max_rate_applies_to_all_create_functions() {
             end_time: 1000,
             withdraw_dust_threshold: Some(0),
             memo: None,
+            metadata: None,
         },
     ];
 
@@ -229,6 +235,7 @@ fn test_max_rate_applies_to_all_create_functions() {
         duration: 1000,
         withdraw_dust_threshold: Some(0),
         memo: None,
+        metadata: None,
     };
 
     let result = ctx.client.try_create_stream_relative(&ctx.sender, &relative_params);

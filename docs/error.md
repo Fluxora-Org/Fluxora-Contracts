@@ -716,6 +716,7 @@ The factory contract (`contracts/factory`) uses a separate `FactoryError` enum.
 - Success/failure semantics for each operation
 - Time-driven edge cases
 - Client action recommendations
+- Dust-attack prevention guidance
 
 ### Excluded
 
@@ -733,4 +734,4 @@ The factory contract (`contracts/factory`) uses a separate `FactoryError` enum.
 |------|------------|--------|------------|
 | Error code changes | Low | High | Versioning in client SDKs |
 | Missing error cases | Low | Medium | Comprehensive test coverage |
-| Client mishandling | Medium | Medium | This documentation |
+| Client mishandling | Medium | Medium | This documentation | Dust-attack bypass | Very Low |	High | MIN_RATE_PER_SECOND enforced at validation layer

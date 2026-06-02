@@ -1,4 +1,4 @@
-extern crate std;
+﻿extern crate std;
 
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
@@ -1330,6 +1330,7 @@ fn test_create_stream_deposit_one_valid() {
         &1u64, // 1 second, so rate * duration = 1 == deposit
         &0,
         &None,
+        &None,
     );
     let state = ctx.client().get_stream_state(&id);
     assert_eq!(state.deposit_amount, 1);
@@ -1740,6 +1741,7 @@ fn test_create_stream_deposit_less_than_total_panics() {
         &1000u64, // duration = 1000s, so total = 1000 tokens needed
         &0,
         &None,
+        &None,
     );
 }
 
@@ -1776,6 +1778,7 @@ fn test_create_stream_deposit_greater_than_total_succeeds() {
         &0u64,
         &1000u64, // duration = 1000s, total needed = 1000
         &0,
+        &None,
         &None,
     );
     let state = ctx.client().get_stream_state(&stream_id);
@@ -2953,6 +2956,7 @@ fn test_accrued_never_exceeds_deposit_multiple_checks() {
         &0u64,
         &100u64, // Would accrue 5,000 at end
         &0,
+        &None,
         &None,
     );
 
@@ -7581,6 +7585,7 @@ fn test_withdraw_excess_deposit_only_streams_calculated_amount() {
         &1000u64, // duration 1000s, so only 1000 will stream
         &0,
         &None,
+        &None,
     );
 
     // At end, only 1000 should be withdrawable (rate * duration)
@@ -9364,6 +9369,7 @@ fn test_create_streams_batch_success() {
         cliff_time: 0,
         end_time: 1000,
         memo: None,
+        metadata: None,
     };
 
     let params2 = CreateStreamParams {
@@ -9376,6 +9382,7 @@ fn test_create_streams_batch_success() {
         cliff_time: 200,
         end_time: 1100,
         memo: None,
+        metadata: None,
     };
 
     let params3 = CreateStreamParams {
@@ -9388,6 +9395,7 @@ fn test_create_streams_batch_success() {
         cliff_time: 500,
         end_time: 1500,
         memo: None,
+        metadata: None,
     };
 
     let streams = vec![&ctx.env, params1.clone(), params2.clone(), params3.clone()];
@@ -9439,6 +9447,7 @@ fn test_create_streams_batch_atomic_failure() {
         cliff_time: 0,
         end_time: 1000,
         memo: None,
+        metadata: None,
     };
 
     let invalid_params = CreateStreamParams {
@@ -9451,6 +9460,7 @@ fn test_create_streams_batch_atomic_failure() {
         cliff_time: 0,
         end_time: 1000,
         memo: None,
+        metadata: None,
     };
 
     let streams = vec![&ctx.env, valid_params, invalid_params];
@@ -9501,6 +9511,7 @@ fn test_create_streams_batch_sender_recipient_panic() {
         cliff_time: 0,
         end_time: 1000,
         memo: None,
+        metadata: None,
     };
 
     let streams = vec![&ctx.env, params];
@@ -9522,6 +9533,7 @@ fn test_create_streams_batch_sender_recipient_has_no_side_effects() {
         cliff_time: 0,
         end_time: 1000,
         memo: None,
+        metadata: None,
     };
 
     let streams = vec![&ctx.env, params];
@@ -9728,6 +9740,7 @@ fn test_create_streams_batch_strict_auth() {
         cliff_time: 0,
         end_time: 1000,
         memo: None,
+        metadata: None,
     };
 
     let params2 = CreateStreamParams {
@@ -9740,6 +9753,7 @@ fn test_create_streams_batch_strict_auth() {
         cliff_time: 0,
         end_time: 2000,
         memo: None,
+        metadata: None,
     };
 
     let streams = vec![&ctx.env, params1.clone(), params2.clone()];
@@ -9776,6 +9790,7 @@ fn test_create_streams_batch_emits_created_events_with_payloads() {
         cliff_time: 0,
         end_time: 1111,
         memo: None,
+        metadata: None,
     };
     let params2 = CreateStreamParams {
         kind: crate::StreamKind::Linear,
@@ -9787,6 +9802,7 @@ fn test_create_streams_batch_emits_created_events_with_payloads() {
         cliff_time: 10,
         end_time: 1121,
         memo: None,
+        metadata: None,
     };
     let streams = vec![&ctx.env, params1.clone(), params2.clone()];
     let events_before = ctx.env.events().all().len();
@@ -9838,6 +9854,7 @@ fn test_create_streams_batch_total_deposit_overflow_has_no_side_effects() {
         cliff_time: 0,
         end_time: 1,
         memo: None,
+        metadata: None,
     };
     let params2 = CreateStreamParams {
         kind: crate::StreamKind::Linear,
@@ -9849,6 +9866,7 @@ fn test_create_streams_batch_total_deposit_overflow_has_no_side_effects() {
         cliff_time: 0,
         end_time: 1,
         memo: None,
+        metadata: None,
     };
     let streams = vec![&ctx.env, params1, params2];
 
@@ -9902,6 +9920,7 @@ fn test_create_streams_batch_wrong_auth_fails_without_side_effects() {
         cliff_time: 0,
         end_time: 1000,
         memo: None,
+        metadata: None,
     };
     let streams = vec![&ctx.env, params.clone()];
     let stream_count_before = ctx.client().get_stream_count();
@@ -12474,6 +12493,7 @@ fn test_create_streams_batch_contract_paused_returns_structured_error() {
             cliff_time: 0,
             end_time: 1000,
             memo: None,
+            metadata: None,
         }],
     );
 
@@ -12548,6 +12568,7 @@ fn test_create_streams_batch_start_time_in_past_returns_structured_error() {
             cliff_time: 500,
             end_time: 1500,
             memo: None,
+            metadata: None,
         }],
     );
 
@@ -13414,6 +13435,7 @@ fn test_get_recipient_streams_batch_create_updates_index() {
                 cliff_time: 0,
                 end_time: 500,
                 memo: None,
+                metadata: None,
             },
             CreateStreamParams {
         kind: crate::StreamKind::Linear,
@@ -13425,6 +13447,7 @@ fn test_get_recipient_streams_batch_create_updates_index() {
                 cliff_time: 0,
                 end_time: 1000,
                 memo: None,
+                metadata: None,
             },
         ],
     );
@@ -13464,6 +13487,7 @@ fn test_get_recipient_streams_batch_create_separate_recipient_indices() {
                 cliff_time: 0,
                 end_time: 500,
                 memo: None,
+                metadata: None,
             },
             CreateStreamParams {
         kind: crate::StreamKind::Linear,
@@ -13475,6 +13499,7 @@ fn test_get_recipient_streams_batch_create_separate_recipient_indices() {
                 cliff_time: 0,
                 end_time: 1000,
                 memo: None,
+                metadata: None,
             },
         ],
     );
@@ -15474,6 +15499,7 @@ fn regression_missing_config_create_streams_batch_panics() {
         cliff_time: 0,
         end_time: 1000,
         memo: None,
+        metadata: None,
     };
 
     env.ledger().set_timestamp(0);
@@ -16725,6 +16751,7 @@ fn test_create_streams_batch_recipient_index_consistency() {
                 cliff_time: 1000,
                 end_time: 2000,
                 memo: None,
+                metadata: None,
             },
             CreateStreamParams {
         kind: crate::StreamKind::Linear,
@@ -16736,6 +16763,7 @@ fn test_create_streams_batch_recipient_index_consistency() {
                 cliff_time: 1000,
                 end_time: 3000,
                 memo: None,
+                metadata: None,
             },
             CreateStreamParams {
         kind: crate::StreamKind::Linear,
@@ -16747,6 +16775,7 @@ fn test_create_streams_batch_recipient_index_consistency() {
                 cliff_time: 1000,
                 end_time: 2500,
                 memo: None,
+                metadata: None,
             },
             CreateStreamParams {
         kind: crate::StreamKind::Linear,
@@ -16758,6 +16787,7 @@ fn test_create_streams_batch_recipient_index_consistency() {
                 cliff_time: 1000,
                 end_time: 4000,
                 memo: None,
+                metadata: None,
             },
             CreateStreamParams {
         kind: crate::StreamKind::Linear,
@@ -16769,6 +16799,7 @@ fn test_create_streams_batch_recipient_index_consistency() {
                 cliff_time: 1000,
                 end_time: 3500,
                 memo: None,
+                metadata: None,
             },
         ],
     );
@@ -16835,6 +16866,7 @@ fn test_create_streams_batch_recipient_index_consistency() {
             cliff_time: 0,
             end_time: 500,
             memo: None,
+            metadata: None,
         }],
     );
 
@@ -16895,6 +16927,7 @@ fn test_create_streams_batch_deposit_overflow() {
         cliff_time: 0,
         end_time: 10,
         memo: None,
+        metadata: None,
     });
 
     streams.push_back(CreateStreamParams {
@@ -16907,6 +16940,7 @@ fn test_create_streams_batch_deposit_overflow() {
         cliff_time: 0,
         end_time: 10,
         memo: None,
+        metadata: None,
     });
 
     let result = ctx.client().try_create_streams(&ctx.sender, &streams);
@@ -17223,6 +17257,7 @@ fn test_budget_create_streams_batch_5() {
             cliff_time: 0,
             end_time: 1000,
             memo: None,
+            metadata: None,
         });
     }
 
@@ -17262,6 +17297,7 @@ fn test_create_streams_batch_atomicity_on_invalid_entry() {
         cliff_time: 0,
         end_time: 1000,
         memo: None,
+        metadata: None,
     };
     // deposit < rate * duration → InsufficientDeposit
     let invalid = CreateStreamParams {
@@ -17274,6 +17310,7 @@ fn test_create_streams_batch_atomicity_on_invalid_entry() {
         cliff_time: 0,
         end_time: 1000,
         memo: None,
+        metadata: None,
     };
 
     let count_before = ctx.client().get_stream_count();
@@ -17330,6 +17367,7 @@ fn test_create_streams_single_entry_matches_create_stream() {
         cliff_time: 0,
         end_time: 1000,
         memo: None,
+        metadata: None,
     });
     let ids = ctx.client().create_streams(&ctx.sender, &params);
     let id_batch = ids.get(0).unwrap();
@@ -17370,6 +17408,7 @@ fn test_create_streams_batch_deposit_overflow_is_atomic() {
             cliff_time: 0,
             end_time: duration,
             memo: None,
+            metadata: None,
         });
     }
 
@@ -18607,6 +18646,7 @@ mod i128_boundary_streams {
                 cliff_time: 0,
                 end_time: 1,
                 memo: None,
+                metadata: None,
             });
         }
 
@@ -18647,6 +18687,7 @@ mod i128_boundary_streams {
             cliff_time: 0,
             end_time: 1_000,
             memo: None,
+            metadata: None,
         };
         // Invalid: deposit < rate * duration
         let invalid = CreateStreamParams {
@@ -18659,6 +18700,7 @@ mod i128_boundary_streams {
             cliff_time: 0,
             end_time: 1_000,
             memo: None,
+            metadata: None,
         };
 
         let params = soroban_sdk::vec![&env, valid, invalid];
@@ -18741,6 +18783,7 @@ mod recipient_index_stress {
                     cliff_time: 100,
                     end_time: 1100,
                     memo: None,
+                    metadata: None,
                 });
             }
             ctx.client().create_streams(&ctx.sender, &streams);
@@ -19418,6 +19461,7 @@ mod structured_error_tests {
                 cliff_time: 0u64,
                 end_time: 100u64,
                 memo: None,
+                metadata: None,
             },
             CreateStreamParams {
         kind: crate::StreamKind::Linear,
@@ -19429,6 +19473,7 @@ mod structured_error_tests {
                 cliff_time: 0u64,
                 end_time: 100u64,
                 memo: None,
+                metadata: None,
             },
         ];
 

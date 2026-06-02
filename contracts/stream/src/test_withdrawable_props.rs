@@ -1,4 +1,4 @@
-//! Property-based tests for withdrawable arithmetic invariants.
+﻿//! Property-based tests for withdrawable arithmetic invariants.
 //!
 //! Proves that across every status transition (Active → Paused → Resumed →
 //! Cancelled / Completed) the following invariants always hold:
