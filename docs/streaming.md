@@ -16,7 +16,7 @@ When changing the contract:
 - Update snapshot tests if externally visible behavior changes
 - No behavior change required for doc-only updates
 
-**Entrypoint index (validator):** `batch_withdraw_to`, `delete_stream_template`, `get_global_emergency_paused`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `global_resume`, `set_contract_paused`, `set_global_emergency_paused`, `version`.
+**Entrypoint index (validator):** `batch_withdraw_to`, `delete_stream_template`, `get_global_emergency_paused`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_metadata`, `get_stream_template`, `global_resume`, `set_contract_paused`, `set_global_emergency_paused`, `version`.
 
 ## Externally Visible Assurances
 
@@ -28,13 +28,66 @@ This document provides crisp success and failure semantics for all protocol oper
 
 No hidden rules or implementation details are required to understand protocol behavior.
 
+### Per-stream metadata (TLV extension, CONTRACT_VERSION 4)
+
+From **CONTRACT_VERSION 4**, every stream may carry an optional bounded key-value map
+(`metadata: Option<Map<Bytes, Bytes>>`) for rich integration data such as invoice IDs,
+project codes, and external reference URIs.
+
+#### API
+
+| Entrypoint | Description |
+|---|---|
+| `create_stream(…, metadata)` | Pass `Some(map)` to attach metadata at creation, or `None` to omit. |
+| `get_stream_metadata(stream_id)` | Returns `Option<Map<Bytes, Bytes>>`. Permissionless read. |
+
+Metadata is also propagated through `create_streams`, `create_streams_relative`,
+`create_streams_partial`, and `create_stream_from_template` via the `metadata` field on
+`CreateStreamParams` / `CreateStreamRelativeParams`.
+
+#### Bounds (enforced at `create_stream` time — `ContractError::MetadataTooLarge` on violation)
+
+| Bound | Constant | Value |
+|---|---|---|
+| Maximum key-value pair count | `MAX_METADATA_KEYS` | 8 |
+| Maximum aggregate (all keys + values) bytes | `MAX_METADATA_BYTES` | 512 |
+| Maximum single key length | `MAX_METADATA_KEY_BYTES` | 32 |
+| Maximum single value length | `MAX_METADATA_VALUE_BYTES` | 128 |
+
+#### Invariants
+
+- Validated entirely at creation time; **immutable post-creation**.
+- Stream ID is **not allocated** if metadata validation fails (no partial state written).
+- No token movement occurs if metadata validation fails.
+- `StreamCreated` event includes the `metadata` field for indexer consumption.
+
+#### Example (Rust client)
+
+```rust
+let mut meta = Map::new(&env);
+meta.set(Bytes::from_slice(&env, b"invoice_id"), Bytes::from_slice(&env, b"INV-2026-001"));
+meta.set(Bytes::from_slice(&env, b"project"),    Bytes::from_slice(&env, b"PROJ-42"));
+
+let stream_id = client.create_stream(
+    &sender, &recipient,
+    &deposit, &rate,
+    &start, &cliff, &end,
+    &0_i128, // dust threshold
+    &None,   // memo
+    &Some(meta),
+);
+
+// Later — permissionless read
+let stored_meta = client.get_stream_metadata(&stream_id);
+```
+
 ### Schedule templates (presets)
 
 From **CONTRACT_VERSION 3**, integrators can register **relative** schedule skeletons (`register_stream_template`) and create streams from them (`create_stream_from_template`). This standardizes recurring payroll windows and trims repeated calldata versus always passing `start_delay` / `cliff_delay` / `duration` through the client for identical shapes.
 
 - **Auth**: registering and deleting templates requires the template `owner` signer. Creating a stream from a template requires the **funding `sender`** to authorize (same as `create_stream_relative`).
 - **Caps**: per-owner and global template counts are bounded; see `MAX_TEMPLATES_PER_OWNER` and `MAX_GLOBAL_TEMPLATES` in `contracts/stream/src/lib.rs`.
-- **Note**: Template-specific errors are not yet implemented in the ContractError enum. Template operations currently use generic errors like `InvalidParams` and `Unauthorized`.
+- **Errors**: `TemplateNotFound`, `TemplateLimitExceeded`, `TemplateUnauthorized`.
 
 ---
 
@@ -1287,3 +1340,27 @@ Comprehensive test coverage includes:
 
 See `contracts/stream/tests/integration_suite.rs` for full test suite.
 
+
+# Bulk Cancel Streams API
+
+## Overview
+
+The `bulk_cancel_streams` entrypoint provides gas-efficient, atomic batch cancellation for senders managing large portfolios. Instead of issuing one `cancel_stream` transaction per stream, senders can cancel up to `MAX_PAGE_SIZE` (100) streams in a single call with a single aggregate refund.
+
+## Motivation
+
+Senders managing large portfolios (up to 100 streams) who need to off-board a recipient or close a project previously had to issue one `cancel_stream` transaction per stream. This was:
+- **Gas-inefficient**: N auth checks, N token transfers for refunds
+- **Operationally complex**: Requires orchestrating multiple transactions
+- **Non-atomic**: Partial failures leave some streams active
+
+`bulk_cancel_streams` solves all three problems.
+
+## API Specification
+
+```rust
+pub fn bulk_cancel_streams(
+    env: Env,
+    sender: Address,
+    stream_ids: Vec&lt;u64&gt;,
+) -&gt; Result&lt;(), ContractError&gt;

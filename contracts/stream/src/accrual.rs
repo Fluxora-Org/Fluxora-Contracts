@@ -1,3 +1,4 @@
+use soroban_sdk::{contracterror, contracttype, Env, Symbol};
 /// Computes accrued stream amount without relying on Soroban environment state.
 ///
 /// This helper is intentionally pure to make the core vesting math easy to unit test.
@@ -37,20 +38,95 @@ pub fn calculate_accrued_amount(
 
 /// Snapshot of a stream's checkpoint state, passed to the accrual function.
 ///
+/// Checkpoint state for accrual calculations with rate change support.
+///
+/// This structure encapsulates all the parameters needed to calculate accrued amounts
+/// for streams that may have undergone rate changes. It supports the checkpointing
+/// mechanism that preserves recipient entitlements when rates are decreased.
+///
+/// ## Usage Context
+///
+/// Used by `calculate_accrued_amount_checkpointed` to compute accrued amounts for:
+/// - Streams with rate changes (via `decrease_rate_per_second`)
+/// - Cancelled streams (frozen accrual at cancellation time)
+/// - Regular streams (where `checkpointed_amount = 0`, `checkpointed_at = start_time`)
+///
+/// ## Checkpointing Mechanics
+///
+/// When a stream's rate is decreased:
+/// 1. Current accrued amount is calculated and stored in `checkpointed_amount`
+/// 2. Current timestamp is stored in `checkpointed_at`
+/// 3. Future accrual = `checkpointed_amount + (new_rate * (time - checkpointed_at))`
+///
+/// This ensures recipients never lose previously accrued entitlements.
+///
+/// ## Cross-References
+///
+/// - **Stream struct**: See `contracts/stream/src/lib.rs` for the main Stream definition
+/// - **Documentation**: See `docs/streaming.md` for complete accrual formula explanation
+/// - **Rate changes**: See `decrease_rate_per_second` function for checkpointing logic
+///
 /// Groups the six stream fields that are always read together, reducing the
 /// argument count of `calculate_accrued_amount_checkpointed` below the
 /// Clippy `too_many_arguments` threshold.
+///
+/// # Balance Conservation Context
+///
+/// When `decrease_rate_per_second` is called, the contract:
+/// 1. Computes `accrued_now` using the OLD rate from `checkpointed_at` to `now`
+/// 2. Sets `checkpointed_amount = accrued_now` and `checkpointed_at = now`
+/// 3. Applies the NEW rate only from `checkpointed_at` forward
+///
+/// This ensures the recipient's already-accrued entitlement is **never reduced**
+/// by a rate decrease, preserving the invariant that `withdrawn_amount` only
+/// increases and `deposit_amount` adjustments only refund *unstreamed* tokens.
 #[derive(Clone, Copy)]
 pub struct CheckpointState {
     /// Tokens accrued under all previous rate epochs, locked in at `checkpointed_at`.
+    ///
+    /// This represents the "base" accrued amount that was earned under previous rates
+    /// before the most recent rate change. For streams that have never had their rate
+    /// changed, this value is 0.
+    ///
+    /// **Invariant**: `checkpointed_amount <= deposit_amount`
     pub checkpointed_amount: i128,
+
     /// Timestamp of the last checkpoint (== `start_time` on creation).
+    ///
+    /// This marks the beginning of the current rate epoch. Accrual calculations
+    /// use this as the starting point for applying the current rate:
+    ///
+    /// ```text
+    /// current_epoch_accrual = rate_per_second * (current_time - checkpointed_at)
+    /// total_accrual = checkpointed_amount + current_epoch_accrual
+    /// ```
+    ///
+    /// **Invariant**: `start_time <= checkpointed_at <= current_time`
     pub checkpointed_at: u64,
+
     /// No accrual is visible before this timestamp.
+    ///
+    /// Even if `start_time < cliff_time`, tokens begin accruing at `start_time`.
+    /// However, the cliff prevents withdrawals until this timestamp is reached.
+    ///
+    /// **Invariant**: `start_time <= cliff_time <= end_time`
     pub cliff_time: u64,
+
     /// Accrual is capped at this timestamp.
+    ///
+    /// No additional tokens accrue beyond this point, regardless of elapsed time.
+    /// For cancelled streams, this is effectively replaced by `cancelled_at`.
+    ///
+    /// **Invariant**: `start_time < end_time`
     pub end_time: u64,
+
     /// Absolute ceiling; result is clamped to `[0, deposit_amount]`.
+    ///
+    /// The maximum amount that can ever be accrued for this stream, regardless
+    /// of rate or time calculations. Provides overflow protection and ensures
+    /// the contract never owes more than was deposited.
+    ///
+    /// **Invariant**: `deposit_amount >= rate_per_second * (end_time - start_time)`
     pub deposit_amount: i128,
 }
 
@@ -81,10 +157,10 @@ pub struct CheckpointState {
 pub fn calculate_accrued_amount_checkpointed(
     state: CheckpointState,
     rate_per_second: i128,
-    deposit_amount: i128,
+    _deposit_amount: i128,
     now: u64,
 ) -> i128 {
-    if now < cliff_time {
+    if now < state.cliff_time {
         return 0;
     }
 
@@ -101,8 +177,8 @@ pub fn calculate_accrued_amount_checkpointed(
         return 0;
     }
 
-    let elapsed_now = now.min(end_time);
-    let elapsed_seconds: i128 = if elapsed_now <= checkpointed_at {
+    let elapsed_now = now.min(state.end_time);
+    let elapsed_seconds: i128 = if elapsed_now <= state.checkpointed_at {
         0
     } else {
         (elapsed_now - state.checkpointed_at) as i128
@@ -390,9 +466,9 @@ mod invariants {
 mod accrued_after_end_time {
     use crate::accrual::calculate_accrued_amount;
 
-    // -----------------------------------------------------------------------
+    
     // Helpers
-    // -----------------------------------------------------------------------
+    
 
     /// A standard stream used across tests:
     ///   start=1000, cliff=1000, end=2000, rate=1/s, deposit=1000
