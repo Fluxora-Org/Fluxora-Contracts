@@ -47,6 +47,24 @@ const MAX_TTL: u32 = 6_307_200;
 /// All paginated entrypoints enforce this limit strictly.
 pub const MAX_PAGE_SIZE: u64 = 100;
 
+/// Maximum number of stream IDs returned per page in `get_recipient_streams_paginated`.
+const RECIPIENT_STREAMS_PAGE_LIMIT: u32 = 100;
+
+/// Maximum byte length for memo attached to a stream.
+pub const MAX_MEMO_BYTES: usize = 256;
+
+/// Maximum byte length for pause-reason strings.
+pub const MAX_PAUSE_REASON_BYTES: usize = 256;
+
+/// Maximum number of templates a single owner may hold.
+pub const MAX_TEMPLATES_PER_OWNER: u64 = 50;
+
+/// Maximum number of templates stored globally.
+pub const MAX_GLOBAL_TEMPLATES: u64 = 1_000;
+
+/// Maximum number of stream IDs that can be reserved in a single `reserve_stream_ids` call.
+pub const MAX_ID_RESERVATION: u32 = 100;
+
 /// Maximum byte length for pause-reason strings passed to `pause_stream`,
 /// `pause_stream_as_admin`, and `pause_protocol`.
 ///
@@ -166,6 +184,42 @@ pub struct Config {
     pub admin: Address,
 }
 
+/// An active ID reservation held by a caller after `reserve_stream_ids`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IdReservation {
+    pub start_id: u64,
+    pub count: u32,
+    pub consumed: u32,
+}
+
+/// Reason for a protocol or stream pause.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PauseReason {
+    Operational = 0,
+    Administrative = 1,
+}
+
+/// Struct for per-stream or per-protocol pause records.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamPaused {
+    pub stream_id: u64,
+    pub reason: soroban_sdk::String,
+}
+
+/// Health report for a stream.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamHealth {
+    pub is_underfunded: bool,
+    pub is_expired: bool,
+    pub accrued_to_date: u128,
+    pub remaining_deposit: u128,
+    pub seconds_until_depletion: Option<u64>,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProtocolStats {
@@ -217,6 +271,20 @@ pub enum ContractError {
     InvalidSignature = 15,
     /// Accrued amount is below the expected minimum specified in the signed payload.
     BelowMinimumAmount = 16,
+    /// `reserve_stream_ids` was called with `count = 0`.
+    ReservationCountZero = 17,
+    /// `reserve_stream_ids` was called with `count > MAX_ID_RESERVATION`.
+    ReservationLimitExceeded = 18,
+    /// Delegated withdrawal signature deadline has expired.
+    SignatureDeadlineExpired = 19,
+    /// Template not found.
+    TemplateNotFound = 20,
+    /// Template limit exceeded (per-owner or global).
+    TemplateLimitExceeded = 21,
+    /// Caller not authorized to delete template.
+    TemplateUnauthorized = 22,
+    /// Pause reason string exceeds `MAX_PAUSE_REASON_BYTES`.
+    PauseReasonTooLong = 23,
 }
 
 #[contracttype]
@@ -445,6 +513,21 @@ pub struct AutoClaimTriggered {
     pub amount: i128,
 }
 
+/// Payload for a valid auto-claim destination.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AutoClaimValidPayload {
+    pub destination: Address,
+    pub claimable: i128,
+}
+
+/// Payload for an invalid auto-claim destination.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AutoClaimInvalidPayload {
+    pub destination: Address,
+}
+
 /// Status of auto-claim configuration for a stream.
 ///
 /// Returned by `get_auto_claim_status` to allow callers to validate
@@ -455,17 +538,9 @@ pub enum AutoClaimStatus {
     /// No auto-claim destination has been set for this stream.
     NotSet,
     /// Auto-claim destination is set and valid.
-    ValidDestination {
-        /// The destination address where tokens will be sent.
-        destination: Address,
-        /// The amount currently claimable (accrued - withdrawn).
-        claimable: i128,
-    },
+    ValidDestination(AutoClaimValidPayload),
     /// Auto-claim destination is set but invalid (zero address or contract itself).
-    InvalidDestination {
-        /// The invalid destination address.
-        destination: Address,
-    },
+    InvalidDestination(AutoClaimInvalidPayload),
 }
 
 #[contracttype]
@@ -528,7 +603,7 @@ pub enum PauseKind {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Stream {
+pub struct Stream {
     pub stream_id: u64,
     pub sender: Address,
     pub recipient: Address,
@@ -724,6 +799,14 @@ pub enum DataKey {
     RecipientStreamPageCount(Address),
     /// Pending recipient update proposal for a stream (sender-initiated, recipient-accepted).
     PendingRecipientUpdate(u64),
+    /// Active ID reservation for a caller (Address → IdReservation).
+    IdReservation(Address),
+    /// Per-stream max rate cap (i128). Instance storage.
+    MaxRatePerSecond,
+    /// Per-recipient nonce for delegated-withdraw replay protection.
+    DelegatedWithdrawNonce(Address),
+    /// Last pause record for stream-level or protocol-level pause.
+    LastPauseRecord(PauseKind),
 }
 
 // ---------------------------------------------------------------------------
@@ -851,6 +934,77 @@ fn read_stream_count(env: &Env) -> u64 {
 fn set_stream_count(env: &Env, count: u64) {
     env.storage().instance().set(&DataKey::NextStreamId, &count);
     bump_instance_ttl(env);
+}
+
+/// Acquire the reentrancy guard. Returns an error if already locked.
+fn acquire_reentrancy_lock(env: &Env) -> Result<(), ContractError> {
+    let locked: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::ReentrancyLock)
+        .unwrap_or(false);
+    if locked {
+        return Err(ContractError::InvalidState);
+    }
+    env.storage()
+        .instance()
+        .set(&DataKey::ReentrancyLock, &true);
+    Ok(())
+}
+
+/// Release the reentrancy guard.
+fn release_reentrancy_lock(env: &Env) {
+    env.storage()
+        .instance()
+        .set(&DataKey::ReentrancyLock, &false);
+}
+
+// ---------------------------------------------------------------------------
+// IdReservation storage helpers (issue #584)
+// ---------------------------------------------------------------------------
+
+fn load_id_reservation(env: &Env, caller: &Address) -> Option<IdReservation> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::IdReservation(caller.clone()))
+}
+
+fn save_id_reservation(env: &Env, caller: &Address, res: &IdReservation) {
+    let key = DataKey::IdReservation(caller.clone());
+    env.storage().persistent().set(&key, res);
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+}
+
+fn remove_id_reservation(env: &Env, caller: &Address) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::IdReservation(caller.clone()));
+}
+
+/// Determine the next stream ID for `caller`.
+///
+/// If the caller has an active reservation, consume the next ID from it.
+/// When the reservation is fully consumed it is deleted.
+/// Otherwise fall through to the live global counter.
+fn next_stream_id_for(env: &Env, caller: &Address) -> u64 {
+    if let Some(mut res) = load_id_reservation(env, caller) {
+        let id = res.start_id + res.consumed as u64;
+        res.consumed += 1;
+        if res.consumed >= res.count {
+            remove_id_reservation(env, caller);
+        } else {
+            save_id_reservation(env, caller, &res);
+        }
+        id
+    } else {
+        let id = read_stream_count(env);
+        set_stream_count(env, id + 1);
+        id
+    }
 }
 
 fn load_stream(env: &Env, stream_id: u64) -> Result<Stream, ContractError> {
@@ -1353,8 +1507,7 @@ impl FluxoraStream {
             }
         }
 
-        let stream_id = read_stream_count(env);
-        set_stream_count(env, stream_id + 1);
+        let stream_id = next_stream_id_for(env, &sender);
 
         let stream = Stream {
             stream_id,
@@ -1428,8 +1581,7 @@ impl FluxoraStream {
             }
         }
 
-        let stream_id = read_stream_count(env);
-        set_stream_count(env, stream_id + 1);
+        let stream_id = next_stream_id_for(env, &sender);
 
         let stream = Stream {
             stream_id,
@@ -1985,7 +2137,7 @@ impl FluxoraStream {
                 };
                 existing.insert(insert_pos, id);
             }
-            save_recipient_streams(&env, &recipient, &existing);
+            save_recipient_streams(&env, &recipient, &existing, None);
         }
 
         Ok(created_ids)
@@ -2241,9 +2393,13 @@ impl FluxoraStream {
         stream.status = StreamStatus::Paused;
         save_stream(&env, &stream);
 
+        let reason_str = match reason {
+            PauseReason::Operational => soroban_sdk::String::from_str(&env, "Operational"),
+            PauseReason::Administrative => soroban_sdk::String::from_str(&env, "Administrative"),
+        };
         env.events().publish(
             (symbol_short!("paused"), stream_id),
-            StreamPaused { stream_id, reason },
+            StreamPaused { stream_id, reason: reason_str },
         );
         Ok(())
     }
@@ -2779,13 +2935,14 @@ impl FluxoraStream {
                     now
                 };
                 let accrued = accrual::calculate_accrued_amount_checkpointed(
-                    stream.start_time,
-                    stream.checkpointed_amount,
-                    stream.checkpointed_at,
-                    stream.cliff_time,
-                    stream.end_time,
+                    accrual::CheckpointState {
+                        checkpointed_amount: stream.checkpointed_amount,
+                        checkpointed_at: stream.checkpointed_at,
+                        cliff_time: stream.cliff_time,
+                        end_time: stream.end_time,
+                        deposit_amount: stream.deposit_amount,
+                    },
                     stream.rate_per_second,
-                    stream.deposit_amount,
                     effective_now,
                 );
                 (accrued - stream.withdrawn_amount).max(0)
@@ -2922,13 +3079,14 @@ impl FluxoraStream {
                     now
                 };
                 let accrued = accrual::calculate_accrued_amount_checkpointed(
-                    stream.start_time,
-                    stream.checkpointed_amount,
-                    stream.checkpointed_at,
-                    stream.cliff_time,
-                    stream.end_time,
+                    accrual::CheckpointState {
+                        checkpointed_amount: stream.checkpointed_amount,
+                        checkpointed_at: stream.checkpointed_at,
+                        cliff_time: stream.cliff_time,
+                        end_time: stream.end_time,
+                        deposit_amount: stream.deposit_amount,
+                    },
                     stream.rate_per_second,
-                    stream.deposit_amount,
                     effective_now,
                 );
                 (accrued - stream.withdrawn_amount).max(0)
@@ -3062,8 +3220,13 @@ impl FluxoraStream {
         msg.extend_from_array(&expected_minimum_amount.to_be_bytes());
 
         // 5. Verify ed25519 signature — panics on failure (Soroban host trap).
-        env.crypto()
-            .ed25519_verify(&recipient_public_key, &msg, &signature);
+        let pk_bytes: soroban_sdk::BytesN<32> = recipient_public_key
+            .try_into()
+            .map_err(|_| ContractError::InvalidSignature)?;
+        let sig_bytes: soroban_sdk::BytesN<64> = signature
+            .try_into()
+            .map_err(|_| ContractError::InvalidSignature)?;
+        env.crypto().ed25519_verify(&pk_bytes, &msg, &sig_bytes);
 
         // 6. State checks (same as withdraw).
         if stream.status == StreamStatus::Completed {
@@ -4184,7 +4347,7 @@ impl FluxoraStream {
         owner.require_auth();
         validate_template_delays(&env, start_delay, cliff_delay, duration)?;
         let ids = load_owner_template_ids(&env, &owner);
-        if ids.len() >= MAX_TEMPLATES_PER_OWNER {
+        if u64::from(ids.len()) >= MAX_TEMPLATES_PER_OWNER {
             return Err(ContractError::TemplateLimitExceeded);
         }
         let active = read_active_template_count(&env);
@@ -4361,6 +4524,8 @@ impl FluxoraStream {
     /// - Paginate: fetch first N IDs, then call `get_stream_state` for each
     /// - Filter by status: fetch all IDs, then check status of each via `get_stream_state`
     pub fn get_recipient_streams(env: Env, recipient: Address) -> soroban_sdk::Vec<u64> {
+        load_recipient_streams(&env, &recipient)
+    }
 
     /// Paginated version of get_recipient_streams to prevent unbounded returns.
     /// 
@@ -4399,28 +4564,26 @@ impl FluxoraStream {
             0
         } else {
             match streams.binary_search(&cursor) {
-                Ok(pos) => pos + 1,  # Start after the cursor
-                Err(pos) => pos,     # Insert position if not found
+                Ok(pos) => pos + 1,  // Start after the cursor
+                Err(pos) => pos,     // Insert position if not found
             }
         };
         
         // Calculate end position
-        let end_idx = (start_idx as u32 + effective_limit).min(total as u32) as usize;
+        let end_idx = (start_idx as u32 + effective_limit).min(total as u32);
         
-        #[allow(unused_assignments)]
-        let mut next_cursor = 0;
-        if end_idx < total {
-            next_cursor = streams.get(end_idx as usize).unwrap();
+        let mut next_cursor = 0u64;
+        if (end_idx as usize) < total as usize {
+            next_cursor = streams.get(end_idx).unwrap();
         }
         
-        #[allow(unused_assignments)]
         let mut page_streams = soroban_sdk::Vec::new(&env);
         for i in start_idx..end_idx {
             page_streams.push_back(streams.get(i).unwrap());
         }
         
-         Page { stream_ids: page_streams, next_cursor }
-     }
+        Page { stream_ids: page_streams, next_cursor }
+    }
 
      /// Count the total number of streams for a recipient.
     ///
@@ -4513,81 +4676,6 @@ impl FluxoraStream {
                 result.push_back(stream);
             }
             current_id += 1;
-        }
-
-        result
-    }
-
-    /// Paginated export of recipient streams with cursor-based pagination.
-    ///
-    /// Returns a bounded page of stream IDs for a recipient starting from a cursor position.
-    /// Designed for efficient, resumable export of large recipient portfolios without
-    /// unbounded memory usage.
-    ///
-    /// # Parameters
-    /// - `recipient`: Address to query streams for
-    /// - `cursor`: Starting position in the recipient's stream list (0-based index).
-    ///   Use 0 for first page, then `cursor + previous_result.len()` for next page.
-    /// - `limit`: Maximum number of streams to return (capped at [`MAX_PAGE_SIZE`])
-    ///
-    /// # Returns
-    /// - `Vec<u64>`: Vector of stream IDs in ascending order
-    ///   - Empty vector if `cursor >= recipient_stream_count`
-    ///   - Length never exceeds `min(limit, MAX_PAGE_SIZE)`
-    ///
-    /// # Cursor Semantics
-    /// - Cursor is a 0-based index into the sorted recipient stream list
-    /// - After each call, next cursor = `cursor + result.len()`
-    /// - When result.len() < limit, you've reached the end
-    /// - Cursor survives stream list mutations (insertions/removals shift indices naturally)
-    ///
-    /// # Pagination Strategy
-    /// ```ignore
-    /// let mut cursor = 0;
-    /// let page_size = 50;
-    /// loop {
-    ///     let page = get_recipient_streams_paginated(&env, &recipient, cursor, page_size);
-    ///     if page.is_empty() { break; }
-    ///     // Process page...
-    ///     cursor += page.len();
-    /// }
-    /// ```
-    ///
-    /// # DoS Protection
-    /// - `limit` is strictly capped at [`MAX_PAGE_SIZE`] (100)
-    /// - Cursor-based pagination prevents unbounded list traversal
-    /// - Gas cost is O(limit) regardless of recipient's total stream count
-    ///
-    /// # Consistency Guarantees
-    /// - Stream list is sorted by stream_id (ascending)
-    /// - Pagination is stable: repeated calls with same cursor return same results
-    ///   unless the underlying list is modified
-    /// - New streams added during pagination may appear or not depending on insertion position
-    pub fn get_recipient_streams_paginated(
-        env: Env,
-        recipient: Address,
-        cursor: u64,
-        limit: u64,
-    ) -> soroban_sdk::Vec<u64> {
-        // Enforce DoS protection limit
-        let page_size = limit.min(MAX_PAGE_SIZE) as u32;
-        let all_streams = load_recipient_streams(&env, &recipient);
-        let total = all_streams.len() as u64;
-
-        // Return empty if cursor is beyond end
-        if cursor >= total || page_size == 0 {
-            return soroban_sdk::Vec::new(&env);
-        }
-
-        let start_idx = cursor as u32;
-        let available = total as u32 - start_idx;
-        let take_count = page_size.min(available);
-
-        let mut result = soroban_sdk::Vec::new(&env);
-        for i in 0..take_count {
-            if let Some(stream_id) = all_streams.get(start_idx + i) {
-                result.push_back(stream_id);
-            }
         }
 
         result
@@ -4713,10 +4801,7 @@ impl FluxoraStream {
 
         Ok(())
     }
-}
 
-#[contractimpl]
-impl FluxoraStream {
     /// Cancel a payment stream as the contract admin.
     ///
     /// Administrative override to cancel any stream, bypassing sender authorization.
@@ -4819,7 +4904,7 @@ impl FluxoraStream {
         let record = PauseRecord {
             actor: admin,
             timestamp: env.ledger().timestamp(),
-            reason: reason_str,
+            reason: reason_str.clone(),
         };
         env.storage()
             .instance()
@@ -4827,7 +4912,7 @@ impl FluxoraStream {
 
         env.events().publish(
             (symbol_short!("paused"), stream_id),
-            StreamPaused { stream_id, reason },
+            StreamPaused { stream_id, reason: reason_str },
         );
         Ok(())
     }
@@ -5033,7 +5118,7 @@ impl FluxoraStream {
         // Store audit trail information
         let reason_str = reason.unwrap_or_else(|| soroban_sdk::String::from_str(&env, ""));
         // Enforce MAX_PAUSE_REASON_BYTES to prevent unbounded ledger-entry growth.
-        if reason_str.len() > MAX_PAUSE_REASON_BYTES {
+        if reason_str.len() > MAX_PAUSE_REASON_BYTES as u32 {
             return Err(ContractError::PauseReasonTooLong);
         }
         env.storage()
@@ -5221,7 +5306,7 @@ impl FluxoraStream {
         admin.require_auth();
 
         // Validate recipient address
-        recipient.require_valid();
+        recipient.require_auth();
 
         // Get contract's token balance
         let token_address = get_token(&env)?;
@@ -5592,7 +5677,7 @@ impl FluxoraStream {
             Some(destination) => {
                 // Check if destination is valid
                 if !Self::is_valid_destination(&env, &destination) {
-                    return Ok(AutoClaimStatus::InvalidDestination { destination });
+                    return Ok(AutoClaimStatus::InvalidDestination(AutoClaimInvalidPayload { destination }));
                 }
 
                 // Calculate claimable amount
@@ -5611,10 +5696,10 @@ impl FluxoraStream {
 
                 let claimable = accrued.saturating_sub(stream.withdrawn_amount).max(0);
 
-                Ok(AutoClaimStatus::ValidDestination {
+                Ok(AutoClaimStatus::ValidDestination(AutoClaimValidPayload {
                     destination,
                     claimable,
-                })
+                }))
             }
         }
     }
@@ -5662,14 +5747,75 @@ impl FluxoraStream {
     /// - `true` if destination is valid
     /// - `false` if destination is invalid
     fn is_valid_destination(env: &Env, destination: &Address) -> bool {
-        // Check if destination is the contract itself
         if destination == &env.current_contract_address() {
             return false;
         }
-
-        // In Soroban, addresses are always valid if they exist
-        // Additional validation could be added here if needed
         true
+    }
+
+    /// Reserve a contiguous range of stream IDs for off-chain pre-computation.
+    ///
+    /// Atomically advances the global ID counter by `count` and stores the reservation
+    /// keyed by `caller`. Off-chain orchestrators use the returned IDs to pre-populate
+    /// database records before the corresponding `create_stream` transactions land on-chain.
+    ///
+    /// Subsequent `create_stream` calls from `caller` consume IDs from the reservation
+    /// in order. A second call before the first reservation is exhausted **replaces** it
+    /// (unconsumed IDs become permanent gaps; the counter is never rewound).
+    ///
+    /// # Parameters
+    /// - `caller`: Address making the reservation (must authorize)
+    /// - `count`: Number of IDs to reserve (1 – `MAX_ID_RESERVATION`)
+    ///
+    /// # Returns
+    /// - `Vec<u64>`: Reserved IDs in ascending order
+    ///
+    /// # Errors
+    /// - `ReservationCountZero` (17): `count` is 0
+    /// - `ReservationLimitExceeded` (18): `count > MAX_ID_RESERVATION`
+    ///
+    /// # Security
+    /// - `count` is capped at `MAX_ID_RESERVATION = 100` to prevent counter-inflation attacks.
+    /// - Authorization required to prevent third parties from consuming counter space.
+    pub fn reserve_stream_ids(
+        env: Env,
+        caller: Address,
+        count: u32,
+    ) -> Result<soroban_sdk::Vec<u64>, ContractError> {
+        caller.require_auth();
+
+        if count == 0 {
+            return Err(ContractError::ReservationCountZero);
+        }
+        if count > MAX_ID_RESERVATION {
+            return Err(ContractError::ReservationLimitExceeded);
+        }
+
+        let start_id = read_stream_count(&env);
+        set_stream_count(&env, start_id + count as u64);
+
+        let res = IdReservation { start_id, count, consumed: 0 };
+        save_id_reservation(&env, &caller, &res);
+
+        let mut ids = soroban_sdk::Vec::new(&env);
+        for i in 0..count {
+            ids.push_back(start_id + i as u64);
+        }
+        Ok(ids)
+    }
+
+    /// View the active ID reservation for a caller, if any.
+    ///
+    /// # Parameters
+    /// - `caller`: Address to query
+    ///
+    /// # Returns
+    /// - `Option<IdReservation>`: Active reservation, or `None`
+    ///
+    /// # Authorization
+    /// - None required (view function)
+    pub fn get_id_reservation(env: Env, caller: Address) -> Option<IdReservation> {
+        load_id_reservation(&env, &caller)
     }
 }
 

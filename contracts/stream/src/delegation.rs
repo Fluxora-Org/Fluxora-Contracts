@@ -20,7 +20,7 @@
 
 use soroban_sdk::Env;
 
-use crate::{load_stream, read_withdraw_nonce, ContractError};
+use crate::{load_stream, load_delegated_nonce, ContractError};
 
 /// Validate the delegation parameters for a delegated-withdraw call.
 ///
@@ -50,7 +50,7 @@ pub(crate) fn validate_delegation_params(
     }
 
     let stream = load_stream(env, stream_id)?;
-    let current_nonce = read_withdraw_nonce(env, &stream.recipient);
+    let current_nonce = load_delegated_nonce(env, &stream.recipient);
     if nonce != current_nonce {
         return Err(ContractError::InvalidParams);
     }

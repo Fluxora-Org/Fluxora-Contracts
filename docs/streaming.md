@@ -36,6 +36,30 @@ From **CONTRACT_VERSION 3**, integrators can register **relative** schedule skel
 - **Caps**: per-owner and global template counts are bounded; see `MAX_TEMPLATES_PER_OWNER` and `MAX_GLOBAL_TEMPLATES` in `contracts/stream/src/lib.rs`.
 - **Note**: Template-specific errors are not yet implemented in the ContractError enum. Template operations currently use generic errors like `InvalidParams` and `Unauthorized`.
 
+### ID pre-allocation (`reserve_stream_ids`) — issue #584
+
+Off-chain orchestrators and indexers that build payment batches often need to know stream IDs **before** submitting `create_stream` transactions, to pre-populate database records or cross-reference external invoice systems.
+
+`reserve_stream_ids(caller, count)` atomically advances the global ID counter by `count` and returns the reserved range as a `Vec<u64>`.  Subsequent `create_stream` calls by the same `caller` consume IDs from the reservation in order; once exhausted (or if no reservation exists) the live counter is used.
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `MAX_ID_RESERVATION` | 100 | Cap per call — prevents counter-inflation attacks |
+| `RESERVATION_TTL_LEDGERS` | 17 280 (~1 day) | Reservation expiry — abandoned ranges do not block the counter forever |
+
+**Security notes:**
+- `count = 0` → `ReservationCountZero` (18).
+- `count > 100` → `ReservationLimitExceeded` (17).
+- A new reservation for the same caller **overwrites** the previous one; the old IDs remain as a gap in the counter (same as any abandoned reservation).
+- The TTL ensures persistent storage entries are cleaned up automatically.
+
+**Usage pattern:**
+```
+1. Call reserve_stream_ids(caller, N)  → get [id_0, id_1, …, id_{N-1}]
+2. Pre-populate off-chain DB with those IDs
+3. Submit N create_stream transactions — each consumes the next reserved ID in order
+```
+
 ---
 
 ## 1. Stream Lifecycle
@@ -1286,4 +1310,99 @@ Comprehensive test coverage includes:
 - ✅ Handles edge cases (completed streams, paused streams, etc.)
 
 See `contracts/stream/tests/integration_suite.rs` for full test suite.
+
+## ID Reservation (Off-Chain Orchestration)
+
+### reserve_stream_ids
+
+**Purpose:** Pre-allocate a contiguous range of stream IDs before creating streams, enabling off-chain orchestrators to pre-populate database records or reference external invoice systems with deterministic IDs.
+
+**Entry-point:**
+
+```rust
+pub fn reserve_stream_ids(
+    env: Env,
+    caller: Address,
+    count: u32,
+) -> Result<Vec<u64>, ContractError>
+```
+
+**Authorization:** Requires `caller` signature.
+
+**Parameters:**
+
+- `caller`: Address making the reservation
+- `count`: Number of IDs to reserve (1 – `MAX_ID_RESERVATION` = 100)
+
+**Returns:** `Vec<u64>` containing the reserved IDs in ascending order.
+
+**Behavior:**
+
+1. Atomically advances the global `NextStreamId` counter by `count`
+2. Stores an `IdReservation { start_id, count, consumed: 0 }` keyed by `caller`
+3. Returns `[start_id, start_id+1, ..., start_id+count-1]`
+4. Subsequent `create_stream` calls from `caller` consume IDs from the reservation in order
+5. When fully consumed, the reservation is automatically deleted
+6. A second `reserve_stream_ids` call before the first is exhausted **replaces** the old reservation (unconsumed IDs become permanent gaps; the counter is never rewound)
+
+**Security:**
+
+- `count` capped at `MAX_ID_RESERVATION = 100` to prevent counter-inflation attacks
+- Authorization required to prevent third parties from consuming a victim's counter space
+- Gaps from unconsumed reservations are permanent but bounded (max 100 per call)
+
+**Errors:**
+
+- `ReservationCountZero` (17): `count` is 0
+- `ReservationLimitExceeded` (18): `count > MAX_ID_RESERVATION`
+
+**Example:**
+
+```rust
+// Off-chain orchestrator reserves 5 IDs
+let ids = client.reserve_stream_ids(&orchestrator, &5); // [0, 1, 2, 3, 4]
+
+// Pre-populate database with these IDs
+database.insert_pending_streams(ids);
+
+// Later: create streams — they'll get the reserved IDs
+let id0 = client.create_stream(&orchestrator, ...); // Uses ID 0
+let id1 = client.create_stream(&orchestrator, ...); // Uses ID 1
+```
+
+### get_id_reservation
+
+**Purpose:** View the active ID reservation for a caller (if any).
+
+**Entry-point:**
+
+```rust
+pub fn get_id_reservation(env: Env, caller: Address) -> Option<IdReservation>
+```
+
+**Authorization:** None (view function).
+
+**Returns:**
+
+- `Some(IdReservation { start_id, count, consumed })` if caller has an active reservation
+- `None` if no reservation exists
+
+**Example:**
+
+```rust
+let res = client.get_id_reservation(&caller);
+match res {
+    Some(r) => println!("Reserved {}-{}, consumed {}", r.start_id, r.start_id + r.count - 1, r.consumed),
+    None => println!("No active reservation"),
+}
+```
+
+**Test coverage:** See `contracts/stream/tests/id_reservation.rs` for comprehensive tests covering:
+
+- ✅ Basic reservation (single, max, sequential)
+- ✅ Error cases (zero count, over-limit)
+- ✅ `get_id_reservation` view (before/after reserve)
+- ✅ `create_stream` consuming reservations
+- ✅ Counter-gap semantics (overwrites, exhaustion)
+- ✅ Multi-caller isolation
 
