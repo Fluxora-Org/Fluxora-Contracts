@@ -4,8 +4,8 @@ extern crate std;
 use fluxora_stream::{ContractError, FluxoraStream, FluxoraStreamClient};
 use soroban_sdk::{
     testutils::{Address as _, Ledger, LedgerInfo},
-    Address, Env,
     token::Client as TokenClient,
+    Address, Env,
 };
 
 struct TestContext {
@@ -26,7 +26,9 @@ impl TestContext {
         let client = FluxoraStreamClient::new(&env, &contract_id);
 
         let token_admin = Address::generate(&env);
-        let token_id = env.register_stellar_asset_contract_v2(token_admin).address();
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
         let token = TokenClient::new(&env, &token_id);
 
         let admin = Address::generate(&env);
@@ -273,7 +275,7 @@ fn test_delegated_withdraw_enforces_rate_limit() {
 #[test]
 fn test_batch_withdraw_enforces_rate_limit_per_stream() {
     let ctx = TestContext::setup();
-    
+
     // Create two streams
     let stream_id1 = ctx.create_stream();
     let stream_id2 = ctx.create_stream();
@@ -304,7 +306,7 @@ fn test_batch_withdraw_enforces_rate_limit_per_stream() {
 #[test]
 fn test_batch_withdraw_fails_if_any_stream_violates_rate_limit() {
     let ctx = TestContext::setup();
-    
+
     // Create two streams
     let stream_id1 = ctx.create_stream();
     let stream_id2 = ctx.create_stream();
@@ -325,7 +327,7 @@ fn test_batch_withdraw_fails_if_any_stream_violates_rate_limit() {
     // stream1 just withdrew (0 ledgers ago), stream2 never withdrew (should succeed)
     let stream_ids = soroban_sdk::vec![&ctx.env, stream_id1, stream_id2];
     let result = ctx.client.try_batch_withdraw(&ctx.recipient, &stream_ids);
-    
+
     // Should fail because stream1 violates rate limit
     assert_eq!(result, Err(Ok(ContractError::WithdrawalTooFrequent)));
 }
@@ -355,7 +357,7 @@ fn test_no_state_mutation_on_rate_limit_error() {
 
     // First withdrawal succeeds
     let first_amount = ctx.client.withdraw(&stream_id).unwrap();
-    
+
     // Get stream state after first withdrawal
     let stream_after_first = ctx.client.get_stream_state(&stream_id);
     let withdrawn_after_first = stream_after_first.withdrawn_amount;
@@ -368,7 +370,7 @@ fn test_no_state_mutation_on_rate_limit_error() {
     // Verify no state mutation occurred
     let stream_after_failed = ctx.client.get_stream_state(&stream_id);
     assert_eq!(stream_after_failed.withdrawn_amount, withdrawn_after_first);
-    
+
     let balance_after_failed = ctx.token.balance(&ctx.recipient);
     assert_eq!(balance_after_failed, balance_after_first);
 }
@@ -382,11 +384,11 @@ fn test_underflow_safety_invariant() {
     for _ in 0..5 {
         ctx.advance_ledger(20);
         ctx.client.withdraw(&stream_id).unwrap();
-        
+
         // After each withdrawal, verify invariant: last_withdraw_ledger <= current_ledger
         let stream = ctx.client.get_stream_state(&stream_id);
         let current_ledger = ctx.env.ledger().sequence();
-        
+
         // This assertion verifies the invariant holds
         // If last_withdraw_ledger > current_ledger, the subtraction would underflow
         assert!(stream.last_withdraw_ledger <= current_ledger);
@@ -396,19 +398,22 @@ fn test_underflow_safety_invariant() {
 #[test]
 fn test_zero_withdrawable_does_not_update_last_withdraw_ledger() {
     let ctx = TestContext::setup();
-    
+
     // Create stream with cliff time in the future
-    let stream_id = ctx.client.create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &1000,
-        &1,
-        &0,
-        &500, // cliff at 500 seconds
-        &1000,
-        &0,
-        &None,
-    ).unwrap();
+    let stream_id = ctx
+        .client
+        .create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &1000,
+            &1,
+            &0,
+            &500, // cliff at 500 seconds
+            &1000,
+            &0,
+            &None,
+        )
+        .unwrap();
 
     // Advance ledgers but not past cliff
     ctx.advance_ledger(50);
@@ -459,7 +464,7 @@ fn test_rate_limit_applies_across_different_withdrawal_methods() {
 #[test]
 fn test_multiple_streams_independent_rate_limits() {
     let ctx = TestContext::setup();
-    
+
     // Create two streams
     let stream_id1 = ctx.create_stream();
     let stream_id2 = ctx.create_stream();
