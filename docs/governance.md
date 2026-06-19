@@ -2,17 +2,31 @@
 
 ## Purpose
 
-The `FluxoraGovernance` contract (`contracts/governance/src/lib.rs`) implements a minimal
-proposal / approve / execute governance pattern with a configurable quorum and timelock.
+The `FluxoraGovernance` contract (`contracts/governance/src/lib.rs`) implements a
+configurable-threshold proposal / approve / execute governance pattern with a timelock.
 It decouples operational signing keys from protocol-parameter authority: no single key can
-change factory parameters immediately; a quorum of co-signers must approve and a mandatory
+change factory parameters immediately; a threshold of co-signers must approve and a mandatory
 waiting period must elapse before the change takes effect.
+
+## Threshold model
+
+The approval **threshold** is set at `init` time and stored in instance storage. It
+represents the minimum number of co-signer approvals required before a proposal can be
+executed. The invariant `1 <= threshold <= signers.len()` is enforced at:
+
+- `init` — the initial threshold must be between 1 and the initial signer count.
+- `remove_signer` — removal is rejected with `QuorumWouldBreak` if it would leave fewer
+  signers than the current threshold.
+- `add_signer` — the threshold is unchanged (adding signers can never violate the invariant).
+
+When quorum is first reached, the current threshold is **snapshotted** alongside the
+timestamp in a `QuorumInfo` record. At execution time the proposal is judged against this
+snapshot, making in-flight proposals immune to mid-flight threshold changes by the admin.
 
 ## Constants
 
 | Constant | Value | Meaning |
-|---|---|---|---|
-| `GOVERNANCE_QUORUM` | 2 | Minimum approvals required before execution is allowed |
+|---|---|---|
 | `GOVERNANCE_TIMELOCK_SECONDS` | 172 800 (48 h) | Seconds to wait after quorum before executing |
 | `MAX_PROPOSAL_AGE_SECONDS` | 2 592 000 (30 d) | Max age of a proposal before it expires and becomes non-executable |
 | `MAX_SIGNERS` | 20 | Maximum co-signers registered at once |
@@ -64,9 +78,10 @@ or executed.
 
 ## Entrypoints
 
-### `init(admin, signers)`
+### `init(admin, signers, threshold)`
 
-Initialises the contract. Can only be called once.
+Initialises the contract with an admin, a list of co-signers, and an approval threshold.
+`threshold` must satisfy `1 <= threshold <= signers.len()`. Can only be called once.
 
 ### `propose(proposer, target, calldata) -> u32`
 
@@ -83,8 +98,10 @@ Submits a new governance proposal and returns its monotonically increasing ID.
 Records an approval from a co-signer.
 
 - Each signer may approve at most once per proposal.
-- When the approval count first reaches `GOVERNANCE_QUORUM`, the timelock clock starts
-  and a `QuorumReached` event is emitted.
+- When the approval count first reaches the configured threshold, the timelock clock starts
+  and a `QuorumReached` event is emitted.  The threshold at that moment is snapshotted in
+  the `QuorumInfo` record so that in-flight proposals are protected against threshold
+  changes.
 
 ### `execute(executor, proposal_id)`
 
@@ -92,7 +109,7 @@ Marks the proposal as executed and emits `ProposalExecuted`.
 
 - Any address may call `execute`; `executor` need not be a co-signer.
 - Execution requires:
-  1. `approvals.len() >= GOVERNANCE_QUORUM`
+  1. `approvals.len() >= threshold` (using the threshold snapshotted at quorum time)
   2. `current_time >= quorum_reached_at + GOVERNANCE_TIMELOCK_SECONDS`
 - The `ProposalExecuted` event contains `target` and `calldata` so that off-chain
   bots or authorised executors can apply the change to the factory.
@@ -135,6 +152,17 @@ admin-mutable parameters. To route parameter changes through governance:
 | `ProposalCancelled` | `("cancelled", proposal_id)` | canceller |
 | `ProposalExecuted` | `("executed", proposal_id)` | executor, target, calldata |
 
+### `remove_signer(signer)`
+
+Removes a co-signer from the governance set.  Rejects removal with `QuorumWouldBreak`
+if the resulting signer count would fall below the configured threshold, preventing
+governance bricking.
+
+### `quorum() -> u32`
+
+Returns the configured approval threshold (not a fixed constant).  The threshold is
+set at `init` time and stored in instance storage.
+
 ## Storage layout
 
 All storage keys are defined in `DataKey`:
@@ -143,9 +171,10 @@ All storage keys are defined in `DataKey`:
 |---|---|---|
 | `Admin` | Instance | `Address` |
 | `Signers` | Instance | `Vec<Address>` |
+| `Threshold` | Instance | `u32` |
 | `NextProposalId` | Instance | `u32` |
 | `Proposal(u32)` | Persistent | `Proposal` (includes `cancelled: bool`) |
-| `QuorumReachedAt(u32)` | Persistent | `u64` (timestamp) |
+| `QuorumReachedAt(u32)` | Persistent | `QuorumInfo { reached_at: u64, threshold: u32 }` |
 
 ## Security considerations
 
@@ -168,6 +197,16 @@ All storage keys are defined in `DataKey`:
    with.
 9. **Terminal states are permanent**: A cancelled or expired proposal can never be revived.
    Approvals, re-cancellation, and execution all fail on proposals in terminal states.
+10. **Threshold invariant prevents governance bricking**: `remove_signer` enforces
+    `signers.len() - 1 >= threshold`, so the signer set can never shrink below the
+    required approval threshold.  This guarantees quorum is always attainable.
+11. **Threshold is snapshotted at quorum time**: When quorum is first reached, the
+    current threshold is recorded inside `QuorumInfo`.  Execution uses this snapshot
+    rather than the live threshold, so an admin cannot raise the threshold after quorum
+    is reached to block execution, nor lower it to let a proposal with fewer approvals
+    through.
+12. **`init` validates threshold bounds**: The threshold must be `>= 1` and
+    `<= signers.len()`, preventing degenerate configurations at deployment.
 
 ## Tests
 
@@ -192,3 +231,8 @@ Integration tests are in `contracts/stream/tests/governance_integration.rs` and 
 - **Expired proposal rejection on approve and execute**
 - **Expiry boundary (exact boundary behaviour, 1 second past boundary)**
 - **Max age constant query**
+- **Threshold validation on init** (zero, above signer count, at boundary, minimum)
+- **Quorum invariant on `remove_signer`** (removal down to threshold succeeds, removal
+  below threshold errors, non-existent removal is no-op)
+- **Quorum uses configured threshold** (adding signers does not change threshold)
+- **Execution with exactly threshold approvals**

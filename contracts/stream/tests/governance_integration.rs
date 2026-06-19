@@ -37,6 +37,7 @@ impl<'a> GovCtx<'a> {
         client.init(
             &admin,
             &vec![&env, signer_a.clone(), signer_b.clone(), signer_c.clone()],
+            &2u32,
         );
 
         GovCtx {
@@ -76,6 +77,7 @@ fn test_init_twice_errors() {
     let result = ctx.client.try_init(
         &ctx.admin,
         &vec![&ctx.env, ctx.signer_a.clone()],
+        &1u32,
     );
     assert_eq!(result, Err(Ok(GovernanceError::AlreadyInitialized)));
 }
@@ -319,6 +321,94 @@ fn test_add_signer_unauthorized_errors() {
     let p = ctx.client.get_proposal(&id);
     assert_eq!(p.proposer, new_signer);
     let _ = outsider; // suppress unused warning
+}
+
+// ---------------------------------------------------------------------------
+// Threshold and quorum invariant
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_init_rejects_zero_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let contract_id = env.register_contract(None, FluxoraGovernance);
+    let admin = Address::generate(&env);
+    let signer = Address::generate(&env);
+    let client = FluxoraGovernanceClient::new(&env, &contract_id);
+    let result = client.try_init(
+        &admin,
+        &vec![&env, signer],
+        &0u32,
+    );
+    assert_eq!(result, Err(Ok(GovernanceError::InvalidThreshold)));
+}
+
+#[test]
+fn test_init_rejects_threshold_above_signer_count() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let contract_id = env.register_contract(None, FluxoraGovernance);
+    let admin = Address::generate(&env);
+    let signer_a = Address::generate(&env);
+    let signer_b = Address::generate(&env);
+    let client = FluxoraGovernanceClient::new(&env, &contract_id);
+    let result = client.try_init(
+        &admin,
+        &vec![&env, signer_a, signer_b],
+        &3u32,
+    );
+    assert_eq!(result, Err(Ok(GovernanceError::InvalidThreshold)));
+}
+
+#[test]
+fn test_remove_signer_below_threshold_errors() {
+    let ctx = GovCtx::setup(); // 3 signers, threshold=2
+    ctx.client.remove_signer(&ctx.signer_c); // 2 signers left
+    let result = ctx.client.try_remove_signer(&ctx.signer_b);
+    assert_eq!(result, Err(Ok(GovernanceError::QuorumWouldBreak)));
+    let signers = ctx.client.get_signers();
+    assert_eq!(signers.len(), 2);
+}
+
+#[test]
+fn test_execute_with_exactly_threshold_approvals_succeeds() {
+    let ctx = GovCtx::setup(); // 3 signers, threshold=2
+    let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+
+    ctx.client.approve(&ctx.signer_a, &id);
+    ctx.client.approve(&ctx.signer_b, &id);
+
+    ctx.env
+        .ledger()
+        .set_timestamp(1_000_000 + TIMELOCK + 1);
+
+    let executor = Address::generate(&ctx.env);
+    let result = ctx.client.try_execute(&executor, &id);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_quorum_threshold_respected_after_add_signer() {
+    // With threshold=2 and 4 signers, still need exactly 2 approvals.
+    let ctx = GovCtx::setup(); // 3 signers, threshold=2
+    let extra = Address::generate(&ctx.env);
+    ctx.client.add_signer(&extra);
+    assert_eq!(ctx.client.get_signers().len(), 4);
+    assert_eq!(ctx.client.quorum(), 2); // threshold unchanged
+
+    let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+    ctx.client.approve(&ctx.signer_a, &id);
+    // Only 1 approval — should NOT reach quorum since threshold=2
+    ctx.env
+        .ledger()
+        .set_timestamp(1_000_000 + TIMELOCK + 1);
+    let executor = Address::generate(&ctx.env);
+    let result = ctx.client.try_execute(&executor, &id);
+    assert_eq!(result, Err(Ok(GovernanceError::QuorumNotReached)));
 }
 
 // ---------------------------------------------------------------------------
