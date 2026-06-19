@@ -11,9 +11,10 @@ waiting period must elapse before the change takes effect.
 ## Constants
 
 | Constant | Value | Meaning |
-|---|---|---|
+|---|---|---|---|
 | `GOVERNANCE_QUORUM` | 2 | Minimum approvals required before execution is allowed |
 | `GOVERNANCE_TIMELOCK_SECONDS` | 172 800 (48 h) | Seconds to wait after quorum before executing |
+| `MAX_PROPOSAL_AGE_SECONDS` | 2 592 000 (30 d) | Max age of a proposal before it expires and becomes non-executable |
 | `MAX_SIGNERS` | 20 | Maximum co-signers registered at once |
 | `MAX_CALLDATA_BYTES` | 4 096 | Maximum byte length for the `calldata` field |
 
@@ -35,21 +36,31 @@ A fixed set of addresses registered by the admin. Co-signers can:
 ## Lifecycle of a proposal
 
 ```
-propose()  →  [0 approvals]
-approve()  →  [1 approval]
-approve()  →  [quorum reached: timelock starts]
+propose()     →  [0 approvals]
+approve()     →  [1 approval]
+approve()     →  [quorum reached: timelock starts]
 ...wait GOVERNANCE_TIMELOCK_SECONDS...
-execute()  →  [executed = true, ProposalExecuted event emitted]
+execute()     →  [executed = true, ProposalExecuted event emitted]
+
+cancel_proposal()  →  [cancelled = true, ProposalCancelled event emitted]
+...after MAX_PROPOSAL_AGE_SECONDS...  →  [proposal expires, no action possible]
 ```
 
 ### State transitions
 
 ```
+                  ┌─→ Cancelled (terminal)
+                  │
 Created → Approved (partial) → Quorum reached → Timelock elapsed → Executed
+    │                                                            │
+    └─→ Expired (terminal, after MAX_PROPOSAL_AGE_SECONDS) ─────┘
 ```
 
-There is no Rejected or Cancelled state; proposals that do not accumulate quorum simply
-remain in storage and cannot be executed.
+A proposal enters the **Expired** state automatically when `MAX_PROPOSAL_AGE_SECONDS` have
+passed since its creation. Neither approval nor execution is possible on an expired proposal.
+The **Cancelled** state is entered explicitly via `cancel_proposal` by the proposer or admin.
+Both states are terminal: once a proposal is cancelled or expired, it can never be approved
+or executed.
 
 ## Entrypoints
 
@@ -86,6 +97,19 @@ Marks the proposal as executed and emits `ProposalExecuted`.
 - The `ProposalExecuted` event contains `target` and `calldata` so that off-chain
   bots or authorised executors can apply the change to the factory.
 
+### `cancel_proposal(caller, proposal_id)`
+
+Cancels a proposal, marking it as terminal. Emits `ProposalCancelled`.
+
+- `caller` must be the original `proposer` or the contract `admin`.
+- Once cancelled, the proposal cannot be approved or executed.
+- Idempotent guard: calling `cancel_proposal` on an already-cancelled proposal returns
+  `ProposalCancelled`.
+
+### `max_proposal_age_seconds() -> u64`
+
+Returns the `MAX_PROPOSAL_AGE_SECONDS` constant.
+
 ## Integration with the factory
 
 The `FluxoraFactory` contract stores `max_deposit`, `min_duration`, and the allowlist as
@@ -108,6 +132,7 @@ admin-mutable parameters. To route parameter changes through governance:
 | `ProposalCreated` | `("proposed", proposal_id)` | proposer, target |
 | `ProposalApproved` | `("approved", proposal_id)` | approver, approval_count |
 | `QuorumReached` | `("quorum", proposal_id)` | quorum_reached_at, executable_after |
+| `ProposalCancelled` | `("cancelled", proposal_id)` | canceller |
 | `ProposalExecuted` | `("executed", proposal_id)` | executor, target, calldata |
 
 ## Storage layout
@@ -119,7 +144,7 @@ All storage keys are defined in `DataKey`:
 | `Admin` | Instance | `Address` |
 | `Signers` | Instance | `Vec<Address>` |
 | `NextProposalId` | Instance | `u32` |
-| `Proposal(u32)` | Persistent | `Proposal` |
+| `Proposal(u32)` | Persistent | `Proposal` (includes `cancelled: bool`) |
 | `QuorumReachedAt(u32)` | Persistent | `u64` (timestamp) |
 
 ## Security considerations
@@ -134,6 +159,15 @@ All storage keys are defined in `DataKey`:
    the admin key; parameter changes still require quorum.
 6. **CEI ordering in `execute`**: The proposal is marked as executed and state is written
    before the `ProposalExecuted` event, preventing re-entrancy from the event handler.
+7. **Proposal expiry prevents latent execution**: Once `MAX_PROPOSAL_AGE_SECONDS` (30 d)
+   have elapsed since creation, a proposal becomes expired and cannot be approved or
+   executed. This prevents forgotten or abandoned proposals from being used as attack
+   vectors.
+8. **Cancel authority is restricted**: Only the original proposer or the contract admin
+   may cancel a proposal. No other signer can unilaterally cancel a proposal they disagree
+   with.
+9. **Terminal states are permanent**: A cancelled or expired proposal can never be revived.
+   Approvals, re-cancellation, and execution all fail on proposals in terminal states.
 
 ## Tests
 
@@ -149,3 +183,12 @@ Integration tests are in `contracts/stream/tests/governance_integration.rs` and 
 - Double-execution prevention
 - Signer management (add / remove)
 - Calldata preservation
+- **Cancellation by proposer and admin**
+- **Unauthorized cancellation rejection**
+- **Double-cancel prevention**
+- **Cancel of executed proposal prevention**
+- **Cancel before quorum makes proposal non-approvable / non-executable**
+- **Cancel after quorum but before timelock makes proposal non-executable**
+- **Expired proposal rejection on approve and execute**
+- **Expiry boundary (exact boundary behaviour, 1 second past boundary)**
+- **Max age constant query**

@@ -8,6 +8,7 @@ use soroban_sdk::{
 
 // Mirror constants from governance lib.rs
 const TIMELOCK: u64 = 172_800; // 48 hours
+const MAX_AGE: u64 = 2_592_000; // 30 days
 
 struct GovCtx<'a> {
     env: Env,
@@ -388,4 +389,214 @@ fn test_calldata_preserved_in_proposal() {
     let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &data);
     let p = ctx.client.get_proposal(&id);
     assert_eq!(p.calldata, data);
+}
+
+// ---------------------------------------------------------------------------
+// Cancellation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_cancel_by_proposer_succeeds() {
+    let ctx = GovCtx::setup();
+    let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+
+    ctx.client.cancel_proposal(&ctx.signer_a, &id);
+
+    let p = ctx.client.get_proposal(&id);
+    assert!(p.cancelled);
+}
+
+#[test]
+fn test_cancel_by_admin_succeeds() {
+    let ctx = GovCtx::setup();
+    let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+
+    ctx.client.cancel_proposal(&ctx.admin, &id);
+
+    let p = ctx.client.get_proposal(&id);
+    assert!(p.cancelled);
+    assert!(!p.executed);
+}
+
+#[test]
+fn test_cancel_unauthorized_non_proposer_non_admin_errors() {
+    let ctx = GovCtx::setup();
+    let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+
+    // signer_b is neither the proposer (signer_a) nor the admin
+    let result = ctx.client.try_cancel_proposal(&ctx.signer_b, &id);
+    assert_eq!(result, Err(Ok(GovernanceError::NotProposerOrAdmin)));
+}
+
+#[test]
+fn test_cancel_twice_errors() {
+    let ctx = GovCtx::setup();
+    let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+
+    ctx.client.cancel_proposal(&ctx.signer_a, &id);
+
+    let result = ctx.client.try_cancel_proposal(&ctx.signer_a, &id);
+    assert_eq!(result, Err(Ok(GovernanceError::ProposalCancelled)));
+}
+
+#[test]
+fn test_cancel_executed_proposal_errors() {
+    let ctx = GovCtx::setup();
+    let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+
+    ctx.client.approve(&ctx.signer_a, &id);
+    ctx.client.approve(&ctx.signer_b, &id);
+
+    ctx.env
+        .ledger()
+        .set_timestamp(1_000_000 + TIMELOCK + 1);
+
+    let executor = Address::generate(&ctx.env);
+    ctx.client.execute(&executor, &id);
+
+    let result = ctx.client.try_cancel_proposal(&ctx.signer_a, &id);
+    assert_eq!(result, Err(Ok(GovernanceError::AlreadyExecuted)));
+}
+
+#[test]
+fn test_cancel_before_quorum() {
+    let ctx = GovCtx::setup();
+    let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+
+    // Cancel before any approvals
+    ctx.client.cancel_proposal(&ctx.signer_a, &id);
+
+    // Subsequent approve should fail
+    let result = ctx.client.try_approve(&ctx.signer_b, &id);
+    assert_eq!(result, Err(Ok(GovernanceError::ProposalCancelled)));
+}
+
+#[test]
+fn test_cancel_after_quorum_before_timelock() {
+    let ctx = GovCtx::setup();
+    let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+
+    ctx.client.approve(&ctx.signer_a, &id);
+    ctx.client.approve(&ctx.signer_b, &id);
+
+    // Cancel before timelock elapses
+    ctx.client.cancel_proposal(&ctx.signer_a, &id);
+
+    // Execute should fail
+    let executor = Address::generate(&ctx.env);
+    let result = ctx.client.try_execute(&executor, &id);
+    assert_eq!(result, Err(Ok(GovernanceError::ProposalCancelled)));
+}
+
+#[test]
+fn test_approve_after_cancel_errors() {
+    let ctx = GovCtx::setup();
+    let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+
+    ctx.client.cancel_proposal(&ctx.signer_a, &id);
+
+    let result = ctx.client.try_approve(&ctx.signer_b, &id);
+    assert_eq!(result, Err(Ok(GovernanceError::ProposalCancelled)));
+}
+
+#[test]
+fn test_execute_after_cancel_errors() {
+    let ctx = GovCtx::setup();
+    let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+
+    ctx.client.approve(&ctx.signer_a, &id);
+    ctx.client.approve(&ctx.signer_b, &id);
+
+    ctx.client.cancel_proposal(&ctx.signer_a, &id);
+
+    ctx.env
+        .ledger()
+        .set_timestamp(1_000_000 + TIMELOCK + 1);
+
+    let executor = Address::generate(&ctx.env);
+    let result = ctx.client.try_execute(&executor, &id);
+    assert_eq!(result, Err(Ok(GovernanceError::ProposalCancelled)));
+}
+
+// ---------------------------------------------------------------------------
+// Expiry
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_execute_at_expiry_boundary_succeeds() {
+    let ctx = GovCtx::setup();
+    let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+
+    ctx.client.approve(&ctx.signer_a, &id);
+    ctx.client.approve(&ctx.signer_b, &id);
+
+    // Set timestamp to exactly the expiry boundary (created_at + MAX_AGE)
+    ctx.env
+        .ledger()
+        .set_timestamp(1_000_000 + MAX_AGE);
+
+    let executor = Address::generate(&ctx.env);
+    let result = ctx.client.try_execute(&executor, &id);
+    assert_eq!(result, Err(Ok(GovernanceError::TimelockNotElapsed)));
+}
+
+#[test]
+fn test_execute_after_expiry_errors() {
+    let ctx = GovCtx::setup();
+    let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+
+    ctx.client.approve(&ctx.signer_a, &id);
+    ctx.client.approve(&ctx.signer_b, &id);
+
+    // Advance past timelock
+    ctx.env
+        .ledger()
+        .set_timestamp(1_000_000 + TIMELOCK + 1);
+
+    // Now advance past the max age too
+    ctx.env
+        .ledger()
+        .set_timestamp(1_000_000 + MAX_AGE + 1);
+
+    let executor = Address::generate(&ctx.env);
+    let result = ctx.client.try_execute(&executor, &id);
+    assert_eq!(result, Err(Ok(GovernanceError::ProposalExpired)));
+}
+
+#[test]
+fn test_approve_after_expiry_errors() {
+    let ctx = GovCtx::setup();
+    let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+
+    // Advance past max age
+    ctx.env
+        .ledger()
+        .set_timestamp(1_000_000 + MAX_AGE + 1);
+
+    let result = ctx.client.try_approve(&ctx.signer_b, &id);
+    assert_eq!(result, Err(Ok(GovernanceError::ProposalExpired)));
+}
+
+#[test]
+fn test_expired_not_executable_even_with_quorum_and_timelock_met() {
+    let ctx = GovCtx::setup();
+    let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+
+    ctx.client.approve(&ctx.signer_a, &id);
+    ctx.client.approve(&ctx.signer_b, &id);
+
+    // Advance past both timelock and max age
+    ctx.env
+        .ledger()
+        .set_timestamp(1_000_000 + MAX_AGE + TIMELOCK + 100);
+
+    let executor = Address::generate(&ctx.env);
+    let result = ctx.client.try_execute(&executor, &id);
+    assert_eq!(result, Err(Ok(GovernanceError::ProposalExpired)));
+}
+
+#[test]
+fn test_max_proposal_age_constant() {
+    let ctx = GovCtx::setup();
+    assert_eq!(ctx.client.max_proposal_age_seconds(), MAX_AGE);
 }
