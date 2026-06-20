@@ -24,6 +24,20 @@ pub enum DataKey {
     Allowlist(Address),
 }
 
+/// Load and authorize the current factory admin.
+///
+/// This is the single authorization chokepoint for admin-only factory setters.
+/// It preserves the existing `NotInitialized` behavior before attempting auth.
+fn require_admin(env: &Env) -> Result<Address, FactoryError> {
+    let admin: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::Admin)
+        .ok_or(FactoryError::NotInitialized)?;
+    admin.require_auth();
+    Ok(admin)
+}
+
 #[contract]
 pub struct FluxoraFactory;
 
@@ -58,12 +72,7 @@ impl FluxoraFactory {
 
     /// Admin updates the factory admin.
     pub fn set_admin(env: Env, new_admin: Address) -> Result<(), FactoryError> {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(FactoryError::NotInitialized)?;
-        admin.require_auth();
+        require_admin(&env)?;
 
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         Ok(())
@@ -71,12 +80,7 @@ impl FluxoraFactory {
 
     /// Admin updates the stream contract address.
     pub fn set_stream_contract(env: Env, new_stream_contract: Address) -> Result<(), FactoryError> {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(FactoryError::NotInitialized)?;
-        admin.require_auth();
+        require_admin(&env)?;
 
         env.storage()
             .instance()
@@ -86,12 +90,7 @@ impl FluxoraFactory {
 
     /// Admin adds or removes a recipient from the allowlist.
     pub fn set_allowlist(env: Env, recipient: Address, allowed: bool) -> Result<(), FactoryError> {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(FactoryError::NotInitialized)?;
-        admin.require_auth();
+        require_admin(&env)?;
 
         let key = DataKey::Allowlist(recipient);
         if allowed {
@@ -105,12 +104,7 @@ impl FluxoraFactory {
 
     /// Admin updates the max deposit cap.
     pub fn set_cap(env: Env, max_deposit: i128) -> Result<(), FactoryError> {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(FactoryError::NotInitialized)?;
-        admin.require_auth();
+        require_admin(&env)?;
 
         env.storage()
             .instance()
@@ -120,12 +114,7 @@ impl FluxoraFactory {
 
     /// Admin updates the minimum stream duration.
     pub fn set_min_duration(env: Env, min_duration: u64) -> Result<(), FactoryError> {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(FactoryError::NotInitialized)?;
-        admin.require_auth();
+        require_admin(&env)?;
 
         env.storage()
             .instance()

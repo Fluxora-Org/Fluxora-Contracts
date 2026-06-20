@@ -6,9 +6,9 @@
 use fluxora_factory::{FactoryError, FluxoraFactory, FluxoraFactoryClient};
 use fluxora_stream::{FluxoraStream, FluxoraStreamClient};
 use soroban_sdk::{
-    testutils::Address as _,
+    testutils::{Address as _, MockAuth, MockAuthInvoke},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env,
+    Address, Env, IntoVal,
 };
 use std::panic::AssertUnwindSafe;
 
@@ -114,6 +114,84 @@ fn test_set_admin_requires_existing_admin() {
     let na2 = Address::generate(&env2);
     f2.init(&a2, &sc2, &10_000, &100);
     f2.set_admin(&na2); // succeeds with mock_all_auths
+}
+
+#[test]
+fn test_factory_setters_reject_non_admin_callers() {
+    fn expect_rejected<F>(call: F)
+    where
+        F: FnOnce(),
+    {
+        let result = std::panic::catch_unwind(AssertUnwindSafe(call));
+        assert!(result.is_err(), "non-admin setter call must fail auth");
+    }
+
+    let env = Env::default();
+    let factory_id = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &factory_id);
+    let admin = Address::generate(&env);
+    let non_admin = Address::generate(&env);
+    let stream_contract = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    let new_stream_contract = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    factory.init(&admin, &stream_contract, &10_000, &100);
+
+    env.mock_auths(&[MockAuth {
+        address: &non_admin,
+        invoke: &MockAuthInvoke {
+            contract: &factory_id,
+            fn_name: "set_admin",
+            args: (&new_admin,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    expect_rejected(|| factory.set_admin(&new_admin));
+
+    env.mock_auths(&[MockAuth {
+        address: &non_admin,
+        invoke: &MockAuthInvoke {
+            contract: &factory_id,
+            fn_name: "set_stream_contract",
+            args: (&new_stream_contract,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    expect_rejected(|| factory.set_stream_contract(&new_stream_contract));
+
+    env.mock_auths(&[MockAuth {
+        address: &non_admin,
+        invoke: &MockAuthInvoke {
+            contract: &factory_id,
+            fn_name: "set_allowlist",
+            args: (&recipient, true).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    expect_rejected(|| factory.set_allowlist(&recipient, &true));
+
+    env.mock_auths(&[MockAuth {
+        address: &non_admin,
+        invoke: &MockAuthInvoke {
+            contract: &factory_id,
+            fn_name: "set_cap",
+            args: (5_000i128,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    expect_rejected(|| factory.set_cap(&5_000));
+
+    env.mock_auths(&[MockAuth {
+        address: &non_admin,
+        invoke: &MockAuthInvoke {
+            contract: &factory_id,
+            fn_name: "set_min_duration",
+            args: (500u64,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    expect_rejected(|| factory.set_min_duration(&500));
 }
 
 // ---------------------------------------------------------------------------
@@ -256,6 +334,36 @@ fn test_factory_not_initialized_returns_error() {
         &0,
     );
     assert_eq!(result, Err(Ok(FactoryError::NotInitialized)));
+}
+
+#[test]
+fn test_factory_setters_before_init_return_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let factory_id = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &factory_id);
+    let address = Address::generate(&env);
+
+    assert_eq!(
+        factory.try_set_admin(&address),
+        Err(Ok(FactoryError::NotInitialized))
+    );
+    assert_eq!(
+        factory.try_set_stream_contract(&address),
+        Err(Ok(FactoryError::NotInitialized))
+    );
+    assert_eq!(
+        factory.try_set_allowlist(&address, &true),
+        Err(Ok(FactoryError::NotInitialized))
+    );
+    assert_eq!(
+        factory.try_set_cap(&1_000),
+        Err(Ok(FactoryError::NotInitialized))
+    );
+    assert_eq!(
+        factory.try_set_min_duration(&100),
+        Err(Ok(FactoryError::NotInitialized))
+    );
 }
 
 // ---------------------------------------------------------------------------
