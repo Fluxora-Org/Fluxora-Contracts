@@ -42,14 +42,23 @@ impl<'a> Ctx<'a> {
 
         client.init(&token_id, &admin);
 
-        Self { env, client, contract_id, sender, token_id }
+        Self {
+            env,
+            client,
+            contract_id,
+            sender,
+            token_id,
+        }
     }
 
     fn mint(&self, to: &Address) {
-        StellarAssetClient::new(&self.env, &self.token_id)
-            .mint(to, &1_000_000_000_000i128);
-        TokenClient::new(&self.env, &self.token_id)
-            .approve(to, &self.contract_id, &i128::MAX, &100_000u32);
+        StellarAssetClient::new(&self.env, &self.token_id).mint(to, &1_000_000_000_000i128);
+        TokenClient::new(&self.env, &self.token_id).approve(
+            to,
+            &self.contract_id,
+            &i128::MAX,
+            &100_000u32,
+        );
     }
 
     fn create_stream(&self, sender: &Address) -> u64 {
@@ -96,7 +105,9 @@ fn reserve_single_id() {
 #[test]
 fn reserve_max_ids() {
     let ctx = Ctx::setup();
-    let ids = ctx.client.reserve_stream_ids(&ctx.sender, &MAX_ID_RESERVATION);
+    let ids = ctx
+        .client
+        .reserve_stream_ids(&ctx.sender, &MAX_ID_RESERVATION);
     assert_eq!(ids.len(), MAX_ID_RESERVATION);
     assert_eq!(ids.get(0).unwrap(), 0u64);
     assert_eq!(

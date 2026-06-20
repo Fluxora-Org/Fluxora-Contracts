@@ -1,21 +1,21 @@
 extern crate std;
 
-//! Comprehensive tests for per-stream metadata TLV extension (issue #580).
-//!
-//! Coverage:
-//! - Happy-path: create stream with metadata, query it back
-//! - Batch creation (create_streams / create_streams_relative) with metadata
-//! - Validation: key count limit, per-key/value byte limits, aggregate byte limit
-//! - Immutability: metadata is unchanged by pause/resume/cancel/withdraw
-//! - StreamCreated event includes metadata
-//! - None metadata is stored and returned as None
-//! - Empty metadata map (Some({})) is valid
-//! - Boundary values at exactly MAX_METADATA_KEYS / MAX_METADATA_BYTES limits
+// Comprehensive tests for per-stream metadata TLV extension (issue #580).
+//
+// Coverage:
+// - Happy-path: create stream with metadata, query it back
+// - Batch creation (create_streams / create_streams_relative) with metadata
+// - Validation: key count limit, per-key/value byte limits, aggregate byte limit
+// - Immutability: metadata is unchanged by pause/resume/cancel/withdraw
+// - StreamCreated event includes metadata
+// - None metadata is stored and returned as None
+// - Empty metadata map (Some({})) is valid
+// - Boundary values at exactly MAX_METADATA_KEYS / MAX_METADATA_BYTES limits
 
 use fluxora_stream::{
     ContractError, CreateStreamParams, CreateStreamRelativeParams, FluxoraStream,
-    FluxoraStreamClient, StreamStatus,
-    MAX_METADATA_BYTES, MAX_METADATA_KEY_BYTES, MAX_METADATA_KEYS, MAX_METADATA_VALUE_BYTES,
+    FluxoraStreamClient, StreamStatus, MAX_METADATA_BYTES, MAX_METADATA_KEYS,
+    MAX_METADATA_KEY_BYTES, MAX_METADATA_VALUE_BYTES,
 };
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
@@ -93,10 +93,7 @@ impl<'a> Ctx<'a> {
         m
     }
 
-    fn create_stream_with_metadata(
-        &self,
-        metadata: Option<Map<Bytes, Bytes>>,
-    ) -> u64 {
+    fn create_stream_with_metadata(&self, metadata: Option<Map<Bytes, Bytes>>) -> u64 {
         self.client().create_stream(
             &self.sender,
             &self.recipient,
@@ -141,16 +138,11 @@ fn test_metadata_empty_map_valid() {
 fn test_metadata_single_entry_round_trips() {
     let ctx = Ctx::setup();
     let mut meta: Map<Bytes, Bytes> = Map::new(&ctx.env);
-    meta.set(
-        ctx.make_key("invoice_id"),
-        ctx.make_val("INV-2026-001"),
-    );
+    meta.set(ctx.make_key("invoice_id"), ctx.make_val("INV-2026-001"));
     let stream_id = ctx.create_stream_with_metadata(Some(meta.clone()));
     let got = ctx.client().get_stream_metadata(&stream_id).unwrap();
     assert_eq!(got.len(), 1);
-    let v = got
-        .get(ctx.make_key("invoice_id"))
-        .expect("key must exist");
+    let v = got.get(ctx.make_key("invoice_id")).expect("key must exist");
     assert_eq!(v, ctx.make_val("INV-2026-001"));
 }
 
@@ -160,7 +152,10 @@ fn test_metadata_multiple_entries_round_trip() {
     let mut meta: Map<Bytes, Bytes> = Map::new(&ctx.env);
     meta.set(ctx.make_key("invoice_id"), ctx.make_val("INV-001"));
     meta.set(ctx.make_key("project"), ctx.make_val("PROJ-42"));
-    meta.set(ctx.make_key("ref_uri"), ctx.make_val("https://example.com/inv/001"));
+    meta.set(
+        ctx.make_key("ref_uri"),
+        ctx.make_val("https://example.com/inv/001"),
+    );
 
     let stream_id = ctx.create_stream_with_metadata(Some(meta.clone()));
     let got = ctx.client().get_stream_metadata(&stream_id).unwrap();
@@ -309,12 +304,9 @@ fn test_metadata_aggregate_exactly_at_limit_valid() {
     // 4 entries: key "kXXXXXXX" (8 bytes) + value of 120 bytes = 128 bytes each × 4 = 512 total.
     let mut meta: Map<Bytes, Bytes> = Map::new(&ctx.env);
     for i in 0u8..4 {
-        let key_str = std::format!("key{:05}", i);      // 8 bytes
+        let key_str = std::format!("key{:05}", i); // 8 bytes
         let value = Bytes::from_slice(&ctx.env, &vec![i; 120].as_slice()); // 120 bytes
-        meta.set(
-            Bytes::from_slice(&ctx.env, key_str.as_bytes()),
-            value,
-        );
+        meta.set(Bytes::from_slice(&ctx.env, key_str.as_bytes()), value);
     }
     let stream_id = ctx.create_stream_with_metadata(Some(meta));
     assert!(ctx.client().get_stream_metadata(&stream_id).is_some());
@@ -328,10 +320,7 @@ fn test_metadata_aggregate_exceeds_limit_rejected() {
     for i in 0u8..5 {
         let key_str = std::format!("key{:05}", i); // 8 bytes
         let value = Bytes::from_slice(&ctx.env, &vec![i; 120].as_slice()); // 120 bytes
-        meta.set(
-            Bytes::from_slice(&ctx.env, key_str.as_bytes()),
-            value,
-        );
+        meta.set(Bytes::from_slice(&ctx.env, key_str.as_bytes()), value);
     }
     let result = ctx.client().try_create_stream(
         &ctx.sender,
@@ -347,7 +336,10 @@ fn test_metadata_aggregate_exceeds_limit_rejected() {
     );
     match result {
         Err(Ok(ContractError::MetadataTooLarge)) => {}
-        _ => panic!("Expected MetadataTooLarge for aggregate overflow, got {:?}", result),
+        _ => panic!(
+            "Expected MetadataTooLarge for aggregate overflow, got {:?}",
+            result
+        ),
     }
 }
 
@@ -362,7 +354,8 @@ fn test_metadata_unchanged_after_pause_resume() {
     meta.set(ctx.make_key("ref"), ctx.make_val("PAUSE_TEST"));
     let stream_id = ctx.create_stream_with_metadata(Some(meta.clone()));
 
-    ctx.client().pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
     ctx.client().resume_stream(&stream_id);
 
     let got = ctx.client().get_stream_metadata(&stream_id).unwrap();
@@ -484,11 +477,23 @@ fn test_create_streams_batch_each_entry_stores_own_metadata() {
     let ids = ctx.client().create_streams(&ctx.sender, &params);
     assert_eq!(ids.len(), 2);
 
-    let got_a = ctx.client().get_stream_metadata(&ids.get(0).unwrap()).unwrap();
-    let got_b = ctx.client().get_stream_metadata(&ids.get(1).unwrap()).unwrap();
+    let got_a = ctx
+        .client()
+        .get_stream_metadata(&ids.get(0).unwrap())
+        .unwrap();
+    let got_b = ctx
+        .client()
+        .get_stream_metadata(&ids.get(1).unwrap())
+        .unwrap();
 
-    assert_eq!(got_a.get(ctx.make_key("stream")).unwrap(), ctx.make_val("A"));
-    assert_eq!(got_b.get(ctx.make_key("stream")).unwrap(), ctx.make_val("B"));
+    assert_eq!(
+        got_a.get(ctx.make_key("stream")).unwrap(),
+        ctx.make_val("A")
+    );
+    assert_eq!(
+        got_b.get(ctx.make_key("stream")).unwrap(),
+        ctx.make_val("B")
+    );
 }
 
 #[test]
@@ -513,7 +518,10 @@ fn test_create_streams_batch_none_metadata_stored_as_none() {
 
     let ids = ctx.client().create_streams(&ctx.sender, &params);
     assert_eq!(ids.len(), 1);
-    assert!(ctx.client().get_stream_metadata(&ids.get(0).unwrap()).is_none());
+    assert!(ctx
+        .client()
+        .get_stream_metadata(&ids.get(0).unwrap())
+        .is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -546,8 +554,14 @@ fn test_create_streams_relative_with_metadata() {
     let ids = ctx.client().create_streams_relative(&ctx.sender, &params);
     assert_eq!(ids.len(), 1);
 
-    let got = ctx.client().get_stream_metadata(&ids.get(0).unwrap()).unwrap();
-    assert_eq!(got.get(ctx.make_key("src")).unwrap(), ctx.make_val("relative"));
+    let got = ctx
+        .client()
+        .get_stream_metadata(&ids.get(0).unwrap())
+        .unwrap();
+    assert_eq!(
+        got.get(ctx.make_key("src")).unwrap(),
+        ctx.make_val("relative")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -582,9 +596,7 @@ fn test_create_streams_partial_invalid_metadata_fails_entry() {
         },
     ];
 
-    let results = ctx
-        .client()
-        .create_streams_partial(&ctx.sender, &params);
+    let results = ctx.client().create_streams_partial(&ctx.sender, &params);
 
     assert_eq!(results.len(), 1);
     let r = results.get(0).unwrap();
