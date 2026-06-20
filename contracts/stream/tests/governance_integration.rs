@@ -80,6 +80,23 @@ fn test_init_twice_errors() {
 }
 
 #[test]
+fn test_init_duplicate_signers_errors() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, FluxoraGovernance);
+    let client = FluxoraGovernanceClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let signer = Address::generate(&env);
+    let result = client.try_init(
+        &admin,
+        &vec![&env, signer.clone(), signer],
+    );
+
+    assert_eq!(result, Err(Ok(GovernanceError::DuplicateSigner)));
+}
+
+#[test]
 fn test_quorum_and_timelock_constants() {
     let ctx = GovCtx::setup();
     assert_eq!(ctx.client.quorum(), 2);
@@ -302,6 +319,14 @@ fn test_add_remove_signer() {
     ctx.client.remove_signer(&new_signer);
     let signers = ctx.client.get_signers();
     assert_eq!(signers.len(), 3);
+}
+
+#[test]
+fn test_add_duplicate_signer_errors() {
+    let ctx = GovCtx::setup();
+    let result = ctx.client.try_add_signer(&ctx.signer_a);
+
+    assert_eq!(result, Err(Ok(GovernanceError::DuplicateSigner)));
 }
 
 #[test]

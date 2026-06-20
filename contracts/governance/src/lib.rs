@@ -75,6 +75,8 @@ pub enum GovernanceError {
     CalldataTooLarge = 10,
     /// Signer list exceeds MAX_SIGNERS.
     TooManySigners = 11,
+    /// Signer is already registered in the co-signer set.
+    DuplicateSigner = 12,
 }
 
 /// Storage keys for the governance contract.
@@ -219,11 +221,12 @@ impl FluxoraGovernance {
     /// # Parameters
     /// - `admin`: Address that can add/remove signers and reset governance state.
     /// - `signers`: Initial list of co-signers eligible to approve proposals.
-    ///   Must not exceed `MAX_SIGNERS`.
+    ///   Must not exceed `MAX_SIGNERS` and must not contain duplicates.
     ///
     /// # Errors
     /// - `AlreadyInitialized`: Contract has already been initialised.
     /// - `TooManySigners`: Provided signer list exceeds `MAX_SIGNERS`.
+    /// - `DuplicateSigner`: Provided signer list contains the same address twice.
     pub fn init(
         env: Env,
         admin: Address,
@@ -235,6 +238,7 @@ impl FluxoraGovernance {
         if signers.len() > MAX_SIGNERS {
             return Err(GovernanceError::TooManySigners);
         }
+        Self::require_unique_signers(&signers)?;
 
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Signers, &signers);
@@ -257,14 +261,20 @@ impl FluxoraGovernance {
 
     /// Add a co-signer to the governance set.
     ///
+    /// The signer set is unique: an address may occupy at most one co-signer slot.
+    ///
     /// # Authorization
     /// - Requires admin signature.
     ///
     /// # Errors
     /// - `TooManySigners`: Adding this signer would exceed `MAX_SIGNERS`.
+    /// - `DuplicateSigner`: `signer` is already registered.
     pub fn add_signer(env: Env, signer: Address) -> Result<(), GovernanceError> {
         get_admin(&env)?.require_auth();
         let mut signers = get_signers(&env)?;
+        if Self::is_signer(&signers, &signer) {
+            return Err(GovernanceError::DuplicateSigner);
+        }
         if signers.len() >= MAX_SIGNERS {
             return Err(GovernanceError::TooManySigners);
         }
@@ -545,5 +555,17 @@ impl FluxoraGovernance {
             }
         }
         false
+    }
+
+    fn require_unique_signers(signers: &Vec<Address>) -> Result<(), GovernanceError> {
+        for i in 0..signers.len() {
+            let signer = signers.get(i).unwrap();
+            for j in (i + 1)..signers.len() {
+                if signers.get(j).unwrap() == signer {
+                    return Err(GovernanceError::DuplicateSigner);
+                }
+            }
+        }
+        Ok(())
     }
 }

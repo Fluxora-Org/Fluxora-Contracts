@@ -32,6 +32,9 @@ A fixed set of addresses registered by the admin. Co-signers can:
 - Submit proposals (`propose`).
 - Approve existing proposals (`approve`).
 
+Each co-signer address may appear only once. `init` and `add_signer` reject duplicate
+addresses with `DuplicateSigner` so quorum calculations are based on unique keys.
+
 ## Lifecycle of a proposal
 
 ```
@@ -126,13 +129,14 @@ All storage keys are defined in `DataKey`:
 
 1. **No self-approval shortcut**: The proposer must call `approve` separately.
 2. **Duplicate approval prevention**: Each signer may approve at most once per proposal.
-3. **Timelock protects against rushed execution**: Even with instant quorum, changes
+3. **Duplicate signer prevention**: A co-signer address can only occupy one signer slot.
+4. **Timelock protects against rushed execution**: Even with instant quorum, changes
    cannot take effect for at least `GOVERNANCE_TIMELOCK_SECONDS` (48 h).
-4. **Executed proposals are immutable**: Once `executed = true`, no further approvals or
+5. **Executed proposals are immutable**: Once `executed = true`, no further approvals or
    re-execution are possible.
-5. **Admin cannot bypass the process**: The admin can only add/remove signers and rotate
+6. **Admin cannot bypass the process**: The admin can only add/remove signers and rotate
    the admin key; parameter changes still require quorum.
-6. **CEI ordering in `execute`**: The proposal is marked as executed and state is written
+7. **CEI ordering in `execute`**: The proposal is marked as executed and state is written
    before the `ProposalExecuted` event, preventing re-entrancy from the event handler.
 
 ## Tests
@@ -140,6 +144,7 @@ All storage keys are defined in `DataKey`:
 Integration tests are in `contracts/stream/tests/governance_integration.rs` and cover:
 
 - Initialization and constant verification
+- Duplicate signer rejection during initialization and signer management
 - Proposal creation and ID assignment
 - Approval counting and duplicate rejection
 - Non-signer rejection on both propose and approve
