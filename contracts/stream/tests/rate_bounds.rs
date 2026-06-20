@@ -1,5 +1,5 @@
-use soroban_sdk::{testutils::Address as _, Address, Env, String};
 use fluxora_stream::{ContractError, FluxoraStream, StreamStatus};
+use soroban_sdk::{testutils::Address as _, Address, Env, String};
 
 fn setup() -> (Env, FluxoraStreamClient, Address, Address, Address) {
     let env = Env::default();
@@ -49,9 +49,7 @@ fn create_stream_with_rate(
         .unwrap()
 }
 
-
 // Happy path: rate at or above MIN_RATE_PER_SECOND
-
 
 #[test]
 fn test_create_stream_at_min_rate_succeeds() {
@@ -81,9 +79,7 @@ fn test_create_stream_at_large_rate_succeeds() {
     assert_eq!(stream.rate_per_second, rate);
 }
 
-
 // Failure path: rate below MIN_RATE_PER_SECOND
-
 
 #[test]
 fn test_create_stream_at_zero_rate_fails() {
@@ -153,9 +149,7 @@ fn test_create_stream_at_min_rate_boundary_succeeds() {
     assert_eq!(stream_id, 0); // first stream
 }
 
-
 // Batch creation: rate bounds enforced per entry
-
 
 #[test]
 fn test_create_streams_with_mixed_rates_fails_atomically() {
@@ -229,9 +223,7 @@ fn test_create_streams_all_valid_rates_succeeds() {
     assert_eq!(client.get_stream_count(), 2);
 }
 
-
 // Relative time creation: rate bounds enforced
-
 
 #[test]
 fn test_create_stream_relative_below_min_rate_fails() {
@@ -271,7 +263,6 @@ fn test_create_stream_relative_at_min_rate_succeeds() {
     let stream = client.get_stream_state(&stream_id).unwrap();
     assert_eq!(stream.rate_per_second, 100i128);
 }
-
 
 // Template-based creation: rate bounds enforced
 

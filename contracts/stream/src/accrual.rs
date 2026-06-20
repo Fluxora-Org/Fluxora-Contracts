@@ -264,7 +264,8 @@ mod kani_proofs {
         };
 
         // Call the function under test. Kani will flag panics or UB.
-        let out = calculate_accrued_amount_checkpointed(state, rate_per_second, deposit_amount, now);
+        let out =
+            calculate_accrued_amount_checkpointed(state, rate_per_second, deposit_amount, now);
 
         // Assert bounds: non-negative and <= deposit_amount
         kani::assert!(out >= 0);
@@ -339,12 +340,22 @@ mod kani_proofs {
             deposit_amount,
         };
 
-        let out_before = calculate_accrued_amount_checkpointed(state, rate_per_second, deposit_amount, now_before);
+        let out_before = calculate_accrued_amount_checkpointed(
+            state,
+            rate_per_second,
+            deposit_amount,
+            now_before,
+        );
         kani::assert!(out_before == 0);
 
         // at or after end
         kani::assume(now_after >= end_time);
-        let out_after = calculate_accrued_amount_checkpointed(state, rate_per_second, deposit_amount, now_after);
+        let out_after = calculate_accrued_amount_checkpointed(
+            state,
+            rate_per_second,
+            deposit_amount,
+            now_after,
+        );
         kani::assert!(out_after >= 0);
         kani::assert!(out_after <= deposit_amount);
     }
@@ -494,9 +505,7 @@ mod invariants {
 mod accrued_after_end_time {
     use crate::accrual::calculate_accrued_amount;
 
-    
     // Helpers
-    
 
     /// A standard stream used across tests:
     ///   start=1000, cliff=1000, end=2000, rate=1/s, deposit=1000

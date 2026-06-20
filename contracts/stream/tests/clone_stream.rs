@@ -14,7 +14,10 @@
 //! - Multiple sequential clones (recurring payroll pattern)
 extern crate std;
 
-use fluxora_stream::{ContractError, FluxoraStream, FluxoraStreamClient, PauseReason, StreamCloned, StreamCreated, StreamStatus};
+use fluxora_stream::{
+    ContractError, FluxoraStream, FluxoraStreamClient, PauseReason, StreamCloned, StreamCreated,
+    StreamStatus,
+};
 use soroban_sdk::{
     testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke},
     token::{Client as TokenClient, StellarAssetClient},
@@ -61,7 +64,16 @@ impl<'a> Ctx<'a> {
         let token = TokenClient::new(&env, &token_id);
         token.approve(&sender, &contract_id, &i128::MAX, &100_000);
 
-        Ctx { env, contract_id, token_id, admin, sender, recipient, sac, token }
+        Ctx {
+            env,
+            contract_id,
+            token_id,
+            admin,
+            sender,
+            recipient,
+            sac,
+            token,
+        }
     }
 
     fn client(&self) -> FluxoraStreamClient<'_> {
@@ -72,10 +84,15 @@ impl<'a> Ctx<'a> {
     fn create_default_stream(&self) -> u64 {
         self.env.ledger().set_timestamp(0);
         self.client().create_stream(
-            &self.sender, &self.recipient,
-            &1000_i128, &1_i128,
-            &0u64, &0u64, &1000u64,
-            &0, &None,
+            &self.sender,
+            &self.recipient,
+            &1000_i128,
+            &1_i128,
+            &0u64,
+            &0u64,
+            &1000u64,
+            &0,
+            &None,
         )
     }
 
@@ -83,10 +100,15 @@ impl<'a> Ctx<'a> {
     fn create_cliff_stream(&self) -> u64 {
         self.env.ledger().set_timestamp(0);
         self.client().create_stream(
-            &self.sender, &self.recipient,
-            &1000_i128, &1_i128,
-            &0u64, &500u64, &1000u64,
-            &0, &None,
+            &self.sender,
+            &self.recipient,
+            &1000_i128,
+            &1_i128,
+            &0u64,
+            &500u64,
+            &1000u64,
+            &0,
+            &None,
         )
     }
 }
@@ -104,14 +126,20 @@ fn clone_from_completed_stream_succeeds() {
     // Complete the source stream.
     ctx.env.ledger().set_timestamp(1000);
     ctx.client().withdraw(&source_id);
-    assert_eq!(ctx.client().get_stream_state(&source_id).status, StreamStatus::Completed);
+    assert_eq!(
+        ctx.client().get_stream_state(&source_id).status,
+        StreamStatus::Completed
+    );
 
     // Clone it for the next period.
     ctx.env.ledger().set_timestamp(1000);
     let new_id = ctx.client().clone_stream(
-        &source_id, &ctx.recipient,
-        &1000u64, &2000u64,
-        &1000_i128, &false,
+        &source_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &1000_i128,
+        &false,
     );
 
     let new_state = ctx.client().get_stream_state(&new_id);
@@ -133,13 +161,19 @@ fn clone_from_cancelled_stream_succeeds() {
 
     ctx.env.ledger().set_timestamp(400);
     ctx.client().cancel_stream(&source_id);
-    assert_eq!(ctx.client().get_stream_state(&source_id).status, StreamStatus::Cancelled);
+    assert_eq!(
+        ctx.client().get_stream_state(&source_id).status,
+        StreamStatus::Cancelled
+    );
 
     ctx.env.ledger().set_timestamp(1000);
     let new_id = ctx.client().clone_stream(
-        &source_id, &ctx.recipient,
-        &1000u64, &2000u64,
-        &1000_i128, &false,
+        &source_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &1000_i128,
+        &false,
     );
 
     let new_state = ctx.client().get_stream_state(&new_id);
@@ -155,15 +189,24 @@ fn clone_from_active_stream_succeeds() {
 
     ctx.env.ledger().set_timestamp(500);
     let new_id = ctx.client().clone_stream(
-        &source_id, &ctx.recipient,
-        &1000u64, &2000u64,
-        &1000_i128, &false,
+        &source_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &1000_i128,
+        &false,
     );
 
     // Source stream is still Active and unaffected.
-    assert_eq!(ctx.client().get_stream_state(&source_id).status, StreamStatus::Active);
+    assert_eq!(
+        ctx.client().get_stream_state(&source_id).status,
+        StreamStatus::Active
+    );
     // New stream is also Active.
-    assert_eq!(ctx.client().get_stream_state(&new_id).status, StreamStatus::Active);
+    assert_eq!(
+        ctx.client().get_stream_state(&new_id).status,
+        StreamStatus::Active
+    );
 }
 
 /// Cloning a Paused stream is allowed.
@@ -173,19 +216,32 @@ fn clone_from_paused_stream_succeeds() {
     let source_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(300);
-    ctx.client().pause_stream(&source_id, &PauseReason::Operational);
-    assert_eq!(ctx.client().get_stream_state(&source_id).status, StreamStatus::Paused);
+    ctx.client()
+        .pause_stream(&source_id, &PauseReason::Operational);
+    assert_eq!(
+        ctx.client().get_stream_state(&source_id).status,
+        StreamStatus::Paused
+    );
 
     ctx.env.ledger().set_timestamp(1000);
     let new_id = ctx.client().clone_stream(
-        &source_id, &ctx.recipient,
-        &1000u64, &2000u64,
-        &1000_i128, &false,
+        &source_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &1000_i128,
+        &false,
     );
 
-    assert_eq!(ctx.client().get_stream_state(&new_id).status, StreamStatus::Active);
+    assert_eq!(
+        ctx.client().get_stream_state(&new_id).status,
+        StreamStatus::Active
+    );
     // Source stream remains Paused.
-    assert_eq!(ctx.client().get_stream_state(&source_id).status, StreamStatus::Paused);
+    assert_eq!(
+        ctx.client().get_stream_state(&source_id).status,
+        StreamStatus::Paused
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -198,10 +254,15 @@ fn clone_inherits_rate_per_second() {
     let ctx = Ctx::setup();
     ctx.env.ledger().set_timestamp(0);
     let source_id = ctx.client().create_stream(
-        &ctx.sender, &ctx.recipient,
-        &5000_i128, &5_i128,
-        &0u64, &0u64, &1000u64,
-        &0, &None,
+        &ctx.sender,
+        &ctx.recipient,
+        &5000_i128,
+        &5_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+        &0,
+        &None,
     );
 
     ctx.env.ledger().set_timestamp(1000);
@@ -209,9 +270,12 @@ fn clone_inherits_rate_per_second() {
 
     ctx.env.ledger().set_timestamp(1000);
     let new_id = ctx.client().clone_stream(
-        &source_id, &ctx.recipient,
-        &1000u64, &2000u64,
-        &5000_i128, &false,
+        &source_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &5000_i128,
+        &false,
     );
 
     assert_eq!(ctx.client().get_stream_state(&new_id).rate_per_second, 5);
@@ -230,9 +294,12 @@ fn clone_preserves_cliff_offset() {
     // Clone: new_start=2000, expected new_cliff = 2000 + 500 = 2500.
     ctx.env.ledger().set_timestamp(1000);
     let new_id = ctx.client().clone_stream(
-        &source_id, &ctx.recipient,
-        &2000u64, &3000u64,
-        &1000_i128, &false,
+        &source_id,
+        &ctx.recipient,
+        &2000u64,
+        &3000u64,
+        &1000_i128,
+        &false,
     );
 
     let new_state = ctx.client().get_stream_state(&new_id);
@@ -252,13 +319,19 @@ fn clone_preserves_zero_cliff_offset() {
 
     ctx.env.ledger().set_timestamp(1000);
     let new_id = ctx.client().clone_stream(
-        &source_id, &ctx.recipient,
-        &2000u64, &3000u64,
-        &1000_i128, &false,
+        &source_id,
+        &ctx.recipient,
+        &2000u64,
+        &3000u64,
+        &1000_i128,
+        &false,
     );
 
     let new_state = ctx.client().get_stream_state(&new_id);
-    assert_eq!(new_state.cliff_time, new_state.start_time, "zero cliff offset must be preserved");
+    assert_eq!(
+        new_state.cliff_time, new_state.start_time,
+        "zero cliff offset must be preserved"
+    );
 }
 
 /// withdraw_dust_threshold is copied verbatim.
@@ -267,10 +340,15 @@ fn clone_inherits_withdraw_dust_threshold() {
     let ctx = Ctx::setup();
     ctx.env.ledger().set_timestamp(0);
     let source_id = ctx.client().create_stream(
-        &ctx.sender, &ctx.recipient,
-        &1000_i128, &1_i128,
-        &0u64, &0u64, &1000u64,
-        &100_i128, &None, // dust threshold = 100
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+        &100_i128,
+        &None, // dust threshold = 100
     );
 
     ctx.env.ledger().set_timestamp(1000);
@@ -278,12 +356,20 @@ fn clone_inherits_withdraw_dust_threshold() {
 
     ctx.env.ledger().set_timestamp(1000);
     let new_id = ctx.client().clone_stream(
-        &source_id, &ctx.recipient,
-        &1000u64, &2000u64,
-        &1000_i128, &false,
+        &source_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &1000_i128,
+        &false,
     );
 
-    assert_eq!(ctx.client().get_stream_state(&new_id).withdraw_dust_threshold, 100);
+    assert_eq!(
+        ctx.client()
+            .get_stream_state(&new_id)
+            .withdraw_dust_threshold,
+        100
+    );
 }
 
 /// Memo is copied verbatim.
@@ -293,10 +379,15 @@ fn clone_inherits_memo() {
     ctx.env.ledger().set_timestamp(0);
     let memo = Some(soroban_sdk::Bytes::from_slice(&ctx.env, b"payroll-jan"));
     let source_id = ctx.client().create_stream(
-        &ctx.sender, &ctx.recipient,
-        &1000_i128, &1_i128,
-        &0u64, &0u64, &1000u64,
-        &0, &memo,
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+        &0,
+        &memo,
     );
 
     ctx.env.ledger().set_timestamp(1000);
@@ -304,9 +395,12 @@ fn clone_inherits_memo() {
 
     ctx.env.ledger().set_timestamp(1000);
     let new_id = ctx.client().clone_stream(
-        &source_id, &ctx.recipient,
-        &1000u64, &2000u64,
-        &1000_i128, &false,
+        &source_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &1000_i128,
+        &false,
     );
 
     let new_state = ctx.client().get_stream_state(&new_id);
@@ -327,9 +421,12 @@ fn clone_with_different_recipient() {
     let new_recipient = Address::generate(&ctx.env);
     ctx.env.ledger().set_timestamp(1000);
     let new_id = ctx.client().clone_stream(
-        &source_id, &new_recipient,
-        &1000u64, &2000u64,
-        &1000_i128, &false,
+        &source_id,
+        &new_recipient,
+        &1000u64,
+        &2000u64,
+        &1000_i128,
+        &false,
     );
 
     let new_state = ctx.client().get_stream_state(&new_id);
@@ -347,7 +444,9 @@ fn clone_sender_authorized_strict() {
     let env = Env::default();
     let contract_id = env.register_contract(None, FluxoraStream);
     let token_admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone()).address();
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
     let admin = Address::generate(&env);
     let sender = Address::generate(&env);
     let recipient = Address::generate(&env);
@@ -362,10 +461,7 @@ fn clone_sender_authorized_strict() {
 
     env.ledger().set_timestamp(0);
     let source_id = client.create_stream(
-        &sender, &recipient,
-        &1000_i128, &1_i128,
-        &0u64, &0u64, &1000u64,
-        &0, &None,
+        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &0, &None,
     );
 
     env.ledger().set_timestamp(1000);
@@ -377,14 +473,18 @@ fn clone_sender_authorized_strict() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "clone_stream",
-            args: (&source_id, &recipient, 1000u64, 2000u64, 1000_i128, false)
-                .into_val(&env),
+            args: (&source_id, &recipient, 1000u64, 2000u64, 1000_i128, false).into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
-    let new_id = client.clone_stream(&source_id, &recipient, &1000u64, &2000u64, &1000_i128, &false);
-    assert_eq!(client.get_stream_state(&new_id).status, StreamStatus::Active);
+    let new_id = client.clone_stream(
+        &source_id, &recipient, &1000u64, &2000u64, &1000_i128, &false,
+    );
+    assert_eq!(
+        client.get_stream_state(&new_id).status,
+        StreamStatus::Active
+    );
 }
 
 /// Recipient cannot clone a stream they receive (strict mode).
@@ -394,7 +494,9 @@ fn clone_recipient_unauthorized() {
     let env = Env::default();
     let contract_id = env.register_contract(None, FluxoraStream);
     let token_admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone()).address();
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
     let admin = Address::generate(&env);
     let sender = Address::generate(&env);
     let recipient = Address::generate(&env);
@@ -409,10 +511,7 @@ fn clone_recipient_unauthorized() {
 
     env.ledger().set_timestamp(0);
     let source_id = client.create_stream(
-        &sender, &recipient,
-        &1000_i128, &1_i128,
-        &0u64, &0u64, &1000u64,
-        &0, &None,
+        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &0, &None,
     );
 
     env.ledger().set_timestamp(1000);
@@ -424,13 +523,14 @@ fn clone_recipient_unauthorized() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "clone_stream",
-            args: (&source_id, &recipient, 1000u64, 2000u64, 1000_i128, false)
-                .into_val(&env),
+            args: (&source_id, &recipient, 1000u64, 2000u64, 1000_i128, false).into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
-    client.clone_stream(&source_id, &recipient, &1000u64, &2000u64, &1000_i128, &false);
+    client.clone_stream(
+        &source_id, &recipient, &1000u64, &2000u64, &1000_i128, &false,
+    );
 }
 
 /// Third party cannot clone a stream they have no relation to (strict mode).
@@ -440,7 +540,9 @@ fn clone_third_party_unauthorized() {
     let env = Env::default();
     let contract_id = env.register_contract(None, FluxoraStream);
     let token_admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone()).address();
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
     let admin = Address::generate(&env);
     let sender = Address::generate(&env);
     let recipient = Address::generate(&env);
@@ -456,10 +558,7 @@ fn clone_third_party_unauthorized() {
 
     env.ledger().set_timestamp(0);
     let source_id = client.create_stream(
-        &sender, &recipient,
-        &1000_i128, &1_i128,
-        &0u64, &0u64, &1000u64,
-        &0, &None,
+        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &0, &None,
     );
 
     env.ledger().set_timestamp(1000);
@@ -471,13 +570,14 @@ fn clone_third_party_unauthorized() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "clone_stream",
-            args: (&source_id, &recipient, 1000u64, 2000u64, 1000_i128, false)
-                .into_val(&env),
+            args: (&source_id, &recipient, 1000u64, 2000u64, 1000_i128, false).into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
-    client.clone_stream(&source_id, &recipient, &1000u64, &2000u64, &1000_i128, &false);
+    client.clone_stream(
+        &source_id, &recipient, &1000u64, &2000u64, &1000_i128, &false,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -491,10 +591,15 @@ fn clone_cliff_only_sentinel_rejected_without_force() {
     ctx.env.ledger().set_timestamp(0);
     // Create a stream with the CliffOnly sentinel threshold.
     let source_id = ctx.client().create_stream(
-        &ctx.sender, &ctx.recipient,
-        &1000_i128, &1_i128,
-        &0u64, &0u64, &1000u64,
-        &i128::MAX, &None, // sentinel
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+        &i128::MAX,
+        &None, // sentinel
     );
 
     ctx.env.ledger().set_timestamp(1000);
@@ -502,9 +607,12 @@ fn clone_cliff_only_sentinel_rejected_without_force() {
 
     ctx.env.ledger().set_timestamp(1000);
     let result = ctx.client().try_clone_stream(
-        &source_id, &ctx.recipient,
-        &1000u64, &2000u64,
-        &1000_i128, &false, // force=false → must reject
+        &source_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &1000_i128,
+        &false, // force=false → must reject
     );
 
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
@@ -516,10 +624,15 @@ fn clone_cliff_only_sentinel_allowed_with_force() {
     let ctx = Ctx::setup();
     ctx.env.ledger().set_timestamp(0);
     let source_id = ctx.client().create_stream(
-        &ctx.sender, &ctx.recipient,
-        &1000_i128, &1_i128,
-        &0u64, &0u64, &1000u64,
-        &i128::MAX, &None,
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+        &i128::MAX,
+        &None,
     );
 
     ctx.env.ledger().set_timestamp(1000);
@@ -527,9 +640,12 @@ fn clone_cliff_only_sentinel_allowed_with_force() {
 
     ctx.env.ledger().set_timestamp(1000);
     let new_id = ctx.client().clone_stream(
-        &source_id, &ctx.recipient,
-        &1000u64, &2000u64,
-        &1000_i128, &true, // force=true → allowed
+        &source_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &1000_i128,
+        &true, // force=true → allowed
     );
 
     let new_state = ctx.client().get_stream_state(&new_id);
@@ -549,12 +665,18 @@ fn clone_normal_stream_force_false_succeeds() {
     ctx.env.ledger().set_timestamp(1000);
     // force=false on a normal stream must succeed.
     let new_id = ctx.client().clone_stream(
-        &source_id, &ctx.recipient,
-        &1000u64, &2000u64,
-        &1000_i128, &false,
+        &source_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &1000_i128,
+        &false,
     );
 
-    assert_eq!(ctx.client().get_stream_state(&new_id).status, StreamStatus::Active);
+    assert_eq!(
+        ctx.client().get_stream_state(&new_id).status,
+        StreamStatus::Active
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -567,11 +689,9 @@ fn clone_source_not_found() {
     let ctx = Ctx::setup();
     ctx.env.ledger().set_timestamp(0);
 
-    let result = ctx.client().try_clone_stream(
-        &999u64, &ctx.recipient,
-        &0u64, &1000u64,
-        &1000_i128, &false,
-    );
+    let result =
+        ctx.client()
+            .try_clone_stream(&999u64, &ctx.recipient, &0u64, &1000u64, &1000_i128, &false);
 
     assert_eq!(result, Err(Ok(ContractError::StreamNotFound)));
 }
@@ -588,9 +708,12 @@ fn clone_start_time_in_past_rejected() {
     // Ledger is at t=1000; start_time=500 is in the past.
     ctx.env.ledger().set_timestamp(1000);
     let result = ctx.client().try_clone_stream(
-        &source_id, &ctx.recipient,
-        &500u64, &1500u64, // start_time < now
-        &1000_i128, &false,
+        &source_id,
+        &ctx.recipient,
+        &500u64,
+        &1500u64, // start_time < now
+        &1000_i128,
+        &false,
     );
 
     assert_eq!(result, Err(Ok(ContractError::StartTimeInPast)));
@@ -608,9 +731,12 @@ fn clone_insufficient_deposit_rejected() {
     ctx.env.ledger().set_timestamp(1000);
     // rate=1, duration=1000s → need 1000 tokens; deposit=500 is insufficient.
     let result = ctx.client().try_clone_stream(
-        &source_id, &ctx.recipient,
-        &1000u64, &2000u64,
-        &500_i128, &false, // too small
+        &source_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &500_i128,
+        &false, // too small
     );
 
     assert_eq!(result, Err(Ok(ContractError::InsufficientDeposit)));
@@ -628,9 +754,12 @@ fn clone_deposit_exactly_covers_duration() {
     ctx.env.ledger().set_timestamp(1000);
     // rate=1, duration=1000 → exactly 1000 tokens needed.
     let new_id = ctx.client().clone_stream(
-        &source_id, &ctx.recipient,
-        &1000u64, &2000u64,
-        &1000_i128, &false,
+        &source_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &1000_i128,
+        &false,
     );
 
     assert_eq!(ctx.client().get_stream_state(&new_id).deposit_amount, 1000);
@@ -647,9 +776,12 @@ fn clone_deposit_above_required_accepted() {
 
     ctx.env.ledger().set_timestamp(1000);
     let new_id = ctx.client().clone_stream(
-        &source_id, &ctx.recipient,
-        &1000u64, &2000u64,
-        &2000_i128, &false, // excess deposit
+        &source_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &2000_i128,
+        &false, // excess deposit
     );
 
     assert_eq!(ctx.client().get_stream_state(&new_id).deposit_amount, 2000);
@@ -667,9 +799,12 @@ fn clone_sender_equals_new_recipient_rejected() {
     ctx.env.ledger().set_timestamp(1000);
     // new_recipient == sender → invalid.
     let result = ctx.client().try_clone_stream(
-        &source_id, &ctx.sender, // same as source.sender
-        &1000u64, &2000u64,
-        &1000_i128, &false,
+        &source_id,
+        &ctx.sender, // same as source.sender
+        &1000u64,
+        &2000u64,
+        &1000_i128,
+        &false,
     );
 
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
@@ -688,9 +823,12 @@ fn clone_blocked_when_globally_paused() {
 
     ctx.env.ledger().set_timestamp(1000);
     let result = ctx.client().try_clone_stream(
-        &source_id, &ctx.recipient,
-        &1000u64, &2000u64,
-        &1000_i128, &false,
+        &source_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &1000_i128,
+        &false,
     );
 
     assert_eq!(result, Err(Ok(ContractError::ContractPaused)));
@@ -709,9 +847,12 @@ fn clone_blocked_when_creation_paused() {
 
     ctx.env.ledger().set_timestamp(1000);
     let result = ctx.client().try_clone_stream(
-        &source_id, &ctx.recipient,
-        &1000u64, &2000u64,
-        &1000_i128, &false,
+        &source_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &1000_i128,
+        &false,
     );
 
     assert_eq!(result, Err(Ok(ContractError::ContractPaused)));
@@ -734,9 +875,12 @@ fn clone_emits_created_and_cloned_events() {
 
     ctx.env.ledger().set_timestamp(1000);
     let new_id = ctx.client().clone_stream(
-        &source_id, &ctx.recipient,
-        &1000u64, &2000u64,
-        &1000_i128, &false,
+        &source_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &1000_i128,
+        &false,
     );
 
     let events = ctx.env.events().all();
@@ -745,7 +889,9 @@ fn clone_emits_created_and_cloned_events() {
 
     for i in events_before..events.len() {
         let event = events.get(i).unwrap();
-        if event.0 != ctx.contract_id { continue; }
+        if event.0 != ctx.contract_id {
+            continue;
+        }
         let topic0 = Symbol::from_val(&ctx.env, &event.1.get(0).unwrap());
         if topic0 == Symbol::new(&ctx.env, "created") {
             let payload = StreamCreated::try_from_val(&ctx.env, &event.2).unwrap();
@@ -787,16 +933,21 @@ fn clone_event_carries_correct_source_stream_id() {
 
     ctx.env.ledger().set_timestamp(1000);
     let new_id = ctx.client().clone_stream(
-        &source_id, &ctx.recipient,
-        &1000u64, &2000u64,
-        &1000_i128, &false,
+        &source_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &1000_i128,
+        &false,
     );
 
     let events = ctx.env.events().all();
     let mut found = false;
     for i in events_before..events.len() {
         let event = events.get(i).unwrap();
-        if event.0 != ctx.contract_id { continue; }
+        if event.0 != ctx.contract_id {
+            continue;
+        }
         let topic0 = Symbol::from_val(&ctx.env, &event.1.get(0).unwrap());
         if topic0 == Symbol::new(&ctx.env, "cloned") {
             let payload = StreamCloned::try_from_val(&ctx.env, &event.2).unwrap();
@@ -805,7 +956,10 @@ fn clone_event_carries_correct_source_stream_id() {
             found = true;
         }
     }
-    assert!(found, "\"cloned\" event must be emitted with correct source_stream_id");
+    assert!(
+        found,
+        "\"cloned\" event must be emitted with correct source_stream_id"
+    );
 }
 
 /// No events are emitted when clone_stream fails (e.g. insufficient deposit).
@@ -821,13 +975,17 @@ fn clone_no_events_on_failure() {
 
     ctx.env.ledger().set_timestamp(1000);
     let _ = ctx.client().try_clone_stream(
-        &source_id, &ctx.recipient,
-        &1000u64, &2000u64,
-        &1_i128, &false, // insufficient deposit
+        &source_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &1_i128,
+        &false, // insufficient deposit
     );
 
     assert_eq!(
-        ctx.env.events().all().len(), events_before,
+        ctx.env.events().all().len(),
+        events_before,
         "no events must be emitted on failed clone"
     );
 }
@@ -850,9 +1008,12 @@ fn clone_sender_balance_decreases_by_deposit() {
 
     ctx.env.ledger().set_timestamp(1000);
     ctx.client().clone_stream(
-        &source_id, &ctx.recipient,
-        &1000u64, &2000u64,
-        &1000_i128, &false,
+        &source_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &1000_i128,
+        &false,
     );
 
     assert_eq!(ctx.token.balance(&ctx.sender), sender_before - 1000);
@@ -872,9 +1033,12 @@ fn clone_recipient_balance_unchanged_immediately() {
 
     ctx.env.ledger().set_timestamp(1000);
     ctx.client().clone_stream(
-        &source_id, &ctx.recipient,
-        &1000u64, &2000u64,
-        &1000_i128, &false,
+        &source_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &1000_i128,
+        &false,
     );
 
     assert_eq!(ctx.token.balance(&ctx.recipient), recipient_before);
@@ -891,9 +1055,12 @@ fn clone_recipient_can_withdraw_from_new_stream() {
 
     ctx.env.ledger().set_timestamp(1000);
     let new_id = ctx.client().clone_stream(
-        &source_id, &ctx.recipient,
-        &1000u64, &2000u64,
-        &1000_i128, &false,
+        &source_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &1000_i128,
+        &false,
     );
 
     // Advance to t=1500 (500s into new stream).
@@ -916,15 +1083,24 @@ fn clone_does_not_mutate_source_stream() {
 
     ctx.env.ledger().set_timestamp(1000);
     ctx.client().clone_stream(
-        &source_id, &ctx.recipient,
-        &1000u64, &2000u64,
-        &1000_i128, &false,
+        &source_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &1000_i128,
+        &false,
     );
 
     let source_state_after = ctx.client().get_stream_state(&source_id);
     assert_eq!(source_state_after.status, source_state_before.status);
-    assert_eq!(source_state_after.withdrawn_amount, source_state_before.withdrawn_amount);
-    assert_eq!(source_state_after.deposit_amount, source_state_before.deposit_amount);
+    assert_eq!(
+        source_state_after.withdrawn_amount,
+        source_state_before.withdrawn_amount
+    );
+    assert_eq!(
+        source_state_after.deposit_amount,
+        source_state_before.deposit_amount
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -946,9 +1122,12 @@ fn clone_recurring_payroll_three_months() {
     // Month 2: clone from month 1.
     ctx.env.ledger().set_timestamp(1000);
     let m2_id = ctx.client().clone_stream(
-        &m1_id, &ctx.recipient,
-        &1000u64, &2000u64,
-        &1000_i128, &false,
+        &m1_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &1000_i128,
+        &false,
     );
 
     ctx.env.ledger().set_timestamp(2000);
@@ -957,9 +1136,12 @@ fn clone_recurring_payroll_three_months() {
     // Month 3: clone from month 2.
     ctx.env.ledger().set_timestamp(2000);
     let m3_id = ctx.client().clone_stream(
-        &m2_id, &ctx.recipient,
-        &2000u64, &3000u64,
-        &1000_i128, &false,
+        &m2_id,
+        &ctx.recipient,
+        &2000u64,
+        &3000u64,
+        &1000_i128,
+        &false,
     );
 
     // All three IDs are distinct and sequential.
@@ -989,9 +1171,12 @@ fn clone_cliff_offset_preserved_across_generations() {
     // Gen 2: start=1000, expected cliff=1500.
     ctx.env.ledger().set_timestamp(1000);
     let gen2_id = ctx.client().clone_stream(
-        &source_id, &ctx.recipient,
-        &1000u64, &2000u64,
-        &1000_i128, &false,
+        &source_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &1000_i128,
+        &false,
     );
     let gen2 = ctx.client().get_stream_state(&gen2_id);
     assert_eq!(gen2.cliff_time, 1500);
@@ -1002,9 +1187,12 @@ fn clone_cliff_offset_preserved_across_generations() {
     // Gen 3: start=2000, expected cliff=2500.
     ctx.env.ledger().set_timestamp(2000);
     let gen3_id = ctx.client().clone_stream(
-        &gen2_id, &ctx.recipient,
-        &2000u64, &3000u64,
-        &1000_i128, &false,
+        &gen2_id,
+        &ctx.recipient,
+        &2000u64,
+        &3000u64,
+        &1000_i128,
+        &false,
     );
     let gen3 = ctx.client().get_stream_state(&gen3_id);
     assert_eq!(gen3.cliff_time, 2500);
@@ -1022,17 +1210,23 @@ fn clone_increments_stream_count() {
 
     ctx.env.ledger().set_timestamp(1000);
     ctx.client().clone_stream(
-        &source_id, &ctx.recipient,
-        &1000u64, &2000u64,
-        &1000_i128, &false,
+        &source_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &1000_i128,
+        &false,
     );
     assert_eq!(ctx.client().get_stream_count(), 2);
 
     ctx.env.ledger().set_timestamp(2000);
     ctx.client().clone_stream(
-        &source_id, &ctx.recipient,
-        &2000u64, &3000u64,
-        &1000_i128, &false,
+        &source_id,
+        &ctx.recipient,
+        &2000u64,
+        &3000u64,
+        &1000_i128,
+        &false,
     );
     assert_eq!(ctx.client().get_stream_count(), 3);
 }
@@ -1051,9 +1245,12 @@ fn clone_new_stream_appears_in_recipient_index() {
 
     ctx.env.ledger().set_timestamp(1000);
     let new_id = ctx.client().clone_stream(
-        &source_id, &ctx.recipient,
-        &1000u64, &2000u64,
-        &1000_i128, &false,
+        &source_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &1000_i128,
+        &false,
     );
 
     let index_after = ctx.client().get_recipient_streams(&ctx.recipient);
@@ -1072,10 +1269,15 @@ fn clone_cliff_equals_end_in_source() {
     ctx.env.ledger().set_timestamp(0);
     // cliff == end_time (degenerate but valid).
     let source_id = ctx.client().create_stream(
-        &ctx.sender, &ctx.recipient,
-        &1000_i128, &1_i128,
-        &0u64, &1000u64, &1000u64, // cliff == end
-        &0, &None,
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &1000u64,
+        &1000u64, // cliff == end
+        &0,
+        &None,
     );
 
     ctx.env.ledger().set_timestamp(1000);
@@ -1084,9 +1286,12 @@ fn clone_cliff_equals_end_in_source() {
     // cliff_offset = 1000 - 0 = 1000. new_cliff = 1000 + 1000 = 2000 == new_end.
     ctx.env.ledger().set_timestamp(1000);
     let new_id = ctx.client().clone_stream(
-        &source_id, &ctx.recipient,
-        &1000u64, &2000u64,
-        &1000_i128, &false,
+        &source_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &1000_i128,
+        &false,
     );
 
     let new_state = ctx.client().get_stream_state(&new_id);
@@ -1106,9 +1311,12 @@ fn clone_with_larger_deposit_for_raise() {
     // "Raise": same rate but larger deposit (excess stays in contract).
     ctx.env.ledger().set_timestamp(1000);
     let new_id = ctx.client().clone_stream(
-        &source_id, &ctx.recipient,
-        &1000u64, &2000u64,
-        &5000_i128, &false, // 5x deposit
+        &source_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &5000_i128,
+        &false, // 5x deposit
     );
 
     let new_state = ctx.client().get_stream_state(&new_id);
@@ -1127,9 +1335,12 @@ fn clone_no_memo_produces_no_memo() {
 
     ctx.env.ledger().set_timestamp(1000);
     let new_id = ctx.client().clone_stream(
-        &source_id, &ctx.recipient,
-        &1000u64, &2000u64,
-        &1000_i128, &false,
+        &source_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &1000_i128,
+        &false,
     );
 
     assert!(ctx.client().get_stream_state(&new_id).memo.is_none());
@@ -1147,9 +1358,12 @@ fn clone_new_stream_has_zero_withdrawn_amount() {
 
     ctx.env.ledger().set_timestamp(1000);
     let new_id = ctx.client().clone_stream(
-        &source_id, &ctx.recipient,
-        &1000u64, &2000u64,
-        &1000_i128, &false,
+        &source_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &1000_i128,
+        &false,
     );
 
     assert_eq!(ctx.client().get_stream_state(&new_id).withdrawn_amount, 0);
@@ -1169,10 +1383,15 @@ fn clone_high_rate_large_deposit_no_overflow() {
     sac.mint(&ctx.sender, &(deposit * 2));
 
     let source_id = ctx.client().create_stream(
-        &ctx.sender, &ctx.recipient,
-        &deposit, &rate,
-        &0u64, &0u64, &duration,
-        &0, &None,
+        &ctx.sender,
+        &ctx.recipient,
+        &deposit,
+        &rate,
+        &0u64,
+        &0u64,
+        &duration,
+        &0,
+        &None,
     );
 
     ctx.env.ledger().set_timestamp(duration);
@@ -1180,9 +1399,12 @@ fn clone_high_rate_large_deposit_no_overflow() {
 
     ctx.env.ledger().set_timestamp(duration);
     let new_id = ctx.client().clone_stream(
-        &source_id, &ctx.recipient,
-        &duration, &(duration * 2),
-        &deposit, &false,
+        &source_id,
+        &ctx.recipient,
+        &duration,
+        &(duration * 2),
+        &deposit,
+        &false,
     );
 
     let new_state = ctx.client().get_stream_state(&new_id);

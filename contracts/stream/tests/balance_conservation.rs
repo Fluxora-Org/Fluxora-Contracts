@@ -65,7 +65,9 @@ impl TestContext {
         let client = FluxoraStreamClient::new(&env, &contract_id);
 
         let token_admin = Address::generate(&env);
-        let token_id = env.register_stellar_asset_contract_v2(token_admin).address();
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
         let token = TokenClient::new(&env, &token_id);
 
         let admin = Address::generate(&env);
@@ -143,9 +145,7 @@ impl TestContext {
 /// - start < end
 /// - cliff in [start, end]
 /// - deposit >= rate * (end - start)
-fn valid_stream_params()
-    -> impl Strategy<Value = (i128, i128, u64, u64, u64)>
-{
+fn valid_stream_params() -> impl Strategy<Value = (i128, i128, u64, u64, u64)> {
     // Use reasonable ranges for efficient testing while covering edge cases
     (1u64..10_000u64, 1u64..10_000u64, 1i128..1_000_000i128)
         .prop_filter("valid stream params", |(duration, cliff_offset, rate)| {
@@ -163,9 +163,7 @@ fn valid_stream_params()
 }
 
 /// Strategy for valid stream parameters with excess deposit (deposit > rate * duration).
-fn stream_with_excess_deposit()
-    -> impl Strategy<Value = (i128, i128, u64, u64, u64)>
-{
+fn stream_with_excess_deposit() -> impl Strategy<Value = (i128, i128, u64, u64, u64)> {
     valid_stream_params().prop_map(|(deposit, rate, start, cliff, end)| {
         let duration = end - start;
         let excess = deposit / 2; // 50% excess
@@ -194,7 +192,7 @@ fn operation_sequence(
     start: u64,
     cliff: u64,
     end: u64,
-) -> impl Strategy<Value = Vec<<StreamOp>> {
+) -> impl Strategy<Value = Vec<StreamOp>> {
     let duration = end - start;
     let max_time = end + 1000; // Allow some post-end operations
 
@@ -216,8 +214,8 @@ fn operation_sequence(
 
     // IncreaseRate: new_rate in (rate, rate * 2] but must satisfy deposit >= new_rate * (end - start)
     // For simplicity, keep within bounds
-    let increase_rate_op = (rate + 1..=rate * 2)
-        .prop_map(|new_rate| StreamOp::IncreaseRate { new_rate });
+    let increase_rate_op =
+        (rate + 1..=rate * 2).prop_map(|new_rate| StreamOp::IncreaseRate { new_rate });
 
     // DecreaseRate: new_rate in [1, rate)
     let decrease_rate_op = (1i128..rate).prop_map(|new_rate| StreamOp::DecreaseRate { new_rate });
@@ -297,9 +295,7 @@ fn assert_stream_balance_conservation(ctx: &TestContext, stream_id: u64) {
         assert_eq!(
             stream.withdrawn_amount, stream.deposit_amount,
             "Stream {}: Completed but withdrawn {} != deposit {}",
-            stream_id,
-            stream.withdrawn_amount,
-            stream.deposit_amount
+            stream_id, stream.withdrawn_amount, stream.deposit_amount
         );
     }
 
@@ -923,7 +919,8 @@ fn cancel_immediately_refunds_full_deposit() {
 
     let deposit = 1000i128;
     let rate = 1i128;
-    let stream_id = ctx.create_stream(deposit, rate, 0, 0, 1000)
+    let stream_id = ctx
+        .create_stream(deposit, rate, 0, 0, 1000)
         .expect("creation should succeed");
 
     let sender_before = ctx.token.balance(&ctx.sender);
@@ -963,7 +960,8 @@ fn cancel_at_cliff_refunds_correct_amount() {
     let start = 0u64;
     let cliff = 500u64;
     let end = 1000u64;
-    let stream_id = ctx.create_stream(deposit, rate, start, cliff, end)
+    let stream_id = ctx
+        .create_stream(deposit, rate, start, cliff, end)
         .expect("creation should succeed");
 
     ctx.set_time(cliff);
@@ -1000,7 +998,8 @@ fn withdraw_after_end_gets_full_deposit() {
 
     let deposit = 1000i128;
     let rate = 1i128;
-    let stream_id = ctx.create_stream(deposit, rate, 0, 0, 1000)
+    let stream_id = ctx
+        .create_stream(deposit, rate, 0, 0, 1000)
         .expect("creation should succeed");
 
     ctx.set_time(2000); // Well past end
@@ -1038,7 +1037,8 @@ fn shorten_refunds_exact_unstreamed() {
 
     let deposit = 1000i128;
     let rate = 1i128;
-    let stream_id = ctx.create_stream(deposit, rate, 0, 0, 1000)
+    let stream_id = ctx
+        .create_stream(deposit, rate, 0, 0, 1000)
         .expect("creation should succeed");
 
     // Shorten from 1000 to 600 at t=100
@@ -1082,7 +1082,8 @@ fn decrease_rate_refunds_excess() {
     // Stream: 1000 tokens, 10/s, 100s
     let deposit = 1000i128;
     let rate = 10i128;
-    let stream_id = ctx.create_stream(deposit, rate, 0, 0, 100)
+    let stream_id = ctx
+        .create_stream(deposit, rate, 0, 0, 100)
         .expect("creation should succeed");
 
     // At t=50, decrease rate from 10 to 5
@@ -1174,9 +1175,8 @@ fn global_conservation_complex_scenario() {
     assert_global_balance_conservation(&ctx);
 
     // Final check: total tokens in system
-    let total = ctx.token.balance(&ctx.sender)
-        + ctx.token.balance(&ctx.recipient)
-        + ctx.contract_balance();
+    let total =
+        ctx.token.balance(&ctx.sender) + ctx.token.balance(&ctx.recipient) + ctx.contract_balance();
     assert_eq!(total, 2_000_000_000_000i128);
 }
 
@@ -1200,7 +1200,11 @@ fn sweep_excess_preserves_liabilities() {
     let swept = ctx.client.sweep_excess(&sweep_recipient);
 
     assert_eq!(swept, extra, "Must sweep exactly the excess amount");
-    assert_eq!(ctx.contract_balance(), deposit, "Contract must retain exactly liabilities");
+    assert_eq!(
+        ctx.contract_balance(),
+        deposit,
+        "Contract must retain exactly liabilities"
+    );
     assert_eq!(
         ctx.token.balance(&sweep_recipient),
         extra,
@@ -1231,10 +1235,9 @@ fn batch_withdraw_partial_completion() {
     // At t=600 > end=500, accrued = min(2*500, 2000) = 1000
 
     let recipient_before = ctx.token.balance(&ctx.recipient);
-    let results = ctx.client.batch_withdraw(
-        &ctx.recipient,
-        &vec![&ctx.env, s1, s2],
-    );
+    let results = ctx
+        .client
+        .batch_withdraw(&ctx.recipient, &vec![&ctx.env, s1, s2]);
     let recipient_after = ctx.token.balance(&ctx.recipient);
 
     let total: i128 = results.iter().map(|r| r.amount).sum();
