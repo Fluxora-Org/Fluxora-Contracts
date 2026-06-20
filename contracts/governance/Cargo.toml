@@ -16,4 +16,3 @@ soroban-sdk = "21.7.7"
 
 [dev-dependencies]
 soroban-sdk = { version = "21.7.7", features = ["testutils"] }
-fluxora_factory = { path = "../factory", features = ["testutils"] }

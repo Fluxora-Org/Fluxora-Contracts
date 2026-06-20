@@ -1,4 +1,4 @@
-﻿//! Property-based tests for withdrawable arithmetic invariants.
+//! Property-based tests for withdrawable arithmetic invariants.
 //!
 //! Proves that across every status transition (Active → Paused → Resumed →
 //! Cancelled / Completed) the following invariants always hold:
@@ -157,7 +157,7 @@ proptest! {
             &0u64,
             &0u64,
             &duration,
-            &0, &None,,
+            &0, &None,
             &crate::StreamKind::Linear,
             );
         for t in &times {
@@ -182,7 +182,7 @@ proptest! {
             &0u64,
             &0u64,
             &duration,
-            &0, &None,,
+            &0, &None,
             &crate::StreamKind::Linear,
             );
         for t in &times {
@@ -208,7 +208,7 @@ proptest! {
             &0u64,
             &0u64,
             &duration,
-            &0, &None,,
+            &0, &None,
             &crate::StreamKind::Linear,
             );
         let mut paused = false;
@@ -244,7 +244,7 @@ proptest! {
             &0u64,
             &0u64,
             &duration,
-            &0, &None,,
+            &0, &None,
             &crate::StreamKind::Linear,
             );
         ctx.env.ledger().set_timestamp(cancel_at);
@@ -270,7 +270,7 @@ proptest! {
             &0u64,
             &0u64,
             &duration,
-            &0, &None,,
+            &0, &None,
             &crate::StreamKind::Linear,
             );
         let mut prev = 0_i128;
@@ -304,9 +304,9 @@ fn setup_standard(deposit: i128) -> (PropCtx, u64) {
         &0u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &crate::StreamKind::Linear,
-        );
+    );
     (ctx, id)
 }
 
@@ -407,9 +407,9 @@ fn invariants_cancelled_before_cliff() {
         &500u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &crate::StreamKind::Linear,
-        );
+    );
     ctx.env.ledger().set_timestamp(200);
     ctx.client().cancel_stream(&id);
     assert_invariants(&ctx, id, "cancelled before cliff");
@@ -449,9 +449,9 @@ fn invariants_high_rate_deposit_capped() {
         &0u64,
         &100u64,
         &0,
-        &None,,
+        &None,
         &crate::StreamKind::Linear,
-        );
+    );
     for t in [0u64, 10, 50, 99, 100, 200] {
         ctx.env.ledger().set_timestamp(t);
         assert_invariants(&ctx, id, &std::format!("high-rate t={t}"));
@@ -472,9 +472,9 @@ fn invariants_excess_deposit_stream() {
         &0u64,
         &1000u64,
         &0,
-        &None,,
+        &None,
         &crate::StreamKind::Linear,
-        );
+    );
     for t in [0u64, 500, 1000, 1500] {
         ctx.env.ledger().set_timestamp(t);
         assert_invariants(&ctx, id, &std::format!("excess-deposit t={t}"));

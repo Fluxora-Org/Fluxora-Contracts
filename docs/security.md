@@ -168,6 +168,22 @@ reentrancy impact — state will already reflect the current operation when the 
 | `set_contract_paused`     | Contract admin                                          |
 | `transfer_sender`         | Current stream sender                                   |
 
+## Admin powers
+
+The stream contract admin can rotate the admin key, set governance-controlled
+limits, pause or resume protocol operations, and use the explicit
+`*_as_admin` stream controls listed in the authorization table above. These
+powers do not replace sender or recipient authorization: stream creation still
+requires the supplied `sender`, withdrawals still require the recipient, and
+top-ups still require the supplied `funder`.
+
+The optional factory wrapper has its own admin for allowlists, deposit caps,
+minimum duration, and the configured stream-contract address. Factory policy
+changes can decide whether a routed creation is accepted, but they do not give
+the factory admin custody of sender funds. See the
+[`fluxora_factory` authorization model](factory.md#cross-contract-authorization-model)
+for the exact factory-to-stream signing tree.
+
 Cancellation-specific boundary checks:
 
 1. Sender path (`cancel_stream`) cannot be executed by recipient or third party.
