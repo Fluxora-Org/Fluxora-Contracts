@@ -20,40 +20,22 @@ Soroban smart contracts for the Fluxora treasury streaming protocol on Stellar. 
 - **Data model** — `Stream` (sender, recipient, deposit_amount, rate_per_second, start/cliff/end time, withdrawn_amount, status, cancelled_at).
 - **Status** — `Active`, `Paused`, `Completed`, `Cancelled`.
 
-### Implemented entry-points
+### Core Stream Entry Points
 
-| Entry-point | Caller | Description |
-|---|---|---|
-| `init` | Bootstrap admin | One-shot initialisation: set token and admin |
-| `create_stream` | Sender | Create a single stream and pull deposit |
-| `create_streams` | Sender | Batch-create streams in one atomic transaction |
-| `pause_stream` | Sender | Halt withdrawals (accrual continues) |
-| `resume_stream` | Sender | Re-enable withdrawals |
-| `cancel_stream` | Sender | Terminate stream; refund unstreamed tokens to sender |
-| `withdraw` | Recipient | Pull accrued tokens to recipient address |
-| `withdraw_to` | Recipient | Pull accrued tokens to a specified destination |
-| `batch_withdraw` | Recipient | Withdraw from multiple streams in one call |
-| `top_up_stream` | Any funder | Add tokens to an existing stream's deposit |
-| `update_rate_per_second` | Sender | Change the streaming rate |
-| `shorten_stream_end_time` | Sender | Move end_time earlier; refunds excess deposit |
-| `extend_stream_end_time` | Sender | Move end_time later |
-| `close_completed_stream` | Anyone | Remove a completed stream from storage (cleanup) |
-| `pause_stream_as_admin` | Admin | Administrative pause override |
-| `resume_stream_as_admin` | Admin | Administrative resume override |
-| `cancel_stream_as_admin` | Admin | Administrative cancel override |
-| `set_admin` | Admin | Rotate the admin key |
-| `set_contract_paused` | Admin | Global emergency pause (blocks new stream creation) |
-| `calculate_accrued` | Anyone | View: accrued amount at current ledger time |
-| `get_withdrawable` | Anyone | View: withdrawable amount at current ledger time |
-| `get_claimable_at` | Anyone | View: simulated claimable amount at an arbitrary timestamp |
-| `get_stream_state` | Anyone | View: full stream struct |
-| `get_stream_count` | Anyone | View: total number of streams created |
-| `get_recipient_streams` | Anyone | View: all stream IDs for a recipient (sorted) |
-| `get_recipient_stream_count` | Anyone | View: number of streams for a recipient |
-| `get_config` | Anyone | View: token address and admin address |
-| `version` | Anyone | View: CONTRACT_VERSION constant (pre-flight check) |
+| Entry Point | Caller / Auth Rules | Description |
+| :--- | :--- | :--- |
+| `delegated_withdraw` | `relayer.require_auth()` | Executes an off-chain signed withdrawal payload using an authorized relayer to pay for network gas. |
+| `clone_stream` | `source.sender.require_auth()` | Duplicates an active source stream's configuration vectors to launch an identical parallel stream allocation. |
+| `reserve_stream_ids` | `caller.require_auth()` | Pre-allocates and locks down sequential identifier spaces for multi-step automated initialization streams. |
+| `bulk_cancel_streams` | `sender.require_auth()` | Cancels a collection of stream keys in a single batch, reclaiming remaining un-allocated collateral. |
+| `keeper_cancel` | `keeper.require_auth()` | Allows designated keeper bots to force-terminate insolvent or expired stream states based on parameter gates. |
+| `trigger_auto_claim` | Public / None | Standard unauthenticated entry point to trigger an automated payout slice to a recipient via incentivized relays. |
+| `register_stream_template`| `owner.require_auth()` | Adds a new pre-validated WASM bytecode hash template matrix into global storage. |
+| `sweep_excess` | `admin.require_auth()` & `recipient.require_auth()` | Cleans up stray/native fee balances out of contract spaces directly into a specified target. |
+| `get_stream_health` | Public / None (View) | Read-only analysis interface detailing stream insolvency metrics and structural drift thresholds. |
+| `get_recipient_streams_paginated` | Public / None (View) | Read-only paginated array fetch targeting memory safety across deep address historical records. |
 
-### Cancel semantics
+> For extended configuration properties, edge-case conditions, and execution schemas, check out the complete [Streaming Documentation](docs/streaming.md).
 
 `cancel_stream` and `cancel_stream_as_admin` are valid only when status is `Active` or `Paused`. Streams in `Completed` or `Cancelled` state return `ContractError::InvalidState`. After cancellation, accrual is frozen at `cancelled_at`; the recipient may still withdraw the frozen accrued amount.
 
@@ -229,7 +211,35 @@ See [docs/security.md](docs/security.md#reproducible-wasm-builds) for the full r
 - **fluxora-frontend** — Dashboard and recipient UI
 
 Each is a separate Git repository.
+---
 
+## 🏭 Factory Contract
+The Factory contract anchors the workspace deployment ecosystem by supervising global templates, managing operational scopes, and generating token-bound stream addresses.
+
+* **Initialization (`init`):** Seals factory state parameters, configuring fundamental baseline settings and mapping the primary admin profile.
+* **Policy Setters:** Secure administration entry-points governing structural template overrides, fee parameters, and network ownership allocations.
+* **Stream Creation (`create_stream`):** Instantiates an isolated stream proxy sequence matched precisely against the active, verified template hash register.
+
+> For deployment parameter schemas, factory variables, and initialization matrices, see [docs/factory.md](docs/factory.md).
+
+---
+
+## ⚖️ Governance Contract
+The Governance module coordinates community actions, parameter threshold overrides, and critical upgrade vectors via verifiable checkpoint logic.
+
+* **Proposal Lifecycles (`propose` / `approve` / `execute`):** Standard multi-signature/voting pipeline driving states from conception through validation rounds directly into on-chain enforcement.
+* **Signer Management:** Updates administrative sign-off lists, multisig weights, and required confirmation consensus thresholds.
+
+> For technical consensus models, voter profiles, and cryptographic execution matrices, see [docs/governance.md](docs/governance.md).
+
+---
+
+## 🛠️ Compilation and Local Development
+
+All three workspace contract modules are structured to build simultaneously under standard WebAssembly environments. To compile `stream`, `factory`, and `governance` uniformly in a single action, run:
+
+```bash
+cargo build --target wasm32-unknown-unknown --workspace
 ## Contributing
 
 Please read [CONTRIBUTING.md](CONTRIBUTING.md) for details on the development workflow, branch naming, and testing requirements (including the 95% test coverage standard).

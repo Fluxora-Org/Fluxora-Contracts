@@ -1,7 +1,9 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
 
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, symbol_short, Address, Bytes, Env, Vec};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Bytes, Env, Vec,
+};
 
 // ---------------------------------------------------------------------------
 // Governance constants
@@ -222,7 +224,9 @@ fn load_proposal(env: &Env, id: u32) -> Result<Proposal, GovernanceError> {
 }
 
 fn save_proposal(env: &Env, id: u32, proposal: &Proposal) {
-    env.storage().persistent().set(&DataKey::Proposal(id), proposal);
+    env.storage()
+        .persistent()
+        .set(&DataKey::Proposal(id), proposal);
     bump_proposal(env, id);
 }
 
@@ -245,11 +249,7 @@ impl FluxoraGovernance {
     /// # Errors
     /// - `AlreadyInitialized`: Contract has already been initialised.
     /// - `TooManySigners`: Provided signer list exceeds `MAX_SIGNERS`.
-    pub fn init(
-        env: Env,
-        admin: Address,
-        signers: Vec<Address>,
-    ) -> Result<(), GovernanceError> {
+    pub fn init(env: Env, admin: Address, signers: Vec<Address>) -> Result<(), GovernanceError> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(GovernanceError::AlreadyInitialized);
         }
@@ -259,7 +259,9 @@ impl FluxoraGovernance {
 
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Signers, &signers);
-        env.storage().instance().set(&DataKey::NextProposalId, &0u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::NextProposalId, &0u32);
 
         bump_instance(&env);
         Ok(())
@@ -399,11 +401,7 @@ impl FluxoraGovernance {
     /// - `ProposalNotFound`: No proposal with this ID.
     /// - `AlreadyExecuted`: Proposal has already been executed.
     /// - `AlreadyApproved`: This signer already approved this proposal.
-    pub fn approve(
-        env: Env,
-        approver: Address,
-        proposal_id: u32,
-    ) -> Result<(), GovernanceError> {
+    pub fn approve(env: Env, approver: Address, proposal_id: u32) -> Result<(), GovernanceError> {
         approver.require_auth();
 
         let signers = get_signers(&env)?;
@@ -491,11 +489,7 @@ impl FluxoraGovernance {
     /// - `QuorumNotReached`: Approval count < `GOVERNANCE_QUORUM`.
     /// - `TimelockNotElapsed`: Less than `GOVERNANCE_TIMELOCK_SECONDS` have passed
     ///   since quorum was reached.
-    pub fn execute(
-        env: Env,
-        executor: Address,
-        proposal_id: u32,
-    ) -> Result<(), GovernanceError> {
+    pub fn execute(env: Env, executor: Address, proposal_id: u32) -> Result<(), GovernanceError> {
         executor.require_auth();
 
         let mut proposal = load_proposal(&env, proposal_id)?;

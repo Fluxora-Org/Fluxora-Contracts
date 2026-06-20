@@ -1,4 +1,4 @@
-﻿#[cfg(test)]
+#[cfg(test)]
 use crate::test::TestContext;
 use crate::StreamStatus;
 use soroban_sdk::{testutils::Address as _, testutils::Ledger, Address};
@@ -124,9 +124,9 @@ fn test_batch_withdraw_running_balance_cap() {
         &500,
         &500,
         &0,
-        &None,,
+        &None,
         &crate::StreamKind::Linear,
-        );
+    );
     let id2 = ctx.client().create_stream(
         &ctx.sender,
         &ctx.recipient,
@@ -136,9 +136,9 @@ fn test_batch_withdraw_running_balance_cap() {
         &500,
         &500,
         &0,
-        &None,,
+        &None,
         &crate::StreamKind::Linear,
-        );
+    );
 
     ctx.env.ledger().set_timestamp(500); // both fully accrued
 

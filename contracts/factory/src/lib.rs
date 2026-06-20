@@ -13,6 +13,10 @@ pub enum FactoryError {
     RecipientNotAllowlisted = 4,
     DepositExceedsCap = 5,
     DurationTooShort = 6,
+    /// The requested stream must end strictly after it starts.
+    InvalidTimeRange = 7,
+    /// The requested cliff must be within the inclusive start/end window.
+    InvalidCliff = 8,
 }
 
 #[contracttype]
@@ -22,6 +26,30 @@ pub enum DataKey {
     MaxDepositCap,
     MinDuration,
     Allowlist(Address),
+}
+
+/// Load and authorize the current factory admin.
+///
+/// This is the single authorization chokepoint for admin-only factory setters.
+/// It preserves the existing `NotInitialized` behavior before attempting auth.
+fn require_admin(env: &Env) -> Result<Address, FactoryError> {
+    let admin: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::Admin)
+        .ok_or(FactoryError::NotInitialized)?;
+    admin.require_auth();
+    Ok(admin)
+}
+
+/// Read-only snapshot of the factory policy stored in instance storage.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FactoryConfig {
+    pub admin: Address,
+    pub stream_contract: Address,
+    pub max_deposit: i128,
+    pub min_duration: u64,
 }
 
 #[contract]
@@ -58,12 +86,7 @@ impl FluxoraFactory {
 
     /// Admin updates the factory admin.
     pub fn set_admin(env: Env, new_admin: Address) -> Result<(), FactoryError> {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(FactoryError::NotInitialized)?;
-        admin.require_auth();
+        require_admin(&env)?;
 
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         Ok(())
@@ -71,12 +94,7 @@ impl FluxoraFactory {
 
     /// Admin updates the stream contract address.
     pub fn set_stream_contract(env: Env, new_stream_contract: Address) -> Result<(), FactoryError> {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(FactoryError::NotInitialized)?;
-        admin.require_auth();
+        require_admin(&env)?;
 
         env.storage()
             .instance()
@@ -86,12 +104,7 @@ impl FluxoraFactory {
 
     /// Admin adds or removes a recipient from the allowlist.
     pub fn set_allowlist(env: Env, recipient: Address, allowed: bool) -> Result<(), FactoryError> {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(FactoryError::NotInitialized)?;
-        admin.require_auth();
+        require_admin(&env)?;
 
         let key = DataKey::Allowlist(recipient);
         if allowed {
@@ -105,12 +118,7 @@ impl FluxoraFactory {
 
     /// Admin updates the max deposit cap.
     pub fn set_cap(env: Env, max_deposit: i128) -> Result<(), FactoryError> {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(FactoryError::NotInitialized)?;
-        admin.require_auth();
+        require_admin(&env)?;
 
         env.storage()
             .instance()
@@ -120,17 +128,46 @@ impl FluxoraFactory {
 
     /// Admin updates the minimum stream duration.
     pub fn set_min_duration(env: Env, min_duration: u64) -> Result<(), FactoryError> {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(FactoryError::NotInitialized)?;
-        admin.require_auth();
+        require_admin(&env)?;
 
         env.storage()
             .instance()
             .set(&DataKey::MinDuration, &min_duration);
         Ok(())
+    }
+
+    /// Return the current factory policy configuration.
+    pub fn get_factory_config(env: Env) -> Result<FactoryConfig, FactoryError> {
+        Ok(FactoryConfig {
+            admin: env
+                .storage()
+                .instance()
+                .get(&DataKey::Admin)
+                .ok_or(FactoryError::NotInitialized)?,
+            stream_contract: env
+                .storage()
+                .instance()
+                .get(&DataKey::StreamContract)
+                .ok_or(FactoryError::NotInitialized)?,
+            max_deposit: env
+                .storage()
+                .instance()
+                .get(&DataKey::MaxDepositCap)
+                .ok_or(FactoryError::NotInitialized)?,
+            min_duration: env
+                .storage()
+                .instance()
+                .get(&DataKey::MinDuration)
+                .ok_or(FactoryError::NotInitialized)?,
+        })
+    }
+
+    /// Return whether `recipient` is currently allowlisted for factory-created streams.
+    pub fn is_allowlisted(env: Env, recipient: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Allowlist(recipient))
+            .unwrap_or(false)
     }
 
     /// Creates a new stream via the FluxoraStream contract after enforcing treasury policies.
@@ -165,12 +202,21 @@ impl FluxoraFactory {
             return Err(FactoryError::DepositExceedsCap);
         }
 
+        // Mirror FluxoraStream time invariants before the cross-contract call so
+        // invalid schedules return typed factory errors instead of downstream panics.
+        if start_time >= end_time {
+            return Err(FactoryError::InvalidTimeRange);
+        }
+        if cliff_time < start_time || cliff_time > end_time {
+            return Err(FactoryError::InvalidCliff);
+        }
+
         let min_duration: u64 = env
             .storage()
             .instance()
             .get(&DataKey::MinDuration)
             .ok_or(FactoryError::NotInitialized)?;
-        let duration = end_time.saturating_sub(start_time);
+        let duration = end_time - start_time;
         if duration < min_duration {
             return Err(FactoryError::DurationTooShort);
         }
