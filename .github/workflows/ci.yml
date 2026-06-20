@@ -46,7 +46,7 @@ jobs:
         run: pip install pytest pytest-cov
 
       - name: Run test suite with coverage
-        run: pytest tests/ --cov=script/validate-doc-alignment.py --cov-fail-under=95 -v --tb=short
+        run: pytest tests/ --cov=script/ --cov-fail-under=95 -v --tb=short
 
       - name: Validate doc alignment
         run: python3 script/validate-doc-alignment.py
