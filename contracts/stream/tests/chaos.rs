@@ -11,14 +11,14 @@
 //! On failure the permutation seed is printed for reproducibility.
 
 use fluxora_stream::{
-    FluxoraStreamClient, FluxoraStream, CreateStreamParams, StreamStatus, PauseReason,
-    ContractError,
+    ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, PauseReason,
+    StreamStatus,
 };
 use proptest::prelude::*;
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
     token::Client as TokenClient,
-    vec, Address, Env, Symbol, IntoVal,
+    vec, Address, Env, IntoVal, Symbol,
 };
 
 struct TestContext {
@@ -40,7 +40,9 @@ impl TestContext {
         let client = FluxoraStreamClient::new(&env, &contract_id);
 
         let token_admin = Address::generate(&env);
-        let token_id = env.register_stellar_asset_contract_v2(token_admin).address();
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
         let token = TokenClient::new(&env, &token_id);
 
         let admin = Address::generate(&env);
@@ -50,7 +52,15 @@ impl TestContext {
         // Initialise contract
         client.init(&token_id, &admin);
 
-        Self { env, client, sender, recipient, token, contract_id, admin }
+        Self {
+            env,
+            client,
+            sender,
+            recipient,
+            token,
+            contract_id,
+            admin,
+        }
     }
 
     fn create_stream(&self) -> u64 {
@@ -93,7 +103,8 @@ fn apply_op(ctx: &TestContext, stream_id: u64, op: Op) -> Result<(), ContractErr
             Ok(())
         }
         Op::Pause => {
-            ctx.client.pause_stream(&stream_id, &PauseReason::Operational);
+            ctx.client
+                .pause_stream(&stream_id, &PauseReason::Operational);
             Ok(())
         }
     }
@@ -107,7 +118,10 @@ fn post_conditions_hold(ctx: &TestContext, stream_id: u64) {
     // Stream status must be a valid enum value.
     let status = ctx.client.get_stream_state(&stream_id).status;
     match status {
-        StreamStatus::Active | StreamStatus::Paused | StreamStatus::Completed | StreamStatus::Cancelled => {}
+        StreamStatus::Active
+        | StreamStatus::Paused
+        | StreamStatus::Completed
+        | StreamStatus::Cancelled => {}
         _ => panic!("invalid stream status"),
     }
 
@@ -116,7 +130,11 @@ fn post_conditions_hold(ctx: &TestContext, stream_id: u64) {
     // For simplicity we just ensure contract balance + sender balance + recipient balance == 1000.
     let sender_bal = ctx.token.balance(&ctx.sender);
     let recipient_bal = ctx.token.balance(&ctx.recipient);
-    assert_eq!(contract_bal + sender_bal + recipient_bal, 1000, "tokens mismatch");
+    assert_eq!(
+        contract_bal + sender_bal + recipient_bal,
+        1000,
+        "tokens mismatch"
+    );
 }
 
 proptest! {
@@ -151,15 +169,21 @@ proptest! {
 // Helper: generate next lexicographic permutation (returns false when finished).
 fn next_permutation<T: Ord>(data: &mut [T]) -> bool {
     // Find the largest index i such that data[i] < data[i + 1]
-    if data.len() < 2 { return false; }
+    if data.len() < 2 {
+        return false;
+    }
     let mut i = data.len() - 2;
     while i != usize::MAX && data[i] >= data[i + 1] {
-        if i == 0 { return false; }
+        if i == 0 {
+            return false;
+        }
         i -= 1;
     }
     // Find the largest index j > i such that data[i] < data[j]
     let mut j = data.len() - 1;
-    while data[i] >= data[j] { j -= 1; }
+    while data[i] >= data[j] {
+        j -= 1;
+    }
     data.swap(i, j);
     data[i + 1..].reverse();
     true
