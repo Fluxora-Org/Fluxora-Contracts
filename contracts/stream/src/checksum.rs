@@ -233,14 +233,27 @@ mod tests {
 
         // Verify positions are contiguous and complete
         let positions = [
-            STREAM_ID_POS, SENDER_POS, RECIPIENT_POS, DEPOSIT_AMOUNT_POS,
-            RATE_PER_SECOND_POS, START_TIME_POS, CLIFF_TIME_POS, END_TIME_POS,
-            WITHDRAWN_AMOUNT_POS, STATUS_POS, CANCELLED_AT_POS,
-            CHECKPOINTED_AMOUNT_POS, CHECKPOINTED_AT_POS, WITHDRAW_DUST_THRESHOLD_POS,
+            STREAM_ID_POS,
+            SENDER_POS,
+            RECIPIENT_POS,
+            DEPOSIT_AMOUNT_POS,
+            RATE_PER_SECOND_POS,
+            START_TIME_POS,
+            CLIFF_TIME_POS,
+            END_TIME_POS,
+            WITHDRAWN_AMOUNT_POS,
+            STATUS_POS,
+            CANCELLED_AT_POS,
+            CHECKPOINTED_AMOUNT_POS,
+            CHECKPOINTED_AT_POS,
+            WITHDRAW_DUST_THRESHOLD_POS,
         ];
         assert_eq!(positions.len(), 14);
         for (i, &pos) in positions.iter().enumerate() {
-            assert_eq!(pos, i, "V5 Stream field at index {i} has wrong position {pos}");
+            assert_eq!(
+                pos, i,
+                "V5 Stream field at index {i} has wrong position {pos}"
+            );
         }
     }
 

@@ -6,8 +6,7 @@ use soroban_sdk::{
 };
 
 use crate::{
-    accrual, FluxoraStream, FluxoraStreamClient, StreamStatus,
-    ContractError, DataKey, Config,
+    accrual, Config, ContractError, DataKey, FluxoraStream, FluxoraStreamClient, StreamStatus,
 };
 
 // ── Test helpers ───────────────────────────────────────────────────────────
@@ -41,20 +40,13 @@ fn create_test_stream(
 ) -> u64 {
     env.mock_all_auths();
     client.create_stream(
-        sender,
-        recipient,
-        &deposit,
-        &rate,
-        &start,
-        &cliff,
-        &end,
-        &0i128,
-        &None,
+        sender, recipient, &deposit, &rate, &start, &cliff, &end, &0i128, &None,
     )
 }
 
 fn advance_time(env: &Env, seconds: u64) {
-    env.ledger().set_timestamp(env.ledger().timestamp() + seconds);
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + seconds);
 }
 
 // ── bulk_cancel_streams tests ──────────────────────────────────────────────
