@@ -231,6 +231,83 @@ fn test_create_stream_duration_at_minimum_ok() {
 }
 
 // ---------------------------------------------------------------------------
+// Time relationship validation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_create_stream_rejects_end_before_start() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient, &true);
+    let now = ctx.now();
+
+    let result = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &1_000,
+        &1,
+        &(now + 200),
+        &(now + 200),
+        &(now + 100),
+        &0,
+    );
+    assert_eq!(result, Err(Ok(FactoryError::InvalidTimeRange)));
+}
+
+#[test]
+fn test_create_stream_rejects_end_equal_start() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient, &true);
+    let now = ctx.now();
+
+    let result =
+        ctx.factory
+            .try_create_stream(&ctx.sender, &recipient, &1_000, &1, &now, &now, &now, &0);
+    assert_eq!(result, Err(Ok(FactoryError::InvalidTimeRange)));
+}
+
+#[test]
+fn test_create_stream_rejects_cliff_before_start() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient, &true);
+    let now = ctx.now();
+
+    let result = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &1_000,
+        &1,
+        &(now + 100),
+        &now,
+        &(now + 300),
+        &0,
+    );
+    assert_eq!(result, Err(Ok(FactoryError::InvalidCliff)));
+}
+
+#[test]
+fn test_create_stream_rejects_cliff_after_end() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient, &true);
+    let now = ctx.now();
+
+    let result = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &1_000,
+        &1,
+        &now,
+        &(now + 300),
+        &(now + 200),
+        &0,
+    );
+    assert_eq!(result, Err(Ok(FactoryError::InvalidCliff)));
+}
+
+// ---------------------------------------------------------------------------
 // NotInitialized
 // ---------------------------------------------------------------------------
 

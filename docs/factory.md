@@ -10,6 +10,19 @@ The `fluxora_factory` acts as a proxy entrypoint to enforce these policies:
 - **Recipient Allowlist**: Streams can only be created for recipients explicitly allowlisted by the admin.
 - **Deposit Caps**: Enforces a `MaxDepositCap` on the total `deposit_amount` of a single stream.
 - **Minimum Duration**: Enforces a `MinDuration` (i.e. `end_time - start_time >= min_duration`), preventing overly short or instantaneous streams.
+- **Time Relationship Checks**: Rejects invalid schedules before calling `FluxoraStream`. `start_time` must be strictly less than `end_time`, and `cliff_time` must be within the inclusive `[start_time, end_time]` window.
+
+## Time Validation
+
+The factory mirrors the underlying stream contract's creation-time schedule invariants and returns typed factory errors before making the cross-contract call:
+
+| Condition | Error |
+|-----------|-------|
+| `start_time >= end_time` | `FactoryError::InvalidTimeRange` |
+| `cliff_time < start_time` | `FactoryError::InvalidCliff` |
+| `cliff_time > end_time` | `FactoryError::InvalidCliff` |
+
+These checks keep invalid treasury requests on the factory error surface instead of relying on downstream stream-contract panics.
 
 ## Important Bypass Warning
 
@@ -21,7 +34,7 @@ The `fluxora_factory` acts as a proxy entrypoint to enforce these policies:
 ## Architecture & CEI
 
 The factory contract follows the Checks-Effects-Interactions (CEI) pattern implicitly:
-1. **Checks**: Validates the recipient against the allowlist, and bounds the deposit and duration against the configured caps.
+1. **Checks**: Validates the recipient against the allowlist, validates the stream time relationship, and bounds the deposit and duration against the configured caps.
 2. **Effects**: No local persistent state changes occur during a successful stream creation.
 3. **Interactions**: Makes a cross-contract call to `FluxoraStream::create_stream`.
 
