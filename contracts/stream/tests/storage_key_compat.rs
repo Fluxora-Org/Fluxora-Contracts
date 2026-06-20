@@ -49,8 +49,7 @@
 extern crate std;
 
 use fluxora_stream::{
-    Config, DataKey, FluxoraStream, FluxoraStreamClient, Stream, StreamStatus,
-    CONTRACT_VERSION,
+    Config, DataKey, FluxoraStream, FluxoraStreamClient, Stream, StreamStatus, CONTRACT_VERSION,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -93,7 +92,14 @@ impl<'a> Ctx<'a> {
 
         client.init(&token_id, &admin);
 
-        Ctx { env, contract_id, client, token_id, admin, sender }
+        Ctx {
+            env,
+            contract_id,
+            client,
+            token_id,
+            admin,
+            sender,
+        }
     }
 
     /// Seed a V5-era `Stream` directly into persistent storage, bypassing the
@@ -163,7 +169,10 @@ fn v5_stream_readable_by_v6_get_stream_state() {
     assert_eq!(state.withdrawn_amount, 0);
     assert_eq!(state.status, StreamStatus::Active);
     // V5 entry has no memo — V6 decoder must return None, not panic.
-    assert!(state.memo.is_none(), "V5 stream must decode with memo == None");
+    assert!(
+        state.memo.is_none(),
+        "V5 stream must decode with memo == None"
+    );
 }
 
 /// V6 `calculate_accrued` works correctly on a V5-era Stream entry.
@@ -181,7 +190,10 @@ fn v5_stream_calculate_accrued_correct() {
 
     let accrued = ctx.client.calculate_accrued(&0u64);
     // rate=1 token/s × 100 s = 100
-    assert_eq!(accrued, 100, "accrual on V5 stream must equal rate × elapsed");
+    assert_eq!(
+        accrued, 100,
+        "accrual on V5 stream must equal rate × elapsed"
+    );
 }
 
 /// V6 `get_withdrawable` works correctly on a V5-era Stream entry.
@@ -272,7 +284,10 @@ fn v5_cancelled_stream_readable_accrual_frozen() {
 
     // Accrual must be frozen at cancelled_at (50 tokens)
     let accrued = ctx.client.calculate_accrued(&0u64);
-    assert_eq!(accrued, 50, "cancelled V5 stream accrual must be frozen at cancelled_at");
+    assert_eq!(
+        accrued, 50,
+        "cancelled V5 stream accrual must be frozen at cancelled_at"
+    );
 }
 
 /// A V5-era Stream with non-zero `checkpointed_amount` decodes correctly.
@@ -346,7 +361,10 @@ fn v5_next_stream_id_readable_by_v6() {
     });
 
     let count = ctx.client.get_stream_count();
-    assert_eq!(count, 3, "V5 NextStreamId must be readable by V6 get_stream_count");
+    assert_eq!(
+        count, 3,
+        "V5 NextStreamId must be readable by V6 get_stream_count"
+    );
 }
 
 /// V5 `GlobalEmergencyPaused` (discriminant 4) is readable by V6.
@@ -449,7 +467,8 @@ fn v5_total_liabilities_readable_by_v6() {
     // TotalLiabilities, so we verify the key is present by reading it directly.
     let cid2 = ctx.contract_id.clone();
     ctx.env.as_contract(&cid2, || {
-        let val: i128 = ctx.env
+        let val: i128 = ctx
+            .env
             .storage()
             .instance()
             .get(&DataKey::TotalLiabilities)
@@ -521,11 +540,15 @@ fn v6_withdraw_nonce_absent_on_v5_instance() {
     let addr = Address::generate(&ctx.env);
     let cid = ctx.contract_id.clone();
     ctx.env.as_contract(&cid, || {
-        let present = ctx.env
+        let present = ctx
+            .env
             .storage()
             .persistent()
             .has(&DataKey::WithdrawNonce(addr.clone()));
-        assert!(!present, "WithdrawNonce must be absent on a V5-seeded instance");
+        assert!(
+            !present,
+            "WithdrawNonce must be absent on a V5-seeded instance"
+        );
     });
 }
 
@@ -538,11 +561,11 @@ fn v6_pause_state_absent_on_v5_instance() {
     let ctx = Ctx::setup();
     let cid = ctx.contract_id.clone();
     ctx.env.as_contract(&cid, || {
-        let present = ctx.env
-            .storage()
-            .instance()
-            .has(&DataKey::PauseState);
-        assert!(!present, "PauseState must be absent on a V5-seeded instance");
+        let present = ctx.env.storage().instance().has(&DataKey::PauseState);
+        assert!(
+            !present,
+            "PauseState must be absent on a V5-seeded instance"
+        );
     });
 }
 
@@ -554,11 +577,11 @@ fn v6_reentrancy_lock_absent_on_v5_instance() {
     let ctx = Ctx::setup();
     let cid = ctx.contract_id.clone();
     ctx.env.as_contract(&cid, || {
-        let present = ctx.env
-            .storage()
-            .instance()
-            .has(&DataKey::ReentrancyLock);
-        assert!(!present, "ReentrancyLock must be absent on a V5-seeded instance");
+        let present = ctx.env.storage().instance().has(&DataKey::ReentrancyLock);
+        assert!(
+            !present,
+            "ReentrancyLock must be absent on a V5-seeded instance"
+        );
     });
 }
 
@@ -572,11 +595,15 @@ fn v6_recipient_stream_page_absent_on_v5_instance() {
     let addr = Address::generate(&ctx.env);
     let cid = ctx.contract_id.clone();
     ctx.env.as_contract(&cid, || {
-        let present = ctx.env
+        let present = ctx
+            .env
             .storage()
             .persistent()
             .has(&DataKey::RecipientStreamPage(addr.clone(), 0u32));
-        assert!(!present, "RecipientStreamPage must be absent on a V5-seeded instance");
+        assert!(
+            !present,
+            "RecipientStreamPage must be absent on a V5-seeded instance"
+        );
     });
 }
 
@@ -587,11 +614,15 @@ fn v6_recipient_stream_page_count_absent_on_v5_instance() {
     let addr = Address::generate(&ctx.env);
     let cid = ctx.contract_id.clone();
     ctx.env.as_contract(&cid, || {
-        let present = ctx.env
+        let present = ctx
+            .env
             .storage()
             .persistent()
             .has(&DataKey::RecipientStreamPageCount(addr.clone()));
-        assert!(!present, "RecipientStreamPageCount must be absent on a V5-seeded instance");
+        assert!(
+            !present,
+            "RecipientStreamPageCount must be absent on a V5-seeded instance"
+        );
     });
 }
 
@@ -601,11 +632,15 @@ fn v6_pending_recipient_update_absent_on_v5_instance() {
     let ctx = Ctx::setup();
     let cid = ctx.contract_id.clone();
     ctx.env.as_contract(&cid, || {
-        let present = ctx.env
+        let present = ctx
+            .env
             .storage()
             .persistent()
             .has(&DataKey::PendingRecipientUpdate(0u64));
-        assert!(!present, "PendingRecipientUpdate must be absent on a V5-seeded instance");
+        assert!(
+            !present,
+            "PendingRecipientUpdate must be absent on a V5-seeded instance"
+        );
     });
 }
 
@@ -634,7 +669,8 @@ fn discriminant_0_config_round_trips() {
                 admin: new_admin.clone(),
             },
         );
-        let cfg: Config = ctx.env
+        let cfg: Config = ctx
+            .env
             .storage()
             .instance()
             .get(&DataKey::Config)
@@ -654,7 +690,8 @@ fn discriminant_1_next_stream_id_round_trips() {
             .storage()
             .instance()
             .set(&DataKey::NextStreamId, &7u64);
-        let val: u64 = ctx.env
+        let val: u64 = ctx
+            .env
             .storage()
             .instance()
             .get(&DataKey::NextStreamId)
@@ -685,7 +722,8 @@ fn discriminant_3_recipient_streams_round_trips() {
 
     let cid = ctx.contract_id.clone();
     ctx.env.as_contract(&cid, || {
-        let ids: soroban_sdk::Vec<u64> = ctx.env
+        let ids: soroban_sdk::Vec<u64> = ctx
+            .env
             .storage()
             .persistent()
             .get(&DataKey::RecipientStreams(recipient.clone()))
@@ -705,7 +743,8 @@ fn discriminant_14_total_liabilities_round_trips() {
             .storage()
             .instance()
             .set(&DataKey::TotalLiabilities, &12345_i128);
-        let val: i128 = ctx.env
+        let val: i128 = ctx
+            .env
             .storage()
             .instance()
             .get(&DataKey::TotalLiabilities)
