@@ -13,6 +13,10 @@ pub enum FactoryError {
     RecipientNotAllowlisted = 4,
     DepositExceedsCap = 5,
     DurationTooShort = 6,
+    /// The requested stream must end strictly after it starts.
+    InvalidTimeRange = 7,
+    /// The requested cliff must be within the inclusive start/end window.
+    InvalidCliff = 8,
 }
 
 #[contracttype]
@@ -209,12 +213,21 @@ impl FluxoraFactory {
             return Err(FactoryError::DepositExceedsCap);
         }
 
+        // Mirror FluxoraStream time invariants before the cross-contract call so
+        // invalid schedules return typed factory errors instead of downstream panics.
+        if start_time >= end_time {
+            return Err(FactoryError::InvalidTimeRange);
+        }
+        if cliff_time < start_time || cliff_time > end_time {
+            return Err(FactoryError::InvalidCliff);
+        }
+
         let min_duration: u64 = env
             .storage()
             .instance()
             .get(&DataKey::MinDuration)
             .ok_or(FactoryError::NotInitialized)?;
-        let duration = end_time.saturating_sub(start_time);
+        let duration = end_time - start_time;
         if duration < min_duration {
             return Err(FactoryError::DurationTooShort);
         }
