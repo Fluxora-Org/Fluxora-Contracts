@@ -189,10 +189,7 @@ fn test_keeper_cancel_too_early_errors() {
     ctx.env.ledger().set_timestamp(1000 + GRACE - 1);
 
     let result = ctx.client().try_keeper_cancel(&stream_id, &ctx.keeper);
-    assert_eq!(
-        result,
-        Err(Ok(ContractError::KeeperGracePeriodNotElapsed))
-    );
+    assert_eq!(result, Err(Ok(ContractError::KeeperGracePeriodNotElapsed)));
 }
 
 // ---------------------------------------------------------------------------
@@ -300,10 +297,8 @@ fn test_keeper_cancel_paused_stream_succeeds() {
 
     // Pause the stream at t=500
     ctx.env.ledger().set_timestamp(500);
-    ctx.client().pause_stream(
-        &stream_id,
-        &fluxora_stream::PauseReason::Operational,
-    );
+    ctx.client()
+        .pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
 
     // Advance past grace period (paused streams are still eligible)
     ctx.env.ledger().set_timestamp(2000 + GRACE + 1);
