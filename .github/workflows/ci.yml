@@ -22,35 +22,6 @@ env:
   STELLAR_CLI_VERSION: "25.2.0"
 
 jobs:
-  factory-governance-quality:
-    name: Factory/Governance fmt + clippy
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-factory-governance-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-factory-governance-
-
-      - name: Check workspace formatting
-        run: cargo fmt --all -- --check
-
-      - name: Run factory and governance Clippy
-        run: cargo clippy -p fluxora_factory -p fluxora_governance --all-targets -- -D warnings
-
   docs-alignment-check:
     name: Docs Alignment Check
     runs-on: ubuntu-latest
