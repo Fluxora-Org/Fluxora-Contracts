@@ -24,6 +24,16 @@ pub enum DataKey {
     Allowlist(Address),
 }
 
+/// Read-only snapshot of the factory policy stored in instance storage.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FactoryConfig {
+    pub admin: Address,
+    pub stream_contract: Address,
+    pub max_deposit: i128,
+    pub min_duration: u64,
+}
+
 #[contract]
 pub struct FluxoraFactory;
 
@@ -131,6 +141,40 @@ impl FluxoraFactory {
             .instance()
             .set(&DataKey::MinDuration, &min_duration);
         Ok(())
+    }
+
+    /// Return the current factory policy configuration.
+    pub fn get_factory_config(env: Env) -> Result<FactoryConfig, FactoryError> {
+        Ok(FactoryConfig {
+            admin: env
+                .storage()
+                .instance()
+                .get(&DataKey::Admin)
+                .ok_or(FactoryError::NotInitialized)?,
+            stream_contract: env
+                .storage()
+                .instance()
+                .get(&DataKey::StreamContract)
+                .ok_or(FactoryError::NotInitialized)?,
+            max_deposit: env
+                .storage()
+                .instance()
+                .get(&DataKey::MaxDepositCap)
+                .ok_or(FactoryError::NotInitialized)?,
+            min_duration: env
+                .storage()
+                .instance()
+                .get(&DataKey::MinDuration)
+                .ok_or(FactoryError::NotInitialized)?,
+        })
+    }
+
+    /// Return whether `recipient` is currently allowlisted for factory-created streams.
+    pub fn is_allowlisted(env: Env, recipient: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Allowlist(recipient))
+            .unwrap_or(false)
     }
 
     /// Creates a new stream via the FluxoraStream contract after enforcing treasury policies.

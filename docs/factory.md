@@ -11,6 +11,17 @@ The `fluxora_factory` acts as a proxy entrypoint to enforce these policies:
 - **Deposit Caps**: Enforces a `MaxDepositCap` on the total `deposit_amount` of a single stream.
 - **Minimum Duration**: Enforces a `MinDuration` (i.e. `end_time - start_time >= min_duration`), preventing overly short or instantaneous streams.
 
+## Read-Only Views
+
+The factory exposes read-only views so UIs, operators, and indexers can inspect policy before routing treasury activity through the wrapper.
+
+| View | Returns | Notes |
+|------|---------|-------|
+| `get_factory_config()` | `FactoryConfig { admin, stream_contract, max_deposit, min_duration }` | Reads all instance policy fields. Returns `FactoryError::NotInitialized` before `init`. |
+| `is_allowlisted(recipient)` | `bool` | Returns `true` only when the recipient currently has an allowlist entry. Missing entries return `false`. |
+
+These views are permissionless and do not mutate factory state.
+
 ## Important Bypass Warning
 
 > [!WARNING]
