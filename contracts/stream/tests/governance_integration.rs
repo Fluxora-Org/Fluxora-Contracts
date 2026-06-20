@@ -72,10 +72,9 @@ fn test_init_stores_signers() {
 #[test]
 fn test_init_twice_errors() {
     let ctx = GovCtx::setup();
-    let result = ctx.client.try_init(
-        &ctx.admin,
-        &vec![&ctx.env, ctx.signer_a.clone()],
-    );
+    let result = ctx
+        .client
+        .try_init(&ctx.admin, &vec![&ctx.env, ctx.signer_a.clone()]);
     assert_eq!(result, Err(Ok(GovernanceError::AlreadyInitialized)));
 }
 
@@ -95,8 +94,12 @@ fn test_propose_returns_incremental_ids() {
     let ctx = GovCtx::setup();
     let target = ctx.dummy_target();
 
-    let id0 = ctx.client.propose(&ctx.signer_a, &target, &ctx.calldata("call0"));
-    let id1 = ctx.client.propose(&ctx.signer_b, &target, &ctx.calldata("call1"));
+    let id0 = ctx
+        .client
+        .propose(&ctx.signer_a, &target, &ctx.calldata("call0"));
+    let id1 = ctx
+        .client
+        .propose(&ctx.signer_b, &target, &ctx.calldata("call1"));
 
     assert_eq!(id0, 0);
     assert_eq!(id1, 1);
@@ -134,7 +137,9 @@ fn test_propose_stores_proposal() {
 #[test]
 fn test_approve_increments_approval_count() {
     let ctx = GovCtx::setup();
-    let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+    let id = ctx
+        .client
+        .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
 
     ctx.client.approve(&ctx.signer_a, &id);
     let p = ctx.client.get_proposal(&id);
@@ -148,7 +153,9 @@ fn test_approve_increments_approval_count() {
 #[test]
 fn test_approve_duplicate_errors() {
     let ctx = GovCtx::setup();
-    let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+    let id = ctx
+        .client
+        .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
 
     ctx.client.approve(&ctx.signer_a, &id);
     let result = ctx.client.try_approve(&ctx.signer_a, &id);
@@ -158,7 +165,9 @@ fn test_approve_duplicate_errors() {
 #[test]
 fn test_approve_non_signer_errors() {
     let ctx = GovCtx::setup();
-    let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+    let id = ctx
+        .client
+        .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
     let outsider = Address::generate(&ctx.env);
 
     let result = ctx.client.try_approve(&outsider, &id);
@@ -175,15 +184,15 @@ fn test_approve_nonexistent_proposal_errors() {
 #[test]
 fn test_approve_executed_proposal_errors() {
     let ctx = GovCtx::setup();
-    let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+    let id = ctx
+        .client
+        .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
 
     ctx.client.approve(&ctx.signer_a, &id);
     ctx.client.approve(&ctx.signer_b, &id);
 
     // Advance past timelock
-    ctx.env
-        .ledger()
-        .set_timestamp(1_000_000 + TIMELOCK + 1);
+    ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
 
     let executor = Address::generate(&ctx.env);
     ctx.client.execute(&executor, &id);
@@ -199,15 +208,15 @@ fn test_approve_executed_proposal_errors() {
 #[test]
 fn test_execute_after_quorum_and_timelock_succeeds() {
     let ctx = GovCtx::setup();
-    let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+    let id = ctx
+        .client
+        .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
 
     ctx.client.approve(&ctx.signer_a, &id);
     ctx.client.approve(&ctx.signer_b, &id);
 
     // Advance past timelock
-    ctx.env
-        .ledger()
-        .set_timestamp(1_000_000 + TIMELOCK + 1);
+    ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
 
     let executor = Address::generate(&ctx.env);
     ctx.client.execute(&executor, &id);
@@ -223,14 +232,14 @@ fn test_execute_after_quorum_and_timelock_succeeds() {
 #[test]
 fn test_execute_without_quorum_errors() {
     let ctx = GovCtx::setup();
-    let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+    let id = ctx
+        .client
+        .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
 
     // Only 1 approval (quorum = 2)
     ctx.client.approve(&ctx.signer_a, &id);
 
-    ctx.env
-        .ledger()
-        .set_timestamp(1_000_000 + TIMELOCK + 1);
+    ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
 
     let executor = Address::generate(&ctx.env);
     let result = ctx.client.try_execute(&executor, &id);
@@ -240,15 +249,15 @@ fn test_execute_without_quorum_errors() {
 #[test]
 fn test_execute_before_timelock_errors() {
     let ctx = GovCtx::setup();
-    let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+    let id = ctx
+        .client
+        .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
 
     ctx.client.approve(&ctx.signer_a, &id);
     ctx.client.approve(&ctx.signer_b, &id);
 
     // Advance less than the full timelock
-    ctx.env
-        .ledger()
-        .set_timestamp(1_000_000 + TIMELOCK - 1);
+    ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK - 1);
 
     let executor = Address::generate(&ctx.env);
     let result = ctx.client.try_execute(&executor, &id);
@@ -258,14 +267,14 @@ fn test_execute_before_timelock_errors() {
 #[test]
 fn test_execute_twice_errors() {
     let ctx = GovCtx::setup();
-    let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+    let id = ctx
+        .client
+        .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
 
     ctx.client.approve(&ctx.signer_a, &id);
     ctx.client.approve(&ctx.signer_b, &id);
 
-    ctx.env
-        .ledger()
-        .set_timestamp(1_000_000 + TIMELOCK + 1);
+    ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
 
     let executor = Address::generate(&ctx.env);
     ctx.client.execute(&executor, &id);
@@ -277,9 +286,7 @@ fn test_execute_twice_errors() {
 #[test]
 fn test_execute_nonexistent_proposal_errors() {
     let ctx = GovCtx::setup();
-    ctx.env
-        .ledger()
-        .set_timestamp(1_000_000 + TIMELOCK + 1);
+    ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
 
     let executor = Address::generate(&ctx.env);
     let result = ctx.client.try_execute(&executor, &9999u32);
@@ -314,7 +321,9 @@ fn test_add_signer_unauthorized_errors() {
     let new_signer = Address::generate(&ctx.env);
     ctx.client.add_signer(&new_signer);
     // New signer can now propose
-    let id = ctx.client.propose(&new_signer, &ctx.dummy_target(), &ctx.calldata("y"));
+    let id = ctx
+        .client
+        .propose(&new_signer, &ctx.dummy_target(), &ctx.calldata("y"));
     let p = ctx.client.get_proposal(&id);
     assert_eq!(p.proposer, new_signer);
     let _ = outsider; // suppress unused warning
@@ -348,9 +357,7 @@ fn test_full_governance_flow() {
     assert_eq!(early_result, Err(Ok(GovernanceError::TimelockNotElapsed)));
 
     // Advance past timelock
-    ctx.env
-        .ledger()
-        .set_timestamp(1_000_000 + TIMELOCK + 1);
+    ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
 
     ctx.client.execute(&executor, &id);
 
@@ -366,7 +373,9 @@ fn test_full_governance_flow() {
 #[test]
 fn test_third_approval_after_quorum_is_stored() {
     let ctx = GovCtx::setup();
-    let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+    let id = ctx
+        .client
+        .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
 
     ctx.client.approve(&ctx.signer_a, &id);
     ctx.client.approve(&ctx.signer_b, &id);
@@ -385,7 +394,9 @@ fn test_third_approval_after_quorum_is_stored() {
 fn test_calldata_preserved_in_proposal() {
     let ctx = GovCtx::setup();
     let data = ctx.calldata("set_min_duration:86400");
-    let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &data);
+    let id = ctx
+        .client
+        .propose(&ctx.signer_a, &ctx.dummy_target(), &data);
     let p = ctx.client.get_proposal(&id);
     assert_eq!(p.calldata, data);
 }

@@ -13,6 +13,10 @@ pub enum FactoryError {
     RecipientNotAllowlisted = 4,
     DepositExceedsCap = 5,
     DurationTooShort = 6,
+    /// The requested stream must end strictly after it starts.
+    InvalidTimeRange = 7,
+    /// The requested cliff must be within the inclusive start/end window.
+    InvalidCliff = 8,
 }
 
 #[contracttype]
@@ -36,6 +40,16 @@ fn require_admin(env: &Env) -> Result<Address, FactoryError> {
         .ok_or(FactoryError::NotInitialized)?;
     admin.require_auth();
     Ok(admin)
+}
+
+/// Read-only snapshot of the factory policy stored in instance storage.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FactoryConfig {
+    pub admin: Address,
+    pub stream_contract: Address,
+    pub max_deposit: i128,
+    pub min_duration: u64,
 }
 
 #[contract]
@@ -122,6 +136,40 @@ impl FluxoraFactory {
         Ok(())
     }
 
+    /// Return the current factory policy configuration.
+    pub fn get_factory_config(env: Env) -> Result<FactoryConfig, FactoryError> {
+        Ok(FactoryConfig {
+            admin: env
+                .storage()
+                .instance()
+                .get(&DataKey::Admin)
+                .ok_or(FactoryError::NotInitialized)?,
+            stream_contract: env
+                .storage()
+                .instance()
+                .get(&DataKey::StreamContract)
+                .ok_or(FactoryError::NotInitialized)?,
+            max_deposit: env
+                .storage()
+                .instance()
+                .get(&DataKey::MaxDepositCap)
+                .ok_or(FactoryError::NotInitialized)?,
+            min_duration: env
+                .storage()
+                .instance()
+                .get(&DataKey::MinDuration)
+                .ok_or(FactoryError::NotInitialized)?,
+        })
+    }
+
+    /// Return whether `recipient` is currently allowlisted for factory-created streams.
+    pub fn is_allowlisted(env: Env, recipient: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Allowlist(recipient))
+            .unwrap_or(false)
+    }
+
     /// Creates a new stream via the FluxoraStream contract after enforcing treasury policies.
     #[allow(clippy::too_many_arguments)]
     pub fn create_stream(
@@ -154,12 +202,21 @@ impl FluxoraFactory {
             return Err(FactoryError::DepositExceedsCap);
         }
 
+        // Mirror FluxoraStream time invariants before the cross-contract call so
+        // invalid schedules return typed factory errors instead of downstream panics.
+        if start_time >= end_time {
+            return Err(FactoryError::InvalidTimeRange);
+        }
+        if cliff_time < start_time || cliff_time > end_time {
+            return Err(FactoryError::InvalidCliff);
+        }
+
         let min_duration: u64 = env
             .storage()
             .instance()
             .get(&DataKey::MinDuration)
             .ok_or(FactoryError::NotInitialized)?;
-        let duration = end_time.saturating_sub(start_time);
+        let duration = end_time - start_time;
         if duration < min_duration {
             return Err(FactoryError::DurationTooShort);
         }

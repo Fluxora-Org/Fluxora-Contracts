@@ -9,7 +9,8 @@ use fluxora_stream::{
 use proptest::prelude::*;
 use soroban_sdk::log;
 use soroban_sdk::{
-    contract, contractimpl, testutils::{Address as _, Events, Ledger},
+    contract, contractimpl,
+    testutils::{Address as _, Events, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
     vec, Address, Env, FromVal, IntoVal,
 };
@@ -468,7 +469,7 @@ fn get_stream_health_returns_correct_summary_underfunded() {
         &0,
         &None,
         &fluxora_stream::StreamKind::Linear,
-        );
+    );
 
     ctx.env.ledger().set_timestamp(300);
     let health = ctx.client().get_stream_health(&stream_id);
@@ -523,7 +524,8 @@ fn snapshot_event_paused_resumed_cancelled() {
     let stream_id = ctx.create_default_stream();
 
     // 1. paused
-    ctx.client().pause_stream(&stream_id, &PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &PauseReason::Operational);
     let events = ctx.env.events().all();
     let last_event = events.last().unwrap();
     assert_eq!(
@@ -579,7 +581,7 @@ fn snapshot_event_rate_end_topup_recp() {
         &0,
         &None,
         &fluxora_stream::StreamKind::Linear,
-        );
+    );
 
     // 1. rate_upd
     ctx.client().update_rate_per_second(&stream_id, &2_i128);
@@ -600,7 +602,8 @@ fn snapshot_event_rate_end_topup_recp() {
     );
 
     // 3. top_up — refill the deposit so we can subsequently extend the schedule.
-    ctx.client().top_up_stream(&stream_id, &ctx.sender, &1000_i128);
+    ctx.client()
+        .top_up_stream(&stream_id, &ctx.sender, &1000_i128);
     let events = ctx.env.events().all();
     let last_event = events.last().unwrap();
     assert_eq!(
@@ -657,7 +660,7 @@ fn update_rate_accepts_maximum_i128_rate() {
         &0,
         &None,
         &fluxora_stream::StreamKind::Linear,
-        );
+    );
 
     ctx.client().update_rate_per_second(&stream_id, &i128::MAX);
     let state = ctx.client().get_stream_state(&stream_id);
@@ -671,7 +674,8 @@ fn update_rate_on_paused_stream_is_allowed() {
     ctx.env.ledger().set_timestamp(0);
     let stream_id = ctx.create_default_stream();
 
-    ctx.client().pause_stream(&stream_id, &PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &PauseReason::Operational);
     ctx.client().update_rate_per_second(&stream_id, &2_i128);
 
     let state = ctx.client().get_stream_state(&stream_id);
@@ -768,7 +772,7 @@ fn snapshot_no_event_on_revert() {
         &0,
         &None,
         &fluxora_stream::StreamKind::Linear,
-        );
+    );
     assert!(result.is_err());
     assert_eq!(ctx.env.events().all().len(), events_before);
 }
@@ -819,7 +823,7 @@ fn test_accrual_none_checkpoint_returns_zero() {
         &0,
         &None,
         &fluxora_stream::StreamKind::Linear,
-        );
+    );
 
     // At start_time the elapsed seconds are 0 → accrued must be 0.
     let accrued = ctx.client().calculate_accrued(&stream_id);
@@ -851,7 +855,7 @@ fn test_accrual_none_checkpoint_before_cliff_returns_zero() {
         &0,
         &None,
         &fluxora_stream::StreamKind::Linear,
-        );
+    );
 
     // Before cliff → 0, regardless of checkpoint state.
     let accrued = ctx.client().calculate_accrued(&stream_id);
@@ -1618,7 +1622,9 @@ fn init_accepts_valid_sep41_token() {
 
     let admin = Address::generate(&env);
     let token_admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract_v2(token_admin).address();
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
     let contract_id = env.register_contract(None, FluxoraStream);
     let client = FluxoraStreamClient::new(&env, &contract_id);
 

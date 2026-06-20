@@ -309,6 +309,83 @@ fn test_create_stream_duration_at_minimum_ok() {
 }
 
 // ---------------------------------------------------------------------------
+// Time relationship validation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_create_stream_rejects_end_before_start() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient, &true);
+    let now = ctx.now();
+
+    let result = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &1_000,
+        &1,
+        &(now + 200),
+        &(now + 200),
+        &(now + 100),
+        &0,
+    );
+    assert_eq!(result, Err(Ok(FactoryError::InvalidTimeRange)));
+}
+
+#[test]
+fn test_create_stream_rejects_end_equal_start() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient, &true);
+    let now = ctx.now();
+
+    let result =
+        ctx.factory
+            .try_create_stream(&ctx.sender, &recipient, &1_000, &1, &now, &now, &now, &0);
+    assert_eq!(result, Err(Ok(FactoryError::InvalidTimeRange)));
+}
+
+#[test]
+fn test_create_stream_rejects_cliff_before_start() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient, &true);
+    let now = ctx.now();
+
+    let result = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &1_000,
+        &1,
+        &(now + 100),
+        &now,
+        &(now + 300),
+        &0,
+    );
+    assert_eq!(result, Err(Ok(FactoryError::InvalidCliff)));
+}
+
+#[test]
+fn test_create_stream_rejects_cliff_after_end() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient, &true);
+    let now = ctx.now();
+
+    let result = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &1_000,
+        &1,
+        &now,
+        &(now + 300),
+        &(now + 200),
+        &0,
+    );
+    assert_eq!(result, Err(Ok(FactoryError::InvalidCliff)));
+}
+
+// ---------------------------------------------------------------------------
 // NotInitialized
 // ---------------------------------------------------------------------------
 
@@ -364,6 +441,58 @@ fn test_factory_setters_before_init_return_not_initialized() {
         factory.try_set_min_duration(&100),
         Err(Ok(FactoryError::NotInitialized))
     );
+}
+
+#[test]
+fn test_get_factory_config_before_init_returns_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let factory_id = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &factory_id);
+
+    let result = factory.try_get_factory_config();
+    assert_eq!(result, Err(Ok(FactoryError::NotInitialized)));
+}
+
+// ---------------------------------------------------------------------------
+// Read-only policy views
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_factory_config_returns_current_policy() {
+    let ctx = Ctx::setup();
+
+    let config = ctx.factory.get_factory_config();
+    assert_eq!(config.admin, ctx.admin);
+    assert_eq!(config.max_deposit, 10_000);
+    assert_eq!(config.min_duration, 100);
+
+    let new_admin = Address::generate(&ctx.env);
+    let new_stream_contract = Address::generate(&ctx.env);
+    ctx.factory.set_admin(&new_admin);
+    ctx.factory.set_stream_contract(&new_stream_contract);
+    ctx.factory.set_cap(&5_000);
+    ctx.factory.set_min_duration(&500);
+
+    let updated = ctx.factory.get_factory_config();
+    assert_eq!(updated.admin, new_admin);
+    assert_eq!(updated.stream_contract, new_stream_contract);
+    assert_eq!(updated.max_deposit, 5_000);
+    assert_eq!(updated.min_duration, 500);
+}
+
+#[test]
+fn test_is_allowlisted_reflects_allowlist_state() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+
+    assert!(!ctx.factory.is_allowlisted(&recipient));
+
+    ctx.factory.set_allowlist(&recipient, &true);
+    assert!(ctx.factory.is_allowlisted(&recipient));
+
+    ctx.factory.set_allowlist(&recipient, &false);
+    assert!(!ctx.factory.is_allowlisted(&recipient));
 }
 
 // ---------------------------------------------------------------------------

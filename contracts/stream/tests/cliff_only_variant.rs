@@ -1,11 +1,9 @@
 extern crate std;
 
-use fluxora_stream::{
-    ContractError, FluxoraStream, FluxoraStreamClient, StreamStatus, StreamKind,
-};
+use fluxora_stream::{ContractError, FluxoraStream, FluxoraStreamClient, StreamKind, StreamStatus};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    token::{Client as TokenClient},
+    token::Client as TokenClient,
     Address, Env,
 };
 
@@ -27,9 +25,11 @@ impl<'a> TestContext<'a> {
         let client = FluxoraStreamClient::new(&env, &contract_id);
 
         let token_admin = Address::generate(&env);
-        let token_id = env.register_stellar_asset_contract_v2(token_admin).address();
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
         let token = TokenClient::new(&env, &token_id);
-        
+
         let admin = Address::generate(&env);
         let sender = Address::generate(&env);
         let recipient = Address::generate(&env);
@@ -60,8 +60,8 @@ impl<'a> TestContext<'a> {
             &start,
             &cliff,
             &end,
-            &0,      // dust threshold
-            &None,   // memo
+            &0,    // dust threshold
+            &None, // memo
             &StreamKind::CliffOnly,
         )
     }
@@ -132,7 +132,9 @@ fn test_cliff_only_rejects_mutations() {
     assert_eq!(res, Err(Ok(ContractError::UnsupportedStreamKind)));
 
     // Attempt: top_up_stream
-    let res = ctx.client.try_top_up_stream(&stream_id, &ctx.sender, &500_i128);
+    let res = ctx
+        .client
+        .try_top_up_stream(&stream_id, &ctx.sender, &500_i128);
     assert_eq!(res, Err(Ok(ContractError::UnsupportedStreamKind)));
 }
 
@@ -174,7 +176,10 @@ fn test_cliff_only_cancel_before_cliff() {
     let sender_balance_before = ctx.token.balance(&ctx.sender);
     let stream_id = ctx.create_cliff_only_stream(deposit, 100, 500, 1000);
 
-    assert_eq!(ctx.token.balance(&ctx.sender), sender_balance_before - deposit);
+    assert_eq!(
+        ctx.token.balance(&ctx.sender),
+        sender_balance_before - deposit
+    );
 
     // Cancel before cliff (t = 400)
     ctx.env.ledger().set_timestamp(400);
@@ -204,8 +209,11 @@ fn test_cliff_only_cancel_after_cliff() {
     ctx.client.cancel_stream(&stream_id);
 
     // Sender gets 0 refund, recipient is entitled to 100%
-    assert_eq!(ctx.token.balance(&ctx.sender), sender_balance_before - deposit);
-    
+    assert_eq!(
+        ctx.token.balance(&ctx.sender),
+        sender_balance_before - deposit
+    );
+
     // Recipient pulls their funds
     let withdrawn = ctx.client.withdraw(&stream_id);
     assert_eq!(withdrawn, deposit);
