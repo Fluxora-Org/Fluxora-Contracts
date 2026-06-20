@@ -114,6 +114,12 @@ Marks the proposal as executed and emits `ProposalExecuted`.
 - The `ProposalExecuted` event contains `target` and `calldata` so that off-chain
   bots or authorised executors can apply the change to the factory.
 
+### `proposal_count() -> u32`
+
+Returns the number of proposals created so far. Proposal IDs are assigned densely
+from `0`, so off-chain indexers can enumerate proposals by scanning
+`0..proposal_count()` and calling `get_proposal(proposal_id)` for each ID.
+
 ### `cancel_proposal(caller, proposal_id)`
 
 Cancels a proposal, marking it as terminal. Emits `ProposalCancelled`.

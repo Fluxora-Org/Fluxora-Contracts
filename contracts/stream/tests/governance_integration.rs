@@ -98,15 +98,19 @@ fn test_propose_returns_incremental_ids() {
     let ctx = GovCtx::setup();
     let target = ctx.dummy_target();
 
-    let id0 = ctx
-        .client
-        .propose(&ctx.signer_a, &target, &ctx.calldata("call0"));
-    let id1 = ctx
-        .client
-        .propose(&ctx.signer_b, &target, &ctx.calldata("call1"));
+    assert_eq!(ctx.client.proposal_count(), 0);
 
+    let id0 = ctx.client.propose(&ctx.signer_a, &target, &ctx.calldata("call0"));
     assert_eq!(id0, 0);
+    assert_eq!(ctx.client.proposal_count(), 1);
+
+    let id1 = ctx.client.propose(&ctx.signer_b, &target, &ctx.calldata("call1"));
     assert_eq!(id1, 1);
+    assert_eq!(ctx.client.proposal_count(), 2);
+
+    let id2 = ctx.client.propose(&ctx.signer_c, &target, &ctx.calldata("call2"));
+    assert_eq!(id2, 2);
+    assert_eq!(ctx.client.proposal_count(), 3);
 }
 
 #[test]

@@ -647,6 +647,15 @@ impl FluxoraGovernance {
         load_proposal(&env, proposal_id)
     }
 
+    /// Return the number of proposals created so far.
+    ///
+    /// Proposal IDs are assigned densely starting at 0, so this is also the
+    /// exclusive upper bound for enumerating proposals by ID.
+    pub fn proposal_count(env: Env) -> u32 {
+        bump_instance(&env);
+        read_next_proposal_id(&env)
+    }
+
     /// Return the list of registered co-signers.
     pub fn get_signers(env: Env) -> Result<Vec<Address>, GovernanceError> {
         get_signers(&env)
