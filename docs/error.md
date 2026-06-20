@@ -29,6 +29,21 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `InvalidSignature` | 15 | Delegated withdrawal signature is invalid, expired, or nonce mismatch | `delegated_withdraw` |
 | `BelowMinimumAmount` | 16 | Withdrawable amount is below the `expected_minimum_amount` committed in the signature | `delegated_withdraw` |
 | `ClockRegression` | 17 | Ledger-backed accrual observed a timestamp lower than the previous accrual timestamp | `calculate_accrued`, `get_withdrawable`, `withdraw`, `withdraw_to`, `batch_withdraw`, `batch_withdraw_to`, rate changes, `cancel_stream`, auto-claim paths |
+| `ReservationCountZero` | 17 | ID reservation count is zero | `reserve_stream_ids` |
+| `ReservationLimitExceeded` | 18 | ID reservation count exceeds `MAX_ID_RESERVATION` | `reserve_stream_ids` |
+| `SignatureDeadlineExpired` | 19 | Delegated withdrawal signature deadline has passed | `delegated_withdraw` |
+| `TemplateNotFound` | 20 | Requested stream template does not exist | `get_stream_template`, `create_stream_from_template`, `delete_stream_template` |
+| `TemplateLimitExceeded` | 21 | Per-owner or global template limit would be exceeded | `register_stream_template` |
+| `TemplateUnauthorized` | 22 | Caller is not authorized to delete a template | `delete_stream_template` |
+| `TokenVerificationFailed` | 23 | Token contract does not expose the expected SEP-41 interface during init | `init` |
+| `PauseReasonTooLong` | 23 | Pause reason string exceeds `MAX_PAUSE_REASON_BYTES` | `pause_protocol` |
+
+Non-error enum values used by stream creation and accrual:
+
+| Enum | Value | Meaning |
+|------|-------|---------|
+| `Linear` | 0 | A `StreamKind` that accrues continuously over time after the start time. |
+| `CliffOnly` | 1 | A `StreamKind` that unlocks the full deposit at the cliff time in one step. |
 
 ---
 
@@ -602,6 +617,70 @@ match client.try_delegated_withdraw(&relayer, &stream_id, &signature, &nonce, &e
 **Client Action**: Treat as an infrastructure or test-environment failure. Do not retry at the lower timestamp; restore monotonic ledger time and rerun the transaction.
 
 **Success Semantics**: No stream state is changed when the guard returns this error before withdrawable math.
+
+---
+
+### ReservationCountZero (17)
+
+**Definition**: `reserve_stream_ids` was called with `count = 0`.
+
+**Client Action**: Request at least one ID before reserving, or skip the reservation call when there are no streams to pre-allocate.
+
+---
+
+### ReservationLimitExceeded (18)
+
+**Definition**: `reserve_stream_ids` was called with `count > MAX_ID_RESERVATION`.
+
+**Client Action**: Split large batches into reservations of at most `MAX_ID_RESERVATION` IDs.
+
+---
+
+### SignatureDeadlineExpired (19)
+
+**Definition**: A delegated withdrawal signature is structurally valid but its signed deadline has passed.
+
+**Client Action**: Ask the recipient to sign a fresh delegated withdrawal payload with a later deadline.
+
+---
+
+### TemplateNotFound (20)
+
+**Definition**: The requested stream template is not present in storage.
+
+**Client Action**: Refresh the template list before retrying, or register the template before creating streams from it.
+
+---
+
+### TemplateLimitExceeded (21)
+
+**Definition**: Registering a template would exceed either the per-owner or global template limit.
+
+**Client Action**: Delete unused templates or reuse an existing template instead of registering another one.
+
+---
+
+### TemplateUnauthorized (22)
+
+**Definition**: A caller attempted to delete or manage a template they do not own.
+
+**Client Action**: Switch to the template owner account or leave the template unchanged.
+
+---
+
+### TokenVerificationFailed (23)
+
+**Definition**: During initialization, the configured token contract did not expose the expected SEP-41 interface.
+
+**Client Action**: Verify the token address and deploy/init against a compatible token contract before retrying.
+
+---
+
+### PauseReasonTooLong (23)
+
+**Definition**: `pause_protocol` received a reason string longer than `MAX_PAUSE_REASON_BYTES`.
+
+**Client Action**: Shorten the operator-facing pause reason and retry the pause transaction.
 
 ---
 

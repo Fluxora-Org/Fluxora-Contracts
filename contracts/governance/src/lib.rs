@@ -294,8 +294,12 @@ impl FluxoraGovernance {
 
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Signers, &signers);
-        env.storage().instance().set(&DataKey::Threshold, &threshold);
-        env.storage().instance().set(&DataKey::NextProposalId, &0u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::Threshold, &threshold);
+        env.storage()
+            .instance()
+            .set(&DataKey::NextProposalId, &0u32);
 
         bump_instance(&env);
         Ok(())
@@ -806,11 +810,7 @@ mod tests {
         let admin = Address::generate(&env);
         let signer = Address::generate(&env);
         let client = FluxoraGovernanceClient::new(&env, &contract_id);
-        let result = client.try_init(
-            &admin,
-            &vec![&env, signer],
-            &0u32,
-        );
+        let result = client.try_init(&admin, &vec![&env, signer], &0u32);
         assert_eq!(result, Err(Ok(GovernanceError::InvalidThreshold)));
     }
 
@@ -825,11 +825,7 @@ mod tests {
         let signer_b = Address::generate(&env);
         let client = FluxoraGovernanceClient::new(&env, &contract_id);
         // 2 signers but threshold = 3
-        let result = client.try_init(
-            &admin,
-            &vec![&env, signer_a, signer_b],
-            &3u32,
-        );
+        let result = client.try_init(&admin, &vec![&env, signer_a, signer_b], &3u32);
         assert_eq!(result, Err(Ok(GovernanceError::InvalidThreshold)));
     }
 
@@ -843,11 +839,7 @@ mod tests {
         let signer_a = Address::generate(&env);
         let signer_b = Address::generate(&env);
         let client = FluxoraGovernanceClient::new(&env, &contract_id);
-        let result = client.try_init(
-            &admin,
-            &vec![&env, signer_a, signer_b],
-            &2u32,
-        );
+        let result = client.try_init(&admin, &vec![&env, signer_a, signer_b], &2u32);
         assert!(result.is_ok());
         assert_eq!(client.quorum(), 2);
     }
@@ -861,11 +853,7 @@ mod tests {
         let admin = Address::generate(&env);
         let signer = Address::generate(&env);
         let client = FluxoraGovernanceClient::new(&env, &contract_id);
-        let result = client.try_init(
-            &admin,
-            &vec![&env, signer],
-            &1u32,
-        );
+        let result = client.try_init(&admin, &vec![&env, signer], &1u32);
         assert!(result.is_ok());
         assert_eq!(client.quorum(), 1);
     }
@@ -877,7 +865,7 @@ mod tests {
     #[test]
     fn test_remove_signer_down_to_threshold_succeeds() {
         let ctx = Ctx::setup(); // 3 signers, threshold=2
-        // After removing signer_c, we have 2 signers == threshold — should succeed.
+                                // After removing signer_c, we have 2 signers == threshold — should succeed.
         ctx.client.remove_signer(&ctx.signer_c);
         let signers = ctx.client.get_signers();
         assert_eq!(signers.len(), 2);
@@ -889,7 +877,7 @@ mod tests {
     fn test_remove_signer_below_threshold_errors() {
         let ctx = Ctx::setup(); // 3 signers, threshold=2
         ctx.client.remove_signer(&ctx.signer_c); // 2 signers left
-        // Trying to remove another signer would leave 1 < threshold=2
+                                                 // Trying to remove another signer would leave 1 < threshold=2
         let result = ctx.client.try_remove_signer(&ctx.signer_b);
         assert_eq!(result, Err(Ok(GovernanceError::QuorumWouldBreak)));
         // Verify signer set is unchanged.
@@ -915,8 +903,12 @@ mod tests {
     #[test]
     fn test_propose_returns_incremental_ids() {
         let ctx = Ctx::setup();
-        let id0 = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("a"));
-        let id1 = ctx.client.propose(&ctx.signer_b, &ctx.dummy_target(), &ctx.calldata("b"));
+        let id0 = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("a"));
+        let id1 = ctx
+            .client
+            .propose(&ctx.signer_b, &ctx.dummy_target(), &ctx.calldata("b"));
         assert_eq!(id0, 0);
         assert_eq!(id1, 1);
     }
@@ -942,7 +934,9 @@ mod tests {
     #[test]
     fn test_cancel_by_proposer_succeeds() {
         let ctx = Ctx::setup();
-        let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
         ctx.client.cancel_proposal(&ctx.signer_a, &id);
         let p = ctx.client.get_proposal(&id);
         assert!(p.cancelled);
@@ -951,7 +945,9 @@ mod tests {
     #[test]
     fn test_cancel_by_admin_succeeds() {
         let ctx = Ctx::setup();
-        let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
         ctx.client.cancel_proposal(&ctx.admin, &id);
         let p = ctx.client.get_proposal(&id);
         assert!(p.cancelled);
@@ -960,7 +956,9 @@ mod tests {
     #[test]
     fn test_cancel_unauthorized_errors() {
         let ctx = Ctx::setup();
-        let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
         let result = ctx.client.try_cancel_proposal(&ctx.signer_b, &id);
         assert_eq!(result, Err(Ok(GovernanceError::NotProposerOrAdmin)));
     }
@@ -968,7 +966,9 @@ mod tests {
     #[test]
     fn test_cancel_twice_errors() {
         let ctx = Ctx::setup();
-        let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
         ctx.client.cancel_proposal(&ctx.signer_a, &id);
         let result = ctx.client.try_cancel_proposal(&ctx.signer_a, &id);
         assert_eq!(result, Err(Ok(GovernanceError::ProposalCancelled)));
@@ -977,7 +977,9 @@ mod tests {
     #[test]
     fn test_cancel_executed_proposal_errors() {
         let ctx = Ctx::setup();
-        let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
         ctx.client.approve(&ctx.signer_a, &id);
         ctx.client.approve(&ctx.signer_b, &id);
         ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
@@ -990,7 +992,9 @@ mod tests {
     #[test]
     fn test_cancel_before_quorum() {
         let ctx = Ctx::setup();
-        let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
         ctx.client.cancel_proposal(&ctx.signer_a, &id);
         let result = ctx.client.try_approve(&ctx.signer_b, &id);
         assert_eq!(result, Err(Ok(GovernanceError::ProposalCancelled)));
@@ -999,7 +1003,9 @@ mod tests {
     #[test]
     fn test_cancel_after_quorum_before_timelock() {
         let ctx = Ctx::setup();
-        let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
         ctx.client.approve(&ctx.signer_a, &id);
         ctx.client.approve(&ctx.signer_b, &id);
         ctx.client.cancel_proposal(&ctx.signer_a, &id);
@@ -1011,7 +1017,9 @@ mod tests {
     #[test]
     fn test_approve_after_cancel_errors() {
         let ctx = Ctx::setup();
-        let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
         ctx.client.cancel_proposal(&ctx.signer_a, &id);
         let result = ctx.client.try_approve(&ctx.signer_b, &id);
         assert_eq!(result, Err(Ok(GovernanceError::ProposalCancelled)));
@@ -1020,7 +1028,9 @@ mod tests {
     #[test]
     fn test_execute_after_cancel_errors() {
         let ctx = Ctx::setup();
-        let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
         ctx.client.approve(&ctx.signer_a, &id);
         ctx.client.approve(&ctx.signer_b, &id);
         ctx.client.cancel_proposal(&ctx.signer_a, &id);
@@ -1037,7 +1047,9 @@ mod tests {
     #[test]
     fn test_approve_after_expiry_errors() {
         let ctx = Ctx::setup();
-        let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
         ctx.env.ledger().set_timestamp(1_000_000 + MAX_AGE + 1);
         let result = ctx.client.try_approve(&ctx.signer_b, &id);
         assert_eq!(result, Err(Ok(GovernanceError::ProposalExpired)));
@@ -1046,7 +1058,9 @@ mod tests {
     #[test]
     fn test_execute_after_expiry_errors() {
         let ctx = Ctx::setup();
-        let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
         ctx.client.approve(&ctx.signer_a, &id);
         ctx.client.approve(&ctx.signer_b, &id);
         ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
@@ -1059,7 +1073,9 @@ mod tests {
     #[test]
     fn test_execute_at_expiry_boundary_succeeds() {
         let ctx = Ctx::setup();
-        let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
         ctx.client.approve(&ctx.signer_a, &id);
         ctx.client.approve(&ctx.signer_b, &id);
         // Set timestamp to exactly the expiry boundary (created_at + MAX_AGE).
@@ -1074,10 +1090,14 @@ mod tests {
     #[test]
     fn test_expired_not_executable_even_with_quorum_and_timelock_met() {
         let ctx = Ctx::setup();
-        let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
         ctx.client.approve(&ctx.signer_a, &id);
         ctx.client.approve(&ctx.signer_b, &id);
-        ctx.env.ledger().set_timestamp(1_000_000 + MAX_AGE + TIMELOCK + 100);
+        ctx.env
+            .ledger()
+            .set_timestamp(1_000_000 + MAX_AGE + TIMELOCK + 100);
         let executor = Address::generate(&ctx.env);
         let result = ctx.client.try_execute(&executor, &id);
         assert_eq!(result, Err(Ok(GovernanceError::ProposalExpired)));
@@ -1117,7 +1137,9 @@ mod tests {
     #[test]
     fn test_execute_without_quorum_errors() {
         let ctx = Ctx::setup();
-        let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
         ctx.client.approve(&ctx.signer_a, &id);
         ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
         let executor = Address::generate(&ctx.env);
@@ -1128,7 +1150,9 @@ mod tests {
     #[test]
     fn test_execute_twice_errors() {
         let ctx = Ctx::setup();
-        let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
         ctx.client.approve(&ctx.signer_a, &id);
         ctx.client.approve(&ctx.signer_b, &id);
         ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
