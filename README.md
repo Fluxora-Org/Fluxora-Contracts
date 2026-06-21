@@ -22,22 +22,79 @@ Soroban smart contracts for the Fluxora treasury streaming protocol on Stellar. 
 
 ### Core Stream Entry Points
 
+The following table lists every public stream contract entry point implemented in `contracts/stream/src/lib.rs` inside the `FluxoraStream` `#[contractimpl]` block.
+
 | Entry Point | Caller / Auth Rules | Description |
 | :--- | :--- | :--- |
-| `delegated_withdraw` | `relayer.require_auth()` | Executes an off-chain signed withdrawal payload using an authorized relayer to pay for network gas. |
-| `clone_stream` | `source.sender.require_auth()` | Duplicates an active source stream's configuration vectors to launch an identical parallel stream allocation. |
-| `reserve_stream_ids` | `caller.require_auth()` | Pre-allocates and locks down sequential identifier spaces for multi-step automated initialization streams. |
-| `bulk_cancel_streams` | `sender.require_auth()` | Cancels a collection of stream keys in a single batch, reclaiming remaining un-allocated collateral. |
-| `keeper_cancel` | `keeper.require_auth()` | Allows designated keeper bots to force-terminate insolvent or expired stream states based on parameter gates. |
-| `trigger_auto_claim` | Public / None | Standard unauthenticated entry point to trigger an automated payout slice to a recipient via incentivized relays. |
-| `register_stream_template`| `owner.require_auth()` | Adds a new pre-validated WASM bytecode hash template matrix into global storage. |
-| `sweep_excess` | `admin.require_auth()` & `recipient.require_auth()` | Cleans up stray/native fee balances out of contract spaces directly into a specified target. |
-| `get_stream_health` | Public / None (View) | Read-only analysis interface detailing stream insolvency metrics and structural drift thresholds. |
-| `get_recipient_streams_paginated` | Public / None (View) | Read-only paginated array fetch targeting memory safety across deep address historical records. |
+| `init` | `admin.require_auth()` | Initialize contract config with token and admin |
+| `create_stream` | `sender.require_auth()` | Create one new stream with explicit absolute timing |
+| `create_stream_relative` | `sender.require_auth()` (via `create_stream`) | Create a stream with relative delays instead of absolute timestamps |
+| `create_streams` | `sender.require_auth()` | Create a batch of streams in one atomic call |
+| `create_streams_relative` | `sender.require_auth()` (via `create_streams`) | Create a batch of streams using relative timing |
+| `create_streams_partial` | `sender.require_auth()` | Create a batch of streams with per-entry failure isolation |
+| `pause_stream` | `stream.sender.require_auth()` | Pause a sender-owned stream |
+| `resume_stream` | `stream.sender.require_auth()` | Resume a sender-owned paused stream |
+| `cancel_stream` | `stream.sender.require_auth()` | Cancel a sender-owned stream and refund unstreamed deposit |
+| `withdraw` | `stream.recipient.require_auth()` | Withdraw accrued tokens as the stream recipient |
+| `withdraw_to` | `stream.recipient.require_auth()` | Withdraw accrued tokens to a specified destination as recipient |
+| `update_recipient` | `stream.recipient.require_auth()` | Rotate stream recipient to a new address |
+| `get_pending_recipient_update` | Public / None | Read the pending recipient update request |
+| `accept_recipient_update` | `stream.recipient.require_auth()` | Accept a pending recipient update as current recipient |
+| `cancel_recipient_update` | `stream.sender.require_auth()` | Cancel a pending recipient update as stream sender |
+| `batch_withdraw` | `recipient.require_auth()` | Withdraw accrued tokens from many streams as recipient |
+| `batch_withdraw_to` | `recipient.require_auth()` | Withdraw accrued tokens from many streams to destinations |
+| `delegated_withdraw` | `relayer.require_auth()` | Relayer-executed withdrawal using recipient signature |
+| `get_delegated_nonce` | Public / None | Read the delegated withdrawal nonce for a recipient |
+| `calculate_accrued` | Public / None | Compute accrued amount for a stream |
+| `get_withdrawable` | Public / None | Compute current withdrawable balance for a stream |
+| `get_claimable_at` | Public / None | Query claimable amount at a target timestamp |
+| `get_config` | Public / None | Read stored contract config |
+| `get_global_emergency_paused` | Public / None | Read emergency pause state |
+| `set_admin` | `old_admin.require_auth()` | Change contract admin (old admin auth required) |
+| `set_max_rate_per_second` | `admin.require_auth()` | Set the global max rate-per-second cap |
+| `get_stream_state` | Public / None | Read full stream details |
+| `get_stream_health` | Public / None | Read health metrics for a stream |
+| `get_stream_memo` | Public / None | Read the stream memo field |
+| `get_stream_metadata` | Public / None | Read stream metadata map |
+| `get_stream_count` | Public / None | Read total number of streams created |
+| `update_rate_per_second` | `stream.sender.require_auth()` | Increase a sender-owned stream rate |
+| `decrease_rate_per_second` | `stream.sender.require_auth()` | Decrease a sender-owned stream rate safely |
+| `shorten_stream_end_time` | `stream.sender.require_auth()` | Shorten stream duration and refund unstreamed deposit |
+| `extend_stream_end_time` | `stream.sender.require_auth()` | Extend stream duration without changing deposit |
+| `top_up_stream` | `funder.require_auth()` | Add deposit to a stream by an authorized funder |
+| `close_completed_stream` | Public / None | Permissionless cleanup of a completed or cancelled stream |
+| `register_stream_template` | `owner.require_auth()` | Create a reusable schedule template |
+| `delete_stream_template` | `owner.require_auth()` | Remove a schedule template owned by the caller |
+| `create_stream_from_template` | `sender.require_auth()` (via `create_stream_relative` / `create_stream`) | Create a stream from a registered template |
+| `get_stream_template` | Public / None | Read a saved schedule template |
+| `version` | Public / None | Read current contract version |
+| `get_recipient_streams` | Public / None | List stream IDs for a recipient |
+| `get_recipient_streams_paginated` | Public / None | Paginate recipient stream IDs |
+| `get_recipient_stream_count` | Public / None | Count streams for a recipient |
+| `get_streams_by_id_range` | Public / None | Read streams in an ID range for export |
+| `update_rate` | `caller.require_auth()` (sender or admin) | Update stream rate as sender or admin |
+| `cancel_stream_as_admin` | `admin.require_auth()` | Cancel any stream as contract admin |
+| `keeper_cancel` | `keeper.require_auth()` | Keeper-cancel an eligible stream after grace period |
+| `pause_stream_as_admin` | `admin.require_auth()` | Pause any stream as contract admin |
+| `resume_stream_as_admin` | `admin.require_auth()` | Resume any paused stream as contract admin |
+| `set_global_emergency_paused` | `admin.require_auth()` | Admin toggle emergency pause |
+| `global_resume` | `admin.require_auth()` | Admin clear emergency pause |
+| `set_contract_paused` | `admin.require_auth()` | Admin pause or unpause stream creation |
+| `pause_protocol` | `admin.require_auth()` | Admin globally pause protocol creation |
+| `resume_protocol` | `admin.require_auth()` | Admin globally resume protocol creation |
+| `is_paused` | Public / None | Read protocol pause status |
+| `get_pause_info` | Public / None | Read current pause metadata |
+| `sweep_excess` | `admin.require_auth()` + `recipient.require_auth()` | Admin sweep excess tokens to a recipient |
+| `set_auto_claim` | `stream.recipient.require_auth()` | Recipient set auto-claim destination |
+| `revoke_auto_claim` | `stream.recipient.require_auth()` | Recipient revoke auto-claim destination |
+| `trigger_auto_claim` | Public / None | Permissionless execute auto-claim withdrawal |
+| `get_auto_claim_status` | Public / None | Read auto-claim status for a stream |
+| `get_auto_claim_destination` | Public / None | Read auto-claim destination if set |
+| `clone_stream` | `source.sender.require_auth()` | Clone a source stream into a new stream |
+| `reserve_stream_ids` | `caller.require_auth()` | Reserve contiguous stream IDs for later use |
+| `get_id_reservation` | Public / None | View active stream ID reservation for caller |
 
-> For extended configuration properties, edge-case conditions, and execution schemas, check out the complete [Streaming Documentation](docs/streaming.md).
-
-`cancel_stream` and `cancel_stream_as_admin` are valid only when status is `Active` or `Paused`. Streams in `Completed` or `Cancelled` state return `ContractError::InvalidState`. After cancellation, accrual is frozen at `cancelled_at`; the recipient may still withdraw the frozen accrued amount.
+> `cancel_stream` and `cancel_stream_as_admin` are valid only when status is `Active` or `Paused`. Streams in `Completed` or `Cancelled` state return `ContractError::InvalidState`. After cancellation, accrual is frozen at `cancelled_at`; the recipient may still withdraw the frozen accrued amount.
 
 ## Tech stack
 
