@@ -192,6 +192,7 @@ pub struct IdReservation {
     pub start_id: u64,
     pub count: u32,
     pub consumed: u32,
+    pub expiry: Option<u64>
 }
 
 /// Reason for a protocol or stream pause.
@@ -371,6 +372,9 @@ pub enum ContractError {
     TemplateUnauthorized = 22,
     /// Pause reason string exceeds `MAX_PAUSE_REASON_BYTES`.
     PauseReasonTooLong = 23,
+    ReservationNotFound = 24,
+    ReservationNotExpirable = 25,
+    ReservationStillActive = 26
 }
 
 #[contracttype]
@@ -6475,6 +6479,7 @@ impl FluxoraStream {
         env: Env,
         caller: Address,
         count: u32,
+        expiry: Option<u64>
     ) -> Result<soroban_sdk::Vec<u64>, ContractError> {
         caller.require_auth();
 
@@ -6492,6 +6497,7 @@ impl FluxoraStream {
             start_id,
             count,
             consumed: 0,
+            expiry
         };
         save_id_reservation(&env, &caller, &res);
 
@@ -6500,6 +6506,65 @@ impl FluxoraStream {
             ids.push_back(start_id + i as u64);
         }
         Ok(ids)
+    }
+
+    /// Release a reserved  stream IDs for off-chain pre-computation.
+    ///
+    ///
+    /// # Parameters
+    /// - `caller`: Address making the reservation (must authorize)
+    ///
+    /// # Security
+    /// - Authorization required .
+    pub fn release_id_reservation(
+        env: Env,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+
+        remove_id_reservation(&env, &caller);
+        Ok(())
+    }
+
+    fn release_reservation(env: &Env, holder: &Address, res: &IdReservation) {
+        let unconsumed_start = res.start_id + res.consumed as u64;
+        let reservation_end = res.start_id + res.count as u64;
+        let current_count = read_stream_count(env);
+
+        let mut reclaimed = 0u32;
+
+        if reservation_end == current_count && unconsumed_start < reservation_end {
+            set_stream_count(env, unconsumed_start);
+            reclaimed = (reservation_end - unconsumed_start) as u32;
+        }
+
+        remove_id_reservation(env, holder);
+
+        env.events().publish(
+            (symbol_short!("res_rel"), holder.clone()),
+            (res.start_id, res.count, res.consumed, reclaimed),
+        );
+    }
+    /// Release/ Reclaim expired reservation stream IDs for off-chain pre-computation.
+    ///
+    ///
+    /// # Parameters
+    /// - `holder`: Address that made the reservation
+    ///
+    /// # Errors
+    /// - `ReservationNotExpirable` (25): `expiry` is None.
+    /// - `ReservationStillActive` (26): `current time > expiry`
+    pub fn reclaim_expired_id_reservation(env: Env, holder: Address) -> Result<(), ContractError> {
+        let res = load_id_reservation(&env, &holder)
+            .ok_or(ContractError::ReservationNotFound)?;
+
+        let expiry = res.expiry.ok_or(ContractError::ReservationNotExpirable)?;
+        if env.ledger().timestamp() < expiry {
+            return Err(ContractError::ReservationStillActive);
+        }
+
+        Self::release_reservation(&env, &holder, &res);
+        Ok(())
     }
 
     /// View the active ID reservation for a caller, if any.
