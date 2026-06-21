@@ -92,6 +92,20 @@ Cancelled, expired, and executed proposals cannot receive approvals or be execut
 Additional approvals above quorum do not rewrite `QuorumInfo` and do not restart the
 timelock.
 
+### TTL and timelock durability
+
+`Proposal(id)` and its `QuorumReachedAt(id)` timestamp are both persistent entries. The
+governance contract refreshes the proposal TTL on every proposal read/write and refreshes
+the quorum timestamp TTL whenever a quorum-reached proposal is touched, including
+`get_proposal`, `approve`, `cancel_proposal`, and `execute` paths that load the proposal.
+
+The configured persistent bump is `120,960` ledgers. At the 5-second ledger cadence used by
+the TTL policy, that is 604,800 seconds (7 days), which comfortably exceeds the
+`GOVERNANCE_TIMELOCK_SECONDS` value of 172,800 seconds (48 hours). Refreshing
+`QuorumReachedAt(id)` preserves the original quorum timestamp and threshold snapshot while
+keeping the timelock evidence live long enough for low-traffic governance proposals to be
+executed after the delay.
+
 ## Entrypoints
 
 ### `init(admin, signers, threshold)`

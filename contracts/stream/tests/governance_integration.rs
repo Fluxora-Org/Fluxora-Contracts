@@ -1,14 +1,19 @@
 extern crate std;
 
-use fluxora_governance::{FluxoraGovernance, FluxoraGovernanceClient, GovernanceError};
+use fluxora_governance::{
+    DataKey, FluxoraGovernance, FluxoraGovernanceClient, GovernanceError,
+    GOVERNANCE_TTL_LEDGER_SECONDS,
+};
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
+    testutils::{storage::Persistent as _, Address as _, Ledger, LedgerInfo},
     vec, Address, Bytes, Env,
 };
 
 // Mirror constants from governance lib.rs
 const TIMELOCK: u64 = 172_800; // 48 hours
 const MAX_AGE: u64 = 2_592_000; // 30 days
+const PERSISTENT_LIFETIME_THRESHOLD: u32 = 17_280;
+const PERSISTENT_BUMP_AMOUNT: u32 = 120_960;
 
 struct GovCtx<'a> {
     env: Env,
@@ -57,6 +62,30 @@ impl<'a> GovCtx<'a> {
 
     fn calldata(&self, tag: &str) -> Bytes {
         Bytes::from_slice(&self.env, tag.as_bytes())
+    }
+
+    fn advance_ledger(&self, ledgers: u32) {
+        let current = self.env.ledger().sequence();
+        self.env.ledger().set(LedgerInfo {
+            timestamp: self.env.ledger().timestamp()
+                + u64::from(ledgers) * GOVERNANCE_TTL_LEDGER_SECONDS,
+            protocol_version: 20,
+            sequence_number: current + ledgers,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 16,
+            max_entry_ttl: 6_312_000,
+        });
+    }
+
+    fn quorum_ttl(&self, proposal_id: u32) -> u32 {
+        self.env.as_contract(&self.contract_id, || {
+            self.env
+                .storage()
+                .persistent()
+                .get_ttl(&DataKey::QuorumReachedAt(proposal_id))
+        })
     }
 }
 
@@ -243,6 +272,32 @@ fn test_execute_after_quorum_and_timelock_succeeds() {
 
     // Advance past timelock
     ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
+
+    let executor = Address::generate(&ctx.env);
+    ctx.client.execute(&executor, &id);
+
+    let p = ctx.client.get_proposal(&id);
+    assert!(p.executed);
+}
+
+#[test]
+fn test_quorum_record_ttl_refreshes_when_proposal_is_touched() {
+    let ctx = GovCtx::setup();
+    let id = ctx
+        .client
+        .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+
+    ctx.client.approve(&ctx.signer_a, &id);
+    ctx.client.approve(&ctx.signer_b, &id);
+
+    assert_eq!(ctx.quorum_ttl(id), PERSISTENT_BUMP_AMOUNT);
+
+    ctx.advance_ledger(PERSISTENT_BUMP_AMOUNT - PERSISTENT_LIFETIME_THRESHOLD + 1);
+    assert!(ctx.quorum_ttl(id) < PERSISTENT_LIFETIME_THRESHOLD);
+
+    let p = ctx.client.get_proposal(&id);
+    assert_eq!(p.approvals.len(), 2);
+    assert_eq!(ctx.quorum_ttl(id), PERSISTENT_BUMP_AMOUNT);
 
     let executor = Address::generate(&ctx.env);
     ctx.client.execute(&executor, &id);

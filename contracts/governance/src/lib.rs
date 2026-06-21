@@ -120,6 +120,11 @@ const INSTANCE_BUMP_AMOUNT: u32 = 120_960;
 const PERSISTENT_LIFETIME_THRESHOLD: u32 = 17_280;
 const PERSISTENT_BUMP_AMOUNT: u32 = 120_960;
 
+/// Number of seconds represented by one ledger under the network cadence used
+/// by the TTL policy. Governance's persistent bump covers 7 days of ledgers,
+/// which is well above the 48 hour timelock.
+pub const GOVERNANCE_TTL_LEDGER_SECONDS: u64 = 5;
+
 // ---------------------------------------------------------------------------
 // Events
 // ---------------------------------------------------------------------------
@@ -197,6 +202,32 @@ fn bump_proposal(env: &Env, id: u32) {
     );
 }
 
+/// Refreshes the quorum timestamp entry when it exists so the timelock record
+/// keeps the same TTL guarantee as the proposal it unlocks.
+fn bump_quorum_reached_at(env: &Env, id: u32) {
+    let key = DataKey::QuorumReachedAt(id);
+    if env.storage().persistent().has(&key) {
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+}
+
+/// Loads the stored quorum snapshot and refreshes its TTL before execution
+/// evaluates the immutable threshold/timelock pair.
+fn load_quorum_info(env: &Env, id: u32) -> Result<QuorumInfo, GovernanceError> {
+    let key = DataKey::QuorumReachedAt(id);
+    let info: QuorumInfo = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .ok_or(GovernanceError::QuorumNotReached)?;
+    bump_quorum_reached_at(env, id);
+    Ok(info)
+}
+
 fn get_admin(env: &Env) -> Result<Address, GovernanceError> {
     bump_instance(env);
     env.storage()
@@ -241,6 +272,7 @@ fn load_proposal(env: &Env, id: u32) -> Result<Proposal, GovernanceError> {
         .get(&DataKey::Proposal(id))
         .ok_or(GovernanceError::ProposalNotFound)?;
     bump_proposal(env, id);
+    bump_quorum_reached_at(env, id);
     Ok(proposal)
 }
 
@@ -513,11 +545,7 @@ impl FluxoraGovernance {
             env.storage()
                 .persistent()
                 .set(&DataKey::QuorumReachedAt(proposal_id), &info);
-            env.storage().persistent().extend_ttl(
-                &DataKey::QuorumReachedAt(proposal_id),
-                PERSISTENT_LIFETIME_THRESHOLD,
-                PERSISTENT_BUMP_AMOUNT,
-            );
+            bump_quorum_reached_at(&env, proposal_id);
 
             env.events().publish(
                 (symbol_short!("quorum"), proposal_id),
@@ -569,11 +597,7 @@ impl FluxoraGovernance {
         // Verify quorum was reached and use the recorded threshold (snapshot at
         // quorum time) so that in-flight proposals are immune to mid-flight
         // threshold changes.
-        let quorum_info: QuorumInfo = env
-            .storage()
-            .persistent()
-            .get(&DataKey::QuorumReachedAt(proposal_id))
-            .ok_or(GovernanceError::QuorumNotReached)?;
+        let quorum_info = load_quorum_info(&env, proposal_id)?;
 
         if proposal.approvals.len() < quorum_info.threshold {
             return Err(GovernanceError::QuorumNotReached);
