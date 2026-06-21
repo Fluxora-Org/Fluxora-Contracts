@@ -288,6 +288,100 @@ proptest! {
     }
 }
 
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(200))]
+
+    // ── Rate decrease checkpoint monotonicity ───────────────────────────
+    // Guard against checkpoint bugs that could silently strip earned funds
+    // when a sender decreases the rate mid-stream.
+
+    /// Prop: random sequences of rate decreases interleaved with time advances
+    /// guarantee that `get_withdrawable` is monotonically non-decreasing and
+    /// `accrued <= deposit` always holds.
+    #[test]
+    fn prop_rate_decrease_keeps_withdrawable_monotonic(
+        (deposit, rate, duration) in valid_stream_config(),
+        decreases in proptest::collection::vec(
+            (1_u64..=200_u64, 1_u64..=9_u64),
+            1..=5
+        ),
+    ) {
+        let ctx = PropCtx::new(deposit);
+        ctx.env.ledger().set_timestamp(0);
+        let id = ctx.client().create_stream(
+            &ctx.sender, &ctx.recipient, &deposit, &rate,
+            &0u64, &0u64, &duration, &0, &None,
+            &crate::StreamKind::Linear,
+        );
+
+        let mut current_rate = rate;
+        let mut prev_withdrawable = 0_i128;
+        let mut elapsed = 0_u64;
+
+        for (delay, num) in &decreases {
+            let advance = (*delay).min(duration.saturating_sub(elapsed).max(1));
+            elapsed += advance;
+            ctx.env.ledger().set_timestamp(elapsed);
+
+            let new_rate = (current_rate * (*num as i128) / 10).max(1);
+            if new_rate < current_rate && elapsed < duration {
+                let _ = ctx.client().try_decrease_rate_per_second(&id, &new_rate);
+                current_rate = new_rate;
+            }
+
+            assert_invariants(&ctx, id, &std::format!("rate_dec t={elapsed}"));
+
+            let w = ctx.client().get_withdrawable(&id);
+            assert!(
+                w >= prev_withdrawable,
+                "get_withdrawable decreased at t={elapsed}: {w} < prev={prev_withdrawable}"
+            );
+            prev_withdrawable = w;
+        }
+
+        let final_t = duration + 100;
+        ctx.env.ledger().set_timestamp(final_t);
+        let _ = ctx.client().try_withdraw(&id);
+        assert_invariants(&ctx, id, &std::format!("final t={final_t}"));
+    }
+
+    /// Prop: decrease_rate at cliff boundary and near end_time.
+    #[test]
+    fn prop_rate_decrease_at_boundaries(
+        (deposit, rate, duration) in valid_stream_config(),
+        cliff_pct in 5_u64..=95_u64,
+    ) {
+        let ctx = PropCtx::new(deposit);
+        ctx.env.ledger().set_timestamp(0);
+        let cliff = (duration * cliff_pct / 100).max(1);
+        let id = ctx.client().create_stream(
+            &ctx.sender, &ctx.recipient, &deposit, &rate,
+            &cliff, &0u64, &duration, &0, &None,
+            &crate::StreamKind::Linear,
+        );
+
+        ctx.env.ledger().set_timestamp(cliff);
+        let new_rate = (rate / 2).max(1);
+        let _ = ctx.client().try_decrease_rate_per_second(&id, &new_rate);
+        assert_invariants(&ctx, id, &std::format!("cliff_boundary t={cliff}"));
+
+        let near_end = duration.saturating_sub(1);
+        if near_end > cliff {
+            ctx.env.ledger().set_timestamp(near_end);
+            let tiny_rate = (new_rate / 2).max(1);
+            let res = ctx.client().try_decrease_rate_per_second(&id, &tiny_rate);
+            if res.is_ok() {
+                assert_invariants(&ctx, id, &std::format!("near_end t={near_end}"));
+            }
+        }
+
+        let past_end = duration + 50;
+        ctx.env.ledger().set_timestamp(past_end);
+        let _ = ctx.client().try_withdraw(&id);
+        assert_invariants(&ctx, id, &std::format!("past_end t={past_end}"));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Deterministic regression tests — one per status transition path
 // ---------------------------------------------------------------------------
