@@ -12,6 +12,20 @@ The `fluxora_factory` acts as a proxy entrypoint to enforce these policies:
 - **Minimum Duration**: Enforces a `MinDuration` (i.e. `end_time - start_time >= min_duration`), preventing overly short or instantaneous streams.
 - **Time Relationship Checks**: Rejects invalid schedules before calling `FluxoraStream`. `start_time` must be strictly less than `end_time`, and `cliff_time` must be within the inclusive `[start_time, end_time]` window.
 
+## Policy Parameter Ranges
+
+The factory validates policy values before storing them in `init`, `set_cap`,
+and `set_min_duration`:
+
+| Policy | Accepted range | Error |
+|--------|----------------|-------|
+| `max_deposit` | `max_deposit > 0` | `FactoryError::InvalidCap` |
+| `min_duration` | `1 <= min_duration <= 315_360_000` seconds (10 years) | `FactoryError::InvalidMinDuration` |
+
+Rejecting invalid values at write time prevents an admin mistake from silently
+bricking factory-routed stream creation with a zero/negative cap or an absurd
+minimum duration.
+
 ## Time Validation
 
 The factory mirrors the underlying stream contract's creation-time schedule invariants and returns typed factory errors before making the cross-contract call:

@@ -346,6 +346,10 @@ Unauthorized             = 3
 RecipientNotAllowlisted  = 4
 DepositExceedsCap        = 5
 DurationTooShort         = 6
+InvalidTimeRange         = 7
+InvalidCliff             = 8
+InvalidCap               = 9
+InvalidMinDuration       = 10
 ```
 
 ### Factory Entrypoints

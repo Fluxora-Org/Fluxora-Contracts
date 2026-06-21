@@ -3,7 +3,10 @@
 //! Covers all six FactoryError variants and verifies that `create_stream` via
 //! the factory correctly delegates to the stream contract after passing all checks.
 
-use fluxora_factory::{FactoryError, FluxoraFactory, FluxoraFactoryClient};
+use fluxora_factory::{
+    FactoryError, FluxoraFactory, FluxoraFactoryClient, MAX_FACTORY_DURATION_SECONDS,
+    MIN_FACTORY_DURATION_SECONDS,
+};
 use fluxora_stream::{FluxoraStream, FluxoraStreamClient};
 use soroban_sdk::{
     testutils::{Address as _, MockAuth, MockAuthInvoke},
@@ -80,6 +83,72 @@ fn test_factory_already_initialized() {
         .factory
         .try_init(&ctx.admin, &Address::generate(&ctx.env), &1_000, &10);
     assert_eq!(result, Err(Ok(FactoryError::AlreadyInitialized)));
+}
+
+#[test]
+fn test_init_rejects_non_positive_cap() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let factory_id = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &factory_id);
+    let admin = Address::generate(&env);
+    let stream_contract = Address::generate(&env);
+
+    assert_eq!(
+        factory.try_init(&admin, &stream_contract, &0, &MIN_FACTORY_DURATION_SECONDS),
+        Err(Ok(FactoryError::InvalidCap))
+    );
+    assert_eq!(
+        factory.try_init(&admin, &stream_contract, &-1, &MIN_FACTORY_DURATION_SECONDS),
+        Err(Ok(FactoryError::InvalidCap))
+    );
+    assert_eq!(
+        factory.try_get_factory_config(),
+        Err(Ok(FactoryError::NotInitialized))
+    );
+}
+
+#[test]
+fn test_init_rejects_out_of_range_min_duration() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let factory_id = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &factory_id);
+    let admin = Address::generate(&env);
+    let stream_contract = Address::generate(&env);
+
+    assert_eq!(
+        factory.try_init(&admin, &stream_contract, &1, &0),
+        Err(Ok(FactoryError::InvalidMinDuration))
+    );
+    assert_eq!(
+        factory.try_init(
+            &admin,
+            &stream_contract,
+            &1,
+            &(MAX_FACTORY_DURATION_SECONDS + 1)
+        ),
+        Err(Ok(FactoryError::InvalidMinDuration))
+    );
+    assert_eq!(
+        factory.try_get_factory_config(),
+        Err(Ok(FactoryError::NotInitialized))
+    );
+}
+
+#[test]
+fn test_init_accepts_policy_boundaries() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let factory_id = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &factory_id);
+    let admin = Address::generate(&env);
+    let stream_contract = Address::generate(&env);
+
+    factory.init(&admin, &stream_contract, &1, &MAX_FACTORY_DURATION_SECONDS);
+    let config = factory.get_factory_config();
+    assert_eq!(config.max_deposit, 1);
+    assert_eq!(config.min_duration, MAX_FACTORY_DURATION_SECONDS);
 }
 
 // ---------------------------------------------------------------------------
@@ -521,6 +590,21 @@ fn test_set_cap_enforced() {
     assert_eq!(result, Err(Ok(FactoryError::DepositExceedsCap)));
 }
 
+#[test]
+fn test_set_cap_rejects_non_positive_values_without_changing_policy() {
+    let ctx = Ctx::setup();
+
+    assert_eq!(
+        ctx.factory.try_set_cap(&0),
+        Err(Ok(FactoryError::InvalidCap))
+    );
+    assert_eq!(
+        ctx.factory.try_set_cap(&-1),
+        Err(Ok(FactoryError::InvalidCap))
+    );
+    assert_eq!(ctx.factory.get_factory_config().max_deposit, 10_000);
+}
+
 /// set_min_duration updates the minimum; subsequent short-duration is rejected.
 #[test]
 fn test_set_min_duration_enforced() {
@@ -541,6 +625,39 @@ fn test_set_min_duration_enforced() {
         &0,
     );
     assert_eq!(result, Err(Ok(FactoryError::DurationTooShort)));
+}
+
+#[test]
+fn test_set_min_duration_rejects_out_of_range_values_without_changing_policy() {
+    let ctx = Ctx::setup();
+
+    assert_eq!(
+        ctx.factory.try_set_min_duration(&0),
+        Err(Ok(FactoryError::InvalidMinDuration))
+    );
+    assert_eq!(
+        ctx.factory
+            .try_set_min_duration(&(MAX_FACTORY_DURATION_SECONDS + 1)),
+        Err(Ok(FactoryError::InvalidMinDuration))
+    );
+    assert_eq!(ctx.factory.get_factory_config().min_duration, 100);
+}
+
+#[test]
+fn test_set_min_duration_accepts_documented_boundaries() {
+    let ctx = Ctx::setup();
+
+    ctx.factory.set_min_duration(&MIN_FACTORY_DURATION_SECONDS);
+    assert_eq!(
+        ctx.factory.get_factory_config().min_duration,
+        MIN_FACTORY_DURATION_SECONDS
+    );
+
+    ctx.factory.set_min_duration(&MAX_FACTORY_DURATION_SECONDS);
+    assert_eq!(
+        ctx.factory.get_factory_config().min_duration,
+        MAX_FACTORY_DURATION_SECONDS
+    );
 }
 
 /// set_allowlist(false) removes a previously-allowed recipient.

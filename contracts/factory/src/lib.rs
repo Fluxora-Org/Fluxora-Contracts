@@ -17,7 +17,20 @@ pub enum FactoryError {
     InvalidTimeRange = 7,
     /// The requested cliff must be within the inclusive start/end window.
     InvalidCliff = 8,
+    /// The maximum deposit cap must be strictly positive.
+    InvalidCap = 9,
+    /// The minimum duration must be within the documented factory policy range.
+    InvalidMinDuration = 10,
 }
+
+/// Minimum stream duration accepted by factory policy setters, in seconds.
+pub const MIN_FACTORY_DURATION_SECONDS: u64 = 1;
+
+/// Maximum stream duration accepted by factory policy setters, in seconds.
+///
+/// This ten-year ceiling prevents accidentally storing absurd policy values
+/// that would make factory-routed streams impossible for normal treasury use.
+pub const MAX_FACTORY_DURATION_SECONDS: u64 = 10 * 365 * 24 * 60 * 60;
 
 #[contracttype]
 pub enum DataKey {
@@ -42,6 +55,20 @@ fn require_admin(env: &Env) -> Result<Address, FactoryError> {
     Ok(admin)
 }
 
+fn validate_max_deposit(max_deposit: i128) -> Result<(), FactoryError> {
+    if max_deposit <= 0 {
+        return Err(FactoryError::InvalidCap);
+    }
+    Ok(())
+}
+
+fn validate_min_duration(min_duration: u64) -> Result<(), FactoryError> {
+    if !(MIN_FACTORY_DURATION_SECONDS..=MAX_FACTORY_DURATION_SECONDS).contains(&min_duration) {
+        return Err(FactoryError::InvalidMinDuration);
+    }
+    Ok(())
+}
+
 /// Read-only snapshot of the factory policy stored in instance storage.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -59,6 +86,9 @@ pub struct FluxoraFactory;
 #[allow(clippy::too_many_arguments)]
 impl FluxoraFactory {
     /// Initialize the factory with admin, stream contract, and policies.
+    ///
+    /// `max_deposit` must be greater than zero. `min_duration` must be between
+    /// `MIN_FACTORY_DURATION_SECONDS` and `MAX_FACTORY_DURATION_SECONDS`, inclusive.
     pub fn init(
         env: Env,
         admin: Address,
@@ -69,6 +99,8 @@ impl FluxoraFactory {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(FactoryError::AlreadyInitialized);
         }
+        validate_max_deposit(max_deposit)?;
+        validate_min_duration(min_duration)?;
 
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
@@ -117,8 +149,11 @@ impl FluxoraFactory {
     }
 
     /// Admin updates the max deposit cap.
+    ///
+    /// `max_deposit` must be greater than zero.
     pub fn set_cap(env: Env, max_deposit: i128) -> Result<(), FactoryError> {
         require_admin(&env)?;
+        validate_max_deposit(max_deposit)?;
 
         env.storage()
             .instance()
@@ -127,8 +162,12 @@ impl FluxoraFactory {
     }
 
     /// Admin updates the minimum stream duration.
+    ///
+    /// `min_duration` must be between `MIN_FACTORY_DURATION_SECONDS` and
+    /// `MAX_FACTORY_DURATION_SECONDS`, inclusive.
     pub fn set_min_duration(env: Env, min_duration: u64) -> Result<(), FactoryError> {
         require_admin(&env)?;
+        validate_min_duration(min_duration)?;
 
         env.storage()
             .instance()
