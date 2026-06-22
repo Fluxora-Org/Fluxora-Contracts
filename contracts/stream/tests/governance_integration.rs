@@ -1,9 +1,13 @@
 extern crate std;
 
-use fluxora_governance::{FluxoraGovernance, FluxoraGovernanceClient, GovernanceError};
+use fluxora_governance::{
+    AdminChanged, FluxoraGovernance, FluxoraGovernanceClient, GovernanceError, SignerAdded,
+    SignerRemoved,
+};
 use soroban_sdk::{
+    symbol_short,
     testutils::{Address as _, Ledger},
-    vec, Address, Bytes, Env,
+    vec, Address, Bytes, Env, Symbol, TryFromVal,
 };
 
 // Mirror constants from governance lib.rs
@@ -335,6 +339,76 @@ fn test_add_remove_signer() {
     ctx.client.remove_signer(&new_signer);
     let signers = ctx.client.get_signers();
     assert_eq!(signers.len(), 3);
+}
+
+#[test]
+fn test_add_signer_emits_structured_event() {
+    let ctx = GovCtx::setup();
+    let new_signer = Address::generate(&ctx.env);
+    let events_before = ctx.env.events().all().len();
+
+    ctx.client.add_signer(&new_signer);
+
+    let events = ctx.env.events().all();
+    assert_eq!(events.len(), events_before + 1);
+    let event = events.last().expect("signer add event");
+    assert_eq!(event.0, ctx.contract_id);
+    assert_eq!(event.1.len(), 1);
+    assert_eq!(
+        Symbol::try_from_val(&ctx.env, &event.1.get(0).unwrap()).unwrap(),
+        symbol_short!("sign_add")
+    );
+    let payload = SignerAdded::try_from_val(&ctx.env, &event.2).expect("SignerAdded event payload");
+    assert_eq!(payload.signer, new_signer);
+}
+
+#[test]
+fn test_remove_signer_emits_structured_event_only_when_removed() {
+    let ctx = GovCtx::setup();
+    let events_before = ctx.env.events().all().len();
+
+    ctx.client.remove_signer(&ctx.signer_c);
+
+    let events = ctx.env.events().all();
+    assert_eq!(events.len(), events_before + 1);
+    let event = events.last().expect("signer remove event");
+    assert_eq!(event.0, ctx.contract_id);
+    assert_eq!(event.1.len(), 1);
+    assert_eq!(
+        Symbol::try_from_val(&ctx.env, &event.1.get(0).unwrap()).unwrap(),
+        symbol_short!("sign_rm")
+    );
+    let payload =
+        SignerRemoved::try_from_val(&ctx.env, &event.2).expect("SignerRemoved event payload");
+    assert_eq!(payload.signer, ctx.signer_c);
+
+    let stranger = Address::generate(&ctx.env);
+    let events_before_noop = ctx.env.events().all().len();
+    ctx.client.remove_signer(&stranger);
+    assert_eq!(ctx.env.events().all().len(), events_before_noop);
+}
+
+#[test]
+fn test_set_admin_emits_structured_event() {
+    let ctx = GovCtx::setup();
+    let new_admin = Address::generate(&ctx.env);
+    let events_before = ctx.env.events().all().len();
+
+    ctx.client.set_admin(&new_admin);
+
+    let events = ctx.env.events().all();
+    assert_eq!(events.len(), events_before + 1);
+    let event = events.last().expect("admin changed event");
+    assert_eq!(event.0, ctx.contract_id);
+    assert_eq!(event.1.len(), 1);
+    assert_eq!(
+        Symbol::try_from_val(&ctx.env, &event.1.get(0).unwrap()).unwrap(),
+        symbol_short!("admin_chg")
+    );
+    let payload =
+        AdminChanged::try_from_val(&ctx.env, &event.2).expect("AdminChanged event payload");
+    assert_eq!(payload.old_admin, ctx.admin);
+    assert_eq!(payload.new_admin, new_admin);
 }
 
 #[test]

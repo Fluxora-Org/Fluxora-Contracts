@@ -107,12 +107,15 @@ Initializes the contract. It can only be called once.
 
 Rotates the admin address. The current admin must authorize the call.
 
+- Emits `AdminChanged` with topic `("admin_chg")` after the admin storage entry is updated.
+
 ### `add_signer(signer)`
 
 Adds a co-signer to the governance set. The admin must authorize the call.
 
 - Fails with `DuplicateSigner` if the address is already registered.
 - Fails with `TooManySigners` if adding the signer would exceed `MAX_SIGNERS`.
+- Emits `SignerAdded` with topic `("sign_add")` after the signer set is updated.
 
 ### `remove_signer(signer)`
 
@@ -120,7 +123,8 @@ Removes a co-signer from the governance set. The admin must authorize the call.
 
 - Fails with `QuorumWouldBreak` if removal would leave fewer signers than the current
   threshold.
-- Removing a non-existent signer is a no-op.
+- Removing a non-existent signer is a no-op and emits no event.
+- Emits `SignerRemoved` with topic `("sign_rm")` after an existing signer is removed.
 
 ### `propose(proposer, target, calldata) -> u32`
 
@@ -215,10 +219,13 @@ example by importing `FluxoraFactoryClient` and matching on a known operation ta
 ## Events
 
 For stream-level events, see [`events.md`](events.md). Governance emits the following
-proposal events:
+proposal and membership events:
 
 | Event | Topic | Payload | Emitted when |
 |---|---|---|---|
+| `SignerAdded` | `("sign_add")` | `SignerAdded { signer }` | `add_signer` stores a new co-signer |
+| `SignerRemoved` | `("sign_rm")` | `SignerRemoved { signer }` | `remove_signer` removes an existing co-signer |
+| `AdminChanged` | `("admin_chg")` | `AdminChanged { old_admin, new_admin }` | `set_admin` rotates the admin address |
 | `ProposalCreated` | `("proposed", proposal_id)` | `ProposalCreated { proposal_id, proposer, target }` | `propose` stores a new proposal |
 | `ProposalApproved` | `("approved", proposal_id)` | `ProposalApproved { proposal_id, approver, approval_count }` | `approve` records a unique signer approval |
 | `QuorumReached` | `("quorum", proposal_id)` | `QuorumReached { proposal_id, quorum_reached_at, executable_after }` | Approval count first equals the configured threshold |
@@ -227,6 +234,8 @@ proposal events:
 
 `QuorumReached` is emitted only once per proposal because the contract stores `QuorumInfo`
 only when `approval_count == threshold`.
+Signer and admin events are emitted after the corresponding storage mutation succeeds.
+`remove_signer` emits no event when the supplied address is not in the signer set.
 
 ## Storage layout
 

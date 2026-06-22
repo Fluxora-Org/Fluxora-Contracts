@@ -179,6 +179,28 @@ pub struct ProposalExecuted {
     pub calldata: Bytes,
 }
 
+/// Emitted when the admin adds a co-signer to the governance set.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SignerAdded {
+    pub signer: Address,
+}
+
+/// Emitted when the admin removes a co-signer from the governance set.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SignerRemoved {
+    pub signer: Address,
+}
+
+/// Emitted when the governance admin address is rotated.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AdminChanged {
+    pub old_admin: Address,
+    pub new_admin: Address,
+}
+
 // ---------------------------------------------------------------------------
 // Storage helpers
 // ---------------------------------------------------------------------------
@@ -310,9 +332,17 @@ impl FluxoraGovernance {
     /// # Authorization
     /// - Requires admin signature.
     pub fn set_admin(env: Env, new_admin: Address) -> Result<(), GovernanceError> {
-        get_admin(&env)?.require_auth();
+        let old_admin = get_admin(&env)?;
+        old_admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         bump_instance(&env);
+        env.events().publish(
+            (symbol_short!("admin_chg"),),
+            AdminChanged {
+                old_admin,
+                new_admin,
+            },
+        );
         Ok(())
     }
 
@@ -335,9 +365,11 @@ impl FluxoraGovernance {
         if signers.len() >= MAX_SIGNERS {
             return Err(GovernanceError::TooManySigners);
         }
-        signers.push_back(signer);
+        signers.push_back(signer.clone());
         env.storage().instance().set(&DataKey::Signers, &signers);
         bump_instance(&env);
+        env.events()
+            .publish((symbol_short!("sign_add"),), SignerAdded { signer });
         Ok(())
     }
 
@@ -367,6 +399,8 @@ impl FluxoraGovernance {
             signers.remove(i);
             env.storage().instance().set(&DataKey::Signers, &signers);
             bump_instance(&env);
+            env.events()
+                .publish((symbol_short!("sign_rm"),), SignerRemoved { signer });
         }
         Ok(())
     }
