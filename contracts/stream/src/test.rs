@@ -3536,6 +3536,7 @@ fn test_withdraw_to_requires_recipient_auth() {
                 1000u64,
                 0i128,
                 Option::<soroban_sdk::Bytes>::None,
+                crate::StreamKind::Linear,
             )
                 .into_val(&ctx.env),
             sub_invokes: &[],
@@ -10097,6 +10098,56 @@ fn test_set_admin_same_address_succeeds() {
     let data: (Address, Address) = last_event.2.into_val(&ctx.env);
     assert_eq!(data.0, old_admin);
     assert_eq!(data.1, old_admin);
+}
+
+// ---------------------------------------------------------------------------
+// Tests - sweep_excess authorization model
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_sweep_excess_admin_can_send_to_non_signing_treasury_strict() {
+    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+
+    let ctx = TestContext::setup_strict();
+    let _stream_id = strict_create_stream(&ctx);
+
+    // Simulate excess tokens that are not backing active stream liabilities.
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.token_id,
+            fn_name: "transfer",
+            args: (&ctx.sender, &ctx.contract_id, 500_i128).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+    ctx.token()
+        .transfer(&ctx.sender, &ctx.contract_id, &500_i128);
+
+    let cold_treasury = Address::generate(&ctx.env);
+    assert_eq!(ctx.token().balance(&ctx.contract_id), 1_500);
+
+    // Only the admin authorizes the sweep. The destination/cold treasury does
+    // not sign, which is the intended authorization model.
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.admin,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "sweep_excess",
+            args: (&cold_treasury,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let swept = ctx.client().sweep_excess(&cold_treasury);
+
+    assert_eq!(swept, 500);
+    assert_eq!(ctx.token().balance(&cold_treasury), 500);
+    assert_eq!(
+        ctx.token().balance(&ctx.contract_id),
+        1_000,
+        "sweep must leave active stream liabilities funded"
+    );
 }
 
 // ---------------------------------------------------------------------------

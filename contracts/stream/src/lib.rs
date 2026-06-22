@@ -171,7 +171,10 @@ const MIN_PAUSE_INTERVAL_LEDGERS: u32 = 17;
 ///
 /// Bumped to 4: accrual paths track the last ledger timestamp they observed in
 /// instance storage to detect retrograde test clocks and migration regressions.
-pub const CONTRACT_VERSION: u32 = 4;
+///
+/// Bumped to 5: `sweep_excess` is explicitly admin-authorized only; the
+/// destination address no longer needs to co-sign the sweep transaction.
+pub const CONTRACT_VERSION: u32 = 5;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -5774,7 +5777,9 @@ impl FluxoraStream {
     /// balance and the sum of all outstanding obligations (tracked liabilities).
     ///
     /// # Parameters
-    /// - `recipient`: Address to receive the excess tokens
+    /// - `recipient`: Address to receive the excess tokens. This is a
+    ///   destination chosen by the authenticated admin and does not need to
+    ///   co-sign the sweep transaction.
     ///
     /// # Authorization
     /// - Requires authorization from the contract admin
@@ -5792,6 +5797,8 @@ impl FluxoraStream {
     ///
     /// # Security
     /// - Only callable by admin to prevent unauthorized fund extraction
+    /// - The destination is not an authorizer, so cold treasury wallets can
+    ///   receive swept excess without coming online for each sweep
     /// - Uses tracked liabilities (`TotalLiabilities`) to ensure recipient funds are protected
     /// - CEI pattern: calculates excess, updates state, then transfers tokens
     /// - Reentrancy protected via `acquire_reentrancy_lock`
@@ -5809,6 +5816,8 @@ impl FluxoraStream {
     /// - Does not affect active streams or recipient entitlements
     /// - Useful for recovering funds after mass cancellations or rate decreases
     /// - Should be called periodically by operators to maintain clean accounting
+    /// - Admins should route sweeps only to treasury destinations governed by
+    ///   their operational controls
     ///
     /// # Example Scenarios
     /// 1. Stream cancelled at 50% completion → 50% refunded to sender, but if sender
@@ -5820,9 +5829,6 @@ impl FluxoraStream {
         // Only admin can sweep excess tokens
         let admin = get_admin(&env)?;
         admin.require_auth();
-
-        // Validate recipient address
-        recipient.require_auth();
 
         // Get contract's token balance
         let token_address = get_token(&env)?;

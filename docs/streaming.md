@@ -1291,11 +1291,14 @@ pub fn sweep_excess(env: Env, recipient: Address) -> Result<i128, ContractError>
 
 ### Parameters
 
-- `recipient`: Address to receive the excess tokens
+- `recipient`: Address to receive the excess tokens. The authenticated admin
+  chooses this destination; the destination does not need to co-sign.
 
 ### Authorization
 
 - **Required**: Contract admin must authorize the call via `admin.require_auth()`
+- **Destination signer**: Not required. This permits sweeps to cold or offline
+  treasury wallets selected by the admin.
 - **Unauthorized callers**: Returns `ContractError::Unauthorized`
 
 ### Calculation
@@ -1328,9 +1331,10 @@ Where:
 
 1. **Recipient protection**: Never sweeps tokens that are owed to stream recipients
 2. **Liability tracking**: Uses `TotalLiabilities` counter to ensure all active stream deposits are protected
-3. **CEI pattern**: Emits event before token transfer to reduce reentrancy risk
-4. **Reentrancy guard**: Acquires lock before transfer, releases after
-5. **Idempotent**: Safe to call multiple times; returns 0 when no excess exists
+3. **Admin-selected destination**: The destination address receives funds but is not an authorization boundary
+4. **CEI pattern**: Emits event before token transfer to reduce reentrancy risk
+5. **Reentrancy guard**: Acquires lock before transfer, releases after
+6. **Idempotent**: Safe to call multiple times; returns 0 when no excess exists
 
 ### Invariants
 
@@ -1343,6 +1347,7 @@ Where:
 
 - **Permissionless query**: Anyone can calculate potential excess by comparing `token.balance(contract)` with the sum of all active stream `deposit_amount - withdrawn_amount` values
 - **Operational hygiene**: Should be called periodically by operators to maintain clean accounting
+- **Treasury routing**: Admins should route sweeps only to governed treasury destinations; cold wallets can receive without signing the sweep transaction
 - **No impact on streams**: Does not affect any stream state, accrual, or withdrawal operations
 - **Multiple calls**: Can be called multiple times as excess accumulates
 
@@ -1406,7 +1411,7 @@ pub struct ExcessSwept {
 
 ### Security Considerations
 
-1. **Admin trust**: This function requires trusting the admin not to abuse it. The admin could theoretically call it with their own address to extract excess funds.
+1. **Admin trust**: This function requires trusting the admin not to abuse it. The admin chooses the destination and could theoretically call it with their own address to extract excess funds.
 2. **Liability tracking accuracy**: The safety of this function depends on accurate `TotalLiabilities` tracking. Any bug in liability accounting could allow sweeping of recipient funds.
 3. **Audit trail**: All sweeps are logged via `ExcessSwept` events for transparency and auditing.
 4. **No emergency pause bypass**: This function does not bypass global emergency pause (if implemented in future versions).

@@ -31,7 +31,7 @@ Soroban smart contracts for the Fluxora treasury streaming protocol on Stellar. 
 | `keeper_cancel` | `keeper.require_auth()` | Allows designated keeper bots to force-terminate insolvent or expired stream states based on parameter gates. |
 | `trigger_auto_claim` | Public / None | Standard unauthenticated entry point to trigger an automated payout slice to a recipient via incentivized relays. |
 | `register_stream_template`| `owner.require_auth()` | Adds a new pre-validated WASM bytecode hash template matrix into global storage. |
-| `sweep_excess` | `admin.require_auth()` & `recipient.require_auth()` | Cleans up stray/native fee balances out of contract spaces directly into a specified target. |
+| `sweep_excess` | `admin.require_auth()` | Sweeps only balance above tracked stream liabilities to an admin-selected treasury destination. |
 | `get_stream_health` | Public / None (View) | Read-only analysis interface detailing stream insolvency metrics and structural drift thresholds. |
 | `get_recipient_streams_paginated` | Public / None (View) | Read-only paginated array fetch targeting memory safety across deep address historical records. |
 

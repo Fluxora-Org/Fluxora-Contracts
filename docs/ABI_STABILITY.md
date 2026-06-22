@@ -3,7 +3,7 @@
 Canonical reference for what the Fluxora protocol guarantees to remain stable across deployments, and what constitutes a breaking change for indexers, wallets, and other integrators.
 
 **Source of truth:** `contracts/stream/src/lib.rs`
-**Current version:** `CONTRACT_VERSION = 3`
+**Current version:** `CONTRACT_VERSION = 5`
 **See also:** [`docs/upgrade.md`](./upgrade.md) for the migration runbook and version history.
 
 ---

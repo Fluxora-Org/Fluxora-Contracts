@@ -11,7 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - (leave empty — to be filled as new work is merged)
 
 ### Changed
-- (leave empty)
+- `sweep_excess` is now admin-authorized only: the destination address no longer
+  needs to co-sign, allowing cold or offline treasury wallets to receive excess
+  while preserving the `balance >= total_liabilities` safety invariant.
 
 ### Fixed
 - (leave empty)

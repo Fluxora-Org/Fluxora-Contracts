@@ -163,6 +163,7 @@ reentrancy impact — state will already reflect the current operation when the 
 | `shorten_stream_end_time` | Stream's `sender`                                       |
 | `extend_stream_end_time`  | Stream's `sender`                                       |
 | `top_up_stream`           | `funder` (any address; no sender relationship required) |
+| `sweep_excess`            | Contract admin; destination does not authorize          |
 | `close_completed_stream`  | Permissionless (any caller)                             |
 | `set_admin`               | Current contract admin                                  |
 | `set_contract_paused`     | Contract admin                                          |
@@ -171,11 +172,19 @@ reentrancy impact — state will already reflect the current operation when the 
 ## Admin powers
 
 The stream contract admin can rotate the admin key, set governance-controlled
-limits, pause or resume protocol operations, and use the explicit
-`*_as_admin` stream controls listed in the authorization table above. These
-powers do not replace sender or recipient authorization: stream creation still
-requires the supplied `sender`, withdrawals still require the recipient, and
-top-ups still require the supplied `funder`.
+limits, pause or resume protocol operations, use the explicit `*_as_admin`
+stream controls listed in the authorization table above, and sweep excess
+tokens that are above tracked stream liabilities. These powers do not replace
+sender or recipient authorization: stream creation still requires the supplied
+`sender`, withdrawals still require the recipient, and top-ups still require
+the supplied `funder`.
+
+`sweep_excess` is admin-authorized only. The `recipient` argument is the
+destination chosen by the authenticated admin, not an additional signer. This
+allows protocol excess to be routed to a cold or offline treasury wallet while
+preserving the core accounting invariant: the post-sweep contract token balance
+must remain at least `read_total_liabilities()`. Admin operators should govern
+approved treasury destinations off-chain or through governance policy.
 
 The optional factory wrapper has its own admin for allowlists, deposit caps,
 minimum duration, and the configured stream-contract address. Factory policy
