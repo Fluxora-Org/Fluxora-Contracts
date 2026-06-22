@@ -83,7 +83,6 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
-    needs: lint
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -105,10 +104,10 @@ jobs:
             ${{ runner.os }}-cargo-build-
 
       - name: Build release (native)
-        run: cargo build --release -p fluxora_stream
+        run: cargo build --release -p fluxora_stream -p fluxora_factory -p fluxora_governance
 
       - name: Build WASM
-        run: cargo build --release -p fluxora_stream --target wasm32-unknown-unknown
+        run: cargo build --release --target wasm32-unknown-unknown -p fluxora_stream -p fluxora_factory -p fluxora_governance
 
       - name: Install Stellar CLI (pinned)
         run: |
@@ -125,15 +124,34 @@ jobs:
 
       - name: Optimize WASM
         run: |
-          stellar contract optimize --wasm target/wasm32-unknown-unknown/release/fluxora_stream.wasm
+          set +e
+          for contract in fluxora_stream fluxora_factory fluxora_governance; do
+            wasm="target/wasm32-unknown-unknown/release/${contract}.wasm"
+            if [ ! -f "$wasm" ]; then
+              echo "::warning::Skipping ${contract} optimization; ${wasm} was not built"
+              continue
+            fi
+
+            echo "Optimizing ${wasm}"
+            stellar contract optimize --wasm "$wasm"
+            status=$?
+            if [ "$status" -ne 0 ]; then
+              echo "::warning::stellar contract optimize failed for ${contract} with exit code ${status}; raw WASM will still be size-checked"
+            fi
+          done
         continue-on-error: true
 
       - name: Compute WASM SHA256 hash
         run: |
-          sha256sum target/wasm32-unknown-unknown/release/fluxora_stream.wasm > target/wasm32-unknown-unknown/release/fluxora_stream.wasm.sha256
-          if [ -f target/wasm32-unknown-unknown/release/fluxora_stream.optimized.wasm ]; then
-            sha256sum target/wasm32-unknown-unknown/release/fluxora_stream.optimized.wasm > target/wasm32-unknown-unknown/release/fluxora_stream.optimized.wasm.sha256
-          fi
+          set -euo pipefail
+          for wasm in target/wasm32-unknown-unknown/release/fluxora_{stream,factory,governance}{,.optimized}.wasm; do
+            if [ -f "$wasm" ]; then
+              sha256sum "$wasm" > "${wasm}.sha256"
+            fi
+          done
+
+      - name: Check WASM size budgets
+        run: bash script/check-wasm-size-budget.sh --no-build
 
       - name: Verify WASM build reproducibility
         run: bash script/verify-wasm-checksum.sh --no-build
@@ -142,20 +160,19 @@ jobs:
       - name: Upload WASM hash artifact
         uses: actions/upload-artifact@v4
         with:
-          name: fluxora_stream-wasm-hash
+          name: fluxora-contracts-wasm-hash
           path: |
-            target/wasm32-unknown-unknown/release/fluxora_stream.wasm.sha256
-            target/wasm32-unknown-unknown/release/fluxora_stream.optimized.wasm.sha256
+            target/wasm32-unknown-unknown/release/fluxora_*.wasm.sha256
           retention-days: 30
           if-no-files-found: warn
 
       - name: Upload WASM artifact
         uses: actions/upload-artifact@v4
         with:
-          name: fluxora_stream-wasm
+          name: fluxora-contracts-wasm
           path: |
-            target/wasm32-unknown-unknown/release/fluxora_stream.wasm
-            target/wasm32-unknown-unknown/release/fluxora_stream.optimized.wasm
+            target/wasm32-unknown-unknown/release/fluxora_*.wasm
+            target/wasm32-unknown-unknown/release/wasm-size-report.md
           retention-days: 30
           if-no-files-found: warn
 
@@ -331,7 +348,7 @@ jobs:
       - name: Download WASM artifact
         uses: actions/download-artifact@v4
         with:
-          name: fluxora_stream-wasm
+          name: fluxora-contracts-wasm
           path: ./artifacts
 
       - name: Install Stellar CLI (pinned)
@@ -394,7 +411,7 @@ jobs:
       - name: Download WASM artifact
         uses: actions/download-artifact@v4
         with:
-          name: fluxora_stream-wasm
+          name: fluxora-contracts-wasm
           path: ./artifacts
 
       - name: Install Stellar CLI (pinned)
