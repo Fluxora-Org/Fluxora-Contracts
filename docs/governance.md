@@ -323,3 +323,7 @@ Integration tests are in `contracts/stream/tests/governance_integration.rs` and 
 - Threshold validation on `init`.
 - Quorum invariant on `remove_signer`.
 - Quorum uses the configured threshold; adding signers does not change threshold.
+- Property-based quorum/timelock checks in `contracts/governance/src/lib.rs` randomize
+  signer-set sizes, approval orderings, and time advances to assert that proposals
+  cannot execute below quorum, cannot execute before `QuorumReachedAt + timelock`,
+  and become one-way terminal after the first successful execution.

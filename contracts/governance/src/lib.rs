@@ -729,6 +729,7 @@ impl FluxoraGovernance {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use soroban_sdk::testutils::{Address as _, Ledger};
     use soroban_sdk::{vec, Env};
 
@@ -1166,5 +1167,179 @@ mod tests {
         ctx.client.execute(&executor, &id);
         let result = ctx.client.try_execute(&executor, &id);
         assert_eq!(result, Err(Ok(GovernanceError::AlreadyExecuted)));
+    }
+
+    fn setup_randomized_governance(
+        signer_count: usize,
+        threshold: usize,
+    ) -> (
+        Env,
+        FluxoraGovernanceClient<'static>,
+        soroban_sdk::Vec<Address>,
+        Address,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_000_000);
+
+        let contract_id = env.register_contract(None, FluxoraGovernance);
+        let admin = Address::generate(&env);
+        let mut signers = soroban_sdk::Vec::new(&env);
+        for _ in 0..signer_count {
+            signers.push_back(Address::generate(&env));
+        }
+
+        let client = FluxoraGovernanceClient::new(&env, &contract_id);
+        client.init(&admin, &signers, &(threshold as u32));
+        (env, client, signers, admin)
+    }
+
+    fn approve_by_indices(
+        client: &FluxoraGovernanceClient<'static>,
+        signers: &soroban_sdk::Vec<Address>,
+        proposal_id: u32,
+        indices: &[usize],
+    ) {
+        for index in indices {
+            let signer = signers.get(*index as u32).expect("signer exists");
+            client.approve(&signer, &proposal_id);
+        }
+    }
+
+    fn randomized_approval_indices(
+        signer_count: usize,
+        approvals_needed: usize,
+        rotation: usize,
+        reverse: bool,
+    ) -> std::vec::Vec<usize> {
+        let mut indices: std::vec::Vec<usize> = (0..signer_count).collect();
+        if signer_count > 0 {
+            indices.rotate_left(rotation % signer_count);
+        }
+        if reverse {
+            indices.reverse();
+        }
+        indices.truncate(approvals_needed);
+        indices
+    }
+
+    // -----------------------------------------------------------------------
+    // Property tests
+    // -----------------------------------------------------------------------
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 48,
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn prop_execute_fails_below_quorum(
+            signer_count in 2usize..=6,
+            threshold in 2usize..=6,
+            approval_count in 0usize..=5,
+            approval_rotation in 0usize..32,
+            reverse_approvals in any::<bool>(),
+        ) {
+            prop_assume!(threshold <= signer_count);
+            prop_assume!(approval_count < threshold);
+            prop_assume!(approval_count <= signer_count);
+
+            let (env, client, signers, _) = setup_randomized_governance(signer_count, threshold);
+            let proposer = signers.get(0).expect("first signer exists");
+            let target = Address::generate(&env);
+            let calldata = Bytes::from_slice(&env, b"below-quorum");
+            let proposal_id = client.propose(&proposer, &target, &calldata);
+
+            let approvals = randomized_approval_indices(
+                signer_count,
+                approval_count,
+                approval_rotation,
+                reverse_approvals,
+            );
+
+            approve_by_indices(&client, &signers, proposal_id, &approvals);
+            env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
+
+            let executor = Address::generate(&env);
+            prop_assert_eq!(
+                client.try_execute(&executor, &proposal_id),
+                Err(Ok(GovernanceError::QuorumNotReached))
+            );
+        }
+
+        #[test]
+        fn prop_quorum_respects_timelock_boundary(
+            signer_count in 1usize..=6,
+            threshold in 1usize..=6,
+            extra_approvals in 0usize..=5,
+            early_delta in 0u64..TIMELOCK,
+            late_delta in TIMELOCK..=(TIMELOCK + 86_400),
+            approval_rotation in 0usize..32,
+            reverse_approvals in any::<bool>(),
+        ) {
+            prop_assume!(threshold <= signer_count);
+
+            let (env, client, signers, _) = setup_randomized_governance(signer_count, threshold);
+            let proposer = signers.get(0).expect("first signer exists");
+            let target = Address::generate(&env);
+            let calldata = Bytes::from_slice(&env, b"timelock");
+            let proposal_id = client.propose(&proposer, &target, &calldata);
+
+            let approvals_needed = threshold.saturating_add(extra_approvals).min(signer_count);
+            let approvals = randomized_approval_indices(
+                signer_count,
+                approvals_needed,
+                approval_rotation,
+                reverse_approvals,
+            );
+
+            approve_by_indices(&client, &signers, proposal_id, &approvals);
+
+            let executor = Address::generate(&env);
+            env.ledger().set_timestamp(1_000_000 + early_delta);
+            prop_assert_eq!(
+                client.try_execute(&executor, &proposal_id),
+                Err(Ok(GovernanceError::TimelockNotElapsed))
+            );
+
+            env.ledger().set_timestamp(1_000_000 + late_delta);
+            prop_assert!(client.try_execute(&executor, &proposal_id).is_ok());
+        }
+
+        #[test]
+        fn prop_execute_is_one_way_after_success(
+            signer_count in 1usize..=6,
+            threshold in 1usize..=6,
+            approval_rotation in 0usize..32,
+            reverse_approvals in any::<bool>(),
+            execute_delay in TIMELOCK..=(TIMELOCK + 86_400),
+        ) {
+            prop_assume!(threshold <= signer_count);
+
+            let (env, client, signers, _) = setup_randomized_governance(signer_count, threshold);
+            let proposer = signers.get(0).expect("first signer exists");
+            let target = Address::generate(&env);
+            let calldata = Bytes::from_slice(&env, b"one-way");
+            let proposal_id = client.propose(&proposer, &target, &calldata);
+
+            let approvals = randomized_approval_indices(
+                signer_count,
+                threshold,
+                approval_rotation,
+                reverse_approvals,
+            );
+
+            approve_by_indices(&client, &signers, proposal_id, &approvals);
+            env.ledger().set_timestamp(1_000_000 + execute_delay);
+
+            let executor = Address::generate(&env);
+            prop_assert!(client.try_execute(&executor, &proposal_id).is_ok());
+            prop_assert_eq!(
+                client.try_execute(&executor, &proposal_id),
+                Err(Ok(GovernanceError::AlreadyExecuted))
+            );
+            prop_assert!(client.get_proposal(&proposal_id).executed);
+        }
     }
 }
