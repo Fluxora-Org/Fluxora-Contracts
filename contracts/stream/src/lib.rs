@@ -193,7 +193,7 @@ pub struct IdReservation {
     pub start_id: u64,
     pub count: u32,
     pub consumed: u32,
-    pub expiry: Option<u64>
+    pub expiry: Option<u64>,
 }
 
 /// Reason for a protocol or stream pause.
@@ -375,7 +375,7 @@ pub enum ContractError {
     PauseReasonTooLong = 23,
     ReservationNotFound = 24,
     ReservationNotExpirable = 25,
-    ReservationStillActive = 26
+    ReservationStillActive = 26,
 }
 
 #[contracttype]
@@ -6503,7 +6503,7 @@ impl FluxoraStream {
         env: Env,
         caller: Address,
         count: u32,
-        expiry: Option<u64>
+        expiry: Option<u64>,
     ) -> Result<soroban_sdk::Vec<u64>, ContractError> {
         caller.require_auth();
 
@@ -6521,7 +6521,7 @@ impl FluxoraStream {
             start_id,
             count,
             consumed: 0,
-            expiry
+            expiry,
         };
         save_id_reservation(&env, &caller, &res);
 
@@ -6540,10 +6540,7 @@ impl FluxoraStream {
     ///
     /// # Security
     /// - Authorization required .
-    pub fn release_id_reservation(
-        env: Env,
-        caller: Address,
-    ) -> Result<(), ContractError> {
+    pub fn release_id_reservation(env: Env, caller: Address) -> Result<(), ContractError> {
         caller.require_auth();
 
         remove_id_reservation(&env, &caller);
@@ -6579,8 +6576,7 @@ impl FluxoraStream {
     /// - `ReservationNotExpirable` (25): `expiry` is None.
     /// - `ReservationStillActive` (26): `current time > expiry`
     pub fn reclaim_expired_id_reservation(env: Env, holder: Address) -> Result<(), ContractError> {
-        let res = load_id_reservation(&env, &holder)
-            .ok_or(ContractError::ReservationNotFound)?;
+        let res = load_id_reservation(&env, &holder).ok_or(ContractError::ReservationNotFound)?;
 
         let expiry = res.expiry.ok_or(ContractError::ReservationNotExpirable)?;
         if env.ledger().timestamp() < expiry {

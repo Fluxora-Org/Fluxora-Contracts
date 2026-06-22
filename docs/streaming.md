@@ -103,7 +103,7 @@ From **CONTRACT_VERSION 4**, the contract supports distinct streaming styles, go
 
 Off-chain orchestrators and indexers that build payment batches often need to know stream IDs **before** submitting `create_stream` transactions, to pre-populate database records or cross-reference external invoice systems.
 
-`reserve_stream_ids(caller, count)` atomically advances the global ID counter by `count` and returns the reserved range as a `Vec<u64>`.  Subsequent `create_stream` calls by the same `caller` consume IDs from the reservation in order; once exhausted (or if no reservation exists) the live counter is used.
+`reserve_stream_ids(caller, count, expiry)` atomically advances the global ID counter by `count` and returns the reserved range as a `Vec<u64>`.  Subsequent `create_stream` calls by the same `caller` consume IDs from the reservation in order; once exhausted (or if no reservation exists) the live counter is used.
 
 | Constant | Value | Purpose |
 |---|---|---|
@@ -114,7 +114,8 @@ Off-chain orchestrators and indexers that build payment batches often need to kn
 - `count = 0` -> `ReservationCountZero` (17).
 - `count > 100` -> `ReservationLimitExceeded` (18).
 - A new reservation for the same caller **overwrites** the previous one; the old IDs remain as a gap in the counter (same as any abandoned reservation).
-- The TTL ensures persistent storage entries are cleaned up automatically.
+- `expiry` is optional; reservations without an expiry can only be released by the reserving caller.
+- Expired reservations can be reclaimed by anyone through `reclaim_expired_id_reservation`.
 
 **Usage pattern:**
 ```
@@ -694,6 +695,10 @@ contract.create_streams_relative(&sender, &params)?;
 | `get_auto_claim_destination` | Anyone                     | None (view)                                 |
 | `delegated_withdraw`         | Relayer (ed25519 sig from recipient) | `relayer.require_auth()` + ed25519 sig |
 | `get_delegated_nonce`        | Anyone                     | None (view)                                 |
+| `reserve_stream_ids`         | Reserving caller           | `caller.require_auth()`                     |
+| `release_id_reservation`     | Reserving caller           | `caller.require_auth()`                     |
+| `reclaim_expired_id_reservation` | Anyone                 | None (permissionless expired cleanup)       |
+| `get_id_reservation`         | Anyone                     | None (view)                                 |
 
 **Note:** Sender-managed functions (`pause_stream`, `resume_stream`, `cancel_stream`) require sender auth. Admin uses separate `_as_admin` entry points.
 
@@ -1440,6 +1445,7 @@ pub fn reserve_stream_ids(
     env: Env,
     caller: Address,
     count: u32,
+    expiry: Option<u64>,
 ) -> Result<Vec<u64>, ContractError>
 ```
 
@@ -1449,13 +1455,14 @@ pub fn reserve_stream_ids(
 
 - `caller`: Address making the reservation
 - `count`: Number of IDs to reserve (1 – `MAX_ID_RESERVATION` = 100)
+- `expiry`: Optional ledger timestamp after which anyone may reclaim the unconsumed reservation
 
 **Returns:** `Vec<u64>` containing the reserved IDs in ascending order.
 
 **Behavior:**
 
 1. Atomically advances the global `NextStreamId` counter by `count`
-2. Stores an `IdReservation { start_id, count, consumed: 0 }` keyed by `caller`
+2. Stores an `IdReservation { start_id, count, consumed: 0, expiry }` keyed by `caller`
 3. Returns `[start_id, start_id+1, ..., start_id+count-1]`
 4. Subsequent `create_stream` calls from `caller` consume IDs from the reservation in order
 5. When fully consumed, the reservation is automatically deleted
@@ -1466,6 +1473,7 @@ pub fn reserve_stream_ids(
 - `count` capped at `MAX_ID_RESERVATION = 100` to prevent counter-inflation attacks
 - Authorization required to prevent third parties from consuming a victim's counter space
 - Gaps from unconsumed reservations are permanent but bounded (max 100 per call)
+- Reservations with `expiry = None` cannot be reclaimed by third parties; the caller must release or consume them
 
 **Errors:**
 
@@ -1476,7 +1484,7 @@ pub fn reserve_stream_ids(
 
 ```rust
 // Off-chain orchestrator reserves 5 IDs
-let ids = client.reserve_stream_ids(&orchestrator, &5); // [0, 1, 2, 3, 4]
+let ids = client.reserve_stream_ids(&orchestrator, &5, &None); // [0, 1, 2, 3, 4]
 
 // Pre-populate database with these IDs
 database.insert_pending_streams(ids);
@@ -1485,6 +1493,40 @@ database.insert_pending_streams(ids);
 let id0 = client.create_stream(&orchestrator, ...); // Uses ID 0
 let id1 = client.create_stream(&orchestrator, ...); // Uses ID 1
 ```
+
+### release_id_reservation
+
+**Purpose:** Let the reserving caller explicitly delete its active ID reservation when it no longer needs the reserved range.
+
+**Entry-point:**
+
+```rust
+pub fn release_id_reservation(env: Env, caller: Address) -> Result<(), ContractError>
+```
+
+**Authorization:** Requires `caller` signature.
+
+**Behavior:** Removes the reservation stored for `caller`. IDs that were already advanced remain gaps; this caller-authorized path does not rewind the global stream counter.
+
+### reclaim_expired_id_reservation
+
+**Purpose:** Permissionlessly clean up an active reservation after its optional `expiry` timestamp has passed.
+
+**Entry-point:**
+
+```rust
+pub fn reclaim_expired_id_reservation(env: Env, holder: Address) -> Result<(), ContractError>
+```
+
+**Authorization:** None.
+
+**Behavior:** Loads `holder`'s reservation, verifies it has expired, removes it, and emits `res_rel`. If the unconsumed range is still at the tail of the global stream counter, the counter is rewound to reclaim those unused IDs.
+
+**Errors:**
+
+- `ReservationNotFound` (24): `holder` has no active reservation
+- `ReservationNotExpirable` (25): reservation was created with `expiry = None`
+- `ReservationStillActive` (26): current ledger timestamp is still before `expiry`
 
 ### get_id_reservation
 
@@ -1500,7 +1542,7 @@ pub fn get_id_reservation(env: Env, caller: Address) -> Option<IdReservation>
 
 **Returns:**
 
-- `Some(IdReservation { start_id, count, consumed })` if caller has an active reservation
+- `Some(IdReservation { start_id, count, consumed, expiry })` if caller has an active reservation
 - `None` if no reservation exists
 
 **Example:**

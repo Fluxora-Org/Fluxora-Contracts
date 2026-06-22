@@ -37,6 +37,9 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `TemplateUnauthorized` | 22 | Caller is not authorized to delete a template | `delete_stream_template` |
 | `TokenVerificationFailed` | 23 | Token contract does not expose the expected SEP-41 interface during init | `init` |
 | `PauseReasonTooLong` | 23 | Pause reason string exceeds `MAX_PAUSE_REASON_BYTES` | `pause_protocol` |
+| `ReservationNotFound` | 24 | No active ID reservation exists for the requested holder | `reclaim_expired_id_reservation` |
+| `ReservationNotExpirable` | 25 | ID reservation has no expiry timestamp and cannot be permissionlessly reclaimed | `reclaim_expired_id_reservation` |
+| `ReservationStillActive` | 26 | ID reservation expiry timestamp has not passed yet | `reclaim_expired_id_reservation` |
 
 Non-error enum values used by stream creation and accrual:
 
