@@ -56,6 +56,17 @@ addresses with `DuplicateSigner`, so quorum calculations are based on unique key
 proposer is not automatically counted as an approver; they must submit a separate `approve`
 call if their signature should count toward quorum.
 
+The contract stores co-signers in two synchronized structures:
+
+- `Signers`: the ordered `Vec<Address>` returned by `get_signers` for backward-compatible
+  enumeration.
+- `SignerIndex`: a `Map<Address, bool>` used by hot membership checks in `propose`,
+  `approve`, and duplicate-signer validation.
+
+`init`, `add_signer`, and `remove_signer` update both structures in the same successful
+entrypoint. If upgraded state is missing `SignerIndex`, the index is rebuilt from the
+ordered vector before it is used.
+
 ## Proposal lifecycle
 
 ```text
@@ -138,6 +149,8 @@ Records an approval from a co-signer.
 
 - `approver` must authorize the call and be a registered co-signer.
 - Each signer may approve at most once per proposal.
+- Duplicate approval detection uses `ProposalApprovals(proposal_id)`, a persistent
+  `Map<Address, bool>` kept in sync with the ordered `Proposal.approvals` vector.
 - Approvals are rejected after execution, cancellation, or expiry.
 - Every successful approval emits `ProposalApproved`.
 - When the approval count first reaches the configured threshold, the contract stores
@@ -236,9 +249,11 @@ All storage keys are defined in `DataKey`:
 |---|---|---|
 | `Admin` | Instance | `Address` |
 | `Signers` | Instance | `Vec<Address>` |
+| `SignerIndex` | Instance | `Map<Address, bool>` |
 | `Threshold` | Instance | `u32` |
 | `NextProposalId` | Instance | `u32` |
 | `Proposal(u32)` | Persistent | `Proposal` (includes `created_at`, `executed`, and `cancelled`) |
+| `ProposalApprovals(u32)` | Persistent | `Map<Address, bool>` |
 | `QuorumReachedAt(u32)` | Persistent | `QuorumInfo { reached_at: u64, threshold: u32 }` |
 
 ## GovernanceError codes
@@ -295,6 +310,9 @@ handle these discriminants from `contracts/governance/src/lib.rs`:
 14. **Threshold is snapshotted at quorum time**: execution uses the threshold recorded in
     `QuorumInfo`, so an admin cannot raise or lower the live threshold after quorum to change
     the outcome of an in-flight proposal.
+15. **Signer indexes mirror canonical vectors**: `SignerIndex` and `ProposalApprovals` are
+    updated together with the ordered signer and approval vectors, so indexed membership
+    checks cannot authorize an address that is absent from canonical state.
 
 ## Tests
 
@@ -304,6 +322,7 @@ Integration tests are in `contracts/stream/tests/governance_integration.rs` and 
 - Duplicate signer rejection during initialization and signer management.
 - Proposal creation and ID assignment.
 - Approval counting and duplicate rejection.
+- Signer membership index consistency after add, remove, and re-add.
 - Non-signer rejection on both `propose` and `approve`.
 - Quorum enforcement and exact-threshold execution.
 - Timelock enforcement.

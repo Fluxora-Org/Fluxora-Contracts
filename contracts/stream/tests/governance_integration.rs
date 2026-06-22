@@ -69,6 +69,9 @@ fn test_init_stores_signers() {
     let ctx = GovCtx::setup();
     let signers = ctx.client.get_signers();
     assert_eq!(signers.len(), 3);
+    assert_eq!(signers.get(0), Some(ctx.signer_a.clone()));
+    assert_eq!(signers.get(1), Some(ctx.signer_b.clone()));
+    assert_eq!(signers.get(2), Some(ctx.signer_c.clone()));
 }
 
 #[test]
@@ -186,6 +189,10 @@ fn test_approve_duplicate_errors() {
     ctx.client.approve(&ctx.signer_a, &id);
     let result = ctx.client.try_approve(&ctx.signer_a, &id);
     assert_eq!(result, Err(Ok(GovernanceError::AlreadyApproved)));
+
+    let proposal = ctx.client.get_proposal(&id);
+    assert_eq!(proposal.approvals.len(), 1);
+    assert_eq!(proposal.approvals.get(0), Some(ctx.signer_a.clone()));
 }
 
 #[test]
@@ -335,6 +342,35 @@ fn test_add_remove_signer() {
     ctx.client.remove_signer(&new_signer);
     let signers = ctx.client.get_signers();
     assert_eq!(signers.len(), 3);
+}
+
+#[test]
+fn test_signer_index_updates_after_remove_and_readd() {
+    let ctx = GovCtx::setup();
+    let rotating_signer = Address::generate(&ctx.env);
+
+    ctx.client.add_signer(&rotating_signer);
+    ctx.client.remove_signer(&rotating_signer);
+
+    let result = ctx.client.try_propose(
+        &rotating_signer,
+        &ctx.dummy_target(),
+        &ctx.calldata("removed"),
+    );
+    assert_eq!(result, Err(Ok(GovernanceError::NotASigner)));
+
+    ctx.client.add_signer(&rotating_signer);
+    let signers = ctx.client.get_signers();
+    assert_eq!(signers.len(), 4);
+    assert_eq!(signers.get(3), Some(rotating_signer.clone()));
+
+    let proposal_id = ctx.client.propose(
+        &rotating_signer,
+        &ctx.dummy_target(),
+        &ctx.calldata("readded"),
+    );
+    let proposal = ctx.client.get_proposal(&proposal_id);
+    assert_eq!(proposal.proposer, rotating_signer);
 }
 
 #[test]
