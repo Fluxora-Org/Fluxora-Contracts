@@ -414,7 +414,7 @@ From **CONTRACT_VERSION 6**, all withdrawal operations enforce a minimum ledger 
 
 - **Constant**: `MIN_WITHDRAW_INTERVAL_LEDGERS = 17` (approximately 1 minute at ~5 seconds per ledger close, subject to network conditions)
 - **Enforcement**: `withdraw`, `delegated_withdraw`, and `batch_withdraw` all enforce `current_ledger - last_withdraw_ledger >= MIN_WITHDRAW_INTERVAL_LEDGERS`
-- **Error**: Returns `ContractError::WithdrawalTooFrequent` (error code 17) if the interval check fails
+- **Error**: Returns `ContractError::WithdrawalTooFrequent` (error code 32) if the interval check fails
 - **Atomicity**: For `batch_withdraw`, if any stream in the batch violates the rate limit, the entire batch reverts
 - **Per-Stream**: Each stream tracks its own `last_withdraw_ledger` independently
 - **First Withdrawal**: Always succeeds (`last_withdraw_ledger` is initialized to 0 at stream creation)
@@ -482,7 +482,7 @@ If the existing deposit does not cover the extended duration, `extend_stream_end
 
 ### Mutation Restrictions on Cliff-Only Streams
 
-To preserve the absolute one-shot unlock nature of a `[CliffOnly](#cliff-only-streams)` stream variant and guarantee its immutability post-creation, **all mutating endpoints are strictly blocked**. Attempting to call any of the following functions on a `[CliffOnly](#cliff-only-streams)` stream will return `[ContractError::UnsupportedStreamKind](./error.md#unsupportedstreamkind-17)` and revert all state changes:
+To preserve the absolute one-shot unlock nature of a `[CliffOnly](#cliff-only-streams)` stream variant and guarantee its immutability post-creation, **all mutating endpoints are strictly blocked**. Attempting to call any of the following functions on a `[CliffOnly](#cliff-only-streams)` stream will return `[ContractError::UnsupportedStreamKind](./error.md#unsupportedstreamkind-31)` and revert all state changes:
 
 - `top_up_stream`
 - `update_rate_per_second`
@@ -1194,12 +1194,12 @@ errors relevant to stream creation and timing.
 | `"overflow calculating total streamable amount"`                        | `create_stream` / `create_streams` | overflow in rate \* duration                  |
 | `"overflow calculating total batch deposit"`                            | `create_streams`                   | overflow in sum of deposits                   |
 | `ContractError::StartTimeInPast`                                        | `create_stream` / `create_streams` | start_time < ledger timestamp                 |
-| `ContractError::ClockRegression` (17)                                   | Ledger-backed accrual paths        | ledger timestamp < previous accrual timestamp |
+| `ContractError::ClockRegression` (24)                                   | Ledger-backed accrual paths        | ledger timestamp < previous accrual timestamp |
 | `ContractError::StreamAlreadyPaused` (10)                               | `pause_stream`                     | Double pause                                  |
 | `ContractError::StreamNotPaused` (11)                                   | `resume_stream`                    | Resume active stream                          |
 | `ContractError::StreamTerminalState` (12)                               | `pause_stream` / `resume_stream`   | Modification past end_time                    |
 | `ContractError::StreamNotFound` (1)                                     | Various                            | Invalid stream_id                             |
-| `[ContractError::UnsupportedStreamKind](./error.md#unsupportedstreamkind-17)` (17) | Mutating functions                 | Attempting to mutate a [CliffOnly](#cliff-only-streams) stream       |
+| `[ContractError::UnsupportedStreamKind](./error.md#unsupportedstreamkind-31)` (31) | Mutating functions                 | Attempting to mutate a [CliffOnly](#cliff-only-streams) stream       |
 | `ContractError::Unauthorized` (6)                                       | Various                            | Auth check failed                             |
 | `ContractError::InvalidState` (2)                                       | `withdraw`                         | Withdraw from non-terminal paused             |
 | `ContractError::InvalidState` (2)                                       | `cancel_stream`                    | Cancel completed/cancelled                    |

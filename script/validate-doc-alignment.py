@@ -139,7 +139,12 @@ _RE_EVENT_SYMBOL = re.compile(
 )
 
 _RE_ERROR_VARIANT = re.compile(
-    r"^\s{4}([A-Z][A-Za-z0-9]+)\s*=\s*\d+\s*,",
+    r"^\s{4}([A-Z][A-Za-z0-9]+)\s*=\s*(\d+)\s*,",
+    re.MULTILINE,
+)
+
+_RE_ERROR_DOC_ROW = re.compile(
+    r"^\|\s*`([A-Z][A-Za-z0-9]+)`\s*\|\s*(\d+)\s*\|",
     re.MULTILINE,
 )
 
@@ -157,7 +162,25 @@ def extract_event_symbols(source: str) -> set:
     return out
 
 def extract_error_variants(source: str) -> set:
-    return set(_RE_ERROR_VARIANT.findall(source)) - ERROR_EXTRACT_EXCLUDE
+    return set(extract_error_discriminants(source)) - ERROR_EXTRACT_EXCLUDE
+
+def extract_error_discriminants(source: str) -> dict[str, int]:
+    enum_start = source.find("pub enum ContractError {")
+    if enum_start == -1:
+        enum_source = source
+    else:
+        enum_end = source.find("\n}", enum_start)
+        if enum_end == -1:
+            return {}
+        enum_source = source[enum_start:enum_end]
+    return {
+        name: int(value)
+        for name, value in _RE_ERROR_VARIANT.findall(enum_source)
+        if name not in ERROR_EXTRACT_EXCLUDE
+    }
+
+def extract_documented_error_codes(doc_text: str) -> dict[str, int]:
+    return {name: int(value) for name, value in _RE_ERROR_DOC_ROW.findall(doc_text)}
 
 # ---------------------------------------------------------------------------
 # Validation
@@ -165,6 +188,27 @@ def extract_error_variants(source: str) -> set:
 
 def check_missing(identifiers: set, doc_text: str) -> set:
     return {ident for ident in identifiers if ident not in doc_text}
+
+def check_duplicate_error_codes(error_codes: dict[str, int]) -> dict[int, list[str]]:
+    by_code: dict[int, list[str]] = {}
+    for name, code in error_codes.items():
+        by_code.setdefault(code, []).append(name)
+    return {
+        code: sorted(names)
+        for code, names in by_code.items()
+        if len(names) > 1
+    }
+
+def check_error_doc_codes(
+    error_codes: dict[str, int],
+    documented_codes: dict[str, int],
+) -> dict[str, tuple[int, int]]:
+    mismatches = {}
+    for name, source_code in error_codes.items():
+        documented_code = documented_codes.get(name)
+        if documented_code is not None and documented_code != source_code:
+            mismatches[name] = (source_code, documented_code)
+    return mismatches
 
 def validate(
     contract_path: Path,
@@ -182,10 +226,12 @@ def validate(
     events_text = events_doc.read_text(encoding="utf-8")
     error_text = error_doc.read_text(encoding="utf-8")
 
+    error_codes = extract_error_discriminants(error_source)
+
     checks = [
         (extract_entrypoints(source), streaming_text, streaming_doc, "entrypoint"),
         (extract_event_symbols(events_source), events_text, events_doc, "event symbol"),
-        (extract_error_variants(error_source), error_text, error_doc, "error variant"),
+        (set(error_codes), error_text, error_doc, "error variant"),
     ]
 
     drift_found = False
@@ -198,6 +244,23 @@ def validate(
                 display = doc_path
             print(f"MISSING DOC: '{ident}' ({kind}) found in code but not in '{display}'")
             drift_found = True
+
+    for code, names in sorted(check_duplicate_error_codes(error_codes).items()):
+        print(
+            "DUPLICATE ERROR CODE: "
+            f"ContractError discriminant {code} is shared by {', '.join(names)}"
+        )
+        drift_found = True
+
+    documented_error_codes = extract_documented_error_codes(error_text)
+    for name, (source_code, documented_code) in sorted(
+        check_error_doc_codes(error_codes, documented_error_codes).items()
+    ):
+        print(
+            "ERROR DOC CODE MISMATCH: "
+            f"{name} is {source_code} in code but {documented_code} in docs/error.md"
+        )
+        drift_found = True
 
     if not drift_found:
         print("OK: all contract identifiers are present in documentation.")

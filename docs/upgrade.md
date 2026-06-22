@@ -16,7 +16,7 @@ Version policy, migration runbook, and audit notes for operators, integrators, a
 ### Current value
 
 ```
-CONTRACT_VERSION = 5
+CONTRACT_VERSION = 6
 ```
 
 ### Version history
@@ -28,6 +28,7 @@ CONTRACT_VERSION = 5
 | 3 | `Stream` struct gained `memo: Option<Bytes>`; `StreamCreated` event gained `memo` field; `DataKey::StreamMemo(u64)` added at discriminant 10; `create_stream`/`create_streams` gained `memo` parameter; `get_stream_memo` entry-point added |
 | 4 | `TotalLiabilities` instance key for escrow accounting |
 | 5 | `withdraw_dust_threshold: i128` added to `Stream` struct and creation params |
+| 6 | `ContractError` discriminants de-duplicated; missing stream errors declared; `LastAccrualLedgerTimestamp` and `RotationHistory` keys documented |
 
 ### When to increment
 

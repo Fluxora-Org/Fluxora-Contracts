@@ -57,9 +57,23 @@ pub enum DataKey {
 | 7 | `GlobalPauseTimestamp` | Instance | `u64` | `pause_protocol` | `resume_protocol` (removes) |
 | 8 | `GlobalPauseAdmin` | Instance | `Address` | `pause_protocol` | `resume_protocol` (removes) |
 | 9 | `AutoClaimDestination(u64)` | Persistent | `Address` | auto-claim opt-in | auto-claim revoke |
-| 10 | `StreamMemo(u64)` | Persistent | `Bytes` (max 64 bytes) | `create_stream`, `create_streams` | `close_completed_stream` (removes) |
-| 11 | `PauseState` | Instance | `PauseState` enum | `set_global_emergency_paused`, `set_contract_paused`, `pause_protocol` | `resume_protocol` (Active) |
-| 12 | `ReentrancyLock` | Instance | `bool` | `acquire_reentrancy_lock` | `release_reentrancy_lock` |
+| 10 | `NextTemplateId` | Instance | `u64` | template registration | template registration |
+| 11 | `ActiveTemplateCount` | Instance | `u64` | template registration | template create/delete |
+| 12 | `StreamTemplate(u64)` | Persistent | `StreamScheduleTemplate` | `register_stream_template` | `delete_stream_template` |
+| 13 | `OwnerTemplateIds(Address)` | Persistent | `Vec<u64>` | `register_stream_template` | `delete_stream_template` |
+| 14 | `TotalLiabilities` | Instance | `i128` | stream funding paths | create/top-up/withdraw/cancel paths |
+| 15 | `WithdrawNonce(Address)` | Persistent | `u64` | delegated withdrawal paths | delegated withdrawal paths |
+| 16 | `PauseState` | Instance | `PauseState` enum | `set_global_emergency_paused`, `set_contract_paused`, `pause_protocol` | `resume_protocol` (Active) |
+| 17 | `ReentrancyLock` | Instance | `bool` | `acquire_reentrancy_lock` | `release_reentrancy_lock` |
+| 18 | `RecipientStreamPage(Address, u32)` | Persistent | `Vec<u64>` | paged recipient-index writes | paged recipient-index maintenance |
+| 19 | `RecipientStreamPageCount(Address)` | Persistent | `u32` | paged recipient-index writes | paged recipient-index maintenance |
+| 20 | `PendingRecipientUpdate(u64)` | Persistent | `Address` | `update_recipient` | `accept_recipient_update`, `cancel_recipient_update` |
+| 21 | `IdReservation(Address)` | Persistent | `IdReservation` | `reserve_stream_ids` | `create_stream` reservation consumption |
+| 22 | `MaxRatePerSecond` | Instance | `i128` | `set_max_rate_per_second` | `set_max_rate_per_second` |
+| 23 | `DelegatedWithdrawNonce(Address)` | Persistent | `u64` | `delegated_withdraw` | `delegated_withdraw` |
+| 24 | `LastPauseRecord(PauseKind)` | Instance | `StreamPauseRecord` / protocol pause record | pause paths | pause/resume paths |
+| 25 | `LastAccrualLedgerTimestamp` | Instance | `u64` | ledger-backed accrual paths | ledger-backed accrual paths |
+| 26 | `RotationHistory(u64)` | Persistent | `Vec<RotationEntry>` | recipient rotation paths | recipient rotation paths |
 
 ---
 

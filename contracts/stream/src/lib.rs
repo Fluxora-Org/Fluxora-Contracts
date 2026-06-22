@@ -171,7 +171,13 @@ const MIN_PAUSE_INTERVAL_LEDGERS: u32 = 17;
 ///
 /// Bumped to 4: accrual paths track the last ledger timestamp they observed in
 /// instance storage to detect retrograde test clocks and migration regressions.
-pub const CONTRACT_VERSION: u32 = 4;
+///
+/// Bumped to 5: `withdraw_dust_threshold` was added to `Stream` and creation
+/// parameters.
+///
+/// Bumped to 6: `ContractError` discriminants were de-duplicated and every
+/// stream error referenced by the source/tests was assigned a stable code.
+pub const CONTRACT_VERSION: u32 = 6;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -369,8 +375,26 @@ pub enum ContractError {
     TemplateLimitExceeded = 21,
     /// Caller not authorized to delete template.
     TemplateUnauthorized = 22,
+    /// Ledger-backed accrual observed a timestamp lower than the previous timestamp.
+    ClockRegression = 24,
+    /// Withdraw dust threshold is negative or larger than the initial deposit.
+    InvalidDustThreshold = 25,
+    /// Keeper cancellation was attempted before the grace period elapsed.
+    KeeperGracePeriodNotElapsed = 26,
+    /// Per-stream metadata exceeds the configured byte/count bounds.
+    MetadataTooLarge = 27,
+    /// Pause/resume was attempted before the minimum toggle interval elapsed.
+    PauseCooldownActive = 28,
+    /// A proposed rate exceeds the configured maximum rate per second.
+    RateCapExceeded = 29,
+    /// A proposed streaming rate is below the configured minimum.
+    RateTooLow = 30,
+    /// Operation is not supported for the stream's current kind.
+    UnsupportedStreamKind = 31,
+    /// Withdrawal was attempted before the per-stream ledger interval elapsed.
+    WithdrawalTooFrequent = 32,
     /// Pause reason string exceeds `MAX_PAUSE_REASON_BYTES`.
-    PauseReasonTooLong = 23,
+    PauseReasonTooLong = 33,
 }
 
 #[contracttype]
@@ -916,6 +940,10 @@ pub enum DataKey {
     DelegatedWithdrawNonce(Address),
     /// Last pause record for stream-level or protocol-level pause.
     LastPauseRecord(PauseKind),
+    /// Last ledger timestamp observed by accrual paths.
+    LastAccrualLedgerTimestamp,
+    /// Bounded recipient-rotation history for a stream.
+    RotationHistory(u64),
 }
 
 // ---------------------------------------------------------------------------

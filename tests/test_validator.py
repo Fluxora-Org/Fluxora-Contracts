@@ -357,6 +357,39 @@ class TestExtractErrorVariants:
         assert vda.extract_error_variants(src) == {"Alpha", "Beta", "Gamma"}
 
 
+class TestExtractErrorDiscriminants:
+    def test_finds_variant_codes(self):
+        src = "    StreamNotFound = 1,\n    InvalidState = 2,"
+        assert vda.extract_error_discriminants(src) == {
+            "StreamNotFound": 1,
+            "InvalidState": 2,
+        }
+
+    def test_excludes_other_contract_enums(self):
+        src = "    Operational = 1,\n    StreamNotFound = 2,"
+        assert vda.extract_error_discriminants(src) == {"StreamNotFound": 2}
+
+
+class TestErrorCodeChecks:
+    def test_extracts_documented_error_codes(self):
+        doc = "| `StreamNotFound` | 1 | Missing stream |\n"
+        assert vda.extract_documented_error_codes(doc) == {"StreamNotFound": 1}
+
+    def test_detects_duplicate_error_codes(self):
+        assert vda.check_duplicate_error_codes({"Alpha": 1, "Beta": 1}) == {
+            1: ["Alpha", "Beta"]
+        }
+
+    def test_no_duplicate_error_codes(self):
+        assert vda.check_duplicate_error_codes({"Alpha": 1, "Beta": 2}) == {}
+
+    def test_detects_doc_code_mismatch(self):
+        assert vda.check_error_doc_codes(
+            {"Alpha": 1, "Beta": 2},
+            {"Alpha": 1, "Beta": 3},
+        ) == {"Beta": (2, 3)}
+
+
 # ---------------------------------------------------------------------------
 # check_missing
 # ---------------------------------------------------------------------------
@@ -457,6 +490,28 @@ class TestValidate:
             error="# Errors\nOnly `StreamNotFound` is documented here.\n")
         vda.validate(*paths)
         assert "error variant" in capsys.readouterr().out
+
+    def test_fails_on_duplicate_error_code(self, tmp_path, capsys):
+        paths = _write_files(
+            tmp_path,
+            error_rs=(
+                "#[contracterror]\n"
+                "pub enum ContractError {\n"
+                "    StreamNotFound = 1,\n"
+                "    InvalidState = 1,\n"
+                "}\n"
+            ),
+        )
+        assert vda.validate(*paths) == 1
+        assert "DUPLICATE ERROR CODE:" in capsys.readouterr().out
+
+    def test_fails_on_error_doc_code_mismatch(self, tmp_path, capsys):
+        paths = _write_files(
+            tmp_path,
+            error="# Errors\n| `StreamNotFound` | 9 | wrong |\n`InvalidState` = 2\n",
+        )
+        assert vda.validate(*paths) == 1
+        assert "ERROR DOC CODE MISMATCH:" in capsys.readouterr().out
 
     def test_utf8_encoding_roundtrip(self, tmp_path):
         paths = _write_files(

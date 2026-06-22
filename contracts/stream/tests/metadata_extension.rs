@@ -14,7 +14,7 @@ extern crate std;
 
 use fluxora_stream::{
     ContractError, CreateStreamParams, CreateStreamRelativeParams, FluxoraStream,
-    FluxoraStreamClient, StreamStatus, MAX_METADATA_BYTES, MAX_METADATA_KEYS,
+    FluxoraStreamClient, StreamStatus, CONTRACT_VERSION, MAX_METADATA_BYTES, MAX_METADATA_KEYS,
     MAX_METADATA_KEY_BYTES, MAX_METADATA_VALUE_BYTES,
 };
 use soroban_sdk::{
@@ -749,15 +749,15 @@ fn test_two_streams_independent_metadata() {
 }
 
 // ---------------------------------------------------------------------------
-// CONTRACT_VERSION bumped to 4
+// CONTRACT_VERSION smoke test
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_contract_version_is_4() {
+fn test_contract_version_matches_constant() {
     let ctx = Ctx::setup();
     assert_eq!(
         ctx.client().version(),
-        4,
-        "CONTRACT_VERSION must be 4 after metadata extension"
+        CONTRACT_VERSION,
+        "version() must return the compile-time CONTRACT_VERSION"
     );
 }

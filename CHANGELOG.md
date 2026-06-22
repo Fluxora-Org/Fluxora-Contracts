@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - (leave empty)
 
 ### Fixed
-- (leave empty)
+- De-duplicated `ContractError` discriminants, declared the missing stream error variants used by source/tests, removed the stale `contracts/stream/src/errors.rs` enum stub, and documented the V6 ABI/code mapping.
 
 ---
 

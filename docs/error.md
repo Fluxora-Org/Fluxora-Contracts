@@ -28,7 +28,6 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `DuplicateStreamId` | 14 | Duplicate stream IDs supplied to a batch operation | `batch_withdraw` |
 | `InvalidSignature` | 15 | Delegated withdrawal signature is invalid, expired, or nonce mismatch | `delegated_withdraw` |
 | `BelowMinimumAmount` | 16 | Withdrawable amount is below the `expected_minimum_amount` committed in the signature | `delegated_withdraw` |
-| `ClockRegression` | 17 | Ledger-backed accrual observed a timestamp lower than the previous accrual timestamp | `calculate_accrued`, `get_withdrawable`, `withdraw`, `withdraw_to`, `batch_withdraw`, `batch_withdraw_to`, rate changes, `cancel_stream`, auto-claim paths |
 | `ReservationCountZero` | 17 | ID reservation count is zero | `reserve_stream_ids` |
 | `ReservationLimitExceeded` | 18 | ID reservation count exceeds `MAX_ID_RESERVATION` | `reserve_stream_ids` |
 | `SignatureDeadlineExpired` | 19 | Delegated withdrawal signature deadline has passed | `delegated_withdraw` |
@@ -36,7 +35,16 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `TemplateLimitExceeded` | 21 | Per-owner or global template limit would be exceeded | `register_stream_template` |
 | `TemplateUnauthorized` | 22 | Caller is not authorized to delete a template | `delete_stream_template` |
 | `TokenVerificationFailed` | 23 | Token contract does not expose the expected SEP-41 interface during init | `init` |
-| `PauseReasonTooLong` | 23 | Pause reason string exceeds `MAX_PAUSE_REASON_BYTES` | `pause_protocol` |
+| `ClockRegression` | 24 | Ledger-backed accrual observed a timestamp lower than the previous accrual timestamp | `calculate_accrued`, `get_withdrawable`, `withdraw`, `withdraw_to`, `batch_withdraw`, `batch_withdraw_to`, rate changes, `cancel_stream`, auto-claim paths |
+| `InvalidDustThreshold` | 25 | `withdraw_dust_threshold` is negative or larger than the initial deposit | `create_stream`, `create_streams`, relative/batch creation helpers |
+| `KeeperGracePeriodNotElapsed` | 26 | Permissionless keeper cancellation was attempted before the grace period elapsed | `keeper_cancel` |
+| `MetadataTooLarge` | 27 | Per-stream metadata exceeds configured byte/count bounds | `create_stream`, `create_streams`, relative/batch creation helpers |
+| `PauseCooldownActive` | 28 | Pause/resume attempted before `MIN_PAUSE_INTERVAL_LEDGERS` elapsed | `pause_stream`, `resume_stream`, admin pause/resume helpers |
+| `RateCapExceeded` | 29 | Proposed rate exceeds the configured max rate per second | `update_rate_per_second` |
+| `RateTooLow` | 30 | Proposed rate is below the configured minimum rate | create/update rate validation paths |
+| `UnsupportedStreamKind` | 31 | Mutating operation is not supported for this stream kind | `top_up_stream`, rate/schedule mutation paths |
+| `WithdrawalTooFrequent` | 32 | Withdrawal attempted before the per-stream ledger interval elapsed | `withdraw`, `delegated_withdraw`, `batch_withdraw` |
+| `PauseReasonTooLong` | 33 | Pause reason string exceeds `MAX_PAUSE_REASON_BYTES` | `pause_protocol` |
 
 Non-error enum values used by stream creation and accrual:
 
@@ -606,7 +614,7 @@ match client.try_delegated_withdraw(&relayer, &stream_id, &signature, &nonce, &e
 
 ---
 
-### ClockRegression (17)
+### ClockRegression (24)
 
 **Definition**: Ledger-backed accrual observed a ledger timestamp lower than the previous accrual timestamp stored for the contract instance.
 
@@ -676,7 +684,71 @@ match client.try_delegated_withdraw(&relayer, &stream_id, &signature, &nonce, &e
 
 ---
 
-### PauseReasonTooLong (23)
+### InvalidDustThreshold (25)
+
+**Definition**: `withdraw_dust_threshold` is negative or larger than the initial deposit.
+
+**Client Action**: Use a non-negative dust threshold no larger than the stream's initial deposit, or set it to `0` to disable dust filtering.
+
+---
+
+### KeeperGracePeriodNotElapsed (26)
+
+**Definition**: `keeper_cancel` was called before `end_time + KEEPER_GRACE_PERIOD_SECONDS`.
+
+**Client Action**: Wait until the grace-period boundary is reached before retrying the permissionless cancellation.
+
+---
+
+### MetadataTooLarge (27)
+
+**Definition**: Per-stream metadata exceeds the configured size, count, or key/value bounds.
+
+**Client Action**: Reduce metadata key/value sizes or the number of metadata entries before creating the stream.
+
+---
+
+### PauseCooldownActive (28)
+
+**Definition**: A stream pause/resume operation was attempted before the minimum ledger cooldown elapsed.
+
+**Client Action**: Wait at least `MIN_PAUSE_INTERVAL_LEDGERS` after the previous pause toggle before retrying.
+
+---
+
+### RateCapExceeded (29)
+
+**Definition**: A proposed rate is above the configured `MaxRatePerSecond`.
+
+**Client Action**: Query the configured rate cap and submit a rate at or below that value.
+
+---
+
+### RateTooLow (30)
+
+**Definition**: A proposed rate is below the configured minimum rate.
+
+**Client Action**: Increase the stream rate to at least the contract minimum.
+
+---
+
+### UnsupportedStreamKind (31)
+
+**Definition**: A mutating operation is not supported for the stream's current `StreamKind`.
+
+**Client Action**: For `CliffOnly` streams, leave the immutable schedule untouched or create a replacement stream with the desired parameters.
+
+---
+
+### WithdrawalTooFrequent (32)
+
+**Definition**: A withdrawal was attempted before the minimum per-stream ledger interval elapsed.
+
+**Client Action**: Wait until `last_withdraw_ledger + MIN_WITHDRAW_INTERVAL_LEDGERS` before retrying.
+
+---
+
+### PauseReasonTooLong (33)
 
 **Definition**: `pause_protocol` received a reason string longer than `MAX_PAUSE_REASON_BYTES`.
 
@@ -719,7 +791,7 @@ infrastructure-level failures (not user input errors):
 | `cancel_stream` | - | StreamNotFound, Unauthorized, InvalidState | StreamNotFound, Unauthorized | - |
 | `withdraw` | StreamNotFound, Unauthorized, InvalidState | - | - | - |
 | `delegated_withdraw` | - | - | - | InvalidSignature, BelowMinimumAmount, StreamNotFound, InvalidState |
-| `top_up_stream` | - | StreamNotFound, Unauthorized, InvalidParams, InvalidState, ArithmeticOverflow, `[UnsupportedStreamKind](#unsupportedstreamkind-17)` | StreamNotFound | - |
+| `top_up_stream` | - | StreamNotFound, Unauthorized, InvalidParams, InvalidState, ArithmeticOverflow, `[UnsupportedStreamKind](#unsupportedstreamkind-31)` | StreamNotFound | - |
 | `calculate_accrued` | StreamNotFound | StreamNotFound | StreamNotFound | StreamNotFound |
 | `get_stream_state` | StreamNotFound | StreamNotFound | StreamNotFound | StreamNotFound |
 
@@ -757,6 +829,9 @@ Error handling is verified by tests in `contracts/stream/src/test.rs`:
 | InvalidSignature | `delegated_withdraw` with invalid or expired signature |
 | BelowMinimumAmount | `delegated_withdraw` when accrued < expected_minimum |
 | ClockRegression | `clock_monotonicity.rs` seeds non-monotonic ledger timestamps |
+| InvalidDustThreshold | `dust_threshold.rs` rejects invalid threshold parameters |
+| UnsupportedStreamKind | `cliff_only_variant.rs` rejects unsupported mutations |
+| WithdrawalTooFrequent | `withdrawal_frequency.rs` enforces withdrawal interval limits |
 
 Discriminant stability is verified by `test_contract_error_discriminants_are_stable` in `contracts/stream/src/test.rs`, which asserts the exact `u32` value of every `ContractError` variant and will fail at compile time if any value is changed.
 
@@ -781,7 +856,7 @@ The factory contract (`contracts/factory`) uses a separate `FactoryError` enum.
 
 ### Included
 
-- All 14 `ContractError` variants
+- All `ContractError` variants
 - Role-based error mapping
 - Success/failure semantics for each operation
 - Time-driven edge cases

@@ -20454,90 +20454,140 @@ fn test_resume_at_end_time_leaves_state_unchanged() {
 /// contract ABI surface and must remain stable across versions.
 #[test]
 fn test_contract_error_discriminants_are_stable() {
-    // Core stream errors (1-14)
-    assert_eq!(
-        ContractError::StreamNotFound as u32,
-        1,
-        "StreamNotFound must be 1"
-    );
-    assert_eq!(
-        ContractError::InvalidState as u32,
-        2,
-        "InvalidState must be 2"
-    );
-    assert_eq!(
-        ContractError::InvalidParams as u32,
-        3,
-        "InvalidParams must be 3"
-    );
-    assert_eq!(
-        ContractError::ContractPaused as u32,
-        4,
-        "ContractPaused must be 4"
-    );
-    assert_eq!(
-        ContractError::StartTimeInPast as u32,
-        5,
-        "StartTimeInPast must be 5"
-    );
-    assert_eq!(
-        ContractError::ArithmeticOverflow as u32,
-        6,
-        "ArithmeticOverflow must be 6"
-    );
-    assert_eq!(
-        ContractError::Unauthorized as u32,
-        7,
-        "Unauthorized must be 7"
-    );
-    assert_eq!(
-        ContractError::AlreadyInitialised as u32,
-        8,
-        "AlreadyInitialised must be 8"
-    );
-    assert_eq!(
-        ContractError::InsufficientBalance as u32,
-        9,
-        "InsufficientBalance must be 9"
-    );
-    assert_eq!(
-        ContractError::InsufficientDeposit as u32,
-        10,
-        "InsufficientDeposit must be 10"
-    );
-    assert_eq!(
-        ContractError::StreamAlreadyPaused as u32,
-        11,
-        "StreamAlreadyPaused must be 11"
-    );
-    assert_eq!(
-        ContractError::StreamNotPaused as u32,
-        12,
-        "StreamNotPaused must be 12"
-    );
-    assert_eq!(
-        ContractError::StreamTerminalState as u32,
-        13,
-        "StreamTerminalState must be 13"
-    );
-    assert_eq!(
-        ContractError::DuplicateStreamId as u32,
-        14,
-        "DuplicateStreamId must be 14"
-    );
-    assert_eq!(
-        ContractError::InvalidSignature as u32,
-        15,
-        "InvalidSignature must be 15"
-    );
-    assert_eq!(
-        ContractError::BelowMinimumAmount as u32,
-        16,
-        "BelowMinimumAmount must be 16"
-    );
-    assert_eq!(
-        ContractError::ClockRegression as u32,
-        17,
-        "ClockRegression must be 17"
-    );
+    let discriminants = [
+        ("StreamNotFound", ContractError::StreamNotFound as u32, 1),
+        ("InvalidState", ContractError::InvalidState as u32, 2),
+        ("InvalidParams", ContractError::InvalidParams as u32, 3),
+        ("ContractPaused", ContractError::ContractPaused as u32, 4),
+        ("StartTimeInPast", ContractError::StartTimeInPast as u32, 5),
+        (
+            "ArithmeticOverflow",
+            ContractError::ArithmeticOverflow as u32,
+            6,
+        ),
+        ("Unauthorized", ContractError::Unauthorized as u32, 7),
+        (
+            "AlreadyInitialised",
+            ContractError::AlreadyInitialised as u32,
+            8,
+        ),
+        (
+            "InsufficientBalance",
+            ContractError::InsufficientBalance as u32,
+            9,
+        ),
+        (
+            "InsufficientDeposit",
+            ContractError::InsufficientDeposit as u32,
+            10,
+        ),
+        (
+            "StreamAlreadyPaused",
+            ContractError::StreamAlreadyPaused as u32,
+            11,
+        ),
+        ("StreamNotPaused", ContractError::StreamNotPaused as u32, 12),
+        (
+            "StreamTerminalState",
+            ContractError::StreamTerminalState as u32,
+            13,
+        ),
+        (
+            "DuplicateStreamId",
+            ContractError::DuplicateStreamId as u32,
+            14,
+        ),
+        (
+            "InvalidSignature",
+            ContractError::InvalidSignature as u32,
+            15,
+        ),
+        (
+            "BelowMinimumAmount",
+            ContractError::BelowMinimumAmount as u32,
+            16,
+        ),
+        (
+            "ReservationCountZero",
+            ContractError::ReservationCountZero as u32,
+            17,
+        ),
+        (
+            "ReservationLimitExceeded",
+            ContractError::ReservationLimitExceeded as u32,
+            18,
+        ),
+        (
+            "SignatureDeadlineExpired",
+            ContractError::SignatureDeadlineExpired as u32,
+            19,
+        ),
+        (
+            "TemplateNotFound",
+            ContractError::TemplateNotFound as u32,
+            20,
+        ),
+        (
+            "TemplateLimitExceeded",
+            ContractError::TemplateLimitExceeded as u32,
+            21,
+        ),
+        (
+            "TemplateUnauthorized",
+            ContractError::TemplateUnauthorized as u32,
+            22,
+        ),
+        (
+            "TokenVerificationFailed",
+            ContractError::TokenVerificationFailed as u32,
+            23,
+        ),
+        ("ClockRegression", ContractError::ClockRegression as u32, 24),
+        (
+            "InvalidDustThreshold",
+            ContractError::InvalidDustThreshold as u32,
+            25,
+        ),
+        (
+            "KeeperGracePeriodNotElapsed",
+            ContractError::KeeperGracePeriodNotElapsed as u32,
+            26,
+        ),
+        (
+            "MetadataTooLarge",
+            ContractError::MetadataTooLarge as u32,
+            27,
+        ),
+        (
+            "PauseCooldownActive",
+            ContractError::PauseCooldownActive as u32,
+            28,
+        ),
+        ("RateCapExceeded", ContractError::RateCapExceeded as u32, 29),
+        ("RateTooLow", ContractError::RateTooLow as u32, 30),
+        (
+            "UnsupportedStreamKind",
+            ContractError::UnsupportedStreamKind as u32,
+            31,
+        ),
+        (
+            "WithdrawalTooFrequent",
+            ContractError::WithdrawalTooFrequent as u32,
+            32,
+        ),
+        (
+            "PauseReasonTooLong",
+            ContractError::PauseReasonTooLong as u32,
+            33,
+        ),
+    ];
+
+    let mut seen = std::collections::BTreeMap::new();
+    for (name, actual, expected) in discriminants {
+        assert_eq!(actual, expected, "{name} must be {expected}");
+        assert!(
+            seen.insert(actual, name).is_none(),
+            "duplicate ContractError discriminant {actual}"
+        );
+    }
 }

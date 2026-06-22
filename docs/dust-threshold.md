@@ -152,7 +152,7 @@ The table below shows expected behavior for common `(deposit_amount, threshold, 
 ```
 
 If `withdraw_dust_threshold > deposit_amount`, the contract rejects creation with
-`ContractError::InvalidDustThreshold` (error code 20). This prevents a
+`ContractError::InvalidDustThreshold` (error code 25). This prevents a
 misconfiguration where the threshold can never be reached, permanently locking
 the recipient's funds in non-terminal withdrawals.
 
@@ -241,6 +241,6 @@ If you are building a `StreamScheduleTemplate` or a factory contract that sets
 
 | Error | Code | Condition |
 |-------|------|-----------|
-| `ContractError::InvalidDustThreshold` | 20 | `withdraw_dust_threshold > deposit_amount` at creation |
+| `ContractError::InvalidDustThreshold` | 25 | `withdraw_dust_threshold > deposit_amount` at creation |
 
 See [error.md](./error.md) for the full error code reference.
