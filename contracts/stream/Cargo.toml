@@ -19,6 +19,7 @@ testutils = ["soroban-sdk/testutils"]
 
 [dependencies]
 soroban-sdk = "21.7.7"
+ed25519-dalek = { version = "2.1", default-features = false, features = ["fast"] }
 
 [dev-dependencies]
 # Required for simulating ledger environment and testing time dependencies
@@ -30,5 +31,5 @@ fluxora_governance = { path = "../governance", features = ["testutils"] }
 # Property-based testing for accrual math fuzz harness (#292)
 proptest = "1"
 # Required for constructing Ed25519 keypairs in delegated-withdraw tests
-ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+ed25519-dalek = { version = "2.1", default-features = false, features = ["fast", "rand_core"] }
 rand = "0.8"

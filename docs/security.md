@@ -306,7 +306,8 @@ Including the destination prevents a relayer from redirecting funds.
 
 - A used signature cannot be replayed (nonce incremented on success).
 - An expired signature is rejected before any state change.
-- A signature from the wrong key is rejected by `ed25519_verify` (host trap).
+- A signature from the wrong key is rejected with `InvalidSignature` before the
+  host verifier is called.
 - The destination is bound in the signed message — a relayer cannot redirect funds.
 - The contract address is bound in the signed message — signatures are chain/contract-specific.
 - Direct `withdraw` / `withdraw_to` / `batch_withdraw` are unaffected; their auth paths

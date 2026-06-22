@@ -6,6 +6,7 @@ mod accrual;
 mod checksum;
 mod token_check;
 
+use ed25519_dalek::{Signature, VerifyingKey};
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env};
 use token_check::verify_token_behavior;
 
@@ -956,6 +957,34 @@ fn current_accrual_timestamp(env: &Env) -> Result<u64, ContractError> {
     env.storage().instance().set(&key, &now);
     bump_instance_ttl(env);
     Ok(now)
+}
+
+fn delegated_withdraw_signed_message(
+    stream_id: u64,
+    nonce: u64,
+    deadline: u64,
+    expected_minimum_amount: i128,
+) -> [u8; 40] {
+    let mut msg = [0u8; 40];
+    msg[0..8].copy_from_slice(&stream_id.to_be_bytes());
+    msg[8..16].copy_from_slice(&nonce.to_be_bytes());
+    msg[16..24].copy_from_slice(&deadline.to_be_bytes());
+    msg[24..40].copy_from_slice(&expected_minimum_amount.to_be_bytes());
+    msg
+}
+
+fn verify_delegated_withdraw_signature(
+    recipient_public_key: &soroban_sdk::BytesN<32>,
+    signature: &soroban_sdk::BytesN<64>,
+    message: &[u8; 40],
+) -> Result<(), ContractError> {
+    let verifying_key = VerifyingKey::from_bytes(&recipient_public_key.to_array())
+        .map_err(|_| ContractError::InvalidSignature)?;
+    let signature = Signature::from_bytes(&signature.to_array());
+
+    verifying_key
+        .verify_strict(message, &signature)
+        .map_err(|_| ContractError::InvalidSignature)
 }
 
 fn acquire_reentrancy_lock(env: &Env) -> Result<(), ContractError> {
@@ -3553,20 +3582,15 @@ impl FluxoraStream {
 
         // 5. Build the signed message:
         //    stream_id (8 bytes) | nonce (8 bytes) | deadline (8 bytes) | expected_minimum_amount (16 bytes)
-        let mut msg = soroban_sdk::Bytes::new(&env);
-        msg.extend_from_array(&stream_id.to_be_bytes());
-        msg.extend_from_array(&nonce.to_be_bytes());
-        msg.extend_from_array(&deadline.to_be_bytes());
-        msg.extend_from_array(&expected_minimum_amount.to_be_bytes());
+        let signed_message =
+            delegated_withdraw_signed_message(stream_id, nonce, deadline, expected_minimum_amount);
 
-        // 5. Verify ed25519 signature — panics on failure (Soroban host trap).
-        let pk_bytes: soroban_sdk::BytesN<32> = recipient_public_key
-            .try_into()
-            .map_err(|_| ContractError::InvalidSignature)?;
-        let sig_bytes: soroban_sdk::BytesN<64> = signature
-            .try_into()
-            .map_err(|_| ContractError::InvalidSignature)?;
-        env.crypto().ed25519_verify(&pk_bytes, &msg, &sig_bytes);
+        // 6. Verify ed25519 signature with a structured error before calling
+        // the host verifier, which traps if verification fails.
+        verify_delegated_withdraw_signature(&recipient_public_key, &signature, &signed_message)?;
+        let msg = soroban_sdk::Bytes::from_array(&env, &signed_message);
+        env.crypto()
+            .ed25519_verify(&recipient_public_key, &msg, &signature);
 
         // 7. State checks (same as withdraw).
         if stream.status == StreamStatus::Completed {

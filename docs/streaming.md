@@ -1087,7 +1087,7 @@ Each recipient has a per-address nonce stored in `DataKey::DelegatedWithdrawNonc
 |-----------|-------|
 | `ledger.timestamp() > deadline` | `InvalidSignature` (15) |
 | `nonce != stored_nonce` | `InvalidSignature` (15) |
-| ed25519 signature invalid | host trap (panic) |
+| ed25519 signature invalid | `InvalidSignature` (15) |
 | `withdrawable < expected_minimum_amount` | `BelowMinimumAmount` (16) |
 | Stream paused (non-terminal) | `InvalidState` (2) |
 | Stream completed | `InvalidState` (2) |

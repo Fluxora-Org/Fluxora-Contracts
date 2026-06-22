@@ -1289,6 +1289,44 @@ fn sign_delegated_msg(env: &Env, signing_key: &SigningKey, msg: &soroban_sdk::By
 }
 
 #[test]
+fn delegated_withdraw_bad_signature_returns_invalid_signature() {
+    let ctx = Ctx::setup();
+    ctx.env.mock_all_auths();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_stream();
+
+    ctx.env.ledger().set_sequence_number(100);
+    ctx.env.ledger().set_timestamp(500);
+
+    let (pub_key, signing_key) = delegated_keypair(&ctx.env);
+    let nonce = 0u64;
+    let deadline = 9999u64;
+    let min_amount = 0i128;
+    let msg = build_delegated_msg(&ctx.env, stream_id, nonce, deadline, min_amount);
+    let valid_sig = sign_delegated_msg(&ctx.env, &signing_key, &msg);
+    let mut bad_sig_bytes = valid_sig.to_array();
+    bad_sig_bytes[0] ^= 0x01;
+    let bad_sig = BytesN::from_array(&ctx.env, &bad_sig_bytes);
+
+    let relayer = Address::generate(&ctx.env);
+    let result = ctx.client().try_delegated_withdraw(
+        &stream_id,
+        &relayer,
+        &pub_key,
+        &nonce,
+        &deadline,
+        &min_amount,
+        &bad_sig,
+    );
+
+    assert_eq!(
+        result,
+        Err(Ok(fluxora_stream::ContractError::InvalidSignature)),
+        "bad ed25519 signatures must return InvalidSignature instead of a host trap"
+    );
+}
+
+#[test]
 fn delegated_withdraw_expired_deadline_rejected() {
     let ctx = Ctx::setup();
     ctx.env.mock_all_auths();
