@@ -92,6 +92,10 @@ pub enum GovernanceError {
     QuorumWouldBreak = 16,
     /// Signer is already registered in the co-signer set.
     DuplicateSigner = 17,
+    /// Monotonic proposal ID counter has reached u32::MAX.
+    ProposalIdOverflow = 18,
+    /// Governance timestamp arithmetic overflowed.
+    ArithmeticOverflow = 19,
 }
 
 /// Storage keys for the governance contract.
@@ -226,12 +230,26 @@ fn read_next_proposal_id(env: &Env) -> u32 {
         .unwrap_or(0u32)
 }
 
-fn increment_proposal_id(env: &Env) -> u32 {
+fn increment_proposal_id(env: &Env) -> Result<u32, GovernanceError> {
     let id = read_next_proposal_id(env);
+    let next_id = id
+        .checked_add(1)
+        .ok_or(GovernanceError::ProposalIdOverflow)?;
     env.storage()
         .instance()
-        .set(&DataKey::NextProposalId, &(id + 1));
-    id
+        .set(&DataKey::NextProposalId, &next_id);
+    Ok(id)
+}
+
+fn checked_timestamp_add(timestamp: u64, seconds: u64) -> Result<u64, GovernanceError> {
+    timestamp
+        .checked_add(seconds)
+        .ok_or(GovernanceError::ArithmeticOverflow)
+}
+
+fn is_proposal_expired(env: &Env, proposal: &Proposal) -> Result<bool, GovernanceError> {
+    let expires_at = checked_timestamp_add(proposal.created_at, MAX_PROPOSAL_AGE_SECONDS)?;
+    Ok(env.ledger().timestamp() > expires_at)
 }
 
 fn load_proposal(env: &Env, id: u32) -> Result<Proposal, GovernanceError> {
@@ -383,6 +401,8 @@ impl FluxoraGovernance {
     ///
     /// # Returns
     /// - The proposal ID assigned to the new proposal (monotonically increasing u32).
+    ///   If the counter has reached `u32::MAX`, the call returns
+    ///   `ProposalIdOverflow` rather than host-trapping.
     ///
     /// # Authorization
     /// - Requires `proposer.require_auth()`.
@@ -390,6 +410,7 @@ impl FluxoraGovernance {
     /// # Errors
     /// - `NotASigner`: `proposer` is not in the registered signers list.
     /// - `CalldataTooLarge`: `calldata.len() > MAX_CALLDATA_BYTES`.
+    /// - `ProposalIdOverflow`: the proposal ID counter cannot be advanced.
     pub fn propose(
         env: Env,
         proposer: Address,
@@ -408,7 +429,7 @@ impl FluxoraGovernance {
             return Err(GovernanceError::CalldataTooLarge);
         }
 
-        let id = increment_proposal_id(&env);
+        let id = increment_proposal_id(&env)?;
         let now = env.ledger().timestamp();
 
         let proposal = Proposal {
@@ -453,6 +474,8 @@ impl FluxoraGovernance {
     /// - `ProposalNotFound`: No proposal with this ID.
     /// - `AlreadyExecuted`: Proposal has already been executed.
     /// - `AlreadyApproved`: This signer already approved this proposal.
+    /// - `ArithmeticOverflow`: proposal expiry or executable-after timestamp
+    ///   arithmetic overflowed instead of producing a host trap.
     pub fn approve(env: Env, approver: Address, proposal_id: u32) -> Result<(), GovernanceError> {
         approver.require_auth();
 
@@ -469,7 +492,7 @@ impl FluxoraGovernance {
         if proposal.executed {
             return Err(GovernanceError::AlreadyExecuted);
         }
-        if env.ledger().timestamp() > proposal.created_at + MAX_PROPOSAL_AGE_SECONDS {
+        if is_proposal_expired(&env, &proposal)? {
             return Err(GovernanceError::ProposalExpired);
         }
 
@@ -487,6 +510,25 @@ impl FluxoraGovernance {
         proposal.approvals.push_back(approver.clone());
         let approval_count = proposal.approvals.len();
 
+        // Record the timestamp and effective threshold at which quorum was first
+        // reached.  Using the stored snapshot at execution time protects in-flight
+        // proposals against mid-flight threshold changes by the admin.
+        let threshold = get_threshold(&env)?;
+        let quorum_info = if approval_count == threshold {
+            let now = env.ledger().timestamp();
+            let executable_after = checked_timestamp_add(now, GOVERNANCE_TIMELOCK_SECONDS)?;
+            Some((
+                QuorumInfo {
+                    reached_at: now,
+                    threshold,
+                },
+                now,
+                executable_after,
+            ))
+        } else {
+            None
+        };
+
         save_proposal(&env, proposal_id, &proposal);
         bump_instance(&env);
 
@@ -499,17 +541,9 @@ impl FluxoraGovernance {
             },
         );
 
-        // Record the timestamp and effective threshold at which quorum was first
-        // reached.  Using the stored snapshot at execution time protects in-flight
-        // proposals against mid-flight threshold changes by the admin.
-        let threshold = get_threshold(&env)?;
         if approval_count == threshold {
-            let now = env.ledger().timestamp();
-            let executable_after = now + GOVERNANCE_TIMELOCK_SECONDS;
-            let info = QuorumInfo {
-                reached_at: now,
-                threshold,
-            };
+            let (info, quorum_reached_at, executable_after) =
+                quorum_info.ok_or(GovernanceError::ArithmeticOverflow)?;
             env.storage()
                 .persistent()
                 .set(&DataKey::QuorumReachedAt(proposal_id), &info);
@@ -523,7 +557,7 @@ impl FluxoraGovernance {
                 (symbol_short!("quorum"), proposal_id),
                 QuorumReached {
                     proposal_id,
-                    quorum_reached_at: now,
+                    quorum_reached_at,
                     executable_after,
                 },
             );
@@ -551,6 +585,8 @@ impl FluxoraGovernance {
     /// - `QuorumNotReached`: Approval count < threshold.
     /// - `TimelockNotElapsed`: Less than `GOVERNANCE_TIMELOCK_SECONDS` have passed
     ///   since quorum was reached.
+    /// - `ArithmeticOverflow`: proposal expiry or quorum timelock timestamp
+    ///   arithmetic overflowed instead of producing a host trap.
     pub fn execute(env: Env, executor: Address, proposal_id: u32) -> Result<(), GovernanceError> {
         executor.require_auth();
 
@@ -562,7 +598,7 @@ impl FluxoraGovernance {
         if proposal.executed {
             return Err(GovernanceError::AlreadyExecuted);
         }
-        if env.ledger().timestamp() > proposal.created_at + MAX_PROPOSAL_AGE_SECONDS {
+        if is_proposal_expired(&env, &proposal)? {
             return Err(GovernanceError::ProposalExpired);
         }
 
@@ -581,7 +617,9 @@ impl FluxoraGovernance {
 
         // Verify timelock has elapsed from the moment quorum was reached.
         let now = env.ledger().timestamp();
-        if now < quorum_info.reached_at + GOVERNANCE_TIMELOCK_SECONDS {
+        let executable_after =
+            checked_timestamp_add(quorum_info.reached_at, GOVERNANCE_TIMELOCK_SECONDS)?;
+        if now < executable_after {
             return Err(GovernanceError::TimelockNotElapsed);
         }
 

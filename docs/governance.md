@@ -130,6 +130,8 @@ Submits a new governance proposal and returns its monotonically increasing ID.
 - `calldata` is stored as opaque bytes for on-chain auditability.
 - `calldata.len()` must be less than or equal to `MAX_CALLDATA_BYTES`.
 - The proposer is not automatically counted as an approver.
+- If the proposal counter has reached `u32::MAX`, proposal creation fails with
+  `ProposalIdOverflow` rather than panicking.
 - Emits `ProposalCreated` with topic `("proposed", proposal_id)`.
 
 ### `approve(approver, proposal_id)`
@@ -142,6 +144,8 @@ Records an approval from a co-signer.
 - Every successful approval emits `ProposalApproved`.
 - When the approval count first reaches the configured threshold, the contract stores
   `QuorumInfo { reached_at, threshold }` and emits `QuorumReached`.
+- Proposal expiry and `executable_after` timestamps use checked arithmetic. Overflow
+  returns `ArithmeticOverflow` before storing quorum state or emitting quorum events.
 
 ### `execute(executor, proposal_id)`
 
@@ -153,6 +157,8 @@ Marks the proposal as executed after quorum and timelock.
 - Execution requires
   `env.ledger().timestamp() >= quorum_info.reached_at + GOVERNANCE_TIMELOCK_SECONDS`.
 - Execution is rejected after cancellation or expiry.
+- Timelock and expiry timestamp arithmetic is checked. Overflow returns
+  `ArithmeticOverflow` rather than panicking.
 - The proposal is marked executed and saved before `ProposalExecuted` is emitted.
 - Emits `ProposalExecuted` with the stored `target` and `calldata`.
 
@@ -265,6 +271,8 @@ handle these discriminants from `contracts/governance/src/lib.rs`:
 | `InvalidThreshold` | 15 | `init` threshold is zero or exceeds signer count | Choose a threshold in the range `1..=signers.len()`. |
 | `QuorumWouldBreak` | 16 | `remove_signer` would leave fewer signers than threshold | Lower the threshold through a governed migration or keep enough signers registered. |
 | `DuplicateSigner` | 17 | `init` or `add_signer` includes an already-registered signer | Remove duplicate entries before submitting. |
+| `ProposalIdOverflow` | 18 | `propose` when `NextProposalId == u32::MAX` | Treat governance as terminal for new proposals and migrate to a fresh governance contract. |
+| `ArithmeticOverflow` | 19 | Proposal expiry or timelock timestamp arithmetic would overflow `u64` | Treat the proposal as invalid in the current ledger-time context and avoid retry loops. |
 
 ## Security considerations
 
@@ -295,6 +303,9 @@ handle these discriminants from `contracts/governance/src/lib.rs`:
 14. **Threshold is snapshotted at quorum time**: execution uses the threshold recorded in
     `QuorumInfo`, so an admin cannot raise or lower the live threshold after quorum to change
     the outcome of an in-flight proposal.
+15. **Governance arithmetic is checked**: proposal IDs and timestamp deadlines return
+    structured errors on overflow, so clients and indexers do not need to recover from opaque
+    host traps.
 
 ## Tests
 
@@ -303,7 +314,9 @@ Integration tests are in `contracts/stream/tests/governance_integration.rs` and 
 - Initialization and constant verification.
 - Duplicate signer rejection during initialization and signer management.
 - Proposal creation and ID assignment.
+- Proposal ID overflow rejection.
 - Approval counting and duplicate rejection.
+- Arithmetic overflow rejection for proposal expiry and quorum executable-after timestamps.
 - Non-signer rejection on both `propose` and `approve`.
 - Quorum enforcement and exact-threshold execution.
 - Timelock enforcement.

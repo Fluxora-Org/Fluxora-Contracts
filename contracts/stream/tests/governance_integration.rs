@@ -1,6 +1,8 @@
 extern crate std;
 
-use fluxora_governance::{FluxoraGovernance, FluxoraGovernanceClient, GovernanceError};
+use fluxora_governance::{
+    DataKey, FluxoraGovernance, FluxoraGovernanceClient, GovernanceError, Proposal, QuorumInfo,
+};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     vec, Address, Bytes, Env,
@@ -57,6 +59,36 @@ impl<'a> GovCtx<'a> {
 
     fn calldata(&self, tag: &str) -> Bytes {
         Bytes::from_slice(&self.env, tag.as_bytes())
+    }
+
+    fn seed_next_proposal_id(&self, next_id: u32) {
+        let contract_id = self.contract_id.clone();
+        self.env.as_contract(&contract_id, || {
+            self.env
+                .storage()
+                .instance()
+                .set(&DataKey::NextProposalId, &next_id);
+        });
+    }
+
+    fn seed_proposal(&self, proposal_id: u32, proposal: &Proposal) {
+        let contract_id = self.contract_id.clone();
+        self.env.as_contract(&contract_id, || {
+            self.env
+                .storage()
+                .persistent()
+                .set(&DataKey::Proposal(proposal_id), proposal);
+        });
+    }
+
+    fn seed_quorum_info(&self, proposal_id: u32, info: &QuorumInfo) {
+        let contract_id = self.contract_id.clone();
+        self.env.as_contract(&contract_id, || {
+            self.env
+                .storage()
+                .persistent()
+                .set(&DataKey::QuorumReachedAt(proposal_id), info);
+        });
     }
 }
 
@@ -132,6 +164,21 @@ fn test_propose_returns_incremental_ids() {
 }
 
 #[test]
+fn test_propose_returns_structured_error_on_proposal_id_overflow() {
+    let ctx = GovCtx::setup();
+    ctx.seed_next_proposal_id(u32::MAX);
+
+    let result = ctx.client.try_propose(
+        &ctx.signer_a,
+        &ctx.dummy_target(),
+        &ctx.calldata("overflow"),
+    );
+
+    assert_eq!(result, Err(Ok(GovernanceError::ProposalIdOverflow)));
+    assert_eq!(ctx.client.proposal_count(), u32::MAX);
+}
+
+#[test]
 fn test_propose_non_signer_errors() {
     let ctx = GovCtx::setup();
     let outsider = Address::generate(&ctx.env);
@@ -174,6 +221,26 @@ fn test_approve_increments_approval_count() {
     ctx.client.approve(&ctx.signer_b, &id);
     let p = ctx.client.get_proposal(&id);
     assert_eq!(p.approvals.len(), 2);
+}
+
+#[test]
+fn test_approve_returns_structured_error_when_executable_after_overflows() {
+    let ctx = GovCtx::setup();
+    let proposal = Proposal {
+        proposer: ctx.signer_a.clone(),
+        target: ctx.dummy_target(),
+        calldata: ctx.calldata("x"),
+        approvals: vec![&ctx.env, ctx.signer_a.clone()],
+        created_at: u64::MAX - MAX_AGE,
+        executed: false,
+        cancelled: false,
+    };
+    ctx.seed_proposal(42, &proposal);
+    ctx.env.ledger().set_timestamp(u64::MAX - TIMELOCK + 1);
+
+    let result = ctx.client.try_approve(&ctx.signer_b, &42u32);
+
+    assert_eq!(result, Err(Ok(GovernanceError::ArithmeticOverflow)));
 }
 
 #[test]
@@ -714,6 +781,25 @@ fn test_approve_after_expiry_errors() {
 }
 
 #[test]
+fn test_approve_returns_structured_error_when_expiry_overflows() {
+    let ctx = GovCtx::setup();
+    let proposal = Proposal {
+        proposer: ctx.signer_a.clone(),
+        target: ctx.dummy_target(),
+        calldata: ctx.calldata("x"),
+        approvals: vec![&ctx.env],
+        created_at: u64::MAX - MAX_AGE + 1,
+        executed: false,
+        cancelled: false,
+    };
+    ctx.seed_proposal(43, &proposal);
+
+    let result = ctx.client.try_approve(&ctx.signer_b, &43u32);
+
+    assert_eq!(result, Err(Ok(GovernanceError::ArithmeticOverflow)));
+}
+
+#[test]
 fn test_expired_not_executable_even_with_quorum_and_timelock_met() {
     let ctx = GovCtx::setup();
     let id = ctx
@@ -731,6 +817,34 @@ fn test_expired_not_executable_even_with_quorum_and_timelock_met() {
     let executor = Address::generate(&ctx.env);
     let result = ctx.client.try_execute(&executor, &id);
     assert_eq!(result, Err(Ok(GovernanceError::ProposalExpired)));
+}
+
+#[test]
+fn test_execute_returns_structured_error_when_quorum_timelock_overflows() {
+    let ctx = GovCtx::setup();
+    let proposal = Proposal {
+        proposer: ctx.signer_a.clone(),
+        target: ctx.dummy_target(),
+        calldata: ctx.calldata("x"),
+        approvals: vec![&ctx.env, ctx.signer_a.clone(), ctx.signer_b.clone()],
+        created_at: 1_000_000,
+        executed: false,
+        cancelled: false,
+    };
+    ctx.seed_proposal(77, &proposal);
+    ctx.seed_quorum_info(
+        77,
+        &QuorumInfo {
+            reached_at: u64::MAX - TIMELOCK + 1,
+            threshold: 2,
+        },
+    );
+
+    let executor = Address::generate(&ctx.env);
+    let result = ctx.client.try_execute(&executor, &77u32);
+
+    assert_eq!(result, Err(Ok(GovernanceError::ArithmeticOverflow)));
+    assert!(!ctx.client.get_proposal(&77u32).executed);
 }
 
 #[test]
