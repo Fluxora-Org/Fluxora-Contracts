@@ -586,14 +586,28 @@ fn test_registry_appends_on_successful_create_stream() {
     ctx.factory.set_allowlist(&recipient, &true);
     let now = ctx.now();
 
-    let id0 = ctx
-        .factory
-        .create_stream(&ctx.sender, &recipient, &100, &1, &now, &now, &(now + 200), &0);
+    let id0 = ctx.factory.create_stream(
+        &ctx.sender,
+        &recipient,
+        &100,
+        &1,
+        &now,
+        &now,
+        &(now + 200),
+        &0,
+    );
     assert_eq!(ctx.factory.get_factory_stream_count(), 1);
 
-    let id1 = ctx
-        .factory
-        .create_stream(&ctx.sender, &recipient, &100, &1, &now, &now, &(now + 200), &0);
+    let id1 = ctx.factory.create_stream(
+        &ctx.sender,
+        &recipient,
+        &100,
+        &1,
+        &now,
+        &now,
+        &(now + 200),
+        &0,
+    );
     assert_eq!(ctx.factory.get_factory_stream_count(), 2);
 
     let page = ctx.factory.get_factory_streams_paginated(&0, &10);
@@ -636,10 +650,26 @@ fn test_paginated_enforces_max_page_size() {
     ctx.factory.set_allowlist(&recipient, &true);
     let now = ctx.now();
 
-    ctx.factory
-        .create_stream(&ctx.sender, &recipient, &100, &1, &now, &now, &(now + 200), &0);
-    ctx.factory
-        .create_stream(&ctx.sender, &recipient, &100, &1, &now, &now, &(now + 200), &0);
+    ctx.factory.create_stream(
+        &ctx.sender,
+        &recipient,
+        &100,
+        &1,
+        &now,
+        &now,
+        &(now + 200),
+        &0,
+    );
+    ctx.factory.create_stream(
+        &ctx.sender,
+        &recipient,
+        &100,
+        &1,
+        &now,
+        &now,
+        &(now + 200),
+        &0,
+    );
 
     // Requesting limit=200 is capped to MAX_PAGE_SIZE; with only 2 streams the result is 2.
     let page = ctx
@@ -657,8 +687,16 @@ fn test_paginated_start_index_beyond_end_returns_empty() {
     ctx.factory.set_allowlist(&recipient, &true);
     let now = ctx.now();
 
-    ctx.factory
-        .create_stream(&ctx.sender, &recipient, &100, &1, &now, &now, &(now + 200), &0);
+    ctx.factory.create_stream(
+        &ctx.sender,
+        &recipient,
+        &100,
+        &1,
+        &now,
+        &now,
+        &(now + 200),
+        &0,
+    );
 
     // start_index=5 is beyond the single entry
     let page = ctx.factory.get_factory_streams_paginated(&5, &10);
@@ -675,9 +713,16 @@ fn test_paginated_window_correctness() {
 
     let mut ids = soroban_sdk::Vec::new(&ctx.env);
     for _ in 0..5 {
-        let id = ctx
-            .factory
-            .create_stream(&ctx.sender, &recipient, &100, &1, &now, &now, &(now + 200), &0);
+        let id = ctx.factory.create_stream(
+            &ctx.sender,
+            &recipient,
+            &100,
+            &1,
+            &now,
+            &now,
+            &(now + 200),
+            &0,
+        );
         ids.push_back(id);
     }
 
