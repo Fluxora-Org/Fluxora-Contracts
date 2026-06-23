@@ -1,8 +1,10 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
 
-use fluxora_stream::FluxoraStreamClient;
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env};
+use fluxora_stream::{ContractError as StreamContractErr, FluxoraStreamClient};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env,
+};
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -17,6 +19,13 @@ pub enum FactoryError {
     InvalidTimeRange = 7,
     /// The requested cliff must be within the inclusive start/end window.
     InvalidCliff = 8,
+    /// Factory stream creation is currently paused by admin.
+    CreationPaused = 9,
+    /// The downstream FluxoraStream contract rejected creation because it is paused.
+    StreamContractPaused = 10,
+    /// The downstream FluxoraStream contract rejected creation for a reason other than paused.
+    /// This is a passthrough catch-all for unexpected downstream failures.
+    StreamContractError = 11,
 }
 
 #[contracttype]
@@ -26,6 +35,8 @@ pub enum DataKey {
     MaxDepositCap,
     MinDuration,
     Allowlist(Address),
+    /// Boolean flag: when `true`, `create_stream` rejects all new streams.
+    CreationPaused,
 }
 
 /// Load and authorize the current factory admin.
@@ -80,6 +91,8 @@ impl FluxoraFactory {
         env.storage()
             .instance()
             .set(&DataKey::MinDuration, &min_duration);
+        // CreationPaused defaults to false — no explicit write needed;
+        // `is_factory_paused` falls back to `false` on a missing key.
 
         Ok(())
     }
@@ -136,6 +149,57 @@ impl FluxoraFactory {
         Ok(())
     }
 
+    /// Toggle the factory-level stream creation pause.
+    ///
+    /// When `paused` is `true`, all calls to `create_stream` immediately return
+    /// [`FactoryError::CreationPaused`] — before any policy read — allowing the
+    /// admin to halt new factory-originated streams without dismantling the
+    /// allowlist or other policy state.
+    ///
+    /// # Authorization
+    /// Requires the stored admin's signature. Callers that are not the admin
+    /// will have their transaction rejected by `require_auth`.
+    ///
+    /// # Events
+    /// Emits a `factory_paused` or `factory_resumed` topic depending on the
+    /// new value of `paused`.
+    ///
+    /// # Errors
+    /// - [`FactoryError::NotInitialized`] — factory has not been initialized.
+    pub fn set_factory_paused(env: Env, paused: bool) -> Result<(), FactoryError> {
+        require_admin(&env)?;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::CreationPaused, &paused);
+
+        // Emit a structured event so indexers and monitors can react.
+        if paused {
+            env.events().publish(
+                (symbol_short!("factory"), symbol_short!("paused")),
+                paused,
+            );
+        } else {
+            env.events().publish(
+                (symbol_short!("factory"), symbol_short!("resumed")),
+                paused,
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Return whether factory stream creation is currently paused.
+    ///
+    /// This is a permissionless view — anyone may call it to check the current
+    /// pause state before submitting a `create_stream` transaction.
+    pub fn is_factory_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::CreationPaused)
+            .unwrap_or(false)
+    }
+
     /// Return the current factory policy configuration.
     pub fn get_factory_config(env: Env) -> Result<FactoryConfig, FactoryError> {
         Ok(FactoryConfig {
@@ -171,6 +235,15 @@ impl FluxoraFactory {
     }
 
     /// Creates a new stream via the FluxoraStream contract after enforcing treasury policies.
+    ///
+    /// # Guard order (checked strictly in sequence)
+    /// 1. **CreationPaused** — rejects immediately, before any policy read, to
+    ///    avoid leaking allowlist or cap state during an incident.
+    /// 2. Allowlist check
+    /// 3. Deposit cap check
+    /// 4. Time-range invariants
+    /// 5. Minimum-duration check
+    /// 6. Cross-contract stream creation
     #[allow(clippy::too_many_arguments)]
     pub fn create_stream(
         env: Env,
@@ -183,11 +256,19 @@ impl FluxoraFactory {
         end_time: u64,
         withdraw_dust_threshold: i128,
     ) -> Result<u64, FactoryError> {
-        if !env.storage().instance().has(&DataKey::Admin) {
-            return Err(FactoryError::NotInitialized);
+        // ── Guard 1: pause check (before any policy read) ───────────────────
+        // Checked first so that no allowlist or cap state is observable when
+        // the factory is in emergency-pause mode.
+        let paused: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::CreationPaused)
+            .unwrap_or(false);
+        if paused {
+            return Err(FactoryError::CreationPaused);
         }
 
-        // Enforce policies
+        // ── Guard 2: allowlist ───────────────────────────────────────────────
         let is_allowed: bool = env
             .storage()
             .persistent()
@@ -197,6 +278,7 @@ impl FluxoraFactory {
             return Err(FactoryError::RecipientNotAllowlisted);
         }
 
+        // ── Guard 3: deposit cap ─────────────────────────────────────────────
         let max_deposit: i128 = env
             .storage()
             .instance()
@@ -206,6 +288,7 @@ impl FluxoraFactory {
             return Err(FactoryError::DepositExceedsCap);
         }
 
+        // ── Guard 4: time invariants ─────────────────────────────────────────
         // Mirror FluxoraStream time invariants before the cross-contract call so
         // invalid schedules return typed factory errors instead of downstream panics.
         if start_time >= end_time {
@@ -215,6 +298,7 @@ impl FluxoraFactory {
             return Err(FactoryError::InvalidCliff);
         }
 
+        // ── Guard 5: minimum duration ────────────────────────────────────────
         let min_duration: u64 = env
             .storage()
             .instance()
@@ -237,10 +321,7 @@ impl FluxoraFactory {
 
         let stream_client = FluxoraStreamClient::new(&env, &stream_contract);
 
-        // We wrap the `try_create_stream` to gracefully handle underlying failures if needed,
-        // but for now, `.create_stream()` automatically panics with the underlying contract error
-        // if it fails, which is standard Soroban cross-contract call behavior.
-        let stream_id = stream_client.create_stream(
+        match stream_client.try_create_stream(
             &sender,
             &recipient,
             &deposit_amount,
@@ -251,8 +332,13 @@ impl FluxoraFactory {
             &withdraw_dust_threshold,
             &None,
             &fluxora_stream::StreamKind::Linear,
-        );
-
-        Ok(stream_id)
+        ) {
+            Ok(Ok(stream_id)) => Ok(stream_id),
+            // Recognized downstream contract error reported in the success frame.
+            Ok(Err(_)) => Err(FactoryError::StreamContractError),
+            Err(Ok(StreamContractErr::ContractPaused)) => Err(FactoryError::StreamContractPaused),
+            Err(Ok(_)) => Err(FactoryError::StreamContractError),
+            Err(Err(_)) => Err(FactoryError::StreamContractError),
+        }
     }
 }
