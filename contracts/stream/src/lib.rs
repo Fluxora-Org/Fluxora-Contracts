@@ -4910,7 +4910,6 @@ impl FluxoraStream {
                 kind: stream.kind,
             },
             stream.rate_per_second,
-            stream.deposit_amount,
             cancelled_at,
         );
         let claimable = accrued.saturating_sub(stream.withdrawn_amount).max(0);
