@@ -163,6 +163,60 @@ fn test_close_nonexistent_stream() {
 }
 
 // ---------------------------------------------------------------------------
+// close_cancelled_stream tests
+// ---------------------------------------------------------------------------
+
+/// Non-cancelled stream → close_cancelled_stream returns InvalidState.
+#[test]
+fn test_close_cancelled_non_cancelled_rejected() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream(10_000);
+    let result = ctx.client.try_close_cancelled_stream(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::InvalidState)));
+}
+
+/// Cancelled stream with zero claimable → close_cancelled_stream succeeds.
+#[test]
+fn test_close_cancelled_stream_ok() {
+    let ctx = Ctx::setup();
+    let now = ctx.env.ledger().timestamp();
+    // Stream starts in the future → no accrual at cancel time
+    let stream_id = ctx.client.create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1_000,
+        &1,
+        &(now + 1_000),
+        &(now + 1_000),
+        &(now + 2_000),
+        &0,
+        &None,
+    );
+    ctx.client.cancel_stream(&stream_id);
+    assert_eq!(
+        ctx.client.get_stream_state(&stream_id).status,
+        StreamStatus::Cancelled
+    );
+    ctx.client.close_cancelled_stream(&stream_id);
+    assert!(ctx.client.try_get_stream_state(&stream_id).is_err());
+}
+
+/// Cancelled stream with remaining claimable → close_cancelled_stream returns InvalidState.
+#[test]
+fn test_close_cancelled_stream_with_claimable_rejected() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream(10_000);
+    ctx.env.ledger().with_mut(|l| l.timestamp += 100);
+    ctx.client.cancel_stream(&stream_id);
+    assert_eq!(
+        ctx.client.get_stream_state(&stream_id).status,
+        StreamStatus::Cancelled
+    );
+    let result = ctx.client.try_close_cancelled_stream(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::InvalidState)));
+}
+
+// ---------------------------------------------------------------------------
 // Recipient-index cleanup path
 // ---------------------------------------------------------------------------
 

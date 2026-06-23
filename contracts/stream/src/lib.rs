@@ -4717,6 +4717,67 @@ impl FluxoraStream {
         Ok(())
     }
 
+    /// Close a fully-settled Cancelled stream and reclaim its storage.
+    ///
+    /// Preconditions
+    /// - Stream must exist and have status `Cancelled`.
+    /// - The recipient must have withdrawn any frozen accrued amount at cancellation
+    ///   time (i.e. no claimable balance remains). This prevents destroying recipient
+    ///   funds by mistake.
+    ///
+    /// Behavior
+    /// - Permissionless: anyone may call this entrypoint to perform storage cleanup.
+    /// - Not blocked by global emergency pause (storage hygiene only).
+    /// - Emits the existing `("closed", stream_id)` topic with
+    ///   `StreamEvent::StreamClosed(stream_id)` before removal.
+    /// - Removes the stream's `Stream(stream_id)` entry and its slot in the
+    ///   recipient index (`RecipientStreams(recipient)`). The recipient-index
+    ///   invariants (sorted and unique) are preserved by the index helpers.
+    ///
+    /// Errors
+    /// - `StreamNotFound` if the stream does not exist.
+    /// - `InvalidState` if the stream is not `Cancelled` or the recipient still
+    ///   has unwithdrawn frozen accrued (claimable > 0).
+    pub fn close_cancelled_stream(env: Env, stream_id: u64) -> Result<(), ContractError> {
+        let stream = load_stream(&env, stream_id)?;
+
+        // Only allow explicit cancelled streams here.
+        if stream.status != StreamStatus::Cancelled {
+            return Err(ContractError::InvalidState);
+        }
+
+        // Ensure recipient has fully withdrawn the frozen accrued amount at cancel time.
+        let cancelled_at = stream.cancelled_at.ok_or(ContractError::InvalidState)?;
+        let accrued = accrual::calculate_accrued_amount_checkpointed(
+            accrual::CheckpointState {
+                checkpointed_amount: stream.checkpointed_amount,
+                checkpointed_at: stream.checkpointed_at,
+                cliff_time: stream.cliff_time,
+                end_time: stream.end_time,
+                deposit_amount: stream.deposit_amount,
+                kind: stream.kind,
+            },
+            stream.rate_per_second,
+            stream.deposit_amount,
+            cancelled_at,
+        );
+        let claimable = accrued.saturating_sub(stream.withdrawn_amount).max(0);
+        if claimable > 0 {
+            return Err(ContractError::InvalidState);
+        }
+
+        env.events().publish(
+            (symbol_short!("closed"), stream_id),
+            StreamEvent::StreamClosed(stream_id),
+        );
+
+        // Remove from recipient index and delete stream storage.
+        remove_stream_from_recipient_index(&env, &stream.recipient, stream_id);
+        remove_stream(&env, stream_id);
+
+        Ok(())
+    }
+
     /// Register a reusable relative schedule (start/cliff/duration offsets only).
     ///
     /// Caps: [`MAX_TEMPLATES_PER_OWNER`] per registering address and [`MAX_GLOBAL_TEMPLATES`]
