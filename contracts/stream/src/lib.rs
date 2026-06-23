@@ -6545,15 +6545,15 @@ impl FluxoraStream {
             (res.start_id, res.count, res.consumed, reclaimed),
         );
     }
-    /// Release/ Reclaim expired reservation stream IDs for off-chain pre-computation.
-    ///
+
+    /// Reclaim expired reservation stream IDs for off-chain pre-computation.
     ///
     /// # Parameters
     /// - `holder`: Address that made the reservation
     ///
     /// # Errors
-    /// - `ReservationNotExpirable` (25): `expiry` is None.
-    /// - `ReservationStillActive` (26): `current time > expiry`
+    /// - `ReservationNotExpirable` (25): `expiry` is `None` (reservation has no TTL).
+    /// - `ReservationStillActive` (26): `current time < expiry` (reservation has not yet expired).
     pub fn reclaim_expired_id_reservation(env: Env, holder: Address) -> Result<(), ContractError> {
         let res = load_id_reservation(&env, &holder)
             .ok_or(ContractError::ReservationNotFound)?;
