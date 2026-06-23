@@ -977,11 +977,22 @@ pub enum DataKey {
     /// Rotation history for recipient/sender changes on a stream.
     RotationHistory(u64),
     /// Last ledger timestamp observed for accrual clock-regression detection.
+    /// Last ledger timestamp observed for accrual clock-regression detection.
     LastAccrualLedgerTimestamp,
     /// Protocol-wide count of streams currently in `StreamStatus::Paused` (`u64`, instance storage).
     /// Appended last to preserve existing discriminant values; absent on pre-upgrade deployments
     /// (treated as 0 until pause/resume/cancel/complete transitions repopulate it).
     PausedStreamCount,
+    /// Aggregate sum of all keeper fees paid out via `keeper_cancel` (`i128`, instance storage).
+    ///
+    /// - Initialised to `0` in `init`.
+    /// - Incremented (via `checked_add`) inside `keeper_cancel` **after** the token
+    ///   transfer succeeds, maintaining CEI ordering.
+    /// - Strictly monotone: no code path decrements this counter.
+    /// - Exposed read-only through the `get_protocol_fees_accrued` view entrypoint.
+    ///
+    /// Added in issue #623. Appended at the end to preserve existing discriminants.
+    TotalKeeperFeesPaid,
 }
 
 // ---------------------------------------------------------------------------
@@ -1381,6 +1392,33 @@ fn write_total_liabilities(env: &Env, amount: i128) {
     bump_instance_ttl(env);
 }
 
+
+// ---------------------------------------------------------------------------
+// Keeper-fee aggregate counter (issue #623)
+// ---------------------------------------------------------------------------
+
+/// Returns the cumulative keeper fees paid. Returns 0 on pre-upgrade instances.
+fn read_total_keeper_fees_paid(env: &Env) -> i128 {
+    bump_instance_ttl(env);
+    env.storage()
+        .instance()
+        .get(&DataKey::TotalKeeperFeesPaid)
+        .unwrap_or(0i128)
+}
+
+/// Increments the keeper-fee counter using checked_add.
+/// Must only be called AFTER the token transfer succeeds (CEI ordering).
+fn increment_total_keeper_fees_paid(env: &Env, amount: i128) -> Result<(), ContractError> {
+    let current = read_total_keeper_fees_paid(env);
+    let updated = current
+        .checked_add(amount)
+        .ok_or(ContractError::ArithmeticOverflow)?;
+    env.storage()
+        .instance()
+        .set(&DataKey::TotalKeeperFeesPaid, &updated);
+    bump_instance_ttl(env);
+    Ok(())
+}
 // ---------------------------------------------------------------------------
 // Schedule template registry
 // ---------------------------------------------------------------------------
@@ -1989,6 +2027,10 @@ impl FluxoraStream {
         env.storage()
             .instance()
             .set(&DataKey::TotalLiabilities, &0i128);
+        // Initialise aggregate keeper-fee counter (issue #623).
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalKeeperFeesPaid, &0i128);
 
         // Ensure instance storage (Config / NextStreamId) doesn't expire quickly
         bump_instance_ttl(&env);
@@ -4227,8 +4269,17 @@ impl FluxoraStream {
     ///
     /// This value is backed by `NextStreamId`, which is incremented exactly once for
     /// each successful stream creation.
-    pub fn get_stream_count(env: Env) -> u64 {
+   pub fn get_stream_count(env: Env) -> u64 {
         read_stream_count(&env)
+    }
+
+    /// Returns the cumulative total of all keeper fees paid since `init`.
+    ///
+    /// Auth-free, read-only view (issue #623). Returns `0` for pre-upgrade instances.
+    /// The counter is strictly monotone — it only increases, never decreases.
+    /// It is incremented inside `keeper_cancel` only after the token transfer succeeds.
+    pub fn get_protocol_fees_accrued(env: Env) -> i128 {
+        read_total_keeper_fees_paid(&env)
     }
 
     /// Return the protocol-wide number of streams currently in `StreamStatus::Paused`.
@@ -5494,8 +5545,10 @@ impl FluxoraStream {
         }
 
         // Transfer keeper incentive.
+        // Counter is incremented AFTER the transfer succeeds (CEI ordering).
         if keeper_fee > 0 {
             push_token(&env, &keeper, keeper_fee)?;
+            increment_total_keeper_fees_paid(&env, keeper_fee)?;
         }
 
         env.events().publish(
