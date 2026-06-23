@@ -3509,7 +3509,9 @@ impl FluxoraStream {
     /// - `i128`: Amount transferred to the recipient.
     ///
     /// # Errors
-    /// - `InvalidSignature` (15): Signature verification failed, deadline passed, or nonce mismatch.
+    /// - `SignatureDeadlineExpired` (19): `deadline < current ledger timestamp`.
+    /// - `InvalidSignature` (15): Nonce mismatch, public key does not match stream recipient,
+    ///   or ed25519 signature verification failed (host trap for malformed signatures).
     /// - `BelowMinimumAmount` (16): Withdrawable amount is below `expected_minimum_amount`.
     /// - `InvalidState`: Stream is paused (non-terminal) or completed.
     /// - `StreamNotFound`: `stream_id` does not exist.
@@ -3529,9 +3531,9 @@ impl FluxoraStream {
         // replaced by the ed25519 signature check below.
         relayer.require_auth();
 
-        // 1. Deadline check — reject stale signatures.
+        // 1. Deadline check — reject stale signatures before any storage reads.
         if env.ledger().timestamp() > deadline {
-            return Err(ContractError::InvalidSignature);
+            return Err(ContractError::SignatureDeadlineExpired);
         }
 
         // 2. Load stream.
@@ -3551,22 +3553,49 @@ impl FluxoraStream {
             return Err(ContractError::InvalidSignature);
         }
 
-        // 5. Build the signed message:
-        //    stream_id (8 bytes) | nonce (8 bytes) | deadline (8 bytes) | expected_minimum_amount (16 bytes)
+        // 5. Bind the supplied public key to the stream recipient.
+        //    This prevents a relayer from signing with an arbitrary key and
+        //    burning the recipient's nonce without the recipient's consent.
+        //    `delegated_withdraw` is only valid for ed25519 account recipients;
+        //    contract-account recipients must use the direct `withdraw` path.
+        {
+            use soroban_sdk::{
+                xdr::{AccountId, PublicKey, ScAddress, Uint256},
+                TryIntoVal,
+            };
+            let pk_arr = recipient_public_key.to_array();
+            let derived: Result<Address, _> =
+                ScAddress::Account(AccountId(PublicKey::PublicKeyTypeEd25519(Uint256(pk_arr))))
+                    .try_into_val(&env);
+            match derived {
+                Ok(addr) if addr == stream.recipient => {}
+                _ => return Err(ContractError::InvalidSignature),
+            }
+        }
+
+        // 6. Build the signed message (40 bytes total):
+        //    stream_id (8 bytes, big-endian u64)
+        //    | nonce   (8 bytes, big-endian u64)
+        //    | deadline (8 bytes, big-endian u64)
+        //    | expected_minimum_amount (16 bytes, big-endian i128)
+        //
+        // NOTE: `ed25519_verify` is a Soroban host function. Per the SDK design it
+        // traps the host on an invalid signature rather than returning a typed error.
+        // All pre-conditions (deadline, nonce, key-binding) are checked above so that
+        // a valid relayer call with a wrong signature produces a host error only in the
+        // rare malformed-signature case. Callers using `try_delegated_withdraw` will
+        // observe `Err(Err(HostError))` for a bad signature vs `Err(Ok(ContractError))`
+        // for the pre-condition failures above.
         let mut msg = soroban_sdk::Bytes::new(&env);
         msg.extend_from_array(&stream_id.to_be_bytes());
         msg.extend_from_array(&nonce.to_be_bytes());
         msg.extend_from_array(&deadline.to_be_bytes());
         msg.extend_from_array(&expected_minimum_amount.to_be_bytes());
 
-        // 5. Verify ed25519 signature — panics on failure (Soroban host trap).
-        let pk_bytes: soroban_sdk::BytesN<32> = recipient_public_key
-            .try_into()
-            .map_err(|_| ContractError::InvalidSignature)?;
-        let sig_bytes: soroban_sdk::BytesN<64> = signature
-            .try_into()
-            .map_err(|_| ContractError::InvalidSignature)?;
-        env.crypto().ed25519_verify(&pk_bytes, &msg, &sig_bytes);
+        // Verify signature. `recipient_public_key` and `signature` are already the
+        // correct BytesN<32>/BytesN<64> types — no conversion needed.
+        env.crypto()
+            .ed25519_verify(&recipient_public_key, &msg, &signature);
 
         // 7. State checks (same as withdraw).
         if stream.status == StreamStatus::Completed {
