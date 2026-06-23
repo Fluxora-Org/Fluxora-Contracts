@@ -171,7 +171,9 @@ const MIN_PAUSE_INTERVAL_LEDGERS: u32 = 17;
 ///
 /// Bumped to 4: accrual paths track the last ledger timestamp they observed in
 /// instance storage to detect retrograde test clocks and migration regressions.
-pub const CONTRACT_VERSION: u32 = 4;
+///
+/// Bumped to 5: Fix duplicate ContractError discriminant 23 and declare missing variants.
+pub const CONTRACT_VERSION: u32 = 5;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -371,10 +373,24 @@ pub enum ContractError {
     /// Caller not authorized to delete template.
     TemplateUnauthorized = 22,
     /// Pause reason string exceeds `MAX_PAUSE_REASON_BYTES`.
-    PauseReasonTooLong = 23,
+    PauseReasonTooLong = 27,
     ReservationNotFound = 24,
     ReservationNotExpirable = 25,
-    ReservationStillActive = 26
+    ReservationStillActive = 26,
+    /// Ledger-backed accrual observed a timestamp lower than the previous accrual timestamp.
+    ClockRegression = 28,
+    /// Rate limit exceeded for withdrawals.
+    WithdrawalTooFrequent = 29,
+    /// Stream kind is not supported.
+    UnsupportedStreamKind = 30,
+    /// Keeper attempted to close a stream before the grace period elapsed.
+    KeeperGracePeriodNotElapsed = 31,
+    /// Metadata payload exceeds the allowed size.
+    MetadataTooLarge = 32,
+    /// Operation blocked by a pause cooldown.
+    PauseCooldownActive = 33,
+    /// Rate update exceeds the configured rate cap.
+    RateCapExceeded = 34
 }
 
 #[contracttype]

@@ -20536,8 +20536,93 @@ fn test_contract_error_discriminants_are_stable() {
         "BelowMinimumAmount must be 16"
     );
     assert_eq!(
-        ContractError::ClockRegression as u32,
+        ContractError::ReservationCountZero as u32,
         17,
-        "ClockRegression must be 17"
+        "ReservationCountZero must be 17"
+    );
+    assert_eq!(
+        ContractError::ReservationLimitExceeded as u32,
+        18,
+        "ReservationLimitExceeded must be 18"
+    );
+    assert_eq!(
+        ContractError::SignatureDeadlineExpired as u32,
+        19,
+        "SignatureDeadlineExpired must be 19"
+    );
+    assert_eq!(
+        ContractError::TemplateNotFound as u32,
+        20,
+        "TemplateNotFound must be 20"
+    );
+    assert_eq!(
+        ContractError::TemplateLimitExceeded as u32,
+        21,
+        "TemplateLimitExceeded must be 21"
+    );
+    assert_eq!(
+        ContractError::TemplateUnauthorized as u32,
+        22,
+        "TemplateUnauthorized must be 22"
+    );
+    assert_eq!(
+        ContractError::TokenVerificationFailed as u32,
+        23,
+        "TokenVerificationFailed must be 23"
+    );
+    assert_eq!(
+        ContractError::ReservationNotFound as u32,
+        24,
+        "ReservationNotFound must be 24"
+    );
+    assert_eq!(
+        ContractError::ReservationNotExpirable as u32,
+        25,
+        "ReservationNotExpirable must be 25"
+    );
+    assert_eq!(
+        ContractError::ReservationStillActive as u32,
+        26,
+        "ReservationStillActive must be 26"
+    );
+    assert_eq!(
+        ContractError::PauseReasonTooLong as u32,
+        27,
+        "PauseReasonTooLong must be 27"
+    );
+    assert_eq!(
+        ContractError::ClockRegression as u32,
+        28,
+        "ClockRegression must be 28"
+    );
+    assert_eq!(
+        ContractError::WithdrawalTooFrequent as u32,
+        29,
+        "WithdrawalTooFrequent must be 29"
+    );
+    assert_eq!(
+        ContractError::UnsupportedStreamKind as u32,
+        30,
+        "UnsupportedStreamKind must be 30"
+    );
+    assert_eq!(
+        ContractError::KeeperGracePeriodNotElapsed as u32,
+        31,
+        "KeeperGracePeriodNotElapsed must be 31"
+    );
+    assert_eq!(
+        ContractError::MetadataTooLarge as u32,
+        32,
+        "MetadataTooLarge must be 32"
+    );
+    assert_eq!(
+        ContractError::PauseCooldownActive as u32,
+        33,
+        "PauseCooldownActive must be 33"
+    );
+    assert_eq!(
+        ContractError::RateCapExceeded as u32,
+        34,
+        "RateCapExceeded must be 34"
     );
 }

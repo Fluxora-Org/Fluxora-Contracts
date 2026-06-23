@@ -11,10 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - (leave empty — to be filled as new work is merged)
 
 ### Changed
-- (leave empty)
+- Bumped `CONTRACT_VERSION` to `5` due to breaking ABI changes in error discriminants.
 
 ### Fixed
-- (leave empty)
+- Assigned unique `u32` discriminants to all `ContractError` variants to resolve the collision on code 23.
+- Declared previously missing error variants: `ClockRegression`, `WithdrawalTooFrequent`, `UnsupportedStreamKind`, `KeeperGracePeriodNotElapsed`, `MetadataTooLarge`, `PauseCooldownActive`, and `RateCapExceeded`.
 
 ---
 
