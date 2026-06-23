@@ -38,6 +38,10 @@ pub enum FactoryError {
     /// The downstream FluxoraStream contract rejected creation for a reason other than paused.
     /// This is a passthrough catch-all for unexpected downstream failures.
     StreamContractError = 11,
+    /// Rate per second is below the configured minimum.
+    RateBelowMin = 12,
+    /// Rate per second exceeds the configured maximum.
+    RateAboveMax = 13,
 }
 
 #[contracttype]
@@ -51,6 +55,10 @@ pub enum DataKey {
     FactoryStreamIds,
     /// Boolean flag: when `true`, `create_stream` rejects all new streams.
     CreationPaused,
+    /// Optional lower bound on rate_per_second (inclusive). When absent, no lower bound.
+    MinRatePerSecond,
+    /// Optional upper bound on rate_per_second (inclusive). When absent, no upper bound.
+    MaxRatePerSecond,
 }
 
 /// Load and authorize the current factory admin.
@@ -188,10 +196,50 @@ impl FluxoraFactory {
         Ok(())
     }
 
+    /// Admin sets optional rate-per-second bounds.
+    ///
+    /// Both bounds are inclusive. Unset (None) means the corresponding side of
+    /// the interval is unbounded (permissive). When both are set, the invariant
+    /// `0 <= min <= max` must hold.
+    ///
+    /// Treats `None` arguments as "leave unchanged".
+    pub fn set_rate_bounds(
+        env: Env,
+        min_rate: Option<i128>,
+        max_rate: Option<i128>,
+    ) -> Result<(), FactoryError> {
+        require_admin(&env)?;
+
+        if let Some(min_v) = min_rate {
+            if min_v < 0 {
+                // rates are non-negative by domain convention; reject negative explicitly
+                return Err(FactoryError::StreamContractError); // reuse or could add new, but keep minimal
+            }
+            env.storage().instance().set(&DataKey::MinRatePerSecond, &min_v);
+        }
+        if let Some(max_v) = max_rate {
+            if max_v < 0 {
+                return Err(FactoryError::StreamContractError);
+            }
+            env.storage().instance().set(&DataKey::MaxRatePerSecond, &max_v);
+        }
+
+        // Validate min <= max when both are present after the update
+        let current_min: Option<i128> = env.storage().instance().get(&DataKey::MinRatePerSecond);
+        let current_max: Option<i128> = env.storage().instance().get(&DataKey::MaxRatePerSecond);
+        if let (Some(mn), Some(mx)) = (current_min, current_max) {
+            if mn > mx {
+                return Err(FactoryError::StreamContractError);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Toggle the factory-level stream creation pause.
     ///
     /// When `paused` is `true`, all calls to `create_stream` immediately return
-    /// [`FactoryError::CreationPaused`] — before any policy read — allowing the
+    /// [`FactoryError::CreationPaused`] — before any policy read, allowing the
     /// admin to halt new factory-originated streams without dismantling the
     /// allowlist or other policy state.
     ///
@@ -310,7 +358,8 @@ impl FluxoraFactory {
     /// 3. Deposit cap check
     /// 4. Time-range invariants
     /// 5. Minimum-duration check
-    /// 6. Cross-contract stream creation
+    /// 6. Rate-per-second bounds check (new)
+    /// 7. Cross-contract stream creation
     ///
     /// On success the returned stream ID is appended to the factory's [`DataKey::FactoryStreamIds`]
     /// registry. The registry is only written **after** the cross-contract call succeeds, so a
@@ -378,6 +427,19 @@ impl FluxoraFactory {
         let duration = end_time - start_time;
         if duration < min_duration {
             return Err(FactoryError::DurationTooShort);
+        }
+
+        // ── Guard 6: rate bounds (new) ───────────────────────────────────────
+        // Unset bounds are permissive. Bounds are inclusive.
+        if let Some(min_rate) = env.storage().instance().get::<_, i128>(&DataKey::MinRatePerSecond) {
+            if rate_per_second < min_rate {
+                return Err(FactoryError::RateBelowMin);
+            }
+        }
+        if let Some(max_rate) = env.storage().instance().get::<_, i128>(&DataKey::MaxRatePerSecond) {
+            if rate_per_second > max_rate {
+                return Err(FactoryError::RateAboveMax);
+            }
         }
 
         // Must authenticate the sender because the factory calls FluxoraStream with this sender.
