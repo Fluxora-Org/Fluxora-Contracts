@@ -142,6 +142,25 @@ authorization described above, and the underlying stream contract still enforces
 its own authorization table. See the [`docs/security.md` admin powers
 section](security.md#admin-powers) for the protocol-wide admin boundary.
 
+## Downstream error mapping
+
+The factory uses `FluxoraStreamClient::try_create_stream` instead of the
+panicking `.create_stream()` to catch downstream `ContractError` variants and
+return structured `FactoryError` codes. This ensures factory callers never
+receive a host trap from expected downstream failures.
+
+| Downstream `ContractError` | Factory `FactoryError` | Description |
+|---|---|---|
+| `ContractPaused` (creation paused or global emergency pause) | `StreamContractPaused` | Stream creation is blocked by the downstream contract. Callers can retry after the pause is lifted. |
+| Any other `ContractError` variant | `StreamContractError` | Catch-all for downstream rejections (e.g. `InvalidParams`, `InsufficientDeposit`, `StartTimeInPast`). The factory preserves fail-closed semantics — no downstream error is masked as success. |
+| Host-level error (panic/trap) | `StreamContractError` | If the cross-contract invocation itself fails at the host level (e.g. contract does not exist), it is also mapped to the catch-all error. |
+
+**Security note**: The mapping deliberately **never** converts a downstream
+failure into a success. `ContractPaused` is given a dedicated variant because
+it represents a recoverable administrative state; all other errors collapse
+into the catch-all to avoid leaking internal stream-contract error codes
+through the factory boundary.
+
 ## Code alignment checklist
 
 This document is aligned with the current implementation as follows:
@@ -152,5 +171,6 @@ This document is aligned with the current implementation as follows:
   `memo = None` and `StreamKind::Linear`.
 - `FluxoraStream::create_stream` calls `sender.require_auth()` before validating
   parameters and pulling `deposit_amount` from `sender`.
-- `contracts/stream/tests/factory_policy.rs` covers the factory policy gates and
-  admin-guarded policy updates that surround this authorization model.
+- `contracts/stream/tests/factory_policy.rs` covers the factory policy gates,
+  downstream error mapping, and admin-guarded policy updates that surround this
+  authorization model.

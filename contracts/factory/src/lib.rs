@@ -1,7 +1,7 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
 
-use fluxora_stream::FluxoraStreamClient;
+use fluxora_stream::{ContractError as StreamContractError, FluxoraStreamClient};
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env};
 
 #[contracterror]
@@ -17,6 +17,11 @@ pub enum FactoryError {
     InvalidTimeRange = 7,
     /// The requested cliff must be within the inclusive start/end window.
     InvalidCliff = 8,
+    /// The downstream FluxoraStream contract rejected creation because it is paused.
+    StreamContractPaused = 9,
+    /// The downstream FluxoraStream contract rejected creation for a reason other than paused.
+    /// This is a passthrough catch-all for unexpected downstream failures.
+    StreamContractError = 10,
 }
 
 #[contracttype]
@@ -233,10 +238,7 @@ impl FluxoraFactory {
 
         let stream_client = FluxoraStreamClient::new(&env, &stream_contract);
 
-        // We wrap the `try_create_stream` to gracefully handle underlying failures if needed,
-        // but for now, `.create_stream()` automatically panics with the underlying contract error
-        // if it fails, which is standard Soroban cross-contract call behavior.
-        let stream_id = stream_client.create_stream(
+        match stream_client.try_create_stream(
             &sender,
             &recipient,
             &deposit_amount,
@@ -247,8 +249,11 @@ impl FluxoraFactory {
             &withdraw_dust_threshold,
             &None,
             &fluxora_stream::StreamKind::Linear,
-        );
-
-        Ok(stream_id)
+        ) {
+            Ok(Ok(stream_id)) => Ok(stream_id),
+            Err(Ok(StreamContractError::ContractPaused)) => Err(FactoryError::StreamContractPaused),
+            Err(Ok(_)) => Err(FactoryError::StreamContractError),
+            Err(Err(_)) => Err(FactoryError::StreamContractError),
+        }
     }
 }

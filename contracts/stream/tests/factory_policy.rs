@@ -231,14 +231,170 @@ fn test_create_stream_deposit_exceeds_cap() {
     let result = ctx.factory.try_create_stream(
         &ctx.sender,
         &recipient,
-        &10_001,
-        &1, // exceeds max_deposit=10_000
+        &1_000,
+        &1,
+        &now,
+        &now,
+        &(now + 200),
+        &0,
+    );
+    assert_eq!(result, Err(Ok(FactoryError::RecipientNotAllowlisted)));
+}
+
+// ---------------------------------------------------------------------------
+// Downstream error mapping — StreamContractPaused
+// ---------------------------------------------------------------------------
+
+/// When the underlying FluxoraStream contract has creation paused,
+/// the factory maps ContractError::ContractPaused to FactoryError::StreamContractPaused.
+#[test]
+fn test_create_stream_downstream_paused() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient, &true);
+    let now = ctx.now();
+
+    // Pause stream creation via the stream contract
+    ctx.stream.set_contract_paused(&true);
+
+    let result = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &1_000,
+        &1,
+        &now,
+        &now,
+        &(now + 200),
+        &0,
+    );
+    assert_eq!(result, Err(Ok(FactoryError::StreamContractPaused)));
+}
+
+/// Global emergency pause on the stream contract also maps to StreamContractPaused.
+#[test]
+fn test_create_stream_downstream_global_paused() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient, &true);
+    let now = ctx.now();
+
+    ctx.stream.set_global_emergency_paused(&true);
+
+    let result = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &1_000,
+        &1,
+        &now,
+        &now,
+        &(now + 200),
+        &0,
+    );
+    assert_eq!(result, Err(Ok(FactoryError::StreamContractPaused)));
+}
+
+// ---------------------------------------------------------------------------
+// Downstream error mapping — StreamContractError (catch-all)
+// ---------------------------------------------------------------------------
+
+/// When the stream contract rejects creation for a reason other than paused
+/// (e.g., zero rate), the factory maps it to FactoryError::StreamContractError.
+#[test]
+fn test_create_stream_downstream_zero_rate() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient, &true);
+    let now = ctx.now();
+
+    // rate_per_second = 0 passes factory policy but is rejected by the stream
+    // contract's validate_stream_params (Linear streams require rate > 0).
+    let result = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &11_000,
+        &1,
         &now,
         &now,
         &(now + 200),
         &0,
     );
     assert_eq!(result, Err(Ok(FactoryError::DepositExceedsCap)));
+}
+
+/// Stream rejects sender == recipient, factory maps to StreamContractError.
+#[test]
+fn test_create_stream_downstream_self_stream() {
+    let ctx = Ctx::setup();
+    ctx.factory.set_allowlist(&ctx.sender, &true);
+    let now = ctx.now();
+
+    // sender == recipient passes factory policy but is rejected by the stream
+    // contract's validate_stream_params.
+    let result = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &ctx.sender,
+        &1_000,
+        &1,
+        &now,
+        &now,
+        &(now + 200),
+        &0,
+    );
+    assert_eq!(result, Err(Ok(FactoryError::StreamContractError)));
+}
+
+// ---------------------------------------------------------------------------
+// Happy path — successful creation still works with try_create_stream
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_create_stream_success_returns_stream_id() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient, &true);
+    let now = ctx.now();
+
+    let result = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &1_000,
+        &1,
+        &now,
+        &now,
+        &(now + 1_000),
+        &0,
+    );
+    match result {
+        Ok(Ok(stream_id)) => assert_eq!(stream_id, 0),
+        other => panic!("Expected Ok(Ok(0)), got {:?}", other),
+    }
+}
+
+/// After unpausing, creation succeeds (verifies pause does not permanently break path).
+#[test]
+fn test_create_stream_success_after_unpause() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient, &true);
+    let now = ctx.now();
+
+    ctx.stream.set_contract_paused(&true);
+    ctx.stream.set_contract_paused(&false);
+
+    let result = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &1_000,
+        &1,
+        &now,
+        &now,
+        &(now + 1_000),
+        &0,
+    );
+    match result {
+        Ok(Ok(stream_id)) => assert_eq!(stream_id, 0),
+        other => panic!("Expected Ok(Ok(0)), got {:?}", other),
+    }
 }
 
 /// Deposit exactly at cap is accepted.
