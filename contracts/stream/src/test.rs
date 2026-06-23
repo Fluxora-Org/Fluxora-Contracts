@@ -20596,9 +20596,9 @@ fn test_contract_error_discriminants_are_stable() {
         "ClockRegression must be 28"
     );
     assert_eq!(
-        ContractError::WithdrawalTooFrequent as u32,
+        ContractError::MetadataTooLarge as u32,
         29,
-        "WithdrawalTooFrequent must be 29"
+        "MetadataTooLarge must be 29"
     );
     assert_eq!(
         ContractError::UnsupportedStreamKind as u32,
@@ -20606,23 +20606,23 @@ fn test_contract_error_discriminants_are_stable() {
         "UnsupportedStreamKind must be 30"
     );
     assert_eq!(
-        ContractError::KeeperGracePeriodNotElapsed as u32,
+        ContractError::RateCapExceeded as u32,
         31,
-        "KeeperGracePeriodNotElapsed must be 31"
-    );
-    assert_eq!(
-        ContractError::MetadataTooLarge as u32,
-        32,
-        "MetadataTooLarge must be 32"
+        "RateCapExceeded must be 31"
     );
     assert_eq!(
         ContractError::PauseCooldownActive as u32,
-        33,
-        "PauseCooldownActive must be 33"
+        32,
+        "PauseCooldownActive must be 32"
     );
     assert_eq!(
-        ContractError::RateCapExceeded as u32,
+        ContractError::WithdrawalTooFrequent as u32,
+        33,
+        "WithdrawalTooFrequent must be 33"
+    );
+    assert_eq!(
+        ContractError::KeeperGracePeriodNotElapsed as u32,
         34,
-        "RateCapExceeded must be 34"
+        "KeeperGracePeriodNotElapsed must be 34"
     );
 }

@@ -40,12 +40,12 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `ReservationStillActive` | 26 | ID reservation is still active | `reserve_stream_ids` |
 | `PauseReasonTooLong` | 27 | Pause reason string exceeds `MAX_PAUSE_REASON_BYTES` | `pause_protocol` |
 | `ClockRegression` | 28 | Ledger-backed accrual observed a timestamp lower than the previous accrual timestamp | `calculate_accrued`, `get_withdrawable`, `withdraw`, `withdraw_to`, `batch_withdraw`, `batch_withdraw_to`, rate changes, `cancel_stream`, auto-claim paths |
-| `WithdrawalTooFrequent` | 29 | Rate limit exceeded for withdrawals | `withdraw` |
+| `MetadataTooLarge` | 29 | Metadata payload exceeds the allowed size | `create_stream` |
 | `UnsupportedStreamKind` | 30 | Stream kind is not supported | `withdraw` |
-| `KeeperGracePeriodNotElapsed` | 31 | Keeper attempted to close a stream before the grace period elapsed | `close_completed_stream` |
-| `MetadataTooLarge` | 32 | Metadata payload exceeds the allowed size | `create_stream` |
-| `PauseCooldownActive` | 33 | Operation blocked by a pause cooldown | `pause_stream` |
-| `RateCapExceeded` | 34 | Rate update exceeds the configured rate cap | `update_rate_per_second` |
+| `RateCapExceeded` | 31 | Rate update exceeds the configured rate cap | `update_rate_per_second` |
+| `PauseCooldownActive` | 32 | Operation blocked by a pause cooldown | `pause_stream` |
+| `WithdrawalTooFrequent` | 33 | Rate limit exceeded for withdrawals | `withdraw` |
+| `KeeperGracePeriodNotElapsed` | 34 | Keeper attempted to close a stream before the grace period elapsed | `close_completed_stream` |
 
 Non-error enum values used by stream creation and accrual:
 

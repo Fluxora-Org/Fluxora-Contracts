@@ -241,6 +241,43 @@ All storage keys are defined in `DataKey`:
 | `Proposal(u32)` | Persistent | `Proposal` (includes `created_at`, `executed`, and `cancelled`) |
 | `QuorumReachedAt(u32)` | Persistent | `QuorumInfo { reached_at: u64, threshold: u32 }` |
 
+### TTL policy
+
+Soroban persistent entries are subject to archival once their remaining
+TTL falls below `PERSISTENT_LIFETIME_THRESHOLD` (17,280 ledgers / ~1 day
+at 5 s/ledger). To keep `Proposal(id)` and `QuorumReachedAt(id)` live
+throughout the timelock window, the contract bumps TTL on every read and
+write that touches the entry:
+
+- **`Proposal(id)`**: bumped via `bump_proposal` in `load_proposal` (read path,
+  called by `get_proposal`, `approve`, `execute`, `cancel_proposal`) and in
+  `save_proposal` (write path, called by `propose`, `approve`,
+  `cancel_proposal`, `execute`).
+- **`QuorumReachedAt(id)`**: bumped once when quorum is first reached inside
+  `approve`, immediately after the `QuorumInfo` write.
+
+Constants:
+
+| Symbol | Value | Purpose |
+|---|---:|---|
+| `PERSISTENT_LIFETIME_THRESHOLD` | 17,280 ledgers (~1 d) | Soroban archival threshold; entries whose remaining TTL falls below this value are bump-extended. |
+| `PERSISTENT_BUMP_AMOUNT` | 120,960 ledgers (~7 d) | Bump amount applied on every read and write of `Proposal(id)`, and on `QuorumReachedAt(id)` at quorum-reach. |
+
+The 48-hour timelock corresponds to ~34,560 ledgers, which is comfortably
+covered by a single 7-day bump. The 30-day `MAX_PROPOSAL_AGE_SECONDS`
+window (~518,400 ledgers) requires periodic reads from clients,
+indexers, or admin tools to keep entries alive past the initial ~7-day
+bump; the regression tests in `contracts/stream/tests/governance_ttl.rs`
+pin this behavior.
+
+Security implication: a future change that removes the read-time bump in
+`load_proposal` would cause a `Proposal(id)` entry to archive silently
+between reads, turning `execute` into a `ProposalNotFound` failure
+surface for in-flight, still-timelocked proposals. The
+`test_execute_unknown_id_returns_proposal_not_found` test in
+`governance_ttl.rs` documents the failure signal that change would
+produce.
+
 ## GovernanceError codes
 
 For stream and factory error tables, see [`error.md`](error.md). Governance clients should
@@ -323,3 +360,20 @@ Integration tests are in `contracts/stream/tests/governance_integration.rs` and 
 - Threshold validation on `init`.
 - Quorum invariant on `remove_signer`.
 - Quorum uses the configured threshold; adding signers does not change threshold.
+
+TTL regression tests are in `contracts/stream/tests/governance_ttl.rs` and
+cover:
+
+- `Proposal(id)` survives a ledger advance past the persistent archival
+  threshold thanks to the write-time bump.
+- Reading a proposal re-extends the persistent TTL (`load_proposal` calls
+  `bump_proposal`).
+- `execute` succeeds after the full `GOVERNANCE_TIMELOCK_SECONDS` window
+  because both `Proposal(id)` and `QuorumReachedAt(id)` are still on chain.
+- A proposal with periodic reads can survive the full
+  `MAX_PROPOSAL_AGE_SECONDS` window before `execute`.
+- Negative control: executing a non-existent proposal id returns
+  `ProposalNotFound`, which is the exact error surface a future bump-policy
+  regression would expose.
+- Drift guard: the local TTL constants match the contract's runtime
+  constants via `timelock_seconds()` and `max_proposal_age_seconds()`.
