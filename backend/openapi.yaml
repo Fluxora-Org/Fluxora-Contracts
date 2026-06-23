@@ -1,0 +1,308 @@
+openapi: 3.1.0
+info:
+  title: MentorsMind API
+  version: 1.0.0
+  description: |
+    REST API for the MentorsMind platform.
+
+    ## Idempotency
+
+    Mutating endpoints (POST) support the `Idempotency-Key` header.
+    Clients **should** send a UUID v4 value to safely retry requests
+    without creating duplicate resources.
+
+    | Scenario | Behaviour |
+    |---|---|
+    | First request | Processed normally; result cached 24 h |
+    | Replay (same key, same user) | Cached response returned (200 or original status) |
+    | Concurrent duplicate | `409 Conflict` |
+    | Missing header | Request processed without idempotency protection |
+    | Malformed key (not UUID v4) | `400 Bad Request` |
+
+    ## Amount fields
+
+    All on-chain / API amount fields (`depositAmount`, `ratePerSecond`) are
+    serialized as **decimal strings** to preserve precision for values that
+    exceed `Number.MAX_SAFE_INTEGER` in JavaScript.
+
+servers:
+  - url: http://localhost:3000/api/v1
+    description: Local development
+
+security:
+  - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  headers:
+    IdempotencyKey:
+      description: |
+        Client-generated UUID v4 used to deduplicate requests.
+        The same key scoped to the same authenticated user will return
+        the original response for 24 hours.
+      schema:
+        type: string
+        format: uuid
+        example: "550e8400-e29b-41d4-a716-446655440000"
+    XCorrelationId:
+      description: Correlation ID for distributed tracing.
+      schema:
+        type: string
+        example: "req-abc123"
+
+  schemas:
+    ErrorEnvelope:
+      type: object
+      required: [success, error]
+      properties:
+        success:
+          type: boolean
+          enum: [false]
+        error:
+          type: object
+          required: [message, code]
+          properties:
+            message:
+              type: string
+            code:
+              type: string
+            correlationId:
+              type: string
+              description: Present when X-Correlation-Id was supplied or generated.
+
+    Stream:
+      type: object
+      required:
+        - id
+        - senderId
+        - recipientId
+        - depositAmount
+        - ratePerSecond
+        - startTime
+        - endTime
+        - status
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique stream identifier.
+        senderId:
+          type: string
+          format: uuid
+          description: Authenticated user who created the stream.
+        recipientId:
+          type: string
+          format: uuid
+          description: Recipient of the stream.
+        depositAmount:
+          type: string
+          pattern: '^\d+(\.\d+)?$'
+          description: |
+            Total deposited amount as a **decimal string**.
+            Serialized as a string to preserve precision for on-chain values.
+          example: "1000000"
+        ratePerSecond:
+          type: string
+          pattern: '^\d+(\.\d+)?$'
+          description: |
+            Streaming rate per second as a **decimal string**.
+          example: "100"
+        startTime:
+          type: integer
+          description: Unix timestamp (seconds) when streaming begins.
+          example: 1700000000
+        endTime:
+          type: integer
+          description: Unix timestamp (seconds) when streaming ends.
+          example: 1700010000
+        cliffTime:
+          type: integer
+          nullable: true
+          description: |
+            Optional Unix timestamp before which no tokens accrue.
+            Must be between startTime and endTime.
+          example: 1700001000
+        status:
+          type: string
+          enum: [active, paused, cancelled, completed]
+          description: Current stream status.
+        createdAt:
+          type: string
+          format: date-time
+          description: ISO-8601 creation timestamp.
+
+    CreateStreamRequest:
+      type: object
+      required:
+        - recipientId
+        - depositAmount
+        - ratePerSecond
+        - startTime
+        - endTime
+      properties:
+        recipientId:
+          type: string
+          format: uuid
+        depositAmount:
+          type: string
+          pattern: '^\d+(\.\d+)?$'
+          description: Total deposit as a decimal string.
+          example: "1000000"
+        ratePerSecond:
+          type: string
+          pattern: '^\d+(\.\d+)?$'
+          description: Rate per second as a decimal string.
+          example: "100"
+        startTime:
+          type: integer
+          description: Unix timestamp (seconds).
+          example: 1700000000
+        endTime:
+          type: integer
+          description: Unix timestamp (seconds), must be after startTime.
+          example: 1700010000
+        cliffTime:
+          type: integer
+          nullable: true
+          description: Optional cliff Unix timestamp.
+          example: 1700001000
+
+paths:
+  /streams:
+    post:
+      operationId: createStream
+      summary: Create a payment stream
+      description: |
+        Creates a new payment stream from the authenticated sender to a recipient.
+
+        ### Idempotency
+
+        Include `Idempotency-Key: <uuid-v4>` to make this request safe to retry.
+
+        - **First call**: stream is created, response cached for 24 h.
+        - **Replay**: cached `201` response returned immediately — no duplicate stream.
+        - **Concurrent duplicate**: `409 Conflict` returned.
+
+        ### Amount fields
+
+        `depositAmount` and `ratePerSecond` **must** be decimal strings.
+        This preserves precision for on-chain token amounts that may exceed
+        JavaScript's `Number.MAX_SAFE_INTEGER`.
+      tags:
+        - Streams
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: UUID v4 idempotency key.
+        - in: header
+          name: X-Correlation-Id
+          required: false
+          schema:
+            type: string
+          description: Optional correlation ID for tracing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateStreamRequest'
+            examples:
+              basic:
+                summary: Basic stream
+                value:
+                  recipientId: "a1b2c3d4-e5f6-4789-abcd-ef0123456789"
+                  depositAmount: "1000000"
+                  ratePerSecond: "100"
+                  startTime: 1700000000
+                  endTime: 1700010000
+              withCliff:
+                summary: Stream with cliff
+                value:
+                  recipientId: "a1b2c3d4-e5f6-4789-abcd-ef0123456789"
+                  depositAmount: "5000000"
+                  ratePerSecond: "500"
+                  startTime: 1700000000
+                  endTime: 1700010000
+                  cliffTime: 1700001000
+      responses:
+        '201':
+          description: Stream created successfully.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data]
+                properties:
+                  success:
+                    type: boolean
+                    enum: [true]
+                  data:
+                    type: object
+                    required: [stream]
+                    properties:
+                      stream:
+                        $ref: '#/components/schemas/Stream'
+        '400':
+          description: Validation error or malformed Idempotency-Key.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              examples:
+                validationError:
+                  value:
+                    success: false
+                    error:
+                      message: "depositAmount must be a positive decimal string"
+                      code: "VALIDATION_ERROR"
+                badIdempotencyKey:
+                  value:
+                    success: false
+                    error:
+                      message: "Idempotency-Key must be a valid UUID v4"
+                      code: "INVALID_IDEMPOTENCY_KEY"
+        '401':
+          description: Missing or invalid JWT.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: |
+            Concurrent duplicate detected — a request with this
+            `Idempotency-Key` is already being processed.
+            The client should wait and retry; the first request will
+            complete and subsequent replays will return the cached result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                error:
+                  message: "A request with this Idempotency-Key is already being processed"
+                  code: "IDEMPOTENCY_CONFLICT"
+        '429':
+          description: Rate limit exceeded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'

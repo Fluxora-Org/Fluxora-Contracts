@@ -1,68 +1,132 @@
 #!/usr/bin/env bash
-# =============================================================================
-# update-wasm-checksums.sh — Regenerate reference WASM checksums
-# =============================================================================
-# Builds the fluxora_stream WASM artifact and updates wasm/checksums.sha256
-# with the new SHA256 hash. Run this whenever the contract source changes
-# and you want to update the canonical checksum that CI verifies against.
+# update-wasm-checksums.sh
 #
-# Prerequisites:
-#   - Rust toolchain with wasm32-unknown-unknown target
-#   - cargo on PATH
+# Rebuilds all WASM artifacts and updates wasm/checksums.sha256 with fresh
+# SHA256 hashes. Run this locally whenever contract source changes and commit
+# the updated checksums file alongside your code change.
 #
-# Usage:
-#   bash script/update-wasm-checksums.sh
+# Usage: bash script/update-wasm-checksums.sh [--dry-run]
 #
-# After running, commit wasm/checksums.sha256 along with your source changes.
-# =============================================================================
+# Options:
+#   --dry-run   Print what would be written without modifying checksums.sha256
+#
+# Exit codes:
+#   0  Success — checksums file updated (or dry-run printed)
+#   1  Build failed or WASM artifact missing
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-CHECKSUM_FILE="${REPO_ROOT}/wasm/checksums.sha256"
-WASM_PATH="target/wasm32-unknown-unknown/release/fluxora_stream.wasm"
-PACKAGE_NAME="fluxora_stream"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CHECKSUMS_FILE="${REPO_ROOT}/wasm/checksums.sha256"
+DRY_RUN=false
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; NC='\033[0m'
-info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
-success() { echo -e "${GREEN}[OK]${NC}    $*"; }
-error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY_RUN=true ;;
+    *) echo "Unknown argument: $arg" >&2; exit 1 ;;
+  esac
+done
 
-info "Building ${PACKAGE_NAME} (release / WASM)..."
-cargo build --release -p "${PACKAGE_NAME}" --target wasm32-unknown-unknown 2>&1
+# ---------------------------------------------------------------------------
+# Contracts to hash: name → relative WASM path from repo root
+# Add new contracts here when they are added to the workspace.
+# ---------------------------------------------------------------------------
+declare -A CONTRACTS
+CONTRACTS["fluxora_stream"]="target/wasm32-unknown-unknown/release/fluxora_stream.wasm"
 
-FULL_WASM_PATH="${REPO_ROOT}/${WASM_PATH}"
-[[ -f "${FULL_WASM_PATH}" ]] || error "WASM artifact not found at ${FULL_WASM_PATH} after build."
+# ---------------------------------------------------------------------------
+# Verify required tools
+# ---------------------------------------------------------------------------
+for tool in cargo sha256sum awk date; do
+  if ! command -v "$tool" &>/dev/null; then
+    echo "ERROR: required tool '$tool' not found in PATH" >&2
+    exit 1
+  fi
+done
 
-CHECKSUM=$(sha256sum "${FULL_WASM_PATH}" | awk '{print $1}')
+# ---------------------------------------------------------------------------
+# Verify rust-toolchain.toml is present (reproducibility requirement)
+# ---------------------------------------------------------------------------
+if [ ! -f "${REPO_ROOT}/rust-toolchain.toml" ]; then
+  echo "ERROR: rust-toolchain.toml not found — pinned toolchain is required for reproducible builds" >&2
+  exit 1
+fi
 
-info "WASM SHA256: ${CHECKSUM}"
+TOOLCHAIN_CHANNEL=$(grep 'channel' "${REPO_ROOT}/rust-toolchain.toml" | awk -F'"' '{print $2}')
+echo "Rust toolchain: ${TOOLCHAIN_CHANNEL} (from rust-toolchain.toml)"
 
-# Write the checksums file
-cat > "${CHECKSUM_FILE}" << EOF
-# Fluxora Stream WASM Checksums
+# ---------------------------------------------------------------------------
+# Build all contracts
+# ---------------------------------------------------------------------------
+echo "Building WASM artifacts (release, wasm32-unknown-unknown)..."
+cargo build --release --target wasm32-unknown-unknown \
+  --manifest-path "${REPO_ROOT}/Cargo.toml" \
+  $(for name in "${!CONTRACTS[@]}"; do echo "-p $name"; done)
+
+# ---------------------------------------------------------------------------
+# Compute hashes
+# ---------------------------------------------------------------------------
+declare -A NEW_HASHES
+for name in "${!CONTRACTS[@]}"; do
+  wasm_path="${REPO_ROOT}/${CONTRACTS[$name]}"
+  if [ ! -f "${wasm_path}" ]; then
+    echo "ERROR: WASM artifact not found: ${wasm_path}" >&2
+    echo "  Build may have failed or the contract name is wrong." >&2
+    exit 1
+  fi
+  hash=$(sha256sum "${wasm_path}" | awk '{print $1}')
+  NEW_HASHES["$name"]="$hash"
+  echo "  ${name}: ${hash}"
+done
+
+# ---------------------------------------------------------------------------
+# Dry-run: print and exit
+# ---------------------------------------------------------------------------
+if [ "$DRY_RUN" = true ]; then
+  echo ""
+  echo "--- DRY RUN: checksums.sha256 would be updated to ---"
+  for name in "${!NEW_HASHES[@]}"; do
+    echo "${NEW_HASHES[$name]}  ${name}.wasm"
+  done
+  echo "--- No files were modified ---"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Write checksums file
+# ---------------------------------------------------------------------------
+TODAY=$(date -u +%Y-%m-%d)
+
+{
+  cat <<EOF
+# Fluxora Contract WASM Checksums
 #
-# This file contains reference SHA256 checksums for reproducible WASM builds.
+# Reference SHA256 checksums for reproducible WASM builds.
 # CI verifies that a fresh build produces byte-identical artifacts.
 #
 # Format: <sha256>  <filename>
 # Generated by: script/update-wasm-checksums.sh
-# Last updated: $(date -u +%Y-%m-%d)
+# Last updated: ${TODAY}
+# Rust toolchain: ${TOOLCHAIN_CHANNEL}
 #
-# To regenerate, run: bash script/update-wasm-checksums.sh
+# To regenerate: bash script/update-wasm-checksums.sh
+# To verify:     bash script/verify-wasm-checksum.sh
 #
 # Determinism contract:
-#   - Rust toolchain is pinned via rust-toolchain.toml (stable channel)
-#   - soroban-sdk version is pinned in contracts/stream/Cargo.toml
+#   - Rust toolchain pinned via rust-toolchain.toml
+#   - soroban-sdk version pinned in each contract's Cargo.toml
 #   - Build uses --release with wasm32-unknown-unknown target
-#   - No environment-dependent flags or features beyond the pinned toolchain
+#   - No environment-dependent flags beyond the pinned toolchain
 #
-${CHECKSUM}  fluxora_stream.wasm
 EOF
+  for name in "${!NEW_HASHES[@]}"; do
+    echo "${NEW_HASHES[$name]}  ${name}.wasm"
+  done
+} > "${CHECKSUMS_FILE}"
 
-success "Checksums written to ${CHECKSUM_FILE}"
 echo ""
-echo "Next steps:"
-echo "  1. Review the change: cat ${CHECKSUM_FILE}"
-echo "  2. Commit: git add wasm/checksums.sha256 && git commit -m 'chore: update wasm checksums'"
+echo "Updated ${CHECKSUMS_FILE}"
+echo "Commit this file alongside your source changes."
+echo ""
+echo "To verify the build is reproducible, run:"
+echo "  bash script/verify-wasm-checksum.sh"

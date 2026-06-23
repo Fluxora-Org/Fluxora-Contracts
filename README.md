@@ -5,6 +5,7 @@ Soroban smart contracts for the Fluxora treasury streaming protocol on Stellar. 
 ## Documentation
 
 - **[Stream contract](docs/streaming.md)** — Lifecycle, accrual formula, cliff/end_time, access control, events, and error codes.
+- **[Dust threshold](docs/dust-threshold.md)** — `withdraw_dust_threshold` formula, USDC examples, validation table, and template guidance.
 - **[Security](docs/security.md)** — CEI ordering, token trust model, authorization paths, overflow protection.
 - **[Upgrade strategy](docs/upgrade.md)** — CONTRACT_VERSION policy, breaking-change classification, migration runbook.
 - **[Deployment](docs/DEPLOYMENT.md)** — Step-by-step testnet deployment checklist.
@@ -19,42 +20,81 @@ Soroban smart contracts for the Fluxora treasury streaming protocol on Stellar. 
 - **Data model** — `Stream` (sender, recipient, deposit_amount, rate_per_second, start/cliff/end time, withdrawn_amount, status, cancelled_at).
 - **Status** — `Active`, `Paused`, `Completed`, `Cancelled`.
 
-### Implemented entry-points
+### Core Stream Entry Points
 
-| Entry-point | Caller | Description |
-|---|---|---|
-| `init` | Bootstrap admin | One-shot initialisation: set token and admin |
-| `create_stream` | Sender | Create a single stream and pull deposit |
-| `create_streams` | Sender | Batch-create streams in one atomic transaction |
-| `pause_stream` | Sender | Halt withdrawals (accrual continues) |
-| `resume_stream` | Sender | Re-enable withdrawals |
-| `cancel_stream` | Sender | Terminate stream; refund unstreamed tokens to sender |
-| `withdraw` | Recipient | Pull accrued tokens to recipient address |
-| `withdraw_to` | Recipient | Pull accrued tokens to a specified destination |
-| `batch_withdraw` | Recipient | Withdraw from multiple streams in one call |
-| `top_up_stream` | Any funder | Add tokens to an existing stream's deposit |
-| `update_rate_per_second` | Sender | Change the streaming rate |
-| `shorten_stream_end_time` | Sender | Move end_time earlier; refunds excess deposit |
-| `extend_stream_end_time` | Sender | Move end_time later |
-| `close_completed_stream` | Anyone | Remove a completed stream from storage (cleanup) |
-| `pause_stream_as_admin` | Admin | Administrative pause override |
-| `resume_stream_as_admin` | Admin | Administrative resume override |
-| `cancel_stream_as_admin` | Admin | Administrative cancel override |
-| `set_admin` | Admin | Rotate the admin key |
-| `set_contract_paused` | Admin | Global emergency pause (blocks new stream creation) |
-| `calculate_accrued` | Anyone | View: accrued amount at current ledger time |
-| `get_withdrawable` | Anyone | View: withdrawable amount at current ledger time |
-| `get_claimable_at` | Anyone | View: simulated claimable amount at an arbitrary timestamp |
-| `get_stream_state` | Anyone | View: full stream struct |
-| `get_stream_count` | Anyone | View: total number of streams created |
-| `get_recipient_streams` | Anyone | View: all stream IDs for a recipient (sorted) |
-| `get_recipient_stream_count` | Anyone | View: number of streams for a recipient |
-| `get_config` | Anyone | View: token address and admin address |
-| `version` | Anyone | View: CONTRACT_VERSION constant (pre-flight check) |
+The following table lists every public stream contract entry point implemented in `contracts/stream/src/lib.rs` inside the `FluxoraStream` `#[contractimpl]` block.
 
-### Cancel semantics
+| Entry Point | Caller / Auth Rules | Description |
+| :--- | :--- | :--- |
+| `init` | `admin.require_auth()` | Initialize contract config with token and admin |
+| `create_stream` | `sender.require_auth()` | Create one new stream with explicit absolute timing |
+| `create_stream_relative` | `sender.require_auth()` (via `create_stream`) | Create a stream with relative delays instead of absolute timestamps |
+| `create_streams` | `sender.require_auth()` | Create a batch of streams in one atomic call |
+| `create_streams_relative` | `sender.require_auth()` (via `create_streams`) | Create a batch of streams using relative timing |
+| `create_streams_partial` | `sender.require_auth()` | Create a batch of streams with per-entry failure isolation |
+| `pause_stream` | `stream.sender.require_auth()` | Pause a sender-owned stream |
+| `resume_stream` | `stream.sender.require_auth()` | Resume a sender-owned paused stream |
+| `cancel_stream` | `stream.sender.require_auth()` | Cancel a sender-owned stream and refund unstreamed deposit |
+| `withdraw` | `stream.recipient.require_auth()` | Withdraw accrued tokens as the stream recipient |
+| `withdraw_to` | `stream.recipient.require_auth()` | Withdraw accrued tokens to a specified destination as recipient |
+| `update_recipient` | `stream.recipient.require_auth()` | Rotate stream recipient to a new address |
+| `get_pending_recipient_update` | Public / None | Read the pending recipient update request |
+| `accept_recipient_update` | `stream.recipient.require_auth()` | Accept a pending recipient update as current recipient |
+| `cancel_recipient_update` | `stream.sender.require_auth()` | Cancel a pending recipient update as stream sender |
+| `batch_withdraw` | `recipient.require_auth()` | Withdraw accrued tokens from many streams as recipient |
+| `batch_withdraw_to` | `recipient.require_auth()` | Withdraw accrued tokens from many streams to destinations |
+| `delegated_withdraw` | `relayer.require_auth()` | Relayer-executed withdrawal using recipient signature |
+| `get_delegated_nonce` | Public / None | Read the delegated withdrawal nonce for a recipient |
+| `calculate_accrued` | Public / None | Compute accrued amount for a stream |
+| `get_withdrawable` | Public / None | Compute current withdrawable balance for a stream |
+| `get_claimable_at` | Public / None | Query claimable amount at a target timestamp |
+| `get_config` | Public / None | Read stored contract config |
+| `get_global_emergency_paused` | Public / None | Read emergency pause state |
+| `set_admin` | `old_admin.require_auth()` | Change contract admin (old admin auth required) |
+| `set_max_rate_per_second` | `admin.require_auth()` | Set the global max rate-per-second cap |
+| `get_stream_state` | Public / None | Read full stream details |
+| `get_stream_health` | Public / None | Read health metrics for a stream |
+| `get_stream_memo` | Public / None | Read the stream memo field |
+| `get_stream_metadata` | Public / None | Read stream metadata map |
+| `get_stream_count` | Public / None | Read total number of streams created |
+| `update_rate_per_second` | `stream.sender.require_auth()` | Increase a sender-owned stream rate |
+| `decrease_rate_per_second` | `stream.sender.require_auth()` | Decrease a sender-owned stream rate safely |
+| `shorten_stream_end_time` | `stream.sender.require_auth()` | Shorten stream duration and refund unstreamed deposit |
+| `extend_stream_end_time` | `stream.sender.require_auth()` | Extend stream duration without changing deposit |
+| `top_up_stream` | `funder.require_auth()` | Add deposit to a stream by an authorized funder |
+| `close_completed_stream` | Public / None | Permissionless cleanup of a completed or cancelled stream |
+| `register_stream_template` | `owner.require_auth()` | Create a reusable schedule template |
+| `delete_stream_template` | `owner.require_auth()` | Remove a schedule template owned by the caller |
+| `create_stream_from_template` | `sender.require_auth()` (via `create_stream_relative` / `create_stream`) | Create a stream from a registered template |
+| `get_stream_template` | Public / None | Read a saved schedule template |
+| `version` | Public / None | Read current contract version |
+| `get_recipient_streams` | Public / None | List stream IDs for a recipient |
+| `get_recipient_streams_paginated` | Public / None | Paginate recipient stream IDs |
+| `get_recipient_stream_count` | Public / None | Count streams for a recipient |
+| `get_streams_by_id_range` | Public / None | Read streams in an ID range for export |
+| `update_rate` | `caller.require_auth()` (sender or admin) | Update stream rate as sender or admin |
+| `cancel_stream_as_admin` | `admin.require_auth()` | Cancel any stream as contract admin |
+| `keeper_cancel` | `keeper.require_auth()` | Keeper-cancel an eligible stream after grace period |
+| `pause_stream_as_admin` | `admin.require_auth()` | Pause any stream as contract admin |
+| `resume_stream_as_admin` | `admin.require_auth()` | Resume any paused stream as contract admin |
+| `set_global_emergency_paused` | `admin.require_auth()` | Admin toggle emergency pause |
+| `global_resume` | `admin.require_auth()` | Admin clear emergency pause |
+| `set_contract_paused` | `admin.require_auth()` | Admin pause or unpause stream creation |
+| `pause_protocol` | `admin.require_auth()` | Admin globally pause protocol creation |
+| `resume_protocol` | `admin.require_auth()` | Admin globally resume protocol creation |
+| `is_paused` | Public / None | Read protocol pause status |
+| `get_pause_info` | Public / None | Read current pause metadata |
+| `sweep_excess` | `admin.require_auth()` + `recipient.require_auth()` | Admin sweep excess tokens to a recipient |
+| `set_auto_claim` | `stream.recipient.require_auth()` | Recipient set auto-claim destination |
+| `revoke_auto_claim` | `stream.recipient.require_auth()` | Recipient revoke auto-claim destination |
+| `trigger_auto_claim` | Public / None | Permissionless execute auto-claim withdrawal |
+| `get_auto_claim_status` | Public / None | Read auto-claim status for a stream |
+| `get_auto_claim_destination` | Public / None | Read auto-claim destination if set |
+| `clone_stream` | `source.sender.require_auth()` | Clone a source stream into a new stream |
+| `reserve_stream_ids` | `caller.require_auth()` | Reserve contiguous stream IDs for later use |
+| `get_id_reservation` | Public / None | View active stream ID reservation for caller |
 
-`cancel_stream` and `cancel_stream_as_admin` are valid only when status is `Active` or `Paused`. Streams in `Completed` or `Cancelled` state return `ContractError::InvalidState`. After cancellation, accrual is frozen at `cancelled_at`; the recipient may still withdraw the frozen accrued amount.
+> `cancel_stream` and `cancel_stream_as_admin` are valid only when status is `Active` or `Paused`. Streams in `Completed` or `Cancelled` state return `ContractError::InvalidState`. After cancellation, accrual is frozen at `cancelled_at`; the recipient may still withdraw the frozen accrued amount.
 
 ## Tech stack
 
@@ -203,11 +243,24 @@ After each CI build, the pipeline computes a SHA256 hash of the contract WASM ar
 To verify a deployment:
 
 1. Download the hash artifact from the CI run (GitHub Actions → Artifacts → `fluxora_stream-wasm-hash`).
-2. Compute the SHA256 hash of your local WASM file:
+2. Rebuild locally and verify against the committed reference:
    ```bash
-   sha256sum target/wasm32-unknown-unknown/release/fluxora_stream.wasm
+   bash script/verify-wasm-checksum.sh
    ```
-3. Compare the output to the CI hash file. A match confirms your binary is identical to the tested build.
+3. Or verify existing artifacts without rebuilding:
+   ```bash
+   bash script/verify-wasm-checksum.sh --no-build
+   ```
+
+To update checksums after a source change:
+
+```bash
+bash script/update-wasm-checksums.sh
+git add wasm/checksums.sha256
+git commit -m "chore: update wasm checksums"
+```
+
+See [docs/security.md](docs/security.md#reproducible-wasm-builds) for the full reproducibility contract, auditor verification steps, and residual risks.
 
 ## Related repos
 
@@ -215,7 +268,37 @@ To verify a deployment:
 - **fluxora-frontend** — Dashboard and recipient UI
 
 Each is a separate Git repository.
+---
 
+## 🏭 Factory Contract
+The Factory contract anchors the workspace deployment ecosystem by supervising global templates, managing operational scopes, and generating token-bound stream addresses.
+
+* **Initialization (`init`):** Seals factory state parameters, configuring fundamental baseline settings and mapping the primary admin profile.
+* **Policy Setters:** Secure administration entry-points governing structural template overrides, fee parameters, and network ownership allocations.
+* **Stream Creation (`create_stream`):** Instantiates an isolated stream proxy sequence matched precisely against the active, verified template hash register.
+
+> For deployment parameter schemas, factory variables, and initialization matrices, see [docs/factory.md](docs/factory.md).
+
+---
+
+## ⚖️ Governance Contract
+The Governance module coordinates community actions, parameter threshold overrides, and critical upgrade vectors via verifiable checkpoint logic.
+
+* **Proposal Lifecycles (`propose` / `approve` / `execute`):** Standard multi-signature/voting pipeline driving states from conception through validation rounds directly into on-chain enforcement.
+* **Signer Management:** Updates administrative sign-off lists, multisig weights, and required confirmation consensus thresholds.
+
+> For technical consensus models, voter profiles, and cryptographic execution matrices, see [docs/governance.md](docs/governance.md).
+
+---
+
+## 🛠️ Compilation and Local Development
+
+All three workspace contract modules are structured to build simultaneously under standard WebAssembly environments. To compile `stream`, `factory`, and `governance` uniformly in a single action, run:
+
+```bash
+cargo build --target wasm32-unknown-unknown --workspace
 ## Contributing
 
 Please read [CONTRIBUTING.md](CONTRIBUTING.md) for details on the development workflow, branch naming, and testing requirements (including the 95% test coverage standard).
+
+See [CHANGELOG.md](./CHANGELOG.md) for a full history of changes between contract versions.

@@ -10,7 +10,7 @@ Everything materially related to protocol semantics, authorization boundaries, s
 
 ## Verification Status
 
-✅ **Complete alignment verified** between `docs/streaming.md` narrative and contract implementation as of 2026-03-27.
+✅ **Complete alignment verified** between `docs/streaming.md` narrative and contract implementation as of 2026-03-30.
 
 ---
 
@@ -29,6 +29,7 @@ See continuation in protocol-narrative-code-alignment-part2.md
 | `pause_stream`  | Sender          | `require_stream_sender`    | lib.rs:906   | §4  |
 | `resume_stream` | Sender          | `require_stream_sender`    | lib.rs:937   | §4  |
 | `cancel_stream` | Sender          | `require_stream_sender`    | lib.rs:987   | §4  |
+| `update_rate_per_second` | Sender       | `require_stream_sender`    | lib.rs:1853 | §4  |
 | `withdraw`      | Recipient       | `recipient.require_auth()` | lib.rs:1033  | §4  |
 | `*_as_admin`    | Admin           | `admin.require_auth()`     | lib.rs:2033+ | §4  |
 | Read operations | Anyone          | None                       | Various      | §4  |
@@ -192,6 +193,47 @@ return min(accrued, deposit_amount)
 - **Code**: lib.rs:1039-1041
 - **Error**: `InvalidState`
 - ✅ **Aligned**
+
+---
+
+## update_rate_per_second Semantics (Detailed)
+
+### Success Semantics (Observable)
+
+1. **Authorization**: Only stream sender can call
+2. **State Requirements**: Stream status `Active` or `Paused` (not terminal)
+3. **Rate Validation**: `new_rate > 0` and `new_rate > old_rate`
+4. **Deposit Coverage**: `deposit_amount >= new_rate * (end_time - start_time)`
+5. **Accrual Impact**: Accrual calculation uses new rate retroactively, monotonic increase
+6. **Partial Withdrawal Interaction**: `withdrawn_amount` unchanged, `withdrawable = accrued - withdrawn_amount`
+7. **Event**: `("rate_upd", stream_id)` → `RateUpdated { stream_id, old_rate, new_rate, effective_time }`
+
+**Code**: lib.rs:1853-1901
+**Doc**: streaming.md §3 "update_rate_per_second: Observable Semantics"
+✅ **Aligned**
+
+### Failure Semantics (Observable)
+
+1. Invalid stream → `StreamNotFound`
+2. Not sender → `Unauthorized`
+3. Terminal status → `InvalidState`
+4. Invalid rate → `InvalidParams`
+5. Insufficient deposit → `InsufficientDeposit`
+6. Atomic: Any failure reverts with no changes
+
+**Code**: lib.rs:1855-1875
+**Doc**: streaming.md §3
+✅ **Aligned**
+
+### Invariants
+
+- Accrued amounts never decrease
+- Recipient entitlement preserved or increased
+- Deposit coverage ensures fundability
+
+**Code**: accrual.rs monotonicity, lib.rs validation
+**Doc**: streaming.md §3
+✅ **Aligned**
 
 ---
 
@@ -388,3 +430,84 @@ When changing the contract:
 5. Document any new residual risks
 
 Last verified: 2026-03-27
+
+---
+
+## Local Validation
+
+Run the alignment script directly from the repository root to check for
+documentation drift before pushing:
+
+```bash
+python3 script/validate-doc-alignment.py
+```
+
+A passing run prints:
+
+```
+OK: all contract identifiers are present in documentation.
+```
+
+Any undocumented identifier prints a clear error and exits with code 1:
+
+```
+MISSING DOC: 'new_function' (entrypoint) found in code but not in 'docs/streaming.md'
+```
+
+To also run the full test suite with coverage locally:
+
+```bash
+pip install pytest pytest-cov
+pytest tests/ --cov=script/ --cov-fail-under=95 -v
+```
+
+---
+
+## Doc Alignment CI Check
+
+The script `script/validate-doc-alignment.py` enforces that every public
+entrypoint, event symbol, and `ContractError` variant defined in
+`contracts/stream/src/lib.rs` is mentioned in the corresponding documentation
+file. It runs automatically on every pull request and push to `main` via the
+`docs-check` CI job.
+
+### Running locally
+
+```bash
+python3 script/validate-doc-alignment.py
+```
+
+A clean run prints:
+
+```
+OK: all contract identifiers are present in documentation.
+```
+
+Any drift prints one line per missing identifier and exits with code 1:
+
+```
+MISSING DOC: 'ErrorRateLimit' (error variant) found in code but not in 'docs/error.md'
+```
+
+### Running the test suite
+
+```bash
+pip install pytest
+pytest script/tests/test_validate_doc_alignment.py -v
+```
+
+### What is checked
+
+| Source file | Extracted identifiers | Target doc |
+|---|---|---|
+| `contracts/stream/src/lib.rs` | `pub fn <name>` (entrypoints) | `docs/streaming.md` |
+| `contracts/stream/src/lib.rs` | `symbol_short!("<topic>")` (events) | `docs/events.md` |
+| `contracts/stream/src/lib.rs` | `ContractError` enum variants | `docs/error.md` |
+
+### Fixing drift
+
+1. If you added a new entrypoint, event, or error variant, add a description
+   for it in the relevant doc file.
+2. Re-run the script locally to confirm it passes before pushing.
+3. The CI `docs-check` job will fail with a non-zero exit code if any
+   identifier is undocumented, blocking the PR from merging.

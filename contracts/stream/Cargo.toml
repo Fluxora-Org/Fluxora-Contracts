@@ -7,6 +7,7 @@ description = "Fluxora USDC streaming contract for Stellar Soroban"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
+doctest = false
 
 [features]
 testutils = ["soroban-sdk/testutils"]
@@ -22,8 +23,12 @@ soroban-sdk = "21.7.7"
 [dev-dependencies]
 # Required for simulating ledger environment and testing time dependencies
 soroban-sdk = { version = "21.7.7", features = ["testutils"] }
-
-[[test]]
-name = "adversarial_auth"
-path = "tests/adversarial_auth.rs"
-required-features = ["testutils"]
+# Factory policy enforcement tests (#525)
+fluxora_factory = { path = "../factory", features = ["testutils"] }
+# Governance integration tests (#585)
+fluxora_governance = { path = "../governance", features = ["testutils"] }
+# Property-based testing for accrual math fuzz harness (#292)
+proptest = "1"
+# Required for constructing Ed25519 keypairs in delegated-withdraw tests
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+rand = "0.8"

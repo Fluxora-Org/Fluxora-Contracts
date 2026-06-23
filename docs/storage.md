@@ -13,11 +13,33 @@ All storage keys are defined in the `DataKey` enum:
 ```rust
 #[contracttype]
 pub enum DataKey {
+    Config,                    // Instance storage for global settings (admin/token).
+    NextStreamId,              // Instance storage for the auto-incrementing ID counter.
+    Stream(u64),               // Persistent storage for individual stream data (O(1) lookup).
+    RecipientStreams(Address), // Persistent storage for recipient stream index (sorted by stream_id).
+    PauseState,                // Instance storage: protocol-wide pause state (enum).
+    WithdrawNonce(Address),    // Persistent storage: per-recipient nonce for delegated-withdraw replay protection.
+    ReentrancyLock,            // Instance storage: reentrancy guard flag (bool).
+}
+```
+
+> **Append-only rule**: new variants are always appended at the end to avoid shifting
+> existing discriminant values, which would corrupt live storage on mainnet.
+
+## Storage Types and Usage
     Config,                    // discriminant 0 — instance
     NextStreamId,              // discriminant 1 — instance
     Stream(u64),               // discriminant 2 — persistent
     RecipientStreams(Address), // discriminant 3 — persistent
-    GlobalPaused,              // discriminant 4 — instance
+    GlobalEmergencyPaused,     // discriminant 4 — instance (DEPRECATED)
+    CreationPaused,            // discriminant 5 — instance (DEPRECATED)
+    GlobalPauseReason,         // discriminant 6 — instance
+    GlobalPauseTimestamp,      // discriminant 7 — instance
+    GlobalPauseAdmin,          // discriminant 8 — instance
+    AutoClaimDestination(u64), // discriminant 9 — persistent
+    StreamMemo(u64),           // discriminant 10 — persistent
+    PauseState,                // discriminant 11 — instance
+    ReentrancyLock,            // discriminant 12 — instance
 }
 ```
 
@@ -29,7 +51,15 @@ pub enum DataKey {
 | 1 | `NextStreamId` | Instance | `u64` (monotonic counter) | `init` (→ 0) | `create_stream`, `create_streams` |
 | 2 | `Stream(u64)` | Persistent | `Stream` struct | `create_stream`, `create_streams` | `pause_stream`, `resume_stream`, `cancel_stream`, `withdraw`, `withdraw_to`, `batch_withdraw`, `top_up_stream`, `update_rate_per_second`, `shorten_stream_end_time`, `extend_stream_end_time` |
 | 3 | `RecipientStreams(Address)` | Persistent | `Vec<u64>` (sorted) | `create_stream`, `create_streams` | `close_completed_stream` (removes entry) |
-| 4 | `GlobalPaused` | Instance | `bool` | `set_contract_paused` | `set_contract_paused` |
+| 4 | `GlobalEmergencyPaused` | Instance | `bool` | `set_global_emergency_paused` | (DEPRECATED) |
+| 5 | `CreationPaused` | Instance | `bool` | `set_contract_paused` | (DEPRECATED) |
+| 6 | `GlobalPauseReason` | Instance | `String` | `pause_protocol` | `resume_protocol` (removes) |
+| 7 | `GlobalPauseTimestamp` | Instance | `u64` | `pause_protocol` | `resume_protocol` (removes) |
+| 8 | `GlobalPauseAdmin` | Instance | `Address` | `pause_protocol` | `resume_protocol` (removes) |
+| 9 | `AutoClaimDestination(u64)` | Persistent | `Address` | auto-claim opt-in | auto-claim revoke |
+| 10 | `StreamMemo(u64)` | Persistent | `Bytes` (max 64 bytes) | `create_stream`, `create_streams` | `close_completed_stream` (removes) |
+| 11 | `PauseState` | Instance | `PauseState` enum | `set_global_emergency_paused`, `set_contract_paused`, `pause_protocol` | `resume_protocol` (Active) |
+| 12 | `ReentrancyLock` | Instance | `bool` | `acquire_reentrancy_lock` | `release_reentrancy_lock` |
 
 ---
 
@@ -39,6 +69,13 @@ pub enum DataKey {
 
 ### Rules (must be followed on every PR that touches `DataKey`)
 
+Persistent storage is used for individual stream records and per-recipient nonces:
+
+| Key Pattern | Type | Description | Set By | Modified By |
+|-------------|------|-------------|--------|-------------|
+| `Stream(stream_id)` | `Stream` struct | Complete stream state including participants, amounts, timing, and status | `create_stream()` | `pause_stream()`, `resume_stream()`, `cancel_stream()`, `withdraw()` |
+| `RecipientStreams(address)` | `Vec<u64>` | Sorted list of stream IDs for a recipient | `create_stream()` | `close_completed_stream()` |
+| `WithdrawNonce(address)` | `u64` | Monotonically increasing nonce for delegated-withdraw replay protection | `delegated_withdraw()` (first call) | `delegated_withdraw()` (incremented on each successful withdrawal that moves tokens) |
 1. **Never reorder** existing variants. The discriminant table above is immutable for the lifetime of any deployed instance.
 2. **Never remove** a variant that has ever been written to a live network. Mark it `#[deprecated]` in a doc comment and stop writing to it; do not delete it.
 3. **Always append** new variants at the end of the enum.
@@ -75,7 +112,8 @@ Used for contract-wide configuration and counters. Shared across all operations,
 |---|---|
 | `Config` | Token address and admin address. Immutable after `init` except for admin rotation via `set_admin`. |
 | `NextStreamId` | Monotonically increasing stream ID counter. Never decremented. |
-| `GlobalPaused` | Emergency pause flag. `true` blocks `create_stream` and `create_streams`. |
+| `GlobalEmergencyPaused` | Emergency pause flag. `true` blocks all operational entrypoints. |
+| `CreationPaused` | Soft creation pause flag. `true` blocks `create_stream` and `create_streams`. |
 
 ### Persistent storage
 
@@ -85,6 +123,7 @@ Used for per-stream data and per-recipient indexes. Grows linearly with stream c
 |---|---|
 | `Stream(stream_id)` | Complete stream state: participants, amounts, timing, status, `cancelled_at`. One entry per stream. |
 | `RecipientStreams(address)` | Sorted `Vec<u64>` of stream IDs where `address` is the recipient. Maintained in ascending order. |
+| `AutoClaimDestination(stream_id)` | Recipient-chosen destination `Address` for permissionless auto-claim. Absent when not opted in. Removed by `revoke_auto_claim`. |
 
 ---
 
@@ -101,7 +140,7 @@ const PERSISTENT_BUMP_AMOUNT: u32       = 120_960;
 
 ### Instance TTL
 
-Extended via `bump_instance_ttl()` on **every** entry-point that touches instance storage. This means any contract interaction — read or write — keeps `Config`, `NextStreamId`, and `GlobalPaused` alive.
+Extended via `bump_instance_ttl()` on **every** entry-point that touches instance storage. This means any contract interaction — read or write — keeps `Config`, `NextStreamId`, `GlobalEmergencyPaused`, and `CreationPaused` alive.
 
 ### Persistent TTL
 
@@ -119,6 +158,7 @@ Extended on every `load_stream()` (read) and `save_stream()` (write), and on eve
 ### TTL implications for operators
 
 - **Active streams**: TTL refreshed on any interaction.
+- **Cancelled streams**: Remain in persistent storage until the recipient withdraws the frozen accrued amount. `close_completed_stream` is blocked while any claimable balance remains. Operators must ensure recipients are notified to withdraw before TTL expiry.
 - **Inactive streams**: May expire after ~7 days with zero interaction. Operators must ensure recipients are notified before TTL expiry.
 - **Expired entries**: Cannot be recovered. Data is permanently lost.
 - **Contract liveness**: Instance storage stays alive as long as any function is called at least once per 7 days.
@@ -157,7 +197,8 @@ Extended on every `load_stream()` (read) and `save_stream()` (write), and on eve
 | `extend_stream_end_time` | `Stream(id)` | Updates `end_time` |
 | `close_completed_stream` | Removes `Stream(id)`, updates `RecipientStreams(addr)` | Permissionless cleanup |
 | `set_admin` | `Config` | Admin key rotation |
-| `set_contract_paused` | `GlobalPaused` | Emergency pause flag |
+| `set_global_emergency_paused` | `GlobalEmergencyPaused` | Global emergency pause flag |
+| `set_contract_paused` | `CreationPaused` | Soft creation pause flag |
 
 ---
 
@@ -168,3 +209,125 @@ Extended on every `load_stream()` (read) and `save_stream()` (write), and on eve
 - **CEI ordering**: State is always persisted (`save_stream`) before any external token transfer. See `docs/security.md`.
 - **No stale reads**: TTL bumps on reads mean monitoring queries keep data fresh.
 - **Admin rotation**: `set_admin` writes a new `Config` with the updated admin address. The token address is immutable.
+
+---
+
+## 7. Version History
+
+For a full description of what changed between contract versions and how to migrate, see [DEPLOYMENT.md — Version Migration](./DEPLOYMENT.md#version-migration).
+
+---
+
+## 8. V5 Storage Layout (historical reference)
+
+This section documents the storage layout as it existed in **CONTRACT_VERSION = 5**, before the V6 additions. It is the authoritative reference for:
+
+- Regression tests that seed V5-era ledger state and verify V6 read paths.
+- Off-chain indexers that may encounter V5-encoded entries on instances that have not been migrated.
+- Auditors verifying that no discriminant was shifted between V5 and V6.
+
+### V5 DataKey discriminant table (frozen — must never change)
+
+| Discriminant | Variant                     | Storage    | Value type                   |
+|-------------:|:----------------------------|:-----------|:-----------------------------|
+|            0 | `Config`                    | Instance   | `Config { token, admin }`    |
+|            1 | `NextStreamId`              | Instance   | `u64`                        |
+|            2 | `Stream(u64)`               | Persistent | `Stream` (V5, 14 fields)     |
+|            3 | `RecipientStreams(Address)`  | Persistent | `Vec<u64>` (sorted)          |
+|            4 | `GlobalEmergencyPaused`     | Instance   | `bool`                       |
+|            5 | `CreationPaused`            | Instance   | `bool`                       |
+|            6 | `GlobalPauseReason`         | Instance   | `String`                     |
+|            7 | `GlobalPauseTimestamp`      | Instance   | `u64`                        |
+|            8 | `GlobalPauseAdmin`          | Instance   | `Address`                    |
+|            9 | `AutoClaimDestination(u64)` | Persistent | `Address`                    |
+|           10 | `NextTemplateId`            | Instance   | `u64`                        |
+|           11 | `ActiveTemplateCount`       | Instance   | `u64`                        |
+|           12 | `StreamTemplate(u64)`       | Persistent | `StreamScheduleTemplate`     |
+|           13 | `OwnerTemplateIds(Address)` | Persistent | `Vec<u64>`                   |
+|           14 | `TotalLiabilities`          | Instance   | `i128`                       |
+
+Discriminants 0–14 are **permanently frozen**. No variant at these positions may ever be reordered, renamed, or removed on any instance that has processed at least one transaction.
+
+### V5 Stream struct (14 fields, positional XDR encoding)
+
+| Position | Field                     | Type           | Notes                                      |
+|---------:|:--------------------------|:---------------|:-------------------------------------------|
+|        0 | `stream_id`               | `u64`          | Monotonically increasing, set at creation  |
+|        1 | `sender`                  | `Address`      | Stream creator and controller              |
+|        2 | `recipient`               | `Address`      | Token beneficiary                          |
+|        3 | `deposit_amount`          | `i128`         | Total escrowed tokens                      |
+|        4 | `rate_per_second`         | `i128`         | Streaming speed in raw token units/second  |
+|        5 | `start_time`              | `u64`          | Ledger timestamp when accrual begins       |
+|        6 | `cliff_time`              | `u64`          | Ledger timestamp when withdrawals unlock   |
+|        7 | `end_time`                | `u64`          | Ledger timestamp when accrual stops        |
+|        8 | `withdrawn_amount`        | `i128`         | Cumulative tokens already withdrawn        |
+|        9 | `status`                  | `StreamStatus` | `Active`, `Paused`, `Completed`, `Cancelled` |
+|       10 | `cancelled_at`            | `Option<u64>`  | Set when status transitions to `Cancelled` |
+|       11 | `checkpointed_amount`     | `i128`         | Accrued tokens locked at last rate change  |
+|       12 | `checkpointed_at`         | `u64`          | Timestamp of last rate change              |
+|       13 | `withdraw_dust_threshold` | `i128`         | Minimum withdrawal amount (0 = no filter)  |
+
+**No `memo` field in V5.** The V5 `Stream` struct has exactly 14 fields.
+
+### V5 → V6 transition
+
+V6 appended six new `DataKey` variants (discriminants 15–20) and one new `Stream` field:
+
+| Discriminant | Variant                              | Storage    | Value type  | Notes                                    |
+|-------------:|:-------------------------------------|:-----------|:------------|:-----------------------------------------|
+|           15 | `WithdrawNonce(Address)`             | Persistent | `u64`       | Per-recipient nonce; absent until first delegated-withdraw |
+|           16 | `PauseState`                         | Instance   | `PauseState`| Unified pause state enum                 |
+|           17 | `ReentrancyLock`                     | Instance   | `bool`      | Reentrancy guard; absent when not held   |
+|           18 | `RecipientStreamPage(Address, u32)`  | Persistent | `Vec<u64>`  | Paged recipient index (page → IDs)       |
+|           19 | `RecipientStreamPageCount(Address)`  | Persistent | `u32`       | Number of pages in recipient's index     |
+|           20 | `PendingRecipientUpdate(u64)`        | Persistent | `Address`   | Pending recipient rotation proposal      |
+
+V6 `Stream` struct adds one field at the end:
+
+| Position | Field  | Type           | Notes                                                    |
+|---------:|:-------|:---------------|:---------------------------------------------------------|
+|       14 | `memo` | `Option<Bytes>`| Optional indexer correlation memo (max 64 bytes); `None` in V5 entries |
+
+### Forward-compatibility guarantee
+
+All V5 persistent `Stream` entries remain decodable on a V6 instance. Soroban XDR struct decoding is **positional and forward-compatible**: a V6 decoder reading a V5-encoded struct decodes the first 14 fields correctly and treats the absent 15th field as `None` (for `Option<Bytes>`).
+
+This guarantee holds **only** because:
+1. `memo` is `Option`-typed — an absent field decodes as `None`, not a type error.
+2. `memo` is appended as the last field — no positional shift occurs for fields 0–13.
+
+A non-`Option` append or a mid-struct insertion would break V5 entries silently.
+
+### Regression test coverage
+
+The file `contracts/stream/tests/storage_key_compat.rs` encodes these invariants as executable tests:
+
+| Test | What it guards |
+|:-----|:---------------|
+| `v5_stream_readable_by_v6_get_stream_state` | Discriminant 2 stability; `memo == None` on V5 entries |
+| `v5_stream_calculate_accrued_correct` | Accrual math on V5 entries |
+| `v5_stream_get_withdrawable_correct` | Withdrawable calculation on V5 entries |
+| `v5_stream_get_claimable_at_correct` | Claimable-at simulation on V5 entries |
+| `v5_multiple_streams_all_readable` | `Stream(u64)` key encoding for multiple IDs |
+| `v5_cancelled_stream_readable_accrual_frozen` | `cancelled_at` field decoding; frozen accrual |
+| `v5_stream_with_checkpoint_readable` | `checkpointed_amount` field decoding |
+| `v5_config_key_readable_by_v6` | Discriminant 0 stability |
+| `v5_next_stream_id_readable_by_v6` | Discriminant 1 stability |
+| `v5_global_emergency_paused_readable_by_v6` | Discriminant 4 stability |
+| `v5_creation_paused_readable_by_v6` | Discriminant 5 stability |
+| `v5_total_liabilities_readable_by_v6` | Discriminant 14 stability (last frozen key) |
+| `v5_recipient_streams_readable_by_v6` | Discriminant 3 stability |
+| `v5_recipient_stream_count_correct` | RecipientStreams count on V5 index |
+| `v5_absent_recipient_streams_returns_empty` | No panic on absent V5 index |
+| `v6_withdraw_nonce_absent_on_v5_instance` | Discriminant 15 absent on V5 |
+| `v6_pause_state_absent_on_v5_instance` | Discriminant 16 absent on V5 |
+| `v6_reentrancy_lock_absent_on_v5_instance` | Discriminant 17 absent on V5 |
+| `v6_recipient_stream_page_absent_on_v5_instance` | Discriminant 18 absent on V5 |
+| `v6_recipient_stream_page_count_absent_on_v5_instance` | Discriminant 19 absent on V5 |
+| `v6_pending_recipient_update_absent_on_v5_instance` | Discriminant 20 absent on V5 |
+| `discriminant_0_config_round_trips` | Config key round-trip |
+| `discriminant_1_next_stream_id_round_trips` | NextStreamId key round-trip |
+| `discriminant_2_stream_round_trips` | Stream key round-trip |
+| `discriminant_3_recipient_streams_round_trips` | RecipientStreams key round-trip |
+| `discriminant_14_total_liabilities_round_trips` | TotalLiabilities key round-trip |
+| `version_entry_point_works_on_v5_seeded_instance` | `version()` callable on V5 state |

@@ -1,0 +1,12 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 928d1d5b1e578f0ff1d9104983fef8151f8f493c4c2105268b14ad2bae6b2e99 # shrinks to (deposit, rate, duration) = (1, 1, 1), times = [0]
+cc f6a1e51f2f753d43f46241c8cb68df553b2e0139daeacc0de241c9830afdc6df # shrinks to (deposit, rate, duration) = (1, 1, 1), times = [0]
+cc a426e92df303e8d399faae1e1804a886e9bde8dfb5a17a8509f57dbfd65e19c4 # shrinks to (deposit, rate, duration) = (1, 1, 1), times = [0]
+cc d89542220c0471935de6d5df32b52556ce79adfb12093692ffce5f8b570223a6 # shrinks to (deposit, rate, duration) = (1, 1, 1), times = [0]
+cc 34c1f5339938d50dffbf7676c8cfcc416ff88b904a6a01094723794cf75622c3 # shrinks to (deposit, rate, duration) = (1, 1, 1), cancel_at = 0
+cc 2bdcdc2663369d5a3ccbbcda3185d3ef8ec94f69a974ce5a83bcb4b2db12ce5b # shrinks to (deposit, rate, duration) = (32508, 86, 378), times = [340, 1050, 1063]

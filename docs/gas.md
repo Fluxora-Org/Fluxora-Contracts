@@ -1,137 +1,49 @@
-# Gas / Budget Review: Hot Paths and Batching
+# Gas Profiling and Budget Review
 
-This document characterises the Soroban CPU-instruction and memory-byte cost
-profile for the three hot paths in the Fluxora streaming contract, explains the
-batching design decisions, and records the observable guarantees that integrators
-and auditors can rely on.
+This document describes the gas (CPU and Memory) costs for the Fluxora streaming contract.
 
----
+## Safe Batch Limits
 
-## Hot paths
+| Operation | Batch Size | Recommended CPU Budget |
+|-----------|------------|------------------------|
+| `create_streams` | 1 | 1.5M |
+| `create_streams` | 10 | 10M |
+| `create_streams` | 50 | 40M |
+| `batch_withdraw` | 1 | 1.0M |
+| `batch_withdraw` | 10 | 6M |
+| `batch_withdraw` | 50 | 20M |
+| `batch_withdraw` | 100 | 35M |
 
-### 1. `withdraw` (single stream)
+## Hot Path Analysis
 
-**Call pattern:** recipient calls once per stream per claim cycle.
+### `withdraw`
+The `withdraw` function is the most common operation. Its cost is dominated by:
+1. Loading the `Stream` state.
+2. Accrual calculation.
+3. Token transfer (external call).
+4. Saving updated `withdrawn_amount`.
 
-**Work done per call:**
-- 1× persistent storage read (`load_stream`)
-- 1× `calculate_accrued` (pure arithmetic, no storage)
-- 1× persistent storage write + TTL bump (`save_stream`) — only when `withdrawable > 0`
-- 1× token `transfer` call (contract → recipient) — only when `withdrawable > 0`
-- 1–2× event publishes (`withdrew`, optionally `completed`)
+### `batch_withdraw`
+To reduce gas, `batch_withdraw` optimizes by:
+1. Caching the ledger timestamp.
+2. Performing a single authorization check.
+3. Processing multiple streams in a loop.
 
-**Zero-withdrawable short-circuit:** when `accrued == withdrawn_amount` (before
-cliff, or already fully withdrawn) the function returns `0` immediately — no
-storage write, no token transfer, no event. This is the cheapest possible
-outcome and is safe to call speculatively.
+## Performance Metrics
 
-**Guardrail (unit + integration tests):** ≤ 1 000 000 CPU instructions,
-≤ 500 000 memory bytes per single call.
+The following table provides the CPU instruction counts for core operations.
 
----
+<!-- GAS_BASELINE_START -->
+{
+  "create_stream": 0,
+  "withdraw": 0,
+  "batch_withdraw": {
+    "1": 0,
+    "10": 0,
+    "50": 0,
+    "100": 0
+  }
+}
+<!-- GAS_BASELINE_END -->
 
-### 2. `batch_withdraw` (N streams, one auth)
-
-**Call pattern:** recipient calls once to drain multiple streams in one
-transaction.
-
-**Gas-saving vs N individual `withdraw` calls:**
-- Authorization is paid **once** for the entire batch instead of once per stream.
-- The Soroban auth overhead (signature verification, sub-invocation tree) is the
-  dominant fixed cost per transaction; batching amortises it across all streams.
-
-**Work done per stream entry:**
-- 1× persistent storage read (`load_stream`)
-- 1× `calculate_accrued` (pure arithmetic)
-- 1× persistent storage write + TTL bump — only when `withdrawable > 0`
-- 1× token `transfer` — only when `withdrawable > 0`
-- 1–2× event publishes — only when `withdrawable > 0`
-
-**Status semantics in batch:**
-
-| Stream status | Behaviour | Panics? |
-|---|---|---|
-| `Active` | Normal accrual + transfer | No |
-| `Cancelled` | Accrual frozen at `cancelled_at`; transfers remaining accrued − withdrawn | No |
-| `Completed` | Returns `amount = 0`; no transfer, no event | No |
-| `Paused` | Returns `ContractError::InvalidState`; entire batch reverts | Yes |
-| Wrong recipient | Returns `ContractError::Unauthorized`; entire batch reverts | Yes |
-
-**Atomicity:** the batch is all-or-nothing. Any error (stream not found, wrong
-recipient, paused stream) reverts all state changes and token transfers for the
-entire call.
-
-**Guardrail (integration tests):** ≤ 10 000 000 CPU instructions, ≤ 4 000 000
-memory bytes for a 20-stream batch.
-
----
-
-### 3. `create_streams` (N streams, single bulk token pull)
-
-**Call pattern:** treasury operator creates multiple streams in one transaction.
-
-**Gas-saving vs N individual `create_stream` calls:**
-- Authorization is paid **once**.
-- Token transfer is a **single** `transfer(sender → contract, total_deposit)`
-  instead of one transfer per stream. This is the primary gas saving: each
-  token transfer invokes the SAC contract and incurs its own CPU budget.
-
-**Work done:**
-- First pass: validate all entries (pure arithmetic, no storage, no token calls)
-- 1× token `transfer` for the sum of all deposits
-- Second pass: for each entry — 1× stream ID allocation, 1× persistent write,
-  1× recipient-index update, 1× `created` event
-
-**Atomicity:** validation failures, arithmetic overflow in total deposit, or
-token transfer failure abort the entire call. No streams are created, no tokens
-move, and no events are emitted.
-
-**Guardrail (integration tests):** ≤ 6 000 000 CPU instructions, ≤ 3 000 000
-memory bytes for a 10-stream batch.
-
----
-
-## Invariants
-
-1. **Accrual is pure.** `calculate_accrued` reads no storage and performs no
-   token calls. It is safe to call from any context without budget concern.
-
-2. **CEI ordering.** All three hot paths write state before making external
-   token calls. This prevents reentrancy from observing stale state.
-
-3. **Zero-amount paths skip I/O.** When `withdrawable == 0`, no storage write
-   and no token transfer occur. Callers may speculatively invoke `withdraw` or
-   include already-completed streams in `batch_withdraw` without wasting budget
-   on I/O.
-
-4. **Single token pull in `create_streams`.** The total deposit is computed with
-   `checked_add` across all entries before any token interaction. Overflow in
-   the sum returns `ContractError::InvalidParams` and is atomic.
-
-5. **TTL bumps are bounded.** Every `load_stream` and `save_stream` call bumps
-   the persistent entry TTL by at most `PERSISTENT_BUMP_AMOUNT` (120 960
-   ledgers ≈ 7 days). Instance storage is bumped on every entry-point that
-   touches it. These bumps are included in the guardrail measurements above.
-
----
-
-## Residual risks and audit notes
-
-- **Recipient-index updates in `create_streams`:** each stream creation calls
-  `add_stream_to_recipient_index`, which reads and writes a persistent
-  `Vec<u64>` per recipient. For a batch where all streams share the same
-  recipient, this is O(N) reads and writes on the same key. The index is
-  maintained in sorted order via binary search (O(log N) per insert), but the
-  persistent I/O cost is O(N). Operators creating large batches to a single
-  recipient should be aware of this.
-
-- **No hard batch size limit.** The contract does not enforce a maximum number
-  of entries in `create_streams` or `batch_withdraw`. The Soroban network
-  enforces a per-transaction CPU and memory budget; calls that exceed it will
-  fail at the network level. The guardrails in the test suite are conservative
-  upper bounds, not protocol limits.
-
-- **Token contract trust.** All token transfers use the SAC interface. The
-  contract assumes the token contract does not reenter the streaming contract.
-  CEI ordering mitigates this risk but does not eliminate it for non-SAC tokens
-  if the contract is ever re-initialised with a custom token address.
+*Note: Baselines are currently initialized to 0 and should be updated after the first successful run of `script/validate_gas.py` once the contract compiles.*

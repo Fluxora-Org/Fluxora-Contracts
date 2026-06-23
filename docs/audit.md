@@ -27,6 +27,8 @@ This document lists all public entrypoints and core invariants of the Fluxora st
 | `close_completed_stream`  | `env: Env`, `stream_id: u64`                                                                                                                                | —           | Anyone                                        | Remove storage for a Completed stream. Permissionless cleanup.                                                             |
 | `set_admin`               | `env: Env`, `new_admin: Address`                                                                                                                            | —           | Admin                                         | Rotate admin key.                                                                                                          |
 | `version`                 | `env: Env`                                                                                                                                                  | `u32`       | None (view)                                   | Return compile-time contract version.                                                                                      |
+| `delegated_withdraw`      | `env: Env`, `stream_id: u64`, `relayer: Address`, `recipient_public_key: Bytes`, `nonce: u64`, `deadline: u64`, `expected_minimum_amount: i128`, `signature: Bytes` | `i128` | Relayer (`relayer.require_auth()`) + ed25519 sig from recipient | Withdraw on behalf of recipient. Signature commits to `(stream_id, nonce, deadline, expected_minimum_amount)`. Reverts if `withdrawable < expected_minimum_amount`. |
+| `get_delegated_nonce`     | `env: Env`, `recipient: Address`                                                                                                                            | `u64`       | None (view)                                   | Return current replay-protection nonce for a recipient.                                                                    |
 
 There is no `version` entrypoint in the contract.
 
@@ -88,9 +90,46 @@ Auditors can use these as a checklist; the implementation is intended to preserv
 - Refund paid to sender is exactly `deposit_amount - accrued_at(cancelled_at)`.
 - `cancel_stream` and `cancel_stream_as_admin` must produce identical state/event semantics except for the required authorizer.
 
-11. **Contract balance consistency**  
+13. **Reentrancy Guard**
+
+All token-transfer paths (`withdraw`, `withdraw_to`, `batch_withdraw`, `cancel_stream`) are protected by an explicit `DataKey::ReentrancyLock` guard. If a cross-contract callback (e.g., via a custom token hook) attempts to re-enter any of these functions while a transfer is in progress, the call will revert with `ContractError::InvalidState`.
+
+14. **Contract balance consistency**  
     Deposit is pulled in `create_stream`; refunds and withdrawals only move amounts derived from that deposit (unstreamed to sender, accrued to recipient). No minting or arbitrary transfers.
 
 ---
 
 For security patterns (e.g. CEI, reentrancy) see [docs/security.md](security.md).
+
+---
+
+## Delegation helper (`contracts/stream/src/delegation.rs`)
+
+`delegated_withdraw` delegates its deadline and nonce validation to
+`validate_delegation_params(env, stream_id, nonce, deadline)` in
+`src/delegation.rs`.  Auditors reviewing the delegated-withdraw auth path
+should start there.
+
+### What the helper checks
+
+| Check | Error on failure |
+|---|---|
+| `env.ledger().timestamp() > deadline` | `SignatureDeadlineExpired` |
+| `nonce != stored_nonce(stream.recipient)` | `InvalidParams` |
+| `stream_id` does not exist | `StreamNotFound` |
+
+### What the helper does NOT check
+
+The following checks remain in `delegated_withdraw` itself (after the helper returns `Ok`):
+
+- `destination == env.current_contract_address()` → `InvalidParams`
+- `stream.status == Completed` → `InvalidState`
+- `stream.status == Paused` → `InvalidState`
+- Ed25519 signature verification → `InvalidSignature` (or host trap)
+
+### Nonce storage
+
+Nonces are stored under `DataKey::WithdrawNonce(recipient_address)` in persistent
+storage.  The nonce is incremented by `increment_withdraw_nonce` only after all
+checks pass and a non-zero amount is transferred.  A zero-amount call does not
+consume the nonce.
