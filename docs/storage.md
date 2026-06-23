@@ -27,6 +27,7 @@ pub enum DataKey {
 > existing discriminant values, which would corrupt live storage on mainnet.
 
 ## Storage Types and Usage
+
     Config,                    // discriminant 0 — instance
     NextStreamId,              // discriminant 1 — instance
     Stream(u64),               // discriminant 2 — persistent
@@ -40,8 +41,10 @@ pub enum DataKey {
     StreamMemo(u64),           // discriminant 10 — persistent
     PauseState,                // discriminant 11 — instance
     ReentrancyLock,            // discriminant 12 — instance
+
 }
-```
+
+````
 
 ### Current discriminant table
 
@@ -50,7 +53,7 @@ pub enum DataKey {
 | 0 | `Config` | Instance | `Config { token, admin }` | `init` (one-shot) | `set_admin` |
 | 1 | `NextStreamId` | Instance | `u64` (monotonic counter) | `init` (→ 0) | `create_stream`, `create_streams` |
 | 2 | `Stream(u64)` | Persistent | `Stream` struct | `create_stream`, `create_streams` | `pause_stream`, `resume_stream`, `cancel_stream`, `withdraw`, `withdraw_to`, `batch_withdraw`, `top_up_stream`, `update_rate_per_second`, `shorten_stream_end_time`, `extend_stream_end_time` |
-| 3 | `RecipientStreams(Address)` | Persistent | `Vec<u64>` (sorted) | `create_stream`, `create_streams` | `close_completed_stream` (removes entry) |
+| 3 | `RecipientStreams(Address)` | Persistent | `Vec<u64>` (sorted) | `create_stream`, `create_streams` | `close_completed_stream`, `close_cancelled_stream` (removes entry) |
 | 4 | `GlobalEmergencyPaused` | Instance | `bool` | `set_global_emergency_paused` | (DEPRECATED) |
 | 5 | `CreationPaused` | Instance | `bool` | `set_contract_paused` | (DEPRECATED) |
 | 6 | `GlobalPauseReason` | Instance | `String` | `pause_protocol` | `resume_protocol` (removes) |
@@ -136,7 +139,7 @@ const INSTANCE_LIFETIME_THRESHOLD: u32 = 17_280;  // ~1 day at 5 s/ledger
 const INSTANCE_BUMP_AMOUNT: u32       = 120_960;  // ~7 days
 const PERSISTENT_LIFETIME_THRESHOLD: u32 = 17_280;
 const PERSISTENT_BUMP_AMOUNT: u32       = 120_960;
-```
+````
 
 ### Instance TTL
 
@@ -146,19 +149,19 @@ Extended via `bump_instance_ttl()` on **every** entry-point that touches instanc
 
 Extended on every `load_stream()` (read) and `save_stream()` (write), and on every `load_recipient_streams()` / `save_recipient_streams()` call.
 
-| Scenario | TTL refreshed? |
-|---|---|
-| Stream created | Yes (`save_stream` + `save_recipient_streams`) |
-| Stream read via `get_stream_state` | Yes (`load_stream`) |
-| Stream read via `calculate_accrued` | Yes (`load_stream`) |
-| Stream mutated (pause/resume/cancel/withdraw) | Yes (`load_stream` + `save_stream`) |
-| Stream closed via `close_completed_stream` | Entry removed (no TTL) |
-| Recipient index read via `get_recipient_streams` | Yes (if non-empty) |
+| Scenario                                         | TTL refreshed?                                 |
+| ------------------------------------------------ | ---------------------------------------------- |
+| Stream created                                   | Yes (`save_stream` + `save_recipient_streams`) |
+| Stream read via `get_stream_state`               | Yes (`load_stream`)                            |
+| Stream read via `calculate_accrued`              | Yes (`load_stream`)                            |
+| Stream mutated (pause/resume/cancel/withdraw)    | Yes (`load_stream` + `save_stream`)            |
+| Stream closed via `close_completed_stream`       | Entry removed (no TTL)                         |
+| Recipient index read via `get_recipient_streams` | Yes (if non-empty)                             |
 
 ### TTL implications for operators
 
 - **Active streams**: TTL refreshed on any interaction.
-- **Cancelled streams**: Remain in persistent storage until the recipient withdraws the frozen accrued amount. `close_completed_stream` is blocked while any claimable balance remains. Operators must ensure recipients are notified to withdraw before TTL expiry.
+- **Cancelled streams**: Remain in persistent storage until the recipient withdraws the frozen accrued amount. `close_completed_stream` and `close_cancelled_stream` are blocked while any claimable balance remains; only once the recipient has fully withdrawn the frozen accrued can a permissionless cleanup remove the entry. Operators must ensure recipients are notified to withdraw before TTL expiry.
 - **Inactive streams**: May expire after ~7 days with zero interaction. Operators must ensure recipients are notified before TTL expiry.
 - **Expired entries**: Cannot be recovered. Data is permanently lost.
 - **Contract liveness**: Instance storage stays alive as long as any function is called at least once per 7 days.
@@ -169,36 +172,36 @@ Extended on every `load_stream()` (read) and `save_stream()` (write), and on eve
 
 ### Read-only (view functions)
 
-| Function | Keys read | TTL bumped |
-|---|---|---|
-| `get_config` | `Config` | Instance |
-| `get_stream_count` | `NextStreamId` | Instance |
-| `get_stream_state` | `Stream(id)` | Persistent |
-| `calculate_accrued` | `Stream(id)` | Persistent |
-| `get_withdrawable` | `Stream(id)` | Persistent |
-| `get_claimable_at` | `Stream(id)` | Persistent |
-| `get_recipient_streams` | `RecipientStreams(addr)` | Persistent (if non-empty) |
-| `get_recipient_stream_count` | `RecipientStreams(addr)` | Persistent (if non-empty) |
-| `version` | None | Instance (via `bump_instance_ttl`) |
+| Function                     | Keys read                | TTL bumped                         |
+| ---------------------------- | ------------------------ | ---------------------------------- |
+| `get_config`                 | `Config`                 | Instance                           |
+| `get_stream_count`           | `NextStreamId`           | Instance                           |
+| `get_stream_state`           | `Stream(id)`             | Persistent                         |
+| `calculate_accrued`          | `Stream(id)`             | Persistent                         |
+| `get_withdrawable`           | `Stream(id)`             | Persistent                         |
+| `get_claimable_at`           | `Stream(id)`             | Persistent                         |
+| `get_recipient_streams`      | `RecipientStreams(addr)` | Persistent (if non-empty)          |
+| `get_recipient_stream_count` | `RecipientStreams(addr)` | Persistent (if non-empty)          |
+| `version`                    | None                     | Instance (via `bump_instance_ttl`) |
 
 ### State-mutating
 
-| Function | Keys written | Notes |
-|---|---|---|
-| `init` | `Config`, `NextStreamId` | One-shot; fails if `Config` already exists |
-| `create_stream` | `NextStreamId`, `Stream(id)`, `RecipientStreams(addr)` | Atomic |
-| `create_streams` | `NextStreamId`, `Stream(id)×N`, `RecipientStreams(addr)×N` | Atomic batch |
-| `pause_stream` / `resume_stream` | `Stream(id)` | Status field only |
-| `cancel_stream` | `Stream(id)` | Sets `status=Cancelled`, `cancelled_at` |
-| `withdraw` / `withdraw_to` | `Stream(id)` | Updates `withdrawn_amount`; may set `status=Completed` |
-| `top_up_stream` | `Stream(id)` | Updates `deposit_amount` |
-| `update_rate_per_second` | `Stream(id)` | Updates `rate_per_second` |
-| `shorten_stream_end_time` | `Stream(id)` | Updates `end_time`, `deposit_amount` |
-| `extend_stream_end_time` | `Stream(id)` | Updates `end_time` |
-| `close_completed_stream` | Removes `Stream(id)`, updates `RecipientStreams(addr)` | Permissionless cleanup |
-| `set_admin` | `Config` | Admin key rotation |
-| `set_global_emergency_paused` | `GlobalEmergencyPaused` | Global emergency pause flag |
-| `set_contract_paused` | `CreationPaused` | Soft creation pause flag |
+| Function                         | Keys written                                               | Notes                                                  |
+| -------------------------------- | ---------------------------------------------------------- | ------------------------------------------------------ |
+| `init`                           | `Config`, `NextStreamId`                                   | One-shot; fails if `Config` already exists             |
+| `create_stream`                  | `NextStreamId`, `Stream(id)`, `RecipientStreams(addr)`     | Atomic                                                 |
+| `create_streams`                 | `NextStreamId`, `Stream(id)×N`, `RecipientStreams(addr)×N` | Atomic batch                                           |
+| `pause_stream` / `resume_stream` | `Stream(id)`                                               | Status field only                                      |
+| `cancel_stream`                  | `Stream(id)`                                               | Sets `status=Cancelled`, `cancelled_at`                |
+| `withdraw` / `withdraw_to`       | `Stream(id)`                                               | Updates `withdrawn_amount`; may set `status=Completed` |
+| `top_up_stream`                  | `Stream(id)`                                               | Updates `deposit_amount`                               |
+| `update_rate_per_second`         | `Stream(id)`                                               | Updates `rate_per_second`                              |
+| `shorten_stream_end_time`        | `Stream(id)`                                               | Updates `end_time`, `deposit_amount`                   |
+| `extend_stream_end_time`         | `Stream(id)`                                               | Updates `end_time`                                     |
+| `close_completed_stream`         | Removes `Stream(id)`, updates `RecipientStreams(addr)`     | Permissionless cleanup                                 |
+| `set_admin`                      | `Config`                                                   | Admin key rotation                                     |
+| `set_global_emergency_paused`    | `GlobalEmergencyPaused`                                    | Global emergency pause flag                            |
+| `set_contract_paused`            | `CreationPaused`                                           | Soft creation pause flag                               |
 
 ---
 
@@ -228,44 +231,44 @@ This section documents the storage layout as it existed in **CONTRACT_VERSION = 
 
 ### V5 DataKey discriminant table (frozen — must never change)
 
-| Discriminant | Variant                     | Storage    | Value type                   |
-|-------------:|:----------------------------|:-----------|:-----------------------------|
-|            0 | `Config`                    | Instance   | `Config { token, admin }`    |
-|            1 | `NextStreamId`              | Instance   | `u64`                        |
-|            2 | `Stream(u64)`               | Persistent | `Stream` (V5, 14 fields)     |
-|            3 | `RecipientStreams(Address)`  | Persistent | `Vec<u64>` (sorted)          |
-|            4 | `GlobalEmergencyPaused`     | Instance   | `bool`                       |
-|            5 | `CreationPaused`            | Instance   | `bool`                       |
-|            6 | `GlobalPauseReason`         | Instance   | `String`                     |
-|            7 | `GlobalPauseTimestamp`      | Instance   | `u64`                        |
-|            8 | `GlobalPauseAdmin`          | Instance   | `Address`                    |
-|            9 | `AutoClaimDestination(u64)` | Persistent | `Address`                    |
-|           10 | `NextTemplateId`            | Instance   | `u64`                        |
-|           11 | `ActiveTemplateCount`       | Instance   | `u64`                        |
-|           12 | `StreamTemplate(u64)`       | Persistent | `StreamScheduleTemplate`     |
-|           13 | `OwnerTemplateIds(Address)` | Persistent | `Vec<u64>`                   |
-|           14 | `TotalLiabilities`          | Instance   | `i128`                       |
+| Discriminant | Variant                     | Storage    | Value type                |
+| -----------: | :-------------------------- | :--------- | :------------------------ |
+|            0 | `Config`                    | Instance   | `Config { token, admin }` |
+|            1 | `NextStreamId`              | Instance   | `u64`                     |
+|            2 | `Stream(u64)`               | Persistent | `Stream` (V5, 14 fields)  |
+|            3 | `RecipientStreams(Address)` | Persistent | `Vec<u64>` (sorted)       |
+|            4 | `GlobalEmergencyPaused`     | Instance   | `bool`                    |
+|            5 | `CreationPaused`            | Instance   | `bool`                    |
+|            6 | `GlobalPauseReason`         | Instance   | `String`                  |
+|            7 | `GlobalPauseTimestamp`      | Instance   | `u64`                     |
+|            8 | `GlobalPauseAdmin`          | Instance   | `Address`                 |
+|            9 | `AutoClaimDestination(u64)` | Persistent | `Address`                 |
+|           10 | `NextTemplateId`            | Instance   | `u64`                     |
+|           11 | `ActiveTemplateCount`       | Instance   | `u64`                     |
+|           12 | `StreamTemplate(u64)`       | Persistent | `StreamScheduleTemplate`  |
+|           13 | `OwnerTemplateIds(Address)` | Persistent | `Vec<u64>`                |
+|           14 | `TotalLiabilities`          | Instance   | `i128`                    |
 
 Discriminants 0–14 are **permanently frozen**. No variant at these positions may ever be reordered, renamed, or removed on any instance that has processed at least one transaction.
 
 ### V5 Stream struct (14 fields, positional XDR encoding)
 
-| Position | Field                     | Type           | Notes                                      |
-|---------:|:--------------------------|:---------------|:-------------------------------------------|
-|        0 | `stream_id`               | `u64`          | Monotonically increasing, set at creation  |
-|        1 | `sender`                  | `Address`      | Stream creator and controller              |
-|        2 | `recipient`               | `Address`      | Token beneficiary                          |
-|        3 | `deposit_amount`          | `i128`         | Total escrowed tokens                      |
-|        4 | `rate_per_second`         | `i128`         | Streaming speed in raw token units/second  |
-|        5 | `start_time`              | `u64`          | Ledger timestamp when accrual begins       |
-|        6 | `cliff_time`              | `u64`          | Ledger timestamp when withdrawals unlock   |
-|        7 | `end_time`                | `u64`          | Ledger timestamp when accrual stops        |
-|        8 | `withdrawn_amount`        | `i128`         | Cumulative tokens already withdrawn        |
+| Position | Field                     | Type           | Notes                                        |
+| -------: | :------------------------ | :------------- | :------------------------------------------- |
+|        0 | `stream_id`               | `u64`          | Monotonically increasing, set at creation    |
+|        1 | `sender`                  | `Address`      | Stream creator and controller                |
+|        2 | `recipient`               | `Address`      | Token beneficiary                            |
+|        3 | `deposit_amount`          | `i128`         | Total escrowed tokens                        |
+|        4 | `rate_per_second`         | `i128`         | Streaming speed in raw token units/second    |
+|        5 | `start_time`              | `u64`          | Ledger timestamp when accrual begins         |
+|        6 | `cliff_time`              | `u64`          | Ledger timestamp when withdrawals unlock     |
+|        7 | `end_time`                | `u64`          | Ledger timestamp when accrual stops          |
+|        8 | `withdrawn_amount`        | `i128`         | Cumulative tokens already withdrawn          |
 |        9 | `status`                  | `StreamStatus` | `Active`, `Paused`, `Completed`, `Cancelled` |
-|       10 | `cancelled_at`            | `Option<u64>`  | Set when status transitions to `Cancelled` |
-|       11 | `checkpointed_amount`     | `i128`         | Accrued tokens locked at last rate change  |
-|       12 | `checkpointed_at`         | `u64`          | Timestamp of last rate change              |
-|       13 | `withdraw_dust_threshold` | `i128`         | Minimum withdrawal amount (0 = no filter)  |
+|       10 | `cancelled_at`            | `Option<u64>`  | Set when status transitions to `Cancelled`   |
+|       11 | `checkpointed_amount`     | `i128`         | Accrued tokens locked at last rate change    |
+|       12 | `checkpointed_at`         | `u64`          | Timestamp of last rate change                |
+|       13 | `withdraw_dust_threshold` | `i128`         | Minimum withdrawal amount (0 = no filter)    |
 
 **No `memo` field in V5.** The V5 `Stream` struct has exactly 14 fields.
 
@@ -273,26 +276,27 @@ Discriminants 0–14 are **permanently frozen**. No variant at these positions m
 
 V6 appended six new `DataKey` variants (discriminants 15–20) and one new `Stream` field:
 
-| Discriminant | Variant                              | Storage    | Value type  | Notes                                    |
-|-------------:|:-------------------------------------|:-----------|:------------|:-----------------------------------------|
-|           15 | `WithdrawNonce(Address)`             | Persistent | `u64`       | Per-recipient nonce; absent until first delegated-withdraw |
-|           16 | `PauseState`                         | Instance   | `PauseState`| Unified pause state enum                 |
-|           17 | `ReentrancyLock`                     | Instance   | `bool`      | Reentrancy guard; absent when not held   |
-|           18 | `RecipientStreamPage(Address, u32)`  | Persistent | `Vec<u64>`  | Paged recipient index (page → IDs)       |
-|           19 | `RecipientStreamPageCount(Address)`  | Persistent | `u32`       | Number of pages in recipient's index     |
-|           20 | `PendingRecipientUpdate(u64)`        | Persistent | `Address`   | Pending recipient rotation proposal      |
+| Discriminant | Variant                             | Storage    | Value type   | Notes                                                      |
+| -----------: | :---------------------------------- | :--------- | :----------- | :--------------------------------------------------------- |
+|           15 | `WithdrawNonce(Address)`            | Persistent | `u64`        | Per-recipient nonce; absent until first delegated-withdraw |
+|           16 | `PauseState`                        | Instance   | `PauseState` | Unified pause state enum                                   |
+|           17 | `ReentrancyLock`                    | Instance   | `bool`       | Reentrancy guard; absent when not held                     |
+|           18 | `RecipientStreamPage(Address, u32)` | Persistent | `Vec<u64>`   | Paged recipient index (page → IDs)                         |
+|           19 | `RecipientStreamPageCount(Address)` | Persistent | `u32`        | Number of pages in recipient's index                       |
+|           20 | `PendingRecipientUpdate(u64)`       | Persistent | `Address`    | Pending recipient rotation proposal                        |
 
 V6 `Stream` struct adds one field at the end:
 
-| Position | Field  | Type           | Notes                                                    |
-|---------:|:-------|:---------------|:---------------------------------------------------------|
-|       14 | `memo` | `Option<Bytes>`| Optional indexer correlation memo (max 64 bytes); `None` in V5 entries |
+| Position | Field  | Type            | Notes                                                                  |
+| -------: | :----- | :-------------- | :--------------------------------------------------------------------- |
+|       14 | `memo` | `Option<Bytes>` | Optional indexer correlation memo (max 64 bytes); `None` in V5 entries |
 
 ### Forward-compatibility guarantee
 
 All V5 persistent `Stream` entries remain decodable on a V6 instance. Soroban XDR struct decoding is **positional and forward-compatible**: a V6 decoder reading a V5-encoded struct decodes the first 14 fields correctly and treats the absent 15th field as `None` (for `Option<Bytes>`).
 
 This guarantee holds **only** because:
+
 1. `memo` is `Option`-typed — an absent field decodes as `None`, not a type error.
 2. `memo` is appended as the last field — no positional shift occurs for fields 0–13.
 
@@ -302,32 +306,32 @@ A non-`Option` append or a mid-struct insertion would break V5 entries silently.
 
 The file `contracts/stream/tests/storage_key_compat.rs` encodes these invariants as executable tests:
 
-| Test | What it guards |
-|:-----|:---------------|
-| `v5_stream_readable_by_v6_get_stream_state` | Discriminant 2 stability; `memo == None` on V5 entries |
-| `v5_stream_calculate_accrued_correct` | Accrual math on V5 entries |
-| `v5_stream_get_withdrawable_correct` | Withdrawable calculation on V5 entries |
-| `v5_stream_get_claimable_at_correct` | Claimable-at simulation on V5 entries |
-| `v5_multiple_streams_all_readable` | `Stream(u64)` key encoding for multiple IDs |
-| `v5_cancelled_stream_readable_accrual_frozen` | `cancelled_at` field decoding; frozen accrual |
-| `v5_stream_with_checkpoint_readable` | `checkpointed_amount` field decoding |
-| `v5_config_key_readable_by_v6` | Discriminant 0 stability |
-| `v5_next_stream_id_readable_by_v6` | Discriminant 1 stability |
-| `v5_global_emergency_paused_readable_by_v6` | Discriminant 4 stability |
-| `v5_creation_paused_readable_by_v6` | Discriminant 5 stability |
-| `v5_total_liabilities_readable_by_v6` | Discriminant 14 stability (last frozen key) |
-| `v5_recipient_streams_readable_by_v6` | Discriminant 3 stability |
-| `v5_recipient_stream_count_correct` | RecipientStreams count on V5 index |
-| `v5_absent_recipient_streams_returns_empty` | No panic on absent V5 index |
-| `v6_withdraw_nonce_absent_on_v5_instance` | Discriminant 15 absent on V5 |
-| `v6_pause_state_absent_on_v5_instance` | Discriminant 16 absent on V5 |
-| `v6_reentrancy_lock_absent_on_v5_instance` | Discriminant 17 absent on V5 |
-| `v6_recipient_stream_page_absent_on_v5_instance` | Discriminant 18 absent on V5 |
-| `v6_recipient_stream_page_count_absent_on_v5_instance` | Discriminant 19 absent on V5 |
-| `v6_pending_recipient_update_absent_on_v5_instance` | Discriminant 20 absent on V5 |
-| `discriminant_0_config_round_trips` | Config key round-trip |
-| `discriminant_1_next_stream_id_round_trips` | NextStreamId key round-trip |
-| `discriminant_2_stream_round_trips` | Stream key round-trip |
-| `discriminant_3_recipient_streams_round_trips` | RecipientStreams key round-trip |
-| `discriminant_14_total_liabilities_round_trips` | TotalLiabilities key round-trip |
-| `version_entry_point_works_on_v5_seeded_instance` | `version()` callable on V5 state |
+| Test                                                   | What it guards                                         |
+| :----------------------------------------------------- | :----------------------------------------------------- |
+| `v5_stream_readable_by_v6_get_stream_state`            | Discriminant 2 stability; `memo == None` on V5 entries |
+| `v5_stream_calculate_accrued_correct`                  | Accrual math on V5 entries                             |
+| `v5_stream_get_withdrawable_correct`                   | Withdrawable calculation on V5 entries                 |
+| `v5_stream_get_claimable_at_correct`                   | Claimable-at simulation on V5 entries                  |
+| `v5_multiple_streams_all_readable`                     | `Stream(u64)` key encoding for multiple IDs            |
+| `v5_cancelled_stream_readable_accrual_frozen`          | `cancelled_at` field decoding; frozen accrual          |
+| `v5_stream_with_checkpoint_readable`                   | `checkpointed_amount` field decoding                   |
+| `v5_config_key_readable_by_v6`                         | Discriminant 0 stability                               |
+| `v5_next_stream_id_readable_by_v6`                     | Discriminant 1 stability                               |
+| `v5_global_emergency_paused_readable_by_v6`            | Discriminant 4 stability                               |
+| `v5_creation_paused_readable_by_v6`                    | Discriminant 5 stability                               |
+| `v5_total_liabilities_readable_by_v6`                  | Discriminant 14 stability (last frozen key)            |
+| `v5_recipient_streams_readable_by_v6`                  | Discriminant 3 stability                               |
+| `v5_recipient_stream_count_correct`                    | RecipientStreams count on V5 index                     |
+| `v5_absent_recipient_streams_returns_empty`            | No panic on absent V5 index                            |
+| `v6_withdraw_nonce_absent_on_v5_instance`              | Discriminant 15 absent on V5                           |
+| `v6_pause_state_absent_on_v5_instance`                 | Discriminant 16 absent on V5                           |
+| `v6_reentrancy_lock_absent_on_v5_instance`             | Discriminant 17 absent on V5                           |
+| `v6_recipient_stream_page_absent_on_v5_instance`       | Discriminant 18 absent on V5                           |
+| `v6_recipient_stream_page_count_absent_on_v5_instance` | Discriminant 19 absent on V5                           |
+| `v6_pending_recipient_update_absent_on_v5_instance`    | Discriminant 20 absent on V5                           |
+| `discriminant_0_config_round_trips`                    | Config key round-trip                                  |
+| `discriminant_1_next_stream_id_round_trips`            | NextStreamId key round-trip                            |
+| `discriminant_2_stream_round_trips`                    | Stream key round-trip                                  |
+| `discriminant_3_recipient_streams_round_trips`         | RecipientStreams key round-trip                        |
+| `discriminant_14_total_liabilities_round_trips`        | TotalLiabilities key round-trip                        |
+| `version_entry_point_works_on_v5_seeded_instance`      | `version()` callable on V5 state                       |

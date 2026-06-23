@@ -71,12 +71,14 @@ All streams may specify an optional cancellation fee (in basis points, where 1 b
 The cancellation fee is applied **only** to the unstreamed refund portion:
 
 1. When a stream is cancelled, the protocol calculates:
+
    ```
    accrued_at_cancel = calculate_accrued_at(cancelled_at)
    refund_gross = deposit_amount - accrued_at_cancel
    ```
 
 2. If `cancellation_fee_bps > 0`, the fee is calculated as:
+
    ```
    fee = (refund_gross × cancellation_fee_bps) / 10000  (rounded down)
    refund_net = refund_gross - fee
@@ -111,6 +113,7 @@ The recipient's ability to withdraw accrued funds is **completely independent** 
 ### Examples
 
 **Example 1: 50% cancellation fee, cancel at 30% accrual**
+
 - Deposit: 1000 tokens, Rate: 1 token/sec, End: 1000 sec
 - Cancel at: 300 sec
 - Accrued: 300 tokens
@@ -122,6 +125,7 @@ The recipient's ability to withdraw accrued funds is **completely independent** 
 - Unaccounted (fee): 350 tokens (remains in contract)
 
 **Example 2: 10% cancellation fee, fully accrued stream**
+
 - Deposit: 1000, Rate: 1/sec, End: 1000 sec, Cancel at: 1000 sec
 - Accrued: 1000 tokens
 - Refund gross: 0 tokens
@@ -178,10 +182,10 @@ Payload: `KeeperCancelled { stream_id, keeper, keeper_fee, recipient_amount, sen
 
 ### Constants
 
-| Constant | Value | Meaning |
-|---|---|---|
-| `KEEPER_GRACE_PERIOD_SECONDS` | 604 800 (7 days) | Minimum seconds past `end_time` for eligibility |
-| `KEEPER_FEE_BPS` | 50 (0.5 %) | Keeper fee as basis points of the sender gross refund |
+| Constant                      | Value            | Meaning                                               |
+| ----------------------------- | ---------------- | ----------------------------------------------------- |
+| `KEEPER_GRACE_PERIOD_SECONDS` | 604 800 (7 days) | Minimum seconds past `end_time` for eligibility       |
+| `KEEPER_FEE_BPS`              | 50 (0.5 %)       | Keeper fee as basis points of the sender gross refund |
 
 ## Residual assumptions and risks
 
@@ -189,3 +193,18 @@ Payload: `KeeperCancelled { stream_id, keeper, keeper_fee, recipient_amount, sen
 2. CEI ordering reduces reentrancy risk by persisting cancel state before transfer, but cannot fully mitigate a malicious token that violates assumptions.
 3. Event payload does not include refund amount, fee, or timestamp; indexers must read stream state to reconstruct these values.
 4. Cancellation fee is optional (defaults to 0); protocol behavior is identical to pre-fee version when `cancellation_fee_bps = 0`.
+
+## Permissionless cleanup: `close_cancelled_stream`
+
+When a stream has been `Cancelled` and the recipient has withdrawn the frozen accrued
+amount, the contract exposes a permissionless cleanup entrypoint `close_cancelled_stream`.
+
+- Purpose: reclaim persistent storage and remove the stream ID from the recipient index
+  after the recipient is fully settled.
+- Preconditions: stream must be `Cancelled` and the recipient must have no remaining
+  claimable balance at `cancelled_at` (the call rejects with `InvalidState` otherwise).
+- Event: emits `("closed", stream_id)` with `StreamEvent::StreamClosed(stream_id)`
+  before deleting storage.
+
+Keepers and off-chain indexers may call this entrypoint to free storage and reduce
+recipient-index bloat once the recipient's claims are fully settled.

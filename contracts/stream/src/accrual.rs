@@ -1,4 +1,4 @@
-use crate::ContractError;
+use crate::{ContractError, StreamKind};
 
 /// Assert that ledger-backed accrual time has not moved backwards.
 ///
@@ -185,43 +185,40 @@ pub fn calculate_accrued_amount_checkpointed(
         return 0;
     }
 
-    if deposit_amount <= 0 {
+    if state.deposit_amount <= 0 {
         return 0;
     }
 
-    if kind == StreamKind::CliffOnly {
-        return deposit_amount;
+    if state.kind == StreamKind::CliffOnly {
+        return state.deposit_amount;
     }
 
     if rate_per_second < 0 {
         return 0;
     }
 
-    if checkpointed_at >= end_time {
+    if state.checkpointed_at >= state.end_time {
         // Stream already ended; only the checkpointed amount is payable.
-        return checkpointed_amount.min(deposit_amount).max(0);
-    }
-
-    if state.deposit_amount <= 0 {
-        return 0;
+        return state.checkpointed_amount.min(state.deposit_amount).max(0);
     }
 
     let elapsed_now = now.min(state.end_time);
     let elapsed_seconds: i128 = if elapsed_now <= state.checkpointed_at {
         0
     } else {
-        (elapsed_now - checkpointed_at) as i128
+        (elapsed_now - state.checkpointed_at) as i128
     };
 
     let added = match elapsed_seconds.checked_mul(rate_per_second) {
         Some(amount) => amount,
         // Multiplication overflow: clamp to deposit ceiling.
-        None => deposit_amount,
+        None => state.deposit_amount,
     };
 
-    checkpointed_amount
+    state
+        .checkpointed_amount
         .saturating_add(added)
-        .min(deposit_amount)
+        .min(state.deposit_amount)
         .max(0)
 }
 
@@ -261,11 +258,12 @@ mod kani_proofs {
             cliff_time,
             end_time,
             deposit_amount,
+            kind: StreamKind::Linear,
         };
 
         // Call the function under test. Kani will flag panics or UB.
         let out =
-            calculate_accrued_amount_checkpointed(state, rate_per_second, deposit_amount, now);
+            calculate_accrued_amount_checkpointed(state, rate_per_second, now);
 
         // Assert bounds: non-negative and <= deposit_amount
         kani::assert!(out >= 0);
@@ -302,10 +300,11 @@ mod kani_proofs {
             cliff_time,
             end_time,
             deposit_amount,
+            kind: StreamKind::Linear,
         };
 
-        let a = calculate_accrued_amount_checkpointed(state, rate_per_second, deposit_amount, t1);
-        let b = calculate_accrued_amount_checkpointed(state, rate_per_second, deposit_amount, t2);
+        let a = calculate_accrued_amount_checkpointed(state, rate_per_second, t1);
+        let b = calculate_accrued_amount_checkpointed(state, rate_per_second, t2);
 
         kani::assert!(a <= b);
     }
@@ -338,12 +337,12 @@ mod kani_proofs {
             cliff_time,
             end_time,
             deposit_amount,
+            kind: StreamKind::Linear,
         };
 
         let out_before = calculate_accrued_amount_checkpointed(
             state,
             rate_per_second,
-            deposit_amount,
             now_before,
         );
         kani::assert!(out_before == 0);
@@ -353,7 +352,6 @@ mod kani_proofs {
         let out_after = calculate_accrued_amount_checkpointed(
             state,
             rate_per_second,
-            deposit_amount,
             now_after,
         );
         kani::assert!(out_after >= 0);
@@ -363,7 +361,42 @@ mod kani_proofs {
 
 #[cfg(test)]
 mod tests {
-    use super::calculate_accrued_amount;
+    use super::{assert_ledger_time_monotonic, calculate_accrued_amount};
+    use crate::ContractError;
+
+    // =========================================================================
+    // Tests for assert_ledger_time_monotonic
+    // =========================================================================
+
+    #[test]
+    fn ledger_time_monotonic_equal_times_ok() {
+        let result = assert_ledger_time_monotonic(1000, 1000);
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn ledger_time_monotonic_increasing_times_ok() {
+        let result = assert_ledger_time_monotonic(1000, 1001);
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn ledger_time_monotonic_zero_regression_error() {
+        let result = assert_ledger_time_monotonic(1000, 999);
+        assert_eq!(result, Err(ContractError::ClockRegression));
+    }
+
+    #[test]
+    fn ledger_time_monotonic_large_regression_error() {
+        let result = assert_ledger_time_monotonic(1000, 0);
+        assert_eq!(result, Err(ContractError::ClockRegression));
+    }
+
+    #[test]
+    fn ledger_time_monotonic_u64_max_times() {
+        let result = assert_ledger_time_monotonic(u64::MAX, u64::MAX);
+        assert_eq!(result, Ok(()));
+    }
 
     #[test]
     fn returns_zero_before_cliff() {
