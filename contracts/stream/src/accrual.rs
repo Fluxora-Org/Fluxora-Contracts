@@ -1,4 +1,5 @@
 use crate::ContractError;
+use crate::StreamKind;
 
 /// Assert that ledger-backed accrual time has not moved backwards.
 ///
@@ -181,7 +182,16 @@ pub fn calculate_accrued_amount_checkpointed(
     rate_per_second: i128,
     now: u64,
 ) -> i128 {
-    if now < state.cliff_time {
+    let CheckpointState {
+        checkpointed_amount,
+        checkpointed_at,
+        cliff_time,
+        end_time,
+        deposit_amount,
+        kind,
+    } = state;
+
+    if now < cliff_time {
         return 0;
     }
 
@@ -202,12 +212,12 @@ pub fn calculate_accrued_amount_checkpointed(
         return checkpointed_amount.min(deposit_amount).max(0);
     }
 
-    if state.deposit_amount <= 0 {
+    if deposit_amount <= 0 {
         return 0;
     }
 
-    let elapsed_now = now.min(state.end_time);
-    let elapsed_seconds: i128 = if elapsed_now <= state.checkpointed_at {
+    let elapsed_now = now.min(end_time);
+    let elapsed_seconds: i128 = if elapsed_now <= checkpointed_at {
         0
     } else {
         (elapsed_now - checkpointed_at) as i128

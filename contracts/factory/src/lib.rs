@@ -183,6 +183,10 @@ impl FluxoraFactory {
         end_time: u64,
         withdraw_dust_threshold: i128,
     ) -> Result<u64, FactoryError> {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(FactoryError::NotInitialized);
+        }
+
         // Enforce policies
         let is_allowed: bool = env
             .storage()

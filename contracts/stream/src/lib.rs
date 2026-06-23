@@ -4,10 +4,11 @@
 mod accrual;
 #[cfg(test)]
 mod checksum;
-mod token_check;
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env};
-use token_check::verify_token_behavior;
+use soroban_sdk::{
+    contract, contractimpl, contracttype, symbol_short, token, xdr::ToXdr, Address, Bytes, BytesN,
+    Env,
+};
 
 // ---------------------------------------------------------------------------
 // TTL constants
@@ -32,85 +33,15 @@ const PERSISTENT_BUMP_AMOUNT: u32 = 120_960;
 /// All paginated entrypoints enforce this limit strictly.
 pub const MAX_PAGE_SIZE: u64 = 100;
 
-/// Maximum number of stream IDs returned per page in `get_recipient_streams_paginated`.
-const RECIPIENT_STREAMS_PAGE_LIMIT: u32 = 100;
+/// Maximum memo payload size in bytes (stream metadata for indexers).
+pub const MAX_MEMO_BYTES: usize = 64;
 
-/// Maximum byte length for memo attached to a stream.
-pub const MAX_MEMO_BYTES: usize = 256;
+/// Maximum schedule templates a single owner may register (bounds `OwnerTemplateIds` growth).
+pub const MAX_TEMPLATES_PER_OWNER: u32 = 64;
+/// Global bound on stored schedule templates (DoS / storage bloat prevention).
+pub const MAX_GLOBAL_TEMPLATES: u64 = 10_000;
 
-/// Maximum byte length for pause-reason strings.
-pub const MAX_PAUSE_REASON_BYTES: usize = 256;
-
-/// Maximum number of templates a single owner may hold.
-pub const MAX_TEMPLATES_PER_OWNER: u64 = 50;
-
-/// Maximum number of templates stored globally.
-pub const MAX_GLOBAL_TEMPLATES: u64 = 1_000;
-
-/// Maximum number of stream IDs that can be reserved in a single `reserve_stream_ids` call.
-pub const MAX_ID_RESERVATION: u32 = 100;
-
-/// Maximum byte length for pause-reason strings passed to `pause_stream`,
-/// `pause_stream_as_admin`, and `pause_protocol`.
-///
-/// # Rationale for MAX_RECIPIENT_PAGE_SIZE = 100
-///
-/// This value was chosen to balance several competing factors:
-///
-/// 1. **Soroban Storage Limits**: Each persistent storage entry has a practical limit
-///    of ~64KB. With 8 bytes per u64 stream ID, 100 IDs = 800 bytes, leaving ample
-///    headroom for serialization overhead and metadata.
-///
-/// 2. **Gas Efficiency**: Loading/saving 100 IDs is a single persistent I/O operation.
-///    - Too small (e.g., 10): More pages = more I/O for full index traversal
-///    - Too large (e.g., 1000): Higher per-operation cost, approaching storage limits
-///
-/// 3. **Mutation Cost**: Adding/removing streams touches at most 2 pages (200 IDs = 1.6KB),
-///    keeping mutation costs predictable and bounded at O(1).
-///
-/// 4. **Pagination UX**: 100 streams per page provides reasonable granularity for UI
-///    pagination without excessive round-trips.
-///
-/// 5. **Worst-Case Bounds**: With 100 IDs per page:
-///    - 1,000 streams: 10 pages, ~8KB total storage
-///    - 10,000 streams: 100 pages, ~80KB total storage (approaching practical limits)
-///
-/// # Performance Characteristics
-///
-/// - **Add stream**: O(1) - touches last page only (~2,500 CPU instructions)
-/// - **Remove stream**: O(1) amortized - touches ≤2 pages (~3,400 CPU instructions)
-/// - **Query page**: O(1) - loads single page (~850 CPU instructions)
-/// - **Query all**: O(Pages) - loads all pages (~850 × Pages CPU instructions)
-///
-/// # Comparison to Flat List
-///
-/// Prevents unbounded map growth and keeps the storage entry under the
-/// practical Soroban per-entry size limit (~64 KB).
-pub const MAX_METADATA_KEYS: u32 = 8;
-
-/// Maximum aggregate byte size of all metadata keys + values combined (512 bytes).
-///
-/// Even at 8 keys × (32-byte key + 128-byte value) the sum is 1 280 bytes, so
-/// this cap is the binding limit and ensures the metadata block stays well within
-/// the Soroban storage ceiling.
-pub const MAX_METADATA_BYTES: u32 = 512;
-
-/// Maximum byte length of a single metadata key.
-pub const MAX_METADATA_KEY_BYTES: u32 = 32;
-
-/// Maximum byte length of a single metadata value.
-pub const MAX_METADATA_VALUE_BYTES: u32 = 128;
-
-/// Minimum interval (in ledgers) between successive pause/resume operations.
-///
-/// Prevents rapid-toggle DoS attacks where a malicious sender repeatedly pauses
-/// and resumes a stream to manipulate accrual accounting or increase gas costs
-/// for observers replaying the event log.
-///
-/// At ~5 seconds per ledger, 17 ledgers ≈ 85 seconds of cooldown per operation.
-/// This matches Stellar's default pause-time precedent (see `docs/cancel-stream-semantics.md`).
-const MIN_PAUSE_INTERVAL_LEDGERS: u32 = 17;
-
+// ---------------------------------------------------------------------------
 // Contract version
 // ---------------------------------------------------------------------------
 
@@ -163,15 +94,9 @@ const MIN_PAUSE_INTERVAL_LEDGERS: u32 = 17;
 ///   integrators will not detect the incompatibility until a runtime failure occurs.
 ///   Code review and CI checks on this constant are the primary safeguard.
 ///
-/// Bumped to 2: `Stream` struct gained `checkpointed_amount: i128` and `checkpointed_at: u64`
-/// for safe rate-decrease support (see `decrease_rate_per_second`).
-///
-/// Bumped to 3: `delegated_withdraw` signature payload now commits to
-/// `expected_minimum_amount` to close the relayer front-running griefing vector.
-///
-/// Bumped to 4: accrual paths track the last ledger timestamp they observed in
-/// instance storage to detect retrograde test clocks and migration regressions.
-pub const CONTRACT_VERSION: u32 = 4;
+/// Bumped to 5: `withdraw_dust_threshold: i128` added to `Stream` struct and creation params
+/// to reduce fee/event spam from tiny withdrawals.
+pub const CONTRACT_VERSION: u32 = 6;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -185,144 +110,29 @@ pub struct Config {
     pub admin: Address,
 }
 
-/// An active ID reservation held by a caller after `reserve_stream_ids`.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct IdReservation {
-    pub start_id: u64,
-    pub count: u32,
-    pub consumed: u32,
-    pub expiry: Option<u64>
-}
-
-/// Reason for a protocol or stream pause.
-#[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PauseReason {
-    Operational = 0,
-    Administrative = 1,
-}
-
-/// Struct for per-stream or per-protocol pause records.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StreamPaused {
-    pub stream_id: u64,
-    pub reason: soroban_sdk::String,
-}
-
-/// Health report for a stream.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StreamHealth {
-    pub is_underfunded: bool,
-    pub is_expired: bool,
-    pub accrued_to_date: u128,
-    pub remaining_deposit: u128,
-    pub seconds_until_depletion: Option<u64>,
-}
-
-#[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-/// Operational status of a stream, determining which operations are allowed.
-///
-/// The status controls the stream's lifecycle and affects both accrual calculation
-/// and operation availability. Status transitions follow strict rules to maintain
-/// system integrity and prevent unauthorized state changes.
-///
-/// ## State Transition Rules
-///
-/// ```text
-/// Active ↔ Paused    (via pause_stream/resume_stream)
-/// Active → Cancelled (via cancel_stream, terminal)
-/// Paused → Cancelled (via cancel_stream, terminal)
-/// Active → Completed (via withdraw when withdrawn_amount == deposit_amount, terminal)
-/// ```
-///
-/// Terminal states (`Completed`, `Cancelled`) cannot transition to other states.
-///
-/// ## Time-Terminal Behavior
-///
-/// When `current_time >= end_time`, the stream is considered "time-terminal":
-/// - Pause/resume operations are blocked (`StreamTerminalState` error)
-/// - Withdrawals are always allowed regardless of `Paused` status
-/// - This ensures recipients can always claim their full entitlement
-#[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum StreamStatus {
-    /// Stream is operating normally.
-    ///
-    /// **Allowed operations:**
-    /// - Withdrawals (if past `cliff_time`)
-    /// - Pause/resume (if before `end_time`)
-    /// - Rate updates and schedule changes
-    /// - Cancellation
-    /// - Top-ups
-    ///
-    /// **Accrual behavior:** Tokens accrue normally based on elapsed time.
-    Active = 0,
-
-    /// Stream is temporarily suspended by the sender.
-    ///
-    /// **Blocked operations:**
-    /// - Withdrawals (unless past `end_time` - time-terminal override)
-    ///
-    /// **Allowed operations:**
-    /// - Resume (if before `end_time`)
-    /// - Rate updates and schedule changes
-    /// - Cancellation
-    /// - Top-ups
-    ///
-    /// **Accrual behavior:** Tokens continue to accrue normally. Pause only
-    /// blocks withdrawals, not the mathematical accrual of entitlements.
-    ///
-    /// **Time-terminal override:** If `current_time >= end_time`, withdrawals
-    /// are allowed even in `Paused` status to ensure recipient access to funds.
-    Paused = 1,
-
-    /// Stream has been fully withdrawn (terminal state).
-    ///
-    /// **Trigger:** Automatically set when `withdrawn_amount == deposit_amount`
-    ///
-    /// **Allowed operations:**
-    /// - `close_completed_stream` (storage cleanup)
-    /// - Read-only queries
-    ///
-    /// **Blocked operations:** All mutation operations
-    ///
-    /// **Accrual behavior:** Returns `deposit_amount` (deterministic, timestamp-independent)
-    Completed = 2,
-
-    /// Stream was terminated early by sender or admin (terminal state).
-    ///
-    /// **Trigger:** Set by `cancel_stream` or `cancel_stream_as_admin`
-    ///
-    /// **Effects:**
-    /// - Accrual is frozen at `cancelled_at` timestamp
-    /// - Unstreamed portion is refunded to sender
-    /// - Recipient can still withdraw accrued amount up to cancellation
-    ///
-    /// **Allowed operations:**
-    /// - Withdrawals (of frozen accrued amount only)
-    /// - `close_completed_stream` (after full recipient withdrawal)
-    /// - Read-only queries
-    ///
-    /// **Blocked operations:** All other mutation operations
-    ///
-    /// **Accrual behavior:** Frozen at `cancelled_at` - no post-cancellation growth
-    Cancelled = 3,
-}
-
-/// The architectural style of the stream (Linear or CliffOnly).
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StreamKind {
-    /// Vesting/payment stream that accrues linearly over time.
     Linear = 0,
-    /// Stream that unlocks its full deposit at the cliff time in a one-shot event.
     CliffOnly = 1,
 }
 
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StreamStatus {
+    Active = 0,
+    Paused = 1,
+    Completed = 2,
+    Cancelled = 3,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PauseState {
+    Active = 0,
+    CreationPaused = 1,
+    GlobalEmergencyPaused = 2,
+}
 #[soroban_sdk::contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -340,8 +150,6 @@ pub enum ContractError {
     Unauthorized = 7,
     /// Contract is already initialized.
     AlreadyInitialised = 8,
-    /// The token contract did not expose the expected SEP-41 interface during init.
-    TokenVerificationFailed = 23,
     /// Token balance or allowance is insufficient (emulated check if possible, otherwise caught by token client).
     InsufficientBalance = 9,
     /// Deposit amount does not cover the total streamable amount.
@@ -354,27 +162,16 @@ pub enum ContractError {
     StreamTerminalState = 13,
     /// Duplicate stream IDs were supplied to a batch operation.
     DuplicateStreamId = 14,
-    /// Delegated withdrawal signature is invalid or expired.
-    InvalidSignature = 15,
-    /// Accrued amount is below the expected minimum specified in the signed payload.
-    BelowMinimumAmount = 16,
-    /// `reserve_stream_ids` was called with `count = 0`.
-    ReservationCountZero = 17,
-    /// `reserve_stream_ids` was called with `count > MAX_ID_RESERVATION`.
-    ReservationLimitExceeded = 18,
-    /// Delegated withdrawal signature deadline has expired.
-    SignatureDeadlineExpired = 19,
-    /// Template not found.
-    TemplateNotFound = 20,
-    /// Template limit exceeded (per-owner or global).
-    TemplateLimitExceeded = 21,
-    /// Caller not authorized to delete template.
-    TemplateUnauthorized = 22,
-    /// Pause reason string exceeds `MAX_PAUSE_REASON_BYTES`.
-    PauseReasonTooLong = 23,
-    ReservationNotFound = 24,
-    ReservationNotExpirable = 25,
-    ReservationStillActive = 26
+    /// No template exists for the given template id.
+    TemplateNotFound = 15,
+    /// Template registry limits exceeded (per-owner or global cap).
+    TemplateLimitExceeded = 16,
+    /// Caller is not the template owner for a protected template operation.
+    TemplateUnauthorized = 17,
+    /// The signature deadline has passed (current ledger time > deadline).
+    SignatureDeadlineExpired = 18,
+    /// The provided signature does not match the expected signer.
+    InvalidSignature = 19,
 }
 
 #[contracttype]
@@ -404,49 +201,6 @@ pub struct StreamCreated {
     /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
     /// `None` when no memo was supplied at creation time.
     pub memo: Option<soroban_sdk::Bytes>,
-    /// Optional structured metadata emitted for indexer consumption.
-    /// Mirrors the validated `metadata` field stored on the stream.
-    pub metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
-}
-
-/// Emitted when a stream is cloned via `clone_stream`.
-///
-/// Carries both the source stream ID (for audit trail) and the full parameters
-/// of the newly created stream so indexers can correlate the two without a
-/// separate `get_stream_state` call.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct StreamCloned {
-    /// The newly created stream's ID.
-    pub new_stream_id: u64,
-    /// The source stream that was cloned.
-    pub source_stream_id: u64,
-    /// Sender of the new stream (same as the caller / original sender).
-    pub sender: Address,
-    /// Recipient of the new stream (may differ from the source stream's recipient).
-    pub recipient: Address,
-    /// Deposit amount locked into the new stream.
-    pub deposit_amount: i128,
-    /// Rate per second inherited from the source stream.
-    pub rate_per_second: i128,
-    /// Absolute start time of the new stream.
-    pub start_time: u64,
-    /// Cliff time of the new stream (preserves the source cliff offset).
-    pub cliff_time: u64,
-    /// End time of the new stream.
-    pub end_time: u64,
-}
-
-/// Result of a single stream creation attempt in a partial batch.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CreateStreamResult {
-    /// True if the stream was created successfully.
-    pub success: bool,
-    /// The unique identifier of the created stream (None if success is false).
-    pub stream_id: Option<u64>,
-    /// The error code if the creation failed (None if success is true).
-    pub error: Option<u32>,
 }
 
 #[contracttype]
@@ -467,6 +221,18 @@ pub struct WithdrawalTo {
     pub amount: i128,
 }
 
+/// Emitted when a relayer executes a recipient-signed delegated withdrawal.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DelegatedWithdrawal {
+    pub stream_id: u64,
+    pub recipient: Address,
+    pub relayer: Address,
+    pub destination: Address,
+    pub amount: i128,
+    pub nonce: u64,
+}
+
 /// Emitted when a recipient rotates their receiving address for a stream.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -474,13 +240,6 @@ pub struct RecipientUpdated {
     pub stream_id: u64,
     pub old_recipient: Address,
     pub new_recipient: Address,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PendingRecipientUpdate {
-    pub stream_id: u64,
-    pub proposed_recipient: Address,
 }
 
 /// Per-stream result for `batch_withdraw`.
@@ -506,15 +265,6 @@ pub struct RateUpdated {
     pub new_rate_per_second: i128,
     /// Ledger timestamp when the rate update became effective.
     pub effective_time: u64,
-}
-
-/// Event emitted when a rate update is rejected due to exceeding the governance cap.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct RateCapEnforced {
-    pub stream_id: u64,
-    pub attempted_rate: i128,
-    pub max_rate_per_second: i128,
 }
 
 /// Emitted when the sender safely decreases the streaming rate via `decrease_rate_per_second`.
@@ -580,35 +330,6 @@ pub struct SenderTransferred {
     pub new_sender: Address,
 }
 
-/// Emitted when a stream's funding health status transitions between
-/// adequately funded and underfunded states.
-///
-/// A stream is **underfunded** when `remaining_balance < rate_per_second × seconds_remaining`.
-/// Terminal streams (`Completed`, `Cancelled`) always have `seconds_remaining = 0`
-/// and are never considered underfunded.
-///
-/// This event is only emitted when the `is_underfunded` flag actually changes,
-/// not on every mutation.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct StreamHealthChanged {
-    pub stream_id: u64,
-    pub is_underfunded: bool,
-    pub remaining_balance: i128,
-    pub seconds_remaining: u64,
-}
-
-/// Structured health summary returned by `get_stream_health`.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StreamHealth {
-    pub is_underfunded: bool,
-    pub is_expired: bool,
-    pub accrued_to_date: u128,
-    pub remaining_deposit: u128,
-    pub seconds_until_depletion: Option<u64>,
-}
-
 /// Emitted when the contract admin toggles the global emergency pause flag.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -622,60 +343,6 @@ pub struct GlobalEmergencyPauseChanged {
 pub struct ExcessSwept {
     pub to: Address,
     pub amount: i128,
-}
-
-/// Emitted when a recipient sets an auto-claim destination.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct AutoClaimSet {
-    pub stream_id: u64,
-    pub destination: Address,
-}
-
-/// Emitted when a recipient revokes their auto-claim destination.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct AutoClaimRevoked {
-    pub stream_id: u64,
-}
-
-/// Emitted when an auto-claim is triggered.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct AutoClaimTriggered {
-    pub stream_id: u64,
-    pub destination: Address,
-    pub amount: i128,
-}
-
-/// Payload for a valid auto-claim destination.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AutoClaimValidPayload {
-    pub destination: Address,
-    pub claimable: i128,
-}
-
-/// Payload for an invalid auto-claim destination.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AutoClaimInvalidPayload {
-    pub destination: Address,
-}
-
-/// Status of auto-claim configuration for a stream.
-///
-/// Returned by `get_auto_claim_status` to allow callers to validate
-/// the auto-claim destination before executing `trigger_auto_claim`.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum AutoClaimStatus {
-    /// No auto-claim destination has been set for this stream.
-    NotSet,
-    /// Auto-claim destination is set and valid.
-    ValidDestination(AutoClaimValidPayload),
-    /// Auto-claim destination is set but invalid (zero address or contract itself).
-    InvalidDestination(AutoClaimInvalidPayload),
 }
 
 #[contracttype]
@@ -715,28 +382,10 @@ pub struct ProtocolResumed {
 #[derive(Clone, Debug)]
 pub struct PauseInfo {
     pub is_paused: bool,
+    pub state: PauseState,
     pub reason: Option<soroban_sdk::String>,
     pub paused_at: Option<u64>,
     pub paused_by: Option<Address>,
-}
-
-/// Role type for rotation history entries.
-#[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RotationRole {
-    Recipient = 0,
-    Sender = 1,
-}
-
-/// Audit log entry for recipient or sender rotation.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RotationEntry {
-    pub old_addr: Address,
-    pub new_addr: Address,
-    pub ledger: u32,
-    pub role: RotationRole,
-    pub authoriser: Address,
 }
 
 #[contracttype]
@@ -767,8 +416,6 @@ pub struct Stream {
     /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
     /// Maximum length: `MAX_MEMO_BYTES` (64 bytes). `None` when not supplied.
     pub memo: Option<soroban_sdk::Bytes>,
-    /// The architectural style of the stream (Linear or CliffOnly).
-    pub kind: StreamKind,
 }
 
 /// Pagination result for recipient stream listing
@@ -780,6 +427,25 @@ pub struct Page {
     /// Next cursor for pagination (0 if no more pages)
     pub next_cursor: u64,
 }
+
+/// Reason code for pausing a stream.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PauseReason {
+    /// Operational pause initiated by the stream sender.
+    Operational = 0,
+    /// Administrative pause initiated by the contract admin.
+    Administrative = 1,
+}
+
+/// Emitted when a stream is paused.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamPaused {
+    pub stream_id: u64,
+    pub reason: PauseReason,
+}
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct CreateStreamParams {
@@ -800,8 +466,6 @@ pub struct CreateStreamParams {
     /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
     /// Maximum `MAX_MEMO_BYTES` (64) bytes. Pass `None` to omit.
     pub memo: Option<soroban_sdk::Bytes>,
-    /// The architectural style of the stream (Linear or CliffOnly).
-    pub kind: StreamKind,
 }
 
 /// Parameters for creating a payment stream with relative (offset-based) times.
@@ -834,8 +498,6 @@ pub struct CreateStreamRelativeParams {
     /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
     /// Maximum `MAX_MEMO_BYTES` (64) bytes. Pass `None` to omit.
     pub memo: Option<soroban_sdk::Bytes>,
-    /// The architectural style of the stream (Linear or CliffOnly).
-    pub kind: StreamKind,
 }
 
 /// Reusable relative schedule (offsets only). Amounts are supplied when creating a stream.
@@ -906,20 +568,6 @@ pub enum DataKey {
     PauseState,
     /// Reentrancy guard flag (bool) to prevent recursive token transfers.
     ReentrancyLock,
-    /// Paged recipient stream index (page number → Vec<u64> of stream IDs).
-    RecipientStreamPage(Address, u32),
-    /// Number of pages in a recipient's paged stream index.
-    RecipientStreamPageCount(Address),
-    /// Pending recipient update proposal for a stream (sender-initiated, recipient-accepted).
-    PendingRecipientUpdate(u64),
-    /// Active ID reservation for a caller (Address → IdReservation).
-    IdReservation(Address),
-    /// Per-stream max rate cap (i128). Instance storage.
-    MaxRatePerSecond,
-    /// Per-recipient nonce for delegated-withdraw replay protection.
-    DelegatedWithdrawNonce(Address),
-    /// Last pause record for stream-level or protocol-level pause.
-    LastPauseRecord(PauseKind),
 }
 
 // ---------------------------------------------------------------------------
@@ -932,64 +580,6 @@ fn bump_instance_ttl(env: &Env) {
     env.storage()
         .instance()
         .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
-}
-
-/// Return the current ledger timestamp after verifying ledger-backed accrual time
-/// has not regressed since the previous accrual calculation.
-///
-/// # Errors
-/// - `ContractError::ClockRegression` in test/debug builds when `ledger().timestamp()`
-///   is lower than the last accrual timestamp observed by this contract instance.
-///
-/// # Security
-/// Accrual math assumes ledger timestamps are monotonically non-decreasing. Stellar
-/// enforces this on production ledgers; the stored timestamp is a low-cost tripwire
-/// for test harnesses, migrations, or future environments that violate the assumption.
-fn current_accrual_timestamp(env: &Env) -> Result<u64, ContractError> {
-    let now = env.ledger().timestamp();
-    let key = DataKey::LastAccrualLedgerTimestamp;
-
-    if let Some(prev) = env.storage().instance().get::<_, u64>(&key) {
-        accrual::assert_ledger_time_monotonic(prev, now)?;
-    }
-
-    env.storage().instance().set(&key, &now);
-    bump_instance_ttl(env);
-    Ok(now)
-}
-
-fn acquire_reentrancy_lock(env: &Env) -> Result<(), ContractError> {
-    let key = DataKey::ReentrancyLock;
-    if env.storage().instance().get(&key).unwrap_or(false) {
-        return Err(ContractError::InvalidState);
-    }
-
-    env.storage().instance().set(&key, &true);
-    bump_instance_ttl(env);
-    Ok(())
-}
-
-fn release_reentrancy_lock(env: &Env) {
-    env.storage()
-        .instance()
-        .set(&DataKey::ReentrancyLock, &false);
-    bump_instance_ttl(env);
-}
-
-/// Compute an adaptive TTL bump amount proportional to a stream's remaining lifetime.
-///
-/// `adaptive_ttl = min(MAX_TTL, remaining_seconds / LEDGER_CLOSE_TIME + BUFFER_LEDGERS)`
-///
-/// - When `end_time` is far in the future the bump is large, keeping the entry alive.
-/// - When `end_time` has already passed (or `now >= end_time`) the bump falls back to
-///   `BUFFER_LEDGERS` so the entry stays alive long enough for the recipient to withdraw.
-/// - The result is always at least `PERSISTENT_BUMP_AMOUNT` to avoid under-bumping
-///   short-lived streams below the static floor.
-fn compute_adaptive_ttl(now: u64, end_time: u64) -> u32 {
-    let remaining_seconds = end_time.saturating_sub(now);
-    let ledgers_for_stream = (remaining_seconds / LEDGER_CLOSE_TIME) as u32;
-    let adaptive = ledgers_for_stream.saturating_add(BUFFER_LEDGERS);
-    adaptive.clamp(PERSISTENT_BUMP_AMOUNT, MAX_TTL)
 }
 
 fn get_config(env: &Env) -> Result<Config, ContractError> {
@@ -1008,19 +598,21 @@ fn get_admin(env: &Env) -> Result<Address, ContractError> {
     get_config(env).map(|c| c.admin)
 }
 
-/// Returns whether the contract is in **global emergency pause** (default `false` if unset).
-fn is_global_emergency_paused(env: &Env) -> bool {
+/// Returns the current protocol-wide pause state.
+fn get_pause_state(env: &Env) -> PauseState {
     env.storage()
         .instance()
-        .get(&DataKey::GlobalEmergencyPaused)
-        .unwrap_or(false)
+        .get(&DataKey::PauseState)
+        .unwrap_or(PauseState::Active)
+}
+
+/// Returns whether the contract is in **global emergency pause**.
+fn is_global_emergency_paused(env: &Env) -> bool {
+    matches!(get_pause_state(env), PauseState::GlobalEmergencyPaused)
 }
 
 fn is_creation_paused(env: &Env) -> bool {
-    env.storage()
-        .instance()
-        .get(&DataKey::CreationPaused)
-        .unwrap_or(false)
+    matches!(get_pause_state(env), PauseState::CreationPaused)
 }
 
 /// Returns `Err(ContractError::ContractPaused)` when [`is_global_emergency_paused`] is true.
@@ -1034,17 +626,30 @@ fn require_not_globally_paused(env: &Env) -> Result<(), ContractError> {
 
 /// Blocks new stream creation when the emergency pause or creation-only pause is active.
 fn require_not_creation_paused(env: &Env) -> Result<(), ContractError> {
-    require_not_globally_paused(env)?;
-    if is_creation_paused(env) {
-        return Err(ContractError::ContractPaused);
+    match get_pause_state(env) {
+        PauseState::GlobalEmergencyPaused | PauseState::CreationPaused => {
+            Err(ContractError::ContractPaused)
+        }
+        PauseState::Active => Ok(()),
     }
-    Ok(())
 }
 
 /// Returns whether the protocol is globally paused (checks both GlobalEmergencyPaused and CreationPaused).
 /// Default is false (not paused) if no pause keys are set.
 fn is_protocol_paused(env: &Env) -> bool {
-    is_global_emergency_paused(env) || is_creation_paused(env)
+    !matches!(get_pause_state(env), PauseState::Active)
+}
+
+macro_rules! require_not_globally_paused {
+    ($env:expr) => {
+        require_not_globally_paused(&$env)?;
+    };
+}
+
+macro_rules! require_creation_allowed {
+    ($env:expr) => {
+        require_not_creation_paused(&$env)?;
+    };
 }
 
 /// Get the stored pause reason, if any.
@@ -1062,22 +667,6 @@ fn get_pause_admin(env: &Env) -> Option<Address> {
     env.storage().instance().get(&DataKey::GlobalPauseAdmin)
 }
 
-/// Get the governance-controlled maximum rate per second (default: i128::MAX if unset).
-fn get_max_rate_per_second(env: &Env) -> i128 {
-    env.storage()
-        .instance()
-        .get(&DataKey::MaxRatePerSecond)
-        .unwrap_or(i128::MAX)
-}
-
-/// Set the governance-controlled maximum rate per second.
-fn set_max_rate_per_second(env: &Env, max_rate: i128) {
-    env.storage()
-        .instance()
-        .set(&DataKey::MaxRatePerSecond, &max_rate);
-    env.storage().instance().extend_ttl(100, 518400); // 60 days
-}
-
 fn read_stream_count(env: &Env) -> u64 {
     bump_instance_ttl(env);
     env.storage()
@@ -1091,75 +680,29 @@ fn set_stream_count(env: &Env, count: u64) {
     bump_instance_ttl(env);
 }
 
-/// Acquire the reentrancy guard. Returns an error if already locked.
-fn acquire_reentrancy_lock(env: &Env) -> Result<(), ContractError> {
-    let locked: bool = env
-        .storage()
-        .instance()
-        .get(&DataKey::ReentrancyLock)
-        .unwrap_or(false);
-    if locked {
-        return Err(ContractError::InvalidState);
-    }
-    env.storage()
-        .instance()
-        .set(&DataKey::ReentrancyLock, &true);
-    Ok(())
-}
-
-/// Release the reentrancy guard.
-fn release_reentrancy_lock(env: &Env) {
-    env.storage()
-        .instance()
-        .set(&DataKey::ReentrancyLock, &false);
-}
-
 // ---------------------------------------------------------------------------
-// IdReservation storage helpers (issue #584)
+// Delegated-withdraw nonce helpers
 // ---------------------------------------------------------------------------
 
-fn load_id_reservation(env: &Env, caller: &Address) -> Option<IdReservation> {
+/// Read the current nonce for a recipient (0 if never used).
+fn read_withdraw_nonce(env: &Env, recipient: &Address) -> u64 {
     env.storage()
         .persistent()
-        .get(&DataKey::IdReservation(caller.clone()))
+        .get(&DataKey::WithdrawNonce(recipient.clone()))
+        .unwrap_or(0u64)
 }
 
-fn save_id_reservation(env: &Env, caller: &Address, res: &IdReservation) {
-    let key = DataKey::IdReservation(caller.clone());
-    env.storage().persistent().set(&key, res);
+/// Increment and persist the nonce for a recipient.
+fn increment_withdraw_nonce(env: &Env, recipient: &Address) -> u64 {
+    let next = read_withdraw_nonce(env, recipient) + 1;
+    let key = DataKey::WithdrawNonce(recipient.clone());
+    env.storage().persistent().set(&key, &next);
     env.storage().persistent().extend_ttl(
         &key,
         PERSISTENT_LIFETIME_THRESHOLD,
         PERSISTENT_BUMP_AMOUNT,
     );
-}
-
-fn remove_id_reservation(env: &Env, caller: &Address) {
-    env.storage()
-        .persistent()
-        .remove(&DataKey::IdReservation(caller.clone()));
-}
-
-/// Determine the next stream ID for `caller`.
-///
-/// If the caller has an active reservation, consume the next ID from it.
-/// When the reservation is fully consumed it is deleted.
-/// Otherwise fall through to the live global counter.
-fn next_stream_id_for(env: &Env, caller: &Address) -> u64 {
-    if let Some(mut res) = load_id_reservation(env, caller) {
-        let id = res.start_id + res.consumed as u64;
-        res.consumed += 1;
-        if res.consumed >= res.count {
-            remove_id_reservation(env, caller);
-        } else {
-            save_id_reservation(env, caller, &res);
-        }
-        id
-    } else {
-        let id = read_stream_count(env);
-        set_stream_count(env, id + 1);
-        id
-    }
+    next
 }
 
 fn load_stream(env: &Env, stream_id: u64) -> Result<Stream, ContractError> {
@@ -1170,12 +713,12 @@ fn load_stream(env: &Env, stream_id: u64) -> Result<Stream, ContractError> {
         .get(&key)
         .ok_or(ContractError::StreamNotFound)?;
 
-    // Adaptive TTL bump on read: keep the entry alive proportional to remaining stream lifetime.
-    let now = env.ledger().timestamp();
-    let bump = compute_adaptive_ttl(now, stream.end_time);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, bump);
+    // Bump TTL on read so actively-queried streams don't expire
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
 
     Ok(stream)
 }
@@ -1183,12 +726,11 @@ fn load_stream(env: &Env, stream_id: u64) -> Result<Stream, ContractError> {
 pub fn save_stream(env: &Env, stream: &Stream) {
     let key = DataKey::Stream(stream.stream_id);
     env.storage().persistent().set(&key, stream);
-    // Adaptive TTL bump on write: scale to remaining stream lifetime.
-    let now = env.ledger().timestamp();
-    let bump = compute_adaptive_ttl(now, stream.end_time);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, bump);
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
 }
 
 fn is_terminal_state(env: &Env, stream: &Stream) -> bool {
@@ -1230,36 +772,21 @@ fn load_recipient_streams(env: &Env, recipient: &Address) -> soroban_sdk::Vec<u6
 }
 
 /// Save the list of stream IDs for a recipient (maintains sorted order).
-///
-/// `end_time`: when provided, the TTL bump is scaled to the stream's remaining
-/// lifetime via `compute_adaptive_ttl`; otherwise falls back to `PERSISTENT_BUMP_AMOUNT`.
-fn save_recipient_streams(
-    env: &Env,
-    recipient: &Address,
-    streams: &soroban_sdk::Vec<u64>,
-    end_time: Option<u64>,
-) {
+fn save_recipient_streams(env: &Env, recipient: &Address, streams: &soroban_sdk::Vec<u64>) {
     let key = DataKey::RecipientStreams(recipient.clone());
     env.storage().persistent().set(&key, streams);
 
-    // Adaptive TTL bump: scale to the stream's remaining lifetime when known,
-    // otherwise fall back to the static PERSISTENT_BUMP_AMOUNT floor.
-    let bump = end_time
-        .map(|et| compute_adaptive_ttl(env.ledger().timestamp(), et))
-        .unwrap_or(PERSISTENT_BUMP_AMOUNT);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, bump);
+    // Extend TTL on write to ensure persistence
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
 }
 
 /// Add a stream ID to a recipient's index (maintains sorted order).
 /// Assumes stream_id is not already in the list.
-fn add_stream_to_recipient_index(
-    env: &Env,
-    recipient: &Address,
-    stream_id: u64,
-    end_time: Option<u64>,
-) {
+fn add_stream_to_recipient_index(env: &Env, recipient: &Address, stream_id: u64) {
     let mut streams = load_recipient_streams(env, recipient);
 
     // Insert in sorted order (binary search for insertion point)
@@ -1439,37 +966,6 @@ fn remove_template_id_for_owner(
 }
 
 // ---------------------------------------------------------------------------
-// Delegated-withdraw nonce helpers
-// ---------------------------------------------------------------------------
-
-/// Load the current nonce for a recipient (0 if never used).
-pub(crate) fn load_delegated_nonce(env: &Env, recipient: &Address) -> u64 {
-    env.storage()
-        .persistent()
-        .get(&key)
-        .unwrap_or_else(|| soroban_sdk::Vec::new(env))
-}
-
-fn save_rotation_history(env: &Env, stream_id: u64, history: &soroban_sdk::Vec<RotationEntry>) {
-    let key = DataKey::RotationHistory(stream_id);
-    env.storage().persistent().set(&key, history);
-    env.storage().persistent().extend_ttl(
-        &key,
-        PERSISTENT_LIFETIME_THRESHOLD,
-        PERSISTENT_BUMP_AMOUNT,
-    );
-}
-
-fn append_rotation_entry(env: &Env, stream_id: u64, entry: RotationEntry) {
-    let mut history = load_rotation_history(env, stream_id);
-    if history.len() as u32 >= MAX_ROTATION_HISTORY {
-        history.remove(0);
-    }
-    history.push_back(entry);
-    save_rotation_history(env, stream_id, &history);
-}
-
-// ---------------------------------------------------------------------------
 // Token transfer helpers
 // ---------------------------------------------------------------------------
 ///
@@ -1553,54 +1049,56 @@ fn push_token(env: &Env, to: &Address, amount: i128) -> Result<(), ContractError
 }
 
 // ---------------------------------------------------------------------------
-// Metadata validation (issue #580)
+// Reentrancy Guard Helpers
 // ---------------------------------------------------------------------------
 
-/// Validate an optional per-stream metadata map against all size bounds.
+/// Acquire the reentrancy lock before a token transfer operation.
 ///
-/// Called from `persist_new_stream` / `persist_new_stream_skip_index` before any
-/// state is written, so a violation never allocates a stream ID.
+/// # Behavior
+/// - If the lock is already held, returns `Err(ContractError::InvalidState)` to prevent reentrancy.
+/// - If the lock is free, acquires it and returns `Ok(())`.
 ///
-/// # Invariants checked
-/// - `metadata.len() <= MAX_METADATA_KEYS`
-/// - each key length <= `MAX_METADATA_KEY_BYTES`
-/// - each value length <= `MAX_METADATA_VALUE_BYTES`
-/// - aggregate (sum of all key lengths + all value lengths) <= `MAX_METADATA_BYTES`
+/// # Security Model
+/// - Prevents cross-contract callbacks from executing token transfers in the middle of
+///   another transfer, which could violate invariants even with CEI ordering.
+/// - Complements CEI pattern for defense-in-depth against malicious custom SEP-41 hooks.
 ///
-/// # Errors
-/// Returns `ContractError::MetadataTooLarge` on any bound violation.
-fn validate_metadata(
-    metadata: &Map<soroban_sdk::Bytes, soroban_sdk::Bytes>,
-) -> Result<(), ContractError> {
-    if metadata.len() > MAX_METADATA_KEYS {
-        return Err(ContractError::MetadataTooLarge);
+/// # Usage
+/// Always pair with `release_reentrancy_lock` in a match statement:
+/// ```rust,ignore
+/// acquire_reentrancy_lock(&env)?;
+/// let result = do_token_transfer(&env);
+/// release_reentrancy_lock(&env);
+/// result?;
+/// ```
+fn acquire_reentrancy_lock(env: &Env) -> Result<(), ContractError> {
+    let is_locked: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::ReentrancyLock)
+        .unwrap_or(false);
+
+    if is_locked {
+        return Err(ContractError::InvalidState);
     }
 
-    let mut total_bytes: u32 = 0;
-    for (key, value) in metadata.iter() {
-        let key_len = key.len();
-        let val_len = value.len();
-
-        if key_len > MAX_METADATA_KEY_BYTES {
-            return Err(ContractError::MetadataTooLarge);
-        }
-        if val_len > MAX_METADATA_VALUE_BYTES {
-            return Err(ContractError::MetadataTooLarge);
-        }
-
-        // Use saturating addition to avoid overflow on adversarial input; the
-        // subsequent aggregate check catches any wrapped values safely.
-        total_bytes = total_bytes
-            .checked_add(key_len)
-            .and_then(|t| t.checked_add(val_len))
-            .ok_or(ContractError::MetadataTooLarge)?;
-
-        if total_bytes > MAX_METADATA_BYTES {
-            return Err(ContractError::MetadataTooLarge);
-        }
-    }
-
+    env.storage().instance().set(&DataKey::ReentrancyLock, &true);
+    bump_instance_ttl(env);
     Ok(())
+}
+
+/// Release the reentrancy lock after a token transfer operation.
+///
+/// # Behavior
+/// - Clears the reentrancy lock flag.
+/// - Should only be called after `acquire_reentrancy_lock` returns Ok.
+///
+/// # Panic Safety
+/// - Even if the transfer panics, the lock is released on function exit (not auto-release due to transaction rollback).
+/// - Since transactions are atomic, a panic will rollback the lock flag anyway.
+fn release_reentrancy_lock(env: &Env) {
+    env.storage().instance().set(&DataKey::ReentrancyLock, &false);
+    bump_instance_ttl(env);
 }
 
 // ---------------------------------------------------------------------------
@@ -1610,7 +1108,7 @@ fn validate_metadata(
 impl FluxoraStream {
     #[allow(clippy::too_many_arguments)]
     fn validate_stream_params(
-        env: &Env,
+        _env: &Env,
         sender: &Address,
         recipient: &Address,
         deposit_amount: i128,
@@ -1619,28 +1117,10 @@ impl FluxoraStream {
         start_time: u64,
         cliff_time: u64,
         end_time: u64,
-        kind: StreamKind,
     ) -> Result<(), ContractError> {
         // Validate positive amounts (#35)
-        if deposit_amount <= 0 {
+        if deposit_amount <= 0 || rate_per_second <= 0 {
             return Err(ContractError::InvalidParams);
-        }
-
-        if kind == StreamKind::Linear {
-            if rate_per_second <= 0 {
-                return Err(ContractError::InvalidParams);
-            }
-
-            // Enforce governance-controlled maximum rate per second cap
-            let max_rate = get_max_rate_per_second(env);
-            if rate_per_second > max_rate {
-                return Err(ContractError::InvalidParams);
-            }
-        } else {
-            // For CliffOnly stream, rate must be 0
-            if rate_per_second != 0 {
-                return Err(ContractError::InvalidParams);
-            }
         }
 
         // Validate sender != recipient (#35)
@@ -1659,16 +1139,14 @@ impl FluxoraStream {
             return Err(ContractError::InvalidParams);
         }
 
-        if kind == StreamKind::Linear {
-            // Validate deposit covers total streamable amount (#34)
-            let duration = (end_time - start_time) as i128;
-            let total_streamable = rate_per_second
-                .checked_mul(duration)
-                .ok_or(ContractError::InvalidParams)?; // Return InvalidParams on overflow as expected by tests
+        // Validate deposit covers total streamable amount (#34)
+        let duration = (end_time - start_time) as i128;
+        let total_streamable = rate_per_second
+            .checked_mul(duration)
+            .ok_or(ContractError::InvalidParams)?; // Return InvalidParams on overflow as expected by tests
 
-            if deposit_amount < total_streamable {
-                return Err(ContractError::InsufficientDeposit);
-            }
+        if deposit_amount < total_streamable {
+            return Err(ContractError::InsufficientDeposit);
         }
 
         Ok(())
@@ -1686,7 +1164,7 @@ impl FluxoraStream {
         end_time: u64,
         withdraw_dust_threshold: i128,
         memo: Option<soroban_sdk::Bytes>,
-        kind: StreamKind,
+        _kind: StreamKind,
     ) -> Result<u64, ContractError> {
         // Validate memo length before allocating a stream ID.
         if let Some(ref m) = memo {
@@ -1695,7 +1173,8 @@ impl FluxoraStream {
             }
         }
 
-        let stream_id = next_stream_id_for(env, &sender);
+        let stream_id = read_stream_count(env);
+        set_stream_count(env, stream_id + 1);
 
         let stream = Stream {
             stream_id,
@@ -1713,7 +1192,6 @@ impl FluxoraStream {
             checkpointed_at: start_time,
             withdraw_dust_threshold,
             memo: memo.clone(),
-            kind,
         };
 
         save_stream(env, &stream);
@@ -1722,80 +1200,6 @@ impl FluxoraStream {
         add_stream_to_recipient_index(env, &recipient, stream_id);
 
         // Track liability: the full deposit is owed to the recipient until withdrawn/refunded.
-        let liabilities = read_total_liabilities(env)
-            .checked_add(deposit_amount)
-            .unwrap_or(i128::MAX);
-        write_total_liabilities(env, liabilities);
-
-        env.events().publish(
-            (symbol_short!("created"), stream_id),
-            StreamCreated {
-                stream_id,
-                sender,
-                recipient,
-                deposit_amount,
-                rate_per_second,
-                start_time,
-                cliff_time,
-                end_time,
-                withdraw_dust_threshold,
-                memo,
-            },
-        );
-
-        Ok(stream_id)
-    }
-
-    /// Like `persist_new_stream` but skips the per-call recipient index update.
-    ///
-    /// Used by `create_streams` to batch index writes: the caller collects all
-    /// (recipient → stream_ids) pairs and flushes them once per unique recipient,
-    /// reducing ledger I/O from O(n) to O(1) per recipient.
-    #[allow(clippy::too_many_arguments)]
-    fn persist_new_stream_skip_index(
-        env: &Env,
-        sender: Address,
-        recipient: Address,
-        deposit_amount: i128,
-        rate_per_second: i128,
-        start_time: u64,
-        cliff_time: u64,
-        end_time: u64,
-        withdraw_dust_threshold: i128,
-        memo: Option<soroban_sdk::Bytes>,
-        kind: StreamKind,
-    ) -> Result<u64, ContractError> {
-        if let Some(ref m) = memo {
-            if m.len() as usize > MAX_MEMO_BYTES {
-                return Err(ContractError::InvalidParams);
-            }
-        }
-
-        let stream_id = next_stream_id_for(env, &sender);
-
-        let stream = Stream {
-            stream_id,
-            sender: sender.clone(),
-            recipient: recipient.clone(),
-            deposit_amount,
-            rate_per_second,
-            start_time,
-            cliff_time,
-            end_time,
-            withdrawn_amount: 0,
-            status: StreamStatus::Active,
-            cancelled_at: None,
-            checkpointed_amount: 0,
-            checkpointed_at: start_time,
-            withdraw_dust_threshold,
-            memo: memo.clone(),
-            kind,
-        };
-
-        save_stream(env, &stream);
-
-        // Index update is intentionally skipped here; caller must flush the cache.
-
         let liabilities = read_total_liabilities(env)
             .checked_add(deposit_amount)
             .unwrap_or(i128::MAX);
@@ -1865,11 +1269,8 @@ impl FluxoraStream {
     /// - Does not silently fail (panics or returns an error on insufficient balance)
     /// - Implements the standard Soroban token interface
     ///
-    /// **The contract performs an on-chain SEP-41 smoke-test during initialization.**
-    /// It verifies that the token contract exposes `balance` and a no-op `transfer`
-    /// on the contract address before persisting configuration.
-    ///
-    /// If the token does not expose the expected interface, initialization reverts.
+    /// **Operators are responsible for verifying token behavior before initialization.**
+    /// If a malicious token is used, the contract's behavior may become unpredictable.
     ///
     /// See [`token-assumptions.md`](../../docs/token-assumptions.md) for complete token trust model.
     pub fn init(env: Env, token: Address, admin: Address) -> Result<(), ContractError> {
@@ -1877,7 +1278,6 @@ impl FluxoraStream {
         if env.storage().instance().has(&DataKey::Config) {
             return Err(ContractError::AlreadyInitialised);
         }
-        verify_token_behavior(&env, &token)?;
         let config = Config { token, admin };
         env.storage().instance().set(&DataKey::Config, &config);
         env.storage().instance().set(&DataKey::NextStreamId, &0u64);
@@ -1996,27 +1396,21 @@ impl FluxoraStream {
         end_time: u64,
         withdraw_dust_threshold: i128,
         memo: Option<soroban_sdk::Bytes>,
-        kind: StreamKind,
+        _kind: StreamKind,
     ) -> Result<u64, ContractError> {
         sender.require_auth();
         require_not_creation_paused(&env)?;
-
-        let mut final_rate = rate_per_second;
-        if kind == StreamKind::CliffOnly {
-            final_rate = 0;
-        }
 
         Self::validate_stream_params(
             &env,
             &sender,
             &recipient,
             deposit_amount,
-            final_rate,
+            rate_per_second,
             env.ledger().timestamp(),
             start_time,
             cliff_time,
             end_time,
-            kind,
         )?;
 
         pull_token(&env, &sender, deposit_amount)?;
@@ -2026,13 +1420,13 @@ impl FluxoraStream {
             sender,
             recipient,
             deposit_amount,
-            final_rate,
+            rate_per_second,
             start_time,
             cliff_time,
             end_time,
             withdraw_dust_threshold,
             memo,
-            kind,
+            _kind,
         )
     }
 
@@ -2097,7 +1491,6 @@ impl FluxoraStream {
     ///     &(2 * 86400),         // 2 days delay
     ///     &(5 * 86400),         // 5 days cliff
     ///     &(30 * 86400),        // 30 days duration
-    ///     StreamKind::Linear,
     /// )?;
     /// ```
     #[allow(clippy::too_many_arguments)]
@@ -2127,24 +1520,19 @@ impl FluxoraStream {
             .checked_add(params.duration)
             .ok_or(ContractError::InvalidParams)?;
 
-        let mut final_rate = params.rate_per_second;
-        if params.kind == StreamKind::CliffOnly {
-            final_rate = 0;
-        }
-
         // Delegate to standard create_stream with computed absolute times
         Self::create_stream(
             env,
             sender,
             params.recipient,
             params.deposit_amount,
-            final_rate,
+            params.rate_per_second,
             start_time,
             cliff_time,
             end_time,
             params.withdraw_dust_threshold.unwrap_or(0),
             params.memo,
-            params.kind,
+            StreamKind::Linear,
         )
     }
 
@@ -2284,22 +1672,16 @@ impl FluxoraStream {
 
         // First pass: validate all streams and calculate total deposit required
         for params in streams.iter() {
-            let mut final_rate = params.rate_per_second;
-            if params.kind == StreamKind::CliffOnly {
-                final_rate = 0;
-            }
-
             Self::validate_stream_params(
                 &env,
                 &sender,
                 &params.recipient,
                 params.deposit_amount,
-                final_rate,
+                params.rate_per_second,
                 current_time,
                 params.start_time,
                 params.cliff_time,
                 params.end_time,
-                params.kind,
             )?;
             total_deposit = total_deposit
                 .checked_add(params.deposit_amount)
@@ -2315,45 +1697,20 @@ impl FluxoraStream {
         // Second pass: generate IDs, persist state, and emit events iteratively
         let mut created_ids = soroban_sdk::Vec::new(&env);
         for params in streams.iter() {
-            let mut final_rate = params.rate_per_second;
-            if params.kind == StreamKind::CliffOnly {
-                final_rate = 0;
-            }
-
-            let stream_id = Self::persist_new_stream_skip_index(
+            let stream_id = Self::persist_new_stream(
                 &env,
                 sender.clone(),
                 params.recipient,
                 params.deposit_amount,
-                final_rate,
+                params.rate_per_second,
                 params.start_time,
                 params.cliff_time,
                 params.end_time,
                 params.withdraw_dust_threshold.unwrap_or(0),
                 params.memo,
-                params.kind,
+                StreamKind::Linear,
             )?;
             created_ids.push_back(stream_id);
-
-            // Accumulate stream_id into the cache for this recipient.
-            let mut ids = recipient_cache
-                .get(params.recipient.clone())
-                .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
-            ids.push_back(stream_id);
-            recipient_cache.set(params.recipient, ids);
-        }
-
-        // Flush: one read + one write per unique recipient.
-        for (recipient, new_ids) in recipient_cache.iter() {
-            let mut existing = load_recipient_streams(&env, &recipient);
-            for id in new_ids.iter() {
-                let insert_pos = match existing.binary_search(id) {
-                    Ok(pos) => pos,
-                    Err(pos) => pos,
-                };
-                existing.insert(insert_pos, id);
-            }
-            save_recipient_streams(&env, &recipient, &existing, None);
         }
 
         Ok(created_ids)
@@ -2449,126 +1806,20 @@ impl FluxoraStream {
                 .checked_add(rel.duration)
                 .ok_or(ContractError::InvalidParams)?;
 
-            let mut final_rate = rel.rate_per_second;
-            if rel.kind == StreamKind::CliffOnly {
-                final_rate = 0;
-            }
-
             absolute_streams.push_back(CreateStreamParams {
                 recipient: rel.recipient,
                 deposit_amount: rel.deposit_amount,
-                rate_per_second: final_rate,
+                rate_per_second: rel.rate_per_second,
                 start_time,
                 cliff_time,
                 end_time,
                 withdraw_dust_threshold: rel.withdraw_dust_threshold,
                 memo: rel.memo,
-                kind: rel.kind,
             });
         }
 
         // Delegate to standard create_streams with converted absolute times
         Self::create_streams(env, sender, absolute_streams)
-    }
-
-    /// Create multiple payment streams in a single transaction with failure isolation.
-    ///
-    /// Unlike `create_streams`, this function is non-atomic: it attempts to create each
-    /// stream independently. If an entry fails validation or token transfer, it is
-    /// recorded as a failure in the results vector, but the rest of the batch continues.
-    ///
-    /// # Parameters
-    /// - `sender`: Address funding the streams (must authorize the call)
-    /// - `streams`: Vector of stream parameters to process
-    ///
-    /// # Returns
-    /// - `Vec<CreateStreamResult>`: Per-entry success/failure results in input order
-    pub fn create_streams_partial(
-        env: Env,
-        sender: Address,
-        streams: soroban_sdk::Vec<CreateStreamParams>,
-    ) -> Result<soroban_sdk::Vec<CreateStreamResult>, ContractError> {
-        sender.require_auth();
-
-        if streams.is_empty() {
-            return Ok(soroban_sdk::Vec::new(&env));
-        }
-
-        require_not_creation_paused(&env)?;
-
-        let current_time = env.ledger().timestamp();
-        let mut results = soroban_sdk::Vec::new(&env);
-
-        for params in streams.iter() {
-            let mut final_rate = params.rate_per_second;
-            if params.kind == StreamKind::CliffOnly {
-                final_rate = 0;
-            }
-
-            // Validation first
-            let validation = Self::validate_stream_params(
-                &env,
-                &sender,
-                &params.recipient,
-                params.deposit_amount,
-                final_rate,
-                current_time,
-                params.start_time,
-                params.cliff_time,
-                params.end_time,
-                params.kind,
-            );
-
-            if let Err(e) = validation {
-                results.push_back(CreateStreamResult {
-                    success: false,
-                    stream_id: None,
-                    error: Some(e as u32),
-                });
-                continue;
-            }
-
-            // Attempt transfer (per-entry isolation)
-            let transfer = pull_token(&env, &sender, params.deposit_amount);
-            if transfer.is_err() {
-                results.push_back(CreateStreamResult {
-                    success: false,
-                    stream_id: None,
-                    error: Some(ContractError::InsufficientBalance as u32),
-                });
-                continue;
-            }
-
-            // Persist
-            let stream_id = Self::persist_new_stream(
-                &env,
-                sender.clone(),
-                params.recipient,
-                params.deposit_amount,
-                final_rate,
-                params.start_time,
-                params.cliff_time,
-                params.end_time,
-                params.withdraw_dust_threshold.unwrap_or(0),
-                params.memo,
-                params.kind,
-            );
-
-            match stream_id {
-                Ok(id) => results.push_back(CreateStreamResult {
-                    success: true,
-                    stream_id: Some(id),
-                    error: None,
-                }),
-                Err(e) => results.push_back(CreateStreamResult {
-                    success: false,
-                    stream_id: None,
-                    error: Some(e as u32),
-                }),
-            }
-        }
-
-        Ok(results)
     }
 
     /// Pause an active payment stream.
@@ -2619,28 +1870,12 @@ impl FluxoraStream {
             return Err(ContractError::InvalidState);
         }
 
-        // Check pause/resume cooldown to prevent rapid-toggle DoS
-        let current_ledger = env.ledger().sequence();
-        let ledgers_since_last_toggle =
-            current_ledger.saturating_sub(stream.last_pause_toggle_ledger);
-        if ledgers_since_last_toggle < MIN_PAUSE_INTERVAL_LEDGERS {
-            return Err(ContractError::PauseCooldownActive);
-        }
-
         stream.status = StreamStatus::Paused;
-        stream.last_pause_toggle_ledger = current_ledger;
         save_stream(&env, &stream);
 
-        let reason_str = match reason {
-            PauseReason::Operational => soroban_sdk::String::from_str(&env, "Operational"),
-            PauseReason::Administrative => soroban_sdk::String::from_str(&env, "Administrative"),
-        };
         env.events().publish(
             (symbol_short!("paused"), stream_id),
-            StreamPaused {
-                stream_id,
-                reason: reason_str,
-            },
+            StreamPaused { stream_id, reason },
         );
         Ok(())
     }
@@ -2686,16 +1921,7 @@ impl FluxoraStream {
             return Err(ContractError::StreamNotPaused);
         }
 
-        // Check pause/resume cooldown to prevent rapid-toggle DoS
-        let current_ledger = env.ledger().sequence();
-        let ledgers_since_last_toggle =
-            current_ledger.saturating_sub(stream.last_pause_toggle_ledger);
-        if ledgers_since_last_toggle < MIN_PAUSE_INTERVAL_LEDGERS {
-            return Err(ContractError::PauseCooldownActive);
-        }
-
         stream.status = StreamStatus::Active;
-        stream.last_pause_toggle_ledger = current_ledger;
         save_stream(&env, &stream);
 
         env.events().publish(
@@ -2831,14 +2057,6 @@ impl FluxoraStream {
         // Enforce recipient-only authorization
         stream.recipient.require_auth();
 
-        // Enforce withdrawal frequency limit to prevent excessive ledger I/O.
-        // Invariant: current_ledger >= last_withdraw_ledger (monotonic ledger progression).
-        // First withdrawal (last_withdraw_ledger == 0) always succeeds.
-        let current_ledger = env.ledger().sequence();
-        if current_ledger - stream.last_withdraw_ledger < MIN_WITHDRAW_INTERVAL_LEDGERS {
-            return Err(ContractError::WithdrawalTooFrequent);
-        }
-
         if stream.status == StreamStatus::Completed {
             return Err(ContractError::InvalidState);
         }
@@ -2879,7 +2097,6 @@ impl FluxoraStream {
         // CEI: update state before external token transfer to reduce reentrancy risk.
         // Assumption: the token contract does not reenter this contract.
         stream.withdrawn_amount += withdrawable;
-        stream.last_withdraw_ledger = current_ledger; // Update withdrawal timestamp
         let completed_now = (stream.status == StreamStatus::Active
             || stream.status == StreamStatus::Paused)
             && stream.withdrawn_amount == stream.deposit_amount;
@@ -2894,7 +2111,11 @@ impl FluxoraStream {
             .unwrap_or(0);
         write_total_liabilities(&env, liabilities);
 
-        push_token(&env, &stream.recipient, withdrawable)?;
+        // Explicit reentrancy guard for token transfer path
+        acquire_reentrancy_lock(&env)?;
+        let transfer_result = push_token(&env, &stream.recipient, withdrawable);
+        release_reentrancy_lock(&env);
+        transfer_result?;
 
         env.events().publish(
             (symbol_short!("withdrew"), stream_id),
@@ -3029,7 +2250,11 @@ impl FluxoraStream {
             .unwrap_or(0);
         write_total_liabilities(&env, liabilities);
 
-        push_token(&env, &destination, withdrawable)?;
+        // Explicit reentrancy guard for token transfer path
+        acquire_reentrancy_lock(&env)?;
+        let transfer_result = push_token(&env, &destination, withdrawable);
+        release_reentrancy_lock(&env);
+        transfer_result?;
 
         env.events().publish(
             (symbol_short!("wdraw_to"), stream_id),
@@ -3085,19 +2310,6 @@ impl FluxoraStream {
         stream.recipient = new_recipient.clone();
         save_stream(&env, &stream);
 
-        // Append to rotation history
-        append_rotation_entry(
-            &env,
-            stream_id,
-            RotationEntry {
-                old_addr: old_recipient.clone(),
-                new_addr: new_recipient.clone(),
-                ledger: env.ledger().sequence(),
-                role: RotationRole::Recipient,
-                authoriser: old_recipient.clone(),
-            },
-        );
-
         // Emit event
         env.events().publish(
             (symbol_short!("recp_upd"), stream_id),
@@ -3108,58 +2320,6 @@ impl FluxoraStream {
             },
         );
 
-        Ok(())
-    }
-
-    pub fn get_pending_recipient_update(
-        env: Env,
-        stream_id: u64,
-    ) -> Option<PendingRecipientUpdate> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::PendingRecipientUpdate(stream_id))
-    }
-
-    pub fn accept_recipient_update(env: Env, stream_id: u64) -> Result<(), ContractError> {
-        require_not_globally_paused(&env)?;
-        let pending = Self::get_pending_recipient_update(env.clone(), stream_id)
-            .ok_or(ContractError::InvalidState)?;
-        let mut stream = load_stream(&env, stream_id)?;
-
-        stream.recipient.require_auth();
-        let old_recipient = stream.recipient.clone();
-        remove_stream_from_recipient_index(&env, &old_recipient, stream_id);
-        add_stream_to_recipient_index(
-            &env,
-            &pending.proposed_recipient,
-            stream_id,
-            Some(stream.end_time),
-        );
-
-        stream.recipient = pending.proposed_recipient.clone();
-        save_stream(&env, &stream);
-        env.storage()
-            .persistent()
-            .remove(&DataKey::PendingRecipientUpdate(stream_id));
-
-        env.events().publish(
-            (symbol_short!("recp_upd"), stream_id),
-            RecipientUpdated {
-                stream_id,
-                old_recipient,
-                new_recipient: pending.proposed_recipient,
-            },
-        );
-
-        Ok(())
-    }
-
-    pub fn cancel_recipient_update(env: Env, stream_id: u64) -> Result<(), ContractError> {
-        let stream = load_stream(&env, stream_id)?;
-        Self::require_stream_sender(&stream.sender);
-        env.storage()
-            .persistent()
-            .remove(&DataKey::PendingRecipientUpdate(stream_id));
         Ok(())
     }
 
@@ -3234,22 +2394,11 @@ impl FluxoraStream {
             token::Client::new(&env, &token_address).balance(&env.current_contract_address());
         let mut results = soroban_sdk::Vec::new(&env);
 
-        // Cache ledger timestamp once — it is constant within a single transaction.
-        // Avoids a redundant host-function call on every loop iteration (#515).
-        let now = current_accrual_timestamp(&env)?;
-
         for stream_id in stream_ids.iter() {
             let mut stream = load_stream(&env, stream_id)?;
 
             if stream.recipient != recipient {
                 return Err(ContractError::Unauthorized);
-            }
-
-            // Enforce withdrawal frequency limit per stream in the batch.
-            // Each stream must respect its own last_withdraw_ledger independently.
-            // Invariant: current_ledger >= last_withdraw_ledger (monotonic ledger progression).
-            if current_ledger - stream.last_withdraw_ledger < MIN_WITHDRAW_INTERVAL_LEDGERS {
-                return Err(ContractError::WithdrawalTooFrequent);
             }
 
             if stream.status == StreamStatus::Paused && !is_terminal_state(&env, &stream) {
@@ -3259,23 +2408,7 @@ impl FluxoraStream {
             let mut withdrawable = if stream.status == StreamStatus::Completed {
                 0
             } else {
-                // Use cached `now` instead of calling env.ledger().timestamp() per stream.
-                let effective_now = if stream.status == StreamStatus::Cancelled {
-                    stream.cancelled_at.ok_or(ContractError::InvalidState)?
-                } else {
-                    now
-                };
-                let accrued = accrual::calculate_accrued_amount_checkpointed(
-                    accrual::CheckpointState {
-                        checkpointed_amount: stream.checkpointed_amount,
-                        checkpointed_at: stream.checkpointed_at,
-                        cliff_time: stream.cliff_time,
-                        end_time: stream.end_time,
-                        deposit_amount: stream.deposit_amount,
-                    },
-                    stream.rate_per_second,
-                    effective_now,
-                );
+                let accrued = Self::calculate_accrued(env.clone(), stream_id)?;
                 (accrued - stream.withdrawn_amount).max(0)
             };
 
@@ -3296,7 +2429,6 @@ impl FluxoraStream {
                 contract_balance -= withdrawable;
 
                 stream.withdrawn_amount += withdrawable;
-                stream.last_withdraw_ledger = current_ledger; // Update withdrawal timestamp
                 let completed_now = (stream.status == StreamStatus::Active
                     || stream.status == StreamStatus::Paused)
                     && stream.withdrawn_amount == stream.deposit_amount;
@@ -3311,7 +2443,11 @@ impl FluxoraStream {
                     .unwrap_or(0);
                 write_total_liabilities(&env, liabilities);
 
-                push_token(&env, &stream.recipient, withdrawable)?;
+                // Explicit reentrancy guard for token transfer path
+                acquire_reentrancy_lock(&env)?;
+                let transfer_result = push_token(&env, &stream.recipient, withdrawable);
+                release_reentrancy_lock(&env);
+                transfer_result?;
 
                 env.events().publish(
                     (symbol_short!("withdrew"), stream_id),
@@ -3388,9 +2524,6 @@ impl FluxoraStream {
 
         let mut results = soroban_sdk::Vec::new(&env);
 
-        // Cache ledger timestamp once — constant within a single transaction (#515).
-        let now = current_accrual_timestamp(&env)?;
-
         for param in withdrawals.iter() {
             let mut stream = load_stream(&env, param.stream_id)?;
 
@@ -3405,22 +2538,7 @@ impl FluxoraStream {
             let mut withdrawable = if stream.status == StreamStatus::Completed {
                 0
             } else {
-                let effective_now = if stream.status == StreamStatus::Cancelled {
-                    stream.cancelled_at.ok_or(ContractError::InvalidState)?
-                } else {
-                    now
-                };
-                let accrued = accrual::calculate_accrued_amount_checkpointed(
-                    accrual::CheckpointState {
-                        checkpointed_amount: stream.checkpointed_amount,
-                        checkpointed_at: stream.checkpointed_at,
-                        cliff_time: stream.cliff_time,
-                        end_time: stream.end_time,
-                        deposit_amount: stream.deposit_amount,
-                    },
-                    stream.rate_per_second,
-                    effective_now,
-                );
+                let accrued = Self::calculate_accrued(env.clone(), param.stream_id)?;
                 (accrued - stream.withdrawn_amount).max(0)
             };
 
@@ -3477,168 +2595,6 @@ impl FluxoraStream {
         Ok(results)
     }
 
-    /// Withdraw accrued tokens on behalf of a recipient using an ed25519 signature.
-    ///
-    /// A relayer (keeper, bot, or any third party) may call this entrypoint to
-    /// trigger a withdrawal without requiring the recipient to submit a transaction
-    /// themselves. The recipient signs a message committing to:
-    ///
-    /// ```text
-    /// message = stream_id (u64, big-endian)
-    ///         | nonce     (u64, big-endian)
-    ///         | deadline  (u64, big-endian)
-    ///         | expected_minimum_amount (i128, big-endian)
-    /// ```
-    ///
-    /// The `expected_minimum_amount` field closes the relayer front-running griefing
-    /// vector: a relayer cannot delay the transaction until the accrued amount is
-    /// smaller than the recipient expected, because the call will revert with
-    /// `BelowMinimumAmount` if `withdrawable < expected_minimum_amount`.
-    ///
-    /// # Parameters
-    /// - `stream_id`: Stream to withdraw from.
-    /// - `relayer`: Address submitting the transaction (pays fees; no special privilege).
-    /// - `recipient_public_key`: Raw 32-byte ed25519 public key of the recipient.
-    /// - `nonce`: Replay-protection counter; must equal the stored nonce for this recipient.
-    /// - `deadline`: Ledger timestamp after which the signature is rejected.
-    /// - `expected_minimum_amount`: Minimum withdrawable amount the recipient accepts.
-    ///   Pass `0` to accept any positive amount.
-    /// - `signature`: 64-byte ed25519 signature over the message above.
-    ///
-    /// # Returns
-    /// - `i128`: Amount transferred to the recipient.
-    ///
-    /// # Errors
-    /// - `InvalidSignature` (15): Signature verification failed, deadline passed, or nonce mismatch.
-    /// - `BelowMinimumAmount` (16): Withdrawable amount is below `expected_minimum_amount`.
-    /// - `InvalidState`: Stream is paused (non-terminal) or completed.
-    /// - `StreamNotFound`: `stream_id` does not exist.
-    pub fn delegated_withdraw(
-        env: Env,
-        stream_id: u64,
-        relayer: Address,
-        recipient_public_key: soroban_sdk::BytesN<32>,
-        nonce: u64,
-        deadline: u64,
-        expected_minimum_amount: i128,
-        signature: soroban_sdk::BytesN<64>,
-    ) -> Result<i128, ContractError> {
-        require_not_globally_paused(&env)?;
-
-        // The relayer authorizes the transaction (pays fees); recipient auth is
-        // replaced by the ed25519 signature check below.
-        relayer.require_auth();
-
-        // 1. Deadline check — reject stale signatures.
-        if env.ledger().timestamp() > deadline {
-            return Err(ContractError::InvalidSignature);
-        }
-
-        // 2. Load stream.
-        let mut stream = load_stream(&env, stream_id)?;
-
-        // 3. Enforce withdrawal frequency limit to prevent excessive ledger I/O.
-        // Invariant: current_ledger >= last_withdraw_ledger (monotonic ledger progression).
-        // First withdrawal (last_withdraw_ledger == 0) always succeeds.
-        let current_ledger = env.ledger().sequence();
-        if current_ledger - stream.last_withdraw_ledger < MIN_WITHDRAW_INTERVAL_LEDGERS {
-            return Err(ContractError::WithdrawalTooFrequent);
-        }
-
-        // 4. Nonce check — replay protection.
-        let stored_nonce = load_delegated_nonce(&env, &stream.recipient);
-        if nonce != stored_nonce {
-            return Err(ContractError::InvalidSignature);
-        }
-
-        // 5. Build the signed message:
-        //    stream_id (8 bytes) | nonce (8 bytes) | deadline (8 bytes) | expected_minimum_amount (16 bytes)
-        let mut msg = soroban_sdk::Bytes::new(&env);
-        msg.extend_from_array(&stream_id.to_be_bytes());
-        msg.extend_from_array(&nonce.to_be_bytes());
-        msg.extend_from_array(&deadline.to_be_bytes());
-        msg.extend_from_array(&expected_minimum_amount.to_be_bytes());
-
-        // 5. Verify ed25519 signature — panics on failure (Soroban host trap).
-        let pk_bytes: soroban_sdk::BytesN<32> = recipient_public_key
-            .try_into()
-            .map_err(|_| ContractError::InvalidSignature)?;
-        let sig_bytes: soroban_sdk::BytesN<64> = signature
-            .try_into()
-            .map_err(|_| ContractError::InvalidSignature)?;
-        env.crypto().ed25519_verify(&pk_bytes, &msg, &sig_bytes);
-
-        // 7. State checks (same as withdraw).
-        if stream.status == StreamStatus::Completed {
-            return Err(ContractError::InvalidState);
-        }
-        if stream.status == StreamStatus::Paused && !is_terminal_state(&env, &stream) {
-            return Err(ContractError::InvalidState);
-        }
-
-        // 7. Compute withdrawable amount.
-        let accrued = Self::calculate_accrued(env.clone(), stream_id)?;
-        let mut withdrawable = accrued - stream.withdrawn_amount;
-
-        // Cap by contract balance for safety.
-        let token_address = get_token(&env)?;
-        let contract_balance =
-            token::Client::new(&env, &token_address).balance(&env.current_contract_address());
-        withdrawable = withdrawable.min(contract_balance);
-
-        // 8. Enforce minimum amount guard — closes the front-running griefing vector.
-        if withdrawable < expected_minimum_amount {
-            return Err(ContractError::BelowMinimumAmount);
-        }
-
-        if withdrawable <= 0 {
-            return Ok(0);
-        }
-
-        // 9. CEI: update state before external token transfer.
-        stream.withdrawn_amount += withdrawable;
-        stream.last_withdraw_ledger = current_ledger; // Update withdrawal timestamp
-        let completed_now = (stream.status == StreamStatus::Active
-            || stream.status == StreamStatus::Paused)
-            && stream.withdrawn_amount == stream.deposit_amount;
-        if completed_now {
-            stream.status = StreamStatus::Completed;
-        }
-        save_stream(&env, &stream);
-
-        // 10. Increment nonce to prevent replay.
-        increment_delegated_nonce(&env, &stream.recipient);
-
-        // 11. Transfer tokens to recipient.
-        push_token(&env, &stream.recipient, withdrawable)?;
-
-        env.events().publish(
-            (symbol_short!("withdrew"), stream_id),
-            Withdrawal {
-                stream_id,
-                recipient: stream.recipient.clone(),
-                amount: withdrawable,
-            },
-        );
-
-        if completed_now {
-            env.events().publish(
-                (symbol_short!("completed"), stream_id),
-                StreamEvent::StreamCompleted(stream_id),
-            );
-        }
-
-        Ok(withdrawable)
-    }
-
-    /// Return the current delegated-withdraw nonce for a recipient.
-    ///
-    /// Relayers must include this value in the signed message to prevent replay attacks.
-    /// The nonce is incremented on every successful `delegated_withdraw` call.
-    pub fn get_delegated_nonce(env: Env, recipient: Address) -> u64 {
-        load_delegated_nonce(&env, &recipient)
-    }
-
     /// Calculate the total amount accrued to the recipient at the current time.
     ///
     /// # Behaviour by status
@@ -3683,6 +2639,7 @@ impl FluxoraStream {
     /// There is no further accrual possible. Returning `deposit_amount` is the
     /// deterministic, timestamp-independent answer for any UI or downstream caller.
     pub fn calculate_accrued(env: Env, stream_id: u64) -> Result<i128, ContractError> {
+        bump_instance_ttl(&env);
         let stream = load_stream(&env, stream_id)?;
 
         if stream.status == StreamStatus::Completed {
@@ -3692,7 +2649,7 @@ impl FluxoraStream {
         let now = if stream.status == StreamStatus::Cancelled {
             stream.cancelled_at.ok_or(ContractError::InvalidState)?
         } else {
-            current_accrual_timestamp(&env)?
+            env.ledger().timestamp()
         };
 
         Ok(accrual::calculate_accrued_amount_checkpointed(
@@ -3702,10 +2659,8 @@ impl FluxoraStream {
                 cliff_time: stream.cliff_time,
                 end_time: stream.end_time,
                 deposit_amount: stream.deposit_amount,
-                kind: stream.kind,
             },
             stream.rate_per_second,
-            stream.deposit_amount,
             now,
         ))
     }
@@ -3728,6 +2683,7 @@ impl FluxoraStream {
     /// # Errors
     /// - Returns `ContractError::StreamNotFound` if the stream does not exist.
     pub fn get_withdrawable(env: Env, stream_id: u64) -> Result<i128, ContractError> {
+        bump_instance_ttl(&env);
         let stream = load_stream(&env, stream_id)?;
 
         // If the stream is completed or paused, withdrawals are not allowed.
@@ -3802,10 +2758,8 @@ impl FluxoraStream {
                 cliff_time: stream.cliff_time,
                 end_time: stream.end_time,
                 deposit_amount: stream.deposit_amount,
-                kind: stream.kind,
             },
             stream.rate_per_second,
-            stream.deposit_amount,
             effective_time,
         );
 
@@ -3890,50 +2844,10 @@ impl FluxoraStream {
         bump_instance_ttl(&env);
 
         // Emit event with old and new admin addresses
-        env.events()
-            .publish((symbol_short!("AdminUpd"),), (old_admin, new_admin));
-
-        Ok(())
-    }
-
-    /// Set the governance-controlled maximum rate per second.
-    ///
-    /// This administrative function allows the contract admin to set an upper bound
-    /// on the rate_per_second parameter for all streams. This prevents senders from
-    /// setting astronomically high rates that could cause overflow in accrual
-    /// calculations or drain entire deposits in a single ledger.
-    ///
-    /// # Parameters
-    /// - `max_rate`: Maximum allowed rate per second (must be > 0)
-    ///
-    /// # Authorization
-    /// - Requires authorization from the current contract admin
-    ///
-    /// # Behavior
-    /// - Sets the global maximum rate per second cap
-    /// - Applies to all future `update_rate_per_second` calls
-    /// - Does not affect existing streams (only future rate updates)
-    /// - Default value is `i128::MAX` (effectively no limit) if never set
-    ///
-    /// # Returns
-    /// - `Ok(())` on success
-    /// - `Err(Unauthorized)` if caller is not the admin
-    /// - `Err(InvalidParams)` if `max_rate <= 0`
-    ///
-    /// # Security Notes
-    /// - This is a governance parameter that should be set carefully
-    /// - Setting too low may prevent legitimate high-value streams
-    /// - Setting too high defeats the overflow protection purpose
-    ///
-    pub fn set_max_rate_per_second(env: Env, max_rate: i128) -> Result<(), ContractError> {
-        // Only admin can set governance parameters
-        get_admin(&env)?.require_auth();
-
-        if max_rate <= 0 {
-            return Err(ContractError::InvalidParams);
-        }
-
-        set_max_rate_per_second(&env, max_rate);
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "AdminUpdated"),),
+            (old_admin, new_admin),
+        );
 
         Ok(())
     }
@@ -3973,70 +2887,8 @@ impl FluxoraStream {
     ///   - `Completed`: All tokens withdrawn, terminal state
     ///   - `Cancelled`: Terminated early, unstreamed tokens refunded, terminal state
     pub fn get_stream_state(env: Env, stream_id: u64) -> Result<Stream, ContractError> {
-        load_stream(&env, stream_id)
-    }
-
-    /// Returns a structured health summary for a stream.
-    ///
-    /// This view function provides off-chain clients with a unified summary of the stream's
-    /// status, including whether it is underfunded (will run out of funds before `end_time`),
-    /// expired (past `end_time` but not yet fully withdrawn), real-time accrual, and
-    /// remaining deposit.
-    ///
-    /// # Parameters
-    /// - `stream_id`: Unique identifier of the stream.
-    ///
-    /// # Returns
-    /// A `StreamHealth` struct containing the computed state.
-    pub fn get_stream_health(env: Env, stream_id: u64) -> Result<StreamHealth, ContractError> {
         bump_instance_ttl(&env);
-        let stream = load_stream(&env, stream_id)?;
-        let current_time = env.ledger().timestamp();
-
-        let accrued_to_date_i128 = Self::calculate_accrued(env.clone(), stream_id)?;
-        let accrued_to_date = accrued_to_date_i128 as u128;
-
-        let remaining_deposit = stream
-            .deposit_amount
-            .saturating_sub(stream.withdrawn_amount) as u128;
-
-        let is_expired = current_time >= stream.end_time
-            && stream.status != StreamStatus::Completed
-            && stream.status != StreamStatus::Cancelled;
-
-        // Underfunded check: will it run out before end_time?
-        let duration = stream.end_time.saturating_sub(stream.checkpointed_at) as i128;
-        let potential_additional = stream.rate_per_second.checked_mul(duration);
-        let is_underfunded = match potential_additional {
-            Some(added) => stream.checkpointed_amount.saturating_add(added) > stream.deposit_amount,
-            None => true, // Overflow means it definitely exceeds deposit
-        };
-
-        // Seconds until depletion logic
-        let mut seconds_until_depletion = None;
-        if stream.rate_per_second > 0 {
-            let total_to_accrue = stream
-                .deposit_amount
-                .saturating_sub(stream.checkpointed_amount);
-            let seconds_to_deplete = (total_to_accrue / stream.rate_per_second) as u64;
-            let depletion_time = stream.checkpointed_at.saturating_add(seconds_to_deplete);
-
-            if depletion_time < stream.end_time {
-                seconds_until_depletion = Some(depletion_time.saturating_sub(current_time));
-            } else {
-                seconds_until_depletion = Some(stream.end_time.saturating_sub(current_time));
-            }
-        } else if stream.checkpointed_amount >= stream.deposit_amount {
-            seconds_until_depletion = Some(0);
-        }
-
-        Ok(StreamHealth {
-            is_underfunded,
-            is_expired,
-            accrued_to_date,
-            remaining_deposit,
-            seconds_until_depletion,
-        })
+        load_stream(&env, stream_id)
     }
 
     /// Return the optional memo stored for a stream.
@@ -4052,31 +2904,6 @@ impl FluxoraStream {
     ) -> Result<Option<soroban_sdk::Bytes>, ContractError> {
         let stream = load_stream(&env, stream_id)?;
         Ok(stream.memo)
-    }
-
-    /// Return the structured metadata map attached at stream creation, if any.
-    ///
-    /// The metadata field is **immutable** post-creation; this function is a
-    /// pure read that cannot be used to modify stream state.
-    ///
-    /// # Parameters
-    /// - `stream_id`: Unique identifier of the stream.
-    ///
-    /// # Returns
-    /// - `Some(Map<Bytes, Bytes>)` when metadata was supplied at creation time.
-    /// - `None` when no metadata was supplied.
-    ///
-    /// # Authorization
-    /// None required. Any caller (indexer, wallet, integrator) may call this.
-    ///
-    /// # Errors
-    /// - `ContractError::StreamNotFound` if the stream does not exist.
-    pub fn get_stream_metadata(
-        env: Env,
-        stream_id: u64,
-    ) -> Result<Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>, ContractError> {
-        let stream = load_stream(&env, stream_id)?;
-        Ok(stream.metadata)
     }
 
     /// Return the total number of streams created so far.
@@ -4117,10 +2944,6 @@ impl FluxoraStream {
         require_not_globally_paused(&env)?;
         let mut stream = load_stream(&env, stream_id)?;
 
-        if stream.kind == StreamKind::CliffOnly {
-            return Err(ContractError::UnsupportedStreamKind);
-        }
-
         // Only the original sender can update the rate.
         Self::require_stream_sender(&stream.sender);
 
@@ -4139,21 +2962,6 @@ impl FluxoraStream {
             return Err(ContractError::InvalidParams);
         }
 
-        // Enforce governance-controlled maximum rate per second cap.
-        let max_rate = get_max_rate_per_second(&env);
-        if new_rate_per_second > max_rate {
-            // Emit event when cap is enforced
-            env.events().publish(
-                (symbol_short!("rate_cap"), stream_id),
-                RateCapEnforced {
-                    stream_id,
-                    attempted_rate: new_rate_per_second,
-                    max_rate_per_second: max_rate,
-                },
-            );
-            return Err(ContractError::RateCapExceeded);
-        }
-
         // Validate that the existing deposit still covers the new total streamable amount.
         let duration = (stream.end_time - stream.start_time) as i128;
         let total_streamable = new_rate_per_second
@@ -4165,7 +2973,7 @@ impl FluxoraStream {
         }
 
         // Checkpoint accrued-to-date so the rate increase applies forward-only.
-        let now = current_accrual_timestamp(&env)?;
+        let now = env.ledger().timestamp();
         let accrued_now = accrual::calculate_accrued_amount_checkpointed(
             accrual::CheckpointState {
                 checkpointed_amount: stream.checkpointed_amount,
@@ -4173,10 +2981,8 @@ impl FluxoraStream {
                 cliff_time: stream.cliff_time,
                 end_time: stream.end_time,
                 deposit_amount: stream.deposit_amount,
-                kind: stream.kind,
             },
             old_rate,
-            stream.deposit_amount,
             now,
         );
         stream.checkpointed_amount = accrued_now;
@@ -4252,10 +3058,6 @@ impl FluxoraStream {
         require_not_globally_paused(&env)?;
         let mut stream = load_stream(&env, stream_id)?;
 
-        if stream.kind == StreamKind::CliffOnly {
-            return Err(ContractError::UnsupportedStreamKind);
-        }
-
         // Sender-only: only the original creator may reduce the rate.
         Self::require_stream_sender(&stream.sender);
 
@@ -4265,7 +3067,7 @@ impl FluxoraStream {
         }
 
         // Reject once the stream has expired; remaining duration would be zero.
-        let now = current_accrual_timestamp(&env)?;
+        let now = env.ledger().timestamp();
         if now >= stream.end_time {
             return Err(ContractError::InvalidState);
         }
@@ -4290,10 +3092,8 @@ impl FluxoraStream {
                 cliff_time: stream.cliff_time,
                 end_time: stream.end_time,
                 deposit_amount: stream.deposit_amount,
-                kind: stream.kind,
             },
             old_rate,
-            stream.deposit_amount,
             now,
         );
 
@@ -4383,17 +3183,13 @@ impl FluxoraStream {
         require_not_globally_paused(&env)?;
         let mut stream = load_stream(&env, stream_id)?;
 
-        if stream.kind == StreamKind::CliffOnly {
-            return Err(ContractError::UnsupportedStreamKind);
-        }
-
         // Only the original sender can modify the schedule.
         Self::require_stream_sender(&stream.sender);
 
         // Only non-terminal streams may be shortened.
         Self::require_cancellable_status(stream.status)?;
 
-        let now = current_accrual_timestamp(&env)?;
+        let now = env.ledger().timestamp();
 
         // New end time must move strictly earlier and remain strictly in the future.
         if new_end_time <= now
@@ -4483,17 +3279,13 @@ impl FluxoraStream {
         require_not_globally_paused(&env)?;
         let mut stream = load_stream(&env, stream_id)?;
 
-        if stream.kind == StreamKind::CliffOnly {
-            return Err(ContractError::UnsupportedStreamKind);
-        }
-
         // Only the original sender can modify the schedule.
         Self::require_stream_sender(&stream.sender);
 
         // Only non-terminal streams may be extended.
         Self::require_cancellable_status(stream.status)?;
 
-        let now = current_accrual_timestamp(&env)?;
+        let now = env.ledger().timestamp();
 
         // Must move end_time forward in time.
         if new_end_time <= stream.end_time
@@ -4591,10 +3383,6 @@ impl FluxoraStream {
 
         let stream = load_stream(&env, stream_id)?;
 
-        if stream.kind == StreamKind::CliffOnly {
-            return Err(ContractError::UnsupportedStreamKind);
-        }
-
         if stream.status != StreamStatus::Active && stream.status != StreamStatus::Paused {
             return Err(ContractError::InvalidState);
         }
@@ -4602,7 +3390,7 @@ impl FluxoraStream {
         // Reject top-ups on expired streams to prevent zombie fund lock-up.
         // Even if submitted in the same block as expiry, no seconds remain to
         // stream the new funds, so the deposit would be permanently unclaimable.
-        let now = current_accrual_timestamp(&env)?;
+        let now = env.ledger().timestamp();
         if now >= stream.end_time {
             return Err(ContractError::InvalidState);
         }
@@ -4693,10 +3481,8 @@ impl FluxoraStream {
                     cliff_time: stream.cliff_time,
                     end_time: stream.end_time,
                     deposit_amount: stream.deposit_amount,
-                    kind: stream.kind,
                 },
                 stream.rate_per_second,
-                stream.deposit_amount,
                 cancelled_at,
             );
             let claimable = accrued.saturating_sub(stream.withdrawn_amount).max(0);
@@ -4731,7 +3517,7 @@ impl FluxoraStream {
         owner.require_auth();
         validate_template_delays(&env, start_delay, cliff_delay, duration)?;
         let ids = load_owner_template_ids(&env, &owner);
-        if u64::from(ids.len()) >= MAX_TEMPLATES_PER_OWNER {
+        if ids.len() >= MAX_TEMPLATES_PER_OWNER {
             return Err(ContractError::TemplateLimitExceeded);
         }
         let active = read_active_template_count(&env);
@@ -4785,7 +3571,7 @@ impl FluxoraStream {
         rate_per_second: i128,
         withdraw_dust_threshold: i128,
         memo: Option<soroban_sdk::Bytes>,
-        metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
+        _kind: StreamKind,
     ) -> Result<u64, ContractError> {
         let tpl = load_stream_template(&env, template_id)?;
         Self::create_stream_relative(
@@ -4800,7 +3586,6 @@ impl FluxoraStream {
                 duration: tpl.duration,
                 withdraw_dust_threshold: Some(withdraw_dust_threshold),
                 memo,
-                metadata,
             },
         )
     }
@@ -4839,8 +3624,11 @@ impl FluxoraStream {
     /// This allows pre-flight version checks during deployment pipelines.
     ///
     /// # Gas
-    /// Minimal — no storage reads, no token interactions.
-    pub fn version(_env: Env) -> u32 {
+    /// Minimal — only bumps instance TTL so the contract entry stays alive on read.
+    pub fn version(env: Env) -> u32 {
+        // Bump instance TTL so a contract that is only being polled for `version()`
+        // does not have its instance entry archived.
+        bump_instance_ttl(&env);
         CONTRACT_VERSION
     }
 
@@ -4884,76 +3672,11 @@ impl FluxoraStream {
     /// - Paginate: fetch first N IDs, then call `get_stream_state` for each
     /// - Filter by status: fetch all IDs, then check status of each via `get_stream_state`
     pub fn get_recipient_streams(env: Env, recipient: Address) -> soroban_sdk::Vec<u64> {
+        bump_instance_ttl(&env);
         load_recipient_streams(&env, &recipient)
     }
 
-    /// Paginated version of get_recipient_streams to prevent unbounded returns.
-    ///
-    /// # Parameters
-    /// - `env`: Contract environment
-    /// - `recipient`: Address to query streams for
-    /// - `cursor`: Pagination cursor (stream_id to start after, 0 for beginning)
-    /// - `limit`: Maximum number of stream IDs to return (capped at RECIPIENT_STREAMS_PAGE_LIMIT)
-    ///
-    /// # Returns
-    /// - `Page`: Contains stream IDs slice and next cursor for pagination
-    ///
-    /// # Behavior
-    /// - Returns streams in ascending order by stream_id
-    /// - If cursor is 0, starts from the beginning
-    /// - If cursor matches a stream ID, starts after that stream
-    /// - Limit is capped at RECIPIENT_STREAMS_PAGE_LIMIT for safety
-    /// - Returns empty slice when no more streams are available
-    /// - Next cursor is 0 when no more pages exist
-    /// - No authorization required (public information)
-    /// - Extends TTL on the recipient's index to prevent expiration
-    pub fn get_recipient_streams_paginated(
-        env: Env,
-        recipient: Address,
-        cursor: u64,
-        limit: u32,
-    ) -> Page {
-        let streams = load_recipient_streams(&env, &recipient);
-        let total = streams.len();
-
-        // Apply limit cap
-        let effective_limit = limit.min(RECIPIENT_STREAMS_PAGE_LIMIT);
-
-        // Find starting position
-        let start_idx = if cursor == 0 {
-            0
-        } else {
-            match streams.binary_search(&cursor) {
-                Ok(pos) => pos + 1, // Start after the cursor
-                Err(pos) => pos,    // Insert position if not found
-            }
-        };
-
-        // Calculate end position
-        let end_idx = (start_idx as u32 + effective_limit).min(total as u32);
-
-        let mut next_cursor = 0u64;
-        if (end_idx as usize) < total as usize {
-            next_cursor = streams.get(end_idx).unwrap();
-        }
-
-        let mut page_streams = soroban_sdk::Vec::new(&env);
-        for i in start_idx..end_idx {
-            page_streams.push_back(streams.get(i).unwrap());
-        }
-
-        Page {
-            stream_ids: page_streams,
-            next_cursor,
-        }
-    }
-
     /// Count the total number of streams for a recipient.
-    ///
-    /// Returns the count of streams where the recipient is the stream's recipient address.
-    /// This is a convenience function that avoids fetching the full vector when only
-    /// the count is needed.
-    ///
     /// # Parameters
     /// - `recipient`: Address to query stream count for
     ///
@@ -4971,6 +3694,7 @@ impl FluxoraStream {
     /// - Combine with `get_recipient_streams` for pagination
     /// - Closed streams are not included in the count
     pub fn get_recipient_stream_count(env: Env, recipient: Address) -> u64 {
+        bump_instance_ttl(&env);
         load_recipient_streams(&env, &recipient).len() as u64
     }
 
@@ -5044,6 +3768,81 @@ impl FluxoraStream {
         result
     }
 
+    /// Paginated export of recipient streams with cursor-based pagination.
+    ///
+    /// Returns a bounded page of stream IDs for a recipient starting from a cursor position.
+    /// Designed for efficient, resumable export of large recipient portfolios without
+    /// unbounded memory usage.
+    ///
+    /// # Parameters
+    /// - `recipient`: Address to query streams for
+    /// - `cursor`: Starting position in the recipient's stream list (0-based index).
+    ///   Use 0 for first page, then `cursor + previous_result.len()` for next page.
+    /// - `limit`: Maximum number of streams to return (capped at [`MAX_PAGE_SIZE`])
+    ///
+    /// # Returns
+    /// - `Vec<u64>`: Vector of stream IDs in ascending order
+    ///   - Empty vector if `cursor >= recipient_stream_count`
+    ///   - Length never exceeds `min(limit, MAX_PAGE_SIZE)`
+    ///
+    /// # Cursor Semantics
+    /// - Cursor is a 0-based index into the sorted recipient stream list
+    /// - After each call, next cursor = `cursor + result.len()`
+    /// - When result.len() < limit, you've reached the end
+    /// - Cursor survives stream list mutations (insertions/removals shift indices naturally)
+    ///
+    /// # Pagination Strategy
+    /// ```ignore
+    /// let mut cursor = 0;
+    /// let page_size = 50;
+    /// loop {
+    ///     let page = get_recipient_streams_paginated(&env, &recipient, cursor, page_size);
+    ///     if page.is_empty() { break; }
+    ///     // Process page...
+    ///     cursor += page.len();
+    /// }
+    /// ```
+    ///
+    /// # DoS Protection
+    /// - `limit` is strictly capped at [`MAX_PAGE_SIZE`] (100)
+    /// - Cursor-based pagination prevents unbounded list traversal
+    /// - Gas cost is O(limit) regardless of recipient's total stream count
+    ///
+    /// # Consistency Guarantees
+    /// - Stream list is sorted by stream_id (ascending)
+    /// - Pagination is stable: repeated calls with same cursor return same results
+    ///   unless the underlying list is modified
+    /// - New streams added during pagination may appear or not depending on insertion position
+    pub fn get_recipient_streams_paginated(
+        env: Env,
+        recipient: Address,
+        cursor: u64,
+        limit: u64,
+    ) -> soroban_sdk::Vec<u64> {
+        // Enforce DoS protection limit
+        let page_size = limit.min(MAX_PAGE_SIZE) as u32;
+        let all_streams = load_recipient_streams(&env, &recipient);
+        let total = all_streams.len() as u64;
+
+        // Return empty if cursor is beyond end
+        if cursor >= total || page_size == 0 {
+            return soroban_sdk::Vec::new(&env);
+        }
+
+        let start_idx = cursor as u32;
+        let available = total as u32 - start_idx;
+        let take_count = page_size.min(available);
+
+        let mut result = soroban_sdk::Vec::new(&env);
+        for i in 0..take_count {
+            if let Some(stream_id) = all_streams.get(start_idx + i) {
+                result.push_back(stream_id);
+            }
+        }
+
+        result
+    }
+
     /// Internal helper to require authorization from the stream sender.
     ///
     /// Admin override paths are handled by dedicated `*_as_admin` entrypoints.
@@ -5067,7 +3866,7 @@ impl FluxoraStream {
     fn cancel_stream_internal(env: &Env, stream: &mut Stream) -> Result<(), ContractError> {
         Self::require_cancellable_status(stream.status)?;
 
-        let now = current_accrual_timestamp(env)?;
+        let now = env.ledger().timestamp();
         // Use checkpoint-aware accrual so rate-decreased streams are cancelled correctly.
         let accrued_at_cancel = accrual::calculate_accrued_amount_checkpointed(
             accrual::CheckpointState {
@@ -5076,10 +3875,8 @@ impl FluxoraStream {
                 cliff_time: stream.cliff_time,
                 end_time: stream.end_time,
                 deposit_amount: stream.deposit_amount,
-                kind: stream.kind,
             },
             stream.rate_per_second,
-            stream.deposit_amount,
             now,
         );
 
@@ -5100,7 +3897,12 @@ impl FluxoraStream {
                 .checked_sub(refund_amount)
                 .unwrap_or(0);
             write_total_liabilities(env, liabilities);
-            push_token(env, &stream.sender, refund_amount)?;
+
+            // Explicit reentrancy guard for token transfer path
+            acquire_reentrancy_lock(env)?;
+            let transfer_result = push_token(env, &stream.sender, refund_amount);
+            release_reentrancy_lock(env);
+            transfer_result?;
         }
 
         env.events().publish(
@@ -5209,153 +4011,6 @@ impl FluxoraStream {
         Self::cancel_stream_internal(&env, &mut stream)
     }
 
-    /// Permissionless keeper entrypoint to cancel a stream that has expired and been
-    /// abandoned by its sender.
-    ///
-    /// Any caller (keeper bot, liquidator, or end user) may invoke this once the stream
-    /// is at least `KEEPER_GRACE_PERIOD_SECONDS` (7 days) past its `end_time`. This
-    /// prevents unclaimed deposits from remaining locked in contract storage indefinitely.
-    ///
-    /// # Parameters
-    /// - `stream_id`: The stream to cancel.
-    /// - `keeper`: Address of the caller; receives the keeper incentive fee.
-    ///
-    /// # Authorization
-    /// - `keeper.require_auth()`: The keeper must sign the transaction to prevent fee
-    ///   redirection to an arbitrary address by a third party.
-    ///
-    /// # Returns
-    /// - `Ok(())` on success.
-    ///
-    /// # Errors
-    /// - `ContractError::StreamNotFound`: Stream does not exist.
-    /// - `ContractError::InvalidState`: Stream is already in a terminal state.
-    /// - `ContractError::KeeperGracePeriodNotElapsed`: Stream is not yet eligible
-    ///   (`now < end_time + KEEPER_GRACE_PERIOD_SECONDS`).
-    /// - `ContractError::ArithmeticOverflow`: Overflow in fee arithmetic (should not occur
-    ///   in practice for amounts within i128 range).
-    ///
-    /// # Token distribution (CEI order: persist then transfer)
-    ///
-    /// 1. `recipient_amount = accrued - withdrawn_amount` → transferred to stream recipient.
-    /// 2. `sender_refund_gross = deposit_amount - accrued` (unstreamed portion).
-    /// 3. `keeper_fee = sender_refund_gross × KEEPER_FEE_BPS / 10_000` → transferred to keeper.
-    /// 4. `sender_refund = sender_refund_gross - keeper_fee` → transferred to stream sender.
-    ///
-    /// If `sender_refund_gross == 0` (stream is fully accrued), the keeper receives no fee
-    /// and only the recipient payout occurs.
-    ///
-    /// # Events
-    /// - Publishes `("kp_cncl", stream_id)` → `KeeperCancelled { stream_id, keeper,
-    ///   keeper_fee, recipient_amount, sender_refund }`.
-    ///
-    /// # Security
-    /// - CEI pattern: stream is marked Cancelled before any token transfer.
-    /// - Keeper fee is deducted from the sender's unstreamed refund, never from the recipient.
-    /// - Reentrancy is mitigated by the terminal-state write preceding all transfers.
-    pub fn keeper_cancel(env: Env, stream_id: u64, keeper: Address) -> Result<(), ContractError> {
-        keeper.require_auth();
-
-        let mut stream = load_stream(&env, stream_id)?;
-
-        // Reject streams already in a terminal state.
-        Self::require_cancellable_status(stream.status)?;
-
-        let now = env.ledger().timestamp();
-
-        // Grace period must have elapsed past end_time.
-        let eligible_at = stream
-            .end_time
-            .checked_add(KEEPER_GRACE_PERIOD_SECONDS)
-            .ok_or(ContractError::ArithmeticOverflow)?;
-        if now < eligible_at {
-            return Err(ContractError::KeeperGracePeriodNotElapsed);
-        }
-
-        // Compute accrued amount at the moment of keeper cancellation.
-        // Since now >= end_time, this is capped at deposit_amount.
-        let accrued = accrual::calculate_accrued_amount_checkpointed(
-            accrual::CheckpointState {
-                checkpointed_amount: stream.checkpointed_amount,
-                checkpointed_at: stream.checkpointed_at,
-                cliff_time: stream.cliff_time,
-                end_time: stream.end_time,
-                deposit_amount: stream.deposit_amount,
-            },
-            stream.rate_per_second,
-            now,
-        );
-
-        // Recipient's outstanding claimable balance (accrued minus prior withdrawals).
-        let recipient_amount = accrued.saturating_sub(stream.withdrawn_amount).max(0);
-
-        // Unstreamed portion of the deposit; this is where the keeper fee is taken from.
-        let sender_refund_gross = stream
-            .deposit_amount
-            .checked_sub(accrued)
-            .ok_or(ContractError::InvalidState)?
-            .max(0);
-
-        // Keeper fee: KEEPER_FEE_BPS basis points of the gross sender refund.
-        let keeper_fee = sender_refund_gross
-            .checked_mul(KEEPER_FEE_BPS as i128)
-            .ok_or(ContractError::ArithmeticOverflow)?
-            / 10_000;
-
-        let sender_refund = sender_refund_gross
-            .checked_sub(keeper_fee)
-            .ok_or(ContractError::ArithmeticOverflow)?;
-
-        // Capture pre-mutation health for transition detection.
-        let (was_underfunded, _, _) = compute_stream_health(&stream, now);
-
-        // CEI: write terminal state before any external token transfer.
-        stream.status = StreamStatus::Cancelled;
-        stream.cancelled_at = Some(now);
-        save_stream(&env, &stream);
-
-        // Reduce liabilities by the total outstanding balance (recipient + sender portions).
-        let total_outstanding = recipient_amount
-            .checked_add(sender_refund_gross)
-            .ok_or(ContractError::ArithmeticOverflow)?;
-        if total_outstanding > 0 {
-            let liabilities = read_total_liabilities(&env)
-                .checked_sub(total_outstanding)
-                .unwrap_or(0);
-            write_total_liabilities(&env, liabilities);
-        }
-
-        // Transfer accrued portion directly to the recipient.
-        if recipient_amount > 0 {
-            push_token(&env, &stream.recipient, recipient_amount)?;
-        }
-
-        // Transfer sender refund (net of keeper fee).
-        if sender_refund > 0 {
-            push_token(&env, &stream.sender, sender_refund)?;
-        }
-
-        // Transfer keeper incentive.
-        if keeper_fee > 0 {
-            push_token(&env, &keeper, keeper_fee)?;
-        }
-
-        env.events().publish(
-            (symbol_short!("kp_cncl"), stream.stream_id),
-            KeeperCancelled {
-                stream_id: stream.stream_id,
-                keeper,
-                keeper_fee,
-                recipient_amount,
-                sender_refund,
-            },
-        );
-
-        maybe_emit_health_changed(&env, &stream, was_underfunded, now);
-
-        Ok(())
-    }
-
     /// Pause a payment stream as the contract admin.
     ///
     /// Administrative override to pause any stream, bypassing sender authorization.
@@ -5400,39 +4055,12 @@ impl FluxoraStream {
             return Err(ContractError::InvalidState);
         }
 
-        // Check pause/resume cooldown to prevent rapid-toggle DoS
-        let current_ledger = env.ledger().sequence();
-        let ledgers_since_last_toggle =
-            current_ledger.saturating_sub(stream.last_pause_toggle_ledger);
-        if ledgers_since_last_toggle < MIN_PAUSE_INTERVAL_LEDGERS {
-            return Err(ContractError::PauseCooldownActive);
-        }
-
         stream.status = StreamStatus::Paused;
-        stream.last_pause_toggle_ledger = current_ledger;
         save_stream(&env, &stream);
-
-        let reason_str = match reason {
-            PauseReason::Operational => soroban_sdk::String::from_str(&env, "Operational"),
-            PauseReason::Emergency => soroban_sdk::String::from_str(&env, "Emergency"),
-            PauseReason::Compliance => soroban_sdk::String::from_str(&env, "Compliance"),
-            PauseReason::Administrative => soroban_sdk::String::from_str(&env, "Administrative"),
-        };
-        let record = PauseRecord {
-            actor: admin,
-            timestamp: env.ledger().timestamp(),
-            reason: reason_str.clone(),
-        };
-        env.storage()
-            .instance()
-            .set(&DataKey::LastPauseRecord(PauseKind::Stream), &record);
 
         env.events().publish(
             (symbol_short!("paused"), stream_id),
-            StreamPaused {
-                stream_id,
-                reason: reason_str,
-            },
+            StreamPaused { stream_id, reason },
         );
         Ok(())
     }
@@ -5475,16 +4103,7 @@ impl FluxoraStream {
             return Err(ContractError::StreamNotPaused);
         }
 
-        // Check pause/resume cooldown to prevent rapid-toggle DoS
-        let current_ledger = env.ledger().sequence();
-        let ledgers_since_last_toggle =
-            current_ledger.saturating_sub(stream.last_pause_toggle_ledger);
-        if ledgers_since_last_toggle < MIN_PAUSE_INTERVAL_LEDGERS {
-            return Err(ContractError::PauseCooldownActive);
-        }
-
         stream.status = StreamStatus::Active;
-        stream.last_pause_toggle_ledger = current_ledger;
         save_stream(&env, &stream);
 
         env.events().publish(
@@ -5492,6 +4111,213 @@ impl FluxoraStream {
             StreamEvent::Resumed(stream_id),
         );
         Ok(())
+    }
+
+    /// Execute a recipient-signed delegated withdrawal (relayer support).
+    ///
+    /// Allows a relayer to withdraw accrued tokens on behalf of a recipient, provided the
+    /// recipient has signed an authorization message. The signature covers the stream ID,
+    /// destination address, nonce, and deadline, preventing replay and expiry attacks.
+    ///
+    /// # Signature Scheme
+    ///
+    /// The message that the recipient must sign is the SHA-256 hash of the following
+    /// concatenated bytes:
+    ///
+    /// ```text
+    /// "fluxora_delegated_withdraw" (UTF-8, no null terminator)
+    /// || contract_address_xdr  (XDR-encoded)
+    /// || destination_xdr       (XDR-encoded)
+    /// || stream_id             (8 bytes, u64 big-endian)
+    /// || nonce                 (8 bytes, u64 big-endian)
+    /// || deadline              (8 bytes, u64 big-endian)
+    /// ```
+    ///
+    /// The resulting 32-byte hash is verified against `signature` using the recipient's
+    /// Ed25519 public key via `env.crypto().ed25519_verify`.
+    ///
+    /// # Parameters
+    /// - `stream_id`: Unique identifier of the stream to withdraw from.
+    /// - `relayer`: Address submitting the transaction (pays fees; receives no tokens).
+    /// - `destination`: Address that will receive the withdrawn tokens.
+    /// - `nonce`: Must equal the recipient's current nonce (monotonically increasing).
+    /// - `deadline`: Ledger timestamp after which the signature is invalid.
+    /// - `signature`: 64-byte Ed25519 signature produced by the recipient.
+    ///
+    /// # Returns
+    /// - `i128`: Amount of tokens transferred to `destination` (0 if nothing to withdraw).
+    ///
+    /// # Authorization
+    /// - Requires authorization from `relayer` (pays the transaction fee).
+    /// - The recipient does **not** need to be the transaction submitter; their intent is
+    ///   expressed via the off-chain signature.
+    ///
+    /// # Replay Protection
+    /// - `nonce` must equal `get_withdraw_nonce(recipient)` exactly; any other value is rejected.
+    /// - On success the nonce is incremented, invalidating the used signature.
+    /// - Nonces are per-recipient and strictly monotonic (no skipping).
+    ///
+    /// # Expiry
+    /// - `deadline` must be `>= env.ledger().timestamp()` at execution time.
+    /// - Expired signatures are rejected with `SignatureDeadlineExpired`.
+    ///
+    /// # Destination Constraints
+    /// - `destination` must not equal `env.current_contract_address()`.
+    ///
+    /// # CEI Ordering
+    /// 1. Checks (deadline, nonce, signature, stream status, withdrawable amount).
+    /// 2. Effects (increment nonce, update `withdrawn_amount`, optionally set `Completed`).
+    /// 3. Interactions (token transfer, events).
+    ///
+    /// # Events
+    /// - Publishes `("dlg_wdraw", stream_id)` → `DelegatedWithdrawal { ... }` when `amount > 0`.
+    /// - Publishes `("completed", stream_id)` → `StreamEvent::StreamCompleted` if stream drains.
+    ///
+    /// # Errors
+    /// - `SignatureDeadlineExpired` — `deadline < current ledger timestamp`.
+    /// - `InvalidParams` — nonce mismatch or destination is the contract address.
+    /// - `InvalidSignature` — signature does not verify against recipient's key.
+    /// - `StreamNotFound` — stream does not exist.
+    /// - `InvalidState` — stream is `Completed` or `Paused`.
+    pub fn delegated_withdraw(
+        env: Env,
+        stream_id: u64,
+        relayer: Address,
+        destination: Address,
+        nonce: u64,
+        deadline: u64,
+        signature: BytesN<64>,
+    ) -> Result<i128, ContractError> {
+        // Relayer pays the transaction fee.
+        relayer.require_auth();
+
+        // 1. Deadline check.
+        if env.ledger().timestamp() > deadline {
+            return Err(ContractError::SignatureDeadlineExpired);
+        }
+
+        // 2. Destination guard.
+        if destination == env.current_contract_address() {
+            return Err(ContractError::InvalidParams);
+        }
+
+        // 3. Load stream and check status.
+        let mut stream = load_stream(&env, stream_id)?;
+
+        if stream.status == StreamStatus::Completed {
+            return Err(ContractError::InvalidState);
+        }
+        if stream.status == StreamStatus::Paused {
+            return Err(ContractError::InvalidState);
+        }
+
+        // 4. Nonce check (replay protection).
+        let current_nonce = read_withdraw_nonce(&env, &stream.recipient);
+        if nonce != current_nonce {
+            return Err(ContractError::InvalidParams);
+        }
+
+        // 5. Reconstruct and verify signature.
+        //
+        // Message = SHA-256(
+        //   "fluxora_delegated_withdraw"
+        //   || contract_address_xdr
+        //   || destination_xdr
+        //   || stream_id  (8 bytes, big-endian)
+        //   || nonce      (8 bytes, big-endian)
+        //   || deadline   (8 bytes, big-endian)
+        // )
+        let contract_addr_bytes = env.current_contract_address().to_xdr(&env);
+        let dest_bytes = destination.clone().to_xdr(&env);
+
+        let mut msg = Bytes::new(&env);
+        msg.extend_from_array(b"fluxora_delegated_withdraw");
+        msg.append(&contract_addr_bytes);
+        msg.append(&dest_bytes);
+        msg.extend_from_array(&stream_id.to_be_bytes());
+        msg.extend_from_array(&nonce.to_be_bytes());
+        msg.extend_from_array(&deadline.to_be_bytes());
+
+        let msg_hash: BytesN<32> = env.crypto().sha256(&msg).into();
+
+        // Derive the recipient's Ed25519 public key from their XDR-encoded address.
+        // A Stellar G-address XDR encodes as: 4-byte type + 4-byte discriminant + 32-byte key.
+        let recipient_xdr = stream.recipient.clone().to_xdr(&env);
+        let xdr_len = recipient_xdr.len();
+        if xdr_len < 32 {
+            return Err(ContractError::InvalidSignature);
+        }
+        let key_offset = xdr_len - 32;
+        let mut pk_arr = [0u8; 32];
+        for i in 0..32u32 {
+            pk_arr[i as usize] = recipient_xdr.get(key_offset + i).unwrap_or(0);
+        }
+        let public_key: BytesN<32> = BytesN::from_array(&env, &pk_arr);
+
+        // ed25519_verify panics on invalid signature — map to InvalidSignature.
+        // We use a try-pattern via the SDK's verify which panics on failure.
+        // Callers with a bad signature will get a host trap (transaction reverted).
+        env.crypto()
+            .ed25519_verify(&public_key, &msg_hash.into(), &signature);
+
+        // 6. Compute withdrawable amount.
+        let accrued = Self::calculate_accrued(env.clone(), stream_id)?;
+        let withdrawable = accrued - stream.withdrawn_amount;
+
+        if withdrawable == 0 {
+            // Nonce is NOT consumed when there is nothing to withdraw.
+            return Ok(0);
+        }
+
+        // 7. Effects: increment nonce, update stream state (CEI).
+        increment_withdraw_nonce(&env, &stream.recipient);
+
+        stream.withdrawn_amount += withdrawable;
+        let completed_now = stream.status == StreamStatus::Active
+            && stream.withdrawn_amount == stream.deposit_amount;
+        if completed_now {
+            stream.status = StreamStatus::Completed;
+        }
+        save_stream(&env, &stream);
+
+        // 8. Interactions: token transfer then events.
+        push_token(&env, &destination, withdrawable)?;
+
+        env.events().publish(
+            (symbol_short!("dlg_wdraw"), stream_id),
+            DelegatedWithdrawal {
+                stream_id,
+                recipient: stream.recipient.clone(),
+                relayer,
+                destination,
+                amount: withdrawable,
+                nonce,
+            },
+        );
+
+        if completed_now {
+            env.events().publish(
+                (symbol_short!("completed"), stream_id),
+                StreamEvent::StreamCompleted(stream_id),
+            );
+        }
+
+        Ok(withdrawable)
+    }
+
+    /// Return the current delegated-withdraw nonce for a recipient.
+    ///
+    /// The nonce must be included in the signature payload and must match exactly
+    /// when `delegated_withdraw` is called. It is incremented on every successful
+    /// delegated withdrawal that moves tokens.
+    ///
+    /// # Parameters
+    /// - `recipient`: Address to query the nonce for.
+    ///
+    /// # Returns
+    /// - `u64`: Current nonce (0 if no delegated withdrawal has ever been executed).
+    pub fn get_withdraw_nonce(env: Env, recipient: Address) -> u64 {
+        read_withdraw_nonce(&env, &recipient)
     }
 
     /// Set or clear the **global emergency pause** flag (admin only).
@@ -5509,9 +4335,13 @@ impl FluxoraStream {
         let admin = get_admin(&env).unwrap();
         admin.require_auth();
 
-        env.storage()
-            .instance()
-            .set(&DataKey::GlobalEmergencyPaused, &paused);
+        let state = if paused {
+            PauseState::GlobalEmergencyPaused
+        } else {
+            PauseState::Active
+        };
+
+        env.storage().instance().set(&DataKey::PauseState, &state);
         bump_instance_ttl(&env);
 
         env.events().publish(
@@ -5535,7 +4365,7 @@ impl FluxoraStream {
     ///   emergency pause (prevents spurious resume events and double-resume confusion).
     ///
     /// # State Changes
-    /// - Clears `DataKey::GlobalEmergencyPaused` (sets it to `false`).
+    /// - Clears `DataKey::PauseState` (sets it to `Active`).
     /// - All user-facing mutations that were blocked by the emergency pause are immediately
     ///   re-enabled: `create_stream`, `create_streams`, `withdraw`, `withdraw_to`,
     ///   `batch_withdraw`, `cancel_stream`, `update_rate_per_second`,
@@ -5562,7 +4392,7 @@ impl FluxoraStream {
 
         env.storage()
             .instance()
-            .set(&DataKey::GlobalEmergencyPaused, &false);
+            .set(&DataKey::PauseState, &PauseState::Active);
         bump_instance_ttl(&env);
 
         env.events().publish(
@@ -5590,13 +4420,17 @@ impl FluxoraStream {
     pub fn set_contract_paused(env: Env, paused: bool) -> Result<(), ContractError> {
         get_admin(&env)?.require_auth();
 
-        env.storage()
-            .instance()
-            .set(&DataKey::CreationPaused, &paused);
+        let state = if paused {
+            PauseState::CreationPaused
+        } else {
+            PauseState::Active
+        };
+
+        env.storage().instance().set(&DataKey::PauseState, &state);
         bump_instance_ttl(&env);
 
         env.events().publish(
-            (symbol_short!("ct_pause"),),
+            (soroban_sdk::Symbol::new(&env, "paused_ctl"),),
             ContractPauseChanged { paused },
         );
 
@@ -5639,17 +4473,13 @@ impl FluxoraStream {
             return Ok(());
         }
 
-        // Set the global emergency pause flag
+        // Set the global emergency pause state
         env.storage()
             .instance()
-            .set(&DataKey::GlobalEmergencyPaused, &true);
+            .set(&DataKey::PauseState, &PauseState::GlobalEmergencyPaused);
 
         // Store audit trail information
         let reason_str = reason.unwrap_or_else(|| soroban_sdk::String::from_str(&env, ""));
-        // Enforce MAX_PAUSE_REASON_BYTES to prevent unbounded ledger-entry growth.
-        if reason_str.len() > MAX_PAUSE_REASON_BYTES as u32 {
-            return Err(ContractError::PauseReasonTooLong);
-        }
         env.storage()
             .instance()
             .set(&DataKey::GlobalPauseReason, &reason_str);
@@ -5711,7 +4541,7 @@ impl FluxoraStream {
         // Clear all pause-related storage
         env.storage()
             .instance()
-            .set(&DataKey::GlobalEmergencyPaused, &false);
+            .set(&DataKey::PauseState, &PauseState::Active);
         env.storage().instance().remove(&DataKey::GlobalPauseReason);
         env.storage()
             .instance()
@@ -5751,10 +4581,12 @@ impl FluxoraStream {
     /// - `PauseInfo` struct with `is_paused`, `reason`, `paused_at`, `paused_by` fields.
     /// - All optional fields are `None` when not paused.
     pub fn get_pause_info(env: Env) -> PauseInfo {
-        let is_paused = is_protocol_paused(&env);
+        let state = get_pause_state(&env);
+        let is_paused = !matches!(state, PauseState::Active);
         if is_paused {
             PauseInfo {
                 is_paused: true,
+                state,
                 reason: get_pause_reason(&env),
                 paused_at: get_pause_timestamp(&env),
                 paused_by: get_pause_admin(&env),
@@ -5762,823 +4594,12 @@ impl FluxoraStream {
         } else {
             PauseInfo {
                 is_paused: false,
+                state: PauseState::Active,
                 reason: None,
                 paused_at: None,
                 paused_by: None,
             }
         }
-    }
-
-    /// Sweep excess tokens from the contract to a specified recipient.
-    ///
-    /// When streams are cancelled or the deposit sum exceeds cumulative accrual
-    /// (e.g., due to rate decreases via `decrease_rate_per_second`), residual USDC
-    /// can become trapped in the contract. This function allows the admin to recover
-    /// those excess tokens by calculating the difference between the contract's token
-    /// balance and the sum of all outstanding obligations (tracked liabilities).
-    ///
-    /// # Parameters
-    /// - `recipient`: Address to receive the excess tokens
-    ///
-    /// # Authorization
-    /// - Requires authorization from the contract admin
-    ///
-    /// # Returns
-    /// - `i128`: Amount of excess tokens swept (0 if no excess exists)
-    ///
-    /// # Errors
-    /// - `ContractError::InvalidState`: If contract is not initialized
-    /// - `ContractError::Unauthorized`: If caller is not the admin
-    /// - `ContractError::InvalidParams`: If recipient address is invalid
-    ///
-    /// # Events
-    /// - Publishes `ExcessSwept { to, amount }` event on success
-    ///
-    /// # Security
-    /// - Only callable by admin to prevent unauthorized fund extraction
-    /// - Uses tracked liabilities (`TotalLiabilities`) to ensure recipient funds are protected
-    /// - CEI pattern: calculates excess, updates state, then transfers tokens
-    /// - Reentrancy protected via `acquire_reentrancy_lock`
-    ///
-    /// # Calculation
-    /// ```text
-    /// excess = contract_token_balance - total_liabilities
-    /// ```
-    ///
-    /// Where `total_liabilities` is the sum of all active stream deposits that haven't
-    /// been withdrawn or refunded yet.
-    ///
-    /// # Usage Notes
-    /// - Safe to call even when no excess exists (returns 0, no transfer)
-    /// - Does not affect active streams or recipient entitlements
-    /// - Useful for recovering funds after mass cancellations or rate decreases
-    /// - Should be called periodically by operators to maintain clean accounting
-    ///
-    /// # Example Scenarios
-    /// 1. Stream cancelled at 50% completion → 50% refunded to sender, but if sender
-    ///    address is lost, those tokens become excess
-    /// 2. Rate decreased from 100/s to 50/s → excess deposit refunded, but if refund
-    ///    fails, tokens remain in contract
-    /// 3. Rounding errors accumulate over many streams → small excess builds up
-    pub fn sweep_excess(env: Env, recipient: Address) -> Result<i128, ContractError> {
-        // Only admin can sweep excess tokens
-        let admin = get_admin(&env)?;
-        admin.require_auth();
-
-        // Validate recipient address
-        recipient.require_auth();
-
-        // Get contract's token balance
-        let token_address = get_token(&env)?;
-        let token_client = token::Client::new(&env, &token_address);
-        let contract_balance = token_client.balance(&env.current_contract_address());
-
-        // Get total outstanding liabilities (sum of all active stream deposits)
-        let total_liabilities = read_total_liabilities(&env);
-
-        // Calculate excess: balance - liabilities
-        // If liabilities exceed balance, there's no excess (should not happen in normal operation)
-        let excess = contract_balance.saturating_sub(total_liabilities);
-
-        // If no excess, return early (no transfer needed)
-        if excess <= 0 {
-            return Ok(0);
-        }
-
-        // CEI pattern: Emit event before transfer
-        env.events().publish(
-            (symbol_short!("ex_swept"), recipient.clone()),
-            ExcessSwept {
-                to: recipient.clone(),
-                amount: excess,
-            },
-        );
-
-        // Acquire reentrancy lock before token transfer
-        acquire_reentrancy_lock(&env)?;
-
-        // Transfer excess tokens to recipient
-        let transfer_result = push_token(&env, &recipient, excess);
-
-        // Release reentrancy lock
-        release_reentrancy_lock(&env);
-
-        // Propagate any transfer errors
-        transfer_result?;
-
-        Ok(excess)
-    }
-
-    /// Set an auto-claim destination for a stream.
-    ///
-    /// Allows the recipient to opt in to permissionless final withdrawal at `end_time`.
-    /// Once set, anyone can call `trigger_auto_claim` to send the final withdrawal to
-    /// the specified destination address.
-    ///
-    /// # Parameters
-    /// - `stream_id`: The stream to configure
-    /// - `destination`: Address where tokens will be sent when auto-claim is triggered
-    ///
-    /// # Authorization
-    /// - Requires authorization from the stream recipient
-    ///
-    /// # Returns
-    /// - `Ok(())` on success
-    ///
-    /// # Errors
-    /// - `ContractError::StreamNotFound`: Stream does not exist
-    /// - `ContractError::Unauthorized`: Caller is not the recipient
-    /// - `ContractError::InvalidParams`: Destination is zero address or contract itself
-    ///
-    /// # Events
-    /// - Publishes `AutoClaimSet { stream_id, destination }` event
-    ///
-    /// # Security
-    /// - Only recipient can set/change destination
-    /// - Destination is validated (non-zero, not contract)
-    /// - Can be called multiple times to change destination
-    /// - Use `revoke_auto_claim` to remove the destination
-    ///
-    /// # Usage Notes
-    /// - Destination is stored in persistent storage
-    /// - Setting a new destination overwrites the previous one
-    /// - Auto-claim can only be triggered after `end_time`
-    /// - Works with both Active and Paused streams
-    pub fn set_auto_claim(
-        env: Env,
-        stream_id: u64,
-        destination: Address,
-    ) -> Result<(), ContractError> {
-        let stream = load_stream(&env, stream_id)?;
-        stream.recipient.require_auth();
-
-        // Validate destination
-        if !Self::is_valid_destination(&env, &destination) {
-            return Err(ContractError::InvalidParams);
-        }
-
-        // Store destination
-        let key = DataKey::AutoClaimDestination(stream_id);
-        env.storage().persistent().set(&key, &destination);
-        env.storage().persistent().extend_ttl(
-            &key,
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
-
-        // Emit event
-        env.events().publish(
-            (symbol_short!("ac_set"), stream_id),
-            AutoClaimSet {
-                stream_id,
-                destination: destination.clone(),
-            },
-        );
-
-        Ok(())
-    }
-
-    /// Revoke the auto-claim destination for a stream.
-    ///
-    /// Removes the auto-claim destination, preventing `trigger_auto_claim` from being called.
-    /// The recipient can set a new destination later via `set_auto_claim`.
-    ///
-    /// # Parameters
-    /// - `stream_id`: The stream to configure
-    ///
-    /// # Authorization
-    /// - Requires authorization from the stream recipient
-    ///
-    /// # Returns
-    /// - `Ok(())` on success
-    ///
-    /// # Errors
-    /// - `ContractError::StreamNotFound`: Stream does not exist
-    /// - `ContractError::Unauthorized`: Caller is not the recipient
-    ///
-    /// # Events
-    /// - Publishes `AutoClaimRevoked { stream_id }` event
-    ///
-    /// # Usage Notes
-    /// - Removes destination from storage
-    /// - Can be called even if no destination was set (idempotent)
-    /// - Useful for cleaning up storage after stream cancellation
-    pub fn revoke_auto_claim(env: Env, stream_id: u64) -> Result<(), ContractError> {
-        let stream = load_stream(&env, stream_id)?;
-        stream.recipient.require_auth();
-
-        // Remove destination
-        let key = DataKey::AutoClaimDestination(stream_id);
-        env.storage().persistent().remove(&key);
-
-        // Emit event
-        env.events().publish(
-            (symbol_short!("ac_revoke"), stream_id),
-            AutoClaimRevoked { stream_id },
-        );
-
-        Ok(())
-    }
-
-    /// Trigger an auto-claim for a stream (permissionless).
-    ///
-    /// Anyone can call this function to execute the final withdrawal for a stream
-    /// that has reached `end_time` and has an auto-claim destination set by the recipient.
-    /// Tokens are sent to the destination address chosen by the recipient.
-    ///
-    /// # Parameters
-    /// - `stream_id`: The stream to claim
-    ///
-    /// # Authorization
-    /// - None required (permissionless)
-    ///
-    /// # Returns
-    /// - `i128`: Amount of tokens transferred to the destination
-    ///
-    /// # Errors
-    /// - `ContractError::StreamNotFound`: Stream does not exist
-    /// - `ContractError::InvalidState`: Stream is Completed, Cancelled, or before end_time
-    /// - `ContractError::InvalidParams`: No auto-claim destination set, or destination is invalid
-    /// - `ContractError::ContractPaused`: Global emergency pause is active
-    ///
-    /// # Events
-    /// - Publishes `AutoClaimTriggered { stream_id, destination, amount }` event
-    /// - May also publish `Withdrawal` and `Completed` events (same as withdraw)
-    ///
-    /// # Security
-    /// - Caller cannot influence destination (set by recipient)
-    /// - Destination validity is checked before transfer
-    /// - CEI pattern: state updated before token transfer
-    /// - Reentrancy protected
-    /// - Global pause blocks execution
-    ///
-    /// # Preconditions
-    /// 1. Stream exists and is not terminal (Completed/Cancelled)
-    /// 2. Current time >= stream.end_time
-    /// 3. Auto-claim destination is set
-    /// 4. Destination is valid (non-zero, not contract)
-    /// 5. Contract is not globally paused
-    ///
-    /// # Usage Notes
-    /// - Can be called by anyone (keepers, bots, users)
-    /// - Identical accounting to `withdraw_to`
-    /// - May transition stream to Completed status
-    /// - Returns 0 if nothing to withdraw (already fully withdrawn)
-    pub fn trigger_auto_claim(env: Env, stream_id: u64) -> Result<i128, ContractError> {
-        require_not_globally_paused(&env)?;
-
-        let mut stream = load_stream(&env, stream_id)?;
-
-        // Check stream is not terminal
-        if stream.status == StreamStatus::Completed || stream.status == StreamStatus::Cancelled {
-            return Err(ContractError::InvalidState);
-        }
-
-        // Check we're at or past end_time
-        let now = current_accrual_timestamp(&env)?;
-        if now < stream.end_time {
-            return Err(ContractError::InvalidState);
-        }
-
-        // Load auto-claim destination
-        let key = DataKey::AutoClaimDestination(stream_id);
-        let destination: Address = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .ok_or(ContractError::InvalidParams)?;
-
-        // Validate destination before proceeding
-        if !Self::is_valid_destination(&env, &destination) {
-            return Err(ContractError::InvalidParams);
-        }
-
-        // Bump TTL on destination
-        env.storage().persistent().extend_ttl(
-            &key,
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
-
-        // Calculate withdrawable amount (same logic as withdraw)
-        let accrued = accrual::calculate_accrued_amount_checkpointed(
-            accrual::CheckpointState {
-                checkpointed_amount: stream.checkpointed_amount,
-                checkpointed_at: stream.checkpointed_at,
-                cliff_time: stream.cliff_time,
-                end_time: stream.end_time,
-                deposit_amount: stream.deposit_amount,
-                kind: stream.kind,
-            },
-            stream.rate_per_second,
-            now,
-        );
-
-        let withdrawable = accrued.saturating_sub(stream.withdrawn_amount).max(0);
-
-        // Early return if nothing to withdraw
-        if withdrawable == 0 {
-            return Ok(0);
-        }
-
-        // Update stream state (CEI pattern)
-        stream.withdrawn_amount = stream
-            .withdrawn_amount
-            .checked_add(withdrawable)
-            .unwrap_or(i128::MAX);
-
-        // Check if stream is now completed
-        if stream.withdrawn_amount >= stream.deposit_amount {
-            stream.status = StreamStatus::Completed;
-        }
-
-        save_stream(&env, &stream);
-
-        // Emit auto-claim triggered event
-        env.events().publish(
-            (symbol_short!("ac_trig"), stream_id),
-            AutoClaimTriggered {
-                stream_id,
-                destination: destination.clone(),
-                amount: withdrawable,
-            },
-        );
-
-        // Emit withdrawal event (for consistency with withdraw_to)
-        env.events().publish(
-            (symbol_short!("withdrew"), stream_id),
-            WithdrawalTo {
-                stream_id,
-                recipient: stream.recipient.clone(),
-                destination: destination.clone(),
-                amount: withdrawable,
-            },
-        );
-
-        // Emit completed event if applicable
-        if stream.status == StreamStatus::Completed {
-            env.events().publish(
-                (symbol_short!("completed"), stream_id),
-                StreamEvent::StreamCompleted(stream_id),
-            );
-        }
-
-        // Acquire reentrancy lock
-        acquire_reentrancy_lock(&env)?;
-
-        // Transfer tokens to destination
-        let transfer_result = push_token(&env, &destination, withdrawable);
-
-        // Release reentrancy lock
-        release_reentrancy_lock(&env);
-
-        // Propagate any transfer errors
-        transfer_result?;
-
-        Ok(withdrawable)
-    }
-
-    /// Get the auto-claim status for a stream.
-    ///
-    /// Returns information about the auto-claim configuration, including whether
-    /// a destination is set, whether it's valid, and how much is currently claimable.
-    /// This allows callers to validate before executing `trigger_auto_claim`, reducing
-    /// failed transactions and wasted gas on invalid destinations.
-    ///
-    /// # Parameters
-    /// - `stream_id`: The stream to query
-    ///
-    /// # Authorization
-    /// - None required (view function)
-    ///
-    /// # Returns
-    /// - `AutoClaimStatus`: Status of auto-claim configuration
-    ///   - `NotSet`: No destination configured
-    ///   - `ValidDestination { destination, claimable }`: Valid destination with claimable amount
-    ///   - `InvalidDestination { destination }`: Destination is zero address or contract itself
-    ///
-    /// # Errors
-    /// - `ContractError::StreamNotFound`: Stream does not exist
-    ///
-    /// # Usage Notes
-    /// - Read-only query (no state changes)
-    /// - Claimable amount is calculated at current timestamp
-    /// - Destination validity checks: non-zero address, not contract address
-    /// - Use this before calling `trigger_auto_claim` to avoid failed transactions
-    ///
-    /// # Example
-    /// ```rust
-    /// let status = client.get_auto_claim_status(&stream_id);
-    /// match status {
-    ///     AutoClaimStatus::ValidDestination { destination, claimable } => {
-    ///         if claimable > 0 {
-    ///             client.trigger_auto_claim(&stream_id);
-    ///         }
-    ///     }
-    ///     AutoClaimStatus::NotSet => {
-    ///         // No auto-claim configured
-    ///     }
-    ///     AutoClaimStatus::InvalidDestination { destination } => {
-    ///         // Destination is invalid, cannot trigger
-    ///     }
-    /// }
-    /// ```
-    pub fn get_auto_claim_status(
-        env: Env,
-        stream_id: u64,
-    ) -> Result<AutoClaimStatus, ContractError> {
-        let stream = load_stream(&env, stream_id)?;
-
-        // Check if auto-claim destination is set
-        let key = DataKey::AutoClaimDestination(stream_id);
-        let destination_opt: Option<Address> = env.storage().persistent().get(&key);
-
-        match destination_opt {
-            None => Ok(AutoClaimStatus::NotSet),
-            Some(destination) => {
-                // Check if destination is valid
-                if !Self::is_valid_destination(&env, &destination) {
-                    return Ok(AutoClaimStatus::InvalidDestination(
-                        AutoClaimInvalidPayload { destination },
-                    ));
-                }
-
-                // Calculate claimable amount
-                let now = current_accrual_timestamp(&env)?;
-                let accrued = accrual::calculate_accrued_amount_checkpointed(
-                    accrual::CheckpointState {
-                        checkpointed_amount: stream.checkpointed_amount,
-                        checkpointed_at: stream.checkpointed_at,
-                        cliff_time: stream.cliff_time,
-                        end_time: stream.end_time,
-                        deposit_amount: stream.deposit_amount,
-                        kind: stream.kind,
-                    },
-                    stream.rate_per_second,
-                    now,
-                );
-
-                let claimable = accrued.saturating_sub(stream.withdrawn_amount).max(0);
-
-                Ok(AutoClaimStatus::ValidDestination(AutoClaimValidPayload {
-                    destination,
-                    claimable,
-                }))
-            }
-        }
-    }
-
-    /// Get the auto-claim destination for a stream (if set).
-    ///
-    /// Returns the destination address configured by the recipient, or None if not set.
-    ///
-    /// # Parameters
-    /// - `stream_id`: The stream to query
-    ///
-    /// # Authorization
-    /// - None required (view function)
-    ///
-    /// # Returns
-    /// - `Option<Address>`: The destination address, or None if not set
-    ///
-    /// # Errors
-    /// - `ContractError::StreamNotFound`: Stream does not exist
-    ///
-    /// # Usage Notes
-    /// - Read-only query (no state changes)
-    /// - Does not validate destination (use `get_auto_claim_status` for validation)
-    /// - Returns None if no destination is configured
-    pub fn get_auto_claim_destination(
-        env: Env,
-        stream_id: u64,
-    ) -> Result<Option<Address>, ContractError> {
-        let _stream = load_stream(&env, stream_id)?;
-        let key = DataKey::AutoClaimDestination(stream_id);
-        Ok(env.storage().persistent().get(&key))
-    }
-
-    /// Clone an existing stream into a new stream with a different recipient and timing.
-    ///
-    /// Copies `rate_per_second`, the cliff offset (relative to `start_time`), the
-    /// `StreamKind` (via `withdraw_dust_threshold` and `memo`), and the source stream's
-    /// `sender` identity from the source stream, while accepting a fresh `new_recipient`,
-    /// `start_time`, `end_time`, and `deposit` for the new stream.
-    ///
-    /// This is the primary entry-point for recurring payment obligations (e.g. monthly
-    /// salary streams): operators no longer need to reconstruct the full parameter set
-    /// for each new period — they clone the previous stream and supply only what changes.
-    ///
-    /// # Parameters
-    /// - `stream_id`: Source stream to clone from.
-    /// - `new_recipient`: Recipient of the new stream (may equal the source recipient).
-    /// - `start_time`: Absolute start timestamp for the new stream.
-    /// - `end_time`: Absolute end timestamp for the new stream.
-    /// - `deposit`: Deposit amount for the new stream.
-    ///   Must satisfy `deposit >= rate_per_second × (end_time − start_time)`.
-    /// - `force`: When `true`, allows cloning a source stream whose `withdraw_dust_threshold`
-    ///   is set to the sentinel value `i128::MAX` (used internally to mark `CliffOnly`-style
-    ///   streams). When `false` (the default), such streams are rejected with `InvalidParams`
-    ///   to prevent accidental cloning of degenerate configurations.
-    ///
-    /// # Authorization
-    /// - Requires authorization from the **source stream's sender**.
-    ///   The admin can clone streams they created (admin == sender).
-    ///   Third parties and the source stream's recipient cannot clone.
-    ///
-    /// # Inherited fields (copied from source stream)
-    /// | Field | Behaviour |
-    /// |---|---|
-    /// | `rate_per_second` | Copied verbatim |
-    /// | cliff offset | `cliff_time = start_time + (source.cliff_time − source.start_time)` |
-    /// | `withdraw_dust_threshold` | Copied verbatim |
-    /// | `memo` | Copied verbatim |
-    ///
-    /// # Source stream state requirements
-    /// The source stream must be in one of the following states:
-    /// - `Completed` — natural end of a previous period.
-    /// - `Cancelled` — early termination of a previous period.
-    /// - `Active` or `Paused` — allowed when the caller is the original sender or admin
-    ///   (enables pre-scheduling the next period before the current one ends).
-    ///
-    /// # Returns
-    /// - `u64`: The new stream's ID.
-    ///
-    /// # Errors
-    /// - `StreamNotFound` (1): `stream_id` does not exist.
-    /// - `InvalidParams` (3): `force == false` and the source stream has a `CliffOnly`
-    ///   sentinel threshold (`i128::MAX`), or any parameter fails `validate_stream_params`.
-    /// - `ContractPaused` (4): Creation is globally paused.
-    /// - `StartTimeInPast` (5): `start_time < ledger.timestamp()`.
-    /// - `InsufficientDeposit` (10): `deposit < rate_per_second × (end_time − start_time)`.
-    /// - `ArithmeticOverflow` (6): Cliff offset calculation overflows `u64`.
-    ///
-    /// # Events
-    /// - Emits `("created", new_stream_id) → StreamCreated { ... }` (standard creation event).
-    /// - Emits `("cloned", new_stream_id) → StreamCloned { new_stream_id, source_stream_id, ... }`
-    ///   for indexers that need to correlate the clone relationship.
-    ///
-    /// # Security notes
-    /// - The caller must hold the source sender's auth key; a recipient or third party
-    ///   cannot clone a stream they do not own.
-    /// - Cloning an `Active` stream is intentionally allowed so operators can pre-schedule
-    ///   the next period. The source stream continues running independently.
-    /// - The `force` flag is a deliberate opt-in for unusual configurations; the default
-    ///   (`false`) is the safe path.
-    /// - CEI ordering is preserved: state is persisted before the token pull.
-    ///
-    /// # Example — recurring monthly salary
-    /// ```ignore
-    /// // Month 1 stream just completed (stream_id = 42).
-    /// // Clone it for month 2 with the same recipient and rate.
-    /// let month2_id = contract.clone_stream(
-    ///     &42,                    // source stream
-    ///     &employee_address,      // same recipient
-    ///     &month2_start,          // new start_time
-    ///     &month2_end,            // new end_time
-    ///     &monthly_salary,        // deposit
-    ///     &false,                 // force (not a CliffOnly stream)
-    /// )?;
-    /// ```
-    pub fn clone_stream(
-        env: Env,
-        stream_id: u64,
-        new_recipient: Address,
-        start_time: u64,
-        end_time: u64,
-        deposit: i128,
-        force: bool,
-    ) -> Result<u64, ContractError> {
-        // ── 1. Pause guard ────────────────────────────────────────────────────
-        require_not_creation_paused(&env)?;
-
-        // ── 2. Load source stream ─────────────────────────────────────────────
-        let source = load_stream(&env, stream_id)?;
-
-        // ── 3. Authorization: source sender ──────────────────────────────────
-        // Only the source stream's original sender may clone it.
-        // The contract admin can clone streams they created (admin == sender).
-        // For streams created by others, the admin must coordinate with the sender
-        // out-of-band; there is no admin-override path for clone_stream to prevent
-        // privilege escalation (an admin should not be able to spend a sender's tokens).
-        source.sender.require_auth();
-
-        // ── 4. CliffOnly guard ────────────────────────────────────────────────
-        // Streams with withdraw_dust_threshold == i128::MAX are treated as
-        // "CliffOnly" sentinel streams. Cloning them without explicit opt-in
-        // would silently propagate a degenerate configuration.
-        if source.withdraw_dust_threshold == i128::MAX && !force {
-            return Err(ContractError::InvalidParams);
-        }
-
-        // ── 5. Compute inherited cliff offset ─────────────────────────────────
-        // Preserve the relative cliff position: cliff_offset = source.cliff_time - source.start_time.
-        // Apply it to the new start_time.
-        let cliff_offset = source
-            .cliff_time
-            .checked_sub(source.start_time)
-            .unwrap_or(0); // if cliff < start (degenerate), treat as no cliff
-        let new_cliff_time = start_time
-            .checked_add(cliff_offset)
-            .ok_or(ContractError::ArithmeticOverflow)?;
-
-        // ── 6. Validate new stream parameters ────────────────────────────────
-        let current_time = env.ledger().timestamp();
-        Self::validate_stream_params(
-            &env,
-            &source.sender,
-            &new_recipient,
-            deposit,
-            source.rate_per_second,
-            current_time,
-            start_time,
-            new_cliff_time,
-            end_time,
-        )?;
-
-        // ── 7. Pull deposit tokens from sender ────────────────────────────────
-        pull_token(&env, &source.sender, deposit)?;
-
-        // ── 8. Persist the new stream ─────────────────────────────────────────
-        let new_stream_id = Self::persist_new_stream(
-            &env,
-            source.sender.clone(),
-            new_recipient.clone(),
-            deposit,
-            source.rate_per_second,
-            start_time,
-            new_cliff_time,
-            end_time,
-            source.withdraw_dust_threshold,
-            source.memo.clone(),
-        )?;
-
-        // ── 9. Emit clone-specific event for indexer correlation ──────────────
-        env.events().publish(
-            (symbol_short!("cloned"), new_stream_id),
-            StreamCloned {
-                new_stream_id,
-                source_stream_id: stream_id,
-                sender: source.sender.clone(),
-                recipient: new_recipient,
-                deposit_amount: deposit,
-                rate_per_second: source.rate_per_second,
-                start_time,
-                cliff_time: new_cliff_time,
-                end_time,
-            },
-        );
-
-        Ok(new_stream_id)
-    }
-
-    /// Internal helper to validate an auto-claim destination address.
-    ///
-    /// A valid destination must be:
-    /// 1. Not a zero address
-    /// 2. Not the contract itself (would create a circular transfer)
-    ///
-    /// # Parameters
-    /// - `env`: Contract environment
-    /// - `destination`: Address to validate
-    ///
-    /// # Returns
-    /// - `true` if destination is valid
-    /// - `false` if destination is invalid
-    fn is_valid_destination(env: &Env, destination: &Address) -> bool {
-        if destination == &env.current_contract_address() {
-            return false;
-        }
-        true
-    }
-
-    /// Reserve a contiguous range of stream IDs for off-chain pre-computation.
-    ///
-    /// Atomically advances the global ID counter by `count` and stores the reservation
-    /// keyed by `caller`. Off-chain orchestrators use the returned IDs to pre-populate
-    /// database records before the corresponding `create_stream` transactions land on-chain.
-    ///
-    /// Subsequent `create_stream` calls from `caller` consume IDs from the reservation
-    /// in order. A second call before the first reservation is exhausted **replaces** it
-    /// (unconsumed IDs become permanent gaps; the counter is never rewound).
-    ///
-    /// # Parameters
-    /// - `caller`: Address making the reservation (must authorize)
-    /// - `count`: Number of IDs to reserve (1 – `MAX_ID_RESERVATION`)
-    ///
-    /// # Returns
-    /// - `Vec<u64>`: Reserved IDs in ascending order
-    ///
-    /// # Errors
-    /// - `ReservationCountZero` (17): `count` is 0
-    /// - `ReservationLimitExceeded` (18): `count > MAX_ID_RESERVATION`
-    ///
-    /// # Security
-    /// - `count` is capped at `MAX_ID_RESERVATION = 100` to prevent counter-inflation attacks.
-    /// - Authorization required to prevent third parties from consuming counter space.
-    pub fn reserve_stream_ids(
-        env: Env,
-        caller: Address,
-        count: u32,
-        expiry: Option<u64>
-    ) -> Result<soroban_sdk::Vec<u64>, ContractError> {
-        caller.require_auth();
-
-        if count == 0 {
-            return Err(ContractError::ReservationCountZero);
-        }
-        if count > MAX_ID_RESERVATION {
-            return Err(ContractError::ReservationLimitExceeded);
-        }
-
-        let start_id = read_stream_count(&env);
-        set_stream_count(&env, start_id + count as u64);
-
-        let res = IdReservation {
-            start_id,
-            count,
-            consumed: 0,
-            expiry
-        };
-        save_id_reservation(&env, &caller, &res);
-
-        let mut ids = soroban_sdk::Vec::new(&env);
-        for i in 0..count {
-            ids.push_back(start_id + i as u64);
-        }
-        Ok(ids)
-    }
-
-    /// Release a reserved  stream IDs for off-chain pre-computation.
-    ///
-    ///
-    /// # Parameters
-    /// - `caller`: Address making the reservation (must authorize)
-    ///
-    /// # Security
-    /// - Authorization required .
-    pub fn release_id_reservation(
-        env: Env,
-        caller: Address,
-    ) -> Result<(), ContractError> {
-        caller.require_auth();
-
-        remove_id_reservation(&env, &caller);
-        Ok(())
-    }
-
-    fn release_reservation(env: &Env, holder: &Address, res: &IdReservation) {
-        let unconsumed_start = res.start_id + res.consumed as u64;
-        let reservation_end = res.start_id + res.count as u64;
-        let current_count = read_stream_count(env);
-
-        let mut reclaimed = 0u32;
-
-        if reservation_end == current_count && unconsumed_start < reservation_end {
-            set_stream_count(env, unconsumed_start);
-            reclaimed = (reservation_end - unconsumed_start) as u32;
-        }
-
-        remove_id_reservation(env, holder);
-
-        env.events().publish(
-            (symbol_short!("res_rel"), holder.clone()),
-            (res.start_id, res.count, res.consumed, reclaimed),
-        );
-    }
-    /// Release/ Reclaim expired reservation stream IDs for off-chain pre-computation.
-    ///
-    ///
-    /// # Parameters
-    /// - `holder`: Address that made the reservation
-    ///
-    /// # Errors
-    /// - `ReservationNotExpirable` (25): `expiry` is None.
-    /// - `ReservationStillActive` (26): `current time > expiry`
-    pub fn reclaim_expired_id_reservation(env: Env, holder: Address) -> Result<(), ContractError> {
-        let res = load_id_reservation(&env, &holder)
-            .ok_or(ContractError::ReservationNotFound)?;
-
-        let expiry = res.expiry.ok_or(ContractError::ReservationNotExpirable)?;
-        if env.ledger().timestamp() < expiry {
-            return Err(ContractError::ReservationStillActive);
-        }
-
-        Self::release_reservation(&env, &holder, &res);
-        Ok(())
-    }
-
-    /// View the active ID reservation for a caller, if any.
-    ///
-    /// # Parameters
-    /// - `caller`: Address to query
-    ///
-    /// # Returns
-    /// - `Option<IdReservation>`: Active reservation, or `None`
-    ///
-    /// # Authorization
-    /// - None required (view function)
-    pub fn get_id_reservation(env: Env, caller: Address) -> Option<IdReservation> {
-        load_id_reservation(&env, &caller)
     }
 }
 
@@ -6588,182 +4609,3 @@ mod test;
 mod test_issue_39;
 #[cfg(test)]
 mod test_withdrawable_props;
-
-/// Atomically cancel multiple streams owned by the caller and refund the aggregate
-/// unstreamed balance in a single token transfer.
-///
-/// This is the batch counterpart to `cancel_stream`. It provides gas-efficient
-/// off-boarding for senders managing large portfolios (up to `MAX_PAGE_SIZE` streams).
-///
-/// # Two-phase execution
-/// 1. **Validation phase**: Every `stream_id` is loaded and verified:
-///    - Stream must exist (`StreamNotFound` otherwise).
-///    - Caller must be the stream sender (`Unauthorized` otherwise).
-///    - Stream must be in `Active` or `Paused` state (`InvalidState` otherwise).
-///    - Duplicate `stream_id`s are rejected (`DuplicateStreamId`).
-/// 2. **Execution phase**: Only after all validations pass:
-///    - Per-stream accrued amount is computed.
-///    - Recipient is paid their accrued entitlement (individual transfers).
-///    - Stream is marked `Cancelled` with `cancelled_at` timestamp.
-///    - `StreamCancelled` event is emitted per stream.
-///    - Aggregate refund is computed and sent to the sender in **one** token transfer.
-///
-/// # Parameters
-/// - `stream_ids`: Vector of stream IDs to cancel. Must be unique. Max length is
-///   bounded by the caller's transaction resources; the contract enforces no hard
-///   limit beyond Soroban's own VM limits, but `MAX_PAGE_SIZE = 100` is the
-///   recommended batch size for gas predictability.
-///
-/// # Authorization
-/// - Requires authorization from the caller (who must be the sender of every stream).
-///
-/// # Returns
-/// - `Ok(())` on success.
-///
-/// # Errors
-/// - `ContractError::DuplicateStreamId` (14): Duplicate IDs in `stream_ids`.
-/// - `ContractError::StreamNotFound` (1): A stream ID does not exist.
-/// - `ContractError::Unauthorized` (7): Caller is not the sender of a stream.
-/// - `ContractError::InvalidState` (2): A stream is not `Active` or `Paused`.
-/// - `ContractError::ContractPaused` (4): Global emergency pause is active.
-///
-/// # Gas efficiency
-/// - One auth check for the entire batch.
-/// - One token transfer for the aggregate refund (vs. N transfers for N individual
-///   `cancel_stream` calls).
-/// - Per-stream recipient transfers are still individual (required for correct
-///   accounting and event emission), but the sender refund is batched.
-///
-/// # Events
-/// - One `StreamCancelled` event per successfully cancelled stream.
-/// - One `cancelled` topic event per stream (same shape as `cancel_stream`).
-///
-/// # Security
-/// - Atomic: any failure in validation or execution reverts the entire batch.
-/// - CEI pattern: state is persisted before every external token transfer.
-/// - Liabilities are reduced per-stream before the aggregate refund.
-pub fn bulk_cancel_streams(
-    env: Env,
-    sender: Address,
-    stream_ids: soroban_sdk::Vec<u64>,
-) -> Result<(), ContractError> {
-    require_not_globally_paused(&env)?;
-    sender.require_auth();
-
-    let n = stream_ids.len();
-    if n == 0 {
-        return Ok(());
-    }
-
-    // ── Phase 1: Validate all stream IDs and ownership ────────────────────
-    let mut streams = soroban_sdk::Vec::<Stream>::new(&env);
-
-    for i in 0..n {
-        let id = stream_ids.get(i).unwrap();
-
-        // Duplicate detection
-        let mut j = i + 1;
-        while j < n {
-            if stream_ids.get(j).unwrap() == id {
-                return Err(ContractError::DuplicateStreamId);
-            }
-            j += 1;
-        }
-
-        let stream = load_stream(&env, id)?;
-
-        if stream.sender != sender {
-            return Err(ContractError::Unauthorized);
-        }
-
-        Self::require_cancellable_status(stream.status)?;
-
-        streams.push_back(stream);
-    }
-
-    // ── Phase 2: Execute cancellations ────────────────────────────────────
-    let now = env.ledger().timestamp();
-    let mut aggregate_refund: i128 = 0;
-
-    for i in 0..n {
-        let mut stream = streams.get(i).unwrap();
-        let stream_id = stream.stream_id;
-
-        let accrued_at_cancel = accrual::calculate_accrued_amount_checkpointed(
-            accrual::CheckpointState {
-                checkpointed_amount: stream.checkpointed_amount,
-                checkpointed_at: stream.checkpointed_at,
-                cliff_time: stream.cliff_time,
-                end_time: stream.end_time,
-                deposit_amount: stream.deposit_amount,
-            },
-            stream.rate_per_second,
-            now,
-        );
-
-        let refund_amount = stream
-            .deposit_amount
-            .checked_sub(accrued_at_cancel)
-            .ok_or(ContractError::InvalidState)?;
-
-        let (was_underfunded, _, _) = compute_stream_health(&stream, now);
-
-        // ── Pay recipient their accrued entitlement first ─────────────────
-        let recipient_accrual = accrued_at_cancel
-            .saturating_sub(stream.withdrawn_amount)
-            .max(0);
-        if recipient_accrual > 0 {
-            stream.withdrawn_amount = stream
-                .withdrawn_amount
-                .checked_add(recipient_accrual)
-                .unwrap_or(i128::MAX);
-
-            let liabilities = read_total_liabilities(&env)
-                .checked_sub(recipient_accrual)
-                .unwrap_or(0);
-            write_total_liabilities(&env, liabilities);
-
-            push_token(&env, &stream.recipient, recipient_accrual)?;
-
-            env.events().publish(
-                (symbol_short!("withdrew"), stream_id),
-                Withdrawal {
-                    stream_id,
-                    recipient: stream.recipient.clone(),
-                    amount: recipient_accrual,
-                },
-            );
-        }
-
-        // ── Mark stream as cancelled ──────────────────────────────────────
-        stream.status = StreamStatus::Cancelled;
-        stream.cancelled_at = Some(now);
-        save_stream(&env, &stream);
-
-        // ── Accumulate sender refund ──────────────────────────────────────
-        if refund_amount > 0 {
-            aggregate_refund = aggregate_refund
-                .checked_add(refund_amount)
-                .ok_or(ContractError::ArithmeticOverflow)?;
-
-            let liabilities = read_total_liabilities(&env)
-                .checked_sub(refund_amount)
-                .unwrap_or(0);
-            write_total_liabilities(&env, liabilities);
-        }
-
-        env.events().publish(
-            (symbol_short!("cancelled"), stream_id),
-            StreamEvent::StreamCancelled(stream_id),
-        );
-
-        maybe_emit_health_changed(&env, &stream, was_underfunded, now);
-    }
-
-    // ── Single aggregate refund to sender ─────────────────────────────────
-    if aggregate_refund > 0 {
-        push_token(&env, &sender, aggregate_refund)?;
-    }
-
-    Ok(())
-}

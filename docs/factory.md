@@ -128,6 +128,38 @@ If the client omits either scope, the transaction fails at the corresponding
 `require_auth` call. If the sub-invocation arguments differ from the signed
 arguments, the nested authorization is not valid for that call.
 
+## Tests and Verification
+
+### Unit and Policy Tests
+The core policy validation is heavily covered by unit tests in `contracts/stream/tests/factory_policy.rs`. These tests cover basic validation paths and standard edge cases, verifying that:
+- Non-allowlisted recipients are correctly rejected.
+- Deposits exceeding the configured cap are blocked, while deposits exactly at the cap are accepted.
+- Durations below the minimum required duration are rejected, while durations exactly at the minimum are accepted.
+- Start and end time limits (such as `start_time >= end_time`) are strictly validated.
+- Proper administration privileges are required for setter methods.
+
+### Randomized Property-Based Fuzz Harness
+To uncover edge cases and guard against boundary checks or logical bypasses, a comprehensive property fuzzing harness is implemented in `contracts/stream/tests/factory_fuzz.rs` using `proptest`.
+
+This harness systematically generates and evaluates randomized variations of:
+- `max_deposit` (cap) and fuzzed `deposit_offset` (testing values below, exactly at, and above the cap).
+- `min_duration` and fuzzed `duration_offset` (testing values below, exactly at, and above the minimum duration).
+- Randomized recipient allowlist states.
+- Randomized `start_time` and time-bounds.
+
+#### Properties Asserted (iff Semantic Verification)
+Exactly the following logical invariants are verified to hold for every execution of the fuzz harness:
+1. **RecipientNotAllowlisted iff !is_allowlisted**: A request must fail with `RecipientNotAllowlisted` if and only if the recipient is not currently allowlisted, regardless of other parameters.
+2. **DepositExceedsCap iff deposit > cap**: If the recipient is allowlisted, the stream creation fails with `DepositExceedsCap` if and only if the deposit amount exceeds the configured policy cap.
+3. **InvalidTimeRange iff start >= end**: If the recipient is allowlisted and the deposit is within the cap, the stream creation fails with `InvalidTimeRange` if and only if the start time is greater than or equal to the end time.
+4. **DurationTooShort iff duration < min_duration**: If the recipient is allowlisted, the deposit is within the cap, and the time range is valid, the stream creation fails with `DurationTooShort` if and only if the duration is strictly less than the minimum duration.
+5. **No false-rejections**: Any valid in-policy input combination must succeed without error, guaranteeing that no correct transaction is wrongly blocked.
+
+To execute the fuzzing harness, run:
+```bash
+cargo test --test factory_fuzz
+```
+
 ## Admin Controls
 
 The factory has an `Admin` key managed via `set_admin`. The admin can:
