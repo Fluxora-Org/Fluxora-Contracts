@@ -172,6 +172,15 @@ Cancels a proposal, marking it as terminal. Emits `ProposalCancelled`.
 - `quorum() -> u32`: returns the configured approval threshold.
 - `timelock_seconds() -> u64`: returns `GOVERNANCE_TIMELOCK_SECONDS`.
 - `max_proposal_age_seconds() -> u64`: returns `MAX_PROPOSAL_AGE_SECONDS`.
+- `get_quorum_info(proposal_id) -> Option<QuorumInfo>`: returns the stored
+  `QuorumInfo { reached_at, threshold }` snapshot if quorum was reached, or
+  `None` if quorum has not yet been reached.  No authorization required.
+- `is_executable(proposal_id) -> bool`: returns `true` iff the proposal
+  exists, is not cancelled/executed/expired, quorum is reached, and
+  `now >= reached_at + GOVERNANCE_TIMELOCK_SECONDS`.  Mirrors the exact
+  gating order used by `execute`.  Returns an error (`ProposalNotFound` or
+  `ArithmeticOverflow`) only when `execute` would also error.  No
+  authorization required.
 
 ## Calldata encoding contract
 
@@ -250,11 +259,12 @@ throughout the timelock window, the contract bumps TTL on every read and
 write that touches the entry:
 
 - **`Proposal(id)`**: bumped via `bump_proposal` in `load_proposal` (read path,
-  called by `get_proposal`, `approve`, `execute`, `cancel_proposal`) and in
-  `save_proposal` (write path, called by `propose`, `approve`,
-  `cancel_proposal`, `execute`).
-- **`QuorumReachedAt(id)`**: bumped once when quorum is first reached inside
-  `approve`, immediately after the `QuorumInfo` write.
+  called by `get_proposal`, `is_executable`, `approve`, `execute`,
+  `cancel_proposal`) and in `save_proposal` (write path, called by `propose`,
+  `approve`, `cancel_proposal`, `execute`).
+- **`QuorumReachedAt(id)`**: bumped when quorum is first reached inside
+  `approve` (write path), and also bumped on read by `get_quorum_info`
+  and `is_executable` (read path).
 
 Constants:
 
