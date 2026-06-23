@@ -538,6 +538,8 @@ contract.create_streams_relative(&sender, &params)?;
 | `revoke_auto_claim`       | Recipient                     | `recipient.require_auth()`                  |
 | `trigger_auto_claim`      | Anyone                        | None (permissionless; destination fixed by recipient) |
 | `get_auto_claim_destination` | Anyone                     | None (view)                                 |
+| `release_id_reservation`  | Reservation holder            | `holder.require_auth()`                     |
+| `reclaim_expired_id_reservation` | Anyone                 | None (permissionless; reclaims expired reservations) |
 
 **Note:** Sender-managed functions (`pause_stream`, `resume_stream`, `cancel_stream`) require sender auth. Admin uses separate `_as_admin` entry points.
 
@@ -853,6 +855,47 @@ If a stream is cancelled after opt-in, `trigger_auto_claim` returns `InvalidStat
 2. The caller of `trigger_auto_claim` has zero influence over where tokens go.
 3. CEI ordering is preserved: stream state is saved before the token transfer.
 4. Global emergency pause blocks `trigger_auto_claim` (same as `withdraw`).
+
+---
+
+### Stream ID Reservation Management
+
+The contract provides stream ID reservation functionality for advanced integrators who need predictable stream IDs before actually creating streams.
+
+#### `release_id_reservation(holder)`
+
+Voluntarily releases a stream ID reservation that was previously acquired by the caller.
+
+- **Auth**: `holder.require_auth()` — only the reservation holder can release their reservation.
+- **Preconditions**: A reservation must exist for the `holder` address.
+- **Effect**: The reservation is removed from storage, freeing the reserved ID range for future use.
+- **Event**: `("res_rel", holder)` → `(start_id: u64, count: u64, consumed: u64, reclaimed: u64)` — where `reclaimed` indicates how many IDs were returned to the pool.
+- **Errors**:
+  - `ReservationNotFound` (20): No reservation exists for the specified holder.
+
+#### `reclaim_expired_id_reservation(holder)`
+
+Reclaims an expired stream ID reservation, allowing the protocol to reuse abandoned reservation slots.
+
+- **Auth**: **none** — permissionless. Any account may call this to clean up expired reservations.
+- **Preconditions**:
+  1. A reservation must exist for the `holder` address.
+  2. The reservation must have an expiry timestamp (not `None`).
+  3. Current ledger timestamp must be greater than the reservation expiry.
+- **Effect**: The expired reservation is removed from storage, freeing the reserved ID range.
+- **Event**: `("res_rel", holder)` → `(start_id: u64, count: u64, consumed: u64, reclaimed: u64)`.
+- **Errors**:
+  - `ReservationNotFound` (20): No reservation exists for the specified holder.
+  - `ReservationNotExpirable` (22): The reservation has no expiry timestamp and cannot be reclaimed.
+  - `ReservationStillActive` (21): Current time has not exceeded the reservation expiry.
+
+**Use Case**: Treasury operators or batch creation systems can reserve stream ID ranges in advance, use them for stream creation, and then either release unused portions voluntarily or let them expire for permissionless cleanup.
+
+**Security Properties**:
+1. Only the holder can voluntarily release their own reservation.
+2. Anyone can reclaim expired reservations to prevent storage bloat.
+3. Reservations without expiry cannot be reclaimed (permanent until voluntarily released).
+4. Events are emitted for auditability and indexer tracking.
 
 ---
 

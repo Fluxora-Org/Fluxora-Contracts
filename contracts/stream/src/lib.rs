@@ -598,17 +598,6 @@ pub struct StreamHealthChanged {
     pub seconds_remaining: u64,
 }
 
-/// Structured health summary returned by `get_stream_health`.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StreamHealth {
-    pub is_underfunded: bool,
-    pub is_expired: bool,
-    pub accrued_to_date: u128,
-    pub remaining_deposit: u128,
-    pub seconds_until_depletion: Option<u64>,
-}
-
 /// Emitted when the contract admin toggles the global emergency pause flag.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -1089,29 +1078,6 @@ fn read_stream_count(env: &Env) -> u64 {
 fn set_stream_count(env: &Env, count: u64) {
     env.storage().instance().set(&DataKey::NextStreamId, &count);
     bump_instance_ttl(env);
-}
-
-/// Acquire the reentrancy guard. Returns an error if already locked.
-fn acquire_reentrancy_lock(env: &Env) -> Result<(), ContractError> {
-    let locked: bool = env
-        .storage()
-        .instance()
-        .get(&DataKey::ReentrancyLock)
-        .unwrap_or(false);
-    if locked {
-        return Err(ContractError::InvalidState);
-    }
-    env.storage()
-        .instance()
-        .set(&DataKey::ReentrancyLock, &true);
-    Ok(())
-}
-
-/// Release the reentrancy guard.
-fn release_reentrancy_lock(env: &Env) {
-    env.storage()
-        .instance()
-        .set(&DataKey::ReentrancyLock, &false);
 }
 
 // ---------------------------------------------------------------------------

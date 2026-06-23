@@ -31,6 +31,9 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `TemplateUnauthorized` | 17 | Caller is not the template owner | `delete_stream_template` |
 | `RateCapExceeded` | 18 | Rate exceeds the governance-controlled maximum rate per second | `create_stream`, `create_streams`, `create_stream_relative`, `update_rate_per_second` |
 | `GlobalEmergency` | 19 | Global emergency pause is active; no operations permitted | `set_global_emergency_paused`, `pause_all_streams_on_emergency` |
+| `ReservationNotFound` | 20 | No ID reservation exists for the specified holder | `release_id_reservation`, `reclaim_expired_id_reservation` |
+| `ReservationStillActive` | 21 | Reservation has not yet expired and cannot be reclaimed | `reclaim_expired_id_reservation` |
+| `ReservationNotExpirable` | 22 | Reservation has no expiry and cannot be reclaimed | `reclaim_expired_id_reservation` |
 
 ---
 

@@ -35,6 +35,7 @@ Notes:
 | ProtocolPaused   | `["pr_pause", admin: Address]`  | `ProtocolPaused { reason: String, paused_at: u64 }`                                                                                                       | When `pause_protocol` successfully pauses the protocol. Not emitted on idempotent calls.                               |
 | ProtocolResumed  | `["pr_resume", admin: Address]` | `ProtocolResumed { resumed_at: u64 }`                                                                                                                     | When `resume_protocol` successfully resumes the protocol. Not emitted on idempotent calls.                             |
 | SenderTransferred | `["sndr_xfr", stream_id: u64]` | `SenderTransferred { stream_id: u64, old_sender: Address, new_sender: Address }`                                                                          | When `transfer_sender` successfully rotates the stream sender. Emitted after state is persisted. Not emitted on failure. |
+| ReservationReleased | `["res_rel", holder: Address]` | `(start_id: u64, count: u64, consumed: u64, reclaimed: u64)` | When a stream ID reservation is voluntarily released or reclaimed after expiry. |
 
 **Additional topics (validator):** `gl_pause`, `gl_resume`, `rate_dec`, `tmpl_def`.
 
@@ -337,6 +338,26 @@ Example:
 
 Indexers should update their sender reference for the stream on receipt of this event.
 The `old_sender` field allows indexers to correlate the previous treasury key.
+
+### 13) ReservationReleased
+
+Emitted when a stream ID reservation is voluntarily released via `release_id_reservation` or reclaimed after expiry via `reclaim_expired_id_reservation`.
+
+```
+topics: ["res_rel", holder: Address]
+data:   (start_id: u64, count: u64, consumed: u64, reclaimed: u64)
+```
+
+Example:
+
+```json
+{
+  "topics": ["res_rel", "G...HOLDER_ADDRESS..."],
+  "data": [100, 10, 5, 5]
+}
+```
+
+**When emitted**: After a successful ID reservation release or reclaim. The `consumed` field indicates how many IDs were actually used, and `reclaimed` shows how many were freed back to the pool.
 
 ---
 
