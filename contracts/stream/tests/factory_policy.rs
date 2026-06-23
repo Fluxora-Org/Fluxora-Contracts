@@ -564,3 +564,251 @@ fn test_set_allowlist_remove_enforced() {
     );
     assert_eq!(result, Err(Ok(FactoryError::RecipientNotAllowlisted)));
 }
+
+// ---------------------------------------------------------------------------
+// CreationPaused — pause/kill switch
+// ---------------------------------------------------------------------------
+
+/// `is_factory_paused` returns false by default (never explicitly set after init).
+#[test]
+fn test_is_factory_paused_defaults_to_false() {
+    let ctx = Ctx::setup();
+    assert!(!ctx.factory.is_factory_paused());
+}
+
+/// Admin can pause and the flag is immediately reflected by `is_factory_paused`.
+#[test]
+fn test_set_factory_paused_true_reflected_by_view() {
+    let ctx = Ctx::setup();
+    ctx.factory.set_factory_paused(&true);
+    assert!(ctx.factory.is_factory_paused());
+}
+
+/// Admin can resume after pausing.
+#[test]
+fn test_set_factory_paused_false_reflected_by_view() {
+    let ctx = Ctx::setup();
+    ctx.factory.set_factory_paused(&true);
+    ctx.factory.set_factory_paused(&false);
+    assert!(!ctx.factory.is_factory_paused());
+}
+
+/// Idempotent pause: pausing twice keeps the flag true.
+#[test]
+fn test_set_factory_paused_idempotent_true() {
+    let ctx = Ctx::setup();
+    ctx.factory.set_factory_paused(&true);
+    ctx.factory.set_factory_paused(&true);
+    assert!(ctx.factory.is_factory_paused());
+}
+
+/// Idempotent resume: resuming twice keeps the flag false.
+#[test]
+fn test_set_factory_paused_idempotent_false() {
+    let ctx = Ctx::setup();
+    ctx.factory.set_factory_paused(&false);
+    assert!(!ctx.factory.is_factory_paused());
+}
+
+/// When paused, `create_stream` rejects with `CreationPaused` even for an
+/// allowlisted recipient with a valid deposit and schedule.
+#[test]
+fn test_create_stream_rejected_when_paused() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient, &true);
+    ctx.factory.set_factory_paused(&true);
+    let now = ctx.now();
+
+    let result = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &1_000,
+        &1,
+        &now,
+        &now,
+        &(now + 200),
+        &0,
+    );
+    assert_eq!(result, Err(Ok(FactoryError::CreationPaused)));
+}
+
+/// Pause is checked BEFORE the allowlist, so a non-allowlisted recipient while
+/// paused also returns `CreationPaused` (no policy state leak).
+#[test]
+fn test_create_stream_paused_before_allowlist_check() {
+    let ctx = Ctx::setup();
+    // Recipient is NOT allowlisted
+    let recipient = Address::generate(&ctx.env);
+    ctx.factory.set_factory_paused(&true);
+    let now = ctx.now();
+
+    let result = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &1_000,
+        &1,
+        &now,
+        &now,
+        &(now + 200),
+        &0,
+    );
+    // Must be CreationPaused, not RecipientNotAllowlisted
+    assert_eq!(result, Err(Ok(FactoryError::CreationPaused)));
+}
+
+/// Pause is checked BEFORE the cap, so an over-cap deposit while paused
+/// returns `CreationPaused`.
+#[test]
+fn test_create_stream_paused_before_cap_check() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient, &true);
+    ctx.factory.set_factory_paused(&true);
+    let now = ctx.now();
+
+    // deposit=99_999 vastly exceeds max_deposit=10_000
+    let result = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &99_999,
+        &1,
+        &now,
+        &now,
+        &(now + 200),
+        &0,
+    );
+    assert_eq!(result, Err(Ok(FactoryError::CreationPaused)));
+}
+
+/// After resume, `create_stream` proceeds to normal policy evaluation.
+/// (An allowlisted sender with a valid schedule should NOT get CreationPaused.)
+#[test]
+fn test_create_stream_allowed_after_resume() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient, &true);
+
+    // Pause then resume
+    ctx.factory.set_factory_paused(&true);
+    ctx.factory.set_factory_paused(&false);
+    let now = ctx.now();
+
+    let result = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &1_000,
+        &1,
+        &now,
+        &now,
+        &(now + 200),
+        &0,
+    );
+    // CreationPaused must NOT appear; any other error (e.g. stream contract not
+    // initialized) is acceptable here — we only verify the pause is gone.
+    assert_ne!(result, Err(Ok(FactoryError::CreationPaused)));
+}
+
+/// Non-admin cannot toggle the pause flag.
+#[test]
+fn test_set_factory_paused_rejects_non_admin() {
+    let env = Env::default();
+    let factory_id = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &factory_id);
+    let admin = Address::generate(&env);
+    let non_admin = Address::generate(&env);
+    let stream_contract = Address::generate(&env);
+
+    env.mock_all_auths_allowing_non_root_auth();
+    factory.init(&admin, &stream_contract, &10_000, &100);
+
+    // Provide auth as non_admin — should panic because require_auth will fail.
+    env.mock_auths(&[MockAuth {
+        address: &non_admin,
+        invoke: &MockAuthInvoke {
+            contract: &factory_id,
+            fn_name: "set_factory_paused",
+            args: (true,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        factory.set_factory_paused(&true);
+    }));
+    assert!(
+        result.is_err(),
+        "non-admin must not be able to pause factory"
+    );
+
+    // Flag must remain false
+    env.mock_all_auths();
+    assert!(!factory.is_factory_paused());
+}
+
+/// `set_factory_paused` before init returns `NotInitialized`.
+#[test]
+fn test_set_factory_paused_before_init_returns_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let factory_id = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &factory_id);
+
+    let result = factory.try_set_factory_paused(&true);
+    assert_eq!(result, Err(Ok(FactoryError::NotInitialized)));
+}
+
+/// Toggle cycle: pause → create rejects → resume → create passes policy.
+#[test]
+fn test_pause_resume_toggle_cycle() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient, &true);
+    let now = ctx.now();
+
+    // Round 1 — paused
+    ctx.factory.set_factory_paused(&true);
+    assert_eq!(
+        ctx.factory.try_create_stream(
+            &ctx.sender,
+            &recipient,
+            &1_000,
+            &1,
+            &now,
+            &now,
+            &(now + 200),
+            &0,
+        ),
+        Err(Ok(FactoryError::CreationPaused))
+    );
+
+    // Round 2 — resumed
+    ctx.factory.set_factory_paused(&false);
+    let result = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &1_000,
+        &1,
+        &now,
+        &now,
+        &(now + 200),
+        &0,
+    );
+    assert_ne!(result, Err(Ok(FactoryError::CreationPaused)));
+
+    // Round 3 — pause again
+    ctx.factory.set_factory_paused(&true);
+    assert_eq!(
+        ctx.factory.try_create_stream(
+            &ctx.sender,
+            &recipient,
+            &1_000,
+            &1,
+            &now,
+            &now,
+            &(now + 200),
+            &0,
+        ),
+        Err(Ok(FactoryError::CreationPaused))
+    );
+}

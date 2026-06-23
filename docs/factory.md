@@ -154,3 +154,137 @@ This document is aligned with the current implementation as follows:
   parameters and pulling `deposit_amount` from `sender`.
 - `contracts/stream/tests/factory_policy.rs` covers the factory policy gates and
   admin-guarded policy updates that surround this authorization model.
+
+---
+
+## Emergency Pause (Kill Switch)
+
+The factory exposes an admin-controlled pause mechanism that blocks all new stream
+creation without requiring any changes to the allowlist or policy state.
+
+### Motivation
+
+When an incident occurs (e.g., a bug in the underlying stream contract, a policy
+misconfiguration, or an active exploit), the admin previously had no fast path to
+stop new factory-originated streams. The only option was to iteratively remove
+every allowlisted recipient — a destructive, slow operation that leaves the
+incident window open.
+
+The `CreationPaused` flag closes this gap: a single admin transaction halts all
+creation, and a second transaction resumes normal operation once the incident is
+resolved.
+
+### New storage key
+
+| Key | Type | Storage tier | Default |
+|-----|------|-------------|---------|
+| `DataKey::CreationPaused` | `bool` | `instance` | `false` (absent = unpaused) |
+
+The key is omitted from storage on `init`. `is_factory_paused` falls back to
+`false` on a missing entry, so existing deployments are unaffected by the upgrade.
+
+### New entrypoints
+
+#### `set_factory_paused(env, paused: bool) -> Result<(), FactoryError>`
+
+Toggle the creation pause.
+
+- Requires the stored admin's `require_auth`.
+- Returns `FactoryError::NotInitialized` when called before `init`.
+- Emits a `(factory, paused)` event with payload `true` when pausing, or a
+  `(factory, resumed)` event with payload `false` when resuming.
+- Idempotent: calling `set_factory_paused(true)` twice is safe.
+
+#### `is_factory_paused(env) -> bool`
+
+Permissionless view that returns the current value of `CreationPaused`
+(`false` when the key is absent). Intended for UI pre-flight and monitoring.
+
+### Guard order in `create_stream`
+
+The pause guard is inserted as the **first check** — before any policy read:
+
+```
+1. CreationPaused → FactoryError::CreationPaused   (before allowlist / cap reads)
+2. Allowlist check
+3. Deposit cap check
+4. Time-range invariants
+5. Minimum-duration check
+6. sender.require_auth()
+7. Cross-contract stream creation
+```
+
+Checking the pause flag before policy reads prevents leaking allowlist membership
+or cap values to an attacker probing state during an active incident.
+
+### Events
+
+| Topic tuple | Payload | When emitted |
+|-------------|---------|--------------|
+| `(symbol!("factory"), symbol!("paused"))` | `true` | Admin sets `paused = true` |
+| `(symbol!("factory"), symbol!("resumed"))` | `false` | Admin sets `paused = false` |
+
+### Security assumptions
+
+1. **Only the stored admin can toggle the flag.** `require_admin` is the single
+   authorization chokepoint; see `contracts/factory/src/lib.rs`.
+2. **No bypass via direct stream calls.** The pause only applies to
+   `FluxoraFactory::create_stream`. Callers who invoke `FluxoraStream::create_stream`
+   directly bypass all factory policies. Operators must restrict the underlying
+   stream contract as described in the [Bypass Warning](#important-bypass-warning)
+   section above.
+3. **Pause state survives admin rotation.** `DataKey::CreationPaused` is an
+   independent instance entry; rotating the admin via `set_admin` does not reset
+   the pause flag.
+4. **Pause blocks creation, not withdrawal.** Active streams already in flight
+   are unaffected. Recipients can still withdraw from existing streams; senders
+   can still cancel or modify existing streams.
+
+### Operator runbook
+
+**Pause creation during an incident:**
+
+```bash
+# Build and sign the pause transaction
+soroban contract invoke \
+  --id <FACTORY_CONTRACT_ID> \
+  --source <ADMIN_SECRET_KEY> \
+  -- set_factory_paused --paused true
+```
+
+**Verify the flag:**
+
+```bash
+soroban contract invoke \
+  --id <FACTORY_CONTRACT_ID> \
+  --source <ANY_ACCOUNT> \
+  -- is_factory_paused
+# Returns: true
+```
+
+**Resume after the incident is resolved:**
+
+```bash
+soroban contract invoke \
+  --id <FACTORY_CONTRACT_ID> \
+  --source <ADMIN_SECRET_KEY> \
+  -- set_factory_paused --paused false
+```
+
+### Code alignment checklist
+
+- `DataKey::CreationPaused` is declared in `contracts/factory/src/lib.rs`.
+- `set_factory_paused` and `is_factory_paused` are implemented in the same file.
+- `create_stream` checks `CreationPaused` as its **first guard** before any
+  policy read.
+- `contracts/stream/tests/factory_policy.rs` covers:
+  - Default unpause state after `init`
+  - Pause/resume toggle reflected by `is_factory_paused`
+  - Idempotent pause and resume
+  - `create_stream` rejected with `CreationPaused` when paused
+  - Pause checked before allowlist (no state leak)
+  - Pause checked before cap (no state leak)
+  - `create_stream` succeeds (past the pause guard) after resume
+  - Non-admin toggle panics
+  - `set_factory_paused` before `init` returns `NotInitialized`
+  - Full pause → resume → pause toggle cycle

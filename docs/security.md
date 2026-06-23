@@ -256,20 +256,50 @@ properties of `withdraw` while adding replay and expiry protection.
 
 ### Signature scheme
 
-The recipient signs the SHA-256 hash of the following concatenated bytes:
+The recipient signs the following **40 raw bytes** (no prefix, no hashing):
 
 ```
-"fluxora_delegated_withdraw"  (UTF-8, no null terminator)
-|| contract_address_xdr        (XDR-encoded ScAddress)
-|| destination_xdr             (XDR-encoded ScAddress)
-|| stream_id                   (8 bytes, u64 big-endian)
-|| nonce                       (8 bytes, u64 big-endian)
-|| deadline                    (8 bytes, u64 big-endian)
+stream_id              (8 bytes, u64 big-endian)
+| nonce                (8 bytes, u64 big-endian)
+| deadline             (8 bytes, u64 big-endian)
+| expected_minimum_amount (16 bytes, i128 big-endian)
 ```
 
-The 32-byte SHA-256 hash is verified on-chain via `env.crypto().ed25519_verify`.
-Including the contract address in the message prevents cross-contract replay.
-Including the destination prevents a relayer from redirecting funds.
+The 64-byte Ed25519 signature over these raw bytes is verified on-chain via
+`env.crypto().ed25519_verify`. The caller supplies `recipient_public_key` (the
+raw 32-byte Ed25519 key); the contract derives the corresponding Stellar account
+address from that key and asserts it equals `stream.recipient` before calling
+`ed25519_verify`. A key that does not match the stored recipient returns
+`ContractError::InvalidSignature` immediately, without reaching the host-side
+signature check.
+
+**What the message binds:**
+- `stream_id` — prevents using the same signature on a different stream.
+- `nonce` — prevents replay; the recipient's nonce must match exactly.
+- `deadline` — limits the window in which the signature is valid.
+- `expected_minimum_amount` — closes the relayer front-running griefing vector:
+  a relayer cannot delay until accrued < minimum, because the call reverts with
+  `BelowMinimumAmount`.
+
+> **Note on host trapping:** `env.crypto().ed25519_verify` is a Soroban host
+> function that **traps** (panics) on an invalid signature rather than returning
+> a typed error. This is by design in the Soroban SDK. The pre-condition checks
+> (deadline, nonce, public-key binding) that precede it return typed
+> `ContractError` variants; a relayer using `try_delegated_withdraw` will see
+> `Err(Err(HostError))` only for a signature with wrong bytes after all
+> pre-conditions pass. The distinction is observable on the client side.
+
+### Trust assumption: recipient_public_key
+
+The caller supplies `recipient_public_key` as a raw 32-byte Ed25519 public key.
+The contract derives the Stellar account `Address` from that key and compares it
+to `stream.recipient`. This check ensures that:
+
+1. Only the actual stream recipient's key can authorize a delegated withdrawal.
+2. A relayer cannot use an arbitrary self-generated key to burn the recipient's
+   nonce or trigger an unintended withdrawal.
+3. Contract-account recipients (not ed25519 accounts) cannot use `delegated_withdraw`;
+   they must use the direct `withdraw` path.
 
 ### Replay protection (nonce)
 
@@ -277,7 +307,7 @@ Including the destination prevents a relayer from redirecting funds.
   in persistent storage.
 - The supplied `nonce` must equal the current stored nonce exactly — no skipping allowed.
 - On a successful withdrawal that moves tokens, the nonce is incremented atomically
-  before the token transfer (CEI-compliant).
+  **after** all checks and **before** the token transfer (CEI-compliant).
 - If `withdrawable == 0` the nonce is **not** consumed, preserving the signature for
   a future call when tokens have accrued.
 
@@ -287,28 +317,38 @@ Including the destination prevents a relayer from redirecting funds.
   if `env.ledger().timestamp() > deadline`.
 - A deadline equal to the current timestamp is accepted (not yet expired).
 
+### Error codes for `delegated_withdraw`
+
+| Condition | Error code |
+|---|---|
+| `env.ledger().timestamp() > deadline` | `SignatureDeadlineExpired` (19) |
+| `nonce != stored_nonce` | `InvalidSignature` (15) |
+| Public key does not derive `stream.recipient` | `InvalidSignature` (15) |
+| Malformed/wrong ed25519 signature bytes | Host trap (`HostError`, not a typed `ContractError`) |
+| `withdrawable < expected_minimum_amount` | `BelowMinimumAmount` (16) |
+| Stream is Paused (non-terminal) or Completed | `InvalidState` |
+
 ### CEI ordering for `delegated_withdraw`
 
-1. **Checks**: deadline, destination guard, stream status, nonce match, signature verify.
-2. **Effects**: increment nonce, update `withdrawn_amount`, optionally set `Completed`,
-   call `save_stream`.
-3. **Interactions**: `push_token` to destination, emit `dlg_wdraw` event (and optionally
-   `completed` event).
+1. **Checks**: deadline → stream load → withdrawal frequency → nonce → public-key binding → signature.
+2. **Effects**: update `withdrawn_amount`, optionally set `Completed`, call `save_stream`, increment nonce.
+3. **Interactions**: `push_token` to `stream.recipient`, emit `withdrew` event (and optionally `completed` event).
 
 ### Authorization table addition
 
 | Operation             | Authorized callers                                        |
 |-----------------------|-----------------------------------------------------------|
-| `delegated_withdraw`  | `relayer` (any address; recipient intent via signature)   |
-| `get_withdraw_nonce`  | Permissionless (view function)                            |
+| `delegated_withdraw`  | `relayer` (any address; recipient intent via Ed25519 signature) |
+| `get_delegated_nonce` | Permissionless (view function)                            |
 
 ### Security invariants
 
 - A used signature cannot be replayed (nonce incremented on success).
-- An expired signature is rejected before any state change.
-- A signature from the wrong key is rejected by `ed25519_verify` (host trap).
-- The destination is bound in the signed message — a relayer cannot redirect funds.
-- The contract address is bound in the signed message — signatures are chain/contract-specific.
+- An expired signature is rejected before any state change with `SignatureDeadlineExpired`.
+- A signature from the wrong key is rejected by the public-key binding check with `InvalidSignature`.
+- A malformed signature causes an `ed25519_verify` host trap (by Soroban SDK design).
+- The `stream_id` and `expected_minimum_amount` are bound in the signed message.
+- Tokens always transfer to `stream.recipient`; no relayer can redirect funds.
 - Direct `withdraw` / `withdraw_to` / `batch_withdraw` are unaffected; their auth paths
   remain unchanged.
 ## Malicious Token Assumptions and Non-Goals
