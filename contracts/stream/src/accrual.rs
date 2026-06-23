@@ -1,3 +1,27 @@
+use crate::ContractError;
+
+/// Assert that ledger-backed accrual time has not moved backwards.
+///
+/// # Security
+/// Stellar production ledgers are expected to provide monotonically
+/// non-decreasing timestamps. This guard catches test harnesses, migrations, or
+/// future environments that violate that assumption before withdrawable math can
+/// be evaluated at a retrograde timestamp.
+///
+/// # Parameters
+/// - `prev_ts`: Previous recorded ledger timestamp
+/// - `current_ts`: Current ledger timestamp
+///
+/// # Returns
+/// - `Ok(())` if `current_ts >= prev_ts`
+/// - `Err(ContractError::ClockRegression)` if `current_ts < prev_ts` (in all builds)
+pub fn assert_ledger_time_monotonic(prev_ts: u64, current_ts: u64) -> Result<(), ContractError> {
+    if current_ts < prev_ts {
+        return Err(ContractError::ClockRegression);
+    }
+    Ok(())
+}
+
 /// Computes accrued stream amount without relying on Soroban environment state.
 ///
 /// This helper is intentionally pure to make the core vesting math easy to unit test.
@@ -42,7 +66,42 @@ pub fn calculate_accrued_amount(
 
 #[cfg(test)]
 mod tests {
-    use super::calculate_accrued_amount;
+    use super::{assert_ledger_time_monotonic, calculate_accrued_amount};
+    use crate::ContractError;
+
+    // =========================================================================
+    // Tests for assert_ledger_time_monotonic
+    // =========================================================================
+
+    #[test]
+    fn ledger_time_monotonic_equal_times_ok() {
+        let result = assert_ledger_time_monotonic(1000, 1000);
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn ledger_time_monotonic_increasing_times_ok() {
+        let result = assert_ledger_time_monotonic(1000, 1001);
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn ledger_time_monotonic_zero_regression_error() {
+        let result = assert_ledger_time_monotonic(1000, 999);
+        assert_eq!(result, Err(ContractError::ClockRegression));
+    }
+
+    #[test]
+    fn ledger_time_monotonic_large_regression_error() {
+        let result = assert_ledger_time_monotonic(1000, 0);
+        assert_eq!(result, Err(ContractError::ClockRegression));
+    }
+
+    #[test]
+    fn ledger_time_monotonic_u64_max_times() {
+        let result = assert_ledger_time_monotonic(u64::MAX, u64::MAX);
+        assert_eq!(result, Ok(()));
+    }
 
     #[test]
     fn returns_zero_before_cliff() {
@@ -444,18 +503,6 @@ mod property_monotonicity {
         ];
         times.sort();
         times
-    }
-
-    fn sort_array(arr: &mut [u64]) {
-        for i in 0..arr.len() {
-            for j in 0..arr.len() - i - 1 {
-                if arr[j] > arr[j + 1] {
-                    let temp = arr[j];
-                    arr[j] = arr[j + 1];
-                    arr[j + 1] = temp;
-                }
-            }
-        }
     }
 
     fn sort_array(arr: &mut [u64]) {
