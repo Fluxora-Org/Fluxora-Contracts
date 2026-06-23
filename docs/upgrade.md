@@ -16,7 +16,7 @@ Version policy, migration runbook, and audit notes for operators, integrators, a
 ### Current value
 
 ```
-CONTRACT_VERSION = 5
+CONTRACT_VERSION = 7
 ```
 
 ### Version history
@@ -28,6 +28,8 @@ CONTRACT_VERSION = 5
 | 3 | `Stream` struct gained `memo: Option<Bytes>`; `StreamCreated` event gained `memo` field; `DataKey::StreamMemo(u64)` added at discriminant 10; `create_stream`/`create_streams` gained `memo` parameter; `get_stream_memo` entry-point added |
 | 4 | `TotalLiabilities` instance key for escrow accounting |
 | 5 | `withdraw_dust_threshold: i128` added to `Stream` struct and creation params |
+| 6 | Conservative additive version bump for extended protocol-management surface (including sender rotation) |
+| 7 | `DataKey::PausedStreamCount` added and maintained; `get_paused_stream_count()` view added |
 
 ### When to increment
 
@@ -138,6 +140,28 @@ There is no on-chain migration path for stream state between contract versions. 
 | Paused | Sender resumes, then withdraws or cancels on old instance |
 | Cancelled | Recipient withdraws frozen accrued amount on old instance |
 | Completed | Recipient withdraws remaining amount on old instance; optionally close via `close_completed_stream` |
+
+### Paused-stream counter backfill caveat (v7)
+
+`CONTRACT_VERSION = 7` introduces an instance key, `DataKey::PausedStreamCount`, used by
+`get_paused_stream_count()` to expose an O(1) protocol-wide gauge of how many streams are
+currently paused.
+
+Because existing deployments do **not** have historical pause state materialized in this new
+instance key, an upgraded instance starts with the counter effectively unset / `0`.
+
+Operational consequences:
+- Fresh deployments initialised on v7 track the exact live paused-stream count immediately.
+- Upgraded deployments report `0` until post-upgrade stream transitions repopulate the counter.
+- Legacy streams that were already paused before the upgrade are **not** backfilled.
+- The first post-upgrade `resume_*`, `cancel_*`, or terminal completion of such a legacy paused
+  stream will **not** make the counter go negative; the implementation uses saturating decrement
+  semantics for safety.
+- Once a legacy stream experiences a post-upgrade pause transition, it is tracked normally again.
+
+If an exact paused-stream count is required immediately after upgrading an already-live instance,
+operators must reconstruct it off-chain once (for example, by enumerating stream state) and treat
+`get_paused_stream_count()` as authoritative only for post-upgrade transitions thereafter.
 
 ---
 
