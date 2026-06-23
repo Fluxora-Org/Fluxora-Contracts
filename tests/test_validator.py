@@ -573,3 +573,265 @@ class TestEntrypointAllowlistFullCoverage:
         assert "require_not_globally_paused" not in vda.extract_entrypoints(
             "pub fn require_not_globally_paused(env: &Env) {}"
         )
+
+
+# ---------------------------------------------------------------------------
+# validate_gas.py tests
+# ---------------------------------------------------------------------------
+
+import importlib.util
+import json
+import textwrap
+import types
+import unittest.mock as mock
+from pathlib import Path
+
+_GAS_SCRIPT = Path(__file__).resolve().parent.parent / "script" / "validate_gas.py"
+
+
+def _load_gas_module():
+    spec = importlib.util.spec_from_file_location("validate_gas", _GAS_SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+vg = _load_gas_module()
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_BASELINE_BLOCK = textwrap.dedent("""\
+    <!-- GAS_BASELINE_START -->
+    {
+        "create_stream": 1000,
+        "withdraw": 500,
+        "batch_withdraw": {"small": 200, "large": 800}
+    }
+    <!-- GAS_BASELINE_END -->
+""")
+
+_GAS_MD_NO_BLOCK = "# Gas\nNo baseline here.\n"
+
+
+# ---------------------------------------------------------------------------
+# extract_baselines
+# ---------------------------------------------------------------------------
+
+class TestExtractBaselines:
+    def test_parses_valid_block(self, tmp_path):
+        f = tmp_path / "gas.md"
+        f.write_text(_BASELINE_BLOCK, encoding="utf-8")
+        result = vg.extract_baselines(str(f))
+        assert result["create_stream"] == 1000
+        assert result["withdraw"] == 500
+        assert result["batch_withdraw"]["small"] == 200
+
+    def test_raises_on_missing_block(self, tmp_path):
+        f = tmp_path / "gas.md"
+        f.write_text(_GAS_MD_NO_BLOCK, encoding="utf-8")
+        with pytest.raises(ValueError, match="Could not find gas baseline"):
+            vg.extract_baselines(str(f))
+
+    def test_returns_dict(self, tmp_path):
+        f = tmp_path / "gas.md"
+        f.write_text(_BASELINE_BLOCK, encoding="utf-8")
+        assert isinstance(vg.extract_baselines(str(f)), dict)
+
+
+# ---------------------------------------------------------------------------
+# parse_measurements
+# ---------------------------------------------------------------------------
+
+class TestParseMeasurements:
+    def test_parses_single_measurement(self):
+        output = "GAS_MEASUREMENT: create_stream: single: 1050\n"
+        result = vg.parse_measurements(output)
+        assert result == {"create_stream": {"single": 1050}}
+
+    def test_parses_multiple_functions(self):
+        output = (
+            "GAS_MEASUREMENT: create_stream: single: 1050\n"
+            "GAS_MEASUREMENT: withdraw: single: 510\n"
+        )
+        result = vg.parse_measurements(output)
+        assert "create_stream" in result
+        assert "withdraw" in result
+
+    def test_parses_batch_sizes(self):
+        output = (
+            "GAS_MEASUREMENT: batch_withdraw: small: 210\n"
+            "GAS_MEASUREMENT: batch_withdraw: large: 820\n"
+        )
+        result = vg.parse_measurements(output)
+        assert result["batch_withdraw"]["small"] == 210
+        assert result["batch_withdraw"]["large"] == 820
+
+    def test_ignores_non_matching_lines(self):
+        output = "INFO: something else\nno match here\n"
+        assert vg.parse_measurements(output) == {}
+
+    def test_empty_output(self):
+        assert vg.parse_measurements("") == {}
+
+    def test_returns_dict(self):
+        assert isinstance(vg.parse_measurements(""), dict)
+
+
+# ---------------------------------------------------------------------------
+# run_tests
+# ---------------------------------------------------------------------------
+
+class TestRunTests:
+    def test_returns_string(self, monkeypatch):
+        fake_result = types.SimpleNamespace(stdout="GAS_MEASUREMENT: x: single: 1\n")
+        monkeypatch.setattr(
+            vg.subprocess, "run", lambda *a, **kw: fake_result
+        )
+        output = vg.run_tests()
+        assert isinstance(output, str)
+        assert "GAS_MEASUREMENT" in output
+
+    def test_passes_nocapture_flag(self, monkeypatch):
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return types.SimpleNamespace(stdout="")
+
+        monkeypatch.setattr(vg.subprocess, "run", fake_run)
+        vg.run_tests()
+        assert "--nocapture" in captured["cmd"]
+
+    def test_ignores_nonzero_returncode(self, monkeypatch):
+        fake_result = types.SimpleNamespace(stdout="some output")
+        monkeypatch.setattr(
+            vg.subprocess, "run", lambda *a, **kw: fake_result
+        )
+        # Should not raise even if cargo fails
+        result = vg.run_tests()
+        assert result == "some output"
+
+
+# ---------------------------------------------------------------------------
+# main — pass / fail / error paths
+# ---------------------------------------------------------------------------
+
+class TestGasMain:
+    def _patch(self, monkeypatch, tmp_path, measurements, baseline_override=None):
+        """Wire up main() with a temp gas.md and fake subprocess output."""
+        gas_md = tmp_path / "gas.md"
+        gas_md.write_text(_BASELINE_BLOCK, encoding="utf-8")
+
+        raw_output = "\n".join(
+            f"GAS_MEASUREMENT: {fn}: {sz}: {cost}"
+            for fn, sizes in measurements.items()
+            for sz, cost in (sizes.items() if isinstance(sizes, dict) else [("single", sizes)])
+        )
+
+        monkeypatch.setattr(
+            vg.subprocess, "run",
+            lambda *a, **kw: types.SimpleNamespace(stdout=raw_output),
+        )
+        # Override file path used by main() via extract_baselines
+        monkeypatch.setattr(vg, "extract_baselines", lambda _: baseline_override or {
+            "create_stream": 1000,
+            "withdraw": 500,
+            "batch_withdraw": {"small": 200, "large": 800},
+        })
+
+    def test_no_regression_exits_0(self, tmp_path, monkeypatch):
+        self._patch(monkeypatch, tmp_path, {
+            "create_stream": 1000,
+            "withdraw": 500,
+            "batch_withdraw": {"small": 200, "large": 800},
+        })
+        with pytest.raises(SystemExit) as exc:
+            vg.main()
+        assert exc.value.code == 0
+
+    def test_regression_exits_1(self, tmp_path, monkeypatch):
+        # create_stream goes 30% over baseline
+        self._patch(monkeypatch, tmp_path, {
+            "create_stream": 1300,
+            "withdraw": 500,
+        })
+        with pytest.raises(SystemExit) as exc:
+            vg.main()
+        assert exc.value.code == 1
+
+    def test_no_measurements_exits_1(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            vg.subprocess, "run",
+            lambda *a, **kw: types.SimpleNamespace(stdout=""),
+        )
+        monkeypatch.setattr(vg, "extract_baselines", lambda _: {"create_stream": 1000})
+        with pytest.raises(SystemExit) as exc:
+            vg.main()
+        assert exc.value.code == 1
+
+    def test_missing_baseline_key_shows_missing(self, tmp_path, monkeypatch, capsys):
+        # Measured function not in baseline -> printed as MISSING
+        self._patch(monkeypatch, tmp_path, {"unknown_fn": 999},
+                    baseline_override={"create_stream": 1000})
+        with pytest.raises(SystemExit):
+            vg.main()
+        assert "MISSING" in capsys.readouterr().out
+
+    def test_extract_baselines_exception_exits_1(self, tmp_path, monkeypatch):
+        def _raise(_):
+            raise ValueError("bad block")
+
+        monkeypatch.setattr(vg, "extract_baselines", _raise)
+        monkeypatch.setattr(
+            vg.subprocess, "run",
+            lambda *a, **kw: types.SimpleNamespace(stdout=""),
+        )
+        with pytest.raises(SystemExit) as exc:
+            vg.main()
+        assert exc.value.code == 1
+
+    def test_pass_prints_success_message(self, tmp_path, monkeypatch, capsys):
+        self._patch(monkeypatch, tmp_path, {
+            "create_stream": 1000,
+            "withdraw": 500,
+        })
+        with pytest.raises(SystemExit):
+            vg.main()
+        assert "SUCCESS" in capsys.readouterr().out
+
+    def test_fail_prints_failed_message(self, tmp_path, monkeypatch, capsys):
+        self._patch(monkeypatch, tmp_path, {"create_stream": 2000})
+        with pytest.raises(SystemExit):
+            vg.main()
+        assert "FAILED" in capsys.readouterr().out
+
+    def test_batch_withdraw_baseline_lookup(self, tmp_path, monkeypatch):
+        # batch_withdraw sizes are looked up via baselines["batch_withdraw"][size]
+        self._patch(monkeypatch, tmp_path, {
+            "batch_withdraw": {"small": 200, "large": 800},
+        })
+        with pytest.raises(SystemExit) as exc:
+            vg.main()
+        assert exc.value.code == 0
+
+    def test_within_5pct_passes(self, tmp_path, monkeypatch):
+        # 4% increase is within tolerance
+        self._patch(monkeypatch, tmp_path, {"create_stream": 1040})
+        with pytest.raises(SystemExit) as exc:
+            vg.main()
+        assert exc.value.code == 0
+
+    def test_exactly_5pct_passes(self, tmp_path, monkeypatch):
+        # exactly 5% is not strictly > 0.05, so passes
+        self._patch(monkeypatch, tmp_path, {"create_stream": 1050})
+        with pytest.raises(SystemExit) as exc:
+            vg.main()
+        assert exc.value.code == 0
+
+    def test_over_5pct_fails(self, tmp_path, monkeypatch):
+        self._patch(monkeypatch, tmp_path, {"create_stream": 1060})
+        with pytest.raises(SystemExit) as exc:
+            vg.main()
+        assert exc.value.code == 1
