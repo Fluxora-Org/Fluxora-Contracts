@@ -1,7 +1,7 @@
 extern crate std;
 
 use fluxora_governance::{FluxoraGovernance, FluxoraGovernanceClient, GovernanceError};
-use fluxora_stream::{FluxoraStream, FluxoraStreamClient, ContractError};
+use fluxora_stream::{ContractError, FluxoraStream, FluxoraStreamClient};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
@@ -770,85 +770,93 @@ fn test_end_to_end_governance_stream_parameter_change() {
     // ---------------------------------------------------------------------------
     // 1. Deploy and initialize both contracts
     // ---------------------------------------------------------------------------
-    
+
     // Deploy governance contract
     let governance_id = env.register_contract(None, FluxoraGovernance);
     let governance_client = FluxoraGovernanceClient::new(&env, &governance_id);
-    
-    // Deploy stream contract  
+
+    // Deploy stream contract
     let stream_id = env.register_contract(None, FluxoraStream);
     let stream_client = FluxoraStreamClient::new(&env, &stream_id);
-    
+
     // Set up token for stream contract
     let token_admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone()).address();
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
     let token = TokenClient::new(&env, &token_id);
     let stellar_asset = StellarAssetClient::new(&env, &token_id);
-    
+
     // Create test addresses
     let gov_admin = Address::generate(&env);
     let signer_a = Address::generate(&env);
     let signer_b = Address::generate(&env);
     let signer_c = Address::generate(&env);
-    
+
     // Initialize governance with 3 signers, threshold = 2
     governance_client.init(
         &gov_admin,
         &vec![&env, signer_a.clone(), signer_b.clone(), signer_c.clone()],
         &2u32,
     );
-    
+
     // Initialize stream contract with governance as admin (CRITICAL: this makes governance control the stream)
     stream_client.init(&token_id, &governance_id);
-    
+
     // Verify initial setup: governance is now the stream admin
     let stream_config = stream_client.get_config();
-    assert_eq!(stream_config.admin, governance_id, "Governance contract must be stream admin");
-    
+    assert_eq!(
+        stream_config.admin, governance_id,
+        "Governance contract must be stream admin"
+    );
+
     // ---------------------------------------------------------------------------
     // 2. Test baseline: stream creation works with default (unlimited) rate
     // ---------------------------------------------------------------------------
-    
+
     // Create test addresses for streaming
     let sender = Address::generate(&env);
     let recipient = Address::generate(&env);
-    
+
     // Mint tokens to sender
     stellar_asset.mint(&sender, &1_000_000);
-    
+
     // Verify we can create high-rate streams initially (default max rate is i128::MAX)
     let baseline_result = stream_client.try_create_stream(
         &sender,
         &recipient,
-        &10000, // deposit
-        &5000,  // high rate_per_second (should work with default unlimited cap)
+        &10000,                            // deposit
+        &5000, // high rate_per_second (should work with default unlimited cap)
         &(env.ledger().timestamp() + 10), // start_time
-        &(env.ledger().timestamp() + 10), // cliff_time  
+        &(env.ledger().timestamp() + 10), // cliff_time
         &(env.ledger().timestamp() + 100), // end_time
-        &0, // dust_threshold
+        &0,    // dust_threshold
         &None, // memo
     );
-    
+
     assert!(
         baseline_result.is_ok(),
         "Stream creation should work before governance sets rate cap"
     );
-    
+
     // ---------------------------------------------------------------------------
     // 3. Create governance proposal to set max_rate_per_second = 1000
     // ---------------------------------------------------------------------------
-    
+
     let target_address = stream_id.clone();
-    
+
     // Create calldata representing the intended change
     // Note: In a real implementation, this would be properly encoded function call data
     // For this test, we use descriptive text that could be decoded by an off-chain executor
     let new_max_rate: i128 = 1000;
-    let calldata = Bytes::from_slice(&env, &format!("set_max_rate_per_second:{}", new_max_rate).as_bytes());
-    
+    let calldata = Bytes::from_slice(
+        &env,
+        &format!("set_max_rate_per_second:{}", new_max_rate).as_bytes(),
+    );
+
     let proposal_id = governance_client.propose(&signer_a, &target_address, &calldata);
     assert_eq!(proposal_id, 0, "First proposal should have ID 0");
-    
+
     // Verify proposal was stored correctly
     let proposal = governance_client.get_proposal(&proposal_id);
     assert_eq!(proposal.proposer, signer_a);
@@ -857,25 +865,29 @@ fn test_end_to_end_governance_stream_parameter_change() {
     assert!(!proposal.executed);
     assert!(!proposal.cancelled);
     assert_eq!(proposal.approvals.len(), 0);
-    
+
     // ---------------------------------------------------------------------------
     // 4. Achieve quorum through approvals (need 2 of 3 signers)
     // ---------------------------------------------------------------------------
-    
+
     // First approval (signer_a)
     governance_client.approve(&signer_a, &proposal_id);
     let proposal = governance_client.get_proposal(&proposal_id);
     assert_eq!(proposal.approvals.len(), 1);
-    
+
     // Second approval (signer_b) - this should trigger quorum
     governance_client.approve(&signer_b, &proposal_id);
     let proposal = governance_client.get_proposal(&proposal_id);
-    assert_eq!(proposal.approvals.len(), 2, "Should have 2 approvals for quorum");
-    
+    assert_eq!(
+        proposal.approvals.len(),
+        2,
+        "Should have 2 approvals for quorum"
+    );
+
     // ---------------------------------------------------------------------------
     // 5. Verify timelock enforcement (proposal cannot execute immediately)
     // ---------------------------------------------------------------------------
-    
+
     let executor = Address::generate(&env);
     let early_execute_result = governance_client.try_execute(&executor, &proposal_id);
     assert_eq!(
@@ -883,30 +895,30 @@ fn test_end_to_end_governance_stream_parameter_change() {
         Err(Ok(GovernanceError::TimelockNotElapsed)),
         "Execution before timelock should fail"
     );
-    
+
     // ---------------------------------------------------------------------------
     // 6. Wait for timelock and execute proposal
     // ---------------------------------------------------------------------------
-    
+
     // Advance time past the 48-hour timelock
     env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
-    
+
     // Now execution should succeed
     governance_client.execute(&executor, &proposal_id);
-    
+
     // Verify proposal is marked as executed
     let proposal = governance_client.get_proposal(&proposal_id);
     assert!(proposal.executed, "Proposal should be marked as executed");
-    
+
     // ---------------------------------------------------------------------------
     // 7. Simulate off-chain execution: apply the governance-approved change
     // ---------------------------------------------------------------------------
-    
+
     // In a real system, an off-chain executor would read the ProposalExecuted event,
     // decode the calldata, and execute the actual function call as the governance contract.
     // For this test, we simulate that step by calling set_max_rate_per_second
     // as the governance contract (which is the stream admin).
-    
+
     // Mock the auth to allow the governance contract to call stream functions
     env.mock_auths(&[soroban_sdk::testutils::MockAuth {
         address: &governance_id,
@@ -917,65 +929,68 @@ fn test_end_to_end_governance_stream_parameter_change() {
             sub_invokes: &[],
         },
     }]);
-    
+
     // Apply the governance-approved parameter change
     let set_result = stream_client.set_max_rate_per_second(&new_max_rate);
-    assert!(set_result.is_ok(), "Governance contract should be able to set max rate");
-    
+    assert!(
+        set_result.is_ok(),
+        "Governance contract should be able to set max rate"
+    );
+
     // ---------------------------------------------------------------------------
     // 8. Verify stream parameter was actually changed (rate cap now enforced)
     // ---------------------------------------------------------------------------
-    
+
     // Clear previous auth mocks for testing normal user behavior
     env.mock_all_auths();
-    
+
     // Mint more tokens for new tests
     stellar_asset.mint(&sender, &1_000_000);
-    
+
     // Try to create a stream with rate > 1000 (should fail due to governance-set cap)
     let high_rate_result = stream_client.try_create_stream(
         &sender,
         &recipient,
-        &10000, // deposit
-        &1500,  // rate_per_second > 1000 (our governance-set cap)
-        &(env.ledger().timestamp() + 10), // start_time
-        &(env.ledger().timestamp() + 10), // cliff_time  
+        &10000,                            // deposit
+        &1500,                             // rate_per_second > 1000 (our governance-set cap)
+        &(env.ledger().timestamp() + 10),  // start_time
+        &(env.ledger().timestamp() + 10),  // cliff_time
         &(env.ledger().timestamp() + 100), // end_time
-        &0, // dust_threshold
-        &None, // memo
+        &0,                                // dust_threshold
+        &None,                             // memo
     );
-    
+
     // This should fail because rate > max_rate_per_second set by governance
     assert!(
         high_rate_result.is_err(),
         "Stream creation with rate above governance-set limit should fail"
     );
-    
+
     // Try to create a stream with rate <= 1000 (should succeed)
     let acceptable_rate_result = stream_client.try_create_stream(
         &sender,
         &recipient,
-        &5000,  // deposit
-        &500,   // rate_per_second <= 1000 (within governance-set cap)
-        &(env.ledger().timestamp() + 10), // start_time
-        &(env.ledger().timestamp() + 10), // cliff_time
+        &5000,                             // deposit
+        &500,                              // rate_per_second <= 1000 (within governance-set cap)
+        &(env.ledger().timestamp() + 10),  // start_time
+        &(env.ledger().timestamp() + 10),  // cliff_time
         &(env.ledger().timestamp() + 100), // end_time
-        &0, // dust_threshold  
-        &None, // memo
+        &0,                                // dust_threshold
+        &None,                             // memo
     );
-    
+
     assert!(
         acceptable_rate_result.is_ok(),
         "Stream creation with rate within governance-set limit should succeed"
     );
-    
+
     // ---------------------------------------------------------------------------
     // 9. Security verification: unauthorized actors cannot change parameters
     // ---------------------------------------------------------------------------
-    
+
     // Create an unauthorized actor
     let unauthorized = Address::generate(&env);
-    
+
     // Mock auth for unauthorized user attempting parameter change
     env.mock_auths(&[soroban_sdk::testutils::MockAuth {
         address: &unauthorized,
@@ -986,30 +1001,33 @@ fn test_end_to_end_governance_stream_parameter_change() {
             sub_invokes: &[],
         },
     }]);
-    
+
     // Attempt direct parameter change (should fail - only governance admin can do this)
     let unauthorized_result = stream_client.try_set_max_rate_per_second(&2000);
-    
+
     // This should fail because the caller is not the governance contract
     assert!(
         unauthorized_result.is_err(),
         "Direct parameter change by unauthorized actor should fail"
     );
-    
+
     // ---------------------------------------------------------------------------
-    // 10. Test edge case: execution before timelock should fail  
+    // 10. Test edge case: execution before timelock should fail
     // ---------------------------------------------------------------------------
-    
+
     // Create another proposal to test timelock enforcement
     let new_max_rate_2: i128 = 2000;
-    let calldata2 = Bytes::from_slice(&env, &format!("set_max_rate_per_second:{}", new_max_rate_2).as_bytes());
-    
+    let calldata2 = Bytes::from_slice(
+        &env,
+        &format!("set_max_rate_per_second:{}", new_max_rate_2).as_bytes(),
+    );
+
     let proposal_id_2 = governance_client.propose(&signer_b, &target_address, &calldata2);
-    
+
     // Get approvals
     governance_client.approve(&signer_a, &proposal_id_2);
     governance_client.approve(&signer_c, &proposal_id_2);
-    
+
     // Try to execute immediately (should fail)
     let immediate_execute_result = governance_client.try_execute(&executor, &proposal_id_2);
     assert_eq!(
@@ -1017,16 +1035,16 @@ fn test_end_to_end_governance_stream_parameter_change() {
         Err(Ok(GovernanceError::TimelockNotElapsed)),
         "Immediate execution after quorum should fail due to timelock"
     );
-    
+
     // ---------------------------------------------------------------------------
     // Test Summary Verification
     // ---------------------------------------------------------------------------
-    
+
     // ✅ Deployed both governance and stream contracts in test environment
-    // ✅ Set governance contract as stream admin (critical integration point)  
+    // ✅ Set governance contract as stream admin (critical integration point)
     // ✅ Created governance proposal to change stream parameter (set_max_rate_per_second)
     // ✅ Achieved quorum through co-signer approval process (2 of 3 signers)
-    // ✅ Enforced timelock delay (48 hours) before execution  
+    // ✅ Enforced timelock delay (48 hours) before execution
     // ✅ Successfully executed proposal (governance emits execution event)
     // ✅ Simulated off-chain execution of the governance-approved parameter change
     // ✅ Verified stream parameter actually changed (via rate cap enforcement test)
