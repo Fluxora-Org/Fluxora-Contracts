@@ -196,7 +196,9 @@ const KEEPER_FEE_BPS: u64 = 50;
 /// instance storage to detect retrograde test clocks and migration regressions.
 ///
 /// Bumped to 5: `DataKey::PausedStreamCount` added and maintained across pause/
-/// resume/cancel/complete transitions; `get_paused_stream_count()` O(1) view added.
+/// resume/cancel/complete transitions; `get_paused_stream_count()` O(1) view added;
+/// duplicate `ContractError` discriminant 23 resolved and the previously-missing
+/// variants declared.
 pub const CONTRACT_VERSION: u32 = 5;
 
 // ---------------------------------------------------------------------------
@@ -407,12 +409,19 @@ pub enum ContractError {
     ReservationNotFound = 24,
     ReservationNotExpirable = 25,
     ReservationStillActive = 26,
+    /// Ledger-backed accrual observed a timestamp lower than the previous accrual timestamp.
     ClockRegression = 28,
+    /// Metadata payload exceeds the allowed size.
     MetadataTooLarge = 29,
+    /// Stream kind is not supported.
     UnsupportedStreamKind = 30,
+    /// Rate update exceeds the configured rate cap.
     RateCapExceeded = 31,
+    /// Operation blocked by a pause cooldown.
     PauseCooldownActive = 32,
+    /// Rate limit exceeded for withdrawals.
     WithdrawalTooFrequent = 33,
+    /// Keeper attempted to close a stream before the grace period elapsed.
     KeeperGracePeriodNotElapsed = 34,
 }
 
