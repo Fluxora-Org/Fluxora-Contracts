@@ -564,3 +564,182 @@ fn test_set_allowlist_remove_enforced() {
     );
     assert_eq!(result, Err(Ok(FactoryError::RecipientNotAllowlisted)));
 }
+
+// ---------------------------------------------------------------------------
+// Registry: get_factory_stream_count and get_factory_streams_paginated
+// ---------------------------------------------------------------------------
+
+/// Before any streams are created the registry is empty.
+#[test]
+fn test_registry_empty_before_any_creation() {
+    let ctx = Ctx::setup();
+    assert_eq!(ctx.factory.get_factory_stream_count(), 0);
+    let page = ctx.factory.get_factory_streams_paginated(&0, &10);
+    assert_eq!(page.len(), 0);
+}
+
+/// Each successful create_stream appends to the registry and increments the count.
+#[test]
+fn test_registry_appends_on_successful_create_stream() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient, &true);
+    let now = ctx.now();
+
+    let id0 = ctx
+        .factory
+        .create_stream(&ctx.sender, &recipient, &100, &1, &now, &now, &(now + 200), &0);
+    assert_eq!(ctx.factory.get_factory_stream_count(), 1);
+
+    let id1 = ctx
+        .factory
+        .create_stream(&ctx.sender, &recipient, &100, &1, &now, &now, &(now + 200), &0);
+    assert_eq!(ctx.factory.get_factory_stream_count(), 2);
+
+    let page = ctx.factory.get_factory_streams_paginated(&0, &10);
+    assert_eq!(page.len(), 2);
+    assert_eq!(page.get(0).unwrap(), id0);
+    assert_eq!(page.get(1).unwrap(), id1);
+}
+
+/// A failed create_stream (policy check) does not write to the registry.
+#[test]
+fn test_registry_not_written_on_policy_failure() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    // Do NOT allowlist — triggers RecipientNotAllowlisted
+    let now = ctx.now();
+
+    let _ = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &100,
+        &1,
+        &now,
+        &now,
+        &(now + 200),
+        &0,
+    );
+
+    assert_eq!(ctx.factory.get_factory_stream_count(), 0);
+    let page = ctx.factory.get_factory_streams_paginated(&0, &10);
+    assert_eq!(page.len(), 0);
+}
+
+/// get_factory_streams_paginated caps the returned page at MAX_PAGE_SIZE (100).
+#[test]
+fn test_paginated_enforces_max_page_size() {
+    use fluxora_factory::MAX_PAGE_SIZE;
+    // Create two streams and request limit > MAX_PAGE_SIZE — must not exceed MAX_PAGE_SIZE.
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient, &true);
+    let now = ctx.now();
+
+    ctx.factory
+        .create_stream(&ctx.sender, &recipient, &100, &1, &now, &now, &(now + 200), &0);
+    ctx.factory
+        .create_stream(&ctx.sender, &recipient, &100, &1, &now, &now, &(now + 200), &0);
+
+    // Requesting limit=200 is capped to MAX_PAGE_SIZE; with only 2 streams the result is 2.
+    let page = ctx
+        .factory
+        .get_factory_streams_paginated(&0, &(MAX_PAGE_SIZE + 100));
+    assert!(page.len() <= MAX_PAGE_SIZE);
+    assert_eq!(page.len(), 2);
+}
+
+/// get_factory_streams_paginated with start_index beyond end returns an empty list.
+#[test]
+fn test_paginated_start_index_beyond_end_returns_empty() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient, &true);
+    let now = ctx.now();
+
+    ctx.factory
+        .create_stream(&ctx.sender, &recipient, &100, &1, &now, &now, &(now + 200), &0);
+
+    // start_index=5 is beyond the single entry
+    let page = ctx.factory.get_factory_streams_paginated(&5, &10);
+    assert_eq!(page.len(), 0);
+}
+
+/// Pagination correctly windows a multi-entry registry.
+#[test]
+fn test_paginated_window_correctness() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient, &true);
+    let now = ctx.now();
+
+    let mut ids = soroban_sdk::Vec::new(&ctx.env);
+    for _ in 0..5 {
+        let id = ctx
+            .factory
+            .create_stream(&ctx.sender, &recipient, &100, &1, &now, &now, &(now + 200), &0);
+        ids.push_back(id);
+    }
+
+    // Page 0: first 2
+    let page0 = ctx.factory.get_factory_streams_paginated(&0, &2);
+    assert_eq!(page0.len(), 2);
+    assert_eq!(page0.get(0).unwrap(), ids.get(0).unwrap());
+    assert_eq!(page0.get(1).unwrap(), ids.get(1).unwrap());
+
+    // Page 1: next 2
+    let page1 = ctx.factory.get_factory_streams_paginated(&2, &2);
+    assert_eq!(page1.len(), 2);
+    assert_eq!(page1.get(0).unwrap(), ids.get(2).unwrap());
+    assert_eq!(page1.get(1).unwrap(), ids.get(3).unwrap());
+
+    // Page 2: remaining 1
+    let page2 = ctx.factory.get_factory_streams_paginated(&4, &2);
+    assert_eq!(page2.len(), 1);
+    assert_eq!(page2.get(0).unwrap(), ids.get(4).unwrap());
+}
+
+/// get_factory_stream_count stays zero when only failed attempts are made.
+#[test]
+fn test_registry_count_only_counts_successful_streams() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    let now = ctx.now();
+
+    // Allowlist check failure
+    let _ = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &100,
+        &1,
+        &now,
+        &now,
+        &(now + 200),
+        &0,
+    );
+    // Deposit cap failure
+    ctx.factory.set_allowlist(&recipient, &true);
+    let _ = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &999_999,
+        &1,
+        &now,
+        &now,
+        &(now + 200),
+        &0,
+    );
+    // Duration failure
+    let _ = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &100,
+        &1,
+        &now,
+        &now,
+        &(now + 10), // too short
+        &0,
+    );
+
+    assert_eq!(ctx.factory.get_factory_stream_count(), 0);
+}

@@ -142,6 +142,83 @@ authorization described above, and the underlying stream contract still enforces
 its own authorization table. See the [`docs/security.md` admin powers
 section](security.md#admin-powers) for the protocol-wide admin boundary.
 
+## Factory Stream Registry
+
+Every stream ID that passes all policy checks and is successfully created through
+the factory is appended to a persistent on-chain registry. This gives operators,
+auditors, and migration tooling a complete, factory-authoritative list of policy-
+gated streams that is queryable without relying on off-chain indexers.
+
+### Storage key
+
+The registry is stored under `DataKey::FactoryStreamIds` in persistent storage as
+a `Vec<u64>` (ordered by creation time). The key is independent from the stream
+contract's own per-recipient index and from the global `StreamCount`.
+
+### TTL
+
+The index TTL is bumped on every write using the same constants as the stream
+contract:
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `PERSISTENT_LIFETIME_THRESHOLD` | 17 280 ledgers (~1 day) | Bump only when below this remaining TTL |
+| `PERSISTENT_BUMP_AMOUNT` | 120 960 ledgers (~60 days) | Target TTL after a bump |
+
+A busy factory (frequent `create_stream` calls) will continuously reset the index
+to ~60 days. An idle factory will keep the index alive for 60 days after the last
+creation without additional ledger fees.
+
+### Consistency guarantee
+
+The registry write happens **after** the cross-contract call to
+`FluxoraStream::create_stream` returns successfully. If the downstream call
+panics (e.g. insufficient balance, stream contract paused), the entire transaction
+is reverted and no entry is written. There are no orphan index entries.
+
+Policy failures (allowlist, cap, duration, time invariants) return early before
+`sender.require_auth()` and before the cross-contract call, so they also leave the
+registry unchanged.
+
+### Query entry points
+
+| Entry Point | Arguments | Returns | Notes |
+|---|---|---|---|
+| `get_factory_stream_count(env)` | — | `u32` | Total streams ever created through this factory. |
+| `get_factory_streams_paginated(env, start_index, limit)` | `start_index: u32`, `limit: u32` | `Vec<u64>` | Returns up to `min(limit, MAX_PAGE_SIZE)` IDs starting at zero-based `start_index`. Returns an empty list when `start_index ≥ count`. |
+
+Both views are permissionless and read-only.
+
+### Pagination
+
+`get_factory_streams_paginated` enforces a hard cap of **`MAX_PAGE_SIZE = 100`**
+entries per call, mirroring the stream contract's `get_recipient_streams_paginated`
+convention. Callers requesting `limit > 100` will silently receive at most 100
+entries. This prevents unbounded ledger reads that could exhaust the transaction
+CPU budget.
+
+Typical pagination loop (pseudocode):
+
+```
+page_size = 50
+start    = 0
+loop:
+    ids = get_factory_streams_paginated(start, page_size)
+    if ids.is_empty(): break
+    process(ids)
+    start += ids.len()
+```
+
+### Security notes
+
+- The registry can only be written via `create_stream`, which already enforces
+  allowlist, cap, duration, and time-invariant checks plus `sender.require_auth()`.
+  There is no admin path or direct write that can add entries without passing policy.
+- The pagination cap prevents a read-DoS: a caller cannot force the contract to
+  iterate an unbounded list in a single invocation.
+- The factory admin cannot directly modify the registry; it grows only through
+  successful policy-gated creations.
+
 ## Code alignment checklist
 
 This document is aligned with the current implementation as follows:
@@ -152,5 +229,10 @@ This document is aligned with the current implementation as follows:
   `memo = None` and `StreamKind::Linear`.
 - `FluxoraStream::create_stream` calls `sender.require_auth()` before validating
   parameters and pulling `deposit_amount` from `sender`.
-- `contracts/stream/tests/factory_policy.rs` covers the factory policy gates and
-  admin-guarded policy updates that surround this authorization model.
+- `append_stream_id` is called only after the cross-contract call succeeds,
+  keeping the registry consistent with actual on-chain stream state.
+- `get_factory_stream_count` and `get_factory_streams_paginated` are permissionless
+  read-only entry points with a hard `MAX_PAGE_SIZE = 100` cap.
+- `contracts/stream/tests/factory_policy.rs` covers the factory policy gates,
+  admin-guarded policy updates, and registry invariants (count, pagination,
+  no-write-on-failure).

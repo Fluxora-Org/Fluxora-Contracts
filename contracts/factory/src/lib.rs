@@ -2,7 +2,19 @@
 #![allow(clippy::too_many_arguments)]
 
 use fluxora_stream::FluxoraStreamClient;
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, vec, Address, Env, Vec};
+
+/// Maximum number of stream IDs returned per page in `get_factory_streams_paginated`.
+///
+/// Mirrors `MAX_PAGE_SIZE` from the stream contract to keep pagination semantics
+/// consistent across both contracts.
+pub const MAX_PAGE_SIZE: u32 = 100;
+
+/// Persistent TTL threshold (ledgers). Below this value the entry will be extended.
+const PERSISTENT_LIFETIME_THRESHOLD: u32 = 17_280;
+
+/// Persistent TTL bump target (ledgers). ~60 days at 5-second ledger close.
+const PERSISTENT_BUMP_AMOUNT: u32 = 120_960;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -26,6 +38,8 @@ pub enum DataKey {
     MaxDepositCap,
     MinDuration,
     Allowlist(Address),
+    /// Persistent ordered list of stream IDs created through this factory.
+    FactoryStreamIds,
 }
 
 /// Load and authorize the current factory admin.
@@ -40,6 +54,31 @@ fn require_admin(env: &Env) -> Result<Address, FactoryError> {
         .ok_or(FactoryError::NotInitialized)?;
     admin.require_auth();
     Ok(admin)
+}
+
+/// Load the factory-created stream ID list from persistent storage.
+fn load_stream_ids(env: &Env) -> Vec<u64> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::FactoryStreamIds)
+        .unwrap_or_else(|| vec![env])
+}
+
+/// Append `stream_id` to the factory registry and bump its persistent TTL.
+///
+/// The TTL is bumped unconditionally on every write so that a busy factory never
+/// lets the index expire.
+fn append_stream_id(env: &Env, stream_id: u64) {
+    let mut ids = load_stream_ids(env);
+    ids.push_back(stream_id);
+    env.storage()
+        .persistent()
+        .set(&DataKey::FactoryStreamIds, &ids);
+    env.storage().persistent().extend_ttl(
+        &DataKey::FactoryStreamIds,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
 }
 
 /// Read-only snapshot of the factory policy stored in instance storage.
@@ -170,7 +209,39 @@ impl FluxoraFactory {
             .unwrap_or(false)
     }
 
+    /// Return the total number of streams created through this factory.
+    pub fn get_factory_stream_count(env: Env) -> u32 {
+        load_stream_ids(&env).len()
+    }
+
+    /// Return a page of stream IDs created through this factory.
+    ///
+    /// `start_index` is a zero-based offset into the full registry. `limit` is
+    /// capped at [`MAX_PAGE_SIZE`] (100) to prevent unbounded reads.
+    ///
+    /// Returns an empty list when `start_index` is beyond the end of the registry.
+    pub fn get_factory_streams_paginated(env: Env, start_index: u32, limit: u32) -> Vec<u64> {
+        let ids = load_stream_ids(&env);
+        let total = ids.len();
+
+        if start_index >= total {
+            return vec![&env];
+        }
+
+        let capped_limit = limit.min(MAX_PAGE_SIZE);
+        let end = (start_index + capped_limit).min(total);
+        let mut page = vec![&env];
+        for i in start_index..end {
+            page.push_back(ids.get(i).unwrap());
+        }
+        page
+    }
+
     /// Creates a new stream via the FluxoraStream contract after enforcing treasury policies.
+    ///
+    /// On success the returned stream ID is appended to the factory's [`DataKey::FactoryStreamIds`]
+    /// registry. The registry is only written **after** the cross-contract call succeeds, so a
+    /// downstream failure leaves no orphan index entry.
     #[allow(clippy::too_many_arguments)]
     pub fn create_stream(
         env: Env,
@@ -183,7 +254,7 @@ impl FluxoraFactory {
         end_time: u64,
         withdraw_dust_threshold: i128,
     ) -> Result<u64, FactoryError> {
-        // Enforce policies
+        // --- Checks ---
         let is_allowed: bool = env
             .storage()
             .persistent()
@@ -231,11 +302,9 @@ impl FluxoraFactory {
             .get(&DataKey::StreamContract)
             .ok_or(FactoryError::NotInitialized)?;
 
+        // --- Interaction ---
         let stream_client = FluxoraStreamClient::new(&env, &stream_contract);
 
-        // We wrap the `try_create_stream` to gracefully handle underlying failures if needed,
-        // but for now, `.create_stream()` automatically panics with the underlying contract error
-        // if it fails, which is standard Soroban cross-contract call behavior.
         let stream_id = stream_client.create_stream(
             &sender,
             &recipient,
@@ -248,6 +317,9 @@ impl FluxoraFactory {
             &None,
             &fluxora_stream::StreamKind::Linear,
         );
+
+        // --- Effect (post-interaction): record only after a successful creation ---
+        append_stream_id(&env, stream_id);
 
         Ok(stream_id)
     }
