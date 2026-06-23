@@ -141,9 +141,9 @@ fn test_proposal_entry_survives_threshold_on_write_bump() {
     // 7-day bump window.
     let advance = PERSISTENT_LIFETIME_THRESHOLD + 10_000;
     ctx.advance_ledgers(advance);
-    assert!(ctx.env.ledger().sequence_number() > PERSISTENT_LIFETIME_THRESHOLD);
+    assert!(ctx.env.ledger().get().sequence_number > PERSISTENT_LIFETIME_THRESHOLD);
     assert!(
-        ctx.env.ledger().sequence_number() < PERSISTENT_BUMP_AMOUNT,
+        ctx.env.ledger().get().sequence_number < PERSISTENT_BUMP_AMOUNT,
         "advance must keep us inside the bump window"
     );
 
@@ -167,7 +167,7 @@ fn test_read_extends_proposal_persistent_ttl() {
     // Advance to just under the archival threshold.
     let just_under = PERSISTENT_LIFETIME_THRESHOLD - 100;
     ctx.advance_ledgers(just_under);
-    assert!(ctx.env.ledger().sequence_number() < PERSISTENT_LIFETIME_THRESHOLD);
+    assert!(ctx.env.ledger().get().sequence_number < PERSISTENT_LIFETIME_THRESHOLD);
 
     // Read the proposal — the contract's `load_proposal` helper calls
     // `bump_proposal`, which re-extends the TTL.
@@ -176,7 +176,7 @@ fn test_read_extends_proposal_persistent_ttl() {
     // Now advance *past* the original archival threshold. Without the
     // read-time bump, the entry would have archived here.
     ctx.advance_ledgers(500);
-    assert!(ctx.env.ledger().sequence_number() > PERSISTENT_LIFETIME_THRESHOLD);
+    assert!(ctx.env.ledger().get().sequence_number > PERSISTENT_LIFETIME_THRESHOLD);
 
     // The entry is still readable thanks to the read-time TTL bump.
     let proposal = ctx.client.get_proposal(&id);
@@ -195,7 +195,7 @@ fn test_read_extends_proposal_persistent_ttl() {
 fn test_execute_succeeds_at_maximum_timelock_no_archival() {
     let ctx = GovCtx::setup();
     let id = ctx.create_proposal();
-    ctx.reach_quorum(&id);
+    ctx.reach_quorum(id);
 
     // Advance past the timelock window in both sequence and timestamp.
     ctx.env.ledger().with_mut(|l| {
@@ -222,7 +222,7 @@ fn test_execute_succeeds_at_maximum_timelock_no_archival() {
 fn test_proposal_survives_max_proposal_age_with_periodic_reads() {
     let ctx = GovCtx::setup();
     let id = ctx.create_proposal();
-    ctx.reach_quorum(&id);
+    ctx.reach_quorum(id);
 
     // Step in ~5-day increments (~86,000 ledgers each — well inside the
     // ~7-day bump window each read resets). Five steps cover the full 30-day
@@ -297,4 +297,89 @@ fn test_local_ttl_constants_match_contract() {
         ctx.client.max_proposal_age_seconds(),
         MAX_PROPOSAL_AGE_SECONDS
     );
+}
+
+// ---------------------------------------------------------------------
+// QuorumReachedAt TTL regression (issue #638)
+// ---------------------------------------------------------------------
+
+/// Regression test for issue #638: QuorumReachedAt TTL must be bumped on
+/// every approve and execute so that a 48-hour timelock cannot strand a
+/// fully-approved proposal as un-executable due to entry archival.
+///
+/// This test advances the ledger near the TTL horizon between quorum and
+/// execution, then verifies execute still succeeds by reading the still-live
+/// QuorumReachedAt entry.
+#[test]
+fn test_quorum_reached_at_ttl_refreshed_on_execute() {
+    let ctx = GovCtx::setup();
+    let id = ctx.create_proposal();
+    ctx.reach_quorum(id);
+
+    // Advance ledger sequence to just inside the bump window (well past the
+    // archival threshold) and advance timestamp past the timelock.
+    ctx.env.ledger().with_mut(|l| {
+        l.sequence_number += PERSISTENT_BUMP_AMOUNT - 100;
+        l.timestamp += TIMELOCK_SECONDS + 1;
+    });
+
+    // execute must still find the QuorumReachedAt entry and succeed.
+    // Without the TTL bump on execute, this would return QuorumNotReached.
+    let executor = Address::generate(&ctx.env);
+    ctx.client.execute(&executor, &id);
+
+    let proposal = ctx.client.get_proposal(&id);
+    assert!(proposal.executed);
+}
+
+/// Multiple approvals must each refresh the QuorumReachedAt TTL.
+/// After quorum, additional reads of the proposal (e.g. from indexers)
+/// must not let the entry expire before execution.
+#[test]
+fn test_quorum_reached_at_ttl_refreshed_on_approve_and_near_horizon() {
+    let ctx = GovCtx::setup();
+    let id = ctx.create_proposal();
+
+    // Only first approval — quorum not yet reached.
+    ctx.client.approve(&ctx.signer_a, &id);
+
+    // Advance near the TTL horizon.
+    ctx.advance_ledgers(PERSISTENT_BUMP_AMOUNT - 500);
+
+    // Second approval reaches quorum and bumps QuorumReachedAt TTL.
+    ctx.client.approve(&ctx.signer_b, &id);
+
+    // Advance past the timelock.
+    ctx.env.ledger().with_mut(|l| {
+        l.timestamp += TIMELOCK_SECONDS + 1;
+    });
+
+    // Execute must succeed — QuorumReachedAt was bumped on the second approve.
+    let executor = Address::generate(&ctx.env);
+    ctx.client.execute(&executor, &id);
+
+    let proposal = ctx.client.get_proposal(&id);
+    assert!(proposal.executed);
+}
+
+/// Security: an expired QuorumReachedAt entry must cause execute to fail
+/// closed with QuorumNotReached rather than silently re-opening the timelock.
+#[test]
+fn test_execute_fails_closed_if_quorum_entry_missing() {
+    let ctx = GovCtx::setup();
+    let id = ctx.create_proposal();
+
+    // Only one approval — quorum never reached, so QuorumReachedAt is never written.
+    ctx.client.approve(&ctx.signer_a, &id);
+
+    // Advance past the timelock window.
+    ctx.env.ledger().with_mut(|l| {
+        l.sequence_number += LEDGERS_PER_TIMELOCK + 1;
+        l.timestamp += TIMELOCK_SECONDS + 1;
+    });
+
+    // execute must fail closed — no QuorumReachedAt entry means QuorumNotReached.
+    let executor = Address::generate(&ctx.env);
+    let result = ctx.client.try_execute(&executor, &id);
+    assert_eq!(result, Err(Ok(GovernanceError::QuorumNotReached)));
 }

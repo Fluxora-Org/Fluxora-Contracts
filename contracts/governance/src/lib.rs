@@ -199,6 +199,18 @@ fn bump_proposal(env: &Env, id: u32) {
     );
 }
 
+/// Extends the TTL of the QuorumReachedAt entry so it outlives the timelock.
+/// Called on every approve and execute to prevent archival before execution.
+fn bump_quorum_ttl(env: &Env, id: u32) {
+    if env.storage().persistent().has(&DataKey::QuorumReachedAt(id)) {
+        env.storage().persistent().extend_ttl(
+            &DataKey::QuorumReachedAt(id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+}
+
 fn get_admin(env: &Env) -> Result<Address, GovernanceError> {
     bump_instance(env);
     env.storage()
@@ -539,6 +551,7 @@ impl FluxoraGovernance {
                 PERSISTENT_LIFETIME_THRESHOLD,
                 PERSISTENT_BUMP_AMOUNT,
             );
+            bump_quorum_ttl(&env, proposal_id);
 
             env.events().publish(
                 (symbol_short!("quorum"), proposal_id),
@@ -598,6 +611,7 @@ impl FluxoraGovernance {
             .persistent()
             .get(&DataKey::QuorumReachedAt(proposal_id))
             .ok_or(GovernanceError::QuorumNotReached)?;
+        bump_quorum_ttl(&env, proposal_id);
 
         if proposal.approvals.len() < quorum_info.threshold {
             return Err(GovernanceError::QuorumNotReached);
