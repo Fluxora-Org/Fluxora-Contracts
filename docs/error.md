@@ -28,6 +28,7 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `DuplicateStreamId` | 14 | Duplicate stream IDs supplied to a batch operation | `batch_withdraw` |
 | `InvalidSignature` | 15 | Delegated withdrawal signature is invalid, expired, or nonce mismatch | `delegated_withdraw` |
 | `BelowMinimumAmount` | 16 | Withdrawable amount is below the `expected_minimum_amount` committed in the signature | `delegated_withdraw` |
+| `ClockRegression` | 17 | Ledger-backed accrual observed a timestamp lower than the previous accrual timestamp | `calculate_accrued`, `get_withdrawable`, `withdraw`, `withdraw_to`, `batch_withdraw`, `batch_withdraw_to`, rate changes, `cancel_stream`, auto-claim paths |
 | `ReservationCountZero` | 17 | ID reservation count is zero | `reserve_stream_ids` |
 | `ReservationLimitExceeded` | 18 | ID reservation count exceeds `MAX_ID_RESERVATION` | `reserve_stream_ids` |
 | `SignatureDeadlineExpired` | 19 | Delegated withdrawal signature deadline has passed | `delegated_withdraw` |
@@ -35,17 +36,7 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `TemplateLimitExceeded` | 21 | Per-owner or global template limit would be exceeded | `register_stream_template` |
 | `TemplateUnauthorized` | 22 | Caller is not authorized to delete a template | `delete_stream_template` |
 | `TokenVerificationFailed` | 23 | Token contract does not expose the expected SEP-41 interface during init | `init` |
-| `ReservationNotFound` | 24 | ID reservation not found | `reserve_stream_ids` |
-| `ReservationNotExpirable` | 25 | ID reservation cannot expire | `reserve_stream_ids` |
-| `ReservationStillActive` | 26 | ID reservation is still active | `reserve_stream_ids` |
-| `PauseReasonTooLong` | 27 | Pause reason string exceeds `MAX_PAUSE_REASON_BYTES` | `pause_protocol` |
-| `ClockRegression` | 28 | Ledger-backed accrual observed a timestamp lower than the previous accrual timestamp | `calculate_accrued`, `get_withdrawable`, `withdraw`, `withdraw_to`, `batch_withdraw`, `batch_withdraw_to`, rate changes, `cancel_stream`, auto-claim paths |
-| `MetadataTooLarge` | 29 | Metadata payload exceeds the allowed size | `create_stream` |
-| `UnsupportedStreamKind` | 30 | Stream kind is not supported | `withdraw` |
-| `RateCapExceeded` | 31 | Rate update exceeds the configured rate cap | `update_rate_per_second` |
-| `PauseCooldownActive` | 32 | Operation blocked by a pause cooldown | `pause_stream` |
-| `WithdrawalTooFrequent` | 33 | Rate limit exceeded for withdrawals | `withdraw` |
-| `KeeperGracePeriodNotElapsed` | 34 | Keeper attempted to close a stream before the grace period elapsed | `close_completed_stream` |
+| `PauseReasonTooLong` | 23 | Pause reason string exceeds `MAX_PAUSE_REASON_BYTES` | `pause_protocol` |
 
 Non-error enum values used by stream creation and accrual:
 
@@ -783,6 +774,10 @@ The factory contract (`contracts/factory`) uses a separate `FactoryError` enum.
 | `RecipientNotAllowlisted` | Recipient address is not on the factory allowlist |
 | `DepositExceedsCap` | Requested deposit exceeds the per-stream cap configured in the factory |
 | `DurationTooShort` | Stream duration is below the factory-enforced minimum |
+| `InvalidTimeRange` | Requested stream end time is not strictly after its start time |
+| `InvalidCliff` | Requested cliff time is outside the inclusive start/end window |
+| `InvalidCap` | `init` or `set_cap` received a non-positive `max_deposit`; accepted range is `1..=i128::MAX` |
+| `InvalidMinDuration` | `init` or `set_min_duration` received a `min_duration` above `MAX_MIN_DURATION_SECONDS`; accepted range is `0..=3_153_600_000` seconds |
 
 ---
 
