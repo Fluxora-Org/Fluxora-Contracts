@@ -1,5 +1,6 @@
 use fluxora_stream::{
-    ContractError, DataKey, FluxoraStream, FluxoraStreamClient, PauseReason, StreamStatus,
+    ContractError, DataKey, FluxoraStream, FluxoraStreamClient, PauseReason, StreamKind,
+    StreamStatus,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -52,6 +53,14 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// Advance the ledger sequence far enough to clear the pause/resume cooldown
+    /// (`MIN_PAUSE_INTERVAL_LEDGERS`) before toggling pause state.
+    fn clear_pause_cooldown(&self) {
+        self.env
+            .ledger()
+            .with_mut(|ledger| ledger.sequence_number += 32);
+    }
+
     fn create_stream(&self, duration: u64) -> u64 {
         let now = self.env.ledger().timestamp();
         self.client.create_stream(
@@ -64,6 +73,7 @@ impl<'a> Ctx<'a> {
             &(now + duration),
             &0,
             &None,
+            &StreamKind::Linear,
         )
     }
 }
@@ -76,6 +86,7 @@ fn paused_stream_count_tracks_sender_pause_resume() {
     assert_eq!(ctx.client.get_paused_stream_count(), 0);
     assert!(!ctx.client.get_global_emergency_paused());
 
+    ctx.clear_pause_cooldown();
     ctx.client
         .pause_stream(&stream_id, &PauseReason::Operational);
     assert_eq!(ctx.client.get_paused_stream_count(), 1);
@@ -84,6 +95,7 @@ fn paused_stream_count_tracks_sender_pause_resume() {
         StreamStatus::Paused
     );
 
+    ctx.clear_pause_cooldown();
     ctx.client.resume_stream(&stream_id);
     assert_eq!(ctx.client.get_paused_stream_count(), 0);
     assert_eq!(
@@ -97,6 +109,7 @@ fn paused_stream_count_tracks_admin_pause_resume() {
     let ctx = Ctx::setup();
     let stream_id = ctx.create_stream(100);
 
+    ctx.clear_pause_cooldown();
     ctx.client
         .pause_stream_as_admin(&stream_id, &PauseReason::Administrative);
     assert_eq!(ctx.client.get_paused_stream_count(), 1);
@@ -105,6 +118,7 @@ fn paused_stream_count_tracks_admin_pause_resume() {
         StreamStatus::Paused
     );
 
+    ctx.clear_pause_cooldown();
     ctx.client.resume_stream_as_admin(&stream_id);
     assert_eq!(ctx.client.get_paused_stream_count(), 0);
     assert_eq!(
@@ -118,19 +132,23 @@ fn paused_stream_count_ignores_failed_idempotent_calls() {
     let ctx = Ctx::setup();
     let stream_id = ctx.create_stream(100);
 
+    ctx.clear_pause_cooldown();
     ctx.client
         .pause_stream(&stream_id, &PauseReason::Operational);
     assert_eq!(ctx.client.get_paused_stream_count(), 1);
 
+    ctx.clear_pause_cooldown();
     let pause_again = ctx
         .client
         .try_pause_stream(&stream_id, &PauseReason::Operational);
     assert_eq!(pause_again, Err(Ok(ContractError::StreamAlreadyPaused)));
     assert_eq!(ctx.client.get_paused_stream_count(), 1);
 
+    ctx.clear_pause_cooldown();
     ctx.client.resume_stream(&stream_id);
     assert_eq!(ctx.client.get_paused_stream_count(), 0);
 
+    ctx.clear_pause_cooldown();
     let resume_again = ctx.client.try_resume_stream(&stream_id);
     assert_eq!(resume_again, Err(Ok(ContractError::StreamNotPaused)));
     assert_eq!(ctx.client.get_paused_stream_count(), 0);
@@ -141,6 +159,7 @@ fn paused_stream_count_decrements_on_cancel_from_paused() {
     let ctx = Ctx::setup();
     let stream_id = ctx.create_stream(100);
 
+    ctx.clear_pause_cooldown();
     ctx.client
         .pause_stream(&stream_id, &PauseReason::Operational);
     assert_eq!(ctx.client.get_paused_stream_count(), 1);
@@ -158,6 +177,7 @@ fn paused_stream_count_decrements_on_terminal_completion_from_paused() {
     let ctx = Ctx::setup();
     let stream_id = ctx.create_stream(10);
 
+    ctx.clear_pause_cooldown();
     ctx.client
         .pause_stream(&stream_id, &PauseReason::Operational);
     assert_eq!(ctx.client.get_paused_stream_count(), 1);
@@ -178,6 +198,7 @@ fn paused_stream_count_never_underflows_when_upgrade_key_is_missing() {
     let ctx = Ctx::setup();
     let stream_id = ctx.create_stream(100);
 
+    ctx.clear_pause_cooldown();
     ctx.client
         .pause_stream(&stream_id, &PauseReason::Operational);
     assert_eq!(ctx.client.get_paused_stream_count(), 1);
@@ -191,6 +212,7 @@ fn paused_stream_count_never_underflows_when_upgrade_key_is_missing() {
 
     assert_eq!(ctx.client.get_paused_stream_count(), 0);
 
+    ctx.clear_pause_cooldown();
     ctx.client.resume_stream(&stream_id);
     assert_eq!(ctx.client.get_paused_stream_count(), 0);
     assert_eq!(

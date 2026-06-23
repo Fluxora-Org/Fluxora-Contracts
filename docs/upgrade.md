@@ -16,7 +16,7 @@ Version policy, migration runbook, and audit notes for operators, integrators, a
 ### Current value
 
 ```
-CONTRACT_VERSION = 7
+CONTRACT_VERSION = 5
 ```
 
 ### Version history
@@ -26,10 +26,8 @@ CONTRACT_VERSION = 7
 | 1 | Initial release |
 | 2 | `Stream` struct gained `checkpointed_amount: i128` and `checkpointed_at: u64` for safe rate-decrease support |
 | 3 | `Stream` struct gained `memo: Option<Bytes>`; `StreamCreated` event gained `memo` field; `DataKey::StreamMemo(u64)` added at discriminant 10; `create_stream`/`create_streams` gained `memo` parameter; `get_stream_memo` entry-point added |
-| 4 | `TotalLiabilities` instance key for escrow accounting |
-| 5 | `withdraw_dust_threshold: i128` added to `Stream` struct and creation params |
-| 6 | Conservative additive version bump for extended protocol-management surface (including sender rotation) |
-| 7 | `DataKey::PausedStreamCount` added and maintained; `get_paused_stream_count()` view added |
+| 4 | `TotalLiabilities` instance key for escrow accounting; accrual paths track last observed ledger timestamp for clock-regression detection |
+| 5 | `withdraw_dust_threshold: i128` added to `Stream` struct and creation params; `DataKey::PausedStreamCount` added and maintained across pause/resume/cancel/complete transitions; `get_paused_stream_count()` O(1) view added |
 
 ### When to increment
 
@@ -141,9 +139,9 @@ There is no on-chain migration path for stream state between contract versions. 
 | Cancelled | Recipient withdraws frozen accrued amount on old instance |
 | Completed | Recipient withdraws remaining amount on old instance; optionally close via `close_completed_stream` |
 
-### Paused-stream counter backfill caveat (v7)
+### Paused-stream counter backfill caveat (v5)
 
-`CONTRACT_VERSION = 7` introduces an instance key, `DataKey::PausedStreamCount`, used by
+`CONTRACT_VERSION = 5` introduces an instance key, `DataKey::PausedStreamCount`, used by
 `get_paused_stream_count()` to expose an O(1) protocol-wide gauge of how many streams are
 currently paused.
 
