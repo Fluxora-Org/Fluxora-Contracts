@@ -16,3 +16,9 @@ fluxora_stream = { path = "../stream" }
 
 [dev-dependencies]
 soroban-sdk = { version = "21.7.7", features = ["testutils"] }
+fluxora_stream = { path = "../stream", features = ["testutils"] }
+
+[[test]]
+name = "factory_setters"
+path = "tests/factory_setters.rs"
+required-features = ["testutils"]
