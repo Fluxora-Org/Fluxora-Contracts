@@ -736,7 +736,10 @@ fn test_set_factory_paused_rejects_non_admin() {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         factory.set_factory_paused(&true);
     }));
-    assert!(result.is_err(), "non-admin must not be able to pause factory");
+    assert!(
+        result.is_err(),
+        "non-admin must not be able to pause factory"
+    );
 
     // Flag must remain false
     env.mock_all_auths();
