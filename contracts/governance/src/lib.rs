@@ -1501,7 +1501,7 @@ mod tests {
             .client
             .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
         // No approvals yet.
-        assert_eq!(ctx.client.is_executable(&id), false);
+        assert!(!ctx.client.is_executable(&id));
     }
 
     #[test]
@@ -1512,7 +1512,7 @@ mod tests {
             .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
         ctx.client.approve(&ctx.signer_a, &id);
         // Only 1 approval — threshold 2 not met.
-        assert_eq!(ctx.client.is_executable(&id), false);
+        assert!(!ctx.client.is_executable(&id));
     }
 
     #[test]
@@ -1524,7 +1524,7 @@ mod tests {
         ctx.client.approve(&ctx.signer_a, &id);
         ctx.client.approve(&ctx.signer_b, &id);
         // Timelock not yet elapsed (current time is still 1_000_000).
-        assert_eq!(ctx.client.is_executable(&id), false);
+        assert!(!ctx.client.is_executable(&id));
     }
 
     #[test]
@@ -1536,7 +1536,7 @@ mod tests {
         ctx.client.approve(&ctx.signer_a, &id);
         ctx.client.approve(&ctx.signer_b, &id);
         ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
-        assert_eq!(ctx.client.is_executable(&id), true);
+        assert!(ctx.client.is_executable(&id));
     }
 
     #[test]
@@ -1549,7 +1549,7 @@ mod tests {
         ctx.client.approve(&ctx.signer_b, &id);
         ctx.client.cancel_proposal(&ctx.signer_a, &id);
         ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
-        assert_eq!(ctx.client.is_executable(&id), false);
+        assert!(!ctx.client.is_executable(&id));
     }
 
     #[test]
@@ -1563,7 +1563,7 @@ mod tests {
         ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
         let executor = Address::generate(&ctx.env);
         ctx.client.execute(&executor, &id);
-        assert_eq!(ctx.client.is_executable(&id), false);
+        assert!(!ctx.client.is_executable(&id));
     }
 
     #[test]
@@ -1575,7 +1575,7 @@ mod tests {
         ctx.client.approve(&ctx.signer_a, &id);
         ctx.client.approve(&ctx.signer_b, &id);
         ctx.env.ledger().set_timestamp(1_000_000 + MAX_AGE + 1);
-        assert_eq!(ctx.client.is_executable(&id), false);
+        assert!(!ctx.client.is_executable(&id));
     }
 
     #[test]
@@ -1589,7 +1589,7 @@ mod tests {
 
         // Exactly at reached_at + TIMELOCK — timelock has elapsed (now >= exec_after).
         ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK);
-        assert_eq!(ctx.client.is_executable(&id), true);
+        assert!(ctx.client.is_executable(&id));
     }
 
     #[test]
@@ -1603,7 +1603,7 @@ mod tests {
 
         // One second before the timelock elapses — should NOT be executable.
         ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK - 1);
-        assert_eq!(ctx.client.is_executable(&id), false);
+        assert!(!ctx.client.is_executable(&id));
     }
 
     #[test]
@@ -1618,7 +1618,7 @@ mod tests {
         // Exactly at created_at + MAX_AGE — not past it, so not expired.
         // Since MAX_AGE >> TIMELOCK, the timelock has also elapsed.
         ctx.env.ledger().set_timestamp(1_000_000 + MAX_AGE);
-        assert_eq!(ctx.client.is_executable(&id), true);
+        assert!(ctx.client.is_executable(&id));
     }
 
     #[test]
@@ -1632,7 +1632,7 @@ mod tests {
 
         // One second before expiry — still executable if timelock has elapsed.
         ctx.env.ledger().set_timestamp(1_000_000 + MAX_AGE - 1);
-        assert_eq!(ctx.client.is_executable(&id), true);
+        assert!(ctx.client.is_executable(&id));
     }
 
     #[test]
@@ -1646,7 +1646,7 @@ mod tests {
 
         // One second past expiry — not executable.
         ctx.env.ledger().set_timestamp(1_000_000 + MAX_AGE + 1);
-        assert_eq!(ctx.client.is_executable(&id), false);
+        assert!(!ctx.client.is_executable(&id));
     }
 
     #[test]
@@ -1657,7 +1657,7 @@ mod tests {
         let id = ctx
             .client
             .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
-        assert_eq!(ctx.client.is_executable(&id), false);
+        assert!(!ctx.client.is_executable(&id));
         let executor = Address::generate(&ctx.env);
         assert_eq!(
             ctx.client.try_execute(&executor, &id),
@@ -1667,7 +1667,7 @@ mod tests {
         // --- Post-quorum, pre-timelock ---
         ctx.client.approve(&ctx.signer_a, &id);
         ctx.client.approve(&ctx.signer_b, &id);
-        assert_eq!(ctx.client.is_executable(&id), false);
+        assert!(!ctx.client.is_executable(&id));
         assert_eq!(
             ctx.client.try_execute(&executor, &id),
             Err(Ok(GovernanceError::TimelockNotElapsed))
@@ -1675,11 +1675,11 @@ mod tests {
 
         // --- Post-timelock, executable ---
         ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
-        assert_eq!(ctx.client.is_executable(&id), true);
+        assert!(ctx.client.is_executable(&id));
         assert!(ctx.client.try_execute(&executor, &id).is_ok());
 
         // --- Post-execution ---
-        assert_eq!(ctx.client.is_executable(&id), false);
+        assert!(!ctx.client.is_executable(&id));
         assert_eq!(
             ctx.client.try_execute(&executor, &id),
             Err(Ok(GovernanceError::AlreadyExecuted))
@@ -1692,7 +1692,7 @@ mod tests {
         ctx.client.approve(&ctx.signer_a, &id2);
         ctx.client.approve(&ctx.signer_b, &id2);
         ctx.client.cancel_proposal(&ctx.signer_a, &id2);
-        assert_eq!(ctx.client.is_executable(&id2), false);
+        assert!(!ctx.client.is_executable(&id2));
         assert_eq!(
             ctx.client.try_execute(&executor, &id2),
             Err(Ok(GovernanceError::ProposalCancelled))
@@ -1707,7 +1707,7 @@ mod tests {
         ctx.env
             .ledger()
             .set_timestamp(1_000_000 + MAX_AGE + TIMELOCK + 100);
-        assert_eq!(ctx.client.is_executable(&id3), false);
+        assert!(!ctx.client.is_executable(&id3));
         assert_eq!(
             ctx.client.try_execute(&executor, &id3),
             Err(Ok(GovernanceError::ProposalExpired))

@@ -63,6 +63,7 @@ impl<'a> TestContext<'a> {
             &1000u64,
             &0_i128,
             &None,
+            &fluxora_stream::StreamKind::Linear,
         )
     }
 }

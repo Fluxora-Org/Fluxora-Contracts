@@ -1,7 +1,7 @@
 use fluxora_governance::{FluxoraGovernance, FluxoraGovernanceClient};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    vec, Address, Bytes, Env, Vec,
+    Address, Bytes, Env, Vec,
 };
 
 struct GovGasCtx<'a> {
@@ -61,7 +61,7 @@ fn test_governance_gas_propose() {
         let ctx = GovGasCtx::setup(size, threshold);
         let (cpu, mem) = measure_budget(&ctx, |ctx| {
             ctx.client
-                .propose(&ctx.signers[0], &ctx.target, &ctx.calldata("proposal"));
+                .propose(&ctx.signers.get(0).unwrap(), &ctx.target, &ctx.calldata("proposal"));
         });
 
         println!("GAS_MEASUREMENT: propose: {}: {}", size, cpu);
@@ -80,10 +80,10 @@ fn test_governance_gas_approve_nonquorum() {
         let ctx = GovGasCtx::setup(size, threshold);
         let proposal_id =
             ctx.client
-                .propose(&ctx.signers[0], &ctx.target, &ctx.calldata("proposal"));
+                .propose(&ctx.signers.get(0).unwrap(), &ctx.target, &ctx.calldata("proposal"));
 
         let (cpu, mem) = measure_budget(&ctx, |ctx| {
-            ctx.client.approve(&ctx.signers[1], &proposal_id);
+            ctx.client.approve(&ctx.signers.get(1).unwrap(), &proposal_id);
         });
 
         println!("GAS_MEASUREMENT: approve_nonquorum: {}: {}", size, cpu);
@@ -110,14 +110,14 @@ fn test_governance_gas_approve_quorum() {
         let ctx = GovGasCtx::setup(size, threshold);
         let proposal_id =
             ctx.client
-                .propose(&ctx.signers[0], &ctx.target, &ctx.calldata("proposal"));
+                .propose(&ctx.signers.get(0).unwrap(), &ctx.target, &ctx.calldata("proposal"));
 
         for signer in 0..(size - 1) {
             ctx.client
-                .approve(&ctx.signers[signer as usize], &proposal_id);
+                .approve(&ctx.signers.get(signer).unwrap(), &proposal_id);
         }
 
-        let last_signer = ctx.signers[(size - 1) as usize].clone();
+        let last_signer = ctx.signers.get(size - 1).unwrap();
         ctx.env.budget().reset_unlimited();
         ctx.client.approve(&last_signer, &proposal_id);
         let cpu = ctx.env.budget().cpu_instruction_cost();
@@ -147,11 +147,11 @@ fn test_governance_gas_execute() {
         let ctx = GovGasCtx::setup(size, threshold);
         let proposal_id =
             ctx.client
-                .propose(&ctx.signers[0], &ctx.target, &ctx.calldata("proposal"));
+                .propose(&ctx.signers.get(0).unwrap(), &ctx.target, &ctx.calldata("proposal"));
 
         for signer in 0..size {
             ctx.client
-                .approve(&ctx.signers[signer as usize], &proposal_id);
+                .approve(&ctx.signers.get(signer).unwrap(), &proposal_id);
         }
 
         ctx.env.ledger().set_timestamp(1_000_000 + 172_800 + 1);

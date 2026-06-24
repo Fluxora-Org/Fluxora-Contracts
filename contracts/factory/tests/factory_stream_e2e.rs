@@ -48,21 +48,24 @@ const LEDGER_TIMESTAMP: u64 = 1_000_000_000;
 // Test context
 // ---------------------------------------------------------------------------
 
-struct Ctx {
+struct Ctx<'a> {
     env: Env,
-    factory: FluxoraFactoryClient,
-    stream: FluxoraStreamClient,
+    factory: FluxoraFactoryClient<'a>,
+    stream: FluxoraStreamClient<'a>,
+    #[expect(dead_code)]
     admin: Address,
     sender: Address,
     recipient: Address,
-    token: TokenClient,
+    token: TokenClient<'a>,
+    #[expect(dead_code)]
     token_id: Address,
     stream_contract_id: Address,
+    #[expect(dead_code)]
     factory_contract_id: Address,
     sender_balance_before: i128,
 }
 
-impl Ctx {
+impl<'a> Ctx<'a> {
     fn setup() -> Self {
         let env = Env::default();
         env.mock_all_auths();

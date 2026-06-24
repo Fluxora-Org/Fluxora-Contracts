@@ -1359,6 +1359,7 @@ fn add_stream_to_recipient_index(
     stream_id: u64,
     end_time: Option<u64>,
 ) {
+    let _ = end_time; // Reserved for future use in time-based indexing
     let mut streams = load_recipient_streams(env, recipient);
 
     // Insert in sorted order (binary search for insertion point)
@@ -1706,6 +1707,7 @@ fn push_token(env: &Env, to: &Address, amount: i128) -> Result<(), ContractError
 ///
 /// # Errors
 /// Returns `ContractError::MetadataTooLarge` on any bound violation.
+#[expect(dead_code)]
 fn validate_metadata(
     metadata: &Map<soroban_sdk::Bytes, soroban_sdk::Bytes>,
 ) -> Result<(), ContractError> {
@@ -5199,7 +5201,7 @@ impl FluxoraStream {
         let start_idx = if cursor == 0 {
             0
         } else {
-            match streams.binary_search(&cursor) {
+            match streams.binary_search(cursor) {
                 Ok(pos) => pos + 1, // Start after the cursor
                 Err(pos) => pos,    // Insert position if not found
             }
@@ -6662,8 +6664,7 @@ impl FluxoraStream {
         // Apply it to the new start_time.
         let cliff_offset = source
             .cliff_time
-            .checked_sub(source.start_time)
-            .unwrap_or(0); // if cliff < start (degenerate), treat as no cliff
+            .saturating_sub(source.start_time); // if cliff < start (degenerate), treat as no cliff
         let new_cliff_time = start_time
             .checked_add(cliff_offset)
             .ok_or(ContractError::ArithmeticOverflow)?;

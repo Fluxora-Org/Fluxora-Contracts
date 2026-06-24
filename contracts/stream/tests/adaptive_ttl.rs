@@ -63,7 +63,6 @@ impl<'a> Ctx<'a> {
                     end_time: now + duration,
                     withdraw_dust_threshold: None,
                     memo: None,
-                    metadata: None,
                 }
             ],
         );

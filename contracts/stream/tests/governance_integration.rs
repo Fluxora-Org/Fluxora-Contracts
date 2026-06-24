@@ -14,6 +14,7 @@ const MAX_AGE: u64 = 2_592_000; // 30 days
 
 struct GovCtx<'a> {
     env: Env,
+    #[expect(dead_code)]
     contract_id: Address,
     admin: Address,
     signer_a: Address,
@@ -861,7 +862,7 @@ fn test_end_to_end_governance_stream_parameter_change() {
     let new_max_rate: i128 = 1000;
     let calldata = Bytes::from_slice(
         &env,
-        &format!("set_max_rate_per_second:{}", new_max_rate).as_bytes(),
+        format!("set_max_rate_per_second:{}", new_max_rate).as_bytes(),
     );
 
     let proposal_id = governance_client.propose(&signer_a, &target_address, &calldata);
