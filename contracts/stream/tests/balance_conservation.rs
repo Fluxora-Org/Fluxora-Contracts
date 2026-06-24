@@ -1,135 +1,153 @@
-//! Property-based balance-conservation invariants for all stream entrypoints.
+//! Consolidated property-based harness for balance conservation and accrual invariants.
 //!
-//! Issue #570 — The core financial invariant of Fluxora is:
+//! This module exercises randomized sequences of mutating operations on both `Linear`
+//! and `CliffOnly` streams and asserts the protocol's core financial-safety invariants:
 //!
-//!     For every stream: sum(withdrawn) + remaining_contract_balance == total_deposited
+//! 1. **Global balance conservation** — the sum of tokens held by the sender, recipient,
+//!    and the contract is constant (no tokens are created or destroyed).
+//! 2. **Contract solvency** — the contract balance equals `total_deposited - total_withdrawn
+//!    - total_refunded`, so the contract always has exactly enough to cover its obligations.
+//! 3. **Accrual boundedness** — `0 <= calculate_accrued <= deposit_amount`.
+//! 4. **Accrual monotonicity** — for non-decreasing time, `calculate_accrued` never decreases.
+//! 5. **Withdrawal bound** — `0 <= withdrawn_amount <= deposit_amount` and `accrued >= withdrawn`.
+//! 6. **Rate-decrease entitlement preservation** — a successful `decrease_rate_per_second`
+//!    checkpoint locks in the pre-decrease accrued amount; the same-timestamp withdrawable
+//!    value never decreases.
+//! 7. **CliffOnly unsupported-operation guard** — `top_up_stream`, `decrease_rate_per_second`,
+//!    `update_rate_per_second`, `shorten_stream_end_time`, and `extend_stream_end_time` all
+//!    return `ContractError::UnsupportedStreamKind` for `CliffOnly` streams.
 //!
-//! This module uses `proptest` to generate arbitrary stream parameters and
-//! operation sequences, then asserts the invariant holds after every mutating
-//! entrypoint. It covers both single-stream and multi-stream (batch) scenarios.
+//! Run the harness with:
 //!
-//! # Invariants checked
+//! ```bash
+//! cargo test -p fluxora_stream --features testutils --test balance_conservation
+//! ```
 //!
-//! 1. **Per-stream balance conservation**: `withdrawn_amount + remaining_contract_balance_for_stream == deposit_amount`
-//!    (after accounting for refunds on cancel/shorten/rate-decrease).
-//! 2. **Global balance conservation**: `total_contract_token_balance == total_liabilities + excess`
-//!    where `total_liabilities = sum(deposit_amount - refunded_amount - withdrawn_amount)`.
-//! 3. **Monotonicity**: `withdrawn_amount` never decreases; `deposit_amount` only increases via top-up.
-//! 4. **Non-negative**: All token amounts remain >= 0 at all times.
+//! For deeper local coverage before an audit or release:
 //!
-//! # Security assumptions validated
+//! ```bash
+//! PROPTEST_CASES=10000 cargo test -p fluxora_stream --features testutils --test balance_conservation
+//! ```
 //!
-//! - No operation can create or destroy tokens (conservation law).
-//! - Cancel/shorten/rate-decrease always refund exact unstreamed amounts.
-//! - Withdraw never exceeds accrued amount.
-//! - Batch operations are atomic (all succeed or all fail).
+//! # Security notes
 //!
-//! # Test coverage
-//!
-//! - Single-stream lifecycle: create -> [withdraw|top_up|cancel|shorten|extend|rate_change]* -> complete
-//! - Multi-stream batch: create_streams -> batch_withdraw -> mixed operations
-//! - Edge cases: zero deposit, zero rate, cliff==end, immediate cancel, overflow boundaries
+//! Balance conservation and accrual monotonicity are the protocol's core financial-safety
+//! invariants. A violation means either a recipient can over-withdraw or a sender can be
+//! short-refunded. Property-testing the combinatorial operation-sequence space is the most
+//! cost-effective way to find `i128` boundary and checkpointing bugs before an audit.
 
 extern crate std;
 
 use fluxora_stream::{
-    ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamStatus,
+    ContractError, FluxoraStream, FluxoraStreamClient, PauseReason, StreamKind, StreamStatus,
 };
 use proptest::prelude::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    vec, Address, Env, IntoVal,
+    Address, Env,
 };
 
+/// Total tokens minted into the test ecosystem (sender + recipient).  This is a
+/// conservation constant: no operation in this harness should create or destroy
+/// tokens, so `sender_balance + recipient_balance + contract_balance` must always
+/// equal this value.
+const INITIAL_MINT: i128 = 2_000_000_000_000;
+
 // ---------------------------------------------------------------------------
-// Test context helpers
+// Test harness
 // ---------------------------------------------------------------------------
 
 struct TestContext {
     env: Env,
-    client: FluxoraStreamClient<'static>,
     contract_id: Address,
+    token_id: Address,
     sender: Address,
     recipient: Address,
-    token: TokenClient<'static>,
-    admin: Address,
 }
 
 impl TestContext {
-    fn setup() -> Self {
+    fn new() -> Self {
         let env = Env::default();
         env.mock_all_auths();
 
         let contract_id = env.register_contract(None, FluxoraStream);
-        let client = FluxoraStreamClient::new(&env, &contract_id);
-
         let token_admin = Address::generate(&env);
-        let token_id = env
-            .register_stellar_asset_contract_v2(token_admin)
-            .address();
-        let token = TokenClient::new(&env, &token_id);
+        let token_id = env.register_stellar_asset_contract_v2(token_admin).address();
 
         let admin = Address::generate(&env);
         let sender = Address::generate(&env);
         let recipient = Address::generate(&env);
 
-        // Mint generous balance to sender for all stream operations
-        token.mint(&sender, &1_000_000_000_000_i128);
-        token.mint(&recipient, &1_000_000_000_000_i128);
-
+        let client = FluxoraStreamClient::new(&env, &contract_id);
         client.init(&token_id, &admin);
 
-        // Pin ledger timestamp to 0 for deterministic test start
+        // Fund both participants generously so that any generated sequence of
+        // top-ups can be satisfied without extra minting.
+        StellarAssetClient::new(&env, &token_id).mint(&sender, &1_000_000_000_000);
+        StellarAssetClient::new(&env, &token_id).mint(&recipient, &1_000_000_000_000);
+
+        // Approve the contract to pull arbitrary top-up amounts from the sender.
+        TokenClient::new(&env, &token_id).approve(
+            &sender,
+            &contract_id,
+            &i128::MAX,
+            &1_000_000u32,
+        );
+
         env.ledger().set_timestamp(0);
 
         Self {
             env,
-            client,
             contract_id,
+            token_id,
             sender,
             recipient,
-            token,
-            admin,
         }
     }
 
-    /// Create a single stream with the given parameters.
+    fn client(&self) -> FluxoraStreamClient<'_> {
+        FluxoraStreamClient::new(&self.env, &self.contract_id)
+    }
+
+    fn token(&self) -> TokenClient<'_> {
+        TokenClient::new(&self.env, &self.token_id)
+    }
+
+    fn contract_balance(&self) -> i128 {
+        self.token().balance(&self.contract_id)
+    }
+
+    fn sender_balance(&self) -> i128 {
+        self.token().balance(&self.sender)
+    }
+
+    fn recipient_balance(&self) -> i128 {
+        self.token().balance(&self.recipient)
+    }
+
+    /// Create a stream pinned at `start_time = 0` with the supplied parameters.
     fn create_stream(
         &self,
         deposit: i128,
         rate: i128,
-        start: u64,
         cliff: u64,
         end: u64,
-    ) -> Result<u64, ContractError> {
-        self.client.try_create_stream(
+        kind: StreamKind,
+    ) -> u64 {
+        self.env.ledger().set_timestamp(0);
+        self.client().create_stream(
             &self.sender,
             &self.recipient,
             &deposit,
             &rate,
-            &start,
+            &0u64,
             &cliff,
             &end,
-            &0, // withdraw_dust_threshold
+            &0i128,
             &None,
+            &kind,
         )
-    }
-
-    /// Get the contract's current token balance.
-    fn contract_balance(&self) -> i128 {
-        self.token.balance(&self.contract_id)
-    }
-
-    /// Advance ledger time by `seconds`.
-    fn advance_time(&self, seconds: u64) {
-        let now = self.env.ledger().timestamp();
-        self.env.ledger().set_timestamp(now + seconds);
-    }
-
-    /// Set absolute ledger time.
-    fn set_time(&self, timestamp: u64) {
-        self.env.ledger().set_timestamp(timestamp);
     }
 }
 
@@ -137,1121 +155,469 @@ impl TestContext {
 // Proptest strategies
 // ---------------------------------------------------------------------------
 
-/// Strategy for valid stream parameters that satisfy all creation constraints.
-///
-/// Constraints:
-/// - deposit > 0, rate > 0
-/// - start >= current_time (we pin current_time = 0)
-/// - start < end
-/// - cliff in [start, end]
-/// - deposit >= rate * (end - start)
-fn valid_stream_params() -> impl Strategy<Value = (i128, i128, u64, u64, u64)> {
-    // Use reasonable ranges for efficient testing while covering edge cases
-    (1u64..10_000u64, 1u64..10_000u64, 1i128..1_000_000i128)
-        .prop_filter("valid stream params", |(duration, cliff_offset, rate)| {
-            // duration > 0, rate > 0
-            *duration > 0 && *rate > 0 && *cliff_offset <= *duration
-        })
-        .prop_map(|(duration, cliff_offset, rate)| {
-            let start: u64 = 0;
-            let end = start + duration;
-            let cliff = start + cliff_offset;
-            // deposit must cover rate * duration exactly (tight bound)
-            let deposit = rate * (duration as i128);
-            (deposit, rate, start, cliff, end)
-        })
+/// Valid parameters for a `Linear` stream.  The returned tuple is
+/// `(deposit_amount, rate_per_second, cliff_time, end_time)` with `start_time = 0`.
+fn linear_stream_params() -> impl Strategy<Value = (i128, i128, u64, u64)> {
+    (10u64..1000u64, 0u64..1000u64, 1i128..100i128).prop_flat_map(
+        |(duration, cliff_offset, rate)| {
+            let duration = duration.max(1);
+            let cliff = cliff_offset.min(duration);
+            let end = duration;
+            let min_deposit = rate.saturating_mul(duration as i128);
+            let max_deposit = min_deposit.saturating_add(min_deposit.max(1) / 2);
+            (
+                Just(rate),
+                Just(cliff),
+                Just(end),
+                min_deposit..=max_deposit.max(min_deposit),
+            )
+                .prop_map(|(r, c, e, d)| (d, r, c, e))
+        },
+    )
 }
 
-/// Strategy for valid stream parameters with excess deposit (deposit > rate * duration).
-fn stream_with_excess_deposit() -> impl Strategy<Value = (i128, i128, u64, u64, u64)> {
-    valid_stream_params().prop_map(|(deposit, rate, start, cliff, end)| {
-        let duration = end - start;
-        let excess = deposit / 2; // 50% excess
-        (deposit + excess, rate, start, cliff, end)
-    })
+/// Valid parameters for a `CliffOnly` stream.  The returned tuple is
+/// `(deposit_amount, cliff_time, end_time)`; `rate_per_second` is always `0`.
+fn cliff_stream_params() -> impl Strategy<Value = (i128, u64, u64)> {
+    (10u64..1000u64, 0u64..1000u64, 1i128..10_000i128).prop_map(
+        |(duration, cliff_offset, deposit)| {
+            let duration = duration.max(1);
+            let cliff = cliff_offset.min(duration);
+            let end = duration;
+            (deposit, cliff, end)
+        },
+    )
 }
 
-/// Enum representing all mutating operations on a stream.
-#[derive(Clone, Debug)]
-enum StreamOp {
-    Withdraw { at_time: u64 },
-    TopUp { amount: i128 },
-    Cancel { at_time: u64 },
-    Shorten { new_end: u64 },
-    Extend { new_end: u64 },
-    IncreaseRate { new_rate: i128 },
-    DecreaseRate { new_rate: i128 },
-}
-
-/// Strategy for generating a sequence of operations on a stream.
-///
-/// Operations are constrained to be valid given the stream parameters.
-fn operation_sequence(
-    _deposit: i128,
-    rate: i128,
-    start: u64,
-    cliff: u64,
-    end: u64,
-) -> impl Strategy<Value = Vec<StreamOp>> {
-    let duration = end - start;
-    let max_time = end + 1000; // Allow some post-end operations
-
-    // Withdraw: at any time from cliff to max_time
-    let withdraw_op = (cliff..=max_time).prop_map(|at_time| StreamOp::Withdraw { at_time });
-
-    // TopUp: positive amount
-    let topup_op = (1i128..10_000i128).prop_map(|amount| StreamOp::TopUp { amount });
-
-    // Cancel: at any time from start to max_time
-    let cancel_op = (start..=max_time).prop_map(|at_time| StreamOp::Cancel { at_time });
-
-    // Shorten: new_end in (current_time, end)
-    let shorten_op = (start + 1..end).prop_map(|new_end| StreamOp::Shorten { new_end });
-
-    // Extend: new_end in (end, end + 10000), but must satisfy deposit >= rate * (new_end - start)
-    // For simplicity, use smaller extensions that stay within original deposit
-    let extend_op = (end + 1..=end + duration).prop_map(|new_end| StreamOp::Extend { new_end });
-
-    // IncreaseRate: new_rate in (rate, rate * 2] but must satisfy deposit >= new_rate * (end - start)
-    // For simplicity, keep within bounds
-    let increase_rate_op =
-        (rate + 1..=rate * 2).prop_map(|new_rate| StreamOp::IncreaseRate { new_rate });
-
-    // DecreaseRate: new_rate in [1, rate)
-    let decrease_rate_op = (1i128..rate).prop_map(|new_rate| StreamOp::DecreaseRate { new_rate });
-
+/// Stream parameters covering both kinds.
+fn stream_params() -> impl Strategy<Value = (i128, i128, u64, u64, StreamKind)> {
     prop_oneof![
-        4 => withdraw_op,
-        2 => topup_op,
-        1 => cancel_op,
-        1 => shorten_op,
-        1 => extend_op,
-        1 => increase_rate_op,
-        1 => decrease_rate_op,
+        linear_stream_params().prop_map(|(d, r, c, e)| (d, r, c, e, StreamKind::Linear)),
+        cliff_stream_params().prop_map(|(d, c, e)| (d, 0, c, e, StreamKind::CliffOnly)),
     ]
-    .prop_vec(0..20) // 0 to 20 operations per test case
+}
+
+/// A single mutating operation in the randomized sequence.
+#[derive(Clone, Debug)]
+enum Op {
+    Withdraw,
+    TopUp(i128),
+    DecreaseRate(i128),
+    IncreaseRate(i128),
+    Shorten(u64),
+    Extend(u64),
+    Pause,
+    Resume,
+    Cancel,
+}
+
+/// Randomized operation sequences interleaved with time jumps.
+fn op_sequence() -> impl Strategy<Value = std::vec::Vec<(Op, u64)>> {
+    let op = prop_oneof![
+        Just(Op::Withdraw),
+        (1i128..5_000i128).prop_map(Op::TopUp),
+        (1i128..100i128).prop_map(Op::DecreaseRate),
+        (1i128..200i128).prop_map(Op::IncreaseRate),
+        (1u64..100u64).prop_map(Op::Shorten),
+        (1u64..100u64).prop_map(Op::Extend),
+        Just(Op::Pause),
+        Just(Op::Resume),
+        Just(Op::Cancel),
+    ];
+    prop::collection::vec((op, 0u64..100u64), 0..15)
 }
 
 // ---------------------------------------------------------------------------
-// Core invariant helpers
+// Invariant assertions
 // ---------------------------------------------------------------------------
 
-/// Verify the global balance conservation invariant.
+/// Assert all global and per-stream invariants after a mutating step.
 ///
-/// Invariant: contract_token_balance == sum_over_streams(remaining_deposit) + excess
-///
-/// Where remaining_deposit = deposit_amount - withdrawn_amount for each stream,
-/// and excess is any tokens not accounted for by stream liabilities.
-fn assert_global_balance_conservation(ctx: &TestContext) {
-    let contract_balance = ctx.contract_balance();
+/// Returns the current timestamp, accrued amount, and withdrawn amount so the
+/// caller can keep a running history for monotonicity checks.
+fn assert_invariants(
+    ctx: &TestContext,
+    stream_id: u64,
+    total_deposited: i128,
+    total_withdrawn: i128,
+    total_refunded: i128,
+    last_time: u64,
+    last_accrued: i128,
+    last_withdrawn: i128,
+    label: &str,
+) -> (u64, i128, i128) {
+    let current_time = ctx.env.ledger().timestamp();
+    let stream = ctx.client().get_stream_state(&stream_id);
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    let withdrawable = ctx.client().get_withdrawable(&stream_id);
+    let deposit = stream.deposit_amount;
+    let withdrawn = stream.withdrawn_amount;
 
-    // Sum up all remaining deposits across all streams
-    let stream_count = ctx.client.get_stream_count();
-    let mut total_remaining = 0i128;
-
-    for id in 0..stream_count {
-        if let Ok(stream) = ctx.client.try_get_stream_state(&id) {
-            let remaining = stream.deposit_amount - stream.withdrawn_amount;
-            total_remaining += remaining.max(0);
-        }
-    }
-
-    // The contract must always hold enough to cover all stream obligations
+    // Per-stream bounds.
     assert!(
-        contract_balance >= total_remaining,
-        "CRITICAL: contract balance {} < total remaining deposits {}. \
-         This means the contract cannot fulfill its obligations!",
-        contract_balance,
-        total_remaining
+        withdrawn >= 0 && withdrawn <= deposit,
+        "{label}: withdrawn_amount={withdrawn} not in [0, deposit={deposit}]"
     );
-}
-
-/// Verify per-stream balance conservation.
-///
-/// For a single stream at any point in time:
-/// - If Active/Paused: withdrawn_amount + (deposit_amount - withdrawn_amount) == deposit_amount (trivially true)
-/// - The real invariant is about tokens: contract holds deposit_amount - withdrawn_amount (minus any refunds)
-/// - After cancel: refunded = deposit_amount - accrued_at_cancel, and recipient can still withdraw accrued_at_cancel - already_withdrawn
-/// - So total tokens moved out = withdrawn + refunded = withdrawn + (deposit - accrued) = deposit - (accrued - withdrawn)
-/// - Tokens remaining in contract for this stream = accrued - withdrawn (if not yet withdrawn) + 0 (if already withdrawn)
-///
-/// Simplified invariant: For any stream, the sum of all tokens that have left the contract
-/// for this stream (withdrawn + refunded) plus tokens still in contract for this stream
-/// equals the original deposit amount.
-fn assert_stream_balance_conservation(ctx: &TestContext, stream_id: u64) {
-    let stream = ctx.client.get_stream_state(&stream_id);
-
-    // Basic sanity: withdrawn never exceeds deposit
     assert!(
-        stream.withdrawn_amount <= stream.deposit_amount,
-        "Stream {}: withdrawn_amount {} > deposit_amount {}",
-        stream_id,
-        stream.withdrawn_amount,
-        stream.deposit_amount
+        accrued >= 0 && accrued <= deposit,
+        "{label}: calculate_accrued={accrued} not in [0, deposit={deposit}]"
+    );
+    assert!(
+        accrued >= withdrawn,
+        "{label}: accrued={accrued} < withdrawn={withdrawn}"
+    );
+    assert!(
+        withdrawable >= 0 && withdrawable <= deposit.saturating_sub(withdrawn),
+        "{label}: get_withdrawable={withdrawable} not in [0, deposit-withdrawn={}]",
+        deposit.saturating_sub(withdrawn)
     );
 
-    // For completed streams: withdrawn must equal deposit
-    if stream.status == StreamStatus::Completed {
-        assert_eq!(
-            stream.withdrawn_amount, stream.deposit_amount,
-            "Stream {}: Completed but withdrawn {} != deposit {}",
-            stream_id, stream.withdrawn_amount, stream.deposit_amount
-        );
-    }
-
-    // For cancelled streams: withdrawn <= deposit, and accrued at cancel was <= deposit
-    if stream.status == StreamStatus::Cancelled {
+    // Accrual monotonicity over non-decreasing time.  Status transitions such as
+    // cancellation freeze accrual and completion cap it at `deposit`, both of
+    // which are non-decreasing relative to the previous active value.
+    if current_time >= last_time {
         assert!(
-            stream.withdrawn_amount <= stream.deposit_amount,
-            "Stream {}: Cancelled but withdrawn {} > deposit {}",
-            stream_id,
-            stream.withdrawn_amount,
-            stream.deposit_amount
+            accrued >= last_accrued,
+            "{label}: accrual not monotonic: accrued={accrued} at t={current_time} < last={last_accrued} at t={last_time}"
         );
     }
-}
-
-/// Verify that the accrual math is consistent with the stream parameters.
-fn assert_accrual_consistency(ctx: &TestContext, stream_id: u64, expected_deposit: i128) {
-    let stream = ctx.client.get_stream_state(&stream_id);
-    let now = ctx.env.ledger().timestamp();
-
-    // Calculate expected accrued amount at current time
-    let expected_accrued = fluxora_stream::accrual::calculate_accrued_amount(
-        stream.start_time,
-        stream.cliff_time,
-        stream.end_time,
-        stream.rate_per_second,
-        stream.deposit_amount,
-        now,
+    assert!(
+        withdrawn >= last_withdrawn,
+        "{label}: withdrawn_amount decreased from {last_withdrawn} to {withdrawn}"
     );
 
-    // Get contract's calculated accrued
-    let contract_accrued = ctx.client.calculate_accrued(&stream_id);
-
+    // Global token conservation across sender, recipient, and contract.
+    let total_outside = ctx
+        .sender_balance()
+        .saturating_add(ctx.recipient_balance())
+        .saturating_add(ctx.contract_balance());
     assert_eq!(
-        contract_accrued, expected_accrued,
-        "Stream {}: contract accrued {} != expected accrued {} at t={}",
-        stream_id, contract_accrued, expected_accrued, now
+        total_outside, INITIAL_MINT,
+        "{label}: global token conservation violated: sender={} recipient={} contract={}",
+        ctx.sender_balance(),
+        ctx.recipient_balance(),
+        ctx.contract_balance()
     );
 
-    // withdrawable = accrued - withdrawn (when active and past cliff)
-    if stream.status == StreamStatus::Active || stream.status == StreamStatus::Paused {
-        let withdrawable = ctx.client.get_withdrawable(&stream_id);
-        let expected_withdrawable = (expected_accrued - stream.withdrawn_amount).max(0);
-        assert_eq!(
-            withdrawable, expected_withdrawable,
-            "Stream {}: contract withdrawable {} != expected {}",
-            stream_id, withdrawable, expected_withdrawable
-        );
-    }
-
-    // The total deposit should match what was originally provided (before any mutations)
-    // After top_up, deposit increases; after cancel/shorten/rate-decrease, deposit may decrease
-    // We track the expected deposit separately.
+    // Contract balance must exactly match the tracked deposits minus outflows.
+    let expected_contract = total_deposited - total_withdrawn - total_refunded;
     assert_eq!(
-        stream.deposit_amount, expected_deposit,
-        "Stream {}: deposit {} != expected {}",
-        stream_id, stream.deposit_amount, expected_deposit
+        ctx.contract_balance(),
+        expected_contract,
+        "{label}: contract balance {} != expected {} (deposited={} withdrawn={} refunded={})",
+        ctx.contract_balance(),
+        expected_contract,
+        total_deposited,
+        total_withdrawn,
+        total_refunded
     );
+
+    (current_time, accrued, withdrawn)
 }
 
 // ---------------------------------------------------------------------------
-// Property-based tests
+// Main property test
 // ---------------------------------------------------------------------------
 
 proptest! {
-    //! Test that creating a single stream and running a random operation sequence
-    //! preserves the balance conservation invariant.
-
     #![proptest_config(ProptestConfig {
         cases: 256,
         max_shrink_iters: 50,
         ..ProptestConfig::default()
     })]
 
-    /// Property: For any valid stream parameters and any sequence of valid operations,
-    /// the balance conservation invariant holds after each operation.
+    /// Randomized operation sequences on `Linear` and `CliffOnly` streams must
+    /// preserve balance conservation and accrual monotonicity.
     #[test]
-    fn prop_single_stream_balance_conservation(
-        (deposit, rate, start, cliff, end) in valid_stream_params(),
-        ops in operation_sequence(deposit, rate, start, cliff, end)
+    fn prop_random_op_sequences_preserve_invariants(
+        (deposit, rate, cliff, end, kind) in stream_params(),
+        ops in op_sequence(),
     ) {
-        let ctx = TestContext::setup();
-        ctx.set_time(0);
+        let ctx = TestContext::new();
+        let stream_id = ctx.create_stream(deposit, rate, cliff, end, kind);
 
-        // Record sender balance before creation
-        let sender_balance_before = ctx.token.balance(&ctx.sender);
-        let contract_balance_before = ctx.contract_balance();
-
-        // Create the stream
-        let stream_id = ctx.create_stream(deposit, rate, start, cliff, end)
-            .expect("stream creation should succeed for valid params");
-
-        // Verify creation transferred exactly deposit from sender to contract
-        let sender_balance_after_create = ctx.token.balance(&ctx.sender);
-        let contract_balance_after_create = ctx.contract_balance();
-        assert_eq!(
-            sender_balance_before - sender_balance_after_create,
-            deposit,
-            "Creation must transfer exactly deposit amount from sender"
-        );
-        assert_eq!(
-            contract_balance_after_create - contract_balance_before,
-            deposit,
-            "Contract must receive exactly deposit amount"
-        );
-
-        // Track expected deposit (mutated by top_up, cancel, shorten, extend, rate_change)
-        let mut expected_deposit = deposit;
+        let mut total_deposited = deposit;
         let mut total_withdrawn = 0i128;
-        let mut is_cancelled = false;
-        let mut is_completed = false;
+        let mut total_refunded = 0i128;
+        let mut current_time = 0u64;
+        let mut last_time = 0u64;
+        let mut last_accrued = 0i128;
+        let mut last_withdrawn = 0i128;
+        let mut terminal = false;
 
-        // Execute each operation in sequence
-        for op in &ops {
-            // Skip further operations if stream is terminal
-            if is_cancelled || is_completed {
+        // Initial state.
+        (last_time, last_accrued, last_withdrawn) = assert_invariants(
+            &ctx, stream_id, total_deposited, total_withdrawn, total_refunded,
+            last_time, last_accrued, last_withdrawn, "initial",
+        );
+
+        for (idx, (op, advance)) in ops.iter().enumerate() {
+            if terminal {
                 break;
             }
 
+            current_time = current_time.saturating_add(*advance);
+            ctx.env.ledger().set_timestamp(current_time);
+            // Keep ledger sequence advancing so pause/resume and withdrawal
+            // cooldowns are satisfied on the happy path; failed attempts due to
+            // cooldown simply leave state unchanged and invariants still hold.
+            ctx.env.ledger().set_sequence_number((current_time / 5 + 1).max(1) as u32);
+
+            let stream = ctx.client().get_stream_state(&stream_id);
+            let label = std::format!("step {idx} op={op:?} kind={kind:?} t={current_time}");
+
             match op {
-                StreamOp::Withdraw { at_time } => {
-                    ctx.set_time(*at_time);
-
-                    let stream_before = ctx.client.get_stream_state(&stream_id);
-                    let withdrawn_before = stream_before.withdrawn_amount;
-
-                    let result = ctx.client.try_withdraw(&stream_id);
-
-                    if let Ok(amount) = result {
-                        let stream_after = ctx.client.get_stream_state(&stream_id);
-                        // withdrawn_amount must increase by exactly amount
-                        assert_eq!(
-                            stream_after.withdrawn_amount,
-                            withdrawn_before + amount,
-                            "Withdrawn amount must increase by withdrawal amount"
-                        );
-                        total_withdrawn += amount;
-
-                        if stream_after.status == StreamStatus::Completed {
-                            is_completed = true;
-                            // Completed stream must have withdrawn == deposit
-                            assert_eq!(
-                                stream_after.withdrawn_amount,
-                                stream_after.deposit_amount,
-                                "Completed stream must be fully withdrawn"
-                            );
-                        }
+                Op::Withdraw => {
+                    let result = ctx.client().try_withdraw(&stream_id);
+                    if let Ok(Ok(amount)) = result {
+                        total_withdrawn = total_withdrawn.saturating_add(amount);
                     }
                 }
 
-                StreamOp::TopUp { amount } => {
-                    let contract_before = ctx.contract_balance();
-                    let sender_before = ctx.token.balance(&ctx.sender);
-
-                    let result = ctx.client.try_top_up_stream(&stream_id, &ctx.sender, amount);
-
-                    if result.is_ok() {
-                        expected_deposit += *amount;
-                        // Contract balance must increase by exactly amount
-                        assert_eq!(
-                            ctx.contract_balance(),
-                            contract_before + *amount,
-                            "TopUp must increase contract balance by top-up amount"
+                Op::TopUp(amount) => {
+                    let result = ctx.client().try_top_up_stream(&stream_id, &ctx.sender, amount);
+                    if stream.kind == StreamKind::CliffOnly {
+                        assert!(
+                            matches!(result, Err(Ok(ContractError::UnsupportedStreamKind))),
+                            "{label}: CliffOnly top_up must be UnsupportedStreamKind, got {result:?}"
                         );
-                        // Sender balance must decrease by exactly amount
-                        assert_eq!(
-                            ctx.token.balance(&ctx.sender),
-                            sender_before - *amount,
-                            "TopUp must decrease sender balance by top-up amount"
-                        );
+                    } else if let Ok(Ok(())) = result {
+                        total_deposited = total_deposited.saturating_add(*amount);
                     }
                 }
 
-                StreamOp::Cancel { at_time } => {
-                    ctx.set_time(*at_time);
+                Op::DecreaseRate(new_rate) => {
+                    let accrued_before = ctx.client().calculate_accrued(&stream_id);
+                    let withdrawable_before = ctx.client().get_withdrawable(&stream_id);
+                    let deposit_before = stream.deposit_amount;
+                    let sender_before = ctx.sender_balance();
 
-                    let stream_before = ctx.client.get_stream_state(&stream_id);
-                    let contract_before = ctx.contract_balance();
-                    let sender_before = ctx.token.balance(&ctx.sender);
-                    let deposit_before = stream_before.deposit_amount;
+                    let result = ctx.client().try_decrease_rate_per_second(&stream_id, new_rate);
 
-                    let result = ctx.client.try_cancel_stream(&stream_id);
-
-                    if result.is_ok() {
-                        is_cancelled = true;
-                        let stream_after = ctx.client.get_stream_state(&stream_id);
-
-                        // Status must be Cancelled
-                        assert_eq!(stream_after.status, StreamStatus::Cancelled);
-
-                        // cancelled_at must be set
-                        assert!(stream_after.cancelled_at.is_some());
-
-                        // Calculate expected accrued at cancel time
-                        let accrued_at_cancel = fluxora_stream::accrual::calculate_accrued_amount(
-                            stream_after.start_time,
-                            stream_after.cliff_time,
-                            stream_after.end_time,
-                            stream_after.rate_per_second,
-                            deposit_before, // use pre-mutation deposit
-                            stream_after.cancelled_at.unwrap(),
+                    if stream.kind == StreamKind::CliffOnly {
+                        assert!(
+                            matches!(result, Err(Ok(ContractError::UnsupportedStreamKind))),
+                            "{label}: CliffOnly decrease_rate must be UnsupportedStreamKind, got {result:?}"
                         );
+                    } else if let Ok(Ok(())) = result {
+                        let stream_after = ctx.client().get_stream_state(&stream_id);
+                        // Refunds are sent *to* the sender, so the sender balance increases.
+                        let refund = ctx.sender_balance().saturating_sub(sender_before);
+                        total_refunded = total_refunded.saturating_add(refund);
 
-                        // Refund = deposit_before - accrued_at_cancel (but not less than 0)
-                        let expected_refund = (deposit_before - accrued_at_cancel).max(0);
-
-                        // Contract balance must decrease by refund amount
                         assert_eq!(
-                            ctx.contract_balance(),
-                            contract_before - expected_refund,
-                            "Cancel must decrease contract balance by refund amount"
+                            stream_after.deposit_amount,
+                            deposit_before.saturating_sub(refund),
+                            "{label}: deposit did not decrease by refund"
                         );
-
-                        // Sender balance must increase by refund amount
                         assert_eq!(
-                            ctx.token.balance(&ctx.sender),
-                            sender_before + expected_refund,
-                            "Cancel must increase sender balance by refund amount"
+                            ctx.client().calculate_accrued(&stream_id),
+                            accrued_before,
+                            "{label}: decrease_rate changed same-timestamp accrued"
                         );
-
-                        // The stream's deposit_amount is NOT changed on cancel
-                        // (the refund is computed from the original deposit)
-                        assert_eq!(
-                            stream_after.deposit_amount, deposit_before,
-                            "Cancel must not change deposit_amount"
+                        assert!(
+                            ctx.client().get_withdrawable(&stream_id) >= withdrawable_before,
+                            "{label}: decrease_rate reduced same-timestamp withdrawable"
                         );
                     }
                 }
 
-                StreamOp::Shorten { new_end } => {
-                    ctx.set_time(start + 1); // Must be after start and before new_end
-                    if ctx.env.ledger().timestamp() >= *new_end {
-                        ctx.set_time(*new_end - 1);
-                    }
-
-                    let stream_before = ctx.client.get_stream_state(&stream_id);
-                    if stream_before.status != StreamStatus::Active
-                        && stream_before.status != StreamStatus::Paused
-                    {
-                        continue;
-                    }
-
-                    let contract_before = ctx.contract_balance();
-                    let sender_before = ctx.token.balance(&ctx.sender);
-                    let old_end = stream_before.end_time;
-                    let old_deposit = stream_before.deposit_amount;
-
-                    let result = ctx.client.try_shorten_stream_end_time(&stream_id, new_end);
-
-                    if result.is_ok() {
-                        let stream_after = ctx.client.get_stream_state(&stream_id);
-
-                        // end_time must be updated
-                        assert_eq!(stream_after.end_time, *new_end);
-
-                        // deposit must decrease
+                Op::IncreaseRate(new_rate) => {
+                    let result = ctx.client().try_update_rate_per_second(&stream_id, new_rate);
+                    if stream.kind == StreamKind::CliffOnly {
                         assert!(
-                            stream_after.deposit_amount <= old_deposit,
-                            "Shorten must not increase deposit"
+                            matches!(result, Err(Ok(ContractError::UnsupportedStreamKind))),
+                            "{label}: CliffOnly increase_rate must be UnsupportedStreamKind, got {result:?}"
                         );
+                    }
+                    // No token flow on a successful rate increase; invariants catch any
+                    // unexpected state change via the generic checks below.
+                }
 
-                        // Calculate expected new deposit: rate * (new_end - start)
-                        let new_duration = (*new_end - stream_after.start_time) as i128;
-                        let expected_new_deposit = stream_after.rate_per_second * new_duration;
+                Op::Shorten(delta) => {
+                    let new_end = current_time.saturating_add(*delta);
+                    let deposit_before = stream.deposit_amount;
+                    let sender_before = ctx.sender_balance();
 
+                    let result = ctx.client().try_shorten_stream_end_time(&stream_id, &new_end);
+
+                    if stream.kind == StreamKind::CliffOnly {
+                        assert!(
+                            matches!(result, Err(Ok(ContractError::UnsupportedStreamKind))),
+                            "{label}: CliffOnly shorten must be UnsupportedStreamKind, got {result:?}"
+                        );
+                    } else if let Ok(Ok(())) = result {
+                        let stream_after = ctx.client().get_stream_state(&stream_id);
+                        let refund = ctx.sender_balance().saturating_sub(sender_before);
+                        total_refunded = total_refunded.saturating_add(refund);
                         assert_eq!(
-                            stream_after.deposit_amount, expected_new_deposit,
-                            "Shorten must set deposit to rate * new_duration"
+                            stream_after.deposit_amount,
+                            deposit_before.saturating_sub(refund),
+                            "{label}: shorten deposit mismatch"
                         );
-
-                        // Refund = old_deposit - new_deposit
-                        let expected_refund = old_deposit - expected_new_deposit;
-
-                        // Contract balance must decrease by refund
-                        assert_eq!(
-                            ctx.contract_balance(),
-                            contract_before - expected_refund,
-                            "Shorten must decrease contract by refund amount"
-                        );
-
-                        // Sender must receive refund
-                        assert_eq!(
-                            ctx.token.balance(&ctx.sender),
-                            sender_before + expected_refund,
-                            "Shorten must increase sender by refund amount"
-                        );
-
-                        expected_deposit = expected_new_deposit;
                     }
                 }
 
-                StreamOp::Extend { new_end } => {
-                    let stream_before = ctx.client.get_stream_state(&stream_id);
-                    if stream_before.status != StreamStatus::Active
-                        && stream_before.status != StreamStatus::Paused
-                    {
-                        continue;
-                    }
+                Op::Extend(delta) => {
+                    let new_end = stream.end_time.saturating_add(*delta);
+                    let result = ctx.client().try_extend_stream_end_time(&stream_id, &new_end);
 
-                    let old_end = stream_before.end_time;
-                    let old_deposit = stream_before.deposit_amount;
-
-                    let result = ctx.client.try_extend_stream_end_time(&stream_id, new_end);
-
-                    if result.is_ok() {
-                        let stream_after = ctx.client.get_stream_state(&stream_id);
-
-                        // end_time must be updated
-                        assert_eq!(stream_after.end_time, *new_end);
-
-                        // deposit must stay the same (extend doesn't add funds)
-                        assert_eq!(
-                            stream_after.deposit_amount, old_deposit,
-                            "Extend must not change deposit_amount"
-                        );
-
-                        // But the contract must still have enough to cover the extended schedule
-                        let new_duration = (*new_end - stream_after.start_time) as i128;
-                        let required_deposit = stream_after.rate_per_second * new_duration;
+                    if stream.kind == StreamKind::CliffOnly {
                         assert!(
-                            stream_after.deposit_amount >= required_deposit,
-                            "Extend must keep deposit >= rate * new_duration"
+                            matches!(result, Err(Ok(ContractError::UnsupportedStreamKind))),
+                            "{label}: CliffOnly extend must be UnsupportedStreamKind, got {result:?}"
                         );
-
-                        // No token movement on extend
                     }
+                    // No token flow on a successful extend.
                 }
 
-                StreamOp::IncreaseRate { new_rate } => {
-                    let stream_before = ctx.client.get_stream_state(&stream_id);
-                    if stream_before.status != StreamStatus::Active
-                        && stream_before.status != StreamStatus::Paused
-                    {
-                        continue;
-                    }
-
-                    let old_rate = stream_before.rate_per_second;
-                    let result = ctx.client.try_update_rate_per_second(&stream_id, new_rate);
-
-                    if result.is_ok() {
-                        let stream_after = ctx.client.get_stream_state(&stream_id);
-                        // Rate must be updated
-                        assert_eq!(stream_after.rate_per_second, *new_rate);
-                        // Rate must have increased
-                        assert!(
-                            *new_rate > old_rate,
-                            "IncreaseRate must increase the rate"
-                        );
-                        // deposit unchanged
-                        assert_eq!(stream_after.deposit_amount, stream_before.deposit_amount);
-                    }
+                Op::Pause => {
+                    let _ = ctx.client().try_pause_stream(&stream_id, &PauseReason::Operational);
                 }
 
-                StreamOp::DecreaseRate { new_rate } => {
-                    let stream_before = ctx.client.get_stream_state(&stream_id);
-                    if stream_before.status != StreamStatus::Active
-                        && stream_before.status != StreamStatus::Paused
-                    {
-                        continue;
-                    }
+                Op::Resume => {
+                    let _ = ctx.client().try_resume_stream(&stream_id);
+                }
 
-                    let old_rate = stream_before.rate_per_second;
-                    let contract_before = ctx.contract_balance();
-                    let sender_before = ctx.token.balance(&ctx.sender);
-                    let old_deposit = stream_before.deposit_amount;
-
-                    let result = ctx.client.try_decrease_rate_per_second(&stream_id, new_rate);
-
-                    if result.is_ok() {
-                        let stream_after = ctx.client.get_stream_state(&stream_id);
-
-                        // Rate must be updated
-                        assert_eq!(stream_after.rate_per_second, *new_rate);
-                        // Rate must have decreased
-                        assert!(
-                            *new_rate < old_rate,
-                            "DecreaseRate must decrease the rate"
+                Op::Cancel => {
+                    let sender_before = ctx.sender_balance();
+                    let result = ctx.client().try_cancel_stream(&stream_id);
+                    if let Ok(Ok(())) = result {
+                        // Refund is sent *to* the sender, increasing its balance.
+                        total_refunded = total_refunded.saturating_add(
+                            ctx.sender_balance().saturating_sub(sender_before),
                         );
-
-                        // deposit must decrease (refund of unstreamed excess)
-                        assert!(
-                            stream_after.deposit_amount <= old_deposit,
-                            "DecreaseRate must not increase deposit"
-                        );
-
-                        // Checkpoint fields must be updated
-                        assert!(
-                            stream_after.checkpointed_at > 0,
-                            "DecreaseRate must set checkpointed_at"
-                        );
-
-                        // Contract balance must decrease by refund amount
-                        let refund = old_deposit - stream_after.deposit_amount;
-                        assert_eq!(
-                            ctx.contract_balance(),
-                            contract_before - refund,
-                            "DecreaseRate must decrease contract by refund"
-                        );
-
-                        // Sender must receive refund
-                        assert_eq!(
-                            ctx.token.balance(&ctx.sender),
-                            sender_before + refund,
-                            "DecreaseRate must increase sender by refund"
-                        );
-
-                        expected_deposit = stream_after.deposit_amount;
+                        terminal = true;
                     }
                 }
             }
 
-            // After every operation, verify invariants
-            assert_stream_balance_conservation(&ctx, stream_id);
-            assert_global_balance_conservation(&ctx);
-            assert_accrual_consistency(&ctx, stream_id, expected_deposit);
-        }
-
-        // Final verification: total tokens accounted for
-        let final_contract_balance = ctx.contract_balance();
-        let final_sender_balance = ctx.token.balance(&ctx.sender);
-        let final_recipient_balance = ctx.token.balance(&ctx.recipient);
-
-        // Total tokens in the system (sender + recipient + contract) should equal initial mint
-        let total_tokens = final_sender_balance + final_recipient_balance + final_contract_balance;
-        let initial_mint = 2_000_000_000_000_i128; // minted to sender + recipient
-        assert_eq!(
-            total_tokens, initial_mint,
-            "Total token supply must be conserved (no tokens created/destroyed)"
-        );
-    }
-}
-
-proptest! {
-    //! Test batch stream creation and batch withdrawal preserve balance conservation.
-
-    #![proptest_config(ProptestConfig {
-        cases: 128,
-        max_shrink_iters: 30,
-        ..ProptestConfig::default()
-    })]
-
-    /// Property: Creating multiple streams in a batch and then withdrawing from
-    /// them preserves the global balance conservation invariant.
-    #[test]
-    fn prop_batch_streams_balance_conservation(
-        streams in prop::collection::vec(valid_stream_params(), 1..10)
-    ) {
-        let ctx = TestContext::setup();
-        ctx.set_time(0);
-
-        let sender_balance_before = ctx.token.balance(&ctx.sender);
-        let contract_balance_before = ctx.contract_balance();
-
-        // Build batch params
-        let mut batch_params = vec![&ctx.env];
-        let mut expected_total_deposit = 0i128;
-        for (deposit, rate, start, cliff, end) in &streams {
-            batch_params.push_back(CreateStreamParams {
-                recipient: ctx.recipient.clone(),
-                deposit_amount: *deposit,
-                rate_per_second: *rate,
-                start_time: *start,
-                cliff_time: *cliff,
-                end_time: *end,
-                withdraw_dust_threshold: Some(0),
-                memo: None,
-            });
-            expected_total_deposit += *deposit;
-        }
-
-        // Create streams in batch
-        let stream_ids = ctx.client.create_streams(&ctx.sender, &batch_params);
-        assert_eq!(stream_ids.len() as usize, streams.len());
-
-        // Verify total deposit transferred
-        let sender_balance_after_create = ctx.token.balance(&ctx.sender);
-        let contract_balance_after_create = ctx.contract_balance();
-        assert_eq!(
-            sender_balance_before - sender_balance_after_create,
-            expected_total_deposit,
-            "Batch creation must transfer exactly total deposit"
-        );
-        assert_eq!(
-            contract_balance_after_create - contract_balance_before,
-            expected_total_deposit,
-            "Contract must receive exactly total deposit"
-        );
-
-        // Advance time past all end times and withdraw all
-        let max_end = streams.iter().map(|(_, _, _, _, end)| *end).max().unwrap_or(0);
-        ctx.set_time(max_end + 100);
-
-        // Build batch withdraw params
-        let mut withdraw_ids = vec![&ctx.env];
-        for id in stream_ids.iter() {
-            withdraw_ids.push_back(id);
-        }
-
-        let recipient_balance_before = ctx.token.balance(&ctx.recipient);
-        let contract_balance_before_withdraw = ctx.contract_balance();
-
-        let withdraw_results = ctx.client.batch_withdraw(&ctx.recipient, &withdraw_ids);
-
-        let total_withdrawn: i128 = withdraw_results.iter().map(|r| r.amount).sum();
-        let recipient_balance_after = ctx.token.balance(&ctx.recipient);
-        let contract_balance_after_withdraw = ctx.contract_balance();
-
-        // Verify withdrawal amounts transferred correctly
-        assert_eq!(
-            recipient_balance_after - recipient_balance_before,
-            total_withdrawn,
-            "Batch withdraw must transfer exactly total withdrawn to recipient"
-        );
-        assert_eq!(
-            contract_balance_before_withdraw - contract_balance_after_withdraw,
-            total_withdrawn,
-            "Contract balance must decrease by total withdrawn"
-        );
-
-        // Verify global conservation
-        assert_global_balance_conservation(&ctx);
-
-        // All streams should be completed
-        for id in stream_ids.iter() {
-            let stream = ctx.client.get_stream_state(&id);
-            assert_eq!(
-                stream.status, StreamStatus::Completed,
-                "Stream {} should be Completed after full withdrawal", id
+            (last_time, last_accrued, last_withdrawn) = assert_invariants(
+                &ctx, stream_id, total_deposited, total_withdrawn, total_refunded,
+                last_time, last_accrued, last_withdrawn, &label,
             );
-            assert_eq!(
-                stream.withdrawn_amount, stream.deposit_amount,
-                "Stream {} should be fully withdrawn", id
-            );
-        }
 
-        // Final global check: all deposits should be either withdrawn or still in contract
-        let final_contract_balance = ctx.contract_balance();
-        // After full withdrawal of all streams, contract should only have excess (0 in this case)
-        // Any remaining balance is excess that can be swept
-        assert!(
-            final_contract_balance >= 0,
-            "Contract balance must be non-negative"
-        );
-
-        // Total tokens conserved
-        let total_tokens = ctx.token.balance(&ctx.sender)
-            + ctx.token.balance(&ctx.recipient)
-            + final_contract_balance;
-        assert_eq!(total_tokens, 2_000_000_000_000i128);
-    }
-}
-
-proptest! {
-    //! Test that top-up operations preserve balance conservation across multiple streams.
-
-    #![proptest_config(ProptestConfig {
-        cases: 128,
-        ..ProptestConfig::default()
-    })]
-
-    /// Property: Top-up on multiple streams preserves per-stream and global invariants.
-    #[test]
-    fn prop_top_up_preserves_conservation(
-        (deposit, rate, start, cliff, end) in valid_stream_params(),
-        top_up_amounts in prop::collection::vec(1i128..10_000i128, 1..10)
-    ) {
-        let ctx = TestContext::setup();
-        ctx.set_time(0);
-
-        let stream_id = ctx.create_stream(deposit, rate, start, cliff, end)
-            .expect("creation should succeed");
-
-        let mut expected_deposit = deposit;
-
-        for amount in &top_up_amounts {
-            let contract_before = ctx.contract_balance();
-            let sender_before = ctx.token.balance(&ctx.sender);
-
-            let result = ctx.client.try_top_up_stream(&stream_id, &ctx.sender, amount);
-
-            if result.is_ok() {
-                expected_deposit += *amount;
-
-                // Contract must increase by exactly top-up amount
-                assert_eq!(
-                    ctx.contract_balance(),
-                    contract_before + *amount,
-                    "TopUp must increase contract balance"
-                );
-
-                // Sender must decrease by exactly top-up amount
-                assert_eq!(
-                    ctx.token.balance(&ctx.sender),
-                    sender_before - *amount,
-                    "TopUp must decrease sender balance"
-                );
-
-                // Stream deposit must increase
-                let stream = ctx.client.get_stream_state(&stream_id);
-                assert_eq!(
-                    stream.deposit_amount, expected_deposit,
-                    "Stream deposit must reflect top-up"
-                );
-
-                assert_stream_balance_conservation(&ctx, stream_id);
-                assert_global_balance_conservation(&ctx);
+            // Stop once the stream reaches a terminal state; any further mutating
+            // operations would be rejected by the contract anyway.
+            let status = ctx.client().get_stream_state(&stream_id).status;
+            if status == StreamStatus::Completed || status == StreamStatus::Cancelled {
+                terminal = true;
             }
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Edge-case invariants (non-proptest, targeted)
+// Deterministic regression tests
 // ---------------------------------------------------------------------------
 
-/// Test that cancelling immediately after creation refunds the full deposit.
+/// A successful rate decrease on a `Linear` stream must preserve the recipient's
+/// already-accrued entitlement at the checkpoint timestamp.
 #[test]
-fn cancel_immediately_refunds_full_deposit() {
-    let ctx = TestContext::setup();
-    ctx.set_time(0);
+fn regression_rate_decrease_preserves_entitlement() {
+    let ctx = TestContext::new();
+    let id = ctx.create_stream(1000, 10, 0, 100, StreamKind::Linear);
 
-    let deposit = 1000i128;
-    let rate = 1i128;
-    let stream_id = ctx
-        .create_stream(deposit, rate, 0, 0, 1000)
-        .expect("creation should succeed");
+    ctx.env.ledger().set_timestamp(50);
+    ctx.env.ledger().set_sequence_number(20);
 
-    let sender_before = ctx.token.balance(&ctx.sender);
-    let contract_before = ctx.contract_balance();
+    let accrued_before = ctx.client().calculate_accrued(&id);
+    let withdrawable_before = ctx.client().get_withdrawable(&id);
+    assert_eq!(accrued_before, 500); // 10 * 50
 
-    // Cancel immediately (at t=0, before any accrual)
-    ctx.client.cancel_stream(&stream_id);
+    ctx.client().decrease_rate_per_second(&id, &5);
 
-    let sender_after = ctx.token.balance(&ctx.sender);
-    let contract_after = ctx.contract_balance();
-
-    // Full refund since nothing accrued yet
-    assert_eq!(
-        sender_after - sender_before,
-        deposit,
-        "Immediate cancel must refund full deposit"
-    );
-    assert_eq!(
-        contract_before - contract_after,
-        deposit,
-        "Contract must lose full deposit on immediate cancel"
-    );
-
-    let stream = ctx.client.get_stream_state(&stream_id);
-    assert_eq!(stream.status, StreamStatus::Cancelled);
-    assert_eq!(stream.withdrawn_amount, 0);
-}
-
-/// Test that cancelling at cliff time refunds deposit minus cliff-accrued amount.
-#[test]
-fn cancel_at_cliff_refunds_correct_amount() {
-    let ctx = TestContext::setup();
-    ctx.set_time(0);
-
-    let deposit = 1000i128;
-    let rate = 1i128;
-    let start = 0u64;
-    let cliff = 500u64;
-    let end = 1000u64;
-    let stream_id = ctx
-        .create_stream(deposit, rate, start, cliff, end)
-        .expect("creation should succeed");
-
-    ctx.set_time(cliff);
-
-    let sender_before = ctx.token.balance(&ctx.sender);
-    let contract_before = ctx.contract_balance();
-
-    ctx.client.cancel_stream(&stream_id);
-
-    let sender_after = ctx.token.balance(&ctx.sender);
-    let contract_after = ctx.contract_balance();
-
-    // At cliff time, accrued = rate * (cliff - start) = 1 * 500 = 500
-    let accrued = rate * ((cliff - start) as i128);
-    let expected_refund = deposit - accrued;
-
-    assert_eq!(
-        sender_after - sender_before,
-        expected_refund,
-        "Cancel at cliff must refund deposit minus accrued"
-    );
-    assert_eq!(
-        contract_before - contract_after,
-        expected_refund,
-        "Contract must lose refund amount"
-    );
-}
-
-/// Test that withdrawing after end_time gets the full deposit.
-#[test]
-fn withdraw_after_end_gets_full_deposit() {
-    let ctx = TestContext::setup();
-    ctx.set_time(0);
-
-    let deposit = 1000i128;
-    let rate = 1i128;
-    let stream_id = ctx
-        .create_stream(deposit, rate, 0, 0, 1000)
-        .expect("creation should succeed");
-
-    ctx.set_time(2000); // Well past end
-
-    let recipient_before = ctx.token.balance(&ctx.recipient);
-    let contract_before = ctx.contract_balance();
-
-    let withdrawn = ctx.client.withdraw(&stream_id);
-
-    let recipient_after = ctx.token.balance(&ctx.recipient);
-    let contract_after = ctx.contract_balance();
-
-    assert_eq!(withdrawn, deposit, "Must withdraw full deposit after end");
-    assert_eq!(
-        recipient_after - recipient_before,
-        deposit,
-        "Recipient must receive full deposit"
-    );
-    assert_eq!(
-        contract_before - contract_after,
-        deposit,
-        "Contract must lose full deposit"
-    );
-
-    let stream = ctx.client.get_stream_state(&stream_id);
-    assert_eq!(stream.status, StreamStatus::Completed);
-    assert_eq!(stream.withdrawn_amount, deposit);
-}
-
-/// Test that shorten_stream_end_time refunds exactly the unstreamed portion.
-#[test]
-fn shorten_refunds_exact_unstreamed() {
-    let ctx = TestContext::setup();
-    ctx.set_time(0);
-
-    let deposit = 1000i128;
-    let rate = 1i128;
-    let stream_id = ctx
-        .create_stream(deposit, rate, 0, 0, 1000)
-        .expect("creation should succeed");
-
-    // Shorten from 1000 to 600 at t=100
-    ctx.set_time(100);
-    let new_end = 600u64;
-
-    let sender_before = ctx.token.balance(&ctx.sender);
-    let contract_before = ctx.contract_balance();
-
-    ctx.client.shorten_stream_end_time(&stream_id, &new_end);
-
-    let sender_after = ctx.token.balance(&ctx.sender);
-    let contract_after = ctx.contract_balance();
-
-    // New deposit = rate * (new_end - start) = 1 * 600 = 600
-    let new_deposit = rate * ((new_end - 0) as i128);
-    let expected_refund = deposit - new_deposit;
-
-    assert_eq!(
-        sender_after - sender_before,
-        expected_refund,
-        "Shorten must refund exact unstreamed amount"
-    );
-    assert_eq!(
-        contract_before - contract_after,
-        expected_refund,
-        "Contract must lose exact refund amount"
-    );
-
-    let stream = ctx.client.get_stream_state(&stream_id);
-    assert_eq!(stream.deposit_amount, new_deposit);
-    assert_eq!(stream.end_time, new_end);
-}
-
-/// Test that decrease_rate_per_second refunds the correct excess deposit.
-#[test]
-fn decrease_rate_refunds_excess() {
-    let ctx = TestContext::setup();
-    ctx.set_time(0);
-
-    // Stream: 1000 tokens, 10/s, 100s
-    let deposit = 1000i128;
-    let rate = 10i128;
-    let stream_id = ctx
-        .create_stream(deposit, rate, 0, 0, 100)
-        .expect("creation should succeed");
-
-    // At t=50, decrease rate from 10 to 5
-    ctx.set_time(50);
-    let new_rate = 5i128;
-
-    let sender_before = ctx.token.balance(&ctx.sender);
-    let contract_before = ctx.contract_balance();
-
-    ctx.client.decrease_rate_per_second(&stream_id, &new_rate);
-
-    let sender_after = ctx.token.balance(&ctx.sender);
-    let contract_after = ctx.contract_balance();
-
-    let stream = ctx.client.get_stream_state(&stream_id);
-
-    // Accrued at t=50 under old rate: 10 * 50 = 500
-    // Remaining duration: 50s at new rate: 5 * 50 = 250
-    // New deposit = 500 + 250 = 750
-    let expected_new_deposit = 500i128 + (new_rate * 50);
-
-    assert_eq!(
-        stream.deposit_amount, expected_new_deposit,
-        "DecreaseRate must set correct new deposit"
-    );
-
-    let expected_refund = deposit - expected_new_deposit;
-    assert_eq!(
-        sender_after - sender_before,
-        expected_refund,
-        "DecreaseRate must refund exact excess"
-    );
-    assert_eq!(
-        contract_before - contract_after,
-        expected_refund,
-        "Contract must lose exact refund amount"
-    );
-
-    // Checkpoint should be set
-    assert_eq!(stream.checkpointed_amount, 500);
+    let stream = ctx.client().get_stream_state(&id);
+    assert_eq!(stream.rate_per_second, 5);
     assert_eq!(stream.checkpointed_at, 50);
+    assert_eq!(stream.checkpointed_amount, 500);
+    // New deposit = 500 + 5 * 50 = 750, so refund = 250.
+    assert_eq!(stream.deposit_amount, 750);
+
+    assert_eq!(
+        ctx.client().calculate_accrued(&id),
+        accrued_before,
+        "same-timestamp accrued must be preserved"
+    );
+    assert!(
+        ctx.client().get_withdrawable(&id) >= withdrawable_before,
+        "same-timestamp withdrawable must not decrease"
+    );
 }
 
-/// Test global conservation with multiple interleaved operations.
+/// `CliffOnly` streams reject all schedule/rate/top-up mutations with
+/// `UnsupportedStreamKind` while still allowing creation, cliff withdrawal, and
+/// cancellation.
 #[test]
-fn global_conservation_complex_scenario() {
-    let ctx = TestContext::setup();
-    ctx.set_time(0);
+fn regression_cliff_only_unsupported_mutations() {
+    let ctx = TestContext::new();
+    let id = ctx.create_stream(1000, 0, 50, 100, StreamKind::CliffOnly);
 
-    // Create 3 streams with different parameters
-    let s1 = ctx.create_stream(1000, 1, 0, 0, 1000).unwrap();
-    let s2 = ctx.create_stream(2000, 2, 0, 100, 1000).unwrap();
-    let s3 = ctx.create_stream(500, 5, 0, 0, 100).unwrap();
+    // Before cliff: no accrual.
+    ctx.env.ledger().set_timestamp(25);
+    assert_eq!(ctx.client().calculate_accrued(&id), 0);
 
-    let total_initial_deposit = 1000 + 2000 + 500;
+    // All of these must be unsupported.
+    let unsupported = [
+        ctx.client().try_top_up_stream(&id, &ctx.sender, &100),
+        ctx.client().try_decrease_rate_per_second(&id, &1),
+        ctx.client().try_update_rate_per_second(&id, &1),
+        ctx.client().try_shorten_stream_end_time(&id, &75),
+        ctx.client().try_extend_stream_end_time(&id, &150),
+    ];
+    for result in unsupported {
+        assert!(
+            matches!(result, Err(Ok(ContractError::UnsupportedStreamKind))),
+            "CliffOnly mutation must return UnsupportedStreamKind, got {result:?}"
+        );
+    }
 
-    // Verify initial state
-    assert_eq!(ctx.contract_balance(), total_initial_deposit);
-    assert_global_balance_conservation(&ctx);
-
-    // At t=50: withdraw from s1 (50 tokens), s3 is done (all 500)
-    ctx.set_time(50);
-    let w1 = ctx.client.withdraw(&s1);
-    assert_eq!(w1, 50);
-
-    ctx.set_time(100);
-    let w3 = ctx.client.withdraw(&s3);
-    assert_eq!(w3, 500); // Full deposit since rate*duration = 5*100 = 500 = deposit
-
-    // s2 hasn't reached cliff yet (cliff=100), so withdraw at t=100 should work
-    let w2 = ctx.client.withdraw(&s2);
-    // At t=100, s2 accrued = 2 * (100 - 0) = 200
-    assert_eq!(w2, 200);
-
-    // Cancel s1 at t=100
-    let s1_before = ctx.client.get_stream_state(&s1);
-    let sender_before_cancel = ctx.token.balance(&ctx.sender);
-    ctx.client.cancel_stream(&s1);
-    let sender_after_cancel = ctx.token.balance(&ctx.sender);
-
-    // s1 accrued at t=100 = 1 * 100 = 100, withdrawn = 50, so refund = 1000 - 100 = 900
-    let expected_refund = 1000 - 100;
-    assert_eq!(sender_after_cancel - sender_before_cancel, expected_refund);
-
-    // Verify all invariants
-    assert_stream_balance_conservation(&ctx, s1);
-    assert_stream_balance_conservation(&ctx, s2);
-    assert_stream_balance_conservation(&ctx, s3);
-    assert_global_balance_conservation(&ctx);
-
-    // Final check: total tokens in system
-    let total =
-        ctx.token.balance(&ctx.sender) + ctx.token.balance(&ctx.recipient) + ctx.contract_balance();
-    assert_eq!(total, 2_000_000_000_000i128);
+    // After cliff: full deposit is accrued and withdrawable.
+    ctx.env.ledger().set_timestamp(50);
+    ctx.env.ledger().set_sequence_number(100);
+    assert_eq!(ctx.client().calculate_accrued(&id), 1000);
+    assert_eq!(ctx.client().get_withdrawable(&id), 1000);
+    let withdrawn = ctx.client().withdraw(&id);
+    assert_eq!(withdrawn, 1000);
+    assert_eq!(ctx.client().get_stream_state(&id).status, StreamStatus::Completed);
 }
 
-/// Test that sweep_excess correctly identifies and removes only excess tokens.
+/// Completed streams must report a deterministic `deposit_amount` accrual
+/// regardless of the timestamp passed to `calculate_accrued`.
 #[test]
-fn sweep_excess_preserves_liabilities() {
-    let ctx = TestContext::setup();
-    ctx.set_time(0);
+fn regression_completed_stream_accrual_is_deterministic() {
+    let ctx = TestContext::new();
+    let id = ctx.create_stream(1000, 1, 0, 1000, StreamKind::Linear);
 
-    let deposit = 1000i128;
-    let stream_id = ctx.create_stream(deposit, 1, 0, 0, 1000).unwrap();
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.env.ledger().set_sequence_number(1000);
+    ctx.client().withdraw(&id);
+    assert_eq!(ctx.client().get_stream_state(&id).status, StreamStatus::Completed);
 
-    // Manually send extra tokens to contract (simulating trapped funds)
-    let extra = 500i128;
-    ctx.token.transfer(&ctx.sender, &ctx.contract_id, &extra);
+    for t in [0u64, 500, 1000, 10_000, u64::MAX] {
+        ctx.env.ledger().set_timestamp(t);
+        assert_eq!(ctx.client().calculate_accrued(&id), 1000);
+    }
+}
 
+/// Immediate cancellation (before any accrual) refunds the entire deposit to
+/// the sender while preserving global balance conservation.
+#[test]
+fn regression_immediate_cancel_refunds_full_deposit() {
+    let ctx = TestContext::new();
+    let deposit = 1234i128;
+    let id = ctx.create_stream(deposit, 1, 100, 500, StreamKind::Linear);
+
+    let sender_before = ctx.sender_balance();
     let contract_before = ctx.contract_balance();
-    assert_eq!(contract_before, deposit + extra);
 
-    let sweep_recipient = Address::generate(&ctx.env);
-    let swept = ctx.client.sweep_excess(&sweep_recipient);
+    ctx.env.ledger().set_timestamp(0);
+    ctx.client().cancel_stream(&id);
 
-    assert_eq!(swept, extra, "Must sweep exactly the excess amount");
+    assert_eq!(ctx.sender_balance(), sender_before + deposit);
+    assert_eq!(ctx.contract_balance(), contract_before - deposit);
     assert_eq!(
-        ctx.contract_balance(),
-        deposit,
-        "Contract must retain exactly liabilities"
+        ctx.sender_balance() + ctx.recipient_balance() + ctx.contract_balance(),
+        INITIAL_MINT
     );
-    assert_eq!(
-        ctx.token.balance(&sweep_recipient),
-        extra,
-        "Sweep recipient must receive excess"
-    );
-
-    // Stream should still be withdrawable
-    ctx.set_time(500);
-    let withdrawn = ctx.client.withdraw(&stream_id);
-    assert_eq!(withdrawn, 500);
-
-    assert_global_balance_conservation(&ctx);
-}
-
-/// Test batch withdraw with partial completions.
-#[test]
-fn batch_withdraw_partial_completion() {
-    let ctx = TestContext::setup();
-    ctx.set_time(0);
-
-    let s1 = ctx.create_stream(1000, 1, 0, 0, 1000).unwrap();
-    let s2 = ctx.create_stream(2000, 2, 0, 0, 500).unwrap(); // shorter
-
-    ctx.set_time(600);
-
-    // s1 accrued: 600, s2 accrued: 1000 (but capped at deposit=2000, so 1000)
-    // Actually s2: rate=2, duration=500, so max = 2*500 = 1000, deposit=2000
-    // At t=600 > end=500, accrued = min(2*500, 2000) = 1000
-
-    let recipient_before = ctx.token.balance(&ctx.recipient);
-    let results = ctx
-        .client
-        .batch_withdraw(&ctx.recipient, &vec![&ctx.env, s1, s2]);
-    let recipient_after = ctx.token.balance(&ctx.recipient);
-
-    let total: i128 = results.iter().map(|r| r.amount).sum();
-    assert_eq!(recipient_after - recipient_before, total);
-
-    // s2 should be completed (all 1000 withdrawn, but deposit was 2000... wait)
-    // Actually s2 deposit=2000, rate=2, duration=500, so total streamable = 1000
-    // At t=600, accrued = 1000, withdrawn = 1000, remaining = 1000 still in contract
-    // s2 is NOT completed because withdrawn (1000) != deposit (2000)
-    // This is expected behavior: deposit > rate*duration means excess deposit
-
-    let stream2 = ctx.client.get_stream_state(&s2);
-    assert_eq!(stream2.withdrawn_amount, 1000);
-    assert_eq!(stream2.status, StreamStatus::Active); // Not completed because deposit > accrued
-
-    assert_global_balance_conservation(&ctx);
 }

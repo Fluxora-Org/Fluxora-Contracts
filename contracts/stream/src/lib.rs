@@ -1,7 +1,10 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
 
+#[cfg(not(test))]
 mod accrual;
+#[cfg(test)]
+pub mod accrual;
 #[cfg(test)]
 mod checksum;
 mod token_check;
@@ -4624,20 +4627,37 @@ impl FluxoraStream {
             .checked_mul(new_duration)
             .ok_or(ContractError::ArithmeticOverflow)?;
 
+        // Already-accrued entitlement must never be reduced by a schedule change.
+        // Lock in the accrual at the current timestamp and use it as a floor for the
+        // new deposit, mirroring the safety invariant in `decrease_rate_per_second`.
+        let accrued_now = accrual::calculate_accrued_amount_checkpointed(
+            accrual::CheckpointState {
+                checkpointed_amount: stream.checkpointed_amount,
+                checkpointed_at: stream.checkpointed_at,
+                cliff_time: stream.cliff_time,
+                end_time: stream.end_time,
+                deposit_amount: stream.deposit_amount,
+                kind: stream.kind,
+            },
+            stream.rate_per_second,
+            now,
+        );
+        let new_deposit = new_max_streamable.max(accrued_now);
+
         // Deposit must still be sufficient to cover the shortened schedule (by construction
-        // this should hold given the original validation, but we keep an explicit assert).
-        if new_max_streamable > stream.deposit_amount {
+        // this should hold given the original validation, but we keep an explicit check).
+        if new_deposit > stream.deposit_amount {
             return Err(ContractError::InvalidParams);
         }
 
         let old_end_time = stream.end_time;
         let old_deposit = stream.deposit_amount;
         let refund_amount = old_deposit
-            .checked_sub(new_max_streamable)
+            .checked_sub(new_deposit)
             .ok_or(ContractError::ArithmeticOverflow)?;
 
         stream.end_time = new_end_time;
-        stream.deposit_amount = new_max_streamable;
+        stream.deposit_amount = new_deposit;
         save_stream(&env, &stream);
 
         if refund_amount > 0 {
