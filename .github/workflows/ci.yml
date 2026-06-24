@@ -159,6 +159,85 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
 
+  wasm-size-budget:
+    name: WASM Size Budget
+    runs-on: ubuntu-latest
+    # Depends on lint so we only run when the code is well-formed, but runs
+    # in parallel with the existing build job to keep wall-clock time low.
+    needs: lint
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-wasm-size-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-wasm-size-
+
+      # Build all three contracts to release WASM in a single pass.
+      - name: Build all contracts (release WASM)
+        run: cargo build --release --workspace --target wasm32-unknown-unknown
+
+      - name: Install Stellar CLI (pinned)
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          ARCHIVE="stellar-cli-${STELLAR_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          URL="https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/${ARCHIVE}"
+          curl -sSfL "$URL" -o "$ARCHIVE"
+          tar -xzf "$ARCHIVE"
+          mv stellar "$HOME/.local/bin/stellar"
+          chmod +x "$HOME/.local/bin/stellar"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          stellar --version
+
+      # Optimize each contract so the size check reflects the real deployment
+      # artifact. Failures here are non-fatal — raw WASM is checked instead.
+      - name: Optimize WASM artifacts
+        run: |
+          for CONTRACT in fluxora_stream fluxora_factory fluxora_governance; do
+            WASM="target/wasm32-unknown-unknown/release/${CONTRACT}.wasm"
+            if [ -f "$WASM" ]; then
+              stellar contract optimize --wasm "$WASM" || true
+            fi
+          done
+
+      # Check raw WASM sizes against the budgets defined in the script.
+      # Budgets are documented in docs/gas.md.
+      - name: Check raw WASM sizes
+        run: bash script/check-wasm-size.sh
+
+      # Also check optimized sizes when available (informational — does not
+      # gate the build, since not all environments have the optimizer).
+      - name: Check optimized WASM sizes
+        run: bash script/check-wasm-size.sh --optimized
+        continue-on-error: true
+
+      - name: Upload WASM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-size-budget-artifacts
+          path: |
+            target/wasm32-unknown-unknown/release/fluxora_stream.wasm
+            target/wasm32-unknown-unknown/release/fluxora_factory.wasm
+            target/wasm32-unknown-unknown/release/fluxora_governance.wasm
+            target/wasm32-unknown-unknown/release/fluxora_stream.optimized.wasm
+            target/wasm32-unknown-unknown/release/fluxora_factory.optimized.wasm
+            target/wasm32-unknown-unknown/release/fluxora_governance.optimized.wasm
+          retention-days: 14
+          if-no-files-found: warn
+
   test:
     name: Test
     runs-on: ubuntu-latest
