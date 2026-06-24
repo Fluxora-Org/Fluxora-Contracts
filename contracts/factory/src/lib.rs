@@ -18,6 +18,13 @@ const PERSISTENT_LIFETIME_THRESHOLD: u32 = 17_280;
 /// Persistent TTL bump target (ledgers). ~60 days at 5-second ledger close.
 const PERSISTENT_BUMP_AMOUNT: u32 = 120_960;
 
+/// Maximum accepted value for the factory `min_duration` policy, in seconds.
+///
+/// The ceiling is intentionally generous (100 years, using 365-day years) so
+/// normal treasury vesting schedules remain valid while malformed policies
+/// cannot silently make factory-routed stream creation impractical forever.
+pub const MAX_MIN_DURATION_SECONDS: u64 = 100 * 365 * 24 * 60 * 60;
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum FactoryError {
@@ -42,6 +49,11 @@ pub enum FactoryError {
     RateBelowMin = 12,
     /// Rate per second exceeds the configured maximum.
     RateAboveMax = 13,
+    /// The factory cap must be in the accepted range `1..=i128::MAX`.
+    InvalidCap = 14,
+    /// The minimum duration must be in the accepted range
+    /// `0..=MAX_MIN_DURATION_SECONDS` seconds.
+    InvalidMinDuration = 15,
 }
 
 #[contracttype]
@@ -100,6 +112,32 @@ fn append_stream_id(env: &Env, stream_id: u64) {
     );
 }
 
+/// Validate a factory deposit cap before storing it.
+///
+/// The cap must be strictly positive. A non-positive cap would make every
+/// positive stream deposit exceed the cap, effectively bricking factory-routed
+/// stream creation.
+fn validate_cap(max_deposit: i128) -> Result<(), FactoryError> {
+    if max_deposit <= 0 {
+        return Err(FactoryError::InvalidCap);
+    }
+
+    Ok(())
+}
+
+/// Validate a factory minimum-duration policy before storing it.
+///
+/// Accepted range: `0..=MAX_MIN_DURATION_SECONDS` seconds. A value of `0`
+/// disables any additional factory-level minimum duration while `create_stream`
+/// still enforces `start_time < end_time`.
+fn validate_min_duration(min_duration: u64) -> Result<(), FactoryError> {
+    if min_duration > MAX_MIN_DURATION_SECONDS {
+        return Err(FactoryError::InvalidMinDuration);
+    }
+
+    Ok(())
+}
+
 /// Read-only snapshot of the factory policy stored in instance storage.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -117,6 +155,11 @@ pub struct FluxoraFactory;
 #[allow(clippy::too_many_arguments)]
 impl FluxoraFactory {
     /// Initialize the factory with admin, stream contract, and policies.
+    ///
+    /// Accepted policy ranges:
+    /// - `max_deposit`: `1..=i128::MAX` (`FactoryError::InvalidCap` otherwise).
+    /// - `min_duration`: `0..=MAX_MIN_DURATION_SECONDS` seconds
+    ///   (`FactoryError::InvalidMinDuration` otherwise).
     pub fn init(
         env: Env,
         admin: Address,
@@ -127,6 +170,9 @@ impl FluxoraFactory {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(FactoryError::AlreadyInitialized);
         }
+
+        validate_cap(max_deposit)?;
+        validate_min_duration(min_duration)?;
 
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
@@ -177,8 +223,12 @@ impl FluxoraFactory {
     }
 
     /// Admin updates the max deposit cap.
+    ///
+    /// The cap must be strictly positive; a non-positive value returns
+    /// `FactoryError::InvalidCap` and leaves the stored cap unchanged.
     pub fn set_cap(env: Env, max_deposit: i128) -> Result<(), FactoryError> {
         require_admin(&env)?;
+        validate_cap(max_deposit)?;
 
         env.storage()
             .instance()
@@ -187,8 +237,14 @@ impl FluxoraFactory {
     }
 
     /// Admin updates the minimum stream duration.
+    ///
+    /// Accepted range: `0..=MAX_MIN_DURATION_SECONDS` seconds. A value of `0`
+    /// disables any additional factory-level minimum duration; values above the
+    /// ceiling return `FactoryError::InvalidMinDuration` and leave the stored
+    /// policy unchanged.
     pub fn set_min_duration(env: Env, min_duration: u64) -> Result<(), FactoryError> {
         require_admin(&env)?;
+        validate_min_duration(min_duration)?;
 
         env.storage()
             .instance()
