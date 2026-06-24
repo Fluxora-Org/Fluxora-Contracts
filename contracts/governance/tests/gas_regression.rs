@@ -60,8 +60,11 @@ fn test_governance_gas_propose() {
         let threshold = if size == 1 { 1 } else { size };
         let ctx = GovGasCtx::setup(size, threshold);
         let (cpu, mem) = measure_budget(&ctx, |ctx| {
-            ctx.client
-                .propose(&ctx.signers.get(0).unwrap(), &ctx.target, &ctx.calldata("proposal"));
+            ctx.client.propose(
+                &ctx.signers.get(0).unwrap(),
+                &ctx.target,
+                &ctx.calldata("proposal"),
+            );
         });
 
         println!("GAS_MEASUREMENT: propose: {}: {}", size, cpu);
@@ -78,12 +81,15 @@ fn test_governance_gas_approve_nonquorum() {
     for &size in &sizes {
         let threshold = size;
         let ctx = GovGasCtx::setup(size, threshold);
-        let proposal_id =
-            ctx.client
-                .propose(&ctx.signers.get(0).unwrap(), &ctx.target, &ctx.calldata("proposal"));
+        let proposal_id = ctx.client.propose(
+            &ctx.signers.get(0).unwrap(),
+            &ctx.target,
+            &ctx.calldata("proposal"),
+        );
 
         let (cpu, mem) = measure_budget(&ctx, |ctx| {
-            ctx.client.approve(&ctx.signers.get(1).unwrap(), &proposal_id);
+            ctx.client
+                .approve(&ctx.signers.get(1).unwrap(), &proposal_id);
         });
 
         println!("GAS_MEASUREMENT: approve_nonquorum: {}: {}", size, cpu);
@@ -108,9 +114,11 @@ fn test_governance_gas_approve_quorum() {
     for &size in &sizes {
         let threshold = size;
         let ctx = GovGasCtx::setup(size, threshold);
-        let proposal_id =
-            ctx.client
-                .propose(&ctx.signers.get(0).unwrap(), &ctx.target, &ctx.calldata("proposal"));
+        let proposal_id = ctx.client.propose(
+            &ctx.signers.get(0).unwrap(),
+            &ctx.target,
+            &ctx.calldata("proposal"),
+        );
 
         for signer in 0..(size - 1) {
             ctx.client
@@ -145,9 +153,11 @@ fn test_governance_gas_execute() {
     for &size in &sizes {
         let threshold = size;
         let ctx = GovGasCtx::setup(size, threshold);
-        let proposal_id =
-            ctx.client
-                .propose(&ctx.signers.get(0).unwrap(), &ctx.target, &ctx.calldata("proposal"));
+        let proposal_id = ctx.client.propose(
+            &ctx.signers.get(0).unwrap(),
+            &ctx.target,
+            &ctx.calldata("proposal"),
+        );
 
         for signer in 0..size {
             ctx.client

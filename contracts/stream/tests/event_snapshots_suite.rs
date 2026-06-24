@@ -494,7 +494,10 @@ fn event_snapshot_stream_paused_has_correct_topics_and_payload() {
                             .expect("Data must deserialize to StreamPaused");
 
                         assert_eq!(stream_paused.stream_id, stream_id);
-                        assert_eq!(stream_paused.reason, soroban_sdk::String::from_str(&ctx.env, "Operational"));
+                        assert_eq!(
+                            stream_paused.reason,
+                            soroban_sdk::String::from_str(&ctx.env, "Operational")
+                        );
 
                         found_paused = true;
                     }
@@ -546,7 +549,10 @@ fn event_snapshot_stream_paused_as_admin_has_administrative_reason() {
                     let stream_paused = StreamPaused::try_from_val(&ctx.env, &data)
                         .expect("Data must deserialize to StreamPaused");
 
-                    assert_eq!(stream_paused.reason, soroban_sdk::String::from_str(&ctx.env, "Administrative"));
+                    assert_eq!(
+                        stream_paused.reason,
+                        soroban_sdk::String::from_str(&ctx.env, "Administrative")
+                    );
                     found_admin_paused = true;
                 }
             }

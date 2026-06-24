@@ -6662,9 +6662,7 @@ impl FluxoraStream {
         // ── 5. Compute inherited cliff offset ─────────────────────────────────
         // Preserve the relative cliff position: cliff_offset = source.cliff_time - source.start_time.
         // Apply it to the new start_time.
-        let cliff_offset = source
-            .cliff_time
-            .saturating_sub(source.start_time); // if cliff < start (degenerate), treat as no cliff
+        let cliff_offset = source.cliff_time.saturating_sub(source.start_time); // if cliff < start (degenerate), treat as no cliff
         let new_cliff_time = start_time
             .checked_add(cliff_offset)
             .ok_or(ContractError::ArithmeticOverflow)?;
