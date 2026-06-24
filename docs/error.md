@@ -40,6 +40,11 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `ReservationNotFound` | 24 | No ID reservation exists for the specified holder | `release_id_reservation`, `reclaim_expired_id_reservation` |
 | `ReservationStillActive` | 25 | Reservation has not yet expired and cannot be reclaimed | `reclaim_expired_id_reservation` |
 | `ReservationNotExpirable` | 26 | Reservation has no expiry and cannot be reclaimed | `reclaim_expired_id_reservation` |
+| `KeeperGracePeriodNotElapsed` | 27 | Keeper cancellation grace period has not elapsed | `keeper_cancel` |
+| `MetadataTooLarge` | 28 | Stream metadata exceeds size limits | `create_stream`, `create_streams`, `create_streams_partial` |
+| `PauseCooldownActive` | 29 | Stream pause cooldown period is still active | `pause_stream` |
+| `RateCapExceeded` | 30 | Rate per second exceeds the configured maximum | `create_stream`, `update_rate_per_second` |
+| `WithdrawalTooFrequent` | 31 | Withdrawal attempted before minimum interval elapsed | `withdraw`, `delegated_withdraw`, `batch_withdraw` |
 
 Non-error enum values used by stream creation and accrual:
 
