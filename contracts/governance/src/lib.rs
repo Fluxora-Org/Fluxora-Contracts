@@ -181,6 +181,44 @@ pub struct ProposalExecuted {
     pub calldata: Bytes,
 }
 
+/// Emitted when the admin adds a new co-signer to the governance set.
+///
+/// Published by [`add_signer`](FluxoraGovernance::add_signer) after the signer
+/// list has been persisted (CEI: state mutation precedes the event). Indexers
+/// use this to reconstruct the live co-signer set from chain events alone.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SignerAdded {
+    /// The address that was added to the co-signer set.
+    pub signer: Address,
+}
+
+/// Emitted when the admin removes an existing co-signer from the governance set.
+///
+/// Published by [`remove_signer`](FluxoraGovernance::remove_signer) only when a
+/// matching address was actually removed and the updated signer list persisted.
+/// Removing an address that is not registered is a no-op and emits **no** event.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SignerRemoved {
+    /// The address that was removed from the co-signer set.
+    pub signer: Address,
+}
+
+/// Emitted when the admin address is rotated.
+///
+/// Published by [`set_admin`](FluxoraGovernance::set_admin) after the new admin
+/// has been persisted (CEI: state mutation precedes the event). Carries both the
+/// previous and new admin so indexers can reconstruct the full admin history.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AdminChanged {
+    /// The admin address that was in effect before the rotation.
+    pub old: Address,
+    /// The admin address that is in effect after the rotation.
+    pub new: Address,
+}
+
 // ---------------------------------------------------------------------------
 // Storage helpers
 // ---------------------------------------------------------------------------
@@ -333,9 +371,20 @@ impl FluxoraGovernance {
     /// # Authorization
     /// - Requires admin signature.
     pub fn set_admin(env: Env, new_admin: Address) -> Result<(), GovernanceError> {
-        get_admin(&env)?.require_auth();
+        let old_admin = get_admin(&env)?;
+        old_admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         bump_instance(&env);
+
+        // CEI: the new admin is persisted before the event is emitted.
+        env.events().publish(
+            (symbol_short!("adm_chg"),),
+            AdminChanged {
+                old: old_admin,
+                new: new_admin,
+            },
+        );
+
         Ok(())
     }
 
@@ -358,9 +407,14 @@ impl FluxoraGovernance {
         if signers.len() >= MAX_SIGNERS {
             return Err(GovernanceError::TooManySigners);
         }
-        signers.push_back(signer);
+        signers.push_back(signer.clone());
         env.storage().instance().set(&DataKey::Signers, &signers);
         bump_instance(&env);
+
+        // CEI: the updated signer set is persisted before the event is emitted.
+        env.events()
+            .publish((symbol_short!("sgnr_add"),), SignerAdded { signer });
+
         Ok(())
     }
 
@@ -390,6 +444,12 @@ impl FluxoraGovernance {
             signers.remove(i);
             env.storage().instance().set(&DataKey::Signers, &signers);
             bump_instance(&env);
+
+            // CEI: the updated signer set is persisted before the event is
+            // emitted. Only reached when a matching signer was actually removed;
+            // removing a non-existent address is a silent no-op (no event).
+            env.events()
+                .publish((symbol_short!("sgnr_rm"),), SignerRemoved { signer });
         }
         Ok(())
     }
