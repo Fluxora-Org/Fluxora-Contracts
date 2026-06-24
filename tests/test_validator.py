@@ -835,3 +835,57 @@ class TestGasMain:
         with pytest.raises(SystemExit) as exc:
             vg.main()
         assert exc.value.code == 1
+
+
+# ---------------------------------------------------------------------------
+# Additional tests for check_duplicate_discriminants coverage
+# ---------------------------------------------------------------------------
+
+class TestCheckDuplicateDiscriminants:
+    def test_no_contract_error_enum_returns_false(self, capsys):
+        """Test that missing ContractError enum returns False with warning."""
+        source = "pub enum SomeOtherEnum { A = 1, B = 2 }"
+        result = vda.check_duplicate_discriminants(source)
+        assert result is False
+        assert "WARNING: could not locate 'pub enum ContractError'" in capsys.readouterr().out
+
+    def test_duplicate_discriminants_detected(self, capsys):
+        """Test that duplicate discriminants are detected and printed."""
+        source = """\
+pub enum ContractError {
+    ErrorA = 1,
+    ErrorB = 2,
+    ErrorC = 1,
+}
+"""
+        result = vda.check_duplicate_discriminants(source)
+        assert result is True
+        out = capsys.readouterr().out
+        assert "DUPLICATE DISCRIMINANT" in out
+        assert "ErrorA" in out
+        assert "ErrorC" in out
+
+    def test_no_duplicates_returns_false(self):
+        """Test that no duplicates returns False."""
+        source = """\
+pub enum ContractError {
+    ErrorA = 1,
+    ErrorB = 2,
+    ErrorC = 3,
+}
+"""
+        result = vda.check_duplicate_discriminants(source)
+        assert result is False
+
+    def test_excluded_variants_ignored(self):
+        """Test that excluded variants don't trigger duplicate detection."""
+        source = """\
+pub enum ContractError {
+    Operational = 1,
+    Administrative = 1,
+    ErrorA = 2,
+}
+"""
+        # Both Operational and Administrative use value 1, but they're in ERROR_EXTRACT_EXCLUDE
+        result = vda.check_duplicate_discriminants(source)
+        assert result is False
