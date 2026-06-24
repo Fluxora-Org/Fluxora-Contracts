@@ -2,7 +2,8 @@
 #![allow(clippy::too_many_arguments)]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Bytes, Env, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Bytes, Env, Map,
+    Vec,
 };
 
 // ---------------------------------------------------------------------------
@@ -111,6 +112,10 @@ pub enum DataKey {
     Proposal(u32),
     /// Ledger timestamp at which a proposal first reached quorum (persistent).
     QuorumReachedAt(u32),
+    /// Map<Address, bool> membership index for O(1) signer lookups (instance storage).
+    SignerIndex,
+    /// Per-proposal Map<Address, bool> for O(1) duplicate-approval detection (persistent).
+    ProposalApprovalIdx(u32),
 }
 
 // ---------------------------------------------------------------------------
@@ -209,6 +214,35 @@ fn bump_quorum_ttl(env: &Env, id: u32) {
             PERSISTENT_BUMP_AMOUNT,
         );
     }
+}
+
+fn get_signer_index(env: &Env) -> Result<Map<Address, bool>, GovernanceError> {
+    env.storage()
+        .instance()
+        .get(&DataKey::SignerIndex)
+        .ok_or(GovernanceError::NotInitialized)
+}
+
+fn save_signer_index(env: &Env, index: &Map<Address, bool>) {
+    env.storage().instance().set(&DataKey::SignerIndex, index);
+}
+
+fn get_approval_index(env: &Env, proposal_id: u32) -> Map<Address, bool> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::ProposalApprovalIdx(proposal_id))
+        .unwrap_or_else(|| Map::new(env))
+}
+
+fn save_approval_index(env: &Env, proposal_id: u32, index: &Map<Address, bool>) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::ProposalApprovalIdx(proposal_id), index);
+    env.storage().persistent().extend_ttl(
+        &DataKey::ProposalApprovalIdx(proposal_id),
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
 }
 
 fn get_admin(env: &Env) -> Result<Address, GovernanceError> {
@@ -310,13 +344,23 @@ impl FluxoraGovernance {
         if signers.len() > MAX_SIGNERS {
             return Err(GovernanceError::TooManySigners);
         }
-        Self::require_unique_signers(&signers)?;
         if threshold == 0 || threshold > signers.len() {
             return Err(GovernanceError::InvalidThreshold);
         }
 
+        // Build Map index in a single O(n) pass; duplicates are detected via the map.
+        let mut signer_index: Map<Address, bool> = Map::new(&env);
+        for i in 0..signers.len() {
+            let s = signers.get(i).unwrap();
+            if signer_index.contains_key(s.clone()) {
+                return Err(GovernanceError::DuplicateSigner);
+            }
+            signer_index.set(s, true);
+        }
+
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Signers, &signers);
+        env.storage().instance().set(&DataKey::SignerIndex, &signer_index);
         env.storage()
             .instance()
             .set(&DataKey::Threshold, &threshold);
@@ -352,14 +396,19 @@ impl FluxoraGovernance {
     pub fn add_signer(env: Env, signer: Address) -> Result<(), GovernanceError> {
         get_admin(&env)?.require_auth();
         let mut signers = get_signers(&env)?;
-        if Self::is_signer(&signers, &signer) {
+        let mut signer_index = get_signer_index(&env)?;
+
+        // O(1) duplicate check via Map index.
+        if signer_index.contains_key(signer.clone()) {
             return Err(GovernanceError::DuplicateSigner);
         }
         if signers.len() >= MAX_SIGNERS {
             return Err(GovernanceError::TooManySigners);
         }
-        signers.push_back(signer);
+        signers.push_back(signer.clone());
+        signer_index.set(signer, true);
         env.storage().instance().set(&DataKey::Signers, &signers);
+        save_signer_index(&env, &signer_index);
         bump_instance(&env);
         Ok(())
     }
@@ -374,23 +423,31 @@ impl FluxoraGovernance {
     ///   threshold, making future proposals permanently unexecutable.
     pub fn remove_signer(env: Env, signer: Address) -> Result<(), GovernanceError> {
         get_admin(&env)?.require_auth();
+        let mut signer_index = get_signer_index(&env)?;
+
+        // O(1) membership check — skip Vec scan entirely when address is absent.
+        if !signer_index.contains_key(signer.clone()) {
+            return Ok(());
+        }
+
         let mut signers = get_signers(&env)?;
-        let mut idx: Option<u32> = None;
+        let threshold = get_threshold(&env)?;
+        if signers.len() - 1 < threshold {
+            return Err(GovernanceError::QuorumWouldBreak);
+        }
+
+        // Scan Vec only to find the removal position (unavoidable for ordered Vec removal).
         for i in 0..signers.len() {
             if signers.get(i).is_some_and(|candidate| candidate == signer) {
-                idx = Some(i);
+                signers.remove(i);
                 break;
             }
         }
-        if let Some(i) = idx {
-            let threshold = get_threshold(&env)?;
-            if signers.len() - 1 < threshold {
-                return Err(GovernanceError::QuorumWouldBreak);
-            }
-            signers.remove(i);
-            env.storage().instance().set(&DataKey::Signers, &signers);
-            bump_instance(&env);
-        }
+
+        signer_index.remove(signer);
+        env.storage().instance().set(&DataKey::Signers, &signers);
+        save_signer_index(&env, &signer_index);
+        bump_instance(&env);
         Ok(())
     }
 
@@ -422,9 +479,8 @@ impl FluxoraGovernance {
     ) -> Result<u32, GovernanceError> {
         proposer.require_auth();
 
-        // Verify proposer is a registered signer.
-        let signers = get_signers(&env)?;
-        if !Self::is_signer(&signers, &proposer) {
+        // O(1) signer membership check via Map index.
+        if !Self::is_signer(&env, &proposer)? {
             return Err(GovernanceError::NotASigner);
         }
 
@@ -481,8 +537,8 @@ impl FluxoraGovernance {
     pub fn approve(env: Env, approver: Address, proposal_id: u32) -> Result<(), GovernanceError> {
         approver.require_auth();
 
-        let signers = get_signers(&env)?;
-        if !Self::is_signer(&signers, &approver) {
+        // O(1) signer membership check via Map index.
+        if !Self::is_signer(&env, &approver)? {
             return Err(GovernanceError::NotASigner);
         }
 
@@ -500,18 +556,14 @@ impl FluxoraGovernance {
             return Err(GovernanceError::ProposalExpired);
         }
 
-        // Prevent duplicate approvals.
-        for i in 0..proposal.approvals.len() {
-            if proposal
-                .approvals
-                .get(i)
-                .is_some_and(|existing| existing == approver)
-            {
-                return Err(GovernanceError::AlreadyApproved);
-            }
+        // O(1) duplicate-approval check via per-proposal Map index.
+        let mut approval_idx = get_approval_index(&env, proposal_id);
+        if approval_idx.contains_key(approver.clone()) {
+            return Err(GovernanceError::AlreadyApproved);
         }
 
         proposal.approvals.push_back(approver.clone());
+        approval_idx.set(approver.clone(), true);
         let approval_count = proposal.approvals.len();
 
         let threshold = get_threshold(&env)?;
@@ -524,6 +576,7 @@ impl FluxoraGovernance {
         };
 
         save_proposal(&env, proposal_id, &proposal);
+        save_approval_index(&env, proposal_id, &approval_idx);
         bump_instance(&env);
 
         env.events().publish(
@@ -843,27 +896,10 @@ impl FluxoraGovernance {
         checked_deadline(info.reached_at, GOVERNANCE_TIMELOCK_SECONDS)
     }
 
-    fn is_signer(signers: &Vec<Address>, addr: &Address) -> bool {
-        for i in 0..signers.len() {
-            if signers.get(i).is_some_and(|signer| &signer == addr) {
-                return true;
-            }
-        }
-        false
-    }
-
-    fn require_unique_signers(signers: &Vec<Address>) -> Result<(), GovernanceError> {
-        for i in 0..signers.len() {
-            let Some(signer) = signers.get(i) else {
-                continue;
-            };
-            for j in (i + 1)..signers.len() {
-                if signers.get(j).is_some_and(|candidate| candidate == signer) {
-                    return Err(GovernanceError::DuplicateSigner);
-                }
-            }
-        }
-        Ok(())
+    /// O(1) signer membership check via the Map index stored in instance storage.
+    fn is_signer(env: &Env, addr: &Address) -> Result<bool, GovernanceError> {
+        let index = get_signer_index(env)?;
+        Ok(index.contains_key(addr.clone()))
     }
 }
 
