@@ -114,12 +114,28 @@ impl Ctx {
 
     fn default_params(&self) -> (i128, i128, u64, u64, u64, i128) {
         let start = self.now();
-        (DEPOSIT_AMOUNT, RATE_PER_SECOND, start, start, start + STREAM_DURATION, 0)
+        (
+            DEPOSIT_AMOUNT,
+            RATE_PER_SECOND,
+            start,
+            start,
+            start + STREAM_DURATION,
+            0,
+        )
     }
 
     fn create_default_stream(&self) -> u64 {
         let (dep, rate, start, cliff, end, dust) = self.default_params();
-        self.factory.create_stream(&self.sender, &self.recipient, &dep, &rate, &start, &cliff, &end, &dust)
+        self.factory.create_stream(
+            &self.sender,
+            &self.recipient,
+            &dep,
+            &rate,
+            &start,
+            &cliff,
+            &end,
+            &dust,
+        )
     }
 }
 
@@ -133,7 +149,14 @@ fn test_create_stream_happy_path() {
     let (deposit, rate, start, cliff, end, dust) = ctx.default_params();
 
     let stream_id = ctx.factory.create_stream(
-        &ctx.sender, &ctx.recipient, &deposit, &rate, &start, &cliff, &end, &dust,
+        &ctx.sender,
+        &ctx.recipient,
+        &deposit,
+        &rate,
+        &start,
+        &cliff,
+        &end,
+        &dust,
     );
 
     assert_eq!(stream_id, 0, "first stream gets id 0");
@@ -182,7 +205,14 @@ fn test_create_stream_recipient_not_allowlisted() {
     let (dep, rate, start, cliff, end, dust) = ctx.default_params();
 
     let result = ctx.factory.try_create_stream(
-        &ctx.sender, &unknown, &dep, &rate, &start, &cliff, &end, &dust,
+        &ctx.sender,
+        &unknown,
+        &dep,
+        &rate,
+        &start,
+        &cliff,
+        &end,
+        &dust,
     );
     assert_eq!(result, Err(Ok(FactoryError::RecipientNotAllowlisted)));
 }
@@ -198,7 +228,14 @@ fn test_create_stream_deposit_exceeds_cap() {
     let over_cap = MAX_DEPOSIT + 1;
 
     let result = ctx.factory.try_create_stream(
-        &ctx.sender, &ctx.recipient, &over_cap, &rate, &start, &cliff, &end, &dust,
+        &ctx.sender,
+        &ctx.recipient,
+        &over_cap,
+        &rate,
+        &start,
+        &cliff,
+        &end,
+        &dust,
     );
     assert_eq!(result, Err(Ok(FactoryError::DepositExceedsCap)));
 }
@@ -210,7 +247,14 @@ fn test_create_stream_deposit_at_cap_ok() {
     let (_, rate, start, cliff, end, dust) = ctx.default_params();
 
     let result = ctx.factory.try_create_stream(
-        &ctx.sender, &ctx.recipient, &MAX_DEPOSIT, &rate, &start, &cliff, &end, &dust,
+        &ctx.sender,
+        &ctx.recipient,
+        &MAX_DEPOSIT,
+        &rate,
+        &start,
+        &cliff,
+        &end,
+        &dust,
     );
     assert_ne!(result, Err(Ok(FactoryError::DepositExceedsCap)));
 }
@@ -226,8 +270,14 @@ fn test_create_stream_duration_too_short() {
     let short_duration = MIN_DURATION - 1;
 
     let result = ctx.factory.try_create_stream(
-        &ctx.sender, &ctx.recipient, &DEPOSIT_AMOUNT, &RATE_PER_SECOND,
-        &start, &start, &(start + short_duration), &0,
+        &ctx.sender,
+        &ctx.recipient,
+        &DEPOSIT_AMOUNT,
+        &RATE_PER_SECOND,
+        &start,
+        &start,
+        &(start + short_duration),
+        &0,
     );
     assert_eq!(result, Err(Ok(FactoryError::DurationTooShort)));
 }
@@ -239,8 +289,14 @@ fn test_create_stream_duration_at_minimum_ok() {
     let start = ctx.now();
 
     let result = ctx.factory.try_create_stream(
-        &ctx.sender, &ctx.recipient, &DEPOSIT_AMOUNT, &RATE_PER_SECOND,
-        &start, &start, &(start + MIN_DURATION), &0,
+        &ctx.sender,
+        &ctx.recipient,
+        &DEPOSIT_AMOUNT,
+        &RATE_PER_SECOND,
+        &start,
+        &start,
+        &(start + MIN_DURATION),
+        &0,
     );
     assert_ne!(result, Err(Ok(FactoryError::DurationTooShort)));
 }
@@ -255,8 +311,14 @@ fn test_create_stream_invalid_time_range_end_before_start() {
     let now = ctx.now();
 
     let result = ctx.factory.try_create_stream(
-        &ctx.sender, &ctx.recipient, &DEPOSIT_AMOUNT, &RATE_PER_SECOND,
-        &(now + 200), &(now + 200), &(now + 100), &0,
+        &ctx.sender,
+        &ctx.recipient,
+        &DEPOSIT_AMOUNT,
+        &RATE_PER_SECOND,
+        &(now + 200),
+        &(now + 200),
+        &(now + 100),
+        &0,
     );
     assert_eq!(result, Err(Ok(FactoryError::InvalidTimeRange)));
 }
@@ -267,8 +329,14 @@ fn test_create_stream_invalid_time_range_end_equal_start() {
     let now = ctx.now();
 
     let result = ctx.factory.try_create_stream(
-        &ctx.sender, &ctx.recipient, &DEPOSIT_AMOUNT, &RATE_PER_SECOND,
-        &now, &now, &now, &0,
+        &ctx.sender,
+        &ctx.recipient,
+        &DEPOSIT_AMOUNT,
+        &RATE_PER_SECOND,
+        &now,
+        &now,
+        &now,
+        &0,
     );
     assert_eq!(result, Err(Ok(FactoryError::InvalidTimeRange)));
 }
@@ -279,8 +347,14 @@ fn test_create_stream_invalid_cliff_before_start() {
     let now = ctx.now();
 
     let result = ctx.factory.try_create_stream(
-        &ctx.sender, &ctx.recipient, &DEPOSIT_AMOUNT, &RATE_PER_SECOND,
-        &(now + 100), &now, &(now + 300), &0,
+        &ctx.sender,
+        &ctx.recipient,
+        &DEPOSIT_AMOUNT,
+        &RATE_PER_SECOND,
+        &(now + 100),
+        &now,
+        &(now + 300),
+        &0,
     );
     assert_eq!(result, Err(Ok(FactoryError::InvalidCliff)));
 }
@@ -291,8 +365,14 @@ fn test_create_stream_invalid_cliff_after_end() {
     let now = ctx.now();
 
     let result = ctx.factory.try_create_stream(
-        &ctx.sender, &ctx.recipient, &DEPOSIT_AMOUNT, &RATE_PER_SECOND,
-        &now, &(now + 300), &(now + 200), &0,
+        &ctx.sender,
+        &ctx.recipient,
+        &DEPOSIT_AMOUNT,
+        &RATE_PER_SECOND,
+        &now,
+        &(now + 300),
+        &(now + 200),
+        &0,
     );
     assert_eq!(result, Err(Ok(FactoryError::InvalidCliff)));
 }
@@ -308,9 +388,14 @@ fn test_create_stream_cliff_at_start() {
     let now = ctx.now();
 
     let stream_id = ctx.factory.create_stream(
-        &ctx.sender, &ctx.recipient,
-        &DEPOSIT_AMOUNT, &RATE_PER_SECOND,
-        &now, &now, &(now + STREAM_DURATION), &0,
+        &ctx.sender,
+        &ctx.recipient,
+        &DEPOSIT_AMOUNT,
+        &RATE_PER_SECOND,
+        &now,
+        &now,
+        &(now + STREAM_DURATION),
+        &0,
     );
 
     let state = ctx.stream.get_stream_state(&stream_id);
@@ -326,9 +411,14 @@ fn test_create_stream_cliff_at_end() {
     let end = now + STREAM_DURATION;
 
     let stream_id = ctx.factory.create_stream(
-        &ctx.sender, &ctx.recipient,
-        &DEPOSIT_AMOUNT, &RATE_PER_SECOND,
-        &now, &end, &end, &0,
+        &ctx.sender,
+        &ctx.recipient,
+        &DEPOSIT_AMOUNT,
+        &RATE_PER_SECOND,
+        &now,
+        &end,
+        &end,
+        &0,
     );
 
     let state = ctx.stream.get_stream_state(&stream_id);
@@ -368,9 +458,21 @@ fn test_create_stream_requires_sender_auth() {
 
     let now = env.ledger().timestamp();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        factory.create_stream(&sender, &recipient, &DEPOSIT_AMOUNT, &RATE_PER_SECOND, &now, &now, &(now + STREAM_DURATION), &0);
+        factory.create_stream(
+            &sender,
+            &recipient,
+            &DEPOSIT_AMOUNT,
+            &RATE_PER_SECOND,
+            &now,
+            &now,
+            &(now + STREAM_DURATION),
+            &0,
+        );
     }));
-    assert!(result.is_err(), "create_stream must panic without sender auth");
+    assert!(
+        result.is_err(),
+        "create_stream must panic without sender auth"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -385,7 +487,10 @@ fn test_create_stream_moves_tokens_from_sender_to_contract() {
     let contract_before = ctx.token.balance(&ctx.stream_contract_id);
     let recipient_before = ctx.token.balance(&ctx.recipient);
 
-    assert_eq!(contract_before, 0, "stream contract starts with zero balance");
+    assert_eq!(
+        contract_before, 0,
+        "stream contract starts with zero balance"
+    );
     assert_eq!(recipient_before, 0, "recipient starts with zero balance");
 
     ctx.create_default_stream();
@@ -394,8 +499,15 @@ fn test_create_stream_moves_tokens_from_sender_to_contract() {
     let contract_after = ctx.token.balance(&ctx.stream_contract_id);
     let recipient_after = ctx.token.balance(&ctx.recipient);
 
-    assert_eq!(sender_after, sender_before - DEPOSIT_AMOUNT, "sender debited deposit");
-    assert_eq!(contract_after, DEPOSIT_AMOUNT, "stream contract credited deposit");
+    assert_eq!(
+        sender_after,
+        sender_before - DEPOSIT_AMOUNT,
+        "sender debited deposit"
+    );
+    assert_eq!(
+        contract_after, DEPOSIT_AMOUNT,
+        "stream contract credited deposit"
+    );
     assert_eq!(recipient_after, 0, "recipient balance unchanged");
 }
 
@@ -409,11 +521,25 @@ fn test_create_multiple_streams_same_recipient() {
     let (dep, rate, start, cliff, end, dust) = ctx.default_params();
 
     let id0 = ctx.factory.create_stream(
-        &ctx.sender, &ctx.recipient, &dep, &rate, &start, &cliff, &end, &dust,
+        &ctx.sender,
+        &ctx.recipient,
+        &dep,
+        &rate,
+        &start,
+        &cliff,
+        &end,
+        &dust,
     );
     // Slightly different schedule for a second stream
     let id1 = ctx.factory.create_stream(
-        &ctx.sender, &ctx.recipient, &dep, &rate, &start, &cliff, &(end + 100_000), &dust,
+        &ctx.sender,
+        &ctx.recipient,
+        &dep,
+        &rate,
+        &start,
+        &cliff,
+        &(end + 100_000),
+        &dust,
     );
 
     assert_eq!(id0, 0);
@@ -440,14 +566,44 @@ fn test_create_streams_different_recipients() {
 
     let (dep, rate, start, cliff, end, dust) = ctx.default_params();
 
-    ctx.factory.create_stream(&ctx.sender, &ctx.recipient, &dep, &rate, &start, &cliff, &end, &dust);
-    ctx.factory.create_stream(&ctx.sender, &recipient_b, &dep, &rate, &start, &cliff, &(end + 50_000), &dust);
+    ctx.factory.create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &dep,
+        &rate,
+        &start,
+        &cliff,
+        &end,
+        &dust,
+    );
+    ctx.factory.create_stream(
+        &ctx.sender,
+        &recipient_b,
+        &dep,
+        &rate,
+        &start,
+        &cliff,
+        &(end + 50_000),
+        &dust,
+    );
 
     assert_eq!(ctx.stream.get_recipient_stream_count(&ctx.recipient), 1);
     assert_eq!(ctx.stream.get_recipient_stream_count(&recipient_b), 1);
 
-    assert_eq!(ctx.stream.get_recipient_streams(&ctx.recipient).get(0).unwrap(), 0);
-    assert_eq!(ctx.stream.get_recipient_streams(&recipient_b).get(0).unwrap(), 1);
+    assert_eq!(
+        ctx.stream
+            .get_recipient_streams(&ctx.recipient)
+            .get(0)
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        ctx.stream
+            .get_recipient_streams(&recipient_b)
+            .get(0)
+            .unwrap(),
+        1
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -463,8 +619,14 @@ fn test_create_stream_factory_not_initialized_returns_not_initialized() {
     let now = env.ledger().timestamp();
 
     let result = factory.try_create_stream(
-        &Address::generate(&env), &Address::generate(&env),
-        &DEPOSIT_AMOUNT, &RATE_PER_SECOND, &now, &now, &(now + STREAM_DURATION), &0,
+        &Address::generate(&env),
+        &Address::generate(&env),
+        &DEPOSIT_AMOUNT,
+        &RATE_PER_SECOND,
+        &now,
+        &now,
+        &(now + STREAM_DURATION),
+        &0,
     );
     assert_eq!(result, Err(Ok(FactoryError::NotInitialized)));
 }
@@ -480,7 +642,14 @@ fn test_set_cap_enforced_end_to_end() {
 
     let (_, rate, start, cliff, end, dust) = ctx.default_params();
     let result = ctx.factory.try_create_stream(
-        &ctx.sender, &ctx.recipient, &6_000, &rate, &start, &cliff, &end, &dust,
+        &ctx.sender,
+        &ctx.recipient,
+        &6_000,
+        &rate,
+        &start,
+        &cliff,
+        &end,
+        &dust,
     );
     assert_eq!(result, Err(Ok(FactoryError::DepositExceedsCap)));
 }
@@ -492,8 +661,14 @@ fn test_set_min_duration_enforced_end_to_end() {
 
     let now = ctx.now();
     let result = ctx.factory.try_create_stream(
-        &ctx.sender, &ctx.recipient, &DEPOSIT_AMOUNT, &RATE_PER_SECOND,
-        &now, &now, &(now + 200_000), &0,
+        &ctx.sender,
+        &ctx.recipient,
+        &DEPOSIT_AMOUNT,
+        &RATE_PER_SECOND,
+        &now,
+        &now,
+        &(now + 200_000),
+        &0,
     );
     assert_eq!(result, Err(Ok(FactoryError::DurationTooShort)));
 }
@@ -505,7 +680,14 @@ fn test_remove_allowlist_enforced_end_to_end() {
 
     let (dep, rate, start, cliff, end, dust) = ctx.default_params();
     let result = ctx.factory.try_create_stream(
-        &ctx.sender, &ctx.recipient, &dep, &rate, &start, &cliff, &end, &dust,
+        &ctx.sender,
+        &ctx.recipient,
+        &dep,
+        &rate,
+        &start,
+        &cliff,
+        &end,
+        &dust,
     );
     assert_eq!(result, Err(Ok(FactoryError::RecipientNotAllowlisted)));
 }

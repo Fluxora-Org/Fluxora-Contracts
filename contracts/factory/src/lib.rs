@@ -271,13 +271,17 @@ impl FluxoraFactory {
                 // rates are non-negative by domain convention; reject negative explicitly
                 return Err(FactoryError::StreamContractError); // reuse or could add new, but keep minimal
             }
-            env.storage().instance().set(&DataKey::MinRatePerSecond, &min_v);
+            env.storage()
+                .instance()
+                .set(&DataKey::MinRatePerSecond, &min_v);
         }
         if let Some(max_v) = max_rate {
             if max_v < 0 {
                 return Err(FactoryError::StreamContractError);
             }
-            env.storage().instance().set(&DataKey::MaxRatePerSecond, &max_v);
+            env.storage()
+                .instance()
+                .set(&DataKey::MaxRatePerSecond, &max_v);
         }
 
         // Validate min <= max when both are present after the update
@@ -318,15 +322,11 @@ impl FluxoraFactory {
 
         // Emit a structured event so indexers and monitors can react.
         if paused {
-            env.events().publish(
-                (symbol_short!("factory"), symbol_short!("paused")),
-                paused,
-            );
+            env.events()
+                .publish((symbol_short!("factory"), symbol_short!("paused")), paused);
         } else {
-            env.events().publish(
-                (symbol_short!("factory"), symbol_short!("resumed")),
-                paused,
-            );
+            env.events()
+                .publish((symbol_short!("factory"), symbol_short!("resumed")), paused);
         }
 
         Ok(())
@@ -487,12 +487,20 @@ impl FluxoraFactory {
 
         // ── Guard 6: rate bounds (new) ───────────────────────────────────────
         // Unset bounds are permissive. Bounds are inclusive.
-        if let Some(min_rate) = env.storage().instance().get::<_, i128>(&DataKey::MinRatePerSecond) {
+        if let Some(min_rate) = env
+            .storage()
+            .instance()
+            .get::<_, i128>(&DataKey::MinRatePerSecond)
+        {
             if rate_per_second < min_rate {
                 return Err(FactoryError::RateBelowMin);
             }
         }
-        if let Some(max_rate) = env.storage().instance().get::<_, i128>(&DataKey::MaxRatePerSecond) {
+        if let Some(max_rate) = env
+            .storage()
+            .instance()
+            .get::<_, i128>(&DataKey::MaxRatePerSecond)
+        {
             if rate_per_second > max_rate {
                 return Err(FactoryError::RateAboveMax);
             }
