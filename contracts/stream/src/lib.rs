@@ -32,8 +32,12 @@ const PERSISTENT_BUMP_AMOUNT: u32 = 120_960;
 /// All paginated entrypoints enforce this limit strictly.
 pub const MAX_PAGE_SIZE: u64 = 100;
 
-/// Maximum number of stream IDs returned per page in `get_recipient_streams_paginated`.
-const RECIPIENT_STREAMS_PAGE_LIMIT: u32 = 100;
+/// Maximum number of stream IDs returned per page in `get_recipient_streams_paginated`,
+/// and the hard cap applied by `get_recipient_streams`.
+pub const RECIPIENT_STREAMS_PAGE_LIMIT: u32 = 100;
+
+/// Alias for [`RECIPIENT_STREAMS_PAGE_LIMIT`] — exposed for test crates that import by this name.
+pub const MAX_RECIPIENT_PAGE_SIZE: u32 = RECIPIENT_STREAMS_PAGE_LIMIT;
 
 /// Maximum byte length for memo attached to a stream.
 pub const MAX_MEMO_BYTES: usize = 256;
@@ -4844,47 +4848,37 @@ impl FluxoraStream {
         CONTRACT_VERSION
     }
 
-    /// Retrieve all stream IDs for a given recipient (sorted by stream_id).
+    /// Convenience wrapper — returns **at most `RECIPIENT_STREAMS_PAGE_LIMIT`** stream IDs
+    /// for the given recipient (the first page, sorted ascending by stream_id).
     ///
-    /// Returns a vector of stream IDs where the recipient is the stream's recipient address.
-    /// The list is maintained in sorted ascending order by stream_id for deterministic
-    /// pagination and UI display. This enables efficient recipient portal workflows where
-    /// users can see all their incoming streams.
-    ///
-    /// # Parameters
-    /// - `recipient`: Address to query streams for
-    ///
-    /// # Returns
-    /// - `Vec<u64>`: Vector of stream IDs (sorted ascending by stream_id)
-    ///   - Empty vector if the recipient has no streams
-    ///   - Includes streams in all statuses (Active, Paused, Completed, Cancelled)
-    ///   - Does not include closed streams (removed via `close_completed_stream`)
+    /// > **Deprecated convenience wrapper.**
+    /// > This function is hard-bounded at `RECIPIENT_STREAMS_PAGE_LIMIT` (currently 100)
+    /// > to prevent unbounded memory and gas exhaustion on high-volume recipients.
+    /// > Callers that need the full index **must** use
+    /// > [`get_recipient_streams_paginated`](Self::get_recipient_streams_paginated) instead,
+    /// > iterating until `next_cursor == 0`.
     ///
     /// # Behavior
-    /// - This is a view function (read-only, no state changes)
-    /// - No authorization required (public information)
-    /// - Extends TTL on the recipient's index to prevent expiration
-    /// - Useful for recipient portals to enumerate all streams
-    /// - Can be used for pagination by combining with `get_stream_state`
-    ///
-    /// # Consistency Guarantees
-    /// - **Sorted order**: Always returns streams in ascending order by stream_id
-    /// - **Completeness**: Includes all active streams for the recipient
-    /// - **Lifecycle consistency**: Streams are added on creation, removed on close
-    /// - **Recipient updates**: If recipient changes (not currently supported), index remains consistent
-    ///
-    /// # Usage Notes
-    /// - Combine with `get_stream_state` to fetch full stream details
-    /// - Use with `calculate_accrued` to show real-time balances
-    /// - For large recipient portfolios, consider pagination strategies
-    /// - Closed streams are not included (use `get_stream_state` to verify existence)
-    ///
-    /// # Examples
-    /// - Get all streams for a recipient: `get_recipient_streams(env, recipient_address)`
-    /// - Paginate: fetch first N IDs, then call `get_stream_state` for each
-    /// - Filter by status: fetch all IDs, then check status of each via `get_stream_state`
+    /// - Returns streams in ascending order by stream_id.
+    /// - Returns an empty vector when the recipient has no streams.
+    /// - **Never returns more than `RECIPIENT_STREAMS_PAGE_LIMIT` entries**, regardless of
+    ///   how many streams the recipient owns.  The cap is applied *before* the Vec is
+    ///   materialised in memory so the contract cannot be forced to allocate an oversized
+    ///   buffer.
+    /// - Backward-compatible for recipients with ≤ `RECIPIENT_STREAMS_PAGE_LIMIT` streams
+    ///   (full result still returned).
     pub fn get_recipient_streams(env: Env, recipient: Address) -> soroban_sdk::Vec<u64> {
-        load_recipient_streams(&env, &recipient)
+        let all = load_recipient_streams(&env, &recipient);
+        let cap = RECIPIENT_STREAMS_PAGE_LIMIT;
+        if all.len() <= cap {
+            return all;
+        }
+        // Cap applied before Vec is built to avoid materialising an oversized buffer.
+        let mut out = soroban_sdk::Vec::new(&env);
+        for i in 0..cap {
+            out.push_back(all.get(i).unwrap());
+        }
+        out
     }
 
     /// Paginated version of get_recipient_streams to prevent unbounded returns.
