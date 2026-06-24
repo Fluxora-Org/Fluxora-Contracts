@@ -12,6 +12,23 @@ The `fluxora_factory` acts as a proxy entrypoint to enforce these policies:
 - **Minimum Duration**: Enforces a `MinDuration` (i.e. `end_time - start_time >= min_duration`), preventing overly short or instantaneous streams.
 - **Time Relationship Checks**: Rejects invalid schedules before calling `FluxoraStream`. `start_time` must be strictly less than `end_time`, and `cliff_time` must be within the inclusive `[start_time, end_time]` window.
 
+## Policy Parameter Validation
+
+Policy parameters are validated before they are written by `init`, `set_cap`,
+and `set_min_duration`. Invalid values are rejected at write time so the later
+`create_stream` policy checks remain meaningful and cannot be silently bricked by
+nonsensical stored configuration. Failed setter calls leave the previously stored
+policy unchanged.
+
+| Parameter | Entrypoints | Accepted range | Rejection error | Notes |
+|-----------|-------------|----------------|-----------------|-------|
+| `max_deposit: i128` | `init`, `set_cap` | `1..=i128::MAX` | `FactoryError::InvalidCap` | `0` and negative caps are rejected because every positive stream deposit would exceed them. |
+| `min_duration: u64` | `init`, `set_min_duration` | `0..=3_153_600_000` seconds (`MAX_MIN_DURATION_SECONDS`, 100 365-day years) | `FactoryError::InvalidMinDuration` | `0` is valid and means no additional factory-level minimum duration beyond the required `start_time < end_time` invariant. |
+
+These ranges are also documented in the Rust `///` comments on the factory
+entrypoints. Error discriminants are append-only; `InvalidCap = 9` and
+`InvalidMinDuration = 10` were added without renumbering existing values.
+
 ## Time Validation
 
 The factory mirrors the underlying stream contract's creation-time schedule invariants and returns typed factory errors before making the cross-contract call:
@@ -128,38 +145,6 @@ If the client omits either scope, the transaction fails at the corresponding
 `require_auth` call. If the sub-invocation arguments differ from the signed
 arguments, the nested authorization is not valid for that call.
 
-## Tests and Verification
-
-### Unit and Policy Tests
-The core policy validation is heavily covered by unit tests in `contracts/stream/tests/factory_policy.rs`. These tests cover basic validation paths and standard edge cases, verifying that:
-- Non-allowlisted recipients are correctly rejected.
-- Deposits exceeding the configured cap are blocked, while deposits exactly at the cap are accepted.
-- Durations below the minimum required duration are rejected, while durations exactly at the minimum are accepted.
-- Start and end time limits (such as `start_time >= end_time`) are strictly validated.
-- Proper administration privileges are required for setter methods.
-
-### Randomized Property-Based Fuzz Harness
-To uncover edge cases and guard against boundary checks or logical bypasses, a comprehensive property fuzzing harness is implemented in `contracts/stream/tests/factory_fuzz.rs` using `proptest`.
-
-This harness systematically generates and evaluates randomized variations of:
-- `max_deposit` (cap) and fuzzed `deposit_offset` (testing values below, exactly at, and above the cap).
-- `min_duration` and fuzzed `duration_offset` (testing values below, exactly at, and above the minimum duration).
-- Randomized recipient allowlist states.
-- Randomized `start_time` and time-bounds.
-
-#### Properties Asserted (iff Semantic Verification)
-Exactly the following logical invariants are verified to hold for every execution of the fuzz harness:
-1. **RecipientNotAllowlisted iff !is_allowlisted**: A request must fail with `RecipientNotAllowlisted` if and only if the recipient is not currently allowlisted, regardless of other parameters.
-2. **DepositExceedsCap iff deposit > cap**: If the recipient is allowlisted, the stream creation fails with `DepositExceedsCap` if and only if the deposit amount exceeds the configured policy cap.
-3. **InvalidTimeRange iff start >= end**: If the recipient is allowlisted and the deposit is within the cap, the stream creation fails with `InvalidTimeRange` if and only if the start time is greater than or equal to the end time.
-4. **DurationTooShort iff duration < min_duration**: If the recipient is allowlisted, the deposit is within the cap, and the time range is valid, the stream creation fails with `DurationTooShort` if and only if the duration is strictly less than the minimum duration.
-5. **No false-rejections**: Any valid in-policy input combination must succeed without error, guaranteeing that no correct transaction is wrongly blocked.
-
-To execute the fuzzing harness, run:
-```bash
-cargo test --test factory_fuzz
-```
-
 ## Admin Controls
 
 The factory has an `Admin` key managed via `set_admin`. The admin can:
@@ -174,250 +159,18 @@ authorization described above, and the underlying stream contract still enforces
 its own authorization table. See the [`docs/security.md` admin powers
 section](security.md#admin-powers) for the protocol-wide admin boundary.
 
-## Factory Stream Registry
-
-Every stream ID that passes all policy checks and is successfully created through
-the factory is appended to a persistent on-chain registry. This gives operators,
-auditors, and migration tooling a complete, factory-authoritative list of policy-
-gated streams that is queryable without relying on off-chain indexers.
-
-### Storage key
-
-The registry is stored under `DataKey::FactoryStreamIds` in persistent storage as
-a `Vec<u64>` (ordered by creation time). The key is independent from the stream
-contract's own per-recipient index and from the global `StreamCount`.
-
-### TTL
-
-The index TTL is bumped on every write using the same constants as the stream
-contract:
-
-| Constant | Value | Purpose |
-|---|---|---|
-| `PERSISTENT_LIFETIME_THRESHOLD` | 17 280 ledgers (~1 day) | Bump only when below this remaining TTL |
-| `PERSISTENT_BUMP_AMOUNT` | 120 960 ledgers (~60 days) | Target TTL after a bump |
-
-A busy factory (frequent `create_stream` calls) will continuously reset the index
-to ~60 days. An idle factory will keep the index alive for 60 days after the last
-creation without additional ledger fees.
-
-### Consistency guarantee
-
-The registry write happens **after** the cross-contract call to
-`FluxoraStream::create_stream` returns successfully. If the downstream call
-panics (e.g. insufficient balance, stream contract paused), the entire transaction
-is reverted and no entry is written. There are no orphan index entries.
-
-Policy failures (allowlist, cap, duration, time invariants) return early before
-`sender.require_auth()` and before the cross-contract call, so they also leave the
-registry unchanged.
-
-### Query entry points
-
-| Entry Point | Arguments | Returns | Notes |
-|---|---|---|---|
-| `get_factory_stream_count(env)` | — | `u32` | Total streams ever created through this factory. |
-| `get_factory_streams_paginated(env, start_index, limit)` | `start_index: u32`, `limit: u32` | `Vec<u64>` | Returns up to `min(limit, MAX_PAGE_SIZE)` IDs starting at zero-based `start_index`. Returns an empty list when `start_index ≥ count`. |
-
-Both views are permissionless and read-only.
-
-### Pagination
-
-`get_factory_streams_paginated` enforces a hard cap of **`MAX_PAGE_SIZE = 100`**
-entries per call, mirroring the stream contract's `get_recipient_streams_paginated`
-convention. Callers requesting `limit > 100` will silently receive at most 100
-entries. This prevents unbounded ledger reads that could exhaust the transaction
-CPU budget.
-
-Typical pagination loop (pseudocode):
-
-```
-page_size = 50
-start    = 0
-loop:
-    ids = get_factory_streams_paginated(start, page_size)
-    if ids.is_empty(): break
-    process(ids)
-    start += ids.len()
-```
-
-### Security notes
-
-- The registry can only be written via `create_stream`, which already enforces
-  allowlist, cap, duration, and time-invariant checks plus `sender.require_auth()`.
-  There is no admin path or direct write that can add entries without passing policy.
-- The pagination cap prevents a read-DoS: a caller cannot force the contract to
-  iterate an unbounded list in a single invocation.
-- The factory admin cannot directly modify the registry; it grows only through
-  successful policy-gated creations.
-
-## Downstream error mapping
-
-The factory uses `FluxoraStreamClient::try_create_stream` instead of the
-panicking `.create_stream()` to catch downstream `ContractError` variants and
-return structured `FactoryError` codes. This ensures factory callers never
-receive a host trap from expected downstream failures.
-
-| Downstream `ContractError` | Factory `FactoryError` | Description |
-|---|---|---|
-| `ContractPaused` (creation paused or global emergency pause) | `StreamContractPaused` | Stream creation is blocked by the downstream contract. Callers can retry after the pause is lifted. |
-| Any other `ContractError` variant | `StreamContractError` | Catch-all for downstream rejections (e.g. `InvalidParams`, `InsufficientDeposit`, `StartTimeInPast`). The factory preserves fail-closed semantics — no downstream error is masked as success. |
-| Host-level error (panic/trap) | `StreamContractError` | If the cross-contract invocation itself fails at the host level (e.g. contract does not exist), it is also mapped to the catch-all error. |
-
-**Security note**: The mapping deliberately **never** converts a downstream
-failure into a success. `ContractPaused` is given a dedicated variant because
-it represents a recoverable administrative state; all other errors collapse
-into the catch-all to avoid leaking internal stream-contract error codes
-through the factory boundary.
-
 ## Code alignment checklist
 
 This document is aligned with the current implementation as follows:
 
+- `FluxoraFactory::init`, `set_cap`, and `set_min_duration` validate policy
+  ranges before writing factory configuration.
 - `FluxoraFactory::create_stream` enforces allowlist, cap, and duration checks
   before calling `sender.require_auth()`.
 - The factory forwards a linear `FluxoraStream::create_stream` call with
   `memo = None` and `StreamKind::Linear`.
 - `FluxoraStream::create_stream` calls `sender.require_auth()` before validating
   parameters and pulling `deposit_amount` from `sender`.
-- `append_stream_id` is called only after the cross-contract call succeeds,
-  keeping the registry consistent with actual on-chain stream state.
-- `get_factory_stream_count` and `get_factory_streams_paginated` are permissionless
-  read-only entry points with a hard `MAX_PAGE_SIZE = 100` cap.
-- `contracts/stream/tests/factory_policy.rs` covers the factory policy gates,
-  downstream error mapping, admin-guarded policy updates, and registry invariants
-  (count, pagination, no-write-on-failure).
-
----
-
-## Emergency Pause (Kill Switch)
-
-The factory exposes an admin-controlled pause mechanism that blocks all new stream
-creation without requiring any changes to the allowlist or policy state.
-
-### Motivation
-
-When an incident occurs (e.g., a bug in the underlying stream contract, a policy
-misconfiguration, or an active exploit), the admin previously had no fast path to
-stop new factory-originated streams. The only option was to iteratively remove
-every allowlisted recipient — a destructive, slow operation that leaves the
-incident window open.
-
-The `CreationPaused` flag closes this gap: a single admin transaction halts all
-creation, and a second transaction resumes normal operation once the incident is
-resolved.
-
-### New storage key
-
-| Key | Type | Storage tier | Default |
-|-----|------|-------------|---------|
-| `DataKey::CreationPaused` | `bool` | `instance` | `false` (absent = unpaused) |
-
-The key is omitted from storage on `init`. `is_factory_paused` falls back to
-`false` on a missing entry, so existing deployments are unaffected by the upgrade.
-
-### New entrypoints
-
-#### `set_factory_paused(env, paused: bool) -> Result<(), FactoryError>`
-
-Toggle the creation pause.
-
-- Requires the stored admin's `require_auth`.
-- Returns `FactoryError::NotInitialized` when called before `init`.
-- Emits a `(factory, paused)` event with payload `true` when pausing, or a
-  `(factory, resumed)` event with payload `false` when resuming.
-- Idempotent: calling `set_factory_paused(true)` twice is safe.
-
-#### `is_factory_paused(env) -> bool`
-
-Permissionless view that returns the current value of `CreationPaused`
-(`false` when the key is absent). Intended for UI pre-flight and monitoring.
-
-### Guard order in `create_stream`
-
-The pause guard is inserted as the **first check** — before any policy read:
-
-```
-1. CreationPaused → FactoryError::CreationPaused   (before allowlist / cap reads)
-2. Allowlist check
-3. Deposit cap check
-4. Time-range invariants
-5. Minimum-duration check
-6. sender.require_auth()
-7. Cross-contract stream creation
-```
-
-Checking the pause flag before policy reads prevents leaking allowlist membership
-or cap values to an attacker probing state during an active incident.
-
-### Events
-
-| Topic tuple | Payload | When emitted |
-|-------------|---------|--------------|
-| `(symbol!("factory"), symbol!("paused"))` | `true` | Admin sets `paused = true` |
-| `(symbol!("factory"), symbol!("resumed"))` | `false` | Admin sets `paused = false` |
-
-### Security assumptions
-
-1. **Only the stored admin can toggle the flag.** `require_admin` is the single
-   authorization chokepoint; see `contracts/factory/src/lib.rs`.
-2. **No bypass via direct stream calls.** The pause only applies to
-   `FluxoraFactory::create_stream`. Callers who invoke `FluxoraStream::create_stream`
-   directly bypass all factory policies. Operators must restrict the underlying
-   stream contract as described in the [Bypass Warning](#important-bypass-warning)
-   section above.
-3. **Pause state survives admin rotation.** `DataKey::CreationPaused` is an
-   independent instance entry; rotating the admin via `set_admin` does not reset
-   the pause flag.
-4. **Pause blocks creation, not withdrawal.** Active streams already in flight
-   are unaffected. Recipients can still withdraw from existing streams; senders
-   can still cancel or modify existing streams.
-
-### Operator runbook
-
-**Pause creation during an incident:**
-
-```bash
-# Build and sign the pause transaction
-soroban contract invoke \
-  --id <FACTORY_CONTRACT_ID> \
-  --source <ADMIN_SECRET_KEY> \
-  -- set_factory_paused --paused true
-```
-
-**Verify the flag:**
-
-```bash
-soroban contract invoke \
-  --id <FACTORY_CONTRACT_ID> \
-  --source <ANY_ACCOUNT> \
-  -- is_factory_paused
-# Returns: true
-```
-
-**Resume after the incident is resolved:**
-
-```bash
-soroban contract invoke \
-  --id <FACTORY_CONTRACT_ID> \
-  --source <ADMIN_SECRET_KEY> \
-  -- set_factory_paused --paused false
-```
-
-### Code alignment checklist
-
-- `DataKey::CreationPaused` is declared in `contracts/factory/src/lib.rs`.
-- `set_factory_paused` and `is_factory_paused` are implemented in the same file.
-- `create_stream` checks `CreationPaused` as its **first guard** before any
-  policy read.
-- `contracts/stream/tests/factory_policy.rs` covers:
-  - Default unpause state after `init`
-  - Pause/resume toggle reflected by `is_factory_paused`
-  - Idempotent pause and resume
-  - `create_stream` rejected with `CreationPaused` when paused
-  - Pause checked before allowlist (no state leak)
-  - Pause checked before cap (no state leak)
-  - `create_stream` succeeds (past the pause guard) after resume
-  - Non-admin toggle panics
-  - `set_factory_paused` before `init` returns `NotInitialized`
-  - Full pause → resume → pause toggle cycle
+- `contracts/stream/tests/factory_policy.rs` covers policy input validation,
+  factory policy gates, append-only error discriminants, and admin-guarded
+  policy updates that surround this authorization model.

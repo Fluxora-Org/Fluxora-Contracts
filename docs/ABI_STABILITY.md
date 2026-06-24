@@ -346,7 +346,14 @@ Unauthorized             = 3
 RecipientNotAllowlisted  = 4
 DepositExceedsCap        = 5
 DurationTooShort         = 6
+InvalidTimeRange         = 7
+InvalidCliff             = 8
+InvalidCap               = 9
+InvalidMinDuration       = 10
 ```
+
+Factory error codes are append-only. New variants must use fresh discriminants
+and must not renumber existing values.
 
 ### Factory Entrypoints
 
@@ -359,6 +366,10 @@ DurationTooShort         = 6
 | `set_cap` | `max_deposit: i128` | `Result<(), FactoryError>` | `admin` |
 | `set_min_duration` | `min_duration: u64` | `Result<(), FactoryError>` | `admin` |
 | `create_stream` | `sender, recipient, deposit_amount, rate_per_second, start_time, cliff_time, end_time` | `Result<u64, FactoryError>` | `sender` |
+
+`init` and `set_cap` accept only `max_deposit` values in `1..=i128::MAX`.
+`init` and `set_min_duration` accept `min_duration` values in
+`0..=3_153_600_000` seconds (`MAX_MIN_DURATION_SECONDS`).
 
 > **Important:** Factory policies (allowlist, deposit cap, minimum duration) are only enforced when streams are created through the factory. Direct calls to the `FluxoraStream` contract bypass all factory policies.
 
