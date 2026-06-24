@@ -111,7 +111,11 @@ impl GovEnv {
         let client = FluxoraGovernanceClient::new(&env, &contract_id);
         client.init(&admin, &sdk_signers, &threshold);
 
-        GovEnv { env, signers, client }
+        GovEnv {
+            env,
+            signers,
+            client,
+        }
     }
 
     /// Helper: return an opaque `Bytes` payload used as proposal calldata.
@@ -126,8 +130,11 @@ impl GovEnv {
 
     /// Submit a proposal from `signers[0]`, returning the assigned ID.
     fn propose(&self) -> u32 {
-        self.client
-            .propose(&self.signers[0], &self.target(), &self.calldata(b"proptest"))
+        self.client.propose(
+            &self.signers[0],
+            &self.target(),
+            &self.calldata(b"proptest"),
+        )
     }
 
     /// Have the first `n` signers approve `proposal_id`.
@@ -142,9 +149,7 @@ impl GovEnv {
 
     /// Advance the ledger timestamp to `BASE_TIMESTAMP + delta`.
     fn advance_time(&self, delta: u64) {
-        self.env
-            .ledger()
-            .set_timestamp(BASE_TIMESTAMP + delta);
+        self.env.ledger().set_timestamp(BASE_TIMESTAMP + delta);
     }
 }
 

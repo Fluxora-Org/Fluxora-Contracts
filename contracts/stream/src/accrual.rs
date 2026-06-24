@@ -262,8 +262,7 @@ mod kani_proofs {
         };
 
         // Call the function under test. Kani will flag panics or UB.
-        let out =
-            calculate_accrued_amount_checkpointed(state, rate_per_second, now);
+        let out = calculate_accrued_amount_checkpointed(state, rate_per_second, now);
 
         // Assert bounds: non-negative and <= deposit_amount
         kani::assert!(out >= 0);
@@ -340,20 +339,12 @@ mod kani_proofs {
             kind: StreamKind::Linear,
         };
 
-        let out_before = calculate_accrued_amount_checkpointed(
-            state,
-            rate_per_second,
-            now_before,
-        );
+        let out_before = calculate_accrued_amount_checkpointed(state, rate_per_second, now_before);
         kani::assert!(out_before == 0);
 
         // at or after end
         kani::assume(now_after >= end_time);
-        let out_after = calculate_accrued_amount_checkpointed(
-            state,
-            rate_per_second,
-            now_after,
-        );
+        let out_after = calculate_accrued_amount_checkpointed(state, rate_per_second, now_after);
         kani::assert!(out_after >= 0);
         kani::assert!(out_after <= deposit_amount);
     }
