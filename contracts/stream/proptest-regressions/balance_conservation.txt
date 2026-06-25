@@ -1,0 +1,15 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases are re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+#
+# The first seed reproduces a counter-example where a sequence of rate decreases
+# and a shorten operation caused `calculate_accrued` to drop below a previous
+# value, violating accrual monotonicity.  The root cause was that
+# `shorten_stream_end_time` did not floor the new deposit at the already-accrued
+# amount, allowing the schedule to be shortened past the recipient's entitlement.
+# That contract bug is fixed; keeping the seed prevents regression.
+
+cc db020b14fd54c955f0c6a9392a90110f59c9a18659f3b784ec6c00a67b0fe599 # shrinks to (deposit, rate, cliff, end, kind) = (41168, 83, 14, 496, Linear), ops = [(Pause, 98), (Withdraw, 2), (DecreaseRate(76), 46), (Extend(9), 34), (Extend(59), 47), (Pause, 14), (TopUp(4999), 14), (DecreaseRate(47), 32), (DecreaseRate(81), 32), (Shorten(83), 1), (Resume, 89), (Withdraw, 16)]

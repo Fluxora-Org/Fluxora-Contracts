@@ -1,3 +1,29 @@
+//! Pure, stateless accrual math for the Fluxora streaming contract.
+//!
+//! This module is intentionally free of Soroban environment dependencies so that
+//! the core vesting formula can be unit-tested, property-tested, and compared
+//! against the on-chain stateful path.
+//!
+//! # Global invariants enforced by `calculate_accrued_amount_checkpointed`
+//!
+//! For every valid `CheckpointState`, non-negative rate, and timestamp `now`:
+//!
+//! 1. **Boundedness** — `0 <= accrued(now) <= deposit_amount`.
+//! 2. **Monotonicity** — for any `t1 <= t2`, `accrued(t1) <= accrued(t2)`.
+//! 3. **No cliff accrual** — `accrued(t) == 0` for all `t < cliff_time`.
+//! 4. **Cliff-only determinism** — `accrued(t) == deposit_amount` for `CliffOnly`
+//!    streams once `t >= cliff_time`.
+//! 5. **Checkpoint preservation** — when `checkpointed_at >= end_time`, the
+//!    function returns `checkpointed_amount` (clamped to `[0, deposit_amount]`),
+//!    guaranteeing that a prior rate decrease can never reduce the recipient's
+//!    already-accrued entitlement.
+//!
+//! These invariants are the foundation of the protocol's balance-conservation
+//! and no-over-withdrawal guarantees. The consolidated proptest harness in
+//! `tests/balance_conservation.rs` and the unit tests in
+//! `src/test_withdrawable_props.rs` exercise them across randomized operation
+//! sequences on both `Linear` and `CliffOnly` streams.
+
 use crate::{ContractError, StreamKind};
 
 /// Assert that ledger-backed accrual time has not moved backwards.
@@ -199,6 +225,13 @@ pub fn calculate_accrued_amount_checkpointed(
 
     if state.checkpointed_at >= state.end_time {
         // Stream already ended; only the checkpointed amount is payable.
+        //
+        // This is the **checkpoint preservation** invariant: after a rate decrease
+        // (or any other checkpointing event) the contract locks in the accrued
+        // amount earned up to `checkpointed_at`. Even if `end_time` is reached or
+        // passed, the recipient can never be made worse off by a subsequent rate
+        // change — the result is clamped to `[0, deposit_amount]` and never falls
+        // below the locked-in `checkpointed_amount`.
         return state.checkpointed_amount.min(state.deposit_amount).max(0);
     }
 
@@ -262,8 +295,7 @@ mod kani_proofs {
         };
 
         // Call the function under test. Kani will flag panics or UB.
-        let out =
-            calculate_accrued_amount_checkpointed(state, rate_per_second, now);
+        let out = calculate_accrued_amount_checkpointed(state, rate_per_second, now);
 
         // Assert bounds: non-negative and <= deposit_amount
         kani::assert!(out >= 0);
@@ -340,20 +372,12 @@ mod kani_proofs {
             kind: StreamKind::Linear,
         };
 
-        let out_before = calculate_accrued_amount_checkpointed(
-            state,
-            rate_per_second,
-            now_before,
-        );
+        let out_before = calculate_accrued_amount_checkpointed(state, rate_per_second, now_before);
         kani::assert!(out_before == 0);
 
         // at or after end
         kani::assume(now_after >= end_time);
-        let out_after = calculate_accrued_amount_checkpointed(
-            state,
-            rate_per_second,
-            now_after,
-        );
+        let out_after = calculate_accrued_amount_checkpointed(state, rate_per_second, now_after);
         kani::assert!(out_after >= 0);
         kani::assert!(out_after <= deposit_amount);
     }
