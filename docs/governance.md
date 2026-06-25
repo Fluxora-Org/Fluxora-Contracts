@@ -107,12 +107,15 @@ Initializes the contract. It can only be called once.
 
 Rotates the admin address. The current admin must authorize the call.
 
+- Emits `AdminChanged` with topic `("adm_chg",)` carrying the previous and new admin.
+
 ### `add_signer(signer)`
 
 Adds a co-signer to the governance set. The admin must authorize the call.
 
 - Fails with `DuplicateSigner` if the address is already registered.
 - Fails with `TooManySigners` if adding the signer would exceed `MAX_SIGNERS`.
+- Emits `SignerAdded` with topic `("sgnr_add",)` after the signer set is persisted.
 
 ### `remove_signer(signer)`
 
@@ -120,7 +123,9 @@ Removes a co-signer from the governance set. The admin must authorize the call.
 
 - Fails with `QuorumWouldBreak` if removal would leave fewer signers than the current
   threshold.
-- Removing a non-existent signer is a no-op.
+- Removing a non-existent signer is a no-op and emits **no** event.
+- Emits `SignerRemoved` with topic `("sgnr_rm",)` only when a registered signer is
+  actually removed.
 
 ### `propose(proposer, target, calldata) -> u32`
 
@@ -237,6 +242,30 @@ proposal events:
 `QuorumReached` is emitted only once per proposal because the contract stores `QuorumInfo`
 only when `approval_count == threshold`.
 
+### Membership and admin events
+
+In addition to the proposal lifecycle, governance emits structured events for every
+mutation of the co-signer set and the admin address, so indexers can reconstruct the
+full signer set and admin history from chain events alone. These topics are
+single-element (no `proposal_id`) and are deliberately distinct from the proposal
+topics above so they never collide.
+
+| Event | Topic | Payload | Emitted when |
+|---|---|---|---|
+| `SignerAdded` | `("sgnr_add",)` | `SignerAdded { signer }` | `add_signer` adds a new co-signer (after the signer set is persisted) |
+| `SignerRemoved` | `("sgnr_rm",)` | `SignerRemoved { signer }` | `remove_signer` removes a registered co-signer (after the signer set is persisted) |
+| `AdminChanged` | `("adm_chg",)` | `AdminChanged { old, new }` | `set_admin` rotates the admin (after the new admin is persisted) |
+
+Emission guarantees and CEI ordering:
+
+- All three events are emitted **after** the corresponding state mutation is persisted,
+  following the contract's check-effects-interactions discipline.
+- `remove_signer` against an address that is not registered is a silent no-op and emits
+  **no** `SignerRemoved` event. Likewise, a rejected `remove_signer` (`QuorumWouldBreak`)
+  or a rejected `add_signer` (`DuplicateSigner` / `TooManySigners`) emits no event.
+- `AdminChanged` carries both the previous (`old`) and new (`new`) admin so the full
+  admin rotation chain is reconstructable without reading historical state.
+
 ## Storage layout
 
 All storage keys are defined in `DataKey`:
@@ -342,6 +371,12 @@ handle these discriminants from `contracts/governance/src/lib.rs`:
 14. **Threshold is snapshotted at quorum time**: execution uses the threshold recorded in
     `QuorumInfo`, so an admin cannot raise or lower the live threshold after quorum to change
     the outcome of an in-flight proposal.
+15. **Auditable membership and admin changes**: `add_signer`, `remove_signer`, and
+    `set_admin` emit `SignerAdded`, `SignerRemoved`, and `AdminChanged` respectively, all
+    after the state mutation is persisted (CEI). No membership or admin change is silent,
+    so indexers can reconstruct the live signer set and admin history from events. A
+    no-op `remove_signer` (unregistered address) and any rejected mutation emit no event,
+    so an event presence faithfully implies a real state change.
 
 ## Tests
 
@@ -370,6 +405,11 @@ Integration tests are in `contracts/stream/tests/governance_integration.rs` and 
 - Threshold validation on `init`.
 - Quorum invariant on `remove_signer`.
 - Quorum uses the configured threshold; adding signers does not change threshold.
+- Membership and admin events: `add_signer` emits `SignerAdded`, `remove_signer` emits
+  `SignerRemoved`, and `set_admin` emits `AdminChanged` with correct old/new across an
+  admin rotation chain. Snapshot assertions verify both topics and payloads.
+- Negative event coverage: removing a non-existent signer, a `QuorumWouldBreak`-rejected
+  removal, and a `DuplicateSigner`-rejected add all emit no event.
 
 TTL regression tests are in `contracts/stream/tests/governance_ttl.rs` and
 cover:

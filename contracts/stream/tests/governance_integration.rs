@@ -1,9 +1,13 @@
 extern crate std;
 
-use fluxora_governance::{FluxoraGovernance, FluxoraGovernanceClient, GovernanceError};
+use fluxora_governance::{
+    AdminChanged, FluxoraGovernance, FluxoraGovernanceClient, GovernanceError, SignerAdded,
+    SignerRemoved,
+};
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
-    vec, Address, Bytes, Env,
+    symbol_short,
+    testutils::{Address as _, Events, Ledger},
+    vec, Address, Bytes, Env, Symbol, TryFromVal, Val, Vec as SVec,
 };
 
 // Mirror constants from governance lib.rs
@@ -89,7 +93,7 @@ fn test_init_duplicate_signers_errors() {
     let client = FluxoraGovernanceClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let signer = Address::generate(&env);
-    let result = client.try_init(&admin, &vec![&env, signer.clone(), signer]);
+    let result = client.try_init(&admin, &vec![&env, signer.clone(), signer], &1u32);
 
     assert_eq!(result, Err(Ok(GovernanceError::DuplicateSigner)));
 }
@@ -670,12 +674,14 @@ fn test_execute_at_expiry_boundary_succeeds() {
     ctx.client.approve(&ctx.signer_a, &id);
     ctx.client.approve(&ctx.signer_b, &id);
 
-    // Set timestamp to exactly the expiry boundary (created_at + MAX_AGE)
+    // Set timestamp to exactly the expiry boundary (created_at + MAX_AGE).
+    // This is *not* past the boundary, so the proposal is not expired, and
+    // since MAX_AGE >> TIMELOCK the timelock has also elapsed — execution succeeds.
     ctx.env.ledger().set_timestamp(1_000_000 + MAX_AGE);
 
     let executor = Address::generate(&ctx.env);
     let result = ctx.client.try_execute(&executor, &id);
-    assert_eq!(result, Err(Ok(GovernanceError::TimelockNotElapsed)));
+    assert!(result.is_ok());
 }
 
 #[test]
@@ -737,4 +743,128 @@ fn test_expired_not_executable_even_with_quorum_and_timelock_met() {
 fn test_max_proposal_age_constant() {
     let ctx = GovCtx::setup();
     assert_eq!(ctx.client.max_proposal_age_seconds(), MAX_AGE);
+}
+
+// ---------------------------------------------------------------------------
+// Membership / admin events
+// ---------------------------------------------------------------------------
+
+/// Return the most recent event emitted by `contract_id`, decomposed into its
+/// first topic (as a `Symbol`) and its raw data `Val`. Panics if there is no
+/// event from the contract.
+fn last_contract_event(env: &Env, contract_id: &Address) -> (Symbol, Val) {
+    let events = env.events().all();
+    for i in (0..events.len()).rev() {
+        let (addr, topics, data) = events.get(i).unwrap();
+        if &addr != contract_id {
+            continue;
+        }
+        let topic0: SVec<Val> = topics;
+        let first = topic0.get(0).expect("event must carry a topic");
+        let symbol = Symbol::try_from_val(env, &first).expect("first topic is a symbol");
+        return (symbol, data);
+    }
+    panic!("no event emitted by the contract");
+}
+
+#[test]
+fn test_add_signer_emits_signer_added_event() {
+    let ctx = GovCtx::setup();
+    let new_signer = Address::generate(&ctx.env);
+
+    ctx.client.add_signer(&new_signer);
+
+    let (topic, data) = last_contract_event(&ctx.env, &ctx.contract_id);
+    assert_eq!(topic, symbol_short!("sgnr_add"));
+    let payload = SignerAdded::try_from_val(&ctx.env, &data).expect("decodes to SignerAdded");
+    assert_eq!(payload.signer, new_signer);
+}
+
+#[test]
+fn test_remove_signer_emits_signer_removed_event() {
+    let ctx = GovCtx::setup(); // 3 signers, threshold=2
+
+    ctx.client.remove_signer(&ctx.signer_c);
+
+    let (topic, data) = last_contract_event(&ctx.env, &ctx.contract_id);
+    assert_eq!(topic, symbol_short!("sgnr_rm"));
+    let payload = SignerRemoved::try_from_val(&ctx.env, &data).expect("decodes to SignerRemoved");
+    assert_eq!(payload.signer, ctx.signer_c);
+}
+
+#[test]
+fn test_remove_nonexistent_signer_emits_no_event() {
+    let ctx = GovCtx::setup();
+    let stranger = Address::generate(&ctx.env);
+
+    let events_before = ctx.env.events().all().len();
+    let result = ctx.client.try_remove_signer(&stranger);
+    assert!(result.is_ok());
+
+    // Removing a non-registered address is a no-op and must emit no event.
+    let events_after = ctx.env.events().all().len();
+    assert_eq!(events_before, events_after);
+}
+
+#[test]
+fn test_remove_signer_quorum_would_break_emits_no_event() {
+    let ctx = GovCtx::setup(); // 3 signers, threshold=2
+    ctx.client.remove_signer(&ctx.signer_c); // 2 signers left
+
+    let events_before = ctx.env.events().all().len();
+    // Removing another signer would leave 1 < threshold=2 — rejected, no event.
+    let result = ctx.client.try_remove_signer(&ctx.signer_b);
+    assert_eq!(result, Err(Ok(GovernanceError::QuorumWouldBreak)));
+
+    let events_after = ctx.env.events().all().len();
+    assert_eq!(events_before, events_after);
+}
+
+#[test]
+fn test_add_duplicate_signer_emits_no_event() {
+    let ctx = GovCtx::setup();
+
+    let events_before = ctx.env.events().all().len();
+    let result = ctx.client.try_add_signer(&ctx.signer_a);
+    assert_eq!(result, Err(Ok(GovernanceError::DuplicateSigner)));
+
+    let events_after = ctx.env.events().all().len();
+    assert_eq!(events_before, events_after);
+}
+
+#[test]
+fn test_set_admin_emits_admin_changed_event() {
+    let ctx = GovCtx::setup();
+    let new_admin = Address::generate(&ctx.env);
+
+    ctx.client.set_admin(&new_admin);
+
+    let (topic, data) = last_contract_event(&ctx.env, &ctx.contract_id);
+    assert_eq!(topic, symbol_short!("adm_chg"));
+    let payload = AdminChanged::try_from_val(&ctx.env, &data).expect("decodes to AdminChanged");
+    assert_eq!(payload.old, ctx.admin);
+    assert_eq!(payload.new, new_admin);
+}
+
+#[test]
+fn test_admin_rotation_chain_emits_correct_old_and_new() {
+    let ctx = GovCtx::setup();
+    let admin_2 = Address::generate(&ctx.env);
+    let admin_3 = Address::generate(&ctx.env);
+
+    // First rotation: admin -> admin_2.
+    ctx.client.set_admin(&admin_2);
+    let (topic, data) = last_contract_event(&ctx.env, &ctx.contract_id);
+    assert_eq!(topic, symbol_short!("adm_chg"));
+    let payload = AdminChanged::try_from_val(&ctx.env, &data).expect("decodes to AdminChanged");
+    assert_eq!(payload.old, ctx.admin);
+    assert_eq!(payload.new, admin_2);
+
+    // Second rotation: admin_2 -> admin_3. `old` must be the previous admin.
+    ctx.client.set_admin(&admin_3);
+    let (topic, data) = last_contract_event(&ctx.env, &ctx.contract_id);
+    assert_eq!(topic, symbol_short!("adm_chg"));
+    let payload = AdminChanged::try_from_val(&ctx.env, &data).expect("decodes to AdminChanged");
+    assert_eq!(payload.old, admin_2);
+    assert_eq!(payload.new, admin_3);
 }
