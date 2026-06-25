@@ -774,6 +774,10 @@ The factory contract (`contracts/factory`) uses a separate `FactoryError` enum.
 | `RecipientNotAllowlisted` | Recipient address is not on the factory allowlist |
 | `DepositExceedsCap` | Requested deposit exceeds the per-stream cap configured in the factory |
 | `DurationTooShort` | Stream duration is below the factory-enforced minimum |
+| `InvalidTimeRange` | Requested stream end time is not strictly after its start time |
+| `InvalidCliff` | Requested cliff time is outside the inclusive start/end window |
+| `InvalidCap` | `init` or `set_cap` received a non-positive `max_deposit`; accepted range is `1..=i128::MAX` |
+| `InvalidMinDuration` | `init` or `set_min_duration` received a `min_duration` above `MAX_MIN_DURATION_SECONDS`; accepted range is `0..=3_153_600_000` seconds |
 
 ---
 

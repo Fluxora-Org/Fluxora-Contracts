@@ -12,6 +12,23 @@ The `fluxora_factory` acts as a proxy entrypoint to enforce these policies:
 - **Minimum Duration**: Enforces a `MinDuration` (i.e. `end_time - start_time >= min_duration`), preventing overly short or instantaneous streams.
 - **Time Relationship Checks**: Rejects invalid schedules before calling `FluxoraStream`. `start_time` must be strictly less than `end_time`, and `cliff_time` must be within the inclusive `[start_time, end_time]` window.
 
+## Policy Parameter Validation
+
+Policy parameters are validated before they are written by `init`, `set_cap`,
+and `set_min_duration`. Invalid values are rejected at write time so the later
+`create_stream` policy checks remain meaningful and cannot be silently bricked by
+nonsensical stored configuration. Failed setter calls leave the previously stored
+policy unchanged.
+
+| Parameter | Entrypoints | Accepted range | Rejection error | Notes |
+|-----------|-------------|----------------|-----------------|-------|
+| `max_deposit: i128` | `init`, `set_cap` | `1..=i128::MAX` | `FactoryError::InvalidCap` | `0` and negative caps are rejected because every positive stream deposit would exceed them. |
+| `min_duration: u64` | `init`, `set_min_duration` | `0..=3_153_600_000` seconds (`MAX_MIN_DURATION_SECONDS`, 100 365-day years) | `FactoryError::InvalidMinDuration` | `0` is valid and means no additional factory-level minimum duration beyond the required `start_time < end_time` invariant. |
+
+These ranges are also documented in the Rust `///` comments on the factory
+entrypoints. Error discriminants are append-only; `InvalidCap = 9` and
+`InvalidMinDuration = 10` were added without renumbering existing values.
+
 ## Time Validation
 
 The factory mirrors the underlying stream contract's creation-time schedule invariants and returns typed factory errors before making the cross-contract call:
@@ -146,11 +163,14 @@ section](security.md#admin-powers) for the protocol-wide admin boundary.
 
 This document is aligned with the current implementation as follows:
 
+- `FluxoraFactory::init`, `set_cap`, and `set_min_duration` validate policy
+  ranges before writing factory configuration.
 - `FluxoraFactory::create_stream` enforces allowlist, cap, and duration checks
   before calling `sender.require_auth()`.
 - The factory forwards a linear `FluxoraStream::create_stream` call with
   `memo = None` and `StreamKind::Linear`.
 - `FluxoraStream::create_stream` calls `sender.require_auth()` before validating
   parameters and pulling `deposit_amount` from `sender`.
-- `contracts/stream/tests/factory_policy.rs` covers the factory policy gates and
-  admin-guarded policy updates that surround this authorization model.
+- `contracts/stream/tests/factory_policy.rs` covers policy input validation,
+  factory policy gates, append-only error discriminants, and admin-guarded
+  policy updates that surround this authorization model.

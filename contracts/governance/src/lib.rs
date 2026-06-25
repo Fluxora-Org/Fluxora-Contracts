@@ -92,6 +92,8 @@ pub enum GovernanceError {
     QuorumWouldBreak = 16,
     /// Signer is already registered in the co-signer set.
     DuplicateSigner = 17,
+    /// Governance arithmetic would overflow instead of producing a valid deadline or ID.
+    ArithmeticOverflow = 18,
 }
 
 /// Storage keys for the governance contract.
@@ -197,6 +199,18 @@ fn bump_proposal(env: &Env, id: u32) {
     );
 }
 
+/// Extends the TTL of the QuorumReachedAt entry so it outlives the timelock.
+/// Called on every approve and execute to prevent archival before execution.
+fn bump_quorum_ttl(env: &Env, id: u32) {
+    if env.storage().persistent().has(&DataKey::QuorumReachedAt(id)) {
+        env.storage().persistent().extend_ttl(
+            &DataKey::QuorumReachedAt(id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+}
+
 fn get_admin(env: &Env) -> Result<Address, GovernanceError> {
     bump_instance(env);
     env.storage()
@@ -226,12 +240,21 @@ fn read_next_proposal_id(env: &Env) -> u32 {
         .unwrap_or(0u32)
 }
 
-fn increment_proposal_id(env: &Env) -> u32 {
+fn checked_deadline(start: u64, seconds: u64) -> Result<u64, GovernanceError> {
+    start
+        .checked_add(seconds)
+        .ok_or(GovernanceError::ArithmeticOverflow)
+}
+
+fn increment_proposal_id(env: &Env) -> Result<u32, GovernanceError> {
     let id = read_next_proposal_id(env);
+    let next = id
+        .checked_add(1)
+        .ok_or(GovernanceError::ArithmeticOverflow)?;
     env.storage()
         .instance()
-        .set(&DataKey::NextProposalId, &(id + 1));
-    id
+        .set(&DataKey::NextProposalId, &next);
+    Ok(id)
 }
 
 fn load_proposal(env: &Env, id: u32) -> Result<Proposal, GovernanceError> {
@@ -390,6 +413,7 @@ impl FluxoraGovernance {
     /// # Errors
     /// - `NotASigner`: `proposer` is not in the registered signers list.
     /// - `CalldataTooLarge`: `calldata.len() > MAX_CALLDATA_BYTES`.
+    /// - `ArithmeticOverflow`: proposal ID counter has reached `u32::MAX`.
     pub fn propose(
         env: Env,
         proposer: Address,
@@ -408,7 +432,7 @@ impl FluxoraGovernance {
             return Err(GovernanceError::CalldataTooLarge);
         }
 
-        let id = increment_proposal_id(&env);
+        let id = increment_proposal_id(&env)?;
         let now = env.ledger().timestamp();
 
         let proposal = Proposal {
@@ -453,6 +477,7 @@ impl FluxoraGovernance {
     /// - `ProposalNotFound`: No proposal with this ID.
     /// - `AlreadyExecuted`: Proposal has already been executed.
     /// - `AlreadyApproved`: This signer already approved this proposal.
+    /// - `ArithmeticOverflow`: proposal age or quorum timelock deadline cannot be represented.
     pub fn approve(env: Env, approver: Address, proposal_id: u32) -> Result<(), GovernanceError> {
         approver.require_auth();
 
@@ -469,7 +494,9 @@ impl FluxoraGovernance {
         if proposal.executed {
             return Err(GovernanceError::AlreadyExecuted);
         }
-        if env.ledger().timestamp() > proposal.created_at + MAX_PROPOSAL_AGE_SECONDS {
+        if env.ledger().timestamp()
+            > checked_deadline(proposal.created_at, MAX_PROPOSAL_AGE_SECONDS)?
+        {
             return Err(GovernanceError::ProposalExpired);
         }
 
@@ -487,6 +514,15 @@ impl FluxoraGovernance {
         proposal.approvals.push_back(approver.clone());
         let approval_count = proposal.approvals.len();
 
+        let threshold = get_threshold(&env)?;
+        let quorum_reached = if approval_count == threshold {
+            let now = env.ledger().timestamp();
+            let executable_after = checked_deadline(now, GOVERNANCE_TIMELOCK_SECONDS)?;
+            Some((now, executable_after))
+        } else {
+            None
+        };
+
         save_proposal(&env, proposal_id, &proposal);
         bump_instance(&env);
 
@@ -502,10 +538,7 @@ impl FluxoraGovernance {
         // Record the timestamp and effective threshold at which quorum was first
         // reached.  Using the stored snapshot at execution time protects in-flight
         // proposals against mid-flight threshold changes by the admin.
-        let threshold = get_threshold(&env)?;
-        if approval_count == threshold {
-            let now = env.ledger().timestamp();
-            let executable_after = now + GOVERNANCE_TIMELOCK_SECONDS;
+        if let Some((now, executable_after)) = quorum_reached {
             let info = QuorumInfo {
                 reached_at: now,
                 threshold,
@@ -518,6 +551,7 @@ impl FluxoraGovernance {
                 PERSISTENT_LIFETIME_THRESHOLD,
                 PERSISTENT_BUMP_AMOUNT,
             );
+            bump_quorum_ttl(&env, proposal_id);
 
             env.events().publish(
                 (symbol_short!("quorum"), proposal_id),
@@ -551,6 +585,7 @@ impl FluxoraGovernance {
     /// - `QuorumNotReached`: Approval count < threshold.
     /// - `TimelockNotElapsed`: Less than `GOVERNANCE_TIMELOCK_SECONDS` have passed
     ///   since quorum was reached.
+    /// - `ArithmeticOverflow`: proposal age or quorum timelock deadline cannot be represented.
     pub fn execute(env: Env, executor: Address, proposal_id: u32) -> Result<(), GovernanceError> {
         executor.require_auth();
 
@@ -562,7 +597,9 @@ impl FluxoraGovernance {
         if proposal.executed {
             return Err(GovernanceError::AlreadyExecuted);
         }
-        if env.ledger().timestamp() > proposal.created_at + MAX_PROPOSAL_AGE_SECONDS {
+        if env.ledger().timestamp()
+            > checked_deadline(proposal.created_at, MAX_PROPOSAL_AGE_SECONDS)?
+        {
             return Err(GovernanceError::ProposalExpired);
         }
 
@@ -574,6 +611,7 @@ impl FluxoraGovernance {
             .persistent()
             .get(&DataKey::QuorumReachedAt(proposal_id))
             .ok_or(GovernanceError::QuorumNotReached)?;
+        bump_quorum_ttl(&env, proposal_id);
 
         if proposal.approvals.len() < quorum_info.threshold {
             return Err(GovernanceError::QuorumNotReached);
@@ -581,7 +619,8 @@ impl FluxoraGovernance {
 
         // Verify timelock has elapsed from the moment quorum was reached.
         let now = env.ledger().timestamp();
-        if now < quorum_info.reached_at + GOVERNANCE_TIMELOCK_SECONDS {
+        let exec_after = Self::executable_after(&quorum_info)?;
+        if now < exec_after {
             return Err(GovernanceError::TimelockNotElapsed);
         }
 
@@ -694,9 +733,115 @@ impl FluxoraGovernance {
         MAX_PROPOSAL_AGE_SECONDS
     }
 
+    /// Return the stored `QuorumInfo` snapshot for a proposal, or `None` if
+    /// quorum has not yet been reached.
+    ///
+    /// # Parameters
+    /// - `proposal_id`: The proposal to query.
+    ///
+    /// # Returns
+    /// - `Some(QuorumInfo { reached_at, threshold })` if quorum was reached.
+    /// - `None` if quorum has not been reached (no approvals, below threshold,
+    ///   or proposal does not exist).
+    ///
+    /// This is a pure read — no authorization required, no state mutation
+    /// other than the standard TTL bump on the stored `QuorumInfo` entry.
+    pub fn get_quorum_info(env: Env, proposal_id: u32) -> Option<QuorumInfo> {
+        let info: Option<QuorumInfo> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::QuorumReachedAt(proposal_id));
+        if info.is_some() {
+            env.storage().persistent().extend_ttl(
+                &DataKey::QuorumReachedAt(proposal_id),
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
+        }
+        info
+    }
+
+    /// Return `true` if the proposal is in an executable state **right now**.
+    ///
+    /// Mirrors the exact gating order used by [`execute`](Self::execute):
+    ///
+    /// 1. Proposal exists (`ProposalNotFound` otherwise).
+    /// 2. Not cancelled.
+    /// 3. Not already executed.
+    /// 4. Not expired.
+    /// 5. Quorum has been reached (approvals >= threshold snapshot).
+    /// 6. Timelock has elapsed (`now >= executable_after`).
+    ///
+    /// # Parameters
+    /// - `proposal_id`: The proposal to check.
+    ///
+    /// # Returns
+    /// - `Ok(true)` iff all gates pass — the proposal can be executed now.
+    /// - `Ok(false)` if any gate blocks execution (cancelled, executed,
+    ///   expired, quorum not reached, timelock not elapsed).
+    /// - `Err(GovernanceError::ProposalNotFound)` if the ID is unknown.
+    /// - `Err(GovernanceError::ArithmeticOverflow)` if timelock arithmetic
+    ///   overflows (should not happen under normal ledger conditions).
+    ///
+    /// This is a pure read — no authorization required, no state mutation
+    /// beyond the TTL bumps already performed by [`load_proposal`] and
+    /// [`get_quorum_info`].
+    pub fn is_executable(env: Env, proposal_id: u32) -> Result<bool, GovernanceError> {
+        let proposal = load_proposal(&env, proposal_id)?;
+
+        if proposal.cancelled {
+            return Ok(false);
+        }
+        if proposal.executed {
+            return Ok(false);
+        }
+        if env.ledger().timestamp()
+            > checked_deadline(proposal.created_at, MAX_PROPOSAL_AGE_SECONDS)?
+        {
+            return Ok(false);
+        }
+
+        let quorum_info: QuorumInfo = match env
+            .storage()
+            .persistent()
+            .get(&DataKey::QuorumReachedAt(proposal_id))
+        {
+            Some(info) => {
+                env.storage().persistent().extend_ttl(
+                    &DataKey::QuorumReachedAt(proposal_id),
+                    PERSISTENT_LIFETIME_THRESHOLD,
+                    PERSISTENT_BUMP_AMOUNT,
+                );
+                info
+            }
+            None => return Ok(false),
+        };
+
+        if proposal.approvals.len() < quorum_info.threshold {
+            return Ok(false);
+        }
+
+        let now = env.ledger().timestamp();
+        let exec_after = Self::executable_after(&quorum_info)?;
+        if now < exec_after {
+            return Ok(false);
+        }
+
+        Ok(true)
+    }
+
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
+
+    /// Compute the ledger timestamp at which a proposal becomes executable,
+    /// given its `QuorumInfo` snapshot.
+    ///
+    /// Returns `reached_at + GOVERNANCE_TIMELOCK_SECONDS`, or
+    /// `ArithmeticOverflow` if the sum would overflow `u64`.
+    fn executable_after(info: &QuorumInfo) -> Result<u64, GovernanceError> {
+        checked_deadline(info.reached_at, GOVERNANCE_TIMELOCK_SECONDS)
+    }
 
     fn is_signer(signers: &Vec<Address>, addr: &Address) -> bool {
         for i in 0..signers.len() {
@@ -933,6 +1078,76 @@ mod tests {
         assert_eq!(p.approvals.len(), 0);
     }
 
+    #[test]
+    fn test_propose_returns_structured_error_when_proposal_id_counter_overflows() {
+        let ctx = Ctx::setup();
+        ctx.env.as_contract(&ctx.contract_id, || {
+            ctx.env
+                .storage()
+                .instance()
+                .set(&DataKey::NextProposalId, &u32::MAX);
+        });
+
+        let result = ctx.client.try_propose(
+            &ctx.signer_a,
+            &ctx.dummy_target(),
+            &ctx.calldata("overflow"),
+        );
+
+        assert_eq!(result, Err(Ok(GovernanceError::ArithmeticOverflow)));
+        ctx.env.as_contract(&ctx.contract_id, || {
+            assert_eq!(read_next_proposal_id(&ctx.env), u32::MAX);
+        });
+    }
+
+    #[test]
+    fn test_approve_returns_structured_error_when_quorum_timelock_overflows() {
+        let ctx = Ctx::setup();
+        ctx.env.ledger().set_timestamp(u64::MAX - MAX_AGE);
+        let id = ctx.client.propose(
+            &ctx.signer_a,
+            &ctx.dummy_target(),
+            &ctx.calldata("timelock"),
+        );
+
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.env.ledger().set_timestamp(u64::MAX - TIMELOCK + 1);
+
+        let result = ctx.client.try_approve(&ctx.signer_b, &id);
+
+        assert_eq!(result, Err(Ok(GovernanceError::ArithmeticOverflow)));
+    }
+
+    #[test]
+    fn test_execute_returns_structured_error_when_quorum_timelock_overflows() {
+        let ctx = Ctx::setup();
+        ctx.env.ledger().set_timestamp(u64::MAX - MAX_AGE);
+        let id = ctx.client.propose(
+            &ctx.signer_a,
+            &ctx.dummy_target(),
+            &ctx.calldata("timelock"),
+        );
+        let mut proposal = ctx.client.get_proposal(&id);
+        proposal.approvals.push_back(ctx.signer_a.clone());
+        proposal.approvals.push_back(ctx.signer_b.clone());
+        ctx.env.as_contract(&ctx.contract_id, || {
+            save_proposal(&ctx.env, id, &proposal);
+            ctx.env.storage().persistent().set(
+                &DataKey::QuorumReachedAt(id),
+                &QuorumInfo {
+                    reached_at: u64::MAX - TIMELOCK + 1,
+                    threshold: 2,
+                },
+            );
+        });
+        ctx.env.ledger().set_timestamp(u64::MAX - 100);
+        let executor = Address::generate(&ctx.env);
+
+        let result = ctx.client.try_execute(&executor, &id);
+
+        assert_eq!(result, Err(Ok(GovernanceError::ArithmeticOverflow)));
+    }
+
     // -----------------------------------------------------------------------
     // Cancellation
     // -----------------------------------------------------------------------
@@ -1166,5 +1381,318 @@ mod tests {
         ctx.client.execute(&executor, &id);
         let result = ctx.client.try_execute(&executor, &id);
         assert_eq!(result, Err(Ok(GovernanceError::AlreadyExecuted)));
+    }
+
+    // -----------------------------------------------------------------------
+    // get_quorum_info
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_get_quorum_info_before_quorum() {
+        let ctx = Ctx::setup();
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        // No approvals yet — quorum not reached.
+        assert!(ctx.client.get_quorum_info(&id).is_none());
+    }
+
+    #[test]
+    fn test_get_quorum_info_below_threshold() {
+        let ctx = Ctx::setup();
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        ctx.client.approve(&ctx.signer_a, &id);
+        // Only 1 approval — threshold is 2, quorum not reached.
+        assert!(ctx.client.get_quorum_info(&id).is_none());
+    }
+
+    #[test]
+    fn test_get_quorum_info_after_quorum() {
+        let ctx = Ctx::setup();
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        // First approval — below threshold.
+        ctx.client.approve(&ctx.signer_a, &id);
+        // Second approval — hits threshold, quorum reached at timestamp 1_000_000.
+        ctx.client.approve(&ctx.signer_b, &id);
+
+        let info = ctx.client.get_quorum_info(&id).expect("should have quorum info");
+        assert_eq!(info.reached_at, 1_000_000);
+        assert_eq!(info.threshold, 2);
+    }
+
+    #[test]
+    fn test_get_quorum_info_preserves_snapshot_threshold() {
+        // Verify the snapshot threshold is independent of later threshold changes.
+        let ctx = Ctx::setup();
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+
+        let info = ctx.client.get_quorum_info(&id).expect("should have quorum info");
+        assert_eq!(info.threshold, 2);
+
+        // Remove signer_c — threshold stays 2, snapshot should still be 2.
+        ctx.client.remove_signer(&ctx.signer_c);
+        let info = ctx.client.get_quorum_info(&id).expect("should still have quorum info");
+        assert_eq!(info.threshold, 2);
+    }
+
+    #[test]
+    fn test_get_quorum_info_none_for_nonexistent_proposal() {
+        let ctx = Ctx::setup();
+        // A valid ID that was never proposed; no QuorumInfo exists.
+        assert!(ctx.client.get_quorum_info(&999).is_none());
+    }
+
+    #[test]
+    fn test_get_quorum_info_none_after_execute() {
+        let ctx = Ctx::setup();
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+        ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
+        let executor = Address::generate(&ctx.env);
+        ctx.client.execute(&executor, &id);
+        // QuorumInfo should still exist (execution does not delete it).
+        let info = ctx.client.get_quorum_info(&id).expect("should still have quorum info after execute");
+        assert_eq!(info.reached_at, 1_000_000);
+        assert_eq!(info.threshold, 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // is_executable
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_is_executable_nonexistent_proposal() {
+        let ctx = Ctx::setup();
+        let result = ctx.client.try_is_executable(&999);
+        assert_eq!(result, Err(Ok(GovernanceError::ProposalNotFound)));
+    }
+
+    #[test]
+    fn test_is_executable_pre_quorum() {
+        let ctx = Ctx::setup();
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        // No approvals yet.
+        assert_eq!(ctx.client.is_executable(&id), false);
+    }
+
+    #[test]
+    fn test_is_executable_below_threshold() {
+        let ctx = Ctx::setup();
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        ctx.client.approve(&ctx.signer_a, &id);
+        // Only 1 approval — threshold 2 not met.
+        assert_eq!(ctx.client.is_executable(&id), false);
+    }
+
+    #[test]
+    fn test_is_executable_post_quorum_pre_timelock() {
+        let ctx = Ctx::setup();
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+        // Timelock not yet elapsed (current time is still 1_000_000).
+        assert_eq!(ctx.client.is_executable(&id), false);
+    }
+
+    #[test]
+    fn test_is_executable_post_timelock() {
+        let ctx = Ctx::setup();
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+        ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
+        assert_eq!(ctx.client.is_executable(&id), true);
+    }
+
+    #[test]
+    fn test_is_executable_cancelled() {
+        let ctx = Ctx::setup();
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+        ctx.client.cancel_proposal(&ctx.signer_a, &id);
+        ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
+        assert_eq!(ctx.client.is_executable(&id), false);
+    }
+
+    #[test]
+    fn test_is_executable_executed() {
+        let ctx = Ctx::setup();
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+        ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
+        let executor = Address::generate(&ctx.env);
+        ctx.client.execute(&executor, &id);
+        assert_eq!(ctx.client.is_executable(&id), false);
+    }
+
+    #[test]
+    fn test_is_executable_expired() {
+        let ctx = Ctx::setup();
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+        ctx.env.ledger().set_timestamp(1_000_000 + MAX_AGE + 1);
+        assert_eq!(ctx.client.is_executable(&id), false);
+    }
+
+    #[test]
+    fn test_is_executable_at_timelock_boundary() {
+        let ctx = Ctx::setup();
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+
+        // Exactly at reached_at + TIMELOCK — timelock has elapsed (now >= exec_after).
+        ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK);
+        assert_eq!(ctx.client.is_executable(&id), true);
+    }
+
+    #[test]
+    fn test_is_executable_one_second_before_timelock() {
+        let ctx = Ctx::setup();
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+
+        // One second before the timelock elapses — should NOT be executable.
+        ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK - 1);
+        assert_eq!(ctx.client.is_executable(&id), false);
+    }
+
+    #[test]
+    fn test_is_executable_at_expiry_boundary() {
+        let ctx = Ctx::setup();
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+
+        // Exactly at created_at + MAX_AGE — not past it, so not expired.
+        // Since MAX_AGE >> TIMELOCK, the timelock has also elapsed.
+        ctx.env.ledger().set_timestamp(1_000_000 + MAX_AGE);
+        assert_eq!(ctx.client.is_executable(&id), true);
+    }
+
+    #[test]
+    fn test_is_executable_one_second_before_expiry() {
+        let ctx = Ctx::setup();
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+
+        // One second before expiry — still executable if timelock has elapsed.
+        ctx.env.ledger().set_timestamp(1_000_000 + MAX_AGE - 1);
+        assert_eq!(ctx.client.is_executable(&id), true);
+    }
+
+    #[test]
+    fn test_is_executable_one_second_after_expiry() {
+        let ctx = Ctx::setup();
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+
+        // One second past expiry — not executable.
+        ctx.env.ledger().set_timestamp(1_000_000 + MAX_AGE + 1);
+        assert_eq!(ctx.client.is_executable(&id), false);
+    }
+
+    #[test]
+    fn test_is_executable_agrees_with_execute_across_states() {
+        let ctx = Ctx::setup();
+
+        // --- Pre-quorum ---
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        assert_eq!(ctx.client.is_executable(&id), false);
+        let executor = Address::generate(&ctx.env);
+        assert_eq!(
+            ctx.client.try_execute(&executor, &id),
+            Err(Ok(GovernanceError::QuorumNotReached))
+        );
+
+        // --- Post-quorum, pre-timelock ---
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+        assert_eq!(ctx.client.is_executable(&id), false);
+        assert_eq!(
+            ctx.client.try_execute(&executor, &id),
+            Err(Ok(GovernanceError::TimelockNotElapsed))
+        );
+
+        // --- Post-timelock, executable ---
+        ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
+        assert_eq!(ctx.client.is_executable(&id), true);
+        assert!(ctx.client.try_execute(&executor, &id).is_ok());
+
+        // --- Post-execution ---
+        assert_eq!(ctx.client.is_executable(&id), false);
+        assert_eq!(
+            ctx.client.try_execute(&executor, &id),
+            Err(Ok(GovernanceError::AlreadyExecuted))
+        );
+
+        // --- Cancelled proposal (fresh) ---
+        let id2 = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("y"));
+        ctx.client.approve(&ctx.signer_a, &id2);
+        ctx.client.approve(&ctx.signer_b, &id2);
+        ctx.client.cancel_proposal(&ctx.signer_a, &id2);
+        assert_eq!(ctx.client.is_executable(&id2), false);
+        assert_eq!(
+            ctx.client.try_execute(&executor, &id2),
+            Err(Ok(GovernanceError::ProposalCancelled))
+        );
+
+        // --- Expired proposal (fresh) ---
+        let id3 = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("z"));
+        ctx.client.approve(&ctx.signer_a, &id3);
+        ctx.client.approve(&ctx.signer_b, &id3);
+        ctx.env.ledger().set_timestamp(1_000_000 + MAX_AGE + TIMELOCK + 100);
+        assert_eq!(ctx.client.is_executable(&id3), false);
+        assert_eq!(
+            ctx.client.try_execute(&executor, &id3),
+            Err(Ok(GovernanceError::ProposalExpired))
+        );
     }
 }
