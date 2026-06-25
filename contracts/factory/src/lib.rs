@@ -148,6 +148,83 @@ pub struct FactoryConfig {
     pub min_duration: u64,
 }
 
+// ---------------------------------------------------------------------------
+// Event data structs
+// Topics use symbol_short! (≤ 9 chars). Naming mirrors contracts/stream/src/lib.rs.
+// ---------------------------------------------------------------------------
+
+/// Emitted when the factory is first initialised (`fct_init`).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct FactoryInited {
+    pub admin: Address,
+    pub stream_contract: Address,
+    pub max_deposit: i128,
+    pub min_duration: u64,
+}
+
+/// Emitted when the factory admin is rotated (`AdminUpd`).
+/// Mirrors the `AdminUpd` topic used in `FluxoraStream::set_admin`.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct FactoryAdminUpdated {
+    pub old_admin: Address,
+    pub new_admin: Address,
+}
+
+/// Emitted when the stream-contract pointer is changed (`stm_upd`).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct StreamContractUpdated {
+    pub old_contract: Address,
+    pub new_contract: Address,
+}
+
+/// Emitted when a recipient is added to or removed from the allowlist (`allow_upd`).
+/// Carries enough state for an indexer to reconstruct membership without re-reading storage.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AllowlistUpdated {
+    pub recipient: Address,
+    pub allowed: bool,
+}
+
+/// Emitted when the factory deposit cap is changed (`cap_upd`).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CapUpdated {
+    pub old_cap: i128,
+    pub new_cap: i128,
+}
+
+/// Emitted when the factory minimum-duration policy is changed (`dur_upd`).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct MinDurationUpdated {
+    pub old_min_duration: u64,
+    pub new_min_duration: u64,
+}
+
+/// Emitted when rate-per-second bounds are updated (`rate_bnd`).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RateBoundsUpdated {
+    pub min_rate: Option<i128>,
+    pub max_rate: Option<i128>,
+}
+
+/// Emitted when a stream is successfully created through the factory (`fct_strm`).
+/// Provides enough context for indexers to attribute stream creation to a policy-gated path.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct FactoryStreamCreated {
+    pub stream_id: u64,
+    pub sender: Address,
+    pub recipient: Address,
+    pub deposit_amount: i128,
+    pub rate_per_second: i128,
+}
+
 #[contract]
 pub struct FluxoraFactory;
 
@@ -187,14 +264,29 @@ impl FluxoraFactory {
         // CreationPaused defaults to false — no explicit write needed;
         // `is_factory_paused` falls back to `false` on a missing key.
 
+        env.events().publish(
+            (symbol_short!("fct_init"),),
+            FactoryInited {
+                admin,
+                stream_contract,
+                max_deposit,
+                min_duration,
+            },
+        );
+
         Ok(())
     }
 
     /// Admin updates the factory admin.
     pub fn set_admin(env: Env, new_admin: Address) -> Result<(), FactoryError> {
-        require_admin(&env)?;
+        let old_admin = require_admin(&env)?;
 
         env.storage().instance().set(&DataKey::Admin, &new_admin);
+
+        env.events().publish(
+            (symbol_short!("AdminUpd"),),
+            FactoryAdminUpdated { old_admin, new_admin },
+        );
         Ok(())
     }
 
@@ -202,9 +294,23 @@ impl FluxoraFactory {
     pub fn set_stream_contract(env: Env, new_stream_contract: Address) -> Result<(), FactoryError> {
         require_admin(&env)?;
 
+        let old_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::StreamContract)
+            .ok_or(FactoryError::NotInitialized)?;
+
         env.storage()
             .instance()
             .set(&DataKey::StreamContract, &new_stream_contract);
+
+        env.events().publish(
+            (symbol_short!("stm_upd"),),
+            StreamContractUpdated {
+                old_contract,
+                new_contract: new_stream_contract,
+            },
+        );
         Ok(())
     }
 
@@ -212,13 +318,17 @@ impl FluxoraFactory {
     pub fn set_allowlist(env: Env, recipient: Address, allowed: bool) -> Result<(), FactoryError> {
         require_admin(&env)?;
 
-        let key = DataKey::Allowlist(recipient);
+        let key = DataKey::Allowlist(recipient.clone());
         if allowed {
             env.storage().persistent().set(&key, &true);
         } else {
             env.storage().persistent().remove(&key);
         }
 
+        env.events().publish(
+            (symbol_short!("allow_upd"),),
+            AllowlistUpdated { recipient, allowed },
+        );
         Ok(())
     }
 
@@ -230,9 +340,20 @@ impl FluxoraFactory {
         require_admin(&env)?;
         validate_cap(max_deposit)?;
 
+        let old_cap: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxDepositCap)
+            .unwrap_or(0);
+
         env.storage()
             .instance()
             .set(&DataKey::MaxDepositCap, &max_deposit);
+
+        env.events().publish(
+            (symbol_short!("cap_upd"),),
+            CapUpdated { old_cap, new_cap: max_deposit },
+        );
         Ok(())
     }
 
@@ -246,9 +367,23 @@ impl FluxoraFactory {
         require_admin(&env)?;
         validate_min_duration(min_duration)?;
 
+        let old_min_duration: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinDuration)
+            .unwrap_or(0);
+
         env.storage()
             .instance()
             .set(&DataKey::MinDuration, &min_duration);
+
+        env.events().publish(
+            (symbol_short!("dur_upd"),),
+            MinDurationUpdated {
+                old_min_duration,
+                new_min_duration: min_duration,
+            },
+        );
         Ok(())
     }
 
@@ -293,6 +428,10 @@ impl FluxoraFactory {
             }
         }
 
+        env.events().publish(
+            (symbol_short!("rate_bnd"),),
+            RateBoundsUpdated { min_rate, max_rate },
+        );
         Ok(())
     }
 
@@ -536,6 +675,16 @@ impl FluxoraFactory {
                 // The registry is written only after the cross-contract call succeeds,
                 // so a downstream failure leaves no orphan index entry.
                 append_stream_id(&env, stream_id);
+                env.events().publish(
+                    (symbol_short!("fct_strm"),),
+                    FactoryStreamCreated {
+                        stream_id,
+                        sender,
+                        recipient,
+                        deposit_amount,
+                        rate_per_second,
+                    },
+                );
                 Ok(stream_id)
             }
             // Recognized downstream contract error reported in the success frame.

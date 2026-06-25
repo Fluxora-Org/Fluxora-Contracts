@@ -439,9 +439,55 @@ The `remaining_balance` and `seconds_remaining` fields allow precise monitoring 
 
 ---
 
+---
+
+## Factory contract events (`fluxora_factory`)
+
+All state-changing factory entrypoints emit structured events. Topics are ≤ 9
+characters (`symbol_short!` constraint). Naming mirrors `FluxoraStream` where
+applicable (e.g. `AdminUpd`).
+
+| Event name | Topic(s) | Data (shape & types) | When emitted |
+|---|---|---|---|
+| FactoryInited | `["fct_init"]` | `FactoryInited { admin: Address, stream_contract: Address, max_deposit: i128, min_duration: u64 }` | Once, when `init` completes successfully. |
+| FactoryAdminUpdated | `["AdminUpd"]` | `FactoryAdminUpdated { old_admin: Address, new_admin: Address }` | When `set_admin` rotates the factory admin. |
+| StreamContractUpdated | `["stm_upd"]` | `StreamContractUpdated { old_contract: Address, new_contract: Address }` | When `set_stream_contract` changes the stream-contract pointer. |
+| AllowlistUpdated | `["allow_upd"]` | `AllowlistUpdated { recipient: Address, allowed: bool }` | When `set_allowlist` adds (`allowed: true`) or removes (`allowed: false`) a recipient. |
+| CapUpdated | `["cap_upd"]` | `CapUpdated { old_cap: i128, new_cap: i128 }` | When `set_cap` updates the factory deposit cap. |
+| MinDurationUpdated | `["dur_upd"]` | `MinDurationUpdated { old_min_duration: u64, new_min_duration: u64 }` | When `set_min_duration` updates the minimum stream duration policy. |
+| RateBoundsUpdated | `["rate_bnd"]` | `RateBoundsUpdated { min_rate: Option<i128>, max_rate: Option<i128> }` | When `set_rate_bounds` updates rate-per-second bounds. `None` = argument not supplied by caller. |
+| FactoryPaused/Resumed | `["factory", "paused"]` / `["factory", "resumed"]` | `bool` | When `set_factory_paused` toggles the pause flag (pre-existing). |
+| FactoryStreamCreated | `["fct_strm"]` | `FactoryStreamCreated { stream_id: u64, sender: Address, recipient: Address, deposit_amount: i128, rate_per_second: i128 }` | After a policy-gated `create_stream` succeeds. Not emitted on any validation or downstream failure. |
+
+### Example JSON (FactoryStreamCreated)
+
+```json
+{
+  "topics": ["fct_strm"],
+  "data": {
+    "stream_id": 42,
+    "sender": "G...SENDER...",
+    "recipient": "G...RECIPIENT...",
+    "deposit_amount": 50000,
+    "rate_per_second": 10
+  }
+}
+```
+
+### Example JSON (AllowlistUpdated)
+
+```json
+{
+  "topics": ["allow_upd"],
+  "data": { "recipient": "G...RECIPIENT...", "allowed": true }
+}
+```
+
+---
+
 ## Keeping this doc in sync
 
-This file is derived from `contracts/stream/src/lib.rs` emit calls:
+This file is derived from `contracts/stream/src/lib.rs` and `contracts/factory/src/lib.rs` emit calls:
 
 - `persist_new_stream` publishes `(symbol_short!("created"), stream_id), StreamCreated { ... }`
 - `withdraw` publishes `(symbol_short!("withdrew"), stream_id), Withdrawal { stream_id, recipient, amount }`
