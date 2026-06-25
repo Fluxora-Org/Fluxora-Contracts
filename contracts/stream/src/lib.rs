@@ -1,7 +1,10 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
 
+#[cfg(not(test))]
 mod accrual;
+#[cfg(test)]
+pub mod accrual;
 #[cfg(test)]
 mod checksum;
 mod token_check;
@@ -1401,7 +1404,6 @@ fn write_total_liabilities(env: &Env, amount: i128) {
     bump_instance_ttl(env);
 }
 
-
 // ---------------------------------------------------------------------------
 // Keeper-fee aggregate counter (issue #623)
 // ---------------------------------------------------------------------------
@@ -1576,7 +1578,10 @@ pub(crate) fn load_delegated_nonce(env: &Env, recipient: &Address) -> u64 {
 
 fn load_rotation_history(env: &Env, stream_id: u64) -> soroban_sdk::Vec<RotationEntry> {
     let key = DataKey::RotationHistory(stream_id);
-    env.storage().persistent().get(&key).unwrap_or_else(|| soroban_sdk::Vec::new(env))
+    env.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| soroban_sdk::Vec::new(env))
 }
 
 fn save_rotation_history(env: &Env, stream_id: u64, history: &soroban_sdk::Vec<RotationEntry>) {
@@ -4278,7 +4283,7 @@ impl FluxoraStream {
     ///
     /// This value is backed by `NextStreamId`, which is incremented exactly once for
     /// each successful stream creation.
-   pub fn get_stream_count(env: Env) -> u64 {
+    pub fn get_stream_count(env: Env) -> u64 {
         read_stream_count(&env)
     }
 
@@ -4624,20 +4629,37 @@ impl FluxoraStream {
             .checked_mul(new_duration)
             .ok_or(ContractError::ArithmeticOverflow)?;
 
+        // Already-accrued entitlement must never be reduced by a schedule change.
+        // Lock in the accrual at the current timestamp and use it as a floor for the
+        // new deposit, mirroring the safety invariant in `decrease_rate_per_second`.
+        let accrued_now = accrual::calculate_accrued_amount_checkpointed(
+            accrual::CheckpointState {
+                checkpointed_amount: stream.checkpointed_amount,
+                checkpointed_at: stream.checkpointed_at,
+                cliff_time: stream.cliff_time,
+                end_time: stream.end_time,
+                deposit_amount: stream.deposit_amount,
+                kind: stream.kind,
+            },
+            stream.rate_per_second,
+            now,
+        );
+        let new_deposit = new_max_streamable.max(accrued_now);
+
         // Deposit must still be sufficient to cover the shortened schedule (by construction
-        // this should hold given the original validation, but we keep an explicit assert).
-        if new_max_streamable > stream.deposit_amount {
+        // this should hold given the original validation, but we keep an explicit check).
+        if new_deposit > stream.deposit_amount {
             return Err(ContractError::InvalidParams);
         }
 
         let old_end_time = stream.end_time;
         let old_deposit = stream.deposit_amount;
         let refund_amount = old_deposit
-            .checked_sub(new_max_streamable)
+            .checked_sub(new_deposit)
             .ok_or(ContractError::ArithmeticOverflow)?;
 
         stream.end_time = new_end_time;
-        stream.deposit_amount = new_max_streamable;
+        stream.deposit_amount = new_deposit;
         save_stream(&env, &stream);
 
         if refund_amount > 0 {
@@ -6873,7 +6895,9 @@ fn compute_stream_health(stream: &Stream, now: u64) -> (bool, i128, u64) {
         Some(added) => stream.checkpointed_amount.saturating_add(added) > stream.deposit_amount,
         None => true,
     };
-    let remaining_balance = stream.deposit_amount.saturating_sub(stream.withdrawn_amount);
+    let remaining_balance = stream
+        .deposit_amount
+        .saturating_sub(stream.withdrawn_amount);
     let seconds_remaining = stream.end_time.saturating_sub(now);
     (is_underfunded, remaining_balance, seconds_remaining)
 }
@@ -7092,10 +7116,7 @@ pub fn bulk_cancel_streams(
 /// - BPS <= 10_000
 #[cfg(kani)]
 pub fn compute_keeper_fee_split(gross: i128, bps: u32) -> (i128, i128) {
-    let fee = gross
-        .checked_mul(bps as i128)
-        .unwrap_or(i128::MAX)
-        / 10_000;
+    let fee = gross.checked_mul(bps as i128).unwrap_or(i128::MAX) / 10_000;
     let refund = gross.checked_sub(fee).unwrap_or(0);
     (fee, refund)
 }
@@ -7134,7 +7155,8 @@ mod kani_proofs {
         kani::assume(bps <= 10_000);
 
         // This is the exact expression used in production (now via helper)
-        let _ = gross.checked_mul(bps as i128)
+        let _ = gross
+            .checked_mul(bps as i128)
             .ok_or(ContractError::ArithmeticOverflow)
             .map(|v| v / 10_000);
         // If we reach here without panic in checked path, ok.

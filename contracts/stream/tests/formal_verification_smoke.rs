@@ -74,7 +74,10 @@ mod kani_governance {
 
         // Timelock addition must be overflow-safe
         let executable = quorum_at.checked_add(TIMELOCK);
-        assert!(executable.is_some(), "quorum_at + TIMELOCK must not overflow");
+        assert!(
+            executable.is_some(),
+            "quorum_at + TIMELOCK must not overflow"
+        );
 
         // Monotonic: once approvals >= threshold, it stays reached
         if approvals >= threshold {

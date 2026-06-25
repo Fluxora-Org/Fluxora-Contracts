@@ -408,3 +408,57 @@ ensuring QuorumReachedAt entries always outlive the timelock.
 
 An expired or missing QuorumReachedAt entry causes execute to fail closed
 with QuorumNotReached — the timelock is never silently re-opened.
+
+## Property-Based Tests
+
+`contracts/stream/tests/governance_proptest.rs` contains a proptest-driven
+test suite that randomises signer-set sizes, approval orderings, and time
+advances to assert core safety invariants that example-based tests can miss.
+
+### Invariants
+
+| # | Invariant | Assertion |
+|---|-----------|-----------|
+| 1 | **Below-quorum guard** | `execute` returns `QuorumNotReached` whenever `approvals < threshold`, no matter how much time has elapsed. |
+| 2 | **Timelock guard** | `execute` returns `TimelockNotElapsed` for any `now < quorum_at + GOVERNANCE_TIMELOCK_SECONDS`. |
+| 2b | **Timelock boundary (inclusive)** | `execute` succeeds at `now == quorum_at + GOVERNANCE_TIMELOCK_SECONDS` (strict `<` comparison). |
+| 2c | **Post-boundary success** | `execute` succeeds for any `now > quorum_at + GOVERNANCE_TIMELOCK_SECONDS`. |
+| 3 | **One-way executed flag** | A second `execute` on the same proposal always returns `AlreadyExecuted`. |
+| 4 | **Full cross-product** | For all `(approval_count, time_delta)` pairs the outcome matches exactly the (quorum × timelock) truth table. |
+| 5 | **Exactly-quorum boundary** | Exactly `threshold` approvals + `now >= exec_after` allows execution. |
+| 5b | **One-below-quorum boundary** | Exactly `threshold - 1` approvals always blocks execution regardless of time. |
+
+### Security notes
+
+The highest-risk off-by-one locations are:
+
+- **Timelock boundary**: `execute` uses `now < exec_after`, so the boundary is
+  *inclusive* (`now == exec_after` should succeed). Properties 2 and 2b
+  directly probe this.
+- **Quorum boundary**: `approve` triggers quorum recording when
+  `approval_count == threshold`. Properties 5 and 5b probe `threshold` and
+  `threshold - 1` approvals explicitly.
+
+### How to run
+
+```bash
+# Run the full proptest suite (256 cases per property, ~30 s):
+cargo test --test governance_proptest --package fluxora_stream
+
+# Run a single invariant:
+cargo test --test governance_proptest prop_execute_fails_below_quorum
+
+# Increase case count for deeper fuzzing:
+PROPTEST_CASES=2000 cargo test --test governance_proptest
+```
+
+### Configuration
+
+Each `proptest!` block uses `ProptestConfig::default()` with `cases: 256` and
+a stable `source_file` annotation so that regression files in
+`contracts/stream/proptest-regressions/governance_proptest.rs.txt` are
+automatically replayed on every CI run.
+
+To reproduce a specific failure, copy the failing seed from the test output
+into `proptest-regressions/governance_proptest.rs.txt` or pass it via
+`PROPTEST_SEED`.

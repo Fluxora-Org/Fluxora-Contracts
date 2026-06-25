@@ -172,6 +172,19 @@ Test files:
 
 - **Unit tests**: `contracts/stream/src/test.rs` — contract logic, accrual math, auth, edge cases, i128 boundary scenarios, version policy.
 - **Integration tests**: `contracts/stream/tests/integration_suite.rs` — full flows with `init`, `create_stream`, `withdraw`, `get_stream_state`, lifecycle transitions, and edge cases.
+- **Property-based balance-conservation harness**: `contracts/stream/tests/balance_conservation.rs` — randomized sequences of `top_up`, `decrease_rate`, `shorten`, `extend`, `pause/resume`, `cancel`, and `withdraw` on both `Linear` and `CliffOnly` streams. Asserts global token conservation, accrual monotonicity, the rate-decrease checkpoint invariant, and `CliffOnly` unsupported-operation guards. Regression seeds live in `contracts/stream/proptest-regressions/`.
+
+Run the new harness with a bounded case count for CI:
+
+```bash
+cargo test -p fluxora_stream --features testutils --test balance_conservation
+```
+
+For deeper local coverage before an audit or release:
+
+```bash
+PROPTEST_CASES=10000 cargo test -p fluxora_stream --features testutils --test balance_conservation
+```
 
 ### Deploy to Stellar Testnet
 
