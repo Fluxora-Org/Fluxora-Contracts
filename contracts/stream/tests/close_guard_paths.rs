@@ -7,7 +7,7 @@
 //!    index entry is absent (no panic, no partial state left behind).
 
 use fluxora_stream::{
-    ContractError, FluxoraStream, FluxoraStreamClient, PauseReason, StreamStatus,
+    ContractError, FluxoraStream, FluxoraStreamClient, PauseReason, StreamKind, StreamStatus,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -41,6 +41,8 @@ impl<'a> Ctx<'a> {
         let recipient = Address::generate(&env);
         stellar_asset.mint(&sender, &1_000_000_000);
         client.init(&token_id, &admin);
+        // create_stream pulls the deposit via transfer_from, which requires an allowance.
+        token.approve(&sender, &contract_id, &i128::MAX, &100_000);
         Self {
             env,
             client,
@@ -62,6 +64,7 @@ impl<'a> Ctx<'a> {
             &(now + duration),
             &0,
             &None,
+            &StreamKind::Linear,
         )
     }
 }
@@ -88,6 +91,8 @@ fn test_close_non_completed_stream_rejected() {
 fn test_close_paused_stream_rejected() {
     let ctx = Ctx::setup();
     let stream_id = ctx.create_stream(10_000);
+    // Clear the pause/resume cooldown before toggling.
+    ctx.env.ledger().with_mut(|l| l.sequence_number += 32);
     ctx.client
         .pause_stream(&stream_id, &PauseReason::Operational);
     assert_eq!(
@@ -103,7 +108,10 @@ fn test_close_paused_stream_rejected() {
 fn test_close_completed_stream_ok() {
     let ctx = Ctx::setup();
     let stream_id = ctx.create_stream(100);
-    ctx.env.ledger().with_mut(|l| l.timestamp += 101);
+    ctx.env.ledger().with_mut(|l| {
+        l.timestamp += 101;
+        l.sequence_number += 2;
+    });
     ctx.client.withdraw(&stream_id);
     assert_eq!(
         ctx.client.get_stream_state(&stream_id).status,
@@ -129,6 +137,7 @@ fn test_close_cancelled_zero_claimable_ok() {
         &(now + 2_000),
         &0,
         &None,
+        &StreamKind::Linear,
     );
     ctx.client.cancel_stream(&stream_id);
     assert_eq!(
@@ -163,6 +172,61 @@ fn test_close_nonexistent_stream() {
 }
 
 // ---------------------------------------------------------------------------
+// close_cancelled_stream tests
+// ---------------------------------------------------------------------------
+
+/// Non-cancelled stream → close_cancelled_stream returns InvalidState.
+#[test]
+fn test_close_cancelled_non_cancelled_rejected() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream(10_000);
+    let result = ctx.client.try_close_cancelled_stream(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::InvalidState)));
+}
+
+/// Cancelled stream with zero claimable → close_cancelled_stream succeeds.
+#[test]
+fn test_close_cancelled_stream_ok() {
+    let ctx = Ctx::setup();
+    let now = ctx.env.ledger().timestamp();
+    // Stream starts in the future → no accrual at cancel time
+    let stream_id = ctx.client.create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1_000,
+        &1,
+        &(now + 1_000),
+        &(now + 1_000),
+        &(now + 2_000),
+        &0,
+        &None,
+        &StreamKind::Linear,
+    );
+    ctx.client.cancel_stream(&stream_id);
+    assert_eq!(
+        ctx.client.get_stream_state(&stream_id).status,
+        StreamStatus::Cancelled
+    );
+    ctx.client.close_cancelled_stream(&stream_id);
+    assert!(ctx.client.try_get_stream_state(&stream_id).is_err());
+}
+
+/// Cancelled stream with remaining claimable → close_cancelled_stream returns InvalidState.
+#[test]
+fn test_close_cancelled_stream_with_claimable_rejected() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream(10_000);
+    ctx.env.ledger().with_mut(|l| l.timestamp += 100);
+    ctx.client.cancel_stream(&stream_id);
+    assert_eq!(
+        ctx.client.get_stream_state(&stream_id).status,
+        StreamStatus::Cancelled
+    );
+    let result = ctx.client.try_close_cancelled_stream(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::InvalidState)));
+}
+
+// ---------------------------------------------------------------------------
 // Recipient-index cleanup path
 // ---------------------------------------------------------------------------
 
@@ -173,7 +237,10 @@ fn test_close_nonexistent_stream() {
 fn test_recipient_index_cleanup_graceful_on_missing_entry() {
     let ctx = Ctx::setup();
     let stream_id = ctx.create_stream(100);
-    ctx.env.ledger().with_mut(|l| l.timestamp += 101);
+    ctx.env.ledger().with_mut(|l| {
+        l.timestamp += 101;
+        l.sequence_number += 2;
+    });
     ctx.client.withdraw(&stream_id);
 
     let index_before = ctx.client.get_recipient_streams(&ctx.recipient);
@@ -195,7 +262,10 @@ fn test_close_removes_only_target_from_index() {
     let id_a = ctx.create_stream(100);
     let id_b = ctx.create_stream(10_000);
 
-    ctx.env.ledger().with_mut(|l| l.timestamp += 101);
+    ctx.env.ledger().with_mut(|l| {
+        l.timestamp += 101;
+        l.sequence_number += 2;
+    });
     ctx.client.withdraw(&id_a);
     ctx.client.close_completed_stream(&id_a);
 

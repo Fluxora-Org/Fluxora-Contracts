@@ -92,6 +92,48 @@ fn time_sequence(end_time: u64) -> impl Strategy<Value = std::vec::Vec<u64>> {
     })
 }
 
+/// Generates (deposit, rate, cliff, duration) for streams that can be rate-decreased.
+///
+/// The starting rate is at least 2 so every generated stream has at least one
+/// valid lower rate. Values stay intentionally small to keep the Soroban test
+/// harness fast while still exploring many checkpoint histories.
+fn rate_decrease_stream_config() -> impl Strategy<Value = (i128, i128, u64, u64)> {
+    (2_i128..=250_i128, 2_u64..=1_500_u64).prop_flat_map(|(rate, duration)| {
+        let min_deposit = rate * duration as i128;
+        let max_deposit = min_deposit + rate * 10;
+        (
+            Just(rate),
+            Just(duration),
+            0_u64..=duration,
+            min_deposit..=max_deposit,
+        )
+            .prop_map(|(r, d, cliff, dep)| (dep, r, cliff, d))
+    })
+}
+
+#[derive(Clone, Debug)]
+struct RateDecreaseStep {
+    advance_by: u64,
+    drop_by: i128,
+}
+
+/// Randomized time jumps interleaved with requested rate drops.
+///
+/// Each step advances the ledger clock first, then attempts one strict rate
+/// decrease if the stream has not reached its end and the current rate is still
+/// above the minimum valid rate.
+fn rate_decrease_steps() -> impl Strategy<Value = std::vec::Vec<RateDecreaseStep>> {
+    proptest::collection::vec((0_u64..=250_u64, 1_i128..=80_i128), 1..=8).prop_map(|steps| {
+        steps
+            .into_iter()
+            .map(|(advance_by, drop_by)| RateDecreaseStep {
+                advance_by,
+                drop_by,
+            })
+            .collect()
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Core invariant checker
 // ---------------------------------------------------------------------------
@@ -132,6 +174,50 @@ fn assert_invariants(ctx: &PropCtx, stream_id: u64, label: &str) {
         withdrawable <= deposit,
         "{label}: get_withdrawable={withdrawable} > deposit={deposit}"
     );
+}
+
+/// Asserts the recipient entitlement protected by rate checkpoints.
+///
+/// Security invariant: with no intervening withdrawals, `get_withdrawable`
+/// represents the recipient's earned amount. A rate decrease must never make
+/// that value smaller, and the earned amount must always remain capped by the
+/// stream's current deposit after any sender refund.
+fn assert_withdrawable_monotonic_and_bounded(
+    ctx: &PropCtx,
+    stream_id: u64,
+    previous_withdrawable: i128,
+    label: &str,
+) -> i128 {
+    let state = ctx.client().get_stream_state(&stream_id);
+    let withdrawable = ctx.client().get_withdrawable(&stream_id);
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+
+    assert!(
+        withdrawable >= previous_withdrawable,
+        "{label}: get_withdrawable decreased: {withdrawable} < {previous_withdrawable}"
+    );
+    assert!(
+        withdrawable <= state.deposit_amount,
+        "{label}: get_withdrawable={withdrawable} > deposit={}",
+        state.deposit_amount
+    );
+    assert!(
+        accrued <= state.deposit_amount,
+        "{label}: accrued={accrued} > deposit={}",
+        state.deposit_amount
+    );
+    assert!(
+        accrued >= state.withdrawn_amount,
+        "{label}: accrued={accrued} < withdrawn={}",
+        state.withdrawn_amount
+    );
+    assert_eq!(
+        withdrawable,
+        accrued - state.withdrawn_amount,
+        "{label}: withdrawable must track accrued minus withdrawn when no balance cap binds"
+    );
+
+    withdrawable
 }
 
 // ---------------------------------------------------------------------------
@@ -284,6 +370,67 @@ proptest! {
                 state.withdrawn_amount
             );
             prev = state.withdrawn_amount;
+        }
+    }
+
+    /// Random rate-decrease histories preserve already-earned recipient entitlement.
+    ///
+    /// Invariants:
+    /// - `get_withdrawable` is monotonically non-decreasing after every time jump
+    ///   and immediately across every successful `decrease_rate_per_second` checkpoint.
+    /// - `get_withdrawable <= deposit_amount` and `calculate_accrued <= deposit_amount`
+    ///   throughout the whole generated history.
+    #[test]
+    fn prop_decrease_rate_per_second_checkpoints_withdrawable_monotonicity(
+        (deposit, rate, cliff, duration) in rate_decrease_stream_config(),
+        steps in rate_decrease_steps(),
+    ) {
+        let ctx = PropCtx::new(deposit);
+        ctx.env.ledger().set_timestamp(0);
+        let id = ctx.client().create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &deposit,
+            &rate,
+            &0u64,
+            &cliff,
+            &duration,
+            &0, &None,
+            &crate::StreamKind::Linear,
+            );
+
+        let mut now = 0_u64;
+        let mut previous_withdrawable =
+            assert_withdrawable_monotonic_and_bounded(&ctx, id, 0, "initial");
+
+        for (idx, step) in steps.iter().enumerate() {
+            now = now.saturating_add(step.advance_by).min(duration.saturating_add(100));
+            ctx.env.ledger().set_timestamp(now);
+            previous_withdrawable = assert_withdrawable_monotonic_and_bounded(
+                &ctx,
+                id,
+                previous_withdrawable,
+                &std::format!("step {idx} after time advance to t={now}"),
+            );
+
+            let state_before = ctx.client().get_stream_state(&id);
+            if now >= state_before.end_time || state_before.rate_per_second <= 1 {
+                continue;
+            }
+
+            let before_decrease = previous_withdrawable;
+            let max_drop = state_before.rate_per_second - 1;
+            let new_rate = state_before.rate_per_second - step.drop_by.min(max_drop);
+
+            // The core security check: checkpointing at the same timestamp must
+            // preserve all recipient entitlement earned under the old rate.
+            ctx.client().decrease_rate_per_second(&id, &new_rate);
+            previous_withdrawable = assert_withdrawable_monotonic_and_bounded(
+                &ctx,
+                id,
+                before_decrease,
+                &std::format!("step {idx} after decrease to rate={new_rate} at t={now}"),
+            );
         }
     }
 }
@@ -507,4 +654,156 @@ fn invariants_multiple_pause_resume_cycles() {
     ctx.env.ledger().set_timestamp(1000);
     ctx.client().withdraw(&id);
     assert_invariants(&ctx, id, "post-cycles final withdraw");
+}
+
+fn assert_decrease_preserves_withdrawable_at_boundary(cliff: u64, decrease_at: u64, label: &str) {
+    let deposit = 1_000_i128;
+    let initial_rate = 10_i128;
+    let new_rate = 3_i128;
+    let duration = 100_u64;
+    let ctx = PropCtx::new(deposit);
+
+    ctx.env.ledger().set_timestamp(0);
+    let id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &deposit,
+        &initial_rate,
+        &0u64,
+        &cliff,
+        &duration,
+        &0,
+        &None,
+        &crate::StreamKind::Linear,
+    );
+
+    ctx.env.ledger().set_timestamp(decrease_at);
+    let before = ctx.client().get_withdrawable(&id);
+    ctx.client().decrease_rate_per_second(&id, &new_rate);
+    let after = assert_withdrawable_monotonic_and_bounded(&ctx, id, before, label);
+
+    assert_eq!(
+        after, before,
+        "{label}: checkpoint should preserve same-timestamp withdrawable exactly"
+    );
+}
+
+#[test]
+fn decrease_rate_checkpoint_preserves_withdrawable_at_cliff_boundary() {
+    assert_decrease_preserves_withdrawable_at_boundary(50, 50, "decrease at cliff");
+}
+
+#[test]
+fn decrease_rate_checkpoint_preserves_withdrawable_right_before_end_time() {
+    assert_decrease_preserves_withdrawable_at_boundary(0, 99, "decrease right before end_time");
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests for the consolidated balance-conservation / accrual harness
+// ---------------------------------------------------------------------------
+
+/// `shorten_stream_end_time` must never reduce the recipient's already-accrued
+/// entitlement.  The new deposit is floored at `accrued(now)` so that
+/// `calculate_accrued` stays monotonic and `withdrawable` never drops.
+#[test]
+fn shorten_stream_preserves_accrued_entitlement() {
+    let deposit = 2_000i128;
+    let rate = 10i128;
+    let duration = 100u64;
+    let ctx = PropCtx::new(deposit);
+
+    ctx.env.ledger().set_timestamp(0);
+    let id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &deposit,
+        &rate,
+        &0u64,
+        &0u64,
+        &duration,
+        &0,
+        &None,
+        &crate::StreamKind::Linear,
+    );
+
+    // At t=50, 500 tokens are accrued.  Shorten the stream to end at t=80.
+    ctx.env.ledger().set_timestamp(50);
+    let accrued_before = ctx.client().calculate_accrued(&id);
+    let withdrawable_before = ctx.client().get_withdrawable(&id);
+    assert_eq!(accrued_before, 500);
+
+    ctx.client().shorten_stream_end_time(&id, &80u64);
+
+    let stream = ctx.client().get_stream_state(&id);
+    // New deposit must be at least the already-accrued amount (500) and at most
+    // the old deposit.  The pure schedule at the new end would only pay 800,
+    // but the accrued-now floor makes the new deposit 500.
+    assert!(stream.deposit_amount >= accrued_before);
+    assert!(stream.deposit_amount <= deposit);
+    assert_eq!(stream.end_time, 80);
+
+    assert_eq!(
+        ctx.client().calculate_accrued(&id),
+        accrued_before,
+        "same-timestamp accrued must not decrease after shorten"
+    );
+    assert!(
+        ctx.client().get_withdrawable(&id) >= withdrawable_before,
+        "same-timestamp withdrawable must not decrease after shorten"
+    );
+}
+
+/// `CliffOnly` streams unlock the full deposit at the cliff and reject schedule
+/// and rate mutations with `UnsupportedStreamKind`.
+#[test]
+fn cliff_only_stream_lifecycle_and_unsupported_ops() {
+    let deposit = 1_000i128;
+    let ctx = PropCtx::new(deposit);
+
+    ctx.env.ledger().set_timestamp(0);
+    let id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &deposit,
+        &0i128,
+        &0u64,
+        &50u64,
+        &100u64,
+        &0,
+        &None,
+        &crate::StreamKind::CliffOnly,
+    );
+
+    // Before cliff: no accrual.
+    ctx.env.ledger().set_timestamp(25);
+    assert_eq!(ctx.client().calculate_accrued(&id), 0);
+    assert_eq!(ctx.client().get_withdrawable(&id), 0);
+
+    // Unsupported mutations return UnsupportedStreamKind.
+    let unsupported = [
+        ctx.client().try_top_up_stream(&id, &ctx.sender, &100),
+        ctx.client().try_decrease_rate_per_second(&id, &1),
+        ctx.client().try_update_rate_per_second(&id, &1),
+        ctx.client().try_shorten_stream_end_time(&id, &75u64),
+        ctx.client().try_extend_stream_end_time(&id, &150u64),
+    ];
+    for result in unsupported {
+        assert!(
+            matches!(result, Err(Ok(crate::ContractError::UnsupportedStreamKind))),
+            "CliffOnly mutation must return UnsupportedStreamKind, got {result:?}"
+        );
+    }
+
+    // After cliff: full deposit is available.
+    ctx.env.ledger().set_timestamp(50);
+    ctx.env.ledger().set_sequence_number(100);
+    assert_eq!(ctx.client().calculate_accrued(&id), deposit);
+    assert_eq!(ctx.client().get_withdrawable(&id), deposit);
+
+    let withdrawn = ctx.client().withdraw(&id);
+    assert_eq!(withdrawn, deposit);
+    assert_eq!(
+        ctx.client().get_stream_state(&id).status,
+        crate::StreamStatus::Completed
+    );
 }

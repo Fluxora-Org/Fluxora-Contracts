@@ -1,9 +1,11 @@
 //! Tests for issue #525: factory policy enforcement.
 //!
-//! Covers all six FactoryError variants and verifies that `create_stream` via
-//! the factory correctly delegates to the stream contract after passing all checks.
+//! Covers FactoryError variants and verifies that `create_stream` via the factory
+//! correctly delegates to the stream contract after passing all checks.
 
-use fluxora_factory::{FactoryError, FluxoraFactory, FluxoraFactoryClient};
+use fluxora_factory::{
+    FactoryError, FluxoraFactory, FluxoraFactoryClient, MAX_MIN_DURATION_SECONDS,
+};
 use fluxora_stream::{FluxoraStream, FluxoraStreamClient};
 use soroban_sdk::{
     testutils::{Address as _, MockAuth, MockAuthInvoke},
@@ -67,6 +69,160 @@ impl<'a> Ctx<'a> {
     fn now(&self) -> u64 {
         self.env.ledger().timestamp()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Error discriminant stability
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_factory_error_discriminants_are_append_only_and_stable() {
+    assert_eq!(FactoryError::AlreadyInitialized as u32, 1);
+    assert_eq!(FactoryError::NotInitialized as u32, 2);
+    assert_eq!(FactoryError::Unauthorized as u32, 3);
+    assert_eq!(FactoryError::RecipientNotAllowlisted as u32, 4);
+    assert_eq!(FactoryError::DepositExceedsCap as u32, 5);
+    assert_eq!(FactoryError::DurationTooShort as u32, 6);
+    assert_eq!(FactoryError::InvalidTimeRange as u32, 7);
+    assert_eq!(FactoryError::InvalidCliff as u32, 8);
+    assert_eq!(FactoryError::InvalidCap as u32, 9);
+    assert_eq!(FactoryError::InvalidMinDuration as u32, 10);
+}
+
+// ---------------------------------------------------------------------------
+// Policy input validation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_init_rejects_zero_max_deposit() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let factory_id = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &factory_id);
+    let admin = Address::generate(&env);
+    let stream_contract = Address::generate(&env);
+
+    let result = factory.try_init(&admin, &stream_contract, &0, &100);
+    assert_eq!(result, Err(Ok(FactoryError::InvalidCap)));
+    assert_eq!(
+        factory.try_get_factory_config(),
+        Err(Ok(FactoryError::NotInitialized)),
+        "invalid init must not write partial policy state"
+    );
+}
+
+#[test]
+fn test_init_rejects_negative_max_deposit() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let factory_id = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &factory_id);
+    let admin = Address::generate(&env);
+    let stream_contract = Address::generate(&env);
+
+    let result = factory.try_init(&admin, &stream_contract, &-1, &100);
+    assert_eq!(result, Err(Ok(FactoryError::InvalidCap)));
+    assert_eq!(
+        factory.try_get_factory_config(),
+        Err(Ok(FactoryError::NotInitialized)),
+        "invalid init must not write partial policy state"
+    );
+}
+
+#[test]
+fn test_set_cap_rejects_zero_and_negative_values_without_mutation() {
+    let ctx = Ctx::setup();
+    let before = ctx.factory.get_factory_config();
+
+    assert_eq!(
+        ctx.factory.try_set_cap(&0),
+        Err(Ok(FactoryError::InvalidCap))
+    );
+    assert_eq!(
+        ctx.factory.get_factory_config().max_deposit,
+        before.max_deposit,
+        "zero cap must not overwrite the stored positive cap"
+    );
+
+    assert_eq!(
+        ctx.factory.try_set_cap(&-1),
+        Err(Ok(FactoryError::InvalidCap))
+    );
+    assert_eq!(
+        ctx.factory.get_factory_config().max_deposit,
+        before.max_deposit,
+        "negative cap must not overwrite the stored positive cap"
+    );
+}
+
+#[test]
+fn test_init_accepts_zero_min_duration() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let factory_id = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &factory_id);
+    let admin = Address::generate(&env);
+    let stream_contract = Address::generate(&env);
+
+    factory.init(&admin, &stream_contract, &1, &0);
+
+    let config = factory.get_factory_config();
+    assert_eq!(config.max_deposit, 1);
+    assert_eq!(config.min_duration, 0);
+}
+
+#[test]
+fn test_init_rejects_absurd_min_duration() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let factory_id = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &factory_id);
+    let admin = Address::generate(&env);
+    let stream_contract = Address::generate(&env);
+
+    let result = factory.try_init(
+        &admin,
+        &stream_contract,
+        &1_000,
+        &(MAX_MIN_DURATION_SECONDS + 1),
+    );
+    assert_eq!(result, Err(Ok(FactoryError::InvalidMinDuration)));
+    assert_eq!(
+        factory.try_get_factory_config(),
+        Err(Ok(FactoryError::NotInitialized)),
+        "invalid init must not write partial policy state"
+    );
+}
+
+#[test]
+fn test_set_min_duration_rejects_absurd_upper_bound_without_mutation() {
+    let ctx = Ctx::setup();
+    let before = ctx.factory.get_factory_config();
+
+    assert_eq!(
+        ctx.factory
+            .try_set_min_duration(&(MAX_MIN_DURATION_SECONDS + 1)),
+        Err(Ok(FactoryError::InvalidMinDuration))
+    );
+    assert_eq!(
+        ctx.factory.get_factory_config().min_duration,
+        before.min_duration,
+        "invalid min_duration must not overwrite the stored policy"
+    );
+}
+
+#[test]
+fn test_set_min_duration_accepts_zero_and_ceiling() {
+    let ctx = Ctx::setup();
+
+    ctx.factory.set_min_duration(&0);
+    assert_eq!(ctx.factory.get_factory_config().min_duration, 0);
+
+    ctx.factory.set_min_duration(&MAX_MIN_DURATION_SECONDS);
+    assert_eq!(
+        ctx.factory.get_factory_config().min_duration,
+        MAX_MIN_DURATION_SECONDS
+    );
 }
 
 // ---------------------------------------------------------------------------

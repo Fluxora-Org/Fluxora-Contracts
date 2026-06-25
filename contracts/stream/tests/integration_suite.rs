@@ -1687,3 +1687,52 @@ fn test_trigger_auto_claim_respects_global_pause() {
     ctx.env.ledger().set_timestamp(1000);
     ctx.client().trigger_auto_claim(&stream_id);
 }
+
+#[test]
+fn test_contract_error_discriminants_unique() {
+    let variants = std::vec![
+        ContractError::StreamNotFound as u32,
+        ContractError::InvalidState as u32,
+        ContractError::InvalidParams as u32,
+        ContractError::ContractPaused as u32,
+        ContractError::StartTimeInPast as u32,
+        ContractError::ArithmeticOverflow as u32,
+        ContractError::Unauthorized as u32,
+        ContractError::AlreadyInitialised as u32,
+        ContractError::TokenVerificationFailed as u32,
+        ContractError::InsufficientBalance as u32,
+        ContractError::InsufficientDeposit as u32,
+        ContractError::StreamAlreadyPaused as u32,
+        ContractError::StreamNotPaused as u32,
+        ContractError::StreamTerminalState as u32,
+        ContractError::DuplicateStreamId as u32,
+        ContractError::InvalidSignature as u32,
+        ContractError::BelowMinimumAmount as u32,
+        ContractError::ReservationCountZero as u32,
+        ContractError::ReservationLimitExceeded as u32,
+        ContractError::SignatureDeadlineExpired as u32,
+        ContractError::TemplateNotFound as u32,
+        ContractError::TemplateLimitExceeded as u32,
+        ContractError::TemplateUnauthorized as u32,
+        ContractError::ReservationNotFound as u32,
+        ContractError::ReservationNotExpirable as u32,
+        ContractError::ReservationStillActive as u32,
+        ContractError::PauseReasonTooLong as u32,
+        ContractError::ClockRegression as u32,
+        ContractError::WithdrawalTooFrequent as u32,
+        ContractError::UnsupportedStreamKind as u32,
+        ContractError::KeeperGracePeriodNotElapsed as u32,
+        ContractError::MetadataTooLarge as u32,
+        ContractError::PauseCooldownActive as u32,
+        ContractError::RateCapExceeded as u32,
+    ];
+
+    let mut sorted_variants = variants.clone();
+    sorted_variants.sort();
+    sorted_variants.dedup();
+    assert_eq!(
+        variants.len(),
+        sorted_variants.len(),
+        "ContractError has duplicate discriminants"
+    );
+}

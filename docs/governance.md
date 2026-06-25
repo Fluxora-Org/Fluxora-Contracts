@@ -172,6 +172,15 @@ Cancels a proposal, marking it as terminal. Emits `ProposalCancelled`.
 - `quorum() -> u32`: returns the configured approval threshold.
 - `timelock_seconds() -> u64`: returns `GOVERNANCE_TIMELOCK_SECONDS`.
 - `max_proposal_age_seconds() -> u64`: returns `MAX_PROPOSAL_AGE_SECONDS`.
+- `get_quorum_info(proposal_id) -> Option<QuorumInfo>`: returns the stored
+  `QuorumInfo { reached_at, threshold }` snapshot if quorum was reached, or
+  `None` if quorum has not yet been reached.  No authorization required.
+- `is_executable(proposal_id) -> bool`: returns `true` iff the proposal
+  exists, is not cancelled/executed/expired, quorum is reached, and
+  `now >= reached_at + GOVERNANCE_TIMELOCK_SECONDS`.  Mirrors the exact
+  gating order used by `execute`.  Returns an error (`ProposalNotFound` or
+  `ArithmeticOverflow`) only when `execute` would also error.  No
+  authorization required.
 
 ## Calldata encoding contract
 
@@ -240,6 +249,44 @@ All storage keys are defined in `DataKey`:
 | `NextProposalId` | Instance | `u32` |
 | `Proposal(u32)` | Persistent | `Proposal` (includes `created_at`, `executed`, and `cancelled`) |
 | `QuorumReachedAt(u32)` | Persistent | `QuorumInfo { reached_at: u64, threshold: u32 }` |
+
+### TTL policy
+
+Soroban persistent entries are subject to archival once their remaining
+TTL falls below `PERSISTENT_LIFETIME_THRESHOLD` (17,280 ledgers / ~1 day
+at 5 s/ledger). To keep `Proposal(id)` and `QuorumReachedAt(id)` live
+throughout the timelock window, the contract bumps TTL on every read and
+write that touches the entry:
+
+- **`Proposal(id)`**: bumped via `bump_proposal` in `load_proposal` (read path,
+  called by `get_proposal`, `is_executable`, `approve`, `execute`,
+  `cancel_proposal`) and in `save_proposal` (write path, called by `propose`,
+  `approve`, `cancel_proposal`, `execute`).
+- **`QuorumReachedAt(id)`**: bumped when quorum is first reached inside
+  `approve` (write path), and also bumped on read by `get_quorum_info`
+  and `is_executable` (read path).
+
+Constants:
+
+| Symbol | Value | Purpose |
+|---|---:|---|
+| `PERSISTENT_LIFETIME_THRESHOLD` | 17,280 ledgers (~1 d) | Soroban archival threshold; entries whose remaining TTL falls below this value are bump-extended. |
+| `PERSISTENT_BUMP_AMOUNT` | 120,960 ledgers (~7 d) | Bump amount applied on every read and write of `Proposal(id)`, and on `QuorumReachedAt(id)` at quorum-reach. |
+
+The 48-hour timelock corresponds to ~34,560 ledgers, which is comfortably
+covered by a single 7-day bump. The 30-day `MAX_PROPOSAL_AGE_SECONDS`
+window (~518,400 ledgers) requires periodic reads from clients,
+indexers, or admin tools to keep entries alive past the initial ~7-day
+bump; the regression tests in `contracts/stream/tests/governance_ttl.rs`
+pin this behavior.
+
+Security implication: a future change that removes the read-time bump in
+`load_proposal` would cause a `Proposal(id)` entry to archive silently
+between reads, turning `execute` into a `ProposalNotFound` failure
+surface for in-flight, still-timelocked proposals. The
+`test_execute_unknown_id_returns_proposal_not_found` test in
+`governance_ttl.rs` documents the failure signal that change would
+produce.
 
 ## GovernanceError codes
 
@@ -323,3 +370,95 @@ Integration tests are in `contracts/stream/tests/governance_integration.rs` and 
 - Threshold validation on `init`.
 - Quorum invariant on `remove_signer`.
 - Quorum uses the configured threshold; adding signers does not change threshold.
+
+TTL regression tests are in `contracts/stream/tests/governance_ttl.rs` and
+cover:
+
+- `Proposal(id)` survives a ledger advance past the persistent archival
+  threshold thanks to the write-time bump.
+- Reading a proposal re-extends the persistent TTL (`load_proposal` calls
+  `bump_proposal`).
+- `execute` succeeds after the full `GOVERNANCE_TIMELOCK_SECONDS` window
+  because both `Proposal(id)` and `QuorumReachedAt(id)` are still on chain.
+- A proposal with periodic reads can survive the full
+  `MAX_PROPOSAL_AGE_SECONDS` window before `execute`.
+- Negative control: executing a non-existent proposal id returns
+  `ProposalNotFound`, which is the exact error surface a future bump-policy
+  regression would expose.
+- Drift guard: the local TTL constants match the contract's runtime
+  constants via `timelock_seconds()` and `max_proposal_age_seconds()`.
+
+## TTL and Timelock Relationship
+
+### QuorumReachedAt Entry TTL
+The `QuorumReachedAt(proposal_id)` persistent storage entry is bumped on:
+- Every `approve` call when quorum is reached
+- Every `execute` call when reading the entry
+
+### Constants
+| Constant | Value | Duration |
+|---|---|---|
+| PERSISTENT_BUMP_AMOUNT | 120,960 ledgers | ~7 days |
+| PERSISTENT_LIFETIME_THRESHOLD | 17,280 ledgers | ~1 day |
+| GOVERNANCE_TIMELOCK_SECONDS | 172,800 seconds | 48 hours |
+
+### Security
+The bump amount (~7 days) comfortably exceeds the 48-hour timelock window,
+ensuring QuorumReachedAt entries always outlive the timelock.
+
+An expired or missing QuorumReachedAt entry causes execute to fail closed
+with QuorumNotReached — the timelock is never silently re-opened.
+
+## Property-Based Tests
+
+`contracts/stream/tests/governance_proptest.rs` contains a proptest-driven
+test suite that randomises signer-set sizes, approval orderings, and time
+advances to assert core safety invariants that example-based tests can miss.
+
+### Invariants
+
+| # | Invariant | Assertion |
+|---|-----------|-----------|
+| 1 | **Below-quorum guard** | `execute` returns `QuorumNotReached` whenever `approvals < threshold`, no matter how much time has elapsed. |
+| 2 | **Timelock guard** | `execute` returns `TimelockNotElapsed` for any `now < quorum_at + GOVERNANCE_TIMELOCK_SECONDS`. |
+| 2b | **Timelock boundary (inclusive)** | `execute` succeeds at `now == quorum_at + GOVERNANCE_TIMELOCK_SECONDS` (strict `<` comparison). |
+| 2c | **Post-boundary success** | `execute` succeeds for any `now > quorum_at + GOVERNANCE_TIMELOCK_SECONDS`. |
+| 3 | **One-way executed flag** | A second `execute` on the same proposal always returns `AlreadyExecuted`. |
+| 4 | **Full cross-product** | For all `(approval_count, time_delta)` pairs the outcome matches exactly the (quorum × timelock) truth table. |
+| 5 | **Exactly-quorum boundary** | Exactly `threshold` approvals + `now >= exec_after` allows execution. |
+| 5b | **One-below-quorum boundary** | Exactly `threshold - 1` approvals always blocks execution regardless of time. |
+
+### Security notes
+
+The highest-risk off-by-one locations are:
+
+- **Timelock boundary**: `execute` uses `now < exec_after`, so the boundary is
+  *inclusive* (`now == exec_after` should succeed). Properties 2 and 2b
+  directly probe this.
+- **Quorum boundary**: `approve` triggers quorum recording when
+  `approval_count == threshold`. Properties 5 and 5b probe `threshold` and
+  `threshold - 1` approvals explicitly.
+
+### How to run
+
+```bash
+# Run the full proptest suite (256 cases per property, ~30 s):
+cargo test --test governance_proptest --package fluxora_stream
+
+# Run a single invariant:
+cargo test --test governance_proptest prop_execute_fails_below_quorum
+
+# Increase case count for deeper fuzzing:
+PROPTEST_CASES=2000 cargo test --test governance_proptest
+```
+
+### Configuration
+
+Each `proptest!` block uses `ProptestConfig::default()` with `cases: 256` and
+a stable `source_file` annotation so that regression files in
+`contracts/stream/proptest-regressions/governance_proptest.rs.txt` are
+automatically replayed on every CI run.
+
+To reproduce a specific failure, copy the failing seed from the test output
+into `proptest-regressions/governance_proptest.rs.txt` or pass it via
+`PROPTEST_SEED`.
