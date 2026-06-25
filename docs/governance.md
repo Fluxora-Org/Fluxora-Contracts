@@ -387,3 +387,24 @@ cover:
   regression would expose.
 - Drift guard: the local TTL constants match the contract's runtime
   constants via `timelock_seconds()` and `max_proposal_age_seconds()`.
+
+## TTL and Timelock Relationship
+
+### QuorumReachedAt Entry TTL
+The `QuorumReachedAt(proposal_id)` persistent storage entry is bumped on:
+- Every `approve` call when quorum is reached
+- Every `execute` call when reading the entry
+
+### Constants
+| Constant | Value | Duration |
+|---|---|---|
+| PERSISTENT_BUMP_AMOUNT | 120,960 ledgers | ~7 days |
+| PERSISTENT_LIFETIME_THRESHOLD | 17,280 ledgers | ~1 day |
+| GOVERNANCE_TIMELOCK_SECONDS | 172,800 seconds | 48 hours |
+
+### Security
+The bump amount (~7 days) comfortably exceeds the 48-hour timelock window,
+ensuring QuorumReachedAt entries always outlive the timelock.
+
+An expired or missing QuorumReachedAt entry causes execute to fail closed
+with QuorumNotReached — the timelock is never silently re-opened.

@@ -18,6 +18,13 @@ const PERSISTENT_LIFETIME_THRESHOLD: u32 = 17_280;
 /// Persistent TTL bump target (ledgers). ~60 days at 5-second ledger close.
 const PERSISTENT_BUMP_AMOUNT: u32 = 120_960;
 
+/// Maximum accepted value for the factory `min_duration` policy, in seconds.
+///
+/// The ceiling is intentionally generous (100 years, using 365-day years) so
+/// normal treasury vesting schedules remain valid while malformed policies
+/// cannot silently make factory-routed stream creation impractical forever.
+pub const MAX_MIN_DURATION_SECONDS: u64 = 100 * 365 * 24 * 60 * 60;
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum FactoryError {
@@ -38,6 +45,15 @@ pub enum FactoryError {
     /// The downstream FluxoraStream contract rejected creation for a reason other than paused.
     /// This is a passthrough catch-all for unexpected downstream failures.
     StreamContractError = 11,
+    /// Rate per second is below the configured minimum.
+    RateBelowMin = 12,
+    /// Rate per second exceeds the configured maximum.
+    RateAboveMax = 13,
+    /// The factory cap must be in the accepted range `1..=i128::MAX`.
+    InvalidCap = 14,
+    /// The minimum duration must be in the accepted range
+    /// `0..=MAX_MIN_DURATION_SECONDS` seconds.
+    InvalidMinDuration = 15,
 }
 
 #[contracttype]
@@ -51,6 +67,10 @@ pub enum DataKey {
     FactoryStreamIds,
     /// Boolean flag: when `true`, `create_stream` rejects all new streams.
     CreationPaused,
+    /// Optional lower bound on rate_per_second (inclusive). When absent, no lower bound.
+    MinRatePerSecond,
+    /// Optional upper bound on rate_per_second (inclusive). When absent, no upper bound.
+    MaxRatePerSecond,
 }
 
 /// Load and authorize the current factory admin.
@@ -92,6 +112,32 @@ fn append_stream_id(env: &Env, stream_id: u64) {
     );
 }
 
+/// Validate a factory deposit cap before storing it.
+///
+/// The cap must be strictly positive. A non-positive cap would make every
+/// positive stream deposit exceed the cap, effectively bricking factory-routed
+/// stream creation.
+fn validate_cap(max_deposit: i128) -> Result<(), FactoryError> {
+    if max_deposit <= 0 {
+        return Err(FactoryError::InvalidCap);
+    }
+
+    Ok(())
+}
+
+/// Validate a factory minimum-duration policy before storing it.
+///
+/// Accepted range: `0..=MAX_MIN_DURATION_SECONDS` seconds. A value of `0`
+/// disables any additional factory-level minimum duration while `create_stream`
+/// still enforces `start_time < end_time`.
+fn validate_min_duration(min_duration: u64) -> Result<(), FactoryError> {
+    if min_duration > MAX_MIN_DURATION_SECONDS {
+        return Err(FactoryError::InvalidMinDuration);
+    }
+
+    Ok(())
+}
+
 /// Read-only snapshot of the factory policy stored in instance storage.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -109,6 +155,11 @@ pub struct FluxoraFactory;
 #[allow(clippy::too_many_arguments)]
 impl FluxoraFactory {
     /// Initialize the factory with admin, stream contract, and policies.
+    ///
+    /// Accepted policy ranges:
+    /// - `max_deposit`: `1..=i128::MAX` (`FactoryError::InvalidCap` otherwise).
+    /// - `min_duration`: `0..=MAX_MIN_DURATION_SECONDS` seconds
+    ///   (`FactoryError::InvalidMinDuration` otherwise).
     pub fn init(
         env: Env,
         admin: Address,
@@ -119,6 +170,9 @@ impl FluxoraFactory {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(FactoryError::AlreadyInitialized);
         }
+
+        validate_cap(max_deposit)?;
+        validate_min_duration(min_duration)?;
 
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
@@ -169,8 +223,12 @@ impl FluxoraFactory {
     }
 
     /// Admin updates the max deposit cap.
+    ///
+    /// The cap must be strictly positive; a non-positive value returns
+    /// `FactoryError::InvalidCap` and leaves the stored cap unchanged.
     pub fn set_cap(env: Env, max_deposit: i128) -> Result<(), FactoryError> {
         require_admin(&env)?;
+        validate_cap(max_deposit)?;
 
         env.storage()
             .instance()
@@ -179,8 +237,14 @@ impl FluxoraFactory {
     }
 
     /// Admin updates the minimum stream duration.
+    ///
+    /// Accepted range: `0..=MAX_MIN_DURATION_SECONDS` seconds. A value of `0`
+    /// disables any additional factory-level minimum duration; values above the
+    /// ceiling return `FactoryError::InvalidMinDuration` and leave the stored
+    /// policy unchanged.
     pub fn set_min_duration(env: Env, min_duration: u64) -> Result<(), FactoryError> {
         require_admin(&env)?;
+        validate_min_duration(min_duration)?;
 
         env.storage()
             .instance()
@@ -188,10 +252,50 @@ impl FluxoraFactory {
         Ok(())
     }
 
+    /// Admin sets optional rate-per-second bounds.
+    ///
+    /// Both bounds are inclusive. Unset (None) means the corresponding side of
+    /// the interval is unbounded (permissive). When both are set, the invariant
+    /// `0 <= min <= max` must hold.
+    ///
+    /// Treats `None` arguments as "leave unchanged".
+    pub fn set_rate_bounds(
+        env: Env,
+        min_rate: Option<i128>,
+        max_rate: Option<i128>,
+    ) -> Result<(), FactoryError> {
+        require_admin(&env)?;
+
+        if let Some(min_v) = min_rate {
+            if min_v < 0 {
+                // rates are non-negative by domain convention; reject negative explicitly
+                return Err(FactoryError::StreamContractError); // reuse or could add new, but keep minimal
+            }
+            env.storage().instance().set(&DataKey::MinRatePerSecond, &min_v);
+        }
+        if let Some(max_v) = max_rate {
+            if max_v < 0 {
+                return Err(FactoryError::StreamContractError);
+            }
+            env.storage().instance().set(&DataKey::MaxRatePerSecond, &max_v);
+        }
+
+        // Validate min <= max when both are present after the update
+        let current_min: Option<i128> = env.storage().instance().get(&DataKey::MinRatePerSecond);
+        let current_max: Option<i128> = env.storage().instance().get(&DataKey::MaxRatePerSecond);
+        if let (Some(mn), Some(mx)) = (current_min, current_max) {
+            if mn > mx {
+                return Err(FactoryError::StreamContractError);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Toggle the factory-level stream creation pause.
     ///
     /// When `paused` is `true`, all calls to `create_stream` immediately return
-    /// [`FactoryError::CreationPaused`] — before any policy read — allowing the
+    /// [`FactoryError::CreationPaused`] — before any policy read, allowing the
     /// admin to halt new factory-originated streams without dismantling the
     /// allowlist or other policy state.
     ///
@@ -310,7 +414,8 @@ impl FluxoraFactory {
     /// 3. Deposit cap check
     /// 4. Time-range invariants
     /// 5. Minimum-duration check
-    /// 6. Cross-contract stream creation
+    /// 6. Rate-per-second bounds check (new)
+    /// 7. Cross-contract stream creation
     ///
     /// On success the returned stream ID is appended to the factory's [`DataKey::FactoryStreamIds`]
     /// registry. The registry is only written **after** the cross-contract call succeeds, so a
@@ -378,6 +483,19 @@ impl FluxoraFactory {
         let duration = end_time - start_time;
         if duration < min_duration {
             return Err(FactoryError::DurationTooShort);
+        }
+
+        // ── Guard 6: rate bounds (new) ───────────────────────────────────────
+        // Unset bounds are permissive. Bounds are inclusive.
+        if let Some(min_rate) = env.storage().instance().get::<_, i128>(&DataKey::MinRatePerSecond) {
+            if rate_per_second < min_rate {
+                return Err(FactoryError::RateBelowMin);
+            }
+        }
+        if let Some(max_rate) = env.storage().instance().get::<_, i128>(&DataKey::MaxRatePerSecond) {
+            if rate_per_second > max_rate {
+                return Err(FactoryError::RateAboveMax);
+            }
         }
 
         // Must authenticate the sender because the factory calls FluxoraStream with this sender.
