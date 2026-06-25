@@ -17,6 +17,13 @@ pub enum FactoryError {
     InvalidTimeRange = 7,
     /// The requested cliff must be within the inclusive start/end window.
     InvalidCliff = 8,
+    /// The supplied `stream_contract` address did not respond to the
+    /// `FluxoraStream::version()` smoke check (e.g. it is not a deployed
+    /// contract, or does not implement the `FluxoraStream` interface).
+    ///
+    /// Returned by `init` and `set_stream_contract` instead of letting an
+    /// invalid address be persisted and later host-trap inside `create_stream`.
+    InvalidStreamContract = 9,
 }
 
 #[contracttype]
@@ -42,6 +49,27 @@ fn require_admin(env: &Env) -> Result<Address, FactoryError> {
     Ok(admin)
 }
 
+/// Smoke-test a candidate stream contract for the `FluxoraStream` interface.
+///
+/// This helper is called from `init` and `set_stream_contract` before the
+/// candidate address is persisted as the factory's `StreamContract`. It
+/// invokes the read-only, storage-free `version()` entrypoint via
+/// `FluxoraStreamClient::try_version`, which uses `Env::try_invoke_contract`
+/// internally so a missing contract, an EOA address, or a contract that does
+/// not expose `version()` surfaces as a typed `FactoryError` instead of a
+/// host trap.
+///
+/// `version()` is intentionally cheap to check: it performs no storage reads
+/// and works even on a `FluxoraStream` contract that has not yet been
+/// initialized, so it is safe to call during the factory's own bootstrap.
+fn validate_stream_contract(env: &Env, stream_contract: &Address) -> Result<(), FactoryError> {
+    let client = FluxoraStreamClient::new(env, stream_contract);
+    match client.try_version() {
+        Ok(Ok(_)) => Ok(()),
+        _ => Err(FactoryError::InvalidStreamContract),
+    }
+}
+
 /// Read-only snapshot of the factory policy stored in instance storage.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -59,6 +87,26 @@ pub struct FluxoraFactory;
 #[allow(clippy::too_many_arguments)]
 impl FluxoraFactory {
     /// Initialize the factory with admin, stream contract, and policies.
+    ///
+    /// # Authorization
+    /// The declared `admin` must authorize this call via `admin.require_auth()`.
+    /// This matches every other admin-only entrypoint (`set_admin`,
+    /// `set_stream_contract`, `set_allowlist`, `set_cap`, `set_min_duration`,
+    /// all of which go through `require_admin`) and prevents an unrelated
+    /// caller from front-running bootstrap by seeding the factory with an
+    /// admin address they do not control.
+    ///
+    /// # Validation
+    /// `stream_contract` must pass the `FluxoraStream` smoke check (see
+    /// [`validate_stream_contract`]) before it is persisted. This converts a
+    /// misconfigured stream address from a deferred host trap inside
+    /// `create_stream` into an immediate `FactoryError::InvalidStreamContract`
+    /// at setup time.
+    ///
+    /// # Errors
+    /// - `FactoryError::AlreadyInitialized` if `init` has already succeeded.
+    /// - `FactoryError::InvalidStreamContract` if `stream_contract` does not
+    ///   respond to `FluxoraStream::version()`.
     pub fn init(
         env: Env,
         admin: Address,
@@ -69,6 +117,9 @@ impl FluxoraFactory {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(FactoryError::AlreadyInitialized);
         }
+
+        admin.require_auth();
+        validate_stream_contract(&env, &stream_contract)?;
 
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
@@ -93,8 +144,15 @@ impl FluxoraFactory {
     }
 
     /// Admin updates the stream contract address.
+    ///
+    /// # Validation
+    /// `new_stream_contract` must pass the same `FluxoraStream` smoke check
+    /// applied in `init` (see [`validate_stream_contract`]), so a later swap
+    /// cannot silently install a non-`FluxoraStream` address. On failure the
+    /// previously configured `stream_contract` is left untouched.
     pub fn set_stream_contract(env: Env, new_stream_contract: Address) -> Result<(), FactoryError> {
         require_admin(&env)?;
+        validate_stream_contract(&env, &new_stream_contract)?;
 
         env.storage()
             .instance()
