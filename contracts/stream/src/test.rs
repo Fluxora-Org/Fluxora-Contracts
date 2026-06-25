@@ -1347,6 +1347,7 @@ fn test_create_stream_deposit_one_valid() {
         &0,
         &None,
         &None,
+        &None,
     );
     let state = ctx.client().get_stream_state(&id);
     assert_eq!(state.deposit_amount, 1);
@@ -1758,6 +1759,7 @@ fn test_create_stream_deposit_less_than_total_panics() {
         &0,
         &None,
         &None,
+        &None,
     );
 }
 
@@ -1794,6 +1796,7 @@ fn test_create_stream_deposit_greater_than_total_succeeds() {
         &0u64,
         &1000u64, // duration = 1000s, total needed = 1000
         &0,
+        &None,
         &None,
         &None,
     );
@@ -2972,6 +2975,7 @@ fn test_accrued_never_exceeds_deposit_multiple_checks() {
         &0u64,
         &100u64, // Would accrue 5,000 at end
         &0,
+        &None,
         &None,
         &None,
     );
@@ -7600,6 +7604,7 @@ fn test_withdraw_excess_deposit_only_streams_calculated_amount() {
         &0u64,
         &1000u64, // duration 1000s, so only 1000 will stream
         &0,
+        &None,
         &None,
         &None,
     );

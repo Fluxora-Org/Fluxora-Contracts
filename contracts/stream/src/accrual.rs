@@ -1,4 +1,5 @@
 use crate::ContractError;
+use crate::types::StreamKind;
 
 /// Assert that ledger-backed accrual time has not moved backwards.
 ///
@@ -51,7 +52,7 @@ pub fn calculate_accrued_amount(
             cliff_time,
             end_time,
             deposit_amount,
-            kind: StreamKind::Linear,
+            kind: StreamKind::Linear, metadata: None,
         },
         rate_per_second,
         current_time,
@@ -185,21 +186,21 @@ pub fn calculate_accrued_amount_checkpointed(
         return 0;
     }
 
-    if deposit_amount <= 0 {
+    if state.deposit_amount <= 0 {
         return 0;
     }
 
-    if kind == StreamKind::CliffOnly {
-        return deposit_amount;
+    if state.kind == StreamKind::CliffOnly {
+        return state.deposit_amount;
     }
 
     if rate_per_second < 0 {
         return 0;
     }
 
-    if checkpointed_at >= end_time {
+    if state.checkpointed_at >= state.end_time {
         // Stream already ended; only the checkpointed amount is payable.
-        return checkpointed_amount.min(deposit_amount).max(0);
+        return state.checkpointed_amount.min(state.deposit_amount).max(0);
     }
 
     if state.deposit_amount <= 0 {
@@ -210,18 +211,18 @@ pub fn calculate_accrued_amount_checkpointed(
     let elapsed_seconds: i128 = if elapsed_now <= state.checkpointed_at {
         0
     } else {
-        (elapsed_now - checkpointed_at) as i128
+        (elapsed_now - state.checkpointed_at) as i128
     };
 
     let added = match elapsed_seconds.checked_mul(rate_per_second) {
         Some(amount) => amount,
         // Multiplication overflow: clamp to deposit ceiling.
-        None => deposit_amount,
+        None => state.deposit_amount,
     };
 
-    checkpointed_amount
+    state.checkpointed_amount
         .saturating_add(added)
-        .min(deposit_amount)
+        .min(state.deposit_amount)
         .max(0)
 }
 
