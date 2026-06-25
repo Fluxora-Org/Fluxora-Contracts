@@ -9,6 +9,7 @@ The base `FluxoraStream` contract is highly composable and intentionally un-opin
 The `fluxora_factory` acts as a proxy entrypoint to enforce these policies:
 - **Recipient Allowlist**: Streams can only be created for recipients explicitly allowlisted by the admin.
 - **Deposit Caps**: Enforces a `MaxDepositCap` on the total `deposit_amount` of a single stream.
+- **Optional Aggregate Batch Cap**: When enabled, the factory also rejects batches whose total deposit exceeds `MaxDepositCap`, preventing bypass by splitting across entries.
 - **Minimum Duration**: Enforces a `MinDuration` (i.e. `end_time - start_time >= min_duration`), preventing overly short or instantaneous streams.
 - **Time Relationship Checks**: Rejects invalid schedules before calling `FluxoraStream`. `start_time` must be strictly less than `end_time`, and `cliff_time` must be within the inclusive `[start_time, end_time]` window.
 
@@ -30,7 +31,7 @@ The factory exposes read-only views so UIs, operators, and indexers can inspect 
 
 | View | Returns | Notes |
 |------|---------|-------|
-| `get_factory_config()` | `FactoryConfig { admin, stream_contract, max_deposit, min_duration }` | Reads all instance policy fields. Returns `FactoryError::NotInitialized` before `init`. |
+| `get_factory_config()` | `FactoryConfig { admin, stream_contract, max_deposit, min_duration, batch_cap_enforced }` | Reads all instance policy fields. Returns `FactoryError::NotInitialized` before `init`. |
 | `is_allowlisted(recipient)` | `bool` | Returns `true` only when the recipient currently has an allowlist entry. Missing entries return `false`. |
 
 These views are permissionless and do not mutate factory state.
@@ -47,7 +48,16 @@ These views are permissionless and do not mutate factory state.
 The factory contract follows the Checks-Effects-Interactions (CEI) pattern implicitly:
 1. **Checks**: Validates the recipient against the allowlist, validates the stream time relationship, and bounds the deposit and duration against the configured caps.
 2. **Effects**: No local persistent state changes occur during a successful stream creation.
-3. **Interactions**: Makes a cross-contract call to `FluxoraStream::create_stream`.
+3. **Interactions**: Makes a cross-contract call to `FluxoraStream::create_stream` or `FluxoraStream::create_streams`.
+
+## Batch creation semantics
+
+`FluxoraFactory::create_streams` is an atomic batch wrapper around `FluxoraStream::create_streams`.
+- Each entry is validated against the factory policy individually.
+- Each recipient in the batch must be allowlisted.
+- Each stream must individually satisfy the per-stream cap and minimum duration.
+- When `batch_cap_enforced` is enabled, the sum of all `deposit_amount` values in the batch is also checked against `MaxDepositCap`.
+- A single invalid entry causes the entire batch to revert, ensuring no partial or policy-violating streams can be created.
 
 ## Cross-contract authorization model
 
@@ -57,8 +67,8 @@ must cover both the wrapper call and the nested stream call:
 ```mermaid
 flowchart TD
     client[Client transaction]
-    factory["fluxora_factory.create_stream(sender, recipient, deposit, rate, start, cliff, end, dust_threshold)"]
-    stream["fluxora_stream.create_stream(sender, recipient, deposit, rate, start, cliff, end, dust_threshold, None, Linear)"]
+    factory["fluxora_factory.create_stream(sender, recipient, deposit, rate, start, cliff, end, dust_threshold, memo, kind)"]
+    stream["fluxora_stream.create_stream(sender, recipient, deposit, rate, start, cliff, end, dust_threshold, memo, kind)"]
     token["token.transfer_from(sender -> fluxora_stream, deposit)"]
 
     client --> factory
@@ -67,6 +77,9 @@ flowchart TD
 ```
 
 The required authorization scopes are:
+
+For `fluxora_factory.create_streams`, the sender must authorize the factory batch call and the nested `fluxora_stream.create_streams` sub-invocation in the same transaction.
+
 
 | Signer | Scope | Why it is required |
 | --- | --- | --- |
@@ -134,6 +147,7 @@ The factory has an `Admin` key managed via `set_admin`. The admin can:
 - Call `set_allowlist` to grant or revoke recipient eligibility.
 - Call `set_cap` to update the max deposit limit.
 - Call `set_min_duration` to update the minimum duration requirement.
+- Call `set_batch_cap_enforcement` to toggle aggregate batch-cap validation.
 - Call `set_stream_contract` to upgrade or switch the underlying stream primitive if a new version is deployed.
 
 The factory admin can shape policy and the target stream contract, but cannot

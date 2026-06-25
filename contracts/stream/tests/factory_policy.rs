@@ -4,11 +4,11 @@
 //! the factory correctly delegates to the stream contract after passing all checks.
 
 use fluxora_factory::{FactoryError, FluxoraFactory, FluxoraFactoryClient};
-use fluxora_stream::{FluxoraStream, FluxoraStreamClient};
+use fluxora_stream::{FluxoraStream, FluxoraStreamClient, CreateStreamParams, StreamKind};
 use soroban_sdk::{
     testutils::{Address as _, MockAuth, MockAuthInvoke},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env, IntoVal,
+    Address, Bytes, Env, IntoVal, Vec,
 };
 use std::panic::AssertUnwindSafe;
 
@@ -213,8 +213,178 @@ fn test_create_stream_recipient_not_allowlisted() {
         &now,
         &(now + 200),
         &0,
+        &None,
+        &StreamKind::Linear,
     );
     assert_eq!(result, Err(Ok(FactoryError::RecipientNotAllowlisted)));
+}
+
+
+#[test]
+fn test_create_stream_supports_cliff_only_and_memo() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient, &true);
+    let now = ctx.now();
+    let memo = Some(Bytes::from_slice(&ctx.env, b"payroll-batch-42"));
+
+    let result = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &1_000,
+        &0,
+        &now,
+        &now,
+        &(now + 200),
+        &0,
+        &memo,
+        &StreamKind::CliffOnly,
+    );
+    assert!(result.is_ok());
+
+    let stream_id = result.unwrap();
+    let stream_state = ctx.stream.get_stream_state(&stream_id).unwrap();
+    assert!(matches!(stream_state.kind, StreamKind::CliffOnly));
+    assert_eq!(stream_state.memo, memo);
+}
+
+#[test]
+fn test_create_streams_batch_allows_all_valid_entries_atomically() {
+    let ctx = Ctx::setup();
+    let recipient0 = Address::generate(&ctx.env);
+    let recipient1 = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient0, &true);
+    ctx.factory.set_allowlist(&recipient1, &true);
+    let now = ctx.now();
+
+    let mut streams = Vec::new(&ctx.env);
+    streams.push_back(CreateStreamParams {
+        recipient: recipient0.clone(),
+        deposit_amount: 4_000,
+        rate_per_second: 0,
+        start_time: now,
+        cliff_time: now,
+        end_time: now + 200,
+        withdraw_dust_threshold: None,
+        memo: Some(Bytes::from_slice(&ctx.env, b"batch-1")),
+        kind: StreamKind::CliffOnly,
+    });
+    streams.push_back(CreateStreamParams {
+        recipient: recipient1.clone(),
+        deposit_amount: 5_000,
+        rate_per_second: 1,
+        start_time: now,
+        cliff_time: now,
+        end_time: now + 500,
+        withdraw_dust_threshold: Some(0),
+        memo: Some(Bytes::from_slice(&ctx.env, b"batch-2")),
+        kind: StreamKind::Linear,
+    });
+
+    let result = ctx.factory.try_create_streams(&ctx.sender, &streams);
+    assert!(result.is_ok());
+
+    let ids = result.unwrap();
+    assert_eq!(ids.len(), 2);
+    assert_eq!(ctx.stream.get_stream_memo(&ids.get_unchecked(0)).unwrap(), Some(Bytes::from_slice(&ctx.env, b"batch-1")));
+    assert_eq!(ctx.stream.get_stream_memo(&ids.get_unchecked(1)).unwrap(), Some(Bytes::from_slice(&ctx.env, b"batch-2")));
+}
+
+#[test]
+fn test_create_streams_batch_reverts_if_any_recipient_not_allowlisted() {
+    let ctx = Ctx::setup();
+    let recipient0 = Address::generate(&ctx.env);
+    let recipient1 = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient0, &true);
+    let now = ctx.now();
+
+    let mut streams = Vec::new(&ctx.env);
+    streams.push_back(CreateStreamParams {
+        recipient: recipient0.clone(),
+        deposit_amount: 4_000,
+        rate_per_second: 1,
+        start_time: now,
+        cliff_time: now,
+        end_time: now + 200,
+        withdraw_dust_threshold: None,
+        memo: None,
+        kind: StreamKind::Linear,
+    });
+    streams.push_back(CreateStreamParams {
+        recipient: recipient1.clone(),
+        deposit_amount: 3_000,
+        rate_per_second: 1,
+        start_time: now,
+        cliff_time: now,
+        end_time: now + 200,
+        withdraw_dust_threshold: None,
+        memo: None,
+        kind: StreamKind::Linear,
+    });
+
+    let result = ctx.factory.try_create_streams(&ctx.sender, &streams);
+    assert_eq!(result, Err(Ok(FactoryError::RecipientNotAllowlisted)));
+}
+
+#[test]
+fn test_create_streams_batch_rejects_aggregate_deposit_over_cap() {
+    let ctx = Ctx::setup();
+    let recipient0 = Address::generate(&ctx.env);
+    let recipient1 = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient0, &true);
+    ctx.factory.set_allowlist(&recipient1, &true);
+    let now = ctx.now();
+
+    let mut streams = Vec::new(&ctx.env);
+    streams.push_back(CreateStreamParams {
+        recipient: recipient0.clone(),
+        deposit_amount: 6_000,
+        rate_per_second: 0,
+        start_time: now,
+        cliff_time: now,
+        end_time: now + 200,
+        withdraw_dust_threshold: None,
+        memo: None,
+        kind: StreamKind::CliffOnly,
+    });
+    streams.push_back(CreateStreamParams {
+        recipient: recipient1.clone(),
+        deposit_amount: 5_001,
+        rate_per_second: 1,
+        start_time: now,
+        cliff_time: now,
+        end_time: now + 500,
+        withdraw_dust_threshold: None,
+        memo: None,
+        kind: StreamKind::Linear,
+    });
+
+    let result = ctx.factory.try_create_streams(&ctx.sender, &streams);
+    assert_eq!(result, Err(Ok(FactoryError::DepositExceedsCap)));
+}
+
+#[test]
+fn test_create_stream_rejects_over_length_memo() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient, &true);
+    let now = ctx.now();
+    let long_bytes = vec![b'a'; fluxora_stream::MAX_MEMO_BYTES + 1];
+    let memo = Some(Bytes::from_slice(&ctx.env, &long_bytes));
+
+    let result = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &1_000,
+        &1,
+        &now,
+        &now,
+        &(now + 200),
+        &0,
+        &memo,
+        &StreamKind::Linear,
+    );
+    assert_eq!(result, Err(Ok(FactoryError::InvalidMemo)));
 }
 
 // ---------------------------------------------------------------------------
@@ -237,6 +407,8 @@ fn test_create_stream_deposit_exceeds_cap() {
         &now,
         &(now + 200),
         &0,
+        &None,
+        &StreamKind::Linear,
     );
     assert_eq!(result, Err(Ok(FactoryError::DepositExceedsCap)));
 }
@@ -258,6 +430,8 @@ fn test_create_stream_deposit_at_cap_ok() {
         &now,
         &(now + 10_000),
         &0,
+        &None,
+        &StreamKind::Linear,
     );
     // May fail for stream-contract reasons (e.g. token transfer) but not DepositExceedsCap
     assert_ne!(result, Err(Ok(FactoryError::DepositExceedsCap)));
@@ -283,6 +457,8 @@ fn test_create_stream_duration_too_short() {
         &now,
         &(now + 50), // duration=50 < min_duration=100
         &0,
+        &None,
+        &StreamKind::Linear,
     );
     assert_eq!(result, Err(Ok(FactoryError::DurationTooShort)));
 }
@@ -304,6 +480,8 @@ fn test_create_stream_duration_at_minimum_ok() {
         &now,
         &(now + 100), // duration=100 == min_duration
         &0,
+        &None,
+        &StreamKind::Linear,
     );
     assert_ne!(result, Err(Ok(FactoryError::DurationTooShort)));
 }
@@ -328,6 +506,8 @@ fn test_create_stream_rejects_end_before_start() {
         &(now + 200),
         &(now + 100),
         &0,
+        &None,
+        &StreamKind::Linear,
     );
     assert_eq!(result, Err(Ok(FactoryError::InvalidTimeRange)));
 }
@@ -341,7 +521,7 @@ fn test_create_stream_rejects_end_equal_start() {
 
     let result =
         ctx.factory
-            .try_create_stream(&ctx.sender, &recipient, &1_000, &1, &now, &now, &now, &0);
+            .try_create_stream(&ctx.sender, &recipient, &1_000, &1, &now, &now, &now, &0, &None, &StreamKind::Linear);
     assert_eq!(result, Err(Ok(FactoryError::InvalidTimeRange)));
 }
 
@@ -361,6 +541,8 @@ fn test_create_stream_rejects_cliff_before_start() {
         &now,
         &(now + 300),
         &0,
+        &None,
+        &StreamKind::Linear,
     );
     assert_eq!(result, Err(Ok(FactoryError::InvalidCliff)));
 }
@@ -381,6 +563,8 @@ fn test_create_stream_rejects_cliff_after_end() {
         &(now + 300),
         &(now + 200),
         &0,
+        &None,
+        &StreamKind::Linear,
     );
     assert_eq!(result, Err(Ok(FactoryError::InvalidCliff)));
 }
@@ -409,6 +593,8 @@ fn test_factory_not_initialized_returns_error() {
         &now,
         &(now + 200),
         &0,
+        &None,
+        &StreamKind::Linear,
     );
     assert_eq!(result, Err(Ok(FactoryError::NotInitialized)));
 }
@@ -517,6 +703,8 @@ fn test_set_cap_enforced() {
         &now,
         &(now + 200),
         &0,
+        &None,
+        &StreamKind::Linear,
     );
     assert_eq!(result, Err(Ok(FactoryError::DepositExceedsCap)));
 }
@@ -539,6 +727,8 @@ fn test_set_min_duration_enforced() {
         &now,
         &(now + 200), // duration=200 < new min=500
         &0,
+        &None,
+        &StreamKind::Linear,
     );
     assert_eq!(result, Err(Ok(FactoryError::DurationTooShort)));
 }
@@ -561,6 +751,176 @@ fn test_set_allowlist_remove_enforced() {
         &now,
         &(now + 200),
         &0,
+        &None,
+        &StreamKind::Linear,
     );
     assert_eq!(result, Err(Ok(FactoryError::RecipientNotAllowlisted)));
+}
+
+
+#[test]
+fn test_create_stream_supports_cliff_only_and_memo() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient, &true);
+    let now = ctx.now();
+    let memo = Some(Bytes::from_slice(&ctx.env, b"payroll-batch-42"));
+
+    let result = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &1_000,
+        &0,
+        &now,
+        &now,
+        &(now + 200),
+        &0,
+        &memo,
+        &StreamKind::CliffOnly,
+    );
+    assert!(result.is_ok());
+
+    let stream_id = result.unwrap();
+    let stream_state = ctx.stream.get_stream_state(&stream_id).unwrap();
+    assert!(matches!(stream_state.kind, StreamKind::CliffOnly));
+    assert_eq!(stream_state.memo, memo);
+}
+
+#[test]
+fn test_create_streams_batch_allows_all_valid_entries_atomically() {
+    let ctx = Ctx::setup();
+    let recipient0 = Address::generate(&ctx.env);
+    let recipient1 = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient0, &true);
+    ctx.factory.set_allowlist(&recipient1, &true);
+    let now = ctx.now();
+
+    let mut streams = Vec::new(&ctx.env);
+    streams.push_back(CreateStreamParams {
+        recipient: recipient0.clone(),
+        deposit_amount: 4_000,
+        rate_per_second: 0,
+        start_time: now,
+        cliff_time: now,
+        end_time: now + 200,
+        withdraw_dust_threshold: None,
+        memo: Some(Bytes::from_slice(&ctx.env, b"batch-1")),
+        kind: StreamKind::CliffOnly,
+    });
+    streams.push_back(CreateStreamParams {
+        recipient: recipient1.clone(),
+        deposit_amount: 5_000,
+        rate_per_second: 1,
+        start_time: now,
+        cliff_time: now,
+        end_time: now + 500,
+        withdraw_dust_threshold: Some(0),
+        memo: Some(Bytes::from_slice(&ctx.env, b"batch-2")),
+        kind: StreamKind::Linear,
+    });
+
+    let result = ctx.factory.try_create_streams(&ctx.sender, &streams);
+    assert!(result.is_ok());
+
+    let ids = result.unwrap();
+    assert_eq!(ids.len(), 2);
+    assert_eq!(ctx.stream.get_stream_memo(&ids.get_unchecked(0)).unwrap(), Some(Bytes::from_slice(&ctx.env, b"batch-1")));
+    assert_eq!(ctx.stream.get_stream_memo(&ids.get_unchecked(1)).unwrap(), Some(Bytes::from_slice(&ctx.env, b"batch-2")));
+}
+
+#[test]
+fn test_create_streams_batch_reverts_if_any_recipient_not_allowlisted() {
+    let ctx = Ctx::setup();
+    let recipient0 = Address::generate(&ctx.env);
+    let recipient1 = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient0, &true);
+    let now = ctx.now();
+
+    let mut streams = Vec::new(&ctx.env);
+    streams.push_back(CreateStreamParams {
+        recipient: recipient0.clone(),
+        deposit_amount: 4_000,
+        rate_per_second: 1,
+        start_time: now,
+        cliff_time: now,
+        end_time: now + 200,
+        withdraw_dust_threshold: None,
+        memo: None,
+        kind: StreamKind::Linear,
+    });
+    streams.push_back(CreateStreamParams {
+        recipient: recipient1.clone(),
+        deposit_amount: 3_000,
+        rate_per_second: 1,
+        start_time: now,
+        cliff_time: now,
+        end_time: now + 200,
+        withdraw_dust_threshold: None,
+        memo: None,
+        kind: StreamKind::Linear,
+    });
+
+    let result = ctx.factory.try_create_streams(&ctx.sender, &streams);
+    assert_eq!(result, Err(Ok(FactoryError::RecipientNotAllowlisted)));
+}
+
+#[test]
+fn test_create_streams_batch_rejects_aggregate_deposit_over_cap() {
+    let ctx = Ctx::setup();
+    let recipient0 = Address::generate(&ctx.env);
+    let recipient1 = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient0, &true);
+    ctx.factory.set_allowlist(&recipient1, &true);
+    let now = ctx.now();
+
+    let mut streams = Vec::new(&ctx.env);
+    streams.push_back(CreateStreamParams {
+        recipient: recipient0.clone(),
+        deposit_amount: 6_000,
+        rate_per_second: 0,
+        start_time: now,
+        cliff_time: now,
+        end_time: now + 200,
+        withdraw_dust_threshold: None,
+        memo: None,
+        kind: StreamKind::CliffOnly,
+    });
+    streams.push_back(CreateStreamParams {
+        recipient: recipient1.clone(),
+        deposit_amount: 5_001,
+        rate_per_second: 1,
+        start_time: now,
+        cliff_time: now,
+        end_time: now + 500,
+        withdraw_dust_threshold: None,
+        memo: None,
+        kind: StreamKind::Linear,
+    });
+
+    let result = ctx.factory.try_create_streams(&ctx.sender, &streams);
+    assert_eq!(result, Err(Ok(FactoryError::DepositExceedsCap)));
+}
+
+#[test]
+fn test_create_stream_rejects_over_length_memo() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient, &true);
+    let now = ctx.now();
+    let long_bytes = vec![b'a'; fluxora_stream::MAX_MEMO_BYTES + 1];
+    let memo = Some(Bytes::from_slice(&ctx.env, &long_bytes));
+
+    let result = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &1_000,
+        &1,
+        &now,
+        &now,
+        &(now + 200),
+        &0,
+        &memo,
+        &StreamKind::Linear,
+    );
+    assert_eq!(result, Err(Ok(FactoryError::InvalidMemo)));
 }
