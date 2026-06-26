@@ -12,6 +12,14 @@ use soroban_sdk::{
 /// consistent across both contracts.
 pub const MAX_PAGE_SIZE: u32 = 100;
 
+/// Instance TTL threshold (ledgers). Below this value the entry will be extended.
+/// Mirrors governance contract to keep TTL semantics consistent across contracts.
+const INSTANCE_LIFETIME_THRESHOLD: u32 = 17_280;
+
+/// Instance TTL bump target (ledgers). ~60 days at 5-second ledger close.
+/// Mirrors governance contract to keep TTL semantics consistent across contracts.
+const INSTANCE_BUMP_AMOUNT: u32 = 120_960;
+
 /// Persistent TTL threshold (ledgers). Below this value the entry will be extended.
 const PERSISTENT_LIFETIME_THRESHOLD: u32 = 17_280;
 
@@ -88,6 +96,23 @@ fn require_admin(env: &Env) -> Result<Address, FactoryError> {
         .ok_or(FactoryError::NotInitialized)?;
     admin.require_auth();
     Ok(admin)
+}
+
+/// Bump the instance storage TTL to prevent factory config expiration.
+///
+/// The factory's instance entries (Admin, StreamContract, MaxDepositCap, MinDuration,
+/// BatchCapEnforced, rate bounds, CreationPaused) hold the factory's entire config.
+/// Letting them expire would brick all admin operations. This helper extends the TTL
+/// whenever they are read or written, ensuring a busy factory never lets critical
+/// config expire.
+///
+/// **Security note:** This operation requires no additional authorization—it only
+/// extends the TTL of already-protected instance storage without mutating any config.
+/// It mirrors the governance contract's TTL bump patterns.
+fn bump_instance(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 }
 
 /// Load the factory-created stream ID list from persistent storage.
@@ -271,6 +296,9 @@ impl FluxoraFactory {
         // CreationPaused defaults to false — no explicit write needed;
         // `is_factory_paused` falls back to `false` on a missing key.
 
+        // Bump instance TTL to ensure config persists across the factory's lifetime.
+        bump_instance(&env);
+
         env.events().publish(
             (symbol_short!("fct_init"),),
             FactoryInited {
@@ -289,6 +317,9 @@ impl FluxoraFactory {
         let old_admin = require_admin(&env)?;
 
         env.storage().instance().set(&DataKey::Admin, &new_admin);
+
+        // Bump instance TTL after successful update.
+        bump_instance(&env);
 
         env.events().publish(
             (symbol_short!("AdminUpd"),),
@@ -310,6 +341,9 @@ impl FluxoraFactory {
         env.storage()
             .instance()
             .set(&DataKey::StreamContract, &new_stream_contract);
+
+        // Bump instance TTL after successful update.
+        bump_instance(&env);
 
         env.events().publish(
             (symbol_short!("stm_upd"),),
@@ -357,6 +391,9 @@ impl FluxoraFactory {
             .instance()
             .set(&DataKey::MaxDepositCap, &max_deposit);
 
+        // Bump instance TTL after successful update.
+        bump_instance(&env);
+
         env.events().publish(
             (symbol_short!("cap_upd"),),
             CapUpdated { old_cap, new_cap: max_deposit },
@@ -384,6 +421,9 @@ impl FluxoraFactory {
             .instance()
             .set(&DataKey::MinDuration, &min_duration);
 
+        // Bump instance TTL after successful update.
+        bump_instance(&env);
+
         env.events().publish(
             (symbol_short!("dur_upd"),),
             MinDurationUpdated {
@@ -401,6 +441,10 @@ impl FluxoraFactory {
         env.storage()
             .instance()
             .set(&DataKey::BatchCapEnforced, &enabled);
+
+        // Bump instance TTL after successful update.
+        bump_instance(&env);
+
         Ok(())
     }
 
@@ -441,6 +485,9 @@ impl FluxoraFactory {
             }
         }
 
+        // Bump instance TTL after successful update.
+        bump_instance(&env);
+
         env.events().publish(
             (symbol_short!("rate_bnd"),),
             RateBoundsUpdated { min_rate, max_rate },
@@ -471,6 +518,9 @@ impl FluxoraFactory {
         env.storage()
             .instance()
             .set(&DataKey::CreationPaused, &paused);
+
+        // Bump instance TTL after successful update.
+        bump_instance(&env);
 
         // Emit a structured event so indexers and monitors can react.
         if paused {
@@ -749,6 +799,10 @@ impl FluxoraFactory {
             .instance()
             .get(&DataKey::StreamContract)
             .ok_or(FactoryError::NotInitialized)?;
+
+        // Bump instance TTL on every stream creation attempt.
+        // This helps ensure config persists even during periods with many stream operations.
+        bump_instance(&env);
 
         let mut total_deposit: i128 = 0;
         for params in streams.iter() {
