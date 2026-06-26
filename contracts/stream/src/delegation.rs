@@ -58,3 +58,106 @@ pub(crate) fn validate_delegation_params(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use super::*;
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger},
+        token::Client as TokenClient,
+        Address, Env,
+    };
+    use crate::{FluxoraStream, FluxoraStreamClient, StreamKind};
+
+    /// Set up a minimal contract environment and return (env, client, stream_id, recipient).
+    fn setup() -> (Env, FluxoraStreamClient<'static>, u64, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, FluxoraStream);
+        let token_admin = Address::generate(&env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin.clone())
+            .address();
+        let admin = Address::generate(&env);
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+        client.init(&token_id, &admin);
+
+        // Mint tokens to sender and approve the contract
+        let sac = soroban_sdk::token::StellarAssetClient::new(&env, &token_id);
+        sac.mint(&sender, &10_000_i128);
+        TokenClient::new(&env, &token_id).approve(&sender, &contract_id, &i128::MAX, &100_000);
+
+        // Create a default stream (deposit=1000, rate=1/s, 0..1000s, no cliff)
+        env.ledger().set_timestamp(0);
+        let stream_id = client.create_stream(
+            &sender,
+            &recipient,
+            &1000_i128,
+            &1_i128,
+            &0u64,
+            &0u64,
+            &1000u64,
+            &0,
+            &None,
+            &StreamKind::Linear,
+        );
+
+        (env, client, stream_id, recipient)
+    }
+
+    /// Deadline exactly equal to the current timestamp must pass.
+    #[test]
+    fn test_deadline_equal_to_now_passes() {
+        let (env, _client, stream_id, _recipient) = setup();
+        env.ledger().set_timestamp(100);
+
+        let result = validate_delegation_params(&env, stream_id, 0, 100);
+        assert_eq!(result, Ok(()));
+    }
+
+    /// Deadline one second before the current timestamp must fail.
+    #[test]
+    fn test_deadline_one_second_before_fails() {
+        let (env, _client, stream_id, _recipient) = setup();
+        env.ledger().set_timestamp(101);
+
+        let result = validate_delegation_params(&env, stream_id, 0, 100);
+        assert_eq!(result, Err(ContractError::SignatureDeadlineExpired));
+    }
+
+    /// Nonce equal to the stored nonce (0) must pass.
+    #[test]
+    fn test_nonce_equal_passes() {
+        let (env, _client, stream_id, _recipient) = setup();
+        env.ledger().set_timestamp(50);
+
+        let result = validate_delegation_params(&env, stream_id, 0, 100);
+        assert_eq!(result, Ok(()));
+    }
+
+    /// Nonce off-by-one (1 when stored is 0) must fail with InvalidParams.
+    #[test]
+    fn test_nonce_off_by_one_fails() {
+        let (env, _client, stream_id, _recipient) = setup();
+        env.ledger().set_timestamp(50);
+
+        let result = validate_delegation_params(&env, stream_id, 1, 100);
+        assert_eq!(result, Err(ContractError::InvalidParams));
+    }
+
+    /// Nonexistent stream_id must fail with StreamNotFound.
+    #[test]
+    fn test_missing_stream_fails() {
+        let (env, _client, _stream_id, _recipient) = setup();
+        env.ledger().set_timestamp(50);
+
+        let result = validate_delegation_params(&env, 999, 0, 100);
+        assert_eq!(result, Err(ContractError::StreamNotFound));
+    }
+}

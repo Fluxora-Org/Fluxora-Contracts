@@ -8,6 +8,8 @@ pub mod accrual;
 #[cfg(test)]
 mod checksum;
 mod token_check;
+#[cfg(test)]
+mod delegation;
 
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env, Map};
 use token_check::verify_token_behavior;
