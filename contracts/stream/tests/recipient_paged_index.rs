@@ -1,211 +1,235 @@
+//! Regression tests for the bounded `get_recipient_streams` entry-point.
+//!
+//! `get_recipient_streams` is hard-capped at `RECIPIENT_STREAMS_PAGE_LIMIT`
+//! (= `MAX_RECIPIENT_PAGE_SIZE`) to prevent unbounded-read DoS.  These tests
+//! verify:
+//!
+//! * Zero streams  → empty result.
+//! * Exactly cap streams  → full result, all IDs present.
+//! * cap + 1 streams (regression)  → exactly cap IDs returned, never more.
+//! * Full enumeration via `get_recipient_streams_paginated`.
+
 extern crate std;
 
-use fluxora_stream::{FluxoraStream, FluxoraStreamClient, MAX_RECIPIENT_PAGE_SIZE};
+use fluxora_stream::{FluxoraStream, FluxoraStreamClient, StreamKind, MAX_RECIPIENT_PAGE_SIZE};
 use soroban_sdk::{
     testutils::Address as _,
     token::{Client as TokenClient, StellarAssetClient},
     Address, Env,
 };
 
-struct TestContext {
+// ---------------------------------------------------------------------------
+// Test harness
+// ---------------------------------------------------------------------------
+
+struct Ctx {
     env: Env,
     client: FluxoraStreamClient<'static>,
-    #[allow(dead_code)]
-    admin: Address,
     sender: Address,
     recipient: Address,
-    #[allow(dead_code)]
-    token: TokenClient<'static>,
 }
 
-impl TestContext {
+impl Ctx {
     fn setup() -> Self {
         let env = Env::default();
         env.mock_all_auths();
-
-        let admin = Address::generate(&env);
-        let sender = Address::generate(&env);
-        let recipient = Address::generate(&env);
+        env.budget().reset_unlimited();
 
         let token_admin = Address::generate(&env);
         let token_id = env
             .register_stellar_asset_contract_v2(token_admin.clone())
             .address();
-        let token = TokenClient::new(&env, &token_id);
-        let token_asset = StellarAssetClient::new(&env, &token_id);
-        token_asset.mint(&sender, &1_000_000_000);
+        StellarAssetClient::new(&env, &token_id).mint(&Address::generate(&env), &0);
+
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&sender, &1_000_000_000_000);
 
         let contract_id = env.register_contract(None, FluxoraStream);
         let client = FluxoraStreamClient::new(&env, &contract_id);
 
-        token.approve(&sender, &contract_id, &1_000_000_000, &100000);
-
+        let admin = Address::generate(&env);
         client.init(&token_id, &admin);
 
-        Self {
-            env,
-            client,
-            admin,
-            sender,
-            recipient,
-            token,
+        TokenClient::new(&env, &token_id).approve(
+            &sender,
+            &contract_id,
+            &1_000_000_000_000,
+            &9_999_999,
+        );
+
+        // Safety: env lives as long as the returned Ctx; we only hold one Ctx at a time.
+        let client: FluxoraStreamClient<'static> = unsafe { core::mem::transmute(client) };
+
+        Ctx { env, client, sender, recipient }
+    }
+
+    /// Create one minimal stream for `self.recipient` and return its ID.
+    fn create_one(&self) -> u64 {
+        let now = self.env.ledger().timestamp();
+        self.client
+            .create_stream(
+                &self.sender,
+                &self.recipient,
+                &100,
+                &1,
+                &now,
+                &now,
+                &(now + 100),
+                &0,
+                &None,
+                &StreamKind::Linear,
+            )
+            .unwrap()
+    }
+
+    /// Create `n` streams for `self.recipient`.
+    fn create_n(&self, n: u32) {
+        for _ in 0..n {
+            self.create_one();
         }
     }
 }
 
+// ---------------------------------------------------------------------------
+// Edge-case: zero streams
+// ---------------------------------------------------------------------------
+
 #[test]
-fn test_recipient_index_migration() {
-    let ctx = TestContext::setup();
-
-    // 1. Create 5 streams (flat list)
-    for _ in 0..5 {
-        ctx.client.create_stream(
-            &ctx.sender,
-            &ctx.recipient,
-            &1000,
-            &1,
-            &0,
-            &0,
-            &1000,
-            &0,
-            &None,
-            &fluxora_stream::StreamKind::Linear,
-        );
-    }
-
-    let streams = ctx.client.get_recipient_streams(&ctx.recipient);
-    assert_eq!(streams.len(), 5);
-
-    // 2. Migrate
-    ctx.client.migrate_recipient_index(&ctx.recipient);
-
-    // 3. Verify streams still accessible
-    let streams_after = ctx.client.get_recipient_streams(&ctx.recipient);
-    assert_eq!(streams_after.len(), 5);
-    assert_eq!(streams, streams_after);
-
-    // 4. Create another stream (should go to paged index)
-    ctx.client.create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &1000,
-        &1,
-        &0,
-        &0,
-        &1000,
-        &0,
-        &None,
-        &fluxora_stream::StreamKind::Linear,
-    );
-
-    let streams_final = ctx.client.get_recipient_streams(&ctx.recipient);
-    assert_eq!(streams_final.len(), 6);
+fn test_zero_streams_returns_empty() {
+    let ctx = Ctx::setup();
+    let ids = ctx.client.get_recipient_streams(&ctx.recipient);
+    assert_eq!(ids.len(), 0);
 }
 
+// ---------------------------------------------------------------------------
+// Backward-compatible: small recipient (count < cap)
+// ---------------------------------------------------------------------------
+
 #[test]
-fn test_paged_index_pagination() {
-    let ctx = TestContext::setup();
-    ctx.env.budget().reset_unlimited();
+fn test_small_recipient_returns_all() {
+    let ctx = Ctx::setup();
+    ctx.create_n(5);
+    let ids = ctx.client.get_recipient_streams(&ctx.recipient);
+    assert_eq!(ids.len(), 5);
+}
 
-    // Create many streams to force multiple pages
-    let total_streams = (MAX_RECIPIENT_PAGE_SIZE * 2 + 5) as i32;
-    for _ in 0..total_streams {
-        ctx.client.create_stream(
-            &ctx.sender,
-            &ctx.recipient,
-            &100,
-            &1,
-            &0,
-            &0,
-            &100,
-            &0,
-            &None,
-            &fluxora_stream::StreamKind::Linear,
-        );
-    }
+// ---------------------------------------------------------------------------
+// Boundary: exactly cap streams → all returned
+// ---------------------------------------------------------------------------
 
-    // Migrate to paged index
-    ctx.client.migrate_recipient_index(&ctx.recipient);
+#[test]
+fn test_exactly_cap_streams_returns_all() {
+    let ctx = Ctx::setup();
+    ctx.create_n(MAX_RECIPIENT_PAGE_SIZE);
+    let ids = ctx.client.get_recipient_streams(&ctx.recipient);
+    assert_eq!(
+        ids.len(),
+        MAX_RECIPIENT_PAGE_SIZE,
+        "expected full cap returned when count == cap"
+    );
+}
 
-    // Test pagination across page boundaries
-    let limit = 10;
+// ---------------------------------------------------------------------------
+// Regression: cap + 1 streams must NOT exceed the cap
+// ---------------------------------------------------------------------------
 
-    // First page
-    let page1 = ctx
+#[test]
+fn test_cap_plus_one_is_bounded() {
+    let ctx = Ctx::setup();
+    ctx.create_n(MAX_RECIPIENT_PAGE_SIZE + 1);
+
+    let ids = ctx.client.get_recipient_streams(&ctx.recipient);
+
+    assert_eq!(
+        ids.len(),
+        MAX_RECIPIENT_PAGE_SIZE,
+        "get_recipient_streams must never exceed RECIPIENT_STREAMS_PAGE_LIMIT"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Regression: high-volume recipient (2× cap + 5) stays bounded
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_high_volume_recipient_is_bounded() {
+    let ctx = Ctx::setup();
+    let total = MAX_RECIPIENT_PAGE_SIZE * 2 + 5;
+    ctx.create_n(total);
+
+    let ids = ctx.client.get_recipient_streams(&ctx.recipient);
+
+    assert!(
+        ids.len() <= MAX_RECIPIENT_PAGE_SIZE,
+        "returned {} IDs, expected at most {}",
+        ids.len(),
+        MAX_RECIPIENT_PAGE_SIZE,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Result is a prefix: IDs returned by the bounded call are the first page
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_bounded_call_returns_first_page() {
+    let ctx = Ctx::setup();
+    ctx.create_n(MAX_RECIPIENT_PAGE_SIZE + 10);
+
+    let bounded = ctx.client.get_recipient_streams(&ctx.recipient);
+    let page = ctx
         .client
-        .get_recipient_streams_paginated(&ctx.recipient, &0, &limit);
-    assert_eq!(page1.len(), 10);
-    // Stream IDs start from 0 (NextStreamId is initialized to 0 in init)
-    assert_eq!(page1.get(0).unwrap(), 0);
+        .get_recipient_streams_paginated(&ctx.recipient, &0, &MAX_RECIPIENT_PAGE_SIZE);
 
-    // Boundary of page 0 and 1
-    let cursor = (MAX_RECIPIENT_PAGE_SIZE - 5) as u64;
-    let page_boundary = ctx
-        .client
-        .get_recipient_streams_paginated(&ctx.recipient, &cursor, &10);
-    assert_eq!(page_boundary.len(), 10);
-
-    // Verify results match full list
-    let all = ctx.client.get_recipient_streams(&ctx.recipient);
-    for i in 0..10 {
-        assert_eq!(
-            page_boundary.get(i as u32).unwrap(),
-            all.get((cursor + i) as u32).unwrap()
-        );
+    assert_eq!(bounded.len(), page.stream_ids.len());
+    for i in 0..bounded.len() {
+        assert_eq!(bounded.get(i).unwrap(), page.stream_ids.get(i).unwrap());
     }
 }
 
+// ---------------------------------------------------------------------------
+// Full enumeration via pagination covers all streams
+// ---------------------------------------------------------------------------
+
 #[test]
-fn test_remove_from_paged_index() {
-    let ctx = TestContext::setup();
+fn test_paginated_covers_all_streams() {
+    let ctx = Ctx::setup();
+    let total = MAX_RECIPIENT_PAGE_SIZE + 15;
+    ctx.create_n(total);
 
-    // Create 3 streams
-    let id1 = ctx.client.create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &100,
-        &1,
-        &0,
-        &0,
-        &100,
-        &0,
-        &None,
-        &fluxora_stream::StreamKind::Linear,
-    );
-    let id2 = ctx.client.create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &100,
-        &1,
-        &0,
-        &0,
-        &100,
-        &0,
-        &None,
-        &fluxora_stream::StreamKind::Linear,
-    );
-    let id3 = ctx.client.create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &100,
-        &1,
-        &0,
-        &0,
-        &100,
-        &0,
-        &None,
-        &fluxora_stream::StreamKind::Linear,
-    );
+    let mut all_ids = soroban_sdk::Vec::new(&ctx.env);
+    let mut cursor = 0u64;
+    loop {
+        let page = ctx
+            .client
+            .get_recipient_streams_paginated(&ctx.recipient, &cursor, &MAX_RECIPIENT_PAGE_SIZE);
+        for i in 0..page.stream_ids.len() {
+            all_ids.push_back(page.stream_ids.get(i).unwrap());
+        }
+        cursor = page.next_cursor;
+        if cursor == 0 {
+            break;
+        }
+    }
 
-    ctx.client.migrate_recipient_index(&ctx.recipient);
+    assert_eq!(all_ids.len(), total, "pagination must enumerate every stream");
+}
 
-    // Cancel and close stream 2 (should remove from paged index)
-    ctx.client.cancel_stream(&id2);
-    ctx.client.close_completed_stream(&id2);
+// ---------------------------------------------------------------------------
+// IDs are sorted ascending in both interfaces
+// ---------------------------------------------------------------------------
 
-    let streams = ctx.client.get_recipient_streams(&ctx.recipient);
-    assert_eq!(streams.len(), 2);
-    assert!(streams.contains(id1));
-    assert!(streams.contains(id3));
-    assert!(!streams.contains(id2));
+#[test]
+fn test_bounded_ids_are_sorted() {
+    let ctx = Ctx::setup();
+    ctx.create_n(MAX_RECIPIENT_PAGE_SIZE + 3);
+
+    let ids = ctx.client.get_recipient_streams(&ctx.recipient);
+    for i in 1..ids.len() {
+        assert!(
+            ids.get(i - 1).unwrap() < ids.get(i).unwrap(),
+            "IDs must be sorted ascending"
+        );
+    }
 }

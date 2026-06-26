@@ -143,6 +143,17 @@ _RE_ERROR_VARIANT = re.compile(
     re.MULTILINE,
 )
 
+_RE_ERROR_DISCRIMINANT = re.compile(
+    r"^\s{4}([A-Z][A-Za-z0-9]+)\s*=\s*(\d+)\s*,",
+    re.MULTILINE,
+)
+
+# Matches the body of `pub enum ContractError { ... }` (non-greedy on braces).
+_RE_CONTRACT_ERROR_BODY = re.compile(
+    r"pub\s+enum\s+ContractError\s*\{([^}]*)\}",
+    re.DOTALL,
+)
+
 def extract_entrypoints(source: str) -> set:
     names = set(_RE_ENTRYPOINT.findall(source))
     return names - ENTRYPOINT_ALLOWLIST
@@ -158,6 +169,26 @@ def extract_event_symbols(source: str) -> set:
 
 def extract_error_variants(source: str) -> set:
     return set(_RE_ERROR_VARIANT.findall(source)) - ERROR_EXTRACT_EXCLUDE
+
+def check_duplicate_discriminants(source: str) -> bool:
+    """Parse only the ContractError enum body and fail if any two variants share a discriminant."""
+    m = _RE_CONTRACT_ERROR_BODY.search(source)
+    if not m:
+        print("WARNING: could not locate 'pub enum ContractError' in error source")
+        return False
+    body = m.group(1)
+    matches = _RE_ERROR_DISCRIMINANT.findall(body)
+    seen = {}
+    duplicate_found = False
+    for variant, val in matches:
+        if variant in ERROR_EXTRACT_EXCLUDE:
+            continue
+        if val in seen:
+            print(f"DUPLICATE DISCRIMINANT: '{variant}' and '{seen[val]}' both use value {val}")
+            duplicate_found = True
+        else:
+            seen[val] = variant
+    return duplicate_found
 
 # ---------------------------------------------------------------------------
 # Validation
@@ -198,6 +229,9 @@ def validate(
                 display = doc_path
             print(f"MISSING DOC: '{ident}' ({kind}) found in code but not in '{display}'")
             drift_found = True
+
+    if check_duplicate_discriminants(error_source):
+        drift_found = True
 
     if not drift_found:
         print("OK: all contract identifiers are present in documentation.")

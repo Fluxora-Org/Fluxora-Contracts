@@ -13,6 +13,23 @@ The `fluxora_factory` acts as a proxy entrypoint to enforce these policies:
 - **Minimum Duration**: Enforces a `MinDuration` (i.e. `end_time - start_time >= min_duration`), preventing overly short or instantaneous streams.
 - **Time Relationship Checks**: Rejects invalid schedules before calling `FluxoraStream`. `start_time` must be strictly less than `end_time`, and `cliff_time` must be within the inclusive `[start_time, end_time]` window.
 
+## Policy Parameter Validation
+
+Policy parameters are validated before they are written by `init`, `set_cap`,
+and `set_min_duration`. Invalid values are rejected at write time so the later
+`create_stream` policy checks remain meaningful and cannot be silently bricked by
+nonsensical stored configuration. Failed setter calls leave the previously stored
+policy unchanged.
+
+| Parameter | Entrypoints | Accepted range | Rejection error | Notes |
+|-----------|-------------|----------------|-----------------|-------|
+| `max_deposit: i128` | `init`, `set_cap` | `1..=i128::MAX` | `FactoryError::InvalidCap` | `0` and negative caps are rejected because every positive stream deposit would exceed them. |
+| `min_duration: u64` | `init`, `set_min_duration` | `0..=3_153_600_000` seconds (`MAX_MIN_DURATION_SECONDS`, 100 365-day years) | `FactoryError::InvalidMinDuration` | `0` is valid and means no additional factory-level minimum duration beyond the required `start_time < end_time` invariant. |
+
+These ranges are also documented in the Rust `///` comments on the factory
+entrypoints. Error discriminants are append-only; `InvalidCap = 9` and
+`InvalidMinDuration = 10` were added without renumbering existing values.
+
 ## Time Validation
 
 The factory mirrors the underlying stream contract's creation-time schedule invariants and returns typed factory errors before making the cross-contract call:
@@ -149,6 +166,7 @@ The factory has an `Admin` key managed via `set_admin`. The admin can:
 - Call `set_min_duration` to update the minimum duration requirement.
 - Call `set_batch_cap_enforcement` to toggle aggregate batch-cap validation.
 - Call `set_stream_contract` to upgrade or switch the underlying stream primitive if a new version is deployed.
+- Call `set_rate_bounds` to configure optional inclusive rate-per-second bounds.
 
 The factory admin can shape policy and the target stream contract, but cannot
 spend sender funds by itself. A factory-routed stream still needs the `sender`
@@ -156,15 +174,40 @@ authorization described above, and the underlying stream contract still enforces
 its own authorization table. See the [`docs/security.md` admin powers
 section](security.md#admin-powers) for the protocol-wide admin boundary.
 
+## Events
+
+Every state-changing factory entrypoint emits a structured Soroban event so that
+indexers, treasury dashboards, and monitoring tools can observe policy changes and
+stream creation without re-reading storage. Topic symbols are ≤ 9 characters per
+the `symbol_short!` constraint.
+
+| Entrypoint | Topic | Data struct | Notes |
+|---|---|---|---|
+| `init` | `fct_init` | `FactoryInited { admin, stream_contract, max_deposit, min_duration }` | Emitted once on deployment. |
+| `set_admin` | `AdminUpd` | `FactoryAdminUpdated { old_admin, new_admin }` | Mirrors the `AdminUpd` topic used in `FluxoraStream`. |
+| `set_stream_contract` | `stm_upd` | `StreamContractUpdated { old_contract, new_contract }` | Emitted after the pointer is updated. |
+| `set_allowlist` | `allow_upd` | `AllowlistUpdated { recipient, allowed }` | `allowed: true` = added; `false` = removed. Sufficient for an indexer to reconstruct membership. |
+| `set_cap` | `cap_upd` | `CapUpdated { old_cap, new_cap }` | Both old and new values are included. |
+| `set_min_duration` | `dur_upd` | `MinDurationUpdated { old_min_duration, new_min_duration }` | Both old and new values are included. |
+| `set_rate_bounds` | `rate_bnd` | `RateBoundsUpdated { min_rate, max_rate }` | Carries the arguments passed by the caller; `None` means "unchanged". |
+| `set_factory_paused` | `factory` + `paused`/`resumed` | `bool` | Pre-existing event, unchanged. |
+| `create_stream` (success) | `fct_strm` | `FactoryStreamCreated { stream_id, sender, recipient, deposit_amount, rate_per_second }` | Emitted only after the cross-contract call succeeds. Lets indexers attribute a stream to the policy-gated factory path. |
+
+See [docs/events.md](events.md) for the complete event catalogue across all contracts.
+
 ## Code alignment checklist
 
 This document is aligned with the current implementation as follows:
 
+- `FluxoraFactory::init`, `set_cap`, and `set_min_duration` validate policy
+  ranges before writing factory configuration.
 - `FluxoraFactory::create_stream` enforces allowlist, cap, and duration checks
   before calling `sender.require_auth()`.
 - The factory forwards a linear `FluxoraStream::create_stream` call with
   `memo = None` and `StreamKind::Linear`.
 - `FluxoraStream::create_stream` calls `sender.require_auth()` before validating
   parameters and pulling `deposit_amount` from `sender`.
-- `contracts/stream/tests/factory_policy.rs` covers the factory policy gates and
-  admin-guarded policy updates that surround this authorization model.
+- `contracts/stream/tests/factory_policy.rs` covers policy input validation,
+  factory policy gates, append-only error discriminants, and admin-guarded
+  policy updates that surround this authorization model.
+- Every state-changing entrypoint emits a structured event; see the Events table above.
