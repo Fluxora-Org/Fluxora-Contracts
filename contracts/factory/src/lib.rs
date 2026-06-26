@@ -54,6 +54,8 @@ pub enum FactoryError {
     /// The minimum duration must be in the accepted range
     /// `0..=MAX_MIN_DURATION_SECONDS` seconds.
     InvalidMinDuration = 15,
+    /// The requested memo exceeds the allowed max length.
+    InvalidMemo = 16,
 }
 
 #[contracttype]
@@ -62,6 +64,7 @@ pub enum DataKey {
     StreamContract,
     MaxDepositCap,
     MinDuration,
+    BatchCapEnforced,
     Allowlist(Address),
     /// Persistent ordered list of stream IDs created through this factory.
     FactoryStreamIds,
@@ -146,6 +149,7 @@ pub struct FactoryConfig {
     pub stream_contract: Address,
     pub max_deposit: i128,
     pub min_duration: u64,
+    pub batch_cap_enforced: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -261,6 +265,9 @@ impl FluxoraFactory {
         env.storage()
             .instance()
             .set(&DataKey::MinDuration, &min_duration);
+        env.storage()
+            .instance()
+            .set(&DataKey::BatchCapEnforced, &true);
         // CreationPaused defaults to false — no explicit write needed;
         // `is_factory_paused` falls back to `false` on a missing key.
 
@@ -387,6 +394,16 @@ impl FluxoraFactory {
         Ok(())
     }
 
+    /// Admin enables or disables the aggregate batch-cap check.
+    pub fn set_batch_cap_enforcement(env: Env, enabled: bool) -> Result<(), FactoryError> {
+        require_admin(&env)?;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::BatchCapEnforced, &enabled);
+        Ok(())
+    }
+
     /// Admin sets optional rate-per-second bounds.
     ///
     /// Both bounds are inclusive. Unset (None) means the corresponding side of
@@ -505,6 +522,11 @@ impl FluxoraFactory {
                 .instance()
                 .get(&DataKey::MinDuration)
                 .ok_or(FactoryError::NotInitialized)?,
+            batch_cap_enforced: env
+                .storage()
+                .instance()
+                .get(&DataKey::BatchCapEnforced)
+                .ok_or(FactoryError::NotInitialized)?,
         })
     }
 
@@ -570,6 +592,8 @@ impl FluxoraFactory {
         cliff_time: u64,
         end_time: u64,
         withdraw_dust_threshold: i128,
+        memo: Option<soroban_sdk::Bytes>,
+        kind: fluxora_stream::StreamKind,
     ) -> Result<u64, FactoryError> {
         // ── Guard 1: pause check (before any policy read) ───────────────────
         // Checked first so that no allowlist or cap state is observable when
@@ -624,7 +648,7 @@ impl FluxoraFactory {
             return Err(FactoryError::DurationTooShort);
         }
 
-        // ── Guard 6: rate bounds (new) ───────────────────────────────────────
+        // ── Guard 6: rate bounds ─────────────────────────────────────────────
         // Unset bounds are permissive. Bounds are inclusive.
         if let Some(min_rate) = env.storage().instance().get::<_, i128>(&DataKey::MinRatePerSecond) {
             if rate_per_second < min_rate {
@@ -634,6 +658,13 @@ impl FluxoraFactory {
         if let Some(max_rate) = env.storage().instance().get::<_, i128>(&DataKey::MaxRatePerSecond) {
             if rate_per_second > max_rate {
                 return Err(FactoryError::RateAboveMax);
+            }
+        }
+
+        // ── Guard 7: memo length ─────────────────────────────────────────────
+        if let Some(ref m) = memo {
+            if m.len() as usize > fluxora_stream::MAX_MEMO_BYTES {
+                return Err(FactoryError::InvalidMemo);
             }
         }
 
@@ -659,8 +690,8 @@ impl FluxoraFactory {
             &cliff_time,
             &end_time,
             &withdraw_dust_threshold,
-            &None,
-            &fluxora_stream::StreamKind::Linear,
+            &memo,
+            &kind,
         ) {
             Ok(Ok(stream_id)) => {
                 // --- Effect (post-interaction): record only after a successful creation ---
@@ -685,5 +716,94 @@ impl FluxoraFactory {
             Err(Ok(_)) => Err(FactoryError::StreamContractError),
             Err(Err(_)) => Err(FactoryError::StreamContractError),
         }
+    }
+
+    /// Create multiple streams in one atomic factory-wrapped transaction.
+    pub fn create_streams(
+        env: Env,
+        sender: Address,
+        streams: Vec<fluxora_stream::CreateStreamParams>,
+    ) -> Result<Vec<u64>, FactoryError> {
+        sender.require_auth();
+
+        let max_deposit: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxDepositCap)
+            .ok_or(FactoryError::NotInitialized)?;
+
+        let min_duration: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinDuration)
+            .ok_or(FactoryError::NotInitialized)?;
+
+        let enforce_batch_cap: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::BatchCapEnforced)
+            .ok_or(FactoryError::NotInitialized)?;
+
+        let stream_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::StreamContract)
+            .ok_or(FactoryError::NotInitialized)?;
+
+        let mut total_deposit: i128 = 0;
+        for params in streams.iter() {
+            let is_allowed: bool = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Allowlist(params.recipient.clone()))
+                .unwrap_or(false);
+            if !is_allowed {
+                return Err(FactoryError::RecipientNotAllowlisted);
+            }
+
+            if params.deposit_amount > max_deposit {
+                return Err(FactoryError::DepositExceedsCap);
+            }
+
+            if params.start_time >= params.end_time {
+                return Err(FactoryError::InvalidTimeRange);
+            }
+            if params.cliff_time < params.start_time || params.cliff_time > params.end_time {
+                return Err(FactoryError::InvalidCliff);
+            }
+
+            let duration = params.end_time - params.start_time;
+            if duration < min_duration {
+                return Err(FactoryError::DurationTooShort);
+            }
+
+            if let Some(ref m) = params.memo {
+                if m.len() as usize > fluxora_stream::MAX_MEMO_BYTES {
+                    return Err(FactoryError::InvalidMemo);
+                }
+            }
+
+            if enforce_batch_cap {
+                total_deposit = total_deposit
+                    .checked_add(params.deposit_amount)
+                    .ok_or(FactoryError::DepositExceedsCap)?;
+                if total_deposit > max_deposit {
+                    return Err(FactoryError::DepositExceedsCap);
+                }
+            }
+        }
+
+        if streams.is_empty() {
+            return Ok(Vec::new(&env));
+        }
+
+        let stream_client = FluxoraStreamClient::new(&env, &stream_contract);
+        let mut wrapped_streams = Vec::new(&env);
+        for params in streams.iter() {
+            wrapped_streams.push_back(params.clone());
+        }
+
+        let created_ids = stream_client.create_streams(&sender, &wrapped_streams);
+        Ok(created_ids)
     }
 }
