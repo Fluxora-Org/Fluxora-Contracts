@@ -76,6 +76,17 @@ The factory contract follows the Checks-Effects-Interactions (CEI) pattern impli
 - When `batch_cap_enforced` is enabled, the sum of all `deposit_amount` values in the batch is also checked against `MaxDepositCap`.
 - A single invalid entry causes the entire batch to revert, ensuring no partial or policy-violating streams can be created.
 
+### Registry writes for batch creation
+
+After the downstream `FluxoraStream::create_streams` call succeeds, the factory appends every returned stream ID to the `FactoryStreamIds` persistent registry **in creation order** with a single TTL bump for the whole batch. This ensures:
+
+- `get_factory_stream_count` increases by the number of streams in the batch.
+- `get_factory_streams_paginated` returns all batch IDs in insertion order.
+- An empty batch produces no registry writes and leaves the count unchanged.
+- IDs are only written after the cross-contract call succeeds; a downstream failure leaves no orphan index entries.
+
+This mirrors the behaviour of the single `create_stream` path, which appends its one ID immediately after successful creation. The batch path is therefore equivalent to N sequential single-stream creations from the registry's perspective, but O(1) TTL bumps instead of O(N).
+
 ## Cross-contract authorization model
 
 Factory-routed creation has one client-facing entrypoint, but the sender authorization
@@ -207,7 +218,14 @@ This document is aligned with the current implementation as follows:
   `memo = None` and `StreamKind::Linear`.
 - `FluxoraStream::create_stream` calls `sender.require_auth()` before validating
   parameters and pulling `deposit_amount` from `sender`.
+- `FluxoraFactory::create_streams` appends all returned stream IDs to the
+  `FactoryStreamIds` registry in creation order after the cross-contract call
+  succeeds, with a single TTL bump for the whole batch (see `append_stream_ids_batch`
+  in `contracts/factory/src/lib.rs`).
 - `contracts/stream/tests/factory_policy.rs` covers policy input validation,
   factory policy gates, append-only error discriminants, and admin-guarded
   policy updates that surround this authorization model.
+- `contracts/factory/tests/factory_stream_e2e.rs` includes regression tests for
+  the batch registry path: count increase, insertion-order pagination, empty-batch
+  no-op, single-element batch, single-path parity, and mixed single+batch accumulation.
 - Every state-changing entrypoint emits a structured event; see the Events table above.

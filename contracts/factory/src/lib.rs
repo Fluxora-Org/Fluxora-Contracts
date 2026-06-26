@@ -115,6 +115,29 @@ fn append_stream_id(env: &Env, stream_id: u64) {
     );
 }
 
+/// Append multiple stream IDs to the factory registry in insertion order and
+/// bump the persistent TTL once for the entire batch.
+///
+/// Calling this instead of repeated `append_stream_id` cuts TTL extend calls
+/// from O(n) to O(1) for a batch, saving instruction budget.
+fn append_stream_ids_batch(env: &Env, stream_ids: &Vec<u64>) {
+    if stream_ids.is_empty() {
+        return;
+    }
+    let mut ids = load_stream_ids(env);
+    for id in stream_ids.iter() {
+        ids.push_back(id);
+    }
+    env.storage()
+        .persistent()
+        .set(&DataKey::FactoryStreamIds, &ids);
+    env.storage().persistent().extend_ttl(
+        &DataKey::FactoryStreamIds,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+}
+
 /// Validate a factory deposit cap before storing it.
 ///
 /// The cap must be strictly positive. A non-positive cap would make every
@@ -803,7 +826,14 @@ impl FluxoraFactory {
             wrapped_streams.push_back(params.clone());
         }
 
+        // --- Interaction ---
         let created_ids = stream_client.create_streams(&sender, &wrapped_streams);
+
+        // --- Effect (post-interaction): register all batch IDs in creation order ---
+        // Written only after the cross-contract call succeeds; a downstream failure
+        // leaves no orphan index entries. TTL is bumped once for the whole batch.
+        append_stream_ids_batch(&env, &created_ids);
+
         Ok(created_ids)
     }
 }
