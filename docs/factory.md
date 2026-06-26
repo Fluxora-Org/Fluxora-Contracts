@@ -66,46 +66,61 @@ The factory contract follows the Checks-Effects-Interactions (CEI) pattern impli
 2. **Effects**: No local persistent state changes occur during a successful stream creation.
 3. **Interactions**: Makes a cross-contract call to `FluxoraStream::create_stream`.
 
-## Cross-contract authorization model
+## Deployment & wiring
 
-Factory-routed creation has one client-facing entrypoint, but the sender authorization
-must cover both the wrapper call and the nested stream call:
+Operating the `fluxora_factory` requires following a strict deployment sequence, initializing the contract with valid arguments, completing the policy-bootstrap checklist, and satisfying the dual-authorization model.
 
-```mermaid
-flowchart TD
-    client[Client transaction]
-    factory["fluxora_factory.create_stream(sender, recipient, deposit, rate, start, cliff, end, dust_threshold)"]
-    stream["fluxora_stream.create_stream(sender, recipient, deposit, rate, start, cliff, end, dust_threshold, None, Linear)"]
-    token["token.transfer_from(sender -> fluxora_stream, deposit)"]
+### 1. Deployment Order & Wiring Sequence
 
-    client --> factory
-    factory --> stream
-    stream --> token
-```
+To deploy and wire the factory successfully:
 
-The required authorization scopes are:
+1. **Deploy and Initialize `FluxoraStream`**:
+   - First, deploy the main `fluxora_stream` contract.
+   - Initialize `fluxora_stream` by calling its `init` entrypoint, specifying its admin address and target token contract.
+2. **Deploy `FluxoraFactory`**:
+   - Deploy the `fluxora_factory` contract code.
+3. **Initialize `FluxoraFactory`**:
+   - Invoke the `[FluxoraFactory::init](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L163-L191)` entrypoint.
+   - The factory's `stream_contract` address argument **must** point to the live, initialized `FluxoraStream` contract deployed in step 1.
+4. **Bootstrap Factory Policies**:
+   - Follow the [Policy Bootstrap Checklist](#3-policy-bootstrap-checklist) below to configure the operational policies. No stream creation calls will succeed until the policies are configured.
 
-| Signer | Scope | Why it is required |
-| --- | --- | --- |
-| `sender` | `fluxora_factory.create_stream(...)` with the exact wrapper arguments | `FluxoraFactory::create_stream` calls `sender.require_auth()` after policy checks pass. |
-| `sender` | Nested `fluxora_stream.create_stream(...)` with the exact stream arguments the factory forwards | `FluxoraStream::create_stream` also calls `sender.require_auth()` before validating and pulling the deposit. |
+### 2. Initialization Arguments
 
-This is not two independent user intents. A client should build the Soroban
-authorization tree so the `sender` signs the factory invocation and its
-`fluxora_stream.create_stream` sub-invocation in the same transaction. The nested
-scope is intentionally narrow: it authorizes only the exact stream creation that
-the factory forwards after enforcing recipient, cap, and duration policy.
+When calling `[FluxoraFactory::init](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L163-L191)`, you must provide:
 
-The stream contract, not the factory, pulls `deposit_amount` from `sender` into
-the stream contract during `fluxora_stream.create_stream`. The factory never
-custodies the sender's tokens and has no standing privilege to spend sender
-funds. If a later transaction tries to reuse the factory or a changed set of
-arguments, the sender must authorize that new invocation tree again.
+| Argument | Type | Meaning | Permitted Range / Validation |
+|---|---|---|---|
+| `admin` | `Address` | The factory administrative owner. Authorized to update policies and change the target stream contract. | Must be a valid address. |
+| `stream_contract` | `Address` | The address of the deployed and initialized `FluxoraStream` contract. | Must be a live stream contract address. |
+| `max_deposit` | `i128` | The absolute maximum token deposit size allowed for any single stream created via the factory. | Must be strictly positive (`1..=i128::MAX`). Rejects non-positive caps with `FactoryError::InvalidCap`. |
+| `min_duration` | `u64` | The minimum duration (in seconds) required for any stream created via the factory. | Must be within `0..=MAX_MIN_DURATION_SECONDS` (100 years). Rejects values outside range with `FactoryError::InvalidMinDuration`. |
 
-### Worked client-signing example
+### 3. Policy Bootstrap Checklist
+
+Before any client or caller attempts to invoke `create_stream` via the factory, the admin must complete the following configuration steps:
+
+- [ ] **Allowlist Recipients**: By default, the allowlist is empty. The admin **must** call `[set_allowlist](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L212-L223)` to set `allowed = true` for each recipient address. Any attempt to create a stream for a recipient that is not explicitly allowlisted will fail with `FactoryError::RecipientNotAllowlisted`.
+- [ ] **Verify Deposit Cap**: Verify that the initial `max_deposit` limit set during initialization fits operational needs. If it needs adjustments, the admin must call `[set_cap](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L229-L237)`.
+- [ ] **Verify Min Duration**: Verify that `min_duration` is appropriate. If it needs adjustments, the admin must call `[set_min_duration](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L245-L253)`.
+- [ ] **Optional Rate Bounds**: If inclusive upper/lower bounds on the rate-per-second are desired, call `[set_rate_bounds](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L262-L293)` to set them.
+
+### 4. Dual-Authorization Requirement
+
+Creating a factory-routed stream is a single atomic transaction, but the funding `sender` must provide authorization signatures for **two nested scopes**:
+
+1. **Outer Scope**: Auth for the `[FluxoraFactory::create_stream](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L424-L540)` wrapper call.
+   - Enforced by `[sender.require_auth()](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L503)` in the factory contract.
+2. **Inner Scope**: Auth for the nested cross-contract `[FluxoraStream::create_stream](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/stream/src/lib.rs#L2138-L2150)` call.
+   - Enforced by `[sender.require_auth()](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/stream/src/lib.rs#L2151)` in the stream contract.
+
+*(Note: In previous/historical versions of the factory codebase, this authorization logic was tracked under [contracts/factory/src/lib.rs:224-250](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L224-L250). In the current source, it is executed within the `[create_stream](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L424-L540)` function).*
+
+The client must assemble a Soroban transaction with an authorization tree where the `sender` signs both the root factory call and the sub-invocation matching the exact forwarded arguments. If either authorization scope is missing or does not match the invocation parameters, the transaction will fail.
+
+#### Worked client-signing example
 
 Assume a treasury UI wants to create this routed stream:
-
 ```text
 sender = G_SENDER
 recipient = G_RECIPIENT
@@ -117,60 +132,102 @@ end_time = 1_800_001_000
 withdraw_dust_threshold = 0
 ```
 
-The client prepares a transaction whose root host function invokes
-`fluxora_factory.create_stream` with those values. During simulation/preparation,
-the authorization tree must contain `G_SENDER` for the root factory call and the
-nested `fluxora_stream.create_stream` sub-invocation with:
-
+The client prepares a transaction whose root host function invokes `fluxora_factory.create_stream` with those values. During simulation/preparation, the authorization tree must contain `G_SENDER` for the root factory call and the nested `fluxora_stream.create_stream` sub-invocation with:
 ```text
 memo = None
 kind = Linear
 ```
+`G_SENDER` signs that prepared authorization tree. The factory admin does not sign stream creation unless the admin is also the `sender`. The recipient does not sign creation.
 
-`G_SENDER` signs that prepared authorization tree. The factory admin does not
-sign stream creation unless the admin is also the `sender`. The recipient does
-not sign creation. The recipient signs only later recipient-controlled actions
-such as `withdraw` or `withdraw_to`.
+#### Single-auth vs dual-scope auth
 
-### Single-auth vs dual-scope auth
-
-For UI and wallet copy, describe the flow as "one sender signing session with two
-scopes" rather than "two unrelated signatures":
-
+For UI and wallet copy, describe the flow as "one sender signing session with two scopes" rather than "two unrelated signatures":
 1. The factory scope lets the sender opt into the treasury policy wrapper.
-2. The stream scope lets the stream contract create the stream and pull exactly
-   the authorized deposit from the sender.
+2. The stream scope lets the stream contract create the stream and pull exactly the authorized deposit from the sender.
 
-If the client omits either scope, the transaction fails at the corresponding
-`require_auth` call. If the sub-invocation arguments differ from the signed
-arguments, the nested authorization is not valid for that call.
+If the client omits either scope, the transaction fails at the corresponding `require_auth` call. If the sub-invocation arguments differ from the signed arguments, the nested authorization is not valid for that call.
 
-## Admin Controls
+### 5. Call & Authorization Topology Diagram
+
+The following diagram illustrates the call topology and authorization path during stream creation:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Caller as Caller / Sender
+    participant Factory as FluxoraFactory
+    participant Stream as FluxoraStream
+    participant Token as Token Contract
+
+    Caller->>Factory: create_stream(sender, recipient, deposit, rate, start, cliff, end, dust_threshold)
+    Note over Factory: 1. Pause check<br/>2. Recipient allowlist check<br/>3. Deposit cap check<br/>4. Time range & cliff checks<br/>5. Min duration check<br/>6. Rate bounds check
+    Factory->>Caller: require_auth() (Scope 1)
+    
+    rect rgb(240, 245, 255)
+        Note over Factory, Stream: Cross-Contract Call
+        Factory->>Stream: create_stream(sender, recipient, deposit, rate, start, cliff, end, dust_threshold, None, Linear)
+    end
+    
+    Stream->>Caller: require_auth() (Scope 2)
+    Note over Stream: Validate parameters & pull deposit
+    
+    Stream->>Token: transfer_from(sender -> stream, deposit)
+    Token-->>Stream: Success
+    Stream-->>Factory: stream_id
+    Note over Factory: Append stream_id to index
+    Factory-->>Caller: stream_id
+```
+
+### 6. Exhaustive Error Code & Policy Mapping
+
+Below is the complete set of `[FactoryError](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L30-L57)` codes that can be returned during a call to `[FluxoraFactory::create_stream](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L424-L540)`, along with the underlying policy or guard they represent:
+
+| Error Variant | Value | Associated Policy / Guard | Trigger Condition |
+|---|---|---|---|
+| `NotInitialized` | 2 | Initialization check | The factory contract has not been initialized. |
+| `RecipientNotAllowlisted` | 4 | Recipient Allowlist policy | The `recipient` address is not present in the allowlist or is marked `false`. |
+| `DepositExceedsCap` | 5 | Deposit Cap policy | The requested `deposit_amount` exceeds the configured `MaxDepositCap`. |
+| `DurationTooShort` | 6 | Minimum Duration policy | The stream duration (`end_time - start_time`) is less than the configured `MinDuration`. |
+| `InvalidTimeRange` | 7 | Time validation policy | The requested `start_time` is greater than or equal to the `end_time`. |
+| `InvalidCliff` | 8 | Time validation policy | The `cliff_time` is outside the inclusive `[start_time, end_time]` window. |
+| `CreationPaused` | 9 | Factory pause guard | The factory stream creation has been paused by the admin. |
+| `StreamContractPaused` | 10 | Downstream contract state | The underlying `FluxoraStream` contract is paused. |
+| `StreamContractError` | 11 | Downstream contract validation | The downstream contract rejected the stream creation for reasons other than pause state (e.g., duplicate IDs, insufficient token balance/allowance). |
+| `RateBelowMin` | 12 | Rate bounds policy | The `rate_per_second` is below the configured `MinRatePerSecond`. |
+| `RateAboveMax` | 13 | Rate bounds policy | The `rate_per_second` is above the configured `MaxRatePerSecond`. |
+
+### 7. Limitations & Hardcoded Invariants
+
+> [!IMPORTANT]
+> The `fluxora_factory` routes stream creation using a hardcoded set of streaming style parameters (see [contracts/factory/src/lib.rs:523-524](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L523-L524)):
+> - `kind` is hardcoded to `StreamKind::Linear`.
+> - `memo` is hardcoded to `None`.
+>
+> If you need to create streams with a different streaming style (such as `StreamKind::CliffOnly`) or include a custom `memo`, you **must** call the `FluxoraStream` contract directly. These cannot be routed through the factory.
+
+### 8. Admin Controls
 
 The factory has an `Admin` key managed via `set_admin`. The admin can:
-- Call `set_allowlist` to grant or revoke recipient eligibility.
-- Call `set_cap` to update the max deposit limit.
-- Call `set_min_duration` to update the minimum duration requirement.
-- Call `set_stream_contract` to upgrade or switch the underlying stream primitive if a new version is deployed.
+- Call `[set_allowlist](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L212-L223)` to grant or revoke recipient eligibility.
+- Call `[set_cap](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L229-L237)` to update the max deposit limit.
+- Call `[set_min_duration](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L245-L253)` to update the minimum duration requirement.
+- Call `[set_stream_contract](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L202-L209)` to upgrade or switch the underlying stream primitive if a new version is deployed.
+- Call `[set_rate_bounds](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L262-L293)` to configure rate limits.
+- Call `[set_factory_paused](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L312-L333)` to pause/resume stream creation via the factory.
 
-The factory admin can shape policy and the target stream contract, but cannot
-spend sender funds by itself. A factory-routed stream still needs the `sender`
-authorization described above, and the underlying stream contract still enforces
-its own authorization table. See the [`docs/security.md` admin powers
-section](security.md#admin-powers) for the protocol-wide admin boundary.
+The factory admin can shape policy and the target stream contract, but cannot spend sender funds by itself. A factory-routed stream still needs the `sender` authorization described above, and the underlying stream contract still enforces its own authorization table. See the [docs/security.md admin powers section](file:///home/gamp/Desktop/Fluxora-Contracts/docs/security.md#admin-powers) for the protocol-wide admin boundary.
+
+### 9. Related Documentation
+
+- For general contract storage layout rules, key persistence types, and structural evolution rules, see [docs/storage.md](file:///home/gamp/Desktop/Fluxora-Contracts/docs/storage.md).
+- For details on underlying stream calculations, stream lifecycles, and events, see [docs/streaming.md](file:///home/gamp/Desktop/Fluxora-Contracts/docs/streaming.md).
 
 ## Code alignment checklist
 
 This document is aligned with the current implementation as follows:
 
-- `FluxoraFactory::init`, `set_cap`, and `set_min_duration` validate policy
-  ranges before writing factory configuration.
-- `FluxoraFactory::create_stream` enforces allowlist, cap, and duration checks
-  before calling `sender.require_auth()`.
-- The factory forwards a linear `FluxoraStream::create_stream` call with
-  `memo = None` and `StreamKind::Linear`.
-- `FluxoraStream::create_stream` calls `sender.require_auth()` before validating
-  parameters and pulling `deposit_amount` from `sender`.
-- `contracts/stream/tests/factory_policy.rs` covers policy input validation,
-  factory policy gates, append-only error discriminants, and admin-guarded
-  policy updates that surround this authorization model.
+- `[FluxoraFactory::init](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L163-L191)`, `[set_cap](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L229-L237)`, and `[set_min_duration](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L245-L253)` validate policy ranges before writing factory configuration.
+- `[FluxoraFactory::create_stream](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L424-L540)` enforces allowlist, cap, and duration checks before calling `[sender.require_auth()](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L503)`.
+- The factory forwards a linear `[FluxoraStream::create_stream](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/stream/src/lib.rs#L2138-L2150)` call with `memo = None` and `StreamKind::Linear`.
+- `[FluxoraStream::create_stream](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/stream/src/lib.rs#L2138-L2150)` calls `[sender.require_auth()](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/stream/src/lib.rs#L2151)` before validating parameters and pulling `deposit_amount` from `sender`.
+- The test suite [factory_policy.rs](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/stream/tests/factory_policy.rs) covers policy input validation, factory policy gates, append-only error discriminants, and admin-guarded policy updates that surround this authorization model.
