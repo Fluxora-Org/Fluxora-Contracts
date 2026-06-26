@@ -174,7 +174,14 @@ Cancels a proposal, marking it as terminal. Emits `ProposalCancelled`.
 - `get_proposal(proposal_id) -> Proposal`: reads the stored proposal.
 - `proposal_count() -> u32`: returns the number of proposals created so far.
 - `get_signers() -> Vec<Address>`: returns the registered co-signers.
-- `quorum() -> u32`: returns the configured approval threshold.
+- `get_admin() -> Result<Address, GovernanceError>`: returns the admin address.
+  Returns `NotInitialized` if `init` has not been called.
+- `get_threshold() -> Result<u32, GovernanceError>`: returns the configured
+  approval threshold.  Returns `NotInitialized` if `init` has not been called.
+  For a non-erroring convenience wrapper (returns `0` when uninitialized), use
+  `quorum()`.
+- `quorum() -> u32`: returns the configured approval threshold (returns `0` if
+  uninitialized).  Convenience alias for `get_threshold()`.
 - `timelock_seconds() -> u64`: returns `GOVERNANCE_TIMELOCK_SECONDS`.
 - `max_proposal_age_seconds() -> u64`: returns `MAX_PROPOSAL_AGE_SECONDS`.
 - `get_quorum_info(proposal_id) -> Option<QuorumInfo>`: returns the stored

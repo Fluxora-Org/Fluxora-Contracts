@@ -832,7 +832,26 @@ impl FluxoraGovernance {
         get_signers(&env)
     }
 
+    /// Return the admin address.
+    ///
+    /// Returns `GovernanceError::NotInitialized` if `init` has not been called.
+    pub fn get_admin(env: Env) -> Result<Address, GovernanceError> {
+        get_admin(&env)
+    }
+
+    /// Return the configured approval threshold.
+    ///
+    /// Returns `GovernanceError::NotInitialized` if `init` has not been called.
+    /// For a non-erroring convenience wrapper that returns `0` when
+    /// uninitialized, see [`quorum`](Self::quorum).
+    pub fn get_threshold(env: Env) -> Result<u32, GovernanceError> {
+        get_threshold(&env)
+    }
+
     /// Return the effective approval threshold.
+    ///
+    /// Convenience alias for [`get_threshold`](Self::get_threshold) that
+    /// returns `0` instead of an error when the contract is not initialized.
     pub fn quorum(env: Env) -> u32 {
         get_threshold(&env).unwrap_or(0)
     }
@@ -1043,6 +1062,42 @@ mod tests {
     fn test_max_proposal_age_constant() {
         let ctx = Ctx::setup();
         assert_eq!(ctx.client.max_proposal_age_seconds(), MAX_AGE);
+    }
+
+    // -----------------------------------------------------------------------
+    // get_admin / get_threshold views
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_get_admin_after_init() {
+        let ctx = Ctx::setup();
+        let admin = ctx.client.get_admin();
+        assert_eq!(admin, ctx.admin);
+    }
+
+    #[test]
+    fn test_get_admin_pre_init() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, FluxoraGovernance);
+        let client = FluxoraGovernanceClient::new(&env, &contract_id);
+        let result = client.try_get_admin();
+        assert_eq!(result, Err(Ok(GovernanceError::NotInitialized)));
+    }
+
+    #[test]
+    fn test_get_threshold_after_init() {
+        let ctx = Ctx::setup();
+        let threshold = ctx.client.get_threshold();
+        assert_eq!(threshold, 2);
+    }
+
+    #[test]
+    fn test_get_threshold_pre_init() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, FluxoraGovernance);
+        let client = FluxoraGovernanceClient::new(&env, &contract_id);
+        let result = client.try_get_threshold();
+        assert_eq!(result, Err(Ok(GovernanceError::NotInitialized)));
     }
 
     // -----------------------------------------------------------------------
