@@ -1,0 +1,208 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build: compile all three contracts to deployable WASM
+  # ---------------------------------------------------------------------------
+  build:
+    name: WASM Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.94.1"
+          targets: wasm32-unknown-unknown
+          components: rustfmt,clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build fluxora_stream (wasm32)
+        run: cargo build --release --target wasm32-unknown-unknown -p fluxora_stream
+
+      - name: Build fluxora_factory (wasm32)
+        run: cargo build --release --target wasm32-unknown-unknown -p fluxora_factory
+
+      - name: Build fluxora_governance (wasm32)
+        run: cargo build --release --target wasm32-unknown-unknown -p fluxora_governance
+
+      - name: Compute SHA256 hashes
+        run: |
+          sha256sum target/wasm32-unknown-unknown/release/fluxora_stream.wasm
+          sha256sum target/wasm32-unknown-unknown/release/fluxora_factory.wasm
+          sha256sum target/wasm32-unknown-unknown/release/fluxora_governance.wasm
+
+      - name: Upload fluxora_stream WASM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fluxora_stream-wasm
+          path: target/wasm32-unknown-unknown/release/fluxora_stream.wasm
+
+      - name: Upload fluxora_factory WASM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fluxora_factory-wasm
+          path: target/wasm32-unknown-unknown/release/fluxora_factory.wasm
+
+      - name: Upload fluxora_governance WASM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fluxora_governance-wasm
+          path: target/wasm32-unknown-unknown/release/fluxora_governance.wasm
+
+      - name: Upload WASM hash summary
+        run: |
+          sha256sum \
+            target/wasm32-unknown-unknown/release/fluxora_stream.wasm \
+            target/wasm32-unknown-unknown/release/fluxora_factory.wasm \
+            target/wasm32-unknown-unknown/release/fluxora_governance.wasm \
+            > wasm-hashes.txt
+          cat wasm-hashes.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wasm-hashes
+          path: wasm-hashes.txt
+
+  # ---------------------------------------------------------------------------
+  # Test: run unit and integration tests for all crates
+  # ---------------------------------------------------------------------------
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.94.1"
+          components: rustfmt,clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-test-
+
+      - name: Test fluxora_stream
+        run: cargo test -p fluxora_stream --features testutils
+
+      - name: Test fluxora_factory
+        run: cargo test -p fluxora_factory --features testutils
+
+      - name: Test fluxora_governance
+        run: cargo test -p fluxora_governance --features testutils
+
+  # ---------------------------------------------------------------------------
+  # Coverage: enforce 95% threshold on all three contracts.
+  #
+  # Thresholds:
+  #   fluxora_stream    — 95%  (core streaming logic, fully exercised by test suite)
+  #   fluxora_factory   — 95%  (privileged cross-contract create_stream calls)
+  #   fluxora_governance — 95% (privileged multisig/timelock execution paths)
+  #
+  # If a crate's threshold is intentionally below 95%, document the rationale
+  # in a comment on the relevant tarpaulin invocation below.
+  # ---------------------------------------------------------------------------
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.94.1"
+          components: rustfmt,clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-cov-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-cov-
+
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin --locked
+
+      - name: Coverage — fluxora_stream (≥95%)
+        run: |
+          cargo tarpaulin \
+            -p fluxora_stream \
+            --features testutils \
+            --out Xml \
+            --output-dir coverage/stream \
+            --fail-under 95
+
+      - name: Coverage — fluxora_factory (≥95%)
+        run: |
+          cargo tarpaulin \
+            -p fluxora_factory \
+            --features testutils \
+            --out Xml \
+            --output-dir coverage/factory \
+            --fail-under 95
+
+      - name: Coverage — fluxora_governance (≥95%)
+        run: |
+          cargo tarpaulin \
+            -p fluxora_governance \
+            --features testutils \
+            --out Xml \
+            --output-dir coverage/governance \
+            --fail-under 95
+
+      - name: Upload coverage reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-reports
+          path: coverage/
+
+  # ---------------------------------------------------------------------------
+  # Lint: fmt + clippy across the whole workspace
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.94.1"
+          components: rustfmt,clippy
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all --all-features -- -D warnings
