@@ -200,6 +200,13 @@ pub fn calculate_accrued_amount_checkpointed(
 
     if state.checkpointed_at >= state.end_time {
         // Stream already ended; only the checkpointed amount is payable.
+        //
+        // This is the **checkpoint preservation** invariant: after a rate decrease
+        // (or any other checkpointing event) the contract locks in the accrued
+        // amount earned up to `checkpointed_at`. Even if `end_time` is reached or
+        // passed, the recipient can never be made worse off by a subsequent rate
+        // change — the result is clamped to `[0, deposit_amount]` and never falls
+        // below the locked-in `checkpointed_amount`.
         return state.checkpointed_amount.min(state.deposit_amount).max(0);
     }
 
@@ -266,8 +273,7 @@ mod kani_proofs {
         };
 
         // Call the function under test. Kani will flag panics or UB.
-        let out =
-            calculate_accrued_amount_checkpointed(state, rate_per_second, now);
+        let out = calculate_accrued_amount_checkpointed(state, rate_per_second, now);
 
         // Assert bounds: non-negative and <= deposit_amount
         kani::assert!(out >= 0);
@@ -344,20 +350,12 @@ mod kani_proofs {
             kind: StreamKind::Linear,
         };
 
-        let out_before = calculate_accrued_amount_checkpointed(
-            state,
-            rate_per_second,
-            now_before,
-        );
+        let out_before = calculate_accrued_amount_checkpointed(state, rate_per_second, now_before);
         kani::assert!(out_before == 0);
 
         // at or after end
         kani::assume(now_after >= end_time);
-        let out_after = calculate_accrued_amount_checkpointed(
-            state,
-            rate_per_second,
-            now_after,
-        );
+        let out_after = calculate_accrued_amount_checkpointed(state, rate_per_second, now_after);
         kani::assert!(out_after >= 0);
         kani::assert!(out_after <= deposit_amount);
     }

@@ -1384,9 +1384,15 @@ fn delegated_withdraw_valid_signature_succeeds() {
     ctx.env.ledger().set_timestamp(500);
 
     let sig = ctx.sign(0, 9999, 0);
-    let amount = ctx
-        .client()
-        .delegated_withdraw(&ctx.stream_id, &ctx.relayer, &ctx.recipient_pk, &0, &9999, &0, &sig);
+    let amount = ctx.client().delegated_withdraw(
+        &ctx.stream_id,
+        &ctx.relayer,
+        &ctx.recipient_pk,
+        &0,
+        &9999,
+        &0,
+        &sig,
+    );
     assert!(amount > 0, "valid delegated_withdraw must transfer tokens");
 }
 
@@ -1475,8 +1481,15 @@ fn delegated_withdraw_replay_rejected() {
     let sig = ctx.sign(0, 9999, 0);
 
     // First call consumes nonce 0.
-    ctx.client()
-        .delegated_withdraw(&ctx.stream_id, &ctx.relayer, &ctx.recipient_pk, &0, &9999, &0, &sig);
+    ctx.client().delegated_withdraw(
+        &ctx.stream_id,
+        &ctx.relayer,
+        &ctx.recipient_pk,
+        &0,
+        &9999,
+        &0,
+        &sig,
+    );
 
     // Replay the same call — nonce is now 1.
     let replay = ctx.client().try_delegated_withdraw(
@@ -1505,8 +1518,15 @@ fn delegated_withdraw_nonce_increments_once() {
     assert_eq!(ctx.client().get_delegated_nonce(&recipient_addr), 0);
 
     let sig = ctx.sign(0, 9999, 0);
-    ctx.client()
-        .delegated_withdraw(&ctx.stream_id, &ctx.relayer, &ctx.recipient_pk, &0, &9999, &0, &sig);
+    ctx.client().delegated_withdraw(
+        &ctx.stream_id,
+        &ctx.relayer,
+        &ctx.recipient_pk,
+        &0,
+        &9999,
+        &0,
+        &sig,
+    );
 
     assert_eq!(
         ctx.client().get_delegated_nonce(&recipient_addr),

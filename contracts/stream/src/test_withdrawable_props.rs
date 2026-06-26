@@ -697,3 +697,113 @@ fn decrease_rate_checkpoint_preserves_withdrawable_at_cliff_boundary() {
 fn decrease_rate_checkpoint_preserves_withdrawable_right_before_end_time() {
     assert_decrease_preserves_withdrawable_at_boundary(0, 99, "decrease right before end_time");
 }
+
+// ---------------------------------------------------------------------------
+// Regression tests for the consolidated balance-conservation / accrual harness
+// ---------------------------------------------------------------------------
+
+/// `shorten_stream_end_time` must never reduce the recipient's already-accrued
+/// entitlement.  The new deposit is floored at `accrued(now)` so that
+/// `calculate_accrued` stays monotonic and `withdrawable` never drops.
+#[test]
+fn shorten_stream_preserves_accrued_entitlement() {
+    let deposit = 2_000i128;
+    let rate = 10i128;
+    let duration = 100u64;
+    let ctx = PropCtx::new(deposit);
+
+    ctx.env.ledger().set_timestamp(0);
+    let id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &deposit,
+        &rate,
+        &0u64,
+        &0u64,
+        &duration,
+        &0,
+        &None,
+        &crate::StreamKind::Linear,
+    );
+
+    // At t=50, 500 tokens are accrued.  Shorten the stream to end at t=80.
+    ctx.env.ledger().set_timestamp(50);
+    let accrued_before = ctx.client().calculate_accrued(&id);
+    let withdrawable_before = ctx.client().get_withdrawable(&id);
+    assert_eq!(accrued_before, 500);
+
+    ctx.client().shorten_stream_end_time(&id, &80u64);
+
+    let stream = ctx.client().get_stream_state(&id);
+    // New deposit must be at least the already-accrued amount (500) and at most
+    // the old deposit.  The pure schedule at the new end would only pay 800,
+    // but the accrued-now floor makes the new deposit 500.
+    assert!(stream.deposit_amount >= accrued_before);
+    assert!(stream.deposit_amount <= deposit);
+    assert_eq!(stream.end_time, 80);
+
+    assert_eq!(
+        ctx.client().calculate_accrued(&id),
+        accrued_before,
+        "same-timestamp accrued must not decrease after shorten"
+    );
+    assert!(
+        ctx.client().get_withdrawable(&id) >= withdrawable_before,
+        "same-timestamp withdrawable must not decrease after shorten"
+    );
+}
+
+/// `CliffOnly` streams unlock the full deposit at the cliff and reject schedule
+/// and rate mutations with `UnsupportedStreamKind`.
+#[test]
+fn cliff_only_stream_lifecycle_and_unsupported_ops() {
+    let deposit = 1_000i128;
+    let ctx = PropCtx::new(deposit);
+
+    ctx.env.ledger().set_timestamp(0);
+    let id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &deposit,
+        &0i128,
+        &0u64,
+        &50u64,
+        &100u64,
+        &0,
+        &None,
+        &crate::StreamKind::CliffOnly,
+    );
+
+    // Before cliff: no accrual.
+    ctx.env.ledger().set_timestamp(25);
+    assert_eq!(ctx.client().calculate_accrued(&id), 0);
+    assert_eq!(ctx.client().get_withdrawable(&id), 0);
+
+    // Unsupported mutations return UnsupportedStreamKind.
+    let unsupported = [
+        ctx.client().try_top_up_stream(&id, &ctx.sender, &100),
+        ctx.client().try_decrease_rate_per_second(&id, &1),
+        ctx.client().try_update_rate_per_second(&id, &1),
+        ctx.client().try_shorten_stream_end_time(&id, &75u64),
+        ctx.client().try_extend_stream_end_time(&id, &150u64),
+    ];
+    for result in unsupported {
+        assert!(
+            matches!(result, Err(Ok(crate::ContractError::UnsupportedStreamKind))),
+            "CliffOnly mutation must return UnsupportedStreamKind, got {result:?}"
+        );
+    }
+
+    // After cliff: full deposit is available.
+    ctx.env.ledger().set_timestamp(50);
+    ctx.env.ledger().set_sequence_number(100);
+    assert_eq!(ctx.client().calculate_accrued(&id), deposit);
+    assert_eq!(ctx.client().get_withdrawable(&id), deposit);
+
+    let withdrawn = ctx.client().withdraw(&id);
+    assert_eq!(withdrawn, deposit);
+    assert_eq!(
+        ctx.client().get_stream_state(&id).status,
+        crate::StreamStatus::Completed
+    );
+}
