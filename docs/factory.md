@@ -9,6 +9,7 @@ The base `FluxoraStream` contract is highly composable and intentionally un-opin
 The `fluxora_factory` acts as a proxy entrypoint to enforce these policies:
 - **Recipient Allowlist**: Streams can only be created for recipients explicitly allowlisted by the admin.
 - **Deposit Caps**: Enforces a `MaxDepositCap` on the total `deposit_amount` of a single stream.
+- **Optional Aggregate Batch Cap**: When enabled, the factory also rejects batches whose total deposit exceeds `MaxDepositCap`, preventing bypass by splitting across entries.
 - **Minimum Duration**: Enforces a `MinDuration` (i.e. `end_time - start_time >= min_duration`), preventing overly short or instantaneous streams.
 - **Time Relationship Checks**: Rejects invalid schedules before calling `FluxoraStream`. `start_time` must be strictly less than `end_time`, and `cliff_time` must be within the inclusive `[start_time, end_time]` window.
 
@@ -47,7 +48,7 @@ The factory exposes read-only views so UIs, operators, and indexers can inspect 
 
 | View | Returns | Notes |
 |------|---------|-------|
-| `get_factory_config()` | `FactoryConfig { admin, stream_contract, max_deposit, min_duration }` | Reads all instance policy fields. Returns `FactoryError::NotInitialized` before `init`. |
+| `get_factory_config()` | `FactoryConfig { admin, stream_contract, max_deposit, min_duration, batch_cap_enforced }` | Reads all instance policy fields. Returns `FactoryError::NotInitialized` before `init`. |
 | `is_allowlisted(recipient)` | `bool` | Returns `true` only when the recipient currently has an allowlist entry. Missing entries return `false`. |
 
 These views are permissionless and do not mutate factory state.
@@ -64,26 +65,42 @@ These views are permissionless and do not mutate factory state.
 The factory contract follows the Checks-Effects-Interactions (CEI) pattern implicitly:
 1. **Checks**: Validates the recipient against the allowlist, validates the stream time relationship, and bounds the deposit and duration against the configured caps.
 2. **Effects**: No local persistent state changes occur during a successful stream creation.
-3. **Interactions**: Makes a cross-contract call to `FluxoraStream::create_stream`.
+3. **Interactions**: Makes a cross-contract call to `FluxoraStream::create_stream` or `FluxoraStream::create_streams`.
+
+## Batch creation semantics
+
+`FluxoraFactory::create_streams` is an atomic batch wrapper around `FluxoraStream::create_streams`.
+- Each entry is validated against the factory policy individually.
+- Each recipient in the batch must be allowlisted.
+- Each stream must individually satisfy the per-stream cap and minimum duration.
+- When `batch_cap_enforced` is enabled, the sum of all `deposit_amount` values in the batch is also checked against `MaxDepositCap`.
+- A single invalid entry causes the entire batch to revert, ensuring no partial or policy-violating streams can be created.
 
 ## Deployment & wiring
 
 Operating the `fluxora_factory` requires following a strict deployment sequence, initializing the contract with valid arguments, completing the policy-bootstrap checklist, and satisfying the dual-authorization model.
 
-### 1. Deployment Order & Wiring Sequence
+```mermaid
+flowchart TD
+    client[Client transaction]
+    factory["fluxora_factory.create_stream(sender, recipient, deposit, rate, start, cliff, end, dust_threshold, memo, kind)"]
+    stream["fluxora_stream.create_stream(sender, recipient, deposit, rate, start, cliff, end, dust_threshold, memo, kind)"]
+    token["token.transfer_from(sender -> fluxora_stream, deposit)"]
+
+    client --> factory
+    factory --> stream
+    stream --> token
+```
 
 To deploy and wire the factory successfully:
 
-1. **Deploy and Initialize `FluxoraStream`**:
-   - First, deploy the main `fluxora_stream` contract.
-   - Initialize `fluxora_stream` by calling its `init` entrypoint, specifying its admin address and target token contract.
-2. **Deploy `FluxoraFactory`**:
-   - Deploy the `fluxora_factory` contract code.
-3. **Initialize `FluxoraFactory`**:
-   - Invoke the `[FluxoraFactory::init](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L163-L191)` entrypoint.
-   - The factory's `stream_contract` address argument **must** point to the live, initialized `FluxoraStream` contract deployed in step 1.
-4. **Bootstrap Factory Policies**:
-   - Follow the [Policy Bootstrap Checklist](#3-policy-bootstrap-checklist) below to configure the operational policies. No stream creation calls will succeed until the policies are configured.
+For `fluxora_factory.create_streams`, the sender must authorize the factory batch call and the nested `fluxora_stream.create_streams` sub-invocation in the same transaction.
+
+
+| Signer | Scope | Why it is required |
+| --- | --- | --- |
+| `sender` | `fluxora_factory.create_stream(...)` with the exact wrapper arguments | `FluxoraFactory::create_stream` calls `sender.require_auth()` after policy checks pass. |
+| `sender` | Nested `fluxora_stream.create_stream(...)` with the exact stream arguments the factory forwards | `FluxoraStream::create_stream` also calls `sender.require_auth()` before validating and pulling the deposit. |
 
 ### 2. Initialization Arguments
 
@@ -208,26 +225,50 @@ Below is the complete set of `[FactoryError](file:///home/gamp/Desktop/Fluxora-C
 ### 8. Admin Controls
 
 The factory has an `Admin` key managed via `set_admin`. The admin can:
-- Call `[set_allowlist](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L212-L223)` to grant or revoke recipient eligibility.
-- Call `[set_cap](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L229-L237)` to update the max deposit limit.
-- Call `[set_min_duration](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L245-L253)` to update the minimum duration requirement.
-- Call `[set_stream_contract](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L202-L209)` to upgrade or switch the underlying stream primitive if a new version is deployed.
-- Call `[set_rate_bounds](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L262-L293)` to configure rate limits.
-- Call `[set_factory_paused](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L312-L333)` to pause/resume stream creation via the factory.
-
-The factory admin can shape policy and the target stream contract, but cannot spend sender funds by itself. A factory-routed stream still needs the `sender` authorization described above, and the underlying stream contract still enforces its own authorization table. See the [docs/security.md admin powers section](file:///home/gamp/Desktop/Fluxora-Contracts/docs/security.md#admin-powers) for the protocol-wide admin boundary.
-
-### 9. Related Documentation
+- Call `set_allowlist` to grant or revoke recipient eligibility.
+- Call `set_cap` to update the max deposit limit.
+- Call `set_min_duration` to update the minimum duration requirement.
+- Call `set_batch_cap_enforcement` to toggle aggregate batch-cap validation.
+- Call `set_stream_contract` to upgrade or switch the underlying stream primitive if a new version is deployed.
+- Call `set_rate_bounds` to configure optional inclusive rate-per-second bounds.
 
 - For general contract storage layout rules, key persistence types, and structural evolution rules, see [docs/storage.md](file:///home/gamp/Desktop/Fluxora-Contracts/docs/storage.md).
 - For details on underlying stream calculations, stream lifecycles, and events, see [docs/streaming.md](file:///home/gamp/Desktop/Fluxora-Contracts/docs/streaming.md).
+
+## Events
+
+Every state-changing factory entrypoint emits a structured Soroban event so that
+indexers, treasury dashboards, and monitoring tools can observe policy changes and
+stream creation without re-reading storage. Topic symbols are ≤ 9 characters per
+the `symbol_short!` constraint.
+
+| Entrypoint | Topic | Data struct | Notes |
+|---|---|---|---|
+| `init` | `fct_init` | `FactoryInited { admin, stream_contract, max_deposit, min_duration }` | Emitted once on deployment. |
+| `set_admin` | `AdminUpd` | `FactoryAdminUpdated { old_admin, new_admin }` | Mirrors the `AdminUpd` topic used in `FluxoraStream`. |
+| `set_stream_contract` | `stm_upd` | `StreamContractUpdated { old_contract, new_contract }` | Emitted after the pointer is updated. |
+| `set_allowlist` | `allow_upd` | `AllowlistUpdated { recipient, allowed }` | `allowed: true` = added; `false` = removed. Sufficient for an indexer to reconstruct membership. |
+| `set_cap` | `cap_upd` | `CapUpdated { old_cap, new_cap }` | Both old and new values are included. |
+| `set_min_duration` | `dur_upd` | `MinDurationUpdated { old_min_duration, new_min_duration }` | Both old and new values are included. |
+| `set_rate_bounds` | `rate_bnd` | `RateBoundsUpdated { min_rate, max_rate }` | Carries the arguments passed by the caller; `None` means "unchanged". |
+| `set_factory_paused` | `factory` + `paused`/`resumed` | `bool` | Pre-existing event, unchanged. |
+| `create_stream` (success) | `fct_strm` | `FactoryStreamCreated { stream_id, sender, recipient, deposit_amount, rate_per_second }` | Emitted only after the cross-contract call succeeds. Lets indexers attribute a stream to the policy-gated factory path. |
+
+See [docs/events.md](events.md) for the complete event catalogue across all contracts.
 
 ## Code alignment checklist
 
 This document is aligned with the current implementation as follows:
 
-- `[FluxoraFactory::init](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L163-L191)`, `[set_cap](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L229-L237)`, and `[set_min_duration](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L245-L253)` validate policy ranges before writing factory configuration.
-- `[FluxoraFactory::create_stream](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L424-L540)` enforces allowlist, cap, and duration checks before calling `[sender.require_auth()](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/factory/src/lib.rs#L503)`.
-- The factory forwards a linear `[FluxoraStream::create_stream](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/stream/src/lib.rs#L2138-L2150)` call with `memo = None` and `StreamKind::Linear`.
-- `[FluxoraStream::create_stream](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/stream/src/lib.rs#L2138-L2150)` calls `[sender.require_auth()](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/stream/src/lib.rs#L2151)` before validating parameters and pulling `deposit_amount` from `sender`.
-- The test suite [factory_policy.rs](file:///home/gamp/Desktop/Fluxora-Contracts/contracts/stream/tests/factory_policy.rs) covers policy input validation, factory policy gates, append-only error discriminants, and admin-guarded policy updates that surround this authorization model.
+- `FluxoraFactory::init`, `set_cap`, and `set_min_duration` validate policy
+  ranges before writing factory configuration.
+- `FluxoraFactory::create_stream` enforces allowlist, cap, and duration checks
+  before calling `sender.require_auth()`.
+- The factory forwards a linear `FluxoraStream::create_stream` call with
+  `memo = None` and `StreamKind::Linear`.
+- `FluxoraStream::create_stream` calls `sender.require_auth()` before validating
+  parameters and pulling `deposit_amount` from `sender`.
+- `contracts/stream/tests/factory_policy.rs` covers policy input validation,
+  factory policy gates, append-only error discriminants, and admin-guarded
+  policy updates that surround this authorization model.
+- Every state-changing entrypoint emits a structured event; see the Events table above.

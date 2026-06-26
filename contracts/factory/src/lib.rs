@@ -54,6 +54,8 @@ pub enum FactoryError {
     /// The minimum duration must be in the accepted range
     /// `0..=MAX_MIN_DURATION_SECONDS` seconds.
     InvalidMinDuration = 15,
+    /// The requested memo exceeds the allowed max length.
+    InvalidMemo = 16,
 }
 
 #[contracttype]
@@ -62,6 +64,7 @@ pub enum DataKey {
     StreamContract,
     MaxDepositCap,
     MinDuration,
+    BatchCapEnforced,
     Allowlist(Address),
     /// Persistent ordered list of stream IDs created through this factory.
     FactoryStreamIds,
@@ -146,6 +149,84 @@ pub struct FactoryConfig {
     pub stream_contract: Address,
     pub max_deposit: i128,
     pub min_duration: u64,
+    pub batch_cap_enforced: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Event data structs
+// Topics use symbol_short! (≤ 9 chars). Naming mirrors contracts/stream/src/lib.rs.
+// ---------------------------------------------------------------------------
+
+/// Emitted when the factory is first initialised (`fct_init`).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct FactoryInited {
+    pub admin: Address,
+    pub stream_contract: Address,
+    pub max_deposit: i128,
+    pub min_duration: u64,
+}
+
+/// Emitted when the factory admin is rotated (`AdminUpd`).
+/// Mirrors the `AdminUpd` topic used in `FluxoraStream::set_admin`.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct FactoryAdminUpdated {
+    pub old_admin: Address,
+    pub new_admin: Address,
+}
+
+/// Emitted when the stream-contract pointer is changed (`stm_upd`).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct StreamContractUpdated {
+    pub old_contract: Address,
+    pub new_contract: Address,
+}
+
+/// Emitted when a recipient is added to or removed from the allowlist (`allow_upd`).
+/// Carries enough state for an indexer to reconstruct membership without re-reading storage.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AllowlistUpdated {
+    pub recipient: Address,
+    pub allowed: bool,
+}
+
+/// Emitted when the factory deposit cap is changed (`cap_upd`).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CapUpdated {
+    pub old_cap: i128,
+    pub new_cap: i128,
+}
+
+/// Emitted when the factory minimum-duration policy is changed (`dur_upd`).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct MinDurationUpdated {
+    pub old_min_duration: u64,
+    pub new_min_duration: u64,
+}
+
+/// Emitted when rate-per-second bounds are updated (`rate_bnd`).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RateBoundsUpdated {
+    pub min_rate: Option<i128>,
+    pub max_rate: Option<i128>,
+}
+
+/// Emitted when a stream is successfully created through the factory (`fct_strm`).
+/// Provides enough context for indexers to attribute stream creation to a policy-gated path.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct FactoryStreamCreated {
+    pub stream_id: u64,
+    pub sender: Address,
+    pub recipient: Address,
+    pub deposit_amount: i128,
+    pub rate_per_second: i128,
 }
 
 #[contract]
@@ -184,17 +265,35 @@ impl FluxoraFactory {
         env.storage()
             .instance()
             .set(&DataKey::MinDuration, &min_duration);
+        env.storage()
+            .instance()
+            .set(&DataKey::BatchCapEnforced, &true);
         // CreationPaused defaults to false — no explicit write needed;
         // `is_factory_paused` falls back to `false` on a missing key.
+
+        env.events().publish(
+            (symbol_short!("fct_init"),),
+            FactoryInited {
+                admin,
+                stream_contract,
+                max_deposit,
+                min_duration,
+            },
+        );
 
         Ok(())
     }
 
     /// Admin updates the factory admin.
     pub fn set_admin(env: Env, new_admin: Address) -> Result<(), FactoryError> {
-        require_admin(&env)?;
+        let old_admin = require_admin(&env)?;
 
         env.storage().instance().set(&DataKey::Admin, &new_admin);
+
+        env.events().publish(
+            (symbol_short!("AdminUpd"),),
+            FactoryAdminUpdated { old_admin, new_admin },
+        );
         Ok(())
     }
 
@@ -202,9 +301,23 @@ impl FluxoraFactory {
     pub fn set_stream_contract(env: Env, new_stream_contract: Address) -> Result<(), FactoryError> {
         require_admin(&env)?;
 
+        let old_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::StreamContract)
+            .ok_or(FactoryError::NotInitialized)?;
+
         env.storage()
             .instance()
             .set(&DataKey::StreamContract, &new_stream_contract);
+
+        env.events().publish(
+            (symbol_short!("stm_upd"),),
+            StreamContractUpdated {
+                old_contract,
+                new_contract: new_stream_contract,
+            },
+        );
         Ok(())
     }
 
@@ -212,13 +325,17 @@ impl FluxoraFactory {
     pub fn set_allowlist(env: Env, recipient: Address, allowed: bool) -> Result<(), FactoryError> {
         require_admin(&env)?;
 
-        let key = DataKey::Allowlist(recipient);
+        let key = DataKey::Allowlist(recipient.clone());
         if allowed {
             env.storage().persistent().set(&key, &true);
         } else {
             env.storage().persistent().remove(&key);
         }
 
+        env.events().publish(
+            (symbol_short!("allow_upd"),),
+            AllowlistUpdated { recipient, allowed },
+        );
         Ok(())
     }
 
@@ -230,9 +347,20 @@ impl FluxoraFactory {
         require_admin(&env)?;
         validate_cap(max_deposit)?;
 
+        let old_cap: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxDepositCap)
+            .unwrap_or(0);
+
         env.storage()
             .instance()
             .set(&DataKey::MaxDepositCap, &max_deposit);
+
+        env.events().publish(
+            (symbol_short!("cap_upd"),),
+            CapUpdated { old_cap, new_cap: max_deposit },
+        );
         Ok(())
     }
 
@@ -246,9 +374,33 @@ impl FluxoraFactory {
         require_admin(&env)?;
         validate_min_duration(min_duration)?;
 
+        let old_min_duration: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinDuration)
+            .unwrap_or(0);
+
         env.storage()
             .instance()
             .set(&DataKey::MinDuration, &min_duration);
+
+        env.events().publish(
+            (symbol_short!("dur_upd"),),
+            MinDurationUpdated {
+                old_min_duration,
+                new_min_duration: min_duration,
+            },
+        );
+        Ok(())
+    }
+
+    /// Admin enables or disables the aggregate batch-cap check.
+    pub fn set_batch_cap_enforcement(env: Env, enabled: bool) -> Result<(), FactoryError> {
+        require_admin(&env)?;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::BatchCapEnforced, &enabled);
         Ok(())
     }
 
@@ -289,6 +441,10 @@ impl FluxoraFactory {
             }
         }
 
+        env.events().publish(
+            (symbol_short!("rate_bnd"),),
+            RateBoundsUpdated { min_rate, max_rate },
+        );
         Ok(())
     }
 
@@ -366,6 +522,11 @@ impl FluxoraFactory {
                 .instance()
                 .get(&DataKey::MinDuration)
                 .ok_or(FactoryError::NotInitialized)?,
+            batch_cap_enforced: env
+                .storage()
+                .instance()
+                .get(&DataKey::BatchCapEnforced)
+                .ok_or(FactoryError::NotInitialized)?,
         })
     }
 
@@ -431,6 +592,8 @@ impl FluxoraFactory {
         cliff_time: u64,
         end_time: u64,
         withdraw_dust_threshold: i128,
+        memo: Option<soroban_sdk::Bytes>,
+        kind: fluxora_stream::StreamKind,
     ) -> Result<u64, FactoryError> {
         // ── Guard 1: pause check (before any policy read) ───────────────────
         // Checked first so that no allowlist or cap state is observable when
@@ -485,7 +648,7 @@ impl FluxoraFactory {
             return Err(FactoryError::DurationTooShort);
         }
 
-        // ── Guard 6: rate bounds (new) ───────────────────────────────────────
+        // ── Guard 6: rate bounds ─────────────────────────────────────────────
         // Unset bounds are permissive. Bounds are inclusive.
         if let Some(min_rate) = env.storage().instance().get::<_, i128>(&DataKey::MinRatePerSecond) {
             if rate_per_second < min_rate {
@@ -495,6 +658,13 @@ impl FluxoraFactory {
         if let Some(max_rate) = env.storage().instance().get::<_, i128>(&DataKey::MaxRatePerSecond) {
             if rate_per_second > max_rate {
                 return Err(FactoryError::RateAboveMax);
+            }
+        }
+
+        // ── Guard 7: memo length ─────────────────────────────────────────────
+        if let Some(ref m) = memo {
+            if m.len() as usize > fluxora_stream::MAX_MEMO_BYTES {
+                return Err(FactoryError::InvalidMemo);
             }
         }
 
@@ -520,14 +690,24 @@ impl FluxoraFactory {
             &cliff_time,
             &end_time,
             &withdraw_dust_threshold,
-            &None,
-            &fluxora_stream::StreamKind::Linear,
+            &memo,
+            &kind,
         ) {
             Ok(Ok(stream_id)) => {
                 // --- Effect (post-interaction): record only after a successful creation ---
                 // The registry is written only after the cross-contract call succeeds,
                 // so a downstream failure leaves no orphan index entry.
                 append_stream_id(&env, stream_id);
+                env.events().publish(
+                    (symbol_short!("fct_strm"),),
+                    FactoryStreamCreated {
+                        stream_id,
+                        sender,
+                        recipient,
+                        deposit_amount,
+                        rate_per_second,
+                    },
+                );
                 Ok(stream_id)
             }
             // Recognized downstream contract error reported in the success frame.
@@ -536,5 +716,94 @@ impl FluxoraFactory {
             Err(Ok(_)) => Err(FactoryError::StreamContractError),
             Err(Err(_)) => Err(FactoryError::StreamContractError),
         }
+    }
+
+    /// Create multiple streams in one atomic factory-wrapped transaction.
+    pub fn create_streams(
+        env: Env,
+        sender: Address,
+        streams: Vec<fluxora_stream::CreateStreamParams>,
+    ) -> Result<Vec<u64>, FactoryError> {
+        sender.require_auth();
+
+        let max_deposit: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxDepositCap)
+            .ok_or(FactoryError::NotInitialized)?;
+
+        let min_duration: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinDuration)
+            .ok_or(FactoryError::NotInitialized)?;
+
+        let enforce_batch_cap: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::BatchCapEnforced)
+            .ok_or(FactoryError::NotInitialized)?;
+
+        let stream_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::StreamContract)
+            .ok_or(FactoryError::NotInitialized)?;
+
+        let mut total_deposit: i128 = 0;
+        for params in streams.iter() {
+            let is_allowed: bool = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Allowlist(params.recipient.clone()))
+                .unwrap_or(false);
+            if !is_allowed {
+                return Err(FactoryError::RecipientNotAllowlisted);
+            }
+
+            if params.deposit_amount > max_deposit {
+                return Err(FactoryError::DepositExceedsCap);
+            }
+
+            if params.start_time >= params.end_time {
+                return Err(FactoryError::InvalidTimeRange);
+            }
+            if params.cliff_time < params.start_time || params.cliff_time > params.end_time {
+                return Err(FactoryError::InvalidCliff);
+            }
+
+            let duration = params.end_time - params.start_time;
+            if duration < min_duration {
+                return Err(FactoryError::DurationTooShort);
+            }
+
+            if let Some(ref m) = params.memo {
+                if m.len() as usize > fluxora_stream::MAX_MEMO_BYTES {
+                    return Err(FactoryError::InvalidMemo);
+                }
+            }
+
+            if enforce_batch_cap {
+                total_deposit = total_deposit
+                    .checked_add(params.deposit_amount)
+                    .ok_or(FactoryError::DepositExceedsCap)?;
+                if total_deposit > max_deposit {
+                    return Err(FactoryError::DepositExceedsCap);
+                }
+            }
+        }
+
+        if streams.is_empty() {
+            return Ok(Vec::new(&env));
+        }
+
+        let stream_client = FluxoraStreamClient::new(&env, &stream_contract);
+        let mut wrapped_streams = Vec::new(&env);
+        for params in streams.iter() {
+            wrapped_streams.push_back(params.clone());
+        }
+
+        let created_ids = stream_client.create_streams(&sender, &wrapped_streams);
+        Ok(created_ids)
     }
 }
