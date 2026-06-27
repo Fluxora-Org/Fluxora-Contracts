@@ -72,7 +72,7 @@ The factory contract follows the Checks-Effects-Interactions (CEI) pattern impli
 `FluxoraFactory::create_streams` is an atomic batch wrapper around `FluxoraStream::create_streams`.
 - Each entry is validated against the factory policy individually.
 - Each recipient in the batch must be allowlisted.
-- Each stream must individually satisfy the per-stream cap and minimum duration.
+- Each stream must individually satisfy the per-stream cap, minimum duration, and any configured rate-per-second bounds (MinRatePerSecond and MaxRatePerSecond).
 - When `batch_cap_enforced` is enabled, the sum of all `deposit_amount` values in the batch is also checked against `MaxDepositCap`.
 - A single invalid entry causes the entire batch to revert, ensuring no partial or policy-violating streams can be created.
 

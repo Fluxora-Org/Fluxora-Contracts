@@ -44,25 +44,105 @@ const STREAM_DURATION: u64 = 200_000;
 const SENDER_FUNDING: i128 = 1_000_000_000;
 const LEDGER_TIMESTAMP: u64 = 1_000_000_000;
 
+struct FactoryClientWrapper<'a> {
+    client: FluxoraFactoryClient<'a>,
+}
+
+impl<'a> FactoryClientWrapper<'a> {
+    fn new(client: FluxoraFactoryClient<'a>) -> Self {
+        Self { client }
+    }
+
+    fn init(&self, admin: &Address, stream_contract: &Address, max_deposit: &i128, min_duration: &u64) {
+        self.client.init(admin, stream_contract, max_deposit, min_duration);
+    }
+
+    fn set_allowlist(&self, recipient: &Address, allowed: &bool) {
+        self.client.set_allowlist(recipient, allowed);
+    }
+
+    fn set_cap(&self, new_cap: &i128) {
+        self.client.set_cap(new_cap);
+    }
+
+    fn set_min_duration(&self, new_min_duration: &u64) {
+        self.client.set_min_duration(new_min_duration);
+    }
+
+    fn set_rate_bounds(&self, min_rate: &Option<i128>, max_rate: &Option<i128>) {
+        self.client.set_rate_bounds(min_rate, max_rate);
+    }
+
+    fn create_stream(
+        &self,
+        sender: &Address,
+        recipient: &Address,
+        deposit_amount: &i128,
+        rate_per_second: &i128,
+        start_time: &u64,
+        cliff_time: &u64,
+        end_time: &u64,
+        withdraw_dust_threshold: &i128,
+    ) -> u64 {
+        self.client.create_stream(
+            sender,
+            recipient,
+            deposit_amount,
+            rate_per_second,
+            start_time,
+            cliff_time,
+            end_time,
+            withdraw_dust_threshold,
+            &None,
+            &fluxora_stream::StreamKind::Linear,
+        )
+    }
+
+    fn try_create_stream(
+        &self,
+        sender: &Address,
+        recipient: &Address,
+        deposit_amount: &i128,
+        rate_per_second: &i128,
+        start_time: &u64,
+        cliff_time: &u64,
+        end_time: &u64,
+        withdraw_dust_threshold: &i128,
+    ) -> Result<Result<u64, soroban_sdk::Error>, Result<FactoryError, soroban_sdk::InvokeError>> {
+        self.client.try_create_stream(
+            sender,
+            recipient,
+            deposit_amount,
+            rate_per_second,
+            start_time,
+            cliff_time,
+            end_time,
+            withdraw_dust_threshold,
+            &None,
+            &fluxora_stream::StreamKind::Linear,
+        )
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Test context
 // ---------------------------------------------------------------------------
 
-struct Ctx {
+struct Ctx<'a> {
     env: Env,
-    factory: FluxoraFactoryClient,
-    stream: FluxoraStreamClient,
+    factory: FactoryClientWrapper<'a>,
+    stream: FluxoraStreamClient<'a>,
     admin: Address,
     sender: Address,
     recipient: Address,
-    token: TokenClient,
+    token: TokenClient<'a>,
     token_id: Address,
     stream_contract_id: Address,
     factory_contract_id: Address,
     sender_balance_before: i128,
 }
 
-impl Ctx {
+impl<'a> Ctx<'a> {
     fn setup() -> Self {
         let env = Env::default();
         env.mock_all_auths();
@@ -95,7 +175,7 @@ impl Ctx {
 
         Self {
             env,
-            factory,
+            factory: FactoryClientWrapper::new(factory),
             stream,
             admin,
             sender,
@@ -348,7 +428,7 @@ fn test_create_stream_requires_sender_auth() {
     let factory_id = env.register_contract(None, FluxoraFactory);
 
     let stream = FluxoraStreamClient::new(&env, &stream_id);
-    let factory = FluxoraFactoryClient::new(&env, &factory_id);
+    let factory = FactoryClientWrapper::new(FluxoraFactoryClient::new(&env, &factory_id));
 
     let token_admin = Address::generate(&env);
     let token = env
@@ -459,7 +539,7 @@ fn test_create_stream_factory_not_initialized_returns_not_initialized() {
     let env = Env::default();
     env.mock_all_auths();
     let factory_id = env.register_contract(None, FluxoraFactory);
-    let factory = FluxoraFactoryClient::new(&env, &factory_id);
+    let factory = FactoryClientWrapper::new(FluxoraFactoryClient::new(&env, &factory_id));
     let now = env.ledger().timestamp();
 
     let result = factory.try_create_stream(

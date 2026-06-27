@@ -98,6 +98,27 @@ fn load_stream_ids(env: &Env) -> Vec<u64> {
         .unwrap_or_else(|| vec![env])
 }
 
+/// Validate rate bounds for a stream.
+///
+/// Unset bounds are permissive. Bounds are inclusive.
+fn validate_rate_bounds(
+    rate_per_second: i128,
+    min_rate: &Option<i128>,
+    max_rate: &Option<i128>,
+) -> Result<(), FactoryError> {
+    if let Some(min_r) = min_rate {
+        if rate_per_second < *min_r {
+            return Err(FactoryError::RateBelowMin);
+        }
+    }
+    if let Some(max_r) = max_rate {
+        if rate_per_second > *max_r {
+            return Err(FactoryError::RateAboveMax);
+        }
+    }
+    Ok(())
+}
+
 /// Append `stream_id` to the factory registry and bump its persistent TTL.
 ///
 /// The TTL is bumped unconditionally on every write so that a busy factory never
@@ -595,6 +616,13 @@ impl FluxoraFactory {
         memo: Option<soroban_sdk::Bytes>,
         kind: fluxora_stream::StreamKind,
     ) -> Result<u64, FactoryError> {
+        // ── Guard 0: initialization check ──────────────────────────────────
+        let _stream_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::StreamContract)
+            .ok_or(FactoryError::NotInitialized)?;
+
         // ── Guard 1: pause check (before any policy read) ───────────────────
         // Checked first so that no allowlist or cap state is observable when
         // the factory is in emergency-pause mode.
@@ -750,6 +778,9 @@ impl FluxoraFactory {
             .get(&DataKey::StreamContract)
             .ok_or(FactoryError::NotInitialized)?;
 
+        let min_rate: Option<i128> = env.storage().instance().get(&DataKey::MinRatePerSecond);
+        let max_rate: Option<i128> = env.storage().instance().get(&DataKey::MaxRatePerSecond);
+
         let mut total_deposit: i128 = 0;
         for params in streams.iter() {
             let is_allowed: bool = env
@@ -776,6 +807,8 @@ impl FluxoraFactory {
             if duration < min_duration {
                 return Err(FactoryError::DurationTooShort);
             }
+
+            validate_rate_bounds(params.rate_per_second, &min_rate, &max_rate)?;
 
             if let Some(ref m) = params.memo {
                 if m.len() as usize > fluxora_stream::MAX_MEMO_BYTES {
