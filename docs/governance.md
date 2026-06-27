@@ -133,9 +133,11 @@ Submits a new governance proposal and returns its monotonically increasing ID.
 
 - `proposer` must authorize the call and be a registered co-signer.
 - `calldata` is stored as opaque bytes for on-chain auditability.
+- `calldata` must be non-empty (at least 1 byte); empty calldata is rejected with `CalldataEmpty`.
 - `calldata.len()` must be less than or equal to `MAX_CALLDATA_BYTES`.
 - The proposer is not automatically counted as an approver.
 - Emits `ProposalCreated` with topic `("proposed", proposal_id)`.
+- Rejected proposals (empty or oversized calldata, non-signer) do not consume a proposal ID.
 
 ### `approve(approver, proposal_id)`
 
@@ -341,6 +343,8 @@ handle these discriminants from `contracts/governance/src/lib.rs`:
 | `InvalidThreshold` | 15 | `init` threshold is zero or exceeds signer count | Choose a threshold in the range `1..=signers.len()`. |
 | `QuorumWouldBreak` | 16 | `remove_signer` would leave fewer signers than threshold | Lower the threshold through a governed migration or keep enough signers registered. |
 | `DuplicateSigner` | 17 | `init` or `add_signer` includes an already-registered signer | Remove duplicate entries before submitting. |
+| `ArithmeticOverflow` | 18 | Timelock or expiry deadline arithmetic would overflow `u64` | This should not occur under normal ledger conditions; treat as a fatal contract error. |
+| `CalldataEmpty` | 19 | `propose` called with zero-length calldata | Provide at least one byte of calldata encoding the intended operation. |
 
 ## Security considerations
 
@@ -363,15 +367,19 @@ handle these discriminants from `contracts/governance/src/lib.rs`:
     admin key, but parameter changes still require quorum and timelock.
 11. **Calldata is an audit payload**: the governance contract does not decode or enforce
     target-specific calldata semantics.
-12. **CEI ordering in `execute`**: the proposal is marked executed and persisted before
+12. **Non-empty calldata required**: `propose` rejects zero-length calldata with
+    `CalldataEmpty` before any state mutation — the proposal ID counter is not incremented
+    and no storage is written. This prevents vacuous proposals from entering governance and
+    ensures every on-chain proposal carries a verifiable intent payload.
+13. **CEI ordering in `execute`**: the proposal is marked executed and persisted before
     `ProposalExecuted` is emitted.
-13. **Threshold invariant prevents governance bricking**: `remove_signer` enforces
+14. **Threshold invariant prevents governance bricking**: `remove_signer` enforces
     `signers.len() - 1 >= threshold`, so the signer set can never shrink below the required
     approval threshold.
-14. **Threshold is snapshotted at quorum time**: execution uses the threshold recorded in
+15. **Threshold is snapshotted at quorum time**: execution uses the threshold recorded in
     `QuorumInfo`, so an admin cannot raise or lower the live threshold after quorum to change
     the outcome of an in-flight proposal.
-15. **Auditable membership and admin changes**: `add_signer`, `remove_signer`, and
+16. **Auditable membership and admin changes**: `add_signer`, `remove_signer`, and
     `set_admin` emit `SignerAdded`, `SignerRemoved`, and `AdminChanged` respectively, all
     after the state mutation is persisted (CEI). No membership or admin change is silent,
     so indexers can reconstruct the live signer set and admin history from events. A
