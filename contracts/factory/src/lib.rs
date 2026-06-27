@@ -753,6 +753,12 @@ impl FluxoraFactory {
     ///    to avoid leaking allowlist or policy configuration state during an incident.
     /// 2. Iterative validation of each stream: allowlist, cap, times, duration, rate, memo, and batch cap.
     /// 3. Cross-contract batch stream creation.
+    ///
+    /// # Event Emission Ordering
+    /// Appends all created stream IDs to the persistent registry first, then emits a
+    /// `FactoryStreamCreated` event (topic `fct_strm`) for each created stream.
+    /// Following the Checks-Effects-Interactions (CEI) pattern, event emission happens
+    /// strictly after interaction (cross-contract call) and state effects (registry append).
     pub fn create_streams(
         env: Env,
         sender: Address,
@@ -855,6 +861,41 @@ impl FluxoraFactory {
         }
 
         let created_ids = stream_client.create_streams(&sender, &wrapped_streams);
+
+        // --- Effect (post-interaction): record only after a successful creation ---
+        // Append all created stream IDs to the registry in a single batch to minimize storage overhead.
+        let mut ids = load_stream_ids(&env);
+        for i in 0..created_ids.len() {
+            let stream_id = created_ids.get(i).unwrap();
+            ids.push_back(stream_id);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::FactoryStreamIds, &ids);
+        env.storage().persistent().extend_ttl(
+            &DataKey::FactoryStreamIds,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        // Emit FactoryStreamCreated events after state writes (CEI compliance).
+        // Iterate and emit one FactoryStreamCreated event per created stream.
+        for i in 0..created_ids.len() {
+            let stream_id = created_ids.get(i).unwrap();
+            let params = streams.get(i).unwrap();
+            env.events().publish(
+                (symbol_short!("fct_strm"),),
+                FactoryStreamCreated {
+                    stream_id,
+                    sender: sender.clone(),
+                    recipient: params.recipient.clone(),
+                    deposit_amount: params.deposit_amount,
+                    rate_per_second: params.rate_per_second,
+                },
+            );
+        }
+
         Ok(created_ids)
     }
 }

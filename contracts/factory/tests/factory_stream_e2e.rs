@@ -27,9 +27,9 @@ extern crate std;
 use fluxora_factory::{FactoryError, FluxoraFactory, FluxoraFactoryClient};
 use fluxora_stream::{FluxoraStream, FluxoraStreamClient};
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
+    testutils::{Address as _, Ledger, Events},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env,
+    Address, Env, Symbol, TryFromVal,
 };
 
 // ---------------------------------------------------------------------------
@@ -38,7 +38,7 @@ use soroban_sdk::{
 
 const MAX_DEPOSIT: i128 = 10_000_000;
 const MIN_DURATION: u64 = 86_400; // 1 day in seconds
-const DEPOSIT_AMOUNT: i128 = 100_000;
+const DEPOSIT_AMOUNT: i128 = 200_000;
 const RATE_PER_SECOND: i128 = 1;
 const STREAM_DURATION: u64 = 200_000;
 const SENDER_FUNDING: i128 = 1_000_000_000;
@@ -190,6 +190,7 @@ impl<'a> Ctx<'a> {
         let recipient = Address::generate(&env);
 
         stellar_asset.mint(&sender, &SENDER_FUNDING);
+        token.approve(&sender, &stream_contract_id, &SENDER_FUNDING, &100_000);
 
         stream.init(&token_id, &stream_contract_id);
         factory.init(&admin, &stream_contract_id, &MAX_DEPOSIT, &MIN_DURATION);
@@ -515,9 +516,9 @@ fn test_create_multiple_streams_same_recipient() {
     let id0 = ctx.factory.create_stream(
         &ctx.sender, &ctx.recipient, &dep, &rate, &start, &cliff, &end, &dust,
     );
-    // Slightly different schedule for a second stream
+    // Slightly different schedule for a second stream - deposit must cover the longer duration
     let id1 = ctx.factory.create_stream(
-        &ctx.sender, &ctx.recipient, &dep, &rate, &start, &cliff, &(end + 100_000), &dust,
+        &ctx.sender, &ctx.recipient, &(dep + 100_000), &rate, &start, &cliff, &(end + 100_000), &dust,
     );
 
     assert_eq!(id0, 0);
@@ -545,7 +546,7 @@ fn test_create_streams_different_recipients() {
     let (dep, rate, start, cliff, end, dust) = ctx.default_params();
 
     ctx.factory.create_stream(&ctx.sender, &ctx.recipient, &dep, &rate, &start, &cliff, &end, &dust);
-    ctx.factory.create_stream(&ctx.sender, &recipient_b, &dep, &rate, &start, &cliff, &(end + 50_000), &dust);
+    ctx.factory.create_stream(&ctx.sender, &recipient_b, &(dep + 50_000), &rate, &start, &cliff, &(end + 50_000), &dust);
 
     assert_eq!(ctx.stream.get_recipient_stream_count(&ctx.recipient), 1);
     assert_eq!(ctx.stream.get_recipient_stream_count(&recipient_b), 1);
@@ -663,4 +664,125 @@ fn test_create_streams_batch_paused_enforcement() {
     let ids = result_resumed.unwrap().unwrap();
     assert_eq!(ids.len(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// Batch Event & Registry Assertions
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_create_streams_batch_emits_correct_events() {
+    let ctx = Ctx::setup();
+    let now = ctx.now();
+
+    // 1. Clear existing events by reading them
+    let _ = ctx.env.events().all();
+
+    // 2. Prepare 2-element batch
+    let mut streams = soroban_sdk::Vec::new(&ctx.env);
+    let recipient_b = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient_b, &true);
+
+    streams.push_back(fluxora_stream::CreateStreamParams {
+        recipient: ctx.recipient.clone(),
+        deposit_amount: DEPOSIT_AMOUNT,
+        rate_per_second: RATE_PER_SECOND,
+        start_time: now,
+        cliff_time: now,
+        end_time: now + STREAM_DURATION,
+        withdraw_dust_threshold: Some(0),
+        memo: None,
+        kind: fluxora_stream::StreamKind::Linear,
+    });
+    streams.push_back(fluxora_stream::CreateStreamParams {
+        recipient: recipient_b.clone(),
+        deposit_amount: DEPOSIT_AMOUNT * 2,
+        rate_per_second: RATE_PER_SECOND + 1,
+        start_time: now,
+        cliff_time: now,
+        end_time: now + STREAM_DURATION,
+        withdraw_dust_threshold: Some(0),
+        memo: None,
+        kind: fluxora_stream::StreamKind::Linear,
+    });
+
+    // 3. Create streams in batch
+    let ids = ctx.factory.create_streams(&ctx.sender, &streams);
+    assert_eq!(ids.len(), 2);
+
+    // 4. Retrieve all events published during the execution
+    let events = ctx.env.events().all();
+
+    // Find the FactoryStreamCreated events from the factory contract
+    // Topic: symbol_short!("fct_strm")
+    let factory_event_topic = soroban_sdk::symbol_short!("fct_strm");
+    let mut factory_created_events = soroban_sdk::Vec::new(&ctx.env);
+
+    for event in events.iter() {
+        if event.0 == ctx.factory_contract_id {
+            if event.1.len() > 0 && soroban_sdk::Symbol::try_from_val(&ctx.env, &event.1.get(0).unwrap()) == Ok(factory_event_topic.clone()) {
+                factory_created_events.push_back(event);
+            }
+        }
+    }
+
+    // Verify 2 FactoryStreamCreated events were emitted
+    assert_eq!(factory_created_events.len(), 2);
+
+    // Verify first event payload matches the first stream
+    let event0 = factory_created_events.get(0).unwrap();
+    let data0 = fluxora_factory::FactoryStreamCreated::try_from_val(&ctx.env, &event0.2).unwrap();
+    assert_eq!(data0.stream_id, ids.get(0).unwrap());
+    assert_eq!(data0.sender, ctx.sender);
+    assert_eq!(data0.recipient, ctx.recipient);
+    assert_eq!(data0.deposit_amount, DEPOSIT_AMOUNT);
+    assert_eq!(data0.rate_per_second, RATE_PER_SECOND);
+
+    // Verify second event payload matches the second stream
+    let event1 = factory_created_events.get(1).unwrap();
+    let data1 = fluxora_factory::FactoryStreamCreated::try_from_val(&ctx.env, &event1.2).unwrap();
+    assert_eq!(data1.stream_id, ids.get(1).unwrap());
+    assert_eq!(data1.sender, ctx.sender);
+    assert_eq!(data1.recipient, recipient_b);
+    assert_eq!(data1.deposit_amount, DEPOSIT_AMOUNT * 2);
+    assert_eq!(data1.rate_per_second, RATE_PER_SECOND + 1);
+
+    // Verify registry append (using count and streams query)
+    let total_count = ctx.factory.client.get_factory_stream_count();
+    assert_eq!(total_count, 2); // 2 from batch
+
+    let registered_ids = ctx.factory.client.get_factory_streams_paginated(&0, &10);
+    assert_eq!(registered_ids.len(), 2);
+    assert_eq!(registered_ids.get(0).unwrap(), ids.get(0).unwrap());
+    assert_eq!(registered_ids.get(1).unwrap(), ids.get(1).unwrap());
+}
+
+#[test]
+fn test_create_streams_empty_batch_emits_no_events() {
+    let ctx = Ctx::setup();
+
+    // 1. Clear existing events
+    let _ = ctx.env.events().all();
+
+    // 2. Call create_streams with empty vector
+    let streams = soroban_sdk::Vec::new(&ctx.env);
+    let ids = ctx.factory.create_streams(&ctx.sender, &streams);
+    assert_eq!(ids.len(), 0);
+
+    // 3. Verify no FactoryStreamCreated events were emitted
+    let events = ctx.env.events().all();
+    let factory_event_topic = soroban_sdk::symbol_short!("fct_strm");
+
+    for event in events.iter() {
+        if event.0 == ctx.factory_contract_id {
+            if event.1.len() > 0 && soroban_sdk::Symbol::try_from_val(&ctx.env, &event.1.get(0).unwrap()) == Ok(factory_event_topic.clone()) {
+                panic!("FactoryStreamCreated event emitted for empty batch");
+            }
+        }
+    }
+
+    // Verify registry count remains 0 (no stream created)
+    let total_count = ctx.factory.client.get_factory_stream_count();
+    assert_eq!(total_count, 0);
+}
+
 
