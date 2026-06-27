@@ -749,15 +749,17 @@ fn test_two_streams_independent_metadata() {
 }
 
 // ---------------------------------------------------------------------------
-// CONTRACT_VERSION bumped to 4
+// CONTRACT_VERSION bumped to 6 (V5 added metadata extension; V6 changed
+// sweep_excess to admin-only auth so cold treasury destinations need not
+// co-sign with the admin)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_contract_version_is_4() {
+fn test_contract_version_is_6() {
     let ctx = Ctx::setup();
     assert_eq!(
         ctx.client().version(),
-        4,
-        "CONTRACT_VERSION must be 4 after metadata extension"
+        6,
+        "CONTRACT_VERSION must be 6 after sweep_excess auth change"
     );
 }
