@@ -76,6 +76,12 @@ The factory contract follows the Checks-Effects-Interactions (CEI) pattern impli
 - When `batch_cap_enforced` is enabled, the sum of all `deposit_amount` values in the batch is also checked against `MaxDepositCap`.
 - A single invalid entry causes the entire batch to revert, ensuring no partial or policy-violating streams can be created.
 
+## Pause Semantics
+
+The factory admin can toggle stream creation pause using `set_factory_paused(paused)`.
+- When the factory is paused, **both** single stream creation (`create_stream`) and batch stream creation (`create_streams`) are blocked.
+- The pause check is performed at the very beginning of both entrypoints, failing fast and returning `FactoryError::CreationPaused` before any policy evaluation, allowlist check, or loop processing. This prevents info leakage during incident response.
+
 ## Cross-contract authorization model
 
 Factory-routed creation has one client-facing entrypoint, but the sender authorization

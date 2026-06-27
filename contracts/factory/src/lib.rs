@@ -747,12 +747,30 @@ impl FluxoraFactory {
     }
 
     /// Create multiple streams in one atomic factory-wrapped transaction.
+    ///
+    /// # Guard order (checked strictly in sequence)
+    /// 1. **CreationPaused** — rejects immediately, before any policy/loop work,
+    ///    to avoid leaking allowlist or policy configuration state during an incident.
+    /// 2. Iterative validation of each stream: allowlist, cap, times, duration, rate, memo, and batch cap.
+    /// 3. Cross-contract batch stream creation.
     pub fn create_streams(
         env: Env,
         sender: Address,
         streams: Vec<fluxora_stream::CreateStreamParams>,
     ) -> Result<Vec<u64>, FactoryError> {
         sender.require_auth();
+
+        // ── Guard 1: pause check (before any policy/loop work) ──────────────
+        // Checked first so that no policy configuration or allowlist state is
+        // observable when the factory is in emergency-pause mode.
+        let paused: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::CreationPaused)
+            .unwrap_or(false);
+        if paused {
+            return Err(FactoryError::CreationPaused);
+        }
 
         let max_deposit: i128 = env
             .storage()

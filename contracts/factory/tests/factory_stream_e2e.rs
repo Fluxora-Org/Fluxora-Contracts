@@ -122,6 +122,30 @@ impl<'a> FactoryClientWrapper<'a> {
             &fluxora_stream::StreamKind::Linear,
         )
     }
+
+    fn set_factory_paused(&self, paused: &bool) {
+        self.client.set_factory_paused(paused);
+    }
+
+    fn is_factory_paused(&self) -> bool {
+        self.client.is_factory_paused()
+    }
+
+    fn create_streams(
+        &self,
+        sender: &Address,
+        streams: &soroban_sdk::Vec<fluxora_stream::CreateStreamParams>,
+    ) -> soroban_sdk::Vec<u64> {
+        self.client.create_streams(sender, streams)
+    }
+
+    fn try_create_streams(
+        &self,
+        sender: &Address,
+        streams: &soroban_sdk::Vec<fluxora_stream::CreateStreamParams>,
+    ) -> Result<Result<soroban_sdk::Vec<u64>, soroban_sdk::ConversionError>, Result<FactoryError, soroban_sdk::InvokeError>> {
+        self.client.try_create_streams(sender, streams)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -589,3 +613,54 @@ fn test_remove_allowlist_enforced_end_to_end() {
     );
     assert_eq!(result, Err(Ok(FactoryError::RecipientNotAllowlisted)));
 }
+
+// ---------------------------------------------------------------------------
+// Pause Gate for Batch/Multiple Streams
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_create_streams_batch_paused_enforcement() {
+    let ctx = Ctx::setup();
+    let now = ctx.now();
+
+    // 1. Verify initially not paused
+    assert!(!ctx.factory.is_factory_paused());
+
+    // 2. Pause the factory
+    ctx.factory.set_factory_paused(&true);
+    assert!(ctx.factory.is_factory_paused());
+
+    // 3. Prepare non-empty batch of streams
+    let mut streams = soroban_sdk::Vec::new(&ctx.env);
+    streams.push_back(fluxora_stream::CreateStreamParams {
+        recipient: ctx.recipient.clone(),
+        deposit_amount: DEPOSIT_AMOUNT,
+        rate_per_second: RATE_PER_SECOND,
+        start_time: now,
+        cliff_time: now,
+        end_time: now + STREAM_DURATION,
+        withdraw_dust_threshold: Some(0),
+        memo: None,
+        kind: fluxora_stream::StreamKind::Linear,
+    });
+
+    // 4. Assert create_streams rejects with CreationPaused when paused (non-empty batch)
+    let result_non_empty = ctx.factory.try_create_streams(&ctx.sender, &streams);
+    assert_eq!(result_non_empty, Err(Ok(FactoryError::CreationPaused)));
+
+    // 5. Assert empty batch also rejects with CreationPaused when paused (empty batch)
+    let empty_streams = soroban_sdk::Vec::new(&ctx.env);
+    let result_empty = ctx.factory.try_create_streams(&ctx.sender, &empty_streams);
+    assert_eq!(result_empty, Err(Ok(FactoryError::CreationPaused)));
+
+    // 6. Resume the factory
+    ctx.factory.set_factory_paused(&false);
+    assert!(!ctx.factory.is_factory_paused());
+
+    // 7. Assert create_streams succeeds when factory is resumed
+    let result_resumed = ctx.factory.try_create_streams(&ctx.sender, &streams);
+    assert!(result_resumed.is_ok());
+    let ids = result_resumed.unwrap().unwrap();
+    assert_eq!(ids.len(), 1);
+}
+
