@@ -216,10 +216,16 @@ Returns streams within an ID range `[start_id, end_id]` with a strict result lim
 **Returns:**
 - `Vec<Stream>` — Stream structs in ascending ID order
 - Empty vector if `start_id > end_id` or no streams exist in range
-- Closed/archived stream IDs are silently skipped
+- Closed/archived stream IDs (holes) are silently skipped
+
+**Edge Case Behavior:**
+- **Holey Ranges:** Ranges containing closed or never-created IDs (holes) skip missing IDs and return only active streams in the specified range.
+- **Limit Clamping:** Limits above `MAX_PAGE_SIZE = 100` are strictly clamped to `MAX_PAGE_SIZE`.
+- **Start Beyond Max:** If `start_id` is greater than the highest created ID (e.g. `get_stream_count()`), the call returns an empty vector.
+- **Zero Limit:** Requesting a page with `limit = 0` returns an empty vector.
 
 **DoS Protection:**
-- `limit` is capped at `MAX_PAGE_SIZE` (100) regardless of input
+- `limit` is capped at `MAX_PAGE_SIZE` (100) regardless of input. This bounds the maximum execution and read costs, preventing memory or gas exhaustion DoS vectors.
 - Gas cost is O(min(limit, actual_results)), not O(range_size)
 - Each stream lookup is O(1)
 
