@@ -196,6 +196,22 @@ Scope boundary and exclusions:
 2. Out of scope: token-level trust assumptions beyond documented model, off-chain indexer liveness, and economic policy choices (for example who should bear operational costs).
 3. Residual risk: if a non-standard token violates SEP-41 expectations, transfer behavior may diverge; CEI ordering reduces but cannot fully eliminate external token risk.
 
+### Clone Semantics
+
+This section defines the success and failure behavior of `clone_stream`.
+
+Success semantics (observable):
+
+1. Preconditions: Source stream must be in `Active` or `Paused` status.
+2. The contract creates a new stream inheriting the rate, cliff offset, dust threshold, and memo from the source stream.
+3. The new stream is initialized in the `Active` status.
+4. Tokens are pulled from the source stream's sender for the new deposit.
+
+Failure semantics (observable):
+
+1. Terminal source state: If the source stream status is `Completed` or `Cancelled`, the operation is rejected with `ContractError::StreamTerminalState`.
+2. Unauthorized: If the caller is not the sender of the source stream, the operation is rejected.
+
 ### Global Pause Semantics (Issue Scope)
 
 This section is the protocol-level contract for the global pause state managed via `pause_protocol` and `resume_protocol`.

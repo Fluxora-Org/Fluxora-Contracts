@@ -8,9 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- (leave empty — to be filled as new work is merged)
+- `fluxora_factory.create_stream` now accepts `memo: Option<Bytes>` and `kind: StreamKind`, forwarding them to `fluxora_stream.create_stream`.
+- Added `fluxora_factory.create_streams` batch wrapper that enforces allowlist, per-stream cap, minimum duration, and optional aggregate-batch cap semantics before calling `fluxora_stream.create_streams`.
+- Added `set_batch_cap_enforcement` to toggle aggregate batch-cap enforcement.
 
 ### Changed
+- `fluxora_factory` now validates memo length against `fluxora_stream::MAX_MEMO_BYTES` before making the downstream call.
 - Bumped `CONTRACT_VERSION` to `5` due to breaking ABI changes in error discriminants.
 
 ### Fixed

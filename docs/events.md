@@ -457,7 +457,7 @@ applicable (e.g. `AdminUpd`).
 | MinDurationUpdated | `["dur_upd"]` | `MinDurationUpdated { old_min_duration: u64, new_min_duration: u64 }` | When `set_min_duration` updates the minimum stream duration policy. |
 | RateBoundsUpdated | `["rate_bnd"]` | `RateBoundsUpdated { min_rate: Option<i128>, max_rate: Option<i128> }` | When `set_rate_bounds` updates rate-per-second bounds. `None` = argument not supplied by caller. |
 | FactoryPaused/Resumed | `["factory", "paused"]` / `["factory", "resumed"]` | `bool` | When `set_factory_paused` toggles the pause flag (pre-existing). |
-| FactoryStreamCreated | `["fct_strm"]` | `FactoryStreamCreated { stream_id: u64, sender: Address, recipient: Address, deposit_amount: i128, rate_per_second: i128 }` | After a policy-gated `create_stream` succeeds. Not emitted on any validation or downstream failure. |
+| FactoryStreamCreated | `["fct_strm"]` | `FactoryStreamCreated { stream_id: u64, sender: Address, recipient: Address, deposit_amount: i128, rate_per_second: i128 }` | After a policy-gated `create_stream` or batch `create_streams` succeeds (emits one event per created stream). Not emitted on any validation or downstream failure. |
 
 ### Example JSON (FactoryStreamCreated)
 

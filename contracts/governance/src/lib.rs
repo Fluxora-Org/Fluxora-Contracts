@@ -2,8 +2,8 @@
 #![allow(clippy::too_many_arguments)]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Bytes, Env, Map,
-    Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, xdr::FromXdr, Address,
+    Bytes, Env, IntoVal, Map, Symbol, Vec,
 };
 
 // ---------------------------------------------------------------------------
@@ -95,6 +95,8 @@ pub enum GovernanceError {
     DuplicateSigner = 17,
     /// Governance arithmetic would overflow instead of producing a valid deadline or ID.
     ArithmeticOverflow = 18,
+    /// Calldata bytes could not be decoded into a known CallData variant.
+    InvalidCalldata = 19,
 }
 
 /// Storage keys for the governance contract.
@@ -119,8 +121,75 @@ pub enum DataKey {
 }
 
 // ---------------------------------------------------------------------------
-// TTL constants (mirrors stream contract conventions)
+// Typed calldata adapter
 // ---------------------------------------------------------------------------
+
+/// Typed encoding of every parameter change that governance is authorised to
+/// perform on-chain.  Proposers serialise one of these variants to XDR bytes
+/// via `.to_xdr(&env)` and pass the result as the `calldata` field of
+/// `propose`.  `execute` decodes the bytes with `CallData::from_xdr` and
+/// dispatches to the target contract.
+///
+/// Adding a new governed operation = adding a new variant here and a matching
+/// arm in `dispatch_call`.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub enum CallData {
+    // ---- no-op (for testing governance mechanics without a live target) ----
+    /// No operation — dispatch performs no cross-contract call.
+    Noop,
+
+    // ---- stream contract operations ----
+    /// `set_admin(new_admin)`
+    StreamSetAdmin(Address),
+    /// `set_max_rate_per_second(max_rate)`
+    StreamSetMaxRate(i128),
+
+    // ---- factory contract operations ----
+    /// `set_admin(new_admin)`
+    FactorySetAdmin(Address),
+    /// `set_cap(max_deposit)`
+    FactorySetCap(i128),
+    /// `set_min_duration(min_duration)`
+    FactorySetMinDuration(u64),
+    /// `set_allowlist(recipient, allowed)`
+    FactorySetAllowlist(Address, bool),
+    /// `set_stream_contract(new_stream_contract)`
+    FactorySetStreamContract(Address),
+}
+
+/// Decode `calldata` bytes into a `CallData` variant and invoke the target.
+/// Called inside `execute` *after* the proposal has been marked executed (CEI).
+fn dispatch_call(env: &Env, target: &Address, calldata: &Bytes) -> Result<(), GovernanceError> {
+    let op = CallData::from_xdr(env, calldata).map_err(|_| GovernanceError::InvalidCalldata)?;
+    match op {
+        CallData::Noop => {}
+        CallData::StreamSetAdmin(new_admin) => {
+            env.invoke_contract::<()>(target, &Symbol::new(env, "set_admin"), (new_admin,).into_val(env));
+        }
+        CallData::StreamSetMaxRate(max_rate) => {
+            env.invoke_contract::<()>(target, &Symbol::new(env, "set_max_rate_per_second"), (max_rate,).into_val(env));
+        }
+        CallData::FactorySetAdmin(new_admin) => {
+            env.invoke_contract::<()>(target, &Symbol::new(env, "set_admin"), (new_admin,).into_val(env));
+        }
+        CallData::FactorySetCap(max_deposit) => {
+            env.invoke_contract::<()>(target, &Symbol::new(env, "set_cap"), (max_deposit,).into_val(env));
+        }
+        CallData::FactorySetMinDuration(min_duration) => {
+            env.invoke_contract::<()>(target, &Symbol::new(env, "set_min_duration"), (min_duration,).into_val(env));
+        }
+        CallData::FactorySetAllowlist(recipient, allowed) => {
+            env.invoke_contract::<()>(target, &Symbol::new(env, "set_allowlist"), (recipient, allowed).into_val(env));
+        }
+        CallData::FactorySetStreamContract(new_contract) => {
+            env.invoke_contract::<()>(target, &Symbol::new(env, "set_stream_contract"), (new_contract,).into_val(env));
+        }
+    }
+    Ok(())
+}
+
+
 
 const INSTANCE_LIFETIME_THRESHOLD: u32 = 17_280;
 const INSTANCE_BUMP_AMOUNT: u32 = 120_960;
@@ -747,6 +816,13 @@ impl FluxoraGovernance {
         save_proposal(&env, proposal_id, &proposal);
         bump_instance(&env);
 
+        // Dispatch the on-chain call to the target contract.  This runs after
+        // the proposal is marked executed so re-entrancy cannot trigger a
+        // second execution (CEI).  If the call panics (target rejects the
+        // operation), the whole transaction is reverted — including the
+        // `executed = true` write — which is the correct fail-safe behaviour.
+        dispatch_call(&env, &proposal.target, &proposal.calldata)?;
+
         env.events().publish(
             (symbol_short!("executed"), proposal_id),
             ProposalExecuted {
@@ -836,7 +912,26 @@ impl FluxoraGovernance {
         get_signers(&env)
     }
 
+    /// Return the admin address.
+    ///
+    /// Returns `GovernanceError::NotInitialized` if `init` has not been called.
+    pub fn get_admin(env: Env) -> Result<Address, GovernanceError> {
+        get_admin(&env)
+    }
+
+    /// Return the configured approval threshold.
+    ///
+    /// Returns `GovernanceError::NotInitialized` if `init` has not been called.
+    /// For a non-erroring convenience wrapper that returns `0` when
+    /// uninitialized, see [`quorum`](Self::quorum).
+    pub fn get_threshold(env: Env) -> Result<u32, GovernanceError> {
+        get_threshold(&env)
+    }
+
     /// Return the effective approval threshold.
+    ///
+    /// Convenience alias for [`get_threshold`](Self::get_threshold) that
+    /// returns `0` instead of an error when the contract is not initialized.
     pub fn quorum(env: Env) -> u32 {
         get_threshold(&env).unwrap_or(0)
     }
@@ -1027,14 +1122,54 @@ mod tests {
             Address::generate(&self.env)
         }
 
-        fn calldata(&self, tag: &str) -> Bytes {
-            Bytes::from_slice(&self.env, tag.as_bytes())
+        /// Returns XDR-encoded `CallData::Noop`. The `_tag` parameter is
+        /// accepted only to keep call-sites readable; it has no effect on the
+        /// returned bytes.
+        fn calldata(&self, _tag: &str) -> Bytes {
+            use soroban_sdk::xdr::ToXdr;
+            CallData::Noop.to_xdr(&self.env)
         }
     }
 
     // -----------------------------------------------------------------------
-    // Constants
+    // CallData dispatch
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_invalid_calldata_errors_on_execute() {
+        let ctx = Ctx::setup();
+        // XDR bytes that deserialize but are not a CallData variant.  Encode a
+        // plain u32 — it deserialises fine but `CallData::try_from_val` will
+        // reject the type, surfacing as `InvalidCalldata`.
+        use soroban_sdk::xdr::ToXdr;
+        let bad = 42_u32.to_xdr(&ctx.env);
+        let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &bad);
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+        ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
+        let executor = Address::generate(&ctx.env);
+        let result = ctx.client.try_execute(&executor, &id);
+        assert_eq!(result, Err(Ok(GovernanceError::InvalidCalldata)));
+        // Proposal must NOT be marked executed after a failed calldata decode.
+        let p = ctx.client.get_proposal(&id);
+        assert!(!p.executed);
+    }
+
+    #[test]
+    fn test_noop_calldata_executes_cleanly() {
+        use soroban_sdk::xdr::ToXdr;
+        let ctx = Ctx::setup();
+        let noop = CallData::Noop.to_xdr(&ctx.env);
+        let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &noop);
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+        ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
+        let executor = Address::generate(&ctx.env);
+        ctx.client.execute(&executor, &id);
+        assert!(ctx.client.get_proposal(&id).executed);
+    }
+
+
 
     #[test]
     fn test_quorum_and_timelock_constants() {
@@ -1047,6 +1182,42 @@ mod tests {
     fn test_max_proposal_age_constant() {
         let ctx = Ctx::setup();
         assert_eq!(ctx.client.max_proposal_age_seconds(), MAX_AGE);
+    }
+
+    // -----------------------------------------------------------------------
+    // get_admin / get_threshold views
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_get_admin_after_init() {
+        let ctx = Ctx::setup();
+        let admin = ctx.client.get_admin();
+        assert_eq!(admin, ctx.admin);
+    }
+
+    #[test]
+    fn test_get_admin_pre_init() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, FluxoraGovernance);
+        let client = FluxoraGovernanceClient::new(&env, &contract_id);
+        let result = client.try_get_admin();
+        assert_eq!(result, Err(Ok(GovernanceError::NotInitialized)));
+    }
+
+    #[test]
+    fn test_get_threshold_after_init() {
+        let ctx = Ctx::setup();
+        let threshold = ctx.client.get_threshold();
+        assert_eq!(threshold, 2);
+    }
+
+    #[test]
+    fn test_get_threshold_pre_init() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, FluxoraGovernance);
+        let client = FluxoraGovernanceClient::new(&env, &contract_id);
+        let result = client.try_get_threshold();
+        assert_eq!(result, Err(Ok(GovernanceError::NotInitialized)));
     }
 
     // -----------------------------------------------------------------------
