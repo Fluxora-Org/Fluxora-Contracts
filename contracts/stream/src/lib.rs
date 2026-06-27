@@ -6602,17 +6602,17 @@ impl FluxoraStream {
     /// | `memo` | Copied verbatim |
     ///
     /// # Source stream state requirements
-    /// The source stream must be in one of the following states:
-    /// - `Completed` — natural end of a previous period.
-    /// - `Cancelled` — early termination of a previous period.
-    /// - `Active` or `Paused` — allowed when the caller is the original sender or admin
-    ///   (enables pre-scheduling the next period before the current one ends).
+    /// The source stream must be in one of the following non-terminal states:
+    /// - `Active` or `Paused` — allowed (enables pre-scheduling the next period before the current one ends).
+    ///
+    /// Cloning from terminal states (`Completed` or `Cancelled`) is rejected.
     ///
     /// # Returns
     /// - `u64`: The new stream's ID.
     ///
     /// # Errors
     /// - `StreamNotFound` (1): `stream_id` does not exist.
+    /// - `StreamTerminalState` (13): The source stream is in a terminal state (`Completed` or `Cancelled`).
     /// - `InvalidParams` (3): `force == false` and the source stream has a `CliffOnly`
     ///   sentinel threshold (`i128::MAX`), or any parameter fails `validate_stream_params`.
     /// - `ContractPaused` (4): Creation is globally paused.
@@ -6636,7 +6636,7 @@ impl FluxoraStream {
     ///
     /// # Example — recurring monthly salary
     /// ```ignore
-    /// // Month 1 stream just completed (stream_id = 42).
+    /// // Month 1 stream is running (stream_id = 42).
     /// // Clone it for month 2 with the same recipient and rate.
     /// let month2_id = contract.clone_stream(
     ///     &42,                    // source stream
@@ -6661,6 +6661,12 @@ impl FluxoraStream {
 
         // ── 2. Load source stream ─────────────────────────────────────────────
         let source = load_stream(&env, stream_id)?;
+
+        // ── 2.1. Status guard ─────────────────────────────────────────────────
+        // Reject cloning from a terminal-state source (Cancelled or Completed).
+        if source.status == StreamStatus::Cancelled || source.status == StreamStatus::Completed {
+            return Err(ContractError::StreamTerminalState);
+        }
 
         // ── 3. Authorization: source sender ──────────────────────────────────
         // Only the source stream's original sender may clone it.

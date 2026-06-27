@@ -123,6 +123,27 @@ fn load_stream_ids(env: &Env) -> Vec<u64> {
         .unwrap_or_else(|| vec![env])
 }
 
+/// Validate rate bounds for a stream.
+///
+/// Unset bounds are permissive. Bounds are inclusive.
+fn validate_rate_bounds(
+    rate_per_second: i128,
+    min_rate: &Option<i128>,
+    max_rate: &Option<i128>,
+) -> Result<(), FactoryError> {
+    if let Some(min_r) = min_rate {
+        if rate_per_second < *min_r {
+            return Err(FactoryError::RateBelowMin);
+        }
+    }
+    if let Some(max_r) = max_rate {
+        if rate_per_second > *max_r {
+            return Err(FactoryError::RateAboveMax);
+        }
+    }
+    Ok(())
+}
+
 /// Append `stream_id` to the factory registry and bump its persistent TTL.
 ///
 /// The TTL is bumped unconditionally on every write so that a busy factory never
@@ -645,6 +666,13 @@ impl FluxoraFactory {
         memo: Option<soroban_sdk::Bytes>,
         kind: fluxora_stream::StreamKind,
     ) -> Result<u64, FactoryError> {
+        // ── Guard 0: initialization check ──────────────────────────────────
+        let _stream_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::StreamContract)
+            .ok_or(FactoryError::NotInitialized)?;
+
         // ── Guard 1: pause check (before any policy read) ───────────────────
         // Checked first so that no allowlist or cap state is observable when
         // the factory is in emergency-pause mode.
@@ -773,8 +801,14 @@ impl FluxoraFactory {
     /// # Guard order (checked strictly in sequence)
     /// 1. **CreationPaused** — rejects immediately, before any policy/loop work,
     ///    to avoid leaking allowlist or policy configuration state during an incident.
-    /// 2. Iterative validation of each stream: allowlist, cap, times, duration, and batch cap.
+    /// 2. Iterative validation of each stream: allowlist, cap, times, duration, rate, memo, and batch cap.
     /// 3. Cross-contract batch stream creation.
+    ///
+    /// # Event Emission Ordering
+    /// Appends all created stream IDs to the persistent registry first, then emits a
+    /// `FactoryStreamCreated` event (topic `fct_strm`) for each created stream.
+    /// Following the Checks-Effects-Interactions (CEI) pattern, event emission happens
+    /// strictly after interaction (cross-contract call) and state effects (registry append).
     pub fn create_streams(
         env: Env,
         sender: Address,
@@ -818,6 +852,9 @@ impl FluxoraFactory {
             .get(&DataKey::StreamContract)
             .ok_or(FactoryError::NotInitialized)?;
 
+        let min_rate: Option<i128> = env.storage().instance().get(&DataKey::MinRatePerSecond);
+        let max_rate: Option<i128> = env.storage().instance().get(&DataKey::MaxRatePerSecond);
+
         // Bump instance TTL on every stream creation attempt.
         // This helps ensure config persists even during periods with many stream operations.
         bump_instance(&env);
@@ -849,6 +886,8 @@ impl FluxoraFactory {
                 return Err(FactoryError::DurationTooShort);
             }
 
+            validate_rate_bounds(params.rate_per_second, &min_rate, &max_rate)?;
+
             if let Some(ref m) = params.memo {
                 if m.len() as usize > fluxora_stream::MAX_MEMO_BYTES {
                     return Err(FactoryError::InvalidMemo);
@@ -876,6 +915,41 @@ impl FluxoraFactory {
         }
 
         let created_ids = stream_client.create_streams(&sender, &wrapped_streams);
+
+        // --- Effect (post-interaction): record only after a successful creation ---
+        // Append all created stream IDs to the registry in a single batch to minimize storage overhead.
+        let mut ids = load_stream_ids(&env);
+        for i in 0..created_ids.len() {
+            let stream_id = created_ids.get(i).unwrap();
+            ids.push_back(stream_id);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::FactoryStreamIds, &ids);
+        env.storage().persistent().extend_ttl(
+            &DataKey::FactoryStreamIds,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        // Emit FactoryStreamCreated events after state writes (CEI compliance).
+        // Iterate and emit one FactoryStreamCreated event per created stream.
+        for i in 0..created_ids.len() {
+            let stream_id = created_ids.get(i).unwrap();
+            let params = streams.get(i).unwrap();
+            env.events().publish(
+                (symbol_short!("fct_strm"),),
+                FactoryStreamCreated {
+                    stream_id,
+                    sender: sender.clone(),
+                    recipient: params.recipient.clone(),
+                    deposit_amount: params.deposit_amount,
+                    rate_per_second: params.rate_per_second,
+                },
+            );
+        }
+
         Ok(created_ids)
     }
 }
