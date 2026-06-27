@@ -265,6 +265,36 @@ and the stream contract address as admin-mutable parameters. `FluxoraStream` exp
 No off-chain bot is required; the parameter change is enforced atomically within the
 `execute` transaction.
 
+## Event-driven execution pattern
+
+While the current `execute` implementation dispatches the cross-contract call atomically
+inside the transaction, the contract also emits a `ProposalExecuted` event carrying the
+`target` address and `calldata` bytes. This enables an **alternative operational pattern**
+where an off-chain executor monitors governance events and applies the change
+independently.
+
+The `ExecutorStub` in `contracts/stream/tests/governance_executor_e2e.rs` demonstrates
+this pattern:
+
+1. An executor reads `ProposalExecuted` topics from the governance contract.
+2. It decodes the `target` and `calldata` from the event payload.
+3. It deserialises the `CallData` variant from the XDR-encoded `calldata`.
+4. It invokes the appropriate function on the target contract (e.g.
+   `stream.set_max_rate_per_second`).
+
+In this pattern the target contract's admin must be set to the executor's address (or to a
+multisig that the executor controls), not to the governance contract. The governance
+proposal serves as the **authority record** — the executor applies the change based on the
+provenance recorded in the `ProposalExecuted` event.
+
+The e2e test validates both the atomic dispatch and the event-driven flow:
+
+- propose → approve to quorum → wait timelock → execute → executor reads event → verifies
+  state change.
+- Pre-quorum / pre-timelock execution is blocked at the governance level.
+- Cancelled and expired proposals produce no `ProposalExecuted` event and therefore no
+  executor action.
+
 
 ## Events
 
@@ -424,7 +454,8 @@ handle these discriminants from `contracts/governance/src/lib.rs`:
 
 ## Tests
 
-Integration tests are in `contracts/stream/tests/governance_integration.rs` and cover:
+Integration tests are in `contracts/stream/tests/governance_integration.rs` (870 lines)
+and `contracts/stream/tests/governance_executor_e2e.rs` (executor-stub e2e) and cover:
 
 - Initialization and constant verification.
 - Duplicate signer rejection during initialization and signer management.
@@ -454,6 +485,20 @@ Integration tests are in `contracts/stream/tests/governance_integration.rs` and 
   admin rotation chain. Snapshot assertions verify both topics and payloads.
 - Negative event coverage: removing a non-existent signer, a `QuorumWouldBreak`-rejected
   removal, and a `DuplicateSigner`-rejected add all emit no event.
+
+The executor-stub e2e test (`governance_executor_e2e.rs`) adds end-to-end coverage for
+the event-driven operational pattern:
+
+- **Full flow**: propose → approve to quorum → wait timelock → execute → stream parameter
+  changes (`set_max_rate_per_second`).
+- **Executor stub decodes `ProposalExecuted`**: reads events, decodes `target` +
+  `calldata`, and independently dispatches the call.
+- **Pre-quorum/pre-timelock blocked**: parameter change is impossible before quorum or
+  timelock elapses.
+- **Cancelled/expired proposals**: no `ProposalExecuted` event emitted, no executor
+  action.
+- **Security invariant**: the parameter change requires the complete quorum + timelock +
+  execute path; no single key can bypass the process.
 
 TTL regression tests are in `contracts/stream/tests/governance_ttl.rs` and
 cover:
