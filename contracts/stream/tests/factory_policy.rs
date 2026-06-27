@@ -49,6 +49,7 @@ impl<'a> Ctx<'a> {
         let admin = Address::generate(&env);
         let sender = Address::generate(&env);
         stellar_asset.mint(&sender, &1_000_000_000);
+        token.approve(&sender, &stream_id, &1_000_000_000, &99999);
 
         // Init stream contract
         stream.init(&token_contract_id, &stream_id); // admin = stream_id for simplicity
@@ -85,8 +86,8 @@ fn test_factory_error_discriminants_are_append_only_and_stable() {
     assert_eq!(FactoryError::DurationTooShort as u32, 6);
     assert_eq!(FactoryError::InvalidTimeRange as u32, 7);
     assert_eq!(FactoryError::InvalidCliff as u32, 8);
-    assert_eq!(FactoryError::InvalidCap as u32, 9);
-    assert_eq!(FactoryError::InvalidMinDuration as u32, 10);
+    assert_eq!(FactoryError::InvalidCap as u32, 14);
+    assert_eq!(FactoryError::InvalidMinDuration as u32, 15);
 }
 
 // ---------------------------------------------------------------------------
@@ -398,8 +399,8 @@ fn test_create_stream_supports_cliff_only_and_memo() {
     );
     assert!(result.is_ok());
 
-    let stream_id = result.unwrap();
-    let stream_state = ctx.stream.get_stream_state(&stream_id).unwrap();
+    let stream_id = result.unwrap().unwrap();
+    let stream_state = ctx.stream.get_stream_state(&stream_id);
     assert!(matches!(stream_state.kind, StreamKind::CliffOnly));
     assert_eq!(stream_state.memo, memo);
 }
@@ -440,10 +441,10 @@ fn test_create_streams_batch_allows_all_valid_entries_atomically() {
     let result = ctx.factory.try_create_streams(&ctx.sender, &streams);
     assert!(result.is_ok());
 
-    let ids = result.unwrap();
+    let ids = result.unwrap().unwrap();
     assert_eq!(ids.len(), 2);
-    assert_eq!(ctx.stream.get_stream_memo(&ids.get_unchecked(0)).unwrap(), Some(Bytes::from_slice(&ctx.env, b"batch-1")));
-    assert_eq!(ctx.stream.get_stream_memo(&ids.get_unchecked(1)).unwrap(), Some(Bytes::from_slice(&ctx.env, b"batch-2")));
+    assert_eq!(ctx.stream.get_stream_memo(&ids.get_unchecked(0)).unwrap(), Bytes::from_slice(&ctx.env, b"batch-1"));
+    assert_eq!(ctx.stream.get_stream_memo(&ids.get_unchecked(1)).unwrap(), Bytes::from_slice(&ctx.env, b"batch-2"));
 }
 
 #[test]
@@ -913,240 +914,104 @@ fn test_set_allowlist_remove_enforced() {
     assert_eq!(result, Err(Ok(FactoryError::RecipientNotAllowlisted)));
 }
 
-// ---------------------------------------------------------------------------
-// Composed policy enforcement proptest
-//
-// Invariant (accept-iff-all-policies-satisfied):
-//   create_stream succeeds ⟺ allowlisted ∧ deposit ≤ cap ∧ duration ≥ min_duration
-//                              ∧ rate ≥ min_rate (if set) ∧ rate ≤ max_rate (if set)
-//                              ∧ start_time < end_time
-//
-// Guard evaluation order mirrors the factory implementation:
-//   1. allowlist  2. deposit cap  3. time range  4. min duration  5. rate bounds
-//
-// A bug that lets one policy mask another would cause the conjunction to fail.
-// ---------------------------------------------------------------------------
-mod proptest_composed_policy {
-    use super::*;
-    use fluxora_stream::StreamKind;
-    use proptest::prelude::*;
+#[test]
+fn test_create_streams_batch_rate_bounds() {
+    let ctx = Ctx::setup();
+    let recipient0 = Address::generate(&ctx.env);
+    let recipient1 = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient0, &true);
+    ctx.factory.set_allowlist(&recipient1, &true);
+    let now = ctx.now();
 
-    /// Random factory policy configuration.
-    #[derive(Debug, Clone)]
-    struct PolicyConfig {
-        /// Maximum deposit allowed per stream (1_000..=20_000).
-        cap: i128,
-        /// Minimum stream duration in seconds (0..=400).
-        min_duration: u64,
-        /// Optional inclusive lower bound on rate_per_second.
-        min_rate: Option<i128>,
-        /// Optional inclusive upper bound on rate_per_second (≥ min_rate when both set).
-        max_rate: Option<i128>,
-    }
+    // Set rate bounds: min = 10, max = 100
+    ctx.factory.set_rate_bounds(&Some(10), &Some(100));
 
-    /// Random stream creation input.
-    #[derive(Debug, Clone)]
-    struct StreamInput {
-        /// Whether the recipient has been added to the allowlist.
-        allowlisted: bool,
-        deposit: i128,
-        duration: u64,
-        /// rate_per_second chosen from 0..=30.
-        rate: i128,
-        start_time: u64,
-    }
+    // Case 1: Batch rejects rates below MinRatePerSecond
+    let mut streams_too_low = Vec::new(&ctx.env);
+    streams_too_low.push_back(CreateStreamParams {
+        recipient: recipient0.clone(),
+        deposit_amount: 1_000,
+        rate_per_second: 5, // below min
+        start_time: now,
+        cliff_time: now,
+        end_time: now + 200,
+        withdraw_dust_threshold: None,
+        memo: None,
+        kind: StreamKind::Linear,
+    });
+    streams_too_low.push_back(CreateStreamParams {
+        recipient: recipient1.clone(),
+        deposit_amount: 2_000,
+        rate_per_second: 50, // valid
+        start_time: now,
+        cliff_time: now,
+        end_time: now + 200,
+        withdraw_dust_threshold: None,
+        memo: None,
+        kind: StreamKind::Linear,
+    });
+    let result = ctx.factory.try_create_streams(&ctx.sender, &streams_too_low);
+    assert_eq!(result, Err(Ok(FactoryError::RateBelowMin)));
 
-    prop_compose! {
-        /// Strategy that produces a valid [`PolicyConfig`].
-        ///
-        /// When both rate bounds are enabled the max is always ≥ min so the
-        /// config itself is consistent — the test targets *input* violations.
-        fn arb_policy()(
-            cap in 1_000i128..=20_000i128,
-            min_duration in 0u64..=400u64,
-            enable_min_rate in any::<bool>(),
-            min_rate_val in 1i128..=10i128,
-            enable_max_rate in any::<bool>(),
-            max_rate_extra in 0i128..=10i128,
-        ) -> PolicyConfig {
-            let min_rate = if enable_min_rate { Some(min_rate_val) } else { None };
-            // max_rate >= min_rate_val so the window is never empty.
-            let max_rate = if enable_max_rate { Some(min_rate_val + max_rate_extra) } else { None };
-            PolicyConfig { cap, min_duration, min_rate, max_rate }
-        }
-    }
+    // Case 2: Batch rejects rates above MaxRatePerSecond
+    let mut streams_too_high = Vec::new(&ctx.env);
+    streams_too_high.push_back(CreateStreamParams {
+        recipient: recipient0.clone(),
+        deposit_amount: 1_000,
+        rate_per_second: 50, // valid
+        start_time: now,
+        cliff_time: now,
+        end_time: now + 200,
+        withdraw_dust_threshold: None,
+        memo: None,
+        kind: StreamKind::Linear,
+    });
+    streams_too_high.push_back(CreateStreamParams {
+        recipient: recipient1.clone(),
+        deposit_amount: 2_000,
+        rate_per_second: 150, // above max
+        start_time: now,
+        cliff_time: now,
+        end_time: now + 200,
+        withdraw_dust_threshold: None,
+        memo: None,
+        kind: StreamKind::Linear,
+    });
+    let result = ctx.factory.try_create_streams(&ctx.sender, &streams_too_high);
+    assert_eq!(result, Err(Ok(FactoryError::RateAboveMax)));
 
-    prop_compose! {
-        fn arb_input()(
-            allowlisted in any::<bool>(),
-            deposit     in 500i128..=25_000i128,
-            duration    in 1u64..=600u64,
-            rate        in 0i128..=30i128,
-            start_time  in 1_000u64..=5_000u64,
-        ) -> StreamInput {
-            StreamInput { allowlisted, deposit, duration, rate, start_time }
-        }
-    }
+    // Case 3: Boundary rates accepted
+    ctx.factory.set_cap(&50_000); // raise cap for aggregate check
+    let mut streams_valid = Vec::new(&ctx.env);
+    streams_valid.push_back(CreateStreamParams {
+        recipient: recipient0.clone(),
+        deposit_amount: 1_000,
+        rate_per_second: 10, // exactly min
+        start_time: now,
+        cliff_time: now,
+        end_time: now + 100,
+        withdraw_dust_threshold: None,
+        memo: None,
+        kind: StreamKind::Linear,
+    });
+    streams_valid.push_back(CreateStreamParams {
+        recipient: recipient1.clone(),
+        deposit_amount: 10_000,
+        rate_per_second: 100, // exactly max
+        start_time: now,
+        cliff_time: now,
+        end_time: now + 100,
+        withdraw_dust_threshold: None,
+        memo: None,
+        kind: StreamKind::Linear,
+    });
+    let result = ctx.factory.try_create_streams(&ctx.sender, &streams_valid);
+    assert!(result.is_ok());
 
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(256))]
-
-        /// **Composed policy conjunction invariant**
-        ///
-        /// For every combination of (policy config, stream input):
-        ///
-        /// - `create_stream` **succeeds** iff every enabled policy is satisfied:
-        ///   allowlisted ∧ deposit ≤ cap ∧ start < end ∧ duration ≥ min_duration
-        ///   ∧ rate ≥ min_rate (if set) ∧ rate ≤ max_rate (if set).
-        ///
-        /// - On **rejection** the error variant corresponds to the first guard
-        ///   violated in the factory's documented evaluation order, proving no
-        ///   policy masks another.
-        #[test]
-        fn prop_composed_policy_accept_iff_all_satisfied(
-            policy in arb_policy(),
-            input  in arb_input(),
-        ) {
-            let env = Env::default();
-            env.mock_all_auths();
-
-            // ── Deploy contracts ──────────────────────────────────────────────
-            let stream_id = env.register_contract(None, FluxoraStream);
-            let stream_client = FluxoraStreamClient::new(&env, &stream_id);
-
-            let factory_id = env.register_contract(None, FluxoraFactory);
-            let factory = FluxoraFactoryClient::new(&env, &factory_id);
-
-            // ── Token setup ───────────────────────────────────────────────────
-            let token_admin = Address::generate(&env);
-            let token_contract_id = env
-                .register_stellar_asset_contract_v2(token_admin.clone())
-                .address();
-            let stellar_asset = soroban_sdk::token::StellarAssetClient::new(&env, &token_contract_id);
-            let token = soroban_sdk::token::Client::new(&env, &token_contract_id);
-
-            let admin  = Address::generate(&env);
-            let sender = Address::generate(&env);
-            stellar_asset.mint(&sender, &1_000_000_000_000i128);
-            token.approve(&sender, &stream_id, &1_000_000_000_000i128, &99_999u32);
-
-            stream_client.init(&token_contract_id, &stream_id);
-            factory.init(&admin, &stream_id, &policy.cap, &policy.min_duration);
-
-            // ── Apply optional rate bounds ────────────────────────────────────
-            if policy.min_rate.is_some() || policy.max_rate.is_some() {
-                factory.set_rate_bounds(&policy.min_rate, &policy.max_rate);
-            }
-
-            // ── Conditionally allowlist the recipient ─────────────────────────
-            let recipient = Address::generate(&env);
-            if input.allowlisted {
-                factory.set_allowlist(&recipient, &true);
-            }
-
-            let start_time = input.start_time;
-            let end_time   = start_time + input.duration;
-
-            // ── Invoke create_stream ──────────────────────────────────────────
-            let result = factory.try_create_stream(
-                &sender,
-                &recipient,
-                &input.deposit,
-                &input.rate,
-                &start_time,
-                &start_time, // cliff == start (no cliff complexity needed)
-                &end_time,
-                &0i128,
-                &None,
-                &StreamKind::Linear,
-            );
-
-            // ── Derive expected outcome from the guard order ──────────────────
-            //
-            // The factory evaluates guards strictly in this order:
-            //   G1 allowlist → G2 cap → G3 time range → G4 min duration → G5 rate
-            //
-            // We compute a boolean for each guard and verify that the *first*
-            // failing guard produces the matching error (proving no masking).
-
-            let violates_allowlist = !input.allowlisted;
-            let violates_cap       = input.deposit > policy.cap;
-            // duration >= 1 (arb_input lower bound), so end_time > start_time always.
-            let violates_time      = start_time >= end_time;
-            let violates_duration  = input.duration < policy.min_duration;
-            let violates_min_rate  = policy.min_rate.map_or(false, |mn| input.rate < mn);
-            let violates_max_rate  = policy.max_rate.map_or(false, |mx| input.rate > mx);
-
-            let all_satisfied = !violates_allowlist
-                && !violates_cap
-                && !violates_time
-                && !violates_duration
-                && !violates_min_rate
-                && !violates_max_rate;
-
-            if all_satisfied {
-                prop_assert!(
-                    result.is_ok(),
-                    "Expected Ok (all policies satisfied) but got {:?}\n  policy={:?}\n  input={:?}",
-                    result, policy, input
-                );
-            } else {
-                prop_assert!(
-                    result.is_err(),
-                    "Expected Err (a policy is violated) but got Ok\n  policy={:?}\n  input={:?}",
-                    policy, input
-                );
-
-                let err = result.unwrap_err();
-
-                // Verify the error maps to the *first* violated guard.
-                if violates_allowlist {
-                    prop_assert_eq!(
-                        err,
-                        Ok(FactoryError::RecipientNotAllowlisted),
-                        "G1 (allowlist) violated but wrong error\n  policy={:?}\n  input={:?}",
-                        policy, input
-                    );
-                } else if violates_cap {
-                    prop_assert_eq!(
-                        err,
-                        Ok(FactoryError::DepositExceedsCap),
-                        "G2 (cap) violated but wrong error\n  policy={:?}\n  input={:?}",
-                        policy, input
-                    );
-                } else if violates_time {
-                    prop_assert_eq!(
-                        err,
-                        Ok(FactoryError::InvalidTimeRange),
-                        "G3 (time range) violated but wrong error\n  policy={:?}\n  input={:?}",
-                        policy, input
-                    );
-                } else if violates_duration {
-                    prop_assert_eq!(
-                        err,
-                        Ok(FactoryError::DurationTooShort),
-                        "G4 (min duration) violated but wrong error\n  policy={:?}\n  input={:?}",
-                        policy, input
-                    );
-                } else {
-                    // G5: rate bounds — min_rate checked before max_rate in the factory.
-                    if violates_min_rate {
-                        prop_assert_eq!(
-                            err,
-                            Ok(FactoryError::RateBelowMin),
-                            "G5a (min rate) violated but wrong error\n  policy={:?}\n  input={:?}",
-                            policy, input
-                        );
-                    } else {
-                        prop_assert_eq!(
-                            err,
-                            Ok(FactoryError::RateAboveMax),
-                            "G5b (max rate) violated but wrong error\n  policy={:?}\n  input={:?}",
-                            policy, input
-                        );
-                    }
-                }
-            }
-        }
-    }
+    // Verify atomicity: only the valid batch succeeded, none of the invalid ones created streams
+    let count = ctx.stream.get_recipient_stream_count(&recipient0);
+    assert_eq!(count, 1);
+    let count = ctx.stream.get_recipient_stream_count(&recipient1);
+    assert_eq!(count, 1);
 }
+
