@@ -870,6 +870,8 @@ pub struct CreateStreamParams {
     /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
     /// Maximum `MAX_MEMO_BYTES` (64) bytes. Pass `None` to omit.
     pub memo: Option<soroban_sdk::Bytes>,
+    /// Optional structured metadata for indexer consumption.
+    pub metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
     /// The architectural style of the stream (Linear or CliffOnly).
     pub kind: StreamKind,
 }
@@ -2625,6 +2627,7 @@ impl FluxoraStream {
                 end_time,
                 withdraw_dust_threshold: rel.withdraw_dust_threshold,
                 memo: rel.memo,
+                metadata: rel.metadata,
                 kind: rel.kind,
             });
         }
@@ -6931,6 +6934,8 @@ mod test;
 mod test_issue_39;
 #[cfg(test)]
 mod test_withdrawable_props;
+#[cfg(test)]
+mod test_token_edge_cases;
 
 /// Atomically cancel multiple streams owned by the caller and refund the aggregate
 /// unstreamed balance in a single token transfer.
