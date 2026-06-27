@@ -231,6 +231,30 @@ let calldata = CallData::FactorySetCap(100_000_i128).to_xdr(&env);
 governance_client.propose(&proposer, &factory_address, &calldata);
 ```
 
+### Worked example: routing a stream rate change
+
+`set_max_rate_per_second` on the stream contract is admin-only, so once the
+stream contract's admin has been transferred to governance (see
+[Integration](#integration-with-the-factory-and-stream-contracts)) the rate can
+only be changed through a proposal. Encode the change as a `StreamSetMaxRate`
+variant:
+
+```rust
+use soroban_sdk::xdr::ToXdr;
+use fluxora_governance::CallData;
+
+// Raise the per-second rate cap on the stream contract to 5_000 units.
+let calldata = CallData::StreamSetMaxRate(5_000_i128).to_xdr(&env);
+let proposal_id = governance_client.propose(&proposer, &stream_address, &calldata);
+```
+
+On `execute`, the contract decodes the bytes back into
+`CallData::StreamSetMaxRate(5_000)` and dispatches
+`set_max_rate_per_second(5_000)` to `stream_address`. The emitted
+`ProposalExecuted { proposal_id, executor, target, calldata }` event carries the
+exact `calldata` bytes, so an indexer can decode them with `CallData::from_xdr`
+and confirm the applied rate without reading the stream contract's storage.
+
 ### Failure modes
 
 | Condition | Behaviour |
@@ -247,6 +271,29 @@ Security boundary: a successful `execute` call now proves that the downstream
 parameter change has been applied on-chain. The `ProposalExecuted` event carries
 the original `calldata` bytes, letting indexers verify the dispatched operation
 without any side-channel.
+
+### ABI stability of the `CallData` enum
+
+`CallData` is part of the protocol's external ABI: proposers encode against it
+and indexers decode `ProposalExecuted.calldata` against it. Because the enum
+derives `#[contracttype]`, each variant is serialised with its **name** as the
+leading symbol followed by its payload, so the variant *names and payload
+shapes* — not their declaration order — are what integrators depend on. Treat
+the enum under the frozen-discriminant rules in
+[`ABI_STABILITY.md` §5](ABI_STABILITY.md#5-frozen-enum-discriminants) and the
+breaking-change taxonomy in
+[`ABI_STABILITY.md` §3](ABI_STABILITY.md#3-what-counts-as-a-breaking-change):
+
+| Change to `CallData` | Breaking? | Why |
+|---|---|---|
+| Append a new variant at the end | No | Existing calldata still decodes. The new name is only recognised by deployments that ship the variant; older deployments return `InvalidCalldata` (19), which is already the documented behaviour for unknown variants. |
+| Reorder existing variants | No | Decoding keys off the variant name, not its position. |
+| Rename a variant | Yes | Changes the leading symbol, so calldata stored in open proposals and indexer decoders keyed on the old name stop matching. |
+| Remove a variant | Yes | Any proposal whose stored calldata references it can no longer execute. |
+| Change a variant's payload type or arity | Yes | Alters the ScVal shape after the name symbol, so previously-encoded calldata mis-decodes. |
+
+Any change in the "Breaking" rows requires a `CONTRACT_VERSION` increment and a
+new deployment, consistent with §3.1.
 
 
 ## Integration with the factory and stream contracts
