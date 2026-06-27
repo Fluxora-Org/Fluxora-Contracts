@@ -22,3 +22,13 @@ fluxora_stream = { path = "../stream", features = ["testutils"] }
 name = "factory_setters"
 path = "tests/factory_setters.rs"
 required-features = ["testutils"]
+
+[[test]]
+name = "factory_stream_e2e"
+path = "tests/factory_stream_e2e.rs"
+required-features = ["testutils"]
+
+[[test]]
+name = "adversarial_auth"
+path = "tests/adversarial_auth.rs"
+required-features = ["testutils"]

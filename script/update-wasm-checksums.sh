@@ -33,6 +33,8 @@ done
 # ---------------------------------------------------------------------------
 declare -A CONTRACTS
 CONTRACTS["fluxora_stream"]="target/wasm32-unknown-unknown/release/fluxora_stream.wasm"
+CONTRACTS["fluxora_factory"]="target/wasm32-unknown-unknown/release/fluxora_factory.wasm"
+CONTRACTS["fluxora_governance"]="target/wasm32-unknown-unknown/release/fluxora_governance.wasm"
 
 # ---------------------------------------------------------------------------
 # Verify required tools
