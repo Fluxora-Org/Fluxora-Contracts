@@ -199,6 +199,16 @@ Cancels a proposal, marking it as terminal. Emits `ProposalCancelled`.
   gating order used by `execute`.  Returns an error (`ProposalNotFound` or
   `ArithmeticOverflow`) only when `execute` would also error.  No
   authorization required.
+- `is_signer(signer) -> bool`: returns `true` iff `signer` is a registered
+  co-signer.  Cheap O(1) membership probe over `DataKey::SignerIndex`
+  (the same `Map<Address, bool>` consulted internally by `propose`,
+  `approve`, `add_signer`, and `remove_signer`).  Lets off-chain tooling
+  and cross-contract callers verify membership without iterating the
+  full signer list (which is O(n) on the wire and on the receiving side).
+  Returns `false` (no panic, no error) when the contract has not been
+  initialised, so callers can use it as a safe membership probe without
+  first having to check initialisation via `get_admin`.  Pure read — no
+  authorization, no state mutation, no TTL extension.
 
 ## Calldata encoding contract
 

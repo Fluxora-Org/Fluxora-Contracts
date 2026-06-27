@@ -610,7 +610,7 @@ impl FluxoraGovernance {
         proposer.require_auth();
 
         // O(1) signer membership check via Map index.
-        if !Self::is_signer(&env, &proposer)? {
+        if !Self::is_registered_signer(&env, &proposer)? {
             return Err(GovernanceError::NotASigner);
         }
 
@@ -668,7 +668,7 @@ impl FluxoraGovernance {
         approver.require_auth();
 
         // O(1) signer membership check via Map index.
-        if !Self::is_signer(&env, &approver)? {
+        if !Self::is_registered_signer(&env, &approver)? {
             return Err(GovernanceError::NotASigner);
         }
 
@@ -1039,6 +1039,51 @@ impl FluxoraGovernance {
         Ok(true)
     }
 
+    /// Return `true` if `signer` is a registered co-signer of the governance
+    /// contract.
+    ///
+    /// Cheap O(1) membership probe over `DataKey::SignerIndex` (the same
+    /// `Map<Address, bool>` index consulted internally by `propose`,
+    /// `approve`, `add_signer`, and `remove_signer`). Lets off-chain tooling
+    /// and cross-contract callers verify signer membership without
+    /// downloading the entire signer list via `get_signers` (which is O(n)
+    /// on the wire and O(n) on the receiving side).
+    ///
+    /// # Parameters
+    /// - `signer`: The address to test for membership.
+    ///
+    /// # Returns
+    /// - `true` if `signer` is in the current co-signer set.
+    /// - `false` if `signer` is not a co-signer, has been removed by
+    ///   `remove_signer`, or the contract has not been initialised.
+    ///
+    /// # Pre-init behaviour
+    /// Returns `false` (no panic, no error) when `init` has not been called.
+    /// This is a deliberate design choice: callers should be able to use
+    /// `is_signer` as a safe "is this address a potential signer?" probe
+    /// before reading other governance state, without first having to call
+    /// `get_admin` to check initialisation.
+    ///
+    /// # Security
+    /// - Pure read — no `require_auth`, no state mutation.
+    /// - Does **not** extend any TTL. Instance storage is kept alive by
+    ///   every state-mutating entrypoint (`init`, `add_signer`,
+    ///   `remove_signer`, `set_admin`, `propose`, `approve`, `execute`,
+    ///   `cancel_proposal`) via `bump_instance`. Letting `is_signer`
+    ///   extend TTL would let a third party keep a stale `SignerIndex`
+    ///   alive by repeatedly polling, which is unnecessary and would
+    ///   cost the network rent on every call.
+    /// - Reuses [`get_signer_index`], the same helper that backs the
+    ///   duplicate-prevention paths in `add_signer` and the membership
+    ///   check in `remove_signer`. There is no second source of truth;
+    ///   any address reported by `is_signer` is also reported as a
+    ///   duplicate by `add_signer` and as removable by `remove_signer`.
+    pub fn is_signer(env: Env, signer: Address) -> bool {
+        get_signer_index(&env)
+            .map(|index| index.contains_key(signer))
+            .unwrap_or(false)
+    }
+
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
@@ -1053,7 +1098,12 @@ impl FluxoraGovernance {
     }
 
     /// O(1) signer membership check via the Map index stored in instance storage.
-    fn is_signer(env: &Env, addr: &Address) -> Result<bool, GovernanceError> {
+    ///
+    /// Returns `Err(NotInitialized)` if the contract has not been initialised.
+    /// Used by `propose` and `approve` where the caller must be a registered
+    /// co-signer (and where calling on an uninitialised contract is itself an
+    /// error condition surfaced to the caller).
+    fn is_registered_signer(env: &Env, addr: &Address) -> Result<bool, GovernanceError> {
         let index = get_signer_index(env)?;
         Ok(index.contains_key(addr.clone()))
     }
@@ -1738,7 +1788,6 @@ mod tests {
     // -----------------------------------------------------------------------
     // is_executable
     // -----------------------------------------------------------------------
-
     #[test]
     fn test_is_executable_nonexistent_proposal() {
         let ctx = Ctx::setup();
@@ -1899,6 +1948,205 @@ mod tests {
         // One second past expiry — not executable.
         ctx.env.ledger().set_timestamp(1_000_000 + MAX_AGE + 1);
         assert_eq!(ctx.client.is_executable(&id), false);
+    }
+
+    #[test]
+    fn test_is_signer_returns_true_for_registered() {
+        let ctx = Ctx::setup();
+        // All three signers from `Ctx::setup` must be reported as members.
+        assert_eq!(ctx.client.is_signer(&ctx.signer_a), true);
+        assert_eq!(ctx.client.is_signer(&ctx.signer_b), true);
+        assert_eq!(ctx.client.is_signer(&ctx.signer_c), true);
+    }
+
+    #[test]
+    fn test_is_signer_returns_false_for_unregistered() {
+        let ctx = Ctx::setup();
+        // An address that was never added to the signer set.
+        let stranger = Address::generate(&ctx.env);
+        assert_eq!(ctx.client.is_signer(&stranger), false);
+    }
+
+    #[test]
+    fn test_is_signer_returns_false_for_admin_if_not_a_signer() {
+        // The admin address is distinct from the signer set; the admin is not
+        // automatically counted as a co-signer.
+        let ctx = Ctx::setup();
+        assert_eq!(ctx.client.is_signer(&ctx.admin), false);
+    }
+
+    #[test]
+    fn test_is_signer_returns_false_after_removal() {
+        let ctx = Ctx::setup();
+        // Sanity: signer_a starts as a member.
+        assert_eq!(ctx.client.is_signer(&ctx.signer_a), true);
+        // Admin removes signer_a.
+        ctx.client.remove_signer(&ctx.signer_a);
+        // After removal the index entry is gone; the view must reflect that.
+        assert_eq!(ctx.client.is_signer(&ctx.signer_a), false);
+        // Other signers are unaffected.
+        assert_eq!(ctx.client.is_signer(&ctx.signer_b), true);
+        assert_eq!(ctx.client.is_signer(&ctx.signer_c), true);
+    }
+
+    #[test]
+    fn test_is_signer_returns_true_after_add() {
+        let ctx = Ctx::setup();
+        let newcomer = Address::generate(&ctx.env);
+        // Pre-condition: not a member.
+        assert_eq!(ctx.client.is_signer(&newcomer), false);
+        // Admin adds newcomer.
+        ctx.client.add_signer(&newcomer);
+        // Post-condition: now a member.
+        assert_eq!(ctx.client.is_signer(&newcomer), true);
+    }
+
+    #[test]
+    fn test_is_signer_returns_false_pre_init_no_panic() {
+        // Contract deployed but `init` never called. `is_signer` MUST return
+        // `false` rather than panicking or returning an error.
+        let env = Env::default();
+        let contract_id = env.register_contract(None, FluxoraGovernance);
+        let client = FluxoraGovernanceClient::new(&env, &contract_id);
+
+        // Try several addresses, including a freshly generated one and the
+        // zero address-equivalent pattern. None must panic, all must report
+        // `false`.
+        let a1 = Address::generate(&env);
+        let a2 = Address::generate(&env);
+        assert_eq!(client.is_signer(&a1), false);
+        assert_eq!(client.is_signer(&a2), false);
+    }
+
+    #[test]
+    fn test_is_signer_pre_init_matches_no_signers() {
+        // Pre-init behaviour must match the "no signers" semantics of a freshly
+        // initialised contract whose signer list happens to be empty (although
+        // `init` rejects an empty signer list, the contract state is logically
+        // indistinguishable from pre-init for the purposes of `is_signer`).
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_000_000);
+        let contract_id = env.register_contract(None, FluxoraGovernance);
+        let admin = Address::generate(&env);
+        let client = FluxoraGovernanceClient::new(&env, &contract_id);
+        // Note: `init` requires at least 1 signer, so we cannot exercise the
+        // "post-init empty set" path directly. The pre-init path returns
+        // `false` for every address — the strictest possible membership view.
+        let stranger = Address::generate(&env);
+        assert_eq!(client.is_signer(&stranger), false);
+        // `admin` is also not a signer pre-init.
+        assert_eq!(client.is_signer(&admin), false);
+    }
+
+    #[test]
+    fn test_is_signer_agrees_with_get_signers_membership() {
+        // For every signer reported by `get_signers`, `is_signer` must return
+        // `true`; for every address NOT in `get_signers`, it must return
+        // `false`. This is the cross-check that `is_signer` and `get_signers`
+        // share a single source of truth (`DataKey::SignerIndex`).
+        let ctx = Ctx::setup();
+        let on_chain = ctx.client.get_signers();
+        for i in 0..on_chain.len() {
+            let addr = on_chain.get(i).unwrap();
+            assert_eq!(
+                ctx.client.is_signer(&addr),
+                true,
+                "is_signer disagreed with get_signers for a listed signer"
+            );
+        }
+        // A stranger that is definitely not in the set.
+        let stranger = Address::generate(&ctx.env);
+        assert_eq!(ctx.client.is_signer(&stranger), false);
+    }
+
+    #[test]
+    fn test_is_signer_can_be_called_repeatedly() {
+        // The new view must remain side-effect-free under repeated calls.
+        // We can't directly observe TTL bytes in the host, but we can at
+        // least confirm the call returns and does not error or panic when
+        // called many times in a row. If a future change accidentally adds
+        // `bump_instance` to `is_signer`, this test will still pass — the
+        // actual TTL guarantee is documented in the function's doc comment
+        // and the security note in `docs/governance.md`.
+        let ctx = Ctx::setup();
+        for _ in 0..32 {
+            assert_eq!(ctx.client.is_signer(&ctx.signer_a), true);
+            assert_eq!(
+                ctx.client.is_signer(&Address::generate(&ctx.env)),
+                false
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_signer_after_full_lifecycle() {
+        // Walk the full signer lifecycle: init, propose, approve, remove,
+        // re-add. `is_signer` must track `SignerIndex` correctly at every
+        // step.
+        let ctx = Ctx::setup();
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        // All three signers are still present.
+        assert_eq!(ctx.client.is_signer(&ctx.signer_a), true);
+        assert_eq!(ctx.client.is_signer(&ctx.signer_b), true);
+        assert_eq!(ctx.client.is_signer(&ctx.signer_c), true);
+
+        // Approvals proceed; signer_b approves too.
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+
+        // Remove signer_c (set goes from 3 to 2, still >= threshold=2).
+        ctx.client.remove_signer(&ctx.signer_c);
+        assert_eq!(ctx.client.is_signer(&ctx.signer_c), false);
+        assert_eq!(ctx.client.is_signer(&ctx.signer_a), true);
+        assert_eq!(ctx.client.is_signer(&ctx.signer_b), true);
+
+        // Re-add signer_c (back to 3).
+        ctx.client.add_signer(&ctx.signer_c);
+        assert_eq!(ctx.client.is_signer(&ctx.signer_c), true);
+    }
+
+    #[test]
+    fn test_is_signer_agrees_with_propose_membership_check() {
+        // The internal membership check used by `propose` (via
+        // `is_registered_signer`) and the public `is_signer` view must agree.
+        // If a non-signer reports `is_signer == true` but `propose` rejects
+        // with `NotASigner`, the two sources of truth have diverged.
+        let ctx = Ctx::setup();
+        let stranger = Address::generate(&ctx.env);
+        // Stranger: is_signer false, propose must fail with NotASigner.
+        assert_eq!(ctx.client.is_signer(&stranger), false);
+        let result = ctx
+            .client
+            .try_propose(&stranger, &ctx.dummy_target(), &ctx.calldata("x"));
+        assert_eq!(result, Err(Ok(GovernanceError::NotASigner)));
+        // Registered signer: is_signer true, propose must succeed.
+        assert_eq!(ctx.client.is_signer(&ctx.signer_a), true);
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        // Sanity: the proposal got a real ID.
+        assert_eq!(id, 0);
+    }
+
+    #[test]
+    fn test_is_signer_agrees_with_approve_membership_check() {
+        // Symmetric check for `approve` (also goes through
+        // `is_registered_signer`).
+        let ctx = Ctx::setup();
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        // Stranger cannot approve.
+        let stranger = Address::generate(&ctx.env);
+        assert_eq!(ctx.client.is_signer(&stranger), false);
+        let result = ctx.client.try_approve(&stranger, &id);
+        assert_eq!(result, Err(Ok(GovernanceError::NotASigner)));
+        // Registered signer can approve.
+        assert_eq!(ctx.client.is_signer(&ctx.signer_b), true);
+        ctx.client.approve(&ctx.signer_b, &id);
     }
 
     #[test]
