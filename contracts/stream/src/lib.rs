@@ -8,6 +8,8 @@ pub mod accrual;
 #[cfg(test)]
 mod checksum;
 mod token_check;
+#[cfg(test)]
+mod delegation;
 
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env, Map};
 use token_check::verify_token_behavior;
@@ -206,7 +208,7 @@ const KEEPER_FEE_BPS: u64 = 50;
 /// resume/cancel/complete transitions; `get_paused_stream_count()` O(1) view added;
 /// duplicate `ContractError` discriminant 23 resolved and the previously-missing
 /// variants declared.
-pub const CONTRACT_VERSION: u32 = 5;
+pub const CONTRACT_VERSION: u32 = 6;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -6080,7 +6082,9 @@ impl FluxoraStream {
     /// - `recipient`: Address to receive the excess tokens
     ///
     /// # Authorization
-    /// - Requires authorization from the contract admin
+    /// - Requires authorization from the contract admin only
+    /// - The recipient (sweep destination) does **not** need to authorize, allowing the
+    ///   admin to sweep to a cold/offline treasury wallet that cannot sign transactions
     ///
     /// # Returns
     /// - `i128`: Amount of excess tokens swept (0 if no excess exists)
@@ -6088,7 +6092,6 @@ impl FluxoraStream {
     /// # Errors
     /// - `ContractError::InvalidState`: If contract is not initialized
     /// - `ContractError::Unauthorized`: If caller is not the admin
-    /// - `ContractError::InvalidParams`: If recipient address is invalid
     ///
     /// # Events
     /// - Publishes `ExcessSwept { to, amount }` event on success
@@ -6096,7 +6099,8 @@ impl FluxoraStream {
     /// # Security
     /// - Only callable by admin to prevent unauthorized fund extraction
     /// - Uses tracked liabilities (`TotalLiabilities`) to ensure recipient funds are protected
-    /// - CEI pattern: calculates excess, updates state, then transfers tokens
+    ///   — the invariant `contract_balance >= total_liabilities` is maintained after every sweep
+    /// - CEI pattern: calculates excess, emits event, then transfers tokens
     /// - Reentrancy protected via `acquire_reentrancy_lock`
     ///
     /// # Calculation
@@ -6112,6 +6116,7 @@ impl FluxoraStream {
     /// - Does not affect active streams or recipient entitlements
     /// - Useful for recovering funds after mass cancellations or rate decreases
     /// - Should be called periodically by operators to maintain clean accounting
+    /// - The recipient does not co-sign, so cold/offline treasury wallets can receive sweeps
     ///
     /// # Example Scenarios
     /// 1. Stream cancelled at 50% completion → 50% refunded to sender, but if sender
@@ -6124,8 +6129,10 @@ impl FluxoraStream {
         let admin = get_admin(&env)?;
         admin.require_auth();
 
-        // Validate recipient address
-        recipient.require_auth();
+        // NOTE: recipient.require_auth() was intentionally removed.
+        // The sweep destination is chosen by the authenticated admin, so the recipient
+        // does NOT need to co-sign. This enables sweeping to cold/offline treasury
+        // wallets that cannot sign Soroban transactions.
 
         // Get contract's token balance
         let token_address = get_token(&env)?;
