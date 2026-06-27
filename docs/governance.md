@@ -150,7 +150,8 @@ Records an approval from a co-signer.
 
 ### `execute(executor, proposal_id)`
 
-Marks the proposal as executed after quorum and timelock.
+Marks the proposal as executed after quorum and timelock, then dispatches the
+encoded `CallData` operation to the `target` contract.
 
 - `executor` must authorize the call, but does not need to be a co-signer.
 - Execution requires the approval count to satisfy the threshold snapshotted in
@@ -158,8 +159,13 @@ Marks the proposal as executed after quorum and timelock.
 - Execution requires
   `env.ledger().timestamp() >= quorum_info.reached_at + GOVERNANCE_TIMELOCK_SECONDS`.
 - Execution is rejected after cancellation or expiry.
-- The proposal is marked executed and saved before `ProposalExecuted` is emitted.
-- Emits `ProposalExecuted` with the stored `target` and `calldata`.
+- The proposal is marked executed and saved before the cross-contract dispatch
+  (CEI ordering); if the dispatch panics the transaction reverts, restoring the
+  un-executed state so the call can be retried.
+- After a successful dispatch, emits `ProposalExecuted` with the stored `target`
+  and `calldata`.
+- Returns `GovernanceError::InvalidCalldata` (19) if the calldata bytes deserialise
+  but do not represent a known `CallData` variant.
 
 ### `cancel_proposal(caller, proposal_id)`
 
@@ -189,42 +195,69 @@ Cancels a proposal, marking it as terminal. Emits `ProposalCancelled`.
 
 ## Calldata encoding contract
 
-`calldata: Bytes` is intentionally opaque to `FluxoraGovernance`. The contract stores the
-bytes, emits them in `ProposalExecuted`, and enforces only the size bound
-`MAX_CALLDATA_BYTES = 4,096`. It does not decode function names, validate target ABI, or
-perform a generic runtime call into `target`.
+`calldata: Bytes` carries a typed, XDR-serialised `CallData` value. Proposers
+encode the intended operation by constructing a `CallData` variant and calling
+`.to_xdr(&env)` on it; `execute` decodes the bytes with `CallData::from_xdr`
+and dispatches the corresponding cross-contract call to `target`.
 
-The recommended client contract for calldata is:
+### Supported operations (`CallData` variants)
 
-1. Encode the intended downstream operation deterministically, including target entrypoint
-   and arguments. For example, an executor adapter may define `set_cap(i128)` as a small
-   tagged payload, or use a fixed XDR schema shared by wallets, indexers, and bots.
-2. Show the decoded intent to signers before `propose` and `approve`.
-3. Persist the exact bytes in the proposal. Indexers should treat the bytes emitted by
-   `ProposalExecuted` as the audited payload that must match the proposal record.
-4. Have the off-chain bot or typed on-chain adapter decode the bytes and decide whether to
-   call the `target` contract.
+| Variant | Target | Downstream call |
+|---|---|---|
+| `Noop` | — | No call (useful for governance-mechanics-only proposals) |
+| `StreamSetAdmin(Address)` | stream contract | `set_admin(new_admin)` |
+| `StreamSetMaxRate(i128)` | stream contract | `set_max_rate_per_second(max_rate)` |
+| `FactorySetAdmin(Address)` | factory contract | `set_admin(new_admin)` |
+| `FactorySetCap(i128)` | factory contract | `set_cap(max_deposit)` |
+| `FactorySetMinDuration(u64)` | factory contract | `set_min_duration(min_duration)` |
+| `FactorySetAllowlist(Address, bool)` | factory contract | `set_allowlist(recipient, allowed)` |
+| `FactorySetStreamContract(Address)` | factory contract | `set_stream_contract(new_contract)` |
 
-Security boundary: a successful `execute` call records governance consensus and emits an
-auditable payload. It does not prove that the downstream factory or stream change has
-already happened unless a separate adapter transaction or typed dispatch performs that call
-and emits its own event.
+### Encoding example (Rust)
 
-## Integration with the factory
+```rust
+use soroban_sdk::xdr::ToXdr;
+use fluxora_governance::CallData;
+
+// Encode a factory cap change to 100_000 units.
+let calldata = CallData::FactorySetCap(100_000_i128).to_xdr(&env);
+governance_client.propose(&proposer, &factory_address, &calldata);
+```
+
+### Failure modes
+
+| Condition | Behaviour |
+|---|---|
+| Bytes deserialise as a non-`CallData` ScVal (e.g. a plain `u32`) | `execute` returns `GovernanceError::InvalidCalldata` (19); proposal stays un-executed |
+| Completely non-XDR bytes | Host aborts the transaction; proposal state is reverted |
+| Target contract rejects the call (e.g. wrong admin) | Host aborts the transaction; proposal state is reverted |
+
+In every failure case the `executed = true` write is rolled back (Soroban atomic
+transaction semantics), so a failed execution can be retried after the underlying
+cause is resolved.
+
+Security boundary: a successful `execute` call now proves that the downstream
+parameter change has been applied on-chain. The `ProposalExecuted` event carries
+the original `calldata` bytes, letting indexers verify the dispatched operation
+without any side-channel.
+
+
+## Integration with the factory and stream contracts
 
 The `FluxoraFactory` contract stores `max_deposit`, `min_duration`, the recipient allowlist,
-and the stream contract address as admin-mutable parameters. To route parameter changes
-through governance:
+and the stream contract address as admin-mutable parameters. `FluxoraStream` exposes
+`set_admin` and `set_max_rate_per_second`. To route parameter changes through governance:
 
-1. Transfer factory admin to the governance contract address or to a typed adapter controlled
-   by governance.
-2. Encode the desired factory call, such as `set_cap(100_000)`, in `calldata`.
-3. After the governance proposal is executed and `ProposalExecuted` is emitted, an authorized
-   execution bot or typed adapter decodes `calldata` and applies the change to the factory.
+1. Transfer the target contract's admin to the governance contract address.
+2. Encode the desired operation as a `CallData` variant and serialise it with `.to_xdr(&env)`.
+3. Submit a proposal via `propose(proposer, target, calldata)`.
+4. Collect the required threshold of `approve` calls and wait for the timelock.
+5. Call `execute(executor, proposal_id)`. The governance contract decodes `calldata`,
+   calls the target with the encoded arguments, and emits `ProposalExecuted`.
 
-Soroban does not provide a generic arbitrary-calldata invocation primitive inside this
-contract. A fully on-chain execution path must be implemented as typed dispatch code, for
-example by importing `FluxoraFactoryClient` and matching on a known operation tag.
+No off-chain bot is required; the parameter change is enforced atomically within the
+`execute` transaction.
+
 
 ## Events
 
@@ -341,6 +374,8 @@ handle these discriminants from `contracts/governance/src/lib.rs`:
 | `InvalidThreshold` | 15 | `init` threshold is zero or exceeds signer count | Choose a threshold in the range `1..=signers.len()`. |
 | `QuorumWouldBreak` | 16 | `remove_signer` would leave fewer signers than threshold | Lower the threshold through a governed migration or keep enough signers registered. |
 | `DuplicateSigner` | 17 | `init` or `add_signer` includes an already-registered signer | Remove duplicate entries before submitting. |
+| `ArithmeticOverflow` | 18 | Proposal ID counter or timelock deadline would overflow `u32`/`u64` | Should not occur under normal network conditions; report as a bug if seen. |
+| `InvalidCalldata` | 19 | `execute` decoded the calldata bytes but they do not match any known `CallData` variant | Re-encode the calldata as a supported `CallData` variant and submit a new proposal. |
 
 ## Security considerations
 
@@ -361,8 +396,10 @@ handle these discriminants from `contracts/governance/src/lib.rs`:
    cancel a proposal.
 10. **Admin cannot bypass the process**: the admin can add/remove signers and rotate the
     admin key, but parameter changes still require quorum and timelock.
-11. **Calldata is an audit payload**: the governance contract does not decode or enforce
-    target-specific calldata semantics.
+11. **Typed calldata dispatch**: `execute` decodes `calldata` as a `CallData` XDR value and
+    dispatches the corresponding cross-contract call. Only operations explicitly listed in
+    the `CallData` enum are reachable. Unknown or malformed bytes cause `InvalidCalldata`
+    (or a host abort for non-XDR input), both of which revert the transaction.
 12. **CEI ordering in `execute`**: the proposal is marked executed and persisted before
     `ProposalExecuted` is emitted.
 13. **Threshold invariant prevents governance bricking**: `remove_signer` enforces

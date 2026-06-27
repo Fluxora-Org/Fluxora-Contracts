@@ -972,6 +972,193 @@ fn test_recipient_update_auth_enforcement() {
 }
 
 // ---------------------------------------------------------------------------
+// sweep_excess — authorization and liabilities invariant (#617)
+// ---------------------------------------------------------------------------
+
+/// Admin sweeps excess to a non-signing treasury wallet — the recipient does
+/// NOT need to authorize (this is the core fix for issue #617).
+#[test]
+fn test_sweep_excess_admin_to_cold_treasury_succeeds() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream();
+
+    // Add excess tokens to the contract (simulate trapped funds)
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.token_id,
+            fn_name: "transfer",
+            args: (&ctx.sender, &ctx.contract_id, 500_i128).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+    TokenClient::new(&ctx.env, &ctx.token_id).transfer(&ctx.sender, &ctx.contract_id, &500);
+
+    // Contract has 1500 tokens, 1000 liabilities, 500 excess
+    assert_eq!(
+        TokenClient::new(&ctx.env, &ctx.token_id).balance(&ctx.contract_id),
+        1_500
+    );
+
+    // Sweep to a cold treasury wallet (no recipient auth provided — only admin auth)
+    let treasury = Address::generate(&ctx.env);
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.admin,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "sweep_excess",
+            args: (&treasury,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let swept = ctx.client().sweep_excess(&treasury);
+    assert_eq!(swept, 500);
+    assert_eq!(
+        TokenClient::new(&ctx.env, &ctx.token_id).balance(&treasury),
+        500
+    );
+    assert_eq!(
+        TokenClient::new(&ctx.env, &ctx.token_id).balance(&ctx.contract_id),
+        1_000
+    );
+}
+
+/// Non-admin caller cannot sweep excess tokens.
+#[test]
+fn test_sweep_excess_rejects_non_admin() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream();
+
+    // Add excess
+    ctx.env.mock_all_auths();
+    TokenClient::new(&ctx.env, &ctx.token_id).transfer(&ctx.sender, &ctx.contract_id, &500);
+
+    // Attacker tries to sweep without admin auth
+    let attacker = Address::generate(&ctx.env);
+    let treasury = Address::generate(&ctx.env);
+    ctx.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "sweep_excess",
+            args: (&treasury,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = ctx.client().try_sweep_excess(&treasury);
+    assert!(result.is_err(), "non-admin must not be able to sweep");
+}
+
+/// Sweep when there is no excess returns 0 and does not transfer tokens.
+#[test]
+fn test_sweep_excess_zero_excess_is_noop() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream();
+
+    // No excess — contract balance equals liabilities
+    let treasury = Address::generate(&ctx.env);
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.admin,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "sweep_excess",
+            args: (&treasury,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let swept = ctx.client().sweep_excess(&treasury);
+    assert_eq!(swept, 0);
+    assert_eq!(
+        TokenClient::new(&ctx.env, &ctx.token_id).balance(&treasury),
+        0
+    );
+    assert_eq!(
+        TokenClient::new(&ctx.env, &ctx.token_id).balance(&ctx.contract_id),
+        1_000
+    );
+}
+
+/// Post-sweep contract balance is always >= total liabilities (core invariant).
+#[test]
+fn test_sweep_excess_preserves_solvency_invariant() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream();
+
+    // Add various amounts of excess
+    ctx.env.mock_all_auths();
+    TokenClient::new(&ctx.env, &ctx.token_id).transfer(&ctx.sender, &ctx.contract_id, &300);
+    TokenClient::new(&ctx.env, &ctx.token_id).transfer(&ctx.sender, &ctx.contract_id, &200);
+
+    let treasury = Address::generate(&ctx.env);
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.admin,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "sweep_excess",
+            args: (&treasury,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    ctx.client().sweep_excess(&treasury);
+
+    // After sweep, contract should still have exactly 1000 (the liability amount)
+    assert_eq!(
+        TokenClient::new(&ctx.env, &ctx.token_id).balance(&ctx.contract_id),
+        1_000
+    );
+
+    // Recipient can still withdraw their full entitlement
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.recipient,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "withdraw",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn, 0); // at t=0 no accrual yet
+}
+
+/// Sweep_excess to a cold wallet works even when recipient never authorizes
+/// anything — simulates real cold treasury scenario.
+#[test]
+fn test_sweep_excess_to_cold_wallet_no_recipient_interaction() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream();
+
+    // Add excess via sender transfer (no recipient involvement)
+    ctx.env.mock_all_auths();
+    TokenClient::new(&ctx.env, &ctx.token_id).transfer(&ctx.sender, &ctx.contract_id, &500);
+
+    // Cold treasury wallet that will never sign anything
+    let cold_treasury = Address::generate(&ctx.env);
+
+    // Only admin authorizes the sweep — cold treasury does NOT sign
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.admin,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "sweep_excess",
+            args: (&cold_treasury,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let swept = ctx.client().sweep_excess(&cold_treasury);
+    assert_eq!(swept, 500);
+    assert_eq!(
+        TokenClient::new(&ctx.env, &ctx.token_id).balance(&cold_treasury),
+        500
+    );
+}
+
+// ---------------------------------------------------------------------------
 // delegated_withdraw — validate_delegation_params coverage (#518)
 // ---------------------------------------------------------------------------
 //
