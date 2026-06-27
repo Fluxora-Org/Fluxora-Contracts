@@ -195,19 +195,53 @@ the `symbol_short!` constraint.
 
 See [docs/events.md](events.md) for the complete event catalogue across all contracts.
 
+## Instance Storage TTL Management
+
+The factory's entire configuration (Admin, StreamContract, MaxDepositCap, MinDuration, BatchCapEnforced, rate bounds, CreationPaused) is stored in **instance storage**, not persistent storage. Instance entries are automatically pruned by the Soroban ledger when their TTL (time-to-live) expires. A long-idle factory whose instance entries expire becomes uninitialized and bricks all admin operations — a denial-of-service against the contract itself.
+
+To prevent expiration, the factory implements a `bump_instance` helper that:
+- Extends the instance storage TTL to a safe threshold whenever the factory is actively used.
+- Mirrors the governance contract's TTL constants for consistency across contracts.
+
+### TTL Constants
+
+```rust
+const INSTANCE_LIFETIME_THRESHOLD: u32 = 17_280;   // Ledgers below which a bump is triggered
+const INSTANCE_BUMP_AMOUNT: u32 = 120_960;         // Bump target; ~60 days at 5-second ledger close
+```
+
+### When Instance TTL is Bumped
+
+- **`init()`**: Bumps TTL during factory initialization.
+- **Every admin setter**: `set_admin`, `set_stream_contract`, `set_cap`, `set_min_duration`, `set_batch_cap_enforcement`, `set_rate_bounds`, `set_factory_paused` all bump the instance TTL after a successful update.
+- **Stream creation**: Both `create_stream` and `create_streams` bump the instance TTL when called, since they read the factory configuration.
+
+### Why It Matters
+
+A factory that goes idle for longer than the TTL threshold (~60 days) will have its instance entries pruned by the ledger. Subsequent calls to `get_factory_config` or any admin setter will return `FactoryError::NotInitialized`, preventing further operations until the factory is re-initialized—an unrecoverable error on a deployed contract.
+
+By bumping the TTL on every write and read, even a purely inactive factory can survive indefinitely as long as it is occasionally queried or updated. An active factory (regularly creating streams or updating policies) will always keep the instance entries alive.
+
+### Security Note
+
+TTL bumps are performed internally by the factory and do not require additional authorization. They operate on already-protected instance storage without exposing any new attack surface. The bump operation is local to the factory; it does not invoke external contracts or expose any caller-controlled parameters.
+
 ## Code alignment checklist
 
 This document is aligned with the current implementation as follows:
 
 - `FluxoraFactory::init`, `set_cap`, and `set_min_duration` validate policy
   ranges before writing factory configuration.
+- All setters and stream creation functions call `bump_instance()` to extend
+  instance storage TTL and prevent config expiration during idle periods.
 - `FluxoraFactory::create_stream` enforces allowlist, cap, and duration checks
   before calling `sender.require_auth()`.
 - The factory forwards a linear `FluxoraStream::create_stream` call with
   `memo = None` and `StreamKind::Linear`.
 - `FluxoraStream::create_stream` calls `sender.require_auth()` before validating
   parameters and pulling `deposit_amount` from `sender`.
-- `contracts/stream/tests/factory_policy.rs` covers policy input validation,
-  factory policy gates, append-only error discriminants, and admin-guarded
-  policy updates that surround this authorization model.
+- `contracts/factory/tests/factory_setters.rs` covers policy input validation,
+  factory policy gates, append-only error discriminants, admin-guarded
+  policy updates, and instance storage TTL regression tests verifying that
+  config survives simulated idle periods and repeated updates near the TTL threshold.
 - Every state-changing entrypoint emits a structured event; see the Events table above.
