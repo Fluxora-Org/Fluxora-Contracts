@@ -139,7 +139,7 @@ Off-chain orchestrators and indexers that build payment batches often need to kn
 | **Cancellation** | `cancel_stream` / `cancel_stream_as_admin` / `bulk_cancel_streams` | Refunds unstreamed amount; frozen accrued stays for recipient         |
 | **Withdrawal**   | `withdraw` / `withdraw_to` / `batch_withdraw` | Recipient pulls accrued tokens; allowed on Paused if past `end_time`  |
 | **Completion**   | Automatic                                     | When `withdrawn_amount == deposit_amount`, status becomes `Completed` |
-| **Rotation**     | `update_recipient` / `accept_recipient_update` / `cancel_recipient_update` | Recipient transfers entitlement to a new address; pending rotations can be queried with `get_pending_recipient_update` |
+| **Rotation**     | `update_recipient` / `accept_recipient_update` / `cancel_recipient_update` | Sender proposes a new recipient; the current recipient must accept. Pending rotations are queryable via `get_pending_recipient_update`. Acceptance updates both the stream record and recipient indexes atomically. |
 | **Auto-claim**   | `set_auto_claim` / `revoke_auto_claim` / `trigger_auto_claim` | Recipient opts in to permissionless final claim at `end_time` to a chosen destination |
 
 ### State Transitions

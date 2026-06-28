@@ -3221,60 +3221,38 @@ impl FluxoraStream {
         Ok(withdrawable)
     }
 
-    /// Rotate the receiving address for a stream.
+    /// Rotate the receiving address for a stream (propose step).
     ///
-    /// This allows the current recipient to transfer their entitlement to a new
-    /// address (e.g. in case of a compromised wallet). Only the current recipient
-    /// may authorize this rotation.
+    /// Stores a pending recipient update that must be accepted by the current
+    /// recipient via [`accept_recipient_update`](FluxoraStream::accept_recipient_update)
+    /// or cancelled by the sender via [`cancel_recipient_update`](FluxoraStream::cancel_recipient_update).
     ///
     /// # Parameters
     /// - `stream_id`: Unique identifier of the stream to update.
-    /// - `new_recipient`: The new address that will receive the remaining streamed tokens.
+    /// - `new_recipient`: The proposed address that will receive the remaining streamed tokens.
     pub fn update_recipient(
         env: Env,
         stream_id: u64,
         new_recipient: Address,
     ) -> Result<(), ContractError> {
         require_not_globally_paused(&env)?;
-        let mut stream = load_stream(&env, stream_id)?;
+        let stream = load_stream(&env, stream_id)?;
 
-        // Only current recipient can authorize rotation
-        stream.recipient.require_auth();
+        Self::require_stream_sender(&stream.sender);
 
         if new_recipient == stream.recipient {
             return Err(ContractError::InvalidParams);
         }
 
-        let old_recipient = stream.recipient.clone();
+        if Self::get_pending_recipient_update(env.clone(), stream_id).is_some() {
+            return Err(ContractError::InvalidState);
+        }
 
-        // Update indices atomically
-        remove_stream_from_recipient_index(&env, &old_recipient, stream_id);
-        add_stream_to_recipient_index(&env, &new_recipient, stream_id, None);
-
-        // Update state
-        stream.recipient = new_recipient.clone();
-        save_stream(&env, &stream);
-
-        // Append to rotation history
-        append_rotation_entry(
-            &env,
-            stream_id,
-            RotationEntry {
-                old_addr: old_recipient.clone(),
-                new_addr: new_recipient.clone(),
-                ledger: env.ledger().sequence(),
-                role: RotationRole::Recipient,
-                authoriser: old_recipient.clone(),
-            },
-        );
-
-        // Emit event
-        env.events().publish(
-            (symbol_short!("recp_upd"), stream_id),
-            RecipientUpdated {
+        env.storage().persistent().set(
+            &DataKey::PendingRecipientUpdate(stream_id),
+            &PendingRecipientUpdate {
                 stream_id,
-                old_recipient,
-                new_recipient,
+                proposed_recipient: new_recipient,
             },
         );
 
@@ -3296,6 +3274,7 @@ impl FluxoraStream {
             .ok_or(ContractError::InvalidState)?;
         let mut stream = load_stream(&env, stream_id)?;
 
+        // Transition: propose → accept — only the current recipient may authorize.
         stream.recipient.require_auth();
         let old_recipient = stream.recipient.clone();
         remove_stream_from_recipient_index(&env, &old_recipient, stream_id);
@@ -3308,6 +3287,17 @@ impl FluxoraStream {
 
         stream.recipient = pending.proposed_recipient.clone();
         save_stream(&env, &stream);
+        append_rotation_entry(
+            &env,
+            stream_id,
+            RotationEntry {
+                old_addr: old_recipient.clone(),
+                new_addr: pending.proposed_recipient.clone(),
+                ledger: env.ledger().sequence(),
+                role: RotationRole::Recipient,
+                authoriser: old_recipient.clone(),
+            },
+        );
         env.storage()
             .persistent()
             .remove(&DataKey::PendingRecipientUpdate(stream_id));
@@ -3324,9 +3314,19 @@ impl FluxoraStream {
         Ok(())
     }
 
+    /// Cancel a pending recipient rotation. Only the stream sender may authorize.
+    ///
+    /// Transition: propose → cancel. Returns `InvalidState` when no pending update exists.
     pub fn cancel_recipient_update(env: Env, stream_id: u64) -> Result<(), ContractError> {
         let stream = load_stream(&env, stream_id)?;
         Self::require_stream_sender(&stream.sender);
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::PendingRecipientUpdate(stream_id))
+        {
+            return Err(ContractError::InvalidState);
+        }
         env.storage()
             .persistent()
             .remove(&DataKey::PendingRecipientUpdate(stream_id));
