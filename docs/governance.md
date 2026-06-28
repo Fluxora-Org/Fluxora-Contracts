@@ -362,27 +362,27 @@ produce.
 For stream and factory error tables, see [`error.md`](error.md). Governance clients should
 handle these discriminants from `contracts/governance/src/lib.rs`:
 
-| Error | Code | Typical source | Client guidance |
-|---|---:|---|---|
-| `NotInitialized` | 1 | Any entrypoint that reads admin or signers before `init` | Block governance actions until deployment calls `init(admin, signers, threshold)`. |
-| `AlreadyInitialized` | 2 | Second `init` call | Treat as an operator/configuration mistake; read current state instead of retrying. |
-| `Unauthorized` | 3 | Reserved for admin-auth failures in the error enum | Missing admin auth normally fails at `require_auth`; clients should still map this code if an adapter surfaces it. |
-| `NotASigner` | 4 | `propose` or `approve` from an address absent from `Signers` | Ask an admin to add the address or switch to a registered co-signer wallet. |
-| `ProposalNotFound` | 5 | `get_proposal`, `approve`, `execute`, or `cancel_proposal` with an unknown ID | Refresh proposal lists and verify the ID came from a `ProposalCreated` event. |
-| `AlreadyExecuted` | 6 | `approve`, `execute`, or `cancel_proposal` after `proposal.executed = true` | Stop collecting approvals and show the executed state. |
-| `QuorumNotReached` | 7 | `execute` before enough approvals, or missing `QuorumInfo` | Continue collecting signer approvals until `approval_count >= threshold`. |
-| `TimelockNotElapsed` | 8 | `execute` before `quorum_info.reached_at + GOVERNANCE_TIMELOCK_SECONDS` | Display `executable_after` from `QuorumReached` and retry after that timestamp. |
-| `AlreadyApproved` | 9 | Same signer calls `approve` twice for one proposal | Treat the signer as already counted; do not request another approval from that address. |
-| `CalldataTooLarge` | 10 | `propose` with `calldata.len() > MAX_CALLDATA_BYTES` | Compress or simplify the encoded operation, or split it into smaller proposals. |
-| `TooManySigners` | 11 | `init` or `add_signer` would exceed `MAX_SIGNERS` | Remove an old signer first or deploy governance with a smaller signer set. |
-| `ProposalExpired` | 12 | `approve` or `execute` after `MAX_PROPOSAL_AGE_SECONDS` | Treat the proposal as terminal and create a new proposal if the action is still needed. |
-| `ProposalCancelled` | 13 | `approve`, `execute`, or repeated cancellation after cancellation | Treat the proposal as terminal and stop collecting approvals. |
-| `NotProposerOrAdmin` | 14 | `cancel_proposal` from an address that is neither proposer nor admin | Ask the proposer or admin to cancel, or continue the proposal flow. |
-| `InvalidThreshold` | 15 | `init` threshold is zero or exceeds signer count | Choose a threshold in the range `1..=signers.len()`. |
-| `QuorumWouldBreak` | 16 | `remove_signer` would leave fewer signers than threshold | Lower the threshold through a governed migration or keep enough signers registered. |
-| `DuplicateSigner` | 17 | `init` or `add_signer` includes an already-registered signer | Remove duplicate entries before submitting. |
-| `ArithmeticOverflow` | 18 | Proposal ID counter or timelock deadline would overflow `u32`/`u64` | Should not occur under normal network conditions; report as a bug if seen. |
-| `InvalidCalldata` | 19 | `execute` decoded the calldata bytes but they do not match any known `CallData` variant | Re-encode the calldata as a supported `CallData` variant and submit a new proposal. |
+| Error | Code | Typical source (Raising entrypoints) | Recoverability | Client guidance |
+|---|---:|---|---|---|
+| `NotInitialized` | 1 | Any entrypoint that reads admin or signers before `init` (e.g. `get_admin`, `get_signers`, `get_threshold`, `get_signer_index`) | ⚠️ Config fix needed | Block governance actions until deployment calls `init(admin, signers, threshold)`. |
+| `AlreadyInitialized` | 2 | Second `init` call | ❌ Terminal | Treat as an operator/configuration mistake; read current state instead of retrying. |
+| `Unauthorized` | 3 | `set_admin`, `add_signer`, `remove_signer` (reserved for admin-auth failures) | ⚠️ Config fix needed | Missing admin auth normally fails at `require_auth`; clients should still map this code if an adapter surfaces it. |
+| `NotASigner` | 4 | `propose` or `approve` from an address absent from `Signers` | ⚠️ Config fix needed | Ask an admin to add the address or switch to a registered co-signer wallet. |
+| `ProposalNotFound` | 5 | `get_proposal`, `approve`, `execute`, or `cancel_proposal` with an unknown ID | ✅ Recoverable | Refresh proposal lists and verify the ID came from a `ProposalCreated` event. |
+| `AlreadyExecuted` | 6 | `approve`, `execute`, or `cancel_proposal` after `proposal.executed = true` | ❌ Terminal | Stop collecting approvals and show the executed state. |
+| `QuorumNotReached` | 7 | `execute` before enough approvals, or missing `QuorumInfo` | ✅ Recoverable | Continue collecting signer approvals until `approval_count >= threshold`. |
+| `TimelockNotElapsed` | 8 | `execute` before `quorum_info.reached_at + GOVERNANCE_TIMELOCK_SECONDS` | ✅ Recoverable | Display `executable_after` from `QuorumReached` and retry after that timestamp. |
+| `AlreadyApproved` | 9 | Same signer calls `approve` twice for one proposal | ❌ Terminal | Treat the signer as already counted; do not request another approval from that address. |
+| `CalldataTooLarge` | 10 | `propose` with `calldata.len() > MAX_CALLDATA_BYTES` | ✅ Recoverable | Compress or simplify the encoded operation, or split it into smaller proposals. |
+| `TooManySigners` | 11 | `init` or `add_signer` would exceed `MAX_SIGNERS` | ✅ Recoverable | Remove an old signer first or deploy governance with a smaller signer set. |
+| `ProposalExpired` | 12 | `approve` or `execute` after `MAX_PROPOSAL_AGE_SECONDS` | ❌ Terminal | Treat the proposal as terminal and create a new proposal if the action is still needed. |
+| `ProposalCancelled` | 13 | `approve`, `execute`, or repeated cancellation after cancellation | ❌ Terminal | Treat the proposal as terminal and stop collecting approvals. |
+| `NotProposerOrAdmin` | 14 | `cancel_proposal` from an address that is neither proposer nor admin | ⚠️ Config fix needed | Ask the proposer or admin to cancel, or continue the proposal flow. |
+| `InvalidThreshold` | 15 | `init` threshold is zero or exceeds signer count | ✅ Recoverable | Choose a threshold in the range `1..=signers.len()`. |
+| `QuorumWouldBreak` | 16 | `remove_signer` would leave fewer signers than threshold | ⚠️ Config fix needed | Lower the threshold through a governed migration or keep enough signers registered. |
+| `DuplicateSigner` | 17 | `init` or `add_signer` includes an already-registered signer | ✅ Recoverable | Remove duplicate entries before submitting. |
+| `ArithmeticOverflow` | 18 | Proposal ID counter or timelock deadline would overflow `u32`/`u64` | ⚠️ Bug / Non-recoverable | Should not occur under normal network conditions; report as a bug if seen. |
+| `InvalidCalldata` | 19 | `execute` decoded the calldata bytes but they do not match any known `CallData` variant | ✅ Recoverable | Re-encode the calldata as a supported `CallData` variant and submit a new proposal. |
 
 ## Security considerations
 

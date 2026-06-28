@@ -802,10 +802,270 @@ The factory contract (`contracts/factory`) uses a separate `FactoryError` enum.
 
 ---
 
+## GovernanceError Reference
+
+The governance contract (`contracts/governance/src/lib.rs`) uses a separate `GovernanceError`
+enum (annotated `#[contracterror] #[repr(u32)]`). Multisig operators and UI clients decode
+raw numeric error codes returned by governance entrypoints using the table below.
+
+### Quick-reference table
+
+> **Recoverability key**
+> - ✅ **Recoverable** — Retry later or with corrected inputs; no permanent state damage.
+> - ❌ **Terminal** — The proposal (or contract) is permanently in an unrecoverable state for that action; do not retry the same call.
+> - ⚠️ **Config fix needed** — Requires an admin or governance action before retrying.
+
+| Code | Variant | Description | Raising entrypoint(s) | Recoverable? |
+|-----:|---------|-------------|----------------------|:------------:|
+| 1 | `NotInitialized` | Contract has not been initialised; required storage is absent. | `get_admin`, `get_threshold`, `get_signers`, `get_signer_index` (called internally by every mutating entrypoint) | ⚠️ Config fix needed — call `init` |
+| 2 | `AlreadyInitialized` | Contract is already initialised; `init` may only be called once. | `init` | ❌ Terminal for this `init` call |
+| 3 | `Unauthorized` | Caller is not the contract admin. | `set_admin`, `add_signer`, `remove_signer` | ⚠️ Config fix needed — retry from admin wallet |
+| 4 | `NotASigner` | Caller is not a registered co-signer. | `propose`, `approve` | ⚠️ Config fix needed — admin must call `add_signer` |
+| 5 | `ProposalNotFound` | No proposal exists with the supplied ID. | `get_proposal`, `approve`, `execute`, `cancel_proposal`, `is_executable`, `get_quorum_info` | ✅ Recoverable — verify ID from `ProposalCreated` event |
+| 6 | `AlreadyExecuted` | Proposal has already been executed. | `approve`, `execute`, `cancel_proposal` | ❌ Terminal — proposal is complete |
+| 7 | `QuorumNotReached` | Approval count is below the required threshold, or `QuorumInfo` entry is absent. | `execute` | ✅ Recoverable — collect more signer approvals |
+| 8 | `TimelockNotElapsed` | Quorum was reached but `GOVERNANCE_TIMELOCK_SECONDS` (48 h) have not yet passed. | `execute` | ✅ Recoverable — retry after `executable_after` timestamp in `QuorumReached` event |
+| 9 | `AlreadyApproved` | This signer has already approved this proposal. | `approve` | ❌ Terminal for this signer — the approval is already counted |
+| 10 | `CalldataTooLarge` | `calldata.len()` exceeds `MAX_CALLDATA_BYTES` (4,096). | `propose` | ✅ Recoverable — compress or split the operation |
+| 11 | `TooManySigners` | Signer list would exceed `MAX_SIGNERS` (20). | `init`, `add_signer` | ✅ Recoverable — remove an old signer first |
+| 12 | `ProposalExpired` | Proposal age exceeds `MAX_PROPOSAL_AGE_SECONDS` (30 d). | `approve`, `execute` | ❌ Terminal — create a new proposal |
+| 13 | `ProposalCancelled` | Proposal has been cancelled; no further approvals or execution are allowed. | `approve`, `execute`, `cancel_proposal` (repeated cancellation) | ❌ Terminal — create a new proposal if action still needed |
+| 14 | `NotProposerOrAdmin` | Caller is neither the original proposer nor the contract admin. | `cancel_proposal` | ⚠️ Config fix needed — switch to proposer or admin wallet |
+| 15 | `InvalidThreshold` | Threshold is zero or exceeds the signer count; invariant `1 ≤ threshold ≤ signers.len()` violated. | `init` | ✅ Recoverable — choose a valid threshold and retry `init` (or use governance migration) |
+| 16 | `QuorumWouldBreak` | Removing the signer would leave fewer signers than the configured threshold. | `remove_signer` | ⚠️ Config fix needed — lower threshold first via a governed migration or add another signer |
+| 17 | `DuplicateSigner` | Address is already registered in the co-signer set. | `init`, `add_signer` | ✅ Recoverable — deduplicate the signer list |
+| 18 | `ArithmeticOverflow` | A proposal ID counter or timelock deadline calculation would overflow `u32`/`u64`. | `propose` (ID counter), `approve` (timelock deadline), `execute` (age deadline), `checked_deadline` (internal) | ⚠️ Should not occur under normal conditions; report as a bug |
+| 19 | `InvalidCalldata` | `calldata` bytes deserialised but do not match any known `CallData` variant. | `execute` | ✅ Recoverable — re-encode calldata as a supported `CallData` variant and submit a new proposal |
+
+### Detailed semantics
+
+#### NotInitialized (1)
+
+**Trigger**: Any entrypoint that reads `Admin`, `Signers`, `Threshold`, or `SignerIndex` from
+instance storage before `init` has been called.
+
+**Client action**: Block all governance UI actions until deployment confirms `init` has been
+called with a valid `(admin, signers, threshold)` triple.
+
+---
+
+#### AlreadyInitialized (2)
+
+**Trigger**: A second call to `init` when `DataKey::Admin` already exists in instance storage.
+
+**Client action**: This is an operator configuration mistake. Read current state with
+`get_admin()` / `get_signers()` / `get_threshold()` instead of retrying.
+
+---
+
+#### Unauthorized (3)
+
+**Trigger**: `set_admin`, `add_signer`, or `remove_signer` called without the current admin's
+`require_auth` passing.
+
+**Client action**: Ensure the transaction is signed by the current admin key. Use `get_admin()`
+to confirm which address holds the role.
+
+---
+
+#### NotASigner (4)
+
+**Trigger**: `propose` or `approve` from an address absent from the `Signers` vector / `SignerIndex` map.
+
+**Client action**: An admin must call `add_signer(new_address)` before retrying. Switching to a
+registered co-signer wallet is the fastest workaround.
+
+---
+
+#### ProposalNotFound (5)
+
+**Trigger**: Any entrypoint that calls `load_proposal` with an ID not in persistent storage,
+or an ID beyond `NextProposalId - 1`.
+
+**Client action**: Refresh the proposal list; the ID must originate from a `ProposalCreated`
+event. IDs are monotonically increasing starting from 0.
+
+---
+
+#### AlreadyExecuted (6)
+
+**Trigger**: `approve`, `execute`, or `cancel_proposal` when `proposal.executed == true`.
+
+**Client action**: Stop collecting approvals. Show the executed state to the user and surface
+the `ProposalExecuted` event details (executor, target, calldata).
+
+---
+
+#### QuorumNotReached (7)
+
+**Trigger**: `execute` when either:
+- `approval_count < threshold`, or
+- `DataKey::QuorumReachedAt(id)` entry is absent (quorum has not been reached yet).
+
+**Client action**: Continue collecting signer approvals until `approval_count >= threshold`.
+Use `get_proposal(id).approvals.len()` and `get_threshold()` to compute remaining required
+approvals.
+
+---
+
+#### TimelockNotElapsed (8)
+
+**Trigger**: `execute` called before `quorum_info.reached_at + GOVERNANCE_TIMELOCK_SECONDS`.
+
+**Client action**: This is the most common *expected* transient error for multisig UIs.
+Display the `executable_after` timestamp from the `QuorumReached` event and schedule a
+retry after that timestamp. **Do not treat this as a fatal error.**
+
+```text
+executable_after = quorum_reached_at + 172_800  (48 hours)
+```
+
+---
+
+#### AlreadyApproved (9)
+
+**Trigger**: The same co-signer calls `approve` a second time for the same proposal.
+
+**Client action**: The signer's approval is already counted. Show the current
+`approval_count` from `ProposalApproved` events. Do not request another approval from
+that address.
+
+---
+
+#### CalldataTooLarge (10)
+
+**Trigger**: `propose` when `calldata.len() > MAX_CALLDATA_BYTES` (4,096 bytes).
+
+**Client action**: Compress or simplify the XDR-encoded `CallData`. If the operation
+genuinely requires more data, split it across multiple proposals.
+
+---
+
+#### TooManySigners (11)
+
+**Trigger**: `init` or `add_signer` would push `signers.len()` above `MAX_SIGNERS` (20).
+
+**Client action**: Remove a stale or decommissioned signer first, or deploy a new
+governance instance with a pruned signer set.
+
+---
+
+#### ProposalExpired (12)
+
+**Trigger**: `approve` or `execute` when
+`env.ledger().timestamp() > proposal.created_at + MAX_PROPOSAL_AGE_SECONDS` (30 days).
+
+**Client action**: This proposal is permanently unexecutable. If the governed action is
+still required, submit a new proposal. Consider increasing approval cadence to avoid
+future expirations.
+
+---
+
+#### ProposalCancelled (13)
+
+**Trigger**:
+- `approve` or `execute` when `proposal.cancelled == true`.
+- `cancel_proposal` called a second time on an already-cancelled proposal.
+
+**Client action**: The proposal is permanently dead. Stop collecting approvals and surface
+the `ProposalCancelled` event (canceller, timestamp) to operators. Create a new proposal
+if the action is still needed.
+
+> ⚠️ **Security note**: Misclassifying this as *recoverable* would cause operators to
+> retry approvals on a cancelled proposal indefinitely, wasting gas. This is always a
+> terminal state.
+
+---
+
+#### NotProposerOrAdmin (14)
+
+**Trigger**: `cancel_proposal` from an address that is neither `proposal.proposer` nor the
+current `Admin`.
+
+**Client action**: Switch to the proposer or admin wallet. Use `get_proposal(id).proposer`
+and `get_admin()` to identify the authorised cancellers.
+
+---
+
+#### InvalidThreshold (15)
+
+**Trigger**: `init` when `threshold == 0` or `threshold > signers.len()`.
+
+**Client action**: Choose a threshold satisfying `1 ≤ threshold ≤ signers.len()`. This only
+arises during deployment; a governance migration is required for post-init changes.
+
+---
+
+#### QuorumWouldBreak (16)
+
+**Trigger**: `remove_signer` when `signers.len() - 1 < threshold`.
+
+**Client action**: Either add another signer first (`add_signer`) or lower the threshold
+through a governed parameter change before removing the signer.
+
+> ⚠️ **Security note**: This guard is critical — if bypassed, the governance contract could
+> reach a state where quorum is mathematically unreachable, permanently bricking execution.
+
+---
+
+#### DuplicateSigner (17)
+
+**Trigger**: `init` or `add_signer` when the candidate address already appears in the
+`SignerIndex` map.
+
+**Client action**: Deduplicate the signer list before submitting. Each co-signer address
+may occupy exactly one slot.
+
+---
+
+#### ArithmeticOverflow (18)
+
+**Trigger**:
+- `propose`: `NextProposalId + 1` would overflow `u32::MAX`.
+- `approve` / `execute`: `proposal.created_at + MAX_PROPOSAL_AGE_SECONDS` or
+  `quorum_reached_at + GOVERNANCE_TIMELOCK_SECONDS` would overflow `u64::MAX`.
+
+**Client action**: This should never occur under normal Soroban network conditions (ledger
+timestamps are in the year ~2100 range for u64 overflow). If seen, report as a contract bug.
+
+---
+
+#### InvalidCalldata (19)
+
+**Trigger**: `execute` deserialises the `calldata` bytes via `CallData::from_xdr` but the
+resulting `ScVal` does not match any known `CallData` enum variant (e.g., the proposer
+encoded a plain `u32` instead of a `CallData` XDR value).
+
+**Client action**: Re-encode the desired operation as a supported `CallData` variant (see
+the [Calldata encoding contract](governance.md#calldata-encoding-contract) in `governance.md`)
+and submit a new proposal with the corrected bytes. The failed proposal remains
+un-executed and can be retried if the calldata was encoded incorrectly.
+
+**Note**: Completely non-XDR bytes cause a host abort (transaction reverted, not this error).
+`InvalidCalldata` is only returned when deserialization succeeds but the decoded value has no
+matching `CallData` arm in `dispatch_call`.
+
+---
+
+### Discriminant-sync verification
+
+To verify that the documented discriminants match the live enum, run:
+
+```bash
+cargo test -p fluxora_governance governance_error_discriminants
+```
+
+This test (in `contracts/governance/src/lib.rs` or a companion test file) asserts the exact
+`u32` value of every `GovernanceError` variant and will fail if any value is changed without
+updating this table.
+
+---
+
 ## Residual Risks
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|------------|--------|------------|
 | Error code changes | Low | High | Versioning in client SDKs |
 | Missing error cases | Low | Medium | Comprehensive test coverage |
-| Client mishandling | Medium | Medium | This documentation | Dust-attack bypass | Very Low |	High | MIN_RATE_PER_SECOND enforced at validation layer
+| Client mishandling | Medium | Medium | This documentation |
+| Dust-attack bypass | Very Low | High | MIN_RATE_PER_SECOND enforced at validation layer |
