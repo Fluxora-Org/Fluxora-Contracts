@@ -109,7 +109,7 @@ This project pins dependencies for **reproducible builds** and **auditor compati
 
 | Component       | Version | Location                      | Purpose                                          |
 | --------------- | ------- | ----------------------------- | ------------------------------------------------ |
-| **Rust**        | 1.75    | `rust-toolchain.toml`         | Ensures consistent WASM compilation              |
+| **Rust**        | 1.94.1  | `rust-toolchain.toml`         | Ensures consistent WASM compilation              |
 | **soroban-sdk** | 21.7.7  | `contracts/stream/Cargo.toml` | Locked to tested Stellar Soroban network version |
 
 When upgrading versions:
@@ -128,21 +128,21 @@ git clone https://github.com/Fluxora-Org/Fluxora-Contracts.git
 cd Fluxora-Contracts
 ```
 
-- **Rust 1.75+** — Pinned in `rust-toolchain.toml` (auto-enforced via `rustup`)
+- **Rust 1.94.1** — Pinned in `rust-toolchain.toml` (auto-enforced via `rustup`)
 - **Soroban SDK 21.7.7** — Pinned in `contracts/stream/Cargo.toml` for reproducible builds
 - [Stellar CLI](https://developers.stellar.org/docs/tools/developer-tools) (optional, for deploy/test on network)
 
 Install dependencies:
 
 ```bash
-rustup update stable
+rustup toolchain install
 rustup target add wasm32-unknown-unknown
 ```
 
 Then verify:
 
 ```bash
-rustc --version       # Should show 1.75 or newer
+rustc --version       # Should show 1.94.1
 cargo --version
 stellar --version     # Only if installing Stellar CLI
 ```

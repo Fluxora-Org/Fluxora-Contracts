@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Keep CI on the auditor-approved compiler used for reproducible WASM.
+      - name: Set up Rust (pinned)
+        uses: dtolnay/rust-toolchain@1.94.1
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      # Fail fast if this workflow drifts from rust-toolchain.toml.
+      - name: Verify Rust version matches rust-toolchain.toml
+        run: python3 script/verify_rust_version.py
+      - name: Cargo fmt check
+        run: cargo fmt -- --check
+      - name: Cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  build:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      # Keep CI on the auditor-approved compiler used for reproducible WASM.
+      - name: Set up Rust (pinned)
+        uses: dtolnay/rust-toolchain@1.94.1
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      # Fail fast if this workflow drifts from rust-toolchain.toml.
+      - name: Verify Rust version matches rust-toolchain.toml
+        run: python3 script/verify_rust_version.py
+      - name: Build and verify reproducible WASM checksums
+        run: bash script/verify-wasm-checksum.sh
+      - name: Upload WASM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fluxora-wasm
+          path: target/wasm32-unknown-unknown/release/*.wasm
+
+  test:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      # Keep CI on the auditor-approved compiler used for reproducible WASM.
+      - name: Set up Rust (pinned)
+        uses: dtolnay/rust-toolchain@1.94.1
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      # Fail fast if this workflow drifts from rust-toolchain.toml.
+      - name: Verify Rust version matches rust-toolchain.toml
+        run: python3 script/verify_rust_version.py
+      - name: Run tests
+        run: cargo test --all --features testutils
+
+  coverage:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      # Keep CI on the auditor-approved compiler used for reproducible WASM.
+      - name: Set up Rust (pinned)
+        uses: dtolnay/rust-toolchain@1.94.1
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      # Fail fast if this workflow drifts from rust-toolchain.toml.
+      - name: Verify Rust version matches rust-toolchain.toml
+        run: python3 script/verify_rust_version.py
+      - name: Install cargo-tarpaulin
+        uses: taiki-e/install-action@cargo-tarpaulin
+      - name: Generate coverage
+        run: cargo tarpaulin --out Xml
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: tarpaulin-report.xml
