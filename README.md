@@ -12,7 +12,10 @@ Soroban smart contracts for the Fluxora treasury streaming protocol on Stellar. 
 - **[Recipient stream index](docs/recipient-stream-index.md)** — `get_recipient_streams` page cap, full-enumeration pattern, and DoS-prevention rationale.
 - **[Storage layout](docs/storage.md)** — Contract storage architecture, key design, and TTL policies.
 - **[Audit preparation](docs/audit.md)** — Entry-points and invariants for auditors.
-- **[Error codes](docs/error.md)** — Full ContractError reference.
+- **[Error codes](docs/error.md)** — Full ContractError reference and the
+  [FactoryError discriminant table](docs/error.md#factoryerror-reference-factory-contract)
+  (factory decisions map to a stable `u32` per variant; the CI guard is
+  `contracts/factory/tests/factory_error_discriminants.rs`).
 - **[Events](docs/events.md)** — Emitted event shapes and topics.
 
 ## What's in this repo
