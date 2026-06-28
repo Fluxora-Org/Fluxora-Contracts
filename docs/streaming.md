@@ -802,12 +802,14 @@ A naive decrease would retroactively lower the recipient's accrued tokens. To pr
 - **Check-Effects-Interactions (CEI)**: Computes accrual, reduces deposit amount, persists stream state, and finally refunds the difference to the sender.
 - **Rate Validation**: `0 < new_rate_per_second < current rate_per_second`.
 - **Refund**: The sender receives a refund of `old_deposit - new_deposit`, where `new_deposit = checkpointed_amount + new_rate * remaining_seconds`.
+- **Refund-non-negativity invariant**: The refund maths uses `checked_sub` (`old_deposit - new_deposit`), not `saturating_sub`. Any rate change whose `new_deposit` would **exceed** `old_deposit` — i.e. the new schedule streamable amount is *larger* than what has already been deposited — is rejected with `ContractError::ArithmeticOverflow`. The contract never silently grows a stream's deposit ceiling via `decrease_rate_per_second`; only `top_up_stream` adds new deposit, and `update_rate_per_second` re-prices under the existing ceiling. See `contracts/stream/tests/rate_decrease_after_withdraw.rs` for the regression coverage of this invariant.
 
 #### Failures
 - **Unauthorized**: Caller is not the original sender.
 - **InvalidState**: Stream is already expired (`now >= end_time`).
 - **StreamTerminalState**: Stream is Cancelled or Completed.
 - **InvalidParams**: `new_rate_per_second <= 0` or `new_rate_per_second >= old_rate`.
+- **ArithmeticOverflow**: `old_deposit < new_deposit` per the refund-non-negativity invariant above. The contract refuses to *grow* the stream's deposit ceiling via a rate decrease.
 
 ### update_rate_per_second: Observable Semantics
 
