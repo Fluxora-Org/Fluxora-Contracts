@@ -334,13 +334,17 @@ write that touches the entry:
 - **`QuorumReachedAt(id)`**: bumped when quorum is first reached inside
   `approve` (write path), and also bumped on read by `get_quorum_info`
   and `is_executable` (read path).
+- **`ProposalApprovalIdx(id)`**: bumped via `bump_approval_index` in
+  `get_approval_index` (read path), `save_approval_index` (write path),
+  `load_proposal` (keeps the index coupled to the proposal record TTL),
+  and explicitly after every successful `approve`.
 
 Constants:
 
 | Symbol | Value | Purpose |
 |---|---:|---|
 | `PERSISTENT_LIFETIME_THRESHOLD` | 17,280 ledgers (~1 d) | Soroban archival threshold; entries whose remaining TTL falls below this value are bump-extended. |
-| `PERSISTENT_BUMP_AMOUNT` | 120,960 ledgers (~7 d) | Bump amount applied on every read and write of `Proposal(id)`, and on `QuorumReachedAt(id)` at quorum-reach. |
+| `PERSISTENT_BUMP_AMOUNT` | 120,960 ledgers (~7 d) | Bump amount applied on every read and write of `Proposal(id)`, `ProposalApprovalIdx(id)`, and on `QuorumReachedAt(id)` at quorum-reach. |
 
 The 48-hour timelock corresponds to ~34,560 ledgers, which is comfortably
 covered by a single 7-day bump. The 30-day `MAX_PROPOSAL_AGE_SECONDS`
@@ -478,6 +482,19 @@ cover:
 The `QuorumReachedAt(proposal_id)` persistent storage entry is bumped on:
 - Every `approve` call when quorum is reached
 - Every `execute` call when reading the entry
+
+### ProposalApprovalIdx Entry TTL
+The `ProposalApprovalIdx(proposal_id)` duplicate-approval index must outlive the
+proposal record so quorum integrity cannot be undermined by storage expiry.
+Its TTL is bumped on:
+- Every `approve` call after recording an approval
+- Every read via `get_approval_index` and `load_proposal`
+- Every write via `save_approval_index`
+
+Security implication: if the approval index archives before the proposal,
+duplicate-approval detection silently fails and a signer could approve twice.
+The coupling to `load_proposal` ensures any path that touches the proposal
+also refreshes the index TTL when the index entry still exists.
 
 ### Constants
 | Constant | Value | Duration |
