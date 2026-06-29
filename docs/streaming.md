@@ -542,6 +542,60 @@ On failure (`InvalidParams` or `InvalidState`):
 - Rationale: Accrual math (in `accrual.rs`) is already overflow-safe via `checked_mul` and clamping.
 - Application-specific limits should be handled in the frontend or factory contracts.
 
+### Batch Creation: Atomic vs Partial
+
+The contract provides two entrypoints for creating multiple streams in a single transaction. Both accept a vector of `CreateStreamParams` and require a single authorization from the `sender`. For both functions, providing an empty vector safely returns an empty result (`Ok(Vec::new())`) with no side effects and no token transfers.
+
+#### `create_streams` (Atomic)
+
+```rust
+pub fn create_streams(
+    env: Env,
+    sender: Address,
+    streams: Vec<CreateStreamParams>,
+) -> Result<Vec<u64>, ContractError>
+```
+
+**Semantics:** All-or-nothing.
+- The contract first validates all entries.
+- If any single entry fails validation (e.g., `StartTimeInPast`, `InvalidParams`), the entire transaction reverts.
+- A single bulk token transfer is made for the sum of all `deposit_amount`s. If the sender lacks sufficient balance for the aggregate total, the transaction reverts.
+- Returns a `Vec<u64>` containing the new stream IDs in the exact order of the input.
+
+#### `create_streams_partial` (Non-Atomic)
+
+```rust
+pub fn create_streams_partial(
+    env: Env,
+    sender: Address,
+    streams: Vec<CreateStreamParams>,
+) -> Result<Vec<CreateStreamResult>, ContractError>
+
+pub struct CreateStreamResult {
+    pub success: bool,
+    pub stream_id: Option<u64>,
+    pub error: Option<u32>,
+}
+```
+
+**Semantics:** Failure isolation per entry.
+- The contract attempts to create each stream independently.
+- **Token Transfer Handling:** Tokens are pulled from the sender *per entry*. If an entry fails validation, it is skipped entirely (no tokens are pulled). If the per-entry token transfer fails, it is recorded as `InsufficientBalance` (error code 9).
+- Subsequent entries continue processing normally regardless of prior failures.
+- **Return Value:** Callers receive a `Vec<CreateStreamResult>` matching the input order. To learn which elements succeeded, callers iterate the result vector and check `result.success`. Successful entries include `Some(stream_id)`, while failed entries include `Some(error_code)`.
+
+**Example:**
+```rust
+let results = contract.create_streams_partial(&sender, &params)?;
+for (i, res) in results.iter().enumerate() {
+    if res.success {
+        println!("Stream {} created with ID {}", i, res.stream_id.unwrap());
+    } else {
+        println!("Stream {} failed with error code {}", i, res.error.unwrap());
+    }
+}
+```
+
 ### Relative-Time Helpers: `create_stream_relative` and `create_streams_relative`
 
 The contract provides convenience entry points that compute stream times relative to the current ledger timestamp, eliminating off-chain calculation errors that lead to `StartTimeInPast` failures.
@@ -568,18 +622,6 @@ pub fn create_stream_relative(
 ) -> Result<u64, ContractError>
 ```
 
-#### `create_streams_partial` (#411)
-
-From **CONTRACT_VERSION 5**, the contract provides an opt-in partial batch creation entrypoint that allows creating multiple streams in a single transaction with **failure isolation**.
-
-- **Non-Atomic**: Unlike `create_streams`, which reverts the entire transaction if any single stream fails, `create_streams_partial` attempts to create each stream independently.
-- **Per-Entry Results**: Returns a `Vec<CreateStreamResult>` where each entry contains:
-    - `success: bool`: True if the stream was created.
-    - `stream_id: Option<u64>`: The ID of the created stream (if success is true).
-    - `error: Option<u32>`: The error code (if success is false).
-- **Ordering**: Results are returned in the exact same order as the input parameters.
-- **Failures Handled**: Validation errors (e.g. `InvalidParams`) and token transfer failures (e.g. `InsufficientBalance`) for one entry do not block subsequent entries in the same batch.
-- **Auth**: Requires the funding `sender` to authorize the call.
 
 **Computation:**
 ```

@@ -76,6 +76,8 @@ The factory contract follows the Checks-Effects-Interactions (CEI) pattern impli
 - When `batch_cap_enforced` is enabled, the sum of all `deposit_amount` values in the batch is also checked against `MaxDepositCap`.
 - A single invalid entry causes the entire batch to revert, ensuring no partial or policy-violating streams can be created.
 
+> **Note:** The factory intentionally uses the atomic `create_streams` endpoint rather than `create_streams_partial` to ensure strict, all-or-nothing treasury policy compliance. For more details on the difference between atomic and partial batch creation at the stream contract level, see [Batch Creation: Atomic vs Partial](streaming.md#batch-creation-atomic-vs-partial).
+
 ## Pause Semantics
 
 The factory admin can toggle stream creation pause using `set_factory_paused(paused)`.
