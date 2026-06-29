@@ -64,6 +64,13 @@ pub enum FactoryError {
     InvalidMinDuration = 15,
     /// The requested memo exceeds the allowed max length.
     InvalidMemo = 16,
+    /// The supplied `stream_contract` address did not respond to the
+    /// `FluxoraStream::version()` smoke check (e.g. it is not a deployed
+    /// contract, or does not implement the `FluxoraStream` interface).
+    ///
+    /// Returned by `init` and `set_stream_contract` instead of letting an
+    /// invalid address be persisted and later host-trap inside `create_stream`.
+    InvalidStreamContract = 17,
 }
 
 #[contracttype]
@@ -96,6 +103,27 @@ fn require_admin(env: &Env) -> Result<Address, FactoryError> {
         .ok_or(FactoryError::NotInitialized)?;
     admin.require_auth();
     Ok(admin)
+}
+
+/// Smoke-test a candidate stream contract for the `FluxoraStream` interface.
+///
+/// This helper is called from `init` and `set_stream_contract` before the
+/// candidate address is persisted as the factory's `StreamContract`. It
+/// invokes the read-only, storage-free `version()` entrypoint via
+/// `FluxoraStreamClient::try_version`, which uses `Env::try_invoke_contract`
+/// internally so a missing contract, an EOA address, or a contract that does
+/// not expose `version()` surfaces as a typed `FactoryError` instead of a
+/// host trap.
+///
+/// `version()` is intentionally cheap to check: it performs no storage reads
+/// and works even on a `FluxoraStream` contract that has not yet been
+/// initialized, so it is safe to call during the factory's own bootstrap.
+fn validate_stream_contract(env: &Env, stream_contract: &Address) -> Result<(), FactoryError> {
+    let client = FluxoraStreamClient::new(env, stream_contract);
+    match client.try_version() {
+        Ok(Ok(_)) => Ok(()),
+        _ => Err(FactoryError::InvalidStreamContract),
+    }
 }
 
 /// Bump the instance storage TTL to prevent factory config expiration.
@@ -283,10 +311,30 @@ pub struct FluxoraFactory;
 impl FluxoraFactory {
     /// Initialize the factory with admin, stream contract, and policies.
     ///
+    /// # Authorization
+    /// The declared `admin` must authorize this call via `admin.require_auth()`.
+    /// This matches every other admin-only entrypoint (`set_admin`,
+    /// `set_stream_contract`, `set_allowlist`, `set_cap`, `set_min_duration`,
+    /// all of which go through `require_admin`) and prevents an unrelated
+    /// caller from front-running bootstrap by seeding the factory with an
+    /// admin address they do not control.
+    ///
+    /// # Validation
+    /// `stream_contract` must pass the `FluxoraStream` smoke check (see
+    /// [`validate_stream_contract`]) before it is persisted. This converts a
+    /// misconfigured stream address from a deferred host trap inside
+    /// `create_stream` into an immediate `FactoryError::InvalidStreamContract`
+    /// at setup time.
+    ///
     /// Accepted policy ranges:
     /// - `max_deposit`: `1..=i128::MAX` (`FactoryError::InvalidCap` otherwise).
     /// - `min_duration`: `0..=MAX_MIN_DURATION_SECONDS` seconds
     ///   (`FactoryError::InvalidMinDuration` otherwise).
+    ///
+    /// # Errors
+    /// - `FactoryError::AlreadyInitialized` if `init` has already succeeded.
+    /// - `FactoryError::InvalidStreamContract` if `stream_contract` does not
+    ///   respond to `FluxoraStream::version()`.
     pub fn init(
         env: Env,
         admin: Address,
@@ -298,6 +346,8 @@ impl FluxoraFactory {
             return Err(FactoryError::AlreadyInitialized);
         }
 
+        admin.require_auth();
+        validate_stream_contract(&env, &stream_contract)?;
         validate_cap(max_deposit)?;
         validate_min_duration(min_duration)?;
 
@@ -350,8 +400,15 @@ impl FluxoraFactory {
     }
 
     /// Admin updates the stream contract address.
+    ///
+    /// # Validation
+    /// `new_stream_contract` must pass the same `FluxoraStream` smoke check
+    /// applied in `init` (see [`validate_stream_contract`]), so a later swap
+    /// cannot silently install a non-`FluxoraStream` address. On failure the
+    /// previously configured `stream_contract` is left untouched.
     pub fn set_stream_contract(env: Env, new_stream_contract: Address) -> Result<(), FactoryError> {
         require_admin(&env)?;
+        validate_stream_contract(&env, &new_stream_contract)?;
 
         let old_contract: Address = env
             .storage()
