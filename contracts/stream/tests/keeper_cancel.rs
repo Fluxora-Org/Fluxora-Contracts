@@ -361,7 +361,7 @@ fn test_keeper_cancel_fee_reconciliation() {
     // Stream 1: deposit=10000, rate=5/s, end=1000. Canceled at end=1000
     // Accrued = 5000, refund gross = 5000, keeper fee = 25
     let stream_id1 = create_stream(&ctx, 10_000, 5, 0, 1000);
-    
+
     // Stream 2: deposit=20000, rate=10/s, end=1000. Canceled at end=1000
     // Accrued = 10000, refund gross = 10000, keeper fee = 50
     let stream_id2 = create_stream(&ctx, 20_000, 10, 0, 1000);
@@ -380,7 +380,7 @@ fn test_keeper_cancel_fee_reconciliation() {
     expected_total_fees += expected_fee_1;
 
     let fees_after_1 = ctx.client().get_protocol_fees_accrued();
-    
+
     // Accrued increases by exactly the keeper share (since it tracks keeper payouts)
     assert_eq!(fees_after_1, fees_before_1 + expected_fee_1);
     // Keeper received exactly the keeper share
@@ -394,7 +394,7 @@ fn test_keeper_cancel_fee_reconciliation() {
     expected_total_fees += expected_fee_2;
 
     let fees_after_2 = ctx.client().get_protocol_fees_accrued();
-    
+
     // Accrued increases by exactly the keeper share
     assert_eq!(fees_after_2, fees_after_1 + expected_fee_2);
     // Keeper received exactly the keeper share
@@ -403,9 +403,224 @@ fn test_keeper_cancel_fee_reconciliation() {
     // Sequential cancels accumulate correctly
     assert_eq!(fees_after_2, expected_total_fees);
 
-    // Security assertion: Accrued fees never exceed the contract's actual token balance 
-    // attributable to remaining liabilities. Even though the fee is paid out, we assert 
+    // Security assertion: Accrued fees never exceed the contract's actual token balance
+    // attributable to remaining liabilities. Even though the fee is paid out, we assert
     // this mathematical bound as requested.
     let contract_balance = ctx.token.balance(&ctx.contract_id);
     assert!(fees_after_2 <= contract_balance, "accrued fees exceed contract balance");
+}
+
+// ===========================================================================
+// get_keeper_fee_split view tests
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// View/cancel parity: preview matches the amounts actually paid by keeper_cancel
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_keeper_fee_split_matches_keeper_cancel_payout() {
+    let ctx = Ctx::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // deposit=10000, rate=5/s, end=1000 → accrued=5000, gross=5000
+    let stream_id = create_stream(&ctx, 10_000, 5, 0, 1000);
+
+    let cancel_ts = 1000 + GRACE + 1;
+    ctx.env.ledger().set_timestamp(cancel_ts);
+
+    let client = ctx.client();
+
+    // Preview before cancelling
+    let (preview_fee, preview_refund) = client.get_keeper_fee_split(&stream_id);
+
+    // Execute keeper_cancel and measure actual transfers
+    let sender_before = ctx.token.balance(&ctx.sender);
+    let keeper_before = ctx.token.balance(&ctx.keeper);
+
+    client.keeper_cancel(&stream_id, &ctx.keeper);
+
+    let keeper_received = ctx.token.balance(&ctx.keeper) - keeper_before;
+    // sender_refund = (sender_after - sender_before) since sender started with (1_000_000 - 10_000)
+    let sender_received = ctx.token.balance(&ctx.sender) - sender_before;
+
+    assert_eq!(preview_fee, keeper_received, "keeper_fee preview must match actual");
+    assert_eq!(preview_refund, sender_received, "sender_refund preview must match actual");
+}
+
+// ---------------------------------------------------------------------------
+// Not-yet-eligible: returns (0, 0) without error
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_keeper_fee_split_not_yet_eligible_returns_zeros() {
+    let ctx = Ctx::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = create_stream(&ctx, 1000, 1, 0, 1000);
+
+    // Within grace period
+    ctx.env.ledger().set_timestamp(1000 + GRACE - 1);
+
+    let (fee, refund) = ctx.client().get_keeper_fee_split(&stream_id);
+    assert_eq!((fee, refund), (0, 0));
+}
+
+// ---------------------------------------------------------------------------
+// Active stream before end_time: returns (0, 0)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_keeper_fee_split_active_before_end_returns_zeros() {
+    let ctx = Ctx::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = create_stream(&ctx, 1000, 1, 0, 1000);
+
+    ctx.env.ledger().set_timestamp(500); // still active
+
+    let (fee, refund) = ctx.client().get_keeper_fee_split(&stream_id);
+    assert_eq!((fee, refund), (0, 0));
+}
+
+// ---------------------------------------------------------------------------
+// Fully accrued stream: keeper_fee == 0, sender_refund == 0
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_keeper_fee_split_fully_accrued_zero_fee() {
+    let ctx = Ctx::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // deposit == rate * duration → nothing unstreamed
+    let stream_id = create_stream(&ctx, 1000, 1, 0, 1000);
+
+    ctx.env.ledger().set_timestamp(1000 + GRACE + 1);
+
+    let (fee, refund) = ctx.client().get_keeper_fee_split(&stream_id);
+    assert_eq!(fee, 0);
+    assert_eq!(refund, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Terminal state (already Cancelled): returns InvalidState
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_keeper_fee_split_cancelled_stream_errors() {
+    let ctx = Ctx::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = create_stream(&ctx, 1000, 1, 0, 1000);
+    ctx.client().cancel_stream(&stream_id);
+
+    ctx.env.ledger().set_timestamp(1000 + GRACE + 1);
+
+    let result = ctx.client().try_get_keeper_fee_split(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::InvalidState)));
+}
+
+// ---------------------------------------------------------------------------
+// Terminal state (Completed): returns InvalidState
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_keeper_fee_split_completed_stream_errors() {
+    let ctx = Ctx::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = create_stream(&ctx, 1000, 1, 0, 1000);
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    ctx.env.ledger().set_timestamp(1000 + GRACE + 1);
+
+    let result = ctx.client().try_get_keeper_fee_split(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::InvalidState)));
+}
+
+// ---------------------------------------------------------------------------
+// Non-existent stream: returns StreamNotFound
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_keeper_fee_split_nonexistent_stream_errors() {
+    let ctx = Ctx::setup();
+    ctx.env.ledger().set_timestamp(1000 + GRACE + 1);
+
+    let result = ctx.client().try_get_keeper_fee_split(&9999u64);
+    assert_eq!(result, Err(Ok(ContractError::StreamNotFound)));
+}
+
+// ---------------------------------------------------------------------------
+// Paused stream: eligible after grace period, fee split is non-zero
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_keeper_fee_split_paused_stream_eligible() {
+    let ctx = Ctx::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // deposit=10000, rate=5/s, end=1000 → gross=5000
+    let stream_id = create_stream(&ctx, 10_000, 5, 0, 1000);
+
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client()
+        .pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+
+    ctx.env.ledger().set_timestamp(1000 + GRACE + 1);
+
+    let (fee, refund) = ctx.client().get_keeper_fee_split(&stream_id);
+    assert!(fee > 0, "paused eligible stream should produce non-zero keeper fee");
+    assert!(refund > 0, "paused eligible stream should produce non-zero sender refund");
+    assert_eq!(fee + refund, refund + fee); // trivially true; real invariant below
+    // fee + refund == gross == deposit - accrued
+    let accrued = 5_000_i128; // rate * duration = 5 * 1000
+    let gross = 10_000 - accrued;
+    let expected_fee = gross * FEE_BPS / 10_000;
+    let expected_refund = gross - expected_fee;
+    assert_eq!(fee, expected_fee);
+    assert_eq!(refund, expected_refund);
+}
+
+// ---------------------------------------------------------------------------
+// Invariant: fee + refund == sender_refund_gross for all valid inputs
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_keeper_fee_split_fee_plus_refund_equals_gross() {
+    let ctx = Ctx::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let deposit = 7_500_i128;
+    let stream_id = create_stream(&ctx, deposit, 3, 0, 1000);
+
+    ctx.env.ledger().set_timestamp(1000 + GRACE + 1);
+
+    let (fee, refund) = ctx.client().get_keeper_fee_split(&stream_id);
+
+    // accrued = min(3 * 1000, 7500) = 3000; gross = 7500 - 3000 = 4500
+    let accrued = 3_000_i128;
+    let gross = deposit - accrued;
+    assert_eq!(fee + refund, gross, "fee + refund must equal gross unstreamed amount");
+}
+
+// ---------------------------------------------------------------------------
+// Idempotent: calling view twice gives same result (no state change)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_keeper_fee_split_is_idempotent() {
+    let ctx = Ctx::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = create_stream(&ctx, 10_000, 5, 0, 1000);
+    ctx.env.ledger().set_timestamp(1000 + GRACE + 1);
+
+    let client = ctx.client();
+    let result1 = client.get_keeper_fee_split(&stream_id);
+    let result2 = client.get_keeper_fee_split(&stream_id);
+
+    assert_eq!(result1, result2, "view must be idempotent");
 }
