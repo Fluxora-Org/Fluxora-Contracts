@@ -456,7 +456,7 @@ applicable (e.g. `AdminUpd`).
 | MinDurationUpdated | `["dur_upd"]` | `MinDurationUpdated { old_min_duration: u64, new_min_duration: u64 }` | When `set_min_duration` updates the minimum stream duration policy. |
 | RateBoundsUpdated | `["rate_bnd"]` | `RateBoundsUpdated { min_rate: Option<i128>, max_rate: Option<i128> }` | When `set_rate_bounds` updates rate-per-second bounds. `None` = argument not supplied by caller. |
 | FactoryPaused/Resumed | `["factory", "paused"]` / `["factory", "resumed"]` | `bool` | When `set_factory_paused` toggles the pause flag (pre-existing). |
-| FactoryStreamCreated | `["fct_strm"]` | `FactoryStreamCreated { stream_id: u64, sender: Address, recipient: Address, deposit_amount: i128, rate_per_second: i128 }` | After a policy-gated `create_stream` succeeds. Not emitted on any validation or downstream failure. |
+| FactoryStreamCreated | `["fct_strm"]` | `FactoryStreamCreated { stream_id: u64, sender: Address, recipient: Address, deposit_amount: i128, rate_per_second: i128 }` | After a policy-gated `create_stream` or batch `create_streams` succeeds (emits one event per created stream). Not emitted on any validation or downstream failure. |
 
 ### Example JSON (FactoryStreamCreated)
 
@@ -481,6 +481,25 @@ applicable (e.g. `AdminUpd`).
   "data": { "recipient": "G...RECIPIENT...", "allowed": true }
 }
 ```
+
+---
+
+## Governance contract events (`fluxora_governance`)
+
+All state-changing governance entrypoints emit structured events. Topics are ≤ 9
+characters (`symbol_short!` constraint). 
+
+| Event name | Topic(s) | Data (shape & types) | When emitted |
+|---|---|---|---|
+| ProposalCreated | `["proposed", proposal_id: u32]` | `ProposalCreated { proposal_id: u32, proposer: Address, target: Address }` | When `propose` is called successfully. |
+| ProposalApproved | `["approved", proposal_id: u32]` | `ProposalApproved { proposal_id: u32, approver: Address, approval_count: u32 }` | When a co-signer successfully approves a proposal. |
+| QuorumReached | `["quorum", proposal_id: u32]` | `QuorumReached { proposal_id: u32, quorum_reached_at: u64, executable_after: u64 }` | When a proposal reaches the approval threshold. |
+| ProposalCancelled | `["cancelled", proposal_id: u32]` | `ProposalCancelled { proposal_id: u32, canceller: Address }` | When a proposal is cancelled. |
+| ProposalExecuted | `["executed", proposal_id: u32]` | `ProposalExecuted { proposal_id: u32, executor: Address, target: Address, calldata: Bytes }` | When a proposal is executed successfully. |
+| SignerAdded | `["sgnr_add"]` | `SignerAdded { signer: Address }` | When `add_signer` adds a new co-signer. |
+| SignerRemoved | `["sgnr_rm"]` | `SignerRemoved { signer: Address }` | When `remove_signer` successfully removes a co-signer. |
+| AdminChanged | `["adm_chg"]` | `AdminChanged { old: Address, new: Address }` | When the contract admin is rotated. |
+| QuorumConfig | `["quor_cfg"]` | `QuorumConfig { threshold: u32, signer_count: u32 }` | Emitted after `SignerAdded` and `SignerRemoved` to allow indexers to track quorum health and threshold satisfiability. |
 
 ---
 

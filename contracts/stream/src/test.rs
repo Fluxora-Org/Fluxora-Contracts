@@ -1346,8 +1346,7 @@ fn test_create_stream_deposit_one_valid() {
         &1u64, // 1 second, so rate * duration = 1 == deposit
         &0,
         &None,
-        &None,
-        &None,
+        &crate::StreamKind::Linear,
     );
     let state = ctx.client().get_stream_state(&id);
     assert_eq!(state.deposit_amount, 1);
@@ -1758,8 +1757,7 @@ fn test_create_stream_deposit_less_than_total_panics() {
         &1000u64, // duration = 1000s, so total = 1000 tokens needed
         &0,
         &None,
-        &None,
-        &None,
+        &crate::StreamKind::Linear,
     );
 }
 
@@ -1797,8 +1795,7 @@ fn test_create_stream_deposit_greater_than_total_succeeds() {
         &1000u64, // duration = 1000s, total needed = 1000
         &0,
         &None,
-        &None,
-        &None,
+        &crate::StreamKind::Linear,
     );
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.deposit_amount, 2000);
@@ -2976,8 +2973,7 @@ fn test_accrued_never_exceeds_deposit_multiple_checks() {
         &100u64, // Would accrue 5,000 at end
         &0,
         &None,
-        &None,
-        &None,
+        &crate::StreamKind::Linear,
     );
 
     // Check at multiple time points
@@ -5323,7 +5319,7 @@ fn test_admin_ops_emit_events_during_global_emergency_pause() {
         paused_payload,
         StreamPaused {
             stream_id,
-            reason: crate::PauseReason::Administrative
+            reason: soroban_sdk::String::from_str(&ctx.env, "Administrative")
         },
         "pause_stream_as_admin must emit StreamPaused during global emergency pause"
     );
@@ -7605,8 +7601,7 @@ fn test_withdraw_excess_deposit_only_streams_calculated_amount() {
         &1000u64, // duration 1000s, so only 1000 will stream
         &0,
         &None,
-        &None,
-        &None,
+        &crate::StreamKind::Linear,
     );
 
     // At end, only 1000 should be withdrawable (rate * duration)
@@ -14809,7 +14804,7 @@ fn test_pause_stream_as_admin_emits_paused_event() {
         paused_payload,
         StreamPaused {
             stream_id,
-            reason: crate::PauseReason::Administrative
+            reason: soroban_sdk::String::from_str(&ctx.env, "Administrative")
         },
         "pause_stream_as_admin must publish StreamPaused event"
     );
@@ -19190,38 +19185,38 @@ mod recipient_index_stress {
         let page1 = ctx
             .client()
             .get_recipient_streams_paginated(&recipient, &0, &3);
-        assert_eq!(page1.len(), 3);
-        assert_eq!(page1.get(0).unwrap(), 0);
-        assert_eq!(page1.get(1).unwrap(), 1);
-        assert_eq!(page1.get(2).unwrap(), 2);
+        assert_eq!(page1.stream_ids.len(), 3);
+        assert_eq!(page1.stream_ids.get(0).unwrap(), 0);
+        assert_eq!(page1.stream_ids.get(1).unwrap(), 1);
+        assert_eq!(page1.stream_ids.get(2).unwrap(), 2);
 
         // Page 2: cursor=3, limit=3
         let page2 = ctx
             .client()
             .get_recipient_streams_paginated(&recipient, &3, &3);
-        assert_eq!(page2.len(), 3);
-        assert_eq!(page2.get(0).unwrap(), 3);
-        assert_eq!(page2.get(1).unwrap(), 4);
-        assert_eq!(page2.get(2).unwrap(), 5);
+        assert_eq!(page2.stream_ids.len(), 3);
+        assert_eq!(page2.stream_ids.get(0).unwrap(), 3);
+        assert_eq!(page2.stream_ids.get(1).unwrap(), 4);
+        assert_eq!(page2.stream_ids.get(2).unwrap(), 5);
 
         // Page 3: cursor=6, limit=3 (only 4 left)
         let page3 = ctx
             .client()
             .get_recipient_streams_paginated(&recipient, &6, &3);
-        assert_eq!(page3.len(), 3);
+        assert_eq!(page3.stream_ids.len(), 3);
 
         // Page 4: cursor=9, limit=3 (only 1 left)
         let page4 = ctx
             .client()
             .get_recipient_streams_paginated(&recipient, &9, &3);
-        assert_eq!(page4.len(), 1);
-        assert_eq!(page4.get(0).unwrap(), 9);
+        assert_eq!(page4.stream_ids.len(), 1);
+        assert_eq!(page4.stream_ids.get(0).unwrap(), 9);
 
         // Page 5: cursor=10, should be empty (past end)
         let page5 = ctx
             .client()
             .get_recipient_streams_paginated(&recipient, &10, &3);
-        assert_eq!(page5.len(), 0);
+        assert_eq!(page5.stream_ids.len(), 0);
     }
 
     #[test]
@@ -19254,7 +19249,7 @@ mod recipient_index_stress {
         let page = ctx
             .client()
             .get_recipient_streams_paginated(&recipient, &0, &200);
-        assert_eq!(page.len(), 100, "Should respect MAX_PAGE_SIZE of 100");
+        assert_eq!(page.stream_ids.len(), 100, "Should respect MAX_PAGE_SIZE of 100");
     }
 
     #[test]
@@ -19280,7 +19275,7 @@ mod recipient_index_stress {
         let result = ctx
             .client()
             .get_recipient_streams_paginated(&recipient, &100, &10);
-        assert_eq!(result.len(), 0, "Should return empty when cursor >= total");
+        assert_eq!(result.stream_ids.len(), 0, "Should return empty when cursor >= total");
     }
 
     #[test]
@@ -19305,7 +19300,7 @@ mod recipient_index_stress {
         let result = ctx
             .client()
             .get_recipient_streams_paginated(&recipient, &0, &0);
-        assert_eq!(result.len(), 0, "Zero limit should return empty");
+        assert_eq!(result.stream_ids.len(), 0, "Zero limit should return empty");
     }
 
     #[test]
@@ -19352,13 +19347,13 @@ mod recipient_index_stress {
         let page1 = ctx
             .client()
             .get_recipient_streams_paginated(&recipient1, &0, &10);
-        assert_eq!(page1.len(), 5);
+        assert_eq!(page1.stream_ids.len(), 5);
 
         // Paginate recipient2
         let page2 = ctx
             .client()
             .get_recipient_streams_paginated(&recipient2, &0, &10);
-        assert_eq!(page2.len(), 3);
+        assert_eq!(page2.stream_ids.len(), 3);
     }
 
     #[test]
@@ -19397,17 +19392,17 @@ mod recipient_index_stress {
         let page1 = ctx
             .client()
             .get_recipient_streams_paginated(&recipient, &0, &2);
-        assert_eq!(page1.len(), 2);
-        assert_eq!(page1.get(0).unwrap(), 0);
-        assert_eq!(page1.get(1).unwrap(), 1);
+        assert_eq!(page1.stream_ids.len(), 2);
+        assert_eq!(page1.stream_ids.get(0).unwrap(), 0);
+        assert_eq!(page1.stream_ids.get(1).unwrap(), 1);
 
         // Next page should start with 3 (not 2, which is closed)
         let page2 = ctx
             .client()
             .get_recipient_streams_paginated(&recipient, &2, &2);
-        assert_eq!(page2.len(), 2);
-        assert_eq!(page2.get(0).unwrap(), 3);
-        assert_eq!(page2.get(1).unwrap(), 4);
+        assert_eq!(page2.stream_ids.len(), 2);
+        assert_eq!(page2.stream_ids.get(0).unwrap(), 3);
+        assert_eq!(page2.stream_ids.get(1).unwrap(), 4);
     }
 
     #[test]
@@ -19436,19 +19431,19 @@ mod recipient_index_stress {
         // Simulate full export using pagination
         let mut all_stream_ids = Vec::new(&ctx.env);
         let mut cursor = 0u64;
-        let page_size = 10u64;
+        let page_size = 10u32;
 
         loop {
             let page = ctx
                 .client()
                 .get_recipient_streams_paginated(&recipient, &cursor, &page_size);
-            if page.is_empty() {
+            if page.stream_ids.is_empty() {
                 break;
             }
-            for id in page.iter() {
+            for id in page.stream_ids.iter() {
                 all_stream_ids.push_back(id);
             }
-            cursor += page.len() as u64;
+            cursor += page.stream_ids.len() as u64;
         }
 
         assert_eq!(all_stream_ids.len(), 25, "Should export all 25 streams");

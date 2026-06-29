@@ -158,6 +158,26 @@ pub struct CheckpointState {
 /// Checkpoint-aware accrual — the core pure function used by the contract for all
 /// accrual calculations after rate changes.
 ///
+/// **Withdrawable math (entitlement-preservation invariant)**
+///
+/// `get_withdrawable(stream_id)` is computed as `accrued(now) − withdrawn_amount`
+/// where `accrued` comes from `calculate_accrued_amount_checkpointed`. The
+/// `withdrawn_amount` is **monotonically non-decreasing across the entire
+/// stream lifecycle** (Active, Paused, rate-modified, Cancelled). A rate
+/// decrease can never:
+/// 1. Reduce `accrued(t)` below `checkpointed_amount` for `t ≤ checkpointed_at`
+///    (already-entitled tokens stay accessible across the rate change);
+/// 2. Reverse or zero out a previous `withdraw` (no double-count, no
+///    retroactive loss of paid-out tokens);
+/// 3. Move the `withdrawn_amount` value backwards (it is appended-only on
+///    successful withdrawals and unchanged by rate mutations).
+///
+/// In plain terms: once a recipient has withdrawn `W` tokens from a stream,
+/// any subsequent rate change, time advance, pause, resume, or decrease
+/// leaves them with at least `accrued(now) − W` claimable, where
+/// `accrued(now)` strictly grows with future time at the *current* rate
+/// (eventually capped by `deposit_amount` after the decrease refund).
+///
 /// # Parameters
 /// - `_start_time`         – original stream start; reserved for future cliff logic.
 /// - `checkpointed_amount` – tokens accrued under all **previous** rate epochs, locked in

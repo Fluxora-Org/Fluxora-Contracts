@@ -216,10 +216,16 @@ Returns streams within an ID range `[start_id, end_id]` with a strict result lim
 **Returns:**
 - `Vec<Stream>` — Stream structs in ascending ID order
 - Empty vector if `start_id > end_id` or no streams exist in range
-- Closed/archived stream IDs are silently skipped
+- Closed/archived stream IDs (holes) are silently skipped
+
+**Edge Case Behavior:**
+- **Holey Ranges:** Ranges containing closed or never-created IDs (holes) skip missing IDs and return only active streams in the specified range.
+- **Limit Clamping:** Limits above `MAX_PAGE_SIZE = 100` are strictly clamped to `MAX_PAGE_SIZE`.
+- **Start Beyond Max:** If `start_id` is greater than the highest created ID (e.g. `get_stream_count()`), the call returns an empty vector.
+- **Zero Limit:** Requesting a page with `limit = 0` returns an empty vector.
 
 **DoS Protection:**
-- `limit` is capped at `MAX_PAGE_SIZE` (100) regardless of input
+- `limit` is capped at `MAX_PAGE_SIZE` (100) regardless of input. This bounds the maximum execution and read costs, preventing memory or gas exhaustion DoS vectors.
 - Gas cost is O(min(limit, actual_results)), not O(range_size)
 - Each stream lookup is O(1)
 
@@ -302,3 +308,46 @@ All paginated views are tested for:
 - ✅ Full export workflow (accumulate all pages)
 
 See `contracts/stream/src/test.rs` for the complete test suite.
+
+
+
+# On-Chain Contract Upgrades
+
+## Overview
+
+Fluxora supports in-place contract upgrades via the `upgrade()` entrypoint. This allows the protocol to ship security fixes and feature improvements without requiring integrators to migrate to a new contract address.
+
+## How It Works
+
+The `upgrade()` function calls Soroban's `update_current_contract_wasm` host function, which atomically replaces the contract's WASM code in-place.
+
+## Authorization
+
+Upgrades are **admin-only**:
+
+- The admin address (set during `init()`) must sign the transaction
+- In production, the admin should be the governance contract (`fluxora_governance`)
+- Governance requires multi-signer approval (quorum) before the upgrade can execute
+
+## Storage Compatibility
+
+The upgraded WASM must maintain backward-compatible storage layout.
+
+### Safe Changes
+- Add new fields to `Stream` struct (append at end)
+- Add new variants to `DataKey` enum (append at end)
+- Add new functions to the contract
+- Gas optimizations
+
+### Unsafe Changes
+- Reorder `Stream` struct fields
+- Remove `Stream` struct fields
+- Reorder `DataKey` enum variants
+- Remove `DataKey` variants
+
+## Upgrade Workflow
+
+### 1. Build New WASM
+```bash
+cargo build --target wasm32-unknown-unknown --release -p fluxora_stream
+stellar contract optimize --wasm target/wasm32-unknown-unknown/release/fluxora_stream.wasm

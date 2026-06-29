@@ -13,6 +13,47 @@ The `fluxora_factory` acts as a proxy entrypoint to enforce these policies:
 - **Minimum Duration**: Enforces a `MinDuration` (i.e. `end_time - start_time >= min_duration`), preventing overly short or instantaneous streams.
 - **Time Relationship Checks**: Rejects invalid schedules before calling `FluxoraStream`. `start_time` must be strictly less than `end_time`, and `cliff_time` must be within the inclusive `[start_time, end_time]` window.
 
+## Initialization & Stream Contract Validation
+
+### Authorization contract
+
+`init` requires the declared `admin` to authorize the call via
+`admin.require_auth()`, exactly like every other admin-only entrypoint
+(`set_admin`, `set_stream_contract`, `set_allowlist`, `set_cap`,
+`set_min_duration`, all of which route through the shared `require_admin`
+helper). Without this, any unrelated caller could front-run bootstrap by
+calling `init` first and seeding the factory with an admin address they
+control, before the intended admin's transaction lands.
+
+`init` checks `AlreadyInitialized` before requiring auth, so a doomed
+re-initialization call does not need to pay for, or supply, an authorization
+entry — `admin.require_auth()` is only evaluated once it is known the call
+could otherwise succeed.
+
+### Stream contract validation
+
+Both `init` and `set_stream_contract` validate the supplied `stream_contract`
+address before persisting it. The factory invokes the read-only
+`FluxoraStream::version()` entrypoint via `FluxoraStreamClient::try_version`.
+Because `try_version` uses `Env::try_invoke_contract` internally, a missing
+contract, an EOA (non-contract) address, or a deployed contract that does not
+expose `version()` is caught as a typed error and returned as
+`FactoryError::InvalidStreamContract`, instead of letting the bad address be
+stored and only discovered later when `create_stream` host-traps on the
+cross-contract call into `FluxoraStream::create_stream`.
+
+`version()` is intentionally cheap and storage-free, and is documented to
+work even before the target `FluxoraStream` contract's own `init` has been
+called — so the smoke check never depends on the stream contract's
+initialization state.
+
+A failed validation leaves existing state untouched:
+- In `init`, no instance storage keys are written if `stream_contract` fails
+  validation; a subsequent `init` call with a valid address can still
+  succeed.
+- In `set_stream_contract`, the previously configured `stream_contract` is
+  left in place if the new address fails validation.
+
 ## Policy Parameter Validation
 
 Policy parameters are validated before they are written by `init`, `set_cap`,
@@ -27,8 +68,8 @@ policy unchanged.
 | `min_duration: u64` | `init`, `set_min_duration` | `0..=3_153_600_000` seconds (`MAX_MIN_DURATION_SECONDS`, 100 365-day years) | `FactoryError::InvalidMinDuration` | `0` is valid and means no additional factory-level minimum duration beyond the required `start_time < end_time` invariant. |
 
 These ranges are also documented in the Rust `///` comments on the factory
-entrypoints. Error discriminants are append-only; `InvalidCap = 9` and
-`InvalidMinDuration = 10` were added without renumbering existing values.
+entrypoints. Error discriminants are append-only; new variants are added without
+renumbering existing values.
 
 ## Time Validation
 
@@ -72,9 +113,22 @@ The factory contract follows the Checks-Effects-Interactions (CEI) pattern impli
 `FluxoraFactory::create_streams` is an atomic batch wrapper around `FluxoraStream::create_streams`.
 - Each entry is validated against the factory policy individually.
 - Each recipient in the batch must be allowlisted.
-- Each stream must individually satisfy the per-stream cap and minimum duration.
+- Each stream must individually satisfy the per-stream cap, minimum duration, and any configured rate-per-second bounds (MinRatePerSecond and MaxRatePerSecond).
 - When `batch_cap_enforced` is enabled, the sum of all `deposit_amount` values in the batch is also checked against `MaxDepositCap`.
 - A single invalid entry causes the entire batch to revert, ensuring no partial or policy-violating streams can be created.
+
+> **Note:** The factory intentionally uses the atomic `create_streams` endpoint rather than `create_streams_partial` to ensure strict, all-or-nothing treasury policy compliance. For more details on the difference between atomic and partial batch creation at the stream contract level, see [Batch Creation: Atomic vs Partial](streaming.md#batch-creation-atomic-vs-partial).
+
+### Registry writes for batch creation
+
+After the downstream `FluxoraStream::create_streams` call succeeds, the factory appends every returned stream ID to the `FactoryStreamIds` persistent registry **in creation order** with a single TTL bump for the whole batch. This ensures:
+
+- `get_factory_stream_count` increases by the number of streams in the batch.
+- `get_factory_streams_paginated` returns all batch IDs in insertion order.
+- An empty batch produces no registry writes and leaves the count unchanged.
+- IDs are only written after the cross-contract call succeeds; a downstream failure leaves no orphan index entries.
+
+This mirrors the behaviour of the single `create_stream` path, which appends its one ID immediately after successful creation. The batch path is therefore equivalent to N sequential single-stream creations from the registry's perspective, but O(1) TTL bumps instead of O(N).
 
 ## Cross-contract authorization model
 
@@ -165,7 +219,7 @@ The factory has an `Admin` key managed via `set_admin`. The admin can:
 - Call `set_cap` to update the max deposit limit.
 - Call `set_min_duration` to update the minimum duration requirement.
 - Call `set_batch_cap_enforcement` to toggle aggregate batch-cap validation.
-- Call `set_stream_contract` to upgrade or switch the underlying stream primitive if a new version is deployed.
+- Call `set_stream_contract` to upgrade or switch the underlying stream primitive if a new version is deployed. The new address must pass the same `FluxoraStream::version()` smoke check enforced in `init` (see [Initialization & Stream Contract Validation](#initialization--stream-contract-validation)); a bad address is rejected with `FactoryError::InvalidStreamContract` and the previous stream contract remains active.
 - Call `set_rate_bounds` to configure optional inclusive rate-per-second bounds.
 
 The factory admin can shape policy and the target stream contract, but cannot
@@ -195,19 +249,59 @@ the `symbol_short!` constraint.
 
 See [docs/events.md](events.md) for the complete event catalogue across all contracts.
 
+## Instance Storage TTL Management
+
+The factory's entire configuration (Admin, StreamContract, MaxDepositCap, MinDuration, BatchCapEnforced, rate bounds, CreationPaused) is stored in **instance storage**, not persistent storage. Instance entries are automatically pruned by the Soroban ledger when their TTL (time-to-live) expires. A long-idle factory whose instance entries expire becomes uninitialized and bricks all admin operations — a denial-of-service against the contract itself.
+
+To prevent expiration, the factory implements a `bump_instance` helper that:
+- Extends the instance storage TTL to a safe threshold whenever the factory is actively used.
+- Mirrors the governance contract's TTL constants for consistency across contracts.
+
+### TTL Constants
+
+```rust
+const INSTANCE_LIFETIME_THRESHOLD: u32 = 17_280;   // Ledgers below which a bump is triggered
+const INSTANCE_BUMP_AMOUNT: u32 = 120_960;         // Bump target; ~60 days at 5-second ledger close
+```
+
+### When Instance TTL is Bumped
+
+- **`init()`**: Bumps TTL during factory initialization.
+- **Every admin setter**: `set_admin`, `set_stream_contract`, `set_cap`, `set_min_duration`, `set_batch_cap_enforcement`, `set_rate_bounds`, `set_factory_paused` all bump the instance TTL after a successful update.
+- **Stream creation**: Both `create_stream` and `create_streams` bump the instance TTL when called, since they read the factory configuration.
+
+### Why It Matters
+
+A factory that goes idle for longer than the TTL threshold (~60 days) will have its instance entries pruned by the ledger. Subsequent calls to `get_factory_config` or any admin setter will return `FactoryError::NotInitialized`, preventing further operations until the factory is re-initialized—an unrecoverable error on a deployed contract.
+
+By bumping the TTL on every write and read, even a purely inactive factory can survive indefinitely as long as it is occasionally queried or updated. An active factory (regularly creating streams or updating policies) will always keep the instance entries alive.
+
+### Security Note
+
+TTL bumps are performed internally by the factory and do not require additional authorization. They operate on already-protected instance storage without exposing any new attack surface. The bump operation is local to the factory; it does not invoke external contracts or expose any caller-controlled parameters.
+
 ## Code alignment checklist
 
 This document is aligned with the current implementation as follows:
 
 - `FluxoraFactory::init`, `set_cap`, and `set_min_duration` validate policy
   ranges before writing factory configuration.
+- All setters and stream creation functions call `bump_instance()` to extend
+  instance storage TTL and prevent config expiration during idle periods.
 - `FluxoraFactory::create_stream` enforces allowlist, cap, and duration checks
   before calling `sender.require_auth()`.
 - The factory forwards a linear `FluxoraStream::create_stream` call with
   `memo = None` and `StreamKind::Linear`.
 - `FluxoraStream::create_stream` calls `sender.require_auth()` before validating
   parameters and pulling `deposit_amount` from `sender`.
+- `FluxoraFactory::create_streams` appends all returned stream IDs to the
+  `FactoryStreamIds` registry in creation order after the cross-contract call
+  succeeds, with a single TTL bump for the whole batch (see `append_stream_ids_batch`
+  in `contracts/factory/src/lib.rs`).
 - `contracts/stream/tests/factory_policy.rs` covers policy input validation,
   factory policy gates, append-only error discriminants, and admin-guarded
   policy updates that surround this authorization model.
+- `contracts/factory/tests/factory_stream_e2e.rs` includes regression tests for
+  the batch registry path: count increase, insertion-order pagination, empty-batch
+  no-op, single-element batch, single-path parity, and mixed single+batch accumulation.
 - Every state-changing entrypoint emits a structured event; see the Events table above.

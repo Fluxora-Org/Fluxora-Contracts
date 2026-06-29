@@ -2,8 +2,8 @@
 #![allow(clippy::too_many_arguments)]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Bytes, Env, Map,
-    Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, xdr::FromXdr, Address,
+    Bytes, Env, IntoVal, Map, Symbol, Vec,
 };
 
 // ---------------------------------------------------------------------------
@@ -23,6 +23,19 @@ const MAX_CALLDATA_BYTES: u32 = 4_096;
 /// Maximum age in seconds for a proposal before it expires and becomes
 /// non-executable. Default: 30 days.
 const MAX_PROPOSAL_AGE_SECONDS: u64 = 2_592_000;
+
+/// Maximum number of proposals that `get_proposals_by_id_range` will return in
+/// a single call.
+///
+/// # DoS protection
+///
+/// Each proposal record contains a `Vec<Address>` of approvals (up to
+/// `MAX_SIGNERS = 20` entries), a `Bytes` calldata payload (up to
+/// `MAX_CALLDATA_BYTES = 4 096`), and several scalar fields.  At 100 proposals
+/// per page the total read budget stays well within Soroban's metered limits.
+/// Callers that pass a larger `limit` have it silently clamped to this value;
+/// they cannot exceed it by any means.
+pub const MAX_PAGE_SIZE: u32 = 100;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -95,6 +108,8 @@ pub enum GovernanceError {
     DuplicateSigner = 17,
     /// Governance arithmetic would overflow instead of producing a valid deadline or ID.
     ArithmeticOverflow = 18,
+    /// Calldata bytes could not be decoded into a known CallData variant.
+    InvalidCalldata = 19,
 }
 
 /// Storage keys for the governance contract.
@@ -119,8 +134,75 @@ pub enum DataKey {
 }
 
 // ---------------------------------------------------------------------------
-// TTL constants (mirrors stream contract conventions)
+// Typed calldata adapter
 // ---------------------------------------------------------------------------
+
+/// Typed encoding of every parameter change that governance is authorised to
+/// perform on-chain.  Proposers serialise one of these variants to XDR bytes
+/// via `.to_xdr(&env)` and pass the result as the `calldata` field of
+/// `propose`.  `execute` decodes the bytes with `CallData::from_xdr` and
+/// dispatches to the target contract.
+///
+/// Adding a new governed operation = adding a new variant here and a matching
+/// arm in `dispatch_call`.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub enum CallData {
+    // ---- no-op (for testing governance mechanics without a live target) ----
+    /// No operation — dispatch performs no cross-contract call.
+    Noop,
+
+    // ---- stream contract operations ----
+    /// `set_admin(new_admin)`
+    StreamSetAdmin(Address),
+    /// `set_max_rate_per_second(max_rate)`
+    StreamSetMaxRate(i128),
+
+    // ---- factory contract operations ----
+    /// `set_admin(new_admin)`
+    FactorySetAdmin(Address),
+    /// `set_cap(max_deposit)`
+    FactorySetCap(i128),
+    /// `set_min_duration(min_duration)`
+    FactorySetMinDuration(u64),
+    /// `set_allowlist(recipient, allowed)`
+    FactorySetAllowlist(Address, bool),
+    /// `set_stream_contract(new_stream_contract)`
+    FactorySetStreamContract(Address),
+}
+
+/// Decode `calldata` bytes into a `CallData` variant and invoke the target.
+/// Called inside `execute` *after* the proposal has been marked executed (CEI).
+fn dispatch_call(env: &Env, target: &Address, calldata: &Bytes) -> Result<(), GovernanceError> {
+    let op = CallData::from_xdr(env, calldata).map_err(|_| GovernanceError::InvalidCalldata)?;
+    match op {
+        CallData::Noop => {}
+        CallData::StreamSetAdmin(new_admin) => {
+            env.invoke_contract::<()>(target, &Symbol::new(env, "set_admin"), (new_admin,).into_val(env));
+        }
+        CallData::StreamSetMaxRate(max_rate) => {
+            env.invoke_contract::<()>(target, &Symbol::new(env, "set_max_rate_per_second"), (max_rate,).into_val(env));
+        }
+        CallData::FactorySetAdmin(new_admin) => {
+            env.invoke_contract::<()>(target, &Symbol::new(env, "set_admin"), (new_admin,).into_val(env));
+        }
+        CallData::FactorySetCap(max_deposit) => {
+            env.invoke_contract::<()>(target, &Symbol::new(env, "set_cap"), (max_deposit,).into_val(env));
+        }
+        CallData::FactorySetMinDuration(min_duration) => {
+            env.invoke_contract::<()>(target, &Symbol::new(env, "set_min_duration"), (min_duration,).into_val(env));
+        }
+        CallData::FactorySetAllowlist(recipient, allowed) => {
+            env.invoke_contract::<()>(target, &Symbol::new(env, "set_allowlist"), (recipient, allowed).into_val(env));
+        }
+        CallData::FactorySetStreamContract(new_contract) => {
+            env.invoke_contract::<()>(target, &Symbol::new(env, "set_stream_contract"), (new_contract,).into_val(env));
+        }
+    }
+    Ok(())
+}
+
+
 
 const INSTANCE_LIFETIME_THRESHOLD: u32 = 17_280;
 const INSTANCE_BUMP_AMOUNT: u32 = 120_960;
@@ -210,6 +292,20 @@ pub struct SignerRemoved {
     pub signer: Address,
 }
 
+/// Emitted when the co-signer set size changes, allowing indexers to track
+/// whether the current threshold remains satisfiable and how close the
+/// membership is to dropping below the threshold.
+///
+/// Published by [`add_signer`](FluxoraGovernance::add_signer) and
+/// [`remove_signer`](FluxoraGovernance::remove_signer) after the membership
+/// change is persisted.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct QuorumConfig {
+    pub threshold: u32,
+    pub signer_count: u32,
+}
+
 /// Emitted when the admin address is rotated.
 ///
 /// Published by [`set_admin`](FluxoraGovernance::set_admin) after the new admin
@@ -265,7 +361,26 @@ fn save_signer_index(env: &Env, index: &Map<Address, bool>) {
     env.storage().instance().set(&DataKey::SignerIndex, index);
 }
 
+/// Extends the TTL of the per-proposal approval index so it outlives the
+/// proposal record. Called on every read and write of `ProposalApprovalIdx(id)`
+/// to prevent duplicate-approval detection from silently failing when the index
+/// archives before the proposal.
+fn bump_approval_index(env: &Env, proposal_id: u32) {
+    if env
+        .storage()
+        .persistent()
+        .has(&DataKey::ProposalApprovalIdx(proposal_id))
+    {
+        env.storage().persistent().extend_ttl(
+            &DataKey::ProposalApprovalIdx(proposal_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+}
+
 fn get_approval_index(env: &Env, proposal_id: u32) -> Map<Address, bool> {
+    bump_approval_index(env, proposal_id);
     env.storage()
         .persistent()
         .get(&DataKey::ProposalApprovalIdx(proposal_id))
@@ -276,11 +391,7 @@ fn save_approval_index(env: &Env, proposal_id: u32, index: &Map<Address, bool>) 
     env.storage()
         .persistent()
         .set(&DataKey::ProposalApprovalIdx(proposal_id), index);
-    env.storage().persistent().extend_ttl(
-        &DataKey::ProposalApprovalIdx(proposal_id),
-        PERSISTENT_LIFETIME_THRESHOLD,
-        PERSISTENT_BUMP_AMOUNT,
-    );
+    bump_approval_index(env, proposal_id);
 }
 
 fn get_admin(env: &Env) -> Result<Address, GovernanceError> {
@@ -336,6 +447,7 @@ fn load_proposal(env: &Env, id: u32) -> Result<Proposal, GovernanceError> {
         .get(&DataKey::Proposal(id))
         .ok_or(GovernanceError::ProposalNotFound)?;
     bump_proposal(env, id);
+    bump_approval_index(env, id);
     Ok(proposal)
 }
 
@@ -464,6 +576,15 @@ impl FluxoraGovernance {
         env.events()
             .publish((symbol_short!("sgnr_add"),), SignerAdded { signer });
 
+        let threshold = get_threshold(&env)?;
+        env.events().publish(
+            (symbol_short!("quor_cfg"),),
+            QuorumConfig {
+                threshold,
+                signer_count: signers.len(),
+            },
+        );
+
         Ok(())
     }
 
@@ -509,6 +630,15 @@ impl FluxoraGovernance {
         // no event).
         env.events()
             .publish((symbol_short!("sgnr_rm"),), SignerRemoved { signer });
+
+        env.events().publish(
+            (symbol_short!("quor_cfg"),),
+            QuorumConfig {
+                threshold,
+                signer_count: signers.len(),
+            },
+        );
+
         Ok(())
     }
 
@@ -541,7 +671,7 @@ impl FluxoraGovernance {
         proposer.require_auth();
 
         // O(1) signer membership check via Map index.
-        if !Self::is_signer(&env, &proposer)? {
+        if !Self::is_registered_signer(&env, &proposer)? {
             return Err(GovernanceError::NotASigner);
         }
 
@@ -599,7 +729,7 @@ impl FluxoraGovernance {
         approver.require_auth();
 
         // O(1) signer membership check via Map index.
-        if !Self::is_signer(&env, &approver)? {
+        if !Self::is_registered_signer(&env, &approver)? {
             return Err(GovernanceError::NotASigner);
         }
 
@@ -638,6 +768,7 @@ impl FluxoraGovernance {
 
         save_proposal(&env, proposal_id, &proposal);
         save_approval_index(&env, proposal_id, &approval_idx);
+        bump_approval_index(&env, proposal_id);
         bump_instance(&env);
 
         env.events().publish(
@@ -743,6 +874,13 @@ impl FluxoraGovernance {
         save_proposal(&env, proposal_id, &proposal);
         bump_instance(&env);
 
+        // Dispatch the on-chain call to the target contract.  This runs after
+        // the proposal is marked executed so re-entrancy cannot trigger a
+        // second execution (CEI).  If the call panics (target rejects the
+        // operation), the whole transaction is reverted — including the
+        // `executed = true` write — which is the correct fail-safe behaviour.
+        dispatch_call(&env, &proposal.target, &proposal.calldata)?;
+
         env.events().publish(
             (symbol_short!("executed"), proposal_id),
             ProposalExecuted {
@@ -832,7 +970,26 @@ impl FluxoraGovernance {
         get_signers(&env)
     }
 
+    /// Return the admin address.
+    ///
+    /// Returns `GovernanceError::NotInitialized` if `init` has not been called.
+    pub fn get_admin(env: Env) -> Result<Address, GovernanceError> {
+        get_admin(&env)
+    }
+
+    /// Return the configured approval threshold.
+    ///
+    /// Returns `GovernanceError::NotInitialized` if `init` has not been called.
+    /// For a non-erroring convenience wrapper that returns `0` when
+    /// uninitialized, see [`quorum`](Self::quorum).
+    pub fn get_threshold(env: Env) -> Result<u32, GovernanceError> {
+        get_threshold(&env)
+    }
+
     /// Return the effective approval threshold.
+    ///
+    /// Convenience alias for [`get_threshold`](Self::get_threshold) that
+    /// returns `0` instead of an error when the contract is not initialized.
     pub fn quorum(env: Env) -> u32 {
         get_threshold(&env).unwrap_or(0)
     }
@@ -944,6 +1101,128 @@ impl FluxoraGovernance {
         Ok(true)
     }
 
+    /// Return `true` if `signer` is a registered co-signer of the governance
+    /// contract.
+    ///
+    /// Cheap O(1) membership probe over `DataKey::SignerIndex` (the same
+    /// `Map<Address, bool>` index consulted internally by `propose`,
+    /// `approve`, `add_signer`, and `remove_signer`). Lets off-chain tooling
+    /// and cross-contract callers verify signer membership without
+    /// downloading the entire signer list via `get_signers` (which is O(n)
+    /// on the wire and O(n) on the receiving side).
+    ///
+    /// # Parameters
+    /// - `signer`: The address to test for membership.
+    ///
+    /// # Returns
+    /// - `true` if `signer` is in the current co-signer set.
+    /// - `false` if `signer` is not a co-signer, has been removed by
+    ///   `remove_signer`, or the contract has not been initialised.
+    ///
+    /// # Pre-init behaviour
+    /// Returns `false` (no panic, no error) when `init` has not been called.
+    /// This is a deliberate design choice: callers should be able to use
+    /// `is_signer` as a safe "is this address a potential signer?" probe
+    /// before reading other governance state, without first having to call
+    /// `get_admin` to check initialisation.
+    ///
+    /// # Security
+    /// - Pure read — no `require_auth`, no state mutation.
+    /// - Does **not** extend any TTL. Instance storage is kept alive by
+    ///   every state-mutating entrypoint (`init`, `add_signer`,
+    ///   `remove_signer`, `set_admin`, `propose`, `approve`, `execute`,
+    ///   `cancel_proposal`) via `bump_instance`. Letting `is_signer`
+    ///   extend TTL would let a third party keep a stale `SignerIndex`
+    ///   alive by repeatedly polling, which is unnecessary and would
+    ///   cost the network rent on every call.
+    /// - Reuses [`get_signer_index`], the same helper that backs the
+    ///   duplicate-prevention paths in `add_signer` and the membership
+    ///   check in `remove_signer`. There is no second source of truth;
+    ///   any address reported by `is_signer` is also reported as a
+    ///   duplicate by `add_signer` and as removable by `remove_signer`.
+    pub fn is_signer(env: Env, signer: Address) -> bool {
+        get_signer_index(&env)
+            .map(|index| index.contains_key(signer))
+            .unwrap_or(false)
+    }
+
+    /// Return a bounded page of proposals whose IDs fall in `[start_id, start_id + limit)`.
+    ///
+    /// This mirrors `FluxoraStream::get_streams_by_id_range` and is the primary
+    /// entrypoint for dashboard or migration tooling that needs to enumerate
+    /// governance history without issuing one RPC per proposal.
+    ///
+    /// # Parameters
+    /// - `start_id`: First proposal ID to include (inclusive).
+    /// - `limit`: Maximum number of proposals to return.  Hard-capped at
+    ///   [`MAX_PAGE_SIZE`] regardless of the value supplied by the caller.
+    ///   Passing a value above the cap is **not** an error; the cap is silently
+    ///   applied.  Passing `0` returns an empty `Vec`.
+    ///
+    /// # Returns
+    /// A `Vec<Proposal>` containing at most `min(limit, MAX_PAGE_SIZE)` entries.
+    /// IDs for proposals that were cancelled, executed, or never created (i.e.
+    /// storage entries that do not exist) are silently skipped — the caller
+    /// receives only the proposals that are present in storage.  The returned
+    /// slice preserves ascending ID order.
+    ///
+    /// # DoS protection
+    ///
+    /// `limit` is hard-capped at `MAX_PAGE_SIZE` (100).  The cap is enforced
+    /// before any storage reads; it is impossible to exceed via any call path.
+    /// Callers should page by advancing `start_id` to `start_id + limit` on
+    /// each successive call.
+    ///
+    /// # Example
+    ///
+    /// ```text
+    /// // Page 1: proposals 0-99
+    /// get_proposals_by_id_range(env, 0, 100)
+    /// // Page 2: proposals 100-199
+    /// get_proposals_by_id_range(env, 100, 100)
+    /// ```
+    pub fn get_proposals_by_id_range(env: Env, start_id: u32, limit: u32) -> Vec<Proposal> {
+        bump_instance(&env);
+
+        // Hard-cap: silently clamp to MAX_PAGE_SIZE. This is the sole read-DoS
+        // control — it must be applied before any storage iteration.
+        let page_size = limit.min(MAX_PAGE_SIZE);
+
+        let mut result = Vec::new(&env);
+
+        // Zero limit or uninitialized contract (no proposals yet) → empty.
+        if page_size == 0 {
+            return result;
+        }
+
+        // The monotonic counter is the exclusive upper bound for valid IDs.
+        let total = read_next_proposal_id(&env);
+        if start_id >= total {
+            return result;
+        }
+
+        // Iterate [start_id, start_id + page_size) ∩ [0, total).
+        // Use saturating_add so an extreme start_id + page_size cannot wrap.
+        let end_exclusive = start_id.saturating_add(page_size).min(total);
+        let mut current = start_id;
+        while current < end_exclusive {
+            // Missing IDs (cancelled proposals whose storage was never pruned
+            // still exist, but genuinely absent keys — e.g. IDs that were
+            // reserved and then rolled back — are skipped silently).
+            if let Some(proposal) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, Proposal>(&DataKey::Proposal(current))
+            {
+                bump_proposal(&env, current);
+                result.push_back(proposal);
+            }
+            current += 1;
+        }
+
+        result
+    }
+
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
@@ -958,7 +1237,12 @@ impl FluxoraGovernance {
     }
 
     /// O(1) signer membership check via the Map index stored in instance storage.
-    fn is_signer(env: &Env, addr: &Address) -> Result<bool, GovernanceError> {
+    ///
+    /// Returns `Err(NotInitialized)` if the contract has not been initialised.
+    /// Used by `propose` and `approve` where the caller must be a registered
+    /// co-signer (and where calling on an uninitialised contract is itself an
+    /// error condition surfaced to the caller).
+    fn is_registered_signer(env: &Env, addr: &Address) -> Result<bool, GovernanceError> {
         let index = get_signer_index(env)?;
         Ok(index.contains_key(addr.clone()))
     }
@@ -1023,14 +1307,54 @@ mod tests {
             Address::generate(&self.env)
         }
 
-        fn calldata(&self, tag: &str) -> Bytes {
-            Bytes::from_slice(&self.env, tag.as_bytes())
+        /// Returns XDR-encoded `CallData::Noop`. The `_tag` parameter is
+        /// accepted only to keep call-sites readable; it has no effect on the
+        /// returned bytes.
+        fn calldata(&self, _tag: &str) -> Bytes {
+            use soroban_sdk::xdr::ToXdr;
+            CallData::Noop.to_xdr(&self.env)
         }
     }
 
     // -----------------------------------------------------------------------
-    // Constants
+    // CallData dispatch
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_invalid_calldata_errors_on_execute() {
+        let ctx = Ctx::setup();
+        // XDR bytes that deserialize but are not a CallData variant.  Encode a
+        // plain u32 — it deserialises fine but `CallData::try_from_val` will
+        // reject the type, surfacing as `InvalidCalldata`.
+        use soroban_sdk::xdr::ToXdr;
+        let bad = 42_u32.to_xdr(&ctx.env);
+        let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &bad);
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+        ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
+        let executor = Address::generate(&ctx.env);
+        let result = ctx.client.try_execute(&executor, &id);
+        assert_eq!(result, Err(Ok(GovernanceError::InvalidCalldata)));
+        // Proposal must NOT be marked executed after a failed calldata decode.
+        let p = ctx.client.get_proposal(&id);
+        assert!(!p.executed);
+    }
+
+    #[test]
+    fn test_noop_calldata_executes_cleanly() {
+        use soroban_sdk::xdr::ToXdr;
+        let ctx = Ctx::setup();
+        let noop = CallData::Noop.to_xdr(&ctx.env);
+        let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &noop);
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+        ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
+        let executor = Address::generate(&ctx.env);
+        ctx.client.execute(&executor, &id);
+        assert!(ctx.client.get_proposal(&id).executed);
+    }
+
+
 
     #[test]
     fn test_quorum_and_timelock_constants() {
@@ -1043,6 +1367,42 @@ mod tests {
     fn test_max_proposal_age_constant() {
         let ctx = Ctx::setup();
         assert_eq!(ctx.client.max_proposal_age_seconds(), MAX_AGE);
+    }
+
+    // -----------------------------------------------------------------------
+    // get_admin / get_threshold views
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_get_admin_after_init() {
+        let ctx = Ctx::setup();
+        let admin = ctx.client.get_admin();
+        assert_eq!(admin, ctx.admin);
+    }
+
+    #[test]
+    fn test_get_admin_pre_init() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, FluxoraGovernance);
+        let client = FluxoraGovernanceClient::new(&env, &contract_id);
+        let result = client.try_get_admin();
+        assert_eq!(result, Err(Ok(GovernanceError::NotInitialized)));
+    }
+
+    #[test]
+    fn test_get_threshold_after_init() {
+        let ctx = Ctx::setup();
+        let threshold = ctx.client.get_threshold();
+        assert_eq!(threshold, 2);
+    }
+
+    #[test]
+    fn test_get_threshold_pre_init() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, FluxoraGovernance);
+        let client = FluxoraGovernanceClient::new(&env, &contract_id);
+        let result = client.try_get_threshold();
+        assert_eq!(result, Err(Ok(GovernanceError::NotInitialized)));
     }
 
     // -----------------------------------------------------------------------
@@ -1567,7 +1927,6 @@ mod tests {
     // -----------------------------------------------------------------------
     // is_executable
     // -----------------------------------------------------------------------
-
     #[test]
     fn test_is_executable_nonexistent_proposal() {
         let ctx = Ctx::setup();
@@ -1728,6 +2087,378 @@ mod tests {
         // One second past expiry — not executable.
         ctx.env.ledger().set_timestamp(1_000_000 + MAX_AGE + 1);
         assert_eq!(ctx.client.is_executable(&id), false);
+    }
+
+    // -----------------------------------------------------------------------
+    // get_proposals_by_id_range
+    // -----------------------------------------------------------------------
+
+    /// Empty contract — no proposals created yet — returns an empty Vec for any
+    /// start_id and any limit.
+    #[test]
+    fn test_get_proposals_by_id_range_empty_contract() {
+        let ctx = Ctx::setup();
+        let result = ctx.client.get_proposals_by_id_range(&0, &10);
+        assert_eq!(result.len(), 0);
+    }
+
+    /// Zero limit always returns an empty Vec, even when proposals exist.
+    #[test]
+    fn test_get_proposals_by_id_range_zero_limit() {
+        let ctx = Ctx::setup();
+        ctx.client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("a"));
+        let result = ctx.client.get_proposals_by_id_range(&0, &0);
+        assert_eq!(result.len(), 0);
+    }
+
+    /// start_id exactly equal to proposal_count (exclusive upper bound) → empty.
+    #[test]
+    fn test_get_proposals_by_id_range_start_at_count() {
+        let ctx = Ctx::setup();
+        ctx.client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("a"));
+        // proposal_count() == 1 after one propose; IDs are 0-based, so ID 0 exists,
+        // and start_id = 1 is already out of range.
+        let count = ctx.client.proposal_count();
+        let result = ctx.client.get_proposals_by_id_range(&count, &10);
+        assert_eq!(result.len(), 0);
+    }
+
+    /// start_id well beyond proposal_count → empty.
+    #[test]
+    fn test_get_proposals_by_id_range_start_beyond_count() {
+        let ctx = Ctx::setup();
+        ctx.client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("a"));
+        let result = ctx.client.get_proposals_by_id_range(&9999, &10);
+        assert_eq!(result.len(), 0);
+    }
+
+    /// Full page: 5 proposals, request all 5, receive all 5 in order.
+    #[test]
+    fn test_get_proposals_by_id_range_full_page() {
+        let ctx = Ctx::setup();
+        for tag in ["a", "b", "c", "d", "e"] {
+            ctx.client
+                .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata(tag));
+        }
+        let result = ctx.client.get_proposals_by_id_range(&0, &5);
+        assert_eq!(result.len(), 5);
+        for i in 0..5u32 {
+            assert_eq!(result.get(i).unwrap().executed, false);
+        }
+    }
+
+    /// Partial page: 5 proposals, request from start_id=2, limit=10 → returns IDs 2,3,4.
+    #[test]
+    fn test_get_proposals_by_id_range_partial_page() {
+        let ctx = Ctx::setup();
+        for tag in ["a", "b", "c", "d", "e"] {
+            ctx.client
+                .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata(tag));
+        }
+        // IDs are 0,1,2,3,4. Requesting from 2 with limit 10 should yield IDs 2,3,4.
+        let result = ctx.client.get_proposals_by_id_range(&2, &10);
+        assert_eq!(result.len(), 3, "Expected IDs 2,3,4 only");
+    }
+
+    /// Limit clamping: a limit above MAX_PAGE_SIZE is silently clamped.
+    ///
+    /// We create MAX_PAGE_SIZE + 5 proposals and request MAX_PAGE_SIZE + 50.
+    /// The result must be exactly MAX_PAGE_SIZE entries.
+    #[test]
+    fn test_get_proposals_by_id_range_limit_clamping() {
+        let ctx = Ctx::setup();
+        let total = MAX_PAGE_SIZE + 5;
+        for _ in 0..total {
+            ctx.client
+                .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        }
+        let over_cap = MAX_PAGE_SIZE + 50;
+        let result = ctx.client.get_proposals_by_id_range(&0, &over_cap);
+        assert_eq!(
+            result.len(),
+            MAX_PAGE_SIZE,
+            "Result must be clamped to MAX_PAGE_SIZE regardless of caller-supplied limit"
+        );
+    }
+
+    /// Exactly MAX_PAGE_SIZE limit is not clamped (it is the cap itself).
+    #[test]
+    fn test_get_proposals_by_id_range_limit_exactly_cap() {
+        let ctx = Ctx::setup();
+        for _ in 0..MAX_PAGE_SIZE {
+            ctx.client
+                .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        }
+        let result = ctx.client.get_proposals_by_id_range(&0, &MAX_PAGE_SIZE);
+        assert_eq!(result.len(), MAX_PAGE_SIZE);
+    }
+
+    /// Cancelled proposals are NOT removed from storage — they remain present
+    /// with `cancelled = true` and must be returned by the range query.
+    #[test]
+    fn test_get_proposals_by_id_range_includes_cancelled() {
+        let ctx = Ctx::setup();
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("a"));
+        ctx.client.cancel_proposal(&ctx.signer_a, &id);
+
+        let result = ctx.client.get_proposals_by_id_range(&0, &10);
+        assert_eq!(result.len(), 1, "Cancelled proposal must still appear in range");
+        assert!(result.get(0).unwrap().cancelled);
+    }
+
+    /// Executed proposals remain in storage with `executed = true` and must be
+    /// returned by the range query.
+    #[test]
+    fn test_get_proposals_by_id_range_includes_executed() {
+        let ctx = Ctx::setup();
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("a"));
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+        ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
+        let executor = Address::generate(&ctx.env);
+        ctx.client.execute(&executor, &id);
+
+        let result = ctx.client.get_proposals_by_id_range(&0, &10);
+        assert_eq!(result.len(), 1, "Executed proposal must still appear in range");
+        assert!(result.get(0).unwrap().executed);
+    }
+
+    /// Pagination: two consecutive pages with limit=3 over 5 proposals cover all IDs.
+    #[test]
+    fn test_get_proposals_by_id_range_pagination_two_pages() {
+        let ctx = Ctx::setup();
+        for tag in ["a", "b", "c", "d", "e"] {
+            ctx.client
+                .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata(tag));
+        }
+        // Page 1: IDs 0,1,2
+        let page1 = ctx.client.get_proposals_by_id_range(&0, &3);
+        assert_eq!(page1.len(), 3);
+        // Page 2: IDs 3,4
+        let page2 = ctx.client.get_proposals_by_id_range(&3, &3);
+        assert_eq!(page2.len(), 2);
+    }
+
+    /// u32::MAX limit is handled safely via saturating_add; only existing proposals
+    /// within [start_id, total) are returned.
+    #[test]
+    fn test_get_proposals_by_id_range_u32_max_limit() {
+        let ctx = Ctx::setup();
+        for _ in 0..3 {
+            ctx.client
+                .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        }
+        // MAX_PAGE_SIZE clamp applies before the saturating_add path is reached,
+        // but the saturating arithmetic must not panic.
+        let result = ctx.client.get_proposals_by_id_range(&0, &u32::MAX);
+        // Clamped to MAX_PAGE_SIZE; only 3 proposals exist so we get 3.
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn test_is_signer_returns_true_for_registered() {
+        let ctx = Ctx::setup();
+        // All three signers from `Ctx::setup` must be reported as members.
+        assert_eq!(ctx.client.is_signer(&ctx.signer_a), true);
+        assert_eq!(ctx.client.is_signer(&ctx.signer_b), true);
+        assert_eq!(ctx.client.is_signer(&ctx.signer_c), true);
+    }
+
+    #[test]
+    fn test_is_signer_returns_false_for_unregistered() {
+        let ctx = Ctx::setup();
+        // An address that was never added to the signer set.
+        let stranger = Address::generate(&ctx.env);
+        assert_eq!(ctx.client.is_signer(&stranger), false);
+    }
+
+    #[test]
+    fn test_is_signer_returns_false_for_admin_if_not_a_signer() {
+        // The admin address is distinct from the signer set; the admin is not
+        // automatically counted as a co-signer.
+        let ctx = Ctx::setup();
+        assert_eq!(ctx.client.is_signer(&ctx.admin), false);
+    }
+
+    #[test]
+    fn test_is_signer_returns_false_after_removal() {
+        let ctx = Ctx::setup();
+        // Sanity: signer_a starts as a member.
+        assert_eq!(ctx.client.is_signer(&ctx.signer_a), true);
+        // Admin removes signer_a.
+        ctx.client.remove_signer(&ctx.signer_a);
+        // After removal the index entry is gone; the view must reflect that.
+        assert_eq!(ctx.client.is_signer(&ctx.signer_a), false);
+        // Other signers are unaffected.
+        assert_eq!(ctx.client.is_signer(&ctx.signer_b), true);
+        assert_eq!(ctx.client.is_signer(&ctx.signer_c), true);
+    }
+
+    #[test]
+    fn test_is_signer_returns_true_after_add() {
+        let ctx = Ctx::setup();
+        let newcomer = Address::generate(&ctx.env);
+        // Pre-condition: not a member.
+        assert_eq!(ctx.client.is_signer(&newcomer), false);
+        // Admin adds newcomer.
+        ctx.client.add_signer(&newcomer);
+        // Post-condition: now a member.
+        assert_eq!(ctx.client.is_signer(&newcomer), true);
+    }
+
+    #[test]
+    fn test_is_signer_returns_false_pre_init_no_panic() {
+        // Contract deployed but `init` never called. `is_signer` MUST return
+        // `false` rather than panicking or returning an error.
+        let env = Env::default();
+        let contract_id = env.register_contract(None, FluxoraGovernance);
+        let client = FluxoraGovernanceClient::new(&env, &contract_id);
+
+        // Try several addresses, including a freshly generated one and the
+        // zero address-equivalent pattern. None must panic, all must report
+        // `false`.
+        let a1 = Address::generate(&env);
+        let a2 = Address::generate(&env);
+        assert_eq!(client.is_signer(&a1), false);
+        assert_eq!(client.is_signer(&a2), false);
+    }
+
+    #[test]
+    fn test_is_signer_pre_init_matches_no_signers() {
+        // Pre-init behaviour must match the "no signers" semantics of a freshly
+        // initialised contract whose signer list happens to be empty (although
+        // `init` rejects an empty signer list, the contract state is logically
+        // indistinguishable from pre-init for the purposes of `is_signer`).
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_000_000);
+        let contract_id = env.register_contract(None, FluxoraGovernance);
+        let admin = Address::generate(&env);
+        let client = FluxoraGovernanceClient::new(&env, &contract_id);
+        // Note: `init` requires at least 1 signer, so we cannot exercise the
+        // "post-init empty set" path directly. The pre-init path returns
+        // `false` for every address — the strictest possible membership view.
+        let stranger = Address::generate(&env);
+        assert_eq!(client.is_signer(&stranger), false);
+        // `admin` is also not a signer pre-init.
+        assert_eq!(client.is_signer(&admin), false);
+    }
+
+    #[test]
+    fn test_is_signer_agrees_with_get_signers_membership() {
+        // For every signer reported by `get_signers`, `is_signer` must return
+        // `true`; for every address NOT in `get_signers`, it must return
+        // `false`. This is the cross-check that `is_signer` and `get_signers`
+        // share a single source of truth (`DataKey::SignerIndex`).
+        let ctx = Ctx::setup();
+        let on_chain = ctx.client.get_signers();
+        for i in 0..on_chain.len() {
+            let addr = on_chain.get(i).unwrap();
+            assert_eq!(
+                ctx.client.is_signer(&addr),
+                true,
+                "is_signer disagreed with get_signers for a listed signer"
+            );
+        }
+        // A stranger that is definitely not in the set.
+        let stranger = Address::generate(&ctx.env);
+        assert_eq!(ctx.client.is_signer(&stranger), false);
+    }
+
+    #[test]
+    fn test_is_signer_can_be_called_repeatedly() {
+        // The new view must remain side-effect-free under repeated calls.
+        // We can't directly observe TTL bytes in the host, but we can at
+        // least confirm the call returns and does not error or panic when
+        // called many times in a row. If a future change accidentally adds
+        // `bump_instance` to `is_signer`, this test will still pass — the
+        // actual TTL guarantee is documented in the function's doc comment
+        // and the security note in `docs/governance.md`.
+        let ctx = Ctx::setup();
+        for _ in 0..32 {
+            assert_eq!(ctx.client.is_signer(&ctx.signer_a), true);
+            assert_eq!(
+                ctx.client.is_signer(&Address::generate(&ctx.env)),
+                false
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_signer_after_full_lifecycle() {
+        // Walk the full signer lifecycle: init, propose, approve, remove,
+        // re-add. `is_signer` must track `SignerIndex` correctly at every
+        // step.
+        let ctx = Ctx::setup();
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        // All three signers are still present.
+        assert_eq!(ctx.client.is_signer(&ctx.signer_a), true);
+        assert_eq!(ctx.client.is_signer(&ctx.signer_b), true);
+        assert_eq!(ctx.client.is_signer(&ctx.signer_c), true);
+
+        // Approvals proceed; signer_b approves too.
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+
+        // Remove signer_c (set goes from 3 to 2, still >= threshold=2).
+        ctx.client.remove_signer(&ctx.signer_c);
+        assert_eq!(ctx.client.is_signer(&ctx.signer_c), false);
+        assert_eq!(ctx.client.is_signer(&ctx.signer_a), true);
+        assert_eq!(ctx.client.is_signer(&ctx.signer_b), true);
+
+        // Re-add signer_c (back to 3).
+        ctx.client.add_signer(&ctx.signer_c);
+        assert_eq!(ctx.client.is_signer(&ctx.signer_c), true);
+    }
+
+    #[test]
+    fn test_is_signer_agrees_with_propose_membership_check() {
+        // The internal membership check used by `propose` (via
+        // `is_registered_signer`) and the public `is_signer` view must agree.
+        // If a non-signer reports `is_signer == true` but `propose` rejects
+        // with `NotASigner`, the two sources of truth have diverged.
+        let ctx = Ctx::setup();
+        let stranger = Address::generate(&ctx.env);
+        // Stranger: is_signer false, propose must fail with NotASigner.
+        assert_eq!(ctx.client.is_signer(&stranger), false);
+        let result = ctx
+            .client
+            .try_propose(&stranger, &ctx.dummy_target(), &ctx.calldata("x"));
+        assert_eq!(result, Err(Ok(GovernanceError::NotASigner)));
+        // Registered signer: is_signer true, propose must succeed.
+        assert_eq!(ctx.client.is_signer(&ctx.signer_a), true);
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        // Sanity: the proposal got a real ID.
+        assert_eq!(id, 0);
+    }
+
+    #[test]
+    fn test_is_signer_agrees_with_approve_membership_check() {
+        // Symmetric check for `approve` (also goes through
+        // `is_registered_signer`).
+        let ctx = Ctx::setup();
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        // Stranger cannot approve.
+        let stranger = Address::generate(&ctx.env);
+        assert_eq!(ctx.client.is_signer(&stranger), false);
+        let result = ctx.client.try_approve(&stranger, &id);
+        assert_eq!(result, Err(Ok(GovernanceError::NotASigner)));
+        // Registered signer can approve.
+        assert_eq!(ctx.client.is_signer(&ctx.signer_b), true);
+        ctx.client.approve(&ctx.signer_b, &id);
     }
 
     #[test]

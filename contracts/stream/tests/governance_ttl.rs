@@ -383,3 +383,41 @@ fn test_execute_fails_closed_if_quorum_entry_missing() {
     let result = ctx.client.try_execute(&executor, &id);
     assert_eq!(result, Err(Ok(GovernanceError::QuorumNotReached)));
 }
+
+// ---------------------------------------------------------------------
+// ProposalApprovalIdx TTL regression (issue #732)
+// ---------------------------------------------------------------------
+
+/// After a long idle period between approvals, the approval index TTL must
+/// remain coupled to the proposal so duplicate approvals are still rejected.
+#[test]
+fn test_approval_index_ttl_refreshed_rejects_duplicate_after_long_delay() {
+    let ctx = GovCtx::setup();
+    let id = ctx.create_proposal();
+
+    ctx.client.approve(&ctx.signer_a, &id);
+
+    ctx.advance_ledgers(PERSISTENT_BUMP_AMOUNT - 500);
+
+    let duplicate = ctx.client.try_approve(&ctx.signer_a, &id);
+    assert_eq!(duplicate, Err(Ok(GovernanceError::AlreadyApproved)));
+
+    ctx.client.approve(&ctx.signer_b, &id);
+    let proposal = ctx.client.get_proposal(&id);
+    assert_eq!(proposal.approvals.len(), 2);
+}
+
+/// Each approval refreshes the approval-index TTL so later signers can still
+/// rely on duplicate detection near the proposal-age horizon.
+#[test]
+fn test_approval_index_ttl_bumped_on_every_approve() {
+    let ctx = GovCtx::setup();
+    let id = ctx.create_proposal();
+
+    ctx.client.approve(&ctx.signer_a, &id);
+    ctx.advance_ledgers(PERSISTENT_LIFETIME_THRESHOLD + 1_000);
+    ctx.client.approve(&ctx.signer_b, &id);
+
+    let duplicate = ctx.client.try_approve(&ctx.signer_a, &id);
+    assert_eq!(duplicate, Err(Ok(GovernanceError::AlreadyApproved)));
+}
