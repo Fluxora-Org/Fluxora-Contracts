@@ -7011,7 +7011,7 @@ pub fn upgrade(env: Env, new_wasm_hash: soroban_sdk::BytesN<32>) -> Result<(), C
     // 1. Only the admin can call it (checked above)
     // 2. The host validates the WASM hash exists
     // 3. The upgrade is atomic - if the new WASM is invalid, the call reverts
-    env.deployer().update_current_contract_wasm(&new_wasm_hash);
+    env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
 
     // Bump TTL after upgrade to ensure the contract stays alive
     bump_instance_ttl(&env);
@@ -7019,7 +7019,7 @@ pub fn upgrade(env: Env, new_wasm_hash: soroban_sdk::BytesN<32>) -> Result<(), C
     // Emit upgrade event
     // Note: The new version is read from the upgraded contract's constant.
     // We read it after the upgrade so it reflects the new code.
-    let new_version = Self::version(env.clone());
+    let new_version = CONTRACT_VERSION;
     env.events().publish(
         (symbol_short!("upgraded"),),
         ContractUpgraded {
