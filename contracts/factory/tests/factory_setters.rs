@@ -268,7 +268,10 @@ fn test_set_allowlist_remove_non_allowlisted_noop() {
 /// unauthorized `require_auth` calls).
 fn assert_auth_fails<F: FnOnce()>(f: F) {
     let result = std::panic::catch_unwind(AssertUnwindSafe(f));
-    assert!(result.is_err(), "expected auth failure (panic) but call succeeded");
+    assert!(
+        result.is_err(),
+        "expected auth failure (panic) but call succeeded"
+    );
 }
 
 /// `set_admin` rejects a non-admin caller.

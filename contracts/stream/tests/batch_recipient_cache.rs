@@ -145,6 +145,7 @@ fn test_batch_index_matches_sequential_creation() {
         &p2.end_time,
         &0,
         &None,
+        &fluxora_stream::StreamKind::Linear,
     );
     let seq_index = ctx1.client.get_recipient_streams(&recipient1);
 

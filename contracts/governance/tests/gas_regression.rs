@@ -1,3 +1,8 @@
+use fluxora_governance::{FluxoraGovernance, FluxoraGovernanceClient};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger},
+    Address, Bytes, Env, Vec,
+};
 // contracts/governance/tests/gas_regression.rs
 #![cfg(test)]
 
@@ -108,6 +113,18 @@ where
 // ============================================================================
 
 #[test]
+fn test_governance_gas_propose() {
+    let sizes = [1u32, 5, 10, 20];
+    for &size in &sizes {
+        let threshold = if size == 1 { 1 } else { size };
+        let ctx = GovGasCtx::setup(size, threshold);
+        let (cpu, mem) = measure_budget(&ctx, |ctx| {
+            ctx.client.propose(
+                &ctx.signers.get(0).unwrap(),
+                &ctx.target,
+                &ctx.calldata("proposal"),
+            );
+        });
 fn test_propose_budget_snapshots() {
     // We want to see how propose scales with both signer count and calldata size.
     // The calldata storage should be the main cost driver here.
@@ -145,6 +162,17 @@ fn test_propose_budget_snapshots() {
 }
 
 #[test]
+fn test_governance_gas_approve_nonquorum() {
+    let sizes = [5u32, 10, 20];
+    for &size in &sizes {
+        let threshold = size;
+        let ctx = GovGasCtx::setup(size, threshold);
+        let proposal_id = ctx.client.propose(
+            &ctx.signers.get(0).unwrap(),
+            &ctx.target,
+            &ctx.calldata("proposal"),
+        );
+
 fn test_propose_rejects_large_calldata() {
     // Make sure we can't create proposals with more than 4KB of calldata
     let ctx = GovGasCtx::setup(1, 1);
@@ -185,6 +213,9 @@ fn test_approve_budget_snapshots() {
         // Now measure the cost of that final approval
         let last_signer = ctx.signers[(signer_count - 1) as usize].clone();
         let (cpu, mem) = measure_budget(&ctx, |ctx| {
+            ctx.client
+                .approve(&ctx.signers.get(1).unwrap(), &proposal_id);
+
             ctx.client.approve(&last_signer, &proposal_id);
         });
 
@@ -232,6 +263,16 @@ fn test_approve_budget_snapshots() {
             );
         }
 
+        assert!(
+            cpu < 1_300_000,
+            "approve_nonquorum {} exceeded CPU ceiling",
+            size
+        );
+        assert!(
+            mem < 150_000,
+            "approve_nonquorum {} exceeded memory ceiling",
+            size
+        );
         println!(
             "APPROVE: signers={:2}, CPU={:8}, MEM={:6}, CPU/signer={:6.1}, MEM/signer={:5.1}",
             signer_count,
@@ -247,6 +288,27 @@ fn test_approve_budget_snapshots() {
 }
 
 #[test]
+fn test_governance_gas_approve_quorum() {
+    let sizes = [1u32, 5, 10, 20];
+    for &size in &sizes {
+        let threshold = size;
+        let ctx = GovGasCtx::setup(size, threshold);
+        let proposal_id = ctx.client.propose(
+            &ctx.signers.get(0).unwrap(),
+            &ctx.target,
+            &ctx.calldata("proposal"),
+        );
+
+        for signer in 0..(size - 1) {
+            ctx.client
+                .approve(&ctx.signers.get(signer).unwrap(), &proposal_id);
+        }
+
+        let last_signer = ctx.signers.get(size - 1).unwrap();
+        ctx.env.budget().reset_unlimited();
+        ctx.client.approve(&last_signer, &proposal_id);
+        let cpu = ctx.env.budget().cpu_instruction_cost();
+        let mem = ctx.env.budget().memory_bytes_cost();
 fn test_approve_duplicate_error_cost() {
     // Duplicate approval checks should be cheap since we use a Map index for O(1) lookups.
     // If this gets expensive, something went wrong with the storage pattern.
@@ -259,6 +321,17 @@ fn test_approve_duplicate_error_cost() {
         let _ = ctx.client.try_approve(&ctx.signers[0], &proposal_id);
     });
 
+        assert!(
+            cpu < 1_600_000,
+            "approve_quorum {} exceeded CPU ceiling",
+            size
+        );
+        assert!(
+            mem < 180_000,
+            "approve_quorum {} exceeded memory ceiling",
+            size
+        );
+    }
     assert!(
         cpu < 100_000,
         "Duplicate approve error cost too high: {}",
@@ -278,6 +351,21 @@ fn test_approve_duplicate_error_cost() {
 // ============================================================================
 
 #[test]
+fn test_governance_gas_execute() {
+    let sizes = [1u32, 5, 10, 20];
+    for &size in &sizes {
+        let threshold = size;
+        let ctx = GovGasCtx::setup(size, threshold);
+        let proposal_id = ctx.client.propose(
+            &ctx.signers.get(0).unwrap(),
+            &ctx.target,
+            &ctx.calldata("proposal"),
+        );
+
+        for signer in 0..size {
+            ctx.client
+                .approve(&ctx.signers.get(signer).unwrap(), &proposal_id);
+        }
 fn test_execute_budget_snapshots() {
     // Execute cost should scale with calldata size since we process the stored data.
     // We test from empty calldata all the way up to the 4KB limit.
@@ -298,6 +386,8 @@ fn test_execute_budget_snapshots() {
 
         let executor = Address::generate(&ctx.env);
         let (cpu, mem) = measure_budget(&ctx, |ctx| {
+            ctx.client
+                .execute(&Address::generate(&ctx.env), &proposal_id);
             ctx.client.execute(&executor, &proposal_id);
         });
 

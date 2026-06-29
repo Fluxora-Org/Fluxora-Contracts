@@ -421,6 +421,322 @@ The e2e test validates both the atomic dispatch and the event-driven flow:
   executor action.
 
 
+## End-to-End Governance-Stream Integration
+
+The primary purpose of the governance system is to control stream contract parameters through
+a secure, multi-signature approval process with mandatory timelock delays. This section
+documents the complete integration pattern and security model.
+
+### Stream Admin Model
+
+The stream contract (`FluxoraStream`) has an `admin` address stored in its configuration,
+which can be set to the governance contract address to enable governance control. When
+governance is the stream admin, all admin-privileged operations require a successful
+governance proposal execution:
+
+- `set_max_rate_per_second(max_rate: i128)`: Set governance-controlled rate limits
+- `set_admin(new_admin: Address)`: Transfer admin privileges (including back to governance)
+- `set_global_emergency_paused(paused: bool)`: Emergency pause controls
+- `pause_stream_as_admin(stream_id: u64)`: Admin pause individual streams
+- `cancel_stream_as_admin(stream_id: u64)`: Admin cancel streams
+- `sweep_excess(recipient: Address)`: Recover excess tokens
+
+### Integration Architecture
+
+```text
+┌─────────────┐    propose/approve/execute    ┌──────────────────┐
+│ Governance  │◄─────────────────────────────┤ Co-signer Wallets│
+│ Contract    │                              └──────────────────┘
+└─────┬───────┘
+      │ admin relationship
+      ▼
+┌─────────────┐    set_max_rate_per_second    ┌──────────────────┐
+│ Stream      │◄─────────────────────────────┤ Off-chain        │
+│ Contract    │        (after execution)      │ Executor Bot     │
+└─────────────┘                              └──────────────────┘
+```
+
+**Components:**
+1. **Governance Contract**: Manages the proposal lifecycle with threshold signatures and timelock
+2. **Stream Contract**: Target of governance-controlled parameter changes
+3. **Co-signer Wallets**: Multi-signature participants who propose and approve changes
+4. **Off-chain Executor**: Monitors `ProposalExecuted` events and applies the changes
+
+### Complete Integration Flow
+
+#### 1. Initial Setup
+
+```rust
+// Deploy governance with multi-sig configuration
+governance.init(
+    admin: Address,           // Admin for signer management  
+    signers: Vec<Address>,    // Co-signers (e.g., 3 addresses)
+    threshold: u32            // Required approvals (e.g., 2-of-3)
+);
+
+// Deploy stream contract with governance as admin
+stream.init(
+    token: Address,           // Payment token address
+    admin: governance_id      // CRITICAL: Governance controls stream
+);
+
+// Verify governance control
+let config = stream.get_config();
+assert_eq!(config.admin, governance_id);
+```
+
+#### 2. Parameter Change Proposal
+
+```rust
+// Co-signer creates proposal to change max rate from unlimited to 1000/sec
+let calldata = encode_stream_call("set_max_rate_per_second", 1000i128);
+let proposal_id = governance.propose(
+    proposer: Address,        // Must be registered co-signer
+    target: stream_id,        // Target contract to modify
+    calldata: Bytes           // Encoded parameter change
+);
+
+// Emits: ProposalCreated { proposal_id, proposer, target }
+```
+
+#### 3. Multi-Signature Approval
+
+```rust
+// First co-signer approval
+governance.approve(signer_a, proposal_id);
+// Emits: ProposalApproved { proposal_id, approver: signer_a, approval_count: 1 }
+
+// Second co-signer approval (reaches 2-of-3 threshold)  
+governance.approve(signer_b, proposal_id);
+// Emits: ProposalApproved { proposal_id, approver: signer_b, approval_count: 2 }
+// Emits: QuorumReached { proposal_id, quorum_reached_at, executable_after }
+```
+
+#### 4. Timelock Period
+
+Once quorum is reached, the proposal enters a mandatory 48-hour timelock period:
+
+```rust
+let quorum_info = load_quorum_info(proposal_id);
+let executable_after = quorum_info.reached_at + GOVERNANCE_TIMELOCK_SECONDS;
+
+// Attempts to execute before timelock fail
+assert_eq!(
+    governance.try_execute(executor, proposal_id),
+    Err(GovernanceError::TimelockNotElapsed)
+);
+```
+
+This timelock provides a critical security window where:
+- The community can review the approved change
+- Emergency cancellation is possible if issues are discovered
+- Market participants can prepare for the parameter change
+
+#### 5. Proposal Execution
+
+After the timelock elapses, any address can trigger execution:
+
+```rust
+// Execute the approved proposal  
+governance.execute(executor, proposal_id);
+// Emits: ProposalExecuted { 
+//     proposal_id, 
+//     executor, 
+//     target: stream_id, 
+//     calldata: "set_max_rate_per_second:1000" 
+// }
+```
+
+**Critical Security Point:** The governance contract does NOT automatically apply the
+parameter change. Execution only:
+- Marks the proposal as executed
+- Emits the `ProposalExecuted` event with the approved calldata
+- Provides an auditable record of governance consensus
+
+#### 6. Off-Chain Parameter Application
+
+An authorized execution bot monitors for `ProposalExecuted` events and applies the changes:
+
+```rust
+// Off-chain executor (running as governance contract)
+fn handle_proposal_executed(event: ProposalExecuted) {
+    // Decode the approved calldata
+    let call = decode_stream_call(&event.calldata);
+    
+    match call {
+        StreamCall::SetMaxRatePerSecond(rate) => {
+            // Apply the governance-approved change
+            stream.set_max_rate_per_second(rate);
+            // This succeeds because governance is the stream admin
+        }
+        // Handle other governance-approved operations...
+    }
+}
+```
+
+#### 7. Parameter Change Verification
+
+The change takes effect immediately when applied:
+
+```rust
+// Stream creation now enforces the governance-set rate limit
+let result = stream.create_stream(
+    sender, recipient, 
+    deposit: 10000,
+    rate_per_second: 1500,  // > 1000 (governance limit)
+    // ... other params
+);
+
+// Fails with error indicating rate cap exceeded
+assert!(result.is_err()); 
+
+// Stream creation within limits succeeds
+let result = stream.create_stream(
+    sender, recipient,
+    deposit: 5000, 
+    rate_per_second: 500,   // <= 1000 (within governance limit)
+    // ... other params  
+);
+assert!(result.is_ok());
+```
+
+### Security Model
+
+#### Admin Authorization Chain
+
+```text
+1. Co-signers → Governance Proposal (threshold + timelock)
+2. Governance Execution → Stream Parameter Change  
+3. Stream Enforcement → User Transaction Validation
+```
+
+**Key Security Properties:**
+
+1. **No Single Point of Failure**: No individual key can change stream parameters
+2. **Transparent Process**: All governance actions are recorded on-chain with events
+3. **Time-Delayed Execution**: 48-hour minimum between approval and application
+4. **Immutable Audit Trail**: Proposal content and approvals are permanently stored
+5. **Cancellation Window**: Proposals can be cancelled during the timelock period
+
+#### Attack Resistance
+
+The governance integration is designed to resist several attack vectors:
+
+**Compromised Co-signer Key:**
+- Single compromised key cannot propose AND approve changes alone
+- Threshold requirement (2-of-3) means attacker needs multiple keys
+- Timelock provides detection and response window
+
+**Rushed Parameter Changes:**  
+- Mandatory 48-hour timelock prevents immediate execution
+- Community has time to review and potentially cancel harmful proposals
+- Emergency cancellation available through admin or original proposer
+
+**Admin Key Compromise:**
+- If governance contract key is compromised, attacker still cannot bypass process
+- Parameter changes still require full proposal → approval → timelock → execution flow
+- Admin can only manage co-signer set, not directly change stream parameters
+
+**Off-chain Executor Compromise:**
+- Executor can only apply governance-approved changes
+- Cannot modify or forge the approved calldata
+- All actions are authenticated through on-chain governance records
+
+### Implementation Requirements
+
+For teams implementing governance-stream integration:
+
+#### 1. Contract Deployment
+```rust
+// Correct initialization order
+let governance_id = deploy_governance(admin, signers, threshold);
+let stream_id = deploy_stream(token, governance_id); // governance as admin
+```
+
+#### 2. Calldata Encoding
+```rust
+// Standardized encoding for parameter changes
+fn encode_set_max_rate(rate: i128) -> Bytes {
+    format!("set_max_rate_per_second:{}", rate).into_bytes()
+}
+
+// Must be deterministic and parseable by executor
+```
+
+#### 3. Off-chain Monitoring
+```rust
+// Event monitoring for execution
+governance.events()
+    .filter(|e| e.topic == ("executed", proposal_id))
+    .subscribe(handle_proposal_executed);
+```
+
+#### 4. Error Handling
+```rust  
+// Graceful handling of governance errors
+match governance.try_execute(executor, proposal_id) {
+    Err(GovernanceError::TimelockNotElapsed) => {
+        // Schedule retry after timelock
+        schedule_execution(proposal_id, executable_after);
+    },
+    Err(GovernanceError::QuorumNotReached) => {
+        // Continue collecting approvals
+        request_additional_approvals(proposal_id);
+    },
+    // ... handle other cases
+}
+```
+
+### Testing Requirements
+
+The end-to-end governance-stream integration requires comprehensive testing:
+
+#### Integration Test Coverage
+- Deploy both contracts in test environment
+- Set governance as stream admin  
+- Create parameter change proposals
+- Verify multi-signature approval process
+- Test timelock enforcement
+- Confirm parameter changes take effect
+- Validate security boundaries (unauthorized changes fail)
+
+#### Security Test Cases
+- Verify unauthorized actors cannot bypass governance
+- Test timelock prevents premature execution  
+- Confirm cancellation works during timelock period
+- Validate proposal expiry after maximum age
+- Test admin key rotation through governance
+
+#### Edge Case Validation
+- Handle proposal conflicts (multiple rate changes)
+- Test governance contract admin key rotation
+- Verify behavior when stream admin changes
+- Test governance with minimum threshold (1-of-1)
+- Validate maximum threshold (all signers required)
+
+### Integration Test Implementation
+
+The complete end-to-end test is located at:
+`contracts/stream/tests/governance_integration.rs::test_end_to_end_governance_stream_parameter_change`
+
+This test validates:
+
+1. **Contract Deployment**: Both governance and stream contracts deploy successfully
+2. **Admin Relationship**: Stream admin is set to governance contract address
+3. **Baseline Verification**: Stream creation works normally before governance changes
+4. **Proposal Creation**: Governance proposal for `set_max_rate_per_second` is created
+5. **Approval Process**: Multi-signature approval reaches quorum (2-of-3 signers)
+6. **Timelock Enforcement**: Execution fails before 48-hour timelock elapses
+7. **Successful Execution**: Proposal executes successfully after timelock
+8. **Off-chain Application**: Simulates executor applying the governance-approved change
+9. **Parameter Enforcement**: Verifies rate cap is enforced in stream creation
+10. **Security Validation**: Confirms unauthorized actors cannot bypass governance
+11. **Edge Case Testing**: Validates timelock enforcement on subsequent proposals
+
+This test represents the critical integration seam between governance and stream contracts,
+proving that the governance system can successfully control stream parameters through the
+complete multi-signature, time-delayed approval process.
+
 ## Events
 
 For stream-level events, see [`events.md`](events.md). Governance emits the following
