@@ -13,6 +13,47 @@ The `fluxora_factory` acts as a proxy entrypoint to enforce these policies:
 - **Minimum Duration**: Enforces a `MinDuration` (i.e. `end_time - start_time >= min_duration`), preventing overly short or instantaneous streams.
 - **Time Relationship Checks**: Rejects invalid schedules before calling `FluxoraStream`. `start_time` must be strictly less than `end_time`, and `cliff_time` must be within the inclusive `[start_time, end_time]` window.
 
+## Initialization & Stream Contract Validation
+
+### Authorization contract
+
+`init` requires the declared `admin` to authorize the call via
+`admin.require_auth()`, exactly like every other admin-only entrypoint
+(`set_admin`, `set_stream_contract`, `set_allowlist`, `set_cap`,
+`set_min_duration`, all of which route through the shared `require_admin`
+helper). Without this, any unrelated caller could front-run bootstrap by
+calling `init` first and seeding the factory with an admin address they
+control, before the intended admin's transaction lands.
+
+`init` checks `AlreadyInitialized` before requiring auth, so a doomed
+re-initialization call does not need to pay for, or supply, an authorization
+entry — `admin.require_auth()` is only evaluated once it is known the call
+could otherwise succeed.
+
+### Stream contract validation
+
+Both `init` and `set_stream_contract` validate the supplied `stream_contract`
+address before persisting it. The factory invokes the read-only
+`FluxoraStream::version()` entrypoint via `FluxoraStreamClient::try_version`.
+Because `try_version` uses `Env::try_invoke_contract` internally, a missing
+contract, an EOA (non-contract) address, or a deployed contract that does not
+expose `version()` is caught as a typed error and returned as
+`FactoryError::InvalidStreamContract`, instead of letting the bad address be
+stored and only discovered later when `create_stream` host-traps on the
+cross-contract call into `FluxoraStream::create_stream`.
+
+`version()` is intentionally cheap and storage-free, and is documented to
+work even before the target `FluxoraStream` contract's own `init` has been
+called — so the smoke check never depends on the stream contract's
+initialization state.
+
+A failed validation leaves existing state untouched:
+- In `init`, no instance storage keys are written if `stream_contract` fails
+  validation; a subsequent `init` call with a valid address can still
+  succeed.
+- In `set_stream_contract`, the previously configured `stream_contract` is
+  left in place if the new address fails validation.
+
 ## Policy Parameter Validation
 
 Policy parameters are validated before they are written by `init`, `set_cap`,
@@ -27,8 +68,8 @@ policy unchanged.
 | `min_duration: u64` | `init`, `set_min_duration` | `0..=3_153_600_000` seconds (`MAX_MIN_DURATION_SECONDS`, 100 365-day years) | `FactoryError::InvalidMinDuration` | `0` is valid and means no additional factory-level minimum duration beyond the required `start_time < end_time` invariant. |
 
 These ranges are also documented in the Rust `///` comments on the factory
-entrypoints. Error discriminants are append-only; `InvalidCap = 9` and
-`InvalidMinDuration = 10` were added without renumbering existing values.
+entrypoints. Error discriminants are append-only; new variants are added without
+renumbering existing values.
 
 ## Time Validation
 
@@ -171,7 +212,7 @@ The factory has an `Admin` key managed via `set_admin`. The admin can:
 - Call `set_cap` to update the max deposit limit.
 - Call `set_min_duration` to update the minimum duration requirement.
 - Call `set_batch_cap_enforcement` to toggle aggregate batch-cap validation.
-- Call `set_stream_contract` to upgrade or switch the underlying stream primitive if a new version is deployed.
+- Call `set_stream_contract` to upgrade or switch the underlying stream primitive if a new version is deployed. The new address must pass the same `FluxoraStream::version()` smoke check enforced in `init` (see [Initialization & Stream Contract Validation](#initialization--stream-contract-validation)); a bad address is rejected with `FactoryError::InvalidStreamContract` and the previous stream contract remains active.
 - Call `set_rate_bounds` to configure optional inclusive rate-per-second bounds.
 
 The factory admin can shape policy and the target stream contract, but cannot
@@ -246,6 +287,12 @@ This document is aligned with the current implementation as follows:
   `memo = None` and `StreamKind::Linear`.
 - `FluxoraStream::create_stream` calls `sender.require_auth()` before validating
   parameters and pulling `deposit_amount` from `sender`.
+- `contracts/stream/tests/factory_policy.rs` covers the factory policy gates and
+  admin-guarded policy updates that surround this authorization model.
+- `FluxoraFactory::init` calls `admin.require_auth()` and validates
+  `stream_contract` via `FluxoraStream::version()` before persisting any
+  state; `set_stream_contract` applies the same validation. See
+  `contracts/factory/tests/factory_init_security.rs`.
 - `contracts/factory/tests/factory_setters.rs` covers policy input validation,
   factory policy gates, append-only error discriminants, admin-guarded
   policy updates, and instance storage TTL regression tests verifying that

@@ -870,6 +870,8 @@ pub struct CreateStreamParams {
     /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
     /// Maximum `MAX_MEMO_BYTES` (64) bytes. Pass `None` to omit.
     pub memo: Option<soroban_sdk::Bytes>,
+    /// Optional structured metadata for indexer consumption.
+    pub metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
     /// The architectural style of the stream (Linear or CliffOnly).
     pub kind: StreamKind,
 }
@@ -2625,6 +2627,7 @@ impl FluxoraStream {
                 end_time,
                 withdraw_dust_threshold: rel.withdraw_dust_threshold,
                 memo: rel.memo,
+                metadata: rel.metadata,
                 kind: rel.kind,
             });
         }
@@ -6932,6 +6935,8 @@ mod test;
 mod test_issue_39;
 #[cfg(test)]
 mod test_withdrawable_props;
+#[cfg(test)]
+mod test_token_edge_cases;
 
 /// Atomically cancel multiple streams owned by the caller and refund the aggregate
 /// unstreamed balance in a single token transfer.
@@ -7122,7 +7127,7 @@ pub fn bulk_cancel_streams(
 /// Preconditions (enforced by caller & harness):
 /// - gross >= 0
 /// - BPS <= 10_000
-#[cfg(kani)]
+#[cfg(any(test, kani))]
 pub fn compute_keeper_fee_split(gross: i128, bps: u32) -> (i128, i128) {
     let fee = gross.checked_mul(bps as i128).unwrap_or(i128::MAX) / 10_000;
     let refund = gross.checked_sub(fee).unwrap_or(0);
@@ -7168,5 +7173,117 @@ mod kani_proofs {
             .ok_or(ContractError::ArithmeticOverflow)
             .map(|v| v / 10_000);
         // If we reach here without panic in checked path, ok.
+    }
+}
+
+#[cfg(test)]
+mod keeper_fee_split_tests {
+    use super::compute_keeper_fee_split;
+
+    /// Rounding Behavior:
+    /// The division by 10_000 uses integer division, which truncates the fractional part (rounds towards zero).
+    /// For example, if gross is 9 and bps is 5000 (50%), keeper_fee = 9 * 5000 / 10000 = 4.
+    /// The remainder (refund) is computed as gross - fee = 9 - 4 = 5.
+    /// This ensures no tokens are created during division (no rounding up).
+    ///
+    /// Conservation Invariant:
+    /// The split must satisfy `keeper_fee + protocol_remainder == gross` exactly.
+    /// Since protocol_remainder is calculated by subtracting keeper_fee from gross using checked arithmetic,
+    /// any remainder from truncation is implicitly consolidated into the protocol remainder, ensuring that
+    /// the total amount of tokens is strictly conserved.
+    ///
+    /// Security Requirement for Value Preservation:
+    /// Preserving value is a critical security requirement to prevent:
+    /// 1. Token leakage or loss due to truncation errors, which would lock funds in the contract.
+    /// 2. Artificial inflation of balances (creation of phantom tokens), which would allow callers to drain
+    ///    more tokens than are actually backed by contract holdings.
+    #[test]
+    fn test_keeper_fee_split_gross_zero() {
+        // gross == 0 returns (0, 0)
+        let (fee, refund) = compute_keeper_fee_split(0, 5000);
+        assert_eq!(fee, 0);
+        assert_eq!(refund, 0);
+        assert_eq!(fee + refund, 0);
+    }
+
+    #[test]
+    fn test_keeper_fee_split_bps_zero() {
+        // bps == 0 allocates the full amount to the protocol remainder (refund)
+        let gross = 1000_i128;
+        let (fee, refund) = compute_keeper_fee_split(gross, 0);
+        assert_eq!(fee, 0);
+        assert_eq!(refund, gross);
+        assert_eq!(fee + refund, gross);
+    }
+
+    #[test]
+    fn test_keeper_fee_split_bps_max() {
+        // bps == 10_000 allocates the full amount to the keeper fee
+        let gross = 1000_i128;
+        let (fee, refund) = compute_keeper_fee_split(gross, 10_000);
+        assert_eq!(fee, gross);
+        assert_eq!(refund, 0);
+        assert_eq!(fee + refund, gross);
+    }
+
+    #[test]
+    fn test_keeper_fee_split_representative_combinations() {
+        // Rounding validation: truncating towards zero
+        // 9 * 5_000 / 10_000 = 4.5 -> rounds to 4. refund = 9 - 4 = 5.
+        let (fee, refund) = compute_keeper_fee_split(9, 5000);
+        assert_eq!(fee, 4);
+        assert_eq!(refund, 5);
+        assert_eq!(fee + refund, 9);
+
+        // 1000 * 250 / 10_000 = 25. refund = 975.
+        let (fee, refund) = compute_keeper_fee_split(1000, 250);
+        assert_eq!(fee, 25);
+        assert_eq!(refund, 975);
+        assert_eq!(fee + refund, 1000);
+
+        // 12345 * 123 / 10_000 = 151.8435 -> rounds to 151. refund = 12345 - 151 = 12194.
+        let (fee, refund) = compute_keeper_fee_split(12345, 123);
+        assert_eq!(fee, 151);
+        assert_eq!(refund, 12194);
+        assert_eq!(fee + refund, 12345);
+    }
+
+    #[test]
+    fn test_keeper_fee_split_large_gross_near_max() {
+        // Test near i128::MAX. These calculations must not overflow or panic.
+        let large_gross_values = [
+            i128::MAX,
+            i128::MAX - 1,
+            i128::MAX - 10000,
+            i128::MAX / 2,
+        ];
+
+        let bps_values = [0, 1, 10, 100, 1000, 5000, 9999, 10000];
+
+        for &gross in large_gross_values.iter() {
+            for &bps in bps_values.iter() {
+                let (fee, refund) = compute_keeper_fee_split(gross, bps);
+                
+                // Assert conservation invariant holds exactly
+                assert_eq!(
+                    fee + refund,
+                    gross,
+                    "Conservation failed for gross = {}, bps = {}",
+                    gross,
+                    bps
+                );
+                
+                // Assert fee is bounded by gross
+                assert!(
+                    fee <= gross,
+                    "Fee {} exceeded gross {} for bps {}",
+                    fee,
+                    gross,
+                    bps
+                );
+                assert!(fee >= 0, "Fee cannot be negative");
+                assert!(refund >= 0, "Refund cannot be negative");
+            }
+        }
     }
 }
