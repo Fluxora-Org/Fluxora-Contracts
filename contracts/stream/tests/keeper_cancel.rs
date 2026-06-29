@@ -345,3 +345,67 @@ fn test_keeper_cancel_token_conservation() {
         "all tokens must be conserved: sum of payouts == deposit - prior withdrawals"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Fee accounting: protocol-fee accumulator (which tracks total keeper fees)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_keeper_cancel_fee_reconciliation() {
+    let ctx = Ctx::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let mut expected_total_fees = 0_i128;
+
+    // Create two streams to test sequential accumulation
+    // Stream 1: deposit=10000, rate=5/s, end=1000. Canceled at end=1000
+    // Accrued = 5000, refund gross = 5000, keeper fee = 25
+    let stream_id1 = create_stream(&ctx, 10_000, 5, 0, 1000);
+    
+    // Stream 2: deposit=20000, rate=10/s, end=1000. Canceled at end=1000
+    // Accrued = 10000, refund gross = 10000, keeper fee = 50
+    let stream_id2 = create_stream(&ctx, 20_000, 10, 0, 1000);
+
+    ctx.env.ledger().set_timestamp(1000 + GRACE + 1);
+
+    let fees_before_1 = ctx.client().get_protocol_fees_accrued();
+    assert_eq!(fees_before_1, 0);
+
+    let keeper_bal_before_1 = ctx.token.balance(&ctx.keeper);
+
+    // Cancel Stream 1
+    ctx.client().keeper_cancel(&stream_id1, &ctx.keeper);
+
+    let expected_fee_1 = 25_i128;
+    expected_total_fees += expected_fee_1;
+
+    let fees_after_1 = ctx.client().get_protocol_fees_accrued();
+    
+    // Accrued increases by exactly the keeper share (since it tracks keeper payouts)
+    assert_eq!(fees_after_1, fees_before_1 + expected_fee_1);
+    // Keeper received exactly the keeper share
+    assert_eq!(ctx.token.balance(&ctx.keeper), keeper_bal_before_1 + expected_fee_1);
+
+    // Cancel Stream 2
+    let keeper_bal_before_2 = ctx.token.balance(&ctx.keeper);
+    ctx.client().keeper_cancel(&stream_id2, &ctx.keeper);
+
+    let expected_fee_2 = 50_i128;
+    expected_total_fees += expected_fee_2;
+
+    let fees_after_2 = ctx.client().get_protocol_fees_accrued();
+    
+    // Accrued increases by exactly the keeper share
+    assert_eq!(fees_after_2, fees_after_1 + expected_fee_2);
+    // Keeper received exactly the keeper share
+    assert_eq!(ctx.token.balance(&ctx.keeper), keeper_bal_before_2 + expected_fee_2);
+
+    // Sequential cancels accumulate correctly
+    assert_eq!(fees_after_2, expected_total_fees);
+
+    // Security assertion: Accrued fees never exceed the contract's actual token balance 
+    // attributable to remaining liabilities. Even though the fee is paid out, we assert 
+    // this mathematical bound as requested.
+    let contract_balance = ctx.token.balance(&ctx.contract_id);
+    assert!(fees_after_2 <= contract_balance, "accrued fees exceed contract balance");
+}
