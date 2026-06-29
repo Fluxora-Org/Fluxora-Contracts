@@ -16,7 +16,7 @@ When changing the contract:
 - Update snapshot tests if externally visible behavior changes
 - No behavior change required for doc-only updates
 
-**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `cancel_recipient_update`, `delete_stream_template`, `get_global_emergency_paused`, `get_pending_recipient_update`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `global_resume`, `keeper_cancel`, `set_contract_paused`, `set_global_emergency_paused`, `version`, `migration_v5_to_v6`, `set_max_rate_per_second`.
+**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `cancel_recipient_update`, `delete_stream_template`, `get_global_emergency_paused`, `get_keeper_fee_split`, `get_pending_recipient_update`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `global_resume`, `keeper_cancel`, `set_contract_paused`, `set_global_emergency_paused`, `version`, `migration_v5_to_v6`, `set_max_rate_per_second`.
 
 ## Externally Visible Assurances
 
@@ -1450,6 +1450,93 @@ Comprehensive test coverage includes:
 - ✅ Handles edge cases (completed streams, paused streams, etc.)
 
 See `contracts/stream/tests/integration_suite.rs` for full test suite.
+
+## Keeper Cancellation
+
+### Overview
+
+After a stream's `end_time` passes and a configurable grace period elapses, any address may
+call `keeper_cancel` to close the stream and collect a small incentive fee.  This prevents
+unclaimed deposits from remaining locked in contract storage indefinitely.
+
+| Constant | Value | Notes |
+| -------- | ----- | ----- |
+| `KEEPER_GRACE_PERIOD_SECONDS` | 604 800 s (7 days) | Seconds after `end_time` before eligibility |
+| `KEEPER_FEE_BPS` | 50 bps (0.5 %) | Fee as a fraction of the unstreamed sender refund |
+
+### Token distribution on `keeper_cancel`
+
+1. `recipient_amount = accrued − withdrawn_amount` → transferred to recipient.
+2. `sender_refund_gross = deposit_amount − accrued` (unstreamed portion).
+3. `keeper_fee = sender_refund_gross × KEEPER_FEE_BPS / 10 000` → transferred to keeper.
+4. `sender_refund = sender_refund_gross − keeper_fee` → transferred to sender.
+
+When `sender_refund_gross == 0` (stream fully accrued), the keeper receives no fee.
+
+### `keeper_cancel`
+
+**Authorization:** `keeper.require_auth()` — prevents fee redirection by a third party.
+
+**Errors:**
+
+| Error | Condition |
+| ----- | --------- |
+| `StreamNotFound` | `stream_id` does not exist |
+| `InvalidState` | Stream is already `Cancelled` or `Completed` |
+| `KeeperGracePeriodNotElapsed` | `now < end_time + KEEPER_GRACE_PERIOD_SECONDS` |
+
+### `get_keeper_fee_split` (view)
+
+**Purpose:** Preview the `(keeper_fee, sender_refund)` split that `keeper_cancel` would pay,
+without moving any funds or changing any state.  Keepers should call this before paying gas
+to confirm the fee is worthwhile.
+
+**Entry-point:**
+
+```rust
+pub fn get_keeper_fee_split(env: Env, stream_id: u64) -> Result<(i128, i128), ContractError>
+```
+
+**Authorization:** None (public view).
+
+**Returns:**
+
+| Condition | Return |
+| --------- | ------ |
+| Grace period not yet elapsed | `Ok((0, 0))` — not yet eligible, no error |
+| Stream is eligible | `Ok((keeper_fee, sender_refund))` matching `keeper_cancel` payouts |
+| Stream is `Cancelled` or `Completed` | `Err(InvalidState)` |
+| Stream does not exist | `Err(StreamNotFound)` |
+
+**Invariants:**
+
+- `keeper_fee + sender_refund == deposit_amount − accrued` (gross unstreamed) when eligible.
+- Output is identical to the amounts computed inside `keeper_cancel` for the same ledger timestamp.
+- No state writes, no TTL changes, no token operations — cannot be abused for griefing.
+
+**Example (Rust client):**
+
+```rust
+let (fee, refund) = client.get_keeper_fee_split(&stream_id)?;
+if fee > gas_cost_estimate {
+    client.keeper_cancel(&stream_id, &keeper_address);
+}
+```
+
+**Test coverage:** See `contracts/stream/tests/keeper_cancel.rs`.
+
+- ✅ View/cancel parity (preview matches actual keeper and sender payouts)
+- ✅ Not-yet-eligible stream returns `(0, 0)`
+- ✅ Active stream before `end_time` returns `(0, 0)`
+- ✅ Fully-accrued stream returns `(0, 0)` (no gross, no fee)
+- ✅ `Cancelled` stream returns `InvalidState`
+- ✅ `Completed` stream returns `InvalidState`
+- ✅ Non-existent stream returns `StreamNotFound`
+- ✅ Paused eligible stream returns correct split
+- ✅ `fee + refund == gross` invariant
+- ✅ Idempotency (two calls at same timestamp return same result)
+
+---
 
 ## ID Reservation (Off-Chain Orchestration)
 

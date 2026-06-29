@@ -5657,6 +5657,76 @@ impl FluxoraStream {
         Ok(())
     }
 
+    /// Preview the fee split that `keeper_cancel` would pay for a given stream.
+    ///
+    /// Returns `(keeper_fee, sender_refund)` — the amounts that would be transferred to the
+    /// keeper and the stream sender respectively if `keeper_cancel` were called right now.
+    ///
+    /// This is a **read-only** view: it moves no funds and changes no state.
+    ///
+    /// # Parameters
+    /// - `stream_id`: Unique identifier of the stream to preview.
+    ///
+    /// # Returns
+    /// - `(keeper_fee, sender_refund)`: Both values are `>= 0`.
+    ///   Returns `(0, 0)` when the grace period has not yet elapsed (stream not yet eligible).
+    ///
+    /// # Errors
+    /// - `ContractError::StreamNotFound`: Stream does not exist.
+    /// - `ContractError::InvalidState`: Stream is already in a terminal state
+    ///   (`Cancelled` or `Completed`) and therefore not keeper-cancellable.
+    /// - `ContractError::ArithmeticOverflow`: Overflow computing accrual or fee
+    ///   (should not occur for amounts within `i128` range).
+    ///
+    /// # Security
+    /// - Pure read: no TTL bumps, no token transfers, no state writes.
+    /// - Output is identical to what `keeper_cancel` computes before any transfer.
+    pub fn get_keeper_fee_split(
+        env: Env,
+        stream_id: u64,
+    ) -> Result<(i128, i128), ContractError> {
+        let stream = load_stream(&env, stream_id)?;
+
+        // Only Active / Paused streams are keeper-cancellable.
+        Self::require_cancellable_status(stream.status)?;
+
+        let now = env.ledger().timestamp();
+
+        // Grace period not yet elapsed → not eligible; return zeros rather than an error
+        // so callers can query without needing to catch an error for the common polling case.
+        let eligible_at = stream
+            .end_time
+            .checked_add(KEEPER_GRACE_PERIOD_SECONDS)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        if now < eligible_at {
+            return Ok((0, 0));
+        }
+
+        let accrued = accrual::calculate_accrued_amount_checkpointed(
+            accrual::CheckpointState {
+                checkpointed_amount: stream.checkpointed_amount,
+                checkpointed_at: stream.checkpointed_at,
+                cliff_time: stream.cliff_time,
+                end_time: stream.end_time,
+                deposit_amount: stream.deposit_amount,
+                kind: stream.kind,
+            },
+            stream.rate_per_second,
+            now,
+        );
+
+        let sender_refund_gross = stream
+            .deposit_amount
+            .checked_sub(accrued)
+            .ok_or(ContractError::InvalidState)?
+            .max(0);
+
+        Ok(compute_keeper_fee_split(
+            sender_refund_gross,
+            KEEPER_FEE_BPS as u32,
+        ))
+    }
+
     /// Pause a payment stream as the contract admin.
     ///
     /// Administrative override to pause any stream, bypassing sender authorization.
@@ -7231,7 +7301,7 @@ pub fn bulk_cancel_streams(
     Ok(())
 }
 
-/// Pure helper for keeper fee computation (extracted for formal verification).
+/// Pure helper for keeper fee computation (extracted for formal verification and view queries).
 /// Computes `keeper_fee = gross * BPS / 10_000` and `sender_refund = gross - fee`
 /// with the exact production checked arithmetic.
 ///
