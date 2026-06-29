@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 // Additional Token Edge Case Tests
 // ---------------------------------------------------------------------------
 // These tests complement the existing token interaction tests by covering:
@@ -28,6 +28,7 @@ use soroban_sdk::{
 use crate::{
     ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamCreated,
     StreamEvent, StreamStatus, WithdrawalTo,
+    test::TestContext,
 };
 
 // ---------------------------------------------------------------------------
@@ -47,7 +48,7 @@ fn create_stream_emits_correct_event() {
         &0u64,
         &0u64,
         &1000u64,
-        &0, &None,,
+        &0, &None,
         &crate::StreamKind::Linear,
         );
 
@@ -57,7 +58,7 @@ fn create_stream_emits_correct_event() {
     // Verify event contains correct stream_id
     let created_event = events
         .iter()
-        .find(|e| e.0 == (symbol_short!("created"), 0u64));
+        .find(|e| e.1 == (symbol_short!("created"), 0u64).into_val(&ctx.env));
     assert!(created_event.is_some(), "must emit StreamCreated event");
 }
 
@@ -76,7 +77,7 @@ fn withdraw_emits_correct_event() {
     // Verify event contains correct stream_id
     let withdrawal_event = events
         .iter()
-        .find(|e| e.0 == (symbol_short!("withdrew"), stream_id));
+        .find(|e| e.1 == (symbol_short!("withdrew"), stream_id).into_val(&ctx.env));
     assert!(withdrawal_event.is_some(), "must emit Withdrawal event");
 }
 
@@ -95,7 +96,7 @@ fn cancel_stream_emits_correct_event() {
     // Verify event contains correct stream_id
     let cancelled_event = events
         .iter()
-        .find(|e| e.0 == (symbol_short!("cancelled"), stream_id));
+        .find(|e| e.1 == (symbol_short!("cancelled"), stream_id).into_val(&ctx.env));
     assert!(cancelled_event.is_some(), "must emit StreamCancelled event");
 }
 
@@ -115,7 +116,7 @@ fn top_up_stream_emits_correct_event() {
     // Verify event contains correct stream_id
     let topped_up_event = events
         .iter()
-        .find(|e| e.0 == (symbol_short!("top_up"), stream_id));
+        .find(|e| e.1 == (symbol_short!("top_up"), stream_id).into_val(&ctx.env));
     assert!(topped_up_event.is_some(), "must emit StreamToppedUp event");
 }
 
@@ -135,7 +136,7 @@ fn update_rate_emits_correct_event() {
     // Verify event contains correct stream_id
     let rate_updated_event = events
         .iter()
-        .find(|e| e.0 == (symbol_short!("rate_upd"), stream_id));
+        .find(|e| e.1 == (symbol_short!("rate_upd"), stream_id).into_val(&ctx.env));
     assert!(rate_updated_event.is_some(), "must emit RateUpdated event");
 }
 
@@ -155,7 +156,7 @@ fn shorten_end_time_emits_correct_event() {
     // Verify event contains correct stream_id
     let shortened_event = events
         .iter()
-        .find(|e| e.0 == (symbol_short!("end_shrt"), stream_id));
+        .find(|e| e.1 == (symbol_short!("end_shrt"), stream_id).into_val(&ctx.env));
     assert!(
         shortened_event.is_some(),
         "must emit StreamEndShortened event"
@@ -178,7 +179,7 @@ fn extend_end_time_emits_correct_event() {
     // Verify event contains correct stream_id
     let extended_event = events
         .iter()
-        .find(|e| e.0 == (symbol_short!("end_ext"), stream_id));
+        .find(|e| e.1 == (symbol_short!("end_ext"), stream_id).into_val(&ctx.env));
     assert!(
         extended_event.is_some(),
         "must emit StreamEndExtended event"
@@ -293,7 +294,7 @@ fn non_sender_cannot_extend_end_time_strict_auth() {
 #[test]
 fn withdraw_at_exact_cliff_time_returns_zero() {
     let ctx = TestContext::setup();
-    let stream_id = ctx.create_stream(
+    let stream_id = ctx.client().create_stream(
         &ctx.sender,
         &ctx.recipient,
         &1000_i128,
@@ -301,7 +302,7 @@ fn withdraw_at_exact_cliff_time_returns_zero() {
         &0u64,
         &500u64, // cliff at 500
         &1000u64,
-        &0, &None,,
+        &0, &None,
         &crate::StreamKind::Linear,
         );
 
@@ -318,7 +319,7 @@ fn withdraw_at_exact_cliff_time_returns_zero() {
 #[test]
 fn withdraw_one_second_after_cliff_returns_accrued() {
     let ctx = TestContext::setup();
-    let stream_id = ctx.create_stream(
+    let stream_id = ctx.client().create_stream(
         &ctx.sender,
         &ctx.recipient,
         &1000_i128,
@@ -326,7 +327,7 @@ fn withdraw_one_second_after_cliff_returns_accrued() {
         &0u64,
         &500u64, // cliff at 500
         &1000u64,
-        &0, &None,,
+        &0, &None,
         &crate::StreamKind::Linear,
         );
 
@@ -373,7 +374,7 @@ fn withdraw_after_end_time_returns_full_deposit() {
 #[test]
 fn cancel_at_exact_start_time_refunds_full_deposit() {
     let ctx = TestContext::setup();
-    let stream_id = ctx.create_stream(
+    let stream_id = ctx.client().create_stream(
         &ctx.sender,
         &ctx.recipient,
         &1000_i128,
@@ -381,7 +382,7 @@ fn cancel_at_exact_start_time_refunds_full_deposit() {
         &0u64,
         &0u64,
         &1000u64,
-        &0, &None,,
+        &0, &None,
         &crate::StreamKind::Linear,
         );
 
@@ -453,7 +454,7 @@ fn create_stream_max_deposit_fails() {
         &0u64,
         &0u64,
         &1000u64,
-        &0, &None,,
+        &0, &None,
         &crate::StreamKind::Linear,
         );
 
@@ -477,7 +478,7 @@ fn create_stream_max_rate_fails() {
         &0u64,
         &0u64,
         &1000u64,
-        &0, &None,,
+        &0, &None,
         &crate::StreamKind::Linear,
         );
 
@@ -503,7 +504,7 @@ fn create_stream_rate_duration_overflow_fails() {
         &0u64,
         &0u64,
         &1_000_000_000u64,
-        &0, &None,,
+        &0, &None,
         &crate::StreamKind::Linear,
         );
 
@@ -562,7 +563,7 @@ fn update_rate_overflow_fails() {
 #[test]
 fn shorten_end_time_overflow_fails() {
     let ctx = TestContext::setup();
-    let stream_id = ctx.create_stream(
+    let stream_id = ctx.client().create_stream(
         &ctx.sender,
         &ctx.recipient,
         &1_000_000_000_000_000_000_i128,
@@ -570,7 +571,7 @@ fn shorten_end_time_overflow_fails() {
         &0u64,
         &0u64,
         &1_000_000_000u64,
-        &0, &None,,
+        &0, &None,
         &crate::StreamKind::Linear,
         );
 
@@ -676,3 +677,151 @@ fn authorization_model_documented() {
     //
     // See docs/security.md for detailed documentation.
 }
+
+// ---------------------------------------------------------------------------
+// §16  Token Behavior and Invariant Validation Checks (token_check)
+// ---------------------------------------------------------------------------
+
+use crate::token_check::verify_token_behavior;
+
+mod mock_neg {
+    use soroban_sdk::{Env, Address};
+
+    #[soroban_sdk::contract]
+    pub struct MockNegativeBalanceToken;
+
+    #[soroban_sdk::contractimpl]
+    impl MockNegativeBalanceToken {
+        pub fn balance(_env: Env, _id: Address) -> i128 {
+            -100_i128
+        }
+
+        pub fn transfer(_env: Env, _from: Address, _to: Address, _amount: i128) {
+            // no-op
+        }
+    }
+}
+pub use mock_neg::MockNegativeBalanceToken;
+
+mod mock_mut {
+    use soroban_sdk::{Env, Address};
+
+    #[soroban_sdk::contracttype]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub enum MockTokenState {
+        Balance,
+    }
+
+    #[soroban_sdk::contract]
+    pub struct MockMutatingToken;
+
+    #[soroban_sdk::contractimpl]
+    impl MockMutatingToken {
+        pub fn balance(env: Env, _id: Address) -> i128 {
+            env.storage().instance().get(&MockTokenState::Balance).unwrap_or(100_i128)
+        }
+
+        pub fn transfer(env: Env, _from: Address, _to: Address, _amount: i128) {
+            let current: i128 = env.storage().instance().get(&MockTokenState::Balance).unwrap_or(100_i128);
+            env.storage().instance().set(&MockTokenState::Balance, &(current + 5_i128));
+        }
+    }
+}
+pub use mock_mut::MockMutatingToken;
+
+mod mock_test_contract {
+    use soroban_sdk::{Env, Address};
+    use crate::ContractError;
+    use crate::token_check::verify_token_behavior;
+
+    #[soroban_sdk::contract]
+    pub struct TestTokenCheckContract;
+
+    #[soroban_sdk::contractimpl]
+    impl TestTokenCheckContract {
+        pub fn run_verify(env: Env, token_address: Address) -> Result<(), ContractError> {
+            verify_token_behavior(&env, &token_address)
+        }
+    }
+}
+pub use mock_test_contract::TestTokenCheckContract;
+pub use mock_test_contract::TestTokenCheckContractClient;
+
+/// verify_token_behavior succeeds for standard Stellar Asset Contracts (SAC)
+#[test]
+fn test_token_check_sac_passes() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let test_contract_id = env.register_contract(None, TestTokenCheckContract);
+    let test_client = TestTokenCheckContractClient::new(&env, &test_contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin).address();
+
+    let result = test_client.try_run_verify(&token_id);
+    assert_eq!(result, Ok(Ok(())));
+}
+
+/// verify_token_behavior rejects tokens that return negative balances
+#[test]
+fn test_token_check_negative_balance_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let test_contract_id = env.register_contract(None, TestTokenCheckContract);
+    let test_client = TestTokenCheckContractClient::new(&env, &test_contract_id);
+
+    let token_id = env.register_contract(None, MockNegativeBalanceToken);
+
+    let result = test_client.try_run_verify(&token_id);
+    assert_eq!(result, Err(Ok(ContractError::TokenVerificationFailed)));
+}
+
+/// verify_token_behavior rejects tokens whose zero-transfer changes the balance
+#[test]
+fn test_token_check_mutating_balance_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let test_contract_id = env.register_contract(None, TestTokenCheckContract);
+    let test_client = TestTokenCheckContractClient::new(&env, &test_contract_id);
+
+    let token_id = env.register_contract(None, MockMutatingToken);
+
+    let result = test_client.try_run_verify(&token_id);
+    assert_eq!(result, Err(Ok(ContractError::TokenVerificationFailed)));
+}
+
+/// Regression test: init fails if the token returns negative balance
+#[test]
+fn test_token_check_init_fails_for_negative_balance_token() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+
+    let token_id = env.register_contract(None, MockNegativeBalanceToken);
+    let admin = Address::generate(&env);
+
+    let result = client.try_init(&token_id, &admin);
+    assert_eq!(result, Err(Ok(ContractError::TokenVerificationFailed)));
+}
+
+/// Regression test: init fails if the token balance changes on zero-transfer
+#[test]
+fn test_token_check_init_fails_for_mutating_balance_token() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+
+    let token_id = env.register_contract(None, MockMutatingToken);
+    let admin = Address::generate(&env);
+
+    let result = client.try_init(&token_id, &admin);
+    assert_eq!(result, Err(Ok(ContractError::TokenVerificationFailed)));
+}
+
