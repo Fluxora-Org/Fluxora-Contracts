@@ -26,8 +26,8 @@ CONTRACT_VERSION = 5
 | 1 | Initial release |
 | 2 | `Stream` struct gained `checkpointed_amount: i128` and `checkpointed_at: u64` for safe rate-decrease support |
 | 3 | `Stream` struct gained `memo: Option<Bytes>`; `StreamCreated` event gained `memo` field; `DataKey::StreamMemo(u64)` added at discriminant 10; `create_stream`/`create_streams` gained `memo` parameter; `get_stream_memo` entry-point added |
-| 4 | `TotalLiabilities` instance key for escrow accounting |
-| 5 | `withdraw_dust_threshold: i128` added to `Stream` struct and creation params |
+| 4 | `TotalLiabilities` instance key for escrow accounting; accrual paths track last observed ledger timestamp for clock-regression detection |
+| 5 | `withdraw_dust_threshold: i128` added to `Stream` struct and creation params; `DataKey::PausedStreamCount` added and maintained across pause/resume/cancel/complete transitions; `get_paused_stream_count()` O(1) view added |
 
 ### When to increment
 
@@ -139,6 +139,28 @@ There is no on-chain migration path for stream state between contract versions. 
 | Cancelled | Recipient withdraws frozen accrued amount on old instance |
 | Completed | Recipient withdraws remaining amount on old instance; optionally close via `close_completed_stream` |
 
+### Paused-stream counter backfill caveat (v5)
+
+`CONTRACT_VERSION = 5` introduces an instance key, `DataKey::PausedStreamCount`, used by
+`get_paused_stream_count()` to expose an O(1) protocol-wide gauge of how many streams are
+currently paused.
+
+Because existing deployments do **not** have historical pause state materialized in this new
+instance key, an upgraded instance starts with the counter effectively unset / `0`.
+
+Operational consequences:
+- Fresh deployments initialised on v7 track the exact live paused-stream count immediately.
+- Upgraded deployments report `0` until post-upgrade stream transitions repopulate the counter.
+- Legacy streams that were already paused before the upgrade are **not** backfilled.
+- The first post-upgrade `resume_*`, `cancel_*`, or terminal completion of such a legacy paused
+  stream will **not** make the counter go negative; the implementation uses saturating decrement
+  semantics for safety.
+- Once a legacy stream experiences a post-upgrade pause transition, it is tracked normally again.
+
+If an exact paused-stream count is required immediately after upgrading an already-live instance,
+operators must reconstruct it off-chain once (for example, by enumerating stream state) and treat
+`get_paused_stream_count()` as authoritative only for post-upgrade transitions thereafter.
+
 ---
 
 ## 4. Integrator Checklist
@@ -194,10 +216,16 @@ Returns streams within an ID range `[start_id, end_id]` with a strict result lim
 **Returns:**
 - `Vec<Stream>` — Stream structs in ascending ID order
 - Empty vector if `start_id > end_id` or no streams exist in range
-- Closed/archived stream IDs are silently skipped
+- Closed/archived stream IDs (holes) are silently skipped
+
+**Edge Case Behavior:**
+- **Holey Ranges:** Ranges containing closed or never-created IDs (holes) skip missing IDs and return only active streams in the specified range.
+- **Limit Clamping:** Limits above `MAX_PAGE_SIZE = 100` are strictly clamped to `MAX_PAGE_SIZE`.
+- **Start Beyond Max:** If `start_id` is greater than the highest created ID (e.g. `get_stream_count()`), the call returns an empty vector.
+- **Zero Limit:** Requesting a page with `limit = 0` returns an empty vector.
 
 **DoS Protection:**
-- `limit` is capped at `MAX_PAGE_SIZE` (100) regardless of input
+- `limit` is capped at `MAX_PAGE_SIZE` (100) regardless of input. This bounds the maximum execution and read costs, preventing memory or gas exhaustion DoS vectors.
 - Gas cost is O(min(limit, actual_results)), not O(range_size)
 - Each stream lookup is O(1)
 

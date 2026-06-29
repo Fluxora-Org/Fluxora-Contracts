@@ -1,41 +1,52 @@
-# Formal verification notes — `accrual.rs`
+# Formal verification notes — `accrual.rs`, keeper-fee, and governance
 
-This document describes the Kani proof harnesses added to `contracts/stream/src/accrual.rs`.
+This document describes the Kani proof harnesses in Fluxora Contracts.
 
-Summary
-- Added `#[cfg(kani)]` proof harnesses exercising `calculate_accrued_amount_checkpointed`.
-- Proofs cover:
-  - Result bounds: output is always in `[0, deposit_amount]` and no panic occurs.
-  - Monotonicity: for non-negative rates, accrual is non-decreasing over time after the cliff.
-  - Clamping: returns `0` before `cliff_time` and caps at `deposit_amount` at/after `end_time`.
+## Accrual proofs (original)
+- Located in `contracts/stream/src/accrual.rs` (and exercised via tests).
+- Proofs cover result bounds, monotonicity, and clamping.
 
-Assumptions and bounds
-- To keep proofs tractable, harnesses constrain numeric ranges via `kani::assume`:
-  - `deposit_amount` and `rate_per_second` are bounded to ±1e18-ish in proofs.
-  - `checkpointed_amount` is assumed in `[0, deposit_amount]`.
-  - `checkpointed_at <= end_time` and `cliff_time <= end_time`.
+## Keeper-fee conservation proofs (new)
+- Pure helper: `compute_keeper_fee_split(gross, bps)` in `lib.rs`.
+- Harness: `keeper_fee_conservation` (in `formal_verification_smoke.rs` under `#[cfg(kani)]`).
+  - Asserts conservation: `keeper_fee + protocol_remainder == gross`
+  - Proves non-negativity: both `keeper_fee` and `protocol_remainder` are `>= 0`
+  - Asserts stronger bound: `keeper_fee <= gross` (follows from conservation + non-negativity)
+  - Domain assumptions mirror runtime guards: `gross >= 0`, `bps <= 10_000` (full i128 domain via symbolic input).
+- Harness: `keeper_fee_no_mul_overflow`
+  - Proves the `checked_mul(KEEPER_FEE_BPS)` before `/ 10_000` cannot overflow in production path.
 
-Unproven/intentional limitations
-- The harnesses intentionally bound ranges for tractability. While the proofs
-  cover arithmetic logic and clamping, extremely large ranges (e.g. full
-  i128 limits) are not exhaustively explored due to state-space explosion.
-- Kani proofs are a best-effort complement to unit and property tests, not a
-  replacement for manual audits.
+## Governance proofs (new)
+- Harnesses in `formal_verification_smoke.rs` (`kani_governance`).
+  - `governance_quorum_monotonic_and_timelock_safe`
+    - Proves `quorum_at + GOVERNANCE_TIMELOCK_SECONDS` is overflow-safe.
+    - Proves approval-count → quorum transition is monotonic (once reached, stays reached).
+  - `governance_executed_stays_executed`
+    - Proves an executed proposal remains executed (cannot be cancelled or re-executed).
 
-How to run
+## Constants (production values)
+- `KEEPER_GRACE_PERIOD_SECONDS = 604_800` (7 days)
+- `KEEPER_FEE_BPS = 50` (0.5%)
+- `GOVERNANCE_TIMELOCK_SECONDS = 172_800` (48 hours)
 
-Install Kani (see https://model-checking.github.io/kani/), then run from repo
-root:
+## How to run
 
 ```bash
-# Run Kani on the accrual proofs
+# Accrual (original)
 kani contracts/stream/src/accrual.rs --recursive
+
+# Fee + governance (via smoke harness)
+kani contracts/stream/tests/formal_verification_smoke.rs --harness keeper_fee_conservation
+kani contracts/stream/tests/formal_verification_smoke.rs --harness governance_quorum_monotonic_and_timelock_safe
+kani contracts/stream/tests/formal_verification_smoke.rs --harness governance_executed_stays_executed
 ```
 
-If Kani is not installed, CI should skip Kani stages; proofs are gated by
-`#[cfg(kani)]` and do not affect normal `cargo test` runs.
+All proofs are gated by `#[cfg(kani)]`:
+- `cargo test -p fluxora_stream` unaffected.
+- `cargo build --target wasm32-unknown-unknown -p fluxora_stream` unaffected.
 
-Security notes
-- Proofs assert no panic/overflow in the core accrual math and reinforce the
-  contract's CEI and clamping assumptions. Operators should still validate
-  token behaviour and avoid initializing the contract with malicious tokens.
+## Security notes
+- Proofs target the **exact** production arithmetic path (via extracted pure helper for fee).
+- Full symbolic domains (not sampled values) for gross refunds and BPS.
+- Timelock addition uses checked arithmetic + explicit overflow proof.
+- Governance monotonicity + executed-stays-executed prevent replay / double-execution vectors.

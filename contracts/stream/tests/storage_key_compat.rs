@@ -760,7 +760,8 @@ fn discriminant_14_total_liabilities_round_trips() {
 /// `version()` returns the compile-time constant without touching storage.
 ///
 /// This test is intentionally minimal: it confirms the entry-point is callable
-/// on a V5-seeded instance (before any V6-specific storage is written).
+/// on a V5-seeded instance (V6 only changes sweep_excess authorization, so no
+/// new storage keys are written).
 #[test]
 fn version_entry_point_works_on_v5_seeded_instance() {
     let ctx = Ctx::setup();

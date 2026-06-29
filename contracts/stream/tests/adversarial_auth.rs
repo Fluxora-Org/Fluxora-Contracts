@@ -972,6 +972,193 @@ fn test_recipient_update_auth_enforcement() {
 }
 
 // ---------------------------------------------------------------------------
+// sweep_excess — authorization and liabilities invariant (#617)
+// ---------------------------------------------------------------------------
+
+/// Admin sweeps excess to a non-signing treasury wallet — the recipient does
+/// NOT need to authorize (this is the core fix for issue #617).
+#[test]
+fn test_sweep_excess_admin_to_cold_treasury_succeeds() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream();
+
+    // Add excess tokens to the contract (simulate trapped funds)
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.token_id,
+            fn_name: "transfer",
+            args: (&ctx.sender, &ctx.contract_id, 500_i128).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+    TokenClient::new(&ctx.env, &ctx.token_id).transfer(&ctx.sender, &ctx.contract_id, &500);
+
+    // Contract has 1500 tokens, 1000 liabilities, 500 excess
+    assert_eq!(
+        TokenClient::new(&ctx.env, &ctx.token_id).balance(&ctx.contract_id),
+        1_500
+    );
+
+    // Sweep to a cold treasury wallet (no recipient auth provided — only admin auth)
+    let treasury = Address::generate(&ctx.env);
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.admin,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "sweep_excess",
+            args: (&treasury,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let swept = ctx.client().sweep_excess(&treasury);
+    assert_eq!(swept, 500);
+    assert_eq!(
+        TokenClient::new(&ctx.env, &ctx.token_id).balance(&treasury),
+        500
+    );
+    assert_eq!(
+        TokenClient::new(&ctx.env, &ctx.token_id).balance(&ctx.contract_id),
+        1_000
+    );
+}
+
+/// Non-admin caller cannot sweep excess tokens.
+#[test]
+fn test_sweep_excess_rejects_non_admin() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream();
+
+    // Add excess
+    ctx.env.mock_all_auths();
+    TokenClient::new(&ctx.env, &ctx.token_id).transfer(&ctx.sender, &ctx.contract_id, &500);
+
+    // Attacker tries to sweep without admin auth
+    let attacker = Address::generate(&ctx.env);
+    let treasury = Address::generate(&ctx.env);
+    ctx.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "sweep_excess",
+            args: (&treasury,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = ctx.client().try_sweep_excess(&treasury);
+    assert!(result.is_err(), "non-admin must not be able to sweep");
+}
+
+/// Sweep when there is no excess returns 0 and does not transfer tokens.
+#[test]
+fn test_sweep_excess_zero_excess_is_noop() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream();
+
+    // No excess — contract balance equals liabilities
+    let treasury = Address::generate(&ctx.env);
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.admin,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "sweep_excess",
+            args: (&treasury,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let swept = ctx.client().sweep_excess(&treasury);
+    assert_eq!(swept, 0);
+    assert_eq!(
+        TokenClient::new(&ctx.env, &ctx.token_id).balance(&treasury),
+        0
+    );
+    assert_eq!(
+        TokenClient::new(&ctx.env, &ctx.token_id).balance(&ctx.contract_id),
+        1_000
+    );
+}
+
+/// Post-sweep contract balance is always >= total liabilities (core invariant).
+#[test]
+fn test_sweep_excess_preserves_solvency_invariant() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream();
+
+    // Add various amounts of excess
+    ctx.env.mock_all_auths();
+    TokenClient::new(&ctx.env, &ctx.token_id).transfer(&ctx.sender, &ctx.contract_id, &300);
+    TokenClient::new(&ctx.env, &ctx.token_id).transfer(&ctx.sender, &ctx.contract_id, &200);
+
+    let treasury = Address::generate(&ctx.env);
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.admin,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "sweep_excess",
+            args: (&treasury,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    ctx.client().sweep_excess(&treasury);
+
+    // After sweep, contract should still have exactly 1000 (the liability amount)
+    assert_eq!(
+        TokenClient::new(&ctx.env, &ctx.token_id).balance(&ctx.contract_id),
+        1_000
+    );
+
+    // Recipient can still withdraw their full entitlement
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.recipient,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "withdraw",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn, 0); // at t=0 no accrual yet
+}
+
+/// Sweep_excess to a cold wallet works even when recipient never authorizes
+/// anything — simulates real cold treasury scenario.
+#[test]
+fn test_sweep_excess_to_cold_wallet_no_recipient_interaction() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream();
+
+    // Add excess via sender transfer (no recipient involvement)
+    ctx.env.mock_all_auths();
+    TokenClient::new(&ctx.env, &ctx.token_id).transfer(&ctx.sender, &ctx.contract_id, &500);
+
+    // Cold treasury wallet that will never sign anything
+    let cold_treasury = Address::generate(&ctx.env);
+
+    // Only admin authorizes the sweep — cold treasury does NOT sign
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.admin,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "sweep_excess",
+            args: (&cold_treasury,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let swept = ctx.client().sweep_excess(&cold_treasury);
+    assert_eq!(swept, 500);
+    assert_eq!(
+        TokenClient::new(&ctx.env, &ctx.token_id).balance(&cold_treasury),
+        500
+    );
+}
+
+// ---------------------------------------------------------------------------
 // delegated_withdraw — validate_delegation_params coverage (#518)
 // ---------------------------------------------------------------------------
 //
@@ -1259,8 +1446,24 @@ mod delegated_withdraw_adversarial {
 // ---------------------------------------------------------------------------
 // Issue #510: delegated_withdraw — adversarial tests
 // ---------------------------------------------------------------------------
+//
+// All tests below use a recipient whose address IS derived from an ed25519
+// keypair, matching the public-key binding check introduced in the fix.
+// The signed message is the raw 40-byte layout:
+//   stream_id(8) | nonce(8) | deadline(8) | expected_minimum_amount(16)
+// ---------------------------------------------------------------------------
 
-/// Helper: build the 40-byte message that the recipient must sign.
+use soroban_sdk::xdr::{AccountId, PublicKey, ScAddress, Uint256};
+use soroban_sdk::TryIntoVal;
+
+/// Derive a Soroban `Address` from a raw 32-byte ed25519 public key.
+fn address_from_pk(env: &Env, pk: &[u8; 32]) -> Address {
+    ScAddress::Account(AccountId(PublicKey::PublicKeyTypeEd25519(Uint256(*pk))))
+        .try_into_val(env)
+        .expect("valid ed25519 key → address")
+}
+
+/// Build the 40-byte message the recipient signs.
 fn build_delegated_msg(
     env: &Env,
     stream_id: u64,
@@ -1276,61 +1479,149 @@ fn build_delegated_msg(
     msg
 }
 
-fn delegated_keypair(env: &Env) -> (BytesN<32>, SigningKey) {
-    let signing_key = SigningKey::from_bytes(&[0x07u8; 32]);
-    let public_key = BytesN::from_array(env, &signing_key.verifying_key().to_bytes());
-    (public_key, signing_key)
-}
-
 fn sign_delegated_msg(env: &Env, signing_key: &SigningKey, msg: &soroban_sdk::Bytes) -> BytesN<64> {
     let bytes: std::vec::Vec<u8> = (0..msg.len()).map(|i| msg.get_unchecked(i)).collect();
-    let sig = signing_key.sign(&bytes);
-    BytesN::from_array(env, &sig.to_bytes())
+    BytesN::from_array(env, &signing_key.sign(&bytes).to_bytes())
 }
 
+/// Fixture: a stream whose recipient is a known ed25519 keypair.
+struct DelegatedCtx<'a> {
+    env: Env,
+    contract_id: Address,
+    relayer: Address,
+    recipient_pk: BytesN<32>,
+    signing_key: SigningKey,
+    stream_id: u64,
+    #[allow(dead_code)]
+    sac: soroban_sdk::token::StellarAssetClient<'a>,
+}
+
+impl<'a> DelegatedCtx<'a> {
+    fn setup() -> Self {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(0);
+
+        let contract_id = env.register_contract(None, fluxora_stream::FluxoraStream);
+        let token_admin = Address::generate(&env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let admin = Address::generate(&env);
+        let sender = Address::generate(&env);
+        let relayer = Address::generate(&env);
+
+        // Recipient is the address derived from a known ed25519 keypair.
+        let signing_key = SigningKey::from_bytes(&[0xABu8; 32]);
+        let pk_arr = signing_key.verifying_key().to_bytes();
+        let recipient_pk = BytesN::from_array(&env, &pk_arr);
+        let recipient = address_from_pk(&env, &pk_arr);
+
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+        client.init(&token_id, &admin);
+
+        let sac = soroban_sdk::token::StellarAssetClient::new(&env, &token_id);
+        sac.mint(&sender, &10_000_i128);
+        soroban_sdk::token::Client::new(&env, &token_id).approve(
+            &sender,
+            &contract_id,
+            &i128::MAX,
+            &100_000,
+        );
+
+        // Stream: 1000 tokens, rate 1/s, 0..1000s, no cliff.
+        let stream_id = client.create_stream(
+            &sender,
+            &recipient,
+            &1000_i128,
+            &1_i128,
+            &0u64,
+            &0u64,
+            &1000u64,
+            &0,
+            &None,
+            &fluxora_stream::StreamKind::Linear,
+        );
+
+        DelegatedCtx {
+            env,
+            contract_id,
+            relayer,
+            recipient_pk,
+            signing_key,
+            stream_id,
+            sac,
+        }
+    }
+
+    fn client(&self) -> FluxoraStreamClient<'_> {
+        FluxoraStreamClient::new(&self.env, &self.contract_id)
+    }
+
+    fn sign(&self, nonce: u64, deadline: u64, min_amount: i128) -> BytesN<64> {
+        let msg = build_delegated_msg(&self.env, self.stream_id, nonce, deadline, min_amount);
+        sign_delegated_msg(&self.env, &self.signing_key, &msg)
+    }
+}
+
+/// A valid signature from the correct recipient key succeeds.
+#[test]
+fn delegated_withdraw_valid_signature_succeeds() {
+    let ctx = DelegatedCtx::setup();
+    ctx.env.ledger().set_timestamp(500);
+
+    let sig = ctx.sign(0, 9999, 0);
+    let amount = ctx.client().delegated_withdraw(
+        &ctx.stream_id,
+        &ctx.relayer,
+        &ctx.recipient_pk,
+        &0,
+        &9999,
+        &0,
+        &sig,
+    );
+    assert!(amount > 0, "valid delegated_withdraw must transfer tokens");
+}
+
+/// Expired deadline returns `SignatureDeadlineExpired` (not `InvalidSignature`).
 #[test]
 fn delegated_withdraw_expired_deadline_rejected() {
-    let ctx = Ctx::setup();
-    ctx.env.mock_all_auths();
-    ctx.env.ledger().set_timestamp(0);
-    let stream_id = ctx.create_stream();
+    let ctx = DelegatedCtx::setup();
+    ctx.env.ledger().set_timestamp(2000); // past deadline
 
-    // Advance time past deadline
-    ctx.env.ledger().set_timestamp(2000);
-
-    let relayer = Address::generate(&ctx.env);
-    let fake_key = BytesN::from_array(&ctx.env, &[0u8; 32]);
     let fake_sig = BytesN::from_array(&ctx.env, &[0u8; 64]);
-
     let result = ctx.client().try_delegated_withdraw(
-        &stream_id, &relayer, &fake_key, &0u64, &500u64, // deadline in the past
-        &0i128, &fake_sig,
+        &ctx.stream_id,
+        &ctx.relayer,
+        &ctx.recipient_pk,
+        &0,
+        &500, // deadline already expired
+        &0,
+        &fake_sig,
     );
-
     assert_eq!(
         result,
-        Err(Ok(fluxora_stream::ContractError::InvalidSignature)),
-        "expired deadline must return InvalidSignature"
+        Err(Ok(fluxora_stream::ContractError::SignatureDeadlineExpired)),
+        "expired deadline must return SignatureDeadlineExpired"
     );
 }
 
+/// Wrong nonce returns `InvalidSignature` (pre-condition check, no host trap).
 #[test]
 fn delegated_withdraw_wrong_nonce_rejected() {
-    let ctx = Ctx::setup();
-    ctx.env.mock_all_auths();
+    let ctx = DelegatedCtx::setup();
     ctx.env.ledger().set_timestamp(0);
-    let stream_id = ctx.create_stream();
 
-    let relayer = Address::generate(&ctx.env);
-    let fake_key = BytesN::from_array(&ctx.env, &[0u8; 32]);
     let fake_sig = BytesN::from_array(&ctx.env, &[0u8; 64]);
-
-    // Stored nonce is 0; supply nonce=1 (wrong)
     let result = ctx.client().try_delegated_withdraw(
-        &stream_id, &relayer, &fake_key, &1u64, // wrong nonce
-        &9999u64, &0i128, &fake_sig,
+        &ctx.stream_id,
+        &ctx.relayer,
+        &ctx.recipient_pk,
+        &1, // wrong: stored nonce is 0
+        &9999,
+        &0,
+        &fake_sig,
     );
-
     assert_eq!(
         result,
         Err(Ok(fluxora_stream::ContractError::InvalidSignature)),
@@ -1338,83 +1629,63 @@ fn delegated_withdraw_wrong_nonce_rejected() {
     );
 }
 
+/// Public key that does not match the stream recipient returns `InvalidSignature`.
 #[test]
-fn delegated_withdraw_below_minimum_rejected() {
-    let ctx = Ctx::setup();
-    ctx.env.mock_all_auths();
-    ctx.env.ledger().set_timestamp(500); // mid-stream
-    let stream_id = ctx.create_stream();
+fn delegated_withdraw_wrong_public_key_rejected() {
+    let ctx = DelegatedCtx::setup();
+    ctx.env.ledger().set_timestamp(0);
 
-    let (pub_key, signing_key) = delegated_keypair(&ctx.env);
-
-    let nonce = 0u64;
-    let deadline = 9999u64;
-    let expected_minimum = 999i128; // demand 999 but only ~500 accrued
-
-    let msg = build_delegated_msg(&ctx.env, stream_id, nonce, deadline, expected_minimum);
-    let sig = sign_delegated_msg(&ctx.env, &signing_key, &msg);
-
-    let relayer = Address::generate(&ctx.env);
+    // Generate a different keypair (not the stream recipient).
+    let other_sk = SigningKey::from_bytes(&[0x01u8; 32]);
+    let other_pk_arr = other_sk.verifying_key().to_bytes();
+    let other_pk = BytesN::from_array(&ctx.env, &other_pk_arr);
+    // Sign with the other key (valid signature for that key, but wrong recipient).
+    let msg = build_delegated_msg(&ctx.env, ctx.stream_id, 0, 9999, 0);
+    let other_sig = sign_delegated_msg(&ctx.env, &other_sk, &msg);
 
     let result = ctx.client().try_delegated_withdraw(
-        &stream_id,
-        &relayer,
-        &pub_key,
-        &nonce,
-        &deadline,
-        &expected_minimum,
-        &sig,
+        &ctx.stream_id,
+        &ctx.relayer,
+        &other_pk, // wrong key
+        &0,
+        &9999,
+        &0,
+        &other_sig,
     );
-
     assert_eq!(
         result,
-        Err(Ok(fluxora_stream::ContractError::BelowMinimumAmount)),
-        "withdrawable below minimum must return BelowMinimumAmount"
+        Err(Ok(fluxora_stream::ContractError::InvalidSignature)),
+        "public key not matching stream recipient must be rejected before host sig check"
     );
 }
 
+/// Replaying a consumed nonce returns `InvalidSignature`.
 #[test]
-fn delegated_withdraw_nonce_increments_preventing_replay() {
-    let ctx = Ctx::setup();
-    ctx.env.mock_all_auths();
-    ctx.env.ledger().set_timestamp(0);
-    let stream_id = ctx.create_stream();
-
-    // Advance to mid-stream so there's something to withdraw
+fn delegated_withdraw_replay_rejected() {
+    let ctx = DelegatedCtx::setup();
     ctx.env.ledger().set_timestamp(500);
 
-    let (pub_key, signing_key) = delegated_keypair(&ctx.env);
+    let sig = ctx.sign(0, 9999, 0);
 
-    let nonce = 0u64;
-    let deadline = 9999u64;
-    let min_amount = 0i128;
-
-    let msg = build_delegated_msg(&ctx.env, stream_id, nonce, deadline, min_amount);
-    let sig = sign_delegated_msg(&ctx.env, &signing_key, &msg);
-
-    let relayer = Address::generate(&ctx.env);
-
-    // First call succeeds
-    let amount = ctx.client().delegated_withdraw(
-        &stream_id,
-        &relayer,
-        &pub_key,
-        &nonce,
-        &deadline,
-        &min_amount,
+    // First call consumes nonce 0.
+    ctx.client().delegated_withdraw(
+        &ctx.stream_id,
+        &ctx.relayer,
+        &ctx.recipient_pk,
+        &0,
+        &9999,
+        &0,
         &sig,
     );
-    assert!(amount > 0, "first delegated_withdraw must transfer tokens");
 
-    // Nonce is now 1; replaying nonce=0 must fail
-    // stale nonce
+    // Replay the same call — nonce is now 1.
     let replay = ctx.client().try_delegated_withdraw(
-        &stream_id,
-        &relayer,
-        &pub_key,
-        &nonce,
-        &deadline,
-        &min_amount,
+        &ctx.stream_id,
+        &ctx.relayer,
+        &ctx.recipient_pk,
+        &0, // stale nonce
+        &9999,
+        &0,
         &sig,
     );
     assert_eq!(
@@ -1422,11 +1693,64 @@ fn delegated_withdraw_nonce_increments_preventing_replay() {
         Err(Ok(fluxora_stream::ContractError::InvalidSignature)),
         "replayed nonce must be rejected"
     );
+}
 
-    // get_delegated_nonce must return 1
+/// Nonce is incremented exactly once per successful withdrawal.
+#[test]
+fn delegated_withdraw_nonce_increments_once() {
+    let ctx = DelegatedCtx::setup();
+    ctx.env.ledger().set_timestamp(500);
+
+    let recipient_addr = address_from_pk(&ctx.env, &ctx.signing_key.verifying_key().to_bytes());
+    assert_eq!(ctx.client().get_delegated_nonce(&recipient_addr), 0);
+
+    let sig = ctx.sign(0, 9999, 0);
+    ctx.client().delegated_withdraw(
+        &ctx.stream_id,
+        &ctx.relayer,
+        &ctx.recipient_pk,
+        &0,
+        &9999,
+        &0,
+        &sig,
+    );
+
     assert_eq!(
-        ctx.client().get_delegated_nonce(&ctx.recipient),
-        1u64,
-        "nonce must be 1 after one successful delegated_withdraw"
+        ctx.client().get_delegated_nonce(&recipient_addr),
+        1,
+        "nonce must be exactly 1 after one successful delegated_withdraw"
+    );
+}
+
+/// `expected_minimum_amount` above withdrawable returns `BelowMinimumAmount`.
+#[test]
+fn delegated_withdraw_below_minimum_rejected() {
+    let ctx = DelegatedCtx::setup();
+    // At t=500, 500 tokens have accrued.
+    ctx.env.ledger().set_timestamp(500);
+
+    let min_amount = 999i128; // demand 999 but only 500 accrued
+    let sig = ctx.sign(0, 9999, min_amount);
+
+    let result = ctx.client().try_delegated_withdraw(
+        &ctx.stream_id,
+        &ctx.relayer,
+        &ctx.recipient_pk,
+        &0,
+        &9999,
+        &min_amount,
+        &sig,
+    );
+    assert_eq!(
+        result,
+        Err(Ok(fluxora_stream::ContractError::BelowMinimumAmount)),
+        "withdrawable below minimum must return BelowMinimumAmount"
+    );
+    // Nonce must NOT be consumed on a failed withdrawal.
+    let recipient_addr = address_from_pk(&ctx.env, &ctx.signing_key.verifying_key().to_bytes());
+    assert_eq!(
+        ctx.client().get_delegated_nonce(&recipient_addr),
+        0,
+        "nonce must not be consumed when BelowMinimumAmount is returned"
     );
 }
