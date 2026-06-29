@@ -783,6 +783,28 @@ fn test_create_streams_empty_batch_emits_no_events() {
     // Verify registry count remains 0 (no stream created)
     let total_count = ctx.factory.client.get_factory_stream_count();
     assert_eq!(total_count, 0);
+
+    let registered_ids = ctx.factory.client.get_factory_streams_paginated(&0, &10);
+    assert_eq!(registered_ids.len(), 0);
+}
+
+#[test]
+fn test_create_streams_empty_batch_without_auth_fails() {
+    let ctx = Ctx::setup();
+
+    // The factory authenticates `sender` before the empty-vector early return,
+    // so an empty batch must still fail when no sender auth is supplied.
+    ctx.env.mock_auths(&[]);
+
+    let streams = soroban_sdk::Vec::new(&ctx.env);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.factory.try_create_streams(&ctx.sender, &streams)
+    }));
+
+    assert!(
+        result.is_err(),
+        "empty create_streams must still require sender authorization"
+    );
 }
 
 // ---------------------------------------------------------------------------
