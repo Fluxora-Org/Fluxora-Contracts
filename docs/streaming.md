@@ -871,6 +871,74 @@ Treasury key rotation: when a treasury wallet is being rotated, the operator cal
 
 A `Paused` stream **does** return `ContractError::InvalidState` and reverts the entire batch.
 
+---
+
+### batch_withdraw_to: per-stream destination authorization and duplicate-destination aggregation
+
+`batch_withdraw_to(recipient, withdrawals: Vec<WithdrawToParam>)` is the per-stream-destination variant of `batch_withdraw`. Each `WithdrawToParam { stream_id, destination }` allows the recipient to redirect that one stream's withdrawal to a specific destination while still consuming a single `recipient.require_auth()` for the whole batch.
+
+#### Authorization model
+
+| Surface | Auth boundary |
+|---|---|
+| Single call authorization | `recipient.require_auth()` (once per batch) |
+| Per-stream destination authorization | **None required** — the destination is unrestricted (see destination table below) |
+| Per-stream recipient check | For every entry, `stream.recipient` MUST equal the supplied `recipient`; on the first mismatch the entire transaction reverts with `ContractError::Unauthorized` |
+
+#### Destination rules (per `WithdrawToParam.destination`)
+
+| Destination                                            | Allowed | Error on rejection                           |
+| ------------------------------------------------------ | ------- | -------------------------------------------- |
+| Contract address (`env.current_contract_address()`)   | ❌ No   | `ContractError::InvalidParams` (pre-check)   |
+| Recipient address (self-routing)                       | ✅ Yes  | —                                            |
+| Sender address                                         | ✅ Yes  | —                                            |
+| Any unrelated third-party address                      | ✅ Yes  | —                                            |
+
+The contract-address check runs as part of the pre-check loop *before* any state, transfer, or event side effects, and is short-circuit-friendly (the first matching entry returns `InvalidParams` immediately).
+
+#### Duplicate destinations
+
+Two or more entries may share the same `destination`. Each entry transfers its own per-stream amount independently, so the destination receives the **sum** of all matching transfers. One `wdraw_to` event is emitted per entry, each carrying that entry's own `amount` and the shared `destination`. No event coalescing is performed — indexers must aggregate by `destination` client-side.
+
+#### Stream-state filtering (per entry)
+
+| Stream state at call time | Behavior |
+|---|---|
+| `Active` | Process normally (accrued - withdrawn_amount → destination). |
+| `Paused` (not time-terminal) | Returns `ContractError::InvalidState`; whole batch reverts. |
+| `Completed` | Returns 0; no transfer, no event. |
+| `Cancelled` | Withdraws frozen accrued amount — never exceeds `accrued_at(cancelled_at) - withdrawn_amount`. |
+| Dust threshold filtered | Returns 0; no transfer, no event. |
+
+#### Failure modes (atomic across the batch)
+
+- `ContractError::Unauthorized` — entry whose `stream.recipient` ≠ caller. Whole batch reverts; any earlier per-entry transfers are rolled back automatically at the Soroban transaction layer.
+- `ContractError::InvalidParams` — any `destination` equals the contract address. Whole batch reverts.
+- `ContractError::InvalidState` — non-terminal paused stream in batch. Whole batch reverts.
+- **Host trap** — duplicate `stream_id` entries trip the contract's `assert!(param_a.stream_id != param_b.stream_id)` pre-check. The call panics (NOT a typed error); the contract returns no `ContractError`. **Note:** `batch_withdraw` returns typed `DuplicateStreamId` for the same input shape; the divergence is intentional but worth highlighting for indexer authors.
+
+#### Events
+
+- `("wdraw_to", stream_id)` → `WithdrawalTo { stream_id, recipient, destination, amount }` — emitted only when `amount > 0`.
+- `("completed", stream_id)` → `StreamEvent::StreamCompleted(stream_id)` — emitted only when the entry's withdrawal completes the stream.
+
+#### Test coverage matrix (issue #762)
+
+See `contracts/stream/tests/batch_withdraw_to.rs`. The file exercises every acceptance criterion in the issue and the adjacent edge cases above:
+
+| Acceptance criterion                              | Test                                                            |
+|--------------------------------------------------|-----------------------------------------------------------------|
+| Single-recipient batch succeeds                  | `single_recipient_three_streams_drain_correctly`                |
+| Unauthorized cross-recipient entry aborts batch | `unauthorized_cross_recipient_aborts_atomically`, `…_at_various_positions` |
+| Duplicate destinations aggregate correctly       | `duplicate_destinations_aggregate_balance`, `…_emit_consistent_events` |
+| Forbidden destination (contract address) rejected | `forbidden_destination_contract_rejected`, `…_first_position`, `…_mid_batch_aborts_atomically` |
+| Edge: duplicate stream_id                        | `duplicate_stream_id_in_batch_panics`                           |
+| Edge: paused stream                              | `paused_stream_in_batch_aborts_atomically`                      |
+| Edge: dust threshold                             | `dust_threshold_skipped_stream_emits_no_event`, `…_in_multi_stream_batch` |
+| Edge: completed stream                           | `completed_stream_in_batch_returns_zero_with_no_event`         |
+
+> **Security note:** The authorization model guarantees that a caller can only withdraw streams they are the recipient of; the per-stream destination auth check (`stream.recipient != recipient`) is the primary defence against cross-recipient fund redirection. The contract-address destination ban prevents reflexive internal transfers. Both invariants are exhaustively verified by `tests/batch_withdraw_to.rs`.
+
 ### One-Shot Init and Immutable Bootstrap
 
 `init(token, admin)` has explicit externally observable bootstrap semantics:
