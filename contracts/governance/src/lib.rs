@@ -347,7 +347,26 @@ fn save_signer_index(env: &Env, index: &Map<Address, bool>) {
     env.storage().instance().set(&DataKey::SignerIndex, index);
 }
 
+/// Extends the TTL of the per-proposal approval index so it outlives the
+/// proposal record. Called on every read and write of `ProposalApprovalIdx(id)`
+/// to prevent duplicate-approval detection from silently failing when the index
+/// archives before the proposal.
+fn bump_approval_index(env: &Env, proposal_id: u32) {
+    if env
+        .storage()
+        .persistent()
+        .has(&DataKey::ProposalApprovalIdx(proposal_id))
+    {
+        env.storage().persistent().extend_ttl(
+            &DataKey::ProposalApprovalIdx(proposal_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+}
+
 fn get_approval_index(env: &Env, proposal_id: u32) -> Map<Address, bool> {
+    bump_approval_index(env, proposal_id);
     env.storage()
         .persistent()
         .get(&DataKey::ProposalApprovalIdx(proposal_id))
@@ -358,11 +377,7 @@ fn save_approval_index(env: &Env, proposal_id: u32, index: &Map<Address, bool>) 
     env.storage()
         .persistent()
         .set(&DataKey::ProposalApprovalIdx(proposal_id), index);
-    env.storage().persistent().extend_ttl(
-        &DataKey::ProposalApprovalIdx(proposal_id),
-        PERSISTENT_LIFETIME_THRESHOLD,
-        PERSISTENT_BUMP_AMOUNT,
-    );
+    bump_approval_index(env, proposal_id);
 }
 
 fn get_admin(env: &Env) -> Result<Address, GovernanceError> {
@@ -418,6 +433,7 @@ fn load_proposal(env: &Env, id: u32) -> Result<Proposal, GovernanceError> {
         .get(&DataKey::Proposal(id))
         .ok_or(GovernanceError::ProposalNotFound)?;
     bump_proposal(env, id);
+    bump_approval_index(env, id);
     Ok(proposal)
 }
 
@@ -720,6 +736,7 @@ impl FluxoraGovernance {
 
         save_proposal(&env, proposal_id, &proposal);
         save_approval_index(&env, proposal_id, &approval_idx);
+        bump_approval_index(&env, proposal_id);
         bump_instance(&env);
 
         env.events().publish(
