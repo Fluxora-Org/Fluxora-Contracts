@@ -6,10 +6,12 @@
 
 #![cfg(test)]
 
-use fluxora_factory::{load_policy, FactoryError, FactoryPolicy, FluxoraFactory, FluxoraFactoryClient};
+use fluxora_factory::{
+    load_policy, BatchCapUpdated, FactoryError, FactoryPolicy, FluxoraFactory, FluxoraFactoryClient,
+};
 use soroban_sdk::{
-    testutils::{Address as _, MockAuth, MockAuthInvoke},
-    Address, Env, IntoVal,
+    testutils::{Address as _, Events, MockAuth, MockAuthInvoke},
+    Address, Env, IntoVal, Symbol, TryFromVal,
 };
 use std::panic::AssertUnwindSafe;
 
@@ -696,6 +698,41 @@ fn test_load_policy_reflects_batch_cap_toggle() {
 
     factory.set_batch_cap_enforcement(&true);
     assert!(load_policy(&env).unwrap().batch_cap_enforced);
+}
+
+/// `set_batch_cap_enforcement` emits a structured event so indexers can track
+/// aggregate batch-cap policy changes without re-reading contract storage.
+#[test]
+fn test_set_batch_cap_enforcement_emits_batchcap_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let admin = Address::generate(&env);
+    let sc = Address::generate(&env);
+
+    factory.init(&admin, &sc, &10_000, &100);
+    let _ = env.events().all();
+
+    factory.set_batch_cap_enforcement(&false);
+    factory.set_batch_cap_enforcement(&true);
+
+    let events = env.events().all();
+    let batchcap_topic = soroban_sdk::symbol_short!("batchcap");
+    let mut payloads = soroban_sdk::Vec::new(&env);
+
+    for event in events.iter() {
+        if event.0 == fid
+            && event.1.len() > 0
+            && Symbol::try_from_val(&env, &event.1.get(0).unwrap()) == Ok(batchcap_topic.clone())
+        {
+            payloads.push_back(BatchCapUpdated::try_from_val(&env, &event.2).unwrap());
+        }
+    }
+
+    assert_eq!(payloads.len(), 2);
+    assert!(!payloads.get(0).unwrap().enabled);
+    assert!(payloads.get(1).unwrap().enabled);
 }
 
 /// `set_factory_paused` flips `creation_paused`, which is the very first
