@@ -727,6 +727,21 @@ impl FluxoraFactory {
             .unwrap_or(false)
     }
 
+    /// Return whether the aggregate batch-cap check is currently enforced.
+    ///
+    /// This permissionless view mirrors the stored `BatchCapEnforced` policy
+    /// flag without requiring callers to decode the full factory config. A
+    /// missing key falls back to the same `true` default written by `init`.
+    pub fn is_batch_cap_enforced(env: Env) -> bool {
+        let enabled = env
+            .storage()
+            .instance()
+            .get(&DataKey::BatchCapEnforced)
+            .unwrap_or(true);
+        bump_instance(&env);
+        enabled
+    }
+
     /// Return the current factory policy configuration.
     pub fn get_factory_config(env: Env) -> Result<FactoryConfig, FactoryError> {
         Ok(FactoryConfig {

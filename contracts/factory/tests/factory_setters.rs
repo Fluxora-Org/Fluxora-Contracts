@@ -698,6 +698,48 @@ fn test_load_policy_reflects_batch_cap_toggle() {
     assert!(load_policy(&env).unwrap().batch_cap_enforced);
 }
 
+/// `is_batch_cap_enforced` exposes the dedicated batch-cap flag view without
+/// requiring callers to decode the full `FactoryConfig` struct.
+#[test]
+fn test_is_batch_cap_enforced_view_tracks_default_and_toggles() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let admin = Address::generate(&env);
+    let sc = Address::generate(&env);
+
+    factory.init(&admin, &sc, &10_000, &100);
+    assert!(factory.is_batch_cap_enforced());
+
+    factory.set_batch_cap_enforcement(&false);
+    assert!(!factory.is_batch_cap_enforced());
+
+    factory.set_batch_cap_enforcement(&true);
+    assert!(factory.is_batch_cap_enforced());
+}
+
+/// Calling the dedicated batch-cap view bumps instance TTL, so lightweight
+/// off-chain polling helps keep the config alive just like other policy access.
+#[test]
+fn test_is_batch_cap_enforced_bumps_instance_ttl() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let admin = Address::generate(&env);
+    let sc = Address::generate(&env);
+
+    factory.init(&admin, &sc, &10_000, &100);
+    assert!(factory.is_batch_cap_enforced());
+
+    env.ledger().set_sequence_number(env.ledger().sequence() + 10_000);
+    assert!(factory.is_batch_cap_enforced());
+
+    env.ledger().set_sequence_number(env.ledger().sequence() + 10_000);
+    assert_eq!(factory.get_factory_config().batch_cap_enforced, true);
+}
+
 /// `set_factory_paused` flips `creation_paused`, which is the very first
 /// semantic guard after the policy load on both creation paths.
 #[test]
