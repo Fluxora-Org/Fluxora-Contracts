@@ -6,7 +6,7 @@
 
 #![cfg(test)]
 
-use fluxora_factory::{FactoryError, FluxoraFactory, FluxoraFactoryClient};
+use fluxora_factory::{load_policy, FactoryError, FactoryPolicy, FluxoraFactory, FluxoraFactoryClient};
 use soroban_sdk::{
     testutils::{Address as _, MockAuth, MockAuthInvoke},
     Address, Env, IntoVal,
@@ -575,4 +575,176 @@ fn test_set_rate_bounds_bumps_instance_ttl() {
     env.ledger().set_sequence_number(env.ledger().sequence() + 5_000);
     let cfg = factory.get_factory_config();
     assert_eq!(cfg.max_deposit, 10_000); // config still accessible
+}
+
+// ---------------------------------------------------------------------------
+// load_policy helper — centralised policy-load chokepoint
+// ---------------------------------------------------------------------------
+
+/// `load_policy` returns `NotInitialized` before any `init` call. All required
+/// fields are absent, so the first required read fails.
+#[test]
+fn test_load_policy_before_init_returns_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let _fid = env.register_contract(None, FluxoraFactory);
+
+    let result = load_policy(&env);
+    assert_eq!(result, Err(FactoryError::NotInitialized));
+}
+
+/// Immediately after `init`, `load_policy` reflects the init-supplied values
+/// plus the documented defaults for optional fields (pause = false, rate
+/// bounds = None, batch_cap = true).
+#[test]
+fn test_load_policy_reflects_initial_state() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let admin = Address::generate(&env);
+    let sc = Address::generate(&env);
+
+    factory.init(&admin, &sc, &10_000, &100);
+
+    let policy = load_policy(&env).expect("policy should load after init");
+    assert_eq!(policy.stream_contract, sc);
+    assert_eq!(policy.max_deposit, 10_000);
+    assert_eq!(policy.min_duration, 100);
+    assert!(policy.batch_cap_enforced, "init defaults batch-cap to true");
+    assert!(!policy.creation_paused, "init defaults pause to false");
+    assert_eq!(policy.min_rate_per_second, None, "no rate bounds by default");
+    assert_eq!(policy.max_rate_per_second, None, "no rate bounds by default");
+}
+
+/// Applying each policy setter (cap / min_duration / stream_contract /
+/// batch_cap / pause / rate bounds) is reflected by `load_policy`. This is
+/// the primary regression test for the centralised load helper.
+#[test]
+fn test_load_policy_reflects_all_setters() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let admin = Address::generate(&env);
+    let sc = Address::generate(&env);
+
+    // Initial cap/min_duration
+    factory.init(&admin, &sc, &10_000, &100);
+
+    // Replace each policy axis through its setter and verify via load_policy.
+    let new_sc = Address::generate(&env);
+    factory.set_stream_contract(&new_sc);
+    factory.set_cap(&7_500);
+    factory.set_min_duration(&250);
+    factory.set_batch_cap_enforcement(&false);
+    factory.set_factory_paused(&true);
+    factory.set_rate_bounds(&Some(50), &Some(1_000));
+
+    let policy: FactoryPolicy = load_policy(&env).expect("policy should load");
+
+    assert_eq!(policy.stream_contract, new_sc);
+    assert_eq!(policy.max_deposit, 7_500);
+    assert_eq!(policy.min_duration, 250);
+    assert!(!policy.batch_cap_enforced);
+    assert!(policy.creation_paused);
+    assert_eq!(policy.min_rate_per_second, Some(50));
+    assert_eq!(policy.max_rate_per_second, Some(1_000));
+}
+
+/// When rate bounds are absent, `load_policy` reports `None` for both fields.
+/// This guards against accidentally reading them as `0` (which would silently
+/// turn into RateBelowMin / RateAboveMax failures on every stream creation).
+#[test]
+fn test_load_policy_defaults_rate_bounds_to_none() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let admin = Address::generate(&env);
+    let sc = Address::generate(&env);
+
+    factory.init(&admin, &sc, &10_000, &100);
+
+    let policy = load_policy(&env).expect("policy should load");
+    assert_eq!(policy.min_rate_per_second, None);
+    assert_eq!(policy.max_rate_per_second, None);
+
+    // Toggling pause does not implicitly change rate-bound visibility.
+    factory.set_factory_paused(&true);
+    let policy = load_policy(&env).expect("policy should load");
+    assert_eq!(policy.min_rate_per_second, None);
+    assert_eq!(policy.max_rate_per_second, None);
+}
+
+/// `set_batch_cap_enforcement` flips `batch_cap_enforced` in both directions,
+/// which `load_policy` must surface verbatim for the batch path to honour.
+#[test]
+fn test_load_policy_reflects_batch_cap_toggle() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let admin = Address::generate(&env);
+    let sc = Address::generate(&env);
+
+    factory.init(&admin, &sc, &10_000, &100);
+    assert!(load_policy(&env).unwrap().batch_cap_enforced);
+
+    factory.set_batch_cap_enforcement(&false);
+    assert!(!load_policy(&env).unwrap().batch_cap_enforced);
+
+    factory.set_batch_cap_enforcement(&true);
+    assert!(load_policy(&env).unwrap().batch_cap_enforced);
+}
+
+/// `set_factory_paused` flips `creation_paused`, which is the very first
+/// semantic guard after the policy load on both creation paths.
+#[test]
+fn test_load_policy_reflects_pause_toggle() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let admin = Address::generate(&env);
+    let sc = Address::generate(&env);
+
+    factory.init(&admin, &sc, &10_000, &100);
+    assert!(!load_policy(&env).unwrap().creation_paused);
+
+    factory.set_factory_paused(&true);
+    assert!(load_policy(&env).unwrap().creation_paused);
+
+    factory.set_factory_paused(&false);
+    assert!(!load_policy(&env).unwrap().creation_paused);
+}
+
+/// `FactoryPolicy` instances returned from `load_policy` comparing equal must
+/// be a strict struct-equality (not e.g. partial memcmp) so callers can
+/// rely on field-by-field exactness for snapshot tests.
+#[test]
+fn test_load_policy_equality_is_struct_equality() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let admin = Address::generate(&env);
+    let sc = Address::generate(&env);
+
+    factory.init(&admin, &sc, &10_000, &100);
+    factory.set_rate_bounds(&Some(10), &Some(100));
+
+    let p1 = load_policy(&env).unwrap();
+    let p2 = load_policy(&env).unwrap();
+    assert_eq!(p1, p2);
+
+    let admin_addr = p1.stream_contract.clone();
+    let mut different = p1.clone();
+    different.stream_contract = admin_addr; // identical -> still equal
+    assert_eq!(p1, different);
+
+    // Flip a single field — equality must break.
+    let mut different = p1.clone();
+    different.max_deposit += 1;
+    assert_ne!(p1, different);
 }

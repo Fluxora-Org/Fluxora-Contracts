@@ -1062,11 +1062,17 @@ Simple query that returns the stored auto-claim destination address, or `None` i
   - `("completed", stream_id)` → `StreamEvent::StreamCompleted(stream_id)` if stream transitions to `Completed`.
 
 #### Cancellation interaction
-
+ 
 If a stream is cancelled after opt-in, `trigger_auto_claim` returns `InvalidState`. The auto-claim destination entry remains in storage but is inert. Recipients may call `revoke_auto_claim` to clean up storage.
-
+ 
+#### Revocation Boundary and Timing Safety
+ 
+1. **Post-Revoke Trigger Prevention**: Once a recipient calls `revoke_auto_claim`, the auto-claim configuration is immediately deleted. Any subsequent `trigger_auto_claim` calls fail with `ContractError::InvalidParams` without transferring any tokens.
+2. **Early Trigger Restriction**: Permissionless triggering is strictly disallowed before the stream's `end_time` is reached. Early calls return `ContractError::InvalidState` and transfer zero funds.
+3. **Destination Update Immendiate Effect**: If the destination is updated, the change is immediately effective. Triggering auto-claim afterwards sends funds ONLY to the recipient's currently selected destination.
+ 
 #### Security invariants
-
+ 
 1. Only the recipient can set or change the destination (`require_auth` enforced).
 2. The caller of `trigger_auto_claim` has zero influence over where tokens go.
 3. CEI ordering is preserved: stream state is saved before the token transfer.
