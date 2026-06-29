@@ -196,6 +196,16 @@ Scope boundary and exclusions:
 2. Out of scope: token-level trust assumptions beyond documented model, off-chain indexer liveness, and economic policy choices (for example who should bear operational costs).
 3. Residual risk: if a non-standard token violates SEP-41 expectations, transfer behavior may diverge; CEI ordering reduces but cannot fully eliminate external token risk.
 
+### Keeper Cancellation & Fee Accounting
+
+The `keeper_cancel` entrypoint allows any third-party keeper to cancel an expired, unwithdrawn stream after the grace period has elapsed.
+
+**Fee Accounting Note**:
+- The keeper fee (50 BPS) is deducted solely from the *unstreamed* refund bound for the sender.
+- The contract does **not** retain a protocol split of this fee. The entire fee is transferred directly to the keeper.
+- The view function `get_protocol_fees_accrued` (added in #623) tracks the cumulative total of keeper fees *paid out* of the contract, rather than an internal sweepable balance.
+- **Accounting Invariant**: The contract's token balance must securely cover all remaining liabilities. Since the keeper fee is transferred entirely to the keeper and leaves the contract, the tracked total in `get_protocol_fees_accrued` is strictly monotone and safely independent of the contract's real-time asset/liability ratio.
+
 ### Clone Semantics
 
 This section defines the success and failure behavior of `clone_stream`.
