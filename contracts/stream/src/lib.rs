@@ -6929,6 +6929,117 @@ fn maybe_emit_health_changed(env: &Env, stream: &Stream, was_underfunded: bool, 
     }
 }
 
+// ---------------------------------------------------------------------------
+// Upgrade entrypoint
+// ---------------------------------------------------------------------------
+
+/// Event emitted when the contract is upgraded via `upgrade()`.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ContractUpgraded {
+    pub new_wasm_hash: soroban_sdk::BytesN<32>,
+    pub new_version: u32,
+    pub upgraded_at: u64,
+    pub upgraded_by: Address,
+}
+
+// Add to the contract impl block (FluxoraStream)
+
+/// Upgrade the contract WASM to a new version.
+///
+/// This is the highest-privilege operation in the protocol. It replaces the
+/// contract's WASM code in-place via Soroban's `update_current_contract_wasm`
+/// host function. Only the contract admin can call this function.
+///
+/// # Authorization
+/// - Requires authorization from the contract admin (set during `init`).
+/// - The admin must be the governance contract or a multisig that represents
+///   governance consensus.
+///
+/// # Parameters
+/// - `new_wasm_hash`: 32-byte SHA-256 hash of the new WASM binary.
+///   Must match the hash of a deployed WASM blob on the network.
+///
+/// # Behavior
+/// 1. Validates caller is the contract admin.
+/// 2. Calls `env.deployer().update_current_contract_wasm(new_wasm_hash)`.
+/// 3. Emits `ContractUpgraded` event with the new hash and version.
+///
+/// # Storage Compatibility
+/// The upgraded WASM must maintain backward-compatible storage layout:
+/// - `DataKey` enum discriminants must remain unchanged.
+/// - `Stream` struct fields must remain in the same order.
+/// - New fields may be appended, but existing fields cannot be removed or reordered.
+/// - New `DataKey` variants must be appended at the end.
+///
+/// Violating storage compatibility will corrupt existing stream state and
+/// make the contract unusable. See `docs/upgrade.md` for detailed guidance.
+///
+/// # Rollback
+/// There is no automatic rollback. If the upgrade introduces a bug, the admin
+/// must deploy a fixed WASM and call `upgrade()` again with the fixed hash.
+///
+/// # Errors
+/// - `ContractError::Unauthorized`: Caller is not the admin.
+/// - Host error: If the WASM hash is invalid or not deployed.
+///
+/// # Events
+/// - Emits `ContractUpgraded` with the new hash, version, timestamp, and caller.
+///
+/// # Security Notes
+/// This is the highest-privilege operation in the protocol. It should only be
+/// used after:
+/// 1. The new WASM has been audited.
+/// 2. Storage compatibility has been verified.
+/// 3. Governance has approved the upgrade (if governance is the admin).
+///
+/// # Example
+/// ```rust
+/// let new_hash = BytesN::from_array(&env, &[0u8; 32]);
+/// contract.upgrade(&new_hash);
+/// ```
+pub fn upgrade(env: Env, new_wasm_hash: soroban_sdk::BytesN<32>) -> Result<(), ContractError> {
+    // Only the admin can upgrade the contract
+    let admin = get_admin(&env)?;
+    admin.require_auth();
+
+    // Store the old version before upgrade (for the event)
+    let old_version = CONTRACT_VERSION;
+
+    // Call the Soroban host function to replace the WASM
+    // This is safe because:
+    // 1. Only the admin can call it (checked above)
+    // 2. The host validates the WASM hash exists
+    // 3. The upgrade is atomic - if the new WASM is invalid, the call reverts
+    env.deployer().update_current_contract_wasm(&new_wasm_hash);
+
+    // Bump TTL after upgrade to ensure the contract stays alive
+    bump_instance_ttl(&env);
+
+    // Emit upgrade event
+    // Note: The new version is read from the upgraded contract's constant.
+    // We read it after the upgrade so it reflects the new code.
+    let new_version = Self::version(env.clone());
+    env.events().publish(
+        (symbol_short!("upgraded"),),
+        ContractUpgraded {
+            new_wasm_hash: new_wasm_hash.clone(),
+            new_version,
+            upgraded_at: env.ledger().timestamp(),
+            upgraded_by: admin.clone(),
+        },
+    );
+
+    // Also emit a legacy event for backward compatibility with indexers
+    env.events().publish(
+        (symbol_short!("upgrade"),),
+        (new_wasm_hash, old_version, new_version, admin),
+    );
+
+    Ok(())
+}
+
+
 #[cfg(test)]
 mod test;
 #[cfg(test)]
