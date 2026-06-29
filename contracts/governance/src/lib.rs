@@ -292,6 +292,20 @@ pub struct SignerRemoved {
     pub signer: Address,
 }
 
+/// Emitted when the co-signer set size changes, allowing indexers to track
+/// whether the current threshold remains satisfiable and how close the
+/// membership is to dropping below the threshold.
+///
+/// Published by [`add_signer`](FluxoraGovernance::add_signer) and
+/// [`remove_signer`](FluxoraGovernance::remove_signer) after the membership
+/// change is persisted.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct QuorumConfig {
+    pub threshold: u32,
+    pub signer_count: u32,
+}
+
 /// Emitted when the admin address is rotated.
 ///
 /// Published by [`set_admin`](FluxoraGovernance::set_admin) after the new admin
@@ -566,6 +580,15 @@ impl FluxoraGovernance {
         env.events()
             .publish((symbol_short!("sgnr_add"),), SignerAdded { signer });
 
+        let threshold = get_threshold(&env)?;
+        env.events().publish(
+            (symbol_short!("quor_cfg"),),
+            QuorumConfig {
+                threshold,
+                signer_count: signers.len(),
+            },
+        );
+
         Ok(())
     }
 
@@ -611,6 +634,15 @@ impl FluxoraGovernance {
         // no event).
         env.events()
             .publish((symbol_short!("sgnr_rm"),), SignerRemoved { signer });
+
+        env.events().publish(
+            (symbol_short!("quor_cfg"),),
+            QuorumConfig {
+                threshold,
+                signer_count: signers.len(),
+            },
+        );
+
         Ok(())
     }
 

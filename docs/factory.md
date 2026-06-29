@@ -117,11 +117,18 @@ The factory contract follows the Checks-Effects-Interactions (CEI) pattern impli
 - When `batch_cap_enforced` is enabled, the sum of all `deposit_amount` values in the batch is also checked against `MaxDepositCap`.
 - A single invalid entry causes the entire batch to revert, ensuring no partial or policy-violating streams can be created.
 
-## Pause Semantics
+> **Note:** The factory intentionally uses the atomic `create_streams` endpoint rather than `create_streams_partial` to ensure strict, all-or-nothing treasury policy compliance. For more details on the difference between atomic and partial batch creation at the stream contract level, see [Batch Creation: Atomic vs Partial](streaming.md#batch-creation-atomic-vs-partial).
 
-The factory admin can toggle stream creation pause using `set_factory_paused(paused)`.
-- When the factory is paused, **both** single stream creation (`create_stream`) and batch stream creation (`create_streams`) are blocked.
-- The pause check is performed at the very beginning of both entrypoints, failing fast and returning `FactoryError::CreationPaused` before any policy evaluation, allowlist check, or loop processing. This prevents info leakage during incident response.
+### Registry writes for batch creation
+
+After the downstream `FluxoraStream::create_streams` call succeeds, the factory appends every returned stream ID to the `FactoryStreamIds` persistent registry **in creation order** with a single TTL bump for the whole batch. This ensures:
+
+- `get_factory_stream_count` increases by the number of streams in the batch.
+- `get_factory_streams_paginated` returns all batch IDs in insertion order.
+- An empty batch produces no registry writes and leaves the count unchanged.
+- IDs are only written after the cross-contract call succeeds; a downstream failure leaves no orphan index entries.
+
+This mirrors the behaviour of the single `create_stream` path, which appends its one ID immediately after successful creation. The batch path is therefore equivalent to N sequential single-stream creations from the registry's perspective, but O(1) TTL bumps instead of O(N).
 
 ## Cross-contract authorization model
 
@@ -287,14 +294,14 @@ This document is aligned with the current implementation as follows:
   `memo = None` and `StreamKind::Linear`.
 - `FluxoraStream::create_stream` calls `sender.require_auth()` before validating
   parameters and pulling `deposit_amount` from `sender`.
-- `contracts/stream/tests/factory_policy.rs` covers the factory policy gates and
-  admin-guarded policy updates that surround this authorization model.
-- `FluxoraFactory::init` calls `admin.require_auth()` and validates
-  `stream_contract` via `FluxoraStream::version()` before persisting any
-  state; `set_stream_contract` applies the same validation. See
-  `contracts/factory/tests/factory_init_security.rs`.
-- `contracts/factory/tests/factory_setters.rs` covers policy input validation,
-  factory policy gates, append-only error discriminants, admin-guarded
-  policy updates, and instance storage TTL regression tests verifying that
-  config survives simulated idle periods and repeated updates near the TTL threshold.
+- `FluxoraFactory::create_streams` appends all returned stream IDs to the
+  `FactoryStreamIds` registry in creation order after the cross-contract call
+  succeeds, with a single TTL bump for the whole batch (see `append_stream_ids_batch`
+  in `contracts/factory/src/lib.rs`).
+- `contracts/stream/tests/factory_policy.rs` covers policy input validation,
+  factory policy gates, append-only error discriminants, and admin-guarded
+  policy updates that surround this authorization model.
+- `contracts/factory/tests/factory_stream_e2e.rs` includes regression tests for
+  the batch registry path: count increase, insertion-order pagination, empty-batch
+  no-op, single-element batch, single-path parity, and mixed single+batch accumulation.
 - Every state-changing entrypoint emits a structured event; see the Events table above.

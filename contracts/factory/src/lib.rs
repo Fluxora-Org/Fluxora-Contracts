@@ -189,6 +189,29 @@ fn append_stream_id(env: &Env, stream_id: u64) {
     );
 }
 
+/// Append multiple stream IDs to the factory registry in insertion order and
+/// bump the persistent TTL once for the entire batch.
+///
+/// Calling this instead of repeated `append_stream_id` cuts TTL extend calls
+/// from O(n) to O(1) for a batch, saving instruction budget.
+fn append_stream_ids_batch(env: &Env, stream_ids: &Vec<u64>) {
+    if stream_ids.is_empty() {
+        return;
+    }
+    let mut ids = load_stream_ids(env);
+    for id in stream_ids.iter() {
+        ids.push_back(id);
+    }
+    env.storage()
+        .persistent()
+        .set(&DataKey::FactoryStreamIds, &ids);
+    env.storage().persistent().extend_ttl(
+        &DataKey::FactoryStreamIds,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+}
+
 /// Validate a factory deposit cap before storing it.
 ///
 /// The cap must be strictly positive. A non-positive cap would make every
@@ -1050,41 +1073,13 @@ impl FluxoraFactory {
             wrapped_streams.push_back(params.clone());
         }
 
+        // --- Interaction ---
         let created_ids = stream_client.create_streams(&sender, &wrapped_streams);
 
-        // --- Effect (post-interaction): record only after a successful creation ---
-        // Append all created stream IDs to the registry in a single batch to minimize storage overhead.
-        let mut ids = load_stream_ids(&env);
-        for i in 0..created_ids.len() {
-            let stream_id = created_ids.get(i).unwrap();
-            ids.push_back(stream_id);
-        }
-
-        env.storage()
-            .persistent()
-            .set(&DataKey::FactoryStreamIds, &ids);
-        env.storage().persistent().extend_ttl(
-            &DataKey::FactoryStreamIds,
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
-
-        // Emit FactoryStreamCreated events after state writes (CEI compliance).
-        // Iterate and emit one FactoryStreamCreated event per created stream.
-        for i in 0..created_ids.len() {
-            let stream_id = created_ids.get(i).unwrap();
-            let params = streams.get(i).unwrap();
-            env.events().publish(
-                (symbol_short!("fct_strm"),),
-                FactoryStreamCreated {
-                    stream_id,
-                    sender: sender.clone(),
-                    recipient: params.recipient.clone(),
-                    deposit_amount: params.deposit_amount,
-                    rate_per_second: params.rate_per_second,
-                },
-            );
-        }
+        // --- Effect (post-interaction): register all batch IDs in creation order ---
+        // Written only after the cross-contract call succeeds; a downstream failure
+        // leaves no orphan index entries. TTL is bumped once for the whole batch.
+        append_stream_ids_batch(&env, &created_ids);
 
         Ok(created_ids)
     }
