@@ -1,6 +1,6 @@
 # Fluxora Contract WASM Checksums
 #
-# Reference SHA256 checksums for reproducible WASM builds.
+# Reference SHA256 checksums for tracked reproducible WASM builds.
 # CI verifies that a fresh build produces byte-identical artifacts.
 #
 # Format: <sha256>  <filename>
@@ -18,7 +18,3 @@
 #   - No environment-dependent flags beyond the pinned toolchain
 #
 37cc58ea962226b11e7c1c74db0d28e42a27de85461abcb06a5478066606f174  fluxora_stream.wasm
-# placeholder — regenerate with: bash script/update-wasm-checksums.sh
-0000000000000000000000000000000000000000000000000000000000000000  fluxora_factory.wasm
-# placeholder — regenerate with: bash script/update-wasm-checksums.sh
-0000000000000000000000000000000000000000000000000000000000000000  fluxora_governance.wasm
