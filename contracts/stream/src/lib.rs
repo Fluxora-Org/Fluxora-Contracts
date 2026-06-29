@@ -6112,7 +6112,8 @@ impl FluxoraStream {
     /// ```
     ///
     /// Where `total_liabilities` is the sum of all active stream deposits that haven't
-    /// been withdrawn or refunded yet.
+    /// been withdrawn or refunded yet. This intrinsic liability calculation ensures
+    /// that sweep_excess NEVER touches recipient-owed balances or accrued protocol fees.
     ///
     /// # Usage Notes
     /// - Safe to call even when no excess exists (returns 0, no transfer)
