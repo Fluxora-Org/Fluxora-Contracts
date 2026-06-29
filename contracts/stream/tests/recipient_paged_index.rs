@@ -80,7 +80,6 @@ impl Ctx {
                 &None,
                 &StreamKind::Linear,
             )
-            .unwrap()
     }
 
     /// Create `n` streams for `self.recipient`.
