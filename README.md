@@ -76,6 +76,7 @@ The following table lists every public stream contract entry point implemented i
 | `update_rate` | `caller.require_auth()` (sender or admin) | Update stream rate as sender or admin |
 | `cancel_stream_as_admin` | `admin.require_auth()` | Cancel any stream as contract admin |
 | `keeper_cancel` | `keeper.require_auth()` | Keeper-cancel an eligible stream after grace period |
+| `get_keeper_fee_split` | Public / None | Preview the `(keeper_fee, sender_refund)` split `keeper_cancel` would pay |
 | `pause_stream_as_admin` | `admin.require_auth()` | Pause any stream as contract admin |
 | `resume_stream_as_admin` | `admin.require_auth()` | Resume any paused stream as contract admin |
 | `set_global_emergency_paused` | `admin.require_auth()` | Admin toggle emergency pause |
