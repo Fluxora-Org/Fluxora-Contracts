@@ -36,3 +36,8 @@ required-features = ["testutils"]
 [[test]]
 name = "factory_error_discriminants"
 path = "tests/factory_error_discriminants.rs"
+
+[[test]]
+name = "batch_pause_gate"
+path = "tests/batch_pause_gate.rs"
+required-features = ["testutils"]

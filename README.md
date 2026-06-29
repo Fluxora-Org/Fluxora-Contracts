@@ -17,6 +17,7 @@ Soroban smart contracts for the Fluxora treasury streaming protocol on Stellar. 
   (factory decisions map to a stable `u32` per variant; the CI guard is
   `contracts/factory/tests/factory_error_discriminants.rs`).
 - **[Events](docs/events.md)** — Emitted event shapes and topics.
+- **[Stream templates](docs/stream-templates.md)** — Template lifecycle, auth, field mapping, and calldata savings.
 
 ## What's in this repo
 
