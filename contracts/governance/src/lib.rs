@@ -279,6 +279,20 @@ pub struct SignerRemoved {
     pub signer: Address,
 }
 
+/// Emitted when the co-signer set size changes, allowing indexers to track
+/// whether the current threshold remains satisfiable and how close the
+/// membership is to dropping below the threshold.
+///
+/// Published by [`add_signer`](FluxoraGovernance::add_signer) and
+/// [`remove_signer`](FluxoraGovernance::remove_signer) after the membership
+/// change is persisted.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct QuorumConfig {
+    pub threshold: u32,
+    pub signer_count: u32,
+}
+
 /// Emitted when the admin address is rotated.
 ///
 /// Published by [`set_admin`](FluxoraGovernance::set_admin) after the new admin
@@ -533,6 +547,15 @@ impl FluxoraGovernance {
         env.events()
             .publish((symbol_short!("sgnr_add"),), SignerAdded { signer });
 
+        let threshold = get_threshold(&env)?;
+        env.events().publish(
+            (symbol_short!("quor_cfg"),),
+            QuorumConfig {
+                threshold,
+                signer_count: signers.len(),
+            },
+        );
+
         Ok(())
     }
 
@@ -578,6 +601,15 @@ impl FluxoraGovernance {
         // no event).
         env.events()
             .publish((symbol_short!("sgnr_rm"),), SignerRemoved { signer });
+
+        env.events().publish(
+            (symbol_short!("quor_cfg"),),
+            QuorumConfig {
+                threshold,
+                signer_count: signers.len(),
+            },
+        );
+
         Ok(())
     }
 
@@ -1962,5 +1994,56 @@ mod tests {
             ctx.client.try_execute(&executor, &id3),
             Err(Ok(GovernanceError::ProposalExpired))
         );
+    }
+
+    #[test]
+    fn test_quorum_config_events_on_membership_changes() {
+        use soroban_sdk::testutils::Events;
+        use soroban_sdk::{symbol_short, IntoVal, TryFromVal};
+
+        let ctx = Ctx::setup();
+        // Ctx::setup() sets up a contract with 3 signers and a threshold of 2.
+        
+        let new_signer = Address::generate(&ctx.env);
+        
+        // Add a signer
+        ctx.client.add_signer(&new_signer);
+        
+        let events = ctx.env.events().all();
+        let quor_event = events.iter().rfind(|(_, topics, _)| {
+            topics == &soroban_sdk::vec![
+                &ctx.env,
+                symbol_short!("quor_cfg").into_val(&ctx.env)
+            ]
+        });
+        assert!(quor_event.is_some(), "quor_cfg event must be emitted on add");
+
+        let (_, _, data) = quor_event.unwrap();
+        let payload = QuorumConfig::try_from_val(&ctx.env, &data)
+            .expect("event data must deserialize as QuorumConfig");
+        
+        // Started with 3, added 1 -> 4
+        assert_eq!(payload.threshold, 2);
+        assert_eq!(payload.signer_count, 4);
+
+        // Remove the signer
+        ctx.client.remove_signer(&new_signer);
+
+        let events = ctx.env.events().all();
+        let quor_event = events.iter().rfind(|(_, topics, _)| {
+            topics == &soroban_sdk::vec![
+                &ctx.env,
+                symbol_short!("quor_cfg").into_val(&ctx.env)
+            ]
+        });
+        assert!(quor_event.is_some(), "quor_cfg event must be emitted on remove");
+
+        let (_, _, data) = quor_event.unwrap();
+        let payload = QuorumConfig::try_from_val(&ctx.env, &data)
+            .expect("event data must deserialize as QuorumConfig");
+        
+        // Removed 1 -> 3
+        assert_eq!(payload.threshold, 2);
+        assert_eq!(payload.signer_count, 3);
     }
 }

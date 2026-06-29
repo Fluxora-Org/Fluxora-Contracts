@@ -484,6 +484,25 @@ applicable (e.g. `AdminUpd`).
 
 ---
 
+## Governance contract events (`fluxora_governance`)
+
+All state-changing governance entrypoints emit structured events. Topics are ≤ 9
+characters (`symbol_short!` constraint). 
+
+| Event name | Topic(s) | Data (shape & types) | When emitted |
+|---|---|---|---|
+| ProposalCreated | `["proposed", proposal_id: u32]` | `ProposalCreated { proposal_id: u32, proposer: Address, target: Address }` | When `propose` is called successfully. |
+| ProposalApproved | `["approved", proposal_id: u32]` | `ProposalApproved { proposal_id: u32, approver: Address, approval_count: u32 }` | When a co-signer successfully approves a proposal. |
+| QuorumReached | `["quorum", proposal_id: u32]` | `QuorumReached { proposal_id: u32, quorum_reached_at: u64, executable_after: u64 }` | When a proposal reaches the approval threshold. |
+| ProposalCancelled | `["cancelled", proposal_id: u32]` | `ProposalCancelled { proposal_id: u32, canceller: Address }` | When a proposal is cancelled. |
+| ProposalExecuted | `["executed", proposal_id: u32]` | `ProposalExecuted { proposal_id: u32, executor: Address, target: Address, calldata: Bytes }` | When a proposal is executed successfully. |
+| SignerAdded | `["sgnr_add"]` | `SignerAdded { signer: Address }` | When `add_signer` adds a new co-signer. |
+| SignerRemoved | `["sgnr_rm"]` | `SignerRemoved { signer: Address }` | When `remove_signer` successfully removes a co-signer. |
+| AdminChanged | `["adm_chg"]` | `AdminChanged { old: Address, new: Address }` | When the contract admin is rotated. |
+| QuorumConfig | `["quor_cfg"]` | `QuorumConfig { threshold: u32, signer_count: u32 }` | Emitted after `SignerAdded` and `SignerRemoved` to allow indexers to track quorum health and threshold satisfiability. |
+
+---
+
 ## Keeping this doc in sync
 
 This file is derived from `contracts/stream/src/lib.rs` and `contracts/factory/src/lib.rs` emit calls:
