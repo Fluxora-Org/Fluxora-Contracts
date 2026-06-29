@@ -727,6 +727,19 @@ impl FluxoraFactory {
             .unwrap_or(false)
     }
 
+    /// Return the configured inclusive rate-per-second bounds.
+    ///
+    /// Each side is optional: `None` means that side of the interval is
+    /// unbounded. Missing keys, including before factory initialization, are
+    /// reported as `(None, None)` rather than an initialization error so
+    /// clients can safely preflight rate validation without auth.
+    pub fn get_rate_bounds(env: Env) -> (Option<i128>, Option<i128>) {
+        let min_rate: Option<i128> = env.storage().instance().get(&DataKey::MinRatePerSecond);
+        let max_rate: Option<i128> = env.storage().instance().get(&DataKey::MaxRatePerSecond);
+        bump_instance(&env);
+        (min_rate, max_rate)
+    }
+
     /// Return the current factory policy configuration.
     pub fn get_factory_config(env: Env) -> Result<FactoryConfig, FactoryError> {
         Ok(FactoryConfig {

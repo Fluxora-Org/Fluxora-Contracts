@@ -677,6 +677,94 @@ fn test_load_policy_defaults_rate_bounds_to_none() {
     assert_eq!(policy.max_rate_per_second, None);
 }
 
+/// `get_rate_bounds` is a permissionless preflight view and returns the
+/// permissive `(None, None)` state before initialization or stored bounds.
+#[test]
+fn test_get_rate_bounds_returns_none_none_before_and_after_init() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+
+    assert_eq!(factory.get_rate_bounds(), (None, None));
+
+    let admin = Address::generate(&env);
+    let sc = Address::generate(&env);
+    factory.init(&admin, &sc, &10_000, &100);
+    assert_eq!(factory.get_rate_bounds(), (None, None));
+}
+
+/// `get_rate_bounds` reports a lower bound while preserving an unset upper
+/// bound as `None`.
+#[test]
+fn test_get_rate_bounds_returns_min_only() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let admin = Address::generate(&env);
+    let sc = Address::generate(&env);
+
+    factory.init(&admin, &sc, &10_000, &100);
+    factory.set_rate_bounds(&Some(50), &None);
+
+    assert_eq!(factory.get_rate_bounds(), (Some(50), None));
+}
+
+/// `get_rate_bounds` reports an upper bound while preserving an unset lower
+/// bound as `None`.
+#[test]
+fn test_get_rate_bounds_returns_max_only() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let admin = Address::generate(&env);
+    let sc = Address::generate(&env);
+
+    factory.init(&admin, &sc, &10_000, &100);
+    factory.set_rate_bounds(&None, &Some(1_000));
+
+    assert_eq!(factory.get_rate_bounds(), (None, Some(1_000)));
+}
+
+/// `get_rate_bounds` reports both inclusive bounds once they are configured.
+#[test]
+fn test_get_rate_bounds_returns_both_bounds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let admin = Address::generate(&env);
+    let sc = Address::generate(&env);
+
+    factory.init(&admin, &sc, &10_000, &100);
+    factory.set_rate_bounds(&Some(50), &Some(1_000));
+
+    assert_eq!(factory.get_rate_bounds(), (Some(50), Some(1_000)));
+}
+
+/// Calling `get_rate_bounds` bumps instance TTL so frequent client preflight
+/// reads keep factory policy storage alive.
+#[test]
+fn test_get_rate_bounds_bumps_instance_ttl() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let admin = Address::generate(&env);
+    let sc = Address::generate(&env);
+
+    factory.init(&admin, &sc, &10_000, &100);
+    factory.set_rate_bounds(&Some(50), &Some(1_000));
+
+    env.ledger().set_sequence_number(env.ledger().sequence() + 10_000);
+    assert_eq!(factory.get_rate_bounds(), (Some(50), Some(1_000)));
+
+    env.ledger().set_sequence_number(env.ledger().sequence() + 10_000);
+    assert_eq!(factory.get_factory_config().max_deposit, 10_000);
+}
+
 /// `set_batch_cap_enforcement` flips `batch_cap_enforced` in both directions,
 /// which `load_policy` must surface verbatim for the batch path to honour.
 #[test]
