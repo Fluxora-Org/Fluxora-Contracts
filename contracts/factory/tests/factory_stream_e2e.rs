@@ -975,4 +975,179 @@ fn test_create_streams_empty_batch_emits_no_events() {
     assert_eq!(total_count, 0);
 }
 
+// ---------------------------------------------------------------------------
+// Rate bounds enforcement in batch creation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_create_streams_rate_below_min_fails() {
+    let ctx = Ctx::setup();
+    let now = ctx.now();
+
+    // Set min rate
+    ctx.factory.set_rate_bounds(&Some(100), &None);
+
+    let mut streams = soroban_sdk::Vec::new(&ctx.env);
+    streams.push_back(fluxora_stream::CreateStreamParams {
+        recipient: ctx.recipient.clone(),
+        deposit_amount: DEPOSIT_AMOUNT,
+        rate_per_second: 50, // below min
+        start_time: now,
+        cliff_time: now,
+        end_time: now + STREAM_DURATION,
+        withdraw_dust_threshold: Some(0),
+        memo: None,
+        kind: fluxora_stream::StreamKind::Linear,
+    });
+
+    let result = ctx.factory.try_create_streams(&ctx.sender, &streams);
+    assert_eq!(result, Err(Ok(FactoryError::RateBelowMin)));
+
+    // Verify atomic failure: no streams created
+    assert_eq!(ctx.stream.get_stream_count(), 0);
+}
+
+#[test]
+fn test_create_streams_rate_above_max_fails() {
+    let ctx = Ctx::setup();
+    let now = ctx.now();
+
+    // Set max rate
+    ctx.factory.set_rate_bounds(&None, &Some(200));
+
+    let mut streams = soroban_sdk::Vec::new(&ctx.env);
+    streams.push_back(fluxora_stream::CreateStreamParams {
+        recipient: ctx.recipient.clone(),
+        deposit_amount: DEPOSIT_AMOUNT,
+        rate_per_second: 300, // above max
+        start_time: now,
+        cliff_time: now,
+        end_time: now + STREAM_DURATION,
+        withdraw_dust_threshold: Some(0),
+        memo: None,
+        kind: fluxora_stream::StreamKind::Linear,
+    });
+
+    let result = ctx.factory.try_create_streams(&ctx.sender, &streams);
+    assert_eq!(result, Err(Ok(FactoryError::RateAboveMax)));
+
+    // Verify atomic failure: no streams created
+    assert_eq!(ctx.stream.get_stream_count(), 0);
+}
+
+#[test]
+fn test_create_streams_mixed_rates_fails_atomically() {
+    let ctx = Ctx::setup();
+    let now = ctx.now();
+
+    // Set rate bounds
+    ctx.factory.set_rate_bounds(&Some(100), &Some(200));
+
+    let mut streams = soroban_sdk::Vec::new(&ctx.env);
+    // Valid
+    streams.push_back(fluxora_stream::CreateStreamParams {
+        recipient: ctx.recipient.clone(),
+        deposit_amount: DEPOSIT_AMOUNT,
+        rate_per_second: 150,
+        start_time: now,
+        cliff_time: now,
+        end_time: now + STREAM_DURATION,
+        withdraw_dust_threshold: Some(0),
+        memo: None,
+        kind: fluxora_stream::StreamKind::Linear,
+    });
+    // Invalid (below min)
+    streams.push_back(fluxora_stream::CreateStreamParams {
+        recipient: ctx.recipient.clone(),
+        deposit_amount: DEPOSIT_AMOUNT,
+        rate_per_second: 50,
+        start_time: now,
+        cliff_time: now,
+        end_time: now + STREAM_DURATION,
+        withdraw_dust_threshold: Some(0),
+        memo: None,
+        kind: fluxora_stream::StreamKind::Linear,
+    });
+
+    let result = ctx.factory.try_create_streams(&ctx.sender, &streams);
+    assert_eq!(result, Err(Ok(FactoryError::RateBelowMin)));
+
+    // Verify atomic failure: no streams created
+    assert_eq!(ctx.stream.get_stream_count(), 0);
+}
+
+#[test]
+fn test_create_streams_rates_at_bounds_succeed() {
+    let ctx = Ctx::setup();
+    let now = ctx.now();
+
+    // Set rate bounds
+    ctx.factory.set_rate_bounds(&Some(100), &Some(200));
+
+    let mut streams = soroban_sdk::Vec::new(&ctx.env);
+    // At min
+    streams.push_back(fluxora_stream::CreateStreamParams {
+        recipient: ctx.recipient.clone(),
+        deposit_amount: DEPOSIT_AMOUNT,
+        rate_per_second: 100,
+        start_time: now,
+        cliff_time: now,
+        end_time: now + STREAM_DURATION,
+        withdraw_dust_threshold: Some(0),
+        memo: None,
+        kind: fluxora_stream::StreamKind::Linear,
+    });
+    // At max
+    streams.push_back(fluxora_stream::CreateStreamParams {
+        recipient: ctx.recipient.clone(),
+        deposit_amount: DEPOSIT_AMOUNT,
+        rate_per_second: 200,
+        start_time: now,
+        cliff_time: now,
+        end_time: now + STREAM_DURATION,
+        withdraw_dust_threshold: Some(0),
+        memo: None,
+        kind: fluxora_stream::StreamKind::Linear,
+    });
+
+    let ids = ctx.factory.create_streams(&ctx.sender, &streams);
+    assert_eq!(ids.len(), 2);
+    assert_eq!(ctx.stream.get_stream_count(), 2);
+}
+
+#[test]
+fn test_create_streams_without_bounds_succeeds() {
+    let ctx = Ctx::setup();
+    let now = ctx.now();
+
+    // No bounds set
+    let mut streams = soroban_sdk::Vec::new(&ctx.env);
+    streams.push_back(fluxora_stream::CreateStreamParams {
+        recipient: ctx.recipient.clone(),
+        deposit_amount: DEPOSIT_AMOUNT,
+        rate_per_second: 50,
+        start_time: now,
+        cliff_time: now,
+        end_time: now + STREAM_DURATION,
+        withdraw_dust_threshold: Some(0),
+        memo: None,
+        kind: fluxora_stream::StreamKind::Linear,
+    });
+    streams.push_back(fluxora_stream::CreateStreamParams {
+        recipient: ctx.recipient.clone(),
+        deposit_amount: DEPOSIT_AMOUNT,
+        rate_per_second: 300,
+        start_time: now,
+        cliff_time: now,
+        end_time: now + STREAM_DURATION,
+        withdraw_dust_threshold: Some(0),
+        memo: None,
+        kind: fluxora_stream::StreamKind::Linear,
+    });
+
+    let ids = ctx.factory.create_streams(&ctx.sender, &streams);
+    assert_eq!(ids.len(), 2);
+    assert_eq!(ctx.stream.get_stream_count(), 2);
+}
+
 

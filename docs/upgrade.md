@@ -308,3 +308,46 @@ All paginated views are tested for:
 - ✅ Full export workflow (accumulate all pages)
 
 See `contracts/stream/src/test.rs` for the complete test suite.
+
+
+
+# On-Chain Contract Upgrades
+
+## Overview
+
+Fluxora supports in-place contract upgrades via the `upgrade()` entrypoint. This allows the protocol to ship security fixes and feature improvements without requiring integrators to migrate to a new contract address.
+
+## How It Works
+
+The `upgrade()` function calls Soroban's `update_current_contract_wasm` host function, which atomically replaces the contract's WASM code in-place.
+
+## Authorization
+
+Upgrades are **admin-only**:
+
+- The admin address (set during `init()`) must sign the transaction
+- In production, the admin should be the governance contract (`fluxora_governance`)
+- Governance requires multi-signer approval (quorum) before the upgrade can execute
+
+## Storage Compatibility
+
+The upgraded WASM must maintain backward-compatible storage layout.
+
+### Safe Changes
+- Add new fields to `Stream` struct (append at end)
+- Add new variants to `DataKey` enum (append at end)
+- Add new functions to the contract
+- Gas optimizations
+
+### Unsafe Changes
+- Reorder `Stream` struct fields
+- Remove `Stream` struct fields
+- Reorder `DataKey` enum variants
+- Remove `DataKey` variants
+
+## Upgrade Workflow
+
+### 1. Build New WASM
+```bash
+cargo build --target wasm32-unknown-unknown --release -p fluxora_stream
+stellar contract optimize --wasm target/wasm32-unknown-unknown/release/fluxora_stream.wasm
