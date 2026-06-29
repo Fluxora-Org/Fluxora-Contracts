@@ -14,6 +14,7 @@ Soroban smart contracts for the Fluxora treasury streaming protocol on Stellar. 
 - **[Audit preparation](docs/audit.md)** — Entry-points and invariants for auditors.
 - **[Error codes](docs/error.md)** — Full ContractError reference.
 - **[Events](docs/events.md)** — Emitted event shapes and topics.
+- **[Stream templates](docs/stream-templates.md)** — Template lifecycle, auth, field mapping, and calldata savings.
 
 ## What's in this repo
 

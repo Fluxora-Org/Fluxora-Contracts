@@ -203,6 +203,7 @@ occurs and the function returns `0`. This ensures:
 
 - Tokens that back active stream liabilities are never swept.
 - A recipient's withdrawable entitlement is never affected by a sweep.
+- Accrued protocol (keeper) fees are protected (as they are paid out immediately and thus naturally excluded from the contract balance).
 - The contract always remains solvent after a sweep.
 
 ### Security properties

@@ -32,3 +32,8 @@ required-features = ["testutils"]
 name = "adversarial_auth"
 path = "tests/adversarial_auth.rs"
 required-features = ["testutils"]
+
+[[test]]
+name = "batch_pause_gate"
+path = "tests/batch_pause_gate.rs"
+required-features = ["testutils"]

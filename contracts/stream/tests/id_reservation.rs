@@ -5,7 +5,9 @@
 
 extern crate std;
 
-use fluxora_stream::{ContractError, FluxoraStream, FluxoraStreamClient, MAX_ID_RESERVATION};
+use fluxora_stream::{
+    ContractError, FluxoraStream, FluxoraStreamClient, StreamKind, MAX_ID_RESERVATION,
+};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
@@ -74,6 +76,7 @@ impl<'a> Ctx<'a> {
             &(now + 1_000_001),
             &0i128,
             &None,
+            &StreamKind::Linear,
         )
     }
 }
@@ -85,7 +88,7 @@ impl<'a> Ctx<'a> {
 #[test]
 fn reserve_returns_correct_range_from_zero() {
     let ctx = Ctx::setup();
-    let ids = ctx.client.reserve_stream_ids(&ctx.sender, &5u32);
+    let ids = ctx.client.reserve_stream_ids(&ctx.sender, &5u32, &None);
     assert_eq!(ids.len(), 5);
     for i in 0..5u32 {
         assert_eq!(ids.get(i).unwrap(), i as u64);
@@ -96,7 +99,7 @@ fn reserve_returns_correct_range_from_zero() {
 #[test]
 fn reserve_single_id() {
     let ctx = Ctx::setup();
-    let ids = ctx.client.reserve_stream_ids(&ctx.sender, &1u32);
+    let ids = ctx.client.reserve_stream_ids(&ctx.sender, &1u32, &None);
     assert_eq!(ids.len(), 1);
     assert_eq!(ids.get(0).unwrap(), 0u64);
     assert_eq!(ctx.client.get_stream_count(), 1);
@@ -107,7 +110,7 @@ fn reserve_max_ids() {
     let ctx = Ctx::setup();
     let ids = ctx
         .client
-        .reserve_stream_ids(&ctx.sender, &MAX_ID_RESERVATION);
+        .reserve_stream_ids(&ctx.sender, &MAX_ID_RESERVATION, &None);
     assert_eq!(ids.len(), MAX_ID_RESERVATION);
     assert_eq!(ids.get(0).unwrap(), 0u64);
     assert_eq!(
@@ -122,8 +125,8 @@ fn sequential_reservations_are_non_overlapping() {
     let ctx = Ctx::setup();
     let sender2 = Address::generate(&ctx.env);
 
-    let ids1 = ctx.client.reserve_stream_ids(&ctx.sender, &3u32);
-    let ids2 = ctx.client.reserve_stream_ids(&sender2, &3u32);
+    let ids1 = ctx.client.reserve_stream_ids(&ctx.sender, &3u32, &None);
+    let ids2 = ctx.client.reserve_stream_ids(&sender2, &3u32, &None);
 
     assert_eq!(ids1.get(0).unwrap(), 0u64);
     assert_eq!(ids2.get(0).unwrap(), 3u64);
@@ -137,7 +140,7 @@ fn sequential_reservations_are_non_overlapping() {
 #[test]
 fn reserve_zero_count_errors() {
     let ctx = Ctx::setup();
-    let result = ctx.client.try_reserve_stream_ids(&ctx.sender, &0u32);
+    let result = ctx.client.try_reserve_stream_ids(&ctx.sender, &0u32, &None);
     assert_eq!(result, Err(Ok(ContractError::ReservationCountZero)));
 }
 
@@ -146,7 +149,7 @@ fn reserve_over_max_errors() {
     let ctx = Ctx::setup();
     let result = ctx
         .client
-        .try_reserve_stream_ids(&ctx.sender, &(MAX_ID_RESERVATION + 1));
+        .try_reserve_stream_ids(&ctx.sender, &(MAX_ID_RESERVATION + 1), &None);
     assert_eq!(result, Err(Ok(ContractError::ReservationLimitExceeded)));
 }
 
@@ -163,7 +166,7 @@ fn get_id_reservation_none_before_reserve() {
 #[test]
 fn get_id_reservation_returns_active_reservation() {
     let ctx = Ctx::setup();
-    ctx.client.reserve_stream_ids(&ctx.sender, &5u32);
+    ctx.client.reserve_stream_ids(&ctx.sender, &5u32, &None);
     let res = ctx.client.get_id_reservation(&ctx.sender).unwrap();
     assert_eq!(res.start_id, 0);
     assert_eq!(res.count, 5);
@@ -177,7 +180,7 @@ fn get_id_reservation_returns_active_reservation() {
 #[test]
 fn create_stream_uses_reserved_id() {
     let ctx = Ctx::setup();
-    ctx.client.reserve_stream_ids(&ctx.sender, &2u32);
+    ctx.client.reserve_stream_ids(&ctx.sender, &2u32, &None);
 
     let id0 = ctx.create_stream(&ctx.sender);
     assert_eq!(id0, 0u64);
@@ -203,7 +206,7 @@ fn create_stream_without_reservation_uses_live_counter() {
 #[test]
 fn create_stream_after_reservation_exhausted_uses_live_counter() {
     let ctx = Ctx::setup();
-    ctx.client.reserve_stream_ids(&ctx.sender, &1u32);
+    ctx.client.reserve_stream_ids(&ctx.sender, &1u32, &None);
 
     let id0 = ctx.create_stream(&ctx.sender);
     assert_eq!(id0, 0u64);
@@ -217,8 +220,8 @@ fn create_stream_after_reservation_exhausted_uses_live_counter() {
 #[test]
 fn new_reservation_overwrites_existing() {
     let ctx = Ctx::setup();
-    ctx.client.reserve_stream_ids(&ctx.sender, &5u32); // IDs 0..4
-    let ids2 = ctx.client.reserve_stream_ids(&ctx.sender, &5u32); // IDs 5..9
+    ctx.client.reserve_stream_ids(&ctx.sender, &5u32, &None); // IDs 0..4
+    let ids2 = ctx.client.reserve_stream_ids(&ctx.sender, &5u32, &None); // IDs 5..9
     assert_eq!(ids2.get(0).unwrap(), 5u64);
 
     let res = ctx.client.get_id_reservation(&ctx.sender).unwrap();
@@ -232,7 +235,7 @@ fn new_reservation_overwrites_existing() {
 #[test]
 fn reservation_advances_stream_count_by_full_count() {
     let ctx = Ctx::setup();
-    ctx.client.reserve_stream_ids(&ctx.sender, &10u32);
+    ctx.client.reserve_stream_ids(&ctx.sender, &10u32, &None);
     // Only consume 1
     let id = ctx.create_stream(&ctx.sender);
     assert_eq!(id, 0u64);
@@ -246,8 +249,8 @@ fn different_callers_get_independent_reservations() {
     let sender2 = Address::generate(&ctx.env);
     ctx.mint(&sender2);
 
-    ctx.client.reserve_stream_ids(&ctx.sender, &3u32);
-    ctx.client.reserve_stream_ids(&sender2, &3u32);
+    ctx.client.reserve_stream_ids(&ctx.sender, &3u32, &None);
+    ctx.client.reserve_stream_ids(&sender2, &3u32, &None);
 
     let id_s1 = ctx.create_stream(&ctx.sender);
     let id_s2 = ctx.create_stream(&sender2);
@@ -265,8 +268,108 @@ fn reserve_after_existing_streams_starts_at_current_count() {
     assert_eq!(ctx.client.get_stream_count(), 2);
 
     // Reserve 3 more — should start at 2
-    let ids = ctx.client.reserve_stream_ids(&ctx.sender, &3u32);
+    let ids = ctx.client.reserve_stream_ids(&ctx.sender, &3u32, &None);
     assert_eq!(ids.get(0).unwrap(), 2u64);
     assert_eq!(ids.get(2).unwrap(), 4u64);
     assert_eq!(ctx.client.get_stream_count(), 5);
+}
+
+// ---------------------------------------------------------------------------
+// reclaim_expired_id_reservation tests
+// ---------------------------------------------------------------------------
+
+/// Expiry Boundary Semantics:
+/// - A reservation has an optional Time-To-Live (TTL) defined by the `expiry` timestamp.
+/// - If `current_timestamp < expiry`, the reservation is active and cannot be reclaimed.
+/// - If `current_timestamp >= expiry`, the reservation has expired, and anyone is permitted
+///   to trigger reclamation of the reserved IDs to free storage slot and prevent counter blockage.
+///
+/// Why reclaim is only permitted after expiry:
+/// - To protect the reservation holder's exclusive right to use their pre-allocated ID space.
+/// - Preventing premature reclamation ensures that off-chain pre-computation pipelines are not
+///   invalidated by third parties while the reservation is legally active.
+///
+/// Security Rationale:
+/// - Pre-expiry rejection: Blocks denial-of-service (DoS) or front-running attacks where an attacker
+///   reclaims a user's reservation before they can publish their streams.
+/// - At-expiry & post-expiry success: Ensures that if a holder abandons or loses access to their
+///   reservation, the counter space/storage is not permanently locked, maintaining contract liveness.
+/// - Nonexistent reservation rejection: Prevents garbage state modifications or execution of release code paths
+///   for addresses without a reservation.
+/// - Double-reclaim prevention: After successful reclamation, the reservation is permanently deleted,
+///   preventing replay or duplicate release operations.
+#[test]
+fn test_reclaim_before_expiry_errors() {
+    let ctx = Ctx::setup();
+    let now = ctx.env.ledger().timestamp();
+    let expiry = now + 100;
+
+    // Reserve with expiry = Some(expiry)
+    ctx.client.reserve_stream_ids(&ctx.sender, &5u32, &Some(expiry));
+
+    // Attempt reclaim at now + 50 (pre-expiry)
+    ctx.env.ledger().set_timestamp(now + 50);
+    let result = ctx.client.try_reclaim_expired_id_reservation(&ctx.sender);
+    assert_eq!(result, Err(Ok(ContractError::ReservationStillActive)));
+}
+
+#[test]
+fn test_reclaim_exactly_at_expiry_succeeds() {
+    let ctx = Ctx::setup();
+    let now = ctx.env.ledger().timestamp();
+    let expiry = now + 100;
+
+    // Reserve with expiry = Some(expiry)
+    ctx.client.reserve_stream_ids(&ctx.sender, &5u32, &Some(expiry));
+
+    // Reclaim exactly at the expiry boundary
+    ctx.env.ledger().set_timestamp(expiry);
+    let result = ctx.client.reclaim_expired_id_reservation(&ctx.sender);
+    assert_eq!(result, ());
+
+    // Check that reservation is released
+    assert!(ctx.client.get_id_reservation(&ctx.sender).is_none());
+}
+
+#[test]
+fn test_reclaim_after_expiry_succeeds() {
+    let ctx = Ctx::setup();
+    let now = ctx.env.ledger().timestamp();
+    let expiry = now + 100;
+
+    // Reserve with expiry = Some(expiry)
+    ctx.client.reserve_stream_ids(&ctx.sender, &5u32, &Some(expiry));
+
+    // Reclaim after expiry
+    ctx.env.ledger().set_timestamp(expiry + 1);
+    let result = ctx.client.reclaim_expired_id_reservation(&ctx.sender);
+    assert_eq!(result, ());
+
+    // Check that reservation is released
+    assert!(ctx.client.get_id_reservation(&ctx.sender).is_none());
+}
+
+#[test]
+fn test_reclaim_nonexistent_reservation_errors() {
+    let ctx = Ctx::setup();
+    let result = ctx.client.try_reclaim_expired_id_reservation(&ctx.sender);
+    assert_eq!(result, Err(Ok(ContractError::ReservationNotFound)));
+}
+
+#[test]
+fn test_reclaim_twice_errors() {
+    let ctx = Ctx::setup();
+    let now = ctx.env.ledger().timestamp();
+    let expiry = now + 100;
+
+    // Reserve with expiry = Some(expiry)
+    ctx.client.reserve_stream_ids(&ctx.sender, &5u32, &Some(expiry));
+
+    // Reclaim first time (succeeds)
+    ctx.env.ledger().set_timestamp(expiry);
+    ctx.client.reclaim_expired_id_reservation(&ctx.sender);
+
+    // Reclaim second time (errors as it was already deleted)
+    let result = ctx.client.try_reclaim_expired_id_reservation(&ctx.sender);
+    assert_eq!(result, Err(Ok(ContractError::ReservationNotFound)));
 }
