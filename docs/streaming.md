@@ -196,6 +196,22 @@ Scope boundary and exclusions:
 2. Out of scope: token-level trust assumptions beyond documented model, off-chain indexer liveness, and economic policy choices (for example who should bear operational costs).
 3. Residual risk: if a non-standard token violates SEP-41 expectations, transfer behavior may diverge; CEI ordering reduces but cannot fully eliminate external token risk.
 
+### Clone Semantics
+
+This section defines the success and failure behavior of `clone_stream`.
+
+Success semantics (observable):
+
+1. Preconditions: Source stream must be in `Active` or `Paused` status.
+2. The contract creates a new stream inheriting the rate, cliff offset, dust threshold, and memo from the source stream.
+3. The new stream is initialized in the `Active` status.
+4. Tokens are pulled from the source stream's sender for the new deposit.
+
+Failure semantics (observable):
+
+1. Terminal source state: If the source stream status is `Completed` or `Cancelled`, the operation is rejected with `ContractError::StreamTerminalState`.
+2. Unauthorized: If the caller is not the sender of the source stream, the operation is rejected.
+
 ### Global Pause Semantics (Issue Scope)
 
 This section is the protocol-level contract for the global pause state managed via `pause_protocol` and `resume_protocol`.
@@ -442,8 +458,8 @@ Behaviour: Active/Paused streams use the given `timestamp` (clamped to schedule)
 - **is_underfunded**: `true` if the current `deposit_amount` is insufficient to cover the total tokens that will accrue by `end_time` at the current `rate_per_second`.
 - **is_expired**: `true` if `ledger.timestamp() >= end_time` and the stream is not yet `Completed` or `Cancelled`.
 - **accrued_to_date**: Real-time total tokens accrued since `start_time`.
-- **remaining_deposit**: `deposit_amount - withdrawn_amount`.
-- **seconds_until_depletion**: Estimated seconds until the stream's deposit is fully exhausted by accrual. Capped at `end_time`.
+- **remaining_deposit**: `deposit_amount - withdrawn_amount`. For cancelled streams, this reflects the unwithdrawn portion of the original deposit, even though the unstreamed portion has been refunded.
+- **seconds_until_depletion**: Estimated seconds until the stream's deposit is fully exhausted by accrual. Capped at `end_time`. For cancelled streams, this continues to reflect the hypothetical depletion time based on the original rate.
 
 Use this to show real-time health indicators in UIs, alert senders of underfunding, or notify recipients of expired streams ready for final withdrawal.
 
@@ -786,12 +802,14 @@ A naive decrease would retroactively lower the recipient's accrued tokens. To pr
 - **Check-Effects-Interactions (CEI)**: Computes accrual, reduces deposit amount, persists stream state, and finally refunds the difference to the sender.
 - **Rate Validation**: `0 < new_rate_per_second < current rate_per_second`.
 - **Refund**: The sender receives a refund of `old_deposit - new_deposit`, where `new_deposit = checkpointed_amount + new_rate * remaining_seconds`.
+- **Refund-non-negativity invariant**: The refund maths uses `checked_sub` (`old_deposit - new_deposit`), not `saturating_sub`. Any rate change whose `new_deposit` would **exceed** `old_deposit` — i.e. the new schedule streamable amount is *larger* than what has already been deposited — is rejected with `ContractError::ArithmeticOverflow`. The contract never silently grows a stream's deposit ceiling via `decrease_rate_per_second`; only `top_up_stream` adds new deposit, and `update_rate_per_second` re-prices under the existing ceiling. See `contracts/stream/tests/rate_decrease_after_withdraw.rs` for the regression coverage of this invariant.
 
 #### Failures
 - **Unauthorized**: Caller is not the original sender.
 - **InvalidState**: Stream is already expired (`now >= end_time`).
 - **StreamTerminalState**: Stream is Cancelled or Completed.
 - **InvalidParams**: `new_rate_per_second <= 0` or `new_rate_per_second >= old_rate`.
+- **ArithmeticOverflow**: `old_deposit < new_deposit` per the refund-non-negativity invariant above. The contract refuses to *grow* the stream's deposit ceiling via a rate decrease.
 
 ### update_rate_per_second: Observable Semantics
 
@@ -1046,11 +1064,17 @@ Simple query that returns the stored auto-claim destination address, or `None` i
   - `("completed", stream_id)` → `StreamEvent::StreamCompleted(stream_id)` if stream transitions to `Completed`.
 
 #### Cancellation interaction
-
+ 
 If a stream is cancelled after opt-in, `trigger_auto_claim` returns `InvalidState`. The auto-claim destination entry remains in storage but is inert. Recipients may call `revoke_auto_claim` to clean up storage.
-
+ 
+#### Revocation Boundary and Timing Safety
+ 
+1. **Post-Revoke Trigger Prevention**: Once a recipient calls `revoke_auto_claim`, the auto-claim configuration is immediately deleted. Any subsequent `trigger_auto_claim` calls fail with `ContractError::InvalidParams` without transferring any tokens.
+2. **Early Trigger Restriction**: Permissionless triggering is strictly disallowed before the stream's `end_time` is reached. Early calls return `ContractError::InvalidState` and transfer zero funds.
+3. **Destination Update Immendiate Effect**: If the destination is updated, the change is immediately effective. Triggering auto-claim afterwards sends funds ONLY to the recipient's currently selected destination.
+ 
 #### Security invariants
-
+ 
 1. Only the recipient can set or change the destination (`require_auth` enforced).
 2. The caller of `trigger_auto_claim` has zero influence over where tokens go.
 3. CEI ordering is preserved: stream state is saved before the token transfer.

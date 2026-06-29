@@ -164,9 +164,65 @@ reentrancy impact — state will already reflect the current operation when the 
 | `extend_stream_end_time`  | Stream's `sender`                                       |
 | `top_up_stream`           | `funder` (any address; no sender relationship required) |
 | `close_completed_stream`  | Permissionless (any caller)                             |
+| `sweep_excess`            | Contract admin **only** (recipient does not co-sign)    |
 | `set_admin`               | Current contract admin                                  |
 | `set_contract_paused`     | Contract admin                                          |
 | `transfer_sender`         | Current stream sender                                   |
+
+## Sweep excess — authorization model and liabilities invariant
+
+### Authorization
+
+`sweep_excess` requires **only** `admin.require_auth()`. The sweep destination
+(`recipient` parameter) does **not** need to authorize. This is an intentional
+design choice: the admin selects the destination address, so requiring the
+recipient to co-sign would prevent sweeping to cold/offline treasury wallets
+that cannot sign Soroban transactions.
+
+> **Before V6**: `sweep_excess` incorrectly required `recipient.require_auth()`,
+> forcing the destination wallet to co-sign every sweep. This blocked the
+> common operational pattern of sweeping protocol-owned excess to a cold
+> treasury.
+
+### Liabilities invariant
+
+The core safety property of `sweep_excess` is:
+
+```
+post_sweep_contract_balance >= read_total_liabilities
+```
+
+The function computes:
+
+```
+excess = contract_balance.saturating_sub(read_total_liabilities)
+```
+
+and transfers only `excess` to the recipient. If `excess <= 0`, no transfer
+occurs and the function returns `0`. This ensures:
+
+- Tokens that back active stream liabilities are never swept.
+- A recipient's withdrawable entitlement is never affected by a sweep.
+- Accrued protocol (keeper) fees are protected (as they are paid out immediately and thus naturally excluded from the contract balance).
+- The contract always remains solvent after a sweep.
+
+### Security properties
+
+1. **Only admin can sweep**: A non-admin caller is rejected with
+   `ContractError::Unauthorized`.
+2. **Excess-only transfer**: `saturating_sub` ensures the transfer amount
+   is bounded by the actual excess; if liabilities exceed the balance, zero
+   is transferred.
+3. **CEI ordering**: The excess is computed and the event is emitted **before**
+   the token transfer, consistent with the rest of the contract.
+4. **Reentrancy lock**: `acquire_reentrancy_lock` / `release_reentrancy_lock`
+   protects the token transfer.
+5. **Zero-excess no-op**: Calling when there is no excess returns `0` without
+   any token transfer or state change.
+6. **No recipient auth escalation**: The recipient address is specified by the
+   admin; removing the recipient auth requirement does not give the admin any
+   ability to drain funds that back active liabilities, because the transfer
+   is bounded by `saturating_sub(total_liabilities)`.
 
 ## Admin powers
 

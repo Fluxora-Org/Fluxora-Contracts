@@ -8,6 +8,8 @@ pub mod accrual;
 #[cfg(test)]
 mod checksum;
 mod token_check;
+#[cfg(test)]
+mod delegation;
 
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env, Map};
 use token_check::verify_token_behavior;
@@ -206,7 +208,7 @@ const KEEPER_FEE_BPS: u64 = 50;
 /// resume/cancel/complete transitions; `get_paused_stream_count()` O(1) view added;
 /// duplicate `ContractError` discriminant 23 resolved and the previously-missing
 /// variants declared.
-pub const CONTRACT_VERSION: u32 = 5;
+pub const CONTRACT_VERSION: u32 = 6;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -868,6 +870,8 @@ pub struct CreateStreamParams {
     /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
     /// Maximum `MAX_MEMO_BYTES` (64) bytes. Pass `None` to omit.
     pub memo: Option<soroban_sdk::Bytes>,
+    /// Optional structured metadata for indexer consumption.
+    pub metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
     /// The architectural style of the stream (Linear or CliffOnly).
     pub kind: StreamKind,
 }
@@ -2623,6 +2627,7 @@ impl FluxoraStream {
                 end_time,
                 withdraw_dust_threshold: rel.withdraw_dust_threshold,
                 memo: rel.memo,
+                metadata: rel.metadata,
                 kind: rel.kind,
             });
         }
@@ -6080,7 +6085,9 @@ impl FluxoraStream {
     /// - `recipient`: Address to receive the excess tokens
     ///
     /// # Authorization
-    /// - Requires authorization from the contract admin
+    /// - Requires authorization from the contract admin only
+    /// - The recipient (sweep destination) does **not** need to authorize, allowing the
+    ///   admin to sweep to a cold/offline treasury wallet that cannot sign transactions
     ///
     /// # Returns
     /// - `i128`: Amount of excess tokens swept (0 if no excess exists)
@@ -6088,7 +6095,6 @@ impl FluxoraStream {
     /// # Errors
     /// - `ContractError::InvalidState`: If contract is not initialized
     /// - `ContractError::Unauthorized`: If caller is not the admin
-    /// - `ContractError::InvalidParams`: If recipient address is invalid
     ///
     /// # Events
     /// - Publishes `ExcessSwept { to, amount }` event on success
@@ -6096,7 +6102,8 @@ impl FluxoraStream {
     /// # Security
     /// - Only callable by admin to prevent unauthorized fund extraction
     /// - Uses tracked liabilities (`TotalLiabilities`) to ensure recipient funds are protected
-    /// - CEI pattern: calculates excess, updates state, then transfers tokens
+    ///   — the invariant `contract_balance >= total_liabilities` is maintained after every sweep
+    /// - CEI pattern: calculates excess, emits event, then transfers tokens
     /// - Reentrancy protected via `acquire_reentrancy_lock`
     ///
     /// # Calculation
@@ -6105,13 +6112,15 @@ impl FluxoraStream {
     /// ```
     ///
     /// Where `total_liabilities` is the sum of all active stream deposits that haven't
-    /// been withdrawn or refunded yet.
+    /// been withdrawn or refunded yet. This intrinsic liability calculation ensures
+    /// that sweep_excess NEVER touches recipient-owed balances or accrued protocol fees.
     ///
     /// # Usage Notes
     /// - Safe to call even when no excess exists (returns 0, no transfer)
     /// - Does not affect active streams or recipient entitlements
     /// - Useful for recovering funds after mass cancellations or rate decreases
     /// - Should be called periodically by operators to maintain clean accounting
+    /// - The recipient does not co-sign, so cold/offline treasury wallets can receive sweeps
     ///
     /// # Example Scenarios
     /// 1. Stream cancelled at 50% completion → 50% refunded to sender, but if sender
@@ -6124,8 +6133,10 @@ impl FluxoraStream {
         let admin = get_admin(&env)?;
         admin.require_auth();
 
-        // Validate recipient address
-        recipient.require_auth();
+        // NOTE: recipient.require_auth() was intentionally removed.
+        // The sweep destination is chosen by the authenticated admin, so the recipient
+        // does NOT need to co-sign. This enables sweeping to cold/offline treasury
+        // wallets that cannot sign Soroban transactions.
 
         // Get contract's token balance
         let token_address = get_token(&env)?;
@@ -6595,17 +6606,17 @@ impl FluxoraStream {
     /// | `memo` | Copied verbatim |
     ///
     /// # Source stream state requirements
-    /// The source stream must be in one of the following states:
-    /// - `Completed` — natural end of a previous period.
-    /// - `Cancelled` — early termination of a previous period.
-    /// - `Active` or `Paused` — allowed when the caller is the original sender or admin
-    ///   (enables pre-scheduling the next period before the current one ends).
+    /// The source stream must be in one of the following non-terminal states:
+    /// - `Active` or `Paused` — allowed (enables pre-scheduling the next period before the current one ends).
+    ///
+    /// Cloning from terminal states (`Completed` or `Cancelled`) is rejected.
     ///
     /// # Returns
     /// - `u64`: The new stream's ID.
     ///
     /// # Errors
     /// - `StreamNotFound` (1): `stream_id` does not exist.
+    /// - `StreamTerminalState` (13): The source stream is in a terminal state (`Completed` or `Cancelled`).
     /// - `InvalidParams` (3): `force == false` and the source stream has a `CliffOnly`
     ///   sentinel threshold (`i128::MAX`), or any parameter fails `validate_stream_params`.
     /// - `ContractPaused` (4): Creation is globally paused.
@@ -6629,7 +6640,7 @@ impl FluxoraStream {
     ///
     /// # Example — recurring monthly salary
     /// ```ignore
-    /// // Month 1 stream just completed (stream_id = 42).
+    /// // Month 1 stream is running (stream_id = 42).
     /// // Clone it for month 2 with the same recipient and rate.
     /// let month2_id = contract.clone_stream(
     ///     &42,                    // source stream
@@ -6654,6 +6665,12 @@ impl FluxoraStream {
 
         // ── 2. Load source stream ─────────────────────────────────────────────
         let source = load_stream(&env, stream_id)?;
+
+        // ── 2.1. Status guard ─────────────────────────────────────────────────
+        // Reject cloning from a terminal-state source (Cancelled or Completed).
+        if source.status == StreamStatus::Cancelled || source.status == StreamStatus::Completed {
+            return Err(ContractError::StreamTerminalState);
+        }
 
         // ── 3. Authorization: source sender ──────────────────────────────────
         // Only the source stream's original sender may clone it.
@@ -6918,6 +6935,8 @@ mod test;
 mod test_issue_39;
 #[cfg(test)]
 mod test_withdrawable_props;
+#[cfg(test)]
+mod test_token_edge_cases;
 
 /// Atomically cancel multiple streams owned by the caller and refund the aggregate
 /// unstreamed balance in a single token transfer.
@@ -7108,7 +7127,7 @@ pub fn bulk_cancel_streams(
 /// Preconditions (enforced by caller & harness):
 /// - gross >= 0
 /// - BPS <= 10_000
-#[cfg(kani)]
+#[cfg(any(test, kani))]
 pub fn compute_keeper_fee_split(gross: i128, bps: u32) -> (i128, i128) {
     let fee = gross.checked_mul(bps as i128).unwrap_or(i128::MAX) / 10_000;
     let refund = gross.checked_sub(fee).unwrap_or(0);
@@ -7154,5 +7173,117 @@ mod kani_proofs {
             .ok_or(ContractError::ArithmeticOverflow)
             .map(|v| v / 10_000);
         // If we reach here without panic in checked path, ok.
+    }
+}
+
+#[cfg(test)]
+mod keeper_fee_split_tests {
+    use super::compute_keeper_fee_split;
+
+    /// Rounding Behavior:
+    /// The division by 10_000 uses integer division, which truncates the fractional part (rounds towards zero).
+    /// For example, if gross is 9 and bps is 5000 (50%), keeper_fee = 9 * 5000 / 10000 = 4.
+    /// The remainder (refund) is computed as gross - fee = 9 - 4 = 5.
+    /// This ensures no tokens are created during division (no rounding up).
+    ///
+    /// Conservation Invariant:
+    /// The split must satisfy `keeper_fee + protocol_remainder == gross` exactly.
+    /// Since protocol_remainder is calculated by subtracting keeper_fee from gross using checked arithmetic,
+    /// any remainder from truncation is implicitly consolidated into the protocol remainder, ensuring that
+    /// the total amount of tokens is strictly conserved.
+    ///
+    /// Security Requirement for Value Preservation:
+    /// Preserving value is a critical security requirement to prevent:
+    /// 1. Token leakage or loss due to truncation errors, which would lock funds in the contract.
+    /// 2. Artificial inflation of balances (creation of phantom tokens), which would allow callers to drain
+    ///    more tokens than are actually backed by contract holdings.
+    #[test]
+    fn test_keeper_fee_split_gross_zero() {
+        // gross == 0 returns (0, 0)
+        let (fee, refund) = compute_keeper_fee_split(0, 5000);
+        assert_eq!(fee, 0);
+        assert_eq!(refund, 0);
+        assert_eq!(fee + refund, 0);
+    }
+
+    #[test]
+    fn test_keeper_fee_split_bps_zero() {
+        // bps == 0 allocates the full amount to the protocol remainder (refund)
+        let gross = 1000_i128;
+        let (fee, refund) = compute_keeper_fee_split(gross, 0);
+        assert_eq!(fee, 0);
+        assert_eq!(refund, gross);
+        assert_eq!(fee + refund, gross);
+    }
+
+    #[test]
+    fn test_keeper_fee_split_bps_max() {
+        // bps == 10_000 allocates the full amount to the keeper fee
+        let gross = 1000_i128;
+        let (fee, refund) = compute_keeper_fee_split(gross, 10_000);
+        assert_eq!(fee, gross);
+        assert_eq!(refund, 0);
+        assert_eq!(fee + refund, gross);
+    }
+
+    #[test]
+    fn test_keeper_fee_split_representative_combinations() {
+        // Rounding validation: truncating towards zero
+        // 9 * 5_000 / 10_000 = 4.5 -> rounds to 4. refund = 9 - 4 = 5.
+        let (fee, refund) = compute_keeper_fee_split(9, 5000);
+        assert_eq!(fee, 4);
+        assert_eq!(refund, 5);
+        assert_eq!(fee + refund, 9);
+
+        // 1000 * 250 / 10_000 = 25. refund = 975.
+        let (fee, refund) = compute_keeper_fee_split(1000, 250);
+        assert_eq!(fee, 25);
+        assert_eq!(refund, 975);
+        assert_eq!(fee + refund, 1000);
+
+        // 12345 * 123 / 10_000 = 151.8435 -> rounds to 151. refund = 12345 - 151 = 12194.
+        let (fee, refund) = compute_keeper_fee_split(12345, 123);
+        assert_eq!(fee, 151);
+        assert_eq!(refund, 12194);
+        assert_eq!(fee + refund, 12345);
+    }
+
+    #[test]
+    fn test_keeper_fee_split_large_gross_near_max() {
+        // Test near i128::MAX. These calculations must not overflow or panic.
+        let large_gross_values = [
+            i128::MAX,
+            i128::MAX - 1,
+            i128::MAX - 10000,
+            i128::MAX / 2,
+        ];
+
+        let bps_values = [0, 1, 10, 100, 1000, 5000, 9999, 10000];
+
+        for &gross in large_gross_values.iter() {
+            for &bps in bps_values.iter() {
+                let (fee, refund) = compute_keeper_fee_split(gross, bps);
+                
+                // Assert conservation invariant holds exactly
+                assert_eq!(
+                    fee + refund,
+                    gross,
+                    "Conservation failed for gross = {}, bps = {}",
+                    gross,
+                    bps
+                );
+                
+                // Assert fee is bounded by gross
+                assert!(
+                    fee <= gross,
+                    "Fee {} exceeded gross {} for bps {}",
+                    fee,
+                    gross,
+                    bps
+                );
+                assert!(fee >= 0, "Fee cannot be negative");
+                assert!(refund >= 0, "Refund cannot be negative");
+            }
+        }
     }
 }
