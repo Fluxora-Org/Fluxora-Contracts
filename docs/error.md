@@ -762,22 +762,113 @@ Discriminant stability is verified by `test_contract_error_discriminants_are_sta
 
 ---
 
-## FactoryError Reference
+## FactoryError Reference (Factory Contract)
 
-The factory contract (`contracts/factory`) uses a separate `FactoryError` enum.
+The factory contract (`contracts/factory/src/lib.rs`) uses a dedicated `FactoryError`
+enum that is independent of `FluxoraStream::ContractError`. Wallets, indexers, and
+treasury tooling that interact with factory-routed stream creation MUST map these
+discriminants (not the stream contract's) when decoding factory invocation failures.
 
-| Error | Description |
-|-------|-------------|
-| `AlreadyInitialized` | Factory has already been initialized; `init` may only be called once |
-| `NotInitialized` | Factory has not been initialized; call `init` first |
-| `Unauthorized` | Caller is not the factory admin |
-| `RecipientNotAllowlisted` | Recipient address is not on the factory allowlist |
-| `DepositExceedsCap` | Requested deposit exceeds the per-stream cap configured in the factory |
-| `DurationTooShort` | Stream duration is below the factory-enforced minimum |
-| `InvalidTimeRange` | Requested stream end time is not strictly after its start time |
-| `InvalidCliff` | Requested cliff time is outside the inclusive start/end window |
-| `InvalidCap` | `init` or `set_cap` received a non-positive `max_deposit`; accepted range is `1..=i128::MAX` |
-| `InvalidMinDuration` | `init` or `set_min_duration` received a `min_duration` above `MAX_MIN_DURATION_SECONDS`; accepted range is `0..=3_153_600_000` seconds |
+> **Source of truth:** `contracts/factory/src/lib.rs` (`pub enum FactoryError`).
+> The exact `u32` discriminants below are assertions-verified at compile time by
+> `test_factory_error_discriminants_are_stable` in
+> `contracts/factory/tests/factory_error_discriminants.rs`. If a discriminant
+> changes without a coordinated docs PR, that test fails CI.
+
+### Discriminant Table
+
+Discriminants are stable, append-only, and must never be reordered. New variants
+must be appended at the end so existing on-chain error mappings stay byte-identical.
+
+| Discriminant | Variant | Triggering Condition | Functions Returning It |
+|---:|---|---|---|
+| 1 | `AlreadyInitialized` | `init` called when instance already has an `Admin` key | `init` |
+| 2 | `NotInitialized` | A required instance config key (`Admin`, `StreamContract`, `MaxDepositCap`, `MinDuration`, `BatchCapEnforced`) is missing | `get_factory_config`, `set_*` setters, `create_stream`, `create_streams` |
+| 3 | `Unauthorized` | **Reserved / forward-only.** No factory entry point currently constructs `FactoryError::Unauthorized`; every admin-only setter routes auth through `require_admin → admin.require_auth()`, producing either a Soroban auth revert (panic) or `NotInitialized` (2). Code 3 is retained in the enum so that future typed-auth paths and out-of-band error mirrors keep a stable discriminant. Clients should treat a non-admin auth failure on setters as a Soroban auth revert, not a typed enum value. | (reserved — see left column) |
+| 4 | `RecipientNotAllowlisted` | `recipient` has no persistent allowlist entry | `create_stream`, `create_streams` |
+| 5 | `DepositExceedsCap` | `deposit_amount > max_deposit` (per-entry) OR running batch-deposit sum would exceed `max_deposit` while `BatchCapEnforced = true` | `create_stream`, `create_streams` |
+| 6 | `DurationTooShort` | `end_time - start_time < min_duration` | `create_stream`, `create_streams` |
+| 7 | `InvalidTimeRange` | `start_time >= end_time` | `create_stream`, `create_streams` |
+| 8 | `InvalidCliff` | `cliff_time < start_time` OR `cliff_time > end_time` (cliff must be inside the inclusive start/end window) | `create_stream`, `create_streams` |
+| 9 | `CreationPaused` | `DataKey::CreationPaused == true` (factory-level pause); checked first, before any policy/allowlist read | `create_stream`, `create_streams` |
+| 10 | `StreamContractPaused` | Downstream `FluxoraStream` returned `ContractError::ContractPaused` (creation pause active on the stream contract) | `create_stream` |
+| 11 | `StreamContractError` | **Cross-contract failure wrapper**: downstream `FluxoraStream` rejected creation for any other reason (typed error OR transport-level panic). Also reused by `set_rate_bounds` when `min`/`max` are negative or `min > max`. See [Wrapper Semantics](#streamcontracterror-11-wrapper-semantics) below. | `create_stream` (catch-all), `set_rate_bounds` |
+| 12 | `RateBelowMin` | `rate_per_second < MinRatePerSecond` and a min bound is configured (bounds are inclusive) | `create_stream`, `create_streams` |
+| 13 | `RateAboveMax` | `rate_per_second > MaxRatePerSecond` and a max bound is configured (bounds are inclusive) | `create_stream`, `create_streams` |
+| 14 | `InvalidCap` | `max_deposit <= 0`; accepted range is `1..=i128::MAX` | `init`, `set_cap` |
+| 15 | `InvalidMinDuration` | `min_duration > MAX_MIN_DURATION_SECONDS` (≈ 3_153_600_000, i.e. 100 years × 365 days); accepted range is `0..=MAX_MIN_DURATION_SECONDS` | `init`, `set_min_duration` |
+| 16 | `InvalidMemo` | `memo.len() > fluxora_stream::MAX_MEMO_BYTES` | `create_stream`, `create_streams` |
+
+**Range constants referenced above:**
+
+- `MAX_MIN_DURATION_SECONDS = 100 * 365 * 24 * 60 * 60 = 3_153_600_000` (~100 years, defined in `contracts/factory/src/lib.rs`).
+- `MAX_MEMO_BYTES` is shared with the stream contract and trimmed to fit in the `soroban_sdk::Bytes` budget.
+
+### StreamContractError (11) Wrapper Semantics
+
+`StreamContractError` is **not** a typed fanned-out error from the downstream contract — it
+is a single factory-side variant that fires whenever `FluxoraStream::try_create_stream`
+returns any non-`ContractPaused` failure (including transport-level panics). Clients should
+treat code 11 as **"factory routed to stream contract and got back something other than
+ContractPaused"** and re-check the stream contract's `get_pause_info()` / `get_config()`
+to find the actual underlying reason.
+
+Concretely, the four `try_create_stream` result arms collapse to factory-side codes:
+
+| `try_create_stream` result | Factory-side code |
+|---|---|
+| `Ok(Ok(stream_id))` | success |
+| `Err(Ok(ContractError::ContractPaused))` | `StreamContractPaused` (10) |
+| `Err(Ok(stream_contract_err))` for any other typed stream error | `StreamContractError` (11) |
+| `Err(Err(_))` transport/host error | `StreamContractError` (11) |
+| `Ok(Err(_))` (defensive arm; not expected in practice) | `StreamContractError` (11) |
+
+Because the factory cannot forward the exact stream-side discriminant, clients that need
+the precise stream-contract reason must also query the stream contract directly via the
+stream contract's `docs/error.md` table. `set_rate_bounds` reuses variant 11 as a catch-all
+for negative `min_rate`/`max_rate` arguments and `min > max` invariants; treat those
+administrative uses as "configuration rejected by factory guard" rather than as a
+cross-contract passthrough.
+
+### Discriminant Stability Test (CI-friendly)
+
+The companion test
+`contracts/factory/tests/factory_error_discriminants.rs::test_factory_error_discriminants_are_stable`
+asserts every `FactoryError as u32` value listed above. It is intentionally
+`soroban_sdk::testutils`-free, runs in CI without external state, and fails fast
+if a discriminant is unintentionally reordered or reassigned. Update both the test
+and this table together when adding new variants.
+
+### FactoryError Role-Based Error Matrix
+
+| Operation | Recipient | Sender | Admin | Anyone |
+|-----------|-----------|--------|-------|--------|
+| `init` | - | - | AlreadyInitialized, InvalidCap, InvalidMinDuration | - |
+| `create_stream` | - | RecipientNotAllowlisted, DepositExceedsCap, InvalidTimeRange, InvalidCliff, DurationTooShort, RateBelowMin, RateAboveMax, InvalidMemo, StreamContractPaused, StreamContractError | - | - |
+| `create_streams` | - | RecipientNotAllowlisted, DepositExceedsCap, InvalidTimeRange, InvalidCliff, DurationTooShort, RateBelowMin, RateAboveMax, InvalidMemo, CreationPaused | - | - |
+| `set_admin` / setters | - | - | Unauthorized, InvalidCap, InvalidMinDuration, StreamContractError | `NotInitialized` for views |
+| `set_factory_paused` | - | - | Unauthorized, NotInitialized | - |
+| `get_factory_config` / views | - | - | - | NotInitialized |
+
+Any setter called before `init` returns `NotInitialized` (2). Non-admin auth attempts on
+admin-only setters hit a Soroban host-level auth revert (panic), not a typed `Unauthorized`
+result — see code 3 above.
+
+### Edge Cases
+
+| Edge Case | Error | Condition |
+|-----------|-------|-----------|
+| `create_stream` while factory paused | `CreationPaused` | `DataKey::CreationPaused == true`; checked before any policy read |
+| `create_stream` while stream contract paused (different pause flag) | `StreamContractPaused` | downstream `ContractPaused` propagated from fluxora_stream |
+| Deposit exactly at cap | success | boundary inclusive (`> max_deposit` is the rejection condition) |
+| Duration exactly at `min_duration` | success | boundary inclusive (`< min_duration` is the rejection condition) |
+| Cliff equal to `start_time` | success | `start <= cliff <= end` (inclusive on both sides) |
+| Cliff equal to `end_time` | success | same |
+| Zero `min_duration` in `init`/`set_min_duration` | success | `0` is accepted; disables factory-level minimum |
+| `min_duration` at exactly `MAX_MIN_DURATION_SECONDS` | success | boundary inclusive |
+| Downstream contract error other than `ContractPaused` | `StreamContractError` (11) | catch-all wrapper — see above |
+| Memo at exactly `MAX_MEMO_BYTES` | success | `>` comparison used in source |
+| Rate exactly at `MinRatePerSecond` / `MaxRatePerSecond` | success | bounds are inclusive |
 
 ---
 

@@ -687,3 +687,246 @@ fn create_streams_relative_batch_validates_amounts() {
         .try_create_streams_relative(&ctx.sender, &params);
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 }
+
+// ============================================================================
+// Tests: create_streams_relative — anchor invariant
+// ============================================================================
+
+/// An empty relative batch returns an empty vector and emits no events or
+/// token transfers.
+///
+/// Authorization is still provided via `mock_all_auths` (the same auth that
+/// covers any non-empty call), confirming that a single sender authorization
+/// is all that is needed for the batch. The contract must not modify any state
+/// when the vector is empty.
+#[test]
+fn create_streams_relative_empty_batch_emits_no_events() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(1000);
+
+    let events_before = ctx.env.events().all().len();
+    let count_before = ctx.client().get_stream_count();
+    let sender_balance_before = ctx.token.balance(&ctx.sender);
+    let contract_balance_before = ctx.token.balance(&ctx.contract_id);
+
+    let params: soroban_sdk::Vec<CreateStreamRelativeParams> = soroban_sdk::Vec::new(&ctx.env);
+    let ids = ctx.client().create_streams_relative(&ctx.sender, &params);
+
+    assert_eq!(ids.len(), 0, "empty batch must return empty id list");
+    assert_eq!(
+        ctx.client().get_stream_count(),
+        count_before,
+        "empty batch must not create any streams"
+    );
+    assert_eq!(
+        ctx.token.balance(&ctx.sender),
+        sender_balance_before,
+        "empty batch must not transfer tokens from sender"
+    );
+    assert_eq!(
+        ctx.token.balance(&ctx.contract_id),
+        contract_balance_before,
+        "empty batch must not change contract token balance"
+    );
+    assert_eq!(
+        ctx.env.events().all().len(),
+        events_before,
+        "empty batch must emit no events"
+    );
+}
+
+/// All elements in a relative batch compute their absolute times from the same
+/// ledger timestamp captured once at the start of the call.
+///
+/// # Anchor invariant
+///
+/// Let `T = ledger.timestamp()` at the moment `create_streams_relative` is
+/// invoked. For every element `i` in the batch:
+///
+/// ```text
+/// start_time[i] = T + start_delay[i]
+/// cliff_time[i] = T + cliff_delay[i]
+/// end_time[i]   = start_time[i] + duration[i]
+/// ```
+///
+/// This single-capture design prevents anchor-drift: a bug where different
+/// elements in the same batch resolve to different base timestamps, making
+/// some streams start in the past.
+#[test]
+fn create_streams_relative_all_elements_share_same_anchor_timestamp() {
+    let ctx = TestContext::setup();
+
+    // Pin the ledger to a fixed anchor. Every element must derive its absolute
+    // times from exactly this value.
+    const ANCHOR: u64 = 5_000;
+    ctx.env.ledger().set_timestamp(ANCHOR);
+
+    let r1 = Address::generate(&ctx.env);
+    let r2 = Address::generate(&ctx.env);
+    let r3 = Address::generate(&ctx.env);
+
+    // Three elements with distinct offsets. All deposit amounts exactly cover
+    // rate_per_second * duration to satisfy validation.
+    let params = vec![
+        &ctx.env,
+        // Element 0: starts immediately at the anchor (zero delay)
+        CreateStreamRelativeParams {
+            kind: fluxora_stream::StreamKind::Linear,
+            withdraw_dust_threshold: None,
+            recipient: r1,
+            deposit_amount: 1_000, // 1 * 1000
+            rate_per_second: 1,
+            start_delay: 0,
+            cliff_delay: 0,
+            duration: 1_000,
+            memo: None,
+            metadata: None,
+        },
+        // Element 1: starts 200 s after anchor with a 200 s cliff
+        CreateStreamRelativeParams {
+            kind: fluxora_stream::StreamKind::Linear,
+            withdraw_dust_threshold: None,
+            recipient: r2,
+            deposit_amount: 1_600, // 2 * 800
+            rate_per_second: 2,
+            start_delay: 200,
+            cliff_delay: 200,
+            duration: 800,
+            memo: None,
+            metadata: None,
+        },
+        // Element 2: starts 500 s after anchor with a 700 s cliff
+        CreateStreamRelativeParams {
+            kind: fluxora_stream::StreamKind::Linear,
+            withdraw_dust_threshold: None,
+            recipient: r3,
+            deposit_amount: 4_500, // 3 * 1500
+            rate_per_second: 3,
+            start_delay: 500,
+            cliff_delay: 700,
+            duration: 1_500,
+            memo: None,
+            metadata: None,
+        },
+    ];
+
+    let ids = ctx.client().create_streams_relative(&ctx.sender, &params);
+    assert_eq!(ids.len(), 3);
+
+    // Anchor-invariant assertions: every element's times are computed from
+    // the same ANCHOR, not from any independently sampled timestamp.
+    let cases: &[(u32, u64, u64, u64)] = &[
+        // (element index, start_delay, cliff_delay, duration)
+        (0, 0, 0, 1_000),
+        (1, 200, 200, 800),
+        (2, 500, 700, 1_500),
+    ];
+
+    for &(idx, start_delay, cliff_delay, duration) in cases {
+        let stream = ctx.client().get_stream_state(&ids.get_unchecked(idx));
+
+        let expected_start = ANCHOR + start_delay;
+        let expected_cliff = ANCHOR + cliff_delay;
+        let expected_end = expected_start + duration;
+
+        assert_eq!(
+            stream.start_time, expected_start,
+            "element {idx}: start_time must be anchor({ANCHOR}) + start_delay({start_delay})"
+        );
+        assert_eq!(
+            stream.cliff_time, expected_cliff,
+            "element {idx}: cliff_time must be anchor({ANCHOR}) + cliff_delay({cliff_delay})"
+        );
+        assert_eq!(
+            stream.end_time, expected_end,
+            "element {idx}: end_time must be start_time({expected_start}) + duration({duration})"
+        );
+    }
+
+    // Also assert that every stream was actually created (stream count grew by 3).
+    assert_eq!(ctx.client().get_stream_count(), 3);
+}
+
+/// A single-element batch with zero delays produces the same absolute times as
+/// `create_stream_relative` called directly with identical zero delays.
+///
+/// This confirms that the batch code path and the single-entry code path share
+/// the same anchor-computation logic: both capture `ledger.timestamp()` once
+/// and apply offsets identically. Zero-offset is a valid degenerate case that
+/// must be accepted by both APIs.
+#[test]
+fn create_streams_relative_zero_offset_parity_with_single() {
+    let ctx = TestContext::setup();
+
+    // Fix the ledger so both calls (single then batch) see the same timestamp.
+    const ANCHOR: u64 = 3_000;
+    ctx.env.ledger().set_timestamp(ANCHOR);
+
+    let r_single = Address::generate(&ctx.env);
+    let r_batch = Address::generate(&ctx.env);
+
+    // Call 1: single create_stream_relative with zero delays
+    let single_id = ctx.client().create_stream_relative(
+        &ctx.sender,
+        &CreateStreamRelativeParams {
+            kind: fluxora_stream::StreamKind::Linear,
+            withdraw_dust_threshold: None,
+            recipient: r_single,
+            deposit_amount: 2_000,
+            rate_per_second: 2,
+            start_delay: 0,
+            cliff_delay: 0,
+            duration: 1_000,
+            memo: None,
+            metadata: None,
+        },
+    );
+
+    // Call 2: single-element batch create_streams_relative with the same zero delays
+    let batch_ids = ctx.client().create_streams_relative(
+        &ctx.sender,
+        &vec![
+            &ctx.env,
+            CreateStreamRelativeParams {
+                kind: fluxora_stream::StreamKind::Linear,
+                withdraw_dust_threshold: None,
+                recipient: r_batch,
+                deposit_amount: 2_000,
+                rate_per_second: 2,
+                start_delay: 0,
+                cliff_delay: 0,
+                duration: 1_000,
+                memo: None,
+                metadata: None,
+            },
+        ],
+    );
+
+    let single_state = ctx.client().get_stream_state(&single_id);
+    let batch_state = ctx.client().get_stream_state(&batch_ids.get_unchecked(0));
+
+    // Both paths must produce identical absolute times from the same anchor.
+    assert_eq!(
+        single_state.start_time, batch_state.start_time,
+        "zero-offset single and batch must produce the same start_time"
+    );
+    assert_eq!(
+        single_state.cliff_time, batch_state.cliff_time,
+        "zero-offset single and batch must produce the same cliff_time"
+    );
+    assert_eq!(
+        single_state.end_time, batch_state.end_time,
+        "zero-offset single and batch must produce the same end_time"
+    );
+
+    // Verify both anchor exactly at ledger.timestamp() (start_delay = 0)
+    assert_eq!(
+        single_state.start_time, ANCHOR,
+        "zero start_delay must anchor start_time to ledger.timestamp()"
+    );
+    assert_eq!(
+        single_state.cliff_time, ANCHOR,
+        "zero cliff_delay must anchor cliff_time to ledger.timestamp()"
+    );
+    assert_eq!(single_state.end_time, ANCHOR + 1_000);
+}
