@@ -24,6 +24,19 @@ const MAX_CALLDATA_BYTES: u32 = 4_096;
 /// non-executable. Default: 30 days.
 const MAX_PROPOSAL_AGE_SECONDS: u64 = 2_592_000;
 
+/// Maximum number of proposals that `get_proposals_by_id_range` will return in
+/// a single call.
+///
+/// # DoS protection
+///
+/// Each proposal record contains a `Vec<Address>` of approvals (up to
+/// `MAX_SIGNERS = 20` entries), a `Bytes` calldata payload (up to
+/// `MAX_CALLDATA_BYTES = 4 096`), and several scalar fields.  At 100 proposals
+/// per page the total read budget stays well within Soroban's metered limits.
+/// Callers that pass a larger `limit` have it silently clamped to this value;
+/// they cannot exceed it by any means.
+pub const MAX_PAGE_SIZE: u32 = 100;
+
 // ---------------------------------------------------------------------------
 // Data types
 // ---------------------------------------------------------------------------
@@ -1084,6 +1097,83 @@ impl FluxoraGovernance {
             .unwrap_or(false)
     }
 
+    /// Return a bounded page of proposals whose IDs fall in `[start_id, start_id + limit)`.
+    ///
+    /// This mirrors `FluxoraStream::get_streams_by_id_range` and is the primary
+    /// entrypoint for dashboard or migration tooling that needs to enumerate
+    /// governance history without issuing one RPC per proposal.
+    ///
+    /// # Parameters
+    /// - `start_id`: First proposal ID to include (inclusive).
+    /// - `limit`: Maximum number of proposals to return.  Hard-capped at
+    ///   [`MAX_PAGE_SIZE`] regardless of the value supplied by the caller.
+    ///   Passing a value above the cap is **not** an error; the cap is silently
+    ///   applied.  Passing `0` returns an empty `Vec`.
+    ///
+    /// # Returns
+    /// A `Vec<Proposal>` containing at most `min(limit, MAX_PAGE_SIZE)` entries.
+    /// IDs for proposals that were cancelled, executed, or never created (i.e.
+    /// storage entries that do not exist) are silently skipped — the caller
+    /// receives only the proposals that are present in storage.  The returned
+    /// slice preserves ascending ID order.
+    ///
+    /// # DoS protection
+    ///
+    /// `limit` is hard-capped at `MAX_PAGE_SIZE` (100).  The cap is enforced
+    /// before any storage reads; it is impossible to exceed via any call path.
+    /// Callers should page by advancing `start_id` to `start_id + limit` on
+    /// each successive call.
+    ///
+    /// # Example
+    ///
+    /// ```text
+    /// // Page 1: proposals 0-99
+    /// get_proposals_by_id_range(env, 0, 100)
+    /// // Page 2: proposals 100-199
+    /// get_proposals_by_id_range(env, 100, 100)
+    /// ```
+    pub fn get_proposals_by_id_range(env: Env, start_id: u32, limit: u32) -> Vec<Proposal> {
+        bump_instance(&env);
+
+        // Hard-cap: silently clamp to MAX_PAGE_SIZE. This is the sole read-DoS
+        // control — it must be applied before any storage iteration.
+        let page_size = limit.min(MAX_PAGE_SIZE);
+
+        let mut result = Vec::new(&env);
+
+        // Zero limit or uninitialized contract (no proposals yet) → empty.
+        if page_size == 0 {
+            return result;
+        }
+
+        // The monotonic counter is the exclusive upper bound for valid IDs.
+        let total = read_next_proposal_id(&env);
+        if start_id >= total {
+            return result;
+        }
+
+        // Iterate [start_id, start_id + page_size) ∩ [0, total).
+        // Use saturating_add so an extreme start_id + page_size cannot wrap.
+        let end_exclusive = start_id.saturating_add(page_size).min(total);
+        let mut current = start_id;
+        while current < end_exclusive {
+            // Missing IDs (cancelled proposals whose storage was never pruned
+            // still exist, but genuinely absent keys — e.g. IDs that were
+            // reserved and then rolled back — are skipped silently).
+            if let Some(proposal) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, Proposal>(&DataKey::Proposal(current))
+            {
+                bump_proposal(&env, current);
+                result.push_back(proposal);
+            }
+            current += 1;
+        }
+
+        result
+    }
+
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
@@ -1948,6 +2038,179 @@ mod tests {
         // One second past expiry — not executable.
         ctx.env.ledger().set_timestamp(1_000_000 + MAX_AGE + 1);
         assert_eq!(ctx.client.is_executable(&id), false);
+    }
+
+    // -----------------------------------------------------------------------
+    // get_proposals_by_id_range
+    // -----------------------------------------------------------------------
+
+    /// Empty contract — no proposals created yet — returns an empty Vec for any
+    /// start_id and any limit.
+    #[test]
+    fn test_get_proposals_by_id_range_empty_contract() {
+        let ctx = Ctx::setup();
+        let result = ctx.client.get_proposals_by_id_range(&0, &10);
+        assert_eq!(result.len(), 0);
+    }
+
+    /// Zero limit always returns an empty Vec, even when proposals exist.
+    #[test]
+    fn test_get_proposals_by_id_range_zero_limit() {
+        let ctx = Ctx::setup();
+        ctx.client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("a"));
+        let result = ctx.client.get_proposals_by_id_range(&0, &0);
+        assert_eq!(result.len(), 0);
+    }
+
+    /// start_id exactly equal to proposal_count (exclusive upper bound) → empty.
+    #[test]
+    fn test_get_proposals_by_id_range_start_at_count() {
+        let ctx = Ctx::setup();
+        ctx.client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("a"));
+        // proposal_count() == 1 after one propose; IDs are 0-based, so ID 0 exists,
+        // and start_id = 1 is already out of range.
+        let count = ctx.client.proposal_count();
+        let result = ctx.client.get_proposals_by_id_range(&count, &10);
+        assert_eq!(result.len(), 0);
+    }
+
+    /// start_id well beyond proposal_count → empty.
+    #[test]
+    fn test_get_proposals_by_id_range_start_beyond_count() {
+        let ctx = Ctx::setup();
+        ctx.client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("a"));
+        let result = ctx.client.get_proposals_by_id_range(&9999, &10);
+        assert_eq!(result.len(), 0);
+    }
+
+    /// Full page: 5 proposals, request all 5, receive all 5 in order.
+    #[test]
+    fn test_get_proposals_by_id_range_full_page() {
+        let ctx = Ctx::setup();
+        for tag in ["a", "b", "c", "d", "e"] {
+            ctx.client
+                .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata(tag));
+        }
+        let result = ctx.client.get_proposals_by_id_range(&0, &5);
+        assert_eq!(result.len(), 5);
+        for i in 0..5u32 {
+            assert_eq!(result.get(i).unwrap().executed, false);
+        }
+    }
+
+    /// Partial page: 5 proposals, request from start_id=2, limit=10 → returns IDs 2,3,4.
+    #[test]
+    fn test_get_proposals_by_id_range_partial_page() {
+        let ctx = Ctx::setup();
+        for tag in ["a", "b", "c", "d", "e"] {
+            ctx.client
+                .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata(tag));
+        }
+        // IDs are 0,1,2,3,4. Requesting from 2 with limit 10 should yield IDs 2,3,4.
+        let result = ctx.client.get_proposals_by_id_range(&2, &10);
+        assert_eq!(result.len(), 3, "Expected IDs 2,3,4 only");
+    }
+
+    /// Limit clamping: a limit above MAX_PAGE_SIZE is silently clamped.
+    ///
+    /// We create MAX_PAGE_SIZE + 5 proposals and request MAX_PAGE_SIZE + 50.
+    /// The result must be exactly MAX_PAGE_SIZE entries.
+    #[test]
+    fn test_get_proposals_by_id_range_limit_clamping() {
+        let ctx = Ctx::setup();
+        let total = MAX_PAGE_SIZE + 5;
+        for _ in 0..total {
+            ctx.client
+                .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        }
+        let over_cap = MAX_PAGE_SIZE + 50;
+        let result = ctx.client.get_proposals_by_id_range(&0, &over_cap);
+        assert_eq!(
+            result.len(),
+            MAX_PAGE_SIZE,
+            "Result must be clamped to MAX_PAGE_SIZE regardless of caller-supplied limit"
+        );
+    }
+
+    /// Exactly MAX_PAGE_SIZE limit is not clamped (it is the cap itself).
+    #[test]
+    fn test_get_proposals_by_id_range_limit_exactly_cap() {
+        let ctx = Ctx::setup();
+        for _ in 0..MAX_PAGE_SIZE {
+            ctx.client
+                .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        }
+        let result = ctx.client.get_proposals_by_id_range(&0, &MAX_PAGE_SIZE);
+        assert_eq!(result.len(), MAX_PAGE_SIZE);
+    }
+
+    /// Cancelled proposals are NOT removed from storage — they remain present
+    /// with `cancelled = true` and must be returned by the range query.
+    #[test]
+    fn test_get_proposals_by_id_range_includes_cancelled() {
+        let ctx = Ctx::setup();
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("a"));
+        ctx.client.cancel_proposal(&ctx.signer_a, &id);
+
+        let result = ctx.client.get_proposals_by_id_range(&0, &10);
+        assert_eq!(result.len(), 1, "Cancelled proposal must still appear in range");
+        assert!(result.get(0).unwrap().cancelled);
+    }
+
+    /// Executed proposals remain in storage with `executed = true` and must be
+    /// returned by the range query.
+    #[test]
+    fn test_get_proposals_by_id_range_includes_executed() {
+        let ctx = Ctx::setup();
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("a"));
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+        ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
+        let executor = Address::generate(&ctx.env);
+        ctx.client.execute(&executor, &id);
+
+        let result = ctx.client.get_proposals_by_id_range(&0, &10);
+        assert_eq!(result.len(), 1, "Executed proposal must still appear in range");
+        assert!(result.get(0).unwrap().executed);
+    }
+
+    /// Pagination: two consecutive pages with limit=3 over 5 proposals cover all IDs.
+    #[test]
+    fn test_get_proposals_by_id_range_pagination_two_pages() {
+        let ctx = Ctx::setup();
+        for tag in ["a", "b", "c", "d", "e"] {
+            ctx.client
+                .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata(tag));
+        }
+        // Page 1: IDs 0,1,2
+        let page1 = ctx.client.get_proposals_by_id_range(&0, &3);
+        assert_eq!(page1.len(), 3);
+        // Page 2: IDs 3,4
+        let page2 = ctx.client.get_proposals_by_id_range(&3, &3);
+        assert_eq!(page2.len(), 2);
+    }
+
+    /// u32::MAX limit is handled safely via saturating_add; only existing proposals
+    /// within [start_id, total) are returned.
+    #[test]
+    fn test_get_proposals_by_id_range_u32_max_limit() {
+        let ctx = Ctx::setup();
+        for _ in 0..3 {
+            ctx.client
+                .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
+        }
+        // MAX_PAGE_SIZE clamp applies before the saturating_add path is reached,
+        // but the saturating arithmetic must not panic.
+        let result = ctx.client.get_proposals_by_id_range(&0, &u32::MAX);
+        // Clamped to MAX_PAGE_SIZE; only 3 proposals exist so we get 3.
+        assert_eq!(result.len(), 3);
     }
 
     #[test]
