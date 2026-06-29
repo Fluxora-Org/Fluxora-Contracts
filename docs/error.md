@@ -762,22 +762,113 @@ Discriminant stability is verified by `test_contract_error_discriminants_are_sta
 
 ---
 
-## FactoryError Reference
+## FactoryError Reference (Factory Contract)
 
-The factory contract (`contracts/factory`) uses a separate `FactoryError` enum.
+The factory contract (`contracts/factory/src/lib.rs`) uses a dedicated `FactoryError`
+enum that is independent of `FluxoraStream::ContractError`. Wallets, indexers, and
+treasury tooling that interact with factory-routed stream creation MUST map these
+discriminants (not the stream contract's) when decoding factory invocation failures.
 
-| Error | Description |
-|-------|-------------|
-| `AlreadyInitialized` | Factory has already been initialized; `init` may only be called once |
-| `NotInitialized` | Factory has not been initialized; call `init` first |
-| `Unauthorized` | Caller is not the factory admin |
-| `RecipientNotAllowlisted` | Recipient address is not on the factory allowlist |
-| `DepositExceedsCap` | Requested deposit exceeds the per-stream cap configured in the factory |
-| `DurationTooShort` | Stream duration is below the factory-enforced minimum |
-| `InvalidTimeRange` | Requested stream end time is not strictly after its start time |
-| `InvalidCliff` | Requested cliff time is outside the inclusive start/end window |
-| `InvalidCap` | `init` or `set_cap` received a non-positive `max_deposit`; accepted range is `1..=i128::MAX` |
-| `InvalidMinDuration` | `init` or `set_min_duration` received a `min_duration` above `MAX_MIN_DURATION_SECONDS`; accepted range is `0..=3_153_600_000` seconds |
+> **Source of truth:** `contracts/factory/src/lib.rs` (`pub enum FactoryError`).
+> The exact `u32` discriminants below are assertions-verified at compile time by
+> `test_factory_error_discriminants_are_stable` in
+> `contracts/factory/tests/factory_error_discriminants.rs`. If a discriminant
+> changes without a coordinated docs PR, that test fails CI.
+
+### Discriminant Table
+
+Discriminants are stable, append-only, and must never be reordered. New variants
+must be appended at the end so existing on-chain error mappings stay byte-identical.
+
+| Discriminant | Variant | Triggering Condition | Functions Returning It |
+|---:|---|---|---|
+| 1 | `AlreadyInitialized` | `init` called when instance already has an `Admin` key | `init` |
+| 2 | `NotInitialized` | A required instance config key (`Admin`, `StreamContract`, `MaxDepositCap`, `MinDuration`, `BatchCapEnforced`) is missing | `get_factory_config`, `set_*` setters, `create_stream`, `create_streams` |
+| 3 | `Unauthorized` | **Reserved / forward-only.** No factory entry point currently constructs `FactoryError::Unauthorized`; every admin-only setter routes auth through `require_admin → admin.require_auth()`, producing either a Soroban auth revert (panic) or `NotInitialized` (2). Code 3 is retained in the enum so that future typed-auth paths and out-of-band error mirrors keep a stable discriminant. Clients should treat a non-admin auth failure on setters as a Soroban auth revert, not a typed enum value. | (reserved — see left column) |
+| 4 | `RecipientNotAllowlisted` | `recipient` has no persistent allowlist entry | `create_stream`, `create_streams` |
+| 5 | `DepositExceedsCap` | `deposit_amount > max_deposit` (per-entry) OR running batch-deposit sum would exceed `max_deposit` while `BatchCapEnforced = true` | `create_stream`, `create_streams` |
+| 6 | `DurationTooShort` | `end_time - start_time < min_duration` | `create_stream`, `create_streams` |
+| 7 | `InvalidTimeRange` | `start_time >= end_time` | `create_stream`, `create_streams` |
+| 8 | `InvalidCliff` | `cliff_time < start_time` OR `cliff_time > end_time` (cliff must be inside the inclusive start/end window) | `create_stream`, `create_streams` |
+| 9 | `CreationPaused` | `DataKey::CreationPaused == true` (factory-level pause); checked first, before any policy/allowlist read | `create_stream`, `create_streams` |
+| 10 | `StreamContractPaused` | Downstream `FluxoraStream` returned `ContractError::ContractPaused` (creation pause active on the stream contract) | `create_stream` |
+| 11 | `StreamContractError` | **Cross-contract failure wrapper**: downstream `FluxoraStream` rejected creation for any other reason (typed error OR transport-level panic). Also reused by `set_rate_bounds` when `min`/`max` are negative or `min > max`. See [Wrapper Semantics](#streamcontracterror-11-wrapper-semantics) below. | `create_stream` (catch-all), `set_rate_bounds` |
+| 12 | `RateBelowMin` | `rate_per_second < MinRatePerSecond` and a min bound is configured (bounds are inclusive) | `create_stream`, `create_streams` |
+| 13 | `RateAboveMax` | `rate_per_second > MaxRatePerSecond` and a max bound is configured (bounds are inclusive) | `create_stream`, `create_streams` |
+| 14 | `InvalidCap` | `max_deposit <= 0`; accepted range is `1..=i128::MAX` | `init`, `set_cap` |
+| 15 | `InvalidMinDuration` | `min_duration > MAX_MIN_DURATION_SECONDS` (≈ 3_153_600_000, i.e. 100 years × 365 days); accepted range is `0..=MAX_MIN_DURATION_SECONDS` | `init`, `set_min_duration` |
+| 16 | `InvalidMemo` | `memo.len() > fluxora_stream::MAX_MEMO_BYTES` | `create_stream`, `create_streams` |
+
+**Range constants referenced above:**
+
+- `MAX_MIN_DURATION_SECONDS = 100 * 365 * 24 * 60 * 60 = 3_153_600_000` (~100 years, defined in `contracts/factory/src/lib.rs`).
+- `MAX_MEMO_BYTES` is shared with the stream contract and trimmed to fit in the `soroban_sdk::Bytes` budget.
+
+### StreamContractError (11) Wrapper Semantics
+
+`StreamContractError` is **not** a typed fanned-out error from the downstream contract — it
+is a single factory-side variant that fires whenever `FluxoraStream::try_create_stream`
+returns any non-`ContractPaused` failure (including transport-level panics). Clients should
+treat code 11 as **"factory routed to stream contract and got back something other than
+ContractPaused"** and re-check the stream contract's `get_pause_info()` / `get_config()`
+to find the actual underlying reason.
+
+Concretely, the four `try_create_stream` result arms collapse to factory-side codes:
+
+| `try_create_stream` result | Factory-side code |
+|---|---|
+| `Ok(Ok(stream_id))` | success |
+| `Err(Ok(ContractError::ContractPaused))` | `StreamContractPaused` (10) |
+| `Err(Ok(stream_contract_err))` for any other typed stream error | `StreamContractError` (11) |
+| `Err(Err(_))` transport/host error | `StreamContractError` (11) |
+| `Ok(Err(_))` (defensive arm; not expected in practice) | `StreamContractError` (11) |
+
+Because the factory cannot forward the exact stream-side discriminant, clients that need
+the precise stream-contract reason must also query the stream contract directly via the
+stream contract's `docs/error.md` table. `set_rate_bounds` reuses variant 11 as a catch-all
+for negative `min_rate`/`max_rate` arguments and `min > max` invariants; treat those
+administrative uses as "configuration rejected by factory guard" rather than as a
+cross-contract passthrough.
+
+### Discriminant Stability Test (CI-friendly)
+
+The companion test
+`contracts/factory/tests/factory_error_discriminants.rs::test_factory_error_discriminants_are_stable`
+asserts every `FactoryError as u32` value listed above. It is intentionally
+`soroban_sdk::testutils`-free, runs in CI without external state, and fails fast
+if a discriminant is unintentionally reordered or reassigned. Update both the test
+and this table together when adding new variants.
+
+### FactoryError Role-Based Error Matrix
+
+| Operation | Recipient | Sender | Admin | Anyone |
+|-----------|-----------|--------|-------|--------|
+| `init` | - | - | AlreadyInitialized, InvalidCap, InvalidMinDuration | - |
+| `create_stream` | - | RecipientNotAllowlisted, DepositExceedsCap, InvalidTimeRange, InvalidCliff, DurationTooShort, RateBelowMin, RateAboveMax, InvalidMemo, StreamContractPaused, StreamContractError | - | - |
+| `create_streams` | - | RecipientNotAllowlisted, DepositExceedsCap, InvalidTimeRange, InvalidCliff, DurationTooShort, RateBelowMin, RateAboveMax, InvalidMemo, CreationPaused | - | - |
+| `set_admin` / setters | - | - | Unauthorized, InvalidCap, InvalidMinDuration, StreamContractError | `NotInitialized` for views |
+| `set_factory_paused` | - | - | Unauthorized, NotInitialized | - |
+| `get_factory_config` / views | - | - | - | NotInitialized |
+
+Any setter called before `init` returns `NotInitialized` (2). Non-admin auth attempts on
+admin-only setters hit a Soroban host-level auth revert (panic), not a typed `Unauthorized`
+result — see code 3 above.
+
+### Edge Cases
+
+| Edge Case | Error | Condition |
+|-----------|-------|-----------|
+| `create_stream` while factory paused | `CreationPaused` | `DataKey::CreationPaused == true`; checked before any policy read |
+| `create_stream` while stream contract paused (different pause flag) | `StreamContractPaused` | downstream `ContractPaused` propagated from fluxora_stream |
+| Deposit exactly at cap | success | boundary inclusive (`> max_deposit` is the rejection condition) |
+| Duration exactly at `min_duration` | success | boundary inclusive (`< min_duration` is the rejection condition) |
+| Cliff equal to `start_time` | success | `start <= cliff <= end` (inclusive on both sides) |
+| Cliff equal to `end_time` | success | same |
+| Zero `min_duration` in `init`/`set_min_duration` | success | `0` is accepted; disables factory-level minimum |
+| `min_duration` at exactly `MAX_MIN_DURATION_SECONDS` | success | boundary inclusive |
+| Downstream contract error other than `ContractPaused` | `StreamContractError` (11) | catch-all wrapper — see above |
+| Memo at exactly `MAX_MEMO_BYTES` | success | `>` comparison used in source |
+| Rate exactly at `MinRatePerSecond` / `MaxRatePerSecond` | success | bounds are inclusive |
 
 ---
 
@@ -802,10 +893,270 @@ The factory contract (`contracts/factory`) uses a separate `FactoryError` enum.
 
 ---
 
+## GovernanceError Reference
+
+The governance contract (`contracts/governance/src/lib.rs`) uses a separate `GovernanceError`
+enum (annotated `#[contracterror] #[repr(u32)]`). Multisig operators and UI clients decode
+raw numeric error codes returned by governance entrypoints using the table below.
+
+### Quick-reference table
+
+> **Recoverability key**
+> - ✅ **Recoverable** — Retry later or with corrected inputs; no permanent state damage.
+> - ❌ **Terminal** — The proposal (or contract) is permanently in an unrecoverable state for that action; do not retry the same call.
+> - ⚠️ **Config fix needed** — Requires an admin or governance action before retrying.
+
+| Code | Variant | Description | Raising entrypoint(s) | Recoverable? |
+|-----:|---------|-------------|----------------------|:------------:|
+| 1 | `NotInitialized` | Contract has not been initialised; required storage is absent. | `get_admin`, `get_threshold`, `get_signers`, `get_signer_index` (called internally by every mutating entrypoint) | ⚠️ Config fix needed — call `init` |
+| 2 | `AlreadyInitialized` | Contract is already initialised; `init` may only be called once. | `init` | ❌ Terminal for this `init` call |
+| 3 | `Unauthorized` | Caller is not the contract admin. | `set_admin`, `add_signer`, `remove_signer` | ⚠️ Config fix needed — retry from admin wallet |
+| 4 | `NotASigner` | Caller is not a registered co-signer. | `propose`, `approve` | ⚠️ Config fix needed — admin must call `add_signer` |
+| 5 | `ProposalNotFound` | No proposal exists with the supplied ID. | `get_proposal`, `approve`, `execute`, `cancel_proposal`, `is_executable`, `get_quorum_info` | ✅ Recoverable — verify ID from `ProposalCreated` event |
+| 6 | `AlreadyExecuted` | Proposal has already been executed. | `approve`, `execute`, `cancel_proposal` | ❌ Terminal — proposal is complete |
+| 7 | `QuorumNotReached` | Approval count is below the required threshold, or `QuorumInfo` entry is absent. | `execute` | ✅ Recoverable — collect more signer approvals |
+| 8 | `TimelockNotElapsed` | Quorum was reached but `GOVERNANCE_TIMELOCK_SECONDS` (48 h) have not yet passed. | `execute` | ✅ Recoverable — retry after `executable_after` timestamp in `QuorumReached` event |
+| 9 | `AlreadyApproved` | This signer has already approved this proposal. | `approve` | ❌ Terminal for this signer — the approval is already counted |
+| 10 | `CalldataTooLarge` | `calldata.len()` exceeds `MAX_CALLDATA_BYTES` (4,096). | `propose` | ✅ Recoverable — compress or split the operation |
+| 11 | `TooManySigners` | Signer list would exceed `MAX_SIGNERS` (20). | `init`, `add_signer` | ✅ Recoverable — remove an old signer first |
+| 12 | `ProposalExpired` | Proposal age exceeds `MAX_PROPOSAL_AGE_SECONDS` (30 d). | `approve`, `execute` | ❌ Terminal — create a new proposal |
+| 13 | `ProposalCancelled` | Proposal has been cancelled; no further approvals or execution are allowed. | `approve`, `execute`, `cancel_proposal` (repeated cancellation) | ❌ Terminal — create a new proposal if action still needed |
+| 14 | `NotProposerOrAdmin` | Caller is neither the original proposer nor the contract admin. | `cancel_proposal` | ⚠️ Config fix needed — switch to proposer or admin wallet |
+| 15 | `InvalidThreshold` | Threshold is zero or exceeds the signer count; invariant `1 ≤ threshold ≤ signers.len()` violated. | `init` | ✅ Recoverable — choose a valid threshold and retry `init` (or use governance migration) |
+| 16 | `QuorumWouldBreak` | Removing the signer would leave fewer signers than the configured threshold. | `remove_signer` | ⚠️ Config fix needed — lower threshold first via a governed migration or add another signer |
+| 17 | `DuplicateSigner` | Address is already registered in the co-signer set. | `init`, `add_signer` | ✅ Recoverable — deduplicate the signer list |
+| 18 | `ArithmeticOverflow` | A proposal ID counter or timelock deadline calculation would overflow `u32`/`u64`. | `propose` (ID counter), `approve` (timelock deadline), `execute` (age deadline), `checked_deadline` (internal) | ⚠️ Should not occur under normal conditions; report as a bug |
+| 19 | `InvalidCalldata` | `calldata` bytes deserialised but do not match any known `CallData` variant. | `execute` | ✅ Recoverable — re-encode calldata as a supported `CallData` variant and submit a new proposal |
+
+### Detailed semantics
+
+#### NotInitialized (1)
+
+**Trigger**: Any entrypoint that reads `Admin`, `Signers`, `Threshold`, or `SignerIndex` from
+instance storage before `init` has been called.
+
+**Client action**: Block all governance UI actions until deployment confirms `init` has been
+called with a valid `(admin, signers, threshold)` triple.
+
+---
+
+#### AlreadyInitialized (2)
+
+**Trigger**: A second call to `init` when `DataKey::Admin` already exists in instance storage.
+
+**Client action**: This is an operator configuration mistake. Read current state with
+`get_admin()` / `get_signers()` / `get_threshold()` instead of retrying.
+
+---
+
+#### Unauthorized (3)
+
+**Trigger**: `set_admin`, `add_signer`, or `remove_signer` called without the current admin's
+`require_auth` passing.
+
+**Client action**: Ensure the transaction is signed by the current admin key. Use `get_admin()`
+to confirm which address holds the role.
+
+---
+
+#### NotASigner (4)
+
+**Trigger**: `propose` or `approve` from an address absent from the `Signers` vector / `SignerIndex` map.
+
+**Client action**: An admin must call `add_signer(new_address)` before retrying. Switching to a
+registered co-signer wallet is the fastest workaround.
+
+---
+
+#### ProposalNotFound (5)
+
+**Trigger**: Any entrypoint that calls `load_proposal` with an ID not in persistent storage,
+or an ID beyond `NextProposalId - 1`.
+
+**Client action**: Refresh the proposal list; the ID must originate from a `ProposalCreated`
+event. IDs are monotonically increasing starting from 0.
+
+---
+
+#### AlreadyExecuted (6)
+
+**Trigger**: `approve`, `execute`, or `cancel_proposal` when `proposal.executed == true`.
+
+**Client action**: Stop collecting approvals. Show the executed state to the user and surface
+the `ProposalExecuted` event details (executor, target, calldata).
+
+---
+
+#### QuorumNotReached (7)
+
+**Trigger**: `execute` when either:
+- `approval_count < threshold`, or
+- `DataKey::QuorumReachedAt(id)` entry is absent (quorum has not been reached yet).
+
+**Client action**: Continue collecting signer approvals until `approval_count >= threshold`.
+Use `get_proposal(id).approvals.len()` and `get_threshold()` to compute remaining required
+approvals.
+
+---
+
+#### TimelockNotElapsed (8)
+
+**Trigger**: `execute` called before `quorum_info.reached_at + GOVERNANCE_TIMELOCK_SECONDS`.
+
+**Client action**: This is the most common *expected* transient error for multisig UIs.
+Display the `executable_after` timestamp from the `QuorumReached` event and schedule a
+retry after that timestamp. **Do not treat this as a fatal error.**
+
+```text
+executable_after = quorum_reached_at + 172_800  (48 hours)
+```
+
+---
+
+#### AlreadyApproved (9)
+
+**Trigger**: The same co-signer calls `approve` a second time for the same proposal.
+
+**Client action**: The signer's approval is already counted. Show the current
+`approval_count` from `ProposalApproved` events. Do not request another approval from
+that address.
+
+---
+
+#### CalldataTooLarge (10)
+
+**Trigger**: `propose` when `calldata.len() > MAX_CALLDATA_BYTES` (4,096 bytes).
+
+**Client action**: Compress or simplify the XDR-encoded `CallData`. If the operation
+genuinely requires more data, split it across multiple proposals.
+
+---
+
+#### TooManySigners (11)
+
+**Trigger**: `init` or `add_signer` would push `signers.len()` above `MAX_SIGNERS` (20).
+
+**Client action**: Remove a stale or decommissioned signer first, or deploy a new
+governance instance with a pruned signer set.
+
+---
+
+#### ProposalExpired (12)
+
+**Trigger**: `approve` or `execute` when
+`env.ledger().timestamp() > proposal.created_at + MAX_PROPOSAL_AGE_SECONDS` (30 days).
+
+**Client action**: This proposal is permanently unexecutable. If the governed action is
+still required, submit a new proposal. Consider increasing approval cadence to avoid
+future expirations.
+
+---
+
+#### ProposalCancelled (13)
+
+**Trigger**:
+- `approve` or `execute` when `proposal.cancelled == true`.
+- `cancel_proposal` called a second time on an already-cancelled proposal.
+
+**Client action**: The proposal is permanently dead. Stop collecting approvals and surface
+the `ProposalCancelled` event (canceller, timestamp) to operators. Create a new proposal
+if the action is still needed.
+
+> ⚠️ **Security note**: Misclassifying this as *recoverable* would cause operators to
+> retry approvals on a cancelled proposal indefinitely, wasting gas. This is always a
+> terminal state.
+
+---
+
+#### NotProposerOrAdmin (14)
+
+**Trigger**: `cancel_proposal` from an address that is neither `proposal.proposer` nor the
+current `Admin`.
+
+**Client action**: Switch to the proposer or admin wallet. Use `get_proposal(id).proposer`
+and `get_admin()` to identify the authorised cancellers.
+
+---
+
+#### InvalidThreshold (15)
+
+**Trigger**: `init` when `threshold == 0` or `threshold > signers.len()`.
+
+**Client action**: Choose a threshold satisfying `1 ≤ threshold ≤ signers.len()`. This only
+arises during deployment; a governance migration is required for post-init changes.
+
+---
+
+#### QuorumWouldBreak (16)
+
+**Trigger**: `remove_signer` when `signers.len() - 1 < threshold`.
+
+**Client action**: Either add another signer first (`add_signer`) or lower the threshold
+through a governed parameter change before removing the signer.
+
+> ⚠️ **Security note**: This guard is critical — if bypassed, the governance contract could
+> reach a state where quorum is mathematically unreachable, permanently bricking execution.
+
+---
+
+#### DuplicateSigner (17)
+
+**Trigger**: `init` or `add_signer` when the candidate address already appears in the
+`SignerIndex` map.
+
+**Client action**: Deduplicate the signer list before submitting. Each co-signer address
+may occupy exactly one slot.
+
+---
+
+#### ArithmeticOverflow (18)
+
+**Trigger**:
+- `propose`: `NextProposalId + 1` would overflow `u32::MAX`.
+- `approve` / `execute`: `proposal.created_at + MAX_PROPOSAL_AGE_SECONDS` or
+  `quorum_reached_at + GOVERNANCE_TIMELOCK_SECONDS` would overflow `u64::MAX`.
+
+**Client action**: This should never occur under normal Soroban network conditions (ledger
+timestamps are in the year ~2100 range for u64 overflow). If seen, report as a contract bug.
+
+---
+
+#### InvalidCalldata (19)
+
+**Trigger**: `execute` deserialises the `calldata` bytes via `CallData::from_xdr` but the
+resulting `ScVal` does not match any known `CallData` enum variant (e.g., the proposer
+encoded a plain `u32` instead of a `CallData` XDR value).
+
+**Client action**: Re-encode the desired operation as a supported `CallData` variant (see
+the [Calldata encoding contract](governance.md#calldata-encoding-contract) in `governance.md`)
+and submit a new proposal with the corrected bytes. The failed proposal remains
+un-executed and can be retried if the calldata was encoded incorrectly.
+
+**Note**: Completely non-XDR bytes cause a host abort (transaction reverted, not this error).
+`InvalidCalldata` is only returned when deserialization succeeds but the decoded value has no
+matching `CallData` arm in `dispatch_call`.
+
+---
+
+### Discriminant-sync verification
+
+To verify that the documented discriminants match the live enum, run:
+
+```bash
+cargo test -p fluxora_governance governance_error_discriminants
+```
+
+This test (in `contracts/governance/src/lib.rs` or a companion test file) asserts the exact
+`u32` value of every `GovernanceError` variant and will fail if any value is changed without
+updating this table.
+
+---
+
 ## Residual Risks
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|------------|--------|------------|
 | Error code changes | Low | High | Versioning in client SDKs |
 | Missing error cases | Low | Medium | Comprehensive test coverage |
-| Client mishandling | Medium | Medium | This documentation | Dust-attack bypass | Very Low |	High | MIN_RATE_PER_SECOND enforced at validation layer
+| Client mishandling | Medium | Medium | This documentation |
+| Dust-attack bypass | Very Low | High | MIN_RATE_PER_SECOND enforced at validation layer |
