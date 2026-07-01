@@ -19,9 +19,9 @@ use fluxora_stream::{
     StreamKind, StreamStatus,
 };
 use soroban_sdk::{
-    testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke, Events, LedgerInfo},
+    testutils::{Address as _, Events, Ledger, LedgerInfo, MockAuth, MockAuthInvoke},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env, IntoVal, Symbol, TryFromVal, FromVal,
+    Address, Env, FromVal, IntoVal, Symbol, TryFromVal,
 };
 
 // ---------------------------------------------------------------------------
@@ -470,7 +470,15 @@ fn clone_sender_authorized_strict() {
         max_entry_ttl: 6312000,
     });
     let source_id = client.create_stream(
-        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &0, &None,
+        &sender,
+        &recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+        &0,
+        &None,
         &StreamKind::Linear,
     );
 
@@ -520,7 +528,15 @@ fn clone_recipient_unauthorized() {
 
     env.ledger().set_timestamp(0);
     let source_id = client.create_stream(
-        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &0, &None,
+        &sender,
+        &recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+        &0,
+        &None,
         &StreamKind::Linear,
     );
 
@@ -567,7 +583,15 @@ fn clone_third_party_unauthorized() {
 
     env.ledger().set_timestamp(0);
     let source_id = client.create_stream(
-        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &0, &None,
+        &sender,
+        &recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+        &0,
+        &None,
         &StreamKind::Linear,
     );
 
@@ -2063,8 +2087,6 @@ fn clone_override_cliff_only_inherits_zero_rate() {
         &StreamKind::CliffOnly,
     );
 
-
-
     let snap = StreamSnapshot::capture(&ctx, source_id);
 
     ctx.env.ledger().set_timestamp(1000);
@@ -2130,7 +2152,7 @@ fn clone_override_cliff_offset_overflow_rejected() {
         &source_id,
         &ctx.recipient,
         &overflow_start,
-        &u64::MAX,    // end_time, irrelevant if cliff overflows first
+        &u64::MAX, // end_time, irrelevant if cliff overflows first
         &1000_i128,
         &false,
     );
@@ -2142,4 +2164,3 @@ fn clone_override_cliff_offset_overflow_rejected() {
     );
     snap.assert_unchanged(&ctx, source_id);
 }
-

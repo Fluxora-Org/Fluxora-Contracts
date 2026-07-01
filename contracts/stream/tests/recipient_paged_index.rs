@@ -61,7 +61,12 @@ impl Ctx {
         // Safety: env lives as long as the returned Ctx; we only hold one Ctx at a time.
         let client: FluxoraStreamClient<'static> = unsafe { core::mem::transmute(client) };
 
-        Ctx { env, client, sender, recipient }
+        Ctx {
+            env,
+            client,
+            sender,
+            recipient,
+        }
     }
 
     /// Create one minimal stream for `self.recipient` and return its ID.
@@ -177,9 +182,9 @@ fn test_bounded_call_returns_first_page() {
     ctx.create_n(MAX_RECIPIENT_PAGE_SIZE + 10);
 
     let bounded = ctx.client.get_recipient_streams(&ctx.recipient);
-    let page = ctx
-        .client
-        .get_recipient_streams_paginated(&ctx.recipient, &0, &MAX_RECIPIENT_PAGE_SIZE);
+    let page =
+        ctx.client
+            .get_recipient_streams_paginated(&ctx.recipient, &0, &MAX_RECIPIENT_PAGE_SIZE);
 
     assert_eq!(bounded.len(), page.stream_ids.len());
     for i in 0..bounded.len() {
@@ -200,9 +205,11 @@ fn test_paginated_covers_all_streams() {
     let mut all_ids = soroban_sdk::Vec::new(&ctx.env);
     let mut cursor = 0u64;
     loop {
-        let page = ctx
-            .client
-            .get_recipient_streams_paginated(&ctx.recipient, &cursor, &MAX_RECIPIENT_PAGE_SIZE);
+        let page = ctx.client.get_recipient_streams_paginated(
+            &ctx.recipient,
+            &cursor,
+            &MAX_RECIPIENT_PAGE_SIZE,
+        );
         for i in 0..page.stream_ids.len() {
             all_ids.push_back(page.stream_ids.get(i).unwrap());
         }
@@ -212,7 +219,11 @@ fn test_paginated_covers_all_streams() {
         }
     }
 
-    assert_eq!(all_ids.len(), total, "pagination must enumerate every stream");
+    assert_eq!(
+        all_ids.len(),
+        total,
+        "pagination must enumerate every stream"
+    );
 }
 
 // ---------------------------------------------------------------------------

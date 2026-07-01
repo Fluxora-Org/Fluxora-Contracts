@@ -73,7 +73,9 @@ impl TestContext {
 
         let contract_id = env.register_contract(None, FluxoraStream);
         let token_admin = Address::generate(&env);
-        let token_id = env.register_stellar_asset_contract_v2(token_admin).address();
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
 
         let admin = Address::generate(&env);
         let sender = Address::generate(&env);
@@ -88,12 +90,7 @@ impl TestContext {
         StellarAssetClient::new(&env, &token_id).mint(&recipient, &1_000_000_000_000);
 
         // Approve the contract to pull arbitrary top-up amounts from the sender.
-        TokenClient::new(&env, &token_id).approve(
-            &sender,
-            &contract_id,
-            &i128::MAX,
-            &1_000_000u32,
-        );
+        TokenClient::new(&env, &token_id).approve(&sender, &contract_id, &i128::MAX, &1_000_000u32);
 
         env.ledger().set_timestamp(0);
 
@@ -292,7 +289,8 @@ fn assert_invariants(
         .saturating_add(ctx.recipient_balance())
         .saturating_add(ctx.contract_balance());
     assert_eq!(
-        total_outside, INITIAL_MINT,
+        total_outside,
+        INITIAL_MINT,
         "{label}: global token conservation violated: sender={} recipient={} contract={}",
         ctx.sender_balance(),
         ctx.recipient_balance(),
@@ -579,7 +577,10 @@ fn regression_cliff_only_unsupported_mutations() {
     assert_eq!(ctx.client().get_withdrawable(&id), 1000);
     let withdrawn = ctx.client().withdraw(&id);
     assert_eq!(withdrawn, 1000);
-    assert_eq!(ctx.client().get_stream_state(&id).status, StreamStatus::Completed);
+    assert_eq!(
+        ctx.client().get_stream_state(&id).status,
+        StreamStatus::Completed
+    );
 }
 
 /// Completed streams must report a deterministic `deposit_amount` accrual
@@ -592,7 +593,10 @@ fn regression_completed_stream_accrual_is_deterministic() {
     ctx.env.ledger().set_timestamp(1000);
     ctx.env.ledger().set_sequence_number(1000);
     ctx.client().withdraw(&id);
-    assert_eq!(ctx.client().get_stream_state(&id).status, StreamStatus::Completed);
+    assert_eq!(
+        ctx.client().get_stream_state(&id).status,
+        StreamStatus::Completed
+    );
 
     for t in [0u64, 500, 1000, 10_000, u64::MAX] {
         ctx.env.ledger().set_timestamp(t);

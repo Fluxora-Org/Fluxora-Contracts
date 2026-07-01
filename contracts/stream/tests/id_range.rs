@@ -60,7 +60,12 @@ impl Ctx {
         // Safety: env lives as long as the returned Ctx; we only hold one Ctx at a time.
         let client: FluxoraStreamClient<'static> = unsafe { core::mem::transmute(client) };
 
-        Ctx { env, client, sender, recipient }
+        Ctx {
+            env,
+            client,
+            sender,
+            recipient,
+        }
     }
 
     /// Create one minimal stream for `self.recipient` and return its ID.
@@ -143,7 +148,9 @@ fn test_get_streams_by_id_range_limit_clamping() {
 
     // Request limit 105, which is above MAX_PAGE_SIZE (100). It must be clamped.
     let over_cap_limit = MAX_PAGE_SIZE + 5;
-    let streams = ctx.client.get_streams_by_id_range(&1, &(MAX_PAGE_SIZE + 10), &over_cap_limit);
+    let streams = ctx
+        .client
+        .get_streams_by_id_range(&1, &(MAX_PAGE_SIZE + 10), &over_cap_limit);
 
     assert_eq!(
         streams.len(),
@@ -185,9 +192,5 @@ fn test_get_streams_by_id_range_zero_limit() {
     ctx.create_n(3);
 
     let streams = ctx.client.get_streams_by_id_range(&1, &3, &0);
-    assert_eq!(
-        streams.len(),
-        0,
-        "Limit of 0 must return an empty list"
-    );
+    assert_eq!(streams.len(), 0, "Limit of 0 must return an empty list");
 }

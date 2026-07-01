@@ -385,7 +385,6 @@ fn test_create_stream_recipient_not_allowlisted() {
     assert_eq!(result, Err(Ok(FactoryError::RecipientNotAllowlisted)));
 }
 
-
 #[test]
 fn test_create_stream_supports_cliff_only_and_memo() {
     let ctx = Ctx::setup();
@@ -452,8 +451,14 @@ fn test_create_streams_batch_allows_all_valid_entries_atomically() {
 
     let ids = result.unwrap().unwrap();
     assert_eq!(ids.len(), 2);
-    assert_eq!(ctx.stream.get_stream_memo(&ids.get_unchecked(0)).unwrap(), Bytes::from_slice(&ctx.env, b"batch-1"));
-    assert_eq!(ctx.stream.get_stream_memo(&ids.get_unchecked(1)).unwrap(), Bytes::from_slice(&ctx.env, b"batch-2"));
+    assert_eq!(
+        ctx.stream.get_stream_memo(&ids.get_unchecked(0)).unwrap(),
+        Bytes::from_slice(&ctx.env, b"batch-1")
+    );
+    assert_eq!(
+        ctx.stream.get_stream_memo(&ids.get_unchecked(1)).unwrap(),
+        Bytes::from_slice(&ctx.env, b"batch-2")
+    );
 }
 
 #[test]
