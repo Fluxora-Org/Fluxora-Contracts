@@ -4,7 +4,7 @@ use fluxora_stream::{
     ContractError, FluxoraStream, FluxoraStreamClient, StreamKind, WithdrawToParam,
 };
 use soroban_sdk::{
-    testutils::{Address as _, Events, Ledger},
+    testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
     Address, Env,
 };
@@ -50,6 +50,63 @@ impl<'a> TestContext<'a> {
         }
     }
 
+    fn setup_strict() -> Self {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, FluxoraStream);
+        let token_admin = Address::generate(&env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin.clone())
+            .address();
+
+        let admin = Address::generate(&env);
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+        use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "init",
+                args: (&token_id, &admin).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.init(&token_id, &admin);
+
+        let sac = StellarAssetClient::new(&env, &token_id);
+        env.mock_auths(&[MockAuth {
+            address: &token_admin,
+            invoke: &MockAuthInvoke {
+                contract: &token_id,
+                fn_name: "mint",
+                args: (&sender, 10_000_i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        sac.mint(&sender, &10_000_i128);
+
+        env.mock_auths(&[MockAuth {
+            address: &sender,
+            invoke: &MockAuthInvoke {
+                contract: &token_id,
+                fn_name: "approve",
+                args: (&sender, &contract_id, i128::MAX, 100_000u32).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        TokenClient::new(&env, &token_id).approve(&sender, &contract_id, &i128::MAX, &100_000);
+
+        TestContext {
+            env: env.clone(),
+            contract_id,
+            sender,
+            recipient,
+            token: TokenClient::new(&env, &token_id),
+        }
+    }
+
     fn client(&self) -> FluxoraStreamClient<'_> {
         FluxoraStreamClient::new(&self.env, &self.contract_id)
     }
@@ -57,7 +114,30 @@ impl<'a> TestContext<'a> {
 
 #[test]
 fn test_batch_withdraw_to_requires_recipient_auth() {
-    let ctx = TestContext::setup();
+    let ctx = TestContext::setup_strict();
+    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "create_stream",
+            args: (
+                &ctx.sender,
+                &ctx.recipient,
+                1000_i128,
+                1_i128,
+                0u64,
+                0u64,
+                1000u64,
+                0i128,
+                Option::<soroban_sdk::Bytes>::None,
+                StreamKind::Linear,
+            )
+                .into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
     let stream_id = ctx.client().create_stream(
         &ctx.sender,
         &ctx.recipient,
@@ -81,6 +161,16 @@ fn test_batch_withdraw_to_requires_recipient_auth() {
         },
     ];
 
+    let batch_args = (&ctx.recipient, withdrawals.clone()).into_val(&ctx.env);
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.recipient,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "batch_withdraw_to",
+            args: batch_args,
+            sub_invokes: &[],
+        },
+    }]);
     let results = ctx.client().batch_withdraw_to(&ctx.recipient, &withdrawals);
 
     assert_eq!(results.len(), 1);
@@ -90,9 +180,31 @@ fn test_batch_withdraw_to_requires_recipient_auth() {
 
 #[test]
 fn test_batch_withdraw_to_mixed_recipients_reverts_atomically() {
-    let ctx = TestContext::setup();
+    let ctx = TestContext::setup_strict();
+    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
     let other_recipient = Address::generate(&ctx.env);
 
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "create_stream",
+            args: (
+                &ctx.sender,
+                &ctx.recipient,
+                1000_i128,
+                1_i128,
+                0u64,
+                0u64,
+                1000u64,
+                0i128,
+                Option::<soroban_sdk::Bytes>::None,
+                StreamKind::Linear,
+            )
+                .into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
     let stream_id_a = ctx.client().create_stream(
         &ctx.sender,
         &ctx.recipient,
@@ -105,6 +217,27 @@ fn test_batch_withdraw_to_mixed_recipients_reverts_atomically() {
         &None,
         &StreamKind::Linear,
     );
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "create_stream",
+            args: (
+                &ctx.sender,
+                &other_recipient,
+                1000_i128,
+                1_i128,
+                0u64,
+                0u64,
+                1000u64,
+                0i128,
+                Option::<soroban_sdk::Bytes>::None,
+                StreamKind::Linear,
+            )
+                .into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
     let stream_id_b = ctx.client().create_stream(
         &ctx.sender,
         &other_recipient,
@@ -130,6 +263,17 @@ fn test_batch_withdraw_to_mixed_recipients_reverts_atomically() {
             destination: Address::generate(&ctx.env),
         },
     ];
+
+    let batch_args = (&ctx.recipient, withdrawals.clone()).into_val(&ctx.env);
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.recipient,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "batch_withdraw_to",
+            args: batch_args,
+            sub_invokes: &[],
+        },
+    }]);
 
     let result = ctx
         .client()

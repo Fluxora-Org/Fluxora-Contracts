@@ -20,7 +20,7 @@
 
 use soroban_sdk::Env;
 
-use crate::{load_stream, load_delegated_nonce, ContractError};
+use crate::{load_delegated_nonce, load_stream, ContractError};
 
 /// Validate the delegation parameters for a delegated-withdraw call.
 ///
@@ -64,12 +64,12 @@ mod tests {
     extern crate std;
 
     use super::*;
+    use crate::{FluxoraStream, FluxoraStreamClient, StreamKind};
     use soroban_sdk::{
         testutils::{Address as _, Ledger},
         token::Client as TokenClient,
         Address, Env,
     };
-    use crate::{FluxoraStream, FluxoraStreamClient, StreamKind};
 
     /// Set up a minimal contract environment and return (env, client, stream_id, recipient).
     fn setup() -> (Env, FluxoraStreamClient<'static>, u64, Address) {

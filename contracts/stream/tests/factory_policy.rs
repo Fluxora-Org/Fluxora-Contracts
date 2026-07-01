@@ -376,7 +376,6 @@ fn test_create_stream_recipient_not_allowlisted() {
     assert_eq!(result, Err(Ok(FactoryError::RecipientNotAllowlisted)));
 }
 
-
 #[test]
 fn test_create_stream_supports_cliff_only_and_memo() {
     let ctx = Ctx::setup();
@@ -443,8 +442,14 @@ fn test_create_streams_batch_allows_all_valid_entries_atomically() {
 
     let ids = result.unwrap().unwrap();
     assert_eq!(ids.len(), 2);
-    assert_eq!(ctx.stream.get_stream_memo(&ids.get_unchecked(0)).unwrap(), Bytes::from_slice(&ctx.env, b"batch-1"));
-    assert_eq!(ctx.stream.get_stream_memo(&ids.get_unchecked(1)).unwrap(), Bytes::from_slice(&ctx.env, b"batch-2"));
+    assert_eq!(
+        ctx.stream.get_stream_memo(&ids.get_unchecked(0)).unwrap(),
+        Bytes::from_slice(&ctx.env, b"batch-1")
+    );
+    assert_eq!(
+        ctx.stream.get_stream_memo(&ids.get_unchecked(1)).unwrap(),
+        Bytes::from_slice(&ctx.env, b"batch-2")
+    );
 }
 
 #[test]
@@ -676,9 +681,18 @@ fn test_create_stream_rejects_end_equal_start() {
     ctx.factory.set_allowlist(&recipient, &true);
     let now = ctx.now();
 
-    let result =
-        ctx.factory
-            .try_create_stream(&ctx.sender, &recipient, &1_000, &1, &now, &now, &now, &0, &None, &StreamKind::Linear);
+    let result = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &1_000,
+        &1,
+        &now,
+        &now,
+        &now,
+        &0,
+        &None,
+        &StreamKind::Linear,
+    );
     assert_eq!(result, Err(Ok(FactoryError::InvalidTimeRange)));
 }
 
@@ -950,7 +964,9 @@ fn test_create_streams_batch_rate_bounds() {
         memo: None,
         kind: StreamKind::Linear,
     });
-    let result = ctx.factory.try_create_streams(&ctx.sender, &streams_too_low);
+    let result = ctx
+        .factory
+        .try_create_streams(&ctx.sender, &streams_too_low);
     assert_eq!(result, Err(Ok(FactoryError::RateBelowMin)));
 
     // Case 2: Batch rejects rates above MaxRatePerSecond
@@ -977,7 +993,9 @@ fn test_create_streams_batch_rate_bounds() {
         memo: None,
         kind: StreamKind::Linear,
     });
-    let result = ctx.factory.try_create_streams(&ctx.sender, &streams_too_high);
+    let result = ctx
+        .factory
+        .try_create_streams(&ctx.sender, &streams_too_high);
     assert_eq!(result, Err(Ok(FactoryError::RateAboveMax)));
 
     // Case 3: Boundary rates accepted
@@ -1014,4 +1032,3 @@ fn test_create_streams_batch_rate_bounds() {
     let count = ctx.stream.get_recipient_stream_count(&recipient1);
     assert_eq!(count, 1);
 }
-
