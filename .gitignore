@@ -2,6 +2,14 @@
 Cargo.lock
 .DS_Store
 
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.coverage
+.coverage.*
+.pytest_cache/
+
 # Test snapshots
 **/test_snapshots/
 .target/

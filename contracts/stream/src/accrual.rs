@@ -1,30 +1,5 @@
-//! Pure, stateless accrual math for the Fluxora streaming contract.
-//!
-//! This module is intentionally free of Soroban environment dependencies so that
-//! the core vesting formula can be unit-tested, property-tested, and compared
-//! against the on-chain stateful path.
-//!
-//! # Global invariants enforced by `calculate_accrued_amount_checkpointed`
-//!
-//! For every valid `CheckpointState`, non-negative rate, and timestamp `now`:
-//!
-//! 1. **Boundedness** — `0 <= accrued(now) <= deposit_amount`.
-//! 2. **Monotonicity** — for any `t1 <= t2`, `accrued(t1) <= accrued(t2)`.
-//! 3. **No cliff accrual** — `accrued(t) == 0` for all `t < cliff_time`.
-//! 4. **Cliff-only determinism** — `accrued(t) == deposit_amount` for `CliffOnly`
-//!    streams once `t >= cliff_time`.
-//! 5. **Checkpoint preservation** — when `checkpointed_at >= end_time`, the
-//!    function returns `checkpointed_amount` (clamped to `[0, deposit_amount]`),
-//!    guaranteeing that a prior rate decrease can never reduce the recipient's
-//!    already-accrued entitlement.
-//!
-//! These invariants are the foundation of the protocol's balance-conservation
-//! and no-over-withdrawal guarantees. The consolidated proptest harness in
-//! `tests/balance_conservation.rs` and the unit tests in
-//! `src/test_withdrawable_props.rs` exercise them across randomized operation
-//! sequences on both `Linear` and `CliffOnly` streams.
-
-use crate::{ContractError, StreamKind};
+use crate::ContractError;
+use crate::types::StreamKind;
 
 /// Assert that ledger-backed accrual time has not moved backwards.
 ///
@@ -77,7 +52,7 @@ pub fn calculate_accrued_amount(
             cliff_time,
             end_time,
             deposit_amount,
-            kind: StreamKind::Linear,
+            kind: StreamKind::Linear, metadata: None,
         },
         rate_per_second,
         current_time,
@@ -183,6 +158,26 @@ pub struct CheckpointState {
 /// Checkpoint-aware accrual — the core pure function used by the contract for all
 /// accrual calculations after rate changes.
 ///
+/// **Withdrawable math (entitlement-preservation invariant)**
+///
+/// `get_withdrawable(stream_id)` is computed as `accrued(now) − withdrawn_amount`
+/// where `accrued` comes from `calculate_accrued_amount_checkpointed`. The
+/// `withdrawn_amount` is **monotonically non-decreasing across the entire
+/// stream lifecycle** (Active, Paused, rate-modified, Cancelled). A rate
+/// decrease can never:
+/// 1. Reduce `accrued(t)` below `checkpointed_amount` for `t ≤ checkpointed_at`
+///    (already-entitled tokens stay accessible across the rate change);
+/// 2. Reverse or zero out a previous `withdraw` (no double-count, no
+///    retroactive loss of paid-out tokens);
+/// 3. Move the `withdrawn_amount` value backwards (it is appended-only on
+///    successful withdrawals and unchanged by rate mutations).
+///
+/// In plain terms: once a recipient has withdrawn `W` tokens from a stream,
+/// any subsequent rate change, time advance, pause, resume, or decrease
+/// leaves them with at least `accrued(now) − W` claimable, where
+/// `accrued(now)` strictly grows with future time at the *current* rate
+/// (eventually capped by `deposit_amount` after the decrease refund).
+///
 /// # Parameters
 /// - `_start_time`         – original stream start; reserved for future cliff logic.
 /// - `checkpointed_amount` – tokens accrued under all **previous** rate epochs, locked in
@@ -235,6 +230,10 @@ pub fn calculate_accrued_amount_checkpointed(
         return state.checkpointed_amount.min(state.deposit_amount).max(0);
     }
 
+    if state.deposit_amount <= 0 {
+        return 0;
+    }
+
     let elapsed_now = now.min(state.end_time);
     let elapsed_seconds: i128 = if elapsed_now <= state.checkpointed_at {
         0
@@ -248,8 +247,7 @@ pub fn calculate_accrued_amount_checkpointed(
         None => state.deposit_amount,
     };
 
-    state
-        .checkpointed_amount
+    state.checkpointed_amount
         .saturating_add(added)
         .min(state.deposit_amount)
         .max(0)

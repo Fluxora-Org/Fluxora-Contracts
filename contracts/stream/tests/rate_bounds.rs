@@ -1,4 +1,4 @@
-use fluxora_stream::{ContractError, FluxoraStream, StreamStatus};
+use fluxora_stream::{ContractError, FluxoraStream, StreamStatus, StreamKind};
 use soroban_sdk::{testutils::Address as _, Address, Env, String};
 
 fn setup() -> (Env, FluxoraStreamClient, Address, Address, Address) {
@@ -283,6 +283,8 @@ fn test_create_stream_from_template_below_min_rate_fails() {
         &50i128, // below MIN_RATE_PER_SECOND
         &0i128,
         &None,
+        &None,
+        &StreamKind::Linear,
     );
     assert_eq!(result, Err(Ok(ContractError::RateTooLow)));
 }

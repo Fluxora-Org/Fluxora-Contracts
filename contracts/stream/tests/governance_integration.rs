@@ -16,6 +16,7 @@ const MAX_AGE: u64 = 2_592_000; // 30 days
 
 struct GovCtx<'a> {
     env: Env,
+    #[expect(dead_code)]
     contract_id: Address,
     admin: Address,
     signer_a: Address,

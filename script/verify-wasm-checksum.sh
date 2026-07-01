@@ -6,7 +6,7 @@
 # deployment, or to audit a downloaded artifact.
 #
 # Usage:
-#   bash script/verify-wasm-checksum.sh              # verify all contracts
+#   bash script/verify-wasm-checksum.sh              # verify committed checksum entries
 #   bash script/verify-wasm-checksum.sh --no-build   # skip rebuild, check existing artifacts
 #
 # Exit codes:

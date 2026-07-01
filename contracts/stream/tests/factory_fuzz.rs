@@ -103,6 +103,8 @@ proptest! {
             &start_time, // cliff_time == start_time
             &end_time,
             &0i128, // withdraw_dust_threshold
+            &fluxora_stream::StreamKind::Linear,
+            &None,
         );
 
         // Property 1: RecipientNotAllowlisted iff !is_allowlisted

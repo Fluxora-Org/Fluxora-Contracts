@@ -44,8 +44,9 @@ Notes:
 | AutoClaimRevoked | `["ac_revoke", stream_id: u64]` | `AutoClaimRevoked { stream_id: u64 }` | When a recipient revokes auto-claim configuration via `revoke_auto_claim`. |
 | AutoClaimTriggered | `["ac_trig", stream_id: u64]` | `AutoClaimTriggered { stream_id: u64, destination: Address, amount: i128 }` | When a third party successfully executes a configured final claim via `trigger_auto_claim`. |
 | MigrationCheckpoint | `["migrated"]` | `(from_version: u32, to_version: u32, timestamp: u64)` | When `migration_v5_to_v6` is called as an auditable deployment checkpoint. |
+| ReservationReleased | `["res_rel", holder: Address]` | `(start_id: u64, count: u64, consumed: u64, reclaimed: u64)` | When a stream ID reservation is voluntarily released or reclaimed after expiry. |
 
-**Additional topics (validator):** `cloned`, `kp_cncl`, `gl_pause`, `gl_resume`, `rate_dec`, `tmpl_def`, `hlth_chg`, `ex_swept`, `ac_set`, `ac_revoke`, `ac_trig`, `migrated`.
+**Additional topics (validator):** `cloned`, `kp_cncl`, `gl_pause`, `gl_resume`, `rate_dec`, `tmpl_def`, `hlth_chg`, `ex_swept`, `ac_set`, `ac_revoke`, `ac_trig`, `migrated`, `res_rel`.
 
 ---
 | Event name | Topic(s) | Data (shape & types) | When emitted |
@@ -364,6 +365,64 @@ pub struct PauseRecord {
 }
 ```
 
+### 13) KeeperCancelled
+
+Emitted by `keeper_cancel` after all token transfers succeed (CEI-compliant). The
+event carries the full fee breakdown so off-chain indexers can reconstruct keeper
+economics without inspecting individual token transfers.
+
+**Fee accounting identity (always holds):**
+```
+keeper_fee + recipient_amount + sender_refund == deposit_amount - prior_withdrawn_amount
+```
+
+```
+topics: ["kp_cncl", <stream_id: u64>]
+data:   KeeperCancelled {
+          stream_id:        u64,    // stream that was cancelled
+          keeper:           Address, // keeper who triggered cancellation
+          keeper_fee:       i128,   // KEEPER_FEE_BPS (50 bps) of gross sender refund
+          recipient_amount: i128,   // accrued - prior withdrawals (may be 0)
+          sender_refund:    i128,   // unstreamed deposit minus keeper fee
+        }
+```
+
+Example (partial accrual, deposit=10000, accrued=5000):
+
+```json
+{
+  "topics": ["kp_cncl", 7],
+  "data": {
+    "stream_id": 7,
+    "keeper": "G...KEEPER...",
+    "keeper_fee": 25,
+    "recipient_amount": 5000,
+    "sender_refund": 4975
+  }
+}
+```
+
+Example (fully accrued, zero keeper fee):
+
+```json
+{
+  "topics": ["kp_cncl", 12],
+  "data": {
+    "stream_id": 12,
+    "keeper": "G...KEEPER...",
+    "keeper_fee": 0,
+    "recipient_amount": 1000,
+    "sender_refund": 0
+  }
+}
+```
+
+**Indexer notes:**
+- `keeper_fee` is always `floor(unstreamed * 50 / 10000)`.
+- A fully-accrued stream has `sender_refund = 0` and `keeper_fee = 0`.
+- The event is emitted in the same transaction as the state write to `Cancelled`;
+  no `StreamCancelled` event is emitted for keeper-initiated cancellations.
+
 ### 14) StreamHealthChanged
 
 Emitted by `decrease_rate_per_second`, `shorten_stream_end_time`, `top_up_stream`,
@@ -484,6 +543,25 @@ applicable (e.g. `AdminUpd`).
 
 ---
 
+## Governance contract events (`fluxora_governance`)
+
+All state-changing governance entrypoints emit structured events. Topics are ≤ 9
+characters (`symbol_short!` constraint). 
+
+| Event name | Topic(s) | Data (shape & types) | When emitted |
+|---|---|---|---|
+| ProposalCreated | `["proposed", proposal_id: u32]` | `ProposalCreated { proposal_id: u32, proposer: Address, target: Address }` | When `propose` is called successfully. |
+| ProposalApproved | `["approved", proposal_id: u32]` | `ProposalApproved { proposal_id: u32, approver: Address, approval_count: u32 }` | When a co-signer successfully approves a proposal. |
+| QuorumReached | `["quorum", proposal_id: u32]` | `QuorumReached { proposal_id: u32, quorum_reached_at: u64, executable_after: u64 }` | When a proposal reaches the approval threshold. |
+| ProposalCancelled | `["cancelled", proposal_id: u32]` | `ProposalCancelled { proposal_id: u32, canceller: Address }` | When a proposal is cancelled. |
+| ProposalExecuted | `["executed", proposal_id: u32]` | `ProposalExecuted { proposal_id: u32, executor: Address, target: Address, calldata: Bytes }` | When a proposal is executed successfully. |
+| SignerAdded | `["sgnr_add"]` | `SignerAdded { signer: Address }` | When `add_signer` adds a new co-signer. |
+| SignerRemoved | `["sgnr_rm"]` | `SignerRemoved { signer: Address }` | When `remove_signer` successfully removes a co-signer. |
+| AdminChanged | `["adm_chg"]` | `AdminChanged { old: Address, new: Address }` | When the contract admin is rotated. |
+| QuorumConfig | `["quor_cfg"]` | `QuorumConfig { threshold: u32, signer_count: u32 }` | Emitted after `SignerAdded` and `SignerRemoved` to allow indexers to track quorum health and threshold satisfiability. |
+
+---
+
 ## Keeping this doc in sync
 
 This file is derived from `contracts/stream/src/lib.rs` and `contracts/factory/src/lib.rs` emit calls:
@@ -525,6 +603,7 @@ Commit message suggestion: `docs: add event schema and topics for indexers`
 | `trigger_auto_claim`                                         | `"ac_trig"`     |
 | `sweep_excess`                                               | `"ex_swept"`    |
 | `migrate_recipient_index`                                    | `"migrated"`    |
+| `keeper_cancel`                                              | `"kp_cncl"`     |
 | `decrease_rate_per_second`, `shorten_stream_end_time`, `top_up_stream`, `cancel_stream` | `"hlth_chg"` |
 
 If you change event topics or payloads in the contract, update this document and

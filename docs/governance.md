@@ -31,6 +31,7 @@ in-flight proposals immune to later threshold changes by the admin.
 | `MAX_PROPOSAL_AGE_SECONDS` | 2,592,000 (30 d) | Maximum proposal age before approval and execution are rejected |
 | `MAX_SIGNERS` | 20 | Maximum co-signers registered at once |
 | `MAX_CALLDATA_BYTES` | 4,096 | Maximum byte length for the `calldata` field |
+| `MAX_PAGE_SIZE` | 100 | Maximum proposals returned by `get_proposals_by_id_range` per call |
 
 ## Roles
 
@@ -133,9 +134,11 @@ Submits a new governance proposal and returns its monotonically increasing ID.
 
 - `proposer` must authorize the call and be a registered co-signer.
 - `calldata` is stored as opaque bytes for on-chain auditability.
+- `calldata` must be non-empty (at least 1 byte); empty calldata is rejected with `CalldataEmpty`.
 - `calldata.len()` must be less than or equal to `MAX_CALLDATA_BYTES`.
 - The proposer is not automatically counted as an approver.
 - Emits `ProposalCreated` with topic `("proposed", proposal_id)`.
+- Rejected proposals (empty or oversized calldata, non-signer) do not consume a proposal ID.
 
 ### `approve(approver, proposal_id)`
 
@@ -199,6 +202,83 @@ Cancels a proposal, marking it as terminal. Emits `ProposalCancelled`.
   gating order used by `execute`.  Returns an error (`ProposalNotFound` or
   `ArithmeticOverflow`) only when `execute` would also error.  No
   authorization required.
+- `is_signer(signer) -> bool`: returns `true` iff `signer` is a registered
+  co-signer.  Cheap O(1) membership probe over `DataKey::SignerIndex`
+  (the same `Map<Address, bool>` consulted internally by `propose`,
+  `approve`, `add_signer`, and `remove_signer`).  Lets off-chain tooling
+  and cross-contract callers verify membership without iterating the
+  full signer list (which is O(n) on the wire and on the receiving side).
+  Returns `false` (no panic, no error) when the contract has not been
+  initialised, so callers can use it as a safe membership probe without
+  first having to check initialisation via `get_admin`.  Pure read — no
+  authorization, no state mutation, no TTL extension.
+- `get_proposals_by_id_range(start_id, limit) -> Vec<Proposal>`: returns a
+  bounded page of proposals — see [Paginated enumeration](#paginated-enumeration)
+  below.
+
+## Paginated enumeration
+
+### `get_proposals_by_id_range(start_id: u32, limit: u32) -> Vec<Proposal>`
+
+Returns proposals whose IDs fall in the half-open range `[start_id, start_id + limit)`,
+capped at `MAX_PAGE_SIZE = 100` entries per call.
+
+#### Behaviour
+
+| Condition | Result |
+|---|---|
+| `limit == 0` | Empty `Vec` |
+| `start_id >= proposal_count()` | Empty `Vec` |
+| `limit > MAX_PAGE_SIZE` | Silently clamped to `MAX_PAGE_SIZE` |
+| ID is missing from storage | Skipped without error |
+| ID is present (any status) | Included in result |
+
+Proposal IDs are assigned monotonically from 0.  The effective iteration range
+is `[start_id, min(start_id + effective_limit, proposal_count()))`.
+
+#### DoS protection
+
+`limit` is hard-capped at `MAX_PAGE_SIZE` (100) before any storage reads.
+Callers cannot exceed this by any means — passing `u32::MAX` is safe and
+equivalent to passing `100`.  At 100 proposals per page the read budget stays
+within Soroban's metered limits.
+
+#### Missing IDs
+
+Proposals that are present in storage (including cancelled and executed
+proposals) are included.  IDs that were never written — or that were
+hypothetically rolled back — are silently skipped.  The returned slice
+preserves ascending ID order.
+
+> **Note**: `cancel_proposal` marks `cancelled = true` but **does not**
+> delete the storage entry, so cancelled proposals continue to appear in
+> range queries.  Likewise, executed proposals appear with `executed = true`.
+
+#### Pagination pattern
+
+```rust
+// Page through all proposals in batches of 100:
+let page_size: u32 = 100;
+let mut start: u32 = 0;
+loop {
+    let page = client.get_proposals_by_id_range(&start, &page_size);
+    if page.is_empty() {
+        break;
+    }
+    process(page);
+    start += page_size;
+}
+```
+
+#### Example (single page)
+
+```rust
+// Retrieve proposals 0-49 (up to 50 results):
+let proposals = client.get_proposals_by_id_range(&0, &50);
+
+// Retrieve proposals 100-199 (up to 100 results, clamped at MAX_PAGE_SIZE):
+let proposals = client.get_proposals_by_id_range(&100, &100);
+```
 
 ## Calldata encoding contract
 
@@ -231,6 +311,30 @@ let calldata = CallData::FactorySetCap(100_000_i128).to_xdr(&env);
 governance_client.propose(&proposer, &factory_address, &calldata);
 ```
 
+### Worked example: routing a stream rate change
+
+`set_max_rate_per_second` on the stream contract is admin-only, so once the
+stream contract's admin has been transferred to governance (see
+[Integration](#integration-with-the-factory-and-stream-contracts)) the rate can
+only be changed through a proposal. Encode the change as a `StreamSetMaxRate`
+variant:
+
+```rust
+use soroban_sdk::xdr::ToXdr;
+use fluxora_governance::CallData;
+
+// Raise the per-second rate cap on the stream contract to 5_000 units.
+let calldata = CallData::StreamSetMaxRate(5_000_i128).to_xdr(&env);
+let proposal_id = governance_client.propose(&proposer, &stream_address, &calldata);
+```
+
+On `execute`, the contract decodes the bytes back into
+`CallData::StreamSetMaxRate(5_000)` and dispatches
+`set_max_rate_per_second(5_000)` to `stream_address`. The emitted
+`ProposalExecuted { proposal_id, executor, target, calldata }` event carries the
+exact `calldata` bytes, so an indexer can decode them with `CallData::from_xdr`
+and confirm the applied rate without reading the stream contract's storage.
+
 ### Failure modes
 
 | Condition | Behaviour |
@@ -247,6 +351,29 @@ Security boundary: a successful `execute` call now proves that the downstream
 parameter change has been applied on-chain. The `ProposalExecuted` event carries
 the original `calldata` bytes, letting indexers verify the dispatched operation
 without any side-channel.
+
+### ABI stability of the `CallData` enum
+
+`CallData` is part of the protocol's external ABI: proposers encode against it
+and indexers decode `ProposalExecuted.calldata` against it. Because the enum
+derives `#[contracttype]`, each variant is serialised with its **name** as the
+leading symbol followed by its payload, so the variant *names and payload
+shapes* — not their declaration order — are what integrators depend on. Treat
+the enum under the frozen-discriminant rules in
+[`ABI_STABILITY.md` §5](ABI_STABILITY.md#5-frozen-enum-discriminants) and the
+breaking-change taxonomy in
+[`ABI_STABILITY.md` §3](ABI_STABILITY.md#3-what-counts-as-a-breaking-change):
+
+| Change to `CallData` | Breaking? | Why |
+|---|---|---|
+| Append a new variant at the end | No | Existing calldata still decodes. The new name is only recognised by deployments that ship the variant; older deployments return `InvalidCalldata` (19), which is already the documented behaviour for unknown variants. |
+| Reorder existing variants | No | Decoding keys off the variant name, not its position. |
+| Rename a variant | Yes | Changes the leading symbol, so calldata stored in open proposals and indexer decoders keyed on the old name stop matching. |
+| Remove a variant | Yes | Any proposal whose stored calldata references it can no longer execute. |
+| Change a variant's payload type or arity | Yes | Alters the ScVal shape after the name symbol, so previously-encoded calldata mis-decodes. |
+
+Any change in the "Breaking" rows requires a `CONTRACT_VERSION` increment and a
+new deployment, consistent with §3.1.
 
 
 ## Integration with the factory and stream contracts
@@ -265,6 +392,352 @@ and the stream contract address as admin-mutable parameters. `FluxoraStream` exp
 No off-chain bot is required; the parameter change is enforced atomically within the
 `execute` transaction.
 
+## Event-driven execution pattern
+
+While the current `execute` implementation dispatches the cross-contract call atomically
+inside the transaction, the contract also emits a `ProposalExecuted` event carrying the
+`target` address and `calldata` bytes. This enables an **alternative operational pattern**
+where an off-chain executor monitors governance events and applies the change
+independently.
+
+The `ExecutorStub` in `contracts/stream/tests/governance_executor_e2e.rs` demonstrates
+this pattern:
+
+1. An executor reads `ProposalExecuted` topics from the governance contract.
+2. It decodes the `target` and `calldata` from the event payload.
+3. It deserialises the `CallData` variant from the XDR-encoded `calldata`.
+4. It invokes the appropriate function on the target contract (e.g.
+   `stream.set_max_rate_per_second`).
+
+In this pattern the target contract's admin must be set to the executor's address (or to a
+multisig that the executor controls), not to the governance contract. The governance
+proposal serves as the **authority record** — the executor applies the change based on the
+provenance recorded in the `ProposalExecuted` event.
+
+The e2e test validates both the atomic dispatch and the event-driven flow:
+
+- propose → approve to quorum → wait timelock → execute → executor reads event → verifies
+  state change.
+- Pre-quorum / pre-timelock execution is blocked at the governance level.
+- Cancelled and expired proposals produce no `ProposalExecuted` event and therefore no
+  executor action.
+
+
+## End-to-End Governance-Stream Integration
+
+The primary purpose of the governance system is to control stream contract parameters through
+a secure, multi-signature approval process with mandatory timelock delays. This section
+documents the complete integration pattern and security model.
+
+### Stream Admin Model
+
+The stream contract (`FluxoraStream`) has an `admin` address stored in its configuration,
+which can be set to the governance contract address to enable governance control. When
+governance is the stream admin, all admin-privileged operations require a successful
+governance proposal execution:
+
+- `set_max_rate_per_second(max_rate: i128)`: Set governance-controlled rate limits
+- `set_admin(new_admin: Address)`: Transfer admin privileges (including back to governance)
+- `set_global_emergency_paused(paused: bool)`: Emergency pause controls
+- `pause_stream_as_admin(stream_id: u64)`: Admin pause individual streams
+- `cancel_stream_as_admin(stream_id: u64)`: Admin cancel streams
+- `sweep_excess(recipient: Address)`: Recover excess tokens
+
+### Integration Architecture
+
+```text
+┌─────────────┐    propose/approve/execute    ┌──────────────────┐
+│ Governance  │◄─────────────────────────────┤ Co-signer Wallets│
+│ Contract    │                              └──────────────────┘
+└─────┬───────┘
+      │ admin relationship
+      ▼
+┌─────────────┐    set_max_rate_per_second    ┌──────────────────┐
+│ Stream      │◄─────────────────────────────┤ Off-chain        │
+│ Contract    │        (after execution)      │ Executor Bot     │
+└─────────────┘                              └──────────────────┘
+```
+
+**Components:**
+1. **Governance Contract**: Manages the proposal lifecycle with threshold signatures and timelock
+2. **Stream Contract**: Target of governance-controlled parameter changes
+3. **Co-signer Wallets**: Multi-signature participants who propose and approve changes
+4. **Off-chain Executor**: Monitors `ProposalExecuted` events and applies the changes
+
+### Complete Integration Flow
+
+#### 1. Initial Setup
+
+```rust
+// Deploy governance with multi-sig configuration
+governance.init(
+    admin: Address,           // Admin for signer management  
+    signers: Vec<Address>,    // Co-signers (e.g., 3 addresses)
+    threshold: u32            // Required approvals (e.g., 2-of-3)
+);
+
+// Deploy stream contract with governance as admin
+stream.init(
+    token: Address,           // Payment token address
+    admin: governance_id      // CRITICAL: Governance controls stream
+);
+
+// Verify governance control
+let config = stream.get_config();
+assert_eq!(config.admin, governance_id);
+```
+
+#### 2. Parameter Change Proposal
+
+```rust
+// Co-signer creates proposal to change max rate from unlimited to 1000/sec
+let calldata = encode_stream_call("set_max_rate_per_second", 1000i128);
+let proposal_id = governance.propose(
+    proposer: Address,        // Must be registered co-signer
+    target: stream_id,        // Target contract to modify
+    calldata: Bytes           // Encoded parameter change
+);
+
+// Emits: ProposalCreated { proposal_id, proposer, target }
+```
+
+#### 3. Multi-Signature Approval
+
+```rust
+// First co-signer approval
+governance.approve(signer_a, proposal_id);
+// Emits: ProposalApproved { proposal_id, approver: signer_a, approval_count: 1 }
+
+// Second co-signer approval (reaches 2-of-3 threshold)  
+governance.approve(signer_b, proposal_id);
+// Emits: ProposalApproved { proposal_id, approver: signer_b, approval_count: 2 }
+// Emits: QuorumReached { proposal_id, quorum_reached_at, executable_after }
+```
+
+#### 4. Timelock Period
+
+Once quorum is reached, the proposal enters a mandatory 48-hour timelock period:
+
+```rust
+let quorum_info = load_quorum_info(proposal_id);
+let executable_after = quorum_info.reached_at + GOVERNANCE_TIMELOCK_SECONDS;
+
+// Attempts to execute before timelock fail
+assert_eq!(
+    governance.try_execute(executor, proposal_id),
+    Err(GovernanceError::TimelockNotElapsed)
+);
+```
+
+This timelock provides a critical security window where:
+- The community can review the approved change
+- Emergency cancellation is possible if issues are discovered
+- Market participants can prepare for the parameter change
+
+#### 5. Proposal Execution
+
+After the timelock elapses, any address can trigger execution:
+
+```rust
+// Execute the approved proposal  
+governance.execute(executor, proposal_id);
+// Emits: ProposalExecuted { 
+//     proposal_id, 
+//     executor, 
+//     target: stream_id, 
+//     calldata: "set_max_rate_per_second:1000" 
+// }
+```
+
+**Critical Security Point:** The governance contract does NOT automatically apply the
+parameter change. Execution only:
+- Marks the proposal as executed
+- Emits the `ProposalExecuted` event with the approved calldata
+- Provides an auditable record of governance consensus
+
+#### 6. Off-Chain Parameter Application
+
+An authorized execution bot monitors for `ProposalExecuted` events and applies the changes:
+
+```rust
+// Off-chain executor (running as governance contract)
+fn handle_proposal_executed(event: ProposalExecuted) {
+    // Decode the approved calldata
+    let call = decode_stream_call(&event.calldata);
+    
+    match call {
+        StreamCall::SetMaxRatePerSecond(rate) => {
+            // Apply the governance-approved change
+            stream.set_max_rate_per_second(rate);
+            // This succeeds because governance is the stream admin
+        }
+        // Handle other governance-approved operations...
+    }
+}
+```
+
+#### 7. Parameter Change Verification
+
+The change takes effect immediately when applied:
+
+```rust
+// Stream creation now enforces the governance-set rate limit
+let result = stream.create_stream(
+    sender, recipient, 
+    deposit: 10000,
+    rate_per_second: 1500,  // > 1000 (governance limit)
+    // ... other params
+);
+
+// Fails with error indicating rate cap exceeded
+assert!(result.is_err()); 
+
+// Stream creation within limits succeeds
+let result = stream.create_stream(
+    sender, recipient,
+    deposit: 5000, 
+    rate_per_second: 500,   // <= 1000 (within governance limit)
+    // ... other params  
+);
+assert!(result.is_ok());
+```
+
+### Security Model
+
+#### Admin Authorization Chain
+
+```text
+1. Co-signers → Governance Proposal (threshold + timelock)
+2. Governance Execution → Stream Parameter Change  
+3. Stream Enforcement → User Transaction Validation
+```
+
+**Key Security Properties:**
+
+1. **No Single Point of Failure**: No individual key can change stream parameters
+2. **Transparent Process**: All governance actions are recorded on-chain with events
+3. **Time-Delayed Execution**: 48-hour minimum between approval and application
+4. **Immutable Audit Trail**: Proposal content and approvals are permanently stored
+5. **Cancellation Window**: Proposals can be cancelled during the timelock period
+
+#### Attack Resistance
+
+The governance integration is designed to resist several attack vectors:
+
+**Compromised Co-signer Key:**
+- Single compromised key cannot propose AND approve changes alone
+- Threshold requirement (2-of-3) means attacker needs multiple keys
+- Timelock provides detection and response window
+
+**Rushed Parameter Changes:**  
+- Mandatory 48-hour timelock prevents immediate execution
+- Community has time to review and potentially cancel harmful proposals
+- Emergency cancellation available through admin or original proposer
+
+**Admin Key Compromise:**
+- If governance contract key is compromised, attacker still cannot bypass process
+- Parameter changes still require full proposal → approval → timelock → execution flow
+- Admin can only manage co-signer set, not directly change stream parameters
+
+**Off-chain Executor Compromise:**
+- Executor can only apply governance-approved changes
+- Cannot modify or forge the approved calldata
+- All actions are authenticated through on-chain governance records
+
+### Implementation Requirements
+
+For teams implementing governance-stream integration:
+
+#### 1. Contract Deployment
+```rust
+// Correct initialization order
+let governance_id = deploy_governance(admin, signers, threshold);
+let stream_id = deploy_stream(token, governance_id); // governance as admin
+```
+
+#### 2. Calldata Encoding
+```rust
+// Standardized encoding for parameter changes
+fn encode_set_max_rate(rate: i128) -> Bytes {
+    format!("set_max_rate_per_second:{}", rate).into_bytes()
+}
+
+// Must be deterministic and parseable by executor
+```
+
+#### 3. Off-chain Monitoring
+```rust
+// Event monitoring for execution
+governance.events()
+    .filter(|e| e.topic == ("executed", proposal_id))
+    .subscribe(handle_proposal_executed);
+```
+
+#### 4. Error Handling
+```rust  
+// Graceful handling of governance errors
+match governance.try_execute(executor, proposal_id) {
+    Err(GovernanceError::TimelockNotElapsed) => {
+        // Schedule retry after timelock
+        schedule_execution(proposal_id, executable_after);
+    },
+    Err(GovernanceError::QuorumNotReached) => {
+        // Continue collecting approvals
+        request_additional_approvals(proposal_id);
+    },
+    // ... handle other cases
+}
+```
+
+### Testing Requirements
+
+The end-to-end governance-stream integration requires comprehensive testing:
+
+#### Integration Test Coverage
+- Deploy both contracts in test environment
+- Set governance as stream admin  
+- Create parameter change proposals
+- Verify multi-signature approval process
+- Test timelock enforcement
+- Confirm parameter changes take effect
+- Validate security boundaries (unauthorized changes fail)
+
+#### Security Test Cases
+- Verify unauthorized actors cannot bypass governance
+- Test timelock prevents premature execution  
+- Confirm cancellation works during timelock period
+- Validate proposal expiry after maximum age
+- Test admin key rotation through governance
+
+#### Edge Case Validation
+- Handle proposal conflicts (multiple rate changes)
+- Test governance contract admin key rotation
+- Verify behavior when stream admin changes
+- Test governance with minimum threshold (1-of-1)
+- Validate maximum threshold (all signers required)
+
+### Integration Test Implementation
+
+The complete end-to-end test is located at:
+`contracts/stream/tests/governance_integration.rs::test_end_to_end_governance_stream_parameter_change`
+
+This test validates:
+
+1. **Contract Deployment**: Both governance and stream contracts deploy successfully
+2. **Admin Relationship**: Stream admin is set to governance contract address
+3. **Baseline Verification**: Stream creation works normally before governance changes
+4. **Proposal Creation**: Governance proposal for `set_max_rate_per_second` is created
+5. **Approval Process**: Multi-signature approval reaches quorum (2-of-3 signers)
+6. **Timelock Enforcement**: Execution fails before 48-hour timelock elapses
+7. **Successful Execution**: Proposal executes successfully after timelock
+8. **Off-chain Application**: Simulates executor applying the governance-approved change
+9. **Parameter Enforcement**: Verifies rate cap is enforced in stream creation
+10. **Security Validation**: Confirms unauthorized actors cannot bypass governance
+11. **Edge Case Testing**: Validates timelock enforcement on subsequent proposals
+
+This test represents the critical integration seam between governance and stream contracts,
+proving that the governance system can successfully control stream parameters through the
+complete multi-signature, time-delayed approval process.
 
 ## Events
 
@@ -334,13 +807,17 @@ write that touches the entry:
 - **`QuorumReachedAt(id)`**: bumped when quorum is first reached inside
   `approve` (write path), and also bumped on read by `get_quorum_info`
   and `is_executable` (read path).
+- **`ProposalApprovalIdx(id)`**: bumped via `bump_approval_index` in
+  `get_approval_index` (read path), `save_approval_index` (write path),
+  `load_proposal` (keeps the index coupled to the proposal record TTL),
+  and explicitly after every successful `approve`.
 
 Constants:
 
 | Symbol | Value | Purpose |
 |---|---:|---|
 | `PERSISTENT_LIFETIME_THRESHOLD` | 17,280 ledgers (~1 d) | Soroban archival threshold; entries whose remaining TTL falls below this value are bump-extended. |
-| `PERSISTENT_BUMP_AMOUNT` | 120,960 ledgers (~7 d) | Bump amount applied on every read and write of `Proposal(id)`, and on `QuorumReachedAt(id)` at quorum-reach. |
+| `PERSISTENT_BUMP_AMOUNT` | 120,960 ledgers (~7 d) | Bump amount applied on every read and write of `Proposal(id)`, `ProposalApprovalIdx(id)`, and on `QuorumReachedAt(id)` at quorum-reach. |
 
 The 48-hour timelock corresponds to ~34,560 ledgers, which is comfortably
 covered by a single 7-day bump. The 30-day `MAX_PROPOSAL_AGE_SECONDS`
@@ -381,8 +858,8 @@ handle these discriminants from `contracts/governance/src/lib.rs`:
 | `InvalidThreshold` | 15 | `init` threshold is zero or exceeds signer count | Choose a threshold in the range `1..=signers.len()`. |
 | `QuorumWouldBreak` | 16 | `remove_signer` would leave fewer signers than threshold | Lower the threshold through a governed migration or keep enough signers registered. |
 | `DuplicateSigner` | 17 | `init` or `add_signer` includes an already-registered signer | Remove duplicate entries before submitting. |
-| `ArithmeticOverflow` | 18 | Proposal ID counter or timelock deadline would overflow `u32`/`u64` | Should not occur under normal network conditions; report as a bug if seen. |
-| `InvalidCalldata` | 19 | `execute` decoded the calldata bytes but they do not match any known `CallData` variant | Re-encode the calldata as a supported `CallData` variant and submit a new proposal. |
+| `ArithmeticOverflow` | 18 | Timelock or expiry deadline arithmetic would overflow `u64` | This should not occur under normal ledger conditions; treat as a fatal contract error. |
+| `CalldataEmpty` | 19 | `propose` called with zero-length calldata | Provide at least one byte of calldata encoding the intended operation. |
 
 ## Security considerations
 
@@ -403,19 +880,21 @@ handle these discriminants from `contracts/governance/src/lib.rs`:
    cancel a proposal.
 10. **Admin cannot bypass the process**: the admin can add/remove signers and rotate the
     admin key, but parameter changes still require quorum and timelock.
-11. **Typed calldata dispatch**: `execute` decodes `calldata` as a `CallData` XDR value and
-    dispatches the corresponding cross-contract call. Only operations explicitly listed in
-    the `CallData` enum are reachable. Unknown or malformed bytes cause `InvalidCalldata`
-    (or a host abort for non-XDR input), both of which revert the transaction.
-12. **CEI ordering in `execute`**: the proposal is marked executed and persisted before
+11. **Calldata is an audit payload**: the governance contract does not decode or enforce
+    target-specific calldata semantics.
+12. **Non-empty calldata required**: `propose` rejects zero-length calldata with
+    `CalldataEmpty` before any state mutation — the proposal ID counter is not incremented
+    and no storage is written. This prevents vacuous proposals from entering governance and
+    ensures every on-chain proposal carries a verifiable intent payload.
+13. **CEI ordering in `execute`**: the proposal is marked executed and persisted before
     `ProposalExecuted` is emitted.
-13. **Threshold invariant prevents governance bricking**: `remove_signer` enforces
+14. **Threshold invariant prevents governance bricking**: `remove_signer` enforces
     `signers.len() - 1 >= threshold`, so the signer set can never shrink below the required
     approval threshold.
-14. **Threshold is snapshotted at quorum time**: execution uses the threshold recorded in
+15. **Threshold is snapshotted at quorum time**: execution uses the threshold recorded in
     `QuorumInfo`, so an admin cannot raise or lower the live threshold after quorum to change
     the outcome of an in-flight proposal.
-15. **Auditable membership and admin changes**: `add_signer`, `remove_signer`, and
+16. **Auditable membership and admin changes**: `add_signer`, `remove_signer`, and
     `set_admin` emit `SignerAdded`, `SignerRemoved`, and `AdminChanged` respectively, all
     after the state mutation is persisted (CEI). No membership or admin change is silent,
     so indexers can reconstruct the live signer set and admin history from events. A
@@ -424,9 +903,50 @@ handle these discriminants from `contracts/governance/src/lib.rs`:
 
 ## Tests
 
-Integration tests are in `contracts/stream/tests/governance_integration.rs` and cover:
+Integration tests are in `contracts/stream/tests/governance_integration.rs` (870 lines)
+and `contracts/stream/tests/governance_executor_e2e.rs` (executor-stub e2e) and cover:
 
 - Initialization and constant verification.
+- Duplicate signer rejection during initialization and signer management.
+- Proposal creation and ID assignment.
+- Approval counting and duplicate rejection.
+- Non-signer rejection on both `propose` and `approve`.
+- Quorum enforcement and exact-threshold execution.
+- Timelock enforcement.
+- Full happy path: propose, two-of-three approve, wait, execute.
+- Double-execution prevention.
+- Signer management with add/remove.
+- Calldata preservation.
+- Cancellation by proposer and admin.
+- Unauthorized cancellation rejection.
+- Double-cancel prevention.
+- Cancel of executed proposal prevention.
+- Cancel before quorum makes a proposal non-approvable and non-executable.
+- Cancel after quorum but before timelock makes a proposal non-executable.
+- Expired proposal rejection on approve and execute.
+- Expiry boundary behavior.
+- Maximum age constant query.
+- Threshold validation on `init`.
+- Quorum invariant on `remove_signer`.
+- Quorum uses the configured threshold; adding signers does not change threshold.
+- Membership and admin events: `add_signer` emits `SignerAdded`, `remove_signer` emits
+  `SignerRemoved`, and `set_admin` emits `AdminChanged` with correct old/new across an
+  admin rotation chain.
+
+Inline `#[cfg(test)]` tests for `get_proposals_by_id_range` (in `contracts/governance/src/lib.rs`) cover:
+
+- Empty contract — no proposals → empty result for any inputs.
+- Zero limit → always empty.
+- `start_id` at exactly `proposal_count()` (exclusive bound) → empty.
+- `start_id` well beyond `proposal_count()` → empty.
+- Full page: all proposals returned in ascending ID order.
+- Partial page: `start_id` mid-range returns the tail slice only.
+- Limit clamping: `limit > MAX_PAGE_SIZE` is silently clamped; result length ≤ `MAX_PAGE_SIZE`.
+- Limit exactly equal to `MAX_PAGE_SIZE` is not rejected.
+- Cancelled proposals remain in storage and appear in range results (`cancelled = true`).
+- Executed proposals remain in storage and appear in range results (`executed = true`).
+- Two-page pagination: consecutive calls with non-overlapping `start_id` cover all IDs.
+- `u32::MAX` limit is handled safely via `saturating_add`; no panic, clamped to `MAX_PAGE_SIZE`.
 - Duplicate signer rejection during initialization and signer management.
 - Proposal creation and ID assignment.
 - Approval counting and duplicate rejection.
@@ -455,6 +975,20 @@ Integration tests are in `contracts/stream/tests/governance_integration.rs` and 
 - Negative event coverage: removing a non-existent signer, a `QuorumWouldBreak`-rejected
   removal, and a `DuplicateSigner`-rejected add all emit no event.
 
+The executor-stub e2e test (`governance_executor_e2e.rs`) adds end-to-end coverage for
+the event-driven operational pattern:
+
+- **Full flow**: propose → approve to quorum → wait timelock → execute → stream parameter
+  changes (`set_max_rate_per_second`).
+- **Executor stub decodes `ProposalExecuted`**: reads events, decodes `target` +
+  `calldata`, and independently dispatches the call.
+- **Pre-quorum/pre-timelock blocked**: parameter change is impossible before quorum or
+  timelock elapses.
+- **Cancelled/expired proposals**: no `ProposalExecuted` event emitted, no executor
+  action.
+- **Security invariant**: the parameter change requires the complete quorum + timelock +
+  execute path; no single key can bypass the process.
+
 TTL regression tests are in `contracts/stream/tests/governance_ttl.rs` and
 cover:
 
@@ -478,6 +1012,19 @@ cover:
 The `QuorumReachedAt(proposal_id)` persistent storage entry is bumped on:
 - Every `approve` call when quorum is reached
 - Every `execute` call when reading the entry
+
+### ProposalApprovalIdx Entry TTL
+The `ProposalApprovalIdx(proposal_id)` duplicate-approval index must outlive the
+proposal record so quorum integrity cannot be undermined by storage expiry.
+Its TTL is bumped on:
+- Every `approve` call after recording an approval
+- Every read via `get_approval_index` and `load_proposal`
+- Every write via `save_approval_index`
+
+Security implication: if the approval index archives before the proposal,
+duplicate-approval detection silently fails and a signer could approve twice.
+The coupling to `load_proposal` ensures any path that touches the proposal
+also refreshes the index TTL when the index entry still exists.
 
 ### Constants
 | Constant | Value | Duration |

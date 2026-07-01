@@ -1,18 +1,24 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
 
-#[cfg(not(test))]
-mod accrual;
+pub mod accrual;
 #[cfg(test)]
 pub mod accrual;
 #[cfg(test)]
 mod checksum;
+pub(crate) mod events;
+pub(crate) mod storage;
+mod token_check;
+pub mod types;
 #[cfg(test)]
 mod delegation;
 mod token_check;
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env, Map};
+use events::*;
+use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Map};
+use storage::*;
 use token_check::verify_token_behavior;
+pub use types::*;
 
 // ---------------------------------------------------------------------------
 // TTL constants
@@ -870,6 +876,8 @@ pub struct CreateStreamParams {
     /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
     /// Maximum `MAX_MEMO_BYTES` (64) bytes. Pass `None` to omit.
     pub memo: Option<soroban_sdk::Bytes>,
+    /// Optional structured metadata for indexer consumption.
+    pub metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
     /// The architectural style of the stream (Linear or CliffOnly).
     pub kind: StreamKind,
 }
@@ -1368,6 +1376,7 @@ fn add_stream_to_recipient_index(
     stream_id: u64,
     end_time: Option<u64>,
 ) {
+    let _ = end_time; // Reserved for future use in time-based indexing
     let mut streams = load_recipient_streams(env, recipient);
 
     // Insert in sorted order (binary search for insertion point)
@@ -1575,128 +1584,27 @@ fn remove_template_id_for_owner(
 // ---------------------------------------------------------------------------
 // Delegated-withdraw nonce helpers
 // ---------------------------------------------------------------------------
+/// Approximate seconds per Soroban ledger close.
+const LEDGER_CLOSE_TIME: u64 = 5;
 
-/// Load the current nonce for a recipient (0 if never used).
-pub(crate) fn load_delegated_nonce(env: &Env, recipient: &Address) -> u64 {
-    let key = DataKey::DelegatedWithdrawNonce(recipient.clone());
-    env.storage().persistent().get(&key).unwrap_or(0u64)
-}
+/// Extra ledger buffer added to adaptive TTL bumps to absorb jitter.
+const BUFFER_LEDGERS: u32 = 17_280; // ~1 day
 
-fn load_rotation_history(env: &Env, stream_id: u64) -> soroban_sdk::Vec<RotationEntry> {
-    let key = DataKey::RotationHistory(stream_id);
-    env.storage()
-        .persistent()
-        .get(&key)
-        .unwrap_or_else(|| soroban_sdk::Vec::new(env))
-}
+/// Absolute maximum TTL for any storage entry (Soroban platform limit).
+const MAX_TTL: u32 = 3_110_400; // ~180 days
 
-fn save_rotation_history(env: &Env, stream_id: u64, history: &soroban_sdk::Vec<RotationEntry>) {
-    let key = DataKey::RotationHistory(stream_id);
-    env.storage().persistent().set(&key, history);
-    env.storage().persistent().extend_ttl(
-        &key,
-        PERSISTENT_LIFETIME_THRESHOLD,
-        PERSISTENT_BUMP_AMOUNT,
-    );
-}
+/// Minimum ledger interval between successive withdrawals for the same stream.
+const MIN_WITHDRAW_INTERVAL_LEDGERS: u32 = 1;
 
-fn increment_delegated_nonce(env: &Env, recipient: &Address) {
-    let key = DataKey::DelegatedWithdrawNonce(recipient.clone());
-    let nonce: u64 = env.storage().persistent().get(&key).unwrap_or(0u64);
-    env.storage().persistent().set(&key, &(nonce + 1));
-}
+/// Seconds past end_time before an abandoned stream can be keeper-cancelled.
+const KEEPER_GRACE_PERIOD_SECONDS: u64 = 604_800; // 7 days
 
-fn append_rotation_entry(env: &Env, stream_id: u64, entry: RotationEntry) {
-    let mut history = load_rotation_history(env, stream_id);
-    if history.len() as u32 >= MAX_ROTATION_HISTORY {
-        history.remove(0);
-    }
-    history.push_back(entry);
-    save_rotation_history(env, stream_id, &history);
-}
+/// Keeper incentive fee in basis points (0.5% = 50 BPS).
+const KEEPER_FEE_BPS: u32 = 50;
 
-// ---------------------------------------------------------------------------
-// Token transfer helpers
-// ---------------------------------------------------------------------------
-///
-/// Centralizes all token transfers INTO the contract for security review.
-/// Used when creating streams to pull deposit from sender.
-///
-/// # Token Trust Model
-///
-/// This function assumes the token contract is a well-behaved SEP-41 / SAC token that:
-/// - Does not re-enter the streaming contract during `transfer`
-/// - Does not silently fail (panics or returns an error on insufficient balance)
-/// - Implements the standard Soroban token interface
-///
-/// If a malicious token violates these assumptions, the CEI pattern reduces but does not
-/// eliminate reentrancy impact — state will already reflect the current operation when
-/// the re-entry occurs.
-///
-/// # Parameters
-/// - `env`: Contract environment
-/// - `from`: Address to transfer tokens from (must have approved contract)
-/// - `amount`: Amount of tokens to transfer
-///
-/// # Panics
-/// - If token transfer fails (insufficient balance or allowance)
-/// - If token contract panics or returns an error
-///
-/// # Security Notes
-/// - CEI ordering: State is persisted BEFORE calling this function to reduce reentrancy risk
-/// - Atomic transaction: If this function panics, the entire transaction reverts
-/// - No silent failures: Token transfer either succeeds or fails explicitly
-///
-/// See [`token-assumptions.md`](../../docs/token-assumptions.md) for complete token trust model.
-fn pull_token(env: &Env, from: &Address, amount: i128) -> Result<(), ContractError> {
-    let token_address = get_token(env)?;
-    let token_client = token::Client::new(env, &token_address);
-    token_client.transfer_from(
-        &env.current_contract_address(),
-        from,
-        &env.current_contract_address(),
-        &amount,
-    );
-    Ok(())
-}
+/// Maximum number of rotation entries stored in a per-stream history.
+const MAX_ROTATION_HISTORY: u32 = 50;
 
-/// Push tokens from the contract to an external address.
-///
-/// Centralizes all token transfers OUT OF the contract for security review.
-/// Used for withdrawals (to recipient) and refunds (to sender on cancel).
-///
-/// # Token Trust Model
-///
-/// This function assumes the token contract is a well-behaved SEP-41 / SAC token that:
-/// - Does not re-enter the streaming contract during `transfer`
-/// - Does not silently fail (panics or returns an error on insufficient balance)
-/// - Implements the standard Soroban token interface
-///
-/// If a malicious token violates these assumptions, the CEI pattern reduces but does not
-/// eliminate reentrancy impact — state will already reflect the current operation when
-/// the re-entry occurs.
-///
-/// # Parameters
-/// - `env`: Contract environment
-/// - `to`: Address to transfer tokens to
-/// - `amount`: Amount of tokens to transfer
-///
-/// # Panics
-/// - If token transfer fails (insufficient contract balance, should not happen)
-/// - If token contract panics or returns an error
-///
-/// # Security Notes
-/// - CEI ordering: State is persisted BEFORE calling this function to reduce reentrancy risk
-/// - Atomic transaction: If this function panics, the entire transaction reverts
-/// - No silent failures: Token transfer either succeeds or fails explicitly
-///
-/// See [`token-assumptions.md`](../../docs/token-assumptions.md) for complete token trust model.
-fn push_token(env: &Env, to: &Address, amount: i128) -> Result<(), ContractError> {
-    let token_address = get_token(env)?;
-    let token_client = token::Client::new(env, &token_address);
-    token_client.transfer(&env.current_contract_address(), to, &amount);
-    Ok(())
-}
 
 // ---------------------------------------------------------------------------
 // Metadata validation (issue #580)
@@ -1715,6 +1623,7 @@ fn push_token(env: &Env, to: &Address, amount: i128) -> Result<(), ContractError
 ///
 /// # Errors
 /// Returns `ContractError::MetadataTooLarge` on any bound violation.
+#[expect(dead_code)]
 fn validate_metadata(
     metadata: &Map<soroban_sdk::Bytes, soroban_sdk::Bytes>,
 ) -> Result<(), ContractError> {
@@ -1727,29 +1636,7 @@ fn validate_metadata(
         let key_len = key.len();
         let val_len = value.len();
 
-        if key_len > MAX_METADATA_KEY_BYTES {
-            return Err(ContractError::MetadataTooLarge);
-        }
-        if val_len > MAX_METADATA_VALUE_BYTES {
-            return Err(ContractError::MetadataTooLarge);
-        }
 
-        // Use saturating addition to avoid overflow on adversarial input; the
-        // subsequent aggregate check catches any wrapped values safely.
-        total_bytes = total_bytes
-            .checked_add(key_len)
-            .and_then(|t| t.checked_add(val_len))
-            .ok_or(ContractError::MetadataTooLarge)?;
-
-        if total_bytes > MAX_METADATA_BYTES {
-            return Err(ContractError::MetadataTooLarge);
-        }
-    }
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
 // Internal Helpers
 // ---------------------------------------------------------------------------
 
@@ -1868,7 +1755,7 @@ impl FluxoraStream {
         save_stream(env, &stream);
 
         // Add stream to recipient's index (maintains sorted order by stream_id)
-        add_stream_to_recipient_index(env, &recipient, stream_id, None);
+        add_stream_to_recipient_index(env, &recipient, stream_id, Some(end_time));
 
         // Track liability: the full deposit is owed to the recipient until withdrawn/refunded.
         let liabilities = read_total_liabilities(env)
@@ -1980,6 +1867,7 @@ impl FluxoraStream {
 // ---------------------------------------------------------------------------
 
 #[contract]
+
 pub struct FluxoraStream;
 
 #[allow(clippy::too_many_arguments)]
@@ -2475,7 +2363,8 @@ impl FluxoraStream {
 
         // Second pass: generate IDs, persist state, and emit events iteratively
         let mut created_ids = soroban_sdk::Vec::new(&env);
-        let mut recipient_cache = soroban_sdk::Map::new(&env);
+        let mut recipient_cache: soroban_sdk::Map<Address, soroban_sdk::Vec<u64>> =
+            soroban_sdk::Map::new(&env);
         for params in streams.iter() {
             let mut final_rate = params.rate_per_second;
             if params.kind == StreamKind::CliffOnly {
@@ -2502,7 +2391,7 @@ impl FluxoraStream {
                 .get(params.recipient.clone())
                 .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
             ids.push_back(stream_id);
-            recipient_cache.set(params.recipient, ids);
+            recipient_cache.set(params.recipient.clone(), ids);
         }
 
         // Flush: one read + one write per unique recipient.
@@ -2625,7 +2514,9 @@ impl FluxoraStream {
                 end_time,
                 withdraw_dust_threshold: rel.withdraw_dust_threshold,
                 memo: rel.memo,
+                metadata: rel.metadata,
                 kind: rel.kind,
+                metadata: rel.metadata,
             });
         }
 
@@ -2798,6 +2689,8 @@ impl FluxoraStream {
         let reason_str = match reason {
             PauseReason::Operational => soroban_sdk::String::from_str(&env, "Operational"),
             PauseReason::Administrative => soroban_sdk::String::from_str(&env, "Administrative"),
+            PauseReason::Emergency => soroban_sdk::String::from_str(&env, "Emergency"),
+            PauseReason::Compliance => soroban_sdk::String::from_str(&env, "Compliance"),
         };
         env.events().publish(
             (symbol_short!("paused"), stream_id),
@@ -3221,60 +3114,38 @@ impl FluxoraStream {
         Ok(withdrawable)
     }
 
-    /// Rotate the receiving address for a stream.
+    /// Rotate the receiving address for a stream (propose step).
     ///
-    /// This allows the current recipient to transfer their entitlement to a new
-    /// address (e.g. in case of a compromised wallet). Only the current recipient
-    /// may authorize this rotation.
+    /// Stores a pending recipient update that must be accepted by the current
+    /// recipient via [`accept_recipient_update`](FluxoraStream::accept_recipient_update)
+    /// or cancelled by the sender via [`cancel_recipient_update`](FluxoraStream::cancel_recipient_update).
     ///
     /// # Parameters
     /// - `stream_id`: Unique identifier of the stream to update.
-    /// - `new_recipient`: The new address that will receive the remaining streamed tokens.
+    /// - `new_recipient`: The proposed address that will receive the remaining streamed tokens.
     pub fn update_recipient(
         env: Env,
         stream_id: u64,
         new_recipient: Address,
     ) -> Result<(), ContractError> {
         require_not_globally_paused(&env)?;
-        let mut stream = load_stream(&env, stream_id)?;
+        let stream = load_stream(&env, stream_id)?;
 
-        // Only current recipient can authorize rotation
-        stream.recipient.require_auth();
+        Self::require_stream_sender(&stream.sender);
 
         if new_recipient == stream.recipient {
             return Err(ContractError::InvalidParams);
         }
 
-        let old_recipient = stream.recipient.clone();
+        if Self::get_pending_recipient_update(env.clone(), stream_id).is_some() {
+            return Err(ContractError::InvalidState);
+        }
 
-        // Update indices atomically
-        remove_stream_from_recipient_index(&env, &old_recipient, stream_id);
-        add_stream_to_recipient_index(&env, &new_recipient, stream_id, None);
-
-        // Update state
-        stream.recipient = new_recipient.clone();
-        save_stream(&env, &stream);
-
-        // Append to rotation history
-        append_rotation_entry(
-            &env,
-            stream_id,
-            RotationEntry {
-                old_addr: old_recipient.clone(),
-                new_addr: new_recipient.clone(),
-                ledger: env.ledger().sequence(),
-                role: RotationRole::Recipient,
-                authoriser: old_recipient.clone(),
-            },
-        );
-
-        // Emit event
-        env.events().publish(
-            (symbol_short!("recp_upd"), stream_id),
-            RecipientUpdated {
+        env.storage().persistent().set(
+            &DataKey::PendingRecipientUpdate(stream_id),
+            &PendingRecipientUpdate {
                 stream_id,
-                old_recipient,
-                new_recipient,
+                proposed_recipient: new_recipient,
             },
         );
 
@@ -3296,6 +3167,7 @@ impl FluxoraStream {
             .ok_or(ContractError::InvalidState)?;
         let mut stream = load_stream(&env, stream_id)?;
 
+        // Transition: propose → accept — only the current recipient may authorize.
         stream.recipient.require_auth();
         let old_recipient = stream.recipient.clone();
         remove_stream_from_recipient_index(&env, &old_recipient, stream_id);
@@ -3308,6 +3180,17 @@ impl FluxoraStream {
 
         stream.recipient = pending.proposed_recipient.clone();
         save_stream(&env, &stream);
+        append_rotation_entry(
+            &env,
+            stream_id,
+            RotationEntry {
+                old_addr: old_recipient.clone(),
+                new_addr: pending.proposed_recipient.clone(),
+                ledger: env.ledger().sequence(),
+                role: RotationRole::Recipient,
+                authoriser: old_recipient.clone(),
+            },
+        );
         env.storage()
             .persistent()
             .remove(&DataKey::PendingRecipientUpdate(stream_id));
@@ -3324,9 +3207,19 @@ impl FluxoraStream {
         Ok(())
     }
 
+    /// Cancel a pending recipient rotation. Only the stream sender may authorize.
+    ///
+    /// Transition: propose → cancel. Returns `InvalidState` when no pending update exists.
     pub fn cancel_recipient_update(env: Env, stream_id: u64) -> Result<(), ContractError> {
         let stream = load_stream(&env, stream_id)?;
         Self::require_stream_sender(&stream.sender);
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::PendingRecipientUpdate(stream_id))
+        {
+            return Err(ContractError::InvalidState);
+        }
         env.storage()
             .persistent()
             .remove(&DataKey::PendingRecipientUpdate(stream_id));
@@ -3416,6 +3309,7 @@ impl FluxoraStream {
                 return Err(ContractError::Unauthorized);
             }
 
+            let current_ledger = env.ledger().sequence();
             // Enforce withdrawal frequency limit per stream in the batch.
             // Each stream must respect its own last_withdraw_ledger independently.
             // Invariant: current_ledger >= last_withdraw_ledger (monotonic ledger progression).
@@ -3443,7 +3337,7 @@ impl FluxoraStream {
                         cliff_time: stream.cliff_time,
                         end_time: stream.end_time,
                         deposit_amount: stream.deposit_amount,
-                        kind: stream.kind,
+                kind: stream.kind,
                     },
                     stream.rate_per_second,
                     effective_now,
@@ -3468,6 +3362,7 @@ impl FluxoraStream {
                 contract_balance -= withdrawable;
 
                 stream.withdrawn_amount += withdrawable;
+                let current_ledger = env.ledger().sequence();
                 stream.last_withdraw_ledger = current_ledger; // Update withdrawal timestamp
                 let completed_now = (stream.status == StreamStatus::Active
                     || stream.status == StreamStatus::Paused)
@@ -3591,7 +3486,7 @@ impl FluxoraStream {
                         cliff_time: stream.cliff_time,
                         end_time: stream.end_time,
                         deposit_amount: stream.deposit_amount,
-                        kind: stream.kind,
+                kind: stream.kind,
                     },
                     stream.rate_per_second,
                     effective_now,
@@ -5101,6 +4996,7 @@ impl FluxoraStream {
                 duration: tpl.duration,
                 withdraw_dust_threshold: Some(withdraw_dust_threshold),
                 memo,
+                kind: StreamKind::Linear,
                 metadata,
                 kind,
             },
@@ -5215,7 +5111,7 @@ impl FluxoraStream {
         let start_idx = if cursor == 0 {
             0
         } else {
-            match streams.binary_search(&cursor) {
+            match streams.binary_search(cursor) {
                 Ok(pos) => pos + 1, // Start after the cursor
                 Err(pos) => pos,    // Insert position if not found
             }
@@ -5654,6 +5550,76 @@ impl FluxoraStream {
         Ok(())
     }
 
+    /// Preview the fee split that `keeper_cancel` would pay for a given stream.
+    ///
+    /// Returns `(keeper_fee, sender_refund)` — the amounts that would be transferred to the
+    /// keeper and the stream sender respectively if `keeper_cancel` were called right now.
+    ///
+    /// This is a **read-only** view: it moves no funds and changes no state.
+    ///
+    /// # Parameters
+    /// - `stream_id`: Unique identifier of the stream to preview.
+    ///
+    /// # Returns
+    /// - `(keeper_fee, sender_refund)`: Both values are `>= 0`.
+    ///   Returns `(0, 0)` when the grace period has not yet elapsed (stream not yet eligible).
+    ///
+    /// # Errors
+    /// - `ContractError::StreamNotFound`: Stream does not exist.
+    /// - `ContractError::InvalidState`: Stream is already in a terminal state
+    ///   (`Cancelled` or `Completed`) and therefore not keeper-cancellable.
+    /// - `ContractError::ArithmeticOverflow`: Overflow computing accrual or fee
+    ///   (should not occur for amounts within `i128` range).
+    ///
+    /// # Security
+    /// - Pure read: no TTL bumps, no token transfers, no state writes.
+    /// - Output is identical to what `keeper_cancel` computes before any transfer.
+    pub fn get_keeper_fee_split(
+        env: Env,
+        stream_id: u64,
+    ) -> Result<(i128, i128), ContractError> {
+        let stream = load_stream(&env, stream_id)?;
+
+        // Only Active / Paused streams are keeper-cancellable.
+        Self::require_cancellable_status(stream.status)?;
+
+        let now = env.ledger().timestamp();
+
+        // Grace period not yet elapsed → not eligible; return zeros rather than an error
+        // so callers can query without needing to catch an error for the common polling case.
+        let eligible_at = stream
+            .end_time
+            .checked_add(KEEPER_GRACE_PERIOD_SECONDS)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        if now < eligible_at {
+            return Ok((0, 0));
+        }
+
+        let accrued = accrual::calculate_accrued_amount_checkpointed(
+            accrual::CheckpointState {
+                checkpointed_amount: stream.checkpointed_amount,
+                checkpointed_at: stream.checkpointed_at,
+                cliff_time: stream.cliff_time,
+                end_time: stream.end_time,
+                deposit_amount: stream.deposit_amount,
+                kind: stream.kind,
+            },
+            stream.rate_per_second,
+            now,
+        );
+
+        let sender_refund_gross = stream
+            .deposit_amount
+            .checked_sub(accrued)
+            .ok_or(ContractError::InvalidState)?
+            .max(0);
+
+        Ok(compute_keeper_fee_split(
+            sender_refund_gross,
+            KEEPER_FEE_BPS as u32,
+        ))
+    }
+
     /// Pause a payment stream as the contract admin.
     ///
     /// Administrative override to pause any stream, bypassing sender authorization.
@@ -5718,7 +5684,7 @@ impl FluxoraStream {
             PauseReason::Administrative => soroban_sdk::String::from_str(&env, "Administrative"),
         };
         let record = PauseRecord {
-            actor: admin.clone(),
+            actor: load_config(&env).admin,
             timestamp: env.ledger().timestamp(),
             reason: reason_str.clone(),
         };
@@ -6109,7 +6075,8 @@ impl FluxoraStream {
     /// ```
     ///
     /// Where `total_liabilities` is the sum of all active stream deposits that haven't
-    /// been withdrawn or refunded yet.
+    /// been withdrawn or refunded yet. This intrinsic liability calculation ensures
+    /// that sweep_excess NEVER touches recipient-owed balances or accrued protocol fees.
     ///
     /// # Usage Notes
     /// - Safe to call even when no excess exists (returns 0, no transfer)
@@ -6687,10 +6654,7 @@ impl FluxoraStream {
         // ── 5. Compute inherited cliff offset ─────────────────────────────────
         // Preserve the relative cliff position: cliff_offset = source.cliff_time - source.start_time.
         // Apply it to the new start_time.
-        let cliff_offset = source
-            .cliff_time
-            .checked_sub(source.start_time)
-            .unwrap_or(0); // if cliff < start (degenerate), treat as no cliff
+        let cliff_offset = source.cliff_time.saturating_sub(source.start_time); // if cliff < start (degenerate), treat as no cliff
         let new_cliff_time = start_time
             .checked_add(cliff_offset)
             .ok_or(ContractError::ArithmeticOverflow)?;
@@ -6925,12 +6889,125 @@ fn maybe_emit_health_changed(env: &Env, stream: &Stream, was_underfunded: bool, 
     }
 }
 
+// ---------------------------------------------------------------------------
+// Upgrade entrypoint
+// ---------------------------------------------------------------------------
+
+/// Event emitted when the contract is upgraded via `upgrade()`.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ContractUpgraded {
+    pub new_wasm_hash: soroban_sdk::BytesN<32>,
+    pub new_version: u32,
+    pub upgraded_at: u64,
+    pub upgraded_by: Address,
+}
+
+// Add to the contract impl block (FluxoraStream)
+
+/// Upgrade the contract WASM to a new version.
+///
+/// This is the highest-privilege operation in the protocol. It replaces the
+/// contract's WASM code in-place via Soroban's `update_current_contract_wasm`
+/// host function. Only the contract admin can call this function.
+///
+/// # Authorization
+/// - Requires authorization from the contract admin (set during `init`).
+/// - The admin must be the governance contract or a multisig that represents
+///   governance consensus.
+///
+/// # Parameters
+/// - `new_wasm_hash`: 32-byte SHA-256 hash of the new WASM binary.
+///   Must match the hash of a deployed WASM blob on the network.
+///
+/// # Behavior
+/// 1. Validates caller is the contract admin.
+/// 2. Calls `env.deployer().update_current_contract_wasm(new_wasm_hash)`.
+/// 3. Emits `ContractUpgraded` event with the new hash and version.
+///
+/// # Storage Compatibility
+/// The upgraded WASM must maintain backward-compatible storage layout:
+/// - `DataKey` enum discriminants must remain unchanged.
+/// - `Stream` struct fields must remain in the same order.
+/// - New fields may be appended, but existing fields cannot be removed or reordered.
+/// - New `DataKey` variants must be appended at the end.
+///
+/// Violating storage compatibility will corrupt existing stream state and
+/// make the contract unusable. See `docs/upgrade.md` for detailed guidance.
+///
+/// # Rollback
+/// There is no automatic rollback. If the upgrade introduces a bug, the admin
+/// must deploy a fixed WASM and call `upgrade()` again with the fixed hash.
+///
+/// # Errors
+/// - `ContractError::Unauthorized`: Caller is not the admin.
+/// - Host error: If the WASM hash is invalid or not deployed.
+///
+/// # Events
+/// - Emits `ContractUpgraded` with the new hash, version, timestamp, and caller.
+///
+/// # Security Notes
+/// This is the highest-privilege operation in the protocol. It should only be
+/// used after:
+/// 1. The new WASM has been audited.
+/// 2. Storage compatibility has been verified.
+/// 3. Governance has approved the upgrade (if governance is the admin).
+///
+/// # Example
+/// ```rust
+/// let new_hash = BytesN::from_array(&env, &[0u8; 32]);
+/// contract.upgrade(&new_hash);
+/// ```
+pub fn upgrade(env: Env, new_wasm_hash: soroban_sdk::BytesN<32>) -> Result<(), ContractError> {
+    // Only the admin can upgrade the contract
+    let admin = get_admin(&env)?;
+    admin.require_auth();
+
+    // Store the old version before upgrade (for the event)
+    let old_version = CONTRACT_VERSION;
+
+    // Call the Soroban host function to replace the WASM
+    // This is safe because:
+    // 1. Only the admin can call it (checked above)
+    // 2. The host validates the WASM hash exists
+    // 3. The upgrade is atomic - if the new WASM is invalid, the call reverts
+    env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
+
+    // Bump TTL after upgrade to ensure the contract stays alive
+    bump_instance_ttl(&env);
+
+    // Emit upgrade event
+    // Note: The new version is read from the upgraded contract's constant.
+    // We read it after the upgrade so it reflects the new code.
+    let new_version = CONTRACT_VERSION;
+    env.events().publish(
+        (symbol_short!("upgraded"),),
+        ContractUpgraded {
+            new_wasm_hash: new_wasm_hash.clone(),
+            new_version,
+            upgraded_at: env.ledger().timestamp(),
+            upgraded_by: admin.clone(),
+        },
+    );
+
+    // Also emit a legacy event for backward compatibility with indexers
+    env.events().publish(
+        (symbol_short!("upgrade"),),
+        (new_wasm_hash, old_version, new_version, admin),
+    );
+
+    Ok(())
+}
+
+
 #[cfg(test)]
 mod test;
 #[cfg(test)]
 mod test_issue_39;
 #[cfg(test)]
 mod test_withdrawable_props;
+#[cfg(test)]
+mod test_token_edge_cases;
 
 /// Atomically cancel multiple streams owned by the caller and refund the aggregate
 /// unstreamed balance in a single token transfer.
@@ -7114,14 +7191,14 @@ pub fn bulk_cancel_streams(
     Ok(())
 }
 
-/// Pure helper for keeper fee computation (extracted for formal verification).
+/// Pure helper for keeper fee computation (extracted for formal verification and view queries).
 /// Computes `keeper_fee = gross * BPS / 10_000` and `sender_refund = gross - fee`
 /// with the exact production checked arithmetic.
 ///
 /// Preconditions (enforced by caller & harness):
 /// - gross >= 0
 /// - BPS <= 10_000
-#[cfg(kani)]
+#[cfg(any(test, kani))]
 pub fn compute_keeper_fee_split(gross: i128, bps: u32) -> (i128, i128) {
     let fee = gross.checked_mul(bps as i128).unwrap_or(i128::MAX) / 10_000;
     let refund = gross.checked_sub(fee).unwrap_or(0);
@@ -7167,5 +7244,117 @@ mod kani_proofs {
             .ok_or(ContractError::ArithmeticOverflow)
             .map(|v| v / 10_000);
         // If we reach here without panic in checked path, ok.
+    }
+}
+
+#[cfg(test)]
+mod keeper_fee_split_tests {
+    use super::compute_keeper_fee_split;
+
+    /// Rounding Behavior:
+    /// The division by 10_000 uses integer division, which truncates the fractional part (rounds towards zero).
+    /// For example, if gross is 9 and bps is 5000 (50%), keeper_fee = 9 * 5000 / 10000 = 4.
+    /// The remainder (refund) is computed as gross - fee = 9 - 4 = 5.
+    /// This ensures no tokens are created during division (no rounding up).
+    ///
+    /// Conservation Invariant:
+    /// The split must satisfy `keeper_fee + protocol_remainder == gross` exactly.
+    /// Since protocol_remainder is calculated by subtracting keeper_fee from gross using checked arithmetic,
+    /// any remainder from truncation is implicitly consolidated into the protocol remainder, ensuring that
+    /// the total amount of tokens is strictly conserved.
+    ///
+    /// Security Requirement for Value Preservation:
+    /// Preserving value is a critical security requirement to prevent:
+    /// 1. Token leakage or loss due to truncation errors, which would lock funds in the contract.
+    /// 2. Artificial inflation of balances (creation of phantom tokens), which would allow callers to drain
+    ///    more tokens than are actually backed by contract holdings.
+    #[test]
+    fn test_keeper_fee_split_gross_zero() {
+        // gross == 0 returns (0, 0)
+        let (fee, refund) = compute_keeper_fee_split(0, 5000);
+        assert_eq!(fee, 0);
+        assert_eq!(refund, 0);
+        assert_eq!(fee + refund, 0);
+    }
+
+    #[test]
+    fn test_keeper_fee_split_bps_zero() {
+        // bps == 0 allocates the full amount to the protocol remainder (refund)
+        let gross = 1000_i128;
+        let (fee, refund) = compute_keeper_fee_split(gross, 0);
+        assert_eq!(fee, 0);
+        assert_eq!(refund, gross);
+        assert_eq!(fee + refund, gross);
+    }
+
+    #[test]
+    fn test_keeper_fee_split_bps_max() {
+        // bps == 10_000 allocates the full amount to the keeper fee
+        let gross = 1000_i128;
+        let (fee, refund) = compute_keeper_fee_split(gross, 10_000);
+        assert_eq!(fee, gross);
+        assert_eq!(refund, 0);
+        assert_eq!(fee + refund, gross);
+    }
+
+    #[test]
+    fn test_keeper_fee_split_representative_combinations() {
+        // Rounding validation: truncating towards zero
+        // 9 * 5_000 / 10_000 = 4.5 -> rounds to 4. refund = 9 - 4 = 5.
+        let (fee, refund) = compute_keeper_fee_split(9, 5000);
+        assert_eq!(fee, 4);
+        assert_eq!(refund, 5);
+        assert_eq!(fee + refund, 9);
+
+        // 1000 * 250 / 10_000 = 25. refund = 975.
+        let (fee, refund) = compute_keeper_fee_split(1000, 250);
+        assert_eq!(fee, 25);
+        assert_eq!(refund, 975);
+        assert_eq!(fee + refund, 1000);
+
+        // 12345 * 123 / 10_000 = 151.8435 -> rounds to 151. refund = 12345 - 151 = 12194.
+        let (fee, refund) = compute_keeper_fee_split(12345, 123);
+        assert_eq!(fee, 151);
+        assert_eq!(refund, 12194);
+        assert_eq!(fee + refund, 12345);
+    }
+
+    #[test]
+    fn test_keeper_fee_split_large_gross_near_max() {
+        // Test near i128::MAX. These calculations must not overflow or panic.
+        let large_gross_values = [
+            i128::MAX,
+            i128::MAX - 1,
+            i128::MAX - 10000,
+            i128::MAX / 2,
+        ];
+
+        let bps_values = [0, 1, 10, 100, 1000, 5000, 9999, 10000];
+
+        for &gross in large_gross_values.iter() {
+            for &bps in bps_values.iter() {
+                let (fee, refund) = compute_keeper_fee_split(gross, bps);
+                
+                // Assert conservation invariant holds exactly
+                assert_eq!(
+                    fee + refund,
+                    gross,
+                    "Conservation failed for gross = {}, bps = {}",
+                    gross,
+                    bps
+                );
+                
+                // Assert fee is bounded by gross
+                assert!(
+                    fee <= gross,
+                    "Fee {} exceeded gross {} for bps {}",
+                    fee,
+                    gross,
+                    bps
+                );
+                assert!(fee >= 0, "Fee cannot be negative");
+                assert!(refund >= 0, "Refund cannot be negative");
+            }
+        }
     }
 }

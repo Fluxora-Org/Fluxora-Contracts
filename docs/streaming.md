@@ -16,7 +16,8 @@ When changing the contract:
 - Update snapshot tests if externally visible behavior changes
 - No behavior change required for doc-only updates
 
-**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `cancel_recipient_update`, `delete_stream_template`, `get_global_emergency_paused`, `get_pending_recipient_update`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `global_resume`, `keeper_cancel`, `set_contract_paused`, `set_global_emergency_paused`, `version`, `migration_v5_to_v6`, `set_max_rate_per_second`.
+**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `cancel_recipient_update`, `close_cancelled_stream`, `close_completed_stream`, `compute_keeper_fee_split`, `delete_stream_template`, `get_global_emergency_paused`, `get_paused_stream_count`, `get_pending_recipient_update`, `get_protocol_fees_accrued`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `global_resume`, `keeper_cancel`, `set_contract_paused`, `set_global_emergency_paused`, `version`, `migration_v5_to_v6`, `set_max_rate_per_second`.
+**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `cancel_recipient_update`, `delete_stream_template`, `get_global_emergency_paused`, `get_keeper_fee_split`, `get_pending_recipient_update`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `global_resume`, `keeper_cancel`, `set_contract_paused`, `set_global_emergency_paused`, `version`, `migration_v5_to_v6`, `set_max_rate_per_second`.
 
 ## Externally Visible Assurances
 
@@ -139,7 +140,7 @@ Off-chain orchestrators and indexers that build payment batches often need to kn
 | **Cancellation** | `cancel_stream` / `cancel_stream_as_admin` / `bulk_cancel_streams` | Refunds unstreamed amount; frozen accrued stays for recipient         |
 | **Withdrawal**   | `withdraw` / `withdraw_to` / `batch_withdraw` | Recipient pulls accrued tokens; allowed on Paused if past `end_time`  |
 | **Completion**   | Automatic                                     | When `withdrawn_amount == deposit_amount`, status becomes `Completed` |
-| **Rotation**     | `update_recipient` / `accept_recipient_update` / `cancel_recipient_update` | Recipient transfers entitlement to a new address; pending rotations can be queried with `get_pending_recipient_update` |
+| **Rotation**     | `update_recipient` / `accept_recipient_update` / `cancel_recipient_update` | Sender proposes a new recipient; the current recipient must accept. Pending rotations are queryable via `get_pending_recipient_update`. Acceptance updates both the stream record and recipient indexes atomically. |
 | **Auto-claim**   | `set_auto_claim` / `revoke_auto_claim` / `trigger_auto_claim` | Recipient opts in to permissionless final claim at `end_time` to a chosen destination |
 
 ### State Transitions
@@ -195,6 +196,16 @@ Scope boundary and exclusions:
 1. In scope: refund math, `cancelled_at` persistence/freeze semantics, cancel auth paths, cancel event consistency.
 2. Out of scope: token-level trust assumptions beyond documented model, off-chain indexer liveness, and economic policy choices (for example who should bear operational costs).
 3. Residual risk: if a non-standard token violates SEP-41 expectations, transfer behavior may diverge; CEI ordering reduces but cannot fully eliminate external token risk.
+
+### Keeper Cancellation & Fee Accounting
+
+The `keeper_cancel` entrypoint allows any third-party keeper to cancel an expired, unwithdrawn stream after the grace period has elapsed.
+
+**Fee Accounting Note**:
+- The keeper fee (50 BPS) is deducted solely from the *unstreamed* refund bound for the sender.
+- The contract does **not** retain a protocol split of this fee. The entire fee is transferred directly to the keeper.
+- The view function `get_protocol_fees_accrued` (added in #623) tracks the cumulative total of keeper fees *paid out* of the contract, rather than an internal sweepable balance.
+- **Accounting Invariant**: The contract's token balance must securely cover all remaining liabilities. Since the keeper fee is transferred entirely to the keeper and leaves the contract, the tracked total in `get_protocol_fees_accrued` is strictly monotone and safely independent of the contract's real-time asset/liability ratio.
 
 ### Clone Semantics
 
@@ -458,8 +469,8 @@ Behaviour: Active/Paused streams use the given `timestamp` (clamped to schedule)
 - **is_underfunded**: `true` if the current `deposit_amount` is insufficient to cover the total tokens that will accrue by `end_time` at the current `rate_per_second`.
 - **is_expired**: `true` if `ledger.timestamp() >= end_time` and the stream is not yet `Completed` or `Cancelled`.
 - **accrued_to_date**: Real-time total tokens accrued since `start_time`.
-- **remaining_deposit**: `deposit_amount - withdrawn_amount`.
-- **seconds_until_depletion**: Estimated seconds until the stream's deposit is fully exhausted by accrual. Capped at `end_time`.
+- **remaining_deposit**: `deposit_amount - withdrawn_amount`. For cancelled streams, this reflects the unwithdrawn portion of the original deposit, even though the unstreamed portion has been refunded.
+- **seconds_until_depletion**: Estimated seconds until the stream's deposit is fully exhausted by accrual. Capped at `end_time`. For cancelled streams, this continues to reflect the hypothetical depletion time based on the original rate.
 
 Use this to show real-time health indicators in UIs, alert senders of underfunding, or notify recipients of expired streams ready for final withdrawal.
 
@@ -542,6 +553,60 @@ On failure (`InvalidParams` or `InvalidState`):
 - Rationale: Accrual math (in `accrual.rs`) is already overflow-safe via `checked_mul` and clamping.
 - Application-specific limits should be handled in the frontend or factory contracts.
 
+### Batch Creation: Atomic vs Partial
+
+The contract provides two entrypoints for creating multiple streams in a single transaction. Both accept a vector of `CreateStreamParams` and require a single authorization from the `sender`. For both functions, providing an empty vector safely returns an empty result (`Ok(Vec::new())`) with no side effects and no token transfers.
+
+#### `create_streams` (Atomic)
+
+```rust
+pub fn create_streams(
+    env: Env,
+    sender: Address,
+    streams: Vec<CreateStreamParams>,
+) -> Result<Vec<u64>, ContractError>
+```
+
+**Semantics:** All-or-nothing.
+- The contract first validates all entries.
+- If any single entry fails validation (e.g., `StartTimeInPast`, `InvalidParams`), the entire transaction reverts.
+- A single bulk token transfer is made for the sum of all `deposit_amount`s. If the sender lacks sufficient balance for the aggregate total, the transaction reverts.
+- Returns a `Vec<u64>` containing the new stream IDs in the exact order of the input.
+
+#### `create_streams_partial` (Non-Atomic)
+
+```rust
+pub fn create_streams_partial(
+    env: Env,
+    sender: Address,
+    streams: Vec<CreateStreamParams>,
+) -> Result<Vec<CreateStreamResult>, ContractError>
+
+pub struct CreateStreamResult {
+    pub success: bool,
+    pub stream_id: Option<u64>,
+    pub error: Option<u32>,
+}
+```
+
+**Semantics:** Failure isolation per entry.
+- The contract attempts to create each stream independently.
+- **Token Transfer Handling:** Tokens are pulled from the sender *per entry*. If an entry fails validation, it is skipped entirely (no tokens are pulled). If the per-entry token transfer fails, it is recorded as `InsufficientBalance` (error code 9).
+- Subsequent entries continue processing normally regardless of prior failures.
+- **Return Value:** Callers receive a `Vec<CreateStreamResult>` matching the input order. To learn which elements succeeded, callers iterate the result vector and check `result.success`. Successful entries include `Some(stream_id)`, while failed entries include `Some(error_code)`.
+
+**Example:**
+```rust
+let results = contract.create_streams_partial(&sender, &params)?;
+for (i, res) in results.iter().enumerate() {
+    if res.success {
+        println!("Stream {} created with ID {}", i, res.stream_id.unwrap());
+    } else {
+        println!("Stream {} failed with error code {}", i, res.error.unwrap());
+    }
+}
+```
+
 ### Relative-Time Helpers: `create_stream_relative` and `create_streams_relative`
 
 The contract provides convenience entry points that compute stream times relative to the current ledger timestamp, eliminating off-chain calculation errors that lead to `StartTimeInPast` failures.
@@ -568,18 +633,6 @@ pub fn create_stream_relative(
 ) -> Result<u64, ContractError>
 ```
 
-#### `create_streams_partial` (#411)
-
-From **CONTRACT_VERSION 5**, the contract provides an opt-in partial batch creation entrypoint that allows creating multiple streams in a single transaction with **failure isolation**.
-
-- **Non-Atomic**: Unlike `create_streams`, which reverts the entire transaction if any single stream fails, `create_streams_partial` attempts to create each stream independently.
-- **Per-Entry Results**: Returns a `Vec<CreateStreamResult>` where each entry contains:
-    - `success: bool`: True if the stream was created.
-    - `stream_id: Option<u64>`: The ID of the created stream (if success is true).
-    - `error: Option<u32>`: The error code (if success is false).
-- **Ordering**: Results are returned in the exact same order as the input parameters.
-- **Failures Handled**: Validation errors (e.g. `InvalidParams`) and token transfer failures (e.g. `InsufficientBalance`) for one entry do not block subsequent entries in the same batch.
-- **Auth**: Requires the funding `sender` to authorize the call.
 
 **Computation:**
 ```
@@ -710,6 +763,8 @@ contract.create_streams_relative(&sender, &params)?;
 | `get_auto_claim_destination` | Anyone                     | None (view)                                 |
 | `delegated_withdraw`         | Relayer (ed25519 sig from recipient) | `relayer.require_auth()` + ed25519 sig |
 | `get_delegated_nonce`        | Anyone                     | None (view)                                 |
+| `release_id_reservation`     | Reservation holder         | `holder.require_auth()`                     |
+| `reclaim_expired_id_reservation` | Anyone                 | None (permissionless cleanup)               |
 
 **Note:** Sender-managed functions (`pause_stream`, `resume_stream`, `cancel_stream`) require sender auth. Admin uses separate `_as_admin` entry points.
 
@@ -802,12 +857,14 @@ A naive decrease would retroactively lower the recipient's accrued tokens. To pr
 - **Check-Effects-Interactions (CEI)**: Computes accrual, reduces deposit amount, persists stream state, and finally refunds the difference to the sender.
 - **Rate Validation**: `0 < new_rate_per_second < current rate_per_second`.
 - **Refund**: The sender receives a refund of `old_deposit - new_deposit`, where `new_deposit = checkpointed_amount + new_rate * remaining_seconds`.
+- **Refund-non-negativity invariant**: The refund maths uses `checked_sub` (`old_deposit - new_deposit`), not `saturating_sub`. Any rate change whose `new_deposit` would **exceed** `old_deposit` — i.e. the new schedule streamable amount is *larger* than what has already been deposited — is rejected with `ContractError::ArithmeticOverflow`. The contract never silently grows a stream's deposit ceiling via `decrease_rate_per_second`; only `top_up_stream` adds new deposit, and `update_rate_per_second` re-prices under the existing ceiling. See `contracts/stream/tests/rate_decrease_after_withdraw.rs` for the regression coverage of this invariant.
 
 #### Failures
 - **Unauthorized**: Caller is not the original sender.
 - **InvalidState**: Stream is already expired (`now >= end_time`).
 - **StreamTerminalState**: Stream is Cancelled or Completed.
 - **InvalidParams**: `new_rate_per_second <= 0` or `new_rate_per_second >= old_rate`.
+- **ArithmeticOverflow**: `old_deposit < new_deposit` per the refund-non-negativity invariant above. The contract refuses to *grow* the stream's deposit ceiling via a rate decrease.
 
 ### update_rate_per_second: Observable Semantics
 
@@ -1066,11 +1123,17 @@ Simple query that returns the stored auto-claim destination address, or `None` i
   - `("completed", stream_id)` → `StreamEvent::StreamCompleted(stream_id)` if stream transitions to `Completed`.
 
 #### Cancellation interaction
-
+ 
 If a stream is cancelled after opt-in, `trigger_auto_claim` returns `InvalidState`. The auto-claim destination entry remains in storage but is inert. Recipients may call `revoke_auto_claim` to clean up storage.
-
+ 
+#### Revocation Boundary and Timing Safety
+ 
+1. **Post-Revoke Trigger Prevention**: Once a recipient calls `revoke_auto_claim`, the auto-claim configuration is immediately deleted. Any subsequent `trigger_auto_claim` calls fail with `ContractError::InvalidParams` without transferring any tokens.
+2. **Early Trigger Restriction**: Permissionless triggering is strictly disallowed before the stream's `end_time` is reached. Early calls return `ContractError::InvalidState` and transfer zero funds.
+3. **Destination Update Immendiate Effect**: If the destination is updated, the change is immediately effective. Triggering auto-claim afterwards sends funds ONLY to the recipient's currently selected destination.
+ 
 #### Security invariants
-
+ 
 1. Only the recipient can set or change the destination (`require_auth` enforced).
 2. The caller of `trigger_auto_claim` has zero influence over where tokens go.
 3. CEI ordering is preserved: stream state is saved before the token transfer.
@@ -1446,6 +1509,93 @@ Comprehensive test coverage includes:
 - ✅ Handles edge cases (completed streams, paused streams, etc.)
 
 See `contracts/stream/tests/integration_suite.rs` for full test suite.
+
+## Keeper Cancellation
+
+### Overview
+
+After a stream's `end_time` passes and a configurable grace period elapses, any address may
+call `keeper_cancel` to close the stream and collect a small incentive fee.  This prevents
+unclaimed deposits from remaining locked in contract storage indefinitely.
+
+| Constant | Value | Notes |
+| -------- | ----- | ----- |
+| `KEEPER_GRACE_PERIOD_SECONDS` | 604 800 s (7 days) | Seconds after `end_time` before eligibility |
+| `KEEPER_FEE_BPS` | 50 bps (0.5 %) | Fee as a fraction of the unstreamed sender refund |
+
+### Token distribution on `keeper_cancel`
+
+1. `recipient_amount = accrued − withdrawn_amount` → transferred to recipient.
+2. `sender_refund_gross = deposit_amount − accrued` (unstreamed portion).
+3. `keeper_fee = sender_refund_gross × KEEPER_FEE_BPS / 10 000` → transferred to keeper.
+4. `sender_refund = sender_refund_gross − keeper_fee` → transferred to sender.
+
+When `sender_refund_gross == 0` (stream fully accrued), the keeper receives no fee.
+
+### `keeper_cancel`
+
+**Authorization:** `keeper.require_auth()` — prevents fee redirection by a third party.
+
+**Errors:**
+
+| Error | Condition |
+| ----- | --------- |
+| `StreamNotFound` | `stream_id` does not exist |
+| `InvalidState` | Stream is already `Cancelled` or `Completed` |
+| `KeeperGracePeriodNotElapsed` | `now < end_time + KEEPER_GRACE_PERIOD_SECONDS` |
+
+### `get_keeper_fee_split` (view)
+
+**Purpose:** Preview the `(keeper_fee, sender_refund)` split that `keeper_cancel` would pay,
+without moving any funds or changing any state.  Keepers should call this before paying gas
+to confirm the fee is worthwhile.
+
+**Entry-point:**
+
+```rust
+pub fn get_keeper_fee_split(env: Env, stream_id: u64) -> Result<(i128, i128), ContractError>
+```
+
+**Authorization:** None (public view).
+
+**Returns:**
+
+| Condition | Return |
+| --------- | ------ |
+| Grace period not yet elapsed | `Ok((0, 0))` — not yet eligible, no error |
+| Stream is eligible | `Ok((keeper_fee, sender_refund))` matching `keeper_cancel` payouts |
+| Stream is `Cancelled` or `Completed` | `Err(InvalidState)` |
+| Stream does not exist | `Err(StreamNotFound)` |
+
+**Invariants:**
+
+- `keeper_fee + sender_refund == deposit_amount − accrued` (gross unstreamed) when eligible.
+- Output is identical to the amounts computed inside `keeper_cancel` for the same ledger timestamp.
+- No state writes, no TTL changes, no token operations — cannot be abused for griefing.
+
+**Example (Rust client):**
+
+```rust
+let (fee, refund) = client.get_keeper_fee_split(&stream_id)?;
+if fee > gas_cost_estimate {
+    client.keeper_cancel(&stream_id, &keeper_address);
+}
+```
+
+**Test coverage:** See `contracts/stream/tests/keeper_cancel.rs`.
+
+- ✅ View/cancel parity (preview matches actual keeper and sender payouts)
+- ✅ Not-yet-eligible stream returns `(0, 0)`
+- ✅ Active stream before `end_time` returns `(0, 0)`
+- ✅ Fully-accrued stream returns `(0, 0)` (no gross, no fee)
+- ✅ `Cancelled` stream returns `InvalidState`
+- ✅ `Completed` stream returns `InvalidState`
+- ✅ Non-existent stream returns `StreamNotFound`
+- ✅ Paused eligible stream returns correct split
+- ✅ `fee + refund == gross` invariant
+- ✅ Idempotency (two calls at same timestamp return same result)
+
+---
 
 ## ID Reservation (Off-Chain Orchestration)
 

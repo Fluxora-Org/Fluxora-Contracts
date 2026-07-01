@@ -5,6 +5,9 @@ edition = "2021"
 description = "Fluxora USDC streaming contract for Stellar Soroban"
 # Issue #206 — global emergency pause: scaffold branch. Instance pause flag + admin setter to follow.
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 doctest = false

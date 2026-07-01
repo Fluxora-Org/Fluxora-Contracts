@@ -1,8 +1,7 @@
 extern crate std;
 
-use fluxora_stream::{
     ContractError, DataKey, FluxoraStream, FluxoraStreamClient, StreamScheduleTemplate,
-    MAX_GLOBAL_TEMPLATES, MAX_TEMPLATES_PER_OWNER,
+    MAX_GLOBAL_TEMPLATES, MAX_TEMPLATES_PER_OWNER, StreamKind,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -43,8 +42,19 @@ fn template_register_create_delete_happy_path() {
     assert_eq!(stored.cliff_delay, 0);
     assert_eq!(stored.duration, 3600);
 
+    let stream_id = client.create_stream_from_template(
+        &sender,
+        &tid,
+        &recipient,
+        &3600_i128,
+        &1_i128,
+        &0,
+        &None,
+        &None,
+        &fluxora_stream::StreamKind::Linear,
+    );
     let stream_id = client
-        .create_stream_from_template(&sender, &tid, &recipient, &3600_i128, &1_i128, &0, &None);
+        .create_stream_from_template(&sender, &tid, &recipient, &3600_i128, &1_i128, &0, &None, &None, &StreamKind::Linear);
     assert_eq!(stream_id, 0u64);
 
     client.delete_stream_template(&owner, &tid);
@@ -94,7 +104,7 @@ fn per_owner_template_cap_enforced() {
     env.ledger().set_timestamp(2_000_000);
 
     for i in 0..MAX_TEMPLATES_PER_OWNER {
-        client.register_stream_template(&owner, &0u64, &0u64, &(3600u64 + u64::from(i)));
+        client.register_stream_template(&owner, &0u64, &0u64, &(3600u64 + i));
     }
 
     let err = client.try_register_stream_template(&owner, &0u64, &0u64, &9999u64);
@@ -147,7 +157,7 @@ fn test_owner_template_cap_exceeded() {
 
     // Register exactly MAX_TEMPLATES_PER_OWNER (64) templates.
     for i in 0..MAX_TEMPLATES_PER_OWNER {
-        client.register_stream_template(&owner, &0u64, &0u64, &(3600u64 + u64::from(i)));
+        client.register_stream_template(&owner, &0u64, &0u64, &(3600u64 + i));
     }
 
     // The 65th registration must fail.
