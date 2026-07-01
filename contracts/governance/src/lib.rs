@@ -68,6 +68,8 @@ pub struct Proposal {
     pub cancelled: bool,
 }
 
+
+
 /// Error codes for the governance contract.
 #[contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -321,6 +323,19 @@ pub struct AdminChanged {
     pub new: Address,
 }
 
+/// Emitted when the governance contract is initialized.
+///
+/// Provides an on-chain record of the initial admin, signer count, and threshold,
+/// allowing indexers to bootstrap governance state from chain history without
+/// relying on off-chain deployment metadata.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct GovernanceInitialized {
+    pub admin: Address,
+    pub signer_count: u32,
+    pub threshold: u32,
+}
+
 // ---------------------------------------------------------------------------
 // Storage helpers
 // ---------------------------------------------------------------------------
@@ -524,6 +539,19 @@ impl FluxoraGovernance {
             .set(&DataKey::NextProposalId, &0u32);
 
         bump_instance(&env);
+
+        /// # Events
+        /// Emits a `GovernanceInitialized` event with topic `gov_init` containing the
+        /// admin, signer count, and threshold after successful initialization.
+
+        env.events().publish(
+        (symbol_short!("gov_init"),),
+        GovernanceInitialized {
+            admin: admin.clone(),
+            signer_count: signers.len() as u32,
+            threshold,
+        },
+    );
         Ok(())
     }
 
@@ -2599,4 +2627,66 @@ mod tests {
             Err(Ok(GovernanceError::ProposalExpired))
         );
     }
-}
+    #[test]
+    fn test_init_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_000_000);
+        let contract_id = env.register_contract(None, FluxoraGovernance);
+        let admin = Address::generate(&env);
+        let signer_a = Address::generate(&env);
+        let signer_b = Address::generate(&env);
+        let client = FluxoraGovernanceClient::new(&env, &contract_id);
+
+        client.init(&admin, &vec![&env, signer_a.clone(), signer_b.clone()], &2u32);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+        let (topics, data) = events[0].clone();
+        let topic: Vec<Symbol> = topics.try_into().unwrap();
+        assert_eq!(topic[0], symbol_short!("gov_init"));
+
+        let event_data: GovernanceInitialized = data.try_into().unwrap();
+        assert_eq!(event_data.admin, admin);
+        assert_eq!(event_data.signer_count, 2);
+        assert_eq!(event_data.threshold, 2);
+    }
+
+    #[test]
+    fn test_init_event_edge_cases() {
+    // Edge case: 1 signer, threshold 1
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_000_000);
+        let contract_id = env.register_contract(None, FluxoraGovernance);
+        let admin = Address::generate(&env);
+        let signer = Address::generate(&env);
+        let client = FluxoraGovernanceClient::new(&env, &contract_id);
+
+        client.init(&admin, &vec![&env, signer.clone()], &1u32);
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+        let data: GovernanceInitialized = events[0].1.clone().try_into().unwrap();
+        assert_eq!(data.signer_count, 1);
+        assert_eq!(data.threshold, 1);
+
+        // Edge case: 20 signers, threshold 20
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_000_000);
+        let contract_id = env.register_contract(None, FluxoraGovernance);
+        let admin = Address::generate(&env);
+        let mut signers = Vec::new(&env);
+        for _ in 0..20 {
+            signers.push_back(Address::generate(&env));
+        }
+        let client = FluxoraGovernanceClient::new(&env, &contract_id);
+
+        client.init(&admin, &signers, &20u32);
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+        let data: GovernanceInitialized = events[0].1.clone().try_into().unwrap();
+        assert_eq!(data.signer_count, 20);
+        assert_eq!(data.threshold, 20);
+        }
+    }
