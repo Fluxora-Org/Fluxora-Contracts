@@ -937,6 +937,10 @@ These guarantees are limited to `create_streams` creation semantics. They do not
 
 `batch_withdraw(recipient, stream_ids)` enforces recipient-only authorization and deterministic completion semantics:
 
+### batch_withdraw_to: Per-Entry Destination Routing with Atomic Reversion
+
+`batch_withdraw_to(recipient, withdrawals)` extends the same recipient-only authorization model to per-stream destinations. The recipient must authorize the batch, every stream must belong to that recipient, and the batch reverts atomically if any entry is unauthorized, invalid, or otherwise rejected. Destination addresses may be any non-contract address; routing to the contract address is rejected with `ContractError::InvalidParams`.
+
 #### Non-Empty Batch Semantics
 
 - Auth boundary: only the stream `recipient` can authorize `batch_withdraw`.
