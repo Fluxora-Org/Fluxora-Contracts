@@ -69,6 +69,52 @@ fn test_get_factory_config_before_init() {
     );
 }
 
+/// `is_factory_paused` before `init` returns the documented default without panicking.
+#[test]
+fn test_is_factory_paused_before_init_returns_false() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+
+    assert!(!factory.is_factory_paused());
+}
+
+/// `get_factory_stream_count` before `init` returns zero without panicking.
+#[test]
+fn test_get_factory_stream_count_before_init_returns_zero() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+
+    assert_eq!(factory.get_factory_stream_count(), 0);
+}
+
+/// `get_factory_streams_paginated` before `init` returns an empty page without panicking.
+#[test]
+fn test_get_factory_streams_paginated_before_init_returns_empty_vec() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+
+    let page = factory.get_factory_streams_paginated(&0, &10);
+    assert!(page.is_empty());
+}
+
+/// `is_allowlisted` before `init` returns false for any recipient without panicking.
+#[test]
+fn test_is_allowlisted_before_init_returns_false() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let recipient = Address::generate(&env);
+
+    assert!(!factory.is_allowlisted(&recipient));
+}
+
 /// Each admin-only setter before `init` returns `NotInitialized`.
 #[test]
 fn test_setters_before_init_return_not_initialized() {
