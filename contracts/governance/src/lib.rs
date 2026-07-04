@@ -307,6 +307,19 @@ pub struct QuorumConfig {
     pub signer_count: u32,
 }
 
+/// Emitted when the admin changes the approval threshold.
+///
+/// Published by [`set_threshold`](FluxoraGovernance::set_threshold) after the
+/// new threshold has been persisted. Existing proposals that already reached
+/// quorum keep using their stored [`QuorumInfo::threshold`] snapshot; this event
+/// only describes the threshold used for future quorum decisions.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ThresholdUpdated {
+    pub old_threshold: u32,
+    pub new_threshold: u32,
+}
+
 /// Emitted when the admin address is rotated.
 ///
 /// Published by [`set_admin`](FluxoraGovernance::set_admin) after the new admin
@@ -543,6 +556,45 @@ impl FluxoraGovernance {
             AdminChanged {
                 old: old_admin,
                 new: new_admin,
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Update the approval threshold for future governance proposals.
+    ///
+    /// # Authorization
+    /// - Requires the current admin signature.
+    ///
+    /// # Validation
+    /// `new_threshold` must satisfy `1 <= new_threshold <= signers.len()`.
+    /// Invalid values return [`GovernanceError::InvalidThreshold`] before any
+    /// storage write or event emission.
+    ///
+    /// # Security
+    /// Proposals that already reached quorum are not retroactively affected:
+    /// `approve` stores a [`QuorumInfo::threshold`] snapshot when quorum is
+    /// first reached, and `execute` verifies against that snapshot.
+    pub fn set_threshold(env: Env, new_threshold: u32) -> Result<(), GovernanceError> {
+        get_admin(&env)?.require_auth();
+
+        let signers = get_signers(&env)?;
+        if new_threshold == 0 || new_threshold > signers.len() {
+            return Err(GovernanceError::InvalidThreshold);
+        }
+
+        let old_threshold = get_threshold(&env)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::Threshold, &new_threshold);
+        bump_instance(&env);
+
+        env.events().publish(
+            (symbol_short!("thr_upd"),),
+            ThresholdUpdated {
+                old_threshold,
+                new_threshold,
             },
         );
 
@@ -1265,8 +1317,8 @@ impl FluxoraGovernance {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Ledger};
-    use soroban_sdk::{vec, Env};
+    use soroban_sdk::testutils::{Address as _, Events, Ledger};
+    use soroban_sdk::{vec, Env, TryFromVal, Val, Vec as SVec};
 
     const TIMELOCK: u64 = 172_800;
     const MAX_AGE: u64 = 2_592_000;
@@ -1324,6 +1376,22 @@ mod tests {
             use soroban_sdk::xdr::ToXdr;
             CallData::Noop.to_xdr(&self.env)
         }
+    }
+
+    fn last_contract_event(env: &Env, contract_id: &Address) -> (Symbol, Val) {
+        let events = env.events().all();
+        for i in (0..events.len()).rev() {
+            let (addr, topics, data) = events.get(i).unwrap();
+            if &addr != contract_id {
+                continue;
+            }
+            let topic_values: SVec<Val> = topics;
+            let topic = topic_values.get(0).expect("event has a topic");
+            let symbol = Symbol::try_from_val(env, &topic).expect("topic is a symbol");
+            return (symbol, data);
+        }
+
+        panic!("no event emitted by the contract");
     }
 
     // -----------------------------------------------------------------------
@@ -1474,6 +1542,54 @@ mod tests {
         let result = client.try_init(&admin, &vec![&env, signer], &1u32);
         assert!(result.is_ok());
         assert_eq!(client.quorum(), 1);
+    }
+
+    #[test]
+    fn test_set_threshold_updates_value_and_emits_event() {
+        let ctx = Ctx::setup(); // 3 signers, threshold=2
+
+        ctx.client.set_threshold(&3u32);
+
+        assert_eq!(ctx.client.get_threshold(), 3);
+        let (topic, data) = last_contract_event(&ctx.env, &ctx.contract_id);
+        assert_eq!(topic, symbol_short!("thr_upd"));
+        let payload =
+            ThresholdUpdated::try_from_val(&ctx.env, &data).expect("decodes to ThresholdUpdated");
+        assert_eq!(payload.old_threshold, 2);
+        assert_eq!(payload.new_threshold, 3);
+    }
+
+    #[test]
+    fn test_set_threshold_rejects_zero() {
+        let ctx = Ctx::setup();
+        let events_before = ctx.env.events().all().len();
+
+        let result = ctx.client.try_set_threshold(&0u32);
+
+        assert_eq!(result, Err(Ok(GovernanceError::InvalidThreshold)));
+        assert_eq!(ctx.client.get_threshold(), 2);
+        assert_eq!(ctx.env.events().all().len(), events_before);
+    }
+
+    #[test]
+    fn test_set_threshold_rejects_above_signer_count() {
+        let ctx = Ctx::setup(); // 3 signers
+        let events_before = ctx.env.events().all().len();
+
+        let result = ctx.client.try_set_threshold(&4u32);
+
+        assert_eq!(result, Err(Ok(GovernanceError::InvalidThreshold)));
+        assert_eq!(ctx.client.get_threshold(), 2);
+        assert_eq!(ctx.env.events().all().len(), events_before);
+    }
+
+    #[test]
+    fn test_set_threshold_accepts_one() {
+        let ctx = Ctx::setup();
+
+        ctx.client.set_threshold(&1u32);
+
+        assert_eq!(ctx.client.get_threshold(), 1);
     }
 
     // -----------------------------------------------------------------------
