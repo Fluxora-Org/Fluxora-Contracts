@@ -7245,6 +7245,11 @@ mod kani_proofs {
         // If we reach here without panic in checked path, ok.
     }
 }
+pub fn get_paused_duration(env: Env, stream_id: u64) -> Result<u64, ContractError> {
+    let stream = load_stream(&env, stream_id)?;
+    Ok(stream.cumulative_paused_duration)
+}
+        
 
 #[cfg(test)]
 mod keeper_fee_split_tests {
