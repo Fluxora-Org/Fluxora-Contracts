@@ -1,6 +1,8 @@
 extern crate std;
 
-use fluxora_stream::{ContractError, FluxoraStream, FluxoraStreamClient, PauseReason, StreamKind, StreamStatus};
+use fluxora_stream::{
+    ContractError, FluxoraStream, FluxoraStreamClient, PauseReason, StreamKind, StreamStatus,
+};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
@@ -80,8 +82,7 @@ fn test_top_up_active_stream_deposit_reflected() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(100);
-    ctx.client
-        .top_up_stream(&stream_id, &ctx.sender, &500_i128);
+    ctx.client.top_up_stream(&stream_id, &ctx.sender, &500_i128);
 
     let state = ctx.client.get_stream_state(&stream_id);
     assert_eq!(state.deposit_amount, 1_500);
@@ -107,8 +108,7 @@ fn test_top_up_paused_stream_matches_spec() {
     assert_eq!(state.status, StreamStatus::Paused);
 
     // Top up while paused
-    ctx.client
-        .top_up_stream(&stream_id, &ctx.sender, &300_i128);
+    ctx.client.top_up_stream(&stream_id, &ctx.sender, &300_i128);
 
     let state = ctx.client.get_stream_state(&stream_id);
     assert_eq!(state.deposit_amount, 1_300);
@@ -182,8 +182,7 @@ fn test_top_up_near_end_updates_accrual() {
     assert_eq!(accrued_before, 999);
 
     // Top up by 500 → deposit becomes 1500
-    ctx.client
-        .top_up_stream(&stream_id, &ctx.sender, &500_i128);
+    ctx.client.top_up_stream(&stream_id, &ctx.sender, &500_i128);
 
     let state = ctx.client.get_stream_state(&stream_id);
     assert_eq!(state.deposit_amount, 1_500);

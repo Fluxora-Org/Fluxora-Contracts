@@ -12,6 +12,7 @@ mod token_check;
 pub mod types;
 #[cfg(test)]
 mod delegation;
+mod token_check;
 
 use events::*;
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Map};

@@ -61,9 +61,7 @@ mod kani_fee {
         kani::assume(bps <= 10_000);
 
         // Exact production expression
-        let _ = gross
-            .checked_mul(bps as i128)
-            .map(|v| v / 10_000);
+        let _ = gross.checked_mul(bps as i128).map(|v| v / 10_000);
     }
 }
 
