@@ -6,7 +6,9 @@
 
 #![cfg(test)]
 
-use fluxora_factory::{load_policy, FactoryError, FactoryPolicy, FluxoraFactory, FluxoraFactoryClient};
+use fluxora_factory::{
+    load_policy, FactoryError, FactoryPolicy, FluxoraFactory, FluxoraFactoryClient,
+};
 use soroban_sdk::{
     testutils::{Address as _, MockAuth, MockAuthInvoke},
     Address, Env, IntoVal,
@@ -430,7 +432,8 @@ fn test_init_bumps_instance_ttl() {
     // Advance ledger by a significant amount (simulating idle time).
     // The threshold is 17_280 ledgers; we advance less than that to show
     // that a single TTL bump keeps the entry alive past one idle window.
-    env.ledger().set_sequence_number(env.ledger().sequence() + 10_000);
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 10_000);
 
     // Config should still be accessible after simulated idle time.
     let cfg = factory.get_factory_config();
@@ -458,38 +461,45 @@ fn test_setters_bump_instance_ttl() {
     // Test set_admin bumps TTL.
     let new_admin = Address::generate(&env);
     factory.set_admin(&new_admin);
-    env.ledger().set_sequence_number(env.ledger().sequence() + 5_000);
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 5_000);
     assert_eq!(factory.get_factory_config().admin, new_admin);
 
     // Test set_stream_contract bumps TTL.
     let new_sc = Address::generate(&env);
     factory.set_stream_contract(&new_sc);
-    env.ledger().set_sequence_number(env.ledger().sequence() + 5_000);
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 5_000);
     assert_eq!(factory.get_factory_config().stream_contract, new_sc);
 
     // Test set_cap bumps TTL.
     factory.set_cap(&7_500);
-    env.ledger().set_sequence_number(env.ledger().sequence() + 5_000);
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 5_000);
     assert_eq!(factory.get_factory_config().max_deposit, 7_500);
 
     // Test set_min_duration bumps TTL.
     factory.set_min_duration(&250);
-    env.ledger().set_sequence_number(env.ledger().sequence() + 5_000);
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 5_000);
     assert_eq!(factory.get_factory_config().min_duration, 250);
 
     // Test set_batch_cap_enforcement bumps TTL.
     factory.set_batch_cap_enforcement(&false);
-    env.ledger().set_sequence_number(env.ledger().sequence() + 5_000);
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 5_000);
     assert_eq!(factory.get_factory_config().batch_cap_enforced, false);
 
     // Test set_factory_paused bumps TTL.
     factory.set_factory_paused(&true);
-    env.ledger().set_sequence_number(env.ledger().sequence() + 5_000);
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 5_000);
     assert!(factory.is_factory_paused());
 
     // Test set_rate_bounds bumps TTL (by checking config still accessible).
     factory.set_rate_bounds(&Some(100), &Some(1_000));
-    env.ledger().set_sequence_number(env.ledger().sequence() + 5_000);
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 5_000);
     assert_eq!(factory.get_factory_config().max_deposit, 7_500); // config still accessible
 }
 
@@ -511,7 +521,8 @@ fn test_repeated_setter_calls_prevent_expiration() {
 
     // Simulate a busy factory: repeatedly advance and call setters.
     for i in 0..5 {
-        env.ledger().set_sequence_number(env.ledger().sequence() + 3_000);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 3_000);
         factory.set_cap(&(10_000 + (i as i128 * 100)));
         let cfg = factory.get_factory_config();
         assert_eq!(cfg.max_deposit, 10_000 + (i as i128 * 100));
@@ -544,7 +555,8 @@ fn test_idle_factory_recovers_on_first_setter() {
     // Simulate an idle period: don't call any setters, just advance ledger.
     // The instance entries may approach expiration but should not yet expire
     // if the TTL bump from init was sufficient.
-    env.ledger().set_sequence_number(env.ledger().sequence() + 10_000);
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 10_000);
 
     // A read operation (read-only, no TTL bump) should still work.
     let paused = factory.is_factory_paused();
@@ -555,7 +567,8 @@ fn test_idle_factory_recovers_on_first_setter() {
     assert_eq!(factory.get_factory_config().max_deposit, 15_000);
 
     // Advance ledger again and verify config is still accessible.
-    env.ledger().set_sequence_number(env.ledger().sequence() + 5_000);
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 5_000);
     assert_eq!(factory.get_factory_config().max_deposit, 15_000);
 }
 
@@ -575,7 +588,8 @@ fn test_set_rate_bounds_bumps_instance_ttl() {
     factory.set_rate_bounds(&Some(50), &Some(5_000));
 
     // Advance ledger and verify config is still accessible.
-    env.ledger().set_sequence_number(env.ledger().sequence() + 5_000);
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 5_000);
     let cfg = factory.get_factory_config();
     assert_eq!(cfg.max_deposit, 10_000); // config still accessible
 }
@@ -616,8 +630,14 @@ fn test_load_policy_reflects_initial_state() {
     assert_eq!(policy.min_duration, 100);
     assert!(policy.batch_cap_enforced, "init defaults batch-cap to true");
     assert!(!policy.creation_paused, "init defaults pause to false");
-    assert_eq!(policy.min_rate_per_second, None, "no rate bounds by default");
-    assert_eq!(policy.max_rate_per_second, None, "no rate bounds by default");
+    assert_eq!(
+        policy.min_rate_per_second, None,
+        "no rate bounds by default"
+    );
+    assert_eq!(
+        policy.max_rate_per_second, None,
+        "no rate bounds by default"
+    );
 }
 
 /// Applying each policy setter (cap / min_duration / stream_contract /

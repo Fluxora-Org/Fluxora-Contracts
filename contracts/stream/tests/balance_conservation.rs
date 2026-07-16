@@ -232,6 +232,7 @@ fn op_sequence() -> impl Strategy<Value = std::vec::Vec<(Op, u64)>> {
 ///
 /// Returns the current timestamp, accrued amount, and withdrawn amount so the
 /// caller can keep a running history for monotonicity checks.
+#[allow(clippy::too_many_arguments)]
 fn assert_invariants(
     ctx: &TestContext,
     stream_id: u64,

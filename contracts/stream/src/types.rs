@@ -447,7 +447,6 @@ pub struct StreamHealthChanged {
     pub seconds_remaining: u64,
 }
 
-
 /// Emitted when the contract admin toggles the global emergency pause flag.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -650,7 +649,7 @@ pub struct CreateStreamParams {
     /// The architectural style of the stream (Linear or CliffOnly).
     pub kind: StreamKind,
     /// Optional structured metadata emitted for indexer consumption.
-    pub metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes> >,
+    pub metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
 }
 
 /// Parameters for creating a payment stream with relative (offset-based) times.
@@ -774,7 +773,6 @@ pub enum DataKey {
     /// Per-stream rotation audit history.
     RotationHistory(u64),
 }
-
 
 /// Type of pause.
 #[contracttype]

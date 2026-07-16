@@ -1,6 +1,8 @@
 extern crate std;
 
-use fluxora_stream::{ContractError, FluxoraStream, FluxoraStreamClient, KeeperCancelled, StreamStatus};
+use fluxora_stream::{
+    ContractError, FluxoraStream, FluxoraStreamClient, KeeperCancelled, StreamStatus,
+};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
@@ -397,7 +399,10 @@ fn test_keeper_cancel_event_payload_partial_accrual() {
     assert_eq!(ev.sender_refund, expected_sender_refund);
 
     // Reconciliation: keeper_fee + recipient_amount + sender_refund == deposit
-    assert_eq!(ev.keeper_fee + ev.recipient_amount + ev.sender_refund, 10_000);
+    assert_eq!(
+        ev.keeper_fee + ev.recipient_amount + ev.sender_refund,
+        10_000
+    );
 }
 
 /// Event payload for a fully-accrued stream: keeper_fee == 0, no sender refund.
@@ -440,9 +445,18 @@ fn test_keeper_cancel_event_matches_actual_transfers() {
 
     let ev = find_keeper_cancelled_event(&ctx);
 
-    assert_eq!(ctx.token.balance(&ctx.recipient) - recipient_before, ev.recipient_amount);
-    assert_eq!(ctx.token.balance(&ctx.sender) - sender_before, ev.sender_refund);
-    assert_eq!(ctx.token.balance(&ctx.keeper) - keeper_before, ev.keeper_fee);
+    assert_eq!(
+        ctx.token.balance(&ctx.recipient) - recipient_before,
+        ev.recipient_amount
+    );
+    assert_eq!(
+        ctx.token.balance(&ctx.sender) - sender_before,
+        ev.sender_refund
+    );
+    assert_eq!(
+        ctx.token.balance(&ctx.keeper) - keeper_before,
+        ev.keeper_fee
+    );
 }
 
 /// Event is emitted after transfers (CEI): status is Cancelled when event fires.

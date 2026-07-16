@@ -1692,3 +1692,26 @@ match res {
 - ✅ Counter-gap semantics (overwrites, exhaustion)
 - ✅ Multi-caller isolation
 
+### upgrade
+
+**Purpose:** Replace the deployed contract WASM with a new version. This is the
+highest-privilege operation in the protocol and should only be used after the
+new WASM has been audited and verified storage-compatible.
+
+**Entry-point:**
+
+```rust
+pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), ContractError>
+```
+
+**Authorization:** Admin only (`admin.require_auth()`).
+
+**Behavior:**
+
+- Calls `env.deployer().update_current_contract_wasm(new_wasm_hash)`, which is
+  atomic — if the new WASM is invalid, the call reverts and no state changes.
+- Bumps instance TTL after the upgrade so the contract does not expire.
+- Emits `ContractUpgraded` (topic `upgraded`) with the new hash, version, and
+  caller, plus a legacy `upgrade` topic event for backward-compatible indexers.
+  See `docs/events.md` for the exact event shapes.
+

@@ -51,11 +51,16 @@ impl Ctx {
         let admin = Address::generate(&env);
         client.init(&token_id, &admin);
 
+        // NOTE: `live_until_ledger` must not exceed the host's max allowed TTL
+        // offset (6_312_000 ledgers under soroban-env-host 21.2.1); the
+        // original `9_999_999` here predates that cap and made every test in
+        // this file fail during `setup()` with `"live_until is greater than
+        // max"` (pre-existing bug, unrelated to CI restoration).
         TokenClient::new(&env, &token_id).approve(
             &sender,
             &contract_id,
             &1_000_000_000_000,
-            &9_999_999,
+            &6_000_000,
         );
 
         // Safety: env lives as long as the returned Ctx; we only hold one Ctx at a time.
@@ -72,19 +77,18 @@ impl Ctx {
     /// Create one minimal stream for `self.recipient` and return its ID.
     fn create_one(&self) -> u64 {
         let now = self.env.ledger().timestamp();
-        self.client
-            .create_stream(
-                &self.sender,
-                &self.recipient,
-                &100,
-                &1,
-                &now,
-                &now,
-                &(now + 100),
-                &0,
-                &None,
-                &StreamKind::Linear,
-            )
+        self.client.create_stream(
+            &self.sender,
+            &self.recipient,
+            &100,
+            &1,
+            &now,
+            &now,
+            &(now + 100),
+            &0,
+            &None,
+            &StreamKind::Linear,
+        )
     }
 
     /// Create `n` streams for `self.recipient`.

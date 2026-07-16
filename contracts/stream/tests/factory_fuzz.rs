@@ -17,6 +17,7 @@ struct Ctx<'a> {
     factory: FluxoraFactoryClient<'a>,
     #[allow(dead_code)]
     stream: FluxoraStreamClient<'a>,
+    #[allow(dead_code)]
     admin: Address,
     sender: Address,
     #[allow(dead_code)]

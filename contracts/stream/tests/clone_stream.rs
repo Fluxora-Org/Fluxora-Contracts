@@ -32,6 +32,7 @@ struct Ctx<'a> {
     env: Env,
     contract_id: Address,
     token_id: Address,
+    #[allow(dead_code)]
     admin: Address,
     sender: Address,
     recipient: Address,
@@ -1269,7 +1270,7 @@ fn clone_new_stream_appears_in_recipient_index() {
 
     let index_after = ctx.client().get_recipient_streams(&ctx.recipient);
     assert_eq!(index_after.len(), 2);
-    assert!(index_after.contains(&new_id));
+    assert!(index_after.contains(new_id));
 }
 
 // ---------------------------------------------------------------------------
@@ -2008,7 +2009,7 @@ fn clone_override_recipient_index_updated_for_new_recipient() {
         "new recipient index must grow by 1"
     );
     assert!(
-        new_recipient_index_after.contains(&new_id),
+        new_recipient_index_after.contains(new_id),
         "cloned stream_id must appear in new recipient's index"
     );
 

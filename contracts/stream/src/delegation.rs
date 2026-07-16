@@ -117,7 +117,9 @@ mod tests {
         let (env, _client, stream_id, _recipient) = setup();
         env.ledger().set_timestamp(100);
 
-        let result = validate_delegation_params(&env, stream_id, 0, 100);
+        let result = env.as_contract(&_client.address, || {
+            validate_delegation_params(&env, stream_id, 0, 100)
+        });
         assert_eq!(result, Ok(()));
     }
 
@@ -127,7 +129,9 @@ mod tests {
         let (env, _client, stream_id, _recipient) = setup();
         env.ledger().set_timestamp(101);
 
-        let result = validate_delegation_params(&env, stream_id, 0, 100);
+        let result = env.as_contract(&_client.address, || {
+            validate_delegation_params(&env, stream_id, 0, 100)
+        });
         assert_eq!(result, Err(ContractError::SignatureDeadlineExpired));
     }
 
@@ -137,7 +141,9 @@ mod tests {
         let (env, _client, stream_id, _recipient) = setup();
         env.ledger().set_timestamp(50);
 
-        let result = validate_delegation_params(&env, stream_id, 0, 100);
+        let result = env.as_contract(&_client.address, || {
+            validate_delegation_params(&env, stream_id, 0, 100)
+        });
         assert_eq!(result, Ok(()));
     }
 
@@ -147,7 +153,9 @@ mod tests {
         let (env, _client, stream_id, _recipient) = setup();
         env.ledger().set_timestamp(50);
 
-        let result = validate_delegation_params(&env, stream_id, 1, 100);
+        let result = env.as_contract(&_client.address, || {
+            validate_delegation_params(&env, stream_id, 1, 100)
+        });
         assert_eq!(result, Err(ContractError::InvalidParams));
     }
 
@@ -157,7 +165,9 @@ mod tests {
         let (env, _client, _stream_id, _recipient) = setup();
         env.ledger().set_timestamp(50);
 
-        let result = validate_delegation_params(&env, 999, 0, 100);
+        let result = env.as_contract(&_client.address, || {
+            validate_delegation_params(&env, 999, 0, 100)
+        });
         assert_eq!(result, Err(ContractError::StreamNotFound));
     }
 
@@ -169,7 +179,9 @@ mod tests {
         let (env, _client, stream_id, _recipient) = setup();
         env.ledger().set_timestamp(1);
 
-        let result = validate_delegation_params(&env, stream_id, 0, 0);
+        let result = env.as_contract(&_client.address, || {
+            validate_delegation_params(&env, stream_id, 0, 0)
+        });
         assert_eq!(result, Err(ContractError::SignatureDeadlineExpired));
     }
 
@@ -179,7 +191,9 @@ mod tests {
         let (env, _client, stream_id, _recipient) = setup();
         env.ledger().set_timestamp(100);
 
-        let result = validate_delegation_params(&env, stream_id, 0, u64::MAX);
+        let result = env.as_contract(&_client.address, || {
+            validate_delegation_params(&env, stream_id, 0, u64::MAX)
+        });
         assert_eq!(result, Ok(()));
     }
 
@@ -193,7 +207,9 @@ mod tests {
         env.ledger().set_timestamp(200);
 
         // deadline=100 is expired, nonce=999 is wrong — deadline error first
-        let result = validate_delegation_params(&env, stream_id, 999, 100);
+        let result = env.as_contract(&_client.address, || {
+            validate_delegation_params(&env, stream_id, 999, 100)
+        });
         assert_eq!(result, Err(ContractError::SignatureDeadlineExpired));
     }
 
@@ -205,7 +221,9 @@ mod tests {
         env.ledger().set_timestamp(50);
 
         // stream_id=999 doesn't exist, nonce=999 is wrong — StreamNotFound first
-        let result = validate_delegation_params(&env, 999, 999, 100);
+        let result = env.as_contract(&_client.address, || {
+            validate_delegation_params(&env, 999, 999, 100)
+        });
         assert_eq!(result, Err(ContractError::StreamNotFound));
     }
 
@@ -217,7 +235,9 @@ mod tests {
         let (env, _client, stream_id, _recipient) = setup();
         env.ledger().set_timestamp(50);
 
-        let result = validate_delegation_params(&env, stream_id, u64::MAX, 100);
+        let result = env.as_contract(&_client.address, || {
+            validate_delegation_params(&env, stream_id, u64::MAX, 100)
+        });
         assert_eq!(result, Err(ContractError::InvalidParams));
     }
 
@@ -277,21 +297,29 @@ mod tests {
 
         // Both recipients have default nonce=0; nonce 0 must pass for both
         assert_eq!(
-            validate_delegation_params(&env, stream_a, 0, 100),
+            env.as_contract(&contract_id, || validate_delegation_params(
+                &env, stream_a, 0, 100
+            )),
             Ok(())
         );
         assert_eq!(
-            validate_delegation_params(&env, _stream_b, 0, 100),
+            env.as_contract(&contract_id, || validate_delegation_params(
+                &env, _stream_b, 0, 100
+            )),
             Ok(())
         );
 
         // Nonce 1 must fail for both (stored is 0)
         assert_eq!(
-            validate_delegation_params(&env, stream_a, 1, 100),
+            env.as_contract(&contract_id, || validate_delegation_params(
+                &env, stream_a, 1, 100
+            )),
             Err(ContractError::InvalidParams)
         );
         assert_eq!(
-            validate_delegation_params(&env, _stream_b, 1, 100),
+            env.as_contract(&contract_id, || validate_delegation_params(
+                &env, _stream_b, 1, 100
+            )),
             Err(ContractError::InvalidParams)
         );
     }
@@ -304,11 +332,15 @@ mod tests {
         env.ledger().set_timestamp(50);
 
         // First call: wrong nonce → fails
-        let result_fail = validate_delegation_params(&env, stream_id, 1, 100);
+        let result_fail = env.as_contract(&_client.address, || {
+            validate_delegation_params(&env, stream_id, 1, 100)
+        });
         assert_eq!(result_fail, Err(ContractError::InvalidParams));
 
         // Second call: correct nonce → must still succeed
-        let result_ok = validate_delegation_params(&env, stream_id, 0, 100);
+        let result_ok = env.as_contract(&_client.address, || {
+            validate_delegation_params(&env, stream_id, 0, 100)
+        });
         assert_eq!(result_ok, Ok(()));
     }
 }

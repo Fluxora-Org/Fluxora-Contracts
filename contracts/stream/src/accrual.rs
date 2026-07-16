@@ -1,5 +1,5 @@
 use crate::ContractError;
-use crate::types::StreamKind;
+use crate::StreamKind;
 
 /// Assert that ledger-backed accrual time has not moved backwards.
 ///
@@ -52,7 +52,7 @@ pub fn calculate_accrued_amount(
             cliff_time,
             end_time,
             deposit_amount,
-            kind: StreamKind::Linear, metadata: None,
+            kind: StreamKind::Linear,
         },
         rate_per_second,
         current_time,
@@ -247,7 +247,8 @@ pub fn calculate_accrued_amount_checkpointed(
         None => state.deposit_amount,
     };
 
-    state.checkpointed_amount
+    state
+        .checkpointed_amount
         .saturating_add(added)
         .min(state.deposit_amount)
         .max(0)

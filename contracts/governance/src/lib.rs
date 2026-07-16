@@ -111,6 +111,8 @@ pub enum GovernanceError {
     ArithmeticOverflow = 18,
     /// Proposal calldata is empty; at least one byte is required.
     CalldataEmpty = 19,
+    /// Proposal calldata failed to decode into a known `CallData` variant.
+    InvalidCalldata = 20,
 }
 
 /// Storage keys for the governance contract.
@@ -179,31 +181,57 @@ fn dispatch_call(env: &Env, target: &Address, calldata: &Bytes) -> Result<(), Go
     match op {
         CallData::Noop => {}
         CallData::StreamSetAdmin(new_admin) => {
-            env.invoke_contract::<()>(target, &Symbol::new(env, "set_admin"), (new_admin,).into_val(env));
+            env.invoke_contract::<()>(
+                target,
+                &Symbol::new(env, "set_admin"),
+                (new_admin,).into_val(env),
+            );
         }
         CallData::StreamSetMaxRate(max_rate) => {
-            env.invoke_contract::<()>(target, &Symbol::new(env, "set_max_rate_per_second"), (max_rate,).into_val(env));
+            env.invoke_contract::<()>(
+                target,
+                &Symbol::new(env, "set_max_rate_per_second"),
+                (max_rate,).into_val(env),
+            );
         }
         CallData::FactorySetAdmin(new_admin) => {
-            env.invoke_contract::<()>(target, &Symbol::new(env, "set_admin"), (new_admin,).into_val(env));
+            env.invoke_contract::<()>(
+                target,
+                &Symbol::new(env, "set_admin"),
+                (new_admin,).into_val(env),
+            );
         }
         CallData::FactorySetCap(max_deposit) => {
-            env.invoke_contract::<()>(target, &Symbol::new(env, "set_cap"), (max_deposit,).into_val(env));
+            env.invoke_contract::<()>(
+                target,
+                &Symbol::new(env, "set_cap"),
+                (max_deposit,).into_val(env),
+            );
         }
         CallData::FactorySetMinDuration(min_duration) => {
-            env.invoke_contract::<()>(target, &Symbol::new(env, "set_min_duration"), (min_duration,).into_val(env));
+            env.invoke_contract::<()>(
+                target,
+                &Symbol::new(env, "set_min_duration"),
+                (min_duration,).into_val(env),
+            );
         }
         CallData::FactorySetAllowlist(recipient, allowed) => {
-            env.invoke_contract::<()>(target, &Symbol::new(env, "set_allowlist"), (recipient, allowed).into_val(env));
+            env.invoke_contract::<()>(
+                target,
+                &Symbol::new(env, "set_allowlist"),
+                (recipient, allowed).into_val(env),
+            );
         }
         CallData::FactorySetStreamContract(new_contract) => {
-            env.invoke_contract::<()>(target, &Symbol::new(env, "set_stream_contract"), (new_contract,).into_val(env));
+            env.invoke_contract::<()>(
+                target,
+                &Symbol::new(env, "set_stream_contract"),
+                (new_contract,).into_val(env),
+            );
         }
     }
     Ok(())
 }
-
-
 
 const INSTANCE_LIFETIME_THRESHOLD: u32 = 17_280;
 const INSTANCE_BUMP_AMOUNT: u32 = 120_960;
@@ -515,7 +543,9 @@ impl FluxoraGovernance {
 
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Signers, &signers);
-        env.storage().instance().set(&DataKey::SignerIndex, &signer_index);
+        env.storage()
+            .instance()
+            .set(&DataKey::SignerIndex, &signer_index);
         env.storage()
             .instance()
             .set(&DataKey::Threshold, &threshold);
@@ -681,7 +711,7 @@ impl FluxoraGovernance {
             return Err(GovernanceError::NotASigner);
         }
 
-        if calldata.len() == 0 {
+        if calldata.is_empty() {
             return Err(GovernanceError::CalldataEmpty);
         }
 
@@ -1355,7 +1385,9 @@ mod tests {
         use soroban_sdk::xdr::ToXdr;
         let ctx = Ctx::setup();
         let noop = CallData::Noop.to_xdr(&ctx.env);
-        let id = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &noop);
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &noop);
         ctx.client.approve(&ctx.signer_a, &id);
         ctx.client.approve(&ctx.signer_b, &id);
         ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
@@ -1363,8 +1395,6 @@ mod tests {
         ctx.client.execute(&executor, &id);
         assert!(ctx.client.get_proposal(&id).executed);
     }
-
-
 
     #[test]
     fn test_quorum_and_timelock_constants() {
@@ -2168,7 +2198,7 @@ mod tests {
         let result = ctx.client.get_proposals_by_id_range(&0, &5);
         assert_eq!(result.len(), 5);
         for i in 0..5u32 {
-            assert_eq!(result.get(i).unwrap().executed, false);
+            assert!(!result.get(i).unwrap().executed);
         }
     }
 
@@ -2229,7 +2259,11 @@ mod tests {
         ctx.client.cancel_proposal(&ctx.signer_a, &id);
 
         let result = ctx.client.get_proposals_by_id_range(&0, &10);
-        assert_eq!(result.len(), 1, "Cancelled proposal must still appear in range");
+        assert_eq!(
+            result.len(),
+            1,
+            "Cancelled proposal must still appear in range"
+        );
         assert!(result.get(0).unwrap().cancelled);
     }
 
@@ -2248,7 +2282,11 @@ mod tests {
         ctx.client.execute(&executor, &id);
 
         let result = ctx.client.get_proposals_by_id_range(&0, &10);
-        assert_eq!(result.len(), 1, "Executed proposal must still appear in range");
+        assert_eq!(
+            result.len(),
+            1,
+            "Executed proposal must still appear in range"
+        );
         assert!(result.get(0).unwrap().executed);
     }
 
@@ -2288,9 +2326,9 @@ mod tests {
     fn test_is_signer_returns_true_for_registered() {
         let ctx = Ctx::setup();
         // All three signers from `Ctx::setup` must be reported as members.
-        assert_eq!(ctx.client.is_signer(&ctx.signer_a), true);
-        assert_eq!(ctx.client.is_signer(&ctx.signer_b), true);
-        assert_eq!(ctx.client.is_signer(&ctx.signer_c), true);
+        assert!(ctx.client.is_signer(&ctx.signer_a));
+        assert!(ctx.client.is_signer(&ctx.signer_b));
+        assert!(ctx.client.is_signer(&ctx.signer_c));
     }
 
     #[test]
@@ -2298,7 +2336,7 @@ mod tests {
         let ctx = Ctx::setup();
         // An address that was never added to the signer set.
         let stranger = Address::generate(&ctx.env);
-        assert_eq!(ctx.client.is_signer(&stranger), false);
+        assert!(!ctx.client.is_signer(&stranger));
     }
 
     #[test]
@@ -2306,21 +2344,21 @@ mod tests {
         // The admin address is distinct from the signer set; the admin is not
         // automatically counted as a co-signer.
         let ctx = Ctx::setup();
-        assert_eq!(ctx.client.is_signer(&ctx.admin), false);
+        assert!(!ctx.client.is_signer(&ctx.admin));
     }
 
     #[test]
     fn test_is_signer_returns_false_after_removal() {
         let ctx = Ctx::setup();
         // Sanity: signer_a starts as a member.
-        assert_eq!(ctx.client.is_signer(&ctx.signer_a), true);
+        assert!(ctx.client.is_signer(&ctx.signer_a));
         // Admin removes signer_a.
         ctx.client.remove_signer(&ctx.signer_a);
         // After removal the index entry is gone; the view must reflect that.
-        assert_eq!(ctx.client.is_signer(&ctx.signer_a), false);
+        assert!(!ctx.client.is_signer(&ctx.signer_a));
         // Other signers are unaffected.
-        assert_eq!(ctx.client.is_signer(&ctx.signer_b), true);
-        assert_eq!(ctx.client.is_signer(&ctx.signer_c), true);
+        assert!(ctx.client.is_signer(&ctx.signer_b));
+        assert!(ctx.client.is_signer(&ctx.signer_c));
     }
 
     #[test]
@@ -2328,11 +2366,11 @@ mod tests {
         let ctx = Ctx::setup();
         let newcomer = Address::generate(&ctx.env);
         // Pre-condition: not a member.
-        assert_eq!(ctx.client.is_signer(&newcomer), false);
+        assert!(!ctx.client.is_signer(&newcomer));
         // Admin adds newcomer.
         ctx.client.add_signer(&newcomer);
         // Post-condition: now a member.
-        assert_eq!(ctx.client.is_signer(&newcomer), true);
+        assert!(ctx.client.is_signer(&newcomer));
     }
 
     #[test]
@@ -2348,8 +2386,8 @@ mod tests {
         // `false`.
         let a1 = Address::generate(&env);
         let a2 = Address::generate(&env);
-        assert_eq!(client.is_signer(&a1), false);
-        assert_eq!(client.is_signer(&a2), false);
+        assert!(!client.is_signer(&a1));
+        assert!(!client.is_signer(&a2));
     }
 
     #[test]
@@ -2368,9 +2406,9 @@ mod tests {
         // "post-init empty set" path directly. The pre-init path returns
         // `false` for every address — the strictest possible membership view.
         let stranger = Address::generate(&env);
-        assert_eq!(client.is_signer(&stranger), false);
+        assert!(!client.is_signer(&stranger));
         // `admin` is also not a signer pre-init.
-        assert_eq!(client.is_signer(&admin), false);
+        assert!(!client.is_signer(&admin));
     }
 
     #[test]
@@ -2383,15 +2421,14 @@ mod tests {
         let on_chain = ctx.client.get_signers();
         for i in 0..on_chain.len() {
             let addr = on_chain.get(i).unwrap();
-            assert_eq!(
+            assert!(
                 ctx.client.is_signer(&addr),
-                true,
                 "is_signer disagreed with get_signers for a listed signer"
             );
         }
         // A stranger that is definitely not in the set.
         let stranger = Address::generate(&ctx.env);
-        assert_eq!(ctx.client.is_signer(&stranger), false);
+        assert!(!ctx.client.is_signer(&stranger));
     }
 
     #[test]
@@ -2405,11 +2442,8 @@ mod tests {
         // and the security note in `docs/governance.md`.
         let ctx = Ctx::setup();
         for _ in 0..32 {
-            assert_eq!(ctx.client.is_signer(&ctx.signer_a), true);
-            assert_eq!(
-                ctx.client.is_signer(&Address::generate(&ctx.env)),
-                false
-            );
+            assert!(ctx.client.is_signer(&ctx.signer_a));
+            assert!(!ctx.client.is_signer(&Address::generate(&ctx.env)));
         }
     }
 
@@ -2423,9 +2457,9 @@ mod tests {
             .client
             .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
         // All three signers are still present.
-        assert_eq!(ctx.client.is_signer(&ctx.signer_a), true);
-        assert_eq!(ctx.client.is_signer(&ctx.signer_b), true);
-        assert_eq!(ctx.client.is_signer(&ctx.signer_c), true);
+        assert!(ctx.client.is_signer(&ctx.signer_a));
+        assert!(ctx.client.is_signer(&ctx.signer_b));
+        assert!(ctx.client.is_signer(&ctx.signer_c));
 
         // Approvals proceed; signer_b approves too.
         ctx.client.approve(&ctx.signer_a, &id);
@@ -2433,13 +2467,13 @@ mod tests {
 
         // Remove signer_c (set goes from 3 to 2, still >= threshold=2).
         ctx.client.remove_signer(&ctx.signer_c);
-        assert_eq!(ctx.client.is_signer(&ctx.signer_c), false);
-        assert_eq!(ctx.client.is_signer(&ctx.signer_a), true);
-        assert_eq!(ctx.client.is_signer(&ctx.signer_b), true);
+        assert!(!ctx.client.is_signer(&ctx.signer_c));
+        assert!(ctx.client.is_signer(&ctx.signer_a));
+        assert!(ctx.client.is_signer(&ctx.signer_b));
 
         // Re-add signer_c (back to 3).
         ctx.client.add_signer(&ctx.signer_c);
-        assert_eq!(ctx.client.is_signer(&ctx.signer_c), true);
+        assert!(ctx.client.is_signer(&ctx.signer_c));
     }
 
     #[test]
@@ -2451,13 +2485,13 @@ mod tests {
         let ctx = Ctx::setup();
         let stranger = Address::generate(&ctx.env);
         // Stranger: is_signer false, propose must fail with NotASigner.
-        assert_eq!(ctx.client.is_signer(&stranger), false);
+        assert!(!ctx.client.is_signer(&stranger));
         let result = ctx
             .client
             .try_propose(&stranger, &ctx.dummy_target(), &ctx.calldata("x"));
         assert_eq!(result, Err(Ok(GovernanceError::NotASigner)));
         // Registered signer: is_signer true, propose must succeed.
-        assert_eq!(ctx.client.is_signer(&ctx.signer_a), true);
+        assert!(ctx.client.is_signer(&ctx.signer_a));
         let id = ctx
             .client
             .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
@@ -2475,11 +2509,11 @@ mod tests {
             .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("x"));
         // Stranger cannot approve.
         let stranger = Address::generate(&ctx.env);
-        assert_eq!(ctx.client.is_signer(&stranger), false);
+        assert!(!ctx.client.is_signer(&stranger));
         let result = ctx.client.try_approve(&stranger, &id);
         assert_eq!(result, Err(Ok(GovernanceError::NotASigner)));
         // Registered signer can approve.
-        assert_eq!(ctx.client.is_signer(&ctx.signer_b), true);
+        assert!(ctx.client.is_signer(&ctx.signer_b));
         ctx.client.approve(&ctx.signer_b, &id);
     }
 
@@ -2493,7 +2527,9 @@ mod tests {
         let ctx = Ctx::setup();
         let empty = Bytes::new(&ctx.env);
         let before = ctx.client.proposal_count();
-        let result = ctx.client.try_propose(&ctx.signer_a, &ctx.dummy_target(), &empty);
+        let result = ctx
+            .client
+            .try_propose(&ctx.signer_a, &ctx.dummy_target(), &empty);
         assert_eq!(result, Err(Ok(GovernanceError::CalldataEmpty)));
         // Proposal ID counter must not have advanced.
         assert_eq!(ctx.client.proposal_count(), before);
@@ -2504,7 +2540,9 @@ mod tests {
     fn test_propose_accepts_one_byte_calldata() {
         let ctx = Ctx::setup();
         let one_byte = Bytes::from_slice(&ctx.env, &[0x01]);
-        let result = ctx.client.try_propose(&ctx.signer_a, &ctx.dummy_target(), &one_byte);
+        let result = ctx
+            .client
+            .try_propose(&ctx.signer_a, &ctx.dummy_target(), &one_byte);
         assert!(result.is_ok());
     }
 
@@ -2518,7 +2556,9 @@ mod tests {
         for _ in 0..MAX_CALLDATA_BYTES {
             calldata.append(&one);
         }
-        let result = ctx.client.try_propose(&ctx.signer_a, &ctx.dummy_target(), &calldata);
+        let result = ctx
+            .client
+            .try_propose(&ctx.signer_a, &ctx.dummy_target(), &calldata);
         assert!(result.is_ok());
     }
 
@@ -2531,7 +2571,9 @@ mod tests {
         for _ in 0..MAX_CALLDATA_BYTES + 1 {
             calldata.append(&one);
         }
-        let result = ctx.client.try_propose(&ctx.signer_a, &ctx.dummy_target(), &calldata);
+        let result = ctx
+            .client
+            .try_propose(&ctx.signer_a, &ctx.dummy_target(), &calldata);
         assert_eq!(result, Err(Ok(GovernanceError::CalldataTooLarge)));
     }
 

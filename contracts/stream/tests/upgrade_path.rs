@@ -81,9 +81,7 @@ fn test_upgrade_unauthorized_fails() {
     let new_hash = ctx.get_wasm_hash();
     let unauthorized = Address::generate(&ctx.env);
 
-    let result = ctx
-        .client
-        .try_upgrade(&unauthorized, &new_hash);
+    let result = ctx.client.try_upgrade(&unauthorized, &new_hash);
 
     assert_eq!(result, Err(Ok(fluxora_stream::ContractError::Unauthorized)));
 }
@@ -134,10 +132,7 @@ fn test_upgrade_emits_event() {
     ctx.client.upgrade(&ctx.admin, &new_hash);
 
     let events = ctx.env.events().all();
-    let upgrade_events: Vec<_> = events
-        .iter()
-        .filter(|e| e.0.topic0 == "upgraded")
-        .collect();
+    let upgrade_events: Vec<_> = events.iter().filter(|e| e.0.topic0 == "upgraded").collect();
 
     assert_eq!(upgrade_events.len(), 1);
 }
@@ -148,7 +143,7 @@ fn test_upgrade_with_governance_as_admin() {
     let ctx = UpgradeTestCtx::setup();
 
     let governance_addr = Address::generate(&ctx.env);
-    
+
     let token = ctx.token.clone();
     ctx.client.init(&token, &governance_addr);
 

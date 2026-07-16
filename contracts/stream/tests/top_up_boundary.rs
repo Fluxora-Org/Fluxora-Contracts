@@ -9,6 +9,7 @@ use soroban_sdk::{
     Address, Env,
 };
 
+#[allow(dead_code)]
 struct TestContext<'a> {
     env: Env,
     client: FluxoraStreamClient<'a>,

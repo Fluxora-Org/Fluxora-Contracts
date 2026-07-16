@@ -93,7 +93,9 @@ impl TestContext {
 
         let contract_id = env.register_contract(None, FluxoraStream);
         let token_admin = Address::generate(&env);
-        let token_id = env.register_stellar_asset_contract_v2(token_admin).address();
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
 
         let admin = Address::generate(&env);
         let sender = Address::generate(&env);
@@ -104,12 +106,7 @@ impl TestContext {
 
         // Mint enough tokens for the sender to fund any test fixture used here.
         StellarAssetClient::new(&env, &token_id).mint(&sender, &INITIAL_MINT);
-        TokenClient::new(&env, &token_id).approve(
-            &sender,
-            &contract_id,
-            &i128::MAX,
-            &1_000_000u32,
-        );
+        TokenClient::new(&env, &token_id).approve(&sender, &contract_id, &i128::MAX, &1_000_000u32);
 
         env.ledger().set_timestamp(0);
 
@@ -194,13 +191,17 @@ fn rate_decrease_after_partial_withdraw_baseline() {
 
     // ---- t = 10 (same second): decrease to 5/s ----
     let sender_balance_before = ctx.sender_balance();
-    ctx.client().decrease_rate_per_second(&id, &CANONICAL_NEW_RATE);
+    ctx.client()
+        .decrease_rate_per_second(&id, &CANONICAL_NEW_RATE);
     let s = ctx.client().get_stream_state(&id);
     assert_eq!(s.rate_per_second, CANONICAL_NEW_RATE);
     assert_eq!(s.checkpointed_at, 10);
     assert_eq!(s.checkpointed_amount, 100);
     assert_eq!(s.deposit_amount, 550); // 100 + 5 * (100 - 10)
-    assert_eq!(s.withdrawn_amount, 100, "prior withdraw must persist (no double-count)");
+    assert_eq!(
+        s.withdrawn_amount, 100,
+        "prior withdraw must persist (no double-count)"
+    );
 
     // Refund: 1000 (old) - 550 (new) = 450
     let sender_balance_after = ctx.sender_balance();
@@ -224,7 +225,10 @@ fn rate_decrease_after_partial_withdraw_baseline() {
     );
 
     // ---- t = 80: slow accrual at 5/s for 70 seconds ----
-    ctx.advance(CANONICAL_SECOND_WITHDRAW_AT, CANONICAL_SECOND_WITHDRAW_AT + 1);
+    ctx.advance(
+        CANONICAL_SECOND_WITHDRAW_AT,
+        CANONICAL_SECOND_WITHDRAW_AT + 1,
+    );
     assert_eq!(ctx.client().calculate_accrued(&id), 450); // 100 + 5 * 70
     assert_eq!(ctx.client().get_withdrawable(&id), 350); // 450 - 100
 
@@ -270,7 +274,8 @@ fn rate_decrease_before_withdraw_yields_same_baseline() {
 
     // t = 10: decrease at the same moment the canonical test begins to withdraw.
     ctx.advance(CANONICAL_DECREASE_AT, CANONICAL_DECREASE_AT + 1);
-    ctx.client().decrease_rate_per_second(&id, &CANONICAL_NEW_RATE);
+    ctx.client()
+        .decrease_rate_per_second(&id, &CANONICAL_NEW_RATE);
 
     // Same-timestamp withdrawable equals checkpointed_amount when no prior
     // withdrawal has occurred.
@@ -279,11 +284,17 @@ fn rate_decrease_before_withdraw_yields_same_baseline() {
     // Advance one extra ledger second so the cooldown gate is open.
     ctx.advance(CANONICAL_DECREASE_AT + 1, CANONICAL_DECREASE_AT + 2);
     let first = ctx.client().withdraw(&id);
-    assert_eq!(first, 105, "withdraw one second past checkpoint = 100 + 5 * 1");
+    assert_eq!(
+        first, 105,
+        "withdraw one second past checkpoint = 100 + 5 * 1"
+    );
     assert_eq!(ctx.client().get_stream_state(&id).withdrawn_amount, 105);
 
     // t = 80: the remaining entitlement is exactly `accrued − withdrawn`.
-    ctx.advance(CANONICAL_SECOND_WITHDRAW_AT, CANONICAL_SECOND_WITHDRAW_AT + 2);
+    ctx.advance(
+        CANONICAL_SECOND_WITHDRAW_AT,
+        CANONICAL_SECOND_WITHDRAW_AT + 2,
+    );
     assert_eq!(ctx.client().calculate_accrued(&id), 450);
     assert_eq!(ctx.client().get_withdrawable(&id), 450 - 105);
     let second = ctx.client().withdraw(&id);
@@ -308,7 +319,8 @@ fn rate_decrease_at_withdrawal_boundary_preserves_state() {
 
     // Both operations stamped at t = 10. Post-decrease state must include
     // the prior withdraw in its withdrawable math.
-    ctx.client().decrease_rate_per_second(&id, &CANONICAL_NEW_RATE);
+    ctx.client()
+        .decrease_rate_per_second(&id, &CANONICAL_NEW_RATE);
     let s = ctx.client().get_stream_state(&id);
     assert_eq!(s.rate_per_second, CANONICAL_NEW_RATE);
     assert_eq!(s.checkpointed_at, 10);
@@ -340,7 +352,8 @@ fn rate_decrease_boundary_full_drain_three_withdrawals() {
     assert_eq!(ctx.client().get_withdrawable(&id), 0);
 
     // t = 10 -> 5/s decrease. After: deposit=550, checkpoint=100, withdrawn=100.
-    ctx.client().decrease_rate_per_second(&id, &CANONICAL_NEW_RATE);
+    ctx.client()
+        .decrease_rate_per_second(&id, &CANONICAL_NEW_RATE);
     assert_eq!(ctx.client().get_withdrawable(&id), 100 - 100);
 
     // Three further withdrawals over the slowed 5/s schedule.
@@ -449,9 +462,13 @@ fn rate_decrease_preserves_withdraw_amount_at_full_drain() {
     assert_eq!(ctx.client().get_withdrawable(&id), 0);
 
     // t = 80: decrease to 5/s. new_deposit = 800 + 5*(100-80) = 900 ≤ 1000 ✓.
-    ctx.client().decrease_rate_per_second(&id, &CANONICAL_NEW_RATE);
+    ctx.client()
+        .decrease_rate_per_second(&id, &CANONICAL_NEW_RATE);
     let s = ctx.client().get_stream_state(&id);
-    assert_eq!(s.withdrawn_amount, 800, "no double-count: prior withdrawn_amount preserved");
+    assert_eq!(
+        s.withdrawn_amount, 800,
+        "no double-count: prior withdrawn_amount preserved"
+    );
     assert_eq!(s.checkpointed_amount, 800);
     assert_eq!(s.deposit_amount, 900);
     assert_eq!(s.rate_per_second, CANONICAL_NEW_RATE);
@@ -506,7 +523,10 @@ fn rate_decrease_rejects_non_strict_decrease() {
 
     // Sanity check: rejected mutations must not mutate the stream.
     let s = ctx.client().get_stream_state(&id);
-    assert_eq!(s.rate_per_second, 10, "stream rate must still be 10 after rejections");
+    assert_eq!(
+        s.rate_per_second, 10,
+        "stream rate must still be 10 after rejections"
+    );
     assert_eq!(s.checkpointed_amount, 0);
     assert_eq!(s.checkpointed_at, 0);
     assert_eq!(s.deposit_amount, 1_000);

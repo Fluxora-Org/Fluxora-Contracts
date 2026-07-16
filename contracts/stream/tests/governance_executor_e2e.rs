@@ -30,7 +30,9 @@ use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Events, Ledger},
     token::StellarAssetClient,
-    vec, xdr::FromXdr, Address, Bytes, Env, Symbol, TryFromVal, Val, Vec as SdkVec,
+    vec,
+    xdr::FromXdr,
+    Address, Bytes, Env, Symbol, TryFromVal, Val, Vec as SdkVec,
 };
 
 // ---------------------------------------------------------------------------
@@ -72,10 +74,7 @@ impl ExecutorStub {
                 stream_client.set_max_rate_per_second(&max_rate);
             }
             _ => {
-                panic!(
-                    "ExecutorStub: unexpected calldata variant {:?}",
-                    op
-                );
+                panic!("ExecutorStub: unexpected calldata variant {:?}", op);
             }
         }
     }
@@ -235,9 +234,9 @@ fn test_e2e_propose_approve_timelock_execute_changes_max_rate() {
     let calldata = ctx.encode_set_max_rate(5_000);
 
     // ---- Propose ----
-    let proposal_id =
-        ctx.gov_client
-            .propose(&ctx.signer_a, &ctx.stream_id, &calldata);
+    let proposal_id = ctx
+        .gov_client
+        .propose(&ctx.signer_a, &ctx.stream_id, &calldata);
     assert_eq!(proposal_id, 0u32);
 
     // Max rate should still be the default before quorum.
@@ -252,31 +251,21 @@ fn test_e2e_propose_approve_timelock_execute_changes_max_rate() {
 
     // ---- Execute before timelock is blocked ----
     let executor = Address::generate(&ctx.env);
-    let early_result = ctx
-        .gov_client
-        .try_execute(&executor, &proposal_id);
-    assert_eq!(
-        early_result,
-        Err(Ok(GovernanceError::TimelockNotElapsed))
-    );
+    let early_result = ctx.gov_client.try_execute(&executor, &proposal_id);
+    assert_eq!(early_result, Err(Ok(GovernanceError::TimelockNotElapsed)));
     assert_eq!(ctx.current_max_rate(), i128::MAX);
 
     // ---- Wait for timelock ----
     ctx.advance_past_timelock();
 
     // ---- Execute (governance dispatches the call to the stream contract) ----
-    ctx.gov_client
-        .execute(&executor, &proposal_id);
+    ctx.gov_client.execute(&executor, &proposal_id);
 
     // ---- Assert stream parameter changed ----
     assert_eq!(ctx.current_max_rate(), 5_000);
 
     // ---- Executor stub reads the event and verifies the flow ----
-    let has_event = ExecutorStub::has_executed_event(
-        &ctx.env,
-        &ctx.governance_id,
-        proposal_id,
-    );
+    let has_event = ExecutorStub::has_executed_event(&ctx.env, &ctx.governance_id, proposal_id);
     assert!(has_event, "ProposalExecuted event must be present");
 
     // The executor stub can also independently dispatch the decoded

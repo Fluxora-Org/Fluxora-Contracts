@@ -432,6 +432,7 @@ fn test_create_streams_batch_allows_all_valid_entries_atomically() {
         end_time: now + 200,
         withdraw_dust_threshold: None,
         memo: Some(Bytes::from_slice(&ctx.env, b"batch-1")),
+        metadata: None,
         kind: StreamKind::CliffOnly,
     });
     streams.push_back(CreateStreamParams {
@@ -443,6 +444,7 @@ fn test_create_streams_batch_allows_all_valid_entries_atomically() {
         end_time: now + 500,
         withdraw_dust_threshold: Some(0),
         memo: Some(Bytes::from_slice(&ctx.env, b"batch-2")),
+        metadata: None,
         kind: StreamKind::Linear,
     });
 
@@ -479,6 +481,7 @@ fn test_create_streams_batch_reverts_if_any_recipient_not_allowlisted() {
         end_time: now + 200,
         withdraw_dust_threshold: None,
         memo: None,
+        metadata: None,
         kind: StreamKind::Linear,
     });
     streams.push_back(CreateStreamParams {
@@ -490,6 +493,7 @@ fn test_create_streams_batch_reverts_if_any_recipient_not_allowlisted() {
         end_time: now + 200,
         withdraw_dust_threshold: None,
         memo: None,
+        metadata: None,
         kind: StreamKind::Linear,
     });
 
@@ -516,6 +520,7 @@ fn test_create_streams_batch_rejects_aggregate_deposit_over_cap() {
         end_time: now + 200,
         withdraw_dust_threshold: None,
         memo: None,
+        metadata: None,
         kind: StreamKind::CliffOnly,
     });
     streams.push_back(CreateStreamParams {
@@ -527,6 +532,7 @@ fn test_create_streams_batch_rejects_aggregate_deposit_over_cap() {
         end_time: now + 500,
         withdraw_dust_threshold: None,
         memo: None,
+        metadata: None,
         kind: StreamKind::Linear,
     });
 
@@ -690,9 +696,18 @@ fn test_create_stream_rejects_end_equal_start() {
     ctx.factory.set_allowlist(&recipient, &true);
     let now = ctx.now();
 
-    let result =
-        ctx.factory
-            .try_create_stream(&ctx.sender, &recipient, &1_000, &1, &now, &now, &now, &0, &fluxora_stream::StreamKind::Linear, &None);
+    let result = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &1_000,
+        &1,
+        &now,
+        &now,
+        &now,
+        &0,
+        &fluxora_stream::StreamKind::Linear,
+        &None,
+    );
     assert_eq!(result, Err(Ok(FactoryError::InvalidTimeRange)));
 }
 
@@ -948,7 +963,7 @@ fn test_create_stream_cliff_only_via_factory() {
         &1_000,
         &0, // rate ignored for CliffOnly
         &now,
-        &end,  // cliff == end
+        &end, // cliff == end
         &end,
         &0,
         &fluxora_stream::StreamKind::CliffOnly,

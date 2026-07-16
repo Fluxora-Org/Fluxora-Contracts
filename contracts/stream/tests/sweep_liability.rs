@@ -99,7 +99,7 @@ fn test_sweep_excess_excludes_liabilities_and_fees() {
     // Attempt to sweep when there's no surplus.
     let treasury = Address::generate(&ctx.env);
     let swept = client.sweep_excess(&treasury);
-    
+
     // Sweep should return 0, protecting the recipient-owed balance
     assert_eq!(swept, 0);
     assert_eq!(ctx.token.balance(&ctx.contract_id), deposit_amount);
@@ -117,31 +117,35 @@ fn test_sweep_excess_excludes_liabilities_and_fees() {
 
     // Cancel the second stream at 50% completion
     ctx.env.ledger().set_timestamp(start_time + 50);
-    
+
     // We cancel the stream as the sender to trigger the fee
     client.cancel_stream(&stream2_id);
-    
+
     // A fee of 0.5% (50 BPS) of the unstreamed amount (5,000) = 25 is generated and sent to the protocol/keeper
     // Actually, sender cancellation doesn't send fee to keeper, it just pays protocol if a protocol fee is set.
     // Wait, cancel_stream pays to whoever the keeper address is in the config? No, keeper_cancel pays to keeper.
     // Let's test the true excess now.
-    
+
     // Cover the case where extra tokens were sent directly to the contract (true excess)
     let true_excess = 5_555;
     StellarAssetClient::new(&ctx.env, &ctx.token_id).mint(&ctx.sender, &true_excess);
-    ctx.token.transfer(&ctx.sender, &ctx.contract_id, &true_excess);
+    ctx.token
+        .transfer(&ctx.sender, &ctx.contract_id, &true_excess);
 
     // Total balance is now deposit_amount + remaining from stream 2 + true_excess
     let pre_sweep_balance = ctx.token.balance(&ctx.contract_id);
-    
+
     // Sweep the excess
     let swept2 = client.sweep_excess(&treasury);
-    
+
     // The swept amount MUST equal the true excess we just injected
     assert_eq!(swept2, true_excess);
-    
+
     // After sweep, the contract balance should be exactly equal to the total liabilities
     // The recipient-owed balance from stream 1 is protected.
     assert_eq!(ctx.token.balance(&treasury), true_excess);
-    assert_eq!(ctx.token.balance(&ctx.contract_id), pre_sweep_balance - true_excess);
+    assert_eq!(
+        ctx.token.balance(&ctx.contract_id),
+        pre_sweep_balance - true_excess
+    );
 }

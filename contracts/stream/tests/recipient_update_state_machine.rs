@@ -125,8 +125,7 @@ impl<'a> Ctx<'a> {
                 sub_invokes: &[],
             },
         }]);
-        self.client()
-            .update_recipient(&stream_id, new_recipient);
+        self.client().update_recipient(&stream_id, new_recipient);
     }
 }
 
@@ -191,7 +190,10 @@ fn acceptance_updates_recipient_indexes() {
 
     let before_old = ctx.client().get_recipient_streams(&ctx.recipient);
     assert!(before_old.contains(stream_id));
-    assert!(!ctx.client().get_recipient_streams(&new_recipient).contains(stream_id));
+    assert!(!ctx
+        .client()
+        .get_recipient_streams(&new_recipient)
+        .contains(stream_id));
 
     ctx.propose_recipient_update(stream_id, &new_recipient);
 
@@ -206,8 +208,14 @@ fn acceptance_updates_recipient_indexes() {
     }]);
     ctx.client().accept_recipient_update(&stream_id);
 
-    assert!(!ctx.client().get_recipient_streams(&ctx.recipient).contains(stream_id));
-    assert!(ctx.client().get_recipient_streams(&new_recipient).contains(stream_id));
+    assert!(!ctx
+        .client()
+        .get_recipient_streams(&ctx.recipient)
+        .contains(stream_id));
+    assert!(ctx
+        .client()
+        .get_recipient_streams(&new_recipient)
+        .contains(stream_id));
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.recipient, new_recipient);
@@ -232,7 +240,10 @@ fn auth_enforced_for_accept_and_cancel() {
             sub_invokes: &[],
         },
     }]);
-    assert!(ctx.client().try_accept_recipient_update(&stream_id).is_err());
+    assert!(ctx
+        .client()
+        .try_accept_recipient_update(&stream_id)
+        .is_err());
 
     ctx.env.mock_auths(&[MockAuth {
         address: &stranger,
@@ -243,7 +254,10 @@ fn auth_enforced_for_accept_and_cancel() {
             sub_invokes: &[],
         },
     }]);
-    assert!(ctx.client().try_cancel_recipient_update(&stream_id).is_err());
+    assert!(ctx
+        .client()
+        .try_cancel_recipient_update(&stream_id)
+        .is_err());
 }
 
 /// A second accept after completion must fail because pending state was cleared.

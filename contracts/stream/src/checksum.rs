@@ -173,6 +173,7 @@ mod tests {
     /// This forward-compatibility guarantee holds **only** because:
     /// 1. `memo` is `Option`-typed (absent in V5 XDR → decoded as `None`).
     /// 2. `memo` is appended as the last field (no positional shift).
+    ///
     /// A non-`Option` append or a mid-struct insertion would break V5 entries.
     #[test]
     fn stream_struct_v5_has_14_fields_v6_has_15() {

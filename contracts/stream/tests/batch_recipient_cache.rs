@@ -35,6 +35,12 @@ impl<'a> Ctx<'a> {
 
         // Mint enough tokens for tests
         stellar_asset.mint(&sender, &1_000_000_000);
+        // The contract pulls deposits via `transfer_from`, which requires an
+        // allowance from `sender`. Missing here previously (pre-existing bug,
+        // predates this work): every `create_streams` call failed with
+        // `ContractError::InsufficientBalance` since `sender` never granted
+        // the contract an allowance.
+        token.approve(&sender, &contract_id, &1_000_000_000, &100_000);
 
         client.init(&token_id, &admin);
 
@@ -57,6 +63,7 @@ impl<'a> Ctx<'a> {
             end_time: now + duration,
             withdraw_dust_threshold: None,
             memo: None,
+            metadata: None,
             kind: fluxora_stream::StreamKind::Linear,
         }
     }

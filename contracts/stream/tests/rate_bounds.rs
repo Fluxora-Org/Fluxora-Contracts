@@ -1,4 +1,4 @@
-use fluxora_stream::{ContractError, FluxoraStream, StreamStatus, StreamKind};
+use fluxora_stream::{ContractError, FluxoraStream, StreamKind, StreamStatus};
 use soroban_sdk::{testutils::Address as _, Address, Env, String};
 
 fn setup() -> (Env, FluxoraStreamClient, Address, Address, Address) {
