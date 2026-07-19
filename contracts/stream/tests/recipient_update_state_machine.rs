@@ -319,7 +319,9 @@ fn same_recipient_proposal_rejected() {
             sub_invokes: &[],
         },
     }]);
-    let result = ctx.client().try_update_recipient(&stream_id, &ctx.recipient);
+    let result = ctx
+        .client()
+        .try_update_recipient(&stream_id, &ctx.recipient);
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 }
 
@@ -343,5 +345,3 @@ fn duplicate_proposal_rejected() {
     let result = ctx.client().try_update_recipient(&stream_id, &ctx.sender);
     assert_eq!(result, Err(Ok(ContractError::InvalidState)));
 }
-
-
