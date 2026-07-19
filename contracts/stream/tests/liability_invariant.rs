@@ -265,13 +265,9 @@ fn check_sweep_invariant(
         0
     };
     assert_eq!(
-        swept,
-        expected_excess,
+        swept, expected_excess,
         "{label} sweep_excess returned {}, expected {} (balance={}, liabilities={})",
-        swept,
-        expected_excess,
-        balance_before,
-        tracked_liabilities,
+        swept, expected_excess, balance_before, tracked_liabilities,
     );
     assert_eq!(
         balance_after,
