@@ -677,6 +677,42 @@ impl FluxoraGovernance {
         Ok(())
     }
 
+    /// Set the approval threshold for governance proposals.
+    ///
+    /// # Parameters
+    /// - `threshold`: Minimum number of approvals required for a proposal to
+    ///   execute. Must satisfy `1 <= threshold <= current_signer_count`.
+    ///
+    /// # Authorization
+    /// - Requires admin signature.
+    ///
+    /// # Errors
+    /// - `InvalidThreshold`: `threshold` is zero or exceeds the current number of signers.
+    pub fn set_threshold(env: Env, threshold: u32) -> Result<(), GovernanceError> {
+        get_admin(&env)?.require_auth();
+        let signers = get_signers(&env)?;
+
+        if threshold == 0 || threshold > signers.len() {
+            return Err(GovernanceError::InvalidThreshold);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Threshold, &threshold);
+        bump_instance(&env);
+
+        // CEI: the new threshold is persisted before the event is emitted.
+        env.events().publish(
+            (symbol_short!("quor_cfg"),),
+            QuorumConfig {
+                threshold,
+                signer_count: signers.len(),
+            },
+        );
+
+        Ok(())
+    }
+
     /// Submit a new governance proposal.
     ///
     /// Any registered co-signer may propose. The proposer does not automatically
@@ -1504,6 +1540,64 @@ mod tests {
         let result = client.try_init(&admin, &vec![&env, signer], &1u32);
         assert!(result.is_ok());
         assert_eq!(client.quorum(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // set_threshold validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_set_threshold_rejects_zero() {
+        let ctx = Ctx::setup(); // 3 signers, threshold=2
+        let result = ctx.client.try_set_threshold(&0u32);
+        assert_eq!(result, Err(Ok(GovernanceError::InvalidThreshold)));
+        // Verify threshold is unchanged.
+        assert_eq!(ctx.client.get_threshold(), 2);
+    }
+
+    #[test]
+    fn test_set_threshold_rejects_above_signer_count() {
+        let ctx = Ctx::setup(); // 3 signers, threshold=2
+        let result = ctx.client.try_set_threshold(&4u32);
+        assert_eq!(result, Err(Ok(GovernanceError::InvalidThreshold)));
+        // Verify threshold is unchanged.
+        assert_eq!(ctx.client.get_threshold(), 2);
+    }
+
+    #[test]
+    fn test_set_threshold_accepts_valid_range() {
+        let ctx = Ctx::setup(); // 3 signers, threshold=2
+                                // Set to 1 (valid: 1 <= 1 <= 3)
+        ctx.client.set_threshold(&1u32);
+        assert_eq!(ctx.client.get_threshold(), 1);
+        // Set to 3 (valid: 1 <= 3 <= 3)
+        ctx.client.set_threshold(&3u32);
+        assert_eq!(ctx.client.get_threshold(), 3);
+        // Set back to 2 (valid: 1 <= 2 <= 3)
+        ctx.client.set_threshold(&2u32);
+        assert_eq!(ctx.client.get_threshold(), 2);
+    }
+
+    #[test]
+    fn test_set_threshold_requires_admin_auth() {
+        let ctx = Ctx::setup();
+        // Don't mock auths - the call should fail without admin signature
+        let result = ctx.client.try_set_threshold(&1u32);
+        assert_eq!(result, Err(Ok(GovernanceError::Unauthorized)));
+        // Verify threshold is unchanged.
+        assert_eq!(ctx.client.get_threshold(), 2);
+    }
+
+    #[test]
+    fn test_set_threshold_after_signer_removal_respects_current_count() {
+        let ctx = Ctx::setup(); // 3 signers, threshold=2
+        ctx.client.remove_signer(&ctx.signer_c); // Now 2 signers
+                                                 // Setting threshold to 2 should succeed (2 <= 2)
+        ctx.client.set_threshold(&2u32);
+        assert_eq!(ctx.client.get_threshold(), 2);
+        // Setting threshold to 3 should fail (3 > 2)
+        let result = ctx.client.try_set_threshold(&3u32);
+        assert_eq!(result, Err(Ok(GovernanceError::InvalidThreshold)));
     }
 
     // -----------------------------------------------------------------------
