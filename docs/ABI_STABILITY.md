@@ -236,6 +236,7 @@ A change is **breaking** if a correctly-written client targeting the current `CO
 | `set_admin` | `new_admin: Address` | `Result<(), ContractError>` | current `admin` |
 | `pause_stream_as_admin` | `stream_id: u64, reason: PauseReason` | `Result<(), ContractError>` | `admin` |
 | `resume_stream_as_admin` | `stream_id: u64` | `Result<(), ContractError>` | `admin` |
+| `bulk_resume_streams_as_admin` | `stream_ids: Vec<u64>` | `Result<(), ContractError>` | `admin` |
 | `cancel_stream_as_admin` | `stream_id: u64` | `Result<(), ContractError>` | `admin` |
 | `set_global_emergency_paused` | `paused: bool` | `()` | `admin` |
 | `set_contract_paused` | `paused: bool` | `Result<(), ContractError>` | `admin` |
