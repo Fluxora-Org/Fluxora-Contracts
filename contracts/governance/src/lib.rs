@@ -1594,7 +1594,10 @@ mod tests {
         // authorized as the admin.  This verifies that set_threshold does
         // enforce admin authorization.
         let result = client.try_set_threshold(&1u32);
-        assert!(result.is_err(), "set_threshold should abort without admin auth");
+        assert!(
+            result.is_err(),
+            "set_threshold should abort without admin auth"
+        );
         // Verify threshold is unchanged.
         assert_eq!(client.get_threshold(), 2);
     }
