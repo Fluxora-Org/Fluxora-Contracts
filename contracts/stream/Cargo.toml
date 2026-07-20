@@ -176,6 +176,11 @@ path = "tests/adversarial_auth.rs"
 test = false
 
 [[test]]
+name = "liability_invariant"
+path = "tests/liability_invariant.rs"
+test = false
+
+[[test]]
 name = "event_snapshots_suite"
 path = "tests/event_snapshots_suite.rs"
 test = false

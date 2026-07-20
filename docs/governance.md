@@ -15,9 +15,22 @@ the minimum number of co-signer approvals required before a proposal can be exec
 invariant `1 <= threshold <= signers.len()` is enforced at:
 
 - `init`: the initial threshold must be between 1 and the initial signer count.
+- `set_threshold`: the new threshold must be between 1 and the current signer count.
 - `remove_signer`: removal is rejected with `QuorumWouldBreak` if it would leave fewer
   signers than the current threshold.
 - `add_signer`: the threshold is unchanged, so adding signers can never violate the invariant.
+
+**Design choice: reject removal vs auto-adjust threshold**
+
+When removing a signer would violate the threshold invariant (i.e., `signers.len() - 1 < threshold`),
+the contract **rejects the removal** with `QuorumWouldBreak` rather than automatically adjusting
+the threshold downward. This design choice was made for the following reasons:
+
+1. **Explicit intent**: Threshold changes should be deliberate, not side effects of signer removal.
+2. **Auditability**: Requiring a separate `set_threshold` call creates a clear audit trail in events.
+3. **Security**: Auto-adjusting could silently lower security requirements; rejection forces admin awareness.
+4. **Reversibility**: If removal is rejected, the admin can first lower the threshold via `set_threshold`,
+   then remove the signer, maintaining full control over the sequence of changes.
 
 When quorum is first reached, the current threshold is snapshotted alongside the timestamp in
 a `QuorumInfo` record. At execution time the proposal is judged against this snapshot, making
@@ -127,6 +140,15 @@ Removes a co-signer from the governance set. The admin must authorize the call.
 - Removing a non-existent signer is a no-op and emits **no** event.
 - Emits `SignerRemoved` with topic `("sgnr_rm",)` only when a registered signer is
   actually removed.
+
+### `set_threshold(threshold)`
+
+Sets the approval threshold for governance proposals. The admin must authorize the call.
+
+- Fails with `InvalidThreshold` unless `1 <= threshold <= current_signer_count`.
+- Emits `QuorumConfig` with topic `("quor_cfg",)` carrying the new threshold and signer count.
+- The threshold change does not affect in-flight proposals, which are judged against the
+  threshold snapshotted when they first reached quorum.
 
 ### `propose(proposer, target, calldata) -> u32`
 
