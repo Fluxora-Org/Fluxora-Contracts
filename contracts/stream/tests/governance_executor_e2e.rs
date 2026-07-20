@@ -14,18 +14,24 @@
 //! 6. Advance past the timelock and execute.
 //! 7. Assert the rate cap has changed to 5_000.
 //! 8. Verify a cancelled/expired proposal yields no executor action.
+//! 9. Governance-triggered `global_resume` and atomic `bulk_resume_streams_as_admin`
+//!    mixed-batch partial-failure (see `docs/global-resume.md`).
 //!
 //! # Security notes
 //!
 //! The parameter change is impossible without the full
-//! quorum + timelock + execute path completing.
+//! quorum + timelock + execute path completing. A malformed bulk-resume batch
+//! cannot bypass governance authorization.
 
 extern crate std;
 
 use fluxora_governance::{
     CallData, FluxoraGovernance, FluxoraGovernanceClient, GovernanceError, ProposalExecuted,
 };
-use fluxora_stream::{DataKey, FluxoraStream, FluxoraStreamClient};
+use fluxora_stream::{
+    ContractError, DataKey, FluxoraStream, FluxoraStreamClient, PauseReason, StreamKind,
+    StreamStatus,
+};
 use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Events, Ledger},
@@ -72,6 +78,14 @@ impl ExecutorStub {
             CallData::StreamSetMaxRate(max_rate) => {
                 let stream_client = FluxoraStreamClient::new(env, &executed.target);
                 stream_client.set_max_rate_per_second(&max_rate);
+            }
+            CallData::StreamGlobalResume => {
+                let stream_client = FluxoraStreamClient::new(env, &executed.target);
+                stream_client.global_resume();
+            }
+            CallData::StreamBulkResumeAsAdmin(stream_ids) => {
+                let stream_client = FluxoraStreamClient::new(env, &executed.target);
+                stream_client.bulk_resume_streams_as_admin(&stream_ids);
             }
             _ => {
                 panic!("ExecutorStub: unexpected calldata variant {:?}", op);
@@ -134,6 +148,8 @@ struct E2EContext {
     signer_a: Address,
     signer_b: Address,
     signer_c: Address,
+    sender: Address,
+    recipient: Address,
     gov_client: FluxoraGovernanceClient<'static>,
     stream_client: FluxoraStreamClient<'static>,
 }
@@ -168,13 +184,16 @@ impl E2EContext {
 
         let stream_client = FluxoraStreamClient::new(&env, &stream_id);
         // The stream's admin is set to the governance contract, so the
-        // governance contract can successfully call set_max_rate_per_second
+        // governance contract can successfully call admin entrypoints
         // via dispatch_call during execute.
         stream_client.init(&token_id, &governance_id);
 
-        // Mint some tokens for potential stream creation
+        // Mint tokens for stream creation
         let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
         token_asset.mint(&sender, &1_000_000_000);
+        let token = soroban_sdk::token::Client::new(&env, &token_id);
+        token.approve(&sender, &stream_id, &i128::MAX, &100_000);
 
         E2EContext {
             env,
@@ -184,6 +203,8 @@ impl E2EContext {
             signer_a,
             signer_b,
             signer_c,
+            sender,
+            recipient,
             gov_client,
             stream_client,
         }
@@ -208,12 +229,21 @@ impl E2EContext {
         CallData::StreamSetMaxRate(rate).to_xdr(&self.env)
     }
 
-    /// Advance the ledger timestamp past the timelock so the proposal with
-    /// `quorum_at` becomes executable.
+    fn encode_global_resume(&self) -> Bytes {
+        use soroban_sdk::xdr::ToXdr;
+        CallData::StreamGlobalResume.to_xdr(&self.env)
+    }
+
+    fn encode_bulk_resume(&self, stream_ids: SdkVec<u64>) -> Bytes {
+        use soroban_sdk::xdr::ToXdr;
+        CallData::StreamBulkResumeAsAdmin(stream_ids).to_xdr(&self.env)
+    }
+
+    /// Advance the ledger timestamp past the timelock relative to *now*
+    /// so the most recently quorum'd proposal becomes executable.
     fn advance_past_timelock(&self) {
-        self.env
-            .ledger()
-            .set_timestamp(BASE_TIMESTAMP + TIMELOCK + 1);
+        let now = self.env.ledger().timestamp();
+        self.env.ledger().set_timestamp(now + TIMELOCK + 1);
     }
 
     /// Advance past max age so the proposal expires.
@@ -221,6 +251,46 @@ impl E2EContext {
         self.env
             .ledger()
             .set_timestamp(BASE_TIMESTAMP + MAX_AGE + 1);
+    }
+
+    /// Clear the pause/resume cooldown (`MIN_PAUSE_INTERVAL_LEDGERS`).
+    fn clear_pause_cooldown(&self) {
+        self.env
+            .ledger()
+            .with_mut(|ledger| ledger.sequence_number += 32);
+    }
+
+    fn create_stream(&self, duration: u64) -> u64 {
+        let now = self.env.ledger().timestamp();
+        // Duration must outlive multiple governance timelock advances used in
+        // these e2e flows; otherwise is_terminal_state treats the stream as
+        // past end_time and resume fails with StreamTerminalState.
+        let duration = duration.max(TIMELOCK * 3);
+        self.stream_client.create_stream(
+            &self.sender,
+            &self.recipient,
+            &(duration as i128),
+            &1,
+            &now,
+            &now,
+            &(now + duration),
+            &0,
+            &None,
+            &StreamKind::Linear,
+        )
+    }
+
+    /// Propose → approve to quorum → wait timelock → execute.
+    fn propose_approve_execute(&self, calldata: &Bytes) -> u32 {
+        let proposal_id = self
+            .gov_client
+            .propose(&self.signer_a, &self.stream_id, calldata);
+        self.gov_client.approve(&self.signer_a, &proposal_id);
+        self.gov_client.approve(&self.signer_b, &proposal_id);
+        self.advance_past_timelock();
+        let executor = Address::generate(&self.env);
+        self.gov_client.execute(&executor, &proposal_id);
+        proposal_id
     }
 }
 
@@ -410,5 +480,225 @@ fn test_e2e_expired_proposal_yields_no_action() {
     assert!(
         !ExecutorStub::has_executed_event(&ctx.env, &ctx.governance_id, proposal_id),
         "No ProposalExecuted event should exist for an expired proposal"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Global resume + mixed-batch bulk resume (atomic partial-failure)
+// ---------------------------------------------------------------------------
+
+/// Governance-triggered `global_resume` clears the emergency pause; a subsequent
+/// mixed `StreamBulkResumeAsAdmin` batch that includes one cancelled stream
+/// fails atomically — no paused stream is resumed.
+#[test]
+fn test_e2e_global_resume_mixed_batch_partial_failure_is_atomic() {
+    let ctx = E2EContext::setup();
+
+    // Create three streams; pause two; cancel one (the non-resumable target).
+    let paused_a = ctx.create_stream(1_000);
+    let cancelled = ctx.create_stream(1_000);
+    let paused_b = ctx.create_stream(1_000);
+
+    ctx.clear_pause_cooldown();
+    ctx.stream_client
+        .pause_stream_as_admin(&paused_a, &PauseReason::Emergency);
+    ctx.clear_pause_cooldown();
+    ctx.stream_client
+        .pause_stream_as_admin(&paused_b, &PauseReason::Emergency);
+    ctx.stream_client.cancel_stream_as_admin(&cancelled);
+
+    assert_eq!(
+        ctx.stream_client.get_stream_state(&paused_a).status,
+        StreamStatus::Paused
+    );
+    assert_eq!(
+        ctx.stream_client.get_stream_state(&paused_b).status,
+        StreamStatus::Paused
+    );
+    assert_eq!(
+        ctx.stream_client.get_stream_state(&cancelled).status,
+        StreamStatus::Cancelled
+    );
+
+    // Incident: engage global emergency pause, then clear it via governance.
+    ctx.stream_client.set_global_emergency_paused(&true);
+    assert!(ctx.stream_client.get_global_emergency_paused());
+
+    let resume_proposal = ctx.propose_approve_execute(&ctx.encode_global_resume());
+    assert!(
+        ExecutorStub::has_executed_event(&ctx.env, &ctx.governance_id, resume_proposal),
+        "global_resume ProposalExecuted event must be present"
+    );
+    assert!(
+        !ctx.stream_client.get_global_emergency_paused(),
+        "global_resume must clear the emergency pause flag"
+    );
+
+    // Mixed batch: two resumable paused streams + one cancelled.
+    ctx.clear_pause_cooldown();
+    let batch = vec![&ctx.env, paused_a, cancelled, paused_b];
+    let calldata = ctx.encode_bulk_resume(batch);
+
+    let proposal_id = ctx
+        .gov_client
+        .propose(&ctx.signer_a, &ctx.stream_id, &calldata);
+    ctx.gov_client.approve(&ctx.signer_a, &proposal_id);
+    ctx.gov_client.approve(&ctx.signer_b, &proposal_id);
+    ctx.advance_past_timelock();
+
+    let executor = Address::generate(&ctx.env);
+    let result = ctx.gov_client.try_execute(&executor, &proposal_id);
+
+    // Dispatch traps on StreamTerminalState → whole execute reverts.
+    assert!(
+        result.is_err(),
+        "mixed batch with a cancelled stream must fail, got {:?}",
+        result
+    );
+
+    // Proposal must not be marked executed (tx reverted including CEI write).
+    let proposal = ctx.gov_client.get_proposal(&proposal_id);
+    assert!(
+        !proposal.executed,
+        "failed bulk resume must not leave proposal executed"
+    );
+    assert!(
+        !ExecutorStub::has_executed_event(&ctx.env, &ctx.governance_id, proposal_id),
+        "no ProposalExecuted event on atomic bulk-resume failure"
+    );
+
+    // Atomic: previously-paused streams stay Paused; cancelled stays Cancelled.
+    assert_eq!(
+        ctx.stream_client.get_stream_state(&paused_a).status,
+        StreamStatus::Paused,
+        "paused_a must not be partially resumed"
+    );
+    assert_eq!(
+        ctx.stream_client.get_stream_state(&paused_b).status,
+        StreamStatus::Paused,
+        "paused_b must not be partially resumed"
+    );
+    assert_eq!(
+        ctx.stream_client.get_stream_state(&cancelled).status,
+        StreamStatus::Cancelled
+    );
+}
+
+/// Even when the bulk-resume batch is malformed (includes a non-resumable
+/// stream), governance quorum + timelock are still required — there is no
+/// auth bypass via a bad batch.
+#[test]
+fn test_e2e_bulk_resume_partial_failure_still_requires_governance_auth() {
+    let ctx = E2EContext::setup();
+
+    let paused = ctx.create_stream(1_000);
+    let cancelled = ctx.create_stream(1_000);
+    ctx.clear_pause_cooldown();
+    ctx.stream_client
+        .pause_stream_as_admin(&paused, &PauseReason::Emergency);
+    ctx.stream_client.cancel_stream_as_admin(&cancelled);
+
+    let batch = vec![&ctx.env, paused, cancelled];
+    let calldata = ctx.encode_bulk_resume(batch);
+
+    let proposal_id = ctx
+        .gov_client
+        .propose(&ctx.signer_a, &ctx.stream_id, &calldata);
+
+    // Pre-quorum: only one approval — execute must be blocked at governance.
+    ctx.gov_client.approve(&ctx.signer_a, &proposal_id);
+    ctx.advance_past_timelock();
+
+    let executor = Address::generate(&ctx.env);
+    let result = ctx.gov_client.try_execute(&executor, &proposal_id);
+    assert_eq!(result, Err(Ok(GovernanceError::QuorumNotReached)));
+
+    assert_eq!(
+        ctx.stream_client.get_stream_state(&paused).status,
+        StreamStatus::Paused
+    );
+    assert_eq!(
+        ctx.stream_client.get_stream_state(&cancelled).status,
+        StreamStatus::Cancelled
+    );
+    assert!(
+        !ExecutorStub::has_executed_event(&ctx.env, &ctx.governance_id, proposal_id),
+        "malformed batch must not bypass quorum"
+    );
+}
+
+/// Happy-path control: after `global_resume`, an all-paused bulk resume via
+/// governance succeeds and activates every target.
+#[test]
+fn test_e2e_global_resume_then_bulk_resume_all_paused_succeeds() {
+    let ctx = E2EContext::setup();
+
+    let a = ctx.create_stream(1_000);
+    let b = ctx.create_stream(1_000);
+    ctx.clear_pause_cooldown();
+    ctx.stream_client
+        .pause_stream_as_admin(&a, &PauseReason::Emergency);
+    ctx.clear_pause_cooldown();
+    ctx.stream_client
+        .pause_stream_as_admin(&b, &PauseReason::Emergency);
+
+    ctx.stream_client.set_global_emergency_paused(&true);
+    ctx.propose_approve_execute(&ctx.encode_global_resume());
+    assert!(!ctx.stream_client.get_global_emergency_paused());
+
+    ctx.clear_pause_cooldown();
+    let batch = vec![&ctx.env, a, b];
+    let proposal_id = ctx.propose_approve_execute(&ctx.encode_bulk_resume(batch));
+
+    assert!(ExecutorStub::has_executed_event(
+        &ctx.env,
+        &ctx.governance_id,
+        proposal_id
+    ));
+    assert_eq!(
+        ctx.stream_client.get_stream_state(&a).status,
+        StreamStatus::Active
+    );
+    assert_eq!(
+        ctx.stream_client.get_stream_state(&b).status,
+        StreamStatus::Active
+    );
+}
+
+/// Direct contract-level assertion of atomic mixed-batch semantics (mirrors
+/// docs/global-resume.md without the governance wrapper).
+#[test]
+fn test_bulk_resume_as_admin_mixed_batch_atomic_no_partial() {
+    let ctx = E2EContext::setup();
+
+    let paused_a = ctx.create_stream(1_000);
+    let cancelled = ctx.create_stream(1_000);
+    let paused_b = ctx.create_stream(1_000);
+
+    ctx.clear_pause_cooldown();
+    ctx.stream_client
+        .pause_stream_as_admin(&paused_a, &PauseReason::Emergency);
+    ctx.clear_pause_cooldown();
+    ctx.stream_client
+        .pause_stream_as_admin(&paused_b, &PauseReason::Emergency);
+    ctx.stream_client.cancel_stream_as_admin(&cancelled);
+
+    ctx.clear_pause_cooldown();
+    let result = ctx
+        .stream_client
+        .try_bulk_resume_streams_as_admin(&vec![&ctx.env, paused_a, cancelled, paused_b]);
+
+    assert_eq!(result, Err(Ok(ContractError::StreamTerminalState)));
+    assert_eq!(
+        ctx.stream_client.get_stream_state(&paused_a).status,
+        StreamStatus::Paused
+    );
+    assert_eq!(
+        ctx.stream_client.get_stream_state(&paused_b).status,
+        StreamStatus::Paused
+    );
+    assert_eq!(
+        ctx.stream_client.get_stream_state(&cancelled).status,
+        StreamStatus::Cancelled
     );
 }

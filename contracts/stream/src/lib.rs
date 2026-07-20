@@ -5715,6 +5715,103 @@ impl FluxoraStream {
         Ok(())
     }
 
+    /// Atomically resume a batch of paused streams as the contract admin.
+    ///
+    /// Post-incident counterpart to per-stream [`Self::resume_stream_as_admin`]: after
+    /// [`Self::global_resume`] clears the emergency pause flag, operators (or governance)
+    /// may need to restore multiple streams that were admin-paused during the incident.
+    /// This entrypoint applies **atomic all-or-nothing** semantics — there is no
+    /// skip-and-report mode.
+    ///
+    /// # Two-phase execution
+    /// 1. **Validation phase**: Every `stream_id` is loaded and verified before any
+    ///    mutation:
+    ///    - Stream must exist (`StreamNotFound`).
+    ///    - Stream must be `Paused` (`StreamNotPaused` / `StreamTerminalState`).
+    ///    - Pause/resume cooldown must have elapsed (`PauseCooldownActive`).
+    ///    - Duplicate IDs are rejected (`DuplicateStreamId`).
+    /// 2. **Execution phase**: Only after all validations pass, each stream is set to
+    ///    `Active` and a `Resumed` event is emitted.
+    ///
+    /// # Authorization
+    /// - Requires authorization from the contract admin (same as `resume_stream_as_admin`).
+    ///
+    /// # Errors
+    /// - Any validation failure aborts the entire batch with **no** stream status
+    ///   changes and **no** `Resumed` events. Callers must remove or fix the offending
+    ///   ID (e.g. an already-cancelled stream) and retry.
+    ///
+    /// # Security
+    /// - Atomic: a mixed batch containing one non-resumable stream cannot leave the
+    ///   protocol in a partially-resumed state after an incident-response attempt.
+    /// - Admin auth is checked **before** validation, so a malformed batch cannot
+    ///   bypass governance / admin authorization.
+    pub fn bulk_resume_streams_as_admin(
+        env: Env,
+        stream_ids: soroban_sdk::Vec<u64>,
+    ) -> Result<(), ContractError> {
+        get_admin(&env)?.require_auth();
+
+        let n = stream_ids.len();
+        if n == 0 {
+            return Ok(());
+        }
+
+        let current_ledger = env.ledger().sequence();
+        let mut streams = soroban_sdk::Vec::<Stream>::new(&env);
+
+        // ── Phase 1: Validate all IDs (no mutations) ─────────────────────────
+        for i in 0..n {
+            let id = stream_ids.get(i).unwrap();
+
+            let mut j = i + 1;
+            while j < n {
+                if stream_ids.get(j).unwrap() == id {
+                    return Err(ContractError::DuplicateStreamId);
+                }
+                j += 1;
+            }
+
+            let stream = load_stream(&env, id)?;
+
+            if stream.status == StreamStatus::Active {
+                return Err(ContractError::StreamNotPaused);
+            }
+            if is_terminal_state(&env, &stream) {
+                return Err(ContractError::StreamTerminalState);
+            }
+            if stream.status != StreamStatus::Paused {
+                return Err(ContractError::StreamNotPaused);
+            }
+
+            let ledgers_since_last_toggle =
+                current_ledger.saturating_sub(stream.last_pause_toggle_ledger);
+            if ledgers_since_last_toggle < MIN_PAUSE_INTERVAL_LEDGERS {
+                return Err(ContractError::PauseCooldownActive);
+            }
+
+            streams.push_back(stream);
+        }
+
+        // ── Phase 2: Apply resumes ───────────────────────────────────────────
+        for i in 0..n {
+            let mut stream = streams.get(i).unwrap();
+            let stream_id = stream.stream_id;
+            let previous_status = stream.status;
+            stream.status = StreamStatus::Active;
+            stream.last_pause_toggle_ledger = current_ledger;
+            save_stream(&env, &stream);
+            reconcile_paused_stream_count(&env, previous_status, stream.status);
+
+            env.events().publish(
+                (symbol_short!("resumed"), stream_id),
+                StreamEvent::Resumed(stream_id),
+            );
+        }
+
+        Ok(())
+    }
+
     /// Set or clear the **global emergency pause** flag (admin only).
     ///
     /// When `paused == true`, routine user-facing mutations revert with

@@ -160,6 +160,14 @@ pub enum CallData {
     StreamSetAdmin(Address),
     /// `set_max_rate_per_second(max_rate)`
     StreamSetMaxRate(i128),
+    /// `global_resume()` — clear the stream contract's global emergency pause.
+    /// Requires the governance contract to be the stream admin.
+    StreamGlobalResume,
+    /// `bulk_resume_streams_as_admin(stream_ids)` — atomically resume a batch of
+    /// paused streams. Requires the governance contract to be the stream admin.
+    /// Mixed batches that include a non-resumable stream (e.g. Cancelled) revert
+    /// the entire dispatch with no partial state changes.
+    StreamBulkResumeAsAdmin(soroban_sdk::Vec<u64>),
 
     // ---- factory contract operations ----
     /// `set_admin(new_admin)`
@@ -192,6 +200,16 @@ fn dispatch_call(env: &Env, target: &Address, calldata: &Bytes) -> Result<(), Go
                 target,
                 &Symbol::new(env, "set_max_rate_per_second"),
                 (max_rate,).into_val(env),
+            );
+        }
+        CallData::StreamGlobalResume => {
+            env.invoke_contract::<()>(target, &Symbol::new(env, "global_resume"), Vec::new(env));
+        }
+        CallData::StreamBulkResumeAsAdmin(stream_ids) => {
+            env.invoke_contract::<()>(
+                target,
+                &Symbol::new(env, "bulk_resume_streams_as_admin"),
+                (stream_ids,).into_val(env),
             );
         }
         CallData::FactorySetAdmin(new_admin) => {
@@ -1430,6 +1448,30 @@ mod tests {
         let executor = Address::generate(&ctx.env);
         ctx.client.execute(&executor, &id);
         assert!(ctx.client.get_proposal(&id).executed);
+    }
+
+    #[test]
+    fn test_stream_global_resume_and_bulk_resume_calldata_xdr_round_trip() {
+        use soroban_sdk::xdr::{FromXdr, ToXdr};
+        let ctx = Ctx::setup();
+
+        let resume = CallData::StreamGlobalResume.to_xdr(&ctx.env);
+        let decoded = CallData::from_xdr(&ctx.env, &resume).expect("StreamGlobalResume XDR");
+        assert!(matches!(decoded, CallData::StreamGlobalResume));
+
+        let ids = vec![&ctx.env, 1u64, 2u64, 9u64];
+        let bulk = CallData::StreamBulkResumeAsAdmin(ids.clone()).to_xdr(&ctx.env);
+        let decoded_bulk =
+            CallData::from_xdr(&ctx.env, &bulk).expect("StreamBulkResumeAsAdmin XDR");
+        match decoded_bulk {
+            CallData::StreamBulkResumeAsAdmin(got) => {
+                assert_eq!(got.len(), 3);
+                assert_eq!(got.get(0).unwrap(), 1);
+                assert_eq!(got.get(1).unwrap(), 2);
+                assert_eq!(got.get(2).unwrap(), 9);
+            }
+            other => panic!("unexpected variant: {:?}", other),
+        }
     }
 
     #[test]
