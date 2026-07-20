@@ -1580,12 +1580,23 @@ mod tests {
 
     #[test]
     fn test_set_threshold_requires_admin_auth() {
-        let ctx = Ctx::setup();
-        // Don't mock auths - the call should fail without admin signature
-        let result = ctx.client.try_set_threshold(&1u32);
-        assert_eq!(result, Err(Ok(GovernanceError::Unauthorized)));
+        let env = Env::default();
+        env.ledger().set_timestamp(1_000_000);
+        let contract_id = env.register_contract(None, FluxoraGovernance);
+        let admin = Address::generate(&env);
+        let signer_a = Address::generate(&env);
+        let signer_b = Address::generate(&env);
+        let signer_c = Address::generate(&env);
+        let client = FluxoraGovernanceClient::new(&env, &contract_id);
+        client.init(&admin, &vec![&env, signer_a, signer_b, signer_c], &2u32);
+        // Without mock_all_auths, require_auth() on the admin address fails at
+        // the host level (HostError / Abort) because the caller has not
+        // authorized as the admin.  This verifies that set_threshold does
+        // enforce admin authorization.
+        let result = client.try_set_threshold(&1u32);
+        assert!(result.is_err(), "set_threshold should abort without admin auth");
         // Verify threshold is unchanged.
-        assert_eq!(ctx.client.get_threshold(), 2);
+        assert_eq!(client.get_threshold(), 2);
     }
 
     #[test]
