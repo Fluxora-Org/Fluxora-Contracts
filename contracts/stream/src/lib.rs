@@ -2833,11 +2833,12 @@ impl FluxoraStream {
         stream.recipient.require_auth();
 
         // Enforce withdrawal frequency limit to prevent excessive ledger I/O.
-        // Invariant: current_ledger >= last_withdraw_ledger (monotonic ledger progression).
+        // Use saturating_sub to prevent underflow from backward timestamp skew
+        // (if current_ledger < last_withdraw_ledger, elapsed=0, withdrawal blocked).
         // First withdrawal (last_withdraw_ledger == 0) always succeeds.
         let current_ledger = env.ledger().sequence();
         if stream.last_withdraw_ledger != 0
-            && current_ledger - stream.last_withdraw_ledger < MIN_WITHDRAW_INTERVAL_LEDGERS
+            && current_ledger.saturating_sub(stream.last_withdraw_ledger) < MIN_WITHDRAW_INTERVAL_LEDGERS
         {
             return Err(ContractError::WithdrawalTooFrequent);
         }
@@ -3255,9 +3256,9 @@ impl FluxoraStream {
             let current_ledger = env.ledger().sequence();
             // Enforce withdrawal frequency limit per stream in the batch.
             // Each stream must respect its own last_withdraw_ledger independently.
-            // Invariant: current_ledger >= last_withdraw_ledger (monotonic ledger progression).
+            // Use saturating_sub to prevent underflow from backward timestamp skew.
             if stream.last_withdraw_ledger != 0
-                && current_ledger - stream.last_withdraw_ledger < MIN_WITHDRAW_INTERVAL_LEDGERS
+                && current_ledger.saturating_sub(stream.last_withdraw_ledger) < MIN_WITHDRAW_INTERVAL_LEDGERS
             {
                 return Err(ContractError::WithdrawalTooFrequent);
             }
@@ -3557,11 +3558,11 @@ impl FluxoraStream {
         let mut stream = load_stream(&env, stream_id)?;
 
         // 3. Enforce withdrawal frequency limit to prevent excessive ledger I/O.
-        // Invariant: current_ledger >= last_withdraw_ledger (monotonic ledger progression).
+        // Use saturating_sub to prevent underflow from backward timestamp skew.
         // First withdrawal (last_withdraw_ledger == 0) always succeeds.
         let current_ledger = env.ledger().sequence();
         if stream.last_withdraw_ledger != 0
-            && current_ledger - stream.last_withdraw_ledger < MIN_WITHDRAW_INTERVAL_LEDGERS
+            && current_ledger.saturating_sub(stream.last_withdraw_ledger) < MIN_WITHDRAW_INTERVAL_LEDGERS
         {
             return Err(ContractError::WithdrawalTooFrequent);
         }

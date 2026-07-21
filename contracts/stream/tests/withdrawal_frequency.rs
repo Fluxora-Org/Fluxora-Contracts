@@ -493,3 +493,79 @@ fn test_multiple_streams_independent_rate_limits() {
     let result = ctx.client.withdraw(&stream_id1);
     assert!(result.is_ok());
 }
+
+// ─── Backward timestamp skew test (issue #940) ─────────────────────────────
+
+/// After a withdrawal records `last_withdraw_ledger`, set the ledger to a
+/// timestamp with a sequence number earlier than the recorded value.
+/// This simulates a validator clock anomaly.
+///
+/// Without `saturating_sub`, `current_ledger - last_withdraw_ledger` would
+/// underflow to a huge u32 value, bypassing the frequency limiter.
+/// With `saturating_sub`, the elapsed time is clamped to 0, and the
+/// withdrawal is correctly rejected.
+#[test]
+fn test_backward_timestamp_skew_cannot_bypass_rate_limit() {
+    use soroban_sdk::testutils::{Ledger, LedgerInfo};
+
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+
+    let token_id = env
+        .register_stellar_asset_contract_v2(Address::generate(&env))
+        .address();
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    client.init(&token_id, &admin);
+
+    // Create a stream: deposit=1000, rate=1/s, no cliff, duration=1000
+    let stream_id = client
+        .create_stream(&sender, &recipient, &1000, &1, &0, &0, &1000, &0, &None)
+        .unwrap();
+
+    // Advance to ledger 100 to accrue tokens
+    let ledger_100 = LedgerInfo {
+        timestamp: 500,
+        protocol_version: 20,
+        sequence_number: 100,
+        network_id: Default::default(),
+        base_reserve: 10,
+        min_temp_entry_ttl: 16,
+        min_persistent_entry_ttl: 16,
+        max_entry_ttl: 6312000,
+    };
+    env.ledger().set(ledger_100);
+
+    // First withdrawal — succeeds, records last_withdraw_ledger = 100
+    let result = client.withdraw(&stream_id).unwrap();
+    assert!(result > 0, "first withdrawal should accrue tokens");
+
+    // ── ATTACK: set ledger backward ──
+    // Simulate a validator clock anomaly: sequence number jumps BACK
+    // from 100 to 50 (earlier than the recorded last_withdraw_ledger).
+    let ledger_backward = LedgerInfo {
+        timestamp: 250, // earlier timestamp too
+        protocol_version: 20,
+        sequence_number: 50, // < last_withdraw_ledger (100)
+        network_id: Default::default(),
+        base_reserve: 10,
+        min_temp_entry_ttl: 16,
+        min_persistent_entry_ttl: 16,
+        max_entry_ttl: 6312000,
+    };
+    env.ledger().set(ledger_backward);
+
+    // With `saturating_sub`: elapsed = 50 - 100 = 0 (clamped)
+    // 0 < MIN_WITHDRAW_INTERVAL_LEDGERS → withdrawal REJECTED
+    // Without the fix: 50 - 100 would underflow to 4294967246,
+    // which is >> MIN_WITHDRAW_INTERVAL_LEDGERS → withdrawal ALLOWED (vuln)
+    let result = client.try_withdraw(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::WithdrawalTooFrequent)),
+        "backward timestamp skew must NOT bypass rate limit");
+}
