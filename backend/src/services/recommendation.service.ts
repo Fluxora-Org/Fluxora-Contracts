@@ -162,7 +162,21 @@ export class RecommendationService {
     event.sessionCount = null;
     event.rankPosition = null;
 
-    await this.eventRepository.save(event);
+    try {
+      await this.eventRepository.save(event);
+    } catch (error: any) {
+      if (
+        error?.code === '23505' ||
+        error?.driverError?.code === '23505' ||
+        error?.message?.includes('duplicate key') ||
+        error?.message?.includes('UNIQUE constraint failed') ||
+        error?.message?.includes('unique constraint')
+      ) {
+        logger.debug('Duplicate dismissal ignored', { learnerId, mentorId });
+        return;
+      }
+      throw error;
+    }
 
     // Invalidate cache
     const cacheKey = `recommendations:${learnerId}`;
