@@ -17,6 +17,7 @@ fluxora_stream = { path = "../stream" }
 [dev-dependencies]
 soroban-sdk = { version = "21.7.7", features = ["testutils"] }
 fluxora_stream = { path = "../stream", features = ["testutils"] }
+soroban-env-host = "=21.2.1"
 
 # ---------------------------------------------------------------------------
 # Known-broken integration tests (pre-existing, unrelated to CI restoration)
