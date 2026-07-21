@@ -15,17 +15,17 @@ pub const MAX_PAGE_SIZE: u32 = 100;
 
 /// Instance TTL threshold (ledgers). Below this value the entry will be extended.
 /// Mirrors governance contract to keep TTL semantics consistent across contracts.
-const INSTANCE_LIFETIME_THRESHOLD: u32 = 17_280;
+pub const INSTANCE_LIFETIME_THRESHOLD: u32 = 17_280;
 
 /// Instance TTL bump target (ledgers). ~60 days at 5-second ledger close.
 /// Mirrors governance contract to keep TTL semantics consistent across contracts.
-const INSTANCE_BUMP_AMOUNT: u32 = 120_960;
+pub const INSTANCE_BUMP_AMOUNT: u32 = 120_960;
 
 /// Persistent TTL threshold (ledgers). Below this value the entry will be extended.
-const PERSISTENT_LIFETIME_THRESHOLD: u32 = 17_280;
+pub const PERSISTENT_LIFETIME_THRESHOLD: u32 = 17_280;
 
 /// Persistent TTL bump target (ledgers). ~60 days at 5-second ledger close.
-const PERSISTENT_BUMP_AMOUNT: u32 = 120_960;
+pub const PERSISTENT_BUMP_AMOUNT: u32 = 120_960;
 
 /// Maximum accepted value for the factory `min_duration` policy, in seconds.
 ///
