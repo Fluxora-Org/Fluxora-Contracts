@@ -526,7 +526,15 @@ fn test_backward_timestamp_skew_cannot_bypass_rate_limit() {
 
     // Create a stream: deposit=1000, rate=1/s, no cliff, duration=1000
     let stream_id = client.create_stream(
-        &sender, &recipient, &1000, &1, &0, &0, &1000, &0, &None,
+        &sender,
+        &recipient,
+        &1000,
+        &1,
+        &0,
+        &0,
+        &1000,
+        &0,
+        &None,
         &StreamKind::Linear,
     );
     assert!(stream_id > 0, "stream should be created");
@@ -567,6 +575,9 @@ fn test_backward_timestamp_skew_cannot_bypass_rate_limit() {
     // Without the fix: 50 - 100 would underflow to 4294967246,
     // which is >> MIN_WITHDRAW_INTERVAL_LEDGERS → withdrawal ALLOWED (vuln)
     let result = client.try_withdraw(&stream_id);
-    assert_eq!(result, Err(Ok(ContractError::WithdrawalTooFrequent)),
-        "backward timestamp skew must NOT bypass rate limit");
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::WithdrawalTooFrequent)),
+        "backward timestamp skew must NOT bypass rate limit"
+    );
 }

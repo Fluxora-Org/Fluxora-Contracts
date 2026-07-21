@@ -2838,7 +2838,8 @@ impl FluxoraStream {
         // First withdrawal (last_withdraw_ledger == 0) always succeeds.
         let current_ledger = env.ledger().sequence();
         if stream.last_withdraw_ledger != 0
-            && current_ledger.saturating_sub(stream.last_withdraw_ledger) < MIN_WITHDRAW_INTERVAL_LEDGERS
+            && current_ledger.saturating_sub(stream.last_withdraw_ledger)
+                < MIN_WITHDRAW_INTERVAL_LEDGERS
         {
             return Err(ContractError::WithdrawalTooFrequent);
         }
@@ -3258,7 +3259,8 @@ impl FluxoraStream {
             // Each stream must respect its own last_withdraw_ledger independently.
             // Use saturating_sub to prevent underflow from backward timestamp skew.
             if stream.last_withdraw_ledger != 0
-                && current_ledger.saturating_sub(stream.last_withdraw_ledger) < MIN_WITHDRAW_INTERVAL_LEDGERS
+                && current_ledger.saturating_sub(stream.last_withdraw_ledger)
+                    < MIN_WITHDRAW_INTERVAL_LEDGERS
             {
                 return Err(ContractError::WithdrawalTooFrequent);
             }
@@ -3562,7 +3564,8 @@ impl FluxoraStream {
         // First withdrawal (last_withdraw_ledger == 0) always succeeds.
         let current_ledger = env.ledger().sequence();
         if stream.last_withdraw_ledger != 0
-            && current_ledger.saturating_sub(stream.last_withdraw_ledger) < MIN_WITHDRAW_INTERVAL_LEDGERS
+            && current_ledger.saturating_sub(stream.last_withdraw_ledger)
+                < MIN_WITHDRAW_INTERVAL_LEDGERS
         {
             return Err(ContractError::WithdrawalTooFrequent);
         }
