@@ -1,7 +1,7 @@
 #![cfg(test)]
 extern crate std;
 
-use fluxora_stream::{ContractError, FluxoraStream, FluxoraStreamClient};
+use fluxora_stream::{ContractError, FluxoraStream, FluxoraStreamClient, StreamKind};
 use soroban_sdk::{
     testutils::{Address as _, Ledger, LedgerInfo},
     token::Client as TokenClient,
@@ -525,10 +525,11 @@ fn test_backward_timestamp_skew_cannot_bypass_rate_limit() {
     client.init(&token_id, &admin);
 
     // Create a stream: deposit=1000, rate=1/s, no cliff, duration=1000
-    let stream_id = client
-        .create_stream(&sender, &recipient, &1000, &1, &0, &0, &1000, &0, &None)
-        .unwrap();
-
+    let stream_id = client.create_stream(
+        &sender, &recipient, &1000, &1, &0, &0, &1000, &0, &None,
+        &StreamKind::Linear,
+    );
+    assert!(stream_id > 0, "stream should be created");
     // Advance to ledger 100 to accrue tokens
     let ledger_100 = LedgerInfo {
         timestamp: 500,
@@ -543,7 +544,7 @@ fn test_backward_timestamp_skew_cannot_bypass_rate_limit() {
     env.ledger().set(ledger_100);
 
     // First withdrawal — succeeds, records last_withdraw_ledger = 100
-    let result = client.withdraw(&stream_id).unwrap();
+    let result = client.withdraw(&stream_id);
     assert!(result > 0, "first withdrawal should accrue tokens");
 
     // ── ATTACK: set ledger backward ──
