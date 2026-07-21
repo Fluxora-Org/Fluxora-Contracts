@@ -1,3 +1,4 @@
+// See docs/gas.md for the baseline update process and review bar.
 use fluxora_governance::{FluxoraGovernance, FluxoraGovernanceClient, GovernanceError};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},

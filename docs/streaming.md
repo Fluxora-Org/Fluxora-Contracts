@@ -382,6 +382,11 @@ added = elapsed_seconds * rate_per_second         // on overflow → deposit_amo
 return min(checkpointed_amount + added, deposit_amount).max(0)
 ```
 
+### Units, Precision, and Rounding
+- **Time limits:** All time evaluations (like `elapsed_seconds`) are computed in whole **seconds**.
+- **Rate and Amount:** `rate_per_second` is expressed in **base token units per second** (integer), and amounts are in **base token units**.
+- **Rounding Direction:** The contract uses exact integer math. There are no fractional seconds or fractional tokens. Any division resulting in precision loss must occur *prior* to contract interactions (e.g., frontend converting a monthly rate to integer tokens-per-second, essentially flooring it). Internally, exact multiplication provides an integer step-function corresponding to second boundaries.
+
 ### Cliff-Only Streams
 ```text
 if current_time < cliff_time  → return 0
