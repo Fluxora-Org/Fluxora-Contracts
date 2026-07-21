@@ -3,8 +3,14 @@
 //! Each function wraps a single `env.events().publish(...)` call, keeping
 //! the `symbol_short!` topic definitions co-located with the payload struct.
 //! This makes ABI review trivial: every event topic is in one file.
+//!
+//! Some helpers here are not yet wired up as the sole call site for their
+//! event (several entry points in `lib.rs` still publish inline pending a
+//! follow-up refactor), so this module is `#[allow(dead_code)]` like `storage.rs`.
 
-use crate::types::*;
+#![allow(dead_code)]
+
+use crate::*;
 use soroban_sdk::{symbol_short, Env};
 
 /// Emit the `created` event when a new stream is persisted.

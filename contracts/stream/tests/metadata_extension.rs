@@ -20,7 +20,7 @@ use fluxora_stream::{
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    vec, Address, Bytes, Env, Map,
+    Address, Bytes, Env, Map,
 };
 
 // ---------------------------------------------------------------------------
@@ -448,7 +448,7 @@ fn test_create_streams_batch_each_entry_stores_own_metadata() {
     let mut meta_b: Map<Bytes, Bytes> = Map::new(&ctx.env);
     meta_b.set(ctx.make_key("stream"), ctx.make_val("B"));
 
-    let params = vec![
+    let params = soroban_sdk::vec![
         &ctx.env,
         CreateStreamParams {
             recipient: recipient_a.clone(),
@@ -501,7 +501,7 @@ fn test_create_streams_batch_none_metadata_stored_as_none() {
     let ctx = Ctx::setup();
     let recipient = Address::generate(&ctx.env);
 
-    let params = vec![
+    let params = soroban_sdk::vec![
         &ctx.env,
         CreateStreamParams {
             recipient: recipient.clone(),
@@ -536,7 +536,7 @@ fn test_create_streams_relative_with_metadata() {
     let mut meta: Map<Bytes, Bytes> = Map::new(&ctx.env);
     meta.set(ctx.make_key("src"), ctx.make_val("relative"));
 
-    let params = vec![
+    let params = soroban_sdk::vec![
         &ctx.env,
         CreateStreamRelativeParams {
             recipient: recipient.clone(),
@@ -581,7 +581,7 @@ fn test_create_streams_partial_invalid_metadata_fails_entry() {
     let mut bad_meta: Map<Bytes, Bytes> = Map::new(&ctx.env);
     bad_meta.set(oversized_key, ctx.make_val("v"));
 
-    let params = vec![
+    let params = soroban_sdk::vec![
         &ctx.env,
         CreateStreamParams {
             recipient: recipient.clone(),

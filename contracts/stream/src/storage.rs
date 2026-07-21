@@ -14,8 +14,7 @@
 
 use crate::accrual;
 use crate::*;
-use crate::types::*;
-use soroban_sdk::{symbol_short, token, Address, Env, Map};
+use soroban_sdk::{token, Address, Env, Map};
 
 /// Minimum remaining TTL (in ledgers) before we bump.  ~1 day at 5 s/ledger.
 const INSTANCE_LIFETIME_THRESHOLD: u32 = 17_280;
@@ -335,7 +334,7 @@ pub(crate) fn add_stream_to_recipient_index(
     env: &Env,
     recipient: &Address,
     stream_id: u64,
-    end_time: Option<u64>,
+    _end_time: Option<u64>,
 ) {
     let mut streams = load_recipient_streams(env, recipient);
 
@@ -522,10 +521,7 @@ pub(crate) fn remove_template_id_for_owner(
 /// Load the current nonce for a recipient (0 if never used).
 pub(crate) fn load_delegated_nonce(env: &Env, recipient: &Address) -> u64 {
     let key = DataKey::DelegatedWithdrawNonce(recipient.clone());
-    env.storage()
-        .persistent()
-        .get(&key)
-        .unwrap_or(0u64)
+    env.storage().persistent().get(&key).unwrap_or(0u64)
 }
 
 pub(crate) fn increment_delegated_nonce(env: &Env, recipient: &Address) {
@@ -570,8 +566,7 @@ pub(crate) fn maybe_emit_health_changed(
     was_underfunded: bool,
     now: u64,
 ) {
-    let (is_underfunded, remaining_balance, seconds_remaining) =
-        compute_stream_health(stream, now);
+    let (is_underfunded, remaining_balance, seconds_remaining) = compute_stream_health(stream, now);
     if is_underfunded != was_underfunded {
         env.events().publish(
             (soroban_sdk::symbol_short!("hlth_chg"), stream.stream_id),
@@ -593,7 +588,11 @@ pub(crate) fn load_config(env: &Env) -> Config {
         .expect("contract not initialised")
 }
 
-pub(crate) fn save_rotation_history(env: &Env, stream_id: u64, history: &soroban_sdk::Vec<RotationEntry>) {
+pub(crate) fn save_rotation_history(
+    env: &Env,
+    stream_id: u64,
+    history: &soroban_sdk::Vec<RotationEntry>,
+) {
     let key = DataKey::RotationHistory(stream_id);
     env.storage().persistent().set(&key, history);
     env.storage().persistent().extend_ttl(

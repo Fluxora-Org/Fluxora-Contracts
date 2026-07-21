@@ -6,19 +6,19 @@ extern crate std;
 
 use fluxora_stream::{ContractError, FluxoraStream, FluxoraStreamClient};
 use soroban_sdk::{
-    testutils::{Address as _, MockAuth, MockAuthInvoke},
+    testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke},
     token::{Client as TokenClient, StellarAssetClient},
     Address, Env, IntoVal,
 };
 
-struct Ctx<'a> {
+struct Ctx {
     env: Env,
     contract_id: Address,
     sender: Address,
     recipient: Address,
 }
 
-impl<'a> Ctx<'a> {
+impl Ctx {
     fn setup() -> Self {
         let env = Env::default();
 
@@ -97,6 +97,7 @@ impl<'a> Ctx<'a> {
                     1000u64,
                     0i128,
                     Option::<soroban_sdk::Bytes>::None,
+                    fluxora_stream::StreamKind::Linear,
                 )
                     .into_val(&self.env),
                 sub_invokes: &[],
@@ -112,6 +113,7 @@ impl<'a> Ctx<'a> {
             &1000u64,
             &0i128,
             &None,
+            &fluxora_stream::StreamKind::Linear,
         )
     }
 
@@ -125,8 +127,7 @@ impl<'a> Ctx<'a> {
                 sub_invokes: &[],
             },
         }]);
-        self.client()
-            .update_recipient(&stream_id, new_recipient);
+        self.client().update_recipient(&stream_id, new_recipient);
     }
 }
 
@@ -191,7 +192,10 @@ fn acceptance_updates_recipient_indexes() {
 
     let before_old = ctx.client().get_recipient_streams(&ctx.recipient);
     assert!(before_old.contains(stream_id));
-    assert!(!ctx.client().get_recipient_streams(&new_recipient).contains(stream_id));
+    assert!(!ctx
+        .client()
+        .get_recipient_streams(&new_recipient)
+        .contains(stream_id));
 
     ctx.propose_recipient_update(stream_id, &new_recipient);
 
@@ -206,8 +210,14 @@ fn acceptance_updates_recipient_indexes() {
     }]);
     ctx.client().accept_recipient_update(&stream_id);
 
-    assert!(!ctx.client().get_recipient_streams(&ctx.recipient).contains(stream_id));
-    assert!(ctx.client().get_recipient_streams(&new_recipient).contains(stream_id));
+    assert!(!ctx
+        .client()
+        .get_recipient_streams(&ctx.recipient)
+        .contains(stream_id));
+    assert!(ctx
+        .client()
+        .get_recipient_streams(&new_recipient)
+        .contains(stream_id));
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.recipient, new_recipient);
@@ -232,7 +242,10 @@ fn auth_enforced_for_accept_and_cancel() {
             sub_invokes: &[],
         },
     }]);
-    assert!(ctx.client().try_accept_recipient_update(&stream_id).is_err());
+    assert!(ctx
+        .client()
+        .try_accept_recipient_update(&stream_id)
+        .is_err());
 
     ctx.env.mock_auths(&[MockAuth {
         address: &stranger,
@@ -243,7 +256,10 @@ fn auth_enforced_for_accept_and_cancel() {
             sub_invokes: &[],
         },
     }]);
-    assert!(ctx.client().try_cancel_recipient_update(&stream_id).is_err());
+    assert!(ctx
+        .client()
+        .try_cancel_recipient_update(&stream_id)
+        .is_err());
 }
 
 /// A second accept after completion must fail because pending state was cleared.
@@ -286,5 +302,46 @@ fn cancel_without_pending_errors() {
         },
     }]);
     let result = ctx.client().try_cancel_recipient_update(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::InvalidState)));
+}
+
+/// Proposing the same recipient must fail with InvalidParams.
+#[test]
+fn same_recipient_proposal_rejected() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream();
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "update_recipient",
+            args: (stream_id, ctx.recipient.clone()).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+    let result = ctx
+        .client()
+        .try_update_recipient(&stream_id, &ctx.recipient);
+    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
+}
+
+/// Duplicate proposal while one is pending must fail with InvalidState.
+#[test]
+fn duplicate_proposal_rejected() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream();
+    // First proposal succeeds (sender is different from recipient)
+    ctx.propose_recipient_update(stream_id, &ctx.sender);
+    // Second proposal fails (pending exists)
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "update_recipient",
+            args: (stream_id, ctx.sender.clone()).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+    let result = ctx.client().try_update_recipient(&stream_id, &ctx.sender);
     assert_eq!(result, Err(Ok(ContractError::InvalidState)));
 }

@@ -41,7 +41,7 @@ impl<'a> Ctx<'a> {
         let token_id = env
             .register_stellar_asset_contract_v2(token_admin.clone())
             .address();
-        let token = TokenClient::new(&env, &token_id);
+        let _token = TokenClient::new(&env, &token_id);
         let stellar_asset = StellarAssetClient::new(&env, &token_id);
 
         let admin = Address::generate(&env);
@@ -87,6 +87,7 @@ fn test_create_streams_batch_paused_enforcement() {
         end_time: now + STREAM_DURATION,
         withdraw_dust_threshold: Some(0),
         memo: None,
+        metadata: None,
         kind: fluxora_stream::StreamKind::Linear,
     });
 
@@ -128,6 +129,7 @@ fn test_create_streams_succeeds_when_factory_not_paused() {
         end_time: now + STREAM_DURATION,
         withdraw_dust_threshold: Some(0),
         memo: None,
+        metadata: None,
         kind: fluxora_stream::StreamKind::Linear,
     });
 

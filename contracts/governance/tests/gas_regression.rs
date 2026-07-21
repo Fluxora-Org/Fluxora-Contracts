@@ -1,15 +1,8 @@
-use fluxora_governance::{FluxoraGovernance, FluxoraGovernanceClient};
-use soroban_sdk::{
-    testutils::{Address as _, Ledger},
-    Address, Bytes, Env, Vec,
-};
-// contracts/governance/tests/gas_regression.rs
-#![cfg(test)]
-
+// See docs/gas.md for the baseline update process and review bar.
 use fluxora_governance::{FluxoraGovernance, FluxoraGovernanceClient, GovernanceError};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    vec, Address, Bytes, Env, Vec,
+    Address, Bytes, Env, Vec,
 };
 
 // These come straight from the governance contract
@@ -40,6 +33,7 @@ struct GovGasCtx<'a> {
     client: FluxoraGovernanceClient<'a>,
     signers: Vec<Address>,
     target: Address,
+    #[allow(dead_code)]
     admin: Address,
 }
 
@@ -76,7 +70,7 @@ impl<'a> GovGasCtx<'a> {
 
     fn create_proposal(&self, calldata_size: usize) -> u32 {
         self.client.propose(
-            &self.signers[0],
+            &self.signers.get(0).unwrap(),
             &self.target,
             &self.calldata(calldata_size),
         )
@@ -113,18 +107,6 @@ where
 // ============================================================================
 
 #[test]
-fn test_governance_gas_propose() {
-    let sizes = [1u32, 5, 10, 20];
-    for &size in &sizes {
-        let threshold = if size == 1 { 1 } else { size };
-        let ctx = GovGasCtx::setup(size, threshold);
-        let (cpu, mem) = measure_budget(&ctx, |ctx| {
-            ctx.client.propose(
-                &ctx.signers.get(0).unwrap(),
-                &ctx.target,
-                &ctx.calldata("proposal"),
-            );
-        });
 fn test_propose_budget_snapshots() {
     // We want to see how propose scales with both signer count and calldata size.
     // The calldata storage should be the main cost driver here.
@@ -137,19 +119,29 @@ fn test_propose_budget_snapshots() {
             let ctx = GovGasCtx::setup(signer_count, threshold);
 
             let (cpu, mem) = measure_budget(&ctx, |ctx| {
-                ctx.client.propose(&ctx.signers[0], &ctx.target, &ctx.calldata(calldata_size));
+                ctx.client.propose(
+                    &ctx.signers.get(0).unwrap(),
+                    &ctx.target,
+                    &ctx.calldata(calldata_size),
+                );
             });
 
             // If these fail, we need to either optimize the contract or update the thresholds
             assert!(
                 cpu <= MAX_CPU_PROPOSE,
                 "Propose CPU exceeded threshold: {} > {} (signers={}, calldata={}B)",
-                cpu, MAX_CPU_PROPOSE, signer_count, calldata_size
+                cpu,
+                MAX_CPU_PROPOSE,
+                signer_count,
+                calldata_size
             );
             assert!(
                 mem <= MAX_MEM_PROPOSE,
                 "Propose memory exceeded threshold: {} > {} (signers={}, calldata={}B)",
-                mem, MAX_MEM_PROPOSE, signer_count, calldata_size
+                mem,
+                MAX_MEM_PROPOSE,
+                signer_count,
+                calldata_size
             );
 
             // These get collected and used to update the documentation
@@ -162,17 +154,6 @@ fn test_propose_budget_snapshots() {
 }
 
 #[test]
-fn test_governance_gas_approve_nonquorum() {
-    let sizes = [5u32, 10, 20];
-    for &size in &sizes {
-        let threshold = size;
-        let ctx = GovGasCtx::setup(size, threshold);
-        let proposal_id = ctx.client.propose(
-            &ctx.signers.get(0).unwrap(),
-            &ctx.target,
-            &ctx.calldata("proposal"),
-        );
-
 fn test_propose_rejects_large_calldata() {
     // Make sure we can't create proposals with more than 4KB of calldata
     let ctx = GovGasCtx::setup(1, 1);
@@ -180,7 +161,7 @@ fn test_propose_rejects_large_calldata() {
 
     let result = ctx
         .client
-        .try_propose(&ctx.signers[0], &ctx.target, &large_calldata);
+        .try_propose(&ctx.signers.get(0).unwrap(), &ctx.target, &large_calldata);
 
     assert_eq!(result, Err(Ok(GovernanceError::CalldataTooLarge)));
 }
@@ -207,11 +188,12 @@ fn test_approve_budget_snapshots() {
 
         // Approve everyone except the last one first
         for i in 0..(signer_count - 1) {
-            ctx.client.approve(&ctx.signers[i as usize], &proposal_id);
+            ctx.client
+                .approve(&ctx.signers.get(i).unwrap(), &proposal_id);
         }
 
         // Now measure the cost of that final approval
-        let last_signer = ctx.signers[(signer_count - 1) as usize].clone();
+        let last_signer = ctx.signers.get(signer_count - 1).unwrap();
         let (cpu, mem) = measure_budget(&ctx, |ctx| {
             ctx.client
                 .approve(&ctx.signers.get(1).unwrap(), &proposal_id);
@@ -266,12 +248,12 @@ fn test_approve_budget_snapshots() {
         assert!(
             cpu < 1_300_000,
             "approve_nonquorum {} exceeded CPU ceiling",
-            size
+            signer_count
         );
         assert!(
             mem < 150_000,
             "approve_nonquorum {} exceeded memory ceiling",
-            size
+            signer_count
         );
         println!(
             "APPROVE: signers={:2}, CPU={:8}, MEM={:6}, CPU/signer={:6.1}, MEM/signer={:5.1}",
@@ -288,50 +270,21 @@ fn test_approve_budget_snapshots() {
 }
 
 #[test]
-fn test_governance_gas_approve_quorum() {
-    let sizes = [1u32, 5, 10, 20];
-    for &size in &sizes {
-        let threshold = size;
-        let ctx = GovGasCtx::setup(size, threshold);
-        let proposal_id = ctx.client.propose(
-            &ctx.signers.get(0).unwrap(),
-            &ctx.target,
-            &ctx.calldata("proposal"),
-        );
-
-        for signer in 0..(size - 1) {
-            ctx.client
-                .approve(&ctx.signers.get(signer).unwrap(), &proposal_id);
-        }
-
-        let last_signer = ctx.signers.get(size - 1).unwrap();
-        ctx.env.budget().reset_unlimited();
-        ctx.client.approve(&last_signer, &proposal_id);
-        let cpu = ctx.env.budget().cpu_instruction_cost();
-        let mem = ctx.env.budget().memory_bytes_cost();
 fn test_approve_duplicate_error_cost() {
     // Duplicate approval checks should be cheap since we use a Map index for O(1) lookups.
     // If this gets expensive, something went wrong with the storage pattern.
     let ctx = GovGasCtx::setup(5, 2);
     let proposal_id = ctx.create_proposal(1024);
 
-    ctx.client.approve(&ctx.signers[0], &proposal_id);
+    ctx.client
+        .approve(&ctx.signers.get(0).unwrap(), &proposal_id);
 
     let (cpu, mem) = measure_budget(&ctx, |ctx| {
-        let _ = ctx.client.try_approve(&ctx.signers[0], &proposal_id);
+        let _ = ctx
+            .client
+            .try_approve(&ctx.signers.get(0).unwrap(), &proposal_id);
     });
 
-        assert!(
-            cpu < 1_600_000,
-            "approve_quorum {} exceeded CPU ceiling",
-            size
-        );
-        assert!(
-            mem < 180_000,
-            "approve_quorum {} exceeded memory ceiling",
-            size
-        );
-    }
     assert!(
         cpu < 100_000,
         "Duplicate approve error cost too high: {}",
@@ -351,21 +304,6 @@ fn test_approve_duplicate_error_cost() {
 // ============================================================================
 
 #[test]
-fn test_governance_gas_execute() {
-    let sizes = [1u32, 5, 10, 20];
-    for &size in &sizes {
-        let threshold = size;
-        let ctx = GovGasCtx::setup(size, threshold);
-        let proposal_id = ctx.client.propose(
-            &ctx.signers.get(0).unwrap(),
-            &ctx.target,
-            &ctx.calldata("proposal"),
-        );
-
-        for signer in 0..size {
-            ctx.client
-                .approve(&ctx.signers.get(signer).unwrap(), &proposal_id);
-        }
 fn test_execute_budget_snapshots() {
     // Execute cost should scale with calldata size since we process the stored data.
     // We test from empty calldata all the way up to the 4KB limit.
@@ -458,7 +396,8 @@ fn test_execute_without_quorum_error_cost() {
     let proposal_id = ctx.create_proposal(1024);
 
     // Only 1 approval when we need 2
-    ctx.client.approve(&ctx.signers[0], &proposal_id);
+    ctx.client
+        .approve(&ctx.signers.get(0).unwrap(), &proposal_id);
 
     ctx.advance_time(GOVERNANCE_TIMELOCK_SECONDS + 1);
 
@@ -544,38 +483,47 @@ fn test_worst_case_scenario() {
     assert!(
         cpu_propose <= MAX_CPU_PROPOSE,
         "Worst-case propose CPU: {} > {}",
-        cpu_propose, MAX_CPU_PROPOSE
+        cpu_propose,
+        MAX_CPU_PROPOSE
     );
     assert!(
         mem_propose <= MAX_MEM_PROPOSE,
         "Worst-case propose memory: {} > {}",
-        mem_propose, MAX_MEM_PROPOSE
+        mem_propose,
+        MAX_MEM_PROPOSE
     );
 
     assert!(
         cpu_approve_all <= MAX_CPU_APPROVE_MAX_SIGNERS,
         "Worst-case approve CPU: {} > {}",
-        cpu_approve_all, MAX_CPU_APPROVE_MAX_SIGNERS
+        cpu_approve_all,
+        MAX_CPU_APPROVE_MAX_SIGNERS
     );
     assert!(
         mem_approve_all <= MAX_MEM_APPROVE_MAX_SIGNERS,
         "Worst-case approve memory: {} > {}",
-        mem_approve_all, MAX_MEM_APPROVE_MAX_SIGNERS
+        mem_approve_all,
+        MAX_MEM_APPROVE_MAX_SIGNERS
     );
 
     assert!(
         cpu_execute <= MAX_CPU_EXECUTE_MAX_CALLDATA,
         "Worst-case execute CPU: {} > {}",
-        cpu_execute, MAX_CPU_EXECUTE_MAX_CALLDATA
+        cpu_execute,
+        MAX_CPU_EXECUTE_MAX_CALLDATA
     );
     assert!(
         mem_execute <= MAX_MEM_EXECUTE_MAX_CALLDATA,
         "Worst-case execute memory: {} > {}",
-        mem_execute, MAX_MEM_EXECUTE_MAX_CALLDATA
+        mem_execute,
+        MAX_MEM_EXECUTE_MAX_CALLDATA
     );
 
     println!("PROPOSE:   CPU={:8}, MEM={:6}", cpu_propose, mem_propose);
-    println!("APPROVE:   CPU={:8}, MEM={:6}", cpu_approve_all, mem_approve_all);
+    println!(
+        "APPROVE:   CPU={:8}, MEM={:6}",
+        cpu_approve_all, mem_approve_all
+    );
     println!("EXECUTE:   CPU={:8}, MEM={:6}", cpu_execute, mem_execute);
 }
 
@@ -609,8 +557,8 @@ fn test_proposal_expiry_checks_dont_add_hidden_costs() {
     });
 
     // The costs should be similar - expiry check shouldn't add much overhead
-    let cpu_diff = if cpu1 > cpu2 { cpu1 - cpu2 } else { cpu2 - cpu1 };
-    let mem_diff = if mem1 > mem2 { mem1 - mem2 } else { mem2 - mem1 };
+    let cpu_diff = cpu1.abs_diff(cpu2);
+    let mem_diff = mem1.abs_diff(mem2);
 
     assert!(
         cpu_diff < 50_000,
@@ -623,7 +571,10 @@ fn test_proposal_expiry_checks_dont_add_hidden_costs() {
         mem_diff
     );
 
-    println!("EXPIRY_CHECK_OVERHEAD: CPU_diff={}, MEM_diff={}", cpu_diff, mem_diff);
+    println!(
+        "EXPIRY_CHECK_OVERHEAD: CPU_diff={}, MEM_diff={}",
+        cpu_diff, mem_diff
+    );
 }
 
 #[test]
@@ -641,11 +592,12 @@ fn test_budget_reset_is_working_correctly() {
     ctx.create_proposal(1024);
     let cpu2 = ctx.env.budget().cpu_instruction_cost();
 
-    let diff = if cpu1 > cpu2 { cpu1 - cpu2 } else { cpu2 - cpu1 };
+    let diff = cpu1.abs_diff(cpu2);
     assert!(
         diff < 10_000,
         "Budget reset not working - costs differ too much: {} vs {}",
-        cpu1, cpu2
+        cpu1,
+        cpu2
     );
 }
 
@@ -670,19 +622,24 @@ fn test_multiple_proposals_parallel_cost() {
     });
 
     // Costs should be similar - proposals don't affect each other
-    let cpu_diff = if cpu1 > cpu2 { cpu1 - cpu2 } else { cpu2 - cpu1 };
-    let mem_diff = if mem1 > mem2 { mem1 - mem2 } else { mem2 - mem1 };
+    let cpu_diff = cpu1.abs_diff(cpu2);
+    let mem_diff = mem1.abs_diff(mem2);
 
     assert!(
         cpu_diff < 50_000,
         "Proposal cost changed after creating many proposals: {} vs {}",
-        cpu1, cpu2
+        cpu1,
+        cpu2
     );
     assert!(
         mem_diff < 10_000,
         "Proposal memory cost changed after creating many proposals: {} vs {}",
-        mem1, mem2
+        mem1,
+        mem2
     );
 
-    println!("MULTIPLE_PROPOSALS: CPU_diff={}, MEM_diff={}", cpu_diff, mem_diff);
+    println!(
+        "MULTIPLE_PROPOSALS: CPU_diff={}, MEM_diff={}",
+        cpu_diff, mem_diff
+    );
 }

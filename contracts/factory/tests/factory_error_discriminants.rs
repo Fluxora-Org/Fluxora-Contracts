@@ -135,13 +135,13 @@ fn test_factory_error_discriminants_are_dense_no_gaps() {
         discs[discs.len() - 1],
         expected_max
     );
-    for i in 0..discs.len() {
+    for (i, disc) in discs.iter().enumerate() {
         assert_eq!(
-            discs[i],
+            *disc,
             (i + 1) as u32,
             "FactoryError discriminant gap or reorder at position {} (got {}, expected {})",
             i,
-            discs[i],
+            disc,
             (i + 1) as u32
         );
     }

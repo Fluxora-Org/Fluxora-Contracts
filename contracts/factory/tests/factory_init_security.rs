@@ -276,18 +276,16 @@ fn test_uninitialized_stream_contract_passes_smoke_check() {
 // ---------------------------------------------------------------------------
 // Discriminant stability
 // ---------------------------------------------------------------------------
-
-/// `InvalidStreamContract` must be discriminant 9, and all previously
-/// documented discriminants must remain unchanged.
-#[test]
-fn test_factory_error_discriminants_are_stable() {
-    assert_eq!(FactoryError::AlreadyInitialized as u32, 1);
-    assert_eq!(FactoryError::NotInitialized as u32, 2);
-    assert_eq!(FactoryError::Unauthorized as u32, 3);
-    assert_eq!(FactoryError::RecipientNotAllowlisted as u32, 4);
-    assert_eq!(FactoryError::DepositExceedsCap as u32, 5);
-    assert_eq!(FactoryError::DurationTooShort as u32, 6);
-    assert_eq!(FactoryError::InvalidTimeRange as u32, 7);
-    assert_eq!(FactoryError::InvalidCliff as u32, 8);
-    assert_eq!(FactoryError::InvalidStreamContract as u32, 9);
-}
+//
+// A `test_factory_error_discriminants_are_stable` used to live here, but it
+// hardcoded a stale, pre-#788 discriminant set (it asserted
+// `InvalidStreamContract as u32 == 9`, from before `CreationPaused` through
+// `InvalidMemo` were inserted ahead of it, after which `InvalidStreamContract`
+// became discriminant 17). It was never updated in lockstep with
+// `contracts/factory/src/lib.rs::FactoryError`, so it silently bit-rotted
+// until `cargo test --workspace` actually exercised it.
+//
+// The canonical, actively-maintained version of this guard — kept in sync
+// with `docs/error.md` and covering all 17 variants — lives in
+// `contracts/factory/tests/factory_error_discriminants.rs`. Removed the
+// duplicate here rather than re-fixing two copies of the same assertion set.

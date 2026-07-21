@@ -1,11 +1,16 @@
-use fluxora_stream::{FluxoraStream, FluxoraStreamClient};
-use soroban_sdk::{token::Client as TokenClient, Address, Env};
+// See docs/gas.md for the baseline update process and review bar.
+use fluxora_stream::{FluxoraStream, FluxoraStreamClient, StreamKind};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger},
+    token::{Client as TokenClient, StellarAssetClient},
+    Address, Env,
+};
 
 struct TestContext<'a> {
     env: Env,
     client: FluxoraStreamClient<'a>,
     sender: Address,
-    token: TokenClient<'a>,
+    recipient: Address,
 }
 
 impl<'a> TestContext<'a> {
@@ -20,35 +25,37 @@ impl<'a> TestContext<'a> {
         let token_id = env
             .register_stellar_asset_contract_v2(token_admin)
             .address();
-        let token = TokenClient::new(&env, &token_id);
+        let sac = StellarAssetClient::new(&env, &token_id);
 
         let admin = Address::generate(&env);
         let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
 
         client.init(&token_id, &admin);
 
         // Fund the sender using the admin's minting power
-        token.mint(&sender, &1_000_000_i128);
+        sac.mint(&sender, &1_000_000_i128);
+        // Provide default allowance so create_stream can pull the deposit.
+        TokenClient::new(&env, &token_id).approve(&sender, &contract_id, &i128::MAX, &100_000);
 
         Self {
             env,
             client,
             sender,
-            token,
+            recipient,
         }
     }
 
     fn create_default_stream(&self) -> u64 {
-        let recipient = Address::generate(&self.env);
         let amount = 1000_i128;
         let rate = 1_i128;
         let start_time = 0u64;
         let cliff_time = 0u64;
         let end_time = 1000u64;
 
-        let stream_id = self.client.create_stream(
+        self.client.create_stream(
             &self.sender,
-            &recipient,
+            &self.recipient,
             &amount,
             &rate,
             &start_time,
@@ -56,8 +63,8 @@ impl<'a> TestContext<'a> {
             &end_time,
             &0,
             &None,
-        );
-        stream_id
+            &StreamKind::Linear,
+        )
     }
 }
 
@@ -102,16 +109,15 @@ fn test_batch_withdraw_gas() {
     for &size in &sizes {
         let ctx = TestContext::setup();
 
-        let mut streams = Vec::new();
+        let mut streams = soroban_sdk::Vec::new(&ctx.env);
         for _ in 0..size {
-            streams.push(ctx.create_default_stream());
+            streams.push_back(ctx.create_default_stream());
         }
 
         ctx.env.ledger().set_timestamp(500); // Accrue tokens for all
 
         let cost = measure_gas(&ctx, |ctx| {
-            let streams_val = streams.clone().into_val(&ctx.env);
-            ctx.client.batch_withdraw(&streams_val);
+            ctx.client.batch_withdraw(&ctx.recipient, &streams);
         });
 
         println!("GAS_MEASUREMENT: batch_withdraw: {}: {}", size, cost);

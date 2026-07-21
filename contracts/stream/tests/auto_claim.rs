@@ -57,13 +57,13 @@ impl<'a> Ctx<'a> {
         self.client.create_stream(
             &self.sender,
             &self.recipient,
-            &1000i128,       // deposit
-            &1i128,          // rate
-            &(now + 1),      // start_time
-            &(now + 1),      // cliff_time
-            &(now + 1001),   // end_time (duration = 1000s)
-            &0i128,          // fee
-            &None,           // template_id
+            &1000i128,     // deposit
+            &1i128,        // rate
+            &(now + 1),    // start_time
+            &(now + 1),    // cliff_time
+            &(now + 1001), // end_time (duration = 1000s)
+            &0i128,        // fee
+            &None,         // template_id
             &StreamKind::Linear,
         )
     }
@@ -104,7 +104,10 @@ fn test_auto_claim_revoke_then_trigger() {
 
     // 1. Configure auto-claim
     ctx.client.set_auto_claim(&stream_id, &destination);
-    assert_eq!(ctx.client.get_auto_claim_destination(&stream_id), Some(destination.clone()));
+    assert_eq!(
+        ctx.client.get_auto_claim_destination(&stream_id),
+        Some(destination.clone())
+    );
 
     // 2. Revoke auto-claim
     ctx.client.revoke_auto_claim(&stream_id);
@@ -159,11 +162,17 @@ fn test_auto_claim_destination_update() {
 
     // 1. Configure with destination A
     ctx.client.set_auto_claim(&stream_id, &destination_a);
-    assert_eq!(ctx.client.get_auto_claim_destination(&stream_id), Some(destination_a.clone()));
+    assert_eq!(
+        ctx.client.get_auto_claim_destination(&stream_id),
+        Some(destination_a.clone())
+    );
 
     // 2. Update to destination B
     ctx.client.set_auto_claim(&stream_id, &destination_b);
-    assert_eq!(ctx.client.get_auto_claim_destination(&stream_id), Some(destination_b.clone()));
+    assert_eq!(
+        ctx.client.get_auto_claim_destination(&stream_id),
+        Some(destination_b.clone())
+    );
 
     // 3. Fast-forward to/past end time
     ctx.env.ledger().set_timestamp(1_001_001);
@@ -179,7 +188,10 @@ fn test_auto_claim_destination_update() {
     // 5. Verify funds are sent ONLY to destination B
     assert_eq!(ctx.token.balance(&destination_b), dest_b_bal_before + 1000);
     assert_eq!(ctx.token.balance(&destination_a), dest_a_bal_before);
-    assert_eq!(ctx.token.balance(&ctx.contract_id), contract_bal_before - 1000);
+    assert_eq!(
+        ctx.token.balance(&ctx.contract_id),
+        contract_bal_before - 1000
+    );
 }
 
 #[test]
@@ -191,7 +203,10 @@ fn test_auto_claim_status_consistency() {
     let destination_b = Address::generate(&ctx.env);
 
     // 1. Initial status: NotSet
-    assert_eq!(ctx.client.get_auto_claim_status(&stream_id), AutoClaimStatus::NotSet);
+    assert_eq!(
+        ctx.client.get_auto_claim_status(&stream_id),
+        AutoClaimStatus::NotSet
+    );
     assert_eq!(ctx.client.get_auto_claim_destination(&stream_id), None);
 
     // 2. Configure auto-claim -> Active (ValidDestination) with A
@@ -203,7 +218,10 @@ fn test_auto_claim_status_consistency() {
     } else {
         panic!("expected ValidDestination");
     }
-    assert_eq!(ctx.client.get_auto_claim_destination(&stream_id), Some(destination_a.clone()));
+    assert_eq!(
+        ctx.client.get_auto_claim_destination(&stream_id),
+        Some(destination_a.clone())
+    );
 
     // 3. Update auto-claim -> Active (ValidDestination) with B
     ctx.client.set_auto_claim(&stream_id, &destination_b);
@@ -215,10 +233,16 @@ fn test_auto_claim_status_consistency() {
     } else {
         panic!("expected ValidDestination");
     }
-    assert_eq!(ctx.client.get_auto_claim_destination(&stream_id), Some(destination_b.clone()));
+    assert_eq!(
+        ctx.client.get_auto_claim_destination(&stream_id),
+        Some(destination_b.clone())
+    );
 
     // 4. Revoke auto-claim -> NotSet
     ctx.client.revoke_auto_claim(&stream_id);
-    assert_eq!(ctx.client.get_auto_claim_status(&stream_id), AutoClaimStatus::NotSet);
+    assert_eq!(
+        ctx.client.get_auto_claim_status(&stream_id),
+        AutoClaimStatus::NotSet
+    );
     assert_eq!(ctx.client.get_auto_claim_destination(&stream_id), None);
 }

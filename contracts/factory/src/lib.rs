@@ -15,17 +15,17 @@ pub const MAX_PAGE_SIZE: u32 = 100;
 
 /// Instance TTL threshold (ledgers). Below this value the entry will be extended.
 /// Mirrors governance contract to keep TTL semantics consistent across contracts.
-const INSTANCE_LIFETIME_THRESHOLD: u32 = 17_280;
+pub const INSTANCE_LIFETIME_THRESHOLD: u32 = 17_280;
 
 /// Instance TTL bump target (ledgers). ~60 days at 5-second ledger close.
 /// Mirrors governance contract to keep TTL semantics consistent across contracts.
-const INSTANCE_BUMP_AMOUNT: u32 = 120_960;
+pub const INSTANCE_BUMP_AMOUNT: u32 = 120_960;
 
 /// Persistent TTL threshold (ledgers). Below this value the entry will be extended.
-const PERSISTENT_LIFETIME_THRESHOLD: u32 = 17_280;
+pub const PERSISTENT_LIFETIME_THRESHOLD: u32 = 17_280;
 
 /// Persistent TTL bump target (ledgers). ~60 days at 5-second ledger close.
-const PERSISTENT_BUMP_AMOUNT: u32 = 120_960;
+pub const PERSISTENT_BUMP_AMOUNT: u32 = 120_960;
 
 /// Maximum accepted value for the factory `min_duration` policy, in seconds.
 ///
@@ -518,7 +518,10 @@ impl FluxoraFactory {
 
         env.events().publish(
             (symbol_short!("AdminUpd"),),
-            FactoryAdminUpdated { old_admin, new_admin },
+            FactoryAdminUpdated {
+                old_admin,
+                new_admin,
+            },
         );
         Ok(())
     }
@@ -598,7 +601,10 @@ impl FluxoraFactory {
 
         env.events().publish(
             (symbol_short!("cap_upd"),),
-            CapUpdated { old_cap, new_cap: max_deposit },
+            CapUpdated {
+                old_cap,
+                new_cap: max_deposit,
+            },
         );
         Ok(())
     }
@@ -900,26 +906,11 @@ impl FluxoraFactory {
 
         // ── Guard 7: rate bounds ─────────────────────────────────────────────
         // Unset bounds are permissive. Bounds are inclusive.
-        if let Some(min_rate) = env
-            .storage()
-            .instance()
-            .get::<_, i128>(&DataKey::MinRatePerSecond)
-        {
-        if let Some(min_rate) = policy.min_rate_per_second {
-            if rate_per_second < min_rate {
-                return Err(FactoryError::RateBelowMin);
-            }
-        }
-        if let Some(max_rate) = env
-            .storage()
-            .instance()
-            .get::<_, i128>(&DataKey::MaxRatePerSecond)
-        {
-        if let Some(max_rate) = policy.max_rate_per_second {
-            if rate_per_second > max_rate {
-                return Err(FactoryError::RateAboveMax);
-            }
-        }
+        validate_rate_bounds(
+            rate_per_second,
+            &policy.min_rate_per_second,
+            &policy.max_rate_per_second,
+        )?;
 
         // ── Guard 8: memo length ─────────────────────────────────────────────
         if let Some(ref m) = memo {

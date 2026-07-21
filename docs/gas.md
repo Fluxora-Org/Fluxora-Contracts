@@ -180,3 +180,28 @@ The gas regression tests run on every PR and CI build:
 
 ```bash
 cargo test --test gas_regression -- --nocapture
+```
+
+## Baseline Update Process
+
+Gas-regression tests assert that our operations don't unexpectedly increase in CPU instruction count or memory usage. A legitimate baseline bump may be required when intentionally adding features or security checks that increase the cost.
+
+### How the Baseline is Computed and Stored
+
+We currently have two different mechanisms for tracking and asserting gas baselines across our contracts:
+
+1. **Governance (`fluxora_governance`)**:
+   - **Stored**: Baselines are stored directly as hardcoded `const` values at the top of `contracts/governance/tests/gas_regression.rs`.
+   - **Computed**: These constants represent an absolute threshold. Historically, they were computed by running the tests and adding ~25% headroom. The test suite fails via standard `assert!` statements if the measured budget exceeds these constants.
+
+2. **Stream (`fluxora_stream`)**:
+   - **Stored**: Baselines are stored in a JSON block inside `docs/gas.md` (between `<!-- GAS_BASELINE_START -->` and `<!-- GAS_BASELINE_END -->` tags).
+   - **Computed**: The test file (`contracts/stream/tests/gas_regression.rs`) prints the costs. A Python script (`script/validate_gas.py`) parses these prints and compares them against the JSON baseline in `docs/gas.md`. It fails the CI if any measurement exceeds the recorded baseline by more than 5%. To update the baseline, run the tests and copy the new measured values into the JSON block in this document.
+
+### Review Bar for Baseline Increases
+
+Baseline increases are not granted automatically. To get a baseline increase approved, the PR must meet the following review bar:
+
+- **Explicit Justification**: The PR description must explicitly justify the gas increase.
+- **Root Cause**: The increase must be tied to a specific, legitimate change (e.g., adding a new necessary security check, expanding a feature).
+- **No Hidden Costs**: Unintended or unexplainable jumps in gas usage must be optimized or reverted. You cannot blindly bump the baseline to get CI to pass.

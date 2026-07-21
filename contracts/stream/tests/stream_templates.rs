@@ -1,7 +1,8 @@
 extern crate std;
 
-    ContractError, DataKey, FluxoraStream, FluxoraStreamClient, StreamScheduleTemplate,
-    MAX_GLOBAL_TEMPLATES, MAX_TEMPLATES_PER_OWNER, StreamKind,
+use fluxora_stream::{
+    ContractError, DataKey, FluxoraStream, FluxoraStreamClient, StreamKind, StreamScheduleTemplate,
+    MAX_GLOBAL_TEMPLATES, MAX_TEMPLATES_PER_OWNER,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -51,10 +52,8 @@ fn template_register_create_delete_happy_path() {
         &0,
         &None,
         &None,
-        &fluxora_stream::StreamKind::Linear,
+        &StreamKind::Linear,
     );
-    let stream_id = client
-        .create_stream_from_template(&sender, &tid, &recipient, &3600_i128, &1_i128, &0, &None, &None, &StreamKind::Linear);
     assert_eq!(stream_id, 0u64);
 
     client.delete_stream_template(&owner, &tid);

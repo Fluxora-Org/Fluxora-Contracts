@@ -19,7 +19,7 @@ use fluxora_factory::{FluxoraFactory, FluxoraFactoryClient};
 use fluxora_stream::{FluxoraStream, FluxoraStreamClient};
 use soroban_sdk::{
     testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke},
-    token::{StellarAssetClient, Client as TokenClient},
+    token::{Client as TokenClient, StellarAssetClient},
     Address, Env, IntoVal,
 };
 
@@ -78,7 +78,15 @@ impl Ctx {
         factory.init(&admin, &stream_id, &MAX_DEPOSIT, &MIN_DURATION);
         factory.set_allowlist(&recipient, &true);
 
-        Self { env, factory, stream, sender, recipient, factory_id, stream_id }
+        Self {
+            env,
+            factory,
+            stream,
+            sender,
+            recipient,
+            factory_id,
+            stream_id,
+        }
     }
 
     fn start(&self) -> u64 {

@@ -1,8 +1,6 @@
 #![cfg(test)]
 
-use fluxora_stream::{
-    FluxoraStream, FluxoraStreamClient, PauseReason, StreamKind
-};
+use fluxora_stream::{FluxoraStream, FluxoraStreamClient, PauseReason, StreamKind};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::Client as TokenClient,
@@ -54,7 +52,7 @@ impl<'a> TestContext<'a> {
 fn test_health_matrix_active_fully_funded_before_cliff() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
-    
+
     let stream_id = ctx.client.create_stream(
         &ctx.sender,
         &ctx.recipient,
@@ -70,19 +68,19 @@ fn test_health_matrix_active_fully_funded_before_cliff() {
 
     ctx.env.ledger().set_timestamp(50);
     let health = ctx.client.get_stream_health(&stream_id);
-    
+
     assert_eq!(health.is_underfunded, false);
     assert_eq!(health.is_expired, false);
-    assert_eq!(health.accrued_to_date, 0); 
+    assert_eq!(health.accrued_to_date, 0);
     assert_eq!(health.remaining_deposit, 1000);
-    assert_eq!(health.seconds_until_depletion, Some(950)); 
+    assert_eq!(health.seconds_until_depletion, Some(950));
 }
 
 #[test]
 fn test_health_matrix_active_underfunded_mid() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
-    
+
     let stream_id = ctx.client.create_stream(
         &ctx.sender,
         &ctx.recipient,
@@ -98,19 +96,19 @@ fn test_health_matrix_active_underfunded_mid() {
 
     ctx.env.ledger().set_timestamp(300);
     let health = ctx.client.get_stream_health(&stream_id);
-    
+
     assert_eq!(health.is_underfunded, true);
     assert_eq!(health.is_expired, false);
     assert_eq!(health.accrued_to_date, 600);
     assert_eq!(health.remaining_deposit, 1000);
-    assert_eq!(health.seconds_until_depletion, Some(200)); 
+    assert_eq!(health.seconds_until_depletion, Some(200));
 }
 
 #[test]
 fn test_health_matrix_paused_underfunded_mid() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
-    
+
     let stream_id = ctx.client.create_stream(
         &ctx.sender,
         &ctx.recipient,
@@ -126,10 +124,11 @@ fn test_health_matrix_paused_underfunded_mid() {
 
     ctx.env.ledger().set_sequence(100);
     ctx.env.ledger().set_timestamp(300);
-    ctx.client.pause_stream(&stream_id, &PauseReason::Operational);
-    
+    ctx.client
+        .pause_stream(&stream_id, &PauseReason::Operational);
+
     let health = ctx.client.get_stream_health(&stream_id);
-    
+
     assert_eq!(health.is_underfunded, true);
     assert_eq!(health.is_expired, false);
     assert_eq!(health.accrued_to_date, 600);
@@ -141,7 +140,7 @@ fn test_health_matrix_paused_underfunded_mid() {
 fn test_health_matrix_expired_not_fully_withdrawn() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
-    
+
     let stream_id = ctx.client.create_stream(
         &ctx.sender,
         &ctx.recipient,
@@ -157,9 +156,9 @@ fn test_health_matrix_expired_not_fully_withdrawn() {
 
     ctx.env.ledger().set_timestamp(1200);
     let health = ctx.client.get_stream_health(&stream_id);
-    
+
     assert_eq!(health.is_underfunded, false);
-    assert_eq!(health.is_expired, true); 
+    assert_eq!(health.is_expired, true);
     assert_eq!(health.accrued_to_date, 1000);
     assert_eq!(health.remaining_deposit, 1000);
     assert_eq!(health.seconds_until_depletion, Some(0));
@@ -170,7 +169,7 @@ fn test_health_matrix_completed_after_end() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
     ctx.env.ledger().set_sequence(1);
-    
+
     let stream_id = ctx.client.create_stream(
         &ctx.sender,
         &ctx.recipient,
@@ -187,11 +186,11 @@ fn test_health_matrix_completed_after_end() {
     ctx.env.ledger().set_timestamp(1200);
     ctx.env.ledger().set_sequence(100);
     ctx.client.withdraw(&stream_id);
-    
+
     let health = ctx.client.get_stream_health(&stream_id);
-    
+
     assert_eq!(health.is_underfunded, false);
-    assert_eq!(health.is_expired, false); 
+    assert_eq!(health.is_expired, false);
     assert_eq!(health.accrued_to_date, 1000);
     assert_eq!(health.remaining_deposit, 0);
     assert_eq!(health.seconds_until_depletion, Some(0));
@@ -201,7 +200,7 @@ fn test_health_matrix_completed_after_end() {
 fn test_health_matrix_cancelled_mid() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
-    
+
     let stream_id = ctx.client.create_stream(
         &ctx.sender,
         &ctx.recipient,
@@ -217,15 +216,15 @@ fn test_health_matrix_cancelled_mid() {
 
     ctx.env.ledger().set_timestamp(500);
     ctx.client.cancel_stream(&stream_id);
-    
+
     let health = ctx.client.get_stream_health(&stream_id);
-    
+
     assert_eq!(health.is_underfunded, false);
     assert_eq!(health.is_expired, false);
     assert_eq!(health.accrued_to_date, 500);
     // Cancellation does not adjust deposit_amount in state, so remaining_deposit stays 1000 until withdraw.
-    assert_eq!(health.remaining_deposit, 1000); 
-    // Seconds until depletion still returns the time remaining if it wasn't cancelled, 
+    assert_eq!(health.remaining_deposit, 1000);
+    // Seconds until depletion still returns the time remaining if it wasn't cancelled,
     // since the rate_per_second is unmodified.
-    assert_eq!(health.seconds_until_depletion, Some(500)); 
+    assert_eq!(health.seconds_until_depletion, Some(500));
 }

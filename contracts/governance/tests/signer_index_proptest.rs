@@ -48,7 +48,10 @@ extern crate std;
 
 use fluxora_governance::{FluxoraGovernance, FluxoraGovernanceClient, GovernanceError};
 use proptest::prelude::*;
-use soroban_sdk::{testutils::{Address as _, Ledger}, vec, Address, Env};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger},
+    vec, Address, Env,
+};
 use std::collections::HashSet;
 use std::vec::Vec as StdVec;
 
@@ -85,7 +88,11 @@ enum Op {
 /// Strategy: one Op over the address pool.
 fn op_strategy() -> impl Strategy<Value = Op> {
     (any::<bool>(), 0usize..POOL_SIZE).prop_map(|(is_add, idx)| {
-        if is_add { Op::Add(idx) } else { Op::Remove(idx) }
+        if is_add {
+            Op::Add(idx)
+        } else {
+            Op::Remove(idx)
+        }
     })
 }
 
@@ -100,6 +107,7 @@ fn op_sequence_strategy() -> impl Strategy<Value = StdVec<Op>> {
 
 /// Self-contained governance environment for proptest cases.
 struct GovEnv {
+    #[allow(dead_code)]
     env: Env,
     /// All POOL_SIZE pre-generated addresses; ops reference these by index.
     pool: StdVec<Address>,
@@ -131,7 +139,12 @@ impl GovEnv {
         let client = FluxoraGovernanceClient::new(&env, &contract_id);
         client.init(&admin, &sdk_signers, &threshold);
 
-        GovEnv { env, pool, client, threshold }
+        GovEnv {
+            env,
+            pool,
+            client,
+            threshold,
+        }
     }
 }
 
@@ -481,6 +494,7 @@ proptest! {
         client.init(&admin, &sdk_signers, &threshold);
 
         let n_removes = n_removes_raw.min(n);
+        #[allow(clippy::needless_range_loop)]
         for i in 0..n_removes {
             let result = client.try_remove_signer(&pool[i]);
             match result {

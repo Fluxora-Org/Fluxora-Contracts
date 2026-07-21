@@ -980,7 +980,7 @@ fn test_recipient_update_auth_enforcement() {
 #[test]
 fn test_sweep_excess_admin_to_cold_treasury_succeeds() {
     let ctx = Ctx::setup();
-    let stream_id = ctx.create_stream();
+    let _stream_id = ctx.create_stream();
 
     // Add excess tokens to the contract (simulate trapped funds)
     ctx.env.mock_auths(&[MockAuth {
@@ -1028,7 +1028,7 @@ fn test_sweep_excess_admin_to_cold_treasury_succeeds() {
 #[test]
 fn test_sweep_excess_rejects_non_admin() {
     let ctx = Ctx::setup();
-    let stream_id = ctx.create_stream();
+    let _stream_id = ctx.create_stream();
 
     // Add excess
     ctx.env.mock_all_auths();
@@ -1055,7 +1055,7 @@ fn test_sweep_excess_rejects_non_admin() {
 #[test]
 fn test_sweep_excess_zero_excess_is_noop() {
     let ctx = Ctx::setup();
-    let stream_id = ctx.create_stream();
+    let _stream_id = ctx.create_stream();
 
     // No excess — contract balance equals liabilities
     let treasury = Address::generate(&ctx.env);
@@ -1130,7 +1130,7 @@ fn test_sweep_excess_preserves_solvency_invariant() {
 #[test]
 fn test_sweep_excess_to_cold_wallet_no_recipient_interaction() {
     let ctx = Ctx::setup();
-    let stream_id = ctx.create_stream();
+    let _stream_id = ctx.create_stream();
 
     // Add excess via sender transfer (no recipient involvement)
     ctx.env.mock_all_auths();

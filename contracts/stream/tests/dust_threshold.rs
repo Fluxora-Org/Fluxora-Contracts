@@ -1,8 +1,34 @@
-#![cfg(any())]
+//! Dust-threshold boundary tests aligned with `docs/dust-threshold.md`.
+//!
+//! Documents the enforcement formula:
+//!   withdrawable < withdraw_dust_threshold  →  return 0 (blocked)
+//!   withdrawable == threshold               →  allowed (strict `<`, not `<=`)
+//!   withdrawable > threshold                →  allowed
+//!
+//! Covers every public entry point that consults the dust check:
+//!   `withdraw`, `withdraw_to`, `batch_withdraw`, `batch_withdraw_to`.
+//!
+//! ## Doc / code mismatches (flagged, not silently fixed)
+//!
+//! 1. **`InvalidDustThreshold` is documented but missing.**  
+//!    `docs/dust-threshold.md` says creation must reject
+//!    `withdraw_dust_threshold > deposit_amount` with
+//!    `ContractError::InvalidDustThreshold` (claimed code 20).  
+//!    Actual code has no such variant (code 20 is `TemplateNotFound`) and
+//!    does not validate the threshold at creation. See
+//!    `flag_mismatch_create_allows_threshold_above_deposit`.
+//!
+//! 2. **Negative thresholds are documented as rejected but are accepted.**  
+//!    See `flag_mismatch_create_allows_negative_dust_threshold`.
+//!
+//! 3. **`token_check.rs` does not implement dust-threshold logic.**  
+//!    Zero-amount SEP-41 smoke tests live in `token_check::verify_token_behavior`
+//!    (covered in `src/test_token_edge_cases.rs`). Dust enforcement lives in the
+//!    withdraw paths in `lib.rs`.
 
 extern crate std;
 
-use fluxora_stream::{FluxoraStream, FluxoraStreamClient, StreamStatus};
+use fluxora_stream::{FluxoraStream, FluxoraStreamClient, StreamKind, WithdrawToParam};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
@@ -35,8 +61,9 @@ impl<'a> TestContext<'a> {
         let client = FluxoraStreamClient::new(&env, &contract_id);
         client.init(&token_id, &admin);
 
+        // Large mint so doc validation-table cases (10M+ raw units) can fund streams.
         let sac = StellarAssetClient::new(&env, &token_id);
-        sac.mint(&sender, &10_000_i128);
+        sac.mint(&sender, &100_000_000_i128);
 
         let token = TokenClient::new(&env, &token_id);
         token.approve(&sender, &contract_id, &i128::MAX, &100_000);
@@ -53,206 +80,312 @@ impl<'a> TestContext<'a> {
     fn client(&self) -> FluxoraStreamClient<'_> {
         FluxoraStreamClient::new(&self.env, &self.contract_id)
     }
+
+    /// Linear stream: rate=1 raw/s so timestamp == withdrawable (before any prior withdraw).
+    fn create_linear_stream(&self, deposit: i128, threshold: i128, end_time: u64) -> u64 {
+        self.client().create_stream(
+            &self.sender,
+            &self.recipient,
+            &deposit,
+            &1_i128,
+            &0u64,
+            &0u64,
+            &end_time,
+            &threshold,
+            &None,
+            &StreamKind::Linear,
+        )
+    }
 }
 
-#[test]
-fn test_withdraw_dust_threshold_enforced() {
-    let ctx = TestContext::setup();
-    ctx.env.ledger().set_timestamp(0);
-
-    // Create stream with 100 threshold
-    let stream_id = ctx.client().create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &100_i128, // threshold = 100
-        &None,
-        &fluxora_stream::StreamKind::Linear,
-    );
-
-    // At t=50, withdrawable is 50. Threshold is 100.
-    ctx.env.ledger().set_timestamp(50);
-    let withdrawn = ctx.client().withdraw(&stream_id);
-    assert_eq!(withdrawn, 0, "should return 0 when below threshold");
-    assert_eq!(ctx.token.balance(&ctx.recipient), 0);
-
-    // At t=150, withdrawable is 150. Threshold is 100.
-    ctx.env.ledger().set_timestamp(150);
-    let withdrawn2 = ctx.client().withdraw(&stream_id);
-    assert_eq!(withdrawn2, 150, "should allow withdrawal above threshold");
-    assert_eq!(ctx.token.balance(&ctx.recipient), 150);
+/// Expected outcome for a non-terminal, non-final-drain withdrawal.
+#[derive(Clone, Copy, Debug)]
+struct BoundaryCase {
+    /// Label for assertion messages.
+    name: &'static str,
+    threshold: i128,
+    /// Ledger timestamp (= withdrawable when rate=1 and no prior withdraw).
+    withdrawable: i128,
+    /// Doc-expected: allowed when withdrawable >= threshold.
+    expect_allowed: bool,
 }
 
-#[test]
-fn test_withdraw_dust_threshold_ignored_on_final_drain() {
-    let ctx = TestContext::setup();
-    ctx.env.ledger().set_timestamp(0);
+/// Docs validation table + explicit ±1 boundaries around `threshold`.
+///
+/// From `docs/dust-threshold.md`:
+/// - `withdrawable < threshold`  → blocked (return 0)
+/// - `withdrawable == threshold` → allowed (strict `<`)
+/// - `withdrawable > threshold`  → allowed
+const BOUNDARY_CASES: &[BoundaryCase] = &[
+    BoundaryCase {
+        name: "threshold-1 (blocked)",
+        threshold: 100,
+        withdrawable: 99,
+        expect_allowed: false,
+    },
+    BoundaryCase {
+        name: "threshold (allowed, exact)",
+        threshold: 100,
+        withdrawable: 100,
+        expect_allowed: true,
+    },
+    BoundaryCase {
+        name: "threshold+1 (allowed)",
+        threshold: 100,
+        withdrawable: 101,
+        expect_allowed: true,
+    },
+    // Doc validation-table rows (non-bypass).
+    BoundaryCase {
+        name: "doc: threshold=0, withdrawable=1 (allowed no-op threshold)",
+        threshold: 0,
+        withdrawable: 1,
+        expect_allowed: true,
+    },
+    BoundaryCase {
+        name: "doc: below threshold (blocked)",
+        threshold: 10_000_000,
+        withdrawable: 5_000_000,
+        expect_allowed: false,
+    },
+    BoundaryCase {
+        name: "doc: above threshold (allowed)",
+        threshold: 10_000_000,
+        withdrawable: 15_000_000,
+        expect_allowed: true,
+    },
+    BoundaryCase {
+        name: "doc: exactly at threshold (allowed)",
+        threshold: 10_000_000,
+        withdrawable: 10_000_000,
+        expect_allowed: true,
+    },
+];
 
-    // Create stream with 100 threshold
-    let stream_id = ctx.client().create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &500_i128, // threshold = 500
-        &None,
-        &fluxora_stream::StreamKind::Linear,
-    );
-
-    // Withdraw 950 first (above threshold)
-    ctx.env.ledger().set_timestamp(950);
-    ctx.client().withdraw(&stream_id);
-    assert_eq!(ctx.token.balance(&ctx.recipient), 950);
-
-    // Now 50 remains. Threshold is 500.
-    // At t=1000, 50 more is accrued. Total 1000.
-    ctx.env.ledger().set_timestamp(1000);
-    let withdrawn = ctx.client().withdraw(&stream_id);
-    assert_eq!(
-        withdrawn, 50,
-        "should allow final drain even if below threshold"
-    );
-    assert_eq!(ctx.token.balance(&ctx.recipient), 1000);
-
-    let state = ctx.client().get_stream_state(&stream_id);
-    assert_eq!(state.status, StreamStatus::Completed);
-}
-
-#[test]
-fn test_withdraw_dust_threshold_ignored_in_terminal_state() {
-    let ctx = TestContext::setup();
-    ctx.env.ledger().set_timestamp(0);
-
-    // Create stream with 100 threshold
-    let stream_id = ctx.client().create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &500_i128, // threshold = 500
-        &None,
-        &fluxora_stream::StreamKind::Linear,
-    );
-
-    // Cancel stream at t=100.
-    ctx.env.ledger().set_timestamp(100);
-    ctx.client().cancel_stream(&stream_id);
-    // 100 accrued. Threshold 500.
-
-    // Recipient tries to withdraw.
-    let withdrawn = ctx.client().withdraw(&stream_id);
-    assert_eq!(
-        withdrawn, 100,
-        "should allow withdrawal in terminal state (Cancelled) even if below threshold"
-    );
-    assert_eq!(ctx.token.balance(&ctx.recipient), 100);
-}
-
-#[test]
-fn test_withdraw_dust_threshold_ignored_past_end_time() {
-    let ctx = TestContext::setup();
-    ctx.env.ledger().set_timestamp(0);
-
-    // Create stream with 500 threshold
-    let stream_id = ctx.client().create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &500_i128,
-        &None,
-        &fluxora_stream::StreamKind::Linear,
-    );
-
-    // Withdraw 900 at t=900 (above threshold)
-    ctx.env.ledger().set_timestamp(900);
-    ctx.client().withdraw(&stream_id);
-
-    // At t=1100 (past end_time), 100 remains. Threshold 500.
-    ctx.env.ledger().set_timestamp(1100);
-    let withdrawn = ctx.client().withdraw(&stream_id);
-    assert_eq!(
-        withdrawn, 100,
-        "should allow withdrawal past end_time even if below threshold"
-    );
-}
-
-#[test]
-fn test_create_stream_rejects_excessive_dust_threshold() {
-    let ctx = TestContext::setup();
-    ctx.env.ledger().set_timestamp(0);
-
-    // Try to create stream with threshold (1100) > deposit (1000)
-    let res = ctx.client().try_create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &1100_i128, // threshold > deposit
-        &None,
-        &fluxora_stream::StreamKind::Linear,
-    );
-
-    match res {
-        Err(Ok(fluxora_stream::ContractError::InvalidDustThreshold)) => {}
-        _ => panic!("Expected InvalidDustThreshold error, got {:?}", res),
+fn expected_amount(case: &BoundaryCase) -> i128 {
+    if case.expect_allowed {
+        case.withdrawable
+    } else {
+        0
     }
 }
 
 // ---------------------------------------------------------------------------
-// Additional coverage
+// Table-driven boundary tests — one per dust-consulting entry point
 // ---------------------------------------------------------------------------
 
-/// threshold = 0 is a no-op: every withdrawal, including micro-amounts, is allowed.
 #[test]
-fn test_zero_threshold_allows_all_withdrawals() {
-    let ctx = TestContext::setup();
-    ctx.env.ledger().set_timestamp(0);
+fn table_withdraw_dust_boundaries_threshold_minus_exact_plus() {
+    for case in BOUNDARY_CASES {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
 
-    let stream_id = ctx.client().create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0_i128, // no filter
-        &None,
-        &fluxora_stream::StreamKind::Linear,
-    );
+        // End far after withdrawable so we stay non-terminal / non-final-drain.
+        let end_time = (case.withdrawable as u64).saturating_add(10_000);
+        let deposit = case
+            .withdrawable
+            .saturating_add(10_000)
+            .max(case.threshold + 1);
+        let stream_id = ctx.create_linear_stream(deposit, case.threshold, end_time);
 
-    // At t=1, only 1 raw unit has accrued — still allowed with threshold=0.
-    ctx.env.ledger().set_timestamp(1);
-    let withdrawn = ctx.client().withdraw(&stream_id);
-    assert_eq!(withdrawn, 1, "threshold=0 must allow any positive amount");
-    assert_eq!(ctx.token.balance(&ctx.recipient), 1);
+        ctx.env.ledger().set_timestamp(case.withdrawable as u64);
+        let withdrawn = ctx.client().withdraw(&stream_id);
+        let want = expected_amount(case);
+        assert_eq!(
+            withdrawn, want,
+            "withdraw {}: got {}, want {} (threshold={}, withdrawable={})",
+            case.name, withdrawn, want, case.threshold, case.withdrawable
+        );
+        assert_eq!(
+            ctx.token.balance(&ctx.recipient),
+            want,
+            "withdraw {}: recipient balance mismatch",
+            case.name
+        );
+    }
 }
 
-/// threshold = deposit_amount is valid at creation but blocks all non-terminal
-/// withdrawals; the recipient can only drain after end_time.
 #[test]
-fn test_threshold_equal_to_deposit_blocks_until_terminal() {
+fn table_withdraw_to_dust_boundaries_threshold_minus_exact_plus() {
+    for case in BOUNDARY_CASES {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+        let destination = Address::generate(&ctx.env);
+
+        let end_time = (case.withdrawable as u64).saturating_add(10_000);
+        let deposit = case
+            .withdrawable
+            .saturating_add(10_000)
+            .max(case.threshold + 1);
+        let stream_id = ctx.create_linear_stream(deposit, case.threshold, end_time);
+
+        ctx.env.ledger().set_timestamp(case.withdrawable as u64);
+        let withdrawn = ctx.client().withdraw_to(&stream_id, &destination);
+        let want = expected_amount(case);
+        assert_eq!(
+            withdrawn, want,
+            "withdraw_to {}: got {}, want {}",
+            case.name, withdrawn, want
+        );
+        assert_eq!(
+            ctx.token.balance(&destination),
+            want,
+            "withdraw_to {}: destination balance mismatch",
+            case.name
+        );
+        assert_eq!(
+            ctx.token.balance(&ctx.recipient),
+            0,
+            "withdraw_to {}: recipient must not receive tokens",
+            case.name
+        );
+    }
+}
+
+#[test]
+fn table_batch_withdraw_dust_boundaries_threshold_minus_exact_plus() {
+    for case in BOUNDARY_CASES {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+
+        let end_time = (case.withdrawable as u64).saturating_add(10_000);
+        let deposit = case
+            .withdrawable
+            .saturating_add(10_000)
+            .max(case.threshold + 1);
+        let stream_id = ctx.create_linear_stream(deposit, case.threshold, end_time);
+
+        ctx.env.ledger().set_timestamp(case.withdrawable as u64);
+        let results = ctx
+            .client()
+            .batch_withdraw(&ctx.recipient, &vec![&ctx.env, stream_id]);
+        let want = expected_amount(case);
+        assert_eq!(
+            results.get(0).unwrap().amount,
+            want,
+            "batch_withdraw {}: got {}, want {}",
+            case.name,
+            results.get(0).unwrap().amount,
+            want
+        );
+        assert_eq!(
+            ctx.token.balance(&ctx.recipient),
+            want,
+            "batch_withdraw {}: recipient balance mismatch",
+            case.name
+        );
+    }
+}
+
+#[test]
+fn table_batch_withdraw_to_dust_boundaries_threshold_minus_exact_plus() {
+    for case in BOUNDARY_CASES {
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+        let destination = Address::generate(&ctx.env);
+
+        let end_time = (case.withdrawable as u64).saturating_add(10_000);
+        let deposit = case
+            .withdrawable
+            .saturating_add(10_000)
+            .max(case.threshold + 1);
+        let stream_id = ctx.create_linear_stream(deposit, case.threshold, end_time);
+
+        ctx.env.ledger().set_timestamp(case.withdrawable as u64);
+        let param = WithdrawToParam {
+            stream_id,
+            destination: destination.clone(),
+        };
+        let results = ctx
+            .client()
+            .batch_withdraw_to(&ctx.recipient, &vec![&ctx.env, param]);
+        let want = expected_amount(case);
+        assert_eq!(
+            results.get(0).unwrap().amount,
+            want,
+            "batch_withdraw_to {}: got {}, want {}",
+            case.name,
+            results.get(0).unwrap().amount,
+            want
+        );
+        assert_eq!(
+            ctx.token.balance(&destination),
+            want,
+            "batch_withdraw_to {}: destination balance mismatch",
+            case.name
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bypass conditions from docs (terminal / final drain)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn withdraw_dust_threshold_bypassed_on_final_drain() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
 
-    let deposit = 1000_i128;
+    let stream_id = ctx.create_linear_stream(1000, 500, 1000);
+
+    ctx.env.ledger().set_timestamp(950);
+    assert_eq!(ctx.client().withdraw(&stream_id), 950);
+
+    // Remaining 50 < threshold 500, but final drain (withdrawn + withdrawable == deposit).
+    ctx.env.ledger().set_timestamp(1000);
+    assert_eq!(
+        ctx.client().withdraw(&stream_id),
+        50,
+        "final drain must bypass dust threshold per docs"
+    );
+}
+
+#[test]
+fn withdraw_dust_threshold_bypassed_when_cancelled() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.create_linear_stream(1000, 500, 1000);
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().cancel_stream(&stream_id);
+
+    assert_eq!(
+        ctx.client().withdraw(&stream_id),
+        100,
+        "Cancelled terminal state must bypass dust threshold per docs"
+    );
+}
+
+#[test]
+fn withdraw_dust_threshold_bypassed_past_end_time() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.create_linear_stream(1000, 500, 1000);
+    ctx.env.ledger().set_timestamp(900);
+    ctx.client().withdraw(&stream_id);
+
+    ctx.env.ledger().set_timestamp(1100);
+    assert_eq!(
+        ctx.client().withdraw(&stream_id),
+        100,
+        "past end_time terminal bypass must allow remaining balance"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Doc / code mismatch flags (assert actual behavior; do not "fix" production)
+// ---------------------------------------------------------------------------
+
+/// DOC MISMATCH: docs require `InvalidDustThreshold` when threshold > deposit.
+/// Actual: creation succeeds and stores the oversized threshold.
+#[test]
+fn flag_mismatch_create_allows_threshold_above_deposit() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let deposit = 1_000_i128;
+    let oversized = deposit + 1;
     let stream_id = ctx.client().create_stream(
         &ctx.sender,
         &ctx.recipient,
@@ -261,258 +394,28 @@ fn test_threshold_equal_to_deposit_blocks_until_terminal() {
         &0u64,
         &0u64,
         &1000u64,
-        &deposit, // threshold == deposit
+        &oversized,
         &None,
-        &fluxora_stream::StreamKind::Linear,
+        &StreamKind::Linear,
     );
-
-    // Mid-stream: withdrawable < deposit → blocked.
-    ctx.env.ledger().set_timestamp(500);
-    let withdrawn = ctx.client().withdraw(&stream_id);
-    assert_eq!(
-        withdrawn, 0,
-        "threshold == deposit should block mid-stream withdrawals"
-    );
-
-    // Past end_time: terminal bypass kicks in.
-    ctx.env.ledger().set_timestamp(1001);
-    let withdrawn_terminal = ctx.client().withdraw(&stream_id);
-    assert_eq!(
-        withdrawn_terminal, 1000,
-        "terminal bypass must allow full drain when threshold == deposit"
-    );
-    assert_eq!(ctx.token.balance(&ctx.recipient), 1000);
-}
-
-/// batch_withdraw respects the dust threshold for each stream in the batch.
-#[test]
-fn test_batch_withdraw_respects_dust_threshold() {
-    let ctx = TestContext::setup();
-    ctx.env.ledger().set_timestamp(0);
-
-    // Stream A: threshold = 200 (will be below threshold at t=100)
-    let stream_a = ctx.client().create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &200_i128,
-        &None,
-        &fluxora_stream::StreamKind::Linear,
-    );
-
-    // Stream B: threshold = 0 (always allowed)
-    let stream_b = ctx.client().create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0_i128,
-        &None,
-        &fluxora_stream::StreamKind::Linear,
-    );
-
-    ctx.env.ledger().set_timestamp(100);
-    let results = ctx
-        .client()
-        .batch_withdraw(&ctx.recipient, &vec![&ctx.env, stream_a, stream_b]);
-
-    // Stream A: 100 < 200 threshold → 0
-    assert_eq!(results.get(0).unwrap().amount, 0);
-    // Stream B: 100 >= 0 threshold → 100
-    assert_eq!(results.get(1).unwrap().amount, 100);
-
-    assert_eq!(ctx.token.balance(&ctx.recipient), 100);
-}
-
-/// Threshold exactly at withdrawable amount is allowed (check is strictly less-than).
-#[test]
-fn test_threshold_exactly_at_withdrawable_is_allowed() {
-    let ctx = TestContext::setup();
-    ctx.env.ledger().set_timestamp(0);
-
-    // rate=1, threshold=100 → at t=100, withdrawable==threshold → allowed
-    let stream_id = ctx.client().create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &100_i128,
-        &None,
-        &fluxora_stream::StreamKind::Linear,
-    );
-
-    ctx.env.ledger().set_timestamp(100);
-    let withdrawn = ctx.client().withdraw(&stream_id);
-    assert_eq!(
-        withdrawn, 100,
-        "withdrawable == threshold must be allowed (strictly less-than check)"
-    );
-}
-
-/// Short-duration stream: threshold larger than per-second accrual but smaller than
-/// total deposit. Recipient is blocked mid-stream and can only withdraw at end_time.
-#[test]
-fn test_short_stream_threshold_blocks_until_end_time() {
-    let ctx = TestContext::setup();
-    ctx.env.ledger().set_timestamp(0);
-
-    // 10 s stream, rate=100/s, deposit=1000, threshold=600
-    let stream_id = ctx.client().create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &100_i128,
-        &0u64,
-        &0u64,
-        &10u64,
-        &600_i128, // requires 6 s of accrual before first withdrawal
-        &None,
-        &fluxora_stream::StreamKind::Linear,
-    );
-
-    // At t=5: 500 accrued < 600 threshold → blocked
-    ctx.env.ledger().set_timestamp(5);
-    assert_eq!(ctx.client().withdraw(&stream_id), 0);
-
-    // At t=7: 700 accrued > 600 threshold → allowed
-    ctx.env.ledger().set_timestamp(7);
-    let withdrawn = ctx.client().withdraw(&stream_id);
-    assert_eq!(withdrawn, 700);
-    assert_eq!(ctx.token.balance(&ctx.recipient), 700);
-}
-
-struct TestContext<'a> {
-    env: Env,
-    contract_id: Address,
-    sender: Address,
-    recipient: Address,
-    token: TokenClient<'a>,
-}
-
-impl<'a> TestContext<'a> {
-    fn setup() -> Self {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register_contract(None, FluxoraStream);
-        let token_admin = Address::generate(&env);
-        let token_id = env
-            .register_stellar_asset_contract_v2(token_admin)
-            .address();
-
-        let admin = Address::generate(&env);
-        let sender = Address::generate(&env);
-        let recipient = Address::generate(&env);
-
-        let client = FluxoraStreamClient::new(&env, &contract_id);
-        client.init(&token_id, &admin);
-
-        let sac = StellarAssetClient::new(&env, &token_id);
-        sac.mint(&sender, &10_000_i128);
-
-        let token = TokenClient::new(&env, &token_id);
-        token.approve(&sender, &contract_id, &i128::MAX, &100_000);
-
-        TestContext {
-            env,
-            contract_id,
-            sender,
-            recipient,
-            token,
-        }
-    }
-
-    fn client(&self) -> FluxoraStreamClient<'_> {
-        FluxoraStreamClient::new(&self.env, &self.contract_id)
-    }
-}
-
-#[test]
-fn test_withdraw_dust_threshold_enforced() {
-    let ctx = TestContext::setup();
-    ctx.env.ledger().set_timestamp(0);
-
-    // Create stream with 100 threshold
-    let stream_id = ctx.client().create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &100_i128, // threshold = 100
-        &None,
-        &fluxora_stream::StreamKind::Linear,
-    );
-
-    // At t=50, withdrawable is 50. Threshold is 100.
-    ctx.env.ledger().set_timestamp(50);
-    let withdrawn = ctx.client().withdraw(&stream_id);
-    assert_eq!(withdrawn, 0, "should return 0 when below threshold");
-    assert_eq!(ctx.token.balance(&ctx.recipient), 0);
-
-    // At t=150, withdrawable is 150. Threshold is 100.
-    ctx.env.ledger().set_timestamp(150);
-    let withdrawn2 = ctx.client().withdraw(&stream_id);
-    assert_eq!(withdrawn2, 150, "should allow withdrawal above threshold");
-    assert_eq!(ctx.token.balance(&ctx.recipient), 150);
-}
-
-#[test]
-fn test_withdraw_dust_threshold_ignored_on_final_drain() {
-    let ctx = TestContext::setup();
-    ctx.env.ledger().set_timestamp(0);
-
-    // Create stream with 100 threshold
-    let stream_id = ctx.client().create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &500_i128, // threshold = 500
-        &None,
-        &fluxora_stream::StreamKind::Linear,
-    );
-
-    // Withdraw 950 first (above threshold)
-    ctx.env.ledger().set_timestamp(950);
-    ctx.client().withdraw(&stream_id);
-    assert_eq!(ctx.token.balance(&ctx.recipient), 950);
-
-    // Now 50 remains. Threshold is 500.
-    // At t=1000, 50 more is accrued. Total 1000.
-    ctx.env.ledger().set_timestamp(1000);
-    let withdrawn = ctx.client().withdraw(&stream_id);
-    assert_eq!(
-        withdrawn, 50,
-        "should allow final drain even if below threshold"
-    );
-    assert_eq!(ctx.token.balance(&ctx.recipient), 1000);
 
     let state = ctx.client().get_stream_state(&stream_id);
-    assert_eq!(state.status, StreamStatus::Completed);
+    assert_eq!(
+        state.withdraw_dust_threshold, oversized,
+        "MISMATCH vs docs/dust-threshold.md: creation should reject \
+         threshold > deposit with InvalidDustThreshold, but currently accepts it"
+    );
+    // `ContractError::InvalidDustThreshold` does not exist; code 20 is TemplateNotFound.
 }
 
+/// DOC MISMATCH: docs say negative thresholds are rejected.
+/// Actual: negative thresholds are stored; because withdrawable ≥ 0, the
+/// `withdrawable < threshold` check is never true, so behavior equals threshold=0.
 #[test]
-fn test_withdraw_dust_threshold_ignored_in_terminal_state() {
+fn flag_mismatch_create_allows_negative_dust_threshold() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
 
-    // Create stream with 100 threshold
     let stream_id = ctx.client().create_stream(
         &ctx.sender,
         &ctx.recipient,
@@ -521,78 +424,22 @@ fn test_withdraw_dust_threshold_ignored_in_terminal_state() {
         &0u64,
         &0u64,
         &1000u64,
-        &500_i128, // threshold = 500
+        &-1_i128,
         &None,
-        &fluxora_stream::StreamKind::Linear,
+        &StreamKind::Linear,
     );
 
-    // Cancel stream at t=100.
-    ctx.env.ledger().set_timestamp(100);
-    ctx.client().cancel_stream(&stream_id);
-    // 100 accrued. Threshold 500.
-
-    // Recipient tries to withdraw.
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(
-        withdrawn, 100,
-        "should allow withdrawal in terminal state (Cancelled) even if below threshold"
-    );
-    assert_eq!(ctx.token.balance(&ctx.recipient), 100);
-}
-
-#[test]
-fn test_withdraw_dust_threshold_ignored_past_end_time() {
-    let ctx = TestContext::setup();
-    ctx.env.ledger().set_timestamp(0);
-
-    // Create stream with 500 threshold
-    let stream_id = ctx.client().create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &500_i128,
-        &None,
-        &fluxora_stream::StreamKind::Linear,
+        state.withdraw_dust_threshold, -1,
+        "MISMATCH vs docs/dust-threshold.md: negative thresholds should be rejected, \
+         but currently are accepted"
     );
 
-    // Withdraw 900 at t=900 (above threshold)
-    ctx.env.ledger().set_timestamp(900);
-    ctx.client().withdraw(&stream_id);
-
-    // At t=1100 (past end_time), 100 remains. Threshold 500.
-    ctx.env.ledger().set_timestamp(1100);
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    ctx.env.ledger().set_timestamp(1);
     assert_eq!(
-        withdrawn, 100,
-        "should allow withdrawal past end_time even if below threshold"
+        ctx.client().withdraw(&stream_id),
+        1,
+        "negative threshold acts like 0 (never blocks) — flag for maintainer review"
     );
-}
-
-#[test]
-fn test_create_stream_rejects_excessive_dust_threshold() {
-    let ctx = TestContext::setup();
-    ctx.env.ledger().set_timestamp(0);
-
-    // Try to create stream with threshold (1100) > deposit (1000)
-    let res = ctx.client().try_create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &1100_i128, // threshold > deposit
-        &None,
-        &fluxora_stream::StreamKind::Linear,
-    );
-
-    match res {
-        Err(Ok(fluxora_stream::ContractError::InvalidDustThreshold)) => {}
-        _ => panic!("Expected InvalidDustThreshold error, got {:?}", res),
-    }
 }

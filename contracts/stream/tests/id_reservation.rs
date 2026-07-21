@@ -305,7 +305,8 @@ fn test_reclaim_before_expiry_errors() {
     let expiry = now + 100;
 
     // Reserve with expiry = Some(expiry)
-    ctx.client.reserve_stream_ids(&ctx.sender, &5u32, &Some(expiry));
+    ctx.client
+        .reserve_stream_ids(&ctx.sender, &5u32, &Some(expiry));
 
     // Attempt reclaim at now + 50 (pre-expiry)
     ctx.env.ledger().set_timestamp(now + 50);
@@ -320,12 +321,12 @@ fn test_reclaim_exactly_at_expiry_succeeds() {
     let expiry = now + 100;
 
     // Reserve with expiry = Some(expiry)
-    ctx.client.reserve_stream_ids(&ctx.sender, &5u32, &Some(expiry));
+    ctx.client
+        .reserve_stream_ids(&ctx.sender, &5u32, &Some(expiry));
 
     // Reclaim exactly at the expiry boundary
     ctx.env.ledger().set_timestamp(expiry);
-    let result = ctx.client.reclaim_expired_id_reservation(&ctx.sender);
-    assert_eq!(result, ());
+    ctx.client.reclaim_expired_id_reservation(&ctx.sender);
 
     // Check that reservation is released
     assert!(ctx.client.get_id_reservation(&ctx.sender).is_none());
@@ -338,12 +339,12 @@ fn test_reclaim_after_expiry_succeeds() {
     let expiry = now + 100;
 
     // Reserve with expiry = Some(expiry)
-    ctx.client.reserve_stream_ids(&ctx.sender, &5u32, &Some(expiry));
+    ctx.client
+        .reserve_stream_ids(&ctx.sender, &5u32, &Some(expiry));
 
     // Reclaim after expiry
     ctx.env.ledger().set_timestamp(expiry + 1);
-    let result = ctx.client.reclaim_expired_id_reservation(&ctx.sender);
-    assert_eq!(result, ());
+    ctx.client.reclaim_expired_id_reservation(&ctx.sender);
 
     // Check that reservation is released
     assert!(ctx.client.get_id_reservation(&ctx.sender).is_none());
@@ -363,7 +364,8 @@ fn test_reclaim_twice_errors() {
     let expiry = now + 100;
 
     // Reserve with expiry = Some(expiry)
-    ctx.client.reserve_stream_ids(&ctx.sender, &5u32, &Some(expiry));
+    ctx.client
+        .reserve_stream_ids(&ctx.sender, &5u32, &Some(expiry));
 
     // Reclaim first time (succeeds)
     ctx.env.ledger().set_timestamp(expiry);
