@@ -848,3 +848,97 @@ fn test_token_check_init_fails_for_mutating_balance_token() {
     let result = client.try_init(&token_id, &admin);
     assert_eq!(result, Err(Ok(ContractError::TokenVerificationFailed)));
 }
+
+// ---------------------------------------------------------------------------
+// Zero-amount / zero-balance edge cases for token_check::verify_token_behavior
+// ---------------------------------------------------------------------------
+// token_check.rs documents that a zero-value self-transfer must succeed even
+// when the contract has a zero balance (SEP-41 compatibility for clean deploys).
+// Dust-threshold withdrawal filtering is NOT implemented here — see
+// `tests/dust_threshold.rs` and docs/dust-threshold.md.
+
+mod mock_zero_balance {
+    use soroban_sdk::{Address, Env};
+
+    /// Token that always reports balance 0 and treats transfer(0) as a no-op.
+    #[soroban_sdk::contract]
+    pub struct MockZeroBalanceToken;
+
+    #[soroban_sdk::contractimpl]
+    impl MockZeroBalanceToken {
+        pub fn balance(_env: Env, _id: Address) -> i128 {
+            0_i128
+        }
+
+        pub fn transfer(_env: Env, _from: Address, _to: Address, amount: i128) {
+            // Compliant SEP-41 zero-value transfer: succeed without mutating state.
+            assert_eq!(
+                amount, 0,
+                "smoke test must only call transfer with amount 0"
+            );
+        }
+    }
+}
+pub use mock_zero_balance::MockZeroBalanceToken;
+
+/// verify_token_behavior succeeds when the contract token balance is zero.
+#[test]
+fn test_token_check_zero_balance_passes() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let test_contract_id = env.register_contract(None, TestTokenCheckContract);
+    let test_client = TestTokenCheckContractClient::new(&env, &test_contract_id);
+
+    let token_id = env.register_contract(None, MockZeroBalanceToken);
+
+    let result = test_client.try_run_verify(&token_id);
+    assert_eq!(
+        result,
+        Ok(Ok(())),
+        "zero-balance + zero-amount self-transfer must pass per token_check docs"
+    );
+}
+
+/// init succeeds for a zero-balance compliant token (clean deploy path).
+#[test]
+fn test_token_check_init_succeeds_for_zero_balance_token() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+
+    let token_id = env.register_contract(None, MockZeroBalanceToken);
+    let admin = Address::generate(&env);
+
+    let result = client.try_init(&token_id, &admin);
+    assert_eq!(result, Ok(Ok(())));
+}
+
+/// SAC path: contract starts with zero token balance; zero-amount smoke test still passes.
+#[test]
+fn test_token_check_sac_zero_amount_transfer_is_noop() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let test_contract_id = env.register_contract(None, TestTokenCheckContract);
+    let test_client = TestTokenCheckContractClient::new(&env, &test_contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+
+    // Contract address has never been funded — balance is 0.
+    let token = TokenClient::new(&env, &token_id);
+    assert_eq!(token.balance(&test_contract_id), 0);
+
+    let result = test_client.try_run_verify(&token_id);
+    assert_eq!(result, Ok(Ok(())));
+    assert_eq!(
+        token.balance(&test_contract_id),
+        0,
+        "zero-amount self-transfer must leave balance unchanged"
+    );
+}
