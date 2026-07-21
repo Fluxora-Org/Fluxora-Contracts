@@ -90,9 +90,10 @@ pub(crate) fn release_reentrancy_lock(env: &Env) {
 ///   short-lived streams below the static floor.
 pub(crate) fn compute_adaptive_ttl(now: u64, end_time: u64) -> u32 {
     let remaining_seconds = end_time.saturating_sub(now);
-    let ledgers_for_stream = (remaining_seconds / LEDGER_CLOSE_TIME) as u32;
-    let adaptive = ledgers_for_stream.saturating_add(BUFFER_LEDGERS);
-    adaptive.clamp(PERSISTENT_BUMP_AMOUNT, MAX_TTL)
+    let ledgers_for_stream = remaining_seconds / LEDGER_CLOSE_TIME;
+    let adaptive_u64 = ledgers_for_stream.saturating_add(BUFFER_LEDGERS as u64);
+    let clamped = adaptive_u64.clamp(PERSISTENT_BUMP_AMOUNT as u64, MAX_TTL as u64);
+    clamped as u32
 }
 
 pub(crate) fn get_config(env: &Env) -> Result<Config, ContractError> {
