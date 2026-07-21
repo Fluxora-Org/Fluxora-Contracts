@@ -1510,8 +1510,7 @@ mod tests {
 
         let ctx = Ctx::setup();
 
-        let rate_bounds =
-            CallData::FactorySetRateBounds(Some(10), Some(1_000)).to_xdr(&ctx.env);
+        let rate_bounds = CallData::FactorySetRateBounds(Some(10), Some(1_000)).to_xdr(&ctx.env);
         let decoded_rate_bounds = CallData::from_xdr(&ctx.env, &rate_bounds).unwrap();
         match decoded_rate_bounds {
             CallData::FactorySetRateBounds(min_rate, max_rate) => {
