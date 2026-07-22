@@ -758,7 +758,7 @@ impl FluxoraGovernance {
     ///
     /// # Errors
     /// - `InvalidThreshold`: `threshold` is zero or exceeds the current number of signers.
-    pub fn set_threshold(env: Env, threshold: u32) -> Result<(), GovernanceError> {
+    pub fn update_threshold(env: Env, threshold: u32) -> Result<(), GovernanceError> {
         get_admin(&env)?.require_auth();
         let signers = get_signers(&env)?;
 
