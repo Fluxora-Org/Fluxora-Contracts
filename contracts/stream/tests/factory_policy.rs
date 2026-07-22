@@ -1100,3 +1100,43 @@ fn test_none_memo_results_in_no_memo() {
     let stored = ctx.stream.get_stream_memo(&stream_id);
     assert_eq!(stored, None);
 }
+
+// ---------------------------------------------------------------------------
+// #912: DataKey collision audit test
+// ---------------------------------------------------------------------------
+
+/// Verifies that all DataKey variants convert to distinct Val representations
+/// in the Soroban host environment and cause zero storage collisions across variants.
+#[test]
+fn test_factory_datakey_collision_audit_all_variants_distinct() {
+    use fluxora_factory::DataKey;
+
+    let env = Env::default();
+    let addr_a = Address::generate(&env);
+    let addr_b = Address::generate(&env);
+
+    let keys = [
+        DataKey::Admin.into_val(&env),
+        DataKey::StreamContract.into_val(&env),
+        DataKey::MaxDepositCap.into_val(&env),
+        DataKey::MinDuration.into_val(&env),
+        DataKey::BatchCapEnforced.into_val(&env),
+        DataKey::Allowlist(addr_a.clone()).into_val(&env),
+        DataKey::Allowlist(addr_b.clone()).into_val(&env),
+        DataKey::FactoryStreamIds.into_val(&env),
+        DataKey::CreationPaused.into_val(&env),
+        DataKey::MinRatePerSecond.into_val(&env),
+        DataKey::MaxRatePerSecond.into_val(&env),
+    ];
+
+    // Ensure all pairs of keys produce non-equal Val representations in Env
+    for i in 0..keys.len() {
+        for j in (i + 1)..keys.len() {
+            assert_ne!(
+                keys[i], keys[j],
+                "DataKey collision detected between index {} and index {}",
+                i, j
+            );
+        }
+    }
+}
