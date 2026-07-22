@@ -235,6 +235,29 @@ fn test_bulk_cancel_atomic_rollback_on_failure() {
 }
 
 #[test]
+fn test_bulk_cancel_atomic_rollback_on_unauthorized_stream() {
+    let (env, client, _admin, sender, recipient) = setup_env();
+    env.ledger().set_timestamp(0);
+
+    let sender2 = Address::generate(&env);
+
+    let s1 = create_test_stream(&env, &client, &sender, &recipient, 1000, 1, 0, 0, 1000);
+    let s2 = create_test_stream(&env, &client, &sender2, &recipient, 2000, 2, 0, 0, 1000);
+
+    env.mock_all_auths();
+
+    let result = client.try_bulk_cancel_streams(&sender, &vec![&env, s1, s2]);
+    assert!(result.is_err());
+    assert_eq!(result.err().unwrap(), ContractError::Unauthorized);
+
+    let stream1 = client.get_stream_state(&s1);
+    assert_eq!(stream1.status, StreamStatus::Active);
+
+    let stream2 = client.get_stream_state(&s2);
+    assert_eq!(stream2.status, StreamStatus::Active);
+}
+
+#[test]
 fn test_bulk_cancel_with_paused_stream() {
     let (env, client, _admin, sender, recipient) = setup_env();
     env.ledger().set_timestamp(0);
