@@ -3543,10 +3543,9 @@ impl FluxoraStream {
         // replaced by the ed25519 signature check below.
         relayer.require_auth();
 
-        // 1. Deadline check — reject stale signatures before any storage reads.
-        if env.ledger().timestamp() > deadline {
-            return Err(ContractError::SignatureDeadlineExpired);
-        }
+        // 1. Validate delegation parameters (deadline & nonce against live state).
+        // delegation.rs backs delegated_withdraw authorization logic and queries live persistent storage on every call.
+        validate_delegation_params(&env, stream_id, nonce, deadline)?;
 
         // 2. Load stream.
         let mut stream = load_stream(&env, stream_id)?;
@@ -3560,12 +3559,6 @@ impl FluxoraStream {
                 < MIN_WITHDRAW_INTERVAL_LEDGERS
         {
             return Err(ContractError::WithdrawalTooFrequent);
-        }
-
-        // 4. Nonce check — replay protection.
-        let stored_nonce = load_delegated_nonce(&env, &stream.recipient);
-        if nonce != stored_nonce {
-            return Err(ContractError::InvalidSignature);
         }
 
         // 5. Bind the supplied public key to the stream recipient.
