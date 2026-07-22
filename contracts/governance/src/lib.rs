@@ -180,6 +180,10 @@ pub enum CallData {
     FactorySetAllowlist(Address, bool),
     /// `set_stream_contract(new_stream_contract)`
     FactorySetStreamContract(Address),
+    /// `set_rate_bounds(min_rate, max_rate)`
+    FactorySetRateBounds(Option<i128>, Option<i128>),
+    /// `set_factory_paused(paused)`
+    FactorySetPaused(bool),
 }
 
 /// Decode `calldata` bytes into a `CallData` variant and invoke the target.
@@ -245,6 +249,20 @@ fn dispatch_call(env: &Env, target: &Address, calldata: &Bytes) -> Result<(), Go
                 target,
                 &Symbol::new(env, "set_stream_contract"),
                 (new_contract,).into_val(env),
+            );
+        }
+        CallData::FactorySetRateBounds(min_rate, max_rate) => {
+            env.invoke_contract::<()>(
+                target,
+                &Symbol::new(env, "set_rate_bounds"),
+                (min_rate, max_rate).into_val(env),
+            );
+        }
+        CallData::FactorySetPaused(paused) => {
+            env.invoke_contract::<()>(
+                target,
+                &Symbol::new(env, "set_factory_paused"),
+                (paused,).into_val(env),
             );
         }
     }
@@ -1404,6 +1422,42 @@ mod tests {
     use soroban_sdk::testutils::{Address as _, Events, Ledger};
     use soroban_sdk::{vec, Env, TryFromVal, Val, Vec as SVec};
 
+    #[contract]
+    pub struct MockFactoryTarget;
+
+    #[contractimpl]
+    impl MockFactoryTarget {
+        pub fn set_rate_bounds(env: Env, min_rate: Option<i128>, max_rate: Option<i128>) {
+            env.storage()
+                .instance()
+                .set(&symbol_short!("min_rate"), &min_rate);
+            env.storage()
+                .instance()
+                .set(&symbol_short!("max_rate"), &max_rate);
+        }
+
+        pub fn set_factory_paused(env: Env, paused: bool) {
+            env.storage()
+                .instance()
+                .set(&symbol_short!("paused"), &paused);
+        }
+
+        pub fn min_rate(env: Env) -> Option<i128> {
+            env.storage().instance().get(&symbol_short!("min_rate"))
+        }
+
+        pub fn max_rate(env: Env) -> Option<i128> {
+            env.storage().instance().get(&symbol_short!("max_rate"))
+        }
+
+        pub fn paused(env: Env) -> bool {
+            env.storage()
+                .instance()
+                .get(&symbol_short!("paused"))
+                .unwrap_or(false)
+        }
+    }
+
     const TIMELOCK: u64 = 172_800;
     const MAX_AGE: u64 = 2_592_000;
 
@@ -1516,6 +1570,71 @@ mod tests {
         let executor = Address::generate(&ctx.env);
         ctx.client.execute(&executor, &id);
         assert!(ctx.client.get_proposal(&id).executed);
+    }
+
+    #[test]
+    fn test_factory_policy_calldata_round_trips_xdr() {
+        use soroban_sdk::xdr::ToXdr;
+
+        let ctx = Ctx::setup();
+
+        let rate_bounds = CallData::FactorySetRateBounds(Some(10), Some(1_000)).to_xdr(&ctx.env);
+        let decoded_rate_bounds = CallData::from_xdr(&ctx.env, &rate_bounds).unwrap();
+        match decoded_rate_bounds {
+            CallData::FactorySetRateBounds(min_rate, max_rate) => {
+                assert_eq!(min_rate, Some(10));
+                assert_eq!(max_rate, Some(1_000));
+            }
+            _ => assert!(false),
+        }
+
+        let paused = CallData::FactorySetPaused(true).to_xdr(&ctx.env);
+        let decoded_paused = CallData::from_xdr(&ctx.env, &paused).unwrap();
+        match decoded_paused {
+            CallData::FactorySetPaused(paused) => assert!(paused),
+            _ => assert!(false),
+        }
+    }
+
+    #[test]
+    fn test_factory_rate_bounds_calldata_dispatches() {
+        use soroban_sdk::xdr::ToXdr;
+
+        let ctx = Ctx::setup();
+        let target_id = ctx.env.register_contract(None, MockFactoryTarget);
+        let target = MockFactoryTargetClient::new(&ctx.env, &target_id);
+        let calldata = CallData::FactorySetRateBounds(Some(10), Some(1_000)).to_xdr(&ctx.env);
+
+        let id = ctx.client.propose(&ctx.signer_a, &target_id, &calldata);
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+        ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
+
+        let executor = Address::generate(&ctx.env);
+        ctx.client.execute(&executor, &id);
+
+        assert_eq!(target.min_rate(), Some(10));
+        assert_eq!(target.max_rate(), Some(1_000));
+    }
+
+    #[test]
+    fn test_factory_paused_calldata_dispatches() {
+        use soroban_sdk::xdr::ToXdr;
+
+        let ctx = Ctx::setup();
+        let target_id = ctx.env.register_contract(None, MockFactoryTarget);
+        let target = MockFactoryTargetClient::new(&ctx.env, &target_id);
+        let calldata = CallData::FactorySetPaused(true).to_xdr(&ctx.env);
+
+        let id = ctx.client.propose(&ctx.signer_a, &target_id, &calldata);
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+        ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
+
+        let executor = Address::generate(&ctx.env);
+        ctx.client.execute(&executor, &id);
+
+        assert!(target.paused());
     }
 
     #[test]
