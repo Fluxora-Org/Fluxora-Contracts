@@ -32,6 +32,24 @@ servers:
 security:
   - bearerAuth: []
 
+tags:
+  - name: Users
+    description: |
+      User profile management for the authenticated user.
+      All endpoints require a valid JWT Bearer token.
+      Rate limit: **100 requests per 15 minutes** (standardLimiter).
+  - name: Recommendations
+    description: |
+      Mentor recommendation engine — scoring, dismissal, and click tracking.
+      All endpoints require a valid JWT Bearer token.
+      Rate limit: **100 requests per 15 minutes** (standardLimiter).
+  - name: Admin
+    description: |
+      Administrative operations restricted to users with the `admin` role.
+      Rate limit: **100 requests per 15 minutes** (standardLimiter).
+  - name: Streams
+    description: Payment stream creation and management.
+
 components:
   securitySchemes:
     bearerAuth:
@@ -136,6 +154,358 @@ components:
           type: string
           format: date-time
           description: ISO-8601 creation timestamp.
+
+    UserPublicProfile:
+      type: object
+      description: |
+        Public user profile. The `password` field is never returned.
+        Learner-specific fields (`goals`, `skillGaps`, `budget`, `pricePreference`)
+        are `null` for non-learner roles.
+      required:
+        - id
+        - name
+        - email
+        - role
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique user identifier.
+          example: "d290f1ee-6c54-4b01-90e6-d701748f0851"
+        name:
+          type: string
+          maxLength: 255
+          description: Display name.
+          example: "Alex Johnson"
+        email:
+          type: string
+          format: email
+          description: Email address.
+          example: "alex@example.com"
+        role:
+          type: string
+          enum: [learner, mentor, admin]
+          description: User role in the platform.
+          example: "learner"
+        goals:
+          type: array
+          nullable: true
+          maxItems: 10
+          items:
+            type: string
+          description: Learning goals. Learner-only; null for other roles.
+          example: ["Python", "Machine Learning"]
+        skillGaps:
+          type: array
+          nullable: true
+          maxItems: 10
+          items:
+            type: string
+          description: Skills the learner wants to improve. Null for non-learners.
+          example: ["Data Visualization", "Statistics"]
+        budget:
+          type: number
+          nullable: true
+          minimum: 0
+          description: Maximum hourly rate the learner is willing to pay (USD). Null if not set.
+          example: 75.00
+        pricePreference:
+          type: string
+          nullable: true
+          enum: [low, budget, medium, standard, premium, high, null]
+          description: |
+            Qualitative price preference used when an explicit numeric budget
+            is not set. Maps to approximate hourly-rate ranges:
+            `low`→$25, `budget`→$50, `medium`→$75, `standard`→$100,
+            `premium`→$150, `high`→$200. Null if not set.
+          example: "medium"
+        createdAt:
+          type: string
+          format: date-time
+          description: ISO-8601 timestamp of account creation.
+          example: "2024-03-15T10:30:00.000Z"
+
+    MentorPublicProfile:
+      type: object
+      description: |
+        Public mentor profile as returned inside recommendation results.
+        Internal fields (e.g. `availabilitySlots`, `availabilityCount`, `updatedAt`)
+        are excluded from this view.
+      required:
+        - id
+        - userId
+        - averageRating
+        - hourlyRate
+        - isAvailable
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Mentor record identifier (distinct from the linked user id).
+          example: "b1e2f3a4-5678-4abc-90de-f01234567890"
+        userId:
+          type: string
+          format: uuid
+          description: The linked `User.id` for this mentor.
+          example: "d290f1ee-6c54-4b01-90e6-d701748f0851"
+        skills:
+          type: array
+          nullable: true
+          items:
+            type: string
+          description: Topics and technologies the mentor teaches. Null if not populated.
+          example: ["Python", "Machine Learning", "Data Science"]
+        averageRating:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 5
+          description: Average star rating (0–5, two decimal places).
+          example: 4.75
+        hourlyRate:
+          type: number
+          format: float
+          minimum: 0
+          description: Hourly session rate in USD.
+          example: 80.00
+        isAvailable:
+          type: boolean
+          description: Whether the mentor is currently accepting new sessions.
+          example: true
+        bio:
+          type: string
+          nullable: true
+          description: Free-text mentor biography.
+          example: "Senior ML engineer with 8 years of industry experience."
+        createdAt:
+          type: string
+          format: date-time
+          description: ISO-8601 timestamp when the mentor profile was created.
+          example: "2023-11-01T09:00:00.000Z"
+
+    ScoreBreakdown:
+      type: object
+      description: |
+        Per-dimension scoring detail for a single recommendation.
+        All values are normalised to [0.0, 1.0].
+
+        | Dimension | Weight | Description |
+        |---|---|---|
+        | `skillMatch` | 40% | Jaccard similarity between learner goals/skillGaps and mentor skills |
+        | `rating` | 30% | Normalised from [4.0, 5.0] → [0.0, 1.0] |
+        | `availability` | 20% | Based on slot count / isAvailable flag |
+        | `priceFit` | 10% | budget ÷ hourlyRate (clamped to [0, 1]) |
+      required:
+        - skillMatch
+        - rating
+        - availability
+        - priceFit
+      properties:
+        skillMatch:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: Skill alignment score (weight 40%).
+          example: 0.67
+        rating:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: Normalised rating score (weight 30%).
+          example: 0.75
+        availability:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: Availability score (weight 20%).
+          example: 0.85
+        priceFit:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: Price compatibility score (weight 10%).
+          example: 1.00
+
+    MentorScore:
+      type: object
+      description: A ranked recommendation entry combining a mentor profile with scoring metadata.
+      required:
+        - mentorId
+        - mentor
+        - totalScore
+        - scoreBreakdown
+        - sessionCount
+        - rank
+      properties:
+        mentorId:
+          type: string
+          format: uuid
+          description: ID of the recommended mentor record.
+          example: "b1e2f3a4-5678-4abc-90de-f01234567890"
+        mentor:
+          $ref: '#/components/schemas/MentorPublicProfile'
+        totalScore:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: |
+            Weighted composite score across all four dimensions.
+            Higher is a better match for the authenticated learner.
+          example: 0.81
+        scoreBreakdown:
+          $ref: '#/components/schemas/ScoreBreakdown'
+        sessionCount:
+          type: integer
+          minimum: 0
+          description: Number of prior sessions this learner has had with this mentor.
+          example: 1
+        rank:
+          type: integer
+          minimum: 1
+          maximum: 5
+          description: Position in the sorted recommendation list (1 = best match).
+          example: 1
+
+    RecommendationListResponse:
+      type: object
+      description: Successful response envelope for GET /users/recommendations/mentors.
+      required:
+        - success
+        - data
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          type: object
+          required:
+            - recommendations
+            - meta
+          properties:
+            recommendations:
+              type: array
+              items:
+                $ref: '#/components/schemas/MentorScore'
+              description: Ordered list of up to 5 mentor recommendations, best match first.
+            meta:
+              type: object
+              required:
+                - cachedAt
+                - cacheHit
+                - count
+              properties:
+                cachedAt:
+                  type: string
+                  format: date-time
+                  description: ISO-8601 timestamp when this result set was computed and cached.
+                  example: "2024-07-21T18:00:00.000Z"
+                cacheHit:
+                  type: boolean
+                  description: |
+                    `true` if the result was served from a 1-hour cache
+                    (no scoring computation performed this request).
+                  example: false
+                count:
+                  type: integer
+                  minimum: 0
+                  maximum: 5
+                  description: Number of recommendations in this response.
+                  example: 5
+
+    UpdateUserRequest:
+      type: object
+      description: |
+        All fields are optional; only supplied fields are updated.
+        Validation rules mirror `validationSchemas.updateUser` in
+        `validation.middleware.ts`.
+      properties:
+        name:
+          type: string
+          maxLength: 255
+          description: New display name.
+          example: "Alex J."
+        email:
+          type: string
+          format: email
+          description: New email address.
+          example: "alex.new@example.com"
+        goals:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+          description: Learning goals (replaces existing list).
+          example: ["Python", "Deep Learning"]
+        skillGaps:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+          description: Skill gaps (replaces existing list).
+          example: ["Transformers", "PyTorch"]
+        budget:
+          type: number
+          minimum: 0
+          description: Maximum hourly rate in USD.
+          example: 100.00
+
+    UpdateLearnerProfileRequest:
+      type: object
+      description: |
+        All fields are optional; only supplied fields are updated.
+        Validation rules mirror `validationSchemas.updateLearnerProfile` in
+        `validation.middleware.ts`.
+      properties:
+        goals:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+          description: Learning goals (replaces existing list).
+          example: ["NLP", "LLMs"]
+        skillGaps:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+          description: Skill gaps (replaces existing list).
+          example: ["Fine-tuning", "RAG"]
+        budget:
+          type: number
+          minimum: 0
+          description: Maximum hourly rate in USD.
+          example: 75.00
+        pricePreference:
+          type: string
+          enum: [low, budget, medium, standard, premium, high]
+          description: |
+            Qualitative price preference. Used as a budget proxy when a
+            numeric `budget` is not set. Allowed values: `low` (~$25/hr),
+            `budget` (~$50/hr), `medium` (~$75/hr), `standard` (~$100/hr),
+            `premium` (~$150/hr), `high` (~$200/hr).
+          example: "medium"
+
+    LogClickRequest:
+      type: object
+      description: |
+        Optional body for POST /recommendations/click/:mentorId.
+        Providing `rank` improves click-position analytics. The body
+        and all fields are entirely optional — the endpoint always
+        responds 204 regardless.
+      properties:
+        rank:
+          type: integer
+          minimum: 1
+          maximum: 5
+          description: Rank position of the clicked recommendation (1 = top result).
+          example: 2
 
     CreateStreamRequest:
       type: object
@@ -296,6 +666,797 @@ paths:
                   code: "IDEMPOTENCY_CONFLICT"
         '429':
           description: Rate limit exceeded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  # ============================================================================
+  # USER ROUTES — /users
+  # ============================================================================
+
+  /users/me:
+    get:
+      operationId: getCurrentUser
+      summary: Get authenticated user profile
+      description: |
+        Returns the full public profile of the currently authenticated user.
+
+        The `password` field is never included in the response.
+        Learner-specific fields (`goals`, `skillGaps`, `budget`, `pricePreference`)
+        are populated only for users with role `learner`.
+
+        ### Rate limit
+        **standardLimiter**: 100 requests per 15 minutes.
+      tags:
+        - Users
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Authenticated user profile retrieved successfully.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data]
+                properties:
+                  success:
+                    type: boolean
+                    enum: [true]
+                  data:
+                    type: object
+                    required: [user]
+                    properties:
+                      user:
+                        $ref: '#/components/schemas/UserPublicProfile'
+              example:
+                success: true
+                data:
+                  user:
+                    id: "d290f1ee-6c54-4b01-90e6-d701748f0851"
+                    name: "Alex Johnson"
+                    email: "alex@example.com"
+                    role: "learner"
+                    goals: ["Python", "Machine Learning"]
+                    skillGaps: ["Statistics", "Data Visualization"]
+                    budget: 75.00
+                    pricePreference: "medium"
+                    createdAt: "2024-03-15T10:30:00.000Z"
+        '401':
+          description: Missing or invalid JWT.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Authenticated user not found (token subject does not match any user).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          description: Rate limit exceeded (100 req / 15 min).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+    patch:
+      operationId: updateUser
+      summary: Update authenticated user profile
+      description: |
+        Partially updates the authenticated user's profile.
+        All body fields are optional; only supplied fields are modified.
+
+        ### Validation rules (from `validationSchemas.updateUser`)
+        | Field | Type | Constraint |
+        |---|---|---|
+        | `name` | string | maxLength 255 |
+        | `email` | string | valid email format |
+        | `goals` | array | max 10 items |
+        | `skillGaps` | array | max 10 items |
+        | `budget` | number | minimum 0 |
+
+        ### Rate limit
+        **standardLimiter**: 100 requests per 15 minutes.
+      tags:
+        - Users
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateUserRequest'
+            examples:
+              updateName:
+                summary: Update display name only
+                value:
+                  name: "Alex J."
+              updateLearnerFields:
+                summary: Update learner goals and budget
+                value:
+                  goals: ["Python", "Deep Learning"]
+                  skillGaps: ["Transformers"]
+                  budget: 100.00
+      responses:
+        '200':
+          description: User updated successfully.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data]
+                properties:
+                  success:
+                    type: boolean
+                    enum: [true]
+                  data:
+                    type: object
+                    required: [message]
+                    properties:
+                      message:
+                        type: string
+                        example: "User updated successfully"
+        '400':
+          description: Validation error — one or more body fields failed validation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                error:
+                  message: "name must be at most 255 characters"
+                  code: "VALIDATION_ERROR"
+        '401':
+          description: Missing or invalid JWT.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          description: Rate limit exceeded (100 req / 15 min).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+    delete:
+      operationId: deleteUser
+      summary: Delete authenticated user account
+      description: |
+        Permanently deletes the authenticated user's account.
+
+        ### Rate limit
+        **strictLimiter**: 10 requests per 15 minutes.
+        This endpoint uses a stricter rate limit than all other user endpoints
+        to prevent accidental or automated mass deletions.
+      tags:
+        - Users
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: User account deleted successfully.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data]
+                properties:
+                  success:
+                    type: boolean
+                    enum: [true]
+                  data:
+                    type: object
+                    required: [message]
+                    properties:
+                      message:
+                        type: string
+                        example: "User deleted successfully"
+        '401':
+          description: Missing or invalid JWT.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          description: |
+            Rate limit exceeded.
+            **strictLimiter**: 10 requests per 15 minutes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /users/me/learner-profile:
+    patch:
+      operationId: updateLearnerProfile
+      summary: Update learner goals, skill gaps, and budget preferences
+      description: |
+        Partially updates the learner-specific fields of the authenticated user's profile.
+        All body fields are optional; only supplied fields are modified.
+
+        This endpoint is intended for `learner` role users. It will still execute
+        for other roles but only learner-specific fields will be persisted.
+
+        ### Validation rules (from `validationSchemas.updateLearnerProfile`)
+        | Field | Type | Constraint |
+        |---|---|---|
+        | `goals` | array | max 10 items |
+        | `skillGaps` | array | max 10 items |
+        | `budget` | number | minimum 0 |
+        | `pricePreference` | string | enum: `low`, `budget`, `medium`, `standard`, `premium`, `high` |
+
+        ### Rate limit
+        **standardLimiter**: 100 requests per 15 minutes.
+      tags:
+        - Users
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateLearnerProfileRequest'
+            examples:
+              setGoalsAndBudget:
+                summary: Set goals and budget
+                value:
+                  goals: ["NLP", "LLMs"]
+                  skillGaps: ["Fine-tuning", "RAG"]
+                  budget: 75.00
+                  pricePreference: "medium"
+              setPricePreferenceOnly:
+                summary: Update price preference only
+                value:
+                  pricePreference: "premium"
+      responses:
+        '200':
+          description: Learner profile updated successfully.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data]
+                properties:
+                  success:
+                    type: boolean
+                    enum: [true]
+                  data:
+                    type: object
+                    required: [message]
+                    properties:
+                      message:
+                        type: string
+                        example: "Learner profile updated successfully"
+        '400':
+          description: Validation error — one or more body fields failed validation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              examples:
+                tooManyGoals:
+                  summary: Array exceeds max items
+                  value:
+                    success: false
+                    error:
+                      message: "goals can have at most 10 items"
+                      code: "VALIDATION_ERROR"
+                invalidPricePreference:
+                  summary: Invalid enum value
+                  value:
+                    success: false
+                    error:
+                      message: "pricePreference must be one of: low, budget, medium, standard, premium, high"
+                      code: "VALIDATION_ERROR"
+        '401':
+          description: Missing or invalid JWT.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          description: Rate limit exceeded (100 req / 15 min).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /users/me/budget:
+    get:
+      operationId: getLearnerBudget
+      summary: Get learner budget and price preference
+      description: |
+        Returns the authenticated learner's current budget and price preference values.
+
+        Both fields return `null` when the learner has not yet set them.
+        This is a focused read endpoint — use `PATCH /users/me/learner-profile`
+        to update these values.
+
+        ### Rate limit
+        **standardLimiter**: 100 requests per 15 minutes.
+      tags:
+        - Users
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Budget preferences retrieved successfully.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data]
+                properties:
+                  success:
+                    type: boolean
+                    enum: [true]
+                  data:
+                    type: object
+                    required: [budget, pricePreference]
+                    properties:
+                      budget:
+                        type: number
+                        nullable: true
+                        minimum: 0
+                        description: |
+                          Maximum hourly rate in USD the learner is willing to pay.
+                          `null` if not yet configured.
+                        example: 75.00
+                      pricePreference:
+                        type: string
+                        nullable: true
+                        enum: [low, budget, medium, standard, premium, high, null]
+                        description: |
+                          Qualitative price preference. `null` if not yet configured.
+                        example: "medium"
+              examples:
+                withValues:
+                  summary: Budget and preference set
+                  value:
+                    success: true
+                    data:
+                      budget: 75.00
+                      pricePreference: "medium"
+                noPreference:
+                  summary: Neither value set yet
+                  value:
+                    success: true
+                    data:
+                      budget: null
+                      pricePreference: null
+        '401':
+          description: Missing or invalid JWT.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          description: Rate limit exceeded (100 req / 15 min).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /users/{userId}:
+    get:
+      operationId: getUserById
+      summary: Get a user by ID
+      description: |
+        Returns the public profile of any user by their UUID.
+        Intended for administrative use; authentication is required.
+
+        ### Validation rules (from `validationSchemas.getUserById`)
+        | Parameter | Type | Constraint |
+        |---|---|---|
+        | `userId` | path param | valid UUID v4, required |
+
+        ### Rate limit
+        **standardLimiter**: 100 requests per 15 minutes.
+      tags:
+        - Admin
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: userId
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: UUID of the user to look up.
+          example: "d290f1ee-6c54-4b01-90e6-d701748f0851"
+      responses:
+        '200':
+          description: User profile retrieved successfully.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data]
+                properties:
+                  success:
+                    type: boolean
+                    enum: [true]
+                  data:
+                    type: object
+                    required: [user]
+                    properties:
+                      user:
+                        type: object
+                        required: [id]
+                        properties:
+                          id:
+                            type: string
+                            format: uuid
+                            description: The requested user's ID.
+                        description: |
+                          Currently returns the user id only (service layer is a
+                          placeholder that will be expanded to return the full
+                          `UserPublicProfile` once the DB query is implemented).
+              example:
+                success: true
+                data:
+                  user:
+                    id: "d290f1ee-6c54-4b01-90e6-d701748f0851"
+        '400':
+          description: Validation error — `userId` path parameter is not a valid UUID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                error:
+                  message: "userId must be a valid UUID"
+                  code: "VALIDATION_ERROR"
+        '401':
+          description: Missing or invalid JWT.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          description: Rate limit exceeded (100 req / 15 min).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  # ============================================================================
+  # RECOMMENDATION ROUTES — /users/recommendations
+  # ============================================================================
+
+  /users/recommendations/mentors:
+    get:
+      operationId: getRecommendations
+      summary: Get personalised mentor recommendations
+      description: |
+        Returns up to 5 ranked mentor recommendations for the authenticated learner,
+        computed by a weighted scoring algorithm across four dimensions:
+
+        | Dimension | Weight | Algorithm |
+        |---|---|---|
+        | Skill match | 40% | Jaccard similarity between learner goals/skillGaps and mentor skills |
+        | Rating | 30% | Normalised from [4.0, 5.0] → [0.0, 1.0] |
+        | Availability | 20% | Slot count / `isAvailable` flag |
+        | Price fit | 10% | Learner budget ÷ mentor hourly rate (clamped to [0, 1]) |
+
+        Results are cached for **1 hour** per learner. The `meta.cacheHit` field
+        indicates whether the result was served from cache. Dismissed mentors
+        (via `POST /users/recommendations/dismiss/:mentorId`) and mentors with
+        ≥ 3 prior sessions with this learner are excluded automatically.
+
+        Returns `404` with code `LEARNER_NOT_FOUND` if the authenticated user
+        does not have a learner profile.
+
+        ### Rate limit
+        **standardLimiter**: 100 requests per 15 minutes.
+      tags:
+        - Recommendations
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Recommendations retrieved successfully (may be served from cache).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecommendationListResponse'
+              example:
+                success: true
+                data:
+                  recommendations:
+                    - mentorId: "b1e2f3a4-5678-4abc-90de-f01234567890"
+                      mentor:
+                        id: "b1e2f3a4-5678-4abc-90de-f01234567890"
+                        userId: "d290f1ee-6c54-4b01-90e6-d701748f0851"
+                        skills: ["Python", "Machine Learning", "Data Science"]
+                        averageRating: 4.75
+                        hourlyRate: 80.00
+                        isAvailable: true
+                        bio: "Senior ML engineer with 8 years of industry experience."
+                        createdAt: "2023-11-01T09:00:00.000Z"
+                      totalScore: 0.81
+                      scoreBreakdown:
+                        skillMatch: 0.67
+                        rating: 0.75
+                        availability: 0.85
+                        priceFit: 1.00
+                      sessionCount: 1
+                      rank: 1
+                  meta:
+                    cachedAt: "2024-07-21T18:00:00.000Z"
+                    cacheHit: false
+                    count: 1
+        '401':
+          description: Missing or invalid JWT.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: |
+            The authenticated user does not have a learner profile.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                error:
+                  message: "Learner not found"
+                  code: "LEARNER_NOT_FOUND"
+        '429':
+          description: Rate limit exceeded (100 req / 15 min).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /users/recommendations/dismiss/{mentorId}:
+    post:
+      operationId: dismissRecommendation
+      summary: Dismiss a mentor recommendation
+      description: |
+        Marks the specified mentor as dismissed for the authenticated learner.
+        Dismissed mentors are excluded from all future recommendation results.
+
+        This operation is **idempotent** — dismissing an already-dismissed mentor
+        returns `204` without error. Dismissing a mentor also **invalidates the
+        learner's recommendation cache**, so the next call to
+        `GET /users/recommendations/mentors` will recompute results.
+
+        ### Validation rules (from `validationSchemas.dismissRecommendation`)
+        | Parameter | Type | Constraint |
+        |---|---|---|
+        | `mentorId` | path param | valid UUID v4, required |
+
+        ### Rate limit
+        **standardLimiter**: 100 requests per 15 minutes.
+      tags:
+        - Recommendations
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: mentorId
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: UUID of the mentor to dismiss.
+          example: "b1e2f3a4-5678-4abc-90de-f01234567890"
+      responses:
+        '204':
+          description: Recommendation dismissed successfully. No response body.
+        '400':
+          description: Validation error — `mentorId` path parameter is not a valid UUID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                error:
+                  message: "Invalid mentor ID format"
+                  code: "VALIDATION_ERROR"
+        '401':
+          description: Missing or invalid JWT.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Mentor not found — no mentor exists with the given `mentorId`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                error:
+                  message: "Mentor not found"
+                  code: "MENTOR_NOT_FOUND"
+        '429':
+          description: Rate limit exceeded (100 req / 15 min).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /users/recommendations/click/{mentorId}:
+    post:
+      operationId: logRecommendationClick
+      summary: Log a recommendation click event
+      description: |
+        Records that the authenticated learner clicked on a mentor recommendation.
+        Used for analytics and future ranking improvements.
+
+        This is a **fire-and-forget** endpoint:
+        - The response is **always `204 No Content`**, regardless of whether the
+          click could be persisted (logging failures are swallowed silently).
+        - Clients should never retry on error — the `204` is authoritative.
+
+        The request body is entirely optional. Supplying `rank` improves
+        click-position analytics but is not required.
+
+        ### Rate limit
+        **standardLimiter**: 100 requests per 15 minutes.
+      tags:
+        - Recommendations
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: mentorId
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: UUID of the mentor that was clicked.
+          example: "b1e2f3a4-5678-4abc-90de-f01234567890"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LogClickRequest'
+            examples:
+              withRank:
+                summary: Click with rank position
+                value:
+                  rank: 2
+              noBody:
+                summary: Click without optional body
+                value: {}
+      responses:
+        '204':
+          description: |
+            Click recorded (or silently dropped). Always returned regardless of
+            internal logging outcome. No response body.
+        '429':
+          description: Rate limit exceeded (100 req / 15 min).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  # ============================================================================
+  # ADMIN ROUTES — /users
+  # ============================================================================
+
+  /users:
+    get:
+      operationId: listUsers
+      summary: List all users (admin)
+      description: |
+        Returns all registered users. Intended for admin tooling and
+        back-office dashboards.
+
+        > **Note:** The current implementation returns an empty array
+        > (`users: []`) — the database query is a placeholder that will be
+        > implemented in a future iteration.
+
+        ### Rate limit
+        **standardLimiter**: 100 requests per 15 minutes.
+      tags:
+        - Admin
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: User list retrieved successfully.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data]
+                properties:
+                  success:
+                    type: boolean
+                    enum: [true]
+                  data:
+                    type: object
+                    required: [users]
+                    properties:
+                      users:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/UserPublicProfile'
+                        description: All registered users. Empty array when no users exist.
+              example:
+                success: true
+                data:
+                  users: []
+        '401':
+          description: Missing or invalid JWT.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          description: Rate limit exceeded (100 req / 15 min).
           content:
             application/json:
               schema:
