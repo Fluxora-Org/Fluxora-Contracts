@@ -2873,14 +2873,6 @@ impl FluxoraStream {
             return Ok(0);
         }
 
-        // Enforce dust threshold unless terminal state or final drain (#423)
-        if withdrawable < stream.withdraw_dust_threshold
-            && !is_terminal_state(&env, &stream)
-            && stream.withdrawn_amount + withdrawable < stream.deposit_amount
-        {
-            return Ok(0);
-        }
-
         // CEI: update state before external token transfer to reduce reentrancy risk.
         // Assumption: the token contract does not reenter this contract.
         stream.withdrawn_amount += withdrawable;
