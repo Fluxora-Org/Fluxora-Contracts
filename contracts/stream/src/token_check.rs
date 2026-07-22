@@ -21,6 +21,14 @@ use super::ContractError;
 /// non-compliant, or adversarial token contract. Any negative balance read returns
 /// `ContractError::TokenVerificationFailed`.
 ///
+/// ### Panicking Token Rejection
+/// Some SEP-41 implementations choose to panic/revert on zero-value transfers. The
+/// zero-value self-transfer is wrapped via `try_transfer` so that a panicking token
+/// is caught and converted to `ContractError::TokenRevertedOnZeroTransfer` rather
+/// than propagating as an unhandled host panic. This is distinct from
+/// `TokenVerificationFailed` which covers tokens that succeed but return invalid
+/// balance values or change the balance across the no-op transfer.
+///
 /// ### Security Rationale
 /// Enforcing that zero-value transfers are strict no-ops and that balances are non-negative
 /// prevents integration with flawed, bugged, or malicious tokens that could manipulate
@@ -44,8 +52,15 @@ pub fn verify_token_behavior(env: &Env, token_address: &Address) -> Result<(), C
         return Err(ContractError::TokenVerificationFailed);
     }
 
-    // 2. Perform the existing zero-value self-transfer.
-    token_client.transfer(&contract_addr, &contract_addr, &0_i128);
+    // 2. Perform the zero-value self-transfer.
+    //    Use `try_transfer` so a token that panics/reverts on zero-value transfer is
+    //    caught as a typed error rather than propagating as an unhandled host panic.
+    if token_client
+        .try_transfer(&contract_addr, &contract_addr, &0_i128)
+        .is_err()
+    {
+        return Err(ContractError::TokenRevertedOnZeroTransfer);
+    }
 
     // 3. Read the balance again afterward.
     let final_balance = token_client.balance(&contract_addr);

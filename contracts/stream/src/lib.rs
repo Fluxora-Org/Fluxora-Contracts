@@ -365,6 +365,10 @@ pub enum ContractError {
     AlreadyInitialised = 8,
     /// The token contract did not expose the expected SEP-41 interface during init.
     TokenVerificationFailed = 23,
+    /// The token contract panicked/reverted during the zero-value self-transfer
+    /// smoke test. Distinct from `TokenVerificationFailed` — this covers tokens
+    /// that reject zero-value transfers, which some SEP-41 implementations choose.
+    TokenRevertedOnZeroTransfer = 35,
     /// Token balance or allowance is insufficient (emulated check if possible, otherwise caught by token client).
     InsufficientBalance = 9,
     /// Deposit amount does not cover the total streamable amount.

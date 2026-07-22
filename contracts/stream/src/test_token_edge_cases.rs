@@ -942,3 +942,92 @@ fn test_token_check_sac_zero_amount_transfer_is_noop() {
         "zero-amount self-transfer must leave balance unchanged"
     );
 }
+
+// ---------------------------------------------------------------------------
+// §17  Panicking Token on Zero-Value Transfer (issue #955)
+// ---------------------------------------------------------------------------
+// Some SEP-41 implementations choose to panic/revert on zero-value transfers.
+// The smoke test must catch this as a typed `TokenRevertedOnZeroTransfer` error
+// rather than propagating an unhandled host panic.
+
+mod mock_panic_transfer {
+    use soroban_sdk::{Address, Env};
+
+    /// Token that panics unconditionally on transfer, simulating SEP-41
+    /// implementations that reject zero-value transfers.
+    #[soroban_sdk::contract]
+    pub struct MockPanickingTransferToken;
+
+    #[soroban_sdk::contractimpl]
+    impl MockPanickingTransferToken {
+        pub fn balance(_env: Env, _id: Address) -> i128 {
+            100_i128
+        }
+
+        pub fn transfer(_env: Env, _from: Address, _to: Address, _amount: i128) {
+            panic!("zero-value transfer rejected");
+        }
+    }
+}
+pub use mock_panic_transfer::MockPanickingTransferToken;
+
+/// verify_token_behavior returns TokenRevertedOnZeroTransfer when the
+/// token contract panics on zero-value transfer.
+#[test]
+fn test_token_check_panicking_transfer_fails_cleanly() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let test_contract_id = env.register_contract(None, TestTokenCheckContract);
+    let test_client = TestTokenCheckContractClient::new(&env, &test_contract_id);
+
+    let token_id = env.register_contract(None, MockPanickingTransferToken);
+
+    let result = test_client.try_run_verify(&token_id);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::TokenRevertedOnZeroTransfer)),
+        "panicking zero-transfer must produce typed error, not host panic"
+    );
+}
+
+/// init fails with TokenRevertedOnZeroTransfer when the token panics
+/// on zero-value transfer (end-to-end path through the contract init).
+#[test]
+fn test_token_check_init_fails_for_panicking_token() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+
+    let token_id = env.register_contract(None, MockPanickingTransferToken);
+    let admin = Address::generate(&env);
+
+    let result = client.try_init(&token_id, &admin);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::TokenRevertedOnZeroTransfer)),
+        "init must propagate panicking token as typed error"
+    );
+}
+
+/// verify_token_behavior still rejects tokens that succeed but lie about
+/// their balance (no regression — distinct error variant).
+#[test]
+fn test_token_check_mutating_balance_still_returns_verification_failed() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let test_contract_id = env.register_contract(None, TestTokenCheckContract);
+    let test_client = TestTokenCheckContractClient::new(&env, &test_contract_id);
+
+    let token_id = env.register_contract(None, MockMutatingToken);
+
+    let result = test_client.try_run_verify(&token_id);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::TokenVerificationFailed)),
+        "mutating-balance token must still return verification failed (not reverted)"
+    );
+}
