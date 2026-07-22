@@ -747,7 +747,6 @@ impl FluxoraGovernance {
         Ok(())
     }
 
-
     /// Submit a new governance proposal.
     ///
     /// Any registered co-signer may propose. The proposer does not automatically
