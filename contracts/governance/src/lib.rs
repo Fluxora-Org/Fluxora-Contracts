@@ -747,8 +747,6 @@ impl FluxoraGovernance {
         Ok(())
     }
 
-
-
     /// Submit a new governance proposal.
     ///
     /// Any registered co-signer may propose. The proposer does not automatically
@@ -1578,24 +1576,27 @@ mod tests {
         }
     }
 
-    /// Legitimate rate, pause, and factory operations enumerate and round-trip successfully.
+        assert_eq!(
+            res_tuple.unwrap_err(),
+            Ok(GovernanceError::InvalidCallDataFormat)
+        );
+    }
+
     #[test]
-    fn test_legitimate_factory_and_stream_calldata_dispatch_variants() {
+    fn test_calldata_variants_roundtrip() {
         use soroban_sdk::xdr::{FromXdr, ToXdr};
         let ctx = Ctx::setup();
-        let dummy_addr = Address::generate(&ctx.env);
-
-        let variants = [
+        let variants = vec![
             CallData::Noop,
-            CallData::StreamSetAdmin(dummy_addr.clone()),
-            CallData::StreamSetMaxRate(500_i128),
+            CallData::StreamSetAdmin(Address::generate(&ctx.env)),
+            CallData::StreamSetMaxRate(5000),
             CallData::StreamGlobalResume,
-            CallData::StreamBulkResumeAsAdmin(vec![&ctx.env, 1u64, 2u64]),
-            CallData::FactorySetAdmin(dummy_addr.clone()),
-            CallData::FactorySetCap(10_000_i128),
-            CallData::FactorySetMinDuration(3600_u64),
-            CallData::FactorySetAllowlist(dummy_addr.clone(), true),
-            CallData::FactorySetStreamContract(dummy_addr.clone()),
+            CallData::StreamBulkResumeAsAdmin(vec![&ctx.env, 1, 2, 3]),
+            CallData::FactorySetAdmin(Address::generate(&ctx.env)),
+            CallData::FactorySetCap(100_000),
+            CallData::FactorySetMinDuration(86400),
+            CallData::FactorySetAllowlist(Address::generate(&ctx.env), true),
+            CallData::FactorySetStreamContract(Address::generate(&ctx.env)),
         ];
 
         for var in variants.iter() {
@@ -1606,19 +1607,28 @@ mod tests {
             match (var, decoded) {
                 (CallData::Noop, CallData::Noop) => {}
                 (CallData::StreamSetAdmin(a1), CallData::StreamSetAdmin(a2)) => assert_eq!(a1, &a2),
-                (CallData::StreamSetMaxRate(r1), CallData::StreamSetMaxRate(r2)) => assert_eq!(r1, &r2),
+                (CallData::StreamSetMaxRate(r1), CallData::StreamSetMaxRate(r2)) => {
+                    assert_eq!(r1, &r2)
+                }
                 (CallData::StreamGlobalResume, CallData::StreamGlobalResume) => {}
                 (CallData::StreamBulkResumeAsAdmin(v1), CallData::StreamBulkResumeAsAdmin(v2)) => {
                     assert_eq!(v1.len(), v2.len());
                 }
-                (CallData::FactorySetAdmin(a1), CallData::FactorySetAdmin(a2)) => assert_eq!(a1, &a2),
+                (CallData::FactorySetAdmin(a1), CallData::FactorySetAdmin(a2)) => {
+                    assert_eq!(a1, &a2)
+                }
                 (CallData::FactorySetCap(c1), CallData::FactorySetCap(c2)) => assert_eq!(c1, &c2),
-                (CallData::FactorySetMinDuration(d1), CallData::FactorySetMinDuration(d2)) => assert_eq!(d1, &d2),
+                (CallData::FactorySetMinDuration(d1), CallData::FactorySetMinDuration(d2)) => {
+                    assert_eq!(d1, &d2)
+                }
                 (CallData::FactorySetAllowlist(a1, b1), CallData::FactorySetAllowlist(a2, b2)) => {
                     assert_eq!(a1, &a2);
                     assert_eq!(b1, &b2);
                 }
-                (CallData::FactorySetStreamContract(a1), CallData::FactorySetStreamContract(a2)) => {
+                (
+                    CallData::FactorySetStreamContract(a1),
+                    CallData::FactorySetStreamContract(a2),
+                ) => {
                     assert_eq!(a1, &a2);
                 }
                 _ => panic!("Variant mismatch during CallData round-trip test"),
