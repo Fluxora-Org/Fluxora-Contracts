@@ -1609,8 +1609,7 @@ mod tests {
         assert_eq!(ctx.client.get_threshold(), 3);
         let (topic, data) = last_contract_event(&ctx.env, &ctx.contract_id);
         assert_eq!(topic, symbol_short!("quor_cfg"));
-        let payload =
-            QuorumConfig::try_from_val(&ctx.env, &data).expect("decodes to QuorumConfig");
+        let payload = QuorumConfig::try_from_val(&ctx.env, &data).expect("decodes to QuorumConfig");
         assert_eq!(payload.threshold, 3);
         assert_eq!(payload.signer_count, 3);
     }

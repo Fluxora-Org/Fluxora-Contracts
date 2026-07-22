@@ -36,6 +36,7 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `TemplateLimitExceeded` | 21 | Per-owner or global template limit would be exceeded | `register_stream_template` |
 | `TemplateUnauthorized` | 22 | Caller is not authorized to delete a template | `delete_stream_template` |
 | `TokenVerificationFailed` | 23 | Token contract does not expose the expected SEP-41 interface during init | `init` |
+| `TokenRevertedOnZeroTransfer` | 35 | Token contract panicked/reverted on the zero-value self-transfer smoke test | `init` |
 | `PauseReasonTooLong` | 23 | Pause reason string exceeds `MAX_PAUSE_REASON_BYTES` | `pause_protocol` |
 | `ReservationNotFound` | 24 | No ID reservation exists for the specified holder | `release_id_reservation`, `reclaim_expired_id_reservation` |
 | `ReservationStillActive` | 25 | Reservation has not yet expired and cannot be reclaimed | `reclaim_expired_id_reservation` |
@@ -684,6 +685,14 @@ match client.try_delegated_withdraw(&relayer, &stream_id, &signature, &nonce, &e
 
 ---
 
+### TokenRevertedOnZeroTransfer (35)
+
+**Definition**: During the initialization smoke test, the candidate token contract panicked or reverted when called with a zero-value self-transfer. Some SEP-41 implementations choose to reject zero-value transfers, which is compliant but incompatible with this contract's initialization smoke test.
+
+**Client Action**: The token is incompatible with this contract — use a token that accepts zero-value self-transfers, or deploy a SEP-41-compatible token wrapper that treats zero-value transfers as no-ops.
+
+---
+
 ### PauseReasonTooLong (23)
 
 **Definition**: `pause_protocol` received a reason string longer than `MAX_PAUSE_REASON_BYTES`.
@@ -703,6 +712,7 @@ structured `ContractError` variants so clients can handle them programmatically:
 | `panic_with_error!(ArithmeticOverflow)` in batch deposit sum | `ContractError::ArithmeticOverflow` | `create_streams` |
 | `panic_with_error!(ArithmeticOverflow)` in rate × duration | `ContractError::ArithmeticOverflow` | `update_rate_per_second`, `shorten_stream_end_time`, `extend_stream_end_time` |
 | `assert!("batch_withdraw stream_ids must be unique")` | `ContractError::DuplicateStreamId` | `batch_withdraw` |
+| Unhandled host panic from token `transfer()` reverting on zero-value self-transfer | `ContractError::TokenRevertedOnZeroTransfer` | `init` (via `verify_token_behavior` smoke test) |
 
 ---
 
