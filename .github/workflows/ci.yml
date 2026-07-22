@@ -84,7 +84,7 @@ jobs:
       # unaffected and stay a hard gate below. Needs an upstream version
       # bump or a narrower feature set in a follow-up.
       - name: Run Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
         continue-on-error: true
 
   build:
