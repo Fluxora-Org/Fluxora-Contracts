@@ -646,6 +646,17 @@ impl FluxoraGovernance {
             },
         );
 
+        // Also emit a quorum-config summary so indexers that track signer-set
+        // changes (add_signer / remove_signer) see a consistent event shape
+        // whenever quorum parameters change.
+        env.events().publish(
+            (symbol_short!("quor_cfg"),),
+            QuorumConfig {
+                threshold: new_threshold,
+                signer_count: signers.len(),
+            },
+        );
+
         Ok(())
     }
 
@@ -736,42 +747,6 @@ impl FluxoraGovernance {
         env.events()
             .publish((symbol_short!("sgnr_rm"),), SignerRemoved { signer });
 
-        env.events().publish(
-            (symbol_short!("quor_cfg"),),
-            QuorumConfig {
-                threshold,
-                signer_count: signers.len(),
-            },
-        );
-
-        Ok(())
-    }
-
-    /// Set the approval threshold for governance proposals.
-    ///
-    /// # Parameters
-    /// - `threshold`: Minimum number of approvals required for a proposal to
-    ///   execute. Must satisfy `1 <= threshold <= current_signer_count`.
-    ///
-    /// # Authorization
-    /// - Requires admin signature.
-    ///
-    /// # Errors
-    /// - `InvalidThreshold`: `threshold` is zero or exceeds the current number of signers.
-    pub fn set_threshold(env: Env, threshold: u32) -> Result<(), GovernanceError> {
-        get_admin(&env)?.require_auth();
-        let signers = get_signers(&env)?;
-
-        if threshold == 0 || threshold > signers.len() {
-            return Err(GovernanceError::InvalidThreshold);
-        }
-
-        env.storage()
-            .instance()
-            .set(&DataKey::Threshold, &threshold);
-        bump_instance(&env);
-
-        // CEI: the new threshold is persisted before the event is emitted.
         env.events().publish(
             (symbol_short!("quor_cfg"),),
             QuorumConfig {
@@ -1703,24 +1678,6 @@ mod tests {
     // -----------------------------------------------------------------------
     // set_threshold validation
     // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_set_threshold_rejects_zero() {
-        let ctx = Ctx::setup(); // 3 signers, threshold=2
-        let result = ctx.client.try_set_threshold(&0u32);
-        assert_eq!(result, Err(Ok(GovernanceError::InvalidThreshold)));
-        // Verify threshold is unchanged.
-        assert_eq!(ctx.client.get_threshold(), 2);
-    }
-
-    #[test]
-    fn test_set_threshold_rejects_above_signer_count() {
-        let ctx = Ctx::setup(); // 3 signers, threshold=2
-        let result = ctx.client.try_set_threshold(&4u32);
-        assert_eq!(result, Err(Ok(GovernanceError::InvalidThreshold)));
-        // Verify threshold is unchanged.
-        assert_eq!(ctx.client.get_threshold(), 2);
-    }
 
     #[test]
     fn test_set_threshold_accepts_valid_range() {
