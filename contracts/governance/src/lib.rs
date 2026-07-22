@@ -1516,7 +1516,9 @@ mod tests {
 
         // 1. Raw arbitrary bytes (e.g. 0xdeadbeef or EVM/raw selector call payload)
         let raw_bytes = Bytes::from_slice(&ctx.env, &[0xde, 0xad, 0xbe, 0xef]);
-        let id_raw = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &raw_bytes);
+        let id_raw = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &raw_bytes);
         ctx.client.approve(&ctx.signer_a, &id_raw);
         ctx.client.approve(&ctx.signer_b, &id_raw);
         ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
@@ -1533,7 +1535,9 @@ mod tests {
             1_000_i128,
         );
         let tuple_xdr = arbitrary_tuple.to_xdr(&ctx.env);
-        let id_tuple = ctx.client.propose(&ctx.signer_a, &ctx.dummy_target(), &tuple_xdr);
+        let id_tuple = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &tuple_xdr);
         ctx.client.approve(&ctx.signer_a, &id_tuple);
         ctx.client.approve(&ctx.signer_b, &id_tuple);
         let res_tuple = ctx.client.try_execute(&executor, &id_tuple);
@@ -1606,7 +1610,9 @@ mod tests {
             // Each decoded variant should be matching type
             match (var, decoded) {
                 (CallData::Noop, CallData::Noop) => {}
-                (CallData::StreamSetAdmin(a1), CallData::StreamSetAdmin(a2)) => assert_eq!(a1, &a2),
+                (CallData::StreamSetAdmin(a1), CallData::StreamSetAdmin(a2)) => {
+                    assert_eq!(a1, &a2)
+                }
                 (CallData::StreamSetMaxRate(r1), CallData::StreamSetMaxRate(r2)) => {
                     assert_eq!(r1, &r2)
                 }
@@ -1617,7 +1623,9 @@ mod tests {
                 (CallData::FactorySetAdmin(a1), CallData::FactorySetAdmin(a2)) => {
                     assert_eq!(a1, &a2)
                 }
-                (CallData::FactorySetCap(c1), CallData::FactorySetCap(c2)) => assert_eq!(c1, &c2),
+                (CallData::FactorySetCap(c1), CallData::FactorySetCap(c2)) => {
+                    assert_eq!(c1, &c2)
+                }
                 (CallData::FactorySetMinDuration(d1), CallData::FactorySetMinDuration(d2)) => {
                     assert_eq!(d1, &d2)
                 }
