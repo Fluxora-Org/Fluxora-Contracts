@@ -9,18 +9,19 @@ use crate::StreamKind;
 /// future environments that violate that assumption before withdrawable math can
 /// be evaluated at a retrograde timestamp.
 ///
+/// This check is unconditional (not gated behind debug_assertions) because it
+/// is a genuine runtime safety guard, not a debug-only sanity check. A retrograde
+/// ledger timestamp would flow straight into withdrawable-amount math with no
+/// safety net, which is exactly the fund-accounting-adjacent failure mode this
+/// guard was written to prevent.
+///
 /// # Units and Precision
 /// - **Units:** `prev_ts` and `current_ts` are measured in seconds.
 /// - **Rounding Direction:** N/A (this is purely a logical check, no arithmetic).
 pub fn assert_ledger_time_monotonic(prev_ts: u64, current_ts: u64) -> Result<(), ContractError> {
-    #[cfg(any(test, debug_assertions))]
-    {
-        if current_ts < prev_ts {
-            return Err(ContractError::ClockRegression);
-        }
+    if current_ts < prev_ts {
+        return Err(ContractError::ClockRegression);
     }
-
-    debug_assert!(current_ts >= prev_ts, "retrograde ledger timestamp");
 
     Ok(())
 }
@@ -449,6 +450,25 @@ mod tests {
     fn ledger_time_monotonic_u64_max_times() {
         let result = assert_ledger_time_monotonic(u64::MAX, u64::MAX);
         assert_eq!(result, Ok(()));
+    }
+
+    /// Test that the ClockRegression check is unconditional (not gated behind debug_assertions).
+    ///
+    /// This is a security-critical check that must always be active in production builds,
+    /// including release wasm32 deployments where debug_assertions is disabled by default.
+    /// A retrograde ledger timestamp would flow straight into withdrawable-amount math with
+    /// no safety net, which is exactly the fund-accounting-adjacent failure mode this guard
+    /// was written to prevent.
+    ///
+    /// This test locks in the always-on behavior independent of debug_assertions settings.
+    #[test]
+    fn clock_regression_check_is_unconditional() {
+        let result = assert_ledger_time_monotonic(1000, 999);
+        assert_eq!(
+            result,
+            Err(ContractError::ClockRegression),
+            "ClockRegression check must fire even when debug_assertions is disabled"
+        );
     }
 
     #[test]
