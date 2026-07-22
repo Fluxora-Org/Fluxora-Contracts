@@ -639,6 +639,14 @@ impl FluxoraGovernance {
         bump_instance(&env);
 
         env.events().publish(
+            (symbol_short!("quor_cfg"),),
+            QuorumConfig {
+                threshold: new_threshold,
+                signer_count: signers.len(),
+            },
+        );
+
+        env.events().publish(
             (symbol_short!("thr_upd"),),
             ThresholdUpdated {
                 old_threshold,
@@ -736,42 +744,6 @@ impl FluxoraGovernance {
         env.events()
             .publish((symbol_short!("sgnr_rm"),), SignerRemoved { signer });
 
-        env.events().publish(
-            (symbol_short!("quor_cfg"),),
-            QuorumConfig {
-                threshold,
-                signer_count: signers.len(),
-            },
-        );
-
-        Ok(())
-    }
-
-    /// Set the approval threshold for governance proposals.
-    ///
-    /// # Parameters
-    /// - `threshold`: Minimum number of approvals required for a proposal to
-    ///   execute. Must satisfy `1 <= threshold <= current_signer_count`.
-    ///
-    /// # Authorization
-    /// - Requires admin signature.
-    ///
-    /// # Errors
-    /// - `InvalidThreshold`: `threshold` is zero or exceeds the current number of signers.
-    pub fn set_threshold(env: Env, threshold: u32) -> Result<(), GovernanceError> {
-        get_admin(&env)?.require_auth();
-        let signers = get_signers(&env)?;
-
-        if threshold == 0 || threshold > signers.len() {
-            return Err(GovernanceError::InvalidThreshold);
-        }
-
-        env.storage()
-            .instance()
-            .set(&DataKey::Threshold, &threshold);
-        bump_instance(&env);
-
-        // CEI: the new threshold is persisted before the event is emitted.
         env.events().publish(
             (symbol_short!("quor_cfg"),),
             QuorumConfig {
