@@ -1530,6 +1530,139 @@ mod tests {
         }
     }
 
+    /// Calldata shape validation: proposals targeting disallowed function calls,
+    /// arbitrary function payloads, non-enum XDR payloads, or selector-collision
+    /// attempts are strictly rejected with `GovernanceError::InvalidCalldata`.
+    #[test]
+    fn test_calldata_shape_validation_disallowed_target_functions_rejected() {
+        use soroban_sdk::xdr::{FromXdr, ToXdr};
+        let ctx = Ctx::setup();
+
+        // 1. Raw arbitrary bytes (e.g. 0xdeadbeef or EVM/raw selector call payload)
+        let raw_bytes = Bytes::from_slice(&ctx.env, &[0xde, 0xad, 0xbe, 0xef]);
+        let id_raw = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &raw_bytes);
+        ctx.client.approve(&ctx.signer_a, &id_raw);
+        ctx.client.approve(&ctx.signer_b, &id_raw);
+        ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
+        let executor = Address::generate(&ctx.env);
+        let res_raw = ctx.client.try_execute(&executor, &id_raw);
+        assert_eq!(res_raw, Err(Ok(GovernanceError::InvalidCalldata)));
+        assert!(!ctx.client.get_proposal(&id_raw).executed);
+
+        // 2. Struct or Tuple XDR payload simulating an arbitrary contract function call:
+        // (Symbol::new("transfer"), Address, i128)
+        let arbitrary_tuple = (
+            Symbol::new(&ctx.env, "transfer"),
+            Address::generate(&ctx.env),
+            1_000_i128,
+        );
+        let tuple_xdr = arbitrary_tuple.to_xdr(&ctx.env);
+        let id_tuple = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.dummy_target(), &tuple_xdr);
+        ctx.client.approve(&ctx.signer_a, &id_tuple);
+        ctx.client.approve(&ctx.signer_b, &id_tuple);
+        let res_tuple = ctx.client.try_execute(&executor, &id_tuple);
+        assert_eq!(res_tuple, Err(Ok(GovernanceError::InvalidCalldata)));
+        assert!(!ctx.client.get_proposal(&id_tuple).executed);
+
+        // 3. Confirm CallData::from_xdr rejects non-matching XDR encodings
+        assert!(CallData::from_xdr(&ctx.env, &raw_bytes).is_err());
+        assert!(CallData::from_xdr(&ctx.env, &tuple_xdr).is_err());
+    }
+
+    /// Selector-collision bypass prevention: confirms function symbol or selector-based
+    /// encoding tricks cannot bypass CallData enum deserialization.
+    #[test]
+    fn test_calldata_shape_validation_no_selector_collision_bypass() {
+        use soroban_sdk::xdr::{FromXdr, ToXdr};
+        let ctx = Ctx::setup();
+
+        // Attempting to construct payloads with function names targeting factory or stream methods
+        // ("set_cap", "set_admin", "upgrade") using generic Soroban value encodings fails CallData::from_xdr.
+        let fn_symbols = [
+            Symbol::new(&ctx.env, "set_cap"),
+            Symbol::new(&ctx.env, "set_admin"),
+            Symbol::new(&ctx.env, "set_min_duration"),
+            Symbol::new(&ctx.env, "set_allowlist"),
+            Symbol::new(&ctx.env, "set_stream_contract"),
+            Symbol::new(&ctx.env, "set_max_rate_per_second"),
+            Symbol::new(&ctx.env, "global_resume"),
+            Symbol::new(&ctx.env, "bulk_resume_streams_as_admin"),
+            Symbol::new(&ctx.env, "unknown_privileged_function"),
+        ];
+
+        for sym in fn_symbols.iter() {
+            let encoded = sym.to_xdr(&ctx.env);
+            assert!(
+                CallData::from_xdr(&ctx.env, &encoded).is_err(),
+                "Direct symbol XDR for {:?} must not decode as CallData",
+                sym
+            );
+        }
+    }
+
+    #[test]
+    fn test_calldata_variants_roundtrip() {
+        use soroban_sdk::xdr::{FromXdr, ToXdr};
+        let ctx = Ctx::setup();
+        let variants = vec![
+            &ctx.env,
+            CallData::Noop,
+            CallData::StreamSetAdmin(Address::generate(&ctx.env)),
+            CallData::StreamSetMaxRate(5000),
+            CallData::StreamGlobalResume,
+            CallData::StreamBulkResumeAsAdmin(vec![&ctx.env, 1, 2, 3]),
+            CallData::FactorySetAdmin(Address::generate(&ctx.env)),
+            CallData::FactorySetCap(100_000),
+            CallData::FactorySetMinDuration(86400),
+            CallData::FactorySetAllowlist(Address::generate(&ctx.env), true),
+            CallData::FactorySetStreamContract(Address::generate(&ctx.env)),
+        ];
+
+        for var in variants.iter() {
+            let encoded = var.clone().to_xdr(&ctx.env);
+            let decoded = CallData::from_xdr(&ctx.env, &encoded)
+                .expect("Legitimate CallData variant must decode cleanly");
+            // Each decoded variant should be matching type
+            match (var, decoded) {
+                (CallData::Noop, CallData::Noop) => {}
+                (CallData::StreamSetAdmin(a1), CallData::StreamSetAdmin(a2)) => {
+                    assert_eq!(a1, a2)
+                }
+                (CallData::StreamSetMaxRate(r1), CallData::StreamSetMaxRate(r2)) => {
+                    assert_eq!(r1, r2)
+                }
+                (CallData::StreamGlobalResume, CallData::StreamGlobalResume) => {}
+                (CallData::StreamBulkResumeAsAdmin(v1), CallData::StreamBulkResumeAsAdmin(v2)) => {
+                    assert_eq!(v1.len(), v2.len());
+                }
+                (CallData::FactorySetAdmin(a1), CallData::FactorySetAdmin(a2)) => {
+                    assert_eq!(a1, a2)
+                }
+                (CallData::FactorySetCap(c1), CallData::FactorySetCap(c2)) => {
+                    assert_eq!(c1, c2)
+                }
+                (CallData::FactorySetMinDuration(d1), CallData::FactorySetMinDuration(d2)) => {
+                    assert_eq!(d1, d2)
+                }
+                (CallData::FactorySetAllowlist(a1, b1), CallData::FactorySetAllowlist(a2, b2)) => {
+                    assert_eq!(a1, a2);
+                    assert_eq!(b1, b2);
+                }
+                (
+                    CallData::FactorySetStreamContract(a1),
+                    CallData::FactorySetStreamContract(a2),
+                ) => {
+                    assert_eq!(a1, a2);
+                }
+                _ => panic!("Variant mismatch during CallData round-trip test"),
+            }
+        }
+    }
+
     #[test]
     fn test_quorum_and_timelock_constants() {
         let ctx = Ctx::setup();
