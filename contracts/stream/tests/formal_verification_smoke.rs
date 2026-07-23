@@ -20,7 +20,7 @@ fn smoke_accrual_examples() {
 #[cfg(kani)]
 mod kani_fee {
     use super::*;
-    use crate::lib::{compute_keeper_fee_split, KEEPER_FEE_BPS};
+    use crate::lib::compute_keeper_fee_split;
 
     /// Kani proof: keeper_fee + sender_refund == sender_refund_gross
     /// and fee <= gross for full domain (gross >= 0, BPS in [0,10000])
@@ -32,10 +32,23 @@ mod kani_fee {
         kani::assume(gross >= 0);
         kani::assume(bps <= 10_000);
 
-        let (fee, refund) = compute_keeper_fee_split(gross, bps);
+        let (keeper_fee, protocol_remainder) = compute_keeper_fee_split(gross, bps);
 
-        assert!(fee + refund == gross, "fee + refund must equal gross");
-        assert!(fee <= gross, "fee must not exceed gross");
+        // Conservation: keeper_fee + protocol_remainder == gross
+        assert!(
+            keeper_fee + protocol_remainder == gross,
+            "keeper_fee + protocol_remainder must equal gross"
+        );
+
+        // Non-negativity: both parts are >= 0 in the full production domain.
+        assert!(keeper_fee >= 0, "keeper_fee must be non-negative");
+        assert!(
+            protocol_remainder >= 0,
+            "protocol_remainder must be non-negative"
+        );
+
+        // Stronger bound: fee <= gross when all values are non-negative.
+        assert!(keeper_fee <= gross, "keeper_fee must not exceed gross");
     }
 
     /// Kani proof: no overflow on mul before divide
@@ -48,10 +61,7 @@ mod kani_fee {
         kani::assume(bps <= 10_000);
 
         // Exact production expression
-        let _ = gross
-            .checked_mul(bps as i128)
-            .ok_or(ContractError::ArithmeticOverflow)
-            .map(|v| v / 10_000);
+        let _ = gross.checked_mul(bps as i128).map(|v| v / 10_000);
     }
 }
 

@@ -17,6 +17,7 @@ struct Ctx<'a> {
     factory: FluxoraFactoryClient<'a>,
     #[allow(dead_code)]
     stream: FluxoraStreamClient<'a>,
+    #[allow(dead_code)]
     admin: Address,
     sender: Address,
     #[allow(dead_code)]
@@ -103,6 +104,8 @@ proptest! {
             &start_time, // cliff_time == start_time
             &end_time,
             &0i128, // withdraw_dust_threshold
+            &fluxora_stream::StreamKind::Linear,
+            &None,
         );
 
         // Property 1: RecipientNotAllowlisted iff !is_allowlisted

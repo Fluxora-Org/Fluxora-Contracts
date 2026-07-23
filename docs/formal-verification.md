@@ -9,9 +9,10 @@ This document describes the Kani proof harnesses in Fluxora Contracts.
 ## Keeper-fee conservation proofs (new)
 - Pure helper: `compute_keeper_fee_split(gross, bps)` in `lib.rs`.
 - Harness: `keeper_fee_conservation` (in `formal_verification_smoke.rs` under `#[cfg(kani)]`).
-  - Asserts: `keeper_fee + sender_refund == sender_refund_gross`
-  - Asserts: `keeper_fee <= sender_refund_gross`
-  - Domain: `gross >= 0`, `bps <= 10_000` (full i128 domain via symbolic input).
+  - Asserts conservation: `keeper_fee + protocol_remainder == gross`
+  - Proves non-negativity: both `keeper_fee` and `protocol_remainder` are `>= 0`
+  - Asserts stronger bound: `keeper_fee <= gross` (follows from conservation + non-negativity)
+  - Domain assumptions mirror runtime guards: `gross >= 0`, `bps <= 10_000` (full i128 domain via symbolic input).
 - Harness: `keeper_fee_no_mul_overflow`
   - Proves the `checked_mul(KEEPER_FEE_BPS)` before `/ 10_000` cannot overflow in production path.
 

@@ -1,6 +1,6 @@
 # Fluxora Contract WASM Checksums
 #
-# Reference SHA256 checksums for reproducible WASM builds.
+# Reference SHA256 checksums for tracked reproducible WASM builds.
 # CI verifies that a fresh build produces byte-identical artifacts.
 #
 # Format: <sha256>  <filename>

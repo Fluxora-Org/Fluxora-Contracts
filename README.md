@@ -4,6 +4,8 @@ Soroban smart contracts for the Fluxora treasury streaming protocol on Stellar. 
 
 ## Documentation
 
+
+
 - **[Stream contract](docs/streaming.md)** — Lifecycle, accrual formula, cliff/end_time, access control, events, and error codes.
 - **[Dust threshold](docs/dust-threshold.md)** — `withdraw_dust_threshold` formula, USDC examples, validation table, and template guidance.
 - **[Security](docs/security.md)** — CEI ordering, token trust model, authorization paths, overflow protection.
@@ -12,8 +14,12 @@ Soroban smart contracts for the Fluxora treasury streaming protocol on Stellar. 
 - **[Recipient stream index](docs/recipient-stream-index.md)** — `get_recipient_streams` page cap, full-enumeration pattern, and DoS-prevention rationale.
 - **[Storage layout](docs/storage.md)** — Contract storage architecture, key design, and TTL policies.
 - **[Audit preparation](docs/audit.md)** — Entry-points and invariants for auditors.
-- **[Error codes](docs/error.md)** — Full ContractError reference.
+- **[Error codes](docs/error.md)** — Full ContractError reference and the
+  [FactoryError discriminant table](docs/error.md#factoryerror-reference-factory-contract)
+  (factory decisions map to a stable `u32` per variant; the CI guard is
+  `contracts/factory/tests/factory_error_discriminants.rs`).
 - **[Events](docs/events.md)** — Emitted event shapes and topics.
+- **[Stream templates](docs/stream-templates.md)** — Template lifecycle, auth, field mapping, and calldata savings.
 
 ## What's in this repo
 
@@ -76,6 +82,7 @@ The following table lists every public stream contract entry point implemented i
 | `update_rate` | `caller.require_auth()` (sender or admin) | Update stream rate as sender or admin |
 | `cancel_stream_as_admin` | `admin.require_auth()` | Cancel any stream as contract admin |
 | `keeper_cancel` | `keeper.require_auth()` | Keeper-cancel an eligible stream after grace period |
+| `get_keeper_fee_split` | Public / None | Preview the `(keeper_fee, sender_refund)` split `keeper_cancel` would pay |
 | `pause_stream_as_admin` | `admin.require_auth()` | Pause any stream as contract admin |
 | `resume_stream_as_admin` | `admin.require_auth()` | Resume any paused stream as contract admin |
 | `set_global_emergency_paused` | `admin.require_auth()` | Admin toggle emergency pause |
@@ -109,7 +116,7 @@ This project pins dependencies for **reproducible builds** and **auditor compati
 
 | Component       | Version | Location                      | Purpose                                          |
 | --------------- | ------- | ----------------------------- | ------------------------------------------------ |
-| **Rust**        | 1.75    | `rust-toolchain.toml`         | Ensures consistent WASM compilation              |
+| **Rust**        | 1.94.1  | `rust-toolchain.toml`         | Ensures consistent WASM compilation              |
 | **soroban-sdk** | 21.7.7  | `contracts/stream/Cargo.toml` | Locked to tested Stellar Soroban network version |
 
 When upgrading versions:
@@ -128,21 +135,21 @@ git clone https://github.com/Fluxora-Org/Fluxora-Contracts.git
 cd Fluxora-Contracts
 ```
 
-- **Rust 1.75+** — Pinned in `rust-toolchain.toml` (auto-enforced via `rustup`)
+- **Rust 1.94.1** — Pinned in `rust-toolchain.toml` (auto-enforced via `rustup`)
 - **Soroban SDK 21.7.7** — Pinned in `contracts/stream/Cargo.toml` for reproducible builds
 - [Stellar CLI](https://developers.stellar.org/docs/tools/developer-tools) (optional, for deploy/test on network)
 
 Install dependencies:
 
 ```bash
-rustup update stable
+rustup toolchain install
 rustup target add wasm32-unknown-unknown
 ```
 
 Then verify:
 
 ```bash
-rustc --version       # Should show 1.75 or newer
+rustc --version       # Should show 1.94.1
 cargo --version
 stellar --version     # Only if installing Stellar CLI
 ```

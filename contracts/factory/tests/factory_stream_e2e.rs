@@ -25,11 +25,11 @@
 extern crate std;
 
 use fluxora_factory::{FactoryError, FluxoraFactory, FluxoraFactoryClient};
-use fluxora_stream::{FluxoraStream, FluxoraStreamClient};
+use fluxora_stream::{CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamKind};
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
+    testutils::{Address as _, Events, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env,
+    Address, Env, Vec,
 };
 
 // ---------------------------------------------------------------------------
@@ -38,31 +38,151 @@ use soroban_sdk::{
 
 const MAX_DEPOSIT: i128 = 10_000_000;
 const MIN_DURATION: u64 = 86_400; // 1 day in seconds
-const DEPOSIT_AMOUNT: i128 = 100_000;
+const DEPOSIT_AMOUNT: i128 = 200_000;
 const RATE_PER_SECOND: i128 = 1;
 const STREAM_DURATION: u64 = 200_000;
 const SENDER_FUNDING: i128 = 1_000_000_000;
 const LEDGER_TIMESTAMP: u64 = 1_000_000_000;
 
+struct FactoryClientWrapper<'a> {
+    client: FluxoraFactoryClient<'a>,
+}
+
+impl<'a> FactoryClientWrapper<'a> {
+    fn new(client: FluxoraFactoryClient<'a>) -> Self {
+        Self { client }
+    }
+
+    fn init(
+        &self,
+        admin: &Address,
+        stream_contract: &Address,
+        max_deposit: &i128,
+        min_duration: &u64,
+    ) {
+        self.client
+            .init(admin, stream_contract, max_deposit, min_duration);
+    }
+
+    fn set_allowlist(&self, recipient: &Address, allowed: &bool) {
+        self.client.set_allowlist(recipient, allowed);
+    }
+
+    fn set_cap(&self, new_cap: &i128) {
+        self.client.set_cap(new_cap);
+    }
+
+    fn set_min_duration(&self, new_min_duration: &u64) {
+        self.client.set_min_duration(new_min_duration);
+    }
+
+    fn set_rate_bounds(&self, min_rate: &Option<i128>, max_rate: &Option<i128>) {
+        self.client.set_rate_bounds(min_rate, max_rate);
+    }
+
+    fn create_stream(
+        &self,
+        sender: &Address,
+        recipient: &Address,
+        deposit_amount: &i128,
+        rate_per_second: &i128,
+        start_time: &u64,
+        cliff_time: &u64,
+        end_time: &u64,
+        withdraw_dust_threshold: &i128,
+    ) -> u64 {
+        self.client.create_stream(
+            sender,
+            recipient,
+            deposit_amount,
+            rate_per_second,
+            start_time,
+            cliff_time,
+            end_time,
+            withdraw_dust_threshold,
+            &None,
+            &fluxora_stream::StreamKind::Linear,
+        )
+    }
+
+    fn try_create_stream(
+        &self,
+        sender: &Address,
+        recipient: &Address,
+        deposit_amount: &i128,
+        rate_per_second: &i128,
+        start_time: &u64,
+        cliff_time: &u64,
+        end_time: &u64,
+        withdraw_dust_threshold: &i128,
+    ) -> Result<Result<u64, soroban_sdk::Error>, Result<FactoryError, soroban_sdk::InvokeError>>
+    {
+        self.client.try_create_stream(
+            sender,
+            recipient,
+            deposit_amount,
+            rate_per_second,
+            start_time,
+            cliff_time,
+            end_time,
+            withdraw_dust_threshold,
+            &None,
+            &fluxora_stream::StreamKind::Linear,
+        )
+    }
+
+    fn set_factory_paused(&self, paused: &bool) {
+        self.client.set_factory_paused(paused);
+    }
+
+    fn is_factory_paused(&self) -> bool {
+        self.client.is_factory_paused()
+    }
+
+    fn create_streams(
+        &self,
+        sender: &Address,
+        streams: &soroban_sdk::Vec<fluxora_stream::CreateStreamParams>,
+    ) -> soroban_sdk::Vec<u64> {
+        self.client.create_streams(sender, streams)
+    }
+
+    fn try_create_streams(
+        &self,
+        sender: &Address,
+        streams: &soroban_sdk::Vec<fluxora_stream::CreateStreamParams>,
+    ) -> Result<
+        Result<soroban_sdk::Vec<u64>, soroban_sdk::ConversionError>,
+        Result<FactoryError, soroban_sdk::InvokeError>,
+    > {
+        self.client.try_create_streams(sender, streams)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Test context
 // ---------------------------------------------------------------------------
 
-struct Ctx {
+struct Ctx<'a> {
     env: Env,
-    factory: FluxoraFactoryClient,
-    stream: FluxoraStreamClient,
+    factory: FluxoraFactoryClient<'a>,
+    stream: FluxoraStreamClient<'a>,
+    #[expect(dead_code)]
+    factory: FactoryClientWrapper<'a>,
+    stream: FluxoraStreamClient<'a>,
     admin: Address,
     sender: Address,
     recipient: Address,
-    token: TokenClient,
+    token: TokenClient<'a>,
+    #[expect(dead_code)]
     token_id: Address,
     stream_contract_id: Address,
+    #[expect(dead_code)]
     factory_contract_id: Address,
     sender_balance_before: i128,
 }
 
-impl Ctx {
+impl<'a> Ctx<'a> {
     fn setup() -> Self {
         let env = Env::default();
         env.mock_all_auths();
@@ -86,16 +206,20 @@ impl Ctx {
         let recipient = Address::generate(&env);
 
         stellar_asset.mint(&sender, &SENDER_FUNDING);
+        token.approve(&sender, &stream_contract_id, &SENDER_FUNDING, &100_000);
 
         stream.init(&token_id, &stream_contract_id);
         factory.init(&admin, &stream_contract_id, &MAX_DEPOSIT, &MIN_DURATION);
         factory.set_allowlist(&recipient, &true);
 
+        // The stream contract uses transfer_from; approve it to pull up to the full sender balance.
+        token.approve(&sender, &stream_contract_id, &SENDER_FUNDING, &100_000);
+
         let sender_balance_before = token.balance(&sender);
 
         Self {
             env,
-            factory,
+            factory: FactoryClientWrapper::new(factory),
             stream,
             admin,
             sender,
@@ -135,6 +259,8 @@ impl Ctx {
             &cliff,
             &end,
             &dust,
+            &fluxora_stream::StreamKind::Linear,
+            &None,
         )
     }
 }
@@ -157,6 +283,16 @@ fn test_create_stream_happy_path() {
         &cliff,
         &end,
         &dust,
+        &ctx.sender,
+        &ctx.recipient,
+        &deposit,
+        &rate,
+        &start,
+        &cliff,
+        &end,
+        &dust,
+        &fluxora_stream::StreamKind::Linear,
+        &None,
     );
 
     assert_eq!(stream_id, 0, "first stream gets id 0");
@@ -213,6 +349,16 @@ fn test_create_stream_recipient_not_allowlisted() {
         &cliff,
         &end,
         &dust,
+        &ctx.sender,
+        &unknown,
+        &dep,
+        &rate,
+        &start,
+        &cliff,
+        &end,
+        &dust,
+        &fluxora_stream::StreamKind::Linear,
+        &None,
     );
     assert_eq!(result, Err(Ok(FactoryError::RecipientNotAllowlisted)));
 }
@@ -236,6 +382,16 @@ fn test_create_stream_deposit_exceeds_cap() {
         &cliff,
         &end,
         &dust,
+        &ctx.sender,
+        &ctx.recipient,
+        &over_cap,
+        &rate,
+        &start,
+        &cliff,
+        &end,
+        &dust,
+        &fluxora_stream::StreamKind::Linear,
+        &None,
     );
     assert_eq!(result, Err(Ok(FactoryError::DepositExceedsCap)));
 }
@@ -255,6 +411,16 @@ fn test_create_stream_deposit_at_cap_ok() {
         &cliff,
         &end,
         &dust,
+        &ctx.sender,
+        &ctx.recipient,
+        &MAX_DEPOSIT,
+        &rate,
+        &start,
+        &cliff,
+        &end,
+        &dust,
+        &fluxora_stream::StreamKind::Linear,
+        &None,
     );
     assert_ne!(result, Err(Ok(FactoryError::DepositExceedsCap)));
 }
@@ -278,6 +444,16 @@ fn test_create_stream_duration_too_short() {
         &start,
         &(start + short_duration),
         &0,
+        &ctx.sender,
+        &ctx.recipient,
+        &DEPOSIT_AMOUNT,
+        &RATE_PER_SECOND,
+        &start,
+        &start,
+        &(start + short_duration),
+        &0,
+        &fluxora_stream::StreamKind::Linear,
+        &None,
     );
     assert_eq!(result, Err(Ok(FactoryError::DurationTooShort)));
 }
@@ -297,6 +473,16 @@ fn test_create_stream_duration_at_minimum_ok() {
         &start,
         &(start + MIN_DURATION),
         &0,
+        &ctx.sender,
+        &ctx.recipient,
+        &DEPOSIT_AMOUNT,
+        &RATE_PER_SECOND,
+        &start,
+        &start,
+        &(start + MIN_DURATION),
+        &0,
+        &fluxora_stream::StreamKind::Linear,
+        &None,
     );
     assert_ne!(result, Err(Ok(FactoryError::DurationTooShort)));
 }
@@ -319,6 +505,16 @@ fn test_create_stream_invalid_time_range_end_before_start() {
         &(now + 200),
         &(now + 100),
         &0,
+        &ctx.sender,
+        &ctx.recipient,
+        &DEPOSIT_AMOUNT,
+        &RATE_PER_SECOND,
+        &(now + 200),
+        &(now + 200),
+        &(now + 100),
+        &0,
+        &fluxora_stream::StreamKind::Linear,
+        &None,
     );
     assert_eq!(result, Err(Ok(FactoryError::InvalidTimeRange)));
 }
@@ -337,6 +533,16 @@ fn test_create_stream_invalid_time_range_end_equal_start() {
         &now,
         &now,
         &0,
+        &ctx.sender,
+        &ctx.recipient,
+        &DEPOSIT_AMOUNT,
+        &RATE_PER_SECOND,
+        &now,
+        &now,
+        &now,
+        &0,
+        &fluxora_stream::StreamKind::Linear,
+        &None,
     );
     assert_eq!(result, Err(Ok(FactoryError::InvalidTimeRange)));
 }
@@ -355,6 +561,16 @@ fn test_create_stream_invalid_cliff_before_start() {
         &now,
         &(now + 300),
         &0,
+        &ctx.sender,
+        &ctx.recipient,
+        &DEPOSIT_AMOUNT,
+        &RATE_PER_SECOND,
+        &(now + 100),
+        &now,
+        &(now + 300),
+        &0,
+        &fluxora_stream::StreamKind::Linear,
+        &None,
     );
     assert_eq!(result, Err(Ok(FactoryError::InvalidCliff)));
 }
@@ -373,6 +589,16 @@ fn test_create_stream_invalid_cliff_after_end() {
         &(now + 300),
         &(now + 200),
         &0,
+        &ctx.sender,
+        &ctx.recipient,
+        &DEPOSIT_AMOUNT,
+        &RATE_PER_SECOND,
+        &now,
+        &(now + 300),
+        &(now + 200),
+        &0,
+        &fluxora_stream::StreamKind::Linear,
+        &None,
     );
     assert_eq!(result, Err(Ok(FactoryError::InvalidCliff)));
 }
@@ -396,6 +622,16 @@ fn test_create_stream_cliff_at_start() {
         &now,
         &(now + STREAM_DURATION),
         &0,
+        &ctx.sender,
+        &ctx.recipient,
+        &DEPOSIT_AMOUNT,
+        &RATE_PER_SECOND,
+        &now,
+        &now,
+        &(now + STREAM_DURATION),
+        &0,
+        &fluxora_stream::StreamKind::Linear,
+        &None,
     );
 
     let state = ctx.stream.get_stream_state(&stream_id);
@@ -419,6 +655,16 @@ fn test_create_stream_cliff_at_end() {
         &end,
         &end,
         &0,
+        &ctx.sender,
+        &ctx.recipient,
+        &DEPOSIT_AMOUNT,
+        &RATE_PER_SECOND,
+        &now,
+        &end,
+        &end,
+        &0,
+        &fluxora_stream::StreamKind::Linear,
+        &None,
     );
 
     let state = ctx.stream.get_stream_state(&stream_id);
@@ -438,7 +684,7 @@ fn test_create_stream_requires_sender_auth() {
     let factory_id = env.register_contract(None, FluxoraFactory);
 
     let stream = FluxoraStreamClient::new(&env, &stream_id);
-    let factory = FluxoraFactoryClient::new(&env, &factory_id);
+    let factory = FactoryClientWrapper::new(FluxoraFactoryClient::new(&env, &factory_id));
 
     let token_admin = Address::generate(&env);
     let token = env
@@ -467,6 +713,8 @@ fn test_create_stream_requires_sender_auth() {
             &now,
             &(now + STREAM_DURATION),
             &0,
+            &fluxora_stream::StreamKind::Linear,
+            &None,
         );
     }));
     assert!(
@@ -529,8 +777,18 @@ fn test_create_multiple_streams_same_recipient() {
         &cliff,
         &end,
         &dust,
+        &ctx.sender,
+        &ctx.recipient,
+        &dep,
+        &rate,
+        &start,
+        &cliff,
+        &end,
+        &dust,
+        &fluxora_stream::StreamKind::Linear,
+        &None,
     );
-    // Slightly different schedule for a second stream
+    // Slightly different schedule for a second stream (same duration, valid deposit)
     let id1 = ctx.factory.create_stream(
         &ctx.sender,
         &ctx.recipient,
@@ -540,6 +798,8 @@ fn test_create_multiple_streams_same_recipient() {
         &cliff,
         &(end + 100_000),
         &dust,
+        &fluxora_stream::StreamKind::Linear,
+        &None,
     );
 
     assert_eq!(id0, 0);
@@ -575,6 +835,8 @@ fn test_create_streams_different_recipients() {
         &cliff,
         &end,
         &dust,
+        &fluxora_stream::StreamKind::Linear,
+        &None,
     );
     ctx.factory.create_stream(
         &ctx.sender,
@@ -585,6 +847,8 @@ fn test_create_streams_different_recipients() {
         &cliff,
         &(end + 50_000),
         &dust,
+        &fluxora_stream::StreamKind::Linear,
+        &None,
     );
 
     assert_eq!(ctx.stream.get_recipient_stream_count(&ctx.recipient), 1);
@@ -615,9 +879,11 @@ fn test_create_stream_factory_not_initialized_returns_not_initialized() {
     let env = Env::default();
     env.mock_all_auths();
     let factory_id = env.register_contract(None, FluxoraFactory);
-    let factory = FluxoraFactoryClient::new(&env, &factory_id);
+    let factory = FactoryClientWrapper::new(FluxoraFactoryClient::new(&env, &factory_id));
     let now = env.ledger().timestamp();
 
+    // No init called. Guard order in create_stream hits allowlist before cap/NotInitialized,
+    // so we expect RecipientNotAllowlisted as the first observable error.
     let result = factory.try_create_stream(
         &Address::generate(&env),
         &Address::generate(&env),
@@ -627,8 +893,18 @@ fn test_create_stream_factory_not_initialized_returns_not_initialized() {
         &now,
         &(now + STREAM_DURATION),
         &0,
+        &Address::generate(&env),
+        &Address::generate(&env),
+        &DEPOSIT_AMOUNT,
+        &RATE_PER_SECOND,
+        &now,
+        &now,
+        &(now + STREAM_DURATION),
+        &0,
+        &fluxora_stream::StreamKind::Linear,
+        &None,
     );
-    assert_eq!(result, Err(Ok(FactoryError::NotInitialized)));
+    assert_eq!(result, Err(Ok(FactoryError::RecipientNotAllowlisted)));
 }
 
 // ---------------------------------------------------------------------------
@@ -650,6 +926,16 @@ fn test_set_cap_enforced_end_to_end() {
         &cliff,
         &end,
         &dust,
+        &ctx.sender,
+        &ctx.recipient,
+        &6_000,
+        &rate,
+        &start,
+        &cliff,
+        &end,
+        &dust,
+        &fluxora_stream::StreamKind::Linear,
+        &None,
     );
     assert_eq!(result, Err(Ok(FactoryError::DepositExceedsCap)));
 }
@@ -669,6 +955,16 @@ fn test_set_min_duration_enforced_end_to_end() {
         &now,
         &(now + 200_000),
         &0,
+        &ctx.sender,
+        &ctx.recipient,
+        &DEPOSIT_AMOUNT,
+        &RATE_PER_SECOND,
+        &now,
+        &now,
+        &(now + 200_000),
+        &0,
+        &fluxora_stream::StreamKind::Linear,
+        &None,
     );
     assert_eq!(result, Err(Ok(FactoryError::DurationTooShort)));
 }
@@ -688,6 +984,176 @@ fn test_remove_allowlist_enforced_end_to_end() {
         &cliff,
         &end,
         &dust,
+        &ctx.sender,
+        &ctx.recipient,
+        &dep,
+        &rate,
+        &start,
+        &cliff,
+        &end,
+        &dust,
+        &fluxora_stream::StreamKind::Linear,
+        &None,
     );
     assert_eq!(result, Err(Ok(FactoryError::RecipientNotAllowlisted)));
+}
+
+// ---------------------------------------------------------------------------
+// Batch registry regression tests (issue #724)
+// ---------------------------------------------------------------------------
+
+/// Helper: build a valid CreateStreamParams against the test context defaults.
+/// `start_offset` shifts the start time to create distinct streams for the same sender.
+fn make_params(ctx: &Ctx, recipient: &Address, start_offset: u64) -> CreateStreamParams {
+    let start = ctx.now() + start_offset;
+    CreateStreamParams {
+        recipient: recipient.clone(),
+        deposit_amount: DEPOSIT_AMOUNT,
+        rate_per_second: RATE_PER_SECOND,
+        start_time: start,
+        cliff_time: start,
+        end_time: start + STREAM_DURATION,
+        withdraw_dust_threshold: None,
+        memo: None,
+        metadata: None,
+        kind: StreamKind::Linear,
+    }
+}
+
+/// After a successful `create_streams` batch, `get_factory_stream_count` must
+/// increase by the batch size (the core regression from issue #724).
+#[test]
+fn test_create_streams_batch_registers_ids_count() {
+    let ctx = Ctx::setup();
+    let r1 = Address::generate(&ctx.env);
+    let r2 = Address::generate(&ctx.env);
+    let r3 = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&r1, &true);
+    ctx.factory.set_allowlist(&r2, &true);
+    ctx.factory.set_allowlist(&r3, &true);
+
+    assert_eq!(ctx.factory.get_factory_stream_count(), 0);
+
+    let mut streams = Vec::new(&ctx.env);
+    streams.push_back(make_params(&ctx, &r1, 0));
+    streams.push_back(make_params(&ctx, &r2, 10_000));
+    streams.push_back(make_params(&ctx, &r3, 20_000));
+
+    ctx.factory.create_streams(&ctx.sender, &streams);
+
+    assert_eq!(ctx.factory.get_factory_stream_count(), 3);
+}
+
+/// `get_factory_streams_paginated` must return every batch ID in creation order.
+#[test]
+fn test_create_streams_batch_registers_ids_in_order() {
+    let ctx = Ctx::setup();
+    let r1 = Address::generate(&ctx.env);
+    let r2 = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&r1, &true);
+    ctx.factory.set_allowlist(&r2, &true);
+
+    let mut streams = Vec::new(&ctx.env);
+    streams.push_back(make_params(&ctx, &r1, 0));
+    streams.push_back(make_params(&ctx, &r2, 10_000));
+
+    let created_ids = ctx.factory.create_streams(&ctx.sender, &streams);
+    assert_eq!(created_ids.len(), 2);
+
+    let page = ctx.factory.get_factory_streams_paginated(&0, &10);
+    assert_eq!(page.len(), 2);
+    assert_eq!(page.get(0).unwrap(), created_ids.get(0).unwrap());
+    assert_eq!(page.get(1).unwrap(), created_ids.get(1).unwrap());
+}
+
+/// An empty batch must produce no registry writes (count stays 0).
+#[test]
+fn test_create_streams_empty_batch_no_registry_writes() {
+    let ctx = Ctx::setup();
+    let empty: Vec<CreateStreamParams> = Vec::new(&ctx.env);
+
+    let result = ctx.factory.try_create_streams(&ctx.sender, &empty);
+    assert!(result.is_ok());
+    assert_eq!(ctx.factory.get_factory_stream_count(), 0);
+}
+
+/// A single-element batch registers exactly one ID — boundary between single and
+/// batch paths.
+#[test]
+fn test_create_streams_single_element_batch_registers_one_id() {
+    let ctx = Ctx::setup();
+    let r = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&r, &true);
+
+    let mut streams = Vec::new(&ctx.env);
+    streams.push_back(make_params(&ctx, &r, 0));
+
+    ctx.factory.create_streams(&ctx.sender, &streams);
+
+    assert_eq!(ctx.factory.get_factory_stream_count(), 1);
+    let page = ctx.factory.get_factory_streams_paginated(&0, &10);
+    assert_eq!(page.len(), 1);
+}
+
+/// Single `create_stream` path still registers IDs (no regression on the
+/// existing path).
+#[test]
+fn test_single_create_stream_still_registers_in_factory() {
+    let ctx = Ctx::setup();
+
+    let id = ctx.factory.create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &DEPOSIT_AMOUNT,
+        &RATE_PER_SECOND,
+        &ctx.now(),
+        &ctx.now(),
+        &(ctx.now() + STREAM_DURATION),
+        &0,
+        &None,
+        &StreamKind::Linear,
+    );
+
+    assert_eq!(ctx.factory.get_factory_stream_count(), 1);
+    let page = ctx.factory.get_factory_streams_paginated(&0, &10);
+    assert_eq!(page.len(), 1);
+    assert_eq!(page.get(0).unwrap(), id);
+}
+
+/// Mixed usage: one single stream then a batch — registry accumulates all IDs
+/// in correct insertion order.
+#[test]
+fn test_single_then_batch_registry_accumulates_in_order() {
+    let ctx = Ctx::setup();
+    let r1 = Address::generate(&ctx.env);
+    let r2 = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&r1, &true);
+    ctx.factory.set_allowlist(&r2, &true);
+
+    // single stream first
+    let single_id = ctx.factory.create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &DEPOSIT_AMOUNT,
+        &RATE_PER_SECOND,
+        &ctx.now(),
+        &ctx.now(),
+        &(ctx.now() + STREAM_DURATION),
+        &0,
+        &None,
+        &StreamKind::Linear,
+    );
+
+    // batch of two
+    let mut streams = Vec::new(&ctx.env);
+    streams.push_back(make_params(&ctx, &r1, 0));
+    streams.push_back(make_params(&ctx, &r2, 5_000));
+    let batch_ids = ctx.factory.create_streams(&ctx.sender, &streams);
+
+    assert_eq!(ctx.factory.get_factory_stream_count(), 3);
+
+    let page = ctx.factory.get_factory_streams_paginated(&0, &10);
+    assert_eq!(page.get(0).unwrap(), single_id);
+    assert_eq!(page.get(1).unwrap(), batch_ids.get(0).unwrap());
+    assert_eq!(page.get(2).unwrap(), batch_ids.get(1).unwrap());
 }

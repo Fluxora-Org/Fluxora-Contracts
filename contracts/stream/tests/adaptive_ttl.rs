@@ -36,6 +36,12 @@ impl<'a> Ctx<'a> {
         let admin = Address::generate(&env);
         let sender = Address::generate(&env);
         stellar_asset.mint(&sender, &1_000_000_000);
+        // The contract pulls deposits via `transfer_from`, which requires an
+        // allowance from `sender`. Missing here previously (pre-existing bug,
+        // predates this work): every `create_streams` call failed with
+        // `ContractError::InsufficientBalance` since `sender` never granted
+        // the contract an allowance.
+        token.approve(&sender, &contract_id, &1_000_000_000, &100_000);
 
         client.init(&token_id, &admin);
 
@@ -155,6 +161,62 @@ fn test_stream_readable_after_ledger_advance() {
     });
 
     // Should still be readable — adaptive TTL for 1-day stream is > 17280 ledgers
+    let state = ctx.client.get_stream_state(&stream_id);
+    assert_eq!(state.stream_id, stream_id);
+}
+
+/// Test a large single-jump ledger timestamp advance before end_time.
+/// Simulates network inactivity or a large test time skip.
+/// Confirms that adaptive TTL calculation remains within sane bounds without overflow/underflow.
+#[test]
+fn test_large_time_jump_before_end_time_ttl_sane() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    // 1-year duration stream
+    let stream_id = ctx.create_stream_with_duration(&recipient, 31_536_000);
+
+    // Large single-jump time advance (~300 days)
+    ctx.env.ledger().with_mut(|l| {
+        l.sequence_number += 5_184_000;
+        l.timestamp += 25_920_000;
+    });
+
+    // Stream state should be successfully retrieved and readable without panic or overflow
+    let state = ctx.client.get_stream_state(&stream_id);
+    assert_eq!(state.stream_id, stream_id);
+}
+
+/// Test a large single-jump ledger timestamp advance far past stream end_time.
+/// Simulates long network pause after stream expiration.
+/// Confirms adaptive TTL falls back safely to the minimum bump floor (PERSISTENT_BUMP_AMOUNT)
+/// so stream remains readable for recipient withdrawal.
+#[test]
+fn test_large_time_jump_past_end_time_ttl_floor() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    let stream_id = ctx.create_stream_with_duration(&recipient, 86_400);
+
+    // Single-jump past end_time by 1,000,000,000 seconds
+    ctx.env.ledger().with_mut(|l| {
+        l.sequence_number += 200_000_000;
+        l.timestamp += 1_000_000_000;
+    });
+
+    // Stream should remain readable (saturating_sub prevents underflow, floor keeps it alive)
+    let state = ctx.client.get_stream_state(&stream_id);
+    assert_eq!(state.stream_id, stream_id);
+}
+
+/// Test adaptive TTL calculation when remaining time is extremely large,
+/// verifying that u64 saturating arithmetic prevents u32 bit-truncation wrapping.
+#[test]
+fn test_extreme_duration_stream_clock_skew_resilience() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    // Create a stream with a huge duration (e.g. 25,000,000,000 seconds, where ledgers_for_stream > u32::MAX)
+    let stream_id = ctx.create_stream_with_duration(&recipient, 25_000_000_000);
+
+    // Stream should be created and retrieved without truncation wrapping down to minimum floor
     let state = ctx.client.get_stream_state(&stream_id);
     assert_eq!(state.stream_id, stream_id);
 }

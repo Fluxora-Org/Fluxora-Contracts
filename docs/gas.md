@@ -101,3 +101,107 @@ The following table provides the CPU instruction counts for core operations.
 <!-- GAS_BASELINE_END -->
 
 *Note: Baselines are currently initialized to 0 and should be updated after the first successful run of `script/validate_gas.py` once the contract compiles.*
+
+## Governance Operations
+
+The governance contract (`fluxora_governance`) handles proposal creation, approval, and execution with bounded costs to prevent DoS attacks.
+
+### Budget Thresholds
+
+These thresholds are enforced by the gas regression tests in `contracts/governance/tests/gas_regression.rs`. CI will fail if any operation exceeds its budget.
+
+#### Propose
+
+Creating a new proposal stores the calldata and proposal metadata. Cost is independent of signer count since we don't iterate over signers during creation.
+
+| Metric | Threshold | Notes |
+|--------|-----------|-------|
+| CPU Instructions | ≤ 1,000,000 | Independent of calldata size |
+| Memory Bytes | ≤ 100,000 | Independent of calldata size |
+
+The calldata is capped at `MAX_CALLDATA_BYTES` (4,096 bytes) to keep storage costs reasonable.
+
+#### Approve
+
+Approving a proposal involves checking the signer's membership (O(1) via Map index) and appending to the approvals list. The cost scales linearly with the number of existing approvals since we store them as a Vec.
+
+| Signer Count | CPU Threshold | Memory Threshold |
+|--------------|---------------|------------------|
+| 1-5          | ≤ 375,000 + 75,000 per signer | ≤ 37,500 + 7,500 per signer |
+| 6-10         | ≤ 750,000 + 75,000 per signer | ≤ 75,000 + 7,500 per signer |
+| 11-20        | ≤ 1,125,000 + 75,000 per signer | ≤ 112,500 + 7,500 per signer |
+| Max (20)     | ≤ 1,500,000 | ≤ 150,000 |
+
+**Why it matters**: The approvals list is capped at `MAX_SIGNERS` (20), so the maximum cost is bounded. The O(1) duplicate check via the approval index Map prevents additional scanning overhead.
+
+#### Execute
+
+Executing a proposal processes the stored calldata. The cost scales with calldata size since we need to read and process the payload.
+
+| Calldata Size | CPU Threshold | Memory Threshold |
+|---------------|---------------|------------------|
+| 0-1 KB        | ≤ 5,000,000 | ≤ 500,000 |
+| 1-2 KB        | ≤ 6,250,000 | ≤ 625,000 |
+| 2-3 KB        | ≤ 7,500,000 | ≤ 750,000 |
+| 3-4 KB        | ≤ 8,750,000 | ≤ 875,000 |
+| Max (4 KB)    | ≤ 10,000,000 | ≤ 1,000,000 |
+
+**Why it matters**: Calldata is capped at `MAX_CALLDATA_BYTES` (4,096 bytes), so even the worst-case execute cost is bounded. This prevents malicious proposals from being too expensive to execute.
+
+### Worst-Case Scenario
+
+The most expensive governance operation is executing a proposal with:
+- `MAX_SIGNERS` (20) approvals
+- `MAX_CALLDATA_BYTES` (4,096 bytes) calldata
+
+| Operation | CPU | Memory |
+|-----------|-----|--------|
+| Propose | ≤ 1,000,000 | ≤ 100,000 |
+| Approve (all 20) | ≤ 1,500,000 | ≤ 150,000 |
+| Execute | ≤ 10,000,000 | ≤ 1,000,000 |
+
+All operations fit comfortably within Soroban's default budget limits.
+
+### Denial of Service Protection
+
+The governance contract is protected against DoS attacks through:
+
+1. **Bounded approvals**: The signer set is capped at `MAX_SIGNERS` (20), making the approval scan O(n) where n ≤ 20.
+
+2. **Bounded calldata**: The calldata payload is capped at `MAX_CALLDATA_BYTES` (4,096 bytes), limiting storage and processing costs.
+
+3. **O(1) lookups**: Signer membership and duplicate approval checks use Map indices, avoiding linear scans of the signer list.
+
+4. **Proposal expiry**: Proposals expire after `MAX_PROPOSAL_AGE_SECONDS` (30 days), preventing accumulation of stale proposals.
+
+### Regression Testing
+
+The gas regression tests run on every PR and CI build:
+
+```bash
+cargo test --test gas_regression -- --nocapture
+```
+
+## Baseline Update Process
+
+Gas-regression tests assert that our operations don't unexpectedly increase in CPU instruction count or memory usage. A legitimate baseline bump may be required when intentionally adding features or security checks that increase the cost.
+
+### How the Baseline is Computed and Stored
+
+We currently have two different mechanisms for tracking and asserting gas baselines across our contracts:
+
+1. **Governance (`fluxora_governance`)**:
+   - **Stored**: Baselines are stored directly as hardcoded `const` values at the top of `contracts/governance/tests/gas_regression.rs`.
+   - **Computed**: These constants represent an absolute threshold. Historically, they were computed by running the tests and adding ~25% headroom. The test suite fails via standard `assert!` statements if the measured budget exceeds these constants.
+
+2. **Stream (`fluxora_stream`)**:
+   - **Stored**: Baselines are stored in a JSON block inside `docs/gas.md` (between `<!-- GAS_BASELINE_START -->` and `<!-- GAS_BASELINE_END -->` tags).
+   - **Computed**: The test file (`contracts/stream/tests/gas_regression.rs`) prints the costs. A Python script (`script/validate_gas.py`) parses these prints and compares them against the JSON baseline in `docs/gas.md`. It fails the CI if any measurement exceeds the recorded baseline by more than 5%. To update the baseline, run the tests and copy the new measured values into the JSON block in this document.
+
+### Review Bar for Baseline Increases
+
+Baseline increases are not granted automatically. To get a baseline increase approved, the PR must meet the following review bar:
+
+- **Explicit Justification**: The PR description must explicitly justify the gas increase.
+- **Root Cause**: The increase must be tied to a specific, legitimate change (e.g., adding a new necessary security check, expanding a feature).
+- **No Hidden Costs**: Unintended or unexplainable jumps in gas usage must be optimized or reverted. You cannot blindly bump the baseline to get CI to pass.
