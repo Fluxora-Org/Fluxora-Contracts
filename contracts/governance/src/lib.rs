@@ -736,14 +736,6 @@ impl FluxoraGovernance {
         env.events()
             .publish((symbol_short!("sgnr_rm"),), SignerRemoved { signer });
 
-        env.events().publish(
-            (symbol_short!("quor_cfg"),),
-            QuorumConfig {
-                threshold,
-                signer_count: signers.len(),
-            },
-        );
-
         Ok(())
     }
 
