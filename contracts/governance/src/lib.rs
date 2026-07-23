@@ -742,17 +742,8 @@ impl FluxoraGovernance {
         env.events()
             .publish((symbol_short!("sgnr_rm"),), SignerRemoved { signer });
 
-        env.events().publish(
-            (symbol_short!("quor_cfg"),),
-            QuorumConfig {
-                threshold,
-                signer_count: signers.len(),
-            },
-        );
-
         Ok(())
     }
-
 
     /// Submit a new governance proposal.
     ///
@@ -1700,7 +1691,6 @@ mod tests {
     // -----------------------------------------------------------------------
     // set_threshold validation
     // -----------------------------------------------------------------------
-
 
     #[test]
     fn test_set_threshold_accepts_valid_range() {
