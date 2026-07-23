@@ -5,12 +5,14 @@ validate-doc-alignment.py
 Validates that integration-critical identifiers defined in Rust contract source
 files are documented in the corresponding Markdown documentation files.
 
-Checks three categories:
+Checks four categories:
   1. Public entrypoints  (pub fn <name>) in contracts/stream/src/lib.rs
      -> must appear in docs/streaming.md
-  2. Event symbols       (Symbol::short/new) in contracts/core/src/events.rs
+  2. Contractimpl entrypoints (pub fn inside #[contractimpl] impl FluxoraStream)
+     -> must appear in the docs/audit.md entrypoint table (bidirectional)
+  3. Event symbols       (Symbol::short/new) in contracts/stream/src/lib.rs
      -> must appear in docs/events.md
-  3. Error enum variants in contracts/core/src/error.rs
+  4. Error enum variants in contracts/stream/src/lib.rs
      -> must appear in docs/error.md
 """
 
@@ -56,6 +58,10 @@ MAPPING = {
     "DOC_ERROR": (
         REPO_ROOT / "docs" / "error.md",
         "**/docs/error.md",
+    ),
+    "DOC_AUDIT": (
+        REPO_ROOT / "docs" / "audit.md",
+        "**/docs/audit.md",
     ),
 }
 
@@ -154,9 +160,54 @@ _RE_CONTRACT_ERROR_BODY = re.compile(
     re.DOTALL,
 )
 
+_RE_CONTRACTIMPL_BLOCK = re.compile(
+    r"#\[contractimpl\]\s*\nimpl\s+FluxoraStream\s*\{",
+    re.MULTILINE,
+)
+
+_RE_AUDIT_TABLE_ROW = re.compile(r"^\| `([^`]+)`\s+\|", re.MULTILINE)
+
+_VERSION_CONTRADICTION = "There is no `version` entrypoint"
+
 def extract_entrypoints(source: str) -> set:
     names = set(_RE_ENTRYPOINT.findall(source))
     return names - ENTRYPOINT_ALLOWLIST
+
+def extract_contractimpl_entrypoints(source: str) -> set:
+    """Return pub fn names declared inside the FluxoraStream #[contractimpl] block."""
+    match = _RE_CONTRACTIMPL_BLOCK.search(source)
+    if not match:
+        return set()
+
+    brace_start = source.find("{", match.start())
+    if brace_start == -1:
+        return set()
+
+    depth = 0
+    for index in range(brace_start, len(source)):
+        char = source[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                block = source[brace_start:index + 1]
+                names = set(_RE_ENTRYPOINT.findall(block))
+                return names - ENTRYPOINT_ALLOWLIST
+    return set()
+
+def extract_audit_table_entrypoints(doc_text: str) -> set:
+    """Return entrypoint names listed in the docs/audit.md public entrypoints table."""
+    section_start = doc_text.find("## Public entrypoints")
+    if section_start == -1:
+        return set()
+
+    section = doc_text[section_start:]
+    table_end = section.find("\n---")
+    if table_end != -1:
+        section = section[:table_end]
+
+    return set(_RE_AUDIT_TABLE_ROW.findall(section))
 
 def extract_event_symbols(source: str) -> set:
     out: set[str] = set()
@@ -204,6 +255,7 @@ def validate(
     streaming_doc: Path,
     events_doc: Path,
     error_doc: Path,
+    audit_doc: Path,
 ) -> int:
     """Run all alignment checks. Returns 0 on success, 1 on any drift."""
     source = contract_path.read_text(encoding="utf-8")
@@ -212,6 +264,7 @@ def validate(
     streaming_text = streaming_doc.read_text(encoding="utf-8")
     events_text = events_doc.read_text(encoding="utf-8")
     error_text = error_doc.read_text(encoding="utf-8")
+    audit_text = audit_doc.read_text(encoding="utf-8")
 
     checks = [
         (extract_entrypoints(source), streaming_text, streaming_doc, "entrypoint"),
@@ -229,6 +282,38 @@ def validate(
                 display = doc_path
             print(f"MISSING DOC: '{ident}' ({kind}) found in code but not in '{display}'")
             drift_found = True
+
+    contractimpl_entrypoints = extract_contractimpl_entrypoints(source)
+    audit_table_entrypoints = extract_audit_table_entrypoints(audit_text)
+
+    for ident in sorted(contractimpl_entrypoints - audit_table_entrypoints):
+        try:
+            display = audit_doc.relative_to(REPO_ROOT)
+        except ValueError:
+            display = audit_doc
+        print(
+            f"MISSING DOC: '{ident}' (audit entrypoint) found in contractimpl "
+            f"but not in '{display}' table"
+        )
+        drift_found = True
+
+    for ident in sorted(audit_table_entrypoints - contractimpl_entrypoints):
+        try:
+            display = audit_doc.relative_to(REPO_ROOT)
+        except ValueError:
+            display = audit_doc
+        print(
+            f"STALE DOC: '{ident}' (audit entrypoint) listed in '{display}' "
+            "but not in contractimpl"
+        )
+        drift_found = True
+
+    if _VERSION_CONTRADICTION in audit_text:
+        print(
+            "AUDIT CONTRADICTION: docs/audit.md contains the deprecated "
+            f"'{_VERSION_CONTRADICTION}' sentence"
+        )
+        drift_found = True
 
     if check_duplicate_discriminants(error_source):
         drift_found = True
@@ -250,6 +335,7 @@ def main() -> int:
         resolved["DOC_STREAMING"],
         resolved["DOC_EVENTS"],
         resolved["DOC_ERROR"],
+        resolved["DOC_AUDIT"],
     )
 
 if __name__ == "__main__":
