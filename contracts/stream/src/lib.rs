@@ -4143,6 +4143,15 @@ impl FluxoraStream {
         read_total_keeper_fees_paid(&env)
     }
 
+    /// Returns the contract's current total outstanding liabilities: the sum
+    /// of every stream's remaining (not-yet-withdrawn) balance.
+    ///
+    /// Auth-free, read-only view. Used to cross-check that the contract's
+    /// token balance never falls short of what it owes across all streams.
+    pub fn get_total_liabilities(env: Env) -> i128 {
+        read_total_liabilities(&env)
+    }
+
     /// Return the protocol-wide number of streams currently in `StreamStatus::Paused`.
     ///
     /// This view is O(1): it reads the maintained `DataKey::PausedStreamCount` instance key
