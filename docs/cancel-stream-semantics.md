@@ -36,7 +36,7 @@ On failure:
 1. Missing stream: `StreamNotFound`.
 2. Invalid status (`Completed` or already `Cancelled`): `InvalidState`.
 3. Sender path requires sender auth; admin path requires admin auth.
-4. Failures are atomic: no transfer, no state update, no cancel event.
+4. Failures are atomic: no transfer, no state update, no cancel event. This includes bulk cancellations (`bulk_cancel_streams`), which strictly follow an atomic-reject model: if any stream in a batch fails validation (e.g., unauthorized access or invalid state), the entire batch reverts and no streams are mutated.
 
 ## Authorization matrix
 
