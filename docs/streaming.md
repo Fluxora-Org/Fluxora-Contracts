@@ -1721,3 +1721,196 @@ pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), ContractError>
   caller, plus a legacy `upgrade` topic event for backward-compatible indexers.
   See `docs/events.md` for the exact event shapes.
 
+
+---
+
+## Offer-Then-Accept Stream Creation
+
+Every existing creation entry point (`create_stream`, `create_streams`, etc.)
+requires only the **sender's** authorization — a stream can be force-created
+onto any recipient address without their consent. The offer-then-accept flow
+adds a two-phase alternative where the **recipient must explicitly accept**
+before accrual begins.
+
+### Motivation
+
+- Recipients may not want unexpected streams added to their index (spam, tax
+  implications, compliance).
+- Senders can propose terms off-chain first, then commit the deposit on-chain.
+- Offers that are never accepted are automatically refundable by the sender.
+
+### Lifecycle
+
+```
+Sender calls create_stream_offer
+    ↓  deposit escrowed, PendingStreamOffer stored, RecipientStreams NOT updated
+    │
+    ├─► Recipient calls accept_stream_offer
+    │       → offer removed, Active Stream created, RecipientStreams updated
+    │         start_time re-anchored to max(offer.start_time, now)
+    │
+    ├─► Recipient calls reject_stream_offer
+    │       → offer removed, deposit refunded to sender
+    │
+    ├─► Sender calls cancel_stream_offer  (any time, including after expiry)
+    │       → offer removed, deposit refunded to sender
+    │
+    └─► expiry_time elapsed
+            → accept_stream_offer returns OfferExpired (36)
+              sender can still cancel; recipient can still reject
+```
+
+### Entry Points
+
+#### `create_stream_offer`
+
+```rust
+pub fn create_stream_offer(
+    env: Env,
+    sender: Address,
+    recipient: Address,
+    deposit_amount: i128,
+    rate_per_second: i128,
+    start_time: u64,
+    cliff_time: u64,
+    end_time: u64,
+    withdraw_dust_threshold: i128,
+    memo: Option<Bytes>,
+    kind: StreamKind,
+    metadata: Option<Map<Bytes, Bytes>>,
+    expiry_time: Option<u64>,
+) -> Result<u64, ContractError>
+```
+
+**Authorization:** `sender.require_auth()`
+
+**Behavior:**
+- Validates all parameters using the same rules as `create_stream`.
+- If `expiry_time` is `Some(t)` and `t <= now`, returns `InvalidParams`.
+- Allocates an `offer_id` from the global stream ID counter.
+- Stores a `StreamOffer` in `DataKey::PendingStreamOffer(offer_id)`.
+- Adds `offer_id` to `DataKey::RecipientPendingOffers(recipient)`.
+- Pulls `deposit_amount` tokens from `sender` into escrow (CEI: state saved first).
+- Emits `StreamOfferCreated` (topic `offr_crt`).
+- Returns the `offer_id`.
+
+**Does NOT:** start accrual, add to `RecipientStreams`, track liabilities.
+
+#### `accept_stream_offer`
+
+```rust
+pub fn accept_stream_offer(
+    env: Env,
+    recipient: Address,
+    offer_id: u64,
+) -> Result<u64, ContractError>
+```
+
+**Authorization:** `recipient.require_auth()`
+
+**Behavior:**
+- Returns `OfferNotFound` if no pending offer exists.
+- Returns `OfferWrongRecipient` if `recipient != offer.recipient`.
+- Returns `OfferExpired` if `now > offer.expiry_time`.
+- Re-anchors timing: `effective_start = max(offer.start_time, now)`. Cliff
+  offset and stream duration are preserved relative to `effective_start`.
+- Removes the offer from storage and the recipient pending-offers index.
+- Creates an `Active` stream using the same `offer_id` as stream ID.
+- Adds stream to `RecipientStreams` index and tracks liability.
+- Emits `StreamCreated` (topic `created`) and `StreamOfferAccepted` (topic `offr_acc`).
+- No token transfer — deposit was already escrowed at offer creation.
+
+#### `reject_stream_offer`
+
+```rust
+pub fn reject_stream_offer(
+    env: Env,
+    recipient: Address,
+    offer_id: u64,
+) -> Result<(), ContractError>
+```
+
+**Authorization:** `recipient.require_auth()`
+
+Removes the offer and pushes the escrowed deposit back to `offer.sender`.
+Emits `StreamOfferCancelled` (topic `offr_cxl`).
+
+#### `cancel_stream_offer`
+
+```rust
+pub fn cancel_stream_offer(
+    env: Env,
+    sender: Address,
+    offer_id: u64,
+) -> Result<(), ContractError>
+```
+
+**Authorization:** `sender.require_auth()`
+
+Returns `OfferWrongSender` if `sender != offer.sender`. Otherwise removes the
+offer and refunds the deposit. Can be called even after `expiry_time` has elapsed.
+Emits `StreamOfferCancelled` (topic `offr_cxl`).
+
+#### `get_stream_offer` (query)
+
+```rust
+pub fn get_stream_offer(env: Env, offer_id: u64) -> Result<StreamOffer, ContractError>
+```
+
+Returns the full `StreamOffer` struct. Returns `OfferNotFound` once the offer
+has been accepted, rejected, or cancelled.
+
+#### `get_recipient_pending_offers` (query)
+
+```rust
+pub fn get_recipient_pending_offers(env: Env, recipient: Address) -> Vec<u64>
+```
+
+Returns the sorted list of pending offer IDs for `recipient`. Empty if none.
+
+### Start-Time Re-Anchoring
+
+When a recipient accepts an offer, the contract re-anchors timing to prevent
+a stream from starting in the past:
+
+```
+effective_start = max(offer.start_time, ledger.timestamp())
+cliff_offset    = offer.cliff_time - offer.start_time
+effective_cliff = effective_start + cliff_offset
+duration        = offer.end_time  - offer.start_time
+effective_end   = effective_start + duration
+```
+
+The cliff offset and duration are **always preserved** regardless of how much
+time has elapsed. This means a 12-month stream with a 6-month cliff will still
+run for exactly 12 months with a 6-month cliff from the acceptance timestamp.
+
+### New Error Codes
+
+| Code | Name | Meaning |
+|------|------|---------|
+| 36 | `OfferNotFound` | No pending offer with this ID |
+| 37 | `OfferExpired` | `now > offer.expiry_time` |
+| 38 | `OfferWrongRecipient` | Caller is not the intended recipient |
+| 39 | `OfferWrongSender` | Caller is not the original sender |
+
+### New Events
+
+| Topic | Payload struct | Emitted by |
+|-------|---------------|------------|
+| `offr_crt` | `StreamOfferCreated` | `create_stream_offer` |
+| `offr_acc` | `StreamOfferAccepted` | `accept_stream_offer` |
+| `offr_cxl` | `StreamOfferCancelled` | `reject_stream_offer`, `cancel_stream_offer` |
+
+### Security Notes
+
+- **CEI ordering** is strictly maintained: all state changes occur before token
+  transfers in every entry point.
+- The offer is removed from storage **before** the stream is created in
+  `accept_stream_offer`, preventing double-acceptance if a malicious token
+  re-enters the contract.
+- Offer IDs share the global stream ID counter, guaranteeing globally unique
+  identifiers with no collision risk between offers and active streams.
+- Unaccepted offers do not appear in `RecipientStreams` and do not contribute
+  to `TotalLiabilities`, so they cannot inflate recipient-facing views or the
+  contract's liability accounting.
