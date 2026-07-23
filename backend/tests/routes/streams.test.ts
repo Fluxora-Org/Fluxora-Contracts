@@ -258,6 +258,74 @@ describe('Body validation', () => {
     expect(res.status).toBe(400);
   });
 
+  // -------------------------------------------------------------------------
+  // Fractional amount rejection — amounts must be whole integers (i128)
+  // -------------------------------------------------------------------------
+
+  it('returns 400 with VALIDATION_ERROR when depositAmount is fractional (e.g. "100.5")', async () => {
+    const res = await request(app)
+      .post('/api/v1/streams')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ ...VALID_BODY, depositAmount: '100.5' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error.code).toBe('VALIDATION_ERROR');
+    expect(res.body.error.message).toMatch(/depositAmount/i);
+  });
+
+  it('returns 400 with VALIDATION_ERROR when ratePerSecond is fractional (e.g. "1.5")', async () => {
+    const res = await request(app)
+      .post('/api/v1/streams')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ ...VALID_BODY, ratePerSecond: '1.5' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error.code).toBe('VALIDATION_ERROR');
+    expect(res.body.error.message).toMatch(/ratePerSecond/i);
+  });
+
+  it('returns 400 when depositAmount has a trailing dot (e.g. "100.")', async () => {
+    const res = await request(app)
+      .post('/api/v1/streams')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ ...VALID_BODY, depositAmount: '100.' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('VALIDATION_ERROR');
+  });
+
+  it('returns 400 when ratePerSecond has a trailing dot (e.g. "1.")', async () => {
+    const res = await request(app)
+      .post('/api/v1/streams')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ ...VALID_BODY, ratePerSecond: '1.' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('VALIDATION_ERROR');
+  });
+
+  it('returns 400 when depositAmount has a leading dot (e.g. ".5")', async () => {
+    const res = await request(app)
+      .post('/api/v1/streams')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ ...VALID_BODY, depositAmount: '.5' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('VALIDATION_ERROR');
+  });
+
+  it('returns 400 when ratePerSecond has a leading dot (e.g. ".1")', async () => {
+    const res = await request(app)
+      .post('/api/v1/streams')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ ...VALID_BODY, ratePerSecond: '.1' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('VALIDATION_ERROR');
+  });
+
   it('returns 400 when endTime is before startTime', async () => {
     const res = await request(app)
       .post('/api/v1/streams')
