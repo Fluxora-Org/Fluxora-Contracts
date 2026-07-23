@@ -15,7 +15,7 @@
 //! The following invariants must hold for a build to be reproducible:
 //!
 //! 1. **Rust toolchain** is pinned via `rust-toolchain.toml` to a specific
-//!    channel (`stable`) and target set (`wasm32-unknown-unknown`).
+//!    channel (`1.94.1`) and target set (`wasm32-unknown-unknown`).
 //! 2. **soroban-sdk** version is pinned in `contracts/stream/Cargo.toml`
 //!    (currently `21.7.7`).
 //! 3. **Build profile** is `--release` with `wasm32-unknown-unknown` target.
@@ -264,5 +264,33 @@ mod tests {
         const MEMO_POS: usize = 14;
         // memo is the 15th field (0-indexed position 14)
         assert_eq!(MEMO_POS, 14);
+    }
+
+    /// Assert that the documented channel in the module doc-comment and the actual
+    /// channel pinned in rust-toolchain.toml do not diverge.
+    #[test]
+    fn test_rust_toolchain_channel_doc_sync() {
+        let toml_content = include_str!("../../../rust-toolchain.toml");
+        let mut channel_val = None;
+        for line in toml_content.lines() {
+            let line = line.trim();
+            if line.starts_with("channel") {
+                if let Some(idx) = line.find('=') {
+                    let val = line[idx + 1..].trim();
+                    let val = val.trim_matches('"');
+                    channel_val = Some(val.to_string());
+                    break;
+                }
+            }
+        }
+        let channel = channel_val.expect("Failed to find channel in rust-toolchain.toml");
+
+        let checksum_src = include_str!("checksum.rs");
+        let expected_doc_line = format!("channel (`{}`)", channel);
+        assert!(
+            checksum_src.contains(&expected_doc_line),
+            "checksum.rs doc-comment must reference the pinned channel from rust-toolchain.toml: '{}'",
+            expected_doc_line
+        );
     }
 }

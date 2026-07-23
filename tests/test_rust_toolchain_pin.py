@@ -97,3 +97,17 @@ def test_rustc_version_falls_back_to_invoking_real_rustc(monkeypatch):
     monkeypatch.delenv("RUSTC_VERSION_OUTPUT", raising=False)
     version = verify_rust_version.rustc_version()
     assert version
+
+
+def test_checksum_doc_matches_pinned_channel():
+    # Load pinned channel from rust-toolchain.toml using existing helper
+    pinned = verify_rust_version.pinned_channel(TOOLCHAIN)
+    assert pinned
+
+    # Read checksum.rs content
+    checksum_path = Path(__file__).resolve().parents[1] / "contracts" / "stream" / "src" / "checksum.rs"
+    content = checksum_path.read_text(encoding="utf-8")
+
+    # Assert the correct channel description is documented
+    expected_doc = f"channel (`{pinned}`)"
+    assert expected_doc in content, f"Expected checksum.rs to contain '{expected_doc}'"

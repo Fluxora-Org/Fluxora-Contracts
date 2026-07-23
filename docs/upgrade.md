@@ -351,3 +351,19 @@ The upgraded WASM must maintain backward-compatible storage layout.
 ```bash
 cargo build --target wasm32-unknown-unknown --release -p fluxora_stream
 stellar contract optimize --wasm target/wasm32-unknown-unknown/release/fluxora_stream.wasm
+```
+
+## Build Reproducibility and Toolchain Verification
+
+To ensure that the compiled WASM checksum matches the reference checksum (tracked in `wasm/checksums.sha256`), all builds must use a pinned Rust toolchain channel.
+
+### Pinned Toolchain
+
+- The toolchain channel is pinned in `rust-toolchain.toml` to a specific version (currently `1.94.1`).
+- The build reproducibility contract in [checksum.rs](file:///c:/Users/HP/Desktop/Stellar/Fluxora-Contracts/contracts/stream/src/checksum.rs) documents this pin and is validated by automated tests.
+
+### Automated Toolchain Validation
+
+To prevent doc-drift and toolchain version drift, tests are enforced at two levels:
+1. **Rust Test (In-Contract)**: A `#[cfg(test)]` assertion in [checksum.rs](file:///c:/Users/HP/Desktop/Stellar/Fluxora-Contracts/contracts/stream/src/checksum.rs) parses `rust-toolchain.toml` and asserts that its `channel` value is documented exactly in the file's module doc-comment.
+2. **Python Test (CI)**: `tests/test_rust_toolchain_pin.py` asserts that the doc-comment's quoted channel matches the actual `rust-toolchain.toml` channel value.
