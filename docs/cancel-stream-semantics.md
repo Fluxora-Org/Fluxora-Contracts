@@ -208,3 +208,18 @@ amount, the contract exposes a permissionless cleanup entrypoint `close_cancelle
 
 Keepers and off-chain indexers may call this entrypoint to free storage and reduce
 recipient-index bloat once the recipient's claims are fully settled.
+
+## CliffOnly Cancellation Semantics
+
+When `StreamKind::CliffOnly` streams are cancelled (via `cancel_stream`, `cancel_stream_as_admin`, `bulk_cancel_streams`, or `keeper_cancel`), they exhibit distinct mathematical edge cases compared to `Linear` streams because partial accrual is impossible:
+
+1. **Before the cliff time:** The recipient's accrued amount is strictly 0. 
+   - A cancellation refunds the **full** `deposit_amount` back to the sender (`sender_refund_gross == deposit_amount`).
+   - For a `bulk_cancel_streams` (admin only) or sender cancellation, the sender receives the entire deposit minus any configured cancellation fee. The recipient receives nothing.
+
+2. **At or after the cliff time:** The recipient's accrued amount is the **full** `deposit_amount`.
+   - A cancellation (e.g. via `keeper_cancel` after `end_time + GRACE`) calculates `sender_refund_gross = 0`.
+   - Because `sender_refund_gross` is 0, the `keeper_fee` evaluates to 0, and the sender receives a net refund of 0.
+   - The recipient is fully entitled to the `deposit_amount` and can withdraw it at their leisure.
+
+In all paths, `TotalLiabilities`, `KeeperCancelled`, and `StreamCancelled` events operate correctly, preserving the structural invariants proven in adversarial test suites (`contracts/stream/tests/cliff_only_variant.rs`).
