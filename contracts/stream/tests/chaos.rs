@@ -1,25 +1,34 @@
 // Chaos test suite for concurrent operation interleavings
 
 //! This test module generates all permutations of a set of stream operations
-//! (withdraw, cancel_stream, update_rate, pause_stream) against a freshly
-//! created stream and asserts that post‑conditions hold regardless of the order.
+//! (withdraw, cancel_stream, update_rate, pause_stream, resume_stream) against
+//! a freshly created stream and asserts that post‑conditions hold regardless of
+//! the order.
 //!
 //! The goal is to surface race‑condition‑like bugs in the Soroban runtime where
 //! multiple transaction invocations are included in the same ledger close.
 //!
 //! Each permutation is applied to an independent test context to ensure isolation.
 //! On failure the permutation seed is printed for reproducibility.
+//!
+//! # Ledger advancement
+//! Pause and resume operations are gated behind a cooldown of
+//! `MIN_PAUSE_INTERVAL_LEDGERS` (17) ledgers.  To ensure that a pause→resume
+//! sequence in a permutation actually exercises the state transition rather than
+//! always bouncing off the cooldown guard, the ledger sequence is advanced by
+//! `OP_LEDGER_STEP` (20) before every op application.  The timestamp is kept in
+//! sync so that the token‑conservation invariant (total tokens == 1000) remains
+//! meaningful throughout the stream's lifetime.
 
-use fluxora_stream::{
-    ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, PauseReason,
-    StreamStatus,
-};
-use proptest::prelude::*;
+use fluxora_stream::{ContractError, FluxoraStream, FluxoraStreamClient, PauseReason, StreamStatus};
 use soroban_sdk::{
-    testutils::{Address as _, Events, Ledger},
+    testutils::{Address as _, Ledger},
     token::Client as TokenClient,
-    vec, Address, Env, IntoVal, Symbol,
+    Address, Env,
 };
+
+/// Number of ledgers advanced between each op to clear the pause/resume cooldown.
+const OP_LEDGER_STEP: u32 = 20;
 
 struct TestContext {
     env: Env,
@@ -77,14 +86,38 @@ impl TestContext {
             &None,
         )
     }
+
+    /// Advance both the ledger sequence number and the timestamp by one step.
+    ///
+    /// Moving the timestamp forward keeps `calculate_accrued` and the
+    /// token-conservation check consistent.  Each step advances time by a
+    /// small amount (well within the 1 000-second stream window).
+    fn advance_ledger(&self, steps_so_far: u32) {
+        let new_seq = steps_so_far * OP_LEDGER_STEP;
+        // Advance timestamp proportionally (1 second per ledger step, capped
+        // at 500 so we stay inside the stream window for all permutations).
+        let new_ts = ((new_seq as u64) * 1).min(500);
+        self.env.ledger().with_mut(|l| {
+            l.sequence_number = new_seq;
+            l.timestamp = new_ts;
+        });
+    }
 }
 
-#[derive(Clone, Copy)]
+/// Operations that the chaos permutation suite exercises.
+///
+/// Every variant must be safe to call on any stream state: if the operation is
+/// not applicable (wrong state, cooldown active, terminal state, etc.) the
+/// contract returns an error, which `apply_op` silently absorbs via
+/// `catch_unwind` — matching how the existing ops already handle inapplicable
+/// states.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Op {
-    Withdraw,
     Cancel,
-    UpdateRate,
     Pause,
+    Resume,
+    UpdateRate,
+    Withdraw,
 }
 
 fn apply_op(ctx: &TestContext, stream_id: u64, op: Op) -> Result<(), ContractError> {
@@ -105,6 +138,15 @@ fn apply_op(ctx: &TestContext, stream_id: u64, op: Op) -> Result<(), ContractErr
         Op::Pause => {
             ctx.client
                 .pause_stream(&stream_id, &PauseReason::Operational);
+            Ok(())
+        }
+        Op::Resume => {
+            // Only applicable when the stream is currently Paused.  All other
+            // states (Active, Completed, Cancelled) cause the contract to
+            // return ContractError::StreamNotPaused, which is caught by the
+            // caller's catch_unwind — identical to how Pause no-ops on an
+            // already-paused or terminal stream.
+            ctx.client.resume_stream(&stream_id);
             Ok(())
         }
     }
@@ -137,16 +179,23 @@ fn post_conditions_hold(ctx: &TestContext, stream_id: u64) {
     );
 }
 
-proptest! {
+proptest::proptest! {
     #[test]
     fn chaos_permutations(seed: u64) {
-        // Generate all permutations of the four ops.
-        let ops = vec![Op::Withdraw, Op::Cancel, Op::UpdateRate, Op::Pause];
-        let mut permuts = ops.clone();
-        let mut permutations = vec![];
+        // Generate all permutations of the five ops (5! = 120 permutations).
+        let mut permuts = vec![
+            Op::Cancel,
+            Op::Pause,
+            Op::Resume,
+            Op::UpdateRate,
+            Op::Withdraw,
+        ];
+        let mut permutations: Vec<Vec<Op>> = Vec::new();
         loop {
             permutations.push(permuts.clone());
-            if !next_permutation(&mut permuts) { break; }
+            if !next_permutation(&mut permuts) {
+                break;
+            }
         }
 
         for perm in permutations {
@@ -154,8 +203,15 @@ proptest! {
             let ctx = TestContext::new();
             let stream_id = ctx.create_stream();
 
-            for op in perm.iter() {
-                // Each op may panic on invalid state; we ignore errors for this chaos test.
+            for (step, op) in perm.iter().enumerate() {
+                // Advance the ledger before each op so that the pause/resume
+                // cooldown (MIN_PAUSE_INTERVAL_LEDGERS = 17) is satisfied.
+                // `step + 1` ensures we're always past the initial ledger 0.
+                ctx.advance_ledger((step as u32) + 1);
+
+                // Each op may panic on invalid state; we ignore errors for
+                // this chaos test so that the post-condition check below is
+                // the sole arbiter of correctness.
                 let _ = std::panic::catch_unwind(|| apply_op(&ctx, stream_id, *op));
             }
             // Verify post‑conditions. If they fail we include the seed for reproducibility.

@@ -224,6 +224,8 @@ pub enum ContractError {
     MetadataTooLarge = 32,
     /// Keeper attempted to cancel before grace period has elapsed past end_time.
     KeeperGracePeriodNotElapsed = 33,
+    /// Withdraw dust threshold is negative or exceeds deposit amount.
+    InvalidDustThreshold = 35,
 }
 
 #[contracttype]

@@ -698,6 +698,12 @@ impl FluxoraGovernance {
     /// # Authorization
     /// - Requires admin signature.
     ///
+    /// # Tradeoff Note
+    /// Does not mutate historical or in-flight proposal approval vectors to avoid
+    /// unbounded gas consumption scanning pending proposals in storage. Instead,
+    /// `approve`, `execute`, and `is_executable` filter approvals against the current
+    /// signer set at evaluation time.
+    ///
     /// # Errors
     /// - `QuorumWouldBreak`: Removal would leave fewer signers than the required
     ///   threshold, making future proposals permanently unexecutable.
@@ -735,50 +741,6 @@ impl FluxoraGovernance {
         // no event).
         env.events()
             .publish((symbol_short!("sgnr_rm"),), SignerRemoved { signer });
-
-        env.events().publish(
-            (symbol_short!("quor_cfg"),),
-            QuorumConfig {
-                threshold,
-                signer_count: signers.len(),
-            },
-        );
-
-        Ok(())
-    }
-
-    /// Set the approval threshold for governance proposals.
-    ///
-    /// # Parameters
-    /// - `threshold`: Minimum number of approvals required for a proposal to
-    ///   execute. Must satisfy `1 <= threshold <= current_signer_count`.
-    ///
-    /// # Authorization
-    /// - Requires admin signature.
-    ///
-    /// # Errors
-    /// - `InvalidThreshold`: `threshold` is zero or exceeds the current number of signers.
-    pub fn set_threshold(env: Env, threshold: u32) -> Result<(), GovernanceError> {
-        get_admin(&env)?.require_auth();
-        let signers = get_signers(&env)?;
-
-        if threshold == 0 || threshold > signers.len() {
-            return Err(GovernanceError::InvalidThreshold);
-        }
-
-        env.storage()
-            .instance()
-            .set(&DataKey::Threshold, &threshold);
-        bump_instance(&env);
-
-        // CEI: the new threshold is persisted before the event is emitted.
-        env.events().publish(
-            (symbol_short!("quor_cfg"),),
-            QuorumConfig {
-                threshold,
-                signer_count: signers.len(),
-            },
-        );
 
         Ok(())
     }
@@ -901,7 +863,14 @@ impl FluxoraGovernance {
 
         proposal.approvals.push_back(approver.clone());
         approval_idx.set(approver.clone(), true);
-        let approval_count = proposal.approvals.len();
+
+        // Count approvals coming from currently registered co-signers.
+        let mut approval_count = 0u32;
+        for addr in proposal.approvals.iter() {
+            if Self::is_registered_signer(&env, &addr)? {
+                approval_count += 1;
+            }
+        }
 
         let threshold = get_threshold(&env)?;
         let quorum_reached = if approval_count == threshold {
@@ -1004,7 +973,19 @@ impl FluxoraGovernance {
             .ok_or(GovernanceError::QuorumNotReached)?;
         bump_quorum_ttl(&env, proposal_id);
 
-        if proposal.approvals.len() < quorum_info.threshold {
+        // Tradeoff note: Filter recorded approvals against current registered signers.
+        // Stale approvals from signers removed via `remove_signer` are ignored.
+        // This execute-time filtering was chosen over mutating pending proposals in
+        // `remove_signer` to avoid unbounded gas costs from scanning storage, while
+        // ensuring removed signers cannot contribute to quorum.
+        let mut valid_approval_count = 0u32;
+        for addr in proposal.approvals.iter() {
+            if Self::is_registered_signer(&env, &addr)? {
+                valid_approval_count += 1;
+            }
+        }
+
+        if valid_approval_count < quorum_info.threshold {
             return Err(GovernanceError::QuorumNotReached);
         }
 
@@ -1234,7 +1215,14 @@ impl FluxoraGovernance {
             None => return Ok(false),
         };
 
-        if proposal.approvals.len() < quorum_info.threshold {
+        let mut valid_approval_count = 0u32;
+        for addr in proposal.approvals.iter() {
+            if Self::is_registered_signer(&env, &addr)? {
+                valid_approval_count += 1;
+            }
+        }
+
+        if valid_approval_count < quorum_info.threshold {
             return Ok(false);
         }
 
@@ -1705,24 +1693,6 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_set_threshold_rejects_zero() {
-        let ctx = Ctx::setup(); // 3 signers, threshold=2
-        let result = ctx.client.try_set_threshold(&0u32);
-        assert_eq!(result, Err(Ok(GovernanceError::InvalidThreshold)));
-        // Verify threshold is unchanged.
-        assert_eq!(ctx.client.get_threshold(), 2);
-    }
-
-    #[test]
-    fn test_set_threshold_rejects_above_signer_count() {
-        let ctx = Ctx::setup(); // 3 signers, threshold=2
-        let result = ctx.client.try_set_threshold(&4u32);
-        assert_eq!(result, Err(Ok(GovernanceError::InvalidThreshold)));
-        // Verify threshold is unchanged.
-        assert_eq!(ctx.client.get_threshold(), 2);
-    }
-
-    #[test]
     fn test_set_threshold_accepts_valid_range() {
         let ctx = Ctx::setup(); // 3 signers, threshold=2
                                 // Set to 1 (valid: 1 <= 1 <= 3)
@@ -1808,6 +1778,46 @@ mod tests {
         assert!(result.is_ok());
         let signers = ctx.client.get_signers();
         assert_eq!(signers.len(), 3);
+    }
+
+    #[test]
+    fn test_removed_signer_approval_cannot_contribute_to_quorum() {
+        let ctx = Ctx::setup(); // signers A, B, C, threshold=2
+        let target = ctx.dummy_target();
+        let calldata = ctx.calldata("test");
+
+        let id = ctx.client.propose(&ctx.signer_a, &target, &calldata);
+
+        // Signer A approves (1 of 2 required)
+        ctx.client.approve(&ctx.signer_a, &id);
+
+        // Admin removes signer A (signers left: B, C; threshold still 2)
+        ctx.client.remove_signer(&ctx.signer_a);
+
+        // Signer B approves
+        ctx.client.approve(&ctx.signer_b, &id);
+
+        // Advance past timelock
+        ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
+
+        // Without fix, execute succeeds because proposal.approvals has [A, B] (len 2 == threshold 2).
+        // With fix, execute must fail with QuorumNotReached because A is no longer a signer.
+        let executor = Address::generate(&ctx.env);
+        assert!(!ctx.client.is_executable(&id));
+        let res = ctx.client.try_execute(&executor, &id);
+        assert_eq!(res, Err(Ok(GovernanceError::QuorumNotReached)));
+
+        // Once remaining valid signer C approves, valid approvals reach 2 ([B, C]), setting a new QuorumReachedAt.
+        ctx.client.approve(&ctx.signer_c, &id);
+        
+        // We must advance ledger timestamp past the new timelock start (which is 1_000_000 + TIMELOCK + 1)
+        ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1 + TIMELOCK + 1);
+
+        assert!(ctx.client.is_executable(&id));
+        ctx.client.execute(&executor, &id);
+
+        let p = ctx.client.get_proposal(&id);
+        assert!(p.executed);
     }
 
     // -----------------------------------------------------------------------

@@ -314,7 +314,10 @@ fn test_immediate_retrigger_is_noop() {
 
     // ── First trigger: should succeed and transfer 1000 tokens ─────────────
     let first_result = ctx.client.trigger_auto_claim(&stream_id);
-    assert_eq!(first_result, 1000, "first trigger must transfer full deposit");
+    assert_eq!(
+        first_result, 1000,
+        "first trigger must transfer full deposit"
+    );
 
     let contract_bal_after_first = ctx.token.balance(&ctx.contract_id);
     let dest_bal_after_first = ctx.token.balance(&destination);
