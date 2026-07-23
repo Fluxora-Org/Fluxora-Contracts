@@ -418,4 +418,158 @@ describe('StreamChannel', () => {
       );
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Helpers shared by the subscription-stats and cleanup test blocks
+  // ---------------------------------------------------------------------------
+
+  /** Subscribe a mock socket to `streamId` via the hub's message handler. */
+  function subscribeClientToStream(socket: any, streamId: string): void {
+    const messageHandler = socket.on.mock.calls.find((c: any[]) => c[0] === 'message')[1];
+    messageHandler(JSON.stringify({ type: 'subscribe', streamId }));
+  }
+
+  const STREAM_A = '123e4567-e89b-12d3-a456-426614174001';
+  const STREAM_B = '123e4567-e89b-12d3-a456-426614174002';
+
+  describe('getStreamSubscriptionStats', () => {
+    test('returns subscriberCount 0 for a stream with no subscribers', () => {
+      const stats = channel.getStreamSubscriptionStats(STREAM_A);
+      expect(stats).not.toBeNull();
+      expect(stats!.subscriberCount).toBe(0);
+    });
+
+    test('returns null for an invalid stream ID', () => {
+      expect(channel.getStreamSubscriptionStats('not-a-uuid')).toBeNull();
+      expect(channel.getStreamSubscriptionStats('')).toBeNull();
+    });
+
+    test('returns the real subscriber count for a stream with one subscriber', () => {
+      const request = { socket: { remoteAddress: '127.0.0.1' } };
+      hub.addConnection(mockSocket, request);
+      subscribeClientToStream(mockSocket, STREAM_A);
+
+      const stats = channel.getStreamSubscriptionStats(STREAM_A);
+      expect(stats).not.toBeNull();
+      expect(stats!.subscriberCount).toBe(1);
+    });
+
+    test('returns the real subscriber count for a stream with multiple subscribers', () => {
+      const sockets: any[] = [0, 1, 2].map(() => ({
+        readyState: 1,
+        send: jest.fn(),
+        close: jest.fn(),
+        on: jest.fn()
+      }));
+
+      const request = { socket: { remoteAddress: '127.0.0.1' } };
+      sockets.forEach(s => {
+        hub.addConnection(s, request);
+        subscribeClientToStream(s, STREAM_A);
+      });
+
+      const stats = channel.getStreamSubscriptionStats(STREAM_A);
+      expect(stats!.subscriberCount).toBe(3);
+    });
+
+    test('counts subscribers independently per stream', () => {
+      const request = { socket: { remoteAddress: '127.0.0.1' } };
+      hub.addConnection(mockSocket, request);
+      subscribeClientToStream(mockSocket, STREAM_A);
+
+      const statsA = channel.getStreamSubscriptionStats(STREAM_A);
+      const statsB = channel.getStreamSubscriptionStats(STREAM_B);
+      expect(statsA!.subscriberCount).toBe(1);
+      expect(statsB!.subscriberCount).toBe(0);
+    });
+  });
+
+  describe('cleanupStreamSubscriptions', () => {
+    test('is a no-op for a stream with no subscribers and does not throw', () => {
+      expect(() => channel.cleanupStreamSubscriptions(STREAM_A)).not.toThrow();
+      // Stats should still return 0
+      expect(channel.getStreamSubscriptionStats(STREAM_A)!.subscriberCount).toBe(0);
+    });
+
+    test('removes the stream from hub so subscriberCount becomes 0 after cleanup', () => {
+      const request = { socket: { remoteAddress: '127.0.0.1' } };
+      hub.addConnection(mockSocket, request);
+      subscribeClientToStream(mockSocket, STREAM_A);
+
+      // Sanity-check: 1 subscriber before cleanup
+      expect(channel.getStreamSubscriptionStats(STREAM_A)!.subscriberCount).toBe(1);
+
+      channel.cleanupStreamSubscriptions(STREAM_A);
+
+      // Stream-side map: subscriberCount must be 0
+      expect(channel.getStreamSubscriptionStats(STREAM_A)!.subscriberCount).toBe(0);
+    });
+
+    test('removes the stream from each affected client\'s subscription set', () => {
+      const sockets: any[] = [0, 1].map(() => ({
+        readyState: 1,
+        send: jest.fn(),
+        close: jest.fn(),
+        on: jest.fn()
+      }));
+
+      const request = { socket: { remoteAddress: '127.0.0.1' } };
+      sockets.forEach(s => {
+        hub.addConnection(s, request);
+        subscribeClientToStream(s, STREAM_A);
+      });
+
+      channel.cleanupStreamSubscriptions(STREAM_A);
+
+      // Hub-level stats: STREAM_A should have 0 subscribers
+      expect(channel.getStreamSubscriptionStats(STREAM_A)!.subscriberCount).toBe(0);
+
+      // Global hub stats: total subscriptions for STREAM_A gone, hub otherwise intact
+      const hubStats = hub.getStats();
+      expect(hubStats.streamsWithSubscribers).toBe(0);
+      expect(hubStats.totalSubscriptions).toBe(0);
+    });
+
+    test('sends stream_unavailable notification to each affected client', () => {
+      const sockets: any[] = [0, 1].map(() => ({
+        readyState: 1,
+        send: jest.fn(),
+        close: jest.fn(),
+        on: jest.fn()
+      }));
+
+      const request = { socket: { remoteAddress: '127.0.0.1' } };
+      sockets.forEach(s => {
+        hub.addConnection(s, request);
+        subscribeClientToStream(s, STREAM_A);
+      });
+
+      channel.cleanupStreamSubscriptions(STREAM_A);
+
+      sockets.forEach(s => {
+        const unavailableCalls = s.send.mock.calls.filter((call: string[]) =>
+          call[0].includes('"type":"stream_unavailable"')
+        );
+        expect(unavailableCalls.length).toBe(1);
+        expect(unavailableCalls[0][0]).toContain(STREAM_A);
+      });
+    });
+
+    test('only cleans up the targeted stream and leaves other stream subscriptions intact', () => {
+      const request = { socket: { remoteAddress: '127.0.0.1' } };
+      hub.addConnection(mockSocket, request);
+      subscribeClientToStream(mockSocket, STREAM_A);
+      subscribeClientToStream(mockSocket, STREAM_B);
+
+      channel.cleanupStreamSubscriptions(STREAM_A);
+
+      // STREAM_A gone, STREAM_B untouched
+      expect(channel.getStreamSubscriptionStats(STREAM_A)!.subscriberCount).toBe(0);
+      expect(channel.getStreamSubscriptionStats(STREAM_B)!.subscriberCount).toBe(1);
+
+      const hubStats = hub.getStats();
+      expect(hubStats.streamsWithSubscribers).toBe(1);
+      expect(hubStats.totalSubscriptions).toBe(1);
+    });
+  });
 });
