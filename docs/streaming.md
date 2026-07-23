@@ -218,10 +218,34 @@ Success semantics (observable):
 3. The new stream is initialized in the `Active` status.
 4. Tokens are pulled from the source stream's sender for the new deposit.
 
-Failure semantics (observable):
-
 1. Terminal source state: If the source stream status is `Completed` or `Cancelled`, the operation is rejected with `ContractError::StreamTerminalState`.
 2. Unauthorized: If the caller is not the sender of the source stream, the operation is rejected.
+
+### Decommission Semantics
+
+This section defines the success and failure behavior of decommissioning a stream. 
+
+Decommissioning is a mechanism to flag a stream for wind-down without immediately cancelling it. This prevents any further modification of the stream parameters (such as rate updates, top-ups, schedule extensions, and cloning) while fully allowing the recipient to withdraw already-accrued balance, and allowing standard individual pauses, resumes, and cancellations.
+
+#### Entrypoint Matrix under Decommissioned Mode
+
+| Entrypoint | Allowed | Blocked | Reason / Error Code |
+|---|:---:|:---:|---|
+| `set_stream_decommissioned` | Yes | - | Allowed to toggle the decommissioned state. Recommissioning (setting back to `false`) is blocked if the separately-proposed `irrevocable` flag is set (`ContractError::InvalidState`). |
+| `withdraw` / `withdraw_to` / `batch_withdraw` | Yes | - | Allowed to withdraw already-accrued balance. |
+| `pause_stream` / `resume_stream` | Yes | - | Allowed to pause/resume withdrawals. |
+| `cancel_stream` / `cancel_stream_as_admin` | Yes | - | Allowed to terminate stream early and refund the unstreamed balance. |
+| `update_rate_per_second` | - | Yes | Blocked with `ContractError::InvalidState` to lock down streaming rate. |
+| `decrease_rate_per_second` | - | Yes | Blocked with `ContractError::InvalidState` to lock down streaming rate. |
+| `top_up_stream` | - | Yes | Blocked with `ContractError::InvalidState` to lock down total deposit. |
+| `extend_stream_end_time` | - | Yes | Blocked with `ContractError::InvalidState` to lock down stream timing/duration. |
+| `clone_stream` | - | Yes | Blocked with `ContractError::InvalidState` when cloning from a decommissioned stream to prevent propagating decommissioned configurations. |
+
+#### Authorization & Rules
+1. Only the stream `sender` can invoke `set_stream_decommissioned`. Calls by other addresses return `ContractError::Unauthorized`.
+2. Toggling the flag on terminal streams (Completed or Cancelled) is blocked and returns `ContractError::StreamTerminalState`.
+3. If the stream is marked `irrevocable` (separately proposed), setting `decommissioned` from `true` to `false` is blocked and returns `ContractError::InvalidState`.
+4. Successful transitions emit a `decomm` event with the boolean state.
 
 ### Global Pause Semantics (Issue Scope)
 
