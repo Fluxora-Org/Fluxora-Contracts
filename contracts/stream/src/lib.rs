@@ -1703,6 +1703,7 @@ impl FluxoraStream {
             last_pause_toggle_ledger: 0,
             last_withdraw_ledger: 0,
             metadata: None,
+            is_pooled: None,
         };
 
         save_stream(env, &stream);
@@ -1783,6 +1784,7 @@ impl FluxoraStream {
             last_pause_toggle_ledger: 0,
             last_withdraw_ledger: 0,
             metadata: None,
+            is_pooled: None,
         };
 
         save_stream(env, &stream);
@@ -2148,6 +2150,114 @@ impl FluxoraStream {
             params.memo,
             params.kind,
         )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_pooled_stream(
+        env: Env,
+        sender: Address,
+        recipients: soroban_sdk::Vec<(Address, u32)>,
+        deposit_amount: i128,
+        rate_per_second: i128,
+        start_time: u64,
+        cliff_time: u64,
+        end_time: u64,
+        withdraw_dust_threshold: i128,
+        memo: Option<soroban_sdk::Bytes>,
+        kind: StreamKind,
+    ) -> Result<u64, ContractError> {
+        sender.require_auth();
+        require_not_creation_paused(&env)?;
+
+        if recipients.len() > MAX_POOL_RECIPIENTS {
+            return Err(ContractError::InvalidParams);
+        }
+
+        let mut total_shares: u32 = 0;
+        for (_, share) in recipients.iter() {
+            total_shares = total_shares.checked_add(share).ok_or(ContractError::ArithmeticOverflow)?;
+        }
+        if total_shares == 0 {
+            return Err(ContractError::InvalidParams);
+        }
+
+        let mut final_rate = rate_per_second;
+        if kind == StreamKind::CliffOnly {
+            final_rate = 0;
+        }
+
+        Self::validate_stream_params(
+            &env,
+            &sender,
+            &sender,
+            deposit_amount,
+            final_rate,
+            env.ledger().timestamp(),
+            start_time,
+            cliff_time,
+            end_time,
+            kind,
+        )?;
+
+        pull_token(&env, &sender, deposit_amount)?;
+
+        if let Some(ref m) = memo {
+            if m.len() as usize > MAX_MEMO_BYTES {
+                return Err(ContractError::InvalidParams);
+            }
+        }
+
+        let stream_id = next_stream_id_for(&env, &sender);
+
+        let stream = Stream {
+            stream_id,
+            sender: sender.clone(),
+            recipient: sender.clone(),
+            deposit_amount,
+            rate_per_second: final_rate,
+            start_time,
+            cliff_time,
+            end_time,
+            withdrawn_amount: 0,
+            status: StreamStatus::Active,
+            cancelled_at: None,
+            checkpointed_amount: 0,
+            checkpointed_at: start_time,
+            withdraw_dust_threshold,
+            memo: memo.clone(),
+            kind,
+            last_pause_toggle_ledger: 0,
+            last_withdraw_ledger: 0,
+            metadata: None,
+            is_pooled: Some(true),
+        };
+
+        save_stream(&env, &stream);
+        save_pooled_stream_shares(&env, stream_id, &recipients);
+
+        let liabilities = read_total_liabilities(&env)
+            .checked_add(deposit_amount)
+            .unwrap_or(i128::MAX);
+        write_total_liabilities(&env, liabilities);
+
+        env.events().publish(
+            (symbol_short!("created"), stream_id),
+            StreamCreated {
+                stream_id,
+                sender,
+                recipient: stream.recipient.clone(),
+                deposit_amount,
+                rate_per_second: final_rate,
+                start_time,
+                cliff_time,
+                end_time,
+                withdraw_dust_threshold,
+                memo,
+                metadata: None,
+            },
+        );
+
+        Ok(stream_id)
     }
 
     /// Create multiple payment streams in a single transaction.
@@ -2910,6 +3020,99 @@ impl FluxoraStream {
             Withdrawal {
                 stream_id,
                 recipient: stream.recipient.clone(),
+                amount: withdrawable,
+            },
+        );
+
+        if completed_now {
+            env.events().publish(
+                (symbol_short!("completed"), stream_id),
+                StreamEvent::StreamCompleted(stream_id),
+            );
+        }
+
+        Ok(withdrawable)
+    }
+
+    pub fn withdraw_from_pool(env: Env, stream_id: u64, caller: Address) -> Result<i128, ContractError> {
+        require_not_globally_paused(&env)?;
+        caller.require_auth();
+
+        let mut stream = load_stream(&env, stream_id)?;
+        if stream.is_pooled != Some(true) {
+            return Err(ContractError::InvalidState);
+        }
+
+        if stream.status == StreamStatus::Completed {
+            return Err(ContractError::InvalidState);
+        }
+        if stream.status == StreamStatus::Paused && !is_terminal_state(&env, &stream) {
+            return Err(ContractError::InvalidState);
+        }
+
+        let shares = read_pooled_stream_shares(&env, stream_id)?;
+        let mut caller_share: u32 = 0;
+        let mut total_shares: u32 = 0;
+        for (addr, share) in shares.iter() {
+            if addr == caller {
+                caller_share += share;
+            }
+            total_shares += share;
+        }
+
+        if caller_share == 0 {
+            return Err(ContractError::Unauthorized);
+        }
+
+        let global_accrued = Self::calculate_accrued(env.clone(), stream_id)?;
+        
+        let caller_accrued = (global_accrued as u128)
+            .checked_mul(caller_share as u128)
+            .and_then(|val| val.checked_div(total_shares as u128))
+            .ok_or(ContractError::ArithmeticOverflow)? as i128;
+
+        let caller_withdrawn = read_pooled_stream_withdrawn(&env, stream_id, caller.clone());
+        let mut withdrawable = caller_accrued - caller_withdrawn;
+
+        let token_address = get_token(&env)?;
+        let contract_balance = token::Client::new(&env, &token_address).balance(&env.current_contract_address());
+        withdrawable = withdrawable.min(contract_balance);
+
+        if withdrawable <= 0 {
+            return Ok(0);
+        }
+
+        if withdrawable < stream.withdraw_dust_threshold
+            && !is_terminal_state(&env, &stream)
+            && stream.withdrawn_amount + withdrawable < stream.deposit_amount
+        {
+            return Ok(0);
+        }
+
+        stream.withdrawn_amount += withdrawable;
+        stream.last_withdraw_ledger = env.ledger().sequence();
+        save_pooled_stream_withdrawn(&env, stream_id, caller.clone(), caller_withdrawn + withdrawable);
+
+        let completed_now = (stream.status == StreamStatus::Active || stream.status == StreamStatus::Paused)
+            && stream.withdrawn_amount >= stream.deposit_amount;
+        
+        let previous_status = stream.status;
+        if completed_now {
+            stream.status = StreamStatus::Completed;
+        }
+        save_stream(&env, &stream);
+        reconcile_paused_stream_count(&env, previous_status, stream.status);
+
+        let liabilities = read_total_liabilities(&env).checked_sub(withdrawable).unwrap_or(0);
+        write_total_liabilities(&env, liabilities);
+
+        push_token(&env, &caller, withdrawable)?;
+
+        env.events().publish(
+            (symbol_short!("withdrew"), stream_id),
+            Withdrawal {
+                stream_id,
+                recipient: caller.clone(),
                 amount: withdrawable,
             },
         );
