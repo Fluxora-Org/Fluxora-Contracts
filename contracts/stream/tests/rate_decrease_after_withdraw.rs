@@ -159,9 +159,9 @@ impl TestContext {
     /// Advance the ledger timestamp and sequence number past the withdrawal
     /// cooldown (`MIN_WITHDRAW_INTERVAL_LEDGERS == 1`) so the next `withdraw`
     /// is allowed.
-    fn advance(&self, timestamp: u64, sequence: u32) {
+    fn advance(&self, timestamp: u64, sequence: u64) {
         self.env.ledger().set_timestamp(timestamp);
-        self.env.ledger().set_sequence_number(sequence);
+        self.env.ledger().set_sequence_number(sequence as u32);
     }
 }
 
@@ -532,3 +532,80 @@ fn rate_decrease_rejects_non_strict_decrease() {
     assert_eq!(s.deposit_amount, 1_000);
     assert_eq!(s.withdrawn_amount, 0);
 }
+
+#[test]
+fn test_rate_decrease_immediately_after_withdraw_boundary_exact_accrual() {
+    let ctx = TestContext::new();
+    // Start rate: 100/s, total duration 1000s, deposit 100,000
+    let id = ctx.create_stream(100_000, 100, 0, 1000);
+
+    // t = 250: perform withdrawal
+    ctx.advance(250, 251);
+    assert_eq!(ctx.client().calculate_accrued(&id), 25_000); // 250 * 100
+    assert_eq!(ctx.client().withdraw(&id), 25_000);
+    assert_eq!(ctx.client().get_stream_state(&id).withdrawn_amount, 25_000);
+
+    // t = 251 (immediately after): decrease rate to 50/s
+    ctx.advance(251, 252);
+    // before decrease: accrued is 251 * 100 = 25,100. withdrawable is 100.
+    assert_eq!(ctx.client().calculate_accrued(&id), 25_100);
+    assert_eq!(ctx.client().get_withdrawable(&id), 100);
+
+    ctx.client().decrease_rate_per_second(&id, &50);
+
+    // after decrease:
+    // checkpointed_amount = 25,100, checkpointed_at = 251, deposit_amount = 25,100 + 50 * 749 = 62,550
+    let s = ctx.client().get_stream_state(&id);
+    assert_eq!(s.rate_per_second, 50);
+    assert_eq!(s.checkpointed_at, 251);
+    assert_eq!(s.checkpointed_amount, 25_100);
+    assert_eq!(s.deposit_amount, 62_550);
+    assert_eq!(s.withdrawn_amount, 25_000);
+
+    // Already accrued but unwithdrawn amount is preserved exactly
+    assert_eq!(ctx.client().calculate_accrued(&id), 25_100);
+    assert_eq!(ctx.client().get_withdrawable(&id), 100);
+
+    // Withdraw the preserved amount
+    assert_eq!(ctx.client().withdraw(&id), 100);
+    assert_eq!(ctx.client().get_stream_state(&id).withdrawn_amount, 25_100);
+
+    // t = 300: subsequent withdrawal uses new rate
+    ctx.advance(300, 301);
+    // accrued = 25,100 + 50 * (300 - 251) = 25,100 + 50 * 49 = 27,550
+    assert_eq!(ctx.client().calculate_accrued(&id), 27_550);
+    assert_eq!(ctx.client().get_withdrawable(&id), 2_450); // 27,550 - 25,100
+
+    assert_eq!(ctx.client().withdraw(&id), 2_450);
+    assert_eq!(ctx.client().get_stream_state(&id).withdrawn_amount, 27_550);
+}
+
+#[test]
+fn test_rate_decrease_same_ledger_as_withdraw_boundary_exact_accrual() {
+    let ctx = TestContext::new();
+    let id = ctx.create_stream(100_000, 100, 0, 1000);
+
+    // t = 250: perform withdrawal
+    ctx.advance(250, 251);
+    assert_eq!(ctx.client().withdraw(&id), 25_000);
+
+    // t = 250 (same ledger second): decrease rate to 50/s
+    ctx.client().decrease_rate_per_second(&id, &50);
+
+    // after decrease:
+    // checkpointed_amount = 25,000, checkpointed_at = 250, deposit_amount = 25,000 + 50 * 750 = 62,500
+    let s = ctx.client().get_stream_state(&id);
+    assert_eq!(s.rate_per_second, 50);
+    assert_eq!(s.checkpointed_at, 250);
+    assert_eq!(s.checkpointed_amount, 25_000);
+    assert_eq!(s.deposit_amount, 62_500);
+    assert_eq!(s.withdrawn_amount, 25_000);
+    assert_eq!(ctx.client().get_withdrawable(&id), 0);
+
+    // t = 251 (1 second later under new rate)
+    ctx.advance(251, 252);
+    assert_eq!(ctx.client().calculate_accrued(&id), 25_050); // 25,000 + 50 * 1
+    assert_eq!(ctx.client().get_withdrawable(&id), 50);
+    assert_eq!(ctx.client().withdraw(&id), 50);
+}
+

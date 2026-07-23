@@ -1754,3 +1754,68 @@ fn delegated_withdraw_below_minimum_rejected() {
         "nonce must not be consumed when BelowMinimumAmount is returned"
     );
 }
+
+/// Revoking delegation in the same ledger strictly blocks in-flight delegated withdraw attempts.
+#[test]
+fn delegated_withdraw_same_ledger_revocation_race_rejected() {
+    let ctx = DelegatedCtx::setup();
+    ctx.env.ledger().set_timestamp(500);
+
+    let recipient_addr = address_from_pk(&ctx.env, &ctx.signing_key.verifying_key().to_bytes());
+    let sig = ctx.sign(0, 9999, 0);
+
+    // Revoke delegation by incrementing nonce in stored state prior to in-flight withdraw execution
+    ctx.env.as_contract(&ctx.contract_id, || {
+        fluxora_stream::increment_delegated_nonce(&ctx.env, &recipient_addr);
+    });
+
+    // Attempting delegated_withdraw with the revoked signature in the same ledger is rejected
+    let result = ctx.client().try_delegated_withdraw(
+        &ctx.stream_id,
+        &ctx.relayer,
+        &ctx.recipient_pk,
+        &0,
+        &9999,
+        &0,
+        &sig,
+    );
+    assert_eq!(
+        result,
+        Err(Ok(fluxora_stream::ContractError::InvalidSignature)),
+        "just-revoked delegation must be strictly rejected"
+    );
+}
+
+/// Revoking delegation in a prior ledger blocks subsequent delegated withdraw attempts in later ledgers.
+#[test]
+fn delegated_withdraw_later_ledger_revocation_rejected() {
+    let ctx = DelegatedCtx::setup();
+    ctx.env.ledger().set_timestamp(500);
+
+    let recipient_addr = address_from_pk(&ctx.env, &ctx.signing_key.verifying_key().to_bytes());
+    let sig = ctx.sign(0, 9999, 0);
+
+    // Revoke delegation at t=500
+    ctx.env.as_contract(&ctx.contract_id, || {
+        fluxora_stream::increment_delegated_nonce(&ctx.env, &recipient_addr);
+    });
+
+    // Advance to a later ledger
+    ctx.env.ledger().set_timestamp(600);
+
+    let result = ctx.client().try_delegated_withdraw(
+        &ctx.stream_id,
+        &ctx.relayer,
+        &ctx.recipient_pk,
+        &0,
+        &9999,
+        &0,
+        &sig,
+    );
+    assert_eq!(
+        result,
+        Err(Ok(fluxora_stream::ContractError::InvalidSignature)),
+        "delegation revoked in prior ledger must be rejected"
+    );
+}
+

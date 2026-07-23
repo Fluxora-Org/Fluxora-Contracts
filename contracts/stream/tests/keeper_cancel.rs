@@ -1,10 +1,10 @@
 extern crate std;
 
 use fluxora_stream::{
-    ContractError, FluxoraStream, FluxoraStreamClient, KeeperCancelled, StreamStatus,
+    ContractError, FluxoraStream, FluxoraStreamClient, KeeperCancelled, StreamKind, StreamStatus,
 };
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
+    testutils::{Address as _, Events, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
     Address, Env, Symbol, TryFromVal,
 };
@@ -78,6 +78,7 @@ fn create_stream(ctx: &Ctx<'_>, deposit: i128, rate: i128, start: u64, end: u64)
         &end,
         &0_i128,
         &None,
+        &StreamKind::Linear,
     )
 }
 
@@ -297,8 +298,12 @@ fn test_keeper_cancel_paused_stream_succeeds() {
 
     let stream_id = create_stream(&ctx, 2000, 1, 0, 2000);
 
-    // Pause the stream at t=500
+    // Pause the stream at t=500. Also advance the ledger sequence past the
+    // pause/resume cooldown window (MIN_PAUSE_INTERVAL_LEDGERS), since the
+    // cooldown check is sequence-based and the test env's sequence number
+    // does not advance on its own alongside the timestamp.
     ctx.env.ledger().set_timestamp(500);
+    ctx.env.ledger().with_mut(|l| l.sequence_number += 32);
     ctx.client()
         .pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
 
@@ -525,7 +530,7 @@ fn test_ineligible_keeper_cancel_attempt_causes_zero_state_mutation_and_zero_rew
     let initial_sender_balance = ctx.token.balance(&ctx.sender);
     let initial_recipient_balance = ctx.token.balance(&ctx.recipient);
     let initial_liabilities = ctx.client().get_total_liabilities();
-    let initial_total_keeper_fees = ctx.client().get_total_keeper_fees_paid();
+    let initial_total_keeper_fees = ctx.client().get_protocol_fees_accrued();
 
     // Attempt keeper cancel before grace period
     let res = ctx.client().try_keeper_cancel(&stream_id, &ctx.keeper);
@@ -546,7 +551,7 @@ fn test_ineligible_keeper_cancel_attempt_causes_zero_state_mutation_and_zero_rew
     assert_eq!(ctx.token.balance(&ctx.recipient), initial_recipient_balance);
     assert_eq!(ctx.client().get_total_liabilities(), initial_liabilities);
     assert_eq!(
-        ctx.client().get_total_keeper_fees_paid(),
+        ctx.client().get_protocol_fees_accrued(),
         initial_total_keeper_fees
     );
 }
@@ -566,7 +571,7 @@ fn test_double_keeper_cancel_attempt_second_attempt_rejected_no_double_reward() 
     ctx.client().keeper_cancel(&stream_id, &ctx.keeper);
 
     let keeper_balance_after_first = ctx.token.balance(&ctx.keeper);
-    let total_fees_after_first = ctx.client().get_total_keeper_fees_paid();
+    let total_fees_after_first = ctx.client().get_protocol_fees_accrued();
     let liabilities_after_first = ctx.client().get_total_liabilities();
 
     assert!(keeper_balance_after_first > 0);
@@ -578,7 +583,7 @@ fn test_double_keeper_cancel_attempt_second_attempt_rejected_no_double_reward() 
     // Confirm no additional payouts or mutations
     assert_eq!(ctx.token.balance(&ctx.keeper), keeper_balance_after_first);
     assert_eq!(
-        ctx.client().get_total_keeper_fees_paid(),
+        ctx.client().get_protocol_fees_accrued(),
         total_fees_after_first
     );
     assert_eq!(
@@ -607,7 +612,7 @@ fn test_keeper_cancel_eligibility_check_reads_live_state_strictly_before_mutatio
 
     let keeper_bal_before = ctx.token.balance(&ctx.keeper);
     let liabilities_before = ctx.client().get_total_liabilities();
-    let keeper_fees_before = ctx.client().get_total_keeper_fees_paid();
+    let keeper_fees_before = ctx.client().get_protocol_fees_accrued();
 
     // Keeper tries to cancel stream that was just cancelled live
     let res = ctx.client().try_keeper_cancel(&stream_id, &ctx.keeper);
@@ -617,7 +622,7 @@ fn test_keeper_cancel_eligibility_check_reads_live_state_strictly_before_mutatio
     assert_eq!(ctx.token.balance(&ctx.keeper), keeper_bal_before);
     assert_eq!(ctx.client().get_total_liabilities(), liabilities_before);
     assert_eq!(
-        ctx.client().get_total_keeper_fees_paid(),
+        ctx.client().get_protocol_fees_accrued(),
         keeper_fees_before
     );
 }

@@ -4,7 +4,6 @@
 pub mod accrual;
 #[cfg(test)]
 mod checksum;
-#[cfg(test)]
 mod delegation;
 pub(crate) mod events;
 pub(crate) mod storage;
@@ -412,6 +411,8 @@ pub enum ContractError {
     WithdrawalTooFrequent = 33,
     /// Keeper attempted to close a stream before the grace period elapsed.
     KeeperGracePeriodNotElapsed = 34,
+    /// Withdraw dust threshold is negative or exceeds deposit amount.
+    InvalidDustThreshold = 35,
 }
 
 #[contracttype]
@@ -1060,9 +1061,10 @@ fn release_reentrancy_lock(env: &Env) {
 ///   short-lived streams below the static floor.
 fn compute_adaptive_ttl(now: u64, end_time: u64) -> u32 {
     let remaining_seconds = end_time.saturating_sub(now);
-    let ledgers_for_stream = (remaining_seconds / LEDGER_CLOSE_TIME) as u32;
-    let adaptive = ledgers_for_stream.saturating_add(BUFFER_LEDGERS);
-    adaptive.clamp(PERSISTENT_BUMP_AMOUNT, MAX_TTL)
+    let ledgers_for_stream = remaining_seconds / LEDGER_CLOSE_TIME;
+    let adaptive_u64 = ledgers_for_stream.saturating_add(BUFFER_LEDGERS as u64);
+    let clamped = adaptive_u64.clamp(PERSISTENT_BUMP_AMOUNT as u64, MAX_TTL as u64);
+    clamped as u32
 }
 
 fn get_config(env: &Env) -> Result<Config, ContractError> {
@@ -1669,6 +1671,14 @@ impl FluxoraStream {
             if m.len() as usize > MAX_MEMO_BYTES {
                 return Err(ContractError::InvalidParams);
             }
+        }
+
+        // Validate withdraw_dust_threshold: must be in range [0, deposit_amount]
+        if withdraw_dust_threshold < 0 {
+            return Err(ContractError::InvalidDustThreshold);
+        }
+        if withdraw_dust_threshold > deposit_amount {
+            return Err(ContractError::InvalidDustThreshold);
         }
 
         let stream_id = next_stream_id_for(env, &sender);
@@ -2873,14 +2883,6 @@ impl FluxoraStream {
             return Ok(0);
         }
 
-        // Enforce dust threshold unless terminal state or final drain (#423)
-        if withdrawable < stream.withdraw_dust_threshold
-            && !is_terminal_state(&env, &stream)
-            && stream.withdrawn_amount + withdrawable < stream.deposit_amount
-        {
-            return Ok(0);
-        }
-
         // CEI: update state before external token transfer to reduce reentrancy risk.
         // Assumption: the token contract does not reenter this contract.
         stream.withdrawn_amount += withdrawable;
@@ -3551,10 +3553,9 @@ impl FluxoraStream {
         // replaced by the ed25519 signature check below.
         relayer.require_auth();
 
-        // 1. Deadline check — reject stale signatures before any storage reads.
-        if env.ledger().timestamp() > deadline {
-            return Err(ContractError::SignatureDeadlineExpired);
-        }
+        // 1. Validate delegation parameters (deadline & nonce against live state).
+        // delegation.rs backs delegated_withdraw authorization logic and queries live persistent storage on every call.
+        delegation::validate_delegation_params(&env, stream_id, nonce, deadline)?;
 
         // 2. Load stream.
         let mut stream = load_stream(&env, stream_id)?;
@@ -3568,12 +3569,6 @@ impl FluxoraStream {
                 < MIN_WITHDRAW_INTERVAL_LEDGERS
         {
             return Err(ContractError::WithdrawalTooFrequent);
-        }
-
-        // 4. Nonce check — replay protection.
-        let stored_nonce = load_delegated_nonce(&env, &stream.recipient);
-        if nonce != stored_nonce {
-            return Err(ContractError::InvalidSignature);
         }
 
         // 5. Bind the supplied public key to the stream recipient.
@@ -4148,6 +4143,15 @@ impl FluxoraStream {
         read_total_keeper_fees_paid(&env)
     }
 
+    /// Returns the contract's current total outstanding liabilities: the sum
+    /// of every stream's remaining (not-yet-withdrawn) balance.
+    ///
+    /// Auth-free, read-only view. Used to cross-check that the contract's
+    /// token balance never falls short of what it owes across all streams.
+    pub fn get_total_liabilities(env: Env) -> i128 {
+        read_total_liabilities(&env)
+    }
+
     /// Return the protocol-wide number of streams currently in `StreamStatus::Paused`.
     ///
     /// This view is O(1): it reads the maintained `DataKey::PausedStreamCount` instance key
@@ -4715,9 +4719,12 @@ impl FluxoraStream {
         pull_token(&env, &funder, amount)?;
 
         // Increase liabilities to match the additional deposit.
+        // Checked arithmetic: a silent wrap here would corrupt the global
+        // liability counter and allow the contract to believe it owes far less
+        // than it actually does (severe fund-accounting bug).
         let liabilities = read_total_liabilities(&env)
             .checked_add(amount)
-            .unwrap_or(i128::MAX);
+            .ok_or(ContractError::ArithmeticOverflow)?;
         write_total_liabilities(&env, liabilities);
 
         env.events().publish(

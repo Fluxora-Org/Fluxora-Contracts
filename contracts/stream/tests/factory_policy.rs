@@ -10,7 +10,7 @@ use fluxora_stream::{CreateStreamParams, FluxoraStream, FluxoraStreamClient, Str
 use soroban_sdk::{
     testutils::{Address as _, MockAuth, MockAuthInvoke},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Bytes, Env, IntoVal,
+    Address, Bytes, Env, IntoVal, Vec,
 };
 use std::panic::AssertUnwindSafe;
 
@@ -101,7 +101,7 @@ fn test_init_rejects_zero_max_deposit() {
     let factory_id = env.register_contract(None, FluxoraFactory);
     let factory = FluxoraFactoryClient::new(&env, &factory_id);
     let admin = Address::generate(&env);
-    let stream_contract = Address::generate(&env);
+    let stream_contract = env.register_contract(None, FluxoraStream);
 
     let result = factory.try_init(&admin, &stream_contract, &0, &100);
     assert_eq!(result, Err(Ok(FactoryError::InvalidCap)));
@@ -119,7 +119,7 @@ fn test_init_rejects_negative_max_deposit() {
     let factory_id = env.register_contract(None, FluxoraFactory);
     let factory = FluxoraFactoryClient::new(&env, &factory_id);
     let admin = Address::generate(&env);
-    let stream_contract = Address::generate(&env);
+    let stream_contract = env.register_contract(None, FluxoraStream);
 
     let result = factory.try_init(&admin, &stream_contract, &-1, &100);
     assert_eq!(result, Err(Ok(FactoryError::InvalidCap)));
@@ -163,7 +163,7 @@ fn test_init_accepts_zero_min_duration() {
     let factory_id = env.register_contract(None, FluxoraFactory);
     let factory = FluxoraFactoryClient::new(&env, &factory_id);
     let admin = Address::generate(&env);
-    let stream_contract = Address::generate(&env);
+    let stream_contract = env.register_contract(None, FluxoraStream);
 
     factory.init(&admin, &stream_contract, &1, &0);
 
@@ -179,7 +179,7 @@ fn test_init_rejects_absurd_min_duration() {
     let factory_id = env.register_contract(None, FluxoraFactory);
     let factory = FluxoraFactoryClient::new(&env, &factory_id);
     let admin = Address::generate(&env);
-    let stream_contract = Address::generate(&env);
+    let stream_contract = env.register_contract(None, FluxoraStream);
 
     let result = factory.try_init(
         &admin,
@@ -402,8 +402,8 @@ fn test_create_stream_supports_cliff_only_and_memo() {
         &now,
         &(now + 200),
         &0,
-        &memo,
         &StreamKind::CliffOnly,
+        &memo,
     );
     assert!(result.is_ok());
 
@@ -558,8 +558,8 @@ fn test_create_stream_rejects_over_length_memo() {
         &now,
         &(now + 200),
         &0,
-        &memo,
         &StreamKind::Linear,
+        &memo,
     );
     assert_eq!(result, Err(Ok(FactoryError::InvalidMemo)));
 }
@@ -1115,25 +1115,28 @@ fn test_factory_datakey_collision_audit_all_variants_distinct() {
     let addr_a = Address::generate(&env);
     let addr_b = Address::generate(&env);
 
-    let keys = [
-        DataKey::Admin.into_val(&env),
-        DataKey::StreamContract.into_val(&env),
-        DataKey::MaxDepositCap.into_val(&env),
-        DataKey::MinDuration.into_val(&env),
-        DataKey::BatchCapEnforced.into_val(&env),
-        DataKey::Allowlist(addr_a.clone()).into_val(&env),
-        DataKey::Allowlist(addr_b.clone()).into_val(&env),
-        DataKey::FactoryStreamIds.into_val(&env),
-        DataKey::CreationPaused.into_val(&env),
-        DataKey::MinRatePerSecond.into_val(&env),
-        DataKey::MaxRatePerSecond.into_val(&env),
+    // Val has no raw equality of its own (it's env-context-dependent), so
+    // compare each key's XDR-encoded byte representation instead.
+    use soroban_sdk::xdr::ToXdr;
+    let key_bytes: std::vec::Vec<Bytes> = std::vec![
+        DataKey::Admin.to_xdr(&env),
+        DataKey::StreamContract.to_xdr(&env),
+        DataKey::MaxDepositCap.to_xdr(&env),
+        DataKey::MinDuration.to_xdr(&env),
+        DataKey::BatchCapEnforced.to_xdr(&env),
+        DataKey::Allowlist(addr_a.clone()).to_xdr(&env),
+        DataKey::Allowlist(addr_b.clone()).to_xdr(&env),
+        DataKey::FactoryStreamIds.to_xdr(&env),
+        DataKey::CreationPaused.to_xdr(&env),
+        DataKey::MinRatePerSecond.to_xdr(&env),
+        DataKey::MaxRatePerSecond.to_xdr(&env),
     ];
 
-    // Ensure all pairs of keys produce non-equal Val representations in Env
-    for i in 0..keys.len() {
-        for j in (i + 1)..keys.len() {
+    // Ensure all pairs of keys produce non-equal encoded representations.
+    for i in 0..key_bytes.len() {
+        for j in (i + 1)..key_bytes.len() {
             assert_ne!(
-                keys[i], keys[j],
+                key_bytes[i], key_bytes[j],
                 "DataKey collision detected between index {} and index {}",
                 i, j
             );
