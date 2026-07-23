@@ -245,6 +245,12 @@ pub fn calculate_accrued_amount_checkpointed(
         return state.deposit_amount;
     }
 
+    if state.kind == StreamKind::CliffSlope {
+        let elapsed = now.min(state.end_time).saturating_sub(state.cliff_time) as i128;
+        let accrued = elapsed.saturating_mul(rate_per_second);
+        return accrued.min(state.deposit_amount).max(0);
+    }
+
     if rate_per_second < 0 {
         return 0;
     }

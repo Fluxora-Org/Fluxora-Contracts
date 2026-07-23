@@ -157,6 +157,8 @@ pub enum StreamKind {
     Linear = 0,
     /// Stream that unlocks its full deposit at the cliff time in a one-shot event.
     CliffOnly = 1,
+    /// Stream that accrues linearly from cliff_time to end_time, and nothing before.
+    CliffSlope = 2,
 }
 
 #[soroban_sdk::contracterror]
