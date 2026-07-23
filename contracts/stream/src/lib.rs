@@ -185,7 +185,7 @@ const MIN_PAUSE_INTERVAL_LEDGERS: u32 = 17;
 /// resume/cancel/complete transitions; `get_paused_stream_count()` O(1) view added;
 /// duplicate `ContractError` discriminant 23 resolved and the previously-missing
 /// variants declared.
-pub const CONTRACT_VERSION: u32 = 6;
+pub const CONTRACT_VERSION: u32 = 7;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -831,6 +831,52 @@ pub struct Page {
     /// Next cursor for pagination (0 if no more pages)
     pub next_cursor: u64,
 }
+
+/// Paginated aggregate health report for a sender's entire stream portfolio.
+///
+/// Returned by `get_sender_portfolio_health`. Each call processes up to
+/// `MAX_PAGE_SIZE` (100) streams from the sender's index and accumulates
+/// underfunded, expired, and healthy counts. Clients iterate by passing
+/// `next_cursor` back as `cursor` until `next_cursor == 0`.
+///
+/// # Health classification (per stream, evaluated at query time)
+///
+/// | Classification | Condition |
+/// |---|---|
+/// | `underfunded` | `checkpointed_amount + rate × (end − checkpoint) > deposit_amount` |
+/// | `expired` | `now >= end_time` AND status is `Active` or `Paused` |
+/// | `healthy` | not underfunded AND not expired AND status is `Active` or `Paused` |
+///
+/// Terminal streams (`Completed`, `Cancelled`) are excluded from all three counters
+/// because they no longer represent an ongoing funding obligation.
+///
+/// # Pagination
+///
+/// Mirrors `get_recipient_streams_paginated`: the cursor is the stream ID at
+/// which to resume (inclusive). Start with `cursor = 0` to begin from the first
+/// stream. When `next_cursor == 0` in the response, all pages have been consumed.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PortfolioHealthPage {
+    /// Number of underfunded streams on this page.
+    /// A stream is underfunded when its deposit cannot cover the remaining
+    /// obligations at the current rate through `end_time`.
+    pub underfunded_count: u32,
+    /// Number of expired streams on this page.
+    /// A stream is expired when the current time has passed `end_time` but the
+    /// stream has not yet been closed (status is still `Active` or `Paused`).
+    pub expired_count: u32,
+    /// Number of fully healthy streams on this page.
+    /// A stream is healthy when it is active/paused, not underfunded, and not expired.
+    pub healthy_count: u32,
+    /// Cursor to pass as `cursor` in the next call for continuation.
+    /// `0` when all pages have been returned.
+    pub next_cursor: u64,
+    /// Stream IDs evaluated on this page (sorted ascending, at most `MAX_PAGE_SIZE`).
+    /// Callers that only need aggregate counts can ignore this field.
+    pub stream_ids: soroban_sdk::Vec<u64>,
+}
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct CreateStreamParams {
@@ -994,6 +1040,19 @@ pub enum DataKey {
     ///
     /// Added in issue #623. Appended at the end to preserve existing discriminants.
     TotalKeeperFeesPaid,
+    /// Per-sender stream index (persistent `Vec<u64>`, sorted ascending by stream_id).
+    ///
+    /// Mirrors `RecipientStreams(Address)` on the sender side. Maintained by:
+    /// - `persist_new_stream` / batch flush in `create_streams` (add)
+    /// - `close_completed_stream` / `close_cancelled_stream` (remove)
+    ///
+    /// Only streams that have been fully closed are removed. Streams in `Cancelled`
+    /// state remain in the index until the storage is reclaimed by `close_*_stream`.
+    /// This ensures the portfolio-health view can report on in-flight cancelled
+    /// streams whose recipients have not yet withdrawn accrued funds.
+    ///
+    /// Added in issue #sender-portfolio-health. Appended to preserve existing discriminants.
+    SenderStreams(Address),
 }
 
 // ---------------------------------------------------------------------------
@@ -1377,6 +1436,65 @@ fn remove_stream_from_recipient_index(env: &Env, recipient: &Address, stream_id:
 }
 
 // ---------------------------------------------------------------------------
+// Sender stream index helpers
+// ---------------------------------------------------------------------------
+
+/// Load the sorted list of stream IDs for a sender.
+///
+/// Returns an empty `Vec` when the sender has no indexed streams.
+/// TTL is bumped on every read to keep the entry alive.
+fn load_sender_streams(env: &Env, sender: &Address) -> soroban_sdk::Vec<u64> {
+    let key = DataKey::SenderStreams(sender.clone());
+    let streams: soroban_sdk::Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+
+    if !streams.is_empty() {
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+    streams
+}
+
+/// Persist the sender stream index (maintains sorted order).
+fn save_sender_streams(env: &Env, sender: &Address, streams: &soroban_sdk::Vec<u64>) {
+    let key = DataKey::SenderStreams(sender.clone());
+    env.storage().persistent().set(&key, streams);
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+}
+
+/// Insert a stream ID into the sender's index, maintaining ascending sort order.
+/// No-op if the ID is already present.
+fn add_stream_to_sender_index(env: &Env, sender: &Address, stream_id: u64) {
+    let mut streams = load_sender_streams(env, sender);
+    let insert_pos = match streams.binary_search(stream_id) {
+        Ok(_) => return, // already present – idempotent
+        Err(pos) => pos,
+    };
+    streams.insert(insert_pos, stream_id);
+    save_sender_streams(env, sender, &streams);
+}
+
+/// Remove a stream ID from the sender's index.
+/// No-op if the ID is not present.
+fn remove_stream_from_sender_index(env: &Env, sender: &Address, stream_id: u64) {
+    let mut streams = load_sender_streams(env, sender);
+    if let Ok(idx) = streams.binary_search(stream_id) {
+        streams.remove(idx);
+        save_sender_streams(env, sender, &streams);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Liability tracking (total escrow owed to recipients)
 // ---------------------------------------------------------------------------
 
@@ -1709,6 +1827,8 @@ impl FluxoraStream {
 
         // Add stream to recipient's index (maintains sorted order by stream_id)
         add_stream_to_recipient_index(env, &recipient, stream_id, Some(end_time));
+        // Add stream to sender's portfolio index.
+        add_stream_to_sender_index(env, &sender, stream_id);
 
         // Track liability: the full deposit is owed to the recipient until withdrawn/refunded.
         let liabilities = read_total_liabilities(env)
@@ -2358,6 +2478,19 @@ impl FluxoraStream {
                 existing.insert(insert_pos, id);
             }
             save_recipient_streams(&env, &recipient, &existing, None);
+        }
+
+        // Flush sender index once for the whole batch (O(1) read + write for the sender).
+        {
+            let mut existing = load_sender_streams(&env, &sender);
+            for id in created_ids.iter() {
+                let insert_pos = match existing.binary_search(id) {
+                    Ok(pos) => pos,
+                    Err(pos) => pos,
+                };
+                existing.insert(insert_pos, id);
+            }
+            save_sender_streams(&env, &sender, &existing);
         }
 
         Ok(created_ids)
@@ -4805,6 +4938,8 @@ impl FluxoraStream {
 
         // Remove stream from recipient's index before deleting the stream
         remove_stream_from_recipient_index(&env, &stream.recipient, stream_id);
+        // Remove stream from sender's portfolio index.
+        remove_stream_from_sender_index(&env, &stream.sender, stream_id);
         remove_stream(&env, stream_id);
 
         Ok(())
@@ -4865,6 +5000,8 @@ impl FluxoraStream {
 
         // Remove from recipient index and delete stream storage.
         remove_stream_from_recipient_index(&env, &stream.recipient, stream_id);
+        // Remove stream from sender's portfolio index.
+        remove_stream_from_sender_index(&env, &stream.sender, stream_id);
         remove_stream(&env, stream_id);
 
         Ok(())
@@ -5126,6 +5263,158 @@ impl FluxoraStream {
     /// - Closed streams are not included in the count
     pub fn get_recipient_stream_count(env: Env, recipient: Address) -> u64 {
         load_recipient_streams(&env, &recipient).len() as u64
+    }
+
+    /// Paginated aggregate health view for a sender's entire stream portfolio.
+    ///
+    /// Iterates through `sender`'s streams in the `SenderStreams` index (sorted
+    /// ascending by stream ID), evaluates each stream's health with
+    /// `compute_stream_health`, and returns aggregate counts plus a continuation
+    /// cursor. A single call processes at most `MAX_PAGE_SIZE` (100) streams.
+    ///
+    /// # Parameters
+    /// - `sender`: Address whose portfolio to inspect. No authentication required —
+    ///   the sender index is public information.
+    /// - `cursor`: Stream ID to resume from (inclusive). Pass `0` to start from the
+    ///   beginning. Use the `next_cursor` from the previous response to continue.
+    /// - `limit`: Maximum streams to evaluate per call. Clamped to `MAX_PAGE_SIZE`
+    ///   (100). Pass 0 to use the maximum.
+    ///
+    /// # Returns
+    /// A [`PortfolioHealthPage`] containing:
+    /// - `underfunded_count`: streams where the deposit cannot cover obligations at
+    ///   the current rate through `end_time`.
+    /// - `expired_count`: streams past `end_time` that are still `Active` or `Paused`
+    ///   (pending cleanup or recipient withdrawal).
+    /// - `healthy_count`: active/paused streams that are neither underfunded nor expired.
+    /// - `next_cursor`: cursor to pass in the next call (`0` when all pages returned).
+    /// - `stream_ids`: IDs evaluated on this page (for per-stream follow-up queries).
+    ///
+    /// # Health classification
+    ///
+    /// Terminal streams (`Completed`, `Cancelled`) are **excluded** from all three
+    /// counters. They appear in `stream_ids` but do not increment any counter,
+    /// because they represent settled obligations.
+    ///
+    /// | Status | Underfunded? | Expired? | Outcome |
+    /// |---|---|---|---|
+    /// | `Active` / `Paused`, deposit deficit | yes | no | `underfunded_count++` |
+    /// | `Active` / `Paused`, `now ≥ end_time` | any | yes | `expired_count++` |
+    /// | `Active` / `Paused`, fully funded, not expired | no | no | `healthy_count++` |
+    /// | `Completed` / `Cancelled` | — | — | not counted |
+    ///
+    /// When a stream is both underfunded **and** expired it is counted as **expired**
+    /// (expiry takes priority; the sender cannot top it up anyway).
+    ///
+    /// # Pagination
+    ///
+    /// ```ignore
+    /// let mut cursor = 0u64;
+    /// loop {
+    ///     let page = client.get_sender_portfolio_health(&sender, &cursor, &100u32);
+    ///     // process page.underfunded_count, page.expired_count, page.healthy_count …
+    ///     cursor = page.next_cursor;
+    ///     if cursor == 0 { break; }
+    /// }
+    /// ```
+    ///
+    /// # DoS protection
+    /// - Clamped at `MAX_PAGE_SIZE` (100) per call — consistent with every other
+    ///   paginated view in the contract.
+    /// - O(limit) stream loads per call; index lookup is O(log n) via binary search.
+    /// - No authorization required; read-only and does not modify state.
+    ///
+    /// # Security notes
+    /// - The sender index is maintained by `persist_new_stream` (add) and
+    ///   `close_completed_stream` / `close_cancelled_stream` (remove). Streams
+    ///   in `Cancelled` state remain in the index until their storage is reclaimed.
+    /// - Index entries are persistent storage; TTL is bumped on every read/write.
+    /// - No reentrancy risk: no token transfers occur in this function.
+    pub fn get_sender_portfolio_health(
+        env: Env,
+        sender: Address,
+        cursor: u64,
+        limit: u32,
+    ) -> PortfolioHealthPage {
+        bump_instance_ttl(&env);
+
+        let streams = load_sender_streams(&env, &sender);
+        let total = streams.len();
+
+        // Clamp limit to MAX_PAGE_SIZE; treat 0 as "use the maximum".
+        let effective_limit = if limit == 0 {
+            RECIPIENT_STREAMS_PAGE_LIMIT
+        } else {
+            limit.min(RECIPIENT_STREAMS_PAGE_LIMIT)
+        };
+
+        // Find starting position (inclusive cursor semantics — mirrors
+        // get_recipient_streams_paginated).
+        let start_idx = if cursor == 0 {
+            0usize
+        } else {
+            match streams.binary_search(cursor) {
+                Ok(pos) => pos,  // start AT the cursor stream (inclusive)
+                Err(pos) => pos, // gap: start at the next higher stream
+            }
+        };
+
+        let end_idx = ((start_idx as u32).saturating_add(effective_limit)).min(total as u32);
+
+        // Determine next_cursor: the first stream ID NOT returned on this page.
+        let next_cursor = if (end_idx as usize) < total as usize {
+            streams.get(end_idx).unwrap()
+        } else {
+            0u64
+        };
+
+        let now = env.ledger().timestamp();
+        let mut underfunded_count: u32 = 0;
+        let mut expired_count: u32 = 0;
+        let mut healthy_count: u32 = 0;
+        let mut page_stream_ids = soroban_sdk::Vec::new(&env);
+
+        for i in start_idx..end_idx as usize {
+            let stream_id = streams.get(i as u32).unwrap();
+            page_stream_ids.push_back(stream_id);
+
+            // Load the stream. If it was removed between index write and query
+            // (e.g. by a concurrent close), skip it gracefully.
+            let stream = match load_stream(&env, stream_id) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            // Terminal streams don't count toward any health bucket.
+            if stream.status == StreamStatus::Completed
+                || stream.status == StreamStatus::Cancelled
+            {
+                continue;
+            }
+
+            // Expired: past end_time but not yet closed.
+            let is_expired = now >= stream.end_time;
+
+            // Underfunded: deposit cannot cover obligations at current rate.
+            let (is_underfunded, _, _) = compute_stream_health(&stream, now);
+
+            // Expiry takes priority: a stream that has elapsed cannot be topped up.
+            if is_expired {
+                expired_count = expired_count.saturating_add(1);
+            } else if is_underfunded {
+                underfunded_count = underfunded_count.saturating_add(1);
+            } else {
+                healthy_count = healthy_count.saturating_add(1);
+            }
+        }
+
+        PortfolioHealthPage {
+            underfunded_count,
+            expired_count,
+            healthy_count,
+            next_cursor,
+            stream_ids: page_stream_ids,
+        }
     }
 
     /// Export streams by ID range with bounded page size (operator migration support).
