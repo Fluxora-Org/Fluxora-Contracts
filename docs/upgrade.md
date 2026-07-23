@@ -351,3 +351,20 @@ The upgraded WASM must maintain backward-compatible storage layout.
 ```bash
 cargo build --target wasm32-unknown-unknown --release -p fluxora_stream
 stellar contract optimize --wasm target/wasm32-unknown-unknown/release/fluxora_stream.wasm
+```
+
+## Toolchain Verification
+
+To ensure reproducible builds and compatibility, the project uses `script/verify_rust_version.py` which enforces the `rust-toolchain.toml` configuration.
+
+### Checked Properties
+
+The script verifies that the environment exactly matches the pinned toolchain by checking:
+1. **Rust version**: `rustc --version` matches `[toolchain].channel`.
+2. **Targets**: `rustup target list --installed` contains all `[toolchain].targets`.
+3. **Components**: `rustup component list --installed` contains all `[toolchain].components`.
+
+### Security and Testing Notes
+
+- **Assumptions**: We assume `rustup` and `rustc` CLI outputs are trustworthy as they are the source of truth for the local environment. We rely on standard `rustup` components for accurate target/component queries.
+- **Test Overrides**: The script supports environment variable overrides (`RUSTC_VERSION_OUTPUT`, `RUSTUP_TARGET_LIST_OUTPUT`, `RUSTUP_COMPONENT_LIST_OUTPUT`) exclusively for testability. These are intentionally only read if present, prioritizing exact output simulation without shelling out in tests. This provides deterministic test behavior and avoids depending on a specific local rustup state during unit testing.
