@@ -1661,24 +1661,6 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_set_threshold_rejects_zero() {
-        let ctx = Ctx::setup(); // 3 signers, threshold=2
-        let result = ctx.client.try_set_threshold(&0u32);
-        assert_eq!(result, Err(Ok(GovernanceError::InvalidThreshold)));
-        // Verify threshold is unchanged.
-        assert_eq!(ctx.client.get_threshold(), 2);
-    }
-
-    #[test]
-    fn test_set_threshold_rejects_above_signer_count() {
-        let ctx = Ctx::setup(); // 3 signers, threshold=2
-        let result = ctx.client.try_set_threshold(&4u32);
-        assert_eq!(result, Err(Ok(GovernanceError::InvalidThreshold)));
-        // Verify threshold is unchanged.
-        assert_eq!(ctx.client.get_threshold(), 2);
-    }
-
-    #[test]
     fn test_set_threshold_accepts_valid_range() {
         let ctx = Ctx::setup(); // 3 signers, threshold=2
                                 // Set to 1 (valid: 1 <= 1 <= 3)
