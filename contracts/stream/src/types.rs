@@ -617,6 +617,10 @@ pub struct Stream {
     pub last_withdraw_ledger: u32,
     /// Optional structured metadata emitted for indexer consumption.
     pub metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
+    /// Flag indicating whether the stream has been decommissioned.
+    pub decommissioned: bool,
+    /// Separately-proposed flag indicating whether the stream is irrevocable.
+    pub irrevocable: bool,
 }
 
 /// Pagination result for recipient stream listing

@@ -49,7 +49,7 @@
 extern crate std;
 
 use fluxora_stream::{
-    Config, DataKey, FluxoraStream, FluxoraStreamClient, Stream, StreamStatus, CONTRACT_VERSION,
+    Config, DataKey, FluxoraStream, FluxoraStreamClient, Stream, StreamStatus, StreamKind, CONTRACT_VERSION,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -123,6 +123,12 @@ impl<'a> Ctx<'a> {
             checkpointed_at: now,
             withdraw_dust_threshold: 0,
             memo: None, // V5 had no memo field
+            kind: StreamKind::Linear,
+            last_pause_toggle_ledger: 0,
+            last_withdraw_ledger: 0,
+            metadata: None,
+            decommissioned: false,
+            irrevocable: false,
         };
         let cid = self.contract_id.clone();
         self.env.as_contract(&cid, || {
@@ -270,6 +276,12 @@ fn v5_cancelled_stream_readable_accrual_frozen() {
                 checkpointed_at: now,
                 withdraw_dust_threshold: 0,
                 memo: None,
+                kind: StreamKind::Linear,
+                last_pause_toggle_ledger: 0,
+                last_withdraw_ledger: 0,
+                metadata: None,
+                decommissioned: false,
+                irrevocable: false,
             },
         );
     });
@@ -319,6 +331,12 @@ fn v5_stream_with_checkpoint_readable() {
                 checkpointed_at: now,
                 withdraw_dust_threshold: 0,
                 memo: None,
+                kind: StreamKind::Linear,
+                last_pause_toggle_ledger: 0,
+                last_withdraw_ledger: 0,
+                metadata: None,
+                decommissioned: false,
+                irrevocable: false,
             },
         );
     });

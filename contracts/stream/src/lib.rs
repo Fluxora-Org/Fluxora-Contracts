@@ -820,6 +820,10 @@ pub struct Stream {
     pub memo: Option<soroban_sdk::Bytes>,
     /// The architectural style of the stream (Linear or CliffOnly).
     pub kind: StreamKind,
+    /// Flag indicating whether the stream has been decommissioned.
+    pub decommissioned: bool,
+    /// Separately-proposed flag indicating whether the stream is irrevocable.
+    pub irrevocable: bool,
 }
 
 /// Pagination result for recipient stream listing
@@ -1703,6 +1707,8 @@ impl FluxoraStream {
             last_pause_toggle_ledger: 0,
             last_withdraw_ledger: 0,
             metadata: None,
+            decommissioned: false,
+            irrevocable: false,
         };
 
         save_stream(env, &stream);
@@ -1783,6 +1789,8 @@ impl FluxoraStream {
             last_pause_toggle_ledger: 0,
             last_withdraw_ledger: 0,
             metadata: None,
+            decommissioned: false,
+            irrevocable: false,
         };
 
         save_stream(env, &stream);
@@ -4193,6 +4201,10 @@ impl FluxoraStream {
         require_not_globally_paused(&env)?;
         let mut stream = load_stream(&env, stream_id)?;
 
+        if stream.decommissioned {
+            return Err(ContractError::InvalidState);
+        }
+
         if stream.kind == StreamKind::CliffOnly {
             return Err(ContractError::UnsupportedStreamKind);
         }
@@ -4326,6 +4338,10 @@ impl FluxoraStream {
     ) -> Result<(), ContractError> {
         require_not_globally_paused(&env)?;
         let mut stream = load_stream(&env, stream_id)?;
+
+        if stream.decommissioned {
+            return Err(ContractError::InvalidState);
+        }
 
         if stream.kind == StreamKind::CliffOnly {
             return Err(ContractError::UnsupportedStreamKind);
@@ -4574,6 +4590,10 @@ impl FluxoraStream {
         require_not_globally_paused(&env)?;
         let mut stream = load_stream(&env, stream_id)?;
 
+        if stream.decommissioned {
+            return Err(ContractError::InvalidState);
+        }
+
         if stream.kind == StreamKind::CliffOnly {
             return Err(ContractError::UnsupportedStreamKind);
         }
@@ -4617,6 +4637,60 @@ impl FluxoraStream {
                 old_end_time,
                 new_end_time,
             },
+        );
+
+        Ok(())
+    }
+
+    /// Flag a stream for wind-down (decommission) without immediately cancelling it.
+    ///
+    /// Once decommissioned is set to `true`, the following mutating entrypoints are blocked:
+    /// `update_rate_per_second`, `decrease_rate_per_second`, `top_up_stream`, `extend_stream_end_time`,
+    /// and `clone_stream`, each returning `ContractError::InvalidState`.
+    /// Withdrawals, pause/resume, and cancellation remain fully functional.
+    ///
+    /// Setting decommissioned back to `false` (recommission) is allowed, unless the separately-proposed
+    /// `irrevocable` flag is set on the stream, in which case the decommissioned state cannot be reversed.
+    ///
+    /// # Authorization
+    /// - Requires authorization from the stream's original sender only.
+    pub fn set_stream_decommissioned(
+        env: Env,
+        stream_id: u64,
+        sender: Address,
+        decommissioned: bool,
+    ) -> Result<(), ContractError> {
+        require_not_globally_paused(&env)?;
+        let mut stream = load_stream(&env, stream_id)?;
+
+        // Only the original sender can decommission/recommission the stream.
+        if stream.sender != sender {
+            return Err(ContractError::Unauthorized);
+        }
+        sender.require_auth();
+
+        // Terminal streams cannot be modified.
+        if stream.status == StreamStatus::Completed || stream.status == StreamStatus::Cancelled {
+            return Err(ContractError::StreamTerminalState);
+        }
+
+        // If the decommissioned state is already equal to the requested state, return Ok.
+        if stream.decommissioned == decommissioned {
+            return Ok(());
+        }
+
+        // Precedence guard: if irrevocable is true, decommissioned cannot be set back to false.
+        if !decommissioned && stream.irrevocable {
+            return Err(ContractError::InvalidState);
+        }
+
+        stream.decommissioned = decommissioned;
+        save_stream(&env, &stream);
+
+        // Emit decommissioned event
+        env.events().publish(
+            (symbol_short!("decomm"), stream_id),
+            decommissioned,
         );
 
         Ok(())
@@ -4681,6 +4755,10 @@ impl FluxoraStream {
         }
 
         let stream = load_stream(&env, stream_id)?;
+
+        if stream.decommissioned {
+            return Err(ContractError::InvalidState);
+        }
 
         if stream.kind == StreamKind::CliffOnly {
             return Err(ContractError::UnsupportedStreamKind);
@@ -6690,6 +6768,10 @@ impl FluxoraStream {
 
         // ── 2. Load source stream ─────────────────────────────────────────────
         let source = load_stream(&env, stream_id)?;
+
+        if source.decommissioned {
+            return Err(ContractError::InvalidState);
+        }
 
         // ── 2.1. Status guard ─────────────────────────────────────────────────
         // Reject cloning from a terminal-state source (Cancelled or Completed).
