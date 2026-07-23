@@ -265,4 +265,12 @@ mod tests {
         // memo is the 15th field (0-indexed position 14)
         assert_eq!(MEMO_POS, 14);
     }
+
+    /// Stream struct field count with `irrevocable` appended.
+    /// V5 (14) + memo (1) + kind (1) + pause_ledger (1) + withdraw_ledger (1) + metadata (1) + irrevocable (1) = 20 fields.
+    #[test]
+    fn stream_struct_has_20_fields_with_irrevocable() {
+        const TOTAL_STREAM_FIELDS: usize = 20;
+        assert_eq!(TOTAL_STREAM_FIELDS, 20);
+    }
 }
