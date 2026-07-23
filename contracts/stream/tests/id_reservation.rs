@@ -233,6 +233,53 @@ fn new_reservation_overwrites_existing() {
 }
 
 #[test]
+fn reserve_stream_ids_overwrites_unreleased_reservation_leaking_ids_regression() {
+    // Regression test for #1021: Pin the current (leaky) behavior where a second 
+    // reservation by the same caller overwrites their first unreleased reservation, 
+    // leaking the first block of IDs permanently.
+    //
+    // Security Rationale / NatSpec:
+    // @dev Currently `save_id_reservation` unconditionally overwrites the single
+    // `DataKey::IdReservation(Address)` entry. The first reservation's ID range 
+    // becomes permanently unreachable via any public entrypoint.
+    // Expected to be updated in a future PR to assert `ContractError::ReservationAlreadyActive`.
+    let ctx = Ctx::setup();
+    
+    // Caller reserves 10 IDs (0..9)
+    ctx.client.reserve_stream_ids(&ctx.sender, &10u32, &None);
+    
+    // Caller reserves 5 more IDs without releasing the first (10..14)
+    ctx.client.reserve_stream_ids(&ctx.sender, &5u32, &None);
+    
+    // Assert get_id_reservation(caller) returns only the second reservation
+    let res = ctx.client.get_id_reservation(&ctx.sender).unwrap();
+    assert_eq!(res.start_id, 10);
+    assert_eq!(res.count, 5);
+    assert_eq!(res.consumed, 0);
+}
+
+#[test]
+fn next_stream_id_reflects_both_bumps_on_overwrite_regression() {
+    // Companion test for #1021 proving that when a reservation is overwritten,
+    // the global NextStreamId counter still correctly reflects both reservations' sizes.
+    // This proves the leak is isolated to tracking, and the counter itself is safely advanced.
+    let ctx = Ctx::setup();
+    
+    // Counter initially 0
+    assert_eq!(ctx.client.get_stream_count(), 0);
+    
+    // Reserve 10 IDs -> counter advances to 10
+    ctx.client.reserve_stream_ids(&ctx.sender, &10u32, &None);
+    assert_eq!(ctx.client.get_stream_count(), 10);
+    
+    // Reserve 5 more IDs -> counter advances to 15
+    ctx.client.reserve_stream_ids(&ctx.sender, &5u32, &None);
+    
+    // Assert counter reflects both bumps (10 + 5 = 15)
+    assert_eq!(ctx.client.get_stream_count(), 15);
+}
+
+#[test]
 fn reservation_advances_stream_count_by_full_count() {
     let ctx = Ctx::setup();
     ctx.client.reserve_stream_ids(&ctx.sender, &10u32, &None);
