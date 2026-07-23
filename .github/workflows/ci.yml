@@ -254,6 +254,48 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
 
+      # ── Snapshot Security-Field Diff Gate ─────────────────────────────────
+      # Hard gate (no continue-on-error) for pull_request events.
+      #
+      # Runs check_snapshot_diff.py, which parses every snapshot JSON touched
+      # by the PR and exits 1 if any security-relevant field (auth, events,
+      # error codes, storage) was altered. The exit-code contract forces
+      # "mandatory extra review" before such a PR can be merged.
+      #
+      # Trigger split:
+      #   pull_request → compare against the target branch tip already fetched
+      #                  by actions/checkout (origin/<base_ref>).
+      #   push         → compare against the immediate parent commit (HEAD~1).
+      #   All other events (workflow_dispatch, etc.) → skip via the `if:` guard.
+      #
+      # Security notes:
+      #   • origin/${{ github.base_ref }} is set by the checkout action and is
+      #     read-only; no user input is interpolated into a shell command.
+      #   • The script itself calls `git diff --name-only` and `git show`,
+      #     both of which receive only the two validated ref strings.
+      #   • Fetch depth must be ≥ 2 (the default checkout fetches the full
+      #     history for push; for pull_request it fetches a merge commit with
+      #     both parents available, so origin/<base_ref> is resolvable).
+      - name: Set up Python for snapshot diff gate
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Snapshot security-field diff gate
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="origin/${{ github.base_ref }}"
+          else
+            BASE="HEAD~1"
+          fi
+          echo "Running snapshot diff gate: base=${BASE}"
+          python3 script/check_snapshot_diff.py --base "${BASE}"
+        # No continue-on-error — this step is intentionally a hard gate.
+        # A PR that modifies auth/events/error/storage fields in committed
+        # snapshots will fail CI here and must receive mandatory extra review.
+
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
