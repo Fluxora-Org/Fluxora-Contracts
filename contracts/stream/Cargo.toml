@@ -119,6 +119,11 @@ path = "tests/rate_decrease_after_withdraw.rs"
 test = true
 
 [[test]]
+name = "witnessed_cancel"
+path = "tests/witnessed_cancel.rs"
+test = true
+
+[[test]]
 name = "recipient_update_state_machine"
 path = "tests/recipient_update_state_machine.rs"
 test = false
