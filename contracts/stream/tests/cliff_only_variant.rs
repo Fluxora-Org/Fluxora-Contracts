@@ -65,6 +65,21 @@ impl<'a> TestContext<'a> {
             &StreamKind::CliffOnly,
         )
     }
+
+    fn create_cliff_slope_stream(&self, deposit: i128, rate: i128, start: u64, cliff: u64, end: u64) -> u64 {
+        self.client.create_stream(
+            &self.sender,
+            &self.recipient,
+            &deposit,
+            &rate,
+            &start,
+            &cliff,
+            &end,
+            &0,
+            &None,
+            &StreamKind::CliffSlope,
+        )
+    }
 }
 
 /// 1. Timeline Boundary Testing:
@@ -222,3 +237,59 @@ fn test_cliff_only_cancel_after_cliff() {
     let state = ctx.client.get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Cancelled);
 }
+
+/// 6. CliffSlope Timeline Testing:
+/// - 0 before cliff
+/// - linear from cliff to end
+#[test]
+fn test_cliff_slope_accrual_timeline() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let deposit = 1000_i128;
+    let rate = 2_i128; // 2 tokens per sec
+    let start = 100u64;
+    let cliff = 500u64;
+    let end = 1000u64; // duration 500 secs, 2 * 500 = 1000 deposit
+
+    let stream_id = ctx.create_cliff_slope_stream(deposit, rate, start, cliff, end);
+
+    // 1 second before cliff (t = 499)
+    ctx.env.ledger().set_timestamp(499);
+    assert_eq!(ctx.client.calculate_accrued(&stream_id), 0);
+
+    // Exactly at cliff (t = 500)
+    ctx.env.ledger().set_timestamp(500);
+    assert_eq!(ctx.client.calculate_accrued(&stream_id), 0);
+
+    // After cliff (t = 600 -> 100 secs passed -> 200 accrued)
+    ctx.env.ledger().set_timestamp(600);
+    assert_eq!(ctx.client.calculate_accrued(&stream_id), 200);
+
+    // At end (t = 1000 -> 500 secs passed -> 1000 accrued)
+    ctx.env.ledger().set_timestamp(1000);
+    assert_eq!(ctx.client.calculate_accrued(&stream_id), deposit);
+
+    // Long after end (t = 1500)
+    ctx.env.ledger().set_timestamp(1500);
+    assert_eq!(ctx.client.calculate_accrued(&stream_id), deposit);
+}
+
+/// 7. CliffSlope Mutation Restriction Verification
+#[test]
+fn test_cliff_slope_rejects_mutations() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.create_cliff_slope_stream(1000, 2, 100, 500, 1000);
+
+    let state = ctx.client.get_stream_state(&stream_id);
+    assert!(matches!(state.kind, StreamKind::CliffSlope));
+
+    let res = ctx.client.try_update_rate_per_second(&stream_id, &5_i128);
+    assert_eq!(res, Err(Ok(ContractError::UnsupportedStreamKind)));
+
+    let res = ctx.client.try_decrease_rate_per_second(&stream_id, &1_i128);
+    assert_eq!(res, Err(Ok(ContractError::UnsupportedStreamKind)));
+}
+
