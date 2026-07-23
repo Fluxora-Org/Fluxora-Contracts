@@ -889,3 +889,518 @@ pub enum ContractError {
         # Both Operational and Administrative use value 1, but they're in ERROR_EXTRACT_EXCLUDE
         result = vda.check_duplicate_discriminants(source)
         assert result is False
+
+
+# ---------------------------------------------------------------------------
+# Shared fixtures for audit.md drift tests
+# ---------------------------------------------------------------------------
+
+# Minimal lib.rs with a #[contractimpl] block containing two pub fns.
+_CONTRACTIMPL_SRC = """\
+pub fn save_stream(env: &Env) {}
+
+#[contractimpl]
+impl FluxoraStream {
+    pub fn init(env: Env) -> Result<(), Error> { Ok(()) }
+    pub fn withdraw(env: Env) -> Result<i128, Error> { Ok(0) }
+    pub fn upgrade(env: Env) {}
+}
+
+pub fn compute_keeper_fee_split(gross: i128, bps: u32) -> (i128, i128) { (0, 0) }
+"""
+
+# audit.md snippet that documents both ABI entrypoints.
+_AUDIT_DOC_FULL = """\
+## Public entrypoints
+
+| Entrypoint | Parameters | Return type | Authorization | Description |
+| --- | --- | --- | --- | --- |
+| `init` | `env: Env` | — | Bootstrap admin | One-time setup. |
+| `withdraw` | `env: Env`, `stream_id: u64` | `i128` | Recipient | Withdraw accrued. |
+"""
+
+# audit.md missing the `withdraw` row.
+_AUDIT_DOC_PARTIAL = """\
+## Public entrypoints
+
+| Entrypoint | Parameters | Return type | Authorization | Description |
+| --- | --- | --- | --- | --- |
+| `init` | `env: Env` | — | Bootstrap admin | One-time setup. |
+"""
+
+# audit.md with no table at all.
+_AUDIT_DOC_EMPTY = "# Audit preparation\n\nNo table here.\n"
+
+
+# ---------------------------------------------------------------------------
+# extract_contractimpl_entrypoints
+# ---------------------------------------------------------------------------
+
+class TestExtractContractimplEntrypoints:
+    """Tests for extract_contractimpl_entrypoints()."""
+
+    def test_returns_set_type(self):
+        result = vda.extract_contractimpl_entrypoints(_CONTRACTIMPL_SRC)
+        assert isinstance(result, set)
+
+    def test_finds_init_inside_contractimpl(self):
+        result = vda.extract_contractimpl_entrypoints(_CONTRACTIMPL_SRC)
+        assert "init" in result
+
+    def test_finds_withdraw_inside_contractimpl(self):
+        result = vda.extract_contractimpl_entrypoints(_CONTRACTIMPL_SRC)
+        assert "withdraw" in result
+
+    def test_excludes_save_stream_module_level(self):
+        # save_stream is a module-level pub fn, not inside #[contractimpl].
+        result = vda.extract_contractimpl_entrypoints(_CONTRACTIMPL_SRC)
+        assert "save_stream" not in result
+
+    def test_excludes_compute_keeper_fee_split_via_allowlist(self):
+        # compute_keeper_fee_split appears after the impl block and is
+        # in AUDIT_ENTRYPOINT_ALLOWLIST.
+        result = vda.extract_contractimpl_entrypoints(_CONTRACTIMPL_SRC)
+        assert "compute_keeper_fee_split" not in result
+
+    def test_excludes_upgrade_via_allowlist(self):
+        # upgrade is inside the contractimpl block but is in
+        # AUDIT_ENTRYPOINT_ALLOWLIST, so it must be excluded.
+        result = vda.extract_contractimpl_entrypoints(_CONTRACTIMPL_SRC)
+        assert "upgrade" not in result
+
+    def test_no_contractimpl_returns_empty_set(self):
+        src = "pub fn orphan(env: Env) {}\n"
+        assert vda.extract_contractimpl_entrypoints(src) == set()
+
+    def test_empty_source_returns_empty_set(self):
+        assert vda.extract_contractimpl_entrypoints("") == set()
+
+    def test_multiple_entrypoints_all_found(self):
+        src = (
+            "#[contractimpl]\n"
+            "impl Foo {\n"
+            "    pub fn alpha(env: Env) {}\n"
+            "    pub fn beta(env: Env) {}\n"
+            "    pub fn gamma(env: Env) {}\n"
+            "}\n"
+        )
+        result = vda.extract_contractimpl_entrypoints(src)
+        assert {"alpha", "beta", "gamma"}.issubset(result)
+
+    def test_private_fn_inside_contractimpl_not_returned(self):
+        src = (
+            "#[contractimpl]\n"
+            "impl Foo {\n"
+            "    pub fn public_fn(env: Env) {}\n"
+            "    fn private_fn(env: Env) {}\n"
+            "}\n"
+        )
+        result = vda.extract_contractimpl_entrypoints(src)
+        assert "public_fn" in result
+        assert "private_fn" not in result
+
+    def test_nested_braces_do_not_confuse_scanner(self):
+        src = (
+            "#[contractimpl]\n"
+            "impl Foo {\n"
+            "    pub fn complex(env: Env) {\n"
+            "        let x = { 1 + 2 };\n"
+            "        if true { let _y = { 3 }; }\n"
+            "    }\n"
+            "    pub fn simple(env: Env) {}\n"
+            "}\n"
+        )
+        result = vda.extract_contractimpl_entrypoints(src)
+        assert "complex" in result
+        assert "simple" in result
+
+    def test_module_level_pub_fn_after_impl_not_included(self):
+        src = (
+            "#[contractimpl]\n"
+            "impl Foo {\n"
+            "    pub fn inside(env: Env) {}\n"
+            "}\n"
+            "pub fn outside(env: Env) {}\n"
+        )
+        result = vda.extract_contractimpl_entrypoints(src)
+        assert "inside" in result
+        assert "outside" not in result
+
+    def test_allowlist_names_filtered_even_inside_contractimpl(self):
+        src = (
+            "#[contractimpl]\n"
+            "impl Foo {\n"
+            "    pub fn upgrade(env: Env) {}\n"
+            "    pub fn compute_keeper_fee_split(x: i128) -> (i128, i128) { (0, 0) }\n"
+            "    pub fn real_entrypoint(env: Env) {}\n"
+            "}\n"
+        )
+        result = vda.extract_contractimpl_entrypoints(src)
+        assert "real_entrypoint" in result
+        assert "upgrade" not in result
+        assert "compute_keeper_fee_split" not in result
+
+    def test_generic_pub_fn_inside_contractimpl(self):
+        src = (
+            "#[contractimpl]\n"
+            "impl Foo {\n"
+            "    pub fn generic_fn<T>(x: T) {}\n"
+            "}\n"
+        )
+        result = vda.extract_contractimpl_entrypoints(src)
+        assert "generic_fn" in result
+
+
+# ---------------------------------------------------------------------------
+# extract_audit_entrypoints_from_doc
+# ---------------------------------------------------------------------------
+
+class TestExtractAuditEntrypointsFromDoc:
+    """Tests for extract_audit_entrypoints_from_doc()."""
+
+    def test_returns_set_type(self):
+        result = vda.extract_audit_entrypoints_from_doc(_AUDIT_DOC_FULL)
+        assert isinstance(result, set)
+
+    def test_finds_init_in_full_doc(self):
+        result = vda.extract_audit_entrypoints_from_doc(_AUDIT_DOC_FULL)
+        assert "init" in result
+
+    def test_finds_withdraw_in_full_doc(self):
+        result = vda.extract_audit_entrypoints_from_doc(_AUDIT_DOC_FULL)
+        assert "withdraw" in result
+
+    def test_empty_doc_returns_empty_set(self):
+        assert vda.extract_audit_entrypoints_from_doc("") == set()
+
+    def test_no_table_returns_empty_set(self):
+        assert vda.extract_audit_entrypoints_from_doc(_AUDIT_DOC_EMPTY) == set()
+
+    def test_partial_doc_missing_withdraw(self):
+        result = vda.extract_audit_entrypoints_from_doc(_AUDIT_DOC_PARTIAL)
+        assert "init" in result
+        assert "withdraw" not in result
+
+    def test_deduplicates_repeated_rows(self):
+        doc = (
+            "| `init` | ... |\n"
+            "| `init` | ... |\n"
+            "| `withdraw` | ... |\n"
+        )
+        result = vda.extract_audit_entrypoints_from_doc(doc)
+        assert result == {"init", "withdraw"}
+
+    def test_ignores_header_row_dashes(self):
+        # Table separator lines like | --- | should not produce identifiers.
+        doc = (
+            "| Entrypoint | Description |\n"
+            "| --- | --- |\n"
+            "| `init` | One-time setup. |\n"
+        )
+        result = vda.extract_audit_entrypoints_from_doc(doc)
+        assert "---" not in result
+        assert "init" in result
+
+    def test_handles_indented_table_rows(self):
+        doc = "   | `create_stream` | ... |\n"
+        result = vda.extract_audit_entrypoints_from_doc(doc)
+        assert "create_stream" in result
+
+    def test_alphanumeric_underscored_names_extracted(self):
+        doc = "| `get_stream_state_2` | ... |\n"
+        result = vda.extract_audit_entrypoints_from_doc(doc)
+        assert "get_stream_state_2" in result
+
+
+# ---------------------------------------------------------------------------
+# check_audit_md_entrypoint_drift
+# ---------------------------------------------------------------------------
+
+class TestCheckAuditMdEntrypointDrift:
+    """Tests for check_audit_md_entrypoint_drift()."""
+
+    def test_returns_false_when_all_documented(self, tmp_path):
+        audit_path = tmp_path / "audit.md"
+        audit_path.write_text(_AUDIT_DOC_FULL, encoding="utf-8")
+        result = vda.check_audit_md_entrypoint_drift(
+            _CONTRACTIMPL_SRC, _AUDIT_DOC_FULL, audit_path
+        )
+        assert result is False
+
+    def test_returns_true_when_entrypoint_missing(self, tmp_path):
+        audit_path = tmp_path / "audit.md"
+        audit_path.write_text(_AUDIT_DOC_PARTIAL, encoding="utf-8")
+        result = vda.check_audit_md_entrypoint_drift(
+            _CONTRACTIMPL_SRC, _AUDIT_DOC_PARTIAL, audit_path
+        )
+        assert result is True
+
+    def test_prints_missing_audit_doc_tag(self, tmp_path, capsys):
+        audit_path = tmp_path / "audit.md"
+        result = vda.check_audit_md_entrypoint_drift(
+            _CONTRACTIMPL_SRC, _AUDIT_DOC_PARTIAL, audit_path
+        )
+        assert result is True
+        assert "MISSING AUDIT DOC:" in capsys.readouterr().out
+
+    def test_missing_message_contains_function_name(self, tmp_path, capsys):
+        audit_path = tmp_path / "audit.md"
+        vda.check_audit_md_entrypoint_drift(
+            _CONTRACTIMPL_SRC, _AUDIT_DOC_PARTIAL, audit_path
+        )
+        assert "withdraw" in capsys.readouterr().out
+
+    def test_missing_message_contains_doc_filename(self, tmp_path, capsys):
+        audit_path = tmp_path / "audit.md"
+        # Patch REPO_ROOT so relative_to() works
+        orig = vda.REPO_ROOT
+        vda.REPO_ROOT = tmp_path
+        try:
+            vda.check_audit_md_entrypoint_drift(
+                _CONTRACTIMPL_SRC, _AUDIT_DOC_PARTIAL, audit_path
+            )
+        finally:
+            vda.REPO_ROOT = orig
+        assert "audit.md" in capsys.readouterr().out
+
+    def test_no_contractimpl_block_no_drift(self, tmp_path):
+        # If there's no #[contractimpl] block, no entrypoints are expected.
+        src = "pub fn orphan(env: Env) {}\n"
+        audit_path = tmp_path / "audit.md"
+        result = vda.check_audit_md_entrypoint_drift(
+            src, _AUDIT_DOC_EMPTY, audit_path
+        )
+        assert result is False
+
+    def test_empty_source_no_drift(self, tmp_path):
+        audit_path = tmp_path / "audit.md"
+        result = vda.check_audit_md_entrypoint_drift(
+            "", _AUDIT_DOC_EMPTY, audit_path
+        )
+        assert result is False
+
+    def test_allowlisted_entrypoints_not_flagged(self, tmp_path):
+        # upgrade and compute_keeper_fee_split inside contractimpl should
+        # not be flagged even when absent from audit.md.
+        src = (
+            "#[contractimpl]\n"
+            "impl Foo {\n"
+            "    pub fn upgrade(env: Env) {}\n"
+            "    pub fn compute_keeper_fee_split(x: i128) -> (i128, i128) { (0, 0) }\n"
+            "}\n"
+        )
+        audit_path = tmp_path / "audit.md"
+        result = vda.check_audit_md_entrypoint_drift(
+            src, _AUDIT_DOC_EMPTY, audit_path
+        )
+        assert result is False
+
+    def test_multiple_missing_all_printed(self, tmp_path, capsys):
+        src = (
+            "#[contractimpl]\n"
+            "impl Foo {\n"
+            "    pub fn alpha(env: Env) {}\n"
+            "    pub fn beta(env: Env) {}\n"
+            "    pub fn gamma(env: Env) {}\n"
+            "}\n"
+        )
+        audit_path = tmp_path / "audit.md"
+        vda.check_audit_md_entrypoint_drift(src, _AUDIT_DOC_EMPTY, audit_path)
+        out = capsys.readouterr().out
+        assert "alpha" in out
+        assert "beta" in out
+        assert "gamma" in out
+
+    def test_path_outside_repo_root_falls_back_to_full_path(self, tmp_path, capsys):
+        # If audit_doc_path is outside REPO_ROOT, relative_to raises ValueError;
+        # the function should gracefully fall back to the absolute path.
+        outside_path = tmp_path / "elsewhere" / "audit.md"
+        outside_path.parent.mkdir(parents=True, exist_ok=True)
+        # REPO_ROOT does NOT contain outside_path
+        orig = vda.REPO_ROOT
+        vda.REPO_ROOT = tmp_path / "repo"
+        try:
+            vda.check_audit_md_entrypoint_drift(
+                _CONTRACTIMPL_SRC, _AUDIT_DOC_PARTIAL, outside_path
+            )
+        finally:
+            vda.REPO_ROOT = orig
+        out = capsys.readouterr().out
+        assert "MISSING AUDIT DOC:" in out
+
+    def test_outputs_are_sorted_alphabetically(self, tmp_path, capsys):
+        src = (
+            "#[contractimpl]\n"
+            "impl Foo {\n"
+            "    pub fn zzz_last(env: Env) {}\n"
+            "    pub fn aaa_first(env: Env) {}\n"
+            "    pub fn mmm_mid(env: Env) {}\n"
+            "}\n"
+        )
+        audit_path = tmp_path / "audit.md"
+        vda.check_audit_md_entrypoint_drift(src, _AUDIT_DOC_EMPTY, audit_path)
+        out = capsys.readouterr().out
+        lines = [l for l in out.splitlines() if "MISSING AUDIT DOC:" in l]
+        names = [l.split("'")[1] for l in lines]
+        assert names == sorted(names)
+
+    def test_stale_doc_rows_not_flagged(self, tmp_path):
+        # audit.md may document names that no longer exist in code;
+        # that is NOT flagged by this check (additive-only).
+        src = (
+            "#[contractimpl]\n"
+            "impl Foo {\n"
+            "    pub fn init(env: Env) {}\n"
+            "}\n"
+        )
+        doc = _AUDIT_DOC_FULL  # documents `init` AND `withdraw`; withdraw gone from code
+        audit_path = tmp_path / "audit.md"
+        result = vda.check_audit_md_entrypoint_drift(src, doc, audit_path)
+        assert result is False
+
+
+# ---------------------------------------------------------------------------
+# validate() with audit_doc parameter
+# ---------------------------------------------------------------------------
+
+def _make_audit_files(tmp_path, audit_content=None):
+    """Write all files including audit.md and return paths tuple.
+
+    Uses a combined lib.rs that:
+    - Satisfies the streaming.md entrypoint check (init, create_stream, withdraw
+      plus upgrade and compute_keeper_fee_split are documented in the streaming stub)
+    - Contains a #[contractimpl] block with init/withdraw for the audit check
+    - Has upgrade and compute_keeper_fee_split as module-level pub fns that are
+      in AUDIT_ENTRYPOINT_ALLOWLIST and also mentioned in the streaming stub
+    """
+    # Streaming doc that documents all pub fn names that appear in _CONTRACTIMPL_SRC
+    # plus MINIMAL_LIB_RS (init, create_stream, withdraw, upgrade,
+    # compute_keeper_fee_split). save_stream is in ENTRYPOINT_ALLOWLIST.
+    streaming_doc = (
+        "# Streaming\n"
+        "`init`, `create_stream`, `withdraw`, `upgrade`, `compute_keeper_fee_split`\n"
+    )
+    lib_rs, events_rs, error_rs, streaming, events, error = _write_files(
+        tmp_path, streaming=streaming_doc
+    )
+    if audit_content is None:
+        audit_content = _AUDIT_DOC_FULL
+    # Rewrite lib.rs to contain the contractimpl block with init/withdraw
+    # plus module-level helpers upgrade and compute_keeper_fee_split.
+    lib_rs.write_text(_CONTRACTIMPL_SRC + MINIMAL_LIB_RS, encoding="utf-8")
+    audit_path = tmp_path / "audit.md"
+    audit_path.write_text(audit_content, encoding="utf-8")
+    return lib_rs, events_rs, error_rs, streaming, events, error, audit_path
+
+
+class TestValidateWithAuditDoc:
+    """Tests for validate() when audit_doc is supplied."""
+
+    def test_passes_with_full_audit_doc(self, tmp_path):
+        paths = _make_audit_files(tmp_path, _AUDIT_DOC_FULL)
+        result = vda.validate(*paths[:6], audit_doc=paths[6])
+        assert result == 0
+
+    def test_fails_with_partial_audit_doc(self, tmp_path):
+        paths = _make_audit_files(tmp_path, _AUDIT_DOC_PARTIAL)
+        result = vda.validate(*paths[:6], audit_doc=paths[6])
+        assert result == 1
+
+    def test_audit_doc_none_skips_check(self, tmp_path):
+        # When audit_doc=None, audit.md check is entirely skipped.
+        paths = _make_audit_files(tmp_path, _AUDIT_DOC_EMPTY)
+        # Without audit_doc, only streaming/events/error checks run.
+        result = vda.validate(*paths[:6], audit_doc=None)
+        # streaming/events/error should still pass with default MINIMAL stubs.
+        assert result == 0
+
+    def test_prints_missing_audit_doc_on_drift(self, tmp_path, capsys):
+        paths = _make_audit_files(tmp_path, _AUDIT_DOC_PARTIAL)
+        vda.validate(*paths[:6], audit_doc=paths[6])
+        assert "MISSING AUDIT DOC:" in capsys.readouterr().out
+
+    def test_ok_message_printed_when_audit_passes(self, tmp_path, capsys):
+        paths = _make_audit_files(tmp_path, _AUDIT_DOC_FULL)
+        vda.validate(*paths[:6], audit_doc=paths[6])
+        assert "OK:" in capsys.readouterr().out
+
+    def test_ok_message_not_printed_when_audit_fails(self, tmp_path, capsys):
+        paths = _make_audit_files(tmp_path, _AUDIT_DOC_PARTIAL)
+        vda.validate(*paths[:6], audit_doc=paths[6])
+        assert "OK:" not in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# main() with DOC_AUDIT in MAPPING
+# ---------------------------------------------------------------------------
+
+def _fake_mapping_with_audit(tmp_path, files_7, missing_key=None):
+    """Build a MAPPING dict that includes DOC_AUDIT."""
+    keys = [
+        "CONTRACT_SRC", "EVENTS_SRC", "ERROR_SRC",
+        "DOC_STREAMING", "DOC_EVENTS", "DOC_ERROR", "DOC_AUDIT",
+    ]
+    names = [
+        "lib.rs", "events.rs", "error.rs",
+        "streaming.md", "events.md", "error.md", "audit.md",
+    ]
+    mapping = {}
+    for key, name, path in zip(keys, names, files_7):
+        if key == missing_key:
+            mapping[key] = (tmp_path / "no_such_audit_xyz.md", "**/no_such_audit_xyz.md")
+        else:
+            mapping[key] = (path, f"**/{name}")
+    return mapping
+
+
+class TestMainWithAuditDoc:
+    """Tests for main() exercising the DOC_AUDIT mapping entry."""
+
+    def _setup(self, tmp_path, monkeypatch, audit_content=None):
+        paths = _make_audit_files(tmp_path, audit_content)
+        mapping = _fake_mapping_with_audit(tmp_path, paths)
+        monkeypatch.setattr(vda, "MAPPING", mapping)
+        monkeypatch.setattr(vda, "REPO_ROOT", tmp_path)
+        return paths
+
+    def test_main_passes_with_full_audit_doc(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch, _AUDIT_DOC_FULL)
+        assert vda.main() == 0
+
+    def test_main_fails_with_partial_audit_doc(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch, _AUDIT_DOC_PARTIAL)
+        assert vda.main() == 1
+
+    def test_main_missing_audit_doc_file_returns_1(self, tmp_path, monkeypatch):
+        paths = _make_audit_files(tmp_path, _AUDIT_DOC_FULL)
+        mapping = _fake_mapping_with_audit(tmp_path, paths, missing_key="DOC_AUDIT")
+        monkeypatch.setattr(vda, "MAPPING", mapping)
+        monkeypatch.setattr(vda, "REPO_ROOT", tmp_path)
+        assert vda.main() == 1
+
+    def test_main_prints_missing_audit_doc_tag_on_drift(
+            self, tmp_path, monkeypatch, capsys):
+        self._setup(tmp_path, monkeypatch, _AUDIT_DOC_PARTIAL)
+        vda.main()
+        assert "MISSING AUDIT DOC:" in capsys.readouterr().out
+
+    def test_main_ok_when_all_entrypoints_documented(
+            self, tmp_path, monkeypatch, capsys):
+        self._setup(tmp_path, monkeypatch, _AUDIT_DOC_FULL)
+        vda.main()
+        assert "OK:" in capsys.readouterr().out
+
+    def test_audit_allowlist_members_do_not_cause_failure(
+            self, tmp_path, monkeypatch):
+        # upgrade and compute_keeper_fee_split are in AUDIT_ENTRYPOINT_ALLOWLIST;
+        # even if absent from audit.md, main() must still return 0.
+        src_with_allowlisted = (
+            _CONTRACTIMPL_SRC  # contains upgrade inside contractimpl
+            + MINIMAL_LIB_RS
+        )
+        paths = _make_audit_files(tmp_path, _AUDIT_DOC_FULL)
+        paths[0].write_text(src_with_allowlisted, encoding="utf-8")
+        mapping = _fake_mapping_with_audit(tmp_path, paths)
+        monkeypatch.setattr(vda, "MAPPING", mapping)
+        monkeypatch.setattr(vda, "REPO_ROOT", tmp_path)
+        assert vda.main() == 0

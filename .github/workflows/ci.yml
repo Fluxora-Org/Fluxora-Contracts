@@ -48,8 +48,49 @@ jobs:
       - name: Run test suite with coverage
         run: pytest tests/ --cov=script/ --cov-fail-under=95 -v --tb=short
 
-      - name: Validate doc alignment
+      - name: Validate doc alignment (streaming / events / errors)
         run: python3 script/validate-doc-alignment.py
+
+      # Hard gate: diff the #[contractimpl] pub fn surface against
+      # docs/audit.md's entrypoint table.  Fails (exit 1) if any ABI
+      # entrypoint is missing from the table.  Excludes the two
+      # intentional non-ABI entries: `upgrade` and
+      # `compute_keeper_fee_split` (see AUDIT_ENTRYPOINT_ALLOWLIST in
+      # validate-doc-alignment.py).  Add new entrypoints to audit.md
+      # before merging or this step will block the PR.
+      - name: Audit entrypoint drift check (docs/audit.md vs lib.rs)
+        run: |
+          python3 - <<'EOF'
+          import sys
+          from pathlib import Path
+          import importlib.util
+
+          script = Path("script/validate-doc-alignment.py")
+          spec = importlib.util.spec_from_file_location("vda", script)
+          mod = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+
+          repo_root = mod.REPO_ROOT
+          lib_rs = repo_root / "contracts" / "stream" / "src" / "lib.rs"
+          audit_md = repo_root / "docs" / "audit.md"
+
+          if not lib_rs.exists():
+              print(f"ERROR: {lib_rs} not found")
+              sys.exit(1)
+          if not audit_md.exists():
+              print(f"ERROR: {audit_md} not found")
+              sys.exit(1)
+
+          source = lib_rs.read_text(encoding="utf-8")
+          audit_text = audit_md.read_text(encoding="utf-8")
+
+          drift = mod.check_audit_md_entrypoint_drift(source, audit_text, audit_md)
+          if drift:
+              print("FAIL: docs/audit.md entrypoint table is out of date.")
+              print("Add the missing entrypoints to docs/audit.md and re-push.")
+              sys.exit(1)
+          print("OK: docs/audit.md entrypoint table is complete.")
+          EOF
 
   lint:
     name: Lint
