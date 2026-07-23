@@ -645,6 +645,132 @@ fn v6_pending_recipient_update_absent_on_v5_instance() {
 }
 
 // ---------------------------------------------------------------------------
+// V7-only key absence tests (discriminants 21–28)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn v7_id_reservation_absent_on_v5_instance() {
+    let ctx = Ctx::setup();
+    let addr = Address::generate(&ctx.env);
+    let cid = ctx.contract_id.clone();
+    ctx.env.as_contract(&cid, || {
+        let present = ctx
+            .env
+            .storage()
+            .persistent()
+            .has(&DataKey::IdReservation(addr.clone()));
+        assert!(
+            !present,
+            "IdReservation must be absent on a V5-seeded instance"
+        );
+    });
+}
+
+#[test]
+fn v7_max_rate_per_second_absent_on_v5_instance() {
+    let ctx = Ctx::setup();
+    let cid = ctx.contract_id.clone();
+    ctx.env.as_contract(&cid, || {
+        let present = ctx.env.storage().instance().has(&DataKey::MaxRatePerSecond);
+        assert!(
+            !present,
+            "MaxRatePerSecond must be absent on a V5-seeded instance"
+        );
+    });
+}
+
+#[test]
+fn v7_delegated_withdraw_nonce_absent_on_v5_instance() {
+    let ctx = Ctx::setup();
+    let addr = Address::generate(&ctx.env);
+    let cid = ctx.contract_id.clone();
+    ctx.env.as_contract(&cid, || {
+        let present = ctx
+            .env
+            .storage()
+            .persistent()
+            .has(&DataKey::DelegatedWithdrawNonce(addr.clone()));
+        assert!(
+            !present,
+            "DelegatedWithdrawNonce must be absent on a V5-seeded instance"
+        );
+    });
+}
+
+#[test]
+fn v7_last_pause_record_absent_on_v5_instance() {
+    let ctx = Ctx::setup();
+    let cid = ctx.contract_id.clone();
+    ctx.env.as_contract(&cid, || {
+        let present = ctx
+            .env
+            .storage()
+            .persistent()
+            .has(&DataKey::LastPauseRecord(fluxora_stream::PauseKind::Protocol));
+        assert!(
+            !present,
+            "LastPauseRecord must be absent on a V5-seeded instance"
+        );
+    });
+}
+
+#[test]
+fn v7_rotation_history_absent_on_v5_instance() {
+    let ctx = Ctx::setup();
+    let cid = ctx.contract_id.clone();
+    ctx.env.as_contract(&cid, || {
+        let present = ctx
+            .env
+            .storage()
+            .persistent()
+            .has(&DataKey::RotationHistory(0u64));
+        assert!(
+            !present,
+            "RotationHistory must be absent on a V5-seeded instance"
+        );
+    });
+}
+
+#[test]
+fn v7_last_accrual_ledger_timestamp_absent_on_v5_instance() {
+    let ctx = Ctx::setup();
+    let cid = ctx.contract_id.clone();
+    ctx.env.as_contract(&cid, || {
+        let present = ctx.env.storage().instance().has(&DataKey::LastAccrualLedgerTimestamp);
+        assert!(
+            !present,
+            "LastAccrualLedgerTimestamp must be absent on a V5-seeded instance"
+        );
+    });
+}
+
+#[test]
+fn v7_paused_stream_count_absent_on_v5_instance() {
+    let ctx = Ctx::setup();
+    let cid = ctx.contract_id.clone();
+    ctx.env.as_contract(&cid, || {
+        let present = ctx.env.storage().instance().has(&DataKey::PausedStreamCount);
+        assert!(
+            !present,
+            "PausedStreamCount must be absent on a V5-seeded instance"
+        );
+    });
+}
+
+#[test]
+fn v7_total_keeper_fees_paid_absent_on_v5_instance() {
+    let ctx = Ctx::setup();
+    let cid = ctx.contract_id.clone();
+    ctx.env.as_contract(&cid, || {
+        let present = ctx.env.storage().instance().has(&DataKey::TotalKeeperFeesPaid);
+        assert!(
+            !present,
+            "TotalKeeperFeesPaid must be absent on a V5-seeded instance"
+        );
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Discriminant stability smoke tests
 // ---------------------------------------------------------------------------
 //
