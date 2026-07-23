@@ -417,6 +417,47 @@ if current_time < cliff_time  → return 0
 else                         → return deposit_amount
 ```
 
+#### CliffOnly Accrual Worked Examples
+
+Unlike **Linear Streams** which accrue continuously over time at a rate of `rate_per_second`, a **Cliff-Only Stream** accrues its entire `deposit_amount` in one lump sum at `cliff_time`. Once the cliff is reached, the stream is fully accrued.
+
+##### Key Differences from Linear Streams:
+- **Lump Sum Vesting**: Accrual is a binary step function: `0` before the cliff, and the full `deposit_amount` at or after the cliff.
+- **Rate Ignored**: The `rate_per_second` parameter is completely ignored when computing Cliff-Only accrual. The vesting amount past the cliff is determined solely by `deposit_amount`.
+- **Clamping**: The accrued amount is capped at `deposit_amount` immediately upon reaching `cliff_time`.
+
+---
+
+##### Example 1: Prior to Cliff (`now < cliff_time`)
+
+Consider a Cliff-Only stream with the following parameters:
+- `start_time` = 10,000 (timestamp in seconds)
+- `cliff_time` = 15,000 (timestamp in seconds)
+- `end_time` = 20,000 (timestamp in seconds)
+- `deposit_amount` = 5,000 tokens
+- `rate_per_second` = 1 token/sec (ignored)
+
+If we evaluate accrual at `now` = 14,999:
+1. Compare `now` against `cliff_time`: `14,999 < 15,000`.
+2. Since `now < cliff_time`, the accrual returns exactly `0`.
+3. **Result**: `0` tokens accrued.
+
+---
+
+##### Example 2: At or After Cliff (`now >= cliff_time`)
+
+Using the same stream parameters:
+- `start_time` = 10,000
+- `cliff_time` = 15,000
+- `end_time` = 20,000
+- `deposit_amount` = 5,000 tokens
+- `rate_per_second` = 1 token/sec (ignored)
+
+If we evaluate accrual at `now` = 15,000 (exactly at the cliff) or `now` = 18,000 (midway) or `now` = 25,000 (past the end time):
+1. Compare `now` against `cliff_time`: `now >= 15,000`.
+2. Since `now >= cliff_time`, the accrual branch returns the full `deposit_amount`.
+3. **Result**: `5,000` tokens accrued. Even though `rate_per_second` is 1, and only 0 seconds or 3,000 seconds have elapsed since the cliff, the recipient has immediate entitlement to the entire 5,000 deposit.
+
 ### Rules
 
 - **Before cliff:** Returns 0 (no withdrawals allowed)

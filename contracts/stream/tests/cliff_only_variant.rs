@@ -222,3 +222,35 @@ fn test_cliff_only_cancel_after_cliff() {
     let state = ctx.client.get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Cancelled);
 }
+
+/// 6. Worked Numerical Examples from docs/streaming.md:
+/// - Example 1: now < cliff_time (t = 14,999) -> accrual is 0.
+/// - Example 2: now >= cliff_time (t = 15,000 / 18,000 / 25,000) -> accrual is full deposit (5000) regardless of rate.
+#[test]
+fn test_cliff_only_accrual_worked_examples() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let deposit = 5000_i128;
+    let start = 10_000u64;
+    let cliff = 15_000u64;
+    let end = 20_000u64;
+
+    let stream_id = ctx.create_cliff_only_stream(deposit, start, cliff, end);
+
+    // Example 1: now < cliff_time (now = 14,999)
+    ctx.env.ledger().set_timestamp(14_999);
+    assert_eq!(ctx.client.calculate_accrued(&stream_id), 0);
+
+    // Example 2a: now = cliff_time (now = 15,000)
+    ctx.env.ledger().set_timestamp(15_000);
+    assert_eq!(ctx.client.calculate_accrued(&stream_id), deposit);
+
+    // Example 2b: now midway (now = 18,000)
+    ctx.env.ledger().set_timestamp(18_000);
+    assert_eq!(ctx.client.calculate_accrued(&stream_id), deposit);
+
+    // Example 2c: now past end_time (now = 25,000)
+    ctx.env.ledger().set_timestamp(25_000);
+    assert_eq!(ctx.client.calculate_accrued(&stream_id), deposit);
+}
