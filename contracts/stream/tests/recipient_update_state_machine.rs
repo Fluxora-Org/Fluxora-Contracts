@@ -345,3 +345,65 @@ fn duplicate_proposal_rejected() {
     let result = ctx.client().try_update_recipient(&stream_id, &ctx.sender);
     assert_eq!(result, Err(Ok(ContractError::InvalidState)));
 }
+
+/// Transfer claim ownership immediately changes the claim owner without sender approval.
+#[test]
+fn transfer_claim_ownership_success() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream();
+    let new_owner = Address::generate(&ctx.env);
+
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.recipient,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "transfer_claim_ownership",
+            args: (stream_id, ctx.recipient.clone(), new_owner.clone()).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    ctx.client().transfer_claim_ownership(&stream_id, &ctx.recipient, &new_owner);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.claim_owner, Some(new_owner.clone()));
+    
+    // Now the new owner can transfer it again
+    let even_newer_owner = Address::generate(&ctx.env);
+    ctx.env.mock_auths(&[MockAuth {
+        address: &new_owner,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "transfer_claim_ownership",
+            args: (stream_id, new_owner.clone(), even_newer_owner.clone()).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    ctx.client().transfer_claim_ownership(&stream_id, &new_owner, &even_newer_owner);
+
+    let state2 = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state2.claim_owner, Some(even_newer_owner));
+}
+
+/// Attempting to transfer claim ownership by a non-owner fails.
+#[test]
+fn transfer_claim_ownership_unauthorized() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream();
+    let stranger = Address::generate(&ctx.env);
+    let new_owner = Address::generate(&ctx.env);
+
+    ctx.env.mock_auths(&[MockAuth {
+        address: &stranger,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "transfer_claim_ownership",
+            args: (stream_id, stranger.clone(), new_owner.clone()).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = ctx.client().try_transfer_claim_ownership(&stream_id, &stranger, &new_owner);
+    assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
+}

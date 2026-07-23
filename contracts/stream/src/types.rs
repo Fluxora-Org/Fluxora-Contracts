@@ -431,6 +431,15 @@ pub struct SenderTransferred {
     pub new_sender: Address,
 }
 
+/// Emitted when a stream's claim ownership is transferred.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaimOwnershipTransferred {
+    pub stream_id: u64,
+    pub old_owner: Option<Address>,
+    pub new_owner: Address,
+}
+
 /// Emitted when a stream's funding health status transitions between
 /// adequately funded and underfunded states.
 ///
@@ -585,6 +594,7 @@ pub struct Stream {
     pub stream_id: u64,
     pub sender: Address,
     pub recipient: Address,
+    pub claim_owner: Option<Address>,
     pub deposit_amount: i128,
     pub rate_per_second: i128,
     pub start_time: u64,
