@@ -245,7 +245,11 @@ fn bump_proposal(env: &Env, id: u32) {
 /// Extends the TTL of the QuorumReachedAt entry so it outlives the timelock.
 /// Called on every approve and execute to prevent archival before execution.
 fn bump_quorum_ttl(env: &Env, id: u32) {
-    if env.storage().persistent().has(&DataKey::QuorumReachedAt(id)) {
+    if env
+        .storage()
+        .persistent()
+        .has(&DataKey::QuorumReachedAt(id))
+    {
         env.storage().persistent().extend_ttl(
             &DataKey::QuorumReachedAt(id),
             PERSISTENT_LIFETIME_THRESHOLD,
@@ -398,7 +402,9 @@ impl FluxoraGovernance {
 
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Signers, &signers);
-        env.storage().instance().set(&DataKey::SignerIndex, &signer_index);
+        env.storage()
+            .instance()
+            .set(&DataKey::SignerIndex, &signer_index);
         env.storage()
             .instance()
             .set(&DataKey::Threshold, &threshold);
@@ -1516,7 +1522,10 @@ mod tests {
         // Second approval — hits threshold, quorum reached at timestamp 1_000_000.
         ctx.client.approve(&ctx.signer_b, &id);
 
-        let info = ctx.client.get_quorum_info(&id).expect("should have quorum info");
+        let info = ctx
+            .client
+            .get_quorum_info(&id)
+            .expect("should have quorum info");
         assert_eq!(info.reached_at, 1_000_000);
         assert_eq!(info.threshold, 2);
     }
@@ -1531,12 +1540,18 @@ mod tests {
         ctx.client.approve(&ctx.signer_a, &id);
         ctx.client.approve(&ctx.signer_b, &id);
 
-        let info = ctx.client.get_quorum_info(&id).expect("should have quorum info");
+        let info = ctx
+            .client
+            .get_quorum_info(&id)
+            .expect("should have quorum info");
         assert_eq!(info.threshold, 2);
 
         // Remove signer_c — threshold stays 2, snapshot should still be 2.
         ctx.client.remove_signer(&ctx.signer_c);
-        let info = ctx.client.get_quorum_info(&id).expect("should still have quorum info");
+        let info = ctx
+            .client
+            .get_quorum_info(&id)
+            .expect("should still have quorum info");
         assert_eq!(info.threshold, 2);
     }
 
@@ -1559,7 +1574,10 @@ mod tests {
         let executor = Address::generate(&ctx.env);
         ctx.client.execute(&executor, &id);
         // QuorumInfo should still exist (execution does not delete it).
-        let info = ctx.client.get_quorum_info(&id).expect("should still have quorum info after execute");
+        let info = ctx
+            .client
+            .get_quorum_info(&id)
+            .expect("should still have quorum info after execute");
         assert_eq!(info.reached_at, 1_000_000);
         assert_eq!(info.threshold, 2);
     }
@@ -1785,7 +1803,9 @@ mod tests {
             .propose(&ctx.signer_a, &ctx.dummy_target(), &ctx.calldata("z"));
         ctx.client.approve(&ctx.signer_a, &id3);
         ctx.client.approve(&ctx.signer_b, &id3);
-        ctx.env.ledger().set_timestamp(1_000_000 + MAX_AGE + TIMELOCK + 100);
+        ctx.env
+            .ledger()
+            .set_timestamp(1_000_000 + MAX_AGE + TIMELOCK + 100);
         assert_eq!(ctx.client.is_executable(&id3), false);
         assert_eq!(
             ctx.client.try_execute(&executor, &id3),

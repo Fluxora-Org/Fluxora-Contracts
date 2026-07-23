@@ -44,8 +44,9 @@ Notes:
 | AutoClaimRevoked | `["ac_revoke", stream_id: u64]` | `AutoClaimRevoked { stream_id: u64 }` | When a recipient revokes auto-claim configuration via `revoke_auto_claim`. |
 | AutoClaimTriggered | `["ac_trig", stream_id: u64]` | `AutoClaimTriggered { stream_id: u64, destination: Address, amount: i128 }` | When a third party successfully executes a configured final claim via `trigger_auto_claim`. |
 | MigrationCheckpoint | `["migrated"]` | `(from_version: u32, to_version: u32, timestamp: u64)` | When `migration_v5_to_v6` is called as an auditable deployment checkpoint. |
+| ReservationReleased | `["res_rel", holder: Address]` | `(start_id: u64, count: u32, consumed: u32, reclaimed: u32)` | When `release_id_reservation` or `reclaim_expired_id_reservation` removes a caller's ID reservation. `reclaimed` is the number of unconsumed IDs returned to the counter (non-zero only when the reservation was at the tail of the counter). |
 
-**Additional topics (validator):** `cloned`, `kp_cncl`, `gl_pause`, `gl_resume`, `rate_dec`, `tmpl_def`, `hlth_chg`, `ex_swept`, `ac_set`, `ac_revoke`, `ac_trig`, `migrated`.
+**Additional topics (validator):** `cloned`, `kp_cncl`, `gl_pause`, `gl_resume`, `rate_dec`, `tmpl_def`, `hlth_chg`, `ex_swept`, `ac_set`, `ac_revoke`, `ac_trig`, `migrated`, `res_rel`.
 
 ---
 | Event name | Topic(s) | Data (shape & types) | When emitted |

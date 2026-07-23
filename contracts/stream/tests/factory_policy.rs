@@ -375,7 +375,6 @@ fn test_create_stream_recipient_not_allowlisted() {
     assert_eq!(result, Err(Ok(FactoryError::RecipientNotAllowlisted)));
 }
 
-
 #[test]
 fn test_create_stream_supports_cliff_only_and_memo() {
     let ctx = Ctx::setup();
@@ -442,8 +441,14 @@ fn test_create_streams_batch_allows_all_valid_entries_atomically() {
 
     let ids = result.unwrap();
     assert_eq!(ids.len(), 2);
-    assert_eq!(ctx.stream.get_stream_memo(&ids.get_unchecked(0)).unwrap(), Some(Bytes::from_slice(&ctx.env, b"batch-1")));
-    assert_eq!(ctx.stream.get_stream_memo(&ids.get_unchecked(1)).unwrap(), Some(Bytes::from_slice(&ctx.env, b"batch-2")));
+    assert_eq!(
+        ctx.stream.get_stream_memo(&ids.get_unchecked(0)).unwrap(),
+        Some(Bytes::from_slice(&ctx.env, b"batch-1"))
+    );
+    assert_eq!(
+        ctx.stream.get_stream_memo(&ids.get_unchecked(1)).unwrap(),
+        Some(Bytes::from_slice(&ctx.env, b"batch-2"))
+    );
 }
 
 #[test]
@@ -675,9 +680,18 @@ fn test_create_stream_rejects_end_equal_start() {
     ctx.factory.set_allowlist(&recipient, &true);
     let now = ctx.now();
 
-    let result =
-        ctx.factory
-            .try_create_stream(&ctx.sender, &recipient, &1_000, &1, &now, &now, &now, &0, &None, &StreamKind::Linear);
+    let result = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &1_000,
+        &1,
+        &now,
+        &now,
+        &now,
+        &0,
+        &None,
+        &StreamKind::Linear,
+    );
     assert_eq!(result, Err(Ok(FactoryError::InvalidTimeRange)));
 }
 
@@ -911,3 +925,4 @@ fn test_set_allowlist_remove_enforced() {
         &StreamKind::Linear,
     );
     assert_eq!(result, Err(Ok(FactoryError::RecipientNotAllowlisted)));
+}

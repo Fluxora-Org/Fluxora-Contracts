@@ -718,6 +718,16 @@ contract.create_streams_relative(&sender, &params)?;
 | `get_auto_claim_destination` | Anyone                     | None (view)                                 |
 | `delegated_withdraw`         | Relayer (ed25519 sig from recipient) | `relayer.require_auth()` + ed25519 sig |
 | `get_delegated_nonce`        | Anyone                     | None (view)                                 |
+| `release_id_reservation`     | Caller                     | `caller.require_auth()`                     |
+| `reclaim_expired_id_reservation` | Anyone               | None (permissionless after reservation expiry) |
+| `close_cancelled_stream`     | Anyone                     | None (permissionless terminal cleanup)      |
+| `get_protocol_fees_accrued`  | Anyone                     | None (view)                                 |
+| `get_paused_stream_count`    | Anyone                     | None (view)                                 |
+| `release_id_reservation`     | Caller                     | `caller.require_auth()`                     |
+| `reclaim_expired_id_reservation` | Anyone               | None (permissionless after reservation expiry) |
+| `close_cancelled_stream`     | Anyone                     | None (permissionless terminal cleanup)      |
+| `get_protocol_fees_accrued`  | Anyone                     | None (view)                                 |
+| `get_paused_stream_count`    | Anyone                     | None (view)                                 |
 
 **Note:** Sender-managed functions (`pause_stream`, `resume_stream`, `cancel_stream`) require sender auth. Admin uses separate `_as_admin` entry points.
 

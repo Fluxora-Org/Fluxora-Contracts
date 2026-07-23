@@ -37,6 +37,14 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `TemplateUnauthorized` | 22 | Caller is not authorized to delete a template | `delete_stream_template` |
 | `TokenVerificationFailed` | 23 | Token contract does not expose the expected SEP-41 interface during init | `init` |
 | `PauseReasonTooLong` | 23 | Pause reason string exceeds `MAX_PAUSE_REASON_BYTES` | `pause_protocol` |
+| `ReservationNotFound` | 24 | No active ID reservation exists for the specified holder | `reclaim_expired_id_reservation` |
+| `ReservationNotExpirable` | 25 | Reservation has no expiry TTL and cannot be force-reclaimed | `reclaim_expired_id_reservation` |
+| `ReservationStillActive` | 26 | Reservation has not yet expired; reclaim not permitted | `reclaim_expired_id_reservation` |
+| `MetadataTooLarge` | 29 | Stream metadata exceeds per-key, per-value, aggregate-bytes, or key-count limits | `create_stream`, `create_streams`, `create_streams_partial` |
+| `RateCapExceeded` | 31 | Requested rate exceeds the governance-controlled `max_rate_per_second` cap | `update_rate_per_second`, `update_rate`, `create_stream` |
+| `PauseCooldownActive` | 32 | Pause/resume toggled before `MIN_PAUSE_INTERVAL_LEDGERS` have elapsed since last toggle | `pause_stream`, `resume_stream`, `pause_stream_as_admin`, `resume_stream_as_admin` |
+| `WithdrawalTooFrequent` | 33 | Withdrawal attempted before `MIN_WITHDRAW_INTERVAL_LEDGERS` have elapsed since last withdrawal | `withdraw`, `withdraw_to`, `batch_withdraw`, `delegated_withdraw` |
+| `KeeperGracePeriodNotElapsed` | 34 | Keeper attempted to cancel a stream before the keeper grace period has elapsed | `keeper_cancel` |
 
 Non-error enum values used by stream creation and accrual:
 

@@ -64,6 +64,8 @@ ENTRYPOINT_ALLOWLIST = frozenset({
     "save_stream",
     "require_not_paused",
     "require_not_globally_paused",
+    # Kani formal-proof harness helper — not a contract ABI entrypoint.
+    "compute_keeper_fee_split",
 })
 
 # `#[contracterror]`-shaped variants that belong to other enums in the same file.

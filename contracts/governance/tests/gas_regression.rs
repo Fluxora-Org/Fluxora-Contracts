@@ -1,5 +1,8 @@
 use fluxora_governance::{FluxoraGovernance, FluxoraGovernanceClient};
-use soroban_sdk::{testutils::{Address as _, Ledger}, vec, Address, Bytes, Env, Vec};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger},
+    vec, Address, Bytes, Env, Vec,
+};
 
 struct GovGasCtx<'a> {
     env: Env,
@@ -57,7 +60,8 @@ fn test_governance_gas_propose() {
         let threshold = if size == 1 { 1 } else { size };
         let ctx = GovGasCtx::setup(size, threshold);
         let (cpu, mem) = measure_budget(&ctx, |ctx| {
-            ctx.client.propose(&ctx.signers[0], &ctx.target, &ctx.calldata("proposal"));
+            ctx.client
+                .propose(&ctx.signers[0], &ctx.target, &ctx.calldata("proposal"));
         });
 
         println!("GAS_MEASUREMENT: propose: {}: {}", size, cpu);
@@ -74,7 +78,9 @@ fn test_governance_gas_approve_nonquorum() {
     for &size in &sizes {
         let threshold = size;
         let ctx = GovGasCtx::setup(size, threshold);
-        let proposal_id = ctx.client.propose(&ctx.signers[0], &ctx.target, &ctx.calldata("proposal"));
+        let proposal_id =
+            ctx.client
+                .propose(&ctx.signers[0], &ctx.target, &ctx.calldata("proposal"));
 
         let (cpu, mem) = measure_budget(&ctx, |ctx| {
             ctx.client.approve(&ctx.signers[1], &proposal_id);
@@ -83,8 +89,16 @@ fn test_governance_gas_approve_nonquorum() {
         println!("GAS_MEASUREMENT: approve_nonquorum: {}: {}", size, cpu);
         println!("GAS_MEASUREMENT: approve_nonquorum_mem: {}: {}", size, mem);
 
-        assert!(cpu < 1_300_000, "approve_nonquorum {} exceeded CPU ceiling", size);
-        assert!(mem < 150_000, "approve_nonquorum {} exceeded memory ceiling", size);
+        assert!(
+            cpu < 1_300_000,
+            "approve_nonquorum {} exceeded CPU ceiling",
+            size
+        );
+        assert!(
+            mem < 150_000,
+            "approve_nonquorum {} exceeded memory ceiling",
+            size
+        );
     }
 }
 
@@ -94,10 +108,13 @@ fn test_governance_gas_approve_quorum() {
     for &size in &sizes {
         let threshold = size;
         let ctx = GovGasCtx::setup(size, threshold);
-        let proposal_id = ctx.client.propose(&ctx.signers[0], &ctx.target, &ctx.calldata("proposal"));
+        let proposal_id =
+            ctx.client
+                .propose(&ctx.signers[0], &ctx.target, &ctx.calldata("proposal"));
 
         for signer in 0..(size - 1) {
-            ctx.client.approve(&ctx.signers[signer as usize], &proposal_id);
+            ctx.client
+                .approve(&ctx.signers[signer as usize], &proposal_id);
         }
 
         let last_signer = ctx.signers[(size - 1) as usize].clone();
@@ -109,8 +126,16 @@ fn test_governance_gas_approve_quorum() {
         println!("GAS_MEASUREMENT: approve_quorum: {}: {}", size, cpu);
         println!("GAS_MEASUREMENT: approve_quorum_mem: {}: {}", size, mem);
 
-        assert!(cpu < 1_600_000, "approve_quorum {} exceeded CPU ceiling", size);
-        assert!(mem < 180_000, "approve_quorum {} exceeded memory ceiling", size);
+        assert!(
+            cpu < 1_600_000,
+            "approve_quorum {} exceeded CPU ceiling",
+            size
+        );
+        assert!(
+            mem < 180_000,
+            "approve_quorum {} exceeded memory ceiling",
+            size
+        );
     }
 }
 
@@ -120,15 +145,19 @@ fn test_governance_gas_execute() {
     for &size in &sizes {
         let threshold = size;
         let ctx = GovGasCtx::setup(size, threshold);
-        let proposal_id = ctx.client.propose(&ctx.signers[0], &ctx.target, &ctx.calldata("proposal"));
+        let proposal_id =
+            ctx.client
+                .propose(&ctx.signers[0], &ctx.target, &ctx.calldata("proposal"));
 
         for signer in 0..size {
-            ctx.client.approve(&ctx.signers[signer as usize], &proposal_id);
+            ctx.client
+                .approve(&ctx.signers[signer as usize], &proposal_id);
         }
 
         ctx.env.ledger().set_timestamp(1_000_000 + 172_800 + 1);
         let (cpu, mem) = measure_budget(&ctx, |ctx| {
-            ctx.client.execute(&Address::generate(&ctx.env), &proposal_id);
+            ctx.client
+                .execute(&Address::generate(&ctx.env), &proposal_id);
         });
 
         println!("GAS_MEASUREMENT: execute: {}: {}", size, cpu);

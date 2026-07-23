@@ -466,7 +466,15 @@ fn clone_sender_authorized_strict() {
 
     env.ledger().set_timestamp(0);
     let source_id = client.create_stream(
-        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &0, &None,
+        &sender,
+        &recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+        &0,
+        &None,
         &StreamKind::Linear,
     );
 
@@ -517,7 +525,15 @@ fn clone_recipient_unauthorized() {
 
     env.ledger().set_timestamp(0);
     let source_id = client.create_stream(
-        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &0, &None,
+        &sender,
+        &recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+        &0,
+        &None,
         &StreamKind::Linear,
     );
 
@@ -565,7 +581,15 @@ fn clone_third_party_unauthorized() {
 
     env.ledger().set_timestamp(0);
     let source_id = client.create_stream(
-        &sender, &recipient, &1000_i128, &1_i128, &0u64, &0u64, &1000u64, &0, &None,
+        &sender,
+        &recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+        &0,
+        &None,
         &StreamKind::Linear,
     );
 
@@ -2171,7 +2195,7 @@ fn clone_override_cliff_offset_overflow_rejected() {
         &source_id,
         &ctx.recipient,
         &overflow_start,
-        &u64::MAX,    // end_time, irrelevant if cliff overflows first
+        &u64::MAX, // end_time, irrelevant if cliff overflows first
         &1000_i128,
         &false,
     );
