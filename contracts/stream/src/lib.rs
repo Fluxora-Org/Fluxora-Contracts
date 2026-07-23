@@ -185,7 +185,15 @@ const MIN_PAUSE_INTERVAL_LEDGERS: u32 = 17;
 /// resume/cancel/complete transitions; `get_paused_stream_count()` O(1) view added;
 /// duplicate `ContractError` discriminant 23 resolved and the previously-missing
 /// variants declared.
-pub const CONTRACT_VERSION: u32 = 6;
+///
+/// Bumped to 7: Two-phase offer-then-accept stream creation flow added.
+/// New entry points: `create_stream_offer`, `accept_stream_offer`,
+/// `reject_stream_offer`, `cancel_stream_offer`, `get_stream_offer`,
+/// `get_recipient_pending_offers`. New `StreamOffer` struct, new
+/// `DataKey::PendingStreamOffer` / `DataKey::RecipientPendingOffers` variants,
+/// new `ContractError` variants `OfferNotFound`, `OfferExpired`,
+/// `OfferWrongRecipient`, `OfferWrongSender`.
+pub const CONTRACT_VERSION: u32 = 7;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -413,6 +421,14 @@ pub enum ContractError {
     KeeperGracePeriodNotElapsed = 34,
     /// Withdraw dust threshold is negative or exceeds deposit amount.
     InvalidDustThreshold = 35,
+    /// Stream offer not found (accepted, rejected, cancelled, or never existed).
+    OfferNotFound = 36,
+    /// Stream offer has expired (`current_time > offer.expiry_time`).
+    OfferExpired = 37,
+    /// Caller is not the intended recipient of this offer.
+    OfferWrongRecipient = 38,
+    /// Caller is not the sender who created this offer.
+    OfferWrongSender = 39,
 }
 
 #[contracttype]
@@ -660,6 +676,107 @@ pub struct KeeperCancelled {
     pub keeper_fee: i128,
     pub recipient_amount: i128,
     pub sender_refund: i128,
+}
+
+// ---------------------------------------------------------------------------
+// Offer-then-accept types (two-phase stream creation)
+// ---------------------------------------------------------------------------
+
+/// A pending stream offer awaiting recipient acceptance.
+///
+/// Created by `create_stream_offer`. The deposit is held in escrow by the
+/// contract until the recipient accepts, rejects, or the sender cancels.
+/// No accrual occurs and no `RecipientStreams` index entry is created until
+/// `accept_stream_offer` is called.
+///
+/// # Lifecycle
+/// ```text
+/// create_stream_offer → [PendingStreamOffer stored, deposit escrowed]
+///     ↓ recipient calls accept_stream_offer
+///     → offer removed, Active Stream created, RecipientStreams updated
+///     ↓ recipient calls reject_stream_offer
+///     → offer removed, deposit refunded to sender
+///     ↓ sender calls cancel_stream_offer
+///     → offer removed, deposit refunded to sender
+///     ↓ expiry_time elapsed (checked on accept)
+///     → accept returns OfferExpired; sender can still cancel
+/// ```
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct StreamOffer {
+    /// Offer ID (equals the pre-allocated stream ID from the counter).
+    pub offer_id: u64,
+    /// The address that funded this offer and will be the stream sender upon acceptance.
+    pub sender: Address,
+    /// The intended recipient — only this address can accept or reject.
+    pub recipient: Address,
+    /// Total deposit amount escrowed for this offer.
+    pub deposit_amount: i128,
+    /// Streaming rate in tokens per second (0 for `CliffOnly` streams).
+    pub rate_per_second: i128,
+    /// Requested stream start time (absolute ledger timestamp).
+    /// Re-anchored to `max(start_time, ledger.timestamp())` on acceptance so
+    /// the stream never starts in the past.
+    pub start_time: u64,
+    /// Requested cliff time (absolute ledger timestamp).
+    /// Shifted proportionally when `start_time` is re-anchored.
+    pub cliff_time: u64,
+    /// Requested stream end time (absolute ledger timestamp).
+    /// Duration is preserved relative to the re-anchored start time.
+    pub end_time: u64,
+    /// Optional withdrawal dust threshold (raw units).
+    pub withdraw_dust_threshold: i128,
+    /// Optional bounded memo for indexer correlation.
+    pub memo: Option<soroban_sdk::Bytes>,
+    /// Stream architectural style (Linear or CliffOnly).
+    pub kind: StreamKind,
+    /// Optional structured metadata for indexer consumption.
+    pub metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
+    /// Optional absolute timestamp after which `accept_stream_offer` returns
+    /// `OfferExpired`. `None` means the offer never expires automatically.
+    /// The sender may still call `cancel_stream_offer` at any time.
+    pub expiry_time: Option<u64>,
+    /// Ledger timestamp when this offer was created.
+    pub created_at: u64,
+}
+
+/// Emitted when a stream offer is created via `create_stream_offer`.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct StreamOfferCreated {
+    pub offer_id: u64,
+    pub sender: Address,
+    pub recipient: Address,
+    pub deposit_amount: i128,
+    pub rate_per_second: i128,
+    pub start_time: u64,
+    pub cliff_time: u64,
+    pub end_time: u64,
+    /// `None` means no expiry.
+    pub expiry_time: Option<u64>,
+    pub created_at: u64,
+}
+
+/// Emitted when a recipient accepts an offer via `accept_stream_offer`.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct StreamOfferAccepted {
+    /// Offer ID (equals stream ID).
+    pub offer_id: u64,
+    /// Effective start time after re-anchoring (`max(offer.start_time, now)`).
+    pub effective_start_time: u64,
+    pub recipient: Address,
+}
+
+/// Emitted when an offer is rejected by the recipient or cancelled by the sender.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct StreamOfferCancelled {
+    pub offer_id: u64,
+    /// Address that cancelled/rejected the offer (`recipient` or `sender`).
+    pub by: Address,
+    /// Amount refunded to the sender.
+    pub refund_amount: i128,
 }
 
 /// Emitted when a recipient sets an auto-claim destination.
@@ -994,6 +1111,14 @@ pub enum DataKey {
     ///
     /// Added in issue #623. Appended at the end to preserve existing discriminants.
     TotalKeeperFeesPaid,
+    /// Pending stream offer awaiting recipient acceptance (persistent).
+    /// Keyed by offer_id, which reuses the global stream ID counter.
+    /// Absent once the offer is accepted, rejected, or cancelled.
+    PendingStreamOffer(u64),
+    /// Sorted list of pending offer IDs for a specific recipient (persistent `Vec<u64>`).
+    /// Populated on `create_stream_offer`, removed on accept/reject/cancel.
+    /// Not updated when an offer is cancelled by the sender (sender index maintained separately).
+    RecipientPendingOffers(Address),
 }
 
 // ---------------------------------------------------------------------------
@@ -1554,6 +1679,92 @@ fn remove_template_id_for_owner(
             Ok(())
         }
         Err(_) => Err(ContractError::TemplateNotFound),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stream offer storage helpers (two-phase offer-then-accept flow)
+// ---------------------------------------------------------------------------
+
+/// Persist a `StreamOffer` in storage. Uses `PERSISTENT_BUMP_AMOUNT` TTL since
+/// offers have no `end_time` to drive adaptive bumping.
+fn save_stream_offer(env: &Env, offer: &StreamOffer) {
+    let key = DataKey::PendingStreamOffer(offer.offer_id);
+    env.storage().persistent().set(&key, offer);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+}
+
+/// Load a `StreamOffer` by offer ID, bumping its TTL on read.
+///
+/// Returns `ContractError::OfferNotFound` if no offer exists under this ID.
+fn load_stream_offer(env: &Env, offer_id: u64) -> Result<StreamOffer, ContractError> {
+    let key = DataKey::PendingStreamOffer(offer_id);
+    let offer: StreamOffer = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .ok_or(ContractError::OfferNotFound)?;
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+    Ok(offer)
+}
+
+/// Remove a `StreamOffer` from storage (called on accept / reject / cancel).
+fn remove_stream_offer(env: &Env, offer_id: u64) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::PendingStreamOffer(offer_id));
+}
+
+/// Load the sorted list of pending offer IDs for a recipient.
+fn load_recipient_pending_offers(env: &Env, recipient: &Address) -> soroban_sdk::Vec<u64> {
+    let key = DataKey::RecipientPendingOffers(recipient.clone());
+    let offers: soroban_sdk::Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+    if !offers.is_empty() {
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+    offers
+}
+
+/// Save the sorted list of pending offer IDs for a recipient.
+fn save_recipient_pending_offers(env: &Env, recipient: &Address, offers: &soroban_sdk::Vec<u64>) {
+    let key = DataKey::RecipientPendingOffers(recipient.clone());
+    env.storage().persistent().set(&key, offers);
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+}
+
+/// Add an offer ID to a recipient's pending-offers index (maintains sorted order).
+fn add_offer_to_recipient_pending(env: &Env, recipient: &Address, offer_id: u64) {
+    let mut offers = load_recipient_pending_offers(env, recipient);
+    let insert_pos = match offers.binary_search(offer_id) {
+        Ok(pos) => pos,
+        Err(pos) => pos,
+    };
+    offers.insert(insert_pos, offer_id);
+    save_recipient_pending_offers(env, recipient, &offers);
+}
+
+/// Remove an offer ID from a recipient's pending-offers index.
+fn remove_offer_from_recipient_pending(env: &Env, recipient: &Address, offer_id: u64) {
+    let mut offers = load_recipient_pending_offers(env, recipient);
+    if let Ok(idx) = offers.binary_search(offer_id) {
+        offers.remove(idx);
+        save_recipient_pending_offers(env, recipient, &offers);
     }
 }
 
@@ -7099,6 +7310,453 @@ impl FluxoraStream {
         }
 
         Ok(())
+    }
+
+    // =========================================================================
+    // Two-phase offer-then-accept stream creation
+    // =========================================================================
+
+    /// Create a pending stream offer and escrow the deposit.
+    ///
+    /// Unlike `create_stream`, this entry point does **not** start accrual
+    /// immediately. The deposit is pulled from the sender and held in escrow.
+    /// No `RecipientStreams` index entry is created. The intended recipient must
+    /// call `accept_stream_offer` to activate the stream, or the sender may call
+    /// `cancel_stream_offer` at any time to reclaim the deposit.
+    ///
+    /// # Authorization
+    /// - `sender.require_auth()`
+    ///
+    /// # Parameters
+    /// - `sender`: Address funding the offer (deposit pulled immediately).
+    /// - `recipient`: Address of the intended stream recipient.
+    /// - `deposit_amount`: Total tokens to deposit (same rules as `create_stream`).
+    /// - `rate_per_second`: Streaming rate (0 for `CliffOnly` streams).
+    /// - `start_time`: Requested stream start (absolute timestamp). Re-anchored
+    ///   to `max(start_time, acceptance_timestamp)` when accepted.
+    /// - `cliff_time`: Requested cliff time. Shifted proportionally on acceptance.
+    /// - `end_time`: Requested stream end. Duration is preserved on acceptance.
+    /// - `withdraw_dust_threshold`: Minimum withdrawal amount (same rules as `create_stream`).
+    /// - `memo`: Optional bounded memo (max `MAX_MEMO_BYTES` bytes).
+    /// - `kind`: `Linear` or `CliffOnly`.
+    /// - `metadata`: Optional metadata map (same size limits as `create_stream`).
+    /// - `expiry_time`: Optional expiry. If `Some(t)` and `t <= now`, creation
+    ///   fails with `InvalidParams`. After expiry, `accept_stream_offer` returns
+    ///   `OfferExpired`; the sender can still call `cancel_stream_offer`.
+    ///
+    /// # Returns
+    /// The `offer_id` (pre-allocated stream ID) that uniquely identifies this offer.
+    ///
+    /// # Errors
+    /// - `ContractPaused` (4): Stream creation is globally halted.
+    /// - `InvalidParams` (3): Any parameter fails validation (same as `create_stream`),
+    ///   or `expiry_time` is already in the past.
+    /// - `StartTimeInPast` (5): `start_time < current ledger timestamp`.
+    /// - `InvalidDustThreshold` (35): Dust threshold out of range.
+    /// - All other `create_stream` validation errors apply.
+    ///
+    /// # Security
+    /// - CEI order: validate → allocate ID → store offer → update index → pull tokens → emit event.
+    /// - Deposit is fully escrowed; no partial-fill risk.
+    /// - Offer ID is taken from the same global counter as stream IDs, ensuring
+    ///   globally unique identifiers with no collision with active streams.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_stream_offer(
+        env: Env,
+        sender: Address,
+        recipient: Address,
+        deposit_amount: i128,
+        rate_per_second: i128,
+        start_time: u64,
+        cliff_time: u64,
+        end_time: u64,
+        withdraw_dust_threshold: i128,
+        memo: Option<soroban_sdk::Bytes>,
+        kind: StreamKind,
+        metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
+        expiry_time: Option<u64>,
+    ) -> Result<u64, ContractError> {
+        sender.require_auth();
+        require_not_creation_paused(&env)?;
+
+        let now = env.ledger().timestamp();
+
+        // Validate expiry is in the future if provided.
+        if let Some(expiry) = expiry_time {
+            if expiry <= now {
+                return Err(ContractError::InvalidParams);
+            }
+        }
+
+        // For CliffOnly, rate must be 0.
+        let final_rate = if kind == StreamKind::CliffOnly {
+            0
+        } else {
+            rate_per_second
+        };
+
+        // Reuse stream parameter validation (same rules as create_stream).
+        Self::validate_stream_params(
+            &env,
+            &sender,
+            &recipient,
+            deposit_amount,
+            final_rate,
+            now,
+            start_time,
+            cliff_time,
+            end_time,
+            kind,
+        )?;
+
+        // Validate memo length.
+        if let Some(ref m) = memo {
+            if m.len() as usize > MAX_MEMO_BYTES {
+                return Err(ContractError::InvalidParams);
+            }
+        }
+
+        // Validate dust threshold.
+        if withdraw_dust_threshold < 0 {
+            return Err(ContractError::InvalidDustThreshold);
+        }
+        if withdraw_dust_threshold > deposit_amount {
+            return Err(ContractError::InvalidDustThreshold);
+        }
+
+        // Validate metadata if present.
+        if let Some(ref meta) = metadata {
+            storage::validate_metadata(meta)?;
+        }
+
+        // ── CEI: state changes before token transfer ──────────────────────────
+
+        // Allocate offer ID from the global stream counter.
+        let offer_id = next_stream_id_for(&env, &sender);
+
+        let offer = StreamOffer {
+            offer_id,
+            sender: sender.clone(),
+            recipient: recipient.clone(),
+            deposit_amount,
+            rate_per_second: final_rate,
+            start_time,
+            cliff_time,
+            end_time,
+            withdraw_dust_threshold,
+            memo: memo.clone(),
+            kind,
+            metadata: metadata.clone(),
+            expiry_time,
+            created_at: now,
+        };
+
+        // Persist offer and update recipient index BEFORE pulling tokens.
+        save_stream_offer(&env, &offer);
+        add_offer_to_recipient_pending(&env, &recipient, offer_id);
+
+        // ── CEI: token transfer ───────────────────────────────────────────────
+        pull_token(&env, &sender, deposit_amount)?;
+
+        // ── Emit event ────────────────────────────────────────────────────────
+        env.events().publish(
+            (symbol_short!("offr_crt"), offer_id),
+            StreamOfferCreated {
+                offer_id,
+                sender,
+                recipient,
+                deposit_amount,
+                rate_per_second: final_rate,
+                start_time,
+                cliff_time,
+                end_time,
+                expiry_time,
+                created_at: now,
+            },
+        );
+
+        Ok(offer_id)
+    }
+
+    /// Accept a pending stream offer and activate it as a live stream.
+    ///
+    /// Only the intended recipient (stored in the offer) may call this function.
+    /// The stream's `start_time` is re-anchored to `max(offer.start_time, now)` so
+    /// the stream never starts in the past. The cliff and duration offsets are
+    /// preserved relative to the (potentially advanced) start time.
+    ///
+    /// # Authorization
+    /// - `recipient.require_auth()`
+    ///
+    /// # Parameters
+    /// - `recipient`: Must match `offer.recipient`.
+    /// - `offer_id`: ID returned by `create_stream_offer`.
+    ///
+    /// # Returns
+    /// The stream ID (equals `offer_id`).
+    ///
+    /// # Errors
+    /// - `OfferNotFound` (36): No pending offer with this ID.
+    /// - `OfferExpired` (37): `expiry_time` is set and the current time has passed it.
+    /// - `OfferWrongRecipient` (38): `recipient` does not match `offer.recipient`.
+    /// - `InvalidParams` (3): Re-anchored timing produces an invalid schedule.
+    ///
+    /// # Security
+    /// - CEI order: load + validate → remove offer → remove from index → create stream
+    ///   → track liabilities → emit events. No token movement on accept (deposit already escrowed).
+    /// - The offer is removed from storage **before** creating the stream to prevent
+    ///   double-acceptance if the token contract re-enters.
+    pub fn accept_stream_offer(
+        env: Env,
+        recipient: Address,
+        offer_id: u64,
+    ) -> Result<u64, ContractError> {
+        recipient.require_auth();
+        require_not_globally_paused(&env)?;
+
+        let now = env.ledger().timestamp();
+
+        // ── Validate ──────────────────────────────────────────────────────────
+        let offer = load_stream_offer(&env, offer_id)?;
+
+        if offer.recipient != recipient {
+            return Err(ContractError::OfferWrongRecipient);
+        }
+
+        // Check expiry.
+        if let Some(expiry) = offer.expiry_time {
+            if now > expiry {
+                return Err(ContractError::OfferExpired);
+            }
+        }
+
+        // Re-anchor start_time so the stream never starts in the past.
+        let effective_start = offer.start_time.max(now);
+
+        // Preserve cliff offset: cliff_offset = cliff_time - start_time.
+        let cliff_offset = offer.cliff_time.saturating_sub(offer.start_time);
+        let effective_cliff = effective_start
+            .checked_add(cliff_offset)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+
+        // Preserve duration: duration = end_time - start_time.
+        let duration = offer.end_time.saturating_sub(offer.start_time);
+        let effective_end = effective_start
+            .checked_add(duration)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+
+        // Re-validate the adjusted schedule (cliff and end must still be consistent).
+        if effective_start >= effective_end {
+            return Err(ContractError::InvalidParams);
+        }
+        if effective_cliff > effective_end {
+            return Err(ContractError::InvalidParams);
+        }
+
+        // For Linear streams: re-validate deposit covers the preserved duration.
+        if offer.kind == StreamKind::Linear {
+            let total_streamable = offer
+                .rate_per_second
+                .checked_mul(duration as i128)
+                .ok_or(ContractError::ArithmeticOverflow)?;
+            if offer.deposit_amount < total_streamable {
+                return Err(ContractError::InsufficientDeposit);
+            }
+        }
+
+        // ── CEI: state changes (remove offer, create stream, update indices) ──
+
+        // Remove offer from storage and recipient's pending index FIRST.
+        remove_stream_offer(&env, offer_id);
+        remove_offer_from_recipient_pending(&env, &offer.recipient, offer_id);
+
+        // Construct and persist the Active stream (reusing the pre-allocated ID).
+        let stream = Stream {
+            stream_id: offer_id,
+            sender: offer.sender.clone(),
+            recipient: offer.recipient.clone(),
+            deposit_amount: offer.deposit_amount,
+            rate_per_second: offer.rate_per_second,
+            start_time: effective_start,
+            cliff_time: effective_cliff,
+            end_time: effective_end,
+            withdrawn_amount: 0,
+            status: StreamStatus::Active,
+            cancelled_at: None,
+            checkpointed_amount: 0,
+            checkpointed_at: effective_start,
+            withdraw_dust_threshold: offer.withdraw_dust_threshold,
+            memo: offer.memo.clone(),
+            kind: offer.kind,
+            last_pause_toggle_ledger: 0,
+            last_withdraw_ledger: 0,
+            metadata: offer.metadata.clone(),
+        };
+
+        save_stream(&env, &stream);
+
+        // Add to RecipientStreams index (the offer was intentionally excluded from it).
+        add_stream_to_recipient_index(&env, &offer.recipient, offer_id, Some(effective_end));
+
+        // Track liability: the full deposit is now owed to the recipient.
+        let liabilities = read_total_liabilities(&env)
+            .checked_add(offer.deposit_amount)
+            .unwrap_or(i128::MAX);
+        write_total_liabilities(&env, liabilities);
+
+        // ── Emit events ───────────────────────────────────────────────────────
+        env.events().publish(
+            (symbol_short!("created"), offer_id),
+            StreamCreated {
+                stream_id: offer_id,
+                sender: offer.sender.clone(),
+                recipient: offer.recipient.clone(),
+                deposit_amount: offer.deposit_amount,
+                rate_per_second: offer.rate_per_second,
+                start_time: effective_start,
+                cliff_time: effective_cliff,
+                end_time: effective_end,
+                withdraw_dust_threshold: offer.withdraw_dust_threshold,
+                memo: offer.memo,
+                metadata: offer.metadata,
+            },
+        );
+
+        env.events().publish(
+            (symbol_short!("offr_acc"), offer_id),
+            StreamOfferAccepted {
+                offer_id,
+                effective_start_time: effective_start,
+                recipient: offer.recipient,
+            },
+        );
+
+        Ok(offer_id)
+    }
+
+    /// Reject a pending stream offer (recipient-initiated).
+    ///
+    /// The caller must be the intended recipient of the offer. The offer is
+    /// removed and the escrowed deposit is refunded to the original sender.
+    ///
+    /// # Authorization
+    /// - `recipient.require_auth()`
+    ///
+    /// # Errors
+    /// - `OfferNotFound` (36): No pending offer with this ID.
+    /// - `OfferWrongRecipient` (38): Caller is not the intended recipient.
+    ///
+    /// # Security
+    /// - CEI order: load + validate → remove offer → remove from index → push token refund → emit event.
+    pub fn reject_stream_offer(
+        env: Env,
+        recipient: Address,
+        offer_id: u64,
+    ) -> Result<(), ContractError> {
+        recipient.require_auth();
+
+        let offer = load_stream_offer(&env, offer_id)?;
+
+        if offer.recipient != recipient {
+            return Err(ContractError::OfferWrongRecipient);
+        }
+
+        let sender = offer.sender.clone();
+        let deposit = offer.deposit_amount;
+
+        // ── CEI: remove state before token transfer ───────────────────────────
+        remove_stream_offer(&env, offer_id);
+        remove_offer_from_recipient_pending(&env, &offer.recipient, offer_id);
+
+        // ── CEI: token transfer ───────────────────────────────────────────────
+        push_token(&env, &sender, deposit)?;
+
+        env.events().publish(
+            (symbol_short!("offr_cxl"), offer_id),
+            StreamOfferCancelled {
+                offer_id,
+                by: recipient,
+                refund_amount: deposit,
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Cancel a pending stream offer (sender-initiated).
+    ///
+    /// The caller must be the original sender of the offer. The offer is
+    /// removed and the escrowed deposit is refunded to the sender. This can be
+    /// called at any time, including after the offer has expired.
+    ///
+    /// # Authorization
+    /// - `sender.require_auth()`
+    ///
+    /// # Errors
+    /// - `OfferNotFound` (36): No pending offer with this ID.
+    /// - `OfferWrongSender` (39): Caller is not the original sender.
+    ///
+    /// # Security
+    /// - CEI order: load + validate → remove offer → remove from index → push token refund → emit event.
+    pub fn cancel_stream_offer(
+        env: Env,
+        sender: Address,
+        offer_id: u64,
+    ) -> Result<(), ContractError> {
+        sender.require_auth();
+
+        let offer = load_stream_offer(&env, offer_id)?;
+
+        if offer.sender != sender {
+            return Err(ContractError::OfferWrongSender);
+        }
+
+        let deposit = offer.deposit_amount;
+        let recipient = offer.recipient.clone();
+
+        // ── CEI: remove state before token transfer ───────────────────────────
+        remove_stream_offer(&env, offer_id);
+        remove_offer_from_recipient_pending(&env, &recipient, offer_id);
+
+        // ── CEI: token transfer ───────────────────────────────────────────────
+        push_token(&env, &sender, deposit)?;
+
+        env.events().publish(
+            (symbol_short!("offr_cxl"), offer_id),
+            StreamOfferCancelled {
+                offer_id,
+                by: sender,
+                refund_amount: deposit,
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Read a pending stream offer by ID.
+    ///
+    /// Returns the full `StreamOffer` struct, or `OfferNotFound` if the offer
+    /// does not exist (was never created, or has already been accepted / rejected /
+    /// cancelled).
+    ///
+    /// # Authorization
+    /// None — this is a public read-only query.
+    pub fn get_stream_offer(env: Env, offer_id: u64) -> Result<StreamOffer, ContractError> {
+        load_stream_offer(&env, offer_id)
+    }
+
+    /// List pending offer IDs for a recipient.
+    ///
+    /// Returns the sorted `Vec<u64>` of offer IDs that are currently pending
+    /// for `recipient`. Empty if no pending offers exist.
+    ///
+    /// # Authorization
+    /// None — public read-only query.
+    pub fn get_recipient_pending_offers(
+        env: Env,
+        recipient: Address,
+    ) -> soroban_sdk::Vec<u64> {
+        load_recipient_pending_offers(&env, &recipient)
     }
 }
 

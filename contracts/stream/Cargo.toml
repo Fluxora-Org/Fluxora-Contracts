@@ -109,6 +109,11 @@ path = "tests/metadata_extension.rs"
 test = false
 
 [[test]]
+name = "stream_offer"
+path = "tests/stream_offer.rs"
+test = true
+
+[[test]]
 name = "rate_bounds"
 path = "tests/rate_bounds.rs"
 test = true
