@@ -109,12 +109,22 @@ forwarded verbatim to `FluxoraStream::create_stream`:
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `stream_kind` | `fluxora_stream::StreamKind` | `StreamKind::Linear` (standard time-vesting) or `StreamKind::CliffOnly` (full deposit unlocked at cliff). |
-| `memo` | `Option<soroban_sdk::Bytes>` | Optional opaque correlation bytes stored on the stream and readable via `get_stream_memo`. Length validation is delegated to the stream contract. |
+| `memo` | `Option<soroban_sdk::Bytes>` | Optional opaque correlation bytes stored on the stream and readable via `get_stream_memo`. Length is validated early by the factory against `fluxora_stream::MAX_MEMO_BYTES` returning `FactoryError::InvalidMemo` before the cross-contract call. |
 
 All policy checks (allowlist, deposit cap, minimum duration, time invariants,
-rate bounds) are enforced **before** the cross-contract call, regardless of
+rate bounds, memo length) are enforced **before** the cross-contract call, regardless of
 `stream_kind`. A `CliffOnly` stream is subject to exactly the same treasury
 policy guards as a `Linear` stream.
+
+## Memo Length Validation
+
+The factory enforces an early memo length guard (Guard 8) on both `create_stream` and `create_streams`:
+
+| Condition | Shared Constant | Rejection Error |
+|-----------|-----------------|-----------------|
+| `memo.len() > fluxora_stream::MAX_MEMO_BYTES` | `fluxora_stream::MAX_MEMO_BYTES` (256 bytes) | `FactoryError::InvalidMemo` |
+
+This guard directly references the shared constant `fluxora_stream::MAX_MEMO_BYTES` at compile time, guaranteeing that any update to the stream contract's maximum memo length is automatically reflected in factory validation without risk of version drift or stale limits. Oversized memos are rejected on the factory error surface before initiating cross-contract calls or side-effects.
 
 For `CliffOnly` streams the `rate_per_second` argument is ignored — the stream
 contract sets the effective rate to `0` internally.
