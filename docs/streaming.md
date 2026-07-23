@@ -381,6 +381,30 @@ Ledger-backed accrual paths cache the last observed accrual timestamp in instanc
 
 `get_claimable_at(stream_id, timestamp)` is exempt because the timestamp is caller-supplied simulation input rather than `ledger().timestamp()`.
 
+### Ledger Sequence vs. Timestamp: Sequence-Independence Guarantee
+
+**Guarantee:** Stream accrual is defined entirely in terms of `env.ledger().timestamp()` (wall-clock seconds). The ledger sequence number (block height) has **no influence** on the amount accrued or the amount withdrawable.
+
+**Why this matters:** On the Stellar network the ledger sequence number and the UNIX timestamp advance independently. A burst of rapid ledger closes can push the sequence far ahead while the timestamp barely moves (e.g., 10 000 ledger closes in 400 seconds). Conversely, a slow-close period may hold the sequence near-constant while wall-clock time advances normally. Any accidental dependency on `env.ledger().sequence()` inside the accrual path would make recipient payout amounts sensitive to network block-production rate rather than actual elapsed time — a fund-accuracy issue.
+
+**Where sequence numbers are used (intentionally):**
+
+| Usage | Location | Purpose |
+|---|---|---|
+| `MIN_PAUSE_INTERVAL_LEDGERS` | `pause_stream` / `resume_stream` | DoS cooldown: prevents rapid pause/resume toggling (17 ledgers) |
+| `MIN_WITHDRAW_INTERVAL_LEDGERS` | `withdraw` / `batch_withdraw` / `delegated_withdraw` | DoS guard: prevents excessive ledger I/O from high-frequency polling (1 ledger) |
+| `last_withdraw_ledger` | Per-stream storage | Tracks last successful withdrawal for the frequency guard above |
+| `last_pause_toggle_ledger` | Per-stream storage | Tracks last pause/resume toggle for the cooldown guard above |
+
+These are all **operational rate-limiting** mechanisms. None of them affect the mathematical accrual formula in `accrual.rs`.
+
+**Verified by tests (`contracts/stream/tests/clock_monotonicity.rs`):**
+
+- `sequence_advances_fast_timestamp_static_accrual_is_timestamp_only` — advances sequence to 10 000 while holding timestamp at 400 s. Asserts that `calculate_accrued` and `withdraw` both return 400, not 10 000. Any accidental sequence-to-accrual coupling would cause this test to fail.
+- `timestamp_advances_sequence_static_normal_accrual_works` — holds sequence at 1 (the minimum needed to pass the withdrawal-frequency DoS gate) while advancing timestamp to 700 s. Asserts that accrual equals 700 and withdrawal succeeds, confirming that low-sequence environments do not suppress accrual.
+
+**No accidental dependency found:** A review of `contracts/stream/src/accrual.rs` and `contracts/stream/src/lib.rs` confirmed that every call to `calculate_accrued_amount_checkpointed` passes `env.ledger().timestamp()` as the `now` argument. There is no code path that passes `env.ledger().sequence()` (or any function of it) into the accrual formula. The sequence-number usages listed above are in separate, clearly labelled guard blocks.
+
 ### Status-Specific Behavior Matrix
 
 | Status    | Time Source            | Expected Behavior                      |
