@@ -771,9 +771,14 @@ pub enum DataKey {
     DelegatedWithdrawNonce(Address),
     /// Last pause record for stream-level or protocol-level pause.
     LastPauseRecord(PauseKind),
-    LastAccrualLedgerTimestamp,
-    /// Per-stream rotation audit history.
+    /// Rotation history for recipient/sender changes on a stream.
     RotationHistory(u64),
+    /// Last ledger timestamp observed for accrual clock-regression detection.
+    LastAccrualLedgerTimestamp,
+    /// Protocol-wide count of streams currently in `StreamStatus::Paused` (`u64`, instance storage).
+    PausedStreamCount,
+    /// Aggregate sum of all keeper fees paid out via `keeper_cancel` (`i128`, instance storage).
+    TotalKeeperFeesPaid,
 }
 
 /// Type of pause.
