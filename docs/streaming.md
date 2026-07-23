@@ -457,6 +457,16 @@ From **CONTRACT_VERSION 6**, all withdrawal operations enforce a minimum ledger 
 
 **Example**: If a withdrawal succeeds at ledger 100, the next withdrawal can occur at ledger 117 or later (100 + 17 = 117).
 
+### Rate Adjustment Throttle
+
+From **CONTRACT_VERSION 7** (or with issue #1018), both `update_rate_per_second` and `decrease_rate_per_second` enforce a minimum ledger interval to prevent spam and rapid rate oscillation within a single ledger window.
+
+- **Constant**: `MIN_RATE_INTERVAL_LEDGERS = 17` (approximately 1.5 minutes)
+- **Enforcement**: Checks `current_ledger - last_rate_change_ledger >= MIN_RATE_INTERVAL_LEDGERS`.
+- **Error**: Returns `ContractError::RateCooldownActive` (error code 36) if the throttle is violated.
+- **First Change Exempt**: The throttle does not block the very first rate change on a freshly created stream (`last_rate_change_ledger` is initialized to 0 at stream creation).
+- **State Update**: `last_rate_change_ledger` is updated to `env.ledger().sequence()` only after a successful rate adjustment.
+
 ### Frontend: get_claimable_at (simulation)
 
 `get_claimable_at(stream_id, timestamp)` is a read-only view that returns the amount that would be claimable (withdrawable) at an arbitrary timestamp. Use it for:

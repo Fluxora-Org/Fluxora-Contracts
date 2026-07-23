@@ -120,6 +120,10 @@ pub const MAX_METADATA_VALUE_BYTES: u32 = 128;
 /// This matches Stellar's default pause-time precedent (see `docs/cancel-stream-semantics.md`).
 const MIN_PAUSE_INTERVAL_LEDGERS: u32 = 17;
 
+/// Minimum interval (in ledgers) between successive rate adjustment operations.
+/// Prevents rapid rate updates within the same ledger window.
+const MIN_RATE_INTERVAL_LEDGERS: u32 = 17;
+
 // Contract version
 // ---------------------------------------------------------------------------
 
@@ -1703,6 +1707,7 @@ impl FluxoraStream {
             last_pause_toggle_ledger: 0,
             last_withdraw_ledger: 0,
             metadata: None,
+            last_rate_change_ledger: 0,
         };
 
         save_stream(env, &stream);
@@ -1783,6 +1788,7 @@ impl FluxoraStream {
             last_pause_toggle_ledger: 0,
             last_withdraw_ledger: 0,
             metadata: None,
+            last_rate_change_ledger: 0,
         };
 
         save_stream(env, &stream);
@@ -4197,6 +4203,13 @@ impl FluxoraStream {
             return Err(ContractError::UnsupportedStreamKind);
         }
 
+        if stream.last_rate_change_ledger > 0 {
+            let min_ledger = stream.last_rate_change_ledger.saturating_add(MIN_RATE_INTERVAL_LEDGERS);
+            if env.ledger().sequence() < min_ledger {
+                return Err(ContractError::RateCooldownActive);
+            }
+        }
+
         // Only the original sender can update the rate.
         Self::require_stream_sender(&stream.sender);
 
@@ -4257,6 +4270,7 @@ impl FluxoraStream {
         stream.checkpointed_amount = accrued_now;
         stream.checkpointed_at = now;
         stream.rate_per_second = new_rate_per_second;
+        stream.last_rate_change_ledger = env.ledger().sequence();
         save_stream(&env, &stream);
 
         env.events().publish(
@@ -4331,6 +4345,13 @@ impl FluxoraStream {
             return Err(ContractError::UnsupportedStreamKind);
         }
 
+        if stream.last_rate_change_ledger > 0 {
+            let min_ledger = stream.last_rate_change_ledger.saturating_add(MIN_RATE_INTERVAL_LEDGERS);
+            if env.ledger().sequence() < min_ledger {
+                return Err(ContractError::RateCooldownActive);
+            }
+        }
+
         // Sender-only: only the original creator may reduce the rate.
         Self::require_stream_sender(&stream.sender);
 
@@ -4398,6 +4419,7 @@ impl FluxoraStream {
         stream.checkpointed_at = now;
         stream.rate_per_second = new_rate_per_second;
         stream.deposit_amount = new_deposit;
+        stream.last_rate_change_ledger = env.ledger().sequence();
         save_stream(&env, &stream);
 
         // Refund the now-unreachable portion of the deposit to the sender.
