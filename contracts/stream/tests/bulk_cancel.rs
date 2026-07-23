@@ -2,11 +2,12 @@
 
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
-    vec, Address, Env, IntoVal, Symbol,
+    token::{Client as TokenClient, StellarAssetClient},
+    vec, Address, Env, IntoVal, Symbol, TryFromVal,
 };
 
-use crate::{
-    accrual, Config, ContractError, DataKey, FluxoraStream, FluxoraStreamClient, StreamStatus,
+use fluxora_stream::{
+    ContractError, FluxoraStream, FluxoraStreamClient, PauseReason, StreamStatus,
 };
 
 // ── Test helpers ───────────────────────────────────────────────────────────
@@ -17,12 +18,20 @@ fn setup_env() -> (Env, FluxoraStreamClient<'static>, Address, Address, Address)
     let client = FluxoraStreamClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
-    let token = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
     let sender = Address::generate(&env);
     let recipient = Address::generate(&env);
 
     env.mock_all_auths();
-    client.init(&token, &admin);
+    client.init(&token_id, &admin);
+
+    let sac = StellarAssetClient::new(&env, &token_id);
+    sac.mint(&sender, &1_000_000_000_i128);
+    let token = TokenClient::new(&env, &token_id);
+    token.approve(&sender, &contract_id, &i128::MAX, &200_000);
 
     (env, client, admin, sender, recipient)
 }
@@ -40,7 +49,16 @@ fn create_test_stream(
 ) -> u64 {
     env.mock_all_auths();
     client.create_stream(
-        sender, recipient, &deposit, &rate, &start, &cliff, &end, &0i128, &None,
+        sender,
+        recipient,
+        &deposit,
+        &rate,
+        &start,
+        &cliff,
+        &end,
+        &0i128,
+        &None,
+        &fluxora_stream::StreamKind::Linear,
     )
 }
 
@@ -135,8 +153,13 @@ fn test_bulk_cancel_emits_events_per_stream() {
     let cancelled_events: Vec<_> = events
         .iter()
         .filter(|e| {
-            let topics: Vec<Symbol> = e.0.clone().try_into().unwrap_or_default();
-            topics.len() > 0 && topics.get(0) == Some(Symbol::new(&env, "cancelled"))
+            let topics = e.1.clone();
+            topics.len() > 0
+                && topics
+                    .get(0)
+                    .and_then(|t| Symbol::try_from_val(&env, &t).ok())
+                    .map(|s| s == Symbol::new(&env, "cancelled"))
+                    .unwrap_or(false)
         })
         .collect();
 
@@ -160,7 +183,7 @@ fn test_bulk_cancel_rejects_duplicate_ids() {
     env.mock_all_auths();
     let result = client.try_bulk_cancel_streams(&sender, &vec![&env, s1, s1]);
     assert!(result.is_err());
-    assert_eq!(result.err().unwrap(), ContractError::DuplicateStreamId);
+    assert_eq!(result, Err(Ok(ContractError::DuplicateStreamId)));
 }
 
 #[test]
@@ -169,7 +192,7 @@ fn test_bulk_cancel_rejects_nonexistent_stream() {
     env.mock_all_auths();
     let result = client.try_bulk_cancel_streams(&sender, &vec![&env, 999u64]);
     assert!(result.is_err());
-    assert_eq!(result.err().unwrap(), ContractError::StreamNotFound);
+    assert_eq!(result, Err(Ok(ContractError::StreamNotFound)));
 }
 
 #[test]
@@ -183,7 +206,7 @@ fn test_bulk_cancel_rejects_unauthorized_sender() {
     env.mock_all_auths();
     let result = client.try_bulk_cancel_streams(&attacker, &vec![&env, stream_id]);
     assert!(result.is_err());
-    assert_eq!(result.err().unwrap(), ContractError::Unauthorized);
+    assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
 }
 
 #[test]
@@ -197,7 +220,7 @@ fn test_bulk_cancel_rejects_terminal_stream() {
 
     let result = client.try_bulk_cancel_streams(&sender, &vec![&env, stream_id]);
     assert!(result.is_err());
-    assert_eq!(result.err().unwrap(), ContractError::InvalidState);
+    assert_eq!(result, Err(Ok(ContractError::InvalidState)));
 }
 
 #[test]
@@ -212,7 +235,7 @@ fn test_bulk_cancel_rejects_completed_stream() {
 
     let result = client.try_bulk_cancel_streams(&sender, &vec![&env, stream_id]);
     assert!(result.is_err());
-    assert_eq!(result.err().unwrap(), ContractError::InvalidState);
+    assert_eq!(result, Err(Ok(ContractError::InvalidState)));
 }
 
 #[test]
@@ -228,7 +251,7 @@ fn test_bulk_cancel_atomic_rollback_on_failure() {
 
     let result = client.try_bulk_cancel_streams(&sender, &vec![&env, s1, s2]);
     assert!(result.is_err());
-    assert_eq!(result.err().unwrap(), ContractError::InvalidState);
+    assert_eq!(result, Err(Ok(ContractError::InvalidState)));
 
     let stream1 = client.get_stream_state(&s1);
     assert_eq!(stream1.status, StreamStatus::Active);
@@ -240,6 +263,12 @@ fn test_bulk_cancel_atomic_rollback_on_unauthorized_stream() {
     env.ledger().set_timestamp(0);
 
     let sender2 = Address::generate(&env);
+    let token_id = client.get_config().token;
+    let sac = StellarAssetClient::new(&env, &token_id);
+    sac.mint(&sender2, &1_000_000_000_i128);
+    let token = TokenClient::new(&env, &token_id);
+    env.mock_all_auths();
+    token.approve(&sender2, &client.address, &i128::MAX, &200_000);
 
     let s1 = create_test_stream(&env, &client, &sender, &recipient, 1000, 1, 0, 0, 1000);
     let s2 = create_test_stream(&env, &client, &sender2, &recipient, 2000, 2, 0, 0, 1000);
@@ -248,7 +277,7 @@ fn test_bulk_cancel_atomic_rollback_on_unauthorized_stream() {
 
     let result = client.try_bulk_cancel_streams(&sender, &vec![&env, s1, s2]);
     assert!(result.is_err());
-    assert_eq!(result.err().unwrap(), ContractError::Unauthorized);
+    assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
 
     let stream1 = client.get_stream_state(&s1);
     assert_eq!(stream1.status, StreamStatus::Active);
@@ -264,7 +293,11 @@ fn test_bulk_cancel_with_paused_stream() {
 
     let stream_id = create_test_stream(&env, &client, &sender, &recipient, 1000, 1, 0, 0, 1000);
     env.mock_all_auths();
-    client.pause_stream(&stream_id, &crate::PauseReason::Operational);
+    // Advance the ledger sequence past the pause/resume cooldown window
+    // (MIN_PAUSE_INTERVAL_LEDGERS); the test env's sequence number does not
+    // advance on its own alongside the timestamp.
+    env.ledger().with_mut(|l| l.sequence_number += 32);
+    client.pause_stream(&stream_id, &PauseReason::Operational);
 
     client.bulk_cancel_streams(&sender, &vec![&env, stream_id]);
 
@@ -276,6 +309,10 @@ fn test_bulk_cancel_with_paused_stream() {
 fn test_bulk_cancel_large_batch_up_to_max_page_size() {
     let (env, client, _admin, sender, recipient) = setup_env();
     env.ledger().set_timestamp(0);
+    // A 100-stream batch plus per-stream verification exceeds the default
+    // test budget; this is a resource-accounting ceiling of the harness,
+    // not a contract limitation, so lift it for this stress test.
+    env.budget().reset_unlimited();
 
     let mut stream_ids = vec![&env];
     for _ in 0..100 {
@@ -369,15 +406,58 @@ fn test_bulk_cancel_rejects_global_pause() {
 
     let result = client.try_bulk_cancel_streams(&sender, &vec![&env, stream_id]);
     assert!(result.is_err());
-    assert_eq!(result.err().unwrap(), ContractError::ContractPaused);
+    assert_eq!(result, Err(Ok(ContractError::ContractPaused)));
 }
 
 #[test]
 fn test_bulk_cancel_requires_sender_auth() {
+    // setup_env()/create_test_stream() call env.mock_all_auths(), which is
+    // sticky and would make every subsequent require_auth() succeed
+    // regardless of what's actually authorized — masking exactly the
+    // behavior this test needs to observe. Build a minimal env here instead,
+    // mocking only the create_stream call so the final bulk_cancel_streams
+    // call genuinely has no authorization.
+    use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+
     let (env, client, _admin, sender, recipient) = setup_env();
     env.ledger().set_timestamp(0);
+    env.set_auths(&[]);
 
-    let stream_id = create_test_stream(&env, &client, &sender, &recipient, 1000, 1, 0, 0, 1000);
+    env.mock_auths(&[MockAuth {
+        address: &sender,
+        invoke: &MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "create_stream",
+            args: (
+                &sender,
+                &recipient,
+                1000_i128,
+                1_i128,
+                0u64,
+                0u64,
+                1000u64,
+                0i128,
+                Option::<soroban_sdk::Bytes>::None,
+                fluxora_stream::StreamKind::Linear,
+            )
+                .into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let stream_id = client.create_stream(
+        &sender,
+        &recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+        &0i128,
+        &None,
+        &fluxora_stream::StreamKind::Linear,
+    );
+
+    env.set_auths(&[]);
     let result = client.try_bulk_cancel_streams(&sender, &vec![&env, stream_id]);
     assert!(result.is_err());
 }

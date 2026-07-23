@@ -1,10 +1,10 @@
 extern crate std;
 
 use fluxora_stream::{
-    ContractError, FluxoraStream, FluxoraStreamClient, KeeperCancelled, StreamStatus,
+    ContractError, FluxoraStream, FluxoraStreamClient, KeeperCancelled, StreamKind, StreamStatus,
 };
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
+    testutils::{Address as _, Events, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
     Address, Env, Symbol, TryFromVal,
 };
@@ -78,6 +78,7 @@ fn create_stream(ctx: &Ctx<'_>, deposit: i128, rate: i128, start: u64, end: u64)
         &end,
         &0_i128,
         &None,
+        &StreamKind::Linear,
     )
 }
 
@@ -297,8 +298,12 @@ fn test_keeper_cancel_paused_stream_succeeds() {
 
     let stream_id = create_stream(&ctx, 2000, 1, 0, 2000);
 
-    // Pause the stream at t=500
+    // Pause the stream at t=500. Also advance the ledger sequence past the
+    // pause/resume cooldown window (MIN_PAUSE_INTERVAL_LEDGERS), since the
+    // cooldown check is sequence-based and the test env's sequence number
+    // does not advance on its own alongside the timestamp.
     ctx.env.ledger().set_timestamp(500);
+    ctx.env.ledger().with_mut(|l| l.sequence_number += 32);
     ctx.client()
         .pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
 
@@ -503,4 +508,166 @@ fn test_keeper_cancel_event_reconciles_with_prior_withdrawal() {
         ev.keeper_fee + ev.recipient_amount + ev.sender_refund,
         10_000 - withdrawn,
     );
+}
+
+// ---------------------------------------------------------------------------
+// Security & Griefing Protection Tests (#921)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_ineligible_keeper_cancel_attempt_causes_zero_state_mutation_and_zero_reward() {
+    let ctx = Ctx::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Create stream: deposit=10,000, rate=5/s, start=0, end=1000
+    let stream_id = create_stream(&ctx, 10_000, 5, 0, 1000);
+
+    // Snapshot initial state before ineligible attempt (grace period not elapsed)
+    ctx.env.ledger().set_timestamp(1000 + GRACE - 100);
+
+    let initial_stream = ctx.client().get_stream_state(&stream_id);
+    let initial_keeper_balance = ctx.token.balance(&ctx.keeper);
+    let initial_sender_balance = ctx.token.balance(&ctx.sender);
+    let initial_recipient_balance = ctx.token.balance(&ctx.recipient);
+    let initial_liabilities = ctx.client().get_total_liabilities();
+    let initial_total_keeper_fees = ctx.client().get_protocol_fees_accrued();
+
+    // Attempt keeper cancel before grace period
+    let res = ctx.client().try_keeper_cancel(&stream_id, &ctx.keeper);
+    assert_eq!(res, Err(Ok(ContractError::KeeperGracePeriodNotElapsed)));
+
+    // Verify zero state mutation & zero payout
+    let stream_after = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(stream_after.status, initial_stream.status);
+    assert_eq!(
+        stream_after.checkpointed_amount,
+        initial_stream.checkpointed_amount
+    );
+    assert_eq!(stream_after.checkpointed_at, initial_stream.checkpointed_at);
+    assert_eq!(stream_after.cancelled_at, initial_stream.cancelled_at);
+
+    assert_eq!(ctx.token.balance(&ctx.keeper), initial_keeper_balance);
+    assert_eq!(ctx.token.balance(&ctx.sender), initial_sender_balance);
+    assert_eq!(ctx.token.balance(&ctx.recipient), initial_recipient_balance);
+    assert_eq!(ctx.client().get_total_liabilities(), initial_liabilities);
+    assert_eq!(
+        ctx.client().get_protocol_fees_accrued(),
+        initial_total_keeper_fees
+    );
+}
+
+#[test]
+fn test_double_keeper_cancel_attempt_second_attempt_rejected_no_double_reward() {
+    let ctx = Ctx::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Stream with unstreamed amount so keeper gets a fee
+    let stream_id = create_stream(&ctx, 10_000, 5, 0, 1000);
+
+    // Advance past grace period
+    ctx.env.ledger().set_timestamp(1000 + GRACE + 1);
+
+    // First attempt succeeds
+    ctx.client().keeper_cancel(&stream_id, &ctx.keeper);
+
+    let keeper_balance_after_first = ctx.token.balance(&ctx.keeper);
+    let total_fees_after_first = ctx.client().get_protocol_fees_accrued();
+    let liabilities_after_first = ctx.client().get_total_liabilities();
+
+    assert!(keeper_balance_after_first > 0);
+
+    // Second attempt immediately following first
+    let res = ctx.client().try_keeper_cancel(&stream_id, &ctx.keeper);
+    assert_eq!(res, Err(Ok(ContractError::InvalidState)));
+
+    // Confirm no additional payouts or mutations
+    assert_eq!(ctx.token.balance(&ctx.keeper), keeper_balance_after_first);
+    assert_eq!(
+        ctx.client().get_protocol_fees_accrued(),
+        total_fees_after_first
+    );
+    assert_eq!(
+        ctx.client().get_total_liabilities(),
+        liabilities_after_first
+    );
+
+    let stream = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Cancelled);
+}
+
+#[test]
+fn test_keeper_cancel_eligibility_check_reads_live_state_strictly_before_mutation() {
+    let ctx = Ctx::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = create_stream(&ctx, 10_000, 5, 0, 1000);
+
+    // Advance past grace period
+    ctx.env.ledger().set_timestamp(1000 + GRACE + 1);
+
+    // Sender cancels normal stream right before keeper attempt
+    ctx.client().cancel_stream(&stream_id);
+    let stream_cancelled = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(stream_cancelled.status, StreamStatus::Cancelled);
+
+    let keeper_bal_before = ctx.token.balance(&ctx.keeper);
+    let liabilities_before = ctx.client().get_total_liabilities();
+    let keeper_fees_before = ctx.client().get_protocol_fees_accrued();
+
+    // Keeper tries to cancel stream that was just cancelled live
+    let res = ctx.client().try_keeper_cancel(&stream_id, &ctx.keeper);
+    assert_eq!(res, Err(Ok(ContractError::InvalidState)));
+
+    // Confirm live state check prevented any mutation or fee payment
+    assert_eq!(ctx.token.balance(&ctx.keeper), keeper_bal_before);
+    assert_eq!(ctx.client().get_total_liabilities(), liabilities_before);
+    assert_eq!(
+        ctx.client().get_protocol_fees_accrued(),
+        keeper_fees_before
+    );
+}
+
+#[test]
+fn test_get_keeper_fee_split_before_grace_period_returns_zeros() {
+    let ctx = Ctx::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = create_stream(&ctx, 10_000, 5, 0, 1000);
+
+    // Before grace period: returns (0, 0)
+    ctx.env.ledger().set_timestamp(1000 + GRACE - 10);
+    let split = ctx.client().get_keeper_fee_split(&stream_id);
+    assert_eq!(split, (0, 0));
+}
+
+#[test]
+fn test_get_keeper_fee_split_after_grace_period_matches_actual() {
+    let ctx = Ctx::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = create_stream(&ctx, 10_000, 5, 0, 1000);
+
+    // After grace period: returns expected fee and refund split
+    ctx.env.ledger().set_timestamp(1000 + GRACE + 1);
+    let (fee, refund) = ctx.client().get_keeper_fee_split(&stream_id);
+    assert_eq!(fee, 25);
+    assert_eq!(refund, 4975);
+}
+
+#[test]
+fn test_get_keeper_fee_split_invalid_state_and_not_found() {
+    let ctx = Ctx::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = create_stream(&ctx, 10_000, 5, 0, 1000);
+
+    // Stream cancelled -> invalid state error
+    ctx.client().cancel_stream(&stream_id);
+    ctx.env.ledger().set_timestamp(1000 + GRACE + 1);
+    let res = ctx.client().try_get_keeper_fee_split(&stream_id);
+    assert_eq!(res, Err(Ok(ContractError::InvalidState)));
+
+    // Nonexistent stream -> stream not found error
+    let res_nf = ctx.client().try_get_keeper_fee_split(&99999u64);
+    assert_eq!(res_nf, Err(Ok(ContractError::StreamNotFound)));
 }
