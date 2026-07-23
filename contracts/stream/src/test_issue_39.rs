@@ -126,6 +126,7 @@ fn test_batch_withdraw_running_balance_cap() {
         &0,
         &None,
         &crate::StreamKind::Linear,
+        &None,
     );
     let id2 = ctx.client().create_stream(
         &ctx.sender,
@@ -138,6 +139,7 @@ fn test_batch_withdraw_running_balance_cap() {
         &0,
         &None,
         &crate::StreamKind::Linear,
+        &None,
     );
 
     ctx.env.ledger().set_timestamp(500); // both fully accrued

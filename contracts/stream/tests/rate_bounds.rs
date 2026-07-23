@@ -55,6 +55,7 @@ fn create_stream_with_rate(
             &0i128, // no dust threshold
             &None,  // no memo
             &StreamKind::Linear,
+            &None,
         )
 }
 
@@ -111,6 +112,7 @@ fn test_create_stream_at_zero_rate_fails() {
         &0i128,
         &None,
         &StreamKind::Linear,
+        &None,
     );
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 }
@@ -137,6 +139,7 @@ fn test_create_streams_with_mixed_rates_fails_atomically() {
             memo: None,
             kind: StreamKind::Linear,
             metadata: None,
+            witness: None,
         },
         CreateStreamParams {
             recipient: recipient.clone(),
@@ -149,6 +152,7 @@ fn test_create_streams_with_mixed_rates_fails_atomically() {
             memo: None,
             kind: StreamKind::Linear,
             metadata: None,
+            witness: None,
         },
     ];
 
@@ -179,6 +183,7 @@ fn test_create_streams_all_valid_rates_succeeds() {
             memo: None,
             kind: StreamKind::Linear,
             metadata: None,
+            witness: None,
         },
         CreateStreamParams {
             recipient: recipient.clone(),
@@ -191,6 +196,7 @@ fn test_create_streams_all_valid_rates_succeeds() {
             memo: None,
             kind: StreamKind::Linear,
             metadata: None,
+            witness: None,
         },
     ];
 
@@ -267,6 +273,7 @@ fn test_create_stream_from_template_below_min_rate_fails() {
         &None,
         &None,
         &StreamKind::Linear,
+        &None,
     );
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 }
@@ -291,6 +298,7 @@ fn test_negative_rate_fails_with_invalid_params() {
         &0i128,
         &None,
         &StreamKind::Linear,
+        &None,
     );
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 }
@@ -313,6 +321,7 @@ fn test_rate_at_i128_max_fails_with_invalid_params() {
         &0i128,
         &None,
         &StreamKind::Linear,
+        &None,
     );
     assert!(result.is_err());
 }
@@ -339,6 +348,7 @@ fn test_min_rate_with_long_duration_succeeds() {
             &0i128,
             &None,
             &StreamKind::Linear,
+            &None,
         );
 
     let stream = client.get_stream_state(&stream_id);
@@ -369,6 +379,7 @@ fn test_min_rate_preserves_existing_max_rate_cap() {
         &0i128,
         &None,
         &StreamKind::Linear,
+        &None,
     );
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 
@@ -384,6 +395,7 @@ fn test_min_rate_preserves_existing_max_rate_cap() {
         &0i128,
         &None,
         &StreamKind::Linear,
+        &None,
     );
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 
@@ -399,6 +411,7 @@ fn test_min_rate_preserves_existing_max_rate_cap() {
         &0i128,
         &None,
         &StreamKind::Linear,
+        &None,
     );
     assert!(result.is_ok());
 }

@@ -6,7 +6,7 @@ This note scopes and verifies one protocol slice: cancellation refund behavior a
 
 In scope:
 
-1. `cancel_stream` and `cancel_stream_as_admin` success/failure behavior.
+1. `cancel_stream`, `cancel_stream_as_admin`, and `witnessed_cancel_stream` success/failure behavior.
 2. Authorization boundaries for sender/admin/unauthorized actors.
 3. On-chain observables: stream storage fields, token balances, errors, events.
 4. Time and status edge cases that affect refund and accrued freeze logic.
@@ -43,6 +43,60 @@ On failure:
 1. Sender may call `cancel_stream` for their stream.
 2. Admin may call `cancel_stream_as_admin` for any stream.
 3. Recipient and third parties cannot cancel without the required auth proof.
+4. A configured compliance witness may call `witnessed_cancel_stream` with a valid
+   off-chain ed25519 attestation (see below).
+
+## Witnessed compliance cancellation (`witnessed_cancel_stream`)
+
+### Purpose
+
+Allows a per-stream compliance witness (e.g. a sanctions-screening oracle) to cancel
+a stream via an off-chain signed attestation, without granting that oracle full protocol
+admin authority.
+
+### Configuration
+
+- Optional `witness: Option<Address>` on `Stream` / `CreateStreamParams`, default `None`.
+- Set at stream creation via `create_stream(..., witness)` or batch `create_streams`.
+- Existing streams without the field decode with `witness = None` (forward-compatible).
+
+### Signature payload
+
+Domain-separated from `delegated_withdraw` to prevent cross-protocol replay:
+
+```
+fluxora_witnessed_cancel | stream_id (8 bytes BE) | deadline (8 bytes BE)
+```
+
+The witness signs with their ed25519 private key; the submitter passes
+`witness_public_key`, `deadline`, and `witness_signature`. The public key must derive
+to the stored `witness` address.
+
+### Behavior
+
+Identical to `cancel_stream` on success:
+
+1. Allowed only for `Active` or `Paused` streams.
+2. Refund to sender: `deposit_amount - accrued_at(cancelled_at)`.
+3. Event: topic `("cancelled", stream_id)` with `StreamEvent::StreamCancelled(stream_id)`.
+4. No `require_auth()` on the submitter — authorization is the signature check.
+
+### Errors
+
+| Condition | Error |
+| --- | --- |
+| Expired deadline | `SignatureDeadlineExpired` |
+| No witness configured | `InvalidParams` |
+| Public key mismatch | `InvalidSignature` |
+| Invalid stream status | `InvalidState` |
+| Missing stream | `StreamNotFound` |
+
+### Security invariants
+
+1. Witness signatures cannot be replayed as `delegated_withdraw` authorizations (distinct domain tag and payload layout).
+2. `delegated_withdraw` signatures cannot authorize witnessed cancellation.
+3. Double cancellation fails with `InvalidState` (signature replay after success is harmless).
+4. CEI ordering inherited from shared `cancel_stream_internal` implementation.
 
 ## Evidence in tests
 
@@ -61,6 +115,18 @@ Integration tests (`contracts/stream/tests/integration_suite.rs`):
 2. `cancel_stream_as_admin_updates_state_before_transfer`
 3. `integration_cancel_partial_accrual_partial_refund`
 4. `integration_cancel_refund_plus_frozen_accrued_equals_deposit`
+
+Witnessed cancel tests (`contracts/stream/tests/witnessed_cancel.rs`):
+
+1. `witnessed_cancel_valid_signature_cancels_stream`
+2. `witnessed_cancel_refund_matches_sender_cancel`
+3. `witnessed_cancel_emits_stream_cancelled_event`
+4. `witnessed_cancel_expired_deadline_rejected`
+5. `witnessed_cancel_no_witness_configured_rejected`
+6. `witnessed_cancel_wrong_public_key_rejected`
+7. `witnessed_cancel_delegated_withdraw_signature_not_replayable`
+8. `witnessed_cancel_from_paused_stream_succeeds`
+9. `witnessed_cancel_already_cancelled_rejected`
 
 ## Optional Cancellation Fee
 

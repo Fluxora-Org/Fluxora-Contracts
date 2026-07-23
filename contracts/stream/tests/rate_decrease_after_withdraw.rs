@@ -153,6 +153,7 @@ impl TestContext {
             &0i128,
             &None,
             &StreamKind::Linear,
+            &None,
         )
     }
 

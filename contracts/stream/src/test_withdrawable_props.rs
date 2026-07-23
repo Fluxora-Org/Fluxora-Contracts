@@ -245,7 +245,8 @@ proptest! {
             &duration,
             &0, &None,
             &crate::StreamKind::Linear,
-            );
+            &None,
+        );
         for t in &times {
             ctx.env.ledger().set_timestamp(*t);
             assert_invariants(&ctx, id, &std::format!("active t={t}"));
@@ -270,7 +271,8 @@ proptest! {
             &duration,
             &0, &None,
             &crate::StreamKind::Linear,
-            );
+            &None,
+        );
         for t in &times {
             ctx.env.ledger().set_timestamp(*t);
             let _ = ctx.client().try_withdraw(&id);
@@ -296,7 +298,8 @@ proptest! {
             &duration,
             &0, &None,
             &crate::StreamKind::Linear,
-            );
+            &None,
+        );
         let mut paused = false;
         for t in &times {
             ctx.env.ledger().set_timestamp(*t);
@@ -332,7 +335,8 @@ proptest! {
             &duration,
             &0, &None,
             &crate::StreamKind::Linear,
-            );
+            &None,
+        );
         ctx.env.ledger().set_timestamp(cancel_at);
         ctx.client().cancel_stream(&id);
         assert_invariants(&ctx, id, "post-cancel");
@@ -358,7 +362,8 @@ proptest! {
             &duration,
             &0, &None,
             &crate::StreamKind::Linear,
-            );
+            &None,
+        );
         let mut prev = 0_i128;
         for t in &times {
             ctx.env.ledger().set_timestamp(*t);
@@ -397,7 +402,8 @@ proptest! {
             &duration,
             &0, &None,
             &crate::StreamKind::Linear,
-            );
+            &None,
+        );
 
         let mut now = 0_u64;
         let mut previous_withdrawable =
@@ -452,8 +458,9 @@ fn setup_standard(deposit: i128) -> (PropCtx, u64) {
         &1000u64,
         &0,
         &None,
-        &crate::StreamKind::Linear,
-    );
+            &crate::StreamKind::Linear,
+            &None,
+        );
     (ctx, id)
 }
 
@@ -558,8 +565,9 @@ fn invariants_cancelled_before_cliff() {
         &1000u64,
         &0,
         &None,
-        &crate::StreamKind::Linear,
-    );
+            &crate::StreamKind::Linear,
+            &None,
+        );
     ctx.env.ledger().set_timestamp(200);
     ctx.client().cancel_stream(&id);
     assert_invariants(&ctx, id, "cancelled before cliff");
@@ -600,8 +608,9 @@ fn invariants_high_rate_deposit_capped() {
         &100u64,
         &0,
         &None,
-        &crate::StreamKind::Linear,
-    );
+            &crate::StreamKind::Linear,
+            &None,
+        );
     for t in [0u64, 10, 50, 99, 100, 200] {
         ctx.env.ledger().set_timestamp(t);
         assert_invariants(&ctx, id, &std::format!("high-rate t={t}"));
@@ -624,8 +633,9 @@ fn invariants_excess_deposit_stream() {
         &1000u64,
         &0,
         &None,
-        &crate::StreamKind::Linear,
-    );
+            &crate::StreamKind::Linear,
+            &None,
+        );
     for t in [0u64, 500, 1000, 1500] {
         ctx.env.ledger().set_timestamp(t);
         assert_invariants(&ctx, id, &std::format!("excess-deposit t={t}"));
@@ -679,8 +689,9 @@ fn assert_decrease_preserves_withdrawable_at_boundary(cliff: u64, decrease_at: u
         &duration,
         &0,
         &None,
-        &crate::StreamKind::Linear,
-    );
+            &crate::StreamKind::Linear,
+            &None,
+        );
 
     ctx.env.ledger().set_timestamp(decrease_at);
     let before = ctx.client().get_withdrawable(&id);
@@ -728,8 +739,9 @@ fn shorten_stream_preserves_accrued_entitlement() {
         &duration,
         &0,
         &None,
-        &crate::StreamKind::Linear,
-    );
+            &crate::StreamKind::Linear,
+            &None,
+        );
 
     // At t=50, 500 tokens are accrued.  Shorten the stream to end at t=80.
     ctx.env.ledger().set_timestamp(50);
@@ -777,6 +789,7 @@ fn cliff_only_stream_lifecycle_and_unsupported_ops() {
         &0,
         &None,
         &crate::StreamKind::CliffOnly,
+        &None,
     );
 
     // Before cliff: no accrual.

@@ -185,7 +185,11 @@ const MIN_PAUSE_INTERVAL_LEDGERS: u32 = 17;
 /// resume/cancel/complete transitions; `get_paused_stream_count()` O(1) view added;
 /// duplicate `ContractError` discriminant 23 resolved and the previously-missing
 /// variants declared.
-pub const CONTRACT_VERSION: u32 = 6;
+///
+/// Bumped to 7: `Stream` and `CreateStreamParams` gained optional
+/// `witness: Option<Address>` for off-chain compliance attestation cancellation;
+/// `witnessed_cancel_stream` entrypoint added.
+pub const CONTRACT_VERSION: u32 = 7;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -820,6 +824,9 @@ pub struct Stream {
     pub memo: Option<soroban_sdk::Bytes>,
     /// The architectural style of the stream (Linear or CliffOnly).
     pub kind: StreamKind,
+    /// Optional compliance witness authorized to cancel via signed attestation.
+    /// `None` when not configured (default for backward compatibility).
+    pub witness: Option<Address>,
 }
 
 /// Pagination result for recipient stream listing
@@ -855,6 +862,8 @@ pub struct CreateStreamParams {
     pub metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
     /// The architectural style of the stream (Linear or CliffOnly).
     pub kind: StreamKind,
+    /// Optional compliance witness authorized to cancel via signed attestation.
+    pub witness: Option<Address>,
 }
 
 /// Parameters for creating a payment stream with relative (offset-based) times.
@@ -1665,6 +1674,7 @@ impl FluxoraStream {
         withdraw_dust_threshold: i128,
         memo: Option<soroban_sdk::Bytes>,
         kind: StreamKind,
+        witness: Option<Address>,
     ) -> Result<u64, ContractError> {
         // Validate memo length before allocating a stream ID.
         if let Some(ref m) = memo {
@@ -1703,6 +1713,7 @@ impl FluxoraStream {
             last_pause_toggle_ledger: 0,
             last_withdraw_ledger: 0,
             metadata: None,
+            witness: witness.clone(),
         };
 
         save_stream(env, &stream);
@@ -1754,6 +1765,7 @@ impl FluxoraStream {
         withdraw_dust_threshold: i128,
         memo: Option<soroban_sdk::Bytes>,
         kind: StreamKind,
+        witness: Option<Address>,
     ) -> Result<u64, ContractError> {
         if let Some(ref m) = memo {
             if m.len() as usize > MAX_MEMO_BYTES {
@@ -1783,6 +1795,7 @@ impl FluxoraStream {
             last_pause_toggle_ledger: 0,
             last_withdraw_ledger: 0,
             metadata: None,
+            witness: witness.clone(),
         };
 
         save_stream(env, &stream);
@@ -1999,6 +2012,7 @@ impl FluxoraStream {
         withdraw_dust_threshold: i128,
         memo: Option<soroban_sdk::Bytes>,
         kind: StreamKind,
+        witness: Option<Address>,
     ) -> Result<u64, ContractError> {
         sender.require_auth();
         require_not_creation_paused(&env)?;
@@ -2035,6 +2049,7 @@ impl FluxoraStream {
             withdraw_dust_threshold,
             memo,
             kind,
+            witness,
         )
     }
 
@@ -2147,6 +2162,7 @@ impl FluxoraStream {
             params.withdraw_dust_threshold.unwrap_or(0),
             params.memo,
             params.kind,
+            None,
         )
     }
 
@@ -2336,6 +2352,7 @@ impl FluxoraStream {
                 params.withdraw_dust_threshold.unwrap_or(0),
                 params.memo.clone(),
                 params.kind,
+                params.witness.clone(),
             )?;
             created_ids.push_back(stream_id);
 
@@ -2469,6 +2486,7 @@ impl FluxoraStream {
                 memo: rel.memo,
                 metadata: rel.metadata,
                 kind: rel.kind,
+                witness: None,
             });
         }
 
@@ -2557,6 +2575,7 @@ impl FluxoraStream {
                 params.withdraw_dust_threshold.unwrap_or(0),
                 params.memo,
                 params.kind,
+                params.witness,
             );
 
             match stream_id {
@@ -5364,6 +5383,74 @@ impl FluxoraStream {
         Self::cancel_stream_internal(&env, &mut stream)
     }
 
+    /// Cancel a payment stream using an off-chain compliance witness attestation.
+    ///
+    /// Allows a pre-configured witness (set at stream creation) to authorize cancellation
+    /// via an ed25519 signature without requiring full protocol admin authority. Any caller
+    /// may submit a valid attestation; no `require_auth()` is needed on the submitter.
+    ///
+    /// # Parameters
+    /// - `stream_id`: Stream to cancel.
+    /// - `witness_public_key`: Raw 32-byte ed25519 public key of the configured witness.
+    /// - `deadline`: Ledger timestamp after which the signature is rejected.
+    /// - `witness_signature`: 64-byte ed25519 signature over the domain-separated payload
+    ///   built by [`delegation::build_witnessed_cancel_message`].
+    ///
+    /// # Authorization
+    /// - The stream must have `witness: Some(_)` set at creation time.
+    /// - The supplied public key must derive to the stored witness address.
+    /// - Signature verification replaces on-chain witness `require_auth()`.
+    ///
+    /// # Behavior
+    /// Identical refund and event semantics to [`Self::cancel_stream`]:
+    /// unstreamed tokens refund to the sender and `StreamCancelled` is emitted.
+    ///
+    /// # Errors
+    /// - `SignatureDeadlineExpired`: `deadline < current ledger timestamp`.
+    /// - `InvalidParams`: Stream has no configured witness.
+    /// - `InvalidSignature`: Public key does not match the configured witness.
+    /// - `InvalidState`: Stream is not `Active` or `Paused`.
+    /// - `StreamNotFound`: `stream_id` does not exist.
+    pub fn witnessed_cancel_stream(
+        env: Env,
+        stream_id: u64,
+        witness_public_key: soroban_sdk::BytesN<32>,
+        deadline: u64,
+        witness_signature: soroban_sdk::BytesN<64>,
+    ) -> Result<(), ContractError> {
+        require_not_globally_paused(&env)?;
+
+        delegation::validate_witness_cancel_deadline(&env, deadline)?;
+
+        let mut stream = load_stream(&env, stream_id)?;
+
+        let witness_addr = stream
+            .witness
+            .as_ref()
+            .ok_or(ContractError::InvalidParams)?;
+
+        {
+            use soroban_sdk::{
+                xdr::{AccountId, PublicKey, ScAddress, Uint256},
+                TryIntoVal,
+            };
+            let pk_arr = witness_public_key.to_array();
+            let derived: Result<Address, _> =
+                ScAddress::Account(AccountId(PublicKey::PublicKeyTypeEd25519(Uint256(pk_arr))))
+                    .try_into_val(&env);
+            match derived {
+                Ok(addr) if addr == *witness_addr => {}
+                _ => return Err(ContractError::InvalidSignature),
+            }
+        }
+
+        let msg = delegation::build_witnessed_cancel_message(&env, stream_id, deadline);
+        env.crypto()
+            .ed25519_verify(&witness_public_key, &msg, &witness_signature);
+
+        Self::cancel_stream_internal(&env, &mut stream)
+    }
+
     /// Permissionless keeper entrypoint to cancel a stream that has expired and been
     /// abandoned by its sender.
     ///
@@ -6752,6 +6839,7 @@ impl FluxoraStream {
             source.withdraw_dust_threshold,
             source.memo.clone(),
             source.kind,
+            source.witness.clone(),
         )?;
 
         // ── 9. Emit clone-specific event for indexer correlation ──────────────
