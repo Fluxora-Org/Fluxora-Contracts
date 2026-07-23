@@ -59,6 +59,9 @@ pub const MAX_GLOBAL_TEMPLATES: u64 = 1_000;
 /// Maximum number of stream IDs that can be reserved in a single `reserve_stream_ids` call.
 pub const MAX_ID_RESERVATION: u32 = 100;
 
+/// Maximum allowed depth for recursive stream delegation.
+pub const MAX_DELEGATION_DEPTH: u32 = 3;
+
 /// Maximum byte length for pause-reason strings passed to `pause_stream`,
 /// `pause_stream_as_admin`, and `pause_protocol`.
 ///
@@ -1703,6 +1706,8 @@ impl FluxoraStream {
             last_pause_toggle_ledger: 0,
             last_withdraw_ledger: 0,
             metadata: None,
+            parent_stream_id: None,
+            delegation_depth: 0,
         };
 
         save_stream(env, &stream);
@@ -1783,6 +1788,8 @@ impl FluxoraStream {
             last_pause_toggle_ledger: 0,
             last_withdraw_ledger: 0,
             metadata: None,
+            parent_stream_id: None,
+            delegation_depth: 0,
         };
 
         save_stream(env, &stream);
@@ -4418,6 +4425,161 @@ impl FluxoraStream {
         );
 
         Ok(())
+    }
+
+    /// Delegate a portion of a stream's future accrual to a new child stream.
+    ///
+    /// # Parameters
+    /// - `stream_id`: Unique identifier of the parent stream.
+    /// - `recipient`: The current recipient of the stream (caller).
+    /// - `share_bps`: The portion of the rate to delegate in basis points (1 - 10000).
+    /// - `new_recipient`: The address to receive the delegated stream.
+    ///
+    /// # Returns
+    /// - `u64`: The unique ID of the newly created child stream.
+    pub fn delegate_recipient_share(
+        env: Env,
+        stream_id: u64,
+        recipient: Address,
+        share_bps: u32,
+        new_recipient: Address,
+    ) -> Result<u64, ContractError> {
+        require_not_globally_paused(&env)?;
+        let mut stream = load_stream(&env, stream_id)?;
+
+        if stream.kind == StreamKind::CliffOnly || stream.kind == StreamKind::CliffSlope {
+            return Err(ContractError::UnsupportedStreamKind);
+        }
+
+        recipient.require_auth();
+        if stream.recipient != recipient {
+            return Err(ContractError::Unauthorized);
+        }
+
+        if share_bps == 0 || share_bps > 10000 {
+            return Err(ContractError::InvalidParams);
+        }
+
+        if recipient == new_recipient {
+            return Err(ContractError::CyclicDelegation);
+        }
+
+        if stream.status == StreamStatus::Completed || stream.status == StreamStatus::Cancelled {
+            return Err(ContractError::StreamTerminalState);
+        }
+
+        let now = current_accrual_timestamp(&env)?;
+        if now >= stream.end_time {
+            return Err(ContractError::InvalidState);
+        }
+
+        if stream.delegation_depth >= MAX_DELEGATION_DEPTH {
+            return Err(ContractError::DelegationDepthExceeded);
+        }
+
+        // Prevent cycles by checking if the new_recipient is already in the delegation chain
+        let mut current_ancestor = stream.parent_stream_id;
+        while let Some(ancestor_id) = current_ancestor {
+            let ancestor = load_stream(&env, ancestor_id)?;
+            if ancestor.recipient == new_recipient {
+                return Err(ContractError::CyclicDelegation);
+            }
+            current_ancestor = ancestor.parent_stream_id;
+        }
+
+        let old_rate = stream.rate_per_second;
+        let child_rate = old_rate
+            .checked_mul(share_bps as i128)
+            .ok_or(ContractError::ArithmeticOverflow)?
+            / 10000;
+
+        if child_rate <= 0 || child_rate >= old_rate {
+            return Err(ContractError::InvalidParams);
+        }
+
+        let new_rate_per_second = old_rate - child_rate;
+
+        // Checkpoint accrual under the old rate
+        let accrued_now = accrual::calculate_accrued_amount_checkpointed(
+            accrual::CheckpointState {
+                checkpointed_amount: stream.checkpointed_amount,
+                checkpointed_at: stream.checkpointed_at,
+                cliff_time: stream.cliff_time,
+                end_time: stream.end_time,
+                deposit_amount: stream.deposit_amount,
+                kind: stream.kind,
+            },
+            old_rate,
+            now,
+        );
+
+        let remaining_seconds = (stream.end_time - now) as i128;
+        let future_accrual_parent = new_rate_per_second
+            .checked_mul(remaining_seconds)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        let new_deposit_parent = accrued_now
+            .checked_add(future_accrual_parent)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+
+        let child_deposit = stream.deposit_amount
+            .checked_sub(new_deposit_parent)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+
+        if child_deposit < 0 {
+            return Err(ContractError::InvalidState);
+        }
+
+        // Persist parent state
+        stream.checkpointed_amount = accrued_now;
+        stream.checkpointed_at = now;
+        stream.rate_per_second = new_rate_per_second;
+        stream.deposit_amount = new_deposit_parent;
+        save_stream(&env, &stream);
+
+        // Create child stream
+        let child_stream_id = next_stream_id_for(&env, &stream.sender);
+        
+        let child_stream = Stream {
+            stream_id: child_stream_id,
+            sender: stream.sender.clone(),
+            recipient: new_recipient.clone(),
+            deposit_amount: child_deposit,
+            rate_per_second: child_rate,
+            start_time: now,
+            cliff_time: stream.cliff_time.max(now),
+            end_time: stream.end_time,
+            withdrawn_amount: 0,
+            status: StreamStatus::Active,
+            cancelled_at: None,
+            checkpointed_amount: 0,
+            checkpointed_at: now,
+            withdraw_dust_threshold: stream.withdraw_dust_threshold,
+            memo: stream.memo.clone(),
+            kind: stream.kind,
+            last_pause_toggle_ledger: 0,
+            last_withdraw_ledger: 0,
+            metadata: stream.metadata.clone(),
+            parent_stream_id: Some(stream_id),
+            delegation_depth: stream.delegation_depth + 1,
+        };
+
+        save_stream(&env, &child_stream);
+        add_stream_to_recipient_index(&env, &new_recipient, child_stream_id, Some(stream.end_time));
+
+        env.events().publish(
+            (symbol_short!("del_share"), stream_id),
+            RecipientShareDelegated {
+                parent_stream_id: stream_id,
+                child_stream_id,
+                delegator: recipient,
+                delegatee: new_recipient,
+                share_bps,
+                new_parent_rate: new_rate_per_second,
+                child_rate,
+            },
+        );
+
+        Ok(child_stream_id)
     }
 
     /// Shorten a stream's `end_time` and refund unstreamed tokens to the sender.

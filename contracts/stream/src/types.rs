@@ -226,6 +226,10 @@ pub enum ContractError {
     KeeperGracePeriodNotElapsed = 33,
     /// Withdraw dust threshold is negative or exceeds deposit amount.
     InvalidDustThreshold = 35,
+    /// Maximum delegation depth exceeded.
+    DelegationDepthExceeded = 36,
+    /// Attempted to delegate to an address already in the delegation chain.
+    CyclicDelegation = 37,
 }
 
 #[contracttype]
@@ -325,6 +329,19 @@ pub struct RecipientUpdated {
     pub stream_id: u64,
     pub old_recipient: Address,
     pub new_recipient: Address,
+}
+
+/// Emitted when a recipient delegates a portion of their stream to a new recipient.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecipientShareDelegated {
+    pub parent_stream_id: u64,
+    pub child_stream_id: u64,
+    pub delegator: Address,
+    pub delegatee: Address,
+    pub share_bps: u32,
+    pub new_parent_rate: i128,
+    pub child_rate: i128,
 }
 
 #[contracttype]
@@ -617,6 +634,10 @@ pub struct Stream {
     pub last_withdraw_ledger: u32,
     /// Optional structured metadata emitted for indexer consumption.
     pub metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
+    /// For child streams created via delegation, the parent stream ID.
+    pub parent_stream_id: Option<u64>,
+    /// The delegation depth (0 for root stream, increments by 1 per child).
+    pub delegation_depth: u32,
 }
 
 /// Pagination result for recipient stream listing
