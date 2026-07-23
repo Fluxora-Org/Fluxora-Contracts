@@ -346,5 +346,94 @@ bash script/update-wasm-checksums.sh
 
 ---
 
+---
+
+## 12. Snapshot Security Diff
+
+Before merging any PR that modifies snapshot files under
+`contracts/stream/test_snapshots/`, run `script/check_snapshot_diff.py` to
+detect security-relevant field changes. The script classifies changes to admin
+addresses, token identity, rate caps, pause state, recipient rotation, nonces,
+and storage key layout against the `SECURITY_FIELDS` registry.
+
+```bash
+# Extract the base version from main
+git show origin/main:contracts/stream/test_snapshots/test/test_NAME.1.json \
+  > /tmp/base.json
+
+# Run the classifier
+python script/check_snapshot_diff.py \
+  --base /tmp/base.json \
+  --head contracts/stream/test_snapshots/test/test_NAME.1.json
+```
+
+### Exit-code contract
+
+| Code | Meaning |
+|---|---|
+| `0` | No security-relevant changes. Standard review applies. |
+| `1` | Security-relevant changes detected. Mandatory extra review required. |
+| `2` | Usage error — bad path, invalid JSON, or wrong JSON type. |
+
+### Checklist
+
+- [ ] `check_snapshot_diff.py` has been run for every changed snapshot file in this PR
+- [ ] The exit code is recorded in the PR description or review comment
+- [ ] If exit code was `1`, all applicable mandatory extra review items from
+  `docs/snapshot-security-diff.md` have been completed and documented
+
+> **Note:** This tool is **not yet wired into CI**. The companion CI-wiring
+> issue must land before it is enforced automatically. Until then, run it
+> manually for every PR that touches snapshot files.
+
+For the full field classification reference, worked examples, and the complete
+reviewer workflow, see **[`docs/snapshot-security-diff.md`](snapshot-security-diff.md)**.
+
+---
+
+## 12. Snapshot Security Diff
+
+Before merging any PR that modifies snapshot files under
+`contracts/stream/test_snapshots/`, run `script/check_snapshot_diff.py` to
+detect security-relevant field changes. The script classifies changes to admin
+addresses, token identity, rate caps, pause state, recipient rotation, nonces,
+and storage key layout against its `SECURITY_FIELDS` registry.
+
+```bash
+# Extract the base version from main
+git show origin/main:contracts/stream/test_snapshots/test/test_NAME.1.json \
+  > /tmp/base.json
+
+# Run the classifier
+python script/check_snapshot_diff.py \
+  --base /tmp/base.json \
+  --head contracts/stream/test_snapshots/test/test_NAME.1.json
+```
+
+### Exit-code contract
+
+| Code | Meaning |
+|---|---|
+| `0` | No security-relevant changes. Standard review applies. |
+| `1` | Security-relevant changes detected. Mandatory extra review required. |
+| `2` | Usage error — bad path, invalid JSON, or wrong top-level type. |
+
+### Checklist
+
+- [ ] `check_snapshot_diff.py` has been run for every changed snapshot file in this PR
+- [ ] The exit code is recorded in the PR description or review comment
+- [ ] If exit code was `1`, all applicable mandatory extra review items from
+  [`docs/snapshot-security-diff.md`](snapshot-security-diff.md) have been completed
+  and documented in the PR thread
+
+> **Note:** This tool is **not yet wired into CI**. The companion CI-wiring
+> issue must land before it is enforced automatically. Until then, run it
+> manually for every PR that touches snapshot files.
+
+For the full field classification reference, worked examples, and the complete
+reviewer workflow, see **[`docs/snapshot-security-diff.md`](snapshot-security-diff.md)**.
+
+---
+
 _Review this document after any contract upgrade, admin power change, or storage layout modification._
 _File location: `docs/maintainer-security-checklist.md`_
