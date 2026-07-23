@@ -1,4 +1,4 @@
-﻿//! Tests for issue #522: close guard and recipient-index cleanup paths.
+//! Tests for issue #522: close guard and recipient-index cleanup paths.
 //!
 //! 1. `test_close_non_completed_stream_rejected` — exercises the guard that
 //!    rejects Active/Paused streams passed to `close_completed_stream`.
@@ -65,6 +65,22 @@ impl<'a> Ctx<'a> {
             &0,
             &None,
             &StreamKind::Linear,
+            &None,
+        )
+    fn create_irrevocable_stream(&self, duration: u64) -> u64 {
+        let now = self.env.ledger().timestamp();
+        self.client.create_stream(
+            &self.sender,
+            &self.recipient,
+            &(duration as i128),
+            &1,
+            &now,
+            &now,
+            &(now + duration),
+            &0,
+            &None,
+            &StreamKind::Linear,
+            &Some(true),
         )
     }
 }
@@ -272,4 +288,62 @@ fn test_close_removes_only_target_from_index() {
     let index = ctx.client.get_recipient_streams(&ctx.recipient);
     assert!(!index.contains(id_a));
     assert!(index.contains(id_b));
+}
+
+// ---------------------------------------------------------------------------
+// Irrevocable stream guard
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_irrevocable_stream_rejects_cancel() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_irrevocable_stream(10_000);
+    let result = ctx.client.try_cancel_stream(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
+}
+
+#[test]
+fn test_irrevocable_stream_rejects_admin_cancel() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_irrevocable_stream(10_000);
+    
+    // We would test cancel_stream_as_admin, but for simplicity we verify the guard
+    // logic which is shared.
+    let result = ctx.client.try_cancel_stream_as_admin(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
+}
+
+#[test]
+fn test_irrevocable_stream_rejects_keeper_cancel() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_irrevocable_stream(10_000);
+    
+    // Fast-forward past end_time + grace_period
+    ctx.env.ledger().with_mut(|l| {
+        l.timestamp += 10_000 + 7 * 86400; // end_time + 7 days
+    });
+
+    let keeper = Address::generate(&ctx.env);
+    let result = ctx.client.try_keeper_cancel(&stream_id, &keeper);
+    assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
+}
+
+#[test]
+fn test_irrevocable_stream_rejects_shorten_end_time() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_irrevocable_stream(10_000);
+    
+    let now = ctx.env.ledger().timestamp();
+    let result = ctx.client.try_shorten_stream_end_time(&stream_id, &(now + 5_000));
+    assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
+}
+
+#[test]
+fn test_irrevocable_stream_rejects_bulk_cancel() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_irrevocable_stream(10_000);
+    
+    let streams = soroban_sdk::vec![&ctx.env, stream_id];
+    let result = ctx.client.try_bulk_cancel_streams(&ctx.sender, &streams);
+    assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
 }

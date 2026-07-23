@@ -617,6 +617,9 @@ pub struct Stream {
     pub last_withdraw_ledger: u32,
     /// Optional structured metadata emitted for indexer consumption.
     pub metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
+    /// If true, blocks all cancellation and shortening paths (cancel_stream, cancel_stream_as_admin, keeper_cancel, shorten_stream_end_time).
+    /// Defaults to false (None) for full backward compatibility with existing streams.
+    pub irrevocable: Option<bool>,
 }
 
 /// Pagination result for recipient stream listing
@@ -652,6 +655,8 @@ pub struct CreateStreamParams {
     pub kind: StreamKind,
     /// Optional structured metadata emitted for indexer consumption.
     pub metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
+    /// If true, the stream cannot be cancelled or shortened. Defaults to false (None).
+    pub irrevocable: Option<bool>,
 }
 
 /// Parameters for creating a payment stream with relative (offset-based) times.
@@ -687,6 +692,8 @@ pub struct CreateStreamRelativeParams {
     /// The architectural style of the stream (Linear or CliffOnly).
     pub kind: StreamKind,
     pub metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
+    /// If true, the stream cannot be cancelled or shortened. Defaults to false (None).
+    pub irrevocable: Option<bool>,
 }
 
 /// Reusable relative schedule (offsets only). Amounts are supplied when creating a stream.

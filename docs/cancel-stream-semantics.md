@@ -2,6 +2,29 @@
 
 This note scopes and verifies one protocol slice: cancellation refund behavior and `cancelled_at` semantics.
 
+## Irrevocable Mode
+
+For specific use-cases (e.g., token-vesting agreements without clawback clauses, or compliance-grade irrevocable streams), a stream can be marked as **irrevocable** at creation time.
+
+When `irrevocable` is set to `true` (via `CreateStreamParams` or `CreateStreamRelativeParams`), the stream becomes permanently shielded against all cancellation paths. The `irrevocable` flag is structurally appended to the `Stream` XDR as an `Option<bool>` to preserve backward compatibility (defaulting to `false` for older entries).
+
+### Blocked Operations on Irrevocable Streams
+Attempting to invoke any of the following endpoints on an irrevocable stream will fail with `ContractError::Unauthorized`:
+
+1. **`cancel_stream`**: The sender cannot unilaterally cancel the stream and reclaim unvested tokens.
+2. **`cancel_stream_as_admin`**: Even the protocol admin is blocked from cancelling the stream.
+3. **`keeper_cancel`**: Third-party keepers cannot cancel the stream if it's left abandoned past the grace period.
+4. **`bulk_cancel_streams`**: Attempting to include an irrevocable stream in a bulk cancellation will abort the entire batch.
+5. **`shorten_stream_end_time`**: The sender cannot arbitrarily move the end time forward to effectively cut off the recipient.
+
+### Unaffected Operations
+Irrevocable streams behave normally for all other operations:
+- **`withdraw`**: The recipient can withdraw accrued tokens continuously.
+- **`pause_stream` / `resume_stream`**: If the protocol allows pausing for operational reasons, pausing is still supported (unless restricted elsewhere).
+
+### Security and Trust Assurances
+The `irrevocable` flag ensures that a beneficiary (recipient) can mathematically trust that the tokens allocated to them via the stream's rate and duration will be delivered unconditionally as long as they accrue, regardless of the sender's or admin's future intentions. This is a strict requirement for high-trust vesting distributions.
+
 ## Scope
 
 In scope:
