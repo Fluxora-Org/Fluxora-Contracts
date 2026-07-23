@@ -315,3 +315,33 @@ This document is aligned with the current implementation as follows:
 - `contracts/stream/tests/factory_policy.rs` covers policy input validation,
   factory policy gates, `CliffOnly` kind forwarding, memo forwarding,
   append-only error discriminants, and admin-guarded policy updates.
+
+## Storage Layout & DataKey Collision Audit
+
+The `fluxora_factory` contract uses Soroban storage for configuration and state management. The `DataKey` enum defines all storage keys used by the contract.
+
+### DataKey Enumeration & Parameterization
+
+| DataKey Variant | Storage Type | Payload / Parameter | Value Type | Description |
+|-----------------|--------------|---------------------|------------|-------------|
+| `Admin` | Instance | None (unit variant) | `Address` | Address of the factory administrator. |
+| `StreamContract` | Instance | None (unit variant) | `Address` | Address of the underlying `FluxoraStream` contract primitive. |
+| `MaxDepositCap` | Instance | None (unit variant) | `i128` | Maximum allowable `deposit_amount` per stream or aggregate batch. |
+| `MinDuration` | Instance | None (unit variant) | `u64` | Minimum allowable stream duration (`end_time - start_time`). |
+| `BatchCapEnforced` | Instance | None (unit variant) | `bool` | Flag toggling aggregate batch deposit cap enforcement in `create_streams`. |
+| `CreationPaused` | Instance | None (unit variant) | `bool` | Global pause flag for stream creation via factory. |
+| `MinRatePerSecond` | Instance | None (unit variant) | `i128` | Optional inclusive lower bound on stream rate per second. |
+| `MaxRatePerSecond` | Instance | None (unit variant) | `i128` | Optional inclusive upper bound on stream rate per second. |
+| `Allowlist(Address)` | Persistent | `Address` | `bool` | Per-recipient eligibility flag (`true` if allowlisted). |
+| `FactoryStreamIds` | Persistent | None (unit variant) | `Vec<u64>` | Persistent ordered list of all stream IDs created through this factory. |
+
+### Collision Analysis
+
+Soroban serializes `contracttype` enums by tagging each variant with a distinct discriminant index (0, 1, 2...) combined with its parameter payload during ScVal XDR encoding:
+
+1. **Discriminant Isolation**: Each unit variant (`Admin`, `StreamContract`, `MaxDepositCap`, `MinDuration`, `BatchCapEnforced`, `FactoryStreamIds`, `CreationPaused`, `MinRatePerSecond`, `MaxRatePerSecond`) produces a unique XDR tuple `(VariantTag, ())`.
+2. **Tuple Parameter Isolation**: Parameterized variants (like `Allowlist(Address)`) produce XDR tuples `(VariantTag, Address)`. Because `VariantTag` for `Allowlist` is distinct from all other variants, an `Allowlist(Address)` key can never collide with any unit variant or future parameterized variant with a different tag.
+3. **Parameter Uniqueness**: Within `Allowlist(Address)`, each unique `Address` yields a distinct serialized key.
+
+Therefore, key collisions are mathematically impossible across all valid inputs.
+

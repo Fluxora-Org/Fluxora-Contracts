@@ -111,12 +111,12 @@ test = false
 [[test]]
 name = "rate_bounds"
 path = "tests/rate_bounds.rs"
-test = false
+test = true
 
 [[test]]
 name = "rate_decrease_after_withdraw"
 path = "tests/rate_decrease_after_withdraw.rs"
-test = false
+test = true
 
 [[test]]
 name = "recipient_update_state_machine"

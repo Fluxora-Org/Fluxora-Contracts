@@ -37,9 +37,8 @@ use crate::{load_delegated_nonce, load_stream, ContractError};
 /// # Returns
 /// - `Ok(())` if both checks pass.
 /// - `Err(ContractError::SignatureDeadlineExpired)` if `deadline < current timestamp`.
-/// - `Err(ContractError::InvalidParams)` if `nonce` does not match.
+/// - `Err(ContractError::InvalidSignature)` if `nonce` does not match.
 /// - `Err(ContractError::StreamNotFound)` if `stream_id` does not exist.
-#[allow(dead_code)]
 pub(crate) fn validate_delegation_params(
     env: &Env,
     stream_id: u64,
@@ -53,7 +52,7 @@ pub(crate) fn validate_delegation_params(
     let stream = load_stream(env, stream_id)?;
     let current_nonce = load_delegated_nonce(env, &stream.recipient);
     if nonce != current_nonce {
-        return Err(ContractError::InvalidParams);
+        return Err(ContractError::InvalidSignature);
     }
 
     Ok(())
@@ -147,7 +146,7 @@ mod tests {
         assert_eq!(result, Ok(()));
     }
 
-    /// Nonce off-by-one (1 when stored is 0) must fail with InvalidParams.
+    /// Nonce off-by-one (1 when stored is 0) must fail with InvalidSignature.
     #[test]
     fn test_nonce_off_by_one_fails() {
         let (env, _client, stream_id, _recipient) = setup();
@@ -156,7 +155,7 @@ mod tests {
         let result = env.as_contract(&_client.address, || {
             validate_delegation_params(&env, stream_id, 1, 100)
         });
-        assert_eq!(result, Err(ContractError::InvalidParams));
+        assert_eq!(result, Err(ContractError::InvalidSignature));
     }
 
     /// Nonexistent stream_id must fail with StreamNotFound.
@@ -238,7 +237,7 @@ mod tests {
         let result = env.as_contract(&_client.address, || {
             validate_delegation_params(&env, stream_id, u64::MAX, 100)
         });
-        assert_eq!(result, Err(ContractError::InvalidParams));
+        assert_eq!(result, Err(ContractError::InvalidSignature));
     }
 
     // ── Nonce invariants ────────────────────────────────────────────────
@@ -314,13 +313,13 @@ mod tests {
             env.as_contract(&contract_id, || validate_delegation_params(
                 &env, stream_a, 1, 100
             )),
-            Err(ContractError::InvalidParams)
+            Err(ContractError::InvalidSignature)
         );
         assert_eq!(
             env.as_contract(&contract_id, || validate_delegation_params(
                 &env, _stream_b, 1, 100
             )),
-            Err(ContractError::InvalidParams)
+            Err(ContractError::InvalidSignature)
         );
     }
 
@@ -335,7 +334,7 @@ mod tests {
         let result_fail = env.as_contract(&_client.address, || {
             validate_delegation_params(&env, stream_id, 1, 100)
         });
-        assert_eq!(result_fail, Err(ContractError::InvalidParams));
+        assert_eq!(result_fail, Err(ContractError::InvalidSignature));
 
         // Second call: correct nonce → must still succeed
         let result_ok = env.as_contract(&_client.address, || {
@@ -343,4 +342,104 @@ mod tests {
         });
         assert_eq!(result_ok, Ok(()));
     }
+
+    // ── Delegation Revocation & Live State Tests ─────────────────────────
+
+    /// Legitimate pre-revocation case: delegation granted and used before any revocation
+    /// must succeed.
+    #[test]
+    fn test_pre_revocation_delegated_withdraw_succeeds() {
+        let (env, client, stream_id, recipient) = setup();
+        env.ledger().set_timestamp(50);
+
+        // Delegation granted with stored nonce (0) before any revocation.
+        let result = env.as_contract(&client.address, || {
+            validate_delegation_params(&env, stream_id, 0, 100)
+        });
+        assert_eq!(result, Ok(()));
+
+        // Nonce remains 0 in storage
+        let stored = env.as_contract(&client.address, || load_delegated_nonce(&env, &recipient));
+        assert_eq!(stored, 0);
+    }
+
+    /// Same-ledger revocation race: revoking delegation immediately blocks any
+    /// in-flight or subsequent delegated withdraw attempt processed at or after
+    /// the revoking transaction within the same ledger.
+    #[test]
+    fn test_same_ledger_revocation_race_blocks_withdraw() {
+        let (env, client, stream_id, recipient) = setup();
+        env.ledger().set_timestamp(50);
+
+        // 1. Prior to revocation, nonce 0 is valid.
+        let result_before = env.as_contract(&client.address, || {
+            validate_delegation_params(&env, stream_id, 0, 100)
+        });
+        assert_eq!(result_before, Ok(()));
+
+        // 2. Revoke delegation in the same ledger (advance stored nonce to 1).
+        env.as_contract(&client.address, || {
+            crate::storage::increment_delegated_nonce(&env, &recipient);
+        });
+
+        // 3. Attempt withdraw using revoked delegation (nonce 0) in the same ledger (timestamp 50).
+        // Must be strictly rejected with no window where the just-revoked delegate can withdraw.
+        let result_after = env.as_contract(&client.address, || {
+            validate_delegation_params(&env, stream_id, 0, 100)
+        });
+        assert_eq!(result_after, Err(ContractError::InvalidSignature));
+    }
+
+    /// Later-ledger revocation: revoking delegation blocks withdraw attempts in later ledgers.
+    #[test]
+    fn test_later_ledger_revocation_blocks_withdraw() {
+        let (env, client, stream_id, recipient) = setup();
+        env.ledger().set_timestamp(50);
+
+        // Revoke delegation at t=50 (advance nonce).
+        env.as_contract(&client.address, || {
+            crate::storage::increment_delegated_nonce(&env, &recipient);
+        });
+
+        // Advance to a later ledger timestamp.
+        env.ledger().set_timestamp(150);
+
+        // Attempt withdraw using old/revoked delegation (nonce 0) in later ledger → rejected.
+        let result = env.as_contract(&client.address, || {
+            validate_delegation_params(&env, stream_id, 0, 200)
+        });
+        assert_eq!(result, Err(ContractError::InvalidSignature));
+    }
+
+    /// Authorization check live state verification: confirms that the authorization check
+    /// reads delegation state fresh on every call rather than from a cached/stale value.
+    #[test]
+    fn test_authorization_reads_live_delegation_state_fresh() {
+        let (env, client, stream_id, recipient) = setup();
+        env.ledger().set_timestamp(50);
+
+        // First authorization check with stored nonce 0 → succeeds
+        let check_1 = env.as_contract(&client.address, || {
+            validate_delegation_params(&env, stream_id, 0, 100)
+        });
+        assert_eq!(check_1, Ok(()));
+
+        // Storage state is modified in the contract env (nonce incremented to 1)
+        env.as_contract(&client.address, || {
+            crate::storage::increment_delegated_nonce(&env, &recipient);
+        });
+
+        // Second authorization check with nonce 0 without modifying parameters → fails immediately
+        let check_2 = env.as_contract(&client.address, || {
+            validate_delegation_params(&env, stream_id, 0, 100)
+        });
+        assert_eq!(check_2, Err(ContractError::InvalidSignature));
+
+        // Authorization check with updated nonce 1 → succeeds
+        let check_3 = env.as_contract(&client.address, || {
+            validate_delegation_params(&env, stream_id, 1, 100)
+        });
+        assert_eq!(check_3, Ok(()));
+    }
 }
+

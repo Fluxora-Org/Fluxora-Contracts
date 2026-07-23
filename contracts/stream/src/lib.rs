@@ -4,7 +4,6 @@
 pub mod accrual;
 #[cfg(test)]
 mod checksum;
-#[cfg(test)]
 mod delegation;
 pub(crate) mod events;
 pub(crate) mod storage;
@@ -412,6 +411,8 @@ pub enum ContractError {
     WithdrawalTooFrequent = 33,
     /// Keeper attempted to close a stream before the grace period elapsed.
     KeeperGracePeriodNotElapsed = 34,
+    /// Withdraw dust threshold is negative or exceeds deposit amount.
+    InvalidDustThreshold = 35,
 }
 
 #[contracttype]
@@ -1060,9 +1061,10 @@ fn release_reentrancy_lock(env: &Env) {
 ///   short-lived streams below the static floor.
 fn compute_adaptive_ttl(now: u64, end_time: u64) -> u32 {
     let remaining_seconds = end_time.saturating_sub(now);
-    let ledgers_for_stream = (remaining_seconds / LEDGER_CLOSE_TIME) as u32;
-    let adaptive = ledgers_for_stream.saturating_add(BUFFER_LEDGERS);
-    adaptive.clamp(PERSISTENT_BUMP_AMOUNT, MAX_TTL)
+    let ledgers_for_stream = remaining_seconds / LEDGER_CLOSE_TIME;
+    let adaptive_u64 = ledgers_for_stream.saturating_add(BUFFER_LEDGERS as u64);
+    let clamped = adaptive_u64.clamp(PERSISTENT_BUMP_AMOUNT as u64, MAX_TTL as u64);
+    clamped as u32
 }
 
 fn get_config(env: &Env) -> Result<Config, ContractError> {
@@ -1669,6 +1671,14 @@ impl FluxoraStream {
             if m.len() as usize > MAX_MEMO_BYTES {
                 return Err(ContractError::InvalidParams);
             }
+        }
+
+        // Validate withdraw_dust_threshold: must be in range [0, deposit_amount]
+        if withdraw_dust_threshold < 0 {
+            return Err(ContractError::InvalidDustThreshold);
+        }
+        if withdraw_dust_threshold > deposit_amount {
+            return Err(ContractError::InvalidDustThreshold);
         }
 
         let stream_id = next_stream_id_for(env, &sender);
@@ -2873,14 +2883,6 @@ impl FluxoraStream {
             return Ok(0);
         }
 
-        // Enforce dust threshold unless terminal state or final drain (#423)
-        if withdrawable < stream.withdraw_dust_threshold
-            && !is_terminal_state(&env, &stream)
-            && stream.withdrawn_amount + withdrawable < stream.deposit_amount
-        {
-            return Ok(0);
-        }
-
         // CEI: update state before external token transfer to reduce reentrancy risk.
         // Assumption: the token contract does not reenter this contract.
         stream.withdrawn_amount += withdrawable;
@@ -3551,10 +3553,9 @@ impl FluxoraStream {
         // replaced by the ed25519 signature check below.
         relayer.require_auth();
 
-        // 1. Deadline check — reject stale signatures before any storage reads.
-        if env.ledger().timestamp() > deadline {
-            return Err(ContractError::SignatureDeadlineExpired);
-        }
+        // 1. Validate delegation parameters (deadline & nonce against live state).
+        // delegation.rs backs delegated_withdraw authorization logic and queries live persistent storage on every call.
+        delegation::validate_delegation_params(&env, stream_id, nonce, deadline)?;
 
         // 2. Load stream.
         let mut stream = load_stream(&env, stream_id)?;
@@ -3568,12 +3569,6 @@ impl FluxoraStream {
                 < MIN_WITHDRAW_INTERVAL_LEDGERS
         {
             return Err(ContractError::WithdrawalTooFrequent);
-        }
-
-        // 4. Nonce check — replay protection.
-        let stored_nonce = load_delegated_nonce(&env, &stream.recipient);
-        if nonce != stored_nonce {
-            return Err(ContractError::InvalidSignature);
         }
 
         // 5. Bind the supplied public key to the stream recipient.
@@ -4148,6 +4143,15 @@ impl FluxoraStream {
         read_total_keeper_fees_paid(&env)
     }
 
+    /// Returns the contract's current total outstanding liabilities: the sum
+    /// of every stream's remaining (not-yet-withdrawn) balance.
+    ///
+    /// Auth-free, read-only view. Used to cross-check that the contract's
+    /// token balance never falls short of what it owes across all streams.
+    pub fn get_total_liabilities(env: Env) -> i128 {
+        read_total_liabilities(&env)
+    }
+
     /// Return the protocol-wide number of streams currently in `StreamStatus::Paused`.
     ///
     /// This view is O(1): it reads the maintained `DataKey::PausedStreamCount` instance key
@@ -4715,9 +4719,12 @@ impl FluxoraStream {
         pull_token(&env, &funder, amount)?;
 
         // Increase liabilities to match the additional deposit.
+        // Checked arithmetic: a silent wrap here would corrupt the global
+        // liability counter and allow the contract to believe it owes far less
+        // than it actually does (severe fund-accounting bug).
         let liabilities = read_total_liabilities(&env)
             .checked_add(amount)
-            .unwrap_or(i128::MAX);
+            .ok_or(ContractError::ArithmeticOverflow)?;
         write_total_liabilities(&env, liabilities);
 
         env.events().publish(
@@ -6911,6 +6918,188 @@ impl FluxoraStream {
     pub fn get_id_reservation(env: Env, caller: Address) -> Option<IdReservation> {
         load_id_reservation(&env, &caller)
     }
+
+    /// Atomically cancel multiple streams owned by the caller and refund the aggregate
+    /// unstreamed balance in a single token transfer.
+    ///
+    /// This is the batch counterpart to `cancel_stream`. It provides gas-efficient
+    /// off-boarding for senders managing large portfolios (up to `MAX_PAGE_SIZE` streams).
+    ///
+    /// # Two-phase execution
+    /// 1. **Validation phase**: Every `stream_id` is loaded and verified:
+    ///    - Stream must exist (`StreamNotFound` otherwise).
+    ///    - Caller must be the stream sender (`Unauthorized` otherwise).
+    ///    - Stream must be in `Active` or `Paused` state (`InvalidState` otherwise).
+    ///    - Duplicate `stream_id`s are rejected (`DuplicateStreamId`).
+    /// 2. **Execution phase**: Only after all validations pass:
+    ///    - Per-stream accrued amount is computed.
+    ///    - Recipient is paid their accrued entitlement (individual transfers).
+    ///    - Stream is marked `Cancelled` with `cancelled_at` timestamp.
+    ///    - `StreamCancelled` event is emitted per stream.
+    ///    - Aggregate refund is computed and sent to the sender in **one** token transfer.
+    ///
+    /// # Parameters
+    /// - `stream_ids`: Vector of stream IDs to cancel. Must be unique. Max length is
+    ///   bounded by the caller's transaction resources; the contract enforces no hard
+    ///   limit beyond Soroban's own VM limits, but `MAX_PAGE_SIZE = 100` is the
+    ///   recommended batch size for gas predictability.
+    ///
+    /// # Authorization
+    /// - Requires authorization from the caller (who must be the sender of every stream).
+    ///
+    /// # Returns
+    /// - `Ok(())` on success.
+    ///
+    /// # Errors
+    /// - `ContractError::DuplicateStreamId` (14): Duplicate IDs in `stream_ids`.
+    /// - `ContractError::StreamNotFound` (1): A stream ID does not exist.
+    /// - `ContractError::Unauthorized` (7): Caller is not the sender of a stream.
+    /// - `ContractError::InvalidState` (2): A stream is not `Active` or `Paused`.
+    /// - `ContractError::ContractPaused` (4): Global emergency pause is active.
+    ///
+    /// # Gas efficiency
+    /// - One auth check for the entire batch.
+    /// - One token transfer for the aggregate refund (vs. N transfers for N individual
+    ///   `cancel_stream` calls).
+    /// - Per-stream recipient transfers are still individual (required for correct
+    ///   accounting and event emission), but the sender refund is batched.
+    ///
+    /// # Events
+    /// - One `StreamCancelled` event per successfully cancelled stream.
+    /// - One `cancelled` topic event per stream (same shape as `cancel_stream`).
+    ///
+    /// # Security
+    /// - Atomic: any failure in validation or execution reverts the entire batch.
+    /// - CEI pattern: state is persisted before every external token transfer.
+    /// - Liabilities are reduced per-stream before the aggregate refund.
+    pub fn bulk_cancel_streams(
+        env: Env,
+        sender: Address,
+        stream_ids: soroban_sdk::Vec<u64>,
+    ) -> Result<(), ContractError> {
+        require_not_globally_paused(&env)?;
+        sender.require_auth();
+
+        let n = stream_ids.len();
+        if n == 0 {
+            return Ok(());
+        }
+
+        // ── Phase 1: Validate all stream IDs and ownership ────────────────────
+        let mut streams = soroban_sdk::Vec::<Stream>::new(&env);
+
+        for i in 0..n {
+            let id = stream_ids.get(i).unwrap();
+
+            // Duplicate detection
+            let mut j = i + 1;
+            while j < n {
+                if stream_ids.get(j).unwrap() == id {
+                    return Err(ContractError::DuplicateStreamId);
+                }
+                j += 1;
+            }
+
+            let stream = load_stream(&env, id)?;
+
+            if stream.sender != sender {
+                return Err(ContractError::Unauthorized);
+            }
+
+            FluxoraStream::require_cancellable_status(stream.status)?;
+
+            streams.push_back(stream);
+        }
+
+        // ── Phase 2: Execute cancellations ────────────────────────────────────
+        let now = env.ledger().timestamp();
+        let mut aggregate_refund: i128 = 0;
+
+        for i in 0..n {
+            let mut stream = streams.get(i).unwrap();
+            let stream_id = stream.stream_id;
+
+            let accrued_at_cancel = accrual::calculate_accrued_amount_checkpointed(
+                accrual::CheckpointState {
+                    checkpointed_amount: stream.checkpointed_amount,
+                    checkpointed_at: stream.checkpointed_at,
+                    cliff_time: stream.cliff_time,
+                    end_time: stream.end_time,
+                    deposit_amount: stream.deposit_amount,
+                    kind: stream.kind,
+                },
+                stream.rate_per_second,
+                now,
+            );
+
+            let refund_amount = stream
+                .deposit_amount
+                .checked_sub(accrued_at_cancel)
+                .ok_or(ContractError::InvalidState)?;
+
+            let (was_underfunded, _, _) = compute_stream_health(&stream, now);
+
+            // ── Pay recipient their accrued entitlement first ─────────────────
+            let recipient_accrual = accrued_at_cancel
+                .saturating_sub(stream.withdrawn_amount)
+                .max(0);
+            if recipient_accrual > 0 {
+                stream.withdrawn_amount = stream
+                    .withdrawn_amount
+                    .checked_add(recipient_accrual)
+                    .unwrap_or(i128::MAX);
+
+                let liabilities = read_total_liabilities(&env)
+                    .checked_sub(recipient_accrual)
+                    .unwrap_or(0);
+                write_total_liabilities(&env, liabilities);
+
+                push_token(&env, &stream.recipient, recipient_accrual)?;
+
+                env.events().publish(
+                    (symbol_short!("withdrew"), stream_id),
+                    Withdrawal {
+                        stream_id,
+                        recipient: stream.recipient.clone(),
+                        amount: recipient_accrual,
+                    },
+                );
+            }
+
+            // ── Mark stream as cancelled ──────────────────────────────────────
+            let previous_status = stream.status;
+            stream.status = StreamStatus::Cancelled;
+            stream.cancelled_at = Some(now);
+            save_stream(&env, &stream);
+            reconcile_paused_stream_count(&env, previous_status, stream.status);
+
+            // ── Accumulate sender refund ──────────────────────────────────────
+            if refund_amount > 0 {
+                aggregate_refund = aggregate_refund
+                    .checked_add(refund_amount)
+                    .ok_or(ContractError::ArithmeticOverflow)?;
+
+                let liabilities = read_total_liabilities(&env)
+                    .checked_sub(refund_amount)
+                    .unwrap_or(0);
+                write_total_liabilities(&env, liabilities);
+            }
+
+            env.events().publish(
+                (symbol_short!("cancelled"), stream_id),
+                StreamEvent::StreamCancelled(stream_id),
+            );
+
+            maybe_emit_health_changed(&env, &stream, was_underfunded, now);
+        }
+
+        // ── Single aggregate refund to sender ─────────────────────────────────
+        if aggregate_refund > 0 {
+            push_token(&env, &sender, aggregate_refund)?;
+        }
+
+        Ok(())
+    }
 }
 
 /// Compute whether a stream is underfunded (will run out of funds before end_time).
@@ -7096,188 +7285,6 @@ mod test_issue_39;
 mod test_token_edge_cases;
 #[cfg(test)]
 mod test_withdrawable_props;
-
-/// Atomically cancel multiple streams owned by the caller and refund the aggregate
-/// unstreamed balance in a single token transfer.
-///
-/// This is the batch counterpart to `cancel_stream`. It provides gas-efficient
-/// off-boarding for senders managing large portfolios (up to `MAX_PAGE_SIZE` streams).
-///
-/// # Two-phase execution
-/// 1. **Validation phase**: Every `stream_id` is loaded and verified:
-///    - Stream must exist (`StreamNotFound` otherwise).
-///    - Caller must be the stream sender (`Unauthorized` otherwise).
-///    - Stream must be in `Active` or `Paused` state (`InvalidState` otherwise).
-///    - Duplicate `stream_id`s are rejected (`DuplicateStreamId`).
-/// 2. **Execution phase**: Only after all validations pass:
-///    - Per-stream accrued amount is computed.
-///    - Recipient is paid their accrued entitlement (individual transfers).
-///    - Stream is marked `Cancelled` with `cancelled_at` timestamp.
-///    - `StreamCancelled` event is emitted per stream.
-///    - Aggregate refund is computed and sent to the sender in **one** token transfer.
-///
-/// # Parameters
-/// - `stream_ids`: Vector of stream IDs to cancel. Must be unique. Max length is
-///   bounded by the caller's transaction resources; the contract enforces no hard
-///   limit beyond Soroban's own VM limits, but `MAX_PAGE_SIZE = 100` is the
-///   recommended batch size for gas predictability.
-///
-/// # Authorization
-/// - Requires authorization from the caller (who must be the sender of every stream).
-///
-/// # Returns
-/// - `Ok(())` on success.
-///
-/// # Errors
-/// - `ContractError::DuplicateStreamId` (14): Duplicate IDs in `stream_ids`.
-/// - `ContractError::StreamNotFound` (1): A stream ID does not exist.
-/// - `ContractError::Unauthorized` (7): Caller is not the sender of a stream.
-/// - `ContractError::InvalidState` (2): A stream is not `Active` or `Paused`.
-/// - `ContractError::ContractPaused` (4): Global emergency pause is active.
-///
-/// # Gas efficiency
-/// - One auth check for the entire batch.
-/// - One token transfer for the aggregate refund (vs. N transfers for N individual
-///   `cancel_stream` calls).
-/// - Per-stream recipient transfers are still individual (required for correct
-///   accounting and event emission), but the sender refund is batched.
-///
-/// # Events
-/// - One `StreamCancelled` event per successfully cancelled stream.
-/// - One `cancelled` topic event per stream (same shape as `cancel_stream`).
-///
-/// # Security
-/// - Atomic: any failure in validation or execution reverts the entire batch.
-/// - CEI pattern: state is persisted before every external token transfer.
-/// - Liabilities are reduced per-stream before the aggregate refund.
-pub fn bulk_cancel_streams(
-    env: Env,
-    sender: Address,
-    stream_ids: soroban_sdk::Vec<u64>,
-) -> Result<(), ContractError> {
-    require_not_globally_paused(&env)?;
-    sender.require_auth();
-
-    let n = stream_ids.len();
-    if n == 0 {
-        return Ok(());
-    }
-
-    // ── Phase 1: Validate all stream IDs and ownership ────────────────────
-    let mut streams = soroban_sdk::Vec::<Stream>::new(&env);
-
-    for i in 0..n {
-        let id = stream_ids.get(i).unwrap();
-
-        // Duplicate detection
-        let mut j = i + 1;
-        while j < n {
-            if stream_ids.get(j).unwrap() == id {
-                return Err(ContractError::DuplicateStreamId);
-            }
-            j += 1;
-        }
-
-        let stream = load_stream(&env, id)?;
-
-        if stream.sender != sender {
-            return Err(ContractError::Unauthorized);
-        }
-
-        FluxoraStream::require_cancellable_status(stream.status)?;
-
-        streams.push_back(stream);
-    }
-
-    // ── Phase 2: Execute cancellations ────────────────────────────────────
-    let now = env.ledger().timestamp();
-    let mut aggregate_refund: i128 = 0;
-
-    for i in 0..n {
-        let mut stream = streams.get(i).unwrap();
-        let stream_id = stream.stream_id;
-
-        let accrued_at_cancel = accrual::calculate_accrued_amount_checkpointed(
-            accrual::CheckpointState {
-                checkpointed_amount: stream.checkpointed_amount,
-                checkpointed_at: stream.checkpointed_at,
-                cliff_time: stream.cliff_time,
-                end_time: stream.end_time,
-                deposit_amount: stream.deposit_amount,
-                kind: stream.kind,
-            },
-            stream.rate_per_second,
-            now,
-        );
-
-        let refund_amount = stream
-            .deposit_amount
-            .checked_sub(accrued_at_cancel)
-            .ok_or(ContractError::InvalidState)?;
-
-        let (was_underfunded, _, _) = compute_stream_health(&stream, now);
-
-        // ── Pay recipient their accrued entitlement first ─────────────────
-        let recipient_accrual = accrued_at_cancel
-            .saturating_sub(stream.withdrawn_amount)
-            .max(0);
-        if recipient_accrual > 0 {
-            stream.withdrawn_amount = stream
-                .withdrawn_amount
-                .checked_add(recipient_accrual)
-                .unwrap_or(i128::MAX);
-
-            let liabilities = read_total_liabilities(&env)
-                .checked_sub(recipient_accrual)
-                .unwrap_or(0);
-            write_total_liabilities(&env, liabilities);
-
-            push_token(&env, &stream.recipient, recipient_accrual)?;
-
-            env.events().publish(
-                (symbol_short!("withdrew"), stream_id),
-                Withdrawal {
-                    stream_id,
-                    recipient: stream.recipient.clone(),
-                    amount: recipient_accrual,
-                },
-            );
-        }
-
-        // ── Mark stream as cancelled ──────────────────────────────────────
-        let previous_status = stream.status;
-        stream.status = StreamStatus::Cancelled;
-        stream.cancelled_at = Some(now);
-        save_stream(&env, &stream);
-        reconcile_paused_stream_count(&env, previous_status, stream.status);
-
-        // ── Accumulate sender refund ──────────────────────────────────────
-        if refund_amount > 0 {
-            aggregate_refund = aggregate_refund
-                .checked_add(refund_amount)
-                .ok_or(ContractError::ArithmeticOverflow)?;
-
-            let liabilities = read_total_liabilities(&env)
-                .checked_sub(refund_amount)
-                .unwrap_or(0);
-            write_total_liabilities(&env, liabilities);
-        }
-
-        env.events().publish(
-            (symbol_short!("cancelled"), stream_id),
-            StreamEvent::StreamCancelled(stream_id),
-        );
-
-        maybe_emit_health_changed(&env, &stream, was_underfunded, now);
-    }
-
-    // ── Single aggregate refund to sender ─────────────────────────────────
-    if aggregate_refund > 0 {
-        push_token(&env, &sender, aggregate_refund)?;
-    }
-
-    Ok(())
-}
 
 /// Pure helper for keeper fee computation (extracted for formal verification and view queries).
 /// Computes `keeper_fee = gross * BPS / 10_000` and `sender_refund = gross - fee`
