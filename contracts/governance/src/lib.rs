@@ -1493,7 +1493,8 @@ mod tests {
             }
             let topic_values: SVec<Val> = topics;
             let found_topic_val = topic_values.get(0).expect("event has a topic");
-            let found_topic = Symbol::try_from_val(env, &found_topic_val).expect("topic is a symbol");
+            let found_topic =
+                Symbol::try_from_val(env, &found_topic_val).expect("topic is a symbol");
             if found_topic == topic {
                 return (found_topic, data);
             }
@@ -1993,9 +1994,11 @@ mod tests {
 
         // Once remaining valid signer C approves, valid approvals reach 2 ([B, C]), setting a new QuorumReachedAt.
         ctx.client.approve(&ctx.signer_c, &id);
-        
+
         // We must advance ledger timestamp past the new timelock start (which is 1_000_000 + TIMELOCK + 1)
-        ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1 + TIMELOCK + 1);
+        ctx.env
+            .ledger()
+            .set_timestamp(1_000_000 + TIMELOCK + 1 + TIMELOCK + 1);
 
         assert!(ctx.client.is_executable(&id));
         ctx.client.execute(&executor, &id);

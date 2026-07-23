@@ -608,4 +608,3 @@ fn test_rate_decrease_same_ledger_as_withdraw_boundary_exact_accrual() {
     assert_eq!(ctx.client().get_withdrawable(&id), 50);
     assert_eq!(ctx.client().withdraw(&id), 50);
 }
-
