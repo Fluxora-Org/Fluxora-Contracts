@@ -1993,7 +1993,7 @@ mod tests {
 
         // Once remaining valid signer C approves, valid approvals reach 2 ([B, C]), setting a new QuorumReachedAt.
         ctx.client.approve(&ctx.signer_c, &id);
-        
+
         // We must advance ledger timestamp past the new timelock start (which is 1_000_000 + TIMELOCK + 1)
         ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1 + TIMELOCK + 1);
 
