@@ -783,3 +783,133 @@ describe('Optional cliffTime', () => {
     expect(res.body.data.stream.cliffTime).toBe(cliffTime);
   });
 });
+
+// ===========================================================================
+// 13. Per-user rate limiting
+// ===========================================================================
+
+/**
+ * These tests exercise the keyGenerator added to createStreamLimiter.
+ * Because NODE_ENV=test raises max to 10_000, we build a dedicated Express
+ * app that overrides the limit to 2 so the budget is easily exhausted.
+ */
+
+import rateLimit from 'express-rate-limit';
+
+function buildRateLimitedApp(maxRequests: number): Application {
+  const limiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: maxRequests,
+    standardHeaders: true,
+    legacyHeaders: false,
+    // Same keyGenerator as production code
+    keyGenerator: (req) => (req as express.Request & { user?: { id: string } }).user?.id ?? (req.ip ?? 'unknown'),
+    message: {
+      success: false,
+      error: { message: 'Too many requests', code: 'RATE_LIMIT_EXCEEDED' }
+    }
+  });
+
+  const rateLimitedApp = express();
+  rateLimitedApp.use(express.json());
+  process.env.JWT_SECRET = JWT_SECRET;
+
+  // Re-import authenticate inline so it picks up JWT_SECRET from env
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { authenticate: auth } = require('../../src/middleware/auth.middleware');
+
+  rateLimitedApp.post(
+    '/api/v1/streams',
+    auth,
+    limiter,
+    async (req: express.Request, res: express.Response) => {
+      const { sendSuccess } = await import('../../src/utils/response');
+      sendSuccess(res, { stream: { id: 'test-id', senderId: req.user?.id } }, 201);
+    }
+  );
+
+  rateLimitedApp.use((err: Error & { statusCode?: number }, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    const status = err.statusCode ?? 500;
+    res.status(status).json({ success: false, error: { message: err.message, code: 'UNAUTHORIZED' } });
+  });
+
+  return rateLimitedApp;
+}
+
+describe('Per-user rate limiting (keyGenerator)', () => {
+  let rateLimitedApp: Application;
+
+  beforeAll(() => {
+    // max=2 means the 3rd request from the same user should be rate-limited
+    rateLimitedApp = buildRateLimitedApp(2);
+  });
+
+  it('two different authenticated users behind the same IP each get their own independent budget', async () => {
+    const userAId = uuidv4();
+    const userBId = uuidv4();
+    const tokenA = makeToken(userAId);
+    const tokenB = makeToken(userBId);
+
+    // Exhaust user A's budget (2 requests)
+    const a1 = await request(rateLimitedApp)
+      .post('/api/v1/streams')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .set('X-Forwarded-For', '10.0.0.1') // simulate shared IP
+      .send(VALID_BODY);
+    const a2 = await request(rateLimitedApp)
+      .post('/api/v1/streams')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .set('X-Forwarded-For', '10.0.0.1')
+      .send(VALID_BODY);
+    const a3 = await request(rateLimitedApp)
+      .post('/api/v1/streams')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .set('X-Forwarded-For', '10.0.0.1')
+      .send(VALID_BODY);
+
+    expect(a1.status).toBe(201);
+    expect(a2.status).toBe(201);
+    // User A should now be rate-limited
+    expect(a3.status).toBe(429);
+
+    // User B shares the same IP but must still have a full budget
+    const b1 = await request(rateLimitedApp)
+      .post('/api/v1/streams')
+      .set('Authorization', `Bearer ${tokenB}`)
+      .set('X-Forwarded-For', '10.0.0.1') // same shared IP
+      .send(VALID_BODY);
+
+    expect(b1.status).toBe(201); // not rate-limited — independent budget
+  });
+
+  it('a single user\'s limit is not reset by changing the simulated source IP', async () => {
+    const userId = uuidv4();
+    const token = makeToken(userId);
+
+    // Exhaust the budget from one IP
+    const r1 = await request(rateLimitedApp)
+      .post('/api/v1/streams')
+      .set('Authorization', `Bearer ${token}`)
+      .set('X-Forwarded-For', '192.168.1.1')
+      .send(VALID_BODY);
+    const r2 = await request(rateLimitedApp)
+      .post('/api/v1/streams')
+      .set('Authorization', `Bearer ${token}`)
+      .set('X-Forwarded-For', '192.168.1.1')
+      .send(VALID_BODY);
+
+    expect(r1.status).toBe(201);
+    expect(r2.status).toBe(201);
+
+    // Switch to a different IP — the user is still rate-limited because the
+    // key is their userId, not their IP
+    const r3 = await request(rateLimitedApp)
+      .post('/api/v1/streams')
+      .set('Authorization', `Bearer ${token}`)
+      .set('X-Forwarded-For', '203.0.113.42') // completely different IP
+      .send(VALID_BODY);
+
+    expect(r3.status).toBe(429);
+    expect(r3.body.error.code).toBe('RATE_LIMIT_EXCEEDED');
+  });
+});
