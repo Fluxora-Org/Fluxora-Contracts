@@ -212,6 +212,7 @@ Extended on every `load_stream()` (read) and `save_stream()` (write), and on eve
 - **CEI ordering**: State is always persisted (`save_stream`) before any external token transfer. See `docs/security.md`.
 - **No stale reads**: TTL bumps on reads mean monitoring queries keep data fresh.
 - **Admin rotation**: `set_admin` writes a new `Config` with the updated admin address. The token address is immutable.
+- **ID Reservation Overwrite**: Currently, invoking `reserve_stream_ids` unconditionally overwrites any existing `DataKey::IdReservation(Address)` entry for the caller. The `NextStreamId` global counter accurately tracks the sum of all reserved blocks, meaning the previously reserved but unconsumed IDs are permanently leaked rather than double-allocated. Integrators must avoid creating a new reservation before fully consuming or reclaiming an existing one.
 
 ---
 
