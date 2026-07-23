@@ -771,3 +771,203 @@ fn test_load_policy_equality_is_struct_equality() {
     different.max_deposit += 1;
     assert_ne!(p1, different);
 }
+
+// ---------------------------------------------------------------------------
+// Same-ledger admin rotation tests
+// ---------------------------------------------------------------------------
+
+/// After rotating admin, the old admin cannot use residual authorization for a
+/// setter call issued immediately after rotation in the same ledger. The second
+/// call should fail auth because it requires the new admin's authorization.
+#[test]
+fn test_set_admin_same_ledger_old_admin_fails() {
+    let env = Env::default();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let old_admin = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    let sc = Address::generate(&env);
+
+    // Initialize with old_admin
+    env.mock_auths(&[MockAuth {
+        address: &old_admin,
+        invoke: &MockAuthInvoke {
+            contract: &fid,
+            fn_name: "init",
+            args: (&old_admin, &sc, 10_000i128, 100u64).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    factory.init(&old_admin, &sc, &10_000, &100);
+
+    // Rotate to new_admin using old_admin's auth
+    env.mock_auths(&[MockAuth {
+        address: &old_admin,
+        invoke: &MockAuthInvoke {
+            contract: &fid,
+            fn_name: "set_admin",
+            args: (&new_admin,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    factory.set_admin(&new_admin);
+
+    // Verify rotation succeeded
+    assert_eq!(factory.get_factory_config().admin, new_admin);
+
+    // Same ledger: attempt to call set_cap with only old_admin's authorization
+    // This should fail because the contract now requires new_admin's auth
+    env.mock_auths(&[MockAuth {
+        address: &old_admin,
+        invoke: &MockAuthInvoke {
+            contract: &fid,
+            fn_name: "set_cap",
+            args: (5_000i128,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert_auth_fails(|| factory.set_cap(&5_000));
+
+    // Verify the cap was not changed
+    assert_eq!(factory.get_factory_config().max_deposit, 10_000);
+}
+
+/// After rotating admin in the same ledger, the new admin can successfully
+/// call a setter immediately without waiting for a new ledger.
+#[test]
+fn test_set_admin_same_ledger_new_admin_succeeds() {
+    let env = Env::default();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let old_admin = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    let sc = Address::generate(&env);
+
+    // Initialize with old_admin
+    env.mock_auths(&[MockAuth {
+        address: &old_admin,
+        invoke: &MockAuthInvoke {
+            contract: &fid,
+            fn_name: "init",
+            args: (&old_admin, &sc, 10_000i128, 100u64).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    factory.init(&old_admin, &sc, &10_000, &100);
+
+    // Rotate to new_admin using old_admin's auth
+    env.mock_auths(&[MockAuth {
+        address: &old_admin,
+        invoke: &MockAuthInvoke {
+            contract: &fid,
+            fn_name: "set_admin",
+            args: (&new_admin,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    factory.set_admin(&new_admin);
+
+    // Verify rotation succeeded
+    assert_eq!(factory.get_factory_config().admin, new_admin);
+
+    // Same ledger: new_admin calls set_cap and should succeed
+    env.mock_auths(&[MockAuth {
+        address: &new_admin,
+        invoke: &MockAuthInvoke {
+            contract: &fid,
+            fn_name: "set_cap",
+            args: (7_500i128,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    factory.set_cap(&7_500);
+
+    // Verify the cap was updated successfully
+    assert_eq!(factory.get_factory_config().max_deposit, 7_500);
+}
+
+/// After rotating admin, verify old admin cannot call multiple different setters
+/// in the same ledger, while new admin can.
+#[test]
+fn test_set_admin_same_ledger_multiple_setters() {
+    let env = Env::default();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let old_admin = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    let sc = Address::generate(&env);
+
+    // Initialize with old_admin
+    env.mock_auths(&[MockAuth {
+        address: &old_admin,
+        invoke: &MockAuthInvoke {
+            contract: &fid,
+            fn_name: "init",
+            args: (&old_admin, &sc, 10_000i128, 100u64).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    factory.init(&old_admin, &sc, &10_000, &100);
+
+    // Rotate to new_admin
+    env.mock_auths(&[MockAuth {
+        address: &old_admin,
+        invoke: &MockAuthInvoke {
+            contract: &fid,
+            fn_name: "set_admin",
+            args: (&new_admin,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    factory.set_admin(&new_admin);
+
+    // Old admin tries set_min_duration - should fail
+    env.mock_auths(&[MockAuth {
+        address: &old_admin,
+        invoke: &MockAuthInvoke {
+            contract: &fid,
+            fn_name: "set_min_duration",
+            args: (500u64,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert_auth_fails(|| factory.set_min_duration(&500));
+
+    // New admin calls set_min_duration - should succeed
+    env.mock_auths(&[MockAuth {
+        address: &new_admin,
+        invoke: &MockAuthInvoke {
+            contract: &fid,
+            fn_name: "set_min_duration",
+            args: (300u64,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    factory.set_min_duration(&300);
+    assert_eq!(factory.get_factory_config().min_duration, 300);
+
+    // Old admin tries set_batch_cap_enforcement - should fail
+    env.mock_auths(&[MockAuth {
+        address: &old_admin,
+        invoke: &MockAuthInvoke {
+            contract: &fid,
+            fn_name: "set_batch_cap_enforcement",
+            args: (false,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert_auth_fails(|| factory.set_batch_cap_enforcement(&false));
+
+    // New admin calls set_batch_cap_enforcement - should succeed
+    env.mock_auths(&[MockAuth {
+        address: &new_admin,
+        invoke: &MockAuthInvoke {
+            contract: &fid,
+            fn_name: "set_batch_cap_enforcement",
+            args: (false,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    factory.set_batch_cap_enforcement(&false);
+    assert_eq!(factory.get_factory_config().batch_cap_enforced, false);
+}

@@ -31,11 +31,26 @@ const router = Router();
 // Rate limiting — stream creation is a sensitive write operation
 // ---------------------------------------------------------------------------
 
+/**
+ * User-scoped rate limiter for stream creation.
+ *
+ * Keyed by authenticated userId (req.user.id) so that:
+ *  - Each authenticated user gets their own independent budget regardless of
+ *    shared NAT / corporate IP.
+ *  - Rotating source IPs cannot bypass the limit for an authenticated user.
+ *
+ * Falls back to IP for unauthenticated requests (those will be rejected by
+ * `authenticate` immediately after, so this is just a last-resort backstop).
+ *
+ * Placement: runs AFTER `authenticate` so that req.user is always populated
+ * for valid tokens.
+ */
 const createStreamLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: process.env.NODE_ENV === 'test' ? 10_000 : 30,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req) => (req as Request & { user?: { id: string } }).user?.id ?? (req.ip ?? 'unknown'),
   message: {
     success: false,
     error: { message: 'Too many requests', code: 'RATE_LIMIT_EXCEEDED' }
@@ -231,10 +246,13 @@ async function createStream(
 // Route registration
 // ---------------------------------------------------------------------------
 
+// authenticate runs first so that req.user is populated before the limiter
+// keys by userId. Unauthenticated requests are rejected by authenticate before
+// they ever reach createStreamLimiter.
 router.post(
   '/',
-  createStreamLimiter,
   authenticate,
+  createStreamLimiter,
   idempotency(),
   createStream
 );
