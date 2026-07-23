@@ -96,6 +96,10 @@ The following table provides the CPU instruction counts for core operations.
     "10": 0,
     "50": 0,
     "100": 0
+  },
+  "keeper_cancel": {
+    "partial_accrual": 0,
+    "fully_accrued": 0
   }
 }
 <!-- GAS_BASELINE_END -->
@@ -205,3 +209,120 @@ Baseline increases are not granted automatically. To get a baseline increase app
 - **Explicit Justification**: The PR description must explicitly justify the gas increase.
 - **Root Cause**: The increase must be tied to a specific, legitimate change (e.g., adding a new necessary security check, expanding a feature).
 - **No Hidden Costs**: Unintended or unexplainable jumps in gas usage must be optimized or reverted. You cannot blindly bump the baseline to get CI to pass.
+
+---
+
+## Keeper Economics
+
+`keeper_cancel` pays keeper bots a small incentive (fee) to cancel streams that have passed
+their `end_time` but whose sender never called `cancel_stream`, preventing unclaimed deposits
+from being locked in contract storage indefinitely.  Understanding the relationship between
+that fee and the transaction's own resource cost is essential for keeper-bot operators who
+need to know which streams are worth cancelling.
+
+### How the fee is calculated
+
+The fee is taken from the unstreamed portion of the deposit (the *sender's gross refund*).
+See [docs/cancel-stream-semantics.md](cancel-stream-semantics.md#keeper-initiated-cancellation-keeper_cancel)
+for the full distribution formula and [docs/formal-verification.md](formal-verification.md#constants-production-values)
+for the constant definitions.
+
+```
+accrued          = calculate_accrued_at(end_time)        -- capped at deposit_amount
+recipient_amount = accrued - withdrawn_amount
+sender_refund_gross = deposit_amount - accrued           -- unstreamed portion
+keeper_fee       = sender_refund_gross × KEEPER_FEE_BPS / 10 000
+sender_refund    = sender_refund_gross - keeper_fee
+```
+
+Production constants:
+
+| Constant                        | Value            | Source                            |
+|---------------------------------|------------------|-----------------------------------|
+| `KEEPER_FEE_BPS`                | 50 (0.5 %)       | `lib.rs`, `formal-verification.md` |
+| `KEEPER_GRACE_PERIOD_SECONDS`   | 604 800 (7 days) | `lib.rs`, `formal-verification.md` |
+
+### CPU-instruction cost
+
+`keeper_cancel` in the common case (partial accrual, 3 token transfers) is more expensive
+than a plain `withdraw` because it:
+
+1. Validates grace-period eligibility.
+2. Performs the keeper-fee arithmetic.
+3. Issues **three** separate token transfers: recipient, sender, and keeper.
+
+The gas regression tests in `contracts/stream/tests/gas_regression.rs` measure two variants:
+
+| Variant           | Description                                              |
+|-------------------|----------------------------------------------------------|
+| `partial_accrual` | `deposit_amount > rate × duration` → 3 token transfers (common keeper incentive path) |
+| `fully_accrued`   | `deposit_amount == rate × duration` → 1 token transfer, `keeper_fee = 0` |
+
+Run the measurements with:
+
+```bash
+cargo test -p fluxora_stream gas_regression -- --nocapture
+```
+
+The measured CPU instruction counts are recorded in the JSON baseline above
+(`keeper_cancel.partial_accrual` and `keeper_cancel.fully_accrued`) and validated
+on every CI run by `script/validate_gas.py`.
+
+### Break-even stream size
+
+A keeper-bot only profits when the fee it earns exceeds the Stellar resource fee it pays
+to submit the transaction.  The minimum *unstreamed refund* that makes a keeper_cancel
+call economically rational is:
+
+```
+break_even_unstreamed = (resource_fee_in_tokens × 10 000) / KEEPER_FEE_BPS
+                      = resource_fee_in_tokens × 200
+```
+
+At `KEEPER_FEE_BPS = 50` (0.5 %), the keeper earns 1 token for every 200 tokens of
+unstreamed refund.  Below this threshold the fee is smaller than the cost of the
+transaction itself and a rational keeper should not bother.
+
+Representative break-even values for USDC streams (7 decimal places, 1 USDC = 10 000 000
+stroops):
+
+| Stellar resource fee (USDC) | Break-even unstreamed refund (USDC) |
+|-----------------------------|------------------------------------|
+| 0.001                       | 0.20                               |
+| 0.01                        | 2.00                               |
+| 0.10                        | 20.00                              |
+| 1.00                        | 200.00                             |
+
+> **How to read this table**: at a resource fee of 0.01 USDC per transaction, a keeper
+> earns nothing (or loses money) on a stream whose unstreamed balance is less than
+> **2.00 USDC**.  At a 1.00 USDC resource fee the break-even unstreamed balance rises to
+> **200.00 USDC**.
+
+Actual Stellar resource fees vary with network congestion and the fee-market.  Keeper
+operators should periodically re-evaluate their configured minimum stream sizes against
+current fee levels.
+
+### Implications for stream design
+
+Stream creators can use the break-even formula to reason about keeper incentives:
+
+- **Large, long-running streams** with significant unstreamed balances at expiry will
+  always attract keeper cleanup because the incentive exceeds typical transaction costs.
+- **Small or tightly-scoped streams** (deposit ≈ rate × duration, little unstreamed
+  balance) may not attract keeper cleanup; senders of such streams should call
+  `cancel_stream` themselves rather than relying on keeper bots.
+- The 7-day grace period (`KEEPER_GRACE_PERIOD_SECONDS`) gives senders a window to
+  self-clean before keepers become eligible.
+
+### Security notes
+
+- The keeper fee is taken **only** from the sender's gross refund; the recipient's
+  accrued balance is never reduced.  See the security invariants in
+  [docs/cancel-stream-semantics.md](cancel-stream-semantics.md#security-invariants).
+- Keepers must sign (`keeper.require_auth()`), preventing a third party from
+  redirecting the fee to an arbitrary address.
+- CEI ordering ensures the stream is marked `Cancelled` before any token transfer,
+  preventing re-entrant double-cancellations.
+- Formal proofs that `keeper_fee + protocol_remainder == gross` (conservation) and
+  that `checked_mul(KEEPER_FEE_BPS)` cannot overflow are described in
+  [docs/formal-verification.md](formal-verification.md#keeper-fee-conservation-proofs-new).
