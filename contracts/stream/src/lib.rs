@@ -412,6 +412,8 @@ pub enum ContractError {
     WithdrawalTooFrequent = 33,
     /// Keeper attempted to close a stream before the grace period elapsed.
     KeeperGracePeriodNotElapsed = 34,
+    /// Withdraw dust threshold is negative or exceeds deposit amount.
+    InvalidDustThreshold = 35,
 }
 
 #[contracttype]
@@ -1670,6 +1672,14 @@ impl FluxoraStream {
             if m.len() as usize > MAX_MEMO_BYTES {
                 return Err(ContractError::InvalidParams);
             }
+        }
+
+        // Validate withdraw_dust_threshold: must be in range [0, deposit_amount]
+        if withdraw_dust_threshold < 0 {
+            return Err(ContractError::InvalidDustThreshold);
+        }
+        if withdraw_dust_threshold > deposit_amount {
+            return Err(ContractError::InvalidDustThreshold);
         }
 
         let stream_id = next_stream_id_for(env, &sender);
