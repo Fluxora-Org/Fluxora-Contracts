@@ -37,27 +37,8 @@ use crate::{load_delegated_nonce, load_stream, ContractError};
 /// # Returns
 /// - `Ok(())` if both checks pass.
 /// - `Err(ContractError::SignatureDeadlineExpired)` if `deadline < current timestamp`.
-/// - `Err(ContractError::InvalidParams)` if `nonce` does not match.
-/// - `Err(ContractError::StreamNotFound)` if `stream_id` does not exist.
-#[allow(dead_code)]
-/// Validate the delegation parameters for a delegated-withdraw call.
-///
-/// Checks, in order:
-/// 1. `deadline >= env.ledger().timestamp()` — rejects expired signatures.
-/// 2. `nonce == current_nonce(stream.recipient)` — rejects replays.
-///
-/// # Parameters
-/// - `env`: Contract environment (used for ledger timestamp and storage reads).
-/// - `stream_id`: Stream being withdrawn from (used to look up the recipient).
-/// - `nonce`: Caller-supplied nonce; must match the recipient's stored nonce.
-/// - `deadline`: Ledger timestamp after which the signature is invalid.
-///
-/// # Returns
-/// - `Ok(())` if both checks pass.
-/// - `Err(ContractError::SignatureDeadlineExpired)` if `deadline < current timestamp`.
 /// - `Err(ContractError::InvalidSignature)` if `nonce` does not match.
 /// - `Err(ContractError::StreamNotFound)` if `stream_id` does not exist.
-#[allow(dead_code)]
 pub(crate) fn validate_delegation_params(
     env: &Env,
     stream_id: u64,

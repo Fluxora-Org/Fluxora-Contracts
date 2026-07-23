@@ -4,7 +4,6 @@
 pub mod accrual;
 #[cfg(test)]
 mod checksum;
-#[cfg(test)]
 mod delegation;
 pub(crate) mod events;
 pub(crate) mod storage;
@@ -3556,7 +3555,7 @@ impl FluxoraStream {
 
         // 1. Validate delegation parameters (deadline & nonce against live state).
         // delegation.rs backs delegated_withdraw authorization logic and queries live persistent storage on every call.
-        validate_delegation_params(&env, stream_id, nonce, deadline)?;
+        delegation::validate_delegation_params(&env, stream_id, nonce, deadline)?;
 
         // 2. Load stream.
         let mut stream = load_stream(&env, stream_id)?;
