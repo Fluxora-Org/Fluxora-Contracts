@@ -181,11 +181,16 @@ const MIN_PAUSE_INTERVAL_LEDGERS: u32 = 17;
 /// Bumped to 4: accrual paths track the last ledger timestamp they observed in
 /// instance storage to detect retrograde test clocks and migration regressions.
 ///
-/// Bumped to 5: `DataKey::PausedStreamCount` added and maintained across pause/
-/// resume/cancel/complete transitions; `get_paused_stream_count()` O(1) view added;
-/// duplicate `ContractError` discriminant 23 resolved and the previously-missing
-/// variants declared.
-pub const CONTRACT_VERSION: u32 = 6;
+/// Bumped to 5: `withdraw_dust_threshold: i128` added to `Stream` struct and creation params;
+/// `get_paused_stream_count()` O(1) view added; duplicate `ContractError` discriminant 23 
+/// resolved and the previously-missing variants declared.
+///
+/// Bumped to 6: Appended six new variants to `DataKey` (discriminants 15-20) and `memo: Option<Bytes>`
+/// to `Stream` struct.
+///
+/// Bumped to 7: Appended eight new variants to `DataKey` (discriminants 21-28) to support
+/// rate caps, ID reservations, rotation history, and keeper fees.
+pub const CONTRACT_VERSION: u32 = 7;
 
 // ---------------------------------------------------------------------------
 // Data types

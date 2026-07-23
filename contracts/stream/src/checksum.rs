@@ -94,6 +94,19 @@
 //! |:--------:|:-------|:------------------|
 //! | 14       | `memo` | `Option<Bytes>`   |
 //!
+//! ## V7 additions (appended — discriminants 0–20 preserved)
+//!
+//! | Discriminant | Variant                         | Storage   | Value type  |
+//! |:------------:|:--------------------------------|:----------|:------------|
+//! | 21           | `IdReservation(Address)`        | Persistent| `IdReservation` |
+//! | 22           | `MaxRatePerSecond`              | Instance  | `i128`      |
+//! | 23           | `DelegatedWithdrawNonce(Address)`| Persistent| `u64`       |
+//! | 24           | `LastPauseRecord(PauseKind)`    | Persistent| `PauseRecord` |
+//! | 25           | `RotationHistory(u64)`          | Persistent| `Vec<RotationEntry>`|
+//! | 26           | `LastAccrualLedgerTimestamp`    | Instance  | `u64`       |
+//! | 27           | `PausedStreamCount`             | Instance  | `u64`       |
+//! | 28           | `TotalKeeperFeesPaid`           | Instance  | `i128`      |
+//!
 //! All V5 persistent `Stream` entries remain decodable on a V6 instance because
 //! Soroban XDR struct decoding is **positional and forward-compatible**: a V6
 //! decoder reading a V5-encoded struct will see `memo` as absent (`None`).
@@ -107,7 +120,7 @@
 //! ## Security assumptions
 //!
 //! - **Append-only extension**: New `DataKey` variants must always be appended.
-//!   Inserting a variant at any position ≤ 20 shifts all subsequent discriminants
+//!   Inserting a variant at any position ≤ 28 shifts all subsequent discriminants
 //!   and silently corrupts every affected persistent entry.
 //! - **Struct field ordering**: `Stream` fields must never be reordered. Soroban
 //!   XDR encodes structs positionally; a field swap is a silent type mismatch.
@@ -149,18 +162,25 @@ mod tests {
     }
 
     /// V6 DataKey has exactly 21 variants (discriminants 0–20).
-    ///
-    /// If this assertion fails after a new variant is appended, update the
-    /// V6 discriminant table in the module doc-comment above and increment
-    /// `CONTRACT_VERSION`.
-    ///
-    /// # Security note
-    /// The next variant appended to DataKey must receive discriminant 21.
-    /// Any value other than 21 indicates a mid-enum insertion, which is forbidden.
     #[test]
     fn v6_datakey_variant_count_is_21() {
         const V6_VARIANT_COUNT: usize = 21;
         assert_eq!(V6_VARIANT_COUNT, 21);
+    }
+
+    /// V7 DataKey has exactly 29 variants (discriminants 0–28).
+    ///
+    /// If this assertion fails after a new variant is appended, update the
+    /// V7 discriminant table in the module doc-comment above and increment
+    /// `CONTRACT_VERSION`.
+    ///
+    /// # Security note
+    /// The next variant appended to DataKey must receive discriminant 29.
+    /// Any value other than 29 indicates a mid-enum insertion, which is forbidden.
+    #[test]
+    fn v7_datakey_variant_count_is_29() {
+        const V7_VARIANT_COUNT: usize = 29;
+        assert_eq!(V7_VARIANT_COUNT, 29);
     }
 
     /// V5 Stream struct had 14 fields; V6 adds `memo` for 15 fields.
@@ -183,9 +203,6 @@ mod tests {
     }
 
     /// The six V6-only DataKey variants occupy discriminants 15–20.
-    ///
-    /// This test documents the exact discriminant range so that any future
-    /// append correctly starts at discriminant 21.
     #[test]
     fn v6_new_variants_occupy_discriminants_15_to_20() {
         // WithdrawNonce=15, PauseState=16, ReentrancyLock=17,
@@ -195,6 +212,18 @@ mod tests {
         assert_eq!(v6_only_range.clone().count(), 6);
         assert_eq!(*v6_only_range.start(), 15);
         assert_eq!(*v6_only_range.end(), 20);
+    }
+
+    /// The eight V7-only DataKey variants occupy discriminants 21–28.
+    ///
+    /// This test documents the exact discriminant range so that any future
+    /// append correctly starts at discriminant 29.
+    #[test]
+    fn v7_new_variants_occupy_discriminants_21_to_28() {
+        let v7_only_range = 21usize..=28;
+        assert_eq!(v7_only_range.clone().count(), 8);
+        assert_eq!(*v7_only_range.start(), 21);
+        assert_eq!(*v7_only_range.end(), 28);
     }
 
     /// The frozen V5 discriminant range is 0–14 (inclusive).

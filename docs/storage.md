@@ -17,34 +17,33 @@ pub enum DataKey {
     NextStreamId,              // Instance storage for the auto-incrementing ID counter.
     Stream(u64),               // Persistent storage for individual stream data (O(1) lookup).
     RecipientStreams(Address), // Persistent storage for recipient stream index (sorted by stream_id).
-    PauseState,                // Instance storage: protocol-wide pause state (enum).
-    WithdrawNonce(Address),    // Persistent storage: per-recipient nonce for delegated-withdraw replay protection.
-    ReentrancyLock,            // Instance storage: reentrancy guard flag (bool).
+    GlobalEmergencyPaused,
+    CreationPaused,
+    GlobalPauseReason,
+    GlobalPauseTimestamp,
+    GlobalPauseAdmin,
+    AutoClaimDestination(u64),
+    NextTemplateId,
+    ActiveTemplateCount,
+    StreamTemplate(u64),
+    OwnerTemplateIds(Address),
+    TotalLiabilities,
+    WithdrawNonce(Address),
+    PauseState,
+    ReentrancyLock,
+    RecipientStreamPage(Address, u32),
+    RecipientStreamPageCount(Address),
+    PendingRecipientUpdate(u64),
+    IdReservation(Address),
+    MaxRatePerSecond,
+    DelegatedWithdrawNonce(Address),
+    LastPauseRecord(PauseKind),
+    RotationHistory(u64),
+    LastAccrualLedgerTimestamp,
+    PausedStreamCount,
+    TotalKeeperFeesPaid,
 }
 ```
-
-> **Append-only rule**: new variants are always appended at the end to avoid shifting
-> existing discriminant values, which would corrupt live storage on mainnet.
-
-## Storage Types and Usage
-
-    Config,                    // discriminant 0 — instance
-    NextStreamId,              // discriminant 1 — instance
-    Stream(u64),               // discriminant 2 — persistent
-    RecipientStreams(Address), // discriminant 3 — persistent
-    GlobalEmergencyPaused,     // discriminant 4 — instance (DEPRECATED)
-    CreationPaused,            // discriminant 5 — instance (DEPRECATED)
-    GlobalPauseReason,         // discriminant 6 — instance
-    GlobalPauseTimestamp,      // discriminant 7 — instance
-    GlobalPauseAdmin,          // discriminant 8 — instance
-    AutoClaimDestination(u64), // discriminant 9 — persistent
-    StreamMemo(u64),           // discriminant 10 — persistent
-    PauseState,                // discriminant 11 — instance
-    ReentrancyLock,            // discriminant 12 — instance
-
-}
-
-````
 
 ### Current discriminant table
 
@@ -60,9 +59,25 @@ pub enum DataKey {
 | 7 | `GlobalPauseTimestamp` | Instance | `u64` | `pause_protocol` | `resume_protocol` (removes) |
 | 8 | `GlobalPauseAdmin` | Instance | `Address` | `pause_protocol` | `resume_protocol` (removes) |
 | 9 | `AutoClaimDestination(u64)` | Persistent | `Address` | auto-claim opt-in | auto-claim revoke |
-| 10 | `StreamMemo(u64)` | Persistent | `Bytes` (max 64 bytes) | `create_stream`, `create_streams` | `close_completed_stream` (removes) |
-| 11 | `PauseState` | Instance | `PauseState` enum | `set_global_emergency_paused`, `set_contract_paused`, `pause_protocol` | `resume_protocol` (Active) |
-| 12 | `ReentrancyLock` | Instance | `bool` | `acquire_reentrancy_lock` | `release_reentrancy_lock` |
+| 10 | `NextTemplateId` | Instance | `u64` | `init` | `create_stream_template` |
+| 11 | `ActiveTemplateCount` | Instance | `u64` | `init` | `create_stream_template`, `delete_stream_template` |
+| 12 | `StreamTemplate(u64)` | Persistent | `StreamScheduleTemplate` | `create_stream_template` | `delete_stream_template` (removes) |
+| 13 | `OwnerTemplateIds(Address)`| Persistent | `Vec<u64>` | `create_stream_template` | `delete_stream_template` (removes) |
+| 14 | `TotalLiabilities` | Instance | `i128` | `init` | `create_stream`, `withdraw`, `cancel_stream` |
+| 15 | `WithdrawNonce(Address)` | Persistent | `u64` | `delegated_withdraw` (first) | `delegated_withdraw` (increments) |
+| 16 | `PauseState` | Instance | `PauseState` enum | `set_global_emergency_paused`, `set_contract_paused`, `pause_protocol` | `resume_protocol` (Active) |
+| 17 | `ReentrancyLock` | Instance | `bool` | `acquire_reentrancy_lock` | `release_reentrancy_lock` |
+| 18 | `RecipientStreamPage(Address, u32)` | Persistent | `Vec<u64>` | `create_stream` | `close_completed_stream` |
+| 19 | `RecipientStreamPageCount(Address)`| Persistent | `u32` | `create_stream` | `close_completed_stream` |
+| 20 | `PendingRecipientUpdate(u64)` | Persistent | `Address` | `propose_recipient_update` | `accept_recipient_update` (removes) |
+| 21 | `IdReservation(Address)` | Persistent | `IdReservation` | `reserve_stream_ids` | `create_stream`, `create_streams` (removes when exhausted) |
+| 22 | `MaxRatePerSecond` | Instance | `i128` | `set_max_rate_per_second` | `set_max_rate_per_second` |
+| 23 | `DelegatedWithdrawNonce(Address)` | Persistent | `u64` | `delegated_withdraw` | `delegated_withdraw` (increments) |
+| 24 | `LastPauseRecord(PauseKind)` | Persistent | `PauseRecord` | `pause_stream`, `pause_protocol` | `resume_stream`, `resume_protocol` |
+| 25 | `RotationHistory(u64)` | Persistent | `Vec<RotationEntry>` | `accept_recipient_update`, `transfer_sender` | (append-only) |
+| 26 | `LastAccrualLedgerTimestamp` | Instance | `u64` | `current_accrual_timestamp` | `current_accrual_timestamp` |
+| 27 | `PausedStreamCount` | Instance | `u64` | `pause_stream`, `pause_stream_as_admin` | `resume_stream`, `cancel_stream`, `close_completed_stream` |
+| 28 | `TotalKeeperFeesPaid` | Instance | `i128` | `init` | `keeper_cancel` |
 
 ---
 

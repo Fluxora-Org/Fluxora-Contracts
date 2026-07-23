@@ -16,7 +16,7 @@ Version policy, migration runbook, and audit notes for operators, integrators, a
 ### Current value
 
 ```
-CONTRACT_VERSION = 5
+CONTRACT_VERSION = 7
 ```
 
 ### Version history
@@ -27,7 +27,9 @@ CONTRACT_VERSION = 5
 | 2 | `Stream` struct gained `checkpointed_amount: i128` and `checkpointed_at: u64` for safe rate-decrease support |
 | 3 | `Stream` struct gained `memo: Option<Bytes>`; `StreamCreated` event gained `memo` field; `DataKey::StreamMemo(u64)` added at discriminant 10; `create_stream`/`create_streams` gained `memo` parameter; `get_stream_memo` entry-point added |
 | 4 | `TotalLiabilities` instance key for escrow accounting; accrual paths track last observed ledger timestamp for clock-regression detection |
-| 5 | `withdraw_dust_threshold: i128` added to `Stream` struct and creation params; `DataKey::PausedStreamCount` added and maintained across pause/resume/cancel/complete transitions; `get_paused_stream_count()` O(1) view added |
+| 5 | `withdraw_dust_threshold: i128` added to `Stream` struct and creation params; `get_paused_stream_count()` O(1) view added |
+| 6 | Appended six new variants to `DataKey` (discriminants 15–20) and `memo: Option<Bytes>` to `Stream` struct |
+| 7 | Appended eight new variants to `DataKey` (discriminants 21–28) including `PausedStreamCount`, and `TotalKeeperFeesPaid`. Bumped version per "conservative; recommended" policy for additive entrypoints. |
 
 ### When to increment
 
