@@ -792,6 +792,7 @@ pub struct Stream {
     pub stream_id: u64,
     pub sender: Address,
     pub recipient: Address,
+    pub claim_owner: Option<Address>,
     pub deposit_amount: i128,
     pub rate_per_second: i128,
     pub start_time: u64,
@@ -1687,6 +1688,7 @@ impl FluxoraStream {
             stream_id,
             sender: sender.clone(),
             recipient: recipient.clone(),
+            claim_owner: None,
             deposit_amount,
             rate_per_second,
             start_time,
@@ -2839,8 +2841,12 @@ impl FluxoraStream {
         require_not_globally_paused(&env)?;
         let mut stream = load_stream(&env, stream_id)?;
 
-        // Enforce recipient-only authorization
-        stream.recipient.require_auth();
+        // Enforce claim owner or recipient authorization
+        if let Some(owner) = &stream.claim_owner {
+            owner.require_auth();
+        } else {
+            stream.recipient.require_auth();
+        }
 
         // Enforce withdrawal frequency limit to prevent excessive ledger I/O.
         // Use saturating_sub to prevent underflow from backward timestamp skew
@@ -2987,8 +2993,12 @@ impl FluxoraStream {
         require_not_globally_paused(&env)?;
         let mut stream = load_stream(&env, stream_id)?;
 
-        // Enforce recipient-only authorization for source of funds
-        stream.recipient.require_auth();
+        // Enforce claim owner or recipient authorization for source of funds
+        if let Some(owner) = &stream.claim_owner {
+            owner.require_auth();
+        } else {
+            stream.recipient.require_auth();
+        }
 
         if destination == env.current_contract_address() {
             return Err(ContractError::InvalidParams);
@@ -3174,6 +3184,43 @@ impl FluxoraStream {
         Ok(())
     }
 
+    /// Transfer claim ownership to a new address.
+    ///
+    /// Changes the sole source of truth for `withdraw` authorization from the recipient
+    /// (or the current claim_owner) to the `new_owner`.
+    pub fn transfer_claim_ownership(
+        env: Env,
+        stream_id: u64,
+        current_owner: Address,
+        new_owner: Address,
+    ) -> Result<(), ContractError> {
+        require_not_globally_paused(&env)?;
+        let mut stream = load_stream(&env, stream_id)?;
+
+        let actual_current = stream.claim_owner.clone().unwrap_or(stream.recipient.clone());
+        if actual_current != current_owner {
+            return Err(ContractError::Unauthorized);
+        }
+
+        current_owner.require_auth();
+
+        let old_owner = stream.claim_owner.clone();
+        stream.claim_owner = Some(new_owner.clone());
+        save_stream(&env, &stream);
+
+        env.events().publish(
+            (symbol_short!("claim_own"), stream_id),
+            ClaimOwnershipTransferred {
+                stream_id,
+                old_owner,
+                new_owner,
+            },
+        );
+
+        Ok(())
+    }
+
+
     /// Withdraw accrued tokens from multiple streams in one call (recipient-only).
     ///
     /// The caller must be the recipient of every stream in `stream_ids`. Each stream
@@ -3252,7 +3299,8 @@ impl FluxoraStream {
         for stream_id in stream_ids.iter() {
             let mut stream = load_stream(&env, stream_id)?;
 
-            if stream.recipient != recipient {
+            let current_owner = stream.claim_owner.clone().unwrap_or(stream.recipient.clone());
+            if current_owner != recipient {
                 return Err(ContractError::Unauthorized);
             }
 
