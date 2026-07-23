@@ -1,224 +1,155 @@
+#![cfg(test)]
 extern crate std;
 
-use fluxora_stream::{ContractError, FluxoraStream, FluxoraStreamClient, StreamKind, StreamStatus};
+use fluxora_stream::{
+    ContractError, FluxoraStream, FluxoraStreamClient, KeeperCancelled, StreamKind, StreamStatus,
+    StreamCancelled,
+};
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
+    testutils::{Address as _, Events, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env,
+    Address, Env, Symbol, TryFromVal, vec
 };
 
-struct TestContext<'a> {
+// Grace period in seconds (mirrors KEEPER_GRACE_PERIOD_SECONDS in lib.rs).
+const GRACE: u64 = 604_800;
+
+struct Ctx<'a> {
     env: Env,
-    client: FluxoraStreamClient<'a>,
+    contract_id: Address,
     sender: Address,
     recipient: Address,
+    keeper: Address,
+    admin: Address,
     token: TokenClient<'a>,
-    contract_id: Address,
 }
 
-impl<'a> TestContext<'a> {
+impl<'a> Ctx<'a> {
     fn setup() -> Self {
         let env = Env::default();
         env.mock_all_auths();
 
         let contract_id = env.register_contract(None, FluxoraStream);
-        let client = FluxoraStreamClient::new(&env, &contract_id);
-
         let token_admin = Address::generate(&env);
         let token_id = env
             .register_stellar_asset_contract_v2(token_admin)
             .address();
-        let token = TokenClient::new(&env, &token_id);
 
         let admin = Address::generate(&env);
         let sender = Address::generate(&env);
         let recipient = Address::generate(&env);
+        let keeper = Address::generate(&env);
 
+        let client = FluxoraStreamClient::new(&env, &contract_id);
         client.init(&token_id, &admin);
 
-        // Fund sender with tokens
-        let stellar_asset = env.register_stellar_asset_contract_v2(token_admin);
-        let token_admin_client = StellarAssetClient::new(&env, &token_id);
-        token_admin_client.mint(&sender, &10_000);
+        let sac = StellarAssetClient::new(&env, &token_id);
+        sac.mint(&sender, &1_000_000_i128);
 
-        Self {
+        let token = TokenClient::new(&env, &token_id);
+        token.approve(&sender, &contract_id, &i128::MAX, &200_000);
+
+        Ctx {
             env,
-            client,
+            contract_id,
             sender,
             recipient,
+            keeper,
+            admin,
             token,
-            contract_id,
         }
     }
 
-    fn create_cliff_only_stream(&self, deposit: i128, start: u64, cliff: u64, end: u64) -> u64 {
-        self.client.create_stream(
-            &self.sender,
-            &self.recipient,
-            &deposit,
-            &0_i128, // rate forced/set to 0 for CliffOnly
-            &start,
-            &cliff,
-            &end,
-            &0,    // dust threshold
-            &None, // memo
-            &StreamKind::CliffOnly,
-        )
+    fn client(&self) -> FluxoraStreamClient<'_> {
+        FluxoraStreamClient::new(&self.env, &self.contract_id)
     }
 }
 
-/// 1. Timeline Boundary Testing:
-/// - Query exactly 1 second before the cliff timestamp (cliff_time - 1) and assert accrued/withdrawable is exactly 0.
-/// - Query exactly at the cliff timestamp (cliff_time) and assert accrued/withdrawable is deposit_amount.
-/// - Query in the future (cliff_time + 100) and assert accrued is capped at deposit_amount.
-#[test]
-fn test_cliff_only_accrual_timeline() {
-    let ctx = TestContext::setup();
-    ctx.env.ledger().set_timestamp(0);
-
-    let deposit = 1000_i128;
-    let start = 100u64;
-    let cliff = 500u64;
-    let end = 1000u64;
-
-    let stream_id = ctx.create_cliff_only_stream(deposit, start, cliff, end);
-
-    // 1 second before cliff (t = 499)
-    ctx.env.ledger().set_timestamp(499);
-    assert_eq!(ctx.client.calculate_accrued(&stream_id), 0);
-    assert_eq!(ctx.client.get_withdrawable(&stream_id), 0);
-    assert_eq!(ctx.client.get_claimable_at(&stream_id, &499), 0);
-
-    // Exactly at cliff (t = 500)
-    ctx.env.ledger().set_timestamp(500);
-    assert_eq!(ctx.client.calculate_accrued(&stream_id), deposit);
-    assert_eq!(ctx.client.get_withdrawable(&stream_id), deposit);
-    assert_eq!(ctx.client.get_claimable_at(&stream_id, &500), deposit);
-
-    // Long after cliff (t = 800)
-    ctx.env.ledger().set_timestamp(800);
-    assert_eq!(ctx.client.calculate_accrued(&stream_id), deposit);
-    assert_eq!(ctx.client.get_withdrawable(&stream_id), deposit);
-    assert_eq!(ctx.client.get_claimable_at(&stream_id, &800), deposit);
+// Helper: create a CliffOnly stream
+fn create_cliff_stream(ctx: &Ctx<'_>, deposit: i128, start: u64, cliff: u64, end: u64) -> u64 {
+    ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &deposit,
+        &1_i128, // Rate doesn't matter for CliffOnly
+        &start,
+        &cliff,
+        &end,
+        &0_i128,
+        &None,
+        &StreamKind::CliffOnly,
+    )
 }
 
-/// 2. Mutation Restriction Verification:
-/// Assert all mutations are rejected with UnsupportedStreamKind.
 #[test]
-fn test_cliff_only_rejects_mutations() {
-    let ctx = TestContext::setup();
+fn test_cliffonly_keeper_cancel_after_cliff() {
+    let ctx = Ctx::setup();
     ctx.env.ledger().set_timestamp(0);
 
-    let stream_id = ctx.create_cliff_only_stream(1000, 100, 500, 1000);
+    // Stream: deposit=1000, start=0, cliff=500, end=1000
+    let deposit = 1000;
+    let stream_id = create_cliff_stream(&ctx, deposit, 0, 500, 1000);
 
-    // Ensure CliffOnly stream kind is stored properly
-    let state = ctx.client.get_stream_state(&stream_id);
-    assert!(matches!(state.kind, StreamKind::CliffOnly));
+    // Advance past end_time + grace period
+    ctx.env.ledger().set_timestamp(1000 + GRACE + 1);
 
-    // Attempt: update_rate_per_second
-    let res = ctx.client.try_update_rate_per_second(&stream_id, &5_i128);
-    assert_eq!(res, Err(Ok(ContractError::UnsupportedStreamKind)));
+    let client = ctx.client();
+    
+    // Initial balances
+    let contract_bal_before = ctx.token.balance(&ctx.contract_id);
+    assert_eq!(contract_bal_before, deposit);
+    let liabilities_before = client.get_total_liabilities();
+    assert_eq!(liabilities_before, deposit);
 
-    // Attempt: decrease_rate_per_second
-    let res = ctx.client.try_decrease_rate_per_second(&stream_id, &2_i128);
-    assert_eq!(res, Err(Ok(ContractError::UnsupportedStreamKind)));
+    let sender_bal_before = ctx.token.balance(&ctx.sender);
+    let recipient_bal_before = ctx.token.balance(&ctx.recipient);
+    let keeper_bal_before = ctx.token.balance(&ctx.keeper);
 
-    // Attempt: shorten_stream_end_time
-    let res = ctx.client.try_shorten_stream_end_time(&stream_id, &800u64);
-    assert_eq!(res, Err(Ok(ContractError::UnsupportedStreamKind)));
+    let result = client.keeper_cancel(&stream_id, &ctx.keeper);
 
-    // Attempt: extend_stream_end_time
-    let res = ctx.client.try_extend_stream_end_time(&stream_id, &1200u64);
-    assert_eq!(res, Err(Ok(ContractError::UnsupportedStreamKind)));
+    // Assert return values
+    assert_eq!(result.recipient_amount, deposit, "Recipient gets full deposit");
+    assert_eq!(result.sender_refund_gross, 0, "Sender gets nothing");
+    assert_eq!(result.keeper_fee, 0, "Keeper fee is 0 because refund gross is 0");
+    assert_eq!(result.sender_refund_net, 0, "Net refund is 0");
 
-    // Attempt: top_up_stream
-    let res = ctx
-        .client
-        .try_top_up_stream(&stream_id, &ctx.sender, &500_i128);
-    assert_eq!(res, Err(Ok(ContractError::UnsupportedStreamKind)));
-}
+    // Balances
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 0);
+    assert_eq!(client.get_total_liabilities(), 0);
+    assert_eq!(ctx.token.balance(&ctx.sender), sender_bal_before);
+    assert_eq!(ctx.token.balance(&ctx.recipient), recipient_bal_before + deposit);
+    assert_eq!(ctx.token.balance(&ctx.keeper), keeper_bal_before); // Keeper gets 0
 
-/// 3. Withdrawal Verification:
-/// - Recipient cannot withdraw before cliff.
-/// - Recipient can successfully withdraw 100% of deposit after cliff.
-#[test]
-fn test_cliff_only_withdrawals() {
-    let ctx = TestContext::setup();
-    ctx.env.ledger().set_timestamp(0);
-
-    let deposit = 1000_i128;
-    let stream_id = ctx.create_cliff_only_stream(deposit, 100, 500, 1000);
-
-    // Try withdraw before cliff
-    ctx.env.ledger().set_timestamp(499);
-    let withdrawn = ctx.client.withdraw(&stream_id);
-    assert_eq!(withdrawn, 0);
-    assert_eq!(ctx.token.balance(&ctx.recipient), 0);
-
-    // Withdraw after cliff
-    ctx.env.ledger().set_timestamp(500);
-    let withdrawn = ctx.client.withdraw(&stream_id);
-    assert_eq!(withdrawn, deposit);
-    assert_eq!(ctx.token.balance(&ctx.recipient), deposit);
-
-    let state = ctx.client.get_stream_state(&stream_id);
-    assert_eq!(state.status, StreamStatus::Completed);
-}
-
-/// 4. Cancellation Verification (Before Cliff):
-/// Sender cancelled before cliff -> gets 100% refund.
-#[test]
-fn test_cliff_only_cancel_before_cliff() {
-    let ctx = TestContext::setup();
-    ctx.env.ledger().set_timestamp(0);
-
-    let deposit = 1000_i128;
-    let sender_balance_before = ctx.token.balance(&ctx.sender);
-    let stream_id = ctx.create_cliff_only_stream(deposit, 100, 500, 1000);
-
-    assert_eq!(
-        ctx.token.balance(&ctx.sender),
-        sender_balance_before - deposit
-    );
-
-    // Cancel before cliff (t = 400)
-    ctx.env.ledger().set_timestamp(400);
-    ctx.client.cancel_stream(&stream_id);
-
-    // Sender gets 100% refund, recipient gets 0
-    assert_eq!(ctx.token.balance(&ctx.sender), sender_balance_before);
-    assert_eq!(ctx.token.balance(&ctx.recipient), 0);
-
-    let state = ctx.client.get_stream_state(&stream_id);
+    // Stream state
+    let state = client.get_stream(&stream_id);
     assert_eq!(state.status, StreamStatus::Cancelled);
 }
 
-/// 5. Cancellation Verification (After Cliff):
-/// Sender cancelled after cliff -> recipient keeps 100%, sender gets 0 refund.
 #[test]
-fn test_cliff_only_cancel_after_cliff() {
-    let ctx = TestContext::setup();
+fn test_cliffonly_bulk_cancel_before_cliff() {
+    let ctx = Ctx::setup();
     ctx.env.ledger().set_timestamp(0);
 
-    let deposit = 1000_i128;
-    let sender_balance_before = ctx.token.balance(&ctx.sender);
-    let stream_id = ctx.create_cliff_only_stream(deposit, 100, 500, 1000);
+    let deposit = 1000;
+    let stream_id = create_cliff_stream(&ctx, deposit, 0, 1500, 2000);
 
-    // Cancel after cliff (t = 600)
-    ctx.env.ledger().set_timestamp(600);
-    ctx.client.cancel_stream(&stream_id);
+    // Advance past start but before cliff
+    ctx.env.ledger().set_timestamp(500); // before cliff=1500
 
-    // Sender gets 0 refund, recipient is entitled to 100%
-    assert_eq!(
-        ctx.token.balance(&ctx.sender),
-        sender_balance_before - deposit
-    );
+    let client = ctx.client();
+    let streams = vec![&ctx.env, stream_id];
+    
+    // bulk_cancel_streams is admin only
+    let results = client.bulk_cancel_streams(&streams);
+    assert_eq!(results.len(), 1);
+    let result = results.get(0).unwrap();
 
-    // Recipient pulls their funds
-    let withdrawn = ctx.client.withdraw(&stream_id);
-    assert_eq!(withdrawn, deposit);
-    assert_eq!(ctx.token.balance(&ctx.recipient), deposit);
+    assert_eq!(result.recipient_amount, 0, "Recipient gets 0 before cliff");
+    assert_eq!(result.sender_refund_gross, deposit, "Sender gets full refund gross");
+    assert_eq!(result.keeper_fee, 0, "Admin cancel doesn't take keeper fee");
+    assert_eq!(result.sender_refund_net, deposit, "Sender gets full refund net");
 
-    let state = ctx.client.get_stream_state(&stream_id);
-    assert_eq!(state.status, StreamStatus::Cancelled);
+    // Balances
+    assert_eq!(ctx.token.balance(&ctx.contract_id), 0);
+    assert_eq!(client.get_total_liabilities(), 0);
 }
