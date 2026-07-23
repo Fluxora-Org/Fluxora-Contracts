@@ -4710,9 +4710,12 @@ impl FluxoraStream {
         pull_token(&env, &funder, amount)?;
 
         // Increase liabilities to match the additional deposit.
+        // Checked arithmetic: a silent wrap here would corrupt the global
+        // liability counter and allow the contract to believe it owes far less
+        // than it actually does (severe fund-accounting bug).
         let liabilities = read_total_liabilities(&env)
             .checked_add(amount)
-            .unwrap_or(i128::MAX);
+            .ok_or(ContractError::ArithmeticOverflow)?;
         write_total_liabilities(&env, liabilities);
 
         env.events().publish(

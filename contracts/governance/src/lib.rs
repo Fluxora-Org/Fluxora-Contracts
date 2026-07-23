@@ -646,6 +646,17 @@ impl FluxoraGovernance {
             },
         );
 
+        // Also emit a quorum-config summary so indexers that track signer-set
+        // changes (add_signer / remove_signer) see a consistent event shape
+        // whenever quorum parameters change.
+        env.events().publish(
+            (symbol_short!("quor_cfg"),),
+            QuorumConfig {
+                threshold: new_threshold,
+                signer_count: signers.len(),
+            },
+        );
+
         Ok(())
     }
 
@@ -1466,6 +1477,31 @@ mod tests {
         panic!("no event emitted by the contract");
     }
 
+    /// Finds the most recent event emitted by `contract_id` whose first topic
+    /// matches `topic`, searching newest-first. Useful when a call emits
+    /// multiple distinct events and a test needs one that isn't necessarily last.
+    fn nth_last_contract_event_with_topic(
+        env: &Env,
+        contract_id: &Address,
+        topic: Symbol,
+    ) -> (Symbol, Val) {
+        let events = env.events().all();
+        for i in (0..events.len()).rev() {
+            let (addr, topics, data) = events.get(i).unwrap();
+            if &addr != contract_id {
+                continue;
+            }
+            let topic_values: SVec<Val> = topics;
+            let found_topic_val = topic_values.get(0).expect("event has a topic");
+            let found_topic = Symbol::try_from_val(env, &found_topic_val).expect("topic is a symbol");
+            if found_topic == topic {
+                return (found_topic, data);
+            }
+        }
+
+        panic!("no matching event emitted by the contract");
+    }
+
     // -----------------------------------------------------------------------
     // CallData dispatch
     // -----------------------------------------------------------------------
@@ -1780,12 +1816,27 @@ mod tests {
         ctx.client.set_threshold(&3u32);
 
         assert_eq!(ctx.client.get_threshold(), 3);
-        let (topic, data) = last_contract_event(&ctx.env, &ctx.contract_id);
+
+        // set_threshold emits thr_upd followed by a quor_cfg summary event;
+        // the latter is now last, so find thr_upd explicitly instead of
+        // assuming it's the most recent event.
+        let (topic, data) = nth_last_contract_event_with_topic(
+            &ctx.env,
+            &ctx.contract_id,
+            symbol_short!("thr_upd"),
+        );
         assert_eq!(topic, symbol_short!("thr_upd"));
         let payload =
             ThresholdUpdated::try_from_val(&ctx.env, &data).expect("decodes to ThresholdUpdated");
         assert_eq!(payload.old_threshold, 2);
         assert_eq!(payload.new_threshold, 3);
+
+        let (last_topic, last_data) = last_contract_event(&ctx.env, &ctx.contract_id);
+        assert_eq!(last_topic, symbol_short!("quor_cfg"));
+        let quorum_payload =
+            QuorumConfig::try_from_val(&ctx.env, &last_data).expect("decodes to QuorumConfig");
+        assert_eq!(quorum_payload.threshold, 3);
+        assert_eq!(quorum_payload.signer_count, 3);
     }
 
     #[test]
