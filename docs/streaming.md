@@ -795,6 +795,7 @@ contract.create_streams_relative(&sender, &params)?;
 | `get_delegated_nonce`        | Anyone                     | None (view)                                 |
 | `release_id_reservation`     | Reservation holder         | `holder.require_auth()`                     |
 | `reclaim_expired_id_reservation` | Anyone                 | None (permissionless cleanup)               |
+| `get_total_liabilities`      | Anyone                     | None (view)                                 |
 
 **Note:** Sender-managed functions (`pause_stream`, `resume_stream`, `cancel_stream`) require sender auth. Admin uses separate `_as_admin` entry points.
 

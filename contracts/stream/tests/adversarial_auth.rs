@@ -1818,4 +1818,3 @@ fn delegated_withdraw_later_ledger_revocation_rejected() {
         "delegation revoked in prior ledger must be rejected"
     );
 }
-

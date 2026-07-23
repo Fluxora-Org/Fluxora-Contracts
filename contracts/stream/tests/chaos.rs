@@ -20,7 +20,9 @@
 //! sync so that the token‑conservation invariant (total tokens == 1000) remains
 //! meaningful throughout the stream's lifetime.
 
-use fluxora_stream::{ContractError, FluxoraStream, FluxoraStreamClient, PauseReason, StreamStatus};
+use fluxora_stream::{
+    ContractError, FluxoraStream, FluxoraStreamClient, PauseReason, StreamStatus,
+};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::Client as TokenClient,
