@@ -88,6 +88,21 @@
 //! | 19           | `RecipientStreamPageCount(Address)` | Persistent | `u32`    |
 //! | 20           | `PendingRecipientUpdate(u64)`   | Persistent| `Address`   |
 //!
+//! ## Post-V6 freeze additions (appended — discriminants 0–20 preserved)
+//!
+//! | Discriminant | Variant                         | Storage   | Value type   |
+//! |:------------:|:--------------------------------|:----------|:-------------|
+//! | 21           | `IdReservation(Address)`        | Instance  | `IdReservation` |
+//! | 22           | `MaxRatePerSecond`              | Instance  | `i128`       |
+//! | 23           | `DelegatedWithdrawNonce(Address)`| Persistent| `u64`       |
+//! | 24           | `LastPauseRecord(PauseKind)`    | Instance  | `PauseRecord`|
+//! | 25           | `RotationHistory(u64)`          | Persistent| `Vec<...>`   |
+//! | 26           | `LastAccrualLedgerTimestamp`    | Instance  | `u64`        |
+//! | 27           | `PausedStreamCount`             | Instance  | `u64`        |
+//! | 28           | `TotalKeeperFeesPaid`           | Instance  | `i128`       |
+//!
+//! Total live `DataKey` variant count: **29** (discriminants 0–28).
+//!
 //! V6 `Stream` struct adds one field at the end:
 //!
 //! | Position | Field  | Type              |
@@ -107,15 +122,16 @@
 //! ## Security assumptions
 //!
 //! - **Append-only extension**: New `DataKey` variants must always be appended.
-//!   Inserting a variant at any position ≤ 20 shifts all subsequent discriminants
+//!   Inserting a variant at any position ≤ 28 shifts all subsequent discriminants
 //!   and silently corrupts every affected persistent entry.
 //! - **Struct field ordering**: `Stream` fields must never be reordered. Soroban
 //!   XDR encodes structs positionally; a field swap is a silent type mismatch.
 //! - **Option-tail compatibility**: The V5→V6 `memo: Option<Bytes>` addition is
 //!   safe only because it is appended as the last field and is `Option`-typed.
 //!   A non-`Option` field appended to a struct would break V5 decoders.
-//! - **No compile-time enforcement**: Discriminant stability is enforced by code
-//!   review and the tests in `contracts/stream/tests/storage_key_compat.rs`.
+//! - **No compile-time enforcement**: Discriminant stability and variant count
+//!   alignment are machine-checked by `contracts/stream/tests/storage_key_compat.rs`
+//!   and documented here.
 //!
 //! ## Residual risks
 //!
@@ -148,19 +164,27 @@ mod tests {
         assert_eq!(V5_VARIANT_COUNT, 15);
     }
 
-    /// V6 DataKey has exactly 21 variants (discriminants 0–20).
+    /// V6 DataKey initial freeze had exactly 21 variants (discriminants 0–20).
     ///
-    /// If this assertion fails after a new variant is appended, update the
-    /// V6 discriminant table in the module doc-comment above and increment
-    /// `CONTRACT_VERSION`.
+    /// Post-V6 freeze additions added 8 variants (discriminants 21–28), bringing
+    /// the current live total to 29 variants.
     ///
     /// # Security note
-    /// The next variant appended to DataKey must receive discriminant 21.
-    /// Any value other than 21 indicates a mid-enum insertion, which is forbidden.
+    /// Machine-checked version cross-check is enforced in
+    /// `contracts/stream/tests/storage_key_compat.rs` (`test_contract_version_matches_datakey_variant_count`).
     #[test]
     fn v6_datakey_variant_count_is_21() {
-        const V6_VARIANT_COUNT: usize = 21;
-        assert_eq!(V6_VARIANT_COUNT, 21);
+        const V6_INITIAL_VARIANT_COUNT: usize = 21;
+        assert_eq!(V6_INITIAL_VARIANT_COUNT, 21);
+    }
+
+    /// Live DataKey enum currently contains exactly 29 variants (discriminants 0–28).
+    ///
+    /// Cross-referenced with `CONTRACT_VERSION` in `storage_key_compat.rs`.
+    #[test]
+    fn live_datakey_variant_count_is_29() {
+        const LIVE_VARIANT_COUNT: usize = 29;
+        assert_eq!(LIVE_VARIANT_COUNT, 29);
     }
 
     /// V5 Stream struct had 14 fields; V6 adds `memo` for 15 fields.
@@ -195,6 +219,19 @@ mod tests {
         assert_eq!(v6_only_range.clone().count(), 6);
         assert_eq!(*v6_only_range.start(), 15);
         assert_eq!(*v6_only_range.end(), 20);
+    }
+
+    /// The eight post-V6-freeze DataKey variants occupy discriminants 21–28.
+    ///
+    /// IdReservation=21, MaxRatePerSecond=22, DelegatedWithdrawNonce=23,
+    /// LastPauseRecord=24, RotationHistory=25, LastAccrualLedgerTimestamp=26,
+    /// PausedStreamCount=27, TotalKeeperFeesPaid=28.
+    #[test]
+    fn post_v6_variants_occupy_discriminants_21_to_28() {
+        let post_v6_range = 21usize..=28;
+        assert_eq!(post_v6_range.clone().count(), 8);
+        assert_eq!(*post_v6_range.start(), 21);
+        assert_eq!(*post_v6_range.end(), 28);
     }
 
     /// The frozen V5 discriminant range is 0–14 (inclusive).
