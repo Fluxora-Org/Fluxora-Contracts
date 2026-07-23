@@ -10,18 +10,18 @@
 //!
 //! ## Doc / code mismatches (flagged, not silently fixed)
 //!
-//! 1. **`InvalidDustThreshold` is documented but missing.**  
+//! 1. **`InvalidDustThreshold` is documented but missing.**
 //!    `docs/dust-threshold.md` says creation must reject
 //!    `withdraw_dust_threshold > deposit_amount` with
-//!    `ContractError::InvalidDustThreshold` (claimed code 20).  
+//!    `ContractError::InvalidDustThreshold` (claimed code 20).
 //!    Actual code has no such variant (code 20 is `TemplateNotFound`) and
 //!    does not validate the threshold at creation. See
 //!    `flag_mismatch_create_allows_threshold_above_deposit`.
 //!
-//! 2. **Negative thresholds are documented as rejected but are accepted.**  
+//! 2. **Negative thresholds are documented as rejected but are accepted.**
 //!    See `flag_mismatch_create_allows_negative_dust_threshold`.
 //!
-//! 3. **`token_check.rs` does not implement dust-threshold logic.**  
+//! 3. **`token_check.rs` does not implement dust-threshold logic.**
 //!    Zero-amount SEP-41 smoke tests live in `token_check::verify_token_behavior`
 //!    (covered in `src/test_token_edge_cases.rs`). Dust enforcement lives in the
 //!    withdraw paths in `lib.rs`.

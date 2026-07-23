@@ -53,13 +53,15 @@ def main():
 
         for func, sizes in measured.items():
             for size, cost in sizes.items():
-                # Get baseline value
-                baseline_val = None
-                if func == 'batch_withdraw':
-                    baseline_val = baselines.get('batch_withdraw', {}).get(size)
+                # Get baseline value.
+                # Baseline entries are either:
+                #   - a nested dict  {"variant": value, ...}  (e.g. batch_withdraw, keeper_cancel)
+                #   - a flat integer value                     (e.g. create_stream, withdraw)
+                raw = baselines.get(func)
+                if isinstance(raw, dict):
+                    baseline_val = raw.get(size)
                 else:
-                    # For non-batch functions, 'size' is 'single', we look for the function name key
-                    baseline_val = baselines.get(func)
+                    baseline_val = raw
 
                 if baseline_val is None:
                     print(f"{func:<20} | {size:<10} | {'N/A':<12} | {cost:<12} | {'N/A':<10} | MISSING")

@@ -7,7 +7,7 @@
 ///
 /// Tests cover:
 /// - StreamCreated: topics ["created", stream_id], payload shape verification
-/// - Withdrawal: topics ["withdrew", stream_id], payload shape verification  
+/// - Withdrawal: topics ["withdrew", stream_id], payload shape verification
 /// - WithdrawalTo: topics ["wdraw_to", stream_id], payload shape verification
 /// - StreamPaused: topics ["paused", stream_id], payload shape verification (with reason)
 /// - StreamResumed: topics ["resumed", stream_id], payload shape verification
