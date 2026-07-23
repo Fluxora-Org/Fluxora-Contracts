@@ -140,6 +140,7 @@ Removes a co-signer from the governance set. The admin must authorize the call.
 - Removing a non-existent signer is a no-op and emits **no** event.
 - Emits `SignerRemoved` with topic `("sgnr_rm",)` only when a registered signer is
   actually removed.
+- Stale approvals: Removing a co-signer does not mutate historical proposal records, but approvals from removed signers are filtered out at evaluation time during `approve`, `execute`, and `is_executable`. A proposal that relies on a removed signer's approval to reach threshold cannot be executed unless sufficient active co-signers approve.
 
 ### `set_threshold(threshold)`
 

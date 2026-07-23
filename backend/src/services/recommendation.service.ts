@@ -1,7 +1,7 @@
 import { AppDataSource } from '../config/database';
 import { User, UserRole } from '../models/User';
 import { Mentor, MentorPublicProfile } from '../models/Mentor';
-import { Session } from '../models/Session';
+import { Session, SessionStatus } from '../models/Session';
 import { RecommendationEvent, EventType, ScoreBreakdown } from '../models/RecommendationEvent';
 import { NotFoundError } from '../utils/errors';
 import cache from '../utils/cache';
@@ -232,7 +232,7 @@ export class RecommendationService {
     });
     const dismissedIds = dismissedMentors.map((e: RecommendationEvent) => e.mentorId);
 
-    // Build query with session count subquery
+    // Only completed sessions represent prior engagement for the session cap.
     const query = this.mentorRepository
       .createQueryBuilder('mentor')
       .leftJoin(
@@ -241,6 +241,9 @@ export class RecommendationService {
           .select('session.mentorId', 'mentorId')
           .addSelect('COUNT(*)', 'sessionCount')
           .where('session.learnerId = :learnerId', { learnerId })
+          .andWhere('session.status = :completedStatus', {
+            completedStatus: SessionStatus.COMPLETED
+          })
           .groupBy('session.mentorId'),
         'sessions',
         'sessions.mentorId = mentor.id'
