@@ -101,7 +101,7 @@ pub fn calculate_accrued_amount(
 /// ## Cross-References
 ///
 /// - **Stream struct**: See `contracts/stream/src/lib.rs` for the main Stream definition
-/// - **Documentation**: See `docs/streaming.md` for complete accrual formula explanation
+/// - **Documentation**: See `docs/streaming.md` for complete accrual formula explanation and CliffOnly accrual worked examples
 /// - **Rate changes**: See `decrease_rate_per_second` function for checkpointing logic
 ///
 /// Groups the six stream fields that are always read together, reducing the

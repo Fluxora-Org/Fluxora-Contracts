@@ -218,10 +218,34 @@ Success semantics (observable):
 3. The new stream is initialized in the `Active` status.
 4. Tokens are pulled from the source stream's sender for the new deposit.
 
-Failure semantics (observable):
-
 1. Terminal source state: If the source stream status is `Completed` or `Cancelled`, the operation is rejected with `ContractError::StreamTerminalState`.
 2. Unauthorized: If the caller is not the sender of the source stream, the operation is rejected.
+
+### Decommission Semantics
+
+This section defines the success and failure behavior of decommissioning a stream. 
+
+Decommissioning is a mechanism to flag a stream for wind-down without immediately cancelling it. This prevents any further modification of the stream parameters (such as rate updates, top-ups, schedule extensions, and cloning) while fully allowing the recipient to withdraw already-accrued balance, and allowing standard individual pauses, resumes, and cancellations.
+
+#### Entrypoint Matrix under Decommissioned Mode
+
+| Entrypoint | Allowed | Blocked | Reason / Error Code |
+|---|:---:|:---:|---|
+| `set_stream_decommissioned` | Yes | - | Allowed to toggle the decommissioned state. Recommissioning (setting back to `false`) is blocked if the separately-proposed `irrevocable` flag is set (`ContractError::InvalidState`). |
+| `withdraw` / `withdraw_to` / `batch_withdraw` | Yes | - | Allowed to withdraw already-accrued balance. |
+| `pause_stream` / `resume_stream` | Yes | - | Allowed to pause/resume withdrawals. |
+| `cancel_stream` / `cancel_stream_as_admin` | Yes | - | Allowed to terminate stream early and refund the unstreamed balance. |
+| `update_rate_per_second` | - | Yes | Blocked with `ContractError::InvalidState` to lock down streaming rate. |
+| `decrease_rate_per_second` | - | Yes | Blocked with `ContractError::InvalidState` to lock down streaming rate. |
+| `top_up_stream` | - | Yes | Blocked with `ContractError::InvalidState` to lock down total deposit. |
+| `extend_stream_end_time` | - | Yes | Blocked with `ContractError::InvalidState` to lock down stream timing/duration. |
+| `clone_stream` | - | Yes | Blocked with `ContractError::InvalidState` when cloning from a decommissioned stream to prevent propagating decommissioned configurations. |
+
+#### Authorization & Rules
+1. Only the stream `sender` can invoke `set_stream_decommissioned`. Calls by other addresses return `ContractError::Unauthorized`.
+2. Toggling the flag on terminal streams (Completed or Cancelled) is blocked and returns `ContractError::StreamTerminalState`.
+3. If the stream is marked `irrevocable` (separately proposed), setting `decommissioned` from `true` to `false` is blocked and returns `ContractError::InvalidState`.
+4. Successful transitions emit a `decomm` event with the boolean state.
 
 ### Global Pause Semantics (Issue Scope)
 
@@ -392,6 +416,47 @@ return min(checkpointed_amount + added, deposit_amount).max(0)
 if current_time < cliff_time  → return 0
 else                         → return deposit_amount
 ```
+
+#### CliffOnly Accrual Worked Examples
+
+Unlike **Linear Streams** which accrue continuously over time at a rate of `rate_per_second`, a **Cliff-Only Stream** accrues its entire `deposit_amount` in one lump sum at `cliff_time`. Once the cliff is reached, the stream is fully accrued.
+
+##### Key Differences from Linear Streams:
+- **Lump Sum Vesting**: Accrual is a binary step function: `0` before the cliff, and the full `deposit_amount` at or after the cliff.
+- **Rate Ignored**: The `rate_per_second` parameter is completely ignored when computing Cliff-Only accrual. The vesting amount past the cliff is determined solely by `deposit_amount`.
+- **Clamping**: The accrued amount is capped at `deposit_amount` immediately upon reaching `cliff_time`.
+
+---
+
+##### Example 1: Prior to Cliff (`now < cliff_time`)
+
+Consider a Cliff-Only stream with the following parameters:
+- `start_time` = 10,000 (timestamp in seconds)
+- `cliff_time` = 15,000 (timestamp in seconds)
+- `end_time` = 20,000 (timestamp in seconds)
+- `deposit_amount` = 5,000 tokens
+- `rate_per_second` = 1 token/sec (ignored)
+
+If we evaluate accrual at `now` = 14,999:
+1. Compare `now` against `cliff_time`: `14,999 < 15,000`.
+2. Since `now < cliff_time`, the accrual returns exactly `0`.
+3. **Result**: `0` tokens accrued.
+
+---
+
+##### Example 2: At or After Cliff (`now >= cliff_time`)
+
+Using the same stream parameters:
+- `start_time` = 10,000
+- `cliff_time` = 15,000
+- `end_time` = 20,000
+- `deposit_amount` = 5,000 tokens
+- `rate_per_second` = 1 token/sec (ignored)
+
+If we evaluate accrual at `now` = 15,000 (exactly at the cliff) or `now` = 18,000 (midway) or `now` = 25,000 (past the end time):
+1. Compare `now` against `cliff_time`: `now >= 15,000`.
+2. Since `now >= cliff_time`, the accrual branch returns the full `deposit_amount`.
+3. **Result**: `5,000` tokens accrued. Even though `rate_per_second` is 1, and only 0 seconds or 3,000 seconds have elapsed since the cliff, the recipient has immediate entitlement to the entire 5,000 deposit.
 
 ### Rules
 
