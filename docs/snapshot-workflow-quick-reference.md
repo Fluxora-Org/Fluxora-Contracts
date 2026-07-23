@@ -110,11 +110,31 @@ When your PR changes snapshots:
 
 - [ ] Run tests locally before pushing
 - [ ] Review every changed `.json` file
+- [ ] Run the security diff script: `python script/check_snapshot_diff.py`
+  - *If it flags security-relevant fields (e.g., auth, events, error codes), ensure these changes receive mandatory extra review per the maintainer security checklist.*
 - [ ] Verify changes match intended behavior
 - [ ] Update documentation if behavior changed
 - [ ] Add PR comment explaining snapshot changes
 - [ ] Ensure CI passes
 - [ ] Request review from maintainer
+
+## Automated Security Review
+
+To help identify security-relevant changes (authorization requirements, event payloads, error codes) in snapshots, use the diff checker script:
+
+```bash
+# Check working tree against HEAD
+python script/check_snapshot_diff.py
+
+# Check a specific branch against main
+python script/check_snapshot_diff.py --base origin/main --head my-feature-branch
+```
+
+**What it does:**
+- Diffs snapshot JSON changes between two commits.
+- Flags any change to a security-relevant field (`auth`, `events`, `error`, `storage`, etc.).
+- Exits with a non-zero code if security fields changed, preventing them from slipping through review unnoticed.
+
 
 ## Emergency Procedures
 
