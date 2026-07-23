@@ -222,3 +222,112 @@ fn test_cliff_only_cancel_after_cliff() {
     let state = ctx.client.get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Cancelled);
 }
+
+/// 6. Exact Boundary Testing - 1 second before cliff (cliff_time - 1):
+/// Asserts that withdrawable is 0 at cliff_time - 1 and withdrawal returns 0.
+#[test]
+fn test_cliff_only_withdrawable_one_second_before_cliff() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let deposit = 5000_i128;
+    let start = 100u64;
+    let cliff = 500u64;
+    let end = 1000u64;
+
+    let stream_id = ctx.create_cliff_only_stream(deposit, start, cliff, end);
+
+    // Timestamp set to cliff_time - 1 (499)
+    let t_before = cliff - 1;
+    ctx.env.ledger().set_timestamp(t_before);
+
+    // Accrued and withdrawable must be exactly 0
+    assert_eq!(ctx.client.get_withdrawable(&stream_id), 0);
+    assert_eq!(ctx.client.calculate_accrued(&stream_id), 0);
+    assert_eq!(ctx.client.get_claimable_at(&stream_id, &t_before), 0);
+
+    // Attempting to withdraw must return 0 and not transfer any tokens
+    let withdrawn = ctx.client.withdraw(&stream_id);
+    assert_eq!(withdrawn, 0);
+    assert_eq!(ctx.token.balance(&ctx.recipient), 0);
+}
+
+/// 7. Exact Boundary Testing - Exactly at cliff (cliff_time):
+/// Asserts that withdrawable is the full deposit_amount at exactly cliff_time
+/// confirming inclusive semantics (ledger.timestamp() == cliff_time).
+#[test]
+fn test_cliff_only_withdrawable_exactly_at_cliff() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let deposit = 5000_i128;
+    let start = 100u64;
+    let cliff = 500u64;
+    let end = 1000u64;
+
+    let stream_id = ctx.create_cliff_only_stream(deposit, start, cliff, end);
+
+    // Timestamp set exactly to cliff_time (500)
+    ctx.env.ledger().set_timestamp(cliff);
+
+    // Accrued and withdrawable must equal full deposit_amount (inclusive cliff semantics)
+    assert_eq!(ctx.client.get_withdrawable(&stream_id), deposit);
+    assert_eq!(ctx.client.calculate_accrued(&stream_id), deposit);
+    assert_eq!(ctx.client.get_claimable_at(&stream_id, &cliff), deposit);
+
+    // Recipient successfully withdraws 100% of deposit at cliff_time
+    let withdrawn = ctx.client.withdraw(&stream_id);
+    assert_eq!(withdrawn, deposit);
+    assert_eq!(ctx.token.balance(&ctx.recipient), deposit);
+
+    let state = ctx.client.get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+}
+
+/// 8. Exact Boundary Testing - After cliff (cliff_time + N):
+/// Asserts that withdrawable remains capped at deposit_amount for timestamps after cliff_time
+/// (no further "accrual" past the cliff for a CliffOnly stream).
+#[test]
+fn test_cliff_only_withdrawable_after_cliff_capped() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let deposit = 5000_i128;
+    let start = 100u64;
+    let cliff = 500u64;
+    let end = 1000u64;
+
+    let stream_id = ctx.create_cliff_only_stream(deposit, start, cliff, end);
+
+    // Test multiple timestamps after cliff_time (cliff + 1, cliff + 100, end_time, far past end_time)
+    for &t_after in &[cliff + 1, cliff + 100, end, end + 5000] {
+        ctx.env.ledger().set_timestamp(t_after);
+        assert_eq!(
+            ctx.client.get_withdrawable(&stream_id),
+            deposit,
+            "Withdrawable past cliff at t={} should be capped at deposit_amount",
+            t_after
+        );
+        assert_eq!(
+            ctx.client.calculate_accrued(&stream_id),
+            deposit,
+            "Accrued past cliff at t={} should be capped at deposit_amount",
+            t_after
+        );
+        assert_eq!(
+            ctx.client.get_claimable_at(&stream_id, &t_after),
+            deposit,
+            "Claimable at t={} should be capped at deposit_amount",
+            t_after
+        );
+    }
+
+    // Recipient withdraws full deposit amount
+    let withdrawn = ctx.client.withdraw(&stream_id);
+    assert_eq!(withdrawn, deposit);
+    assert_eq!(ctx.token.balance(&ctx.recipient), deposit);
+
+    let state = ctx.client.get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+}
+
