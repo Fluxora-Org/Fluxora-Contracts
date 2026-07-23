@@ -203,7 +203,7 @@ fn sequence_advances_fast_timestamp_static_accrual_is_timestamp_only() {
     // Withdrawal also succeeds: current_sequence (10 000) − last_withdraw_ledger (0)
     // = 10 000 >= MIN_WITHDRAW_INTERVAL_LEDGERS (1), so the DoS gate passes.
     // The withdrawn amount must match the timestamp-based accrual.
-    let withdrawn = ctx.client().withdraw(&stream_id).unwrap();
+    let withdrawn = ctx.client().withdraw(&stream_id);
     assert_eq!(
         withdrawn, 400,
         "withdraw must transfer exactly the timestamp-based accrued amount, not the sequence count"
@@ -243,7 +243,7 @@ fn timestamp_advances_sequence_static_normal_accrual_works() {
 
     // Withdrawal succeeds: current_sequence (1) − last_withdraw_ledger (0)
     // = 1 >= MIN_WITHDRAW_INTERVAL_LEDGERS (1), so the DoS gate passes.
-    let withdrawn = ctx.client().withdraw(&stream_id).unwrap();
+    let withdrawn = ctx.client().withdraw(&stream_id);
     assert_eq!(
         withdrawn, 700,
         "withdraw must transfer the full timestamp-based accrued amount (700)"
