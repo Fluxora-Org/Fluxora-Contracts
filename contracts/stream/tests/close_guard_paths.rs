@@ -1,4 +1,4 @@
-﻿//! Tests for issue #522: close guard and recipient-index cleanup paths.
+//! Tests for issue #522: close guard and recipient-index cleanup paths.
 //!
 //! 1. `test_close_non_completed_stream_rejected` — exercises the guard that
 //!    rejects Active/Paused streams passed to `close_completed_stream`.
@@ -7,7 +7,7 @@
 //!    index entry is absent (no panic, no partial state left behind).
 
 use fluxora_stream::{
-    ContractError, FluxoraStream, FluxoraStreamClient, PauseReason, StreamKind, StreamStatus,
+    ContractError, DataKey, FluxoraStream, FluxoraStreamClient, PauseReason, Stream, StreamKind, StreamStatus,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -272,4 +272,135 @@ fn test_close_removes_only_target_from_index() {
     let index = ctx.client.get_recipient_streams(&ctx.recipient);
     assert!(!index.contains(id_a));
     assert!(index.contains(id_b));
+}
+
+// ---------------------------------------------------------------------------
+// Decommission Mode tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_set_stream_decommissioned_success() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream(10_000);
+
+    // Initial state: decommissioned is false
+    assert!(!ctx.client.get_stream_state(&stream_id).decommissioned);
+
+    // Sender decommissions the stream
+    ctx.client.set_stream_decommissioned(&stream_id, &ctx.sender, &true);
+    assert!(ctx.client.get_stream_state(&stream_id).decommissioned);
+
+    // Sender recommissions the stream
+    ctx.client.set_stream_decommissioned(&stream_id, &ctx.sender, &false);
+    assert!(!ctx.client.get_stream_state(&stream_id).decommissioned);
+}
+
+#[test]
+fn test_set_stream_decommissioned_blocked_mutations() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream(10_000);
+
+    // Decommission stream
+    ctx.client.set_stream_decommissioned(&stream_id, &ctx.sender, &true);
+
+    // 1. update_rate_per_second is blocked
+    let res_update = ctx.client.try_update_rate_per_second(&stream_id, &2);
+    assert_eq!(res_update, Err(Ok(ContractError::InvalidState)));
+
+    // 2. decrease_rate_per_second is blocked
+    let res_decrease = ctx.client.try_decrease_rate_per_second(&stream_id, &1);
+    assert_eq!(res_decrease, Err(Ok(ContractError::InvalidState)));
+
+    // 3. top_up_stream is blocked
+    let res_top_up = ctx.client.try_top_up_stream(&stream_id, &ctx.sender, &500);
+    assert_eq!(res_top_up, Err(Ok(ContractError::InvalidState)));
+
+    // 4. extend_stream_end_time is blocked
+    let now = ctx.env.ledger().timestamp();
+    let res_extend = ctx.client.try_extend_stream_end_time(&stream_id, &(now + 20_000));
+    assert_eq!(res_extend, Err(Ok(ContractError::InvalidState)));
+
+    // 5. clone_stream is blocked
+    let stranger = Address::generate(&ctx.env);
+    let res_clone = ctx.client.try_clone_stream(
+        &stream_id,
+        &stranger,
+        &(now + 15_000),
+        &(now + 25_000),
+        &1_000,
+        &false,
+    );
+    assert_eq!(res_clone, Err(Ok(ContractError::InvalidState)));
+}
+
+#[test]
+fn test_set_stream_decommissioned_allowed_functions() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream(10_000);
+
+    // Decommission stream
+    ctx.client.set_stream_decommissioned(&stream_id, &ctx.sender, &true);
+
+    // 1. pause_stream is allowed
+    ctx.env.ledger().with_mut(|l| l.sequence_number += 32);
+    ctx.client.pause_stream(&stream_id, &PauseReason::Operational);
+    assert_eq!(
+        ctx.client.get_stream_state(&stream_id).status,
+        StreamStatus::Paused
+    );
+
+    // 2. resume_stream is allowed
+    ctx.env.ledger().with_mut(|l| l.sequence_number += 32);
+    ctx.client.resume_stream(&stream_id);
+    assert_eq!(
+        ctx.client.get_stream_state(&stream_id).status,
+        StreamStatus::Active
+    );
+
+    // 3. withdraw is allowed (recipient can still withdraw accrued balance)
+    ctx.env.ledger().with_mut(|l| {
+        l.timestamp += 100;
+        l.sequence_number += 32;
+    });
+    ctx.client.withdraw(&stream_id);
+
+    // 4. cancel_stream is allowed
+    ctx.client.cancel_stream(&stream_id);
+    assert_eq!(
+        ctx.client.get_stream_state(&stream_id).status,
+        StreamStatus::Cancelled
+    );
+}
+
+#[test]
+fn test_set_stream_decommissioned_unauthorized() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream(10_000);
+    let stranger = Address::generate(&ctx.env);
+
+    // Stranger tries to decommission -> Unauthorized
+    let res = ctx.client.try_set_stream_decommissioned(&stream_id, &stranger, &true);
+    assert_eq!(res, Err(Ok(ContractError::Unauthorized)));
+}
+
+#[test]
+fn test_set_stream_decommissioned_irrevocable_precedence() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream(10_000);
+
+    // Sender decommissions the stream
+    ctx.client.set_stream_decommissioned(&stream_id, &ctx.sender, &true);
+
+    // Directly set irrevocable to true in storage to simulate separately-proposed feature
+    let cid = ctx.client.address.clone();
+    ctx.env.as_contract(&cid, || {
+        let key = DataKey::Stream(stream_id);
+        let mut stream: Stream = ctx.env.storage().persistent().get(&key).unwrap();
+        stream.irrevocable = true;
+        ctx.env.storage().persistent().set(&key, &stream);
+    });
+
+    // Attempting to recommission (set decommissioned to false) should fail with InvalidState
+    let res = ctx.client.try_set_stream_decommissioned(&stream_id, &ctx.sender, &false);
+    assert_eq!(res, Err(Ok(ContractError::InvalidState)));
 }
