@@ -16,7 +16,7 @@ Version policy, migration runbook, and audit notes for operators, integrators, a
 ### Current value
 
 ```
-CONTRACT_VERSION = 5
+CONTRACT_VERSION = 6
 ```
 
 ### Version history
@@ -28,6 +28,7 @@ CONTRACT_VERSION = 5
 | 3 | `Stream` struct gained `memo: Option<Bytes>`; `StreamCreated` event gained `memo` field; `DataKey::StreamMemo(u64)` added at discriminant 10; `create_stream`/`create_streams` gained `memo` parameter; `get_stream_memo` entry-point added |
 | 4 | `TotalLiabilities` instance key for escrow accounting; accrual paths track last observed ledger timestamp for clock-regression detection |
 | 5 | `withdraw_dust_threshold: i128` added to `Stream` struct and creation params; `DataKey::PausedStreamCount` added and maintained across pause/resume/cancel/complete transitions; `get_paused_stream_count()` O(1) view added |
+| 6 | Sweep excess authorization update; added additive `DataKey` variants 15–28 (`WithdrawNonce`, `PauseState`, `ReentrancyLock`, `RecipientStreamPage`, `RecipientStreamPageCount`, `PendingRecipientUpdate`, `IdReservation`, `MaxRatePerSecond`, `DelegatedWithdrawNonce`, `LastPauseRecord`, `RotationHistory`, `LastAccrualLedgerTimestamp`, `PausedStreamCount`, `TotalKeeperFeesPaid`) |
 
 ### When to increment
 
@@ -185,6 +186,11 @@ Before interacting with any Fluxora contract instance:
 4. **Admin key continuity.** The admin address is set at `init` time and is immutable via `init`. Use `set_admin` to rotate the admin key before migrating to a new instance, and call `init` on the new instance with the new admin address.
 
 5. **Token address immutability.** The token is fixed at `init` time. A new contract version that needs a different token requires a new `init` call with the new token address — existing streams on the old instance are unaffected.
+
+6. **Machine-checked `CONTRACT_VERSION` vs `DataKey` variant count cross-check.** To prevent version drift when new storage keys are appended, `contracts/stream/tests/storage_key_compat.rs` enforces a machine-checked mapping between `CONTRACT_VERSION` and expected `DataKey` variant count (currently 29 for version 6). Whenever a new `DataKey` variant is appended or `CONTRACT_VERSION` is incremented, developers MUST update:
+   - `expected_datakey_count_for_version()` and `all_live_datakey_variants()` in `contracts/stream/tests/storage_key_compat.rs`
+   - Discriminant tables & variant count tests in `contracts/stream/src/checksum.rs`
+   - Version history & policy table in `docs/upgrade.md`
 
 ---
 
