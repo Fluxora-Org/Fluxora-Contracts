@@ -1736,3 +1736,115 @@ fn test_contract_error_discriminants_unique() {
         "ContractError has duplicate discriminants"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Tests — Contract-owned senders (vaults, multisigs)
+// ---------------------------------------------------------------------------
+
+#[contract]
+pub struct MockVaultContract;
+
+#[contractimpl]
+impl MockVaultContract {
+    pub fn vault_create_stream(
+        env: Env,
+        stream_contract: Address,
+        recipient: Address,
+        deposit_amount: i128,
+        rate_per_second: i128,
+        start_time: u64,
+        cliff_time: u64,
+        end_time: u64,
+    ) -> u64 {
+        let client = fluxora_stream::FluxoraStreamClient::new(&env, &stream_contract);
+        client.create_stream(
+            &env.current_contract_address(),
+            &recipient,
+            &deposit_amount,
+            &rate_per_second,
+            &start_time,
+            &cliff_time,
+            &end_time,
+            &0,
+            &None,
+            &fluxora_stream::types::StreamKind::Linear,
+        )
+    }
+
+    pub fn vault_top_up_stream(
+        env: Env,
+        stream_contract: Address,
+        stream_id: u64,
+        amount: i128,
+    ) {
+        let client = fluxora_stream::FluxoraStreamClient::new(&env, &stream_contract);
+        client.top_up_stream(&stream_id, &amount)
+    }
+
+    pub fn vault_cancel_stream(
+        env: Env,
+        stream_contract: Address,
+        stream_id: u64,
+    ) {
+        let client = fluxora_stream::FluxoraStreamClient::new(&env, &stream_contract);
+        client.cancel_stream(&stream_id)
+    }
+}
+
+#[test]
+fn test_contract_owned_vault_sender() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.timestamp = 1000;
+        li.sequence = 10;
+    });
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let stream_client = FluxoraStreamClient::new(&env, &contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin).address();
+    let token = TokenClient::new(&env, &token_id);
+
+    let admin = Address::generate(&env);
+    stream_client.init(&token_id, &admin);
+
+    let vault_id = env.register_contract(None, MockVaultContract);
+    let vault_client = MockVaultContractClient::new(&env, &vault_id);
+
+    // Mint tokens to the vault
+    token.mint(&vault_id, &100_000);
+
+    let recipient = Address::generate(&env);
+
+    // Vault creates a stream (tests sender.require_auth() inside create_stream)
+    let stream_id = vault_client.vault_create_stream(
+        &contract_id,
+        &recipient,
+        &10_000,
+        &10,
+        &1000,
+        &1000,
+        &2000,
+    );
+
+    // Vault tops up the stream (tests funder.require_auth() inside top_up_stream)
+    vault_client.vault_top_up_stream(&contract_id, &stream_id, &5_000);
+
+    let state = stream_client.get_stream_state(&stream_id);
+    assert_eq!(state.deposit_amount, 15_000);
+    assert_eq!(state.sender, vault_id);
+
+    // Vault cancels the stream (tests sender.require_auth() inside cancel_stream)
+    env.ledger().with_mut(|li| li.timestamp = 1500);
+    vault_client.vault_cancel_stream(&contract_id, &stream_id);
+
+    let state_after = stream_client.get_stream_state(&stream_id);
+    assert_eq!(state_after.status, StreamStatus::Cancelled);
+    
+    // Vault gets its refund
+    let final_balance = token.balance(&vault_id);
+    // Initial 100_000 - 15_000 (deposit + topup) + 10_000 (refund for remaining 1000s * 10/s) = 95_000
+    assert_eq!(final_balance, 95_000);
+}

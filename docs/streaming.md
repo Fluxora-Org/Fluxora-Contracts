@@ -282,6 +282,19 @@ stateDiagram-v2
     Completed --> [*]
 ```
 
+### Contract-owned senders (vaults, multisigs)
+
+The `create_stream` function and its variants authenticate the `sender` uniformly via `sender.require_auth()`. This pattern seamlessly supports both externally-owned Stellar accounts and smart contract addresses (such as treasury vaults or multisig contracts) without any special-cased code paths.
+
+When a contract creates a stream:
+- **Authorization**: The calling contract naturally authorizes the action via the standard Soroban authentication framework.
+- **Funding**: Tokens are debited from the contract's token balance (the contract must have sufficient funds).
+- **Management**: The contract acts as the stream's sender for all lifecycle operations, meaning only the contract can call `top_up_stream`, `cancel_stream`, `decrease_rate_per_second`, etc.
+- **Refunds**: If a stream is cancelled or shortened, the unstreamed tokens are refunded directly to the sender's contract address.
+
+**Caveat**: Ensure that `sender == recipient` validation (if enforced off-chain or via UI) and refund logic correctly account for contract addresses exactly as they would for standard accounts. The streaming protocol treats them identically.
+
+
 ### Sequence Diagram
 
 The following diagram shows the full create → withdraw flow, including optional pause/resume and cancel paths.
