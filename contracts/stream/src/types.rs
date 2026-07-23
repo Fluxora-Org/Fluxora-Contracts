@@ -13,6 +13,9 @@ use soroban_sdk::{contracttype, Address, Map};
 // Data types
 // ---------------------------------------------------------------------------
 
+/// Maximum number of recipients allowed in a single pooled stream.
+pub const MAX_POOL_RECIPIENTS: u32 = 100;
+
 /// Global configuration for the Fluxora protocol.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -617,6 +620,8 @@ pub struct Stream {
     pub last_withdraw_ledger: u32,
     /// Optional structured metadata emitted for indexer consumption.
     pub metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
+    /// If true, the stream is a pooled stream with multiple recipients.
+    pub is_pooled: Option<bool>,
 }
 
 /// Pagination result for recipient stream listing
@@ -774,6 +779,10 @@ pub enum DataKey {
     LastAccrualLedgerTimestamp,
     /// Per-stream rotation audit history.
     RotationHistory(u64),
+    /// Persistent share table for pooled streams: stream_id -> Vec<(Address, u32)>
+    PooledStreamShares(u64),
+    /// Persistent individual withdrawn amounts for pooled streams: (stream_id, recipient) -> i128
+    PooledStreamWithdrawn(u64, Address),
 }
 
 /// Type of pause.

@@ -1721,3 +1721,16 @@ pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), ContractError>
   caller, plus a legacy `upgrade` topic event for backward-compatible indexers.
   See `docs/events.md` for the exact event shapes.
 
+## Pooled Streams (Multi-Recipient)
+
+Fluxora supports multi-recipient pooled streams where multiple beneficiaries receive pro-rata shares of a single deposited amount.
+
+### `create_pooled_stream`
+
+Creates a pooled stream. The `recipients` list takes pairs of `(Address, u32)` defining the recipient and their share weight. The maximum number of recipients is `MAX_POOL_RECIPIENTS` (100). The stream operates similarly to a single-recipient stream, but its `is_pooled` flag is set to true.
+
+### `withdraw_from_pool`
+
+Withdrawals from a pooled stream are independent. When a recipient calls `withdraw_from_pool(stream_id, caller)`, the contract calculates the total accrued tokens and multiplies by the caller's proportional share `(caller_share / total_shares)`. The contract independently tracks withdrawn amounts for each pool member using `DataKey::PooledStreamWithdrawn`.
+
+**Rounding:** The calculation uses strict integer math (`checked_mul` followed by `checked_div`), rounding down on remainders to avoid over-withdrawing the pool's deposit.
