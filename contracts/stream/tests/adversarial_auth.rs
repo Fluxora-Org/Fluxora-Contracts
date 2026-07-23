@@ -1492,6 +1492,7 @@ struct DelegatedCtx<'a> {
     recipient_pk: BytesN<32>,
     signing_key: SigningKey,
     stream_id: u64,
+    sender: Address,
     #[allow(dead_code)]
     sac: soroban_sdk::token::StellarAssetClient<'a>,
 }
@@ -1550,6 +1551,7 @@ impl<'a> DelegatedCtx<'a> {
             recipient_pk,
             signing_key,
             stream_id,
+            sender,
             sac,
         }
     }

@@ -3521,7 +3521,9 @@ impl FluxoraStream {
     /// - `stream_id`: Stream to withdraw from.
     /// - `relayer`: Address submitting the transaction (pays fees; no special privilege).
     /// - `recipient_public_key`: Raw 32-byte ed25519 public key of the recipient.
-    /// - `nonce`: Replay-protection counter; must equal the stored nonce for this recipient.
+    /// - `nonce`: Replay-protection counter. Note: nonces are scoped **per-recipient**, not per-stream.
+    ///   A shared nonce counter prevents parallel replays across all streams owned by the recipient.
+    ///   Cross-stream confusion is prevented because the `stream_id` is included in the signed payload.
     /// - `deadline`: Ledger timestamp after which the signature is rejected.
     /// - `expected_minimum_amount`: Minimum withdrawable amount the recipient accepts.
     ///   Pass `0` to accept any positive amount.

@@ -558,6 +558,7 @@ match client.try_batch_withdraw(&recipient, &stream_ids) {
 - `delegated_withdraw` called with an invalid ed25519 signature
 - Signature has expired (timestamp check failed)
 - Nonce mismatch (replay protection)
+- Cross-stream confusion (signature crafted for a different `stream_id` but submitted against another)
 - Signature does not match the expected payload structure
 
 **Affected Roles**:
