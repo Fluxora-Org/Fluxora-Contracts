@@ -397,6 +397,7 @@ pub enum ContractError {
     ReservationNotFound = 24,
     ReservationNotExpirable = 25,
     ReservationStillActive = 26,
+    ReservationAlreadyActive = 34,
     /// Ledger-backed accrual observed a timestamp lower than the previous accrual timestamp.
     ClockRegression = 28,
     /// Metadata payload exceeds the allowed size.
@@ -6800,8 +6801,8 @@ impl FluxoraStream {
     /// database records before the corresponding `create_stream` transactions land on-chain.
     ///
     /// Subsequent `create_stream` calls from `caller` consume IDs from the reservation
-    /// in order. A second call before the first reservation is exhausted **replaces** it
-    /// (unconsumed IDs become permanent gaps; the counter is never rewound).
+    /// in order. A caller may only have one active reservation at a time. A second call
+    /// before the first reservation is released will fail with `ReservationAlreadyActive`.
     ///
     /// # Parameters
     /// - `caller`: Address making the reservation (must authorize)
@@ -6813,6 +6814,7 @@ impl FluxoraStream {
     /// # Errors
     /// - `ReservationCountZero` (17): `count` is 0
     /// - `ReservationLimitExceeded` (18): `count > MAX_ID_RESERVATION`
+    /// - `ReservationAlreadyActive` (28): `caller` already has an active reservation
     ///
     /// # Security
     /// - `count` is capped at `MAX_ID_RESERVATION = 100` to prevent counter-inflation attacks.
@@ -6830,6 +6832,10 @@ impl FluxoraStream {
         }
         if count > MAX_ID_RESERVATION {
             return Err(ContractError::ReservationLimitExceeded);
+        }
+
+        if load_id_reservation(&env, &caller).is_some() {
+            return Err(ContractError::ReservationAlreadyActive);
         }
 
         let start_id = read_stream_count(&env);

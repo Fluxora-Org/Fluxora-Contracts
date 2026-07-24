@@ -218,18 +218,15 @@ fn create_stream_after_reservation_exhausted_uses_live_counter() {
 }
 
 #[test]
-fn new_reservation_overwrites_existing() {
+fn new_reservation_fails_if_active() {
     let ctx = Ctx::setup();
     ctx.client.reserve_stream_ids(&ctx.sender, &5u32, &None); // IDs 0..4
-    let ids2 = ctx.client.reserve_stream_ids(&ctx.sender, &5u32, &None); // IDs 5..9
-    assert_eq!(ids2.get(0).unwrap(), 5u64);
+    let result = ctx.client.try_reserve_stream_ids(&ctx.sender, &5u32, &None);
+    assert_eq!(result, Err(Ok(ContractError::ReservationAlreadyActive)));
 
     let res = ctx.client.get_id_reservation(&ctx.sender).unwrap();
-    assert_eq!(res.start_id, 5);
+    assert_eq!(res.start_id, 0);
     assert_eq!(res.consumed, 0);
-
-    let id = ctx.create_stream(&ctx.sender);
-    assert_eq!(id, 5u64);
 }
 
 #[test]

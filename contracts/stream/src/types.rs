@@ -212,6 +212,7 @@ pub enum ContractError {
     ReservationNotExpirable = 25,
     ClockRegression = 27,
     ReservationStillActive = 26,
+    ReservationAlreadyActive = 34,
     /// Stream kind does not support this operation (e.g., rate changes on CliffOnly).
     UnsupportedStreamKind = 28,
     /// New rate exceeds the governance-controlled maximum rate per second.
