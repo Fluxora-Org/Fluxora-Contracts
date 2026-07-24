@@ -17,6 +17,10 @@ export interface ScoreBreakdown {
 @Index(['learnerId', 'createdAt'])
 @Index(['mentorId', 'eventType'])
 @Index(['learnerId', 'mentorId', 'eventType'])
+@Index('idx_unique_learner_mentor_dismiss', ['learnerId', 'mentorId'], {
+  unique: true,
+  where: `"eventType" = 'dismiss'`
+})
 export class RecommendationEvent {
   @PrimaryGeneratedColumn('uuid')
   id!: string;

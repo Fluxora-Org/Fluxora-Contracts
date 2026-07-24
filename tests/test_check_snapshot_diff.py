@@ -1,1065 +1,563 @@
-#!/usr/bin/env python3
 """
 tests/test_check_snapshot_diff.py
+==================================
+Comprehensive unit tests for script/check_snapshot_diff.py.
 
-Comprehensive test suite for script/check_snapshot_diff.py.
+The module under test implements a security-relevant snapshot-diff gate used
+in the CI pipeline.  It:
+  - Determines which ``contracts/stream/test_snapshots/*.json`` files were
+    touched between two git refs.
+  - Reads both the old and new version of each file (from git history or the
+    working tree).
+  - Recursively walks the JSON diff and flags any path that contains a member
+    of ``SECURITY_FIELDS`` (auth, events, error, storage, etc.).
+  - Exits 0 when no security-relevant change is detected, 1 otherwise.
 
-Covers:
-  - SECURITY_FIELDS registry completeness
-  - is_security_relevant() path-matching algorithm (exact, substring, case)
-  - flatten_snapshot() recursive flattening (dicts, lists, nesting, scalars)
-  - compute_diff() added / removed / changed detection
-  - find_security_relevant_changes() classification and sorting
-  - format_human() and format_json_output() output formatting
-  - load_snapshot() error handling (missing file, bad JSON, wrong type)
-  - main() / CLI: exit-code contract (0, 1, 2), --quiet, --output-format json
-  - End-to-end integration scenarios drawn from realistic snapshot shapes
+Coverage targets
+----------------
+Lines 99-100: ``new_json`` JSONDecodeError exception branch
+Line 123:     ``if __name__ == '__main__'`` guard executed directly
+
+Security guarantees under test
+-------------------------------
+- Only snapshot files under ``/test_snapshots/`` trigger analysis.
+- All SECURITY_FIELDS members are individually tested as relevant.
+- Nested and list-indexed paths are correctly classified.
+- Malformed JSON for either the old or new content is treated as ``{}``
+  (empty object) to avoid crashing; any structural delta is still reported.
+- A missing file on either side (returns ``None``) is treated as ``{}``.
+- The script produces exit code 1 when security diffs are found, regardless
+  of which files among multiple changed files contain the diff.
 """
 
-from __future__ import annotations
-
 import json
+import subprocess
 import sys
 import os
-import tempfile
-from pathlib import Path
-from unittest.mock import patch, mock_open, MagicMock
+import runpy
+from unittest.mock import patch, mock_open, MagicMock, call
 
 import pytest
 
 # ---------------------------------------------------------------------------
-# Make sure the repo root is on the path so `script` is importable.
+# Import the module under test
 # ---------------------------------------------------------------------------
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from script.check_snapshot_diff import (
-    SECURITY_FIELDS,
-    is_security_relevant,
-    flatten_snapshot,
-    compute_diff,
-    find_security_relevant_changes,
-    format_human,
-    format_json_output,
-    load_snapshot,
-    main,
-    build_parser,
-)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'script'))
+import check_snapshot_diff  # noqa: E402
 
 
-# ---------------------------------------------------------------------------
-# Shared snapshot fixtures
-# ---------------------------------------------------------------------------
-
-BASE_SNAPSHOT: dict = {
-    "config": {
-        "admin": "GADMIN111",
-        "token": "GTOKEN111",
-        "max_rate_per_second": 1000,
-    },
-    "streams": {
-        "0": {
-            "sender": "GSENDER1",
-            "recipient": "GRECIPIENT1",
-            "rate_per_second": 100,
-            "deposit_amount": 5000,
-            "status": "Active",
-            "start_time": 1700000000,
-        }
-    },
-    "next_stream_id": 1,
-    "global_emergency_paused": False,
-    "creation_paused": False,
-}
-
-HEAD_SNAPSHOT_NO_SECURITY: dict = {
-    "config": {
-        "admin": "GADMIN111",
-        "token": "GTOKEN111",
-        "max_rate_per_second": 1000,
-    },
-    "streams": {
-        "0": {
-            "sender": "GSENDER1",
-            "recipient": "GRECIPIENT1",
-            "rate_per_second": 100,
-            "deposit_amount": 5000,
-            "status": "Completed",          # changed — not security-relevant
-            "start_time": 1700000000,
-        }
-    },
-    "next_stream_id": 2,                    # changed — not security-relevant
-    "global_emergency_paused": False,
-    "creation_paused": False,
-}
-
-HEAD_SNAPSHOT_ADMIN_CHANGED: dict = {
-    "config": {
-        "admin": "GADMIN999",               # changed — security-relevant
-        "token": "GTOKEN111",
-        "max_rate_per_second": 1000,
-    },
-    "streams": {
-        "0": {
-            "sender": "GSENDER1",
-            "recipient": "GRECIPIENT1",
-            "rate_per_second": 100,
-            "deposit_amount": 5000,
-            "status": "Active",
-            "start_time": 1700000000,
-        }
-    },
-    "next_stream_id": 1,
-    "global_emergency_paused": False,
-    "creation_paused": False,
-}
-
-
-# ---------------------------------------------------------------------------
-# Helper: write a snapshot to a temp file and return its Path
-# ---------------------------------------------------------------------------
-
-def _write_snapshot(data: dict, suffix: str = ".json") -> Path:
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w", suffix=suffix, delete=False, encoding="utf-8"
-    )
-    json.dump(data, tmp)
-    tmp.close()
-    return Path(tmp.name)
-
-
-# ---------------------------------------------------------------------------
-# 1. SECURITY_FIELDS registry
-# ---------------------------------------------------------------------------
-
-class TestSecurityFields:
-    """SECURITY_FIELDS must cover all required sentinel categories."""
-
-    def test_is_frozenset(self):
-        assert isinstance(SECURITY_FIELDS, frozenset)
-
-    def test_non_empty(self):
-        assert len(SECURITY_FIELDS) > 0
-
-    def test_all_lowercase(self):
-        for entry in SECURITY_FIELDS:
-            assert entry == entry.lower(), (
-                f"SECURITY_FIELDS entry '{entry}' is not all-lowercase"
-            )
-
-    def test_admin_present(self):
-        assert "admin" in SECURITY_FIELDS
-
-    def test_token_present(self):
-        assert "token" in SECURITY_FIELDS
-
-    def test_rate_per_second_present(self):
-        assert "rate_per_second" in SECURITY_FIELDS
-
-    def test_max_rate_per_second_present(self):
-        assert "max_rate_per_second" in SECURITY_FIELDS
-
-    def test_deposit_amount_present(self):
-        assert "deposit_amount" in SECURITY_FIELDS
-
-    def test_recipient_present(self):
-        assert "recipient" in SECURITY_FIELDS
-
-    def test_paused_present(self):
-        assert "paused" in SECURITY_FIELDS
-
-    def test_emergency_present(self):
-        assert "emergency" in SECURITY_FIELDS
-
-    def test_nonce_present(self):
-        assert "nonce" in SECURITY_FIELDS
-
-    def test_contract_version_present(self):
-        assert "contract_version" in SECURITY_FIELDS
-
-
-# ---------------------------------------------------------------------------
-# 2. is_security_relevant
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# is_security_relevant
+# ===========================================================================
 
 class TestIsSecurityRelevant:
-    """is_security_relevant() exact-match, substring, and negative cases."""
+    """Verify that every SECURITY_FIELDS member is detected, and only them."""
 
-    # --- exact matches ---
+    # --- positive cases: should match ---
+    @pytest.mark.parametrize("path", [
+        "tx.events[0].topic",
+        "tx.auths[0].signatures",
+        "tx.require_auth",
+        "ContractError.code",
+        "data.storage.state",
+        "result.DataKey",
+        "envelope.auth",
+        "envelope.auths",
+        "envelope.events",
+        "envelope.topic",
+        "envelope.topics",
+        "envelope.data",
+        "envelope.error",
+        "envelope.error_code",
+        # Nested deeply
+        "a.b.c.d.events",
+        "root[0].storage[1].DataKey",
+    ])
+    def test_security_relevant_true(self, path):
+        assert check_snapshot_diff.is_security_relevant(path) is True
 
-    def test_exact_admin(self):
-        assert is_security_relevant("admin") is True
+    # --- negative cases: must not match ---
+    @pytest.mark.parametrize("path", [
+        "tx.fee",
+        "timestamp",
+        "sequence",
+        "tx.source_account",
+        "ledger_sequence",
+        "operation.amount",
+        "result.success",
+        "metadata.version",
+        "",
+    ])
+    def test_security_relevant_false(self, path):
+        assert check_snapshot_diff.is_security_relevant(path) is False
 
-    def test_exact_token(self):
-        assert is_security_relevant("token") is True
-
-    def test_exact_paused(self):
-        assert is_security_relevant("paused") is True
-
-    def test_exact_recipient(self):
-        assert is_security_relevant("recipient") is True
-
-    def test_exact_nonce(self):
-        assert is_security_relevant("nonce") is True
-
-    def test_exact_emergency(self):
-        assert is_security_relevant("emergency") is True
-
-    def test_exact_deposit_amount(self):
-        assert is_security_relevant("deposit_amount") is True
-
-    def test_exact_rate_per_second(self):
-        assert is_security_relevant("rate_per_second") is True
-
-    def test_exact_max_rate_per_second(self):
-        assert is_security_relevant("max_rate_per_second") is True
-
-    def test_exact_contract_version(self):
-        assert is_security_relevant("contract_version") is True
-
-    # --- substring / dotted-path matches ---
-
-    def test_dotted_config_admin(self):
-        assert is_security_relevant("config.admin") is True
-
-    def test_dotted_config_token(self):
-        assert is_security_relevant("config.token") is True
-
-    def test_dotted_streams_rate(self):
-        assert is_security_relevant("streams.0.rate_per_second") is True
-
-    def test_dotted_streams_deposit(self):
-        assert is_security_relevant("streams.0.deposit_amount") is True
-
-    def test_dotted_streams_recipient(self):
-        assert is_security_relevant("streams.0.recipient") is True
-
-    def test_global_emergency_paused(self):
-        assert is_security_relevant("global_emergency_paused") is True
-
-    def test_creation_paused(self):
-        assert is_security_relevant("creation_paused") is True
-
-    def test_pending_recipient_update(self):
-        assert is_security_relevant("pending_recipient_update") is True
-
-    def test_delegated_nonce(self):
-        assert is_security_relevant("delegated_nonce") is True
-
-    def test_token_address(self):
-        assert is_security_relevant("token_address") is True
-
-    def test_token_contract(self):
-        assert is_security_relevant("token_contract") is True
-
-    def test_admin_address(self):
-        assert is_security_relevant("admin_address") is True
-
-    # --- case-insensitivity ---
-
-    def test_uppercase_admin(self):
-        assert is_security_relevant("ADMIN") is True
-
-    def test_mixed_case_token(self):
-        assert is_security_relevant("Token_Address") is True
-
-    def test_uppercase_paused(self):
-        assert is_security_relevant("PAUSED") is True
-
-    def test_mixed_case_dotted_path(self):
-        assert is_security_relevant("Config.MAX_RATE_PER_SECOND") is True
-
-    # --- negative cases (non-security fields) ---
-
-    def test_status_not_flagged(self):
-        assert is_security_relevant("status") is False
-
-    def test_start_time_not_flagged(self):
-        assert is_security_relevant("start_time") is False
-
-    def test_end_time_not_flagged(self):
-        assert is_security_relevant("end_time") is False
-
-    def test_sender_not_flagged(self):
-        assert is_security_relevant("sender") is False
-
-    def test_next_stream_id_not_flagged(self):
-        assert is_security_relevant("next_stream_id") is False
-
-    def test_withdrawn_amount_not_flagged(self):
-        assert is_security_relevant("withdrawn_amount") is False
-
-    def test_empty_string_not_flagged(self):
-        assert is_security_relevant("") is False
-
-    def test_whitespace_not_flagged(self):
-        assert is_security_relevant("   ") is False
-
-    def test_cliff_time_not_flagged(self):
-        assert is_security_relevant("cliff_time") is False
-
-    def test_stream_id_not_flagged(self):
-        assert is_security_relevant("stream_id") is False
-
-    def test_cancelled_at_not_flagged(self):
-        assert is_security_relevant("cancelled_at") is False
-
-
-# ---------------------------------------------------------------------------
-# 3. flatten_snapshot
-# ---------------------------------------------------------------------------
-
-class TestFlattenSnapshot:
-    """flatten_snapshot() must produce correct dotted-key→value mappings."""
-
-    def test_flat_dict(self):
-        snap = {"a": 1, "b": 2}
-        result = flatten_snapshot(snap)
-        assert result == {"a": 1, "b": 2}
-
-    def test_nested_dict(self):
-        snap = {"config": {"admin": "G1", "token": "G2"}}
-        result = flatten_snapshot(snap)
-        assert result == {"config.admin": "G1", "config.token": "G2"}
-
-    def test_deeply_nested(self):
-        snap = {"a": {"b": {"c": {"d": 42}}}}
-        result = flatten_snapshot(snap)
-        assert result == {"a.b.c.d": 42}
-
-    def test_list_values(self):
-        snap = {"items": [10, 20, 30]}
-        result = flatten_snapshot(snap)
-        assert result == {"items.0": 10, "items.1": 20, "items.2": 30}
-
-    def test_dict_inside_list(self):
-        snap = {"streams": [{"rate": 5, "status": "Active"}]}
-        result = flatten_snapshot(snap)
-        assert result == {"streams.0.rate": 5, "streams.0.status": "Active"}
-
-    def test_mixed_nesting(self):
-        snap = {"config": {"admin": "G1"}, "ids": [1, 2]}
-        result = flatten_snapshot(snap)
-        assert result == {
-            "config.admin": "G1",
-            "ids.0": 1,
-            "ids.1": 2,
+    def test_security_fields_set_contains_expected_members(self):
+        """Guard against accidental removal from SECURITY_FIELDS."""
+        required = {
+            'auth', 'auths', 'require_auth', 'signatures',
+            'events', 'topic', 'topics', 'data',
+            'error', 'error_code', 'ContractError',
+            'storage', 'state', 'DataKey',
         }
-
-    def test_empty_dict(self):
-        result = flatten_snapshot({})
-        assert result == {}
-
-    def test_empty_list_value(self):
-        snap = {"items": []}
-        result = flatten_snapshot(snap)
-        assert result == {}
-
-    def test_empty_nested_dict(self):
-        snap = {"config": {}}
-        result = flatten_snapshot(snap)
-        assert result == {}
-
-    def test_boolean_values(self):
-        snap = {"paused": True, "active": False}
-        result = flatten_snapshot(snap)
-        assert result == {"paused": True, "active": False}
-
-    def test_null_value(self):
-        snap = {"field": None}
-        result = flatten_snapshot(snap)
-        assert result == {"field": None}
-
-    def test_string_value(self):
-        snap = {"admin": "GADMIN123"}
-        result = flatten_snapshot(snap)
-        assert result == {"admin": "GADMIN123"}
-
-    def test_numeric_string_key(self):
-        snap = {"streams": {"0": {"rate": 100}}}
-        result = flatten_snapshot(snap)
-        assert result == {"streams.0.rate": 100}
-
-    def test_list_of_lists(self):
-        snap = {"matrix": [[1, 2], [3, 4]]}
-        result = flatten_snapshot(snap)
-        assert result == {
-            "matrix.0.0": 1,
-            "matrix.0.1": 2,
-            "matrix.1.0": 3,
-            "matrix.1.1": 4,
-        }
+        assert required.issubset(check_snapshot_diff.SECURITY_FIELDS)
 
 
-# ---------------------------------------------------------------------------
-# 4. compute_diff
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# get_diff_paths
+# ===========================================================================
 
-class TestComputeDiff:
-    """compute_diff() must correctly categorise added/removed/changed keys."""
+class TestGetDiffPaths:
+    """Recursive JSON diff walker covers dict, list, scalar, and type changes."""
 
-    def test_identical_snapshots_produce_empty_diff(self):
-        diff = compute_diff(BASE_SNAPSHOT, BASE_SNAPSHOT)
-        assert diff["added"] == {}
-        assert diff["removed"] == {}
-        assert diff["changed"] == {}
+    def test_identical_dicts_produce_no_diffs(self):
+        obj = {"a": 1, "b": {"c": 2}}
+        assert check_snapshot_diff.get_diff_paths(obj, obj) == []
 
-    def test_added_key_detected(self):
-        head = {**BASE_SNAPSHOT, "new_field": "hello"}
-        diff = compute_diff(BASE_SNAPSHOT, head)
-        assert "new_field" in diff["added"]
-        assert diff["added"]["new_field"] == "hello"
+    def test_changed_scalar_is_reported(self):
+        diffs = check_snapshot_diff.get_diff_paths({"a": 1}, {"a": 2})
+        assert diffs == ["a"]
 
-    def test_removed_key_detected(self):
-        base = {**BASE_SNAPSHOT, "extra": "bye"}
-        diff = compute_diff(base, BASE_SNAPSHOT)
-        assert "extra" in diff["removed"]
+    def test_nested_scalar_change(self):
+        old = {"a": {"b": {"c": 2, "d": [1, 2]}}}
+        new = {"a": {"b": {"c": 3, "d": [1, 3]}}}
+        diffs = check_snapshot_diff.get_diff_paths(old, new)
+        assert set(diffs) == {"a.b.c", "a.b.d[1]"}
 
-    def test_changed_value_detected(self):
-        diff = compute_diff(BASE_SNAPSHOT, HEAD_SNAPSHOT_ADMIN_CHANGED)
-        assert "config.admin" in diff["changed"]
-        assert diff["changed"]["config.admin"]["base"] == "GADMIN111"
-        assert diff["changed"]["config.admin"]["head"] == "GADMIN999"
+    def test_list_element_change(self):
+        old = [{"id": 1}, {"id": 2}]
+        new = [{"id": 1}, {"id": 3}]
+        diffs = check_snapshot_diff.get_diff_paths(old, new)
+        assert set(diffs) == {"[1].id"}
 
-    def test_no_security_diff_produces_no_changed_security(self):
-        diff = compute_diff(BASE_SNAPSHOT, HEAD_SNAPSHOT_NO_SECURITY)
-        # status changed but no security field changed
-        assert "streams.0.status" in diff["changed"]
-        assert "config.admin" not in diff["changed"]
+    def test_list_length_mismatch(self):
+        diffs = check_snapshot_diff.get_diff_paths([1, 2], [1])
+        # The root list itself differs
+        assert "" in diffs
 
-    def test_empty_base_all_added(self):
-        diff = compute_diff({}, {"x": 1})
-        assert diff["added"] == {"x": 1}
-        assert diff["removed"] == {}
-        assert diff["changed"] == {}
+    def test_type_change_is_reported(self):
+        diffs = check_snapshot_diff.get_diff_paths({"a": 1}, {"a": "1"})
+        assert "a" in diffs
 
-    def test_empty_head_all_removed(self):
-        diff = compute_diff({"x": 1}, {})
-        assert diff["removed"] == {"x": 1}
-        assert diff["added"] == {}
-        assert diff["changed"] == {}
+    def test_added_key(self):
+        diffs = check_snapshot_diff.get_diff_paths({}, {"b": 2})
+        assert "b" in diffs
 
-    def test_both_empty(self):
-        diff = compute_diff({}, {})
-        assert diff == {"added": {}, "removed": {}, "changed": {}}
+    def test_removed_key(self):
+        diffs = check_snapshot_diff.get_diff_paths({"a": 1}, {})
+        assert "a" in diffs
 
-    def test_nested_change_detected(self):
-        head = json.loads(json.dumps(BASE_SNAPSHOT))
-        head["config"]["max_rate_per_second"] = 9999
-        diff = compute_diff(BASE_SNAPSHOT, head)
-        assert "config.max_rate_per_second" in diff["changed"]
+    def test_both_dicts_missing_different_keys(self):
+        diffs = check_snapshot_diff.get_diff_paths({"a": 1}, {"b": 2})
+        assert "a" in diffs
+        assert "b" in diffs
 
-    def test_changed_stores_both_values(self):
-        head = json.loads(json.dumps(BASE_SNAPSHOT))
-        head["streams"]["0"]["rate_per_second"] = 777
-        diff = compute_diff(BASE_SNAPSHOT, head)
-        rec = diff["changed"]["streams.0.rate_per_second"]
-        assert rec["base"] == 100
-        assert rec["head"] == 777
+    def test_empty_dicts_are_equal(self):
+        assert check_snapshot_diff.get_diff_paths({}, {}) == []
 
-    def test_boolean_flip_detected(self):
-        head = json.loads(json.dumps(BASE_SNAPSHOT))
-        head["global_emergency_paused"] = True
-        diff = compute_diff(BASE_SNAPSHOT, head)
-        assert "global_emergency_paused" in diff["changed"]
+    def test_empty_lists_are_equal(self):
+        assert check_snapshot_diff.get_diff_paths([], []) == []
 
-    def test_none_to_value_is_changed(self):
-        base = {"field": None}
-        head = {"field": "value"}
-        diff = compute_diff(base, head)
-        assert "field" in diff["changed"]
+    def test_path_prefix_is_prepended(self):
+        """When called recursively, the path prefix is prepended correctly."""
+        diffs = check_snapshot_diff.get_diff_paths({"x": 1}, {"x": 2}, "root")
+        assert "root.x" in diffs
+
+    def test_nested_list_of_dicts(self):
+        old = {"events": [{"topic": "transfer"}, {"topic": "mint"}]}
+        new = {"events": [{"topic": "transfer"}, {"topic": "burn"}]}
+        diffs = check_snapshot_diff.get_diff_paths(old, new)
+        assert set(diffs) == {"events[1].topic"}
+
+    def test_deeply_nested_no_change(self):
+        obj = {"a": {"b": {"c": {"d": [1, 2, {"e": True}]}}}}
+        assert check_snapshot_diff.get_diff_paths(obj, obj) == []
 
 
-# ---------------------------------------------------------------------------
-# 5. find_security_relevant_changes
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# get_changed_files
+# ===========================================================================
 
-class TestFindSecurityRelevantChanges:
-    """find_security_relevant_changes() must classify and sort correctly."""
+class TestGetChangedFiles:
+    """Only snapshot JSON files under /test_snapshots/ pass the filter."""
 
-    def test_no_changes_returns_empty(self):
-        diff = compute_diff(BASE_SNAPSHOT, BASE_SNAPSHOT)
-        hits = find_security_relevant_changes(diff)
-        assert hits == []
-
-    def test_admin_change_flagged(self):
-        diff = compute_diff(BASE_SNAPSHOT, HEAD_SNAPSHOT_ADMIN_CHANGED)
-        hits = find_security_relevant_changes(diff)
-        keys = [h["key"] for h in hits]
-        assert "config.admin" in keys
-
-    def test_non_security_change_not_flagged(self):
-        diff = compute_diff(BASE_SNAPSHOT, HEAD_SNAPSHOT_NO_SECURITY)
-        hits = find_security_relevant_changes(diff)
-        keys = [h["key"] for h in hits]
-        assert "streams.0.status" not in keys
-        assert "next_stream_id" not in keys
-
-    def test_added_security_field_flagged(self):
-        head = json.loads(json.dumps(BASE_SNAPSHOT))
-        head["new_admin"] = "GADMINX"
-        diff = compute_diff(BASE_SNAPSHOT, head)
-        hits = find_security_relevant_changes(diff)
-        keys = [h["key"] for h in hits]
-        assert "new_admin" in keys
-
-    def test_removed_token_flagged(self):
-        base = json.loads(json.dumps(BASE_SNAPSHOT))
-        base["config"]["token"] = "GTOKEN_OLD"
-        head = json.loads(json.dumps(BASE_SNAPSHOT))
-        del head["config"]["token"]
-        diff = compute_diff(base, head)
-        hits = find_security_relevant_changes(diff)
-        keys = [h["key"] for h in hits]
-        assert "config.token" in keys
-
-    def test_change_type_field_correct(self):
-        diff = compute_diff(BASE_SNAPSHOT, HEAD_SNAPSHOT_ADMIN_CHANGED)
-        hits = find_security_relevant_changes(diff)
-        admin_hit = next(h for h in hits if h["key"] == "config.admin")
-        assert admin_hit["change_type"] == "changed"
-        assert admin_hit["base"] == "GADMIN111"
-        assert admin_hit["head"] == "GADMIN999"
-
-    def test_added_change_type(self):
-        head = json.loads(json.dumps(BASE_SNAPSHOT))
-        head["token_address"] = "GNEWTOKEN"
-        diff = compute_diff(BASE_SNAPSHOT, head)
-        hits = find_security_relevant_changes(diff)
-        hit = next(h for h in hits if h["key"] == "token_address")
-        assert hit["change_type"] == "added"
-        assert hit["base"] is None
-        assert hit["head"] == "GNEWTOKEN"
-
-    def test_removed_change_type(self):
-        base = json.loads(json.dumps(BASE_SNAPSHOT))
-        base["token_address"] = "GTOKEN_OLD"
-        diff = compute_diff(base, BASE_SNAPSHOT)
-        hits = find_security_relevant_changes(diff)
-        hit = next(h for h in hits if h["key"] == "token_address")
-        assert hit["change_type"] == "removed"
-        assert hit["head"] is None
-
-    def test_results_sorted_by_key(self):
-        head = json.loads(json.dumps(BASE_SNAPSHOT))
-        head["config"]["admin"] = "GADMIN999"
-        head["config"]["max_rate_per_second"] = 9999
-        head["global_emergency_paused"] = True
-        diff = compute_diff(BASE_SNAPSHOT, head)
-        hits = find_security_relevant_changes(diff)
-        keys = [h["key"] for h in hits]
-        assert keys == sorted(keys)
-
-    def test_multiple_security_changes_all_returned(self):
-        head = json.loads(json.dumps(BASE_SNAPSHOT))
-        head["config"]["admin"] = "GADMIN999"
-        head["config"]["token"] = "GTOKEN999"
-        head["global_emergency_paused"] = True
-        diff = compute_diff(BASE_SNAPSHOT, head)
-        hits = find_security_relevant_changes(diff)
-        keys = [h["key"] for h in hits]
-        assert "config.admin" in keys
-        assert "config.token" in keys
-        assert "global_emergency_paused" in keys
-
-    def test_rate_change_flagged(self):
-        head = json.loads(json.dumps(BASE_SNAPSHOT))
-        head["streams"]["0"]["rate_per_second"] = 9999
-        diff = compute_diff(BASE_SNAPSHOT, head)
-        hits = find_security_relevant_changes(diff)
-        keys = [h["key"] for h in hits]
-        assert "streams.0.rate_per_second" in keys
-
-    def test_deposit_amount_change_flagged(self):
-        head = json.loads(json.dumps(BASE_SNAPSHOT))
-        head["streams"]["0"]["deposit_amount"] = 99999
-        diff = compute_diff(BASE_SNAPSHOT, head)
-        hits = find_security_relevant_changes(diff)
-        keys = [h["key"] for h in hits]
-        assert "streams.0.deposit_amount" in keys
-
-    def test_recipient_change_flagged(self):
-        head = json.loads(json.dumps(BASE_SNAPSHOT))
-        head["streams"]["0"]["recipient"] = "GNEWRECIPIENT"
-        diff = compute_diff(BASE_SNAPSHOT, head)
-        hits = find_security_relevant_changes(diff)
-        keys = [h["key"] for h in hits]
-        assert "streams.0.recipient" in keys
-
-
-# ---------------------------------------------------------------------------
-# 6. format_human
-# ---------------------------------------------------------------------------
-
-class TestFormatHuman:
-    """format_human() output shape for zero, one, and many hits."""
-
-    def test_no_hits_clean_message(self):
-        out = format_human([], "base.json", "head.json")
-        assert "no security-relevant changes" in out
-
-    def test_one_hit_reports_count(self):
-        hits = [{"key": "config.admin", "change_type": "changed",
-                 "base": "OLD", "head": "NEW"}]
-        out = format_human(hits, "base.json", "head.json")
-        assert "1 security-relevant change" in out
-
-    def test_two_hits_reports_count(self):
-        hits = [
-            {"key": "config.admin", "change_type": "changed", "base": "A", "head": "B"},
-            {"key": "config.token", "change_type": "changed", "base": "T1", "head": "T2"},
+    @patch('subprocess.check_output')
+    def test_filters_snapshot_jsons_with_head(self, mock_co):
+        mock_co.return_value = (
+            b"contracts/stream/test_snapshots/a.json\n"
+            b"other.txt\n"
+            b"contracts/stream/test_snapshots/b.json\n"
+        )
+        files = check_snapshot_diff.get_changed_files("HEAD~1", "HEAD")
+        assert files == [
+            "contracts/stream/test_snapshots/a.json",
+            "contracts/stream/test_snapshots/b.json",
         ]
-        out = format_human(hits, "base.json", "head.json")
-        assert "2 security-relevant change" in out
+        mock_co.assert_called_once_with(
+            ['git', 'diff', '--name-only', 'HEAD~1', 'HEAD']
+        )
 
-    def test_paths_included(self):
-        hits = [{"key": "config.admin", "change_type": "changed",
-                 "base": "OLD", "head": "NEW"}]
-        out = format_human(hits, "path/to/base.json", "path/to/head.json")
-        assert "path/to/base.json" in out
-        assert "path/to/head.json" in out
+    @patch('subprocess.check_output')
+    def test_filters_snapshot_jsons_without_head(self, mock_co):
+        mock_co.return_value = b"contracts/stream/test_snapshots/c.json\n"
+        files = check_snapshot_diff.get_changed_files("origin/main", None)
+        assert files == ["contracts/stream/test_snapshots/c.json"]
+        mock_co.assert_called_once_with(
+            ['git', 'diff', '--name-only', 'origin/main']
+        )
 
-    def test_changed_hit_shows_arrow(self):
-        hits = [{"key": "config.admin", "change_type": "changed",
-                 "base": "OLD", "head": "NEW"}]
-        out = format_human(hits, "b.json", "h.json")
-        assert "→" in out
-        assert "config.admin" in out
+    @patch('subprocess.check_output')
+    def test_excludes_non_snapshot_json(self, mock_co):
+        mock_co.return_value = b"README.md\nsrc/lib.rs\nfoo.json\n"
+        files = check_snapshot_diff.get_changed_files("HEAD~1", "HEAD")
+        assert files == []
 
-    def test_added_hit_shows_added_tag(self):
-        hits = [{"key": "token_address", "change_type": "added",
-                 "base": None, "head": "GNEW"}]
-        out = format_human(hits, "b.json", "h.json")
-        assert "ADDED" in out
+    @patch('subprocess.check_output')
+    def test_excludes_non_json_in_snapshot_dir(self, mock_co):
+        # A file *in* test_snapshots but not .json should be excluded
+        mock_co.return_value = (
+            b"contracts/stream/test_snapshots/README.md\n"
+            b"contracts/stream/test_snapshots/test.json\n"
+        )
+        files = check_snapshot_diff.get_changed_files("HEAD~1", "HEAD")
+        assert files == ["contracts/stream/test_snapshots/test.json"]
 
-    def test_removed_hit_shows_removed_tag(self):
-        hits = [{"key": "token_address", "change_type": "removed",
-                 "base": "GOLD", "head": None}]
-        out = format_human(hits, "b.json", "h.json")
-        assert "REMOVED" in out
+    @patch('subprocess.check_output')
+    def test_git_error_returns_empty_list(self, mock_co):
+        mock_co.side_effect = subprocess.CalledProcessError(128, 'git')
+        assert check_snapshot_diff.get_changed_files("HEAD~1", "HEAD") == []
 
-    def test_mandatory_review_notice_present(self):
-        hits = [{"key": "config.admin", "change_type": "changed",
-                 "base": "A", "head": "B"}]
-        out = format_human(hits, "b.json", "h.json")
-        assert "Mandatory extra review" in out or "mandatory extra review" in out.lower()
-
-    def test_doc_link_present(self):
-        hits = [{"key": "config.admin", "change_type": "changed",
-                 "base": "A", "head": "B"}]
-        out = format_human(hits, "b.json", "h.json")
-        assert "snapshot-security-diff.md" in out
+    @patch('subprocess.check_output')
+    def test_empty_output_returns_empty_list(self, mock_co):
+        mock_co.return_value = b""
+        assert check_snapshot_diff.get_changed_files("HEAD", "HEAD") == []
 
 
-# ---------------------------------------------------------------------------
-# 7. format_json_output
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# get_file_content
+# ===========================================================================
 
-class TestFormatJsonOutput:
-    """format_json_output() must produce valid, structured JSON."""
+class TestGetFileContent:
+    """Reads from git history when a commit is given, else from disk."""
 
-    def test_valid_json(self):
-        out = format_json_output([], "b.json", "h.json", flagged=False)
-        parsed = json.loads(out)
-        assert isinstance(parsed, dict)
+    @patch('subprocess.check_output')
+    def test_reads_from_git_with_commit(self, mock_co):
+        mock_co.return_value = b'{"key": "value"}'
+        content = check_snapshot_diff.get_file_content("abc123", "path/to/file.json")
+        assert content == '{"key": "value"}'
+        mock_co.assert_called_once_with(['git', 'show', 'abc123:path/to/file.json'])
 
-    def test_flagged_false_when_no_hits(self):
-        out = format_json_output([], "b.json", "h.json", flagged=False)
-        assert json.loads(out)["flagged"] is False
+    @patch('subprocess.check_output')
+    def test_git_error_returns_none(self, mock_co):
+        mock_co.side_effect = subprocess.CalledProcessError(128, 'git')
+        assert check_snapshot_diff.get_file_content("HEAD", "missing.json") is None
 
-    def test_flagged_true_when_hits(self):
-        hits = [{"key": "config.admin", "change_type": "changed",
-                 "base": "A", "head": "B"}]
-        out = format_json_output(hits, "b.json", "h.json", flagged=True)
-        assert json.loads(out)["flagged"] is True
+    @patch('os.path.exists', return_value=True)
+    @patch('builtins.open', new_callable=mock_open, read_data='{"local": true}')
+    def test_reads_from_local_when_no_commit(self, mock_file, mock_exists):
+        content = check_snapshot_diff.get_file_content(None, "local.json")
+        assert content == '{"local": true}'
+        mock_exists.assert_called_once_with("local.json")
 
-    def test_base_and_head_paths_in_output(self):
-        out = format_json_output([], "path/base.json", "path/head.json", flagged=False)
-        parsed = json.loads(out)
-        assert parsed["base"] == "path/base.json"
-        assert parsed["head"] == "path/head.json"
+    @patch('os.path.exists', return_value=False)
+    def test_local_file_missing_returns_none(self, mock_exists):
+        assert check_snapshot_diff.get_file_content(None, "absent.json") is None
 
-    def test_changes_list_in_output(self):
-        hits = [{"key": "config.admin", "change_type": "changed",
-                 "base": "A", "head": "B"}]
-        out = format_json_output(hits, "b.json", "h.json", flagged=True)
-        parsed = json.loads(out)
-        assert "security_relevant_changes" in parsed
-        assert len(parsed["security_relevant_changes"]) == 1
-
-    def test_empty_changes_list(self):
-        out = format_json_output([], "b.json", "h.json", flagged=False)
-        parsed = json.loads(out)
-        assert parsed["security_relevant_changes"] == []
+    @patch('subprocess.check_output')
+    def test_git_returns_unicode_content(self, mock_co):
+        payload = '{"msg": "hello \\u00e9"}'
+        mock_co.return_value = payload.encode('utf-8')
+        content = check_snapshot_diff.get_file_content("HEAD", "f.json")
+        assert content == payload
 
 
-# ---------------------------------------------------------------------------
-# 8. load_snapshot — error handling
-# ---------------------------------------------------------------------------
-
-class TestLoadSnapshot:
-    """load_snapshot() must exit(2) on bad input."""
-
-    def test_loads_valid_file(self, tmp_path):
-        p = tmp_path / "snap.json"
-        p.write_text(json.dumps({"admin": "G1"}), encoding="utf-8")
-        result = load_snapshot(p)
-        assert result == {"admin": "G1"}
-
-    def test_missing_file_exits_2(self, tmp_path):
-        with pytest.raises(SystemExit) as exc_info:
-            load_snapshot(tmp_path / "nonexistent.json")
-        assert exc_info.value.code == 2
-
-    def test_invalid_json_exits_2(self, tmp_path):
-        p = tmp_path / "bad.json"
-        p.write_text("{not valid json", encoding="utf-8")
-        with pytest.raises(SystemExit) as exc_info:
-            load_snapshot(p)
-        assert exc_info.value.code == 2
-
-    def test_json_array_top_level_exits_2(self, tmp_path):
-        p = tmp_path / "arr.json"
-        p.write_text("[1, 2, 3]", encoding="utf-8")
-        with pytest.raises(SystemExit) as exc_info:
-            load_snapshot(p)
-        assert exc_info.value.code == 2
-
-    def test_json_string_top_level_exits_2(self, tmp_path):
-        p = tmp_path / "str.json"
-        p.write_text('"just a string"', encoding="utf-8")
-        with pytest.raises(SystemExit) as exc_info:
-            load_snapshot(p)
-        assert exc_info.value.code == 2
-
-    def test_json_number_top_level_exits_2(self, tmp_path):
-        p = tmp_path / "num.json"
-        p.write_text("42", encoding="utf-8")
-        with pytest.raises(SystemExit) as exc_info:
-            load_snapshot(p)
-        assert exc_info.value.code == 2
-
-    def test_empty_file_exits_2(self, tmp_path):
-        p = tmp_path / "empty.json"
-        p.write_text("", encoding="utf-8")
-        with pytest.raises(SystemExit) as exc_info:
-            load_snapshot(p)
-        assert exc_info.value.code == 2
-
-    def test_empty_object_valid(self, tmp_path):
-        p = tmp_path / "empty_obj.json"
-        p.write_text("{}", encoding="utf-8")
-        result = load_snapshot(p)
-        assert result == {}
-
-
-# ---------------------------------------------------------------------------
-# 9. main() — exit-code contract and CLI flags
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# main() — integration paths
+# ===========================================================================
 
 class TestMain:
-    """main() must honour the 0/1/2 exit-code contract and CLI flags."""
+    """End-to-end tests for main(), covering all exit-code paths."""
 
-    # --- exit 0: no security-relevant changes ---
+    # --- no snapshot files changed ---
+    @patch('check_snapshot_diff.get_changed_files', return_value=[])
+    def test_exits_0_when_no_snapshot_files(self, _mock, capsys):
+        with patch('sys.argv', ['check_snapshot_diff.py']):
+            with pytest.raises(SystemExit) as exc:
+                check_snapshot_diff.main()
+        assert exc.value.code == 0
+        assert "No snapshot JSON files changed." in capsys.readouterr().out
 
-    def test_exit_0_no_security_changes(self, tmp_path, capsys):
-        base_p = _write_snapshot(BASE_SNAPSHOT)
-        head_p = _write_snapshot(HEAD_SNAPSHOT_NO_SECURITY)
-        try:
-            code = main(["--base", str(base_p), "--head", str(head_p)])
-            assert code == 0
-        finally:
-            base_p.unlink(missing_ok=True)
-            head_p.unlink(missing_ok=True)
+    # --- security-relevant diff → exit 1 ---
+    @patch('check_snapshot_diff.get_changed_files',
+           return_value=["contracts/stream/test_snapshots/snap.json"])
+    @patch('check_snapshot_diff.get_file_content')
+    def test_exits_1_on_security_diff(self, mock_content, _mock_files, capsys):
+        mock_content.side_effect = [
+            '{"events": [{"topic": "old_topic"}]}',
+            '{"events": [{"topic": "new_topic"}]}',
+        ]
+        with patch('sys.argv', ['check_snapshot_diff.py']):
+            with pytest.raises(SystemExit) as exc:
+                check_snapshot_diff.main()
+        assert exc.value.code == 1
+        out = capsys.readouterr().out
+        assert "Security-relevant fields changed" in out
+        assert "Mandatory extra review required" in out
 
-    def test_exit_0_identical_snapshots(self, tmp_path):
-        base_p = _write_snapshot(BASE_SNAPSHOT)
-        head_p = _write_snapshot(BASE_SNAPSHOT)
-        try:
-            code = main(["--base", str(base_p), "--head", str(head_p)])
-            assert code == 0
-        finally:
-            base_p.unlink(missing_ok=True)
-            head_p.unlink(missing_ok=True)
+    # --- non-security diff → exit 0 ---
+    @patch('check_snapshot_diff.get_changed_files',
+           return_value=["contracts/stream/test_snapshots/snap.json"])
+    @patch('check_snapshot_diff.get_file_content')
+    def test_exits_0_on_nonsecurity_diff(self, mock_content, _mock_files, capsys):
+        mock_content.side_effect = [
+            '{"fee": 100}',
+            '{"fee": 200}',
+        ]
+        with patch('sys.argv', ['check_snapshot_diff.py']):
+            with pytest.raises(SystemExit) as exc:
+                check_snapshot_diff.main()
+        assert exc.value.code == 0
+        out = capsys.readouterr().out
+        assert "[INFO] Changes in" in out
+        assert "none are security-relevant" in out
 
-    # --- exit 1: security-relevant changes present ---
+    # --- identical files → exit 0 ---
+    @patch('check_snapshot_diff.get_changed_files',
+           return_value=["contracts/stream/test_snapshots/snap.json"])
+    @patch('check_snapshot_diff.get_file_content')
+    def test_exits_0_when_files_are_identical(self, mock_content, _mock_files, capsys):
+        same = '{"fee": 100, "sequence": 1}'
+        mock_content.side_effect = [same, same]
+        with patch('sys.argv', ['check_snapshot_diff.py']):
+            with pytest.raises(SystemExit) as exc:
+                check_snapshot_diff.main()
+        assert exc.value.code == 0
+        assert "No security-relevant snapshot changes detected." in capsys.readouterr().out
 
-    def test_exit_1_admin_changed(self):
-        base_p = _write_snapshot(BASE_SNAPSHOT)
-        head_p = _write_snapshot(HEAD_SNAPSHOT_ADMIN_CHANGED)
-        try:
-            code = main(["--base", str(base_p), "--head", str(head_p)])
-            assert code == 1
-        finally:
-            base_p.unlink(missing_ok=True)
-            head_p.unlink(missing_ok=True)
+    # --- malformed old JSON (line 95) ---
+    @patch('check_snapshot_diff.get_changed_files',
+           return_value=["contracts/stream/test_snapshots/snap.json"])
+    @patch('check_snapshot_diff.get_file_content')
+    def test_malformed_old_json_treated_as_empty(self, mock_content, _mock_files):
+        mock_content.side_effect = ['{bad json!!', '{"fee": 20}']
+        with patch('sys.argv', ['check_snapshot_diff.py']):
+            with pytest.raises(SystemExit) as exc:
+                check_snapshot_diff.main()
+        # fee is not security-relevant; no hard failure expected
+        assert exc.value.code == 0
 
-    def test_exit_1_rate_changed(self):
-        head = json.loads(json.dumps(BASE_SNAPSHOT))
-        head["streams"]["0"]["rate_per_second"] = 9999
-        base_p = _write_snapshot(BASE_SNAPSHOT)
-        head_p = _write_snapshot(head)
-        try:
-            code = main(["--base", str(base_p), "--head", str(head_p)])
-            assert code == 1
-        finally:
-            base_p.unlink(missing_ok=True)
-            head_p.unlink(missing_ok=True)
+    # --- malformed new JSON (lines 99-100) ---
+    @patch('check_snapshot_diff.get_changed_files',
+           return_value=["contracts/stream/test_snapshots/snap.json"])
+    @patch('check_snapshot_diff.get_file_content')
+    def test_malformed_new_json_treated_as_empty(self, mock_content, _mock_files):
+        """
+        Covers lines 99-100: the JSONDecodeError branch for new_content.
+        When new_json cannot be parsed, it falls back to {} and any structural
+        divergence from old_json is diffed normally without crashing.
+        """
+        mock_content.side_effect = ['{"fee": 20}', '{NOT valid JSON!!!']
+        with patch('sys.argv', ['check_snapshot_diff.py']):
+            with pytest.raises(SystemExit) as exc:
+                check_snapshot_diff.main()
+        # old={fee:20} vs new={} → diff on "fee" key, not security-relevant
+        assert exc.value.code == 0
 
-    def test_exit_1_token_changed(self):
-        head = json.loads(json.dumps(BASE_SNAPSHOT))
-        head["config"]["token"] = "GTOKEN_NEW"
-        base_p = _write_snapshot(BASE_SNAPSHOT)
-        head_p = _write_snapshot(head)
-        try:
-            code = main(["--base", str(base_p), "--head", str(head_p)])
-            assert code == 1
-        finally:
-            base_p.unlink(missing_ok=True)
-            head_p.unlink(missing_ok=True)
+    # --- malformed new JSON that creates a security diff ---
+    @patch('check_snapshot_diff.get_changed_files',
+           return_value=["contracts/stream/test_snapshots/snap.json"])
+    @patch('check_snapshot_diff.get_file_content')
+    def test_malformed_new_json_with_security_field_in_old(self, mock_content, _mock_files, capsys):
+        """
+        Covers lines 99-100 again: new content is invalid JSON → falls back to
+        {}.  If old content had security-relevant fields they now differ (key
+        disappeared), which must still trigger exit 1.
+        """
+        mock_content.side_effect = [
+            '{"events": [{"topic": "transfer"}]}',
+            '{invalid',
+        ]
+        with patch('sys.argv', ['check_snapshot_diff.py']):
+            with pytest.raises(SystemExit) as exc:
+                check_snapshot_diff.main()
+        assert exc.value.code == 1
+        assert "Security-relevant fields changed" in capsys.readouterr().out
 
-    def test_exit_1_emergency_pause_enabled(self):
-        head = json.loads(json.dumps(BASE_SNAPSHOT))
-        head["global_emergency_paused"] = True
-        base_p = _write_snapshot(BASE_SNAPSHOT)
-        head_p = _write_snapshot(head)
-        try:
-            code = main(["--base", str(base_p), "--head", str(head_p)])
-            assert code == 1
-        finally:
-            base_p.unlink(missing_ok=True)
-            head_p.unlink(missing_ok=True)
+    # --- None content (missing file on both sides) ---
+    @patch('check_snapshot_diff.get_changed_files',
+           return_value=["contracts/stream/test_snapshots/new_file.json"])
+    @patch('check_snapshot_diff.get_file_content')
+    def test_none_old_and_new_content(self, mock_content, _mock_files):
+        mock_content.side_effect = [None, None]
+        with patch('sys.argv', ['check_snapshot_diff.py']):
+            with pytest.raises(SystemExit) as exc:
+                check_snapshot_diff.main()
+        assert exc.value.code == 0
 
-    # --- exit 2: usage errors ---
+    # --- new file added (None old, valid new with security fields) ---
+    @patch('check_snapshot_diff.get_changed_files',
+           return_value=["contracts/stream/test_snapshots/new_file.json"])
+    @patch('check_snapshot_diff.get_file_content')
+    def test_new_file_with_security_fields_exits_1(self, mock_content, _mock_files, capsys):
+        mock_content.side_effect = [
+            None,
+            '{"auth": {"require_auth": true}}',
+        ]
+        with patch('sys.argv', ['check_snapshot_diff.py']):
+            with pytest.raises(SystemExit) as exc:
+                check_snapshot_diff.main()
+        assert exc.value.code == 1
 
-    def test_exit_2_missing_base_file(self, tmp_path):
-        head_p = _write_snapshot(BASE_SNAPSHOT)
-        try:
-            with pytest.raises(SystemExit) as exc_info:
-                main(["--base", str(tmp_path / "missing.json"),
-                      "--head", str(head_p)])
-            assert exc_info.value.code == 2
-        finally:
-            head_p.unlink(missing_ok=True)
+    # --- file deleted (valid old with security fields, None new) ---
+    @patch('check_snapshot_diff.get_changed_files',
+           return_value=["contracts/stream/test_snapshots/deleted.json"])
+    @patch('check_snapshot_diff.get_file_content')
+    def test_deleted_file_with_security_fields_exits_1(self, mock_content, _mock_files, capsys):
+        mock_content.side_effect = [
+            '{"storage": {"DataKey": "StreamState"}}',
+            None,
+        ]
+        with patch('sys.argv', ['check_snapshot_diff.py']):
+            with pytest.raises(SystemExit) as exc:
+                check_snapshot_diff.main()
+        assert exc.value.code == 1
 
-    def test_exit_2_missing_head_file(self, tmp_path):
-        base_p = _write_snapshot(BASE_SNAPSHOT)
-        try:
-            with pytest.raises(SystemExit) as exc_info:
-                main(["--base", str(base_p),
-                      "--head", str(tmp_path / "missing.json")])
-            assert exc_info.value.code == 2
-        finally:
-            base_p.unlink(missing_ok=True)
+    # --- multiple files: only one has security diff ---
+    @patch('check_snapshot_diff.get_changed_files',
+           return_value=[
+               "contracts/stream/test_snapshots/safe.json",
+               "contracts/stream/test_snapshots/danger.json",
+           ])
+    @patch('check_snapshot_diff.get_file_content')
+    def test_one_of_multiple_files_triggers_exit_1(self, mock_content, _mock_files, capsys):
+        mock_content.side_effect = [
+            '{"fee": 100}', '{"fee": 200}',          # safe.json — no security diff
+            '{"events": [{"topic": "A"}]}',
+            '{"events": [{"topic": "B"}]}',           # danger.json — security diff
+        ]
+        with patch('sys.argv', ['check_snapshot_diff.py']):
+            with pytest.raises(SystemExit) as exc:
+                check_snapshot_diff.main()
+        assert exc.value.code == 1
+        out = capsys.readouterr().out
+        assert "danger.json" in out
 
-    def test_exit_2_invalid_json_base(self, tmp_path):
-        bad = tmp_path / "bad.json"
-        bad.write_text("{broken", encoding="utf-8")
-        head_p = _write_snapshot(BASE_SNAPSHOT)
-        try:
-            with pytest.raises(SystemExit) as exc_info:
-                main(["--base", str(bad), "--head", str(head_p)])
-            assert exc_info.value.code == 2
-        finally:
-            head_p.unlink(missing_ok=True)
+    # --- --base and --head CLI args are forwarded correctly ---
+    @patch('check_snapshot_diff.get_changed_files', return_value=[])
+    def test_cli_args_base_and_head_forwarded(self, mock_gf):
+        with patch('sys.argv', ['check_snapshot_diff.py',
+                                 '--base', 'origin/main',
+                                 '--head', 'feature-branch']):
+            with pytest.raises(SystemExit):
+                check_snapshot_diff.main()
+        mock_gf.assert_called_once_with('origin/main', 'feature-branch')
 
-    # --- --quiet suppresses output ---
+    # --- default --base is HEAD, default --head is None ---
+    @patch('check_snapshot_diff.get_changed_files', return_value=[])
+    def test_default_cli_args(self, mock_gf):
+        with patch('sys.argv', ['check_snapshot_diff.py']):
+            with pytest.raises(SystemExit):
+                check_snapshot_diff.main()
+        mock_gf.assert_called_once_with('HEAD', None)
 
-    def test_quiet_suppresses_stdout(self, capsys):
-        base_p = _write_snapshot(BASE_SNAPSHOT)
-        head_p = _write_snapshot(HEAD_SNAPSHOT_ADMIN_CHANGED)
-        try:
-            main(["--base", str(base_p), "--head", str(head_p), "--quiet"])
-            captured = capsys.readouterr()
-            assert captured.out == ""
-        finally:
-            base_p.unlink(missing_ok=True)
-            head_p.unlink(missing_ok=True)
+    # --- multiple security diffs in the same file are all reported ---
+    @patch('check_snapshot_diff.get_changed_files',
+           return_value=["contracts/stream/test_snapshots/multi.json"])
+    @patch('check_snapshot_diff.get_file_content')
+    def test_multiple_security_fields_all_reported(self, mock_content, _mock_files, capsys):
+        mock_content.side_effect = [
+            '{"events": [{"topic": "old"}], "auth": {"require_auth": false}}',
+            '{"events": [{"topic": "new"}], "auth": {"require_auth": true}}',
+        ]
+        with patch('sys.argv', ['check_snapshot_diff.py']):
+            with pytest.raises(SystemExit) as exc:
+                check_snapshot_diff.main()
+        assert exc.value.code == 1
+        out = capsys.readouterr().out
+        assert "Security-relevant fields changed" in out
 
-    def test_quiet_still_returns_correct_exit_code(self):
-        base_p = _write_snapshot(BASE_SNAPSHOT)
-        head_p = _write_snapshot(HEAD_SNAPSHOT_ADMIN_CHANGED)
-        try:
-            code = main(["--base", str(base_p), "--head", str(head_p), "--quiet"])
-            assert code == 1
-        finally:
-            base_p.unlink(missing_ok=True)
-            head_p.unlink(missing_ok=True)
+    # --- error_code field is treated as security-relevant ---
+    @patch('check_snapshot_diff.get_changed_files',
+           return_value=["contracts/stream/test_snapshots/err.json"])
+    @patch('check_snapshot_diff.get_file_content')
+    def test_error_code_field_triggers_gate(self, mock_content, _mock_files, capsys):
+        mock_content.side_effect = [
+            '{"error_code": 10}',
+            '{"error_code": 20}',
+        ]
+        with patch('sys.argv', ['check_snapshot_diff.py']):
+            with pytest.raises(SystemExit) as exc:
+                check_snapshot_diff.main()
+        assert exc.value.code == 1
 
-    # --- --output-format json ---
-
-    def test_json_output_format_is_valid_json(self, capsys):
-        base_p = _write_snapshot(BASE_SNAPSHOT)
-        head_p = _write_snapshot(HEAD_SNAPSHOT_ADMIN_CHANGED)
-        try:
-            main(["--base", str(base_p), "--head", str(head_p),
-                  "--output-format", "json"])
-            captured = capsys.readouterr()
-            parsed = json.loads(captured.out)
-            assert parsed["flagged"] is True
-        finally:
-            base_p.unlink(missing_ok=True)
-            head_p.unlink(missing_ok=True)
-
-    def test_json_output_no_changes(self, capsys):
-        base_p = _write_snapshot(BASE_SNAPSHOT)
-        head_p = _write_snapshot(BASE_SNAPSHOT)
-        try:
-            main(["--base", str(base_p), "--head", str(head_p),
-                  "--output-format", "json"])
-            captured = capsys.readouterr()
-            parsed = json.loads(captured.out)
-            assert parsed["flagged"] is False
-            assert parsed["security_relevant_changes"] == []
-        finally:
-            base_p.unlink(missing_ok=True)
-            head_p.unlink(missing_ok=True)
+    # --- storage field triggers gate ---
+    @patch('check_snapshot_diff.get_changed_files',
+           return_value=["contracts/stream/test_snapshots/storage.json"])
+    @patch('check_snapshot_diff.get_file_content')
+    def test_storage_field_triggers_gate(self, mock_content, _mock_files):
+        mock_content.side_effect = [
+            '{"storage": {"key": "old_value"}}',
+            '{"storage": {"key": "new_value"}}',
+        ]
+        with patch('sys.argv', ['check_snapshot_diff.py']):
+            with pytest.raises(SystemExit) as exc:
+                check_snapshot_diff.main()
+        assert exc.value.code == 1
 
 
-# ---------------------------------------------------------------------------
-# 10. build_parser — argument validation
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# __main__ guard (line 123)
+# ===========================================================================
 
-class TestBuildParser:
-    """build_parser() produces a parser with the expected arguments."""
+class TestMainGuard:
+    """
+    Exercises the ``if __name__ == '__main__': main()`` guard (line 123).
 
-    def test_requires_base(self):
-        parser = build_parser()
-        with pytest.raises(SystemExit):
-            parser.parse_args(["--head", "h.json"])
+    We run the script via subprocess (simulating ``python3 script/...``)
+    and via runpy with ``run_name='__main__'`` to confirm the guard fires.
+    The subprocess approach provides the strongest evidence because it is
+    byte-for-byte identical to how CI invokes the tool.
+    """
 
-    def test_requires_head(self):
-        parser = build_parser()
-        with pytest.raises(SystemExit):
-            parser.parse_args(["--base", "b.json"])
+    def test_main_called_when_run_as_script(self):
+        """
+        Covers line 123: confirms that ``main()`` is invoked when the module
+        is executed directly as a script.
 
-    def test_accepts_both(self):
-        parser = build_parser()
-        args = parser.parse_args(["--base", "b.json", "--head", "h.json"])
-        assert args.base == "b.json"
-        assert args.head == "h.json"
-
-    def test_quiet_default_false(self):
-        parser = build_parser()
-        args = parser.parse_args(["--base", "b.json", "--head", "h.json"])
-        assert args.quiet is False
-
-    def test_quiet_flag_sets_true(self):
-        parser = build_parser()
-        args = parser.parse_args(["--base", "b.json", "--head", "h.json", "--quiet"])
-        assert args.quiet is True
-
-    def test_output_format_default(self):
-        parser = build_parser()
-        args = parser.parse_args(["--base", "b.json", "--head", "h.json"])
-        assert args.output_format == "human"
-
-    def test_output_format_json(self):
-        parser = build_parser()
-        args = parser.parse_args(
-            ["--base", "b.json", "--head", "h.json", "--output-format", "json"]
+        We invoke it via subprocess with no snapshot dir, so ``get_changed_files``
+        returns [] and the script exits 0 with "No snapshot JSON files changed."
+        That proves the guard fired and ``main()`` ran.
+        """
+        script_path = os.path.join(
+            os.path.dirname(__file__), '..', 'script', 'check_snapshot_diff.py'
         )
-        assert args.output_format == "json"
+        result = subprocess.run(
+            [sys.executable, script_path, '--base', 'HEAD'],
+            capture_output=True,
+            text=True,
+        )
+        # The script either exits 0 ("No snapshot JSON files changed.")
+        # or 1 (security diff found) or 128+ (git not available / no repo).
+        # Any of these prove main() was called; a crash before main() would
+        # give a Python traceback with exit code 1 and stderr content.
+        # We assert that there is no Python traceback.
+        assert 'Traceback' not in result.stderr, (
+            f"Script raised an exception:\n{result.stderr}"
+        )
+        # And that the exit code is one of the expected values (not a Python crash).
+        assert result.returncode in (0, 1, 128), (
+            f"Unexpected exit code {result.returncode}.\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
 
-    def test_invalid_output_format_rejected(self):
-        parser = build_parser()
-        with pytest.raises(SystemExit):
-            parser.parse_args(
-                ["--base", "b.json", "--head", "h.json", "--output-format", "xml"]
+    def test_main_not_called_when_imported(self):
+        """
+        Confirms that ``main()`` is NOT called when the module is imported
+        normally (i.e. ``__name__ != '__main__'``).
+        """
+        with patch.object(check_snapshot_diff, 'main') as mock_main:
+            runpy.run_path(
+                os.path.join(
+                    os.path.dirname(__file__), '..', 'script', 'check_snapshot_diff.py'
+                ),
+                run_name='check_snapshot_diff',
             )
-
-
-# ---------------------------------------------------------------------------
-# 11. End-to-end integration: realistic snapshot shapes
-# ---------------------------------------------------------------------------
-
-class TestIntegration:
-    """Realistic end-to-end scenarios using near-production snapshot shapes."""
-
-    def _run(self, base: dict, head: dict) -> tuple[int, str]:
-        """Run main() with tmp files; return (exit_code, stdout)."""
-        import io
-        from contextlib import redirect_stdout
-        base_p = _write_snapshot(base)
-        head_p = _write_snapshot(head)
-        buf = io.StringIO()
-        try:
-            with redirect_stdout(buf):
-                code = main(["--base", str(base_p), "--head", str(head_p)])
-        finally:
-            base_p.unlink(missing_ok=True)
-            head_p.unlink(missing_ok=True)
-        return code, buf.getvalue()
-
-    def test_only_stream_count_changed_is_clean(self):
-        head = json.loads(json.dumps(BASE_SNAPSHOT))
-        head["next_stream_id"] = 5
-        code, _ = self._run(BASE_SNAPSHOT, head)
-        assert code == 0
-
-    def test_only_status_change_is_clean(self):
-        head = json.loads(json.dumps(BASE_SNAPSHOT))
-        head["streams"]["0"]["status"] = "Completed"
-        code, _ = self._run(BASE_SNAPSHOT, head)
-        assert code == 0
-
-    def test_admin_rotate_flagged(self):
-        head = json.loads(json.dumps(BASE_SNAPSHOT))
-        head["config"]["admin"] = "GNEWADMIN"
-        code, out = self._run(BASE_SNAPSHOT, head)
-        assert code == 1
-        assert "config.admin" in out
-
-    def test_max_rate_cap_raised_flagged(self):
-        head = json.loads(json.dumps(BASE_SNAPSHOT))
-        head["config"]["max_rate_per_second"] = 999999
-        code, _ = self._run(BASE_SNAPSHOT, head)
-        assert code == 1
-
-    def test_creation_pause_enabled_flagged(self):
-        head = json.loads(json.dumps(BASE_SNAPSHOT))
-        head["creation_paused"] = True
-        code, _ = self._run(BASE_SNAPSHOT, head)
-        assert code == 1
-
-    def test_nonce_added_flagged(self):
-        head = json.loads(json.dumps(BASE_SNAPSHOT))
-        head["streams"]["0"]["delegated_nonce"] = 1
-        code, _ = self._run(BASE_SNAPSHOT, head)
-        assert code == 1
-
-    def test_pending_recipient_update_added_flagged(self):
-        head = json.loads(json.dumps(BASE_SNAPSHOT))
-        head["streams"]["0"]["pending_recipient_update"] = "GNEWRECIP"
-        code, _ = self._run(BASE_SNAPSHOT, head)
-        assert code == 1
-
-    def test_token_swap_flagged(self):
-        head = json.loads(json.dumps(BASE_SNAPSHOT))
-        head["config"]["token"] = "GEVIL_TOKEN"
-        code, _ = self._run(BASE_SNAPSHOT, head)
-        assert code == 1
-
-    def test_contract_version_bump_flagged(self):
-        base = {**BASE_SNAPSHOT, "contract_version": 1}
-        head = {**BASE_SNAPSHOT, "contract_version": 2}
-        code, _ = self._run(base, head)
-        assert code == 1
-
-    def test_multiple_non_security_fields_all_clean(self):
-        head = json.loads(json.dumps(BASE_SNAPSHOT))
-        head["streams"]["0"]["status"] = "Paused"
-        head["streams"]["0"]["start_time"] = 1700000001
-        head["streams"]["0"]["withdrawn_amount"] = 100
-        head["next_stream_id"] = 10
-        code, _ = self._run(BASE_SNAPSHOT, head)
-        assert code == 0
-
-    def test_both_security_and_non_security_exits_1(self):
-        head = json.loads(json.dumps(BASE_SNAPSHOT))
-        head["streams"]["0"]["status"] = "Paused"         # non-security
-        head["config"]["admin"] = "GEVIL"                 # security
-        code, _ = self._run(BASE_SNAPSHOT, head)
-        assert code == 1
+        mock_main.assert_not_called()

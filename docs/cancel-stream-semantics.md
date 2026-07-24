@@ -2,11 +2,34 @@
 
 This note scopes and verifies one protocol slice: cancellation refund behavior and `cancelled_at` semantics.
 
+## Irrevocable Mode
+
+For specific use-cases (e.g., token-vesting agreements without clawback clauses, or compliance-grade irrevocable streams), a stream can be marked as **irrevocable** at creation time.
+
+When `irrevocable` is set to `true` (via `CreateStreamParams` or `CreateStreamRelativeParams`), the stream becomes permanently shielded against all cancellation paths. The `irrevocable` flag is structurally appended to the `Stream` XDR as an `Option<bool>` to preserve backward compatibility (defaulting to `false` for older entries).
+
+### Blocked Operations on Irrevocable Streams
+Attempting to invoke any of the following endpoints on an irrevocable stream will fail with `ContractError::Unauthorized`:
+
+1. **`cancel_stream`**: The sender cannot unilaterally cancel the stream and reclaim unvested tokens.
+2. **`cancel_stream_as_admin`**: Even the protocol admin is blocked from cancelling the stream.
+3. **`keeper_cancel`**: Third-party keepers cannot cancel the stream if it's left abandoned past the grace period.
+4. **`bulk_cancel_streams`**: Attempting to include an irrevocable stream in a bulk cancellation will abort the entire batch.
+5. **`shorten_stream_end_time`**: The sender cannot arbitrarily move the end time forward to effectively cut off the recipient.
+
+### Unaffected Operations
+Irrevocable streams behave normally for all other operations:
+- **`withdraw`**: The recipient can withdraw accrued tokens continuously.
+- **`pause_stream` / `resume_stream`**: If the protocol allows pausing for operational reasons, pausing is still supported (unless restricted elsewhere).
+
+### Security and Trust Assurances
+The `irrevocable` flag ensures that a beneficiary (recipient) can mathematically trust that the tokens allocated to them via the stream's rate and duration will be delivered unconditionally as long as they accrue, regardless of the sender's or admin's future intentions. This is a strict requirement for high-trust vesting distributions.
+
 ## Scope
 
 In scope:
 
-1. `cancel_stream` and `cancel_stream_as_admin` success/failure behavior.
+1. `cancel_stream`, `cancel_stream_as_admin`, and `witnessed_cancel_stream` success/failure behavior.
 2. Authorization boundaries for sender/admin/unauthorized actors.
 3. On-chain observables: stream storage fields, token balances, errors, events.
 4. Time and status edge cases that affect refund and accrued freeze logic.
@@ -36,13 +59,67 @@ On failure:
 1. Missing stream: `StreamNotFound`.
 2. Invalid status (`Completed` or already `Cancelled`): `InvalidState`.
 3. Sender path requires sender auth; admin path requires admin auth.
-4. Failures are atomic: no transfer, no state update, no cancel event.
+4. Failures are atomic: no transfer, no state update, no cancel event. This includes bulk cancellations (`bulk_cancel_streams`), which strictly follow an atomic-reject model: if any stream in a batch fails validation (e.g., unauthorized access or invalid state), the entire batch reverts and no streams are mutated.
 
 ## Authorization matrix
 
 1. Sender may call `cancel_stream` for their stream.
 2. Admin may call `cancel_stream_as_admin` for any stream.
 3. Recipient and third parties cannot cancel without the required auth proof.
+4. A configured compliance witness may call `witnessed_cancel_stream` with a valid
+   off-chain ed25519 attestation (see below).
+
+## Witnessed compliance cancellation (`witnessed_cancel_stream`)
+
+### Purpose
+
+Allows a per-stream compliance witness (e.g. a sanctions-screening oracle) to cancel
+a stream via an off-chain signed attestation, without granting that oracle full protocol
+admin authority.
+
+### Configuration
+
+- Optional `witness: Option<Address>` on `Stream` / `CreateStreamParams`, default `None`.
+- Set at stream creation via `create_stream(..., witness)` or batch `create_streams`.
+- Existing streams without the field decode with `witness = None` (forward-compatible).
+
+### Signature payload
+
+Domain-separated from `delegated_withdraw` to prevent cross-protocol replay:
+
+```
+fluxora_witnessed_cancel | stream_id (8 bytes BE) | deadline (8 bytes BE)
+```
+
+The witness signs with their ed25519 private key; the submitter passes
+`witness_public_key`, `deadline`, and `witness_signature`. The public key must derive
+to the stored `witness` address.
+
+### Behavior
+
+Identical to `cancel_stream` on success:
+
+1. Allowed only for `Active` or `Paused` streams.
+2. Refund to sender: `deposit_amount - accrued_at(cancelled_at)`.
+3. Event: topic `("cancelled", stream_id)` with `StreamEvent::StreamCancelled(stream_id)`.
+4. No `require_auth()` on the submitter — authorization is the signature check.
+
+### Errors
+
+| Condition | Error |
+| --- | --- |
+| Expired deadline | `SignatureDeadlineExpired` |
+| No witness configured | `InvalidParams` |
+| Public key mismatch | `InvalidSignature` |
+| Invalid stream status | `InvalidState` |
+| Missing stream | `StreamNotFound` |
+
+### Security invariants
+
+1. Witness signatures cannot be replayed as `delegated_withdraw` authorizations (distinct domain tag and payload layout).
+2. `delegated_withdraw` signatures cannot authorize witnessed cancellation.
+3. Double cancellation fails with `InvalidState` (signature replay after success is harmless).
+4. CEI ordering inherited from shared `cancel_stream_internal` implementation.
 
 ## Evidence in tests
 
@@ -61,6 +138,18 @@ Integration tests (`contracts/stream/tests/integration_suite.rs`):
 2. `cancel_stream_as_admin_updates_state_before_transfer`
 3. `integration_cancel_partial_accrual_partial_refund`
 4. `integration_cancel_refund_plus_frozen_accrued_equals_deposit`
+
+Witnessed cancel tests (`contracts/stream/tests/witnessed_cancel.rs`):
+
+1. `witnessed_cancel_valid_signature_cancels_stream`
+2. `witnessed_cancel_refund_matches_sender_cancel`
+3. `witnessed_cancel_emits_stream_cancelled_event`
+4. `witnessed_cancel_expired_deadline_rejected`
+5. `witnessed_cancel_no_witness_configured_rejected`
+6. `witnessed_cancel_wrong_public_key_rejected`
+7. `witnessed_cancel_delegated_withdraw_signature_not_replayable`
+8. `witnessed_cancel_from_paused_stream_succeeds`
+9. `witnessed_cancel_already_cancelled_rejected`
 
 ## Optional Cancellation Fee
 
@@ -208,3 +297,18 @@ amount, the contract exposes a permissionless cleanup entrypoint `close_cancelle
 
 Keepers and off-chain indexers may call this entrypoint to free storage and reduce
 recipient-index bloat once the recipient's claims are fully settled.
+
+## CliffOnly Cancellation Semantics
+
+When `StreamKind::CliffOnly` streams are cancelled (via `cancel_stream`, `cancel_stream_as_admin`, `bulk_cancel_streams`, or `keeper_cancel`), they exhibit distinct mathematical edge cases compared to `Linear` streams because partial accrual is impossible:
+
+1. **Before the cliff time:** The recipient's accrued amount is strictly 0. 
+   - A cancellation refunds the **full** `deposit_amount` back to the sender (`sender_refund_gross == deposit_amount`).
+   - For a `bulk_cancel_streams` (admin only) or sender cancellation, the sender receives the entire deposit minus any configured cancellation fee. The recipient receives nothing.
+
+2. **At or after the cliff time:** The recipient's accrued amount is the **full** `deposit_amount`.
+   - A cancellation (e.g. via `keeper_cancel` after `end_time + GRACE`) calculates `sender_refund_gross = 0`.
+   - Because `sender_refund_gross` is 0, the `keeper_fee` evaluates to 0, and the sender receives a net refund of 0.
+   - The recipient is fully entitled to the `deposit_amount` and can withdraw it at their leisure.
+
+In all paths, `TotalLiabilities`, `KeeperCancelled`, and `StreamCancelled` events operate correctly, preserving the structural invariants proven in adversarial test suites (`contracts/stream/tests/cliff_only_variant.rs`).
