@@ -55,6 +55,7 @@ fn create_stream_with_rate(
             &0i128, // no dust threshold
             &None,  // no memo
             &StreamKind::Linear,
+            &None,
         )
 }
 
@@ -111,6 +112,7 @@ fn test_create_stream_at_zero_rate_fails() {
         &0i128,
         &None,
         &StreamKind::Linear,
+        &None,
     );
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 }
@@ -137,6 +139,7 @@ fn test_create_streams_with_mixed_rates_fails_atomically() {
             memo: None,
             kind: StreamKind::Linear,
             metadata: None,
+            witness: None,
         },
         CreateStreamParams {
             recipient: recipient.clone(),
@@ -149,6 +152,7 @@ fn test_create_streams_with_mixed_rates_fails_atomically() {
             memo: None,
             kind: StreamKind::Linear,
             metadata: None,
+            witness: None,
         },
     ];
 
@@ -179,6 +183,7 @@ fn test_create_streams_all_valid_rates_succeeds() {
             memo: None,
             kind: StreamKind::Linear,
             metadata: None,
+            witness: None,
         },
         CreateStreamParams {
             recipient: recipient.clone(),
@@ -191,6 +196,7 @@ fn test_create_streams_all_valid_rates_succeeds() {
             memo: None,
             kind: StreamKind::Linear,
             metadata: None,
+            witness: None,
         },
     ];
 
@@ -254,8 +260,7 @@ fn test_create_stream_from_template_below_min_rate_fails() {
     let client = FluxoraStreamClient::new(&env, &contract_id);
 
     // Register a template first
-    let template_id = client
-        .register_stream_template(&sender, &10, &10, &1000);
+    let template_id = client.register_stream_template(&sender, &10, &10, &1000);
 
     let result = client.try_create_stream_from_template(
         &sender,
@@ -267,6 +272,7 @@ fn test_create_stream_from_template_below_min_rate_fails() {
         &None,
         &None,
         &StreamKind::Linear,
+        &None,
     );
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 }
@@ -291,6 +297,7 @@ fn test_negative_rate_fails_with_invalid_params() {
         &0i128,
         &None,
         &StreamKind::Linear,
+        &None,
     );
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 }
@@ -313,6 +320,7 @@ fn test_rate_at_i128_max_fails_with_invalid_params() {
         &0i128,
         &None,
         &StreamKind::Linear,
+        &None,
     );
     assert!(result.is_err());
 }
@@ -339,6 +347,7 @@ fn test_min_rate_with_long_duration_succeeds() {
             &0i128,
             &None,
             &StreamKind::Linear,
+            &None,
         );
 
     let stream = client.get_stream_state(&stream_id);
@@ -369,6 +378,7 @@ fn test_min_rate_preserves_existing_max_rate_cap() {
         &0i128,
         &None,
         &StreamKind::Linear,
+        &None,
     );
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 
@@ -384,6 +394,7 @@ fn test_min_rate_preserves_existing_max_rate_cap() {
         &0i128,
         &None,
         &StreamKind::Linear,
+        &None,
     );
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 
@@ -399,6 +410,66 @@ fn test_min_rate_preserves_existing_max_rate_cap() {
         &0i128,
         &None,
         &StreamKind::Linear,
+        &None,
     );
     assert!(result.is_ok());
+}
+
+#[test]
+fn test_update_rate_per_second_throttle_enforced() {
+    let (env, contract_id, sender, recipient, _token) = setup();
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+    let stream_id = create_stream_with_rate(&env, &client, &sender, &recipient, 100i128);
+
+    // Initial rate is 100. Stream creation sets last_rate_change_ledger = 0.
+    // The first update works because last_rate_change_ledger is 0.
+    let res = client.try_update_rate_per_second(&stream_id, &200i128);
+    assert_eq!(res, Ok(Ok(())));
+    
+    // Now the next update in the same ledger should fail with RateCooldownActive
+    let result = client.try_update_rate_per_second(&stream_id, &300i128);
+    assert_eq!(result, Err(Ok(ContractError::RateCooldownActive)));
+
+    // Fast forward 16 ledgers (still in cooldown)
+    let seq = env.ledger().sequence();
+    env.ledger().set_sequence_number(seq + 16);
+    let result2 = client.try_update_rate_per_second(&stream_id, &300i128);
+    assert_eq!(result2, Err(Ok(ContractError::RateCooldownActive)));
+
+    // Fast forward 1 more ledger
+    env.ledger().set_sequence_number(seq + 17);
+    let result3 = client.try_update_rate_per_second(&stream_id, &300i128);
+    assert_eq!(result3, Ok(Ok(())));
+}
+
+#[test]
+fn test_decrease_rate_per_second_throttle_enforced() {
+    let (env, contract_id, sender, recipient, _token) = setup();
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+    let stream_id = create_stream_with_rate(&env, &client, &sender, &recipient, 1000i128);
+
+    // First decrease works (last_rate_change_ledger = 0)
+    let res = client.try_decrease_rate_per_second(&stream_id, &500i128);
+    assert_eq!(res, Ok(Ok(())));
+
+    // Second decrease fails in the same ledger
+    let result = client.try_decrease_rate_per_second(&stream_id, &400i128);
+    assert_eq!(result, Err(Ok(ContractError::RateCooldownActive)));
+
+    // Fast forward 16 ledgers (not enough)
+    let seq = env.ledger().sequence();
+    env.ledger().set_sequence_number(seq + 16);
+    let result2 = client.try_decrease_rate_per_second(&stream_id, &400i128);
+    assert_eq!(result2, Err(Ok(ContractError::RateCooldownActive)));
+
+    // Fast forward 1 more ledger
+    env.ledger().set_sequence_number(seq + 17);
+
+    // Fast forward timestamp to avoid ClockRegression error during checkpoint calculation
+    let ts = env.ledger().timestamp();
+    env.ledger().set_timestamp(ts + (17 * 5));
+
+    // Now it should succeed
+    let result3 = client.try_decrease_rate_per_second(&stream_id, &400i128);
+    assert_eq!(result3, Ok(Ok(())));
 }
