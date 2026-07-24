@@ -372,3 +372,48 @@ fn test_reclaim_twice_errors() {
     let result = ctx.client.try_reclaim_expired_id_reservation(&ctx.sender);
     assert_eq!(result, Err(Ok(ContractError::ReservationNotFound)));
 }
+
+// ---------------------------------------------------------------------------
+// release vs reclaim NextStreamId asymmetry regression tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_release_id_reservation_never_shrinks_next_stream_id() {
+    let ctx = Ctx::setup();
+
+    // NextStreamId is 0. Reserve 5. NextStreamId becomes 5.
+    ctx.client.reserve_stream_ids(&ctx.sender, &5u32, &None);
+    assert_eq!(ctx.client.get_stream_count(), 5);
+
+    // Release immediately via release_id_reservation
+    ctx.client.release_id_reservation(&ctx.sender);
+
+    // Reservation is gone
+    assert!(ctx.client.get_id_reservation(&ctx.sender).is_none());
+
+    // Counter didn't shrink. Next stream gets ID 5.
+    let id = ctx.create_stream(&ctx.sender);
+    assert_eq!(id, 5);
+}
+
+#[test]
+fn test_reclaim_expired_id_reservation_shrinks_next_stream_id() {
+    let ctx = Ctx::setup();
+    let now = ctx.env.ledger().timestamp();
+    let expiry = now + 100;
+
+    // NextStreamId is 0. Reserve 5. NextStreamId becomes 5.
+    ctx.client.reserve_stream_ids(&ctx.sender, &5u32, &Some(expiry));
+    assert_eq!(ctx.client.get_stream_count(), 5);
+
+    // Reclaim after advancing ledger past expiry
+    ctx.env.ledger().set_timestamp(expiry + 1);
+    ctx.client.reclaim_expired_id_reservation(&ctx.sender);
+
+    // Reservation is gone
+    assert!(ctx.client.get_id_reservation(&ctx.sender).is_none());
+
+    // Counter rewinds. Next stream gets ID 0.
+    let id = ctx.create_stream(&ctx.sender);
+    assert_eq!(id, 0);
+}
