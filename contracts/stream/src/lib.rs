@@ -3089,13 +3089,17 @@ impl FluxoraStream {
             return Err(ContractError::InvalidState);
         }
 
+        let key = DataKey::PendingRecipientUpdate(stream_id);
         env.storage().persistent().set(
-            &DataKey::PendingRecipientUpdate(stream_id),
+            &key,
             &PendingRecipientUpdate {
                 stream_id,
                 proposed_recipient: new_recipient,
             },
         );
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
 
         Ok(())
     }
@@ -3159,6 +3163,7 @@ impl FluxoraStream {
     ///
     /// Transition: propose → cancel. Returns `InvalidState` when no pending update exists.
     pub fn cancel_recipient_update(env: Env, stream_id: u64) -> Result<(), ContractError> {
+        require_not_globally_paused(&env)?;
         let stream = load_stream(&env, stream_id)?;
         Self::require_stream_sender(&stream.sender);
         if !env

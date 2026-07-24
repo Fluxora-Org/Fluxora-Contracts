@@ -11,6 +11,11 @@ use soroban_sdk::{
     Address, Env, IntoVal,
 };
 
+// TTL constants mirroring the contract's persistent-entry bump parameters
+const PERSISTENT_LIFETIME_THRESHOLD: u32 = 17_280;
+const PERSISTENT_BUMP_AMOUNT: u32 = 120_960;
+const LEDGER_CLOSE_TIME_SECS: u64 = 5;
+
 struct Ctx {
     env: Env,
     contract_id: Address,
@@ -344,4 +349,95 @@ fn duplicate_proposal_rejected() {
     }]);
     let result = ctx.client().try_update_recipient(&stream_id, &ctx.sender);
     assert_eq!(result, Err(Ok(ContractError::InvalidState)));
+}
+
+/// `accept_recipient_update` succeeds after the archival threshold when
+/// `extend_ttl` is called at write time in `update_recipient`.
+///
+/// This test advances the ledger sequence past the persistent-entry
+/// archival threshold (~1 day at 5 s/ledger) without any intervening
+/// read/write to the `PendingRecipientUpdate` entry, then calls accept.
+/// The explicit `extend_ttl` on write keeps the entry alive past the
+/// default archival window, so the rotation completes successfully.
+#[test]
+fn accept_succeeds_across_archival_threshold() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream();
+    let new_recipient = Address::generate(&ctx.env);
+
+    // Propose a recipient update (triggers extend_ttl on the pending entry)
+    ctx.propose_recipient_update(stream_id, &new_recipient);
+
+    // Verify the pending update exists
+    assert!(ctx
+        .client()
+        .get_pending_recipient_update(&stream_id)
+        .is_some());
+
+    // Advance ledger sequence past the archival threshold (17,280 ledgers ≈ 1 day)
+    // but well within the bump window (120,960 ledgers ≈ 7 days)
+    let advance = PERSISTENT_LIFETIME_THRESHOLD + 1_000;
+    ctx.env.ledger().with_mut(|l| {
+        l.sequence_number += advance;
+        l.timestamp += u64::from(advance) * LEDGER_CLOSE_TIME_SECS;
+    });
+
+    // Accept should succeed because the entry's TTL was bumped on write
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.recipient,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "accept_recipient_update",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+    let result = ctx.client().try_accept_recipient_update(&stream_id);
+    assert!(result.is_ok(), "accept should succeed with TTL bump: {:?}", result);
+
+    // Verify the recipient was actually updated
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.recipient, new_recipient);
+}
+
+/// `cancel_recipient_update` succeeds after the archival threshold, consistent
+/// with `accept_recipient_update`, when the pending entry has its TTL bumped.
+#[test]
+fn cancel_succeeds_across_archival_threshold() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream();
+    let new_recipient = Address::generate(&ctx.env);
+
+    // Propose a recipient update
+    ctx.propose_recipient_update(stream_id, &new_recipient);
+
+    // Verify the pending update exists
+    assert!(ctx
+        .client()
+        .get_pending_recipient_update(&stream_id)
+        .is_some());
+
+    // Advance ledger sequence past the archival threshold
+    let advance = PERSISTENT_LIFETIME_THRESHOLD + 1_000;
+    ctx.env.ledger().with_mut(|l| {
+        l.sequence_number += advance;
+        l.timestamp += u64::from(advance) * LEDGER_CLOSE_TIME_SECS;
+    });
+
+    // Cancel should succeed with the TTL bump on write
+    // Use mock_all_auths to avoid test-env limitation with re-registering
+    // mock auth contracts for the same address after large ledger advances
+    ctx.env.mock_all_auths();
+    let result = ctx.client().try_cancel_recipient_update(&stream_id);
+    assert!(result.is_ok(), "cancel should succeed with TTL bump: {:?}", result);
+
+    // Verify the pending update was cleared
+    assert!(ctx
+        .client()
+        .get_pending_recipient_update(&stream_id)
+        .is_none());
+
+    // Original recipient should still be the recipient
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.recipient, ctx.recipient);
 }
