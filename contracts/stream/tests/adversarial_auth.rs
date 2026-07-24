@@ -1492,6 +1492,7 @@ struct DelegatedCtx<'a> {
     recipient_pk: BytesN<32>,
     signing_key: SigningKey,
     stream_id: u64,
+    sender: Address,
     #[allow(dead_code)]
     sac: soroban_sdk::token::StellarAssetClient<'a>,
 }
@@ -1550,6 +1551,7 @@ impl<'a> DelegatedCtx<'a> {
             recipient_pk,
             signing_key,
             stream_id,
+            sender,
             sac,
         }
     }
@@ -1818,4 +1820,3 @@ fn delegated_withdraw_later_ledger_revocation_rejected() {
         "delegation revoked in prior ledger must be rejected"
     );
 }
-
