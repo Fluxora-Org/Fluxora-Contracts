@@ -43,18 +43,20 @@ fn create_stream_with_rate(
     let end_time = start_time + 1000;
     let deposit = rate_per_second * 1000; // exactly covers the stream
 
-    client.create_stream(
-        sender,
-        recipient,
-        &deposit,
-        &rate_per_second,
-        &start_time,
-        &cliff_time,
-        &end_time,
-        &0i128, // no dust threshold
-        &None,  // no memo
-        &StreamKind::Linear,
-    )
+    client
+        .create_stream(
+            sender,
+            recipient,
+            &deposit,
+            &rate_per_second,
+            &start_time,
+            &cliff_time,
+            &end_time,
+            &0i128, // no dust threshold
+            &None,  // no memo
+            &StreamKind::Linear,
+            &None,
+        )
 }
 
 // Happy path: rate above 0
@@ -110,6 +112,7 @@ fn test_create_stream_at_zero_rate_fails() {
         &0i128,
         &None,
         &StreamKind::Linear,
+        &None,
     );
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 }
@@ -136,6 +139,7 @@ fn test_create_streams_with_mixed_rates_fails_atomically() {
             memo: None,
             kind: StreamKind::Linear,
             metadata: None,
+            witness: None,
         },
         CreateStreamParams {
             recipient: recipient.clone(),
@@ -148,6 +152,7 @@ fn test_create_streams_with_mixed_rates_fails_atomically() {
             memo: None,
             kind: StreamKind::Linear,
             metadata: None,
+            witness: None,
         },
     ];
 
@@ -178,6 +183,7 @@ fn test_create_streams_all_valid_rates_succeeds() {
             memo: None,
             kind: StreamKind::Linear,
             metadata: None,
+            witness: None,
         },
         CreateStreamParams {
             recipient: recipient.clone(),
@@ -190,6 +196,7 @@ fn test_create_streams_all_valid_rates_succeeds() {
             memo: None,
             kind: StreamKind::Linear,
             metadata: None,
+            witness: None,
         },
     ];
 
@@ -265,6 +272,7 @@ fn test_create_stream_from_template_below_min_rate_fails() {
         &None,
         &None,
         &StreamKind::Linear,
+        &None,
     );
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 }
@@ -289,6 +297,7 @@ fn test_negative_rate_fails_with_invalid_params() {
         &0i128,
         &None,
         &StreamKind::Linear,
+        &None,
     );
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 }
@@ -311,6 +320,7 @@ fn test_rate_at_i128_max_fails_with_invalid_params() {
         &0i128,
         &None,
         &StreamKind::Linear,
+        &None,
     );
     assert!(result.is_err());
 }
@@ -325,18 +335,20 @@ fn test_min_rate_with_long_duration_succeeds() {
     let rate = 100i128;
     let deposit = rate * (duration as i128);
 
-    let stream_id = client.create_stream(
-        &sender,
-        &recipient,
-        &deposit,
-        &rate,
-        &start_time,
-        &start_time,
-        &end_time,
-        &0i128,
-        &None,
-        &StreamKind::Linear,
-    );
+    let stream_id = client
+        .create_stream(
+            &sender,
+            &recipient,
+            &deposit,
+            &rate,
+            &start_time,
+            &start_time,
+            &end_time,
+            &0i128,
+            &None,
+            &StreamKind::Linear,
+            &None,
+        );
 
     let stream = client.get_stream_state(&stream_id);
     assert_eq!(stream.rate_per_second, rate);
@@ -366,6 +378,7 @@ fn test_min_rate_preserves_existing_max_rate_cap() {
         &0i128,
         &None,
         &StreamKind::Linear,
+        &None,
     );
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 
@@ -381,6 +394,7 @@ fn test_min_rate_preserves_existing_max_rate_cap() {
         &0i128,
         &None,
         &StreamKind::Linear,
+        &None,
     );
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 
@@ -396,6 +410,7 @@ fn test_min_rate_preserves_existing_max_rate_cap() {
         &0i128,
         &None,
         &StreamKind::Linear,
+        &None,
     );
     assert!(result.is_ok());
 }

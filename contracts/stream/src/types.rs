@@ -335,6 +335,19 @@ pub struct RecipientUpdated {
     pub new_recipient: Address,
 }
 
+/// Emitted when a recipient delegates a portion of their stream to a new recipient.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecipientShareDelegated {
+    pub parent_stream_id: u64,
+    pub child_stream_id: u64,
+    pub delegator: Address,
+    pub delegatee: Address,
+    pub share_bps: u32,
+    pub new_parent_rate: i128,
+    pub child_rate: i128,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingRecipientUpdate {
@@ -437,6 +450,15 @@ pub struct SenderTransferred {
     pub stream_id: u64,
     pub old_sender: Address,
     pub new_sender: Address,
+}
+
+/// Emitted when a stream's claim ownership is transferred.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaimOwnershipTransferred {
+    pub stream_id: u64,
+    pub old_owner: Option<Address>,
+    pub new_owner: Address,
 }
 
 /// Emitted when a stream's funding health status transitions between
@@ -593,6 +615,7 @@ pub struct Stream {
     pub stream_id: u64,
     pub sender: Address,
     pub recipient: Address,
+    pub claim_owner: Option<Address>,
     pub deposit_amount: i128,
     pub rate_per_second: i128,
     pub start_time: u64,
@@ -625,6 +648,8 @@ pub struct Stream {
     pub last_withdraw_ledger: u32,
     /// Optional structured metadata emitted for indexer consumption.
     pub metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
+    /// Optional compliance witness authorized to cancel via signed attestation.
+    pub witness: Option<Address>,
     /// Ledger sequence number of the last rate change (or creation).
     /// Used to enforce MIN_RATE_INTERVAL_LEDGERS cooldown.
     pub last_rate_change_ledger: u32,
@@ -663,6 +688,8 @@ pub struct CreateStreamParams {
     pub kind: StreamKind,
     /// Optional structured metadata emitted for indexer consumption.
     pub metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
+    /// Optional compliance witness authorized to cancel via signed attestation.
+    pub witness: Option<Address>,
 }
 
 /// Parameters for creating a payment stream with relative (offset-based) times.
