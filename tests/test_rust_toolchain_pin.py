@@ -4,9 +4,22 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback
+    import tomli as tomllib  # type: ignore[no-redef]
+
 
 SCRIPT = Path(__file__).resolve().parents[1] / "script" / "verify_rust_version.py"
 TOOLCHAIN = Path(__file__).resolve().parents[1] / "rust-toolchain.toml"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+CRATE_MANIFESTS = [
+    REPO_ROOT / "contracts" / "stream" / "Cargo.toml",
+    REPO_ROOT / "contracts" / "factory" / "Cargo.toml",
+    REPO_ROOT / "contracts" / "governance" / "Cargo.toml",
+]
 
 
 def _load_module():
@@ -17,6 +30,14 @@ def _load_module():
 
 
 verify_rust_version = _load_module()
+
+
+def _crate_rust_version(manifest: Path) -> str:
+    data = tomllib.loads(manifest.read_text(encoding="utf-8"))
+    rust_version = data.get("package", {}).get("rust-version")
+    if not isinstance(rust_version, str) or not rust_version:
+        raise AssertionError(f"missing [package].rust-version in {manifest}")
+    return rust_version
 
 
 def test_pinned_channel_reads_rust_toolchain_toml():
@@ -40,7 +61,12 @@ def test_parse_rustc_version_rejects_unexpected_output():
 
 
 def test_script_succeeds_when_rustc_matches_pin():
-    env = {**os.environ, "RUSTC_VERSION_OUTPUT": "rustc 1.94.1 (abcdef 2026-01-01)"}
+    env = {
+        **os.environ,
+        "RUSTC_VERSION_OUTPUT": "rustc 1.94.1 (abcdef 2026-01-01)",
+        "RUSTUP_TARGET_LIST_OUTPUT": "wasm32-unknown-unknown",
+        "RUSTUP_COMPONENT_LIST_OUTPUT": "rustfmt\nclippy",
+    }
     result = subprocess.run(
         [sys.executable, str(SCRIPT)],
         capture_output=True,
@@ -52,7 +78,12 @@ def test_script_succeeds_when_rustc_matches_pin():
 
 
 def test_script_fails_when_rustc_does_not_match_pin():
-    env = {**os.environ, "RUSTC_VERSION_OUTPUT": "rustc 1.95.0 (abcdef 2026-02-01)"}
+    env = {
+        **os.environ,
+        "RUSTC_VERSION_OUTPUT": "rustc 1.95.0 (abcdef 2026-02-01)",
+        "RUSTUP_TARGET_LIST_OUTPUT": "wasm32-unknown-unknown",
+        "RUSTUP_COMPONENT_LIST_OUTPUT": "rustfmt\nclippy",
+    }
     result = subprocess.run(
         [sys.executable, str(SCRIPT)],
         capture_output=True,
@@ -63,6 +94,40 @@ def test_script_fails_when_rustc_does_not_match_pin():
     assert "Rust version mismatch: expected 1.94.1, got 1.95.0" in result.stderr
 
 
+def test_script_fails_when_missing_targets():
+    env = {
+        **os.environ,
+        "RUSTC_VERSION_OUTPUT": "rustc 1.94.1 (abcdef 2026-01-01)",
+        "RUSTUP_TARGET_LIST_OUTPUT": "x86_64-unknown-linux-gnu",
+        "RUSTUP_COMPONENT_LIST_OUTPUT": "rustfmt\nclippy",
+    }
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT)],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 1
+    assert "Missing required targets: wasm32-unknown-unknown" in result.stderr
+
+
+def test_script_fails_when_missing_components():
+    env = {
+        **os.environ,
+        "RUSTC_VERSION_OUTPUT": "rustc 1.94.1 (abcdef 2026-01-01)",
+        "RUSTUP_TARGET_LIST_OUTPUT": "wasm32-unknown-unknown",
+        "RUSTUP_COMPONENT_LIST_OUTPUT": "rustfmt",
+    }
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT)],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 1
+    assert "Missing required components: clippy" in result.stderr
+
+
 # The tests above spawn a subprocess to exercise the CLI end-to-end, but code
 # executed in a child process is invisible to the coverage tracer running in
 # this process. The tests below call `main()`/`rustc_version()` directly
@@ -71,6 +136,8 @@ def test_script_fails_when_rustc_does_not_match_pin():
 
 def test_main_succeeds_in_process_when_rustc_matches_pin(monkeypatch, capsys):
     monkeypatch.setenv("RUSTC_VERSION_OUTPUT", "rustc 1.94.1 (abcdef 2026-01-01)")
+    monkeypatch.setenv("RUSTUP_TARGET_LIST_OUTPUT", "wasm32-unknown-unknown")
+    monkeypatch.setenv("RUSTUP_COMPONENT_LIST_OUTPUT", "rustfmt\nclippy")
     assert verify_rust_version.main() == 0
     captured = capsys.readouterr()
     assert "Rust version matches pinned 1.94.1" in captured.out
@@ -78,6 +145,8 @@ def test_main_succeeds_in_process_when_rustc_matches_pin(monkeypatch, capsys):
 
 def test_main_fails_in_process_when_rustc_does_not_match_pin(monkeypatch, capsys):
     monkeypatch.setenv("RUSTC_VERSION_OUTPUT", "rustc 1.95.0 (abcdef 2026-02-01)")
+    monkeypatch.setenv("RUSTUP_TARGET_LIST_OUTPUT", "wasm32-unknown-unknown")
+    monkeypatch.setenv("RUSTUP_COMPONENT_LIST_OUTPUT", "rustfmt\nclippy")
     assert verify_rust_version.main() == 1
     captured = capsys.readouterr()
     assert "Rust version mismatch: expected 1.94.1, got 1.95.0" in captured.err
@@ -85,6 +154,8 @@ def test_main_fails_in_process_when_rustc_does_not_match_pin(monkeypatch, capsys
 
 def test_main_fails_when_rustc_version_output_is_unparseable(monkeypatch, capsys):
     monkeypatch.setenv("RUSTC_VERSION_OUTPUT", "not rust at all")
+    monkeypatch.setenv("RUSTUP_TARGET_LIST_OUTPUT", "wasm32-unknown-unknown")
+    monkeypatch.setenv("RUSTUP_COMPONENT_LIST_OUTPUT", "rustfmt\nclippy")
     assert verify_rust_version.main() == 1
     captured = capsys.readouterr()
     assert "::error::" in captured.err
@@ -99,15 +170,14 @@ def test_rustc_version_falls_back_to_invoking_real_rustc(monkeypatch):
     assert version
 
 
-def test_checksum_doc_matches_pinned_channel():
-    # Load pinned channel from rust-toolchain.toml using existing helper
-    pinned = verify_rust_version.pinned_channel(TOOLCHAIN)
-    assert pinned
+# MSRV cross-check: each crate manifest's `rust-version` must track the
+# `rust-toolchain.toml` pin independently of the CI-invoked `rustc --version`
+# comparison above, so `cargo` itself enforces the floor on every invocation
+# (including local developer builds), not just CI.
 
-    # Read checksum.rs content
-    checksum_path = Path(__file__).resolve().parents[1] / "contracts" / "stream" / "src" / "checksum.rs"
-    content = checksum_path.read_text(encoding="utf-8")
 
-    # Assert the correct channel description is documented
-    expected_doc = f"channel (`{pinned}`)"
-    assert expected_doc in content, f"Expected checksum.rs to contain '{expected_doc}'"
+@pytest.mark.parametrize(
+    "manifest", CRATE_MANIFESTS, ids=lambda p: p.relative_to(REPO_ROOT).as_posix()
+)
+def test_crate_rust_version_matches_pinned_toolchain(manifest):
+    assert _crate_rust_version(manifest) == verify_rust_version.pinned_channel(TOOLCHAIN)

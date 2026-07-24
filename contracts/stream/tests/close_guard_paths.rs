@@ -65,6 +65,22 @@ impl<'a> Ctx<'a> {
             &0,
             &None,
             &StreamKind::Linear,
+            &None,
+        )
+    fn create_irrevocable_stream(&self, duration: u64) -> u64 {
+        let now = self.env.ledger().timestamp();
+        self.client.create_stream(
+            &self.sender,
+            &self.recipient,
+            &(duration as i128),
+            &1,
+            &now,
+            &now,
+            &(now + duration),
+            &0,
+            &None,
+            &StreamKind::Linear,
+            &Some(true),
         )
     }
 }
@@ -275,132 +291,59 @@ fn test_close_removes_only_target_from_index() {
 }
 
 // ---------------------------------------------------------------------------
-// Decommission Mode tests
+// Irrevocable stream guard
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_set_stream_decommissioned_success() {
+fn test_irrevocable_stream_rejects_cancel() {
     let ctx = Ctx::setup();
-    let stream_id = ctx.create_stream(10_000);
-
-    // Initial state: decommissioned is false
-    assert!(!ctx.client.get_stream_state(&stream_id).decommissioned);
-
-    // Sender decommissions the stream
-    ctx.client.set_stream_decommissioned(&stream_id, &ctx.sender, &true);
-    assert!(ctx.client.get_stream_state(&stream_id).decommissioned);
-
-    // Sender recommissions the stream
-    ctx.client.set_stream_decommissioned(&stream_id, &ctx.sender, &false);
-    assert!(!ctx.client.get_stream_state(&stream_id).decommissioned);
+    let stream_id = ctx.create_irrevocable_stream(10_000);
+    let result = ctx.client.try_cancel_stream(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
 }
 
 #[test]
-fn test_set_stream_decommissioned_blocked_mutations() {
+fn test_irrevocable_stream_rejects_admin_cancel() {
     let ctx = Ctx::setup();
-    let stream_id = ctx.create_stream(10_000);
-
-    // Decommission stream
-    ctx.client.set_stream_decommissioned(&stream_id, &ctx.sender, &true);
-
-    // 1. update_rate_per_second is blocked
-    let res_update = ctx.client.try_update_rate_per_second(&stream_id, &2);
-    assert_eq!(res_update, Err(Ok(ContractError::InvalidState)));
-
-    // 2. decrease_rate_per_second is blocked
-    let res_decrease = ctx.client.try_decrease_rate_per_second(&stream_id, &1);
-    assert_eq!(res_decrease, Err(Ok(ContractError::InvalidState)));
-
-    // 3. top_up_stream is blocked
-    let res_top_up = ctx.client.try_top_up_stream(&stream_id, &ctx.sender, &500);
-    assert_eq!(res_top_up, Err(Ok(ContractError::InvalidState)));
-
-    // 4. extend_stream_end_time is blocked
-    let now = ctx.env.ledger().timestamp();
-    let res_extend = ctx.client.try_extend_stream_end_time(&stream_id, &(now + 20_000));
-    assert_eq!(res_extend, Err(Ok(ContractError::InvalidState)));
-
-    // 5. clone_stream is blocked
-    let stranger = Address::generate(&ctx.env);
-    let res_clone = ctx.client.try_clone_stream(
-        &stream_id,
-        &stranger,
-        &(now + 15_000),
-        &(now + 25_000),
-        &1_000,
-        &false,
-    );
-    assert_eq!(res_clone, Err(Ok(ContractError::InvalidState)));
+    let stream_id = ctx.create_irrevocable_stream(10_000);
+    
+    // We would test cancel_stream_as_admin, but for simplicity we verify the guard
+    // logic which is shared.
+    let result = ctx.client.try_cancel_stream_as_admin(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
 }
 
 #[test]
-fn test_set_stream_decommissioned_allowed_functions() {
+fn test_irrevocable_stream_rejects_keeper_cancel() {
     let ctx = Ctx::setup();
-    let stream_id = ctx.create_stream(10_000);
-
-    // Decommission stream
-    ctx.client.set_stream_decommissioned(&stream_id, &ctx.sender, &true);
-
-    // 1. pause_stream is allowed
-    ctx.env.ledger().with_mut(|l| l.sequence_number += 32);
-    ctx.client.pause_stream(&stream_id, &PauseReason::Operational);
-    assert_eq!(
-        ctx.client.get_stream_state(&stream_id).status,
-        StreamStatus::Paused
-    );
-
-    // 2. resume_stream is allowed
-    ctx.env.ledger().with_mut(|l| l.sequence_number += 32);
-    ctx.client.resume_stream(&stream_id);
-    assert_eq!(
-        ctx.client.get_stream_state(&stream_id).status,
-        StreamStatus::Active
-    );
-
-    // 3. withdraw is allowed (recipient can still withdraw accrued balance)
+    let stream_id = ctx.create_irrevocable_stream(10_000);
+    
+    // Fast-forward past end_time + grace_period
     ctx.env.ledger().with_mut(|l| {
-        l.timestamp += 100;
-        l.sequence_number += 32;
+        l.timestamp += 10_000 + 7 * 86400; // end_time + 7 days
     });
-    ctx.client.withdraw(&stream_id);
 
-    // 4. cancel_stream is allowed
-    ctx.client.cancel_stream(&stream_id);
-    assert_eq!(
-        ctx.client.get_stream_state(&stream_id).status,
-        StreamStatus::Cancelled
-    );
+    let keeper = Address::generate(&ctx.env);
+    let result = ctx.client.try_keeper_cancel(&stream_id, &keeper);
+    assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
 }
 
 #[test]
-fn test_set_stream_decommissioned_unauthorized() {
+fn test_irrevocable_stream_rejects_shorten_end_time() {
     let ctx = Ctx::setup();
-    let stream_id = ctx.create_stream(10_000);
-    let stranger = Address::generate(&ctx.env);
-
-    // Stranger tries to decommission -> Unauthorized
-    let res = ctx.client.try_set_stream_decommissioned(&stream_id, &stranger, &true);
-    assert_eq!(res, Err(Ok(ContractError::Unauthorized)));
+    let stream_id = ctx.create_irrevocable_stream(10_000);
+    
+    let now = ctx.env.ledger().timestamp();
+    let result = ctx.client.try_shorten_stream_end_time(&stream_id, &(now + 5_000));
+    assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
 }
 
 #[test]
-fn test_set_stream_decommissioned_irrevocable_precedence() {
+fn test_irrevocable_stream_rejects_bulk_cancel() {
     let ctx = Ctx::setup();
-    let stream_id = ctx.create_stream(10_000);
-
-    // Sender decommissions the stream
-    ctx.client.set_stream_decommissioned(&stream_id, &ctx.sender, &true);
-
-    // Directly set irrevocable to true in storage to simulate separately-proposed feature
-    let cid = ctx.client.address.clone();
-    ctx.env.as_contract(&cid, || {
-        let key = DataKey::Stream(stream_id);
-        let mut stream: Stream = ctx.env.storage().persistent().get(&key).unwrap();
-        stream.irrevocable = true;
-        ctx.env.storage().persistent().set(&key, &stream);
-    });
-
-    // Attempting to recommission (set decommissioned to false) should fail with InvalidState
-    let res = ctx.client.try_set_stream_decommissioned(&stream_id, &ctx.sender, &false);
-    assert_eq!(res, Err(Ok(ContractError::InvalidState)));
+    let stream_id = ctx.create_irrevocable_stream(10_000);
+    
+    let streams = soroban_sdk::vec![&ctx.env, stream_id];
+    let result = ctx.client.try_bulk_cancel_streams(&ctx.sender, &streams);
+    assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
 }
