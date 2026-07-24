@@ -15,8 +15,8 @@
 extern crate std;
 
 use fluxora_stream::{
-    ContractError, FluxoraStream, FluxoraStreamClient, PauseReason, StreamCloned, StreamCreated,
-    StreamKind, StreamStatus,
+    ContractError, DataKey, FluxoraStream, FluxoraStreamClient, PauseReason, StreamCloned,
+    StreamCreated, StreamKind, StreamStatus,
 };
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger, LedgerInfo, MockAuth, MockAuthInvoke},
@@ -2164,4 +2164,69 @@ fn clone_override_cliff_offset_overflow_rejected() {
         "cliff offset overflow must return ArithmeticOverflow"
     );
     snap.assert_unchanged(&ctx, source_id);
+}
+
+// ---------------------------------------------------------------------------
+// 16. Clone correctly updates TotalLiabilities and doesn't touch original stream
+// ---------------------------------------------------------------------------
+
+/// When cloning a stream, TotalLiabilities increases by exactly the new deposit amount,
+/// and the original stream's state is completely untouched. Confirms no double-counting.
+#[test]
+fn clone_correctly_updates_total_liabilities() {
+    let ctx = Ctx::setup();
+    let source_id = ctx.create_default_stream(); // deposit=1000
+
+    // Record initial state
+    let source_before = ctx.client().get_stream_state(&source_id);
+    let sender_balance_before = ctx.token.balance(&ctx.sender);
+    let contract_balance_before = ctx.token.balance(&ctx.contract_id);
+
+    // Get initial TotalLiabilities
+    let cid = ctx.contract_id.clone();
+    let initial_liabilities: i128 = ctx.env.as_contract(&cid, || {
+        ctx.env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalLiabilities)
+            .unwrap_or(0)
+    });
+    assert_eq!(initial_liabilities, 1000, "initial liabilities must equal source deposit");
+
+    // Perform clone with new deposit of 1000
+    let new_deposit = 1000_i128;
+    ctx.env.ledger().set_timestamp(1000);
+    let new_id = ctx.client().clone_stream(
+        &source_id,
+        &ctx.recipient,
+        &1000u64,
+        &2000u64,
+        &new_deposit,
+        &false,
+    );
+
+    // Verify source is untouched
+    let source_after = ctx.client().get_stream_state(&source_id);
+    assert_eq!(source_after, source_before, "source stream must remain unchanged");
+
+    // Verify sender and contract balances
+    let sender_balance_after = ctx.token.balance(&ctx.sender);
+    let contract_balance_after = ctx.token.balance(&ctx.contract_id);
+    assert_eq!(sender_balance_after, sender_balance_before - new_deposit, "sender balance must decrease by new deposit");
+    assert_eq!(contract_balance_after, contract_balance_before + new_deposit, "contract balance must increase by new deposit");
+
+    // Verify TotalLiabilities is exactly initial + new_deposit
+    let final_liabilities: i128 = ctx.env.as_contract(&cid, || {
+        ctx.env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalLiabilities)
+            .unwrap_or(0)
+    });
+    assert_eq!(final_liabilities, initial_liabilities + new_deposit, "liabilities must increase by new deposit");
+
+    // Verify new stream's state
+    let new_stream = ctx.client().get_stream_state(&new_id);
+    assert_eq!(new_stream.deposit_amount, new_deposit);
+    assert_eq!(new_stream.status, StreamStatus::Active);
 }
