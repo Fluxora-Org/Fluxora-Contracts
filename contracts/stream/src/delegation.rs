@@ -22,6 +22,42 @@ use soroban_sdk::Env;
 
 use crate::{load_delegated_nonce, load_stream, ContractError};
 
+/// Domain-separation tag for witnessed cancellation signatures.
+///
+/// Prepended to the signed payload so a witness attestation cannot be replayed
+/// as a `delegated_withdraw` signature (which uses a distinct byte layout).
+pub(crate) const WITNESSED_CANCEL_DOMAIN: &[u8] = b"fluxora_witnessed_cancel";
+
+/// Validate the deadline for a witnessed cancellation attestation.
+///
+/// Checks `deadline >= env.ledger().timestamp()` — rejects expired signatures
+/// before any stream state is read.
+pub(crate) fn validate_witness_cancel_deadline(
+    env: &Env,
+    deadline: u64,
+) -> Result<(), ContractError> {
+    if env.ledger().timestamp() > deadline {
+        return Err(ContractError::SignatureDeadlineExpired);
+    }
+    Ok(())
+}
+
+/// Build the signed message for witnessed cancellation.
+///
+/// Layout: `WITNESSED_CANCEL_DOMAIN` | `stream_id` (8 bytes, big-endian u64)
+/// | `deadline` (8 bytes, big-endian u64).
+pub(crate) fn build_witnessed_cancel_message(
+    env: &Env,
+    stream_id: u64,
+    deadline: u64,
+) -> soroban_sdk::Bytes {
+    let mut msg = soroban_sdk::Bytes::new(env);
+    msg.extend_from_array(WITNESSED_CANCEL_DOMAIN);
+    msg.extend_from_array(&stream_id.to_be_bytes());
+    msg.extend_from_array(&deadline.to_be_bytes());
+    msg
+}
+
 /// Validate the delegation parameters for a delegated-withdraw call.
 ///
 /// Checks, in order:
@@ -105,6 +141,7 @@ mod tests {
             &0,
             &None,
             &StreamKind::Linear,
+            &None,
         );
 
         (env, client, stream_id, recipient)
@@ -278,6 +315,7 @@ mod tests {
             &0,
             &None,
             &StreamKind::Linear,
+            &None,
         );
         let _stream_b = client.create_stream(
             &sender,
@@ -290,6 +328,7 @@ mod tests {
             &0,
             &None,
             &StreamKind::Linear,
+            &None,
         );
 
         env.ledger().set_timestamp(50);
@@ -341,6 +380,40 @@ mod tests {
             validate_delegation_params(&env, stream_id, 0, 100)
         });
         assert_eq!(result_ok, Ok(()));
+    }
+
+    // ── Witnessed cancel deadline ───────────────────────────────────────
+
+    /// Deadline exactly equal to the current timestamp must pass.
+    #[test]
+    fn test_witness_cancel_deadline_equal_to_now_passes() {
+        let (env, _client, _stream_id, _recipient) = setup();
+        env.ledger().set_timestamp(100);
+
+        let result = env.as_contract(&_client.address, || {
+            validate_witness_cancel_deadline(&env, 100)
+        });
+        assert_eq!(result, Ok(()));
+    }
+
+    /// Deadline one second before the current timestamp must fail.
+    #[test]
+    fn test_witness_cancel_deadline_expired_fails() {
+        let (env, _client, _stream_id, _recipient) = setup();
+        env.ledger().set_timestamp(101);
+
+        let result = env.as_contract(&_client.address, || {
+            validate_witness_cancel_deadline(&env, 100)
+        });
+        assert_eq!(result, Err(ContractError::SignatureDeadlineExpired));
+    }
+
+    /// Witness cancel message includes domain separation tag.
+    #[test]
+    fn test_witness_cancel_message_domain_separated() {
+        let (env, _client, stream_id, _recipient) = setup();
+        let msg = build_witnessed_cancel_message(&env, stream_id, 500);
+        assert!(msg.len() >= WITNESSED_CANCEL_DOMAIN.len() as u32 + 16);
     }
 
     // ── Delegation Revocation & Live State Tests ─────────────────────────
