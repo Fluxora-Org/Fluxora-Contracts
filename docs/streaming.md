@@ -16,8 +16,8 @@ When changing the contract:
 - Update snapshot tests if externally visible behavior changes
 - No behavior change required for doc-only updates
 
-**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `close_cancelled_stream`, `close_completed_stream`, `compute_keeper_fee_split`, `delete_stream_template`, `get_global_emergency_paused`, `get_paused_stream_count`, `get_pending_recipient_update`, `get_protocol_fees_accrued`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `global_resume`, `keeper_cancel`, `set_contract_paused`, `set_global_emergency_paused`, `version`, `migration_v5_to_v6`, `set_max_rate_per_second`.
-**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `delete_stream_template`, `get_global_emergency_paused`, `get_keeper_fee_split`, `get_pending_recipient_update`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `global_resume`, `keeper_cancel`, `set_contract_paused`, `set_global_emergency_paused`, `version`, `migration_v5_to_v6`, `set_max_rate_per_second`.
+**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `close_cancelled_stream`, `close_completed_stream`, `compute_keeper_fee_split`, `delete_stream_template`, `get_auto_renew`, `get_global_emergency_paused`, `get_paused_stream_count`, `get_pending_recipient_update`, `get_protocol_fees_accrued`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `global_resume`, `keeper_cancel`, `renew_stream`, `set_auto_renew`, `set_contract_paused`, `set_global_emergency_paused`, `version`, `migration_v5_to_v6`, `set_max_rate_per_second`.
+**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `delete_stream_template`, `get_auto_renew`, `get_global_emergency_paused`, `get_keeper_fee_split`, `get_pending_recipient_update`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `global_resume`, `keeper_cancel`, `renew_stream`, `set_auto_renew`, `set_contract_paused`, `set_global_emergency_paused`, `version`, `migration_v5_to_v6`, `set_max_rate_per_second`.
 
 ## Externally Visible Assurances
 
@@ -140,6 +140,7 @@ Off-chain orchestrators and indexers that build payment batches often need to kn
 | **Cancellation** | `cancel_stream` / `cancel_stream_as_admin` / `bulk_cancel_streams` | Refunds unstreamed amount; frozen accrued stays for recipient         |
 | **Withdrawal**   | `withdraw` / `withdraw_to` / `batch_withdraw` | Recipient pulls accrued tokens; allowed on Paused if past `end_time`  |
 | **Completion**   | Automatic                                     | When `withdrawn_amount == deposit_amount`, status becomes `Completed` |
+| **Auto-renewal** | `set_auto_renew` / `renew_stream`             | Sender opts in; anyone can trigger the next identical schedule from the sender's allowance |
 | **Rotation**     | `update_recipient` / `accept_recipient_update` / `cancel_recipient_update` | Sender proposes a new recipient; the current recipient must accept. Pending rotations are queryable via `get_pending_recipient_update`. Acceptance updates both the stream record and recipient indexes atomically. |
 | **Auto-claim**   | `set_auto_claim` / `revoke_auto_claim` / `trigger_auto_claim` | Recipient opts in to permissionless final claim at `end_time` to a chosen destination |
 
@@ -153,6 +154,29 @@ Terminal states: `Completed`, `Cancelled`. Both may be closed via `close_complet
 In this "time-terminal" state, pause/resume is blocked, but withdrawal is always allowed regardless of previous pause status.
 
 **Cancelled stream closure rule**: A `Cancelled` stream may only be closed after the recipient has fully withdrawn the frozen accrued amount. Attempting to close a `Cancelled` stream with remaining claimable balance returns `ContractError::InvalidState`. This prevents storage cleanup from destroying recipient funds.
+
+### Auto-renew subscription streams (CONTRACT_VERSION 7)
+
+Auto-renewal supports recurring payroll and subscription payments without granting a
+relayer authority to redirect funds.
+
+1. The original sender calls `set_auto_renew(stream_id, sender, true)`. Only that sender
+    may enable or disable the setting. Cancelled streams cannot be enabled.
+2. After the recipient has fully withdrawn the stream and its status is `Completed`, any
+    caller may call `renew_stream(stream_id)`.
+3. Renewal pulls exactly the old stream's `deposit_amount` from the original sender to
+    the contract using the sender's pre-approved token allowance. The recipient is copied
+    from the completed stream; the caller supplies no source or destination address.
+4. The new stream starts at the current ledger timestamp and preserves the original
+    duration, rate, cliff offset, stream kind, memo, and withdrawal dust threshold. The
+    new stream is itself auto-renew-enabled.
+
+The consumed old opt-in is disabled before the token interaction. Successful renewal
+therefore cannot be replayed against the same completed stream. If the sender's token
+balance or allowance is insufficient, the call returns the dedicated
+`ContractError::AutoRenewFundingUnavailable` error and creates no new stream or event.
+Token transfer failures are atomic as well: state, liabilities, and the opt-in revert
+together with the failed transaction.
 
 ### Cancellation Semantics (Issue Scope)
 
@@ -757,6 +781,9 @@ contract.create_streams_relative(&sender, &params)?;
 | `cancel_stream_as_admin`  | Admin                         | `admin.require_auth()`                      |
 | `close_completed_stream`  | Anyone                        | None (permissionless terminal cleanup)     |
 | `top_up_stream`           | Funder address                | `funder.require_auth()`                     |
+| `set_auto_renew`          | Original stream sender        | `sender.require_auth()`                     |
+| `renew_stream`            | Anyone                        | None (permissionless; funds fixed to original sender) |
+| `get_auto_renew`          | Anyone                        | None (view)                                 |
 | `update_rate_per_second`  | Sender                        | `sender.require_auth()`                     |
 | `update_recipient`        | Recipient                     | `recipient.require_auth()`                  |
 | `decrease_rate_per_second`| Sender                        | `sender.require_auth()`                     |
@@ -1243,6 +1270,7 @@ Emitted when a sender successfully updates the streaming rate via `update_rate_p
 | `("rate_upd", stream_id)` | `RateUpdated` (struct payload)                | `update_rate_per_second`                          |
 | `("closed", stream_id)`    | `StreamEvent::StreamClosed(stream_id)`        | `close_completed_stream`                           |
 | `("top_up", stream_id)`    | `StreamToppedUp` (struct payload)             | `top_up_stream`                                    |
+| `("renewed", old_stream_id, new_stream_id)` | `StreamRenewed { old_stream_id, new_stream_id }` | `renew_stream` |
 
 ---
 
@@ -1294,6 +1322,8 @@ errors relevant to stream creation and timing.
 | `ContractError::InvalidState` (2)                                       | `cancel_stream`                    | Cancel completed/cancelled                    |
 | `"invalid state for stream closure"`                                    | `close_completed_stream`           | Close non-terminal (Active/Paused) stream    |
 | `ContractError::InvalidState` (2)                                       | `close_completed_stream`           | Close Cancelled stream with remaining claimable balance |
+| `ContractError::AutoRenewFundingUnavailable` (36)                      | `renew_stream`                     | Original sender balance or allowance is below deposit amount |
+| `ContractError::InvalidState` (2)                                       | `renew_stream`                     | Source is not Completed or auto-renew is disabled |
 | `"contract not initialised: missing config"`                            | Functions requiring config         | Config missing                                |
 
 ## Protocol-Level Pausing

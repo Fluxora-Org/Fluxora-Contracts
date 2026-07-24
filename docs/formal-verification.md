@@ -6,6 +6,14 @@ This document describes the Kani proof harnesses in Fluxora Contracts.
 - Located in `contracts/stream/src/accrual.rs` (and exercised via tests).
 - Proofs cover result bounds, monotonicity, and clamping.
 
+## Clock monotonicity and CliffOnly proofs (new)
+- Harnesses in `contracts/stream/tests/formal_verification_smoke.rs` under `kani_accrual_security`.
+  - `ledger_time_monotonic_guard`
+    - Proves `assert_ledger_time_monotonic` returns `Err(ClockRegression)` if and only if `current_ts < prev_ts` across the full symbolic `u64` domain.
+  - `cliff_only_accrual_exact_and_bounded`
+    - Proves a `StreamKind::CliffOnly` stream returns exactly `deposit_amount` at or after `cliff_time` and `0` before it across the full symbolic `i128`/`u64` domain.
+    - Proves the result remains within `[0, deposit_amount]` for every nonnegative symbolic deposit.
+
 ## Keeper-fee conservation proofs (new)
 - Pure helper: `compute_keeper_fee_split(gross, bps)` in `lib.rs`.
 - Harness: `keeper_fee_conservation` (in `formal_verification_smoke.rs` under `#[cfg(kani)]`).
@@ -34,6 +42,10 @@ This document describes the Kani proof harnesses in Fluxora Contracts.
 ```bash
 # Accrual (original)
 kani contracts/stream/src/accrual.rs --recursive
+
+# Clock monotonicity and CliffOnly accrual (via smoke harness)
+kani contracts/stream/tests/formal_verification_smoke.rs --harness ledger_time_monotonic_guard
+kani contracts/stream/tests/formal_verification_smoke.rs --harness cliff_only_accrual_exact_and_bounded
 
 # Fee + governance (via smoke harness)
 kani contracts/stream/tests/formal_verification_smoke.rs --harness keeper_fee_conservation
