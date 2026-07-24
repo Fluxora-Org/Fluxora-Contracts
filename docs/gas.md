@@ -89,13 +89,13 @@ The following table provides the CPU instruction counts for core operations.
 
 <!-- GAS_BASELINE_START -->
 {
-  "create_stream": 0,
-  "withdraw": 0,
+  "create_stream": 513118,
+  "withdraw": 521676,
   "batch_withdraw": {
-    "1": 0,
-    "10": 0,
-    "50": 0,
-    "100": 0
+    "1": 498415,
+    "10": 3466576,
+    "50": 18786049,
+    "100": 43337495
   },
   "keeper_cancel": {
     "partial_accrual": 0,
@@ -104,7 +104,7 @@ The following table provides the CPU instruction counts for core operations.
 }
 <!-- GAS_BASELINE_END -->
 
-*Note: Baselines are currently initialized to 0 and should be updated after the first successful run of `script/validate_gas.py` once the contract compiles.*
+*Baselines were captured from a clean run of `script/validate_gas.py` against `contracts/stream/tests/gas_regression.rs` on Rust 1.94.1 / soroban-env-host 21.2.1 (see #1014). Costs are deterministic CPU-instruction counts from the metered host and are stable across runs on the same toolchain/SDK pin. Update via the [review bar](#review-bar-for-baseline-increases) below.*
 
 ## Governance Operations
 

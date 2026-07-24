@@ -136,6 +136,116 @@ python script/check_snapshot_diff.py --base origin/main --head my-feature-branch
 - Exits with a non-zero code if security fields changed, preventing them from slipping through review unnoticed.
 
 
+## CI Snapshot Security-Field Diff Gate
+
+### What it is
+
+The **snapshot security-field diff gate** is a hard CI step (no
+`continue-on-error`) in the `test` job of `.github/workflows/ci.yml`. It
+runs `script/check_snapshot_diff.py` after the snapshot tests pass and
+**blocks merging** whenever a pull request (or push) touches a
+security-relevant field in any committed snapshot JSON under
+`contracts/stream/test_snapshots/`.
+
+### Security-relevant fields
+
+The script monitors changes to any JSON key that is a member of the
+`SECURITY_FIELDS` set defined in `check_snapshot_diff.py`:
+
+| Field / prefix | Why it matters |
+| -------------- | -------------- |
+| `auth`, `auths`, `require_auth`, `signatures` | Authorization requirements — changes here alter who can call a contract entry-point |
+| `events`, `topic`, `topics`, `data` | Emitted event payloads — changes affect off-chain indexers and audit trails |
+| `error`, `error_code`, `ContractError` | Error discriminants — changes can silently break client error handling |
+| `storage`, `state`, `DataKey` | On-chain storage layout — changes can corrupt existing ledger state |
+
+### How it runs in CI
+
+The step resolves the base ref automatically based on the event type:
+
+| Event | Base ref used |
+| ----- | ------------- |
+| `pull_request` | `origin/${{ github.base_ref }}` (the target branch tip) |
+| `push` | `HEAD~1` (the immediate parent commit) |
+| All other events | Step is skipped via the `if:` guard |
+
+The effective command executed by CI:
+
+```yaml
+# For pull_request events:
+python3 script/check_snapshot_diff.py --base "origin/${BASE_REF}"
+
+# For push events:
+python3 script/check_snapshot_diff.py --base "HEAD~1"
+```
+
+### Exit-code contract
+
+| Exit code | Meaning |
+| --------- | ------- |
+| `0` | No security-relevant snapshot changes detected — PR may proceed normally |
+| `1` | One or more security-relevant fields changed — **mandatory extra review required** |
+
+A non-zero exit code fails the `test` job immediately. The PR cannot be
+merged until either the change is reviewed and approved by a maintainer, or
+the diff is reverted.
+
+### Running the gate locally before pushing
+
+```bash
+# Compare your working branch against main (same as CI does for a PR):
+python3 script/check_snapshot_diff.py --base origin/main
+
+# Compare a specific pair of commits:
+python3 script/check_snapshot_diff.py --base origin/main --head feature/my-change
+
+# Compare current working tree against HEAD (quick local sanity check):
+python3 script/check_snapshot_diff.py
+```
+
+### What to do when the gate fires
+
+1. **Read the output** — the script prints which file and which JSON path
+   triggered the flag, for example:
+
+   ```
+   [WARNING] Security-relevant fields changed in: contracts/stream/test_snapshots/test/test_cancel_stream.1.json
+     - events[0].topic
+   Mandatory extra review required due to security-relevant snapshot changes.
+   ```
+
+2. **Determine intent** — is the change deliberate (a bug fix, new feature)
+   or accidental (leftover noise, test pollution)?
+
+3. **If deliberate** — document the change in the PR description, add an
+   entry to `CHANGELOG.md`, and request an explicit review from a maintainer
+   who can sign off on the security implications.
+
+4. **If accidental** — revert the snapshot changes:
+
+   ```bash
+   git checkout HEAD -- contracts/stream/test_snapshots/
+   ```
+
+5. **Re-run locally** to confirm the gate now passes before pushing:
+
+   ```bash
+   python3 script/check_snapshot_diff.py --base origin/main
+   ```
+
+### Security assumptions and design notes
+
+- The script receives only validated git ref strings; no user-controlled
+  input is interpolated into shell commands (the underlying `git diff` and
+  `git show` calls use argument lists, not shell strings).
+- Malformed JSON on either side of the diff is treated as an empty object
+  (`{}`); the structural delta is still evaluated, so a file that becomes
+  unparseable is not silently ignored.
+- The gate runs *after* `cargo test` snapshot validation, so it operates on
+  the committed snapshot state — not ephemeral test output.
+
+---
+
 ## Emergency Procedures
 
 ### Reverting Snapshot Changes
