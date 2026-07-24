@@ -11,6 +11,8 @@
 //! 2. Invoking V6 read paths and asserting correct deserialization.
 //! 3. Asserting that V6-only keys (discriminants 15–20) are absent on a
 //!    V5-seeded instance, confirming no phantom reads.
+//! 4. Cross-checking `CONTRACT_VERSION` against the live `DataKey` variant count
+//!    (currently 29) to ensure versioning discipline when new variants are added.
 //!
 //! # V5 discriminant table (frozen — must never change)
 //!
@@ -32,11 +34,42 @@
 //! |   13 | `OwnerTemplateIds(Address)` | Persistent |
 //! |   14 | `TotalLiabilities`          | Instance   |
 //!
-//! # V5 Stream struct (14 fields, no `memo`)
+//! # V6 discriminant table (discriminants 15–20)
 //!
-//! A V5-era `Stream` entry is represented in V6 as a `Stream` with `memo: None`.
-//! Soroban XDR struct decoding is positional and forward-compatible: a V6 decoder
-//! reading a V5-encoded struct sees the absent 15th field as `None`.
+//! | Disc | Variant                             | Storage    |
+//! |-----:|:------------------------------------|:-----------|
+//! |   15 | `WithdrawNonce(Address)`            | Persistent |
+//! |   16 | `PauseState`                        | Instance   |
+//! |   17 | `ReentrancyLock`                    | Instance   |
+//! |   18 | `RecipientStreamPage(Address, u32)` | Persistent |
+//! |   19 | `RecipientStreamPageCount(Address)` | Persistent |
+//! |   20 | `PendingRecipientUpdate(u64)`       | Persistent |
+//!
+//! # Post-V6 freeze additions (discriminants 21–28)
+//!
+//! | Disc | Variant                            | Storage    |
+//! |-----:|:-----------------------------------|:-----------|
+//! |   21 | `IdReservation(Address)`           | Instance   |
+//! |   22 | `MaxRatePerSecond`                 | Instance   |
+//! |   23 | `DelegatedWithdrawNonce(Address)`  | Persistent |
+//! |   24 | `LastPauseRecord(PauseKind)`       | Instance   |
+//! |   25 | `RotationHistory(u64)`             | Persistent |
+//! |   26 | `LastAccrualLedgerTimestamp`       | Instance   |
+//! |   27 | `PausedStreamCount`                | Instance   |
+//! |   28 | `TotalKeeperFeesPaid`              | Instance   |
+//!
+//! Total live `DataKey` variant count: **29** (discriminants 0–28).
+//!
+//! # Version Mapping Table (`CONTRACT_VERSION` => Expected DataKey Count)
+//!
+//! | CONTRACT_VERSION | Expected DataKey Count | Discriminants | Notes |
+//! |------------------|------------------------|---------------|-------|
+//! | 5                | 15                     | 0..=14        | V5 frozen layout |
+//! | 6                | 29                     | 0..=28        | V6 freeze (21) + 8 post-freeze additive variants |
+//!
+//! # Companion Documentation
+//! - `contracts/stream/src/checksum.rs` (WASM checksum & key layout documentation)
+//! - `docs/upgrade.md` (CONTRACT_VERSION policy & upgrade runbook)
 //!
 //! # Security assumptions tested
 //!
@@ -45,11 +78,13 @@
 //! - V5 persistent keys (`RecipientStreams`, `AutoClaimDestination`) are readable.
 //! - V6-only keys (discriminants 15–20) return absent/default on a V5-seeded instance.
 //! - No `None`-unwrap panics occur on any V6 read path when given V5 storage.
+//! - `CONTRACT_VERSION` matches the expected `DataKey` variant count (29).
 
 extern crate std;
 
 use fluxora_stream::{
-    Config, DataKey, FluxoraStream, FluxoraStreamClient, Stream, StreamStatus, CONTRACT_VERSION,
+    Config, DataKey, FluxoraStream, FluxoraStreamClient, PauseKind, Stream, StreamStatus,
+    CONTRACT_VERSION,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -772,3 +807,181 @@ fn version_entry_point_works_on_v5_seeded_instance() {
     let v = ctx.client.version();
     assert_eq!(v, CONTRACT_VERSION);
 }
+
+// ---------------------------------------------------------------------------
+// CONTRACT_VERSION vs DataKey variant count cross-check suite
+// ---------------------------------------------------------------------------
+
+/// Returns the documented expected `DataKey` variant count for a given `CONTRACT_VERSION`.
+///
+/// # Version Mapping Table
+///
+/// | CONTRACT_VERSION | Expected DataKey Variant Count | Discriminant Range | Notes |
+/// |------------------|--------------------------------|--------------------|-------|
+/// | 5                | 15                             | 0..=14             | V5 release freeze |
+/// | 6                | 29                             | 0..=28             | V6 freeze (21) + 8 post-freeze additive variants |
+///
+/// # Security Safeguard & Maintenance Protocol
+/// When a new `DataKey` variant is appended or `CONTRACT_VERSION` is bumped:
+/// 1. Update this function's match table to include the new mapping.
+/// 2. Update `all_live_datakey_variants()` to include a sample of the new variant.
+/// 3. Update prose docs & discriminant tests in `contracts/stream/src/checksum.rs`.
+/// 4. Update version history & upgrade strategy in `docs/upgrade.md`.
+pub fn expected_datakey_count_for_version(version: u32) -> usize {
+    match version {
+        5 => 15,
+        6 => 29,
+        other => panic!(
+            "Unhandled CONTRACT_VERSION = {other} in expected_datakey_count_for_version. \
+             When incrementing CONTRACT_VERSION, you must update the version mapping table in \
+             contracts/stream/tests/storage_key_compat.rs, contracts/stream/src/checksum.rs, \
+             and docs/upgrade.md."
+        ),
+    }
+}
+
+/// Constructs a vector containing sample instances of all 29 live `DataKey` variants in declaration order.
+///
+/// Includes an exhaustive `match` check on `DataKey` so that adding any new variant to `DataKey`
+/// without adding it here will produce a compile error.
+pub fn all_live_datakey_variants(env: &Env) -> vec::Vec<DataKey> {
+    let dummy_addr = Address::generate(env);
+    let dummy_pause_kind = PauseKind::Protocol;
+
+    let variants = vec![
+        env,
+        DataKey::Config,                                       // 0
+        DataKey::NextStreamId,                                 // 1
+        DataKey::Stream(0),                                    // 2
+        DataKey::RecipientStreams(dummy_addr.clone()),         // 3
+        DataKey::GlobalEmergencyPaused,                        // 4
+        DataKey::CreationPaused,                               // 5
+        DataKey::GlobalPauseReason,                            // 6
+        DataKey::GlobalPauseTimestamp,                         // 7
+        DataKey::GlobalPauseAdmin,                             // 8
+        DataKey::AutoClaimDestination(0),                      // 9
+        DataKey::NextTemplateId,                               // 10
+        DataKey::ActiveTemplateCount,                          // 11
+        DataKey::StreamTemplate(0),                            // 12
+        DataKey::OwnerTemplateIds(dummy_addr.clone()),         // 13
+        DataKey::TotalLiabilities,                             // 14
+        DataKey::WithdrawNonce(dummy_addr.clone()),            // 15
+        DataKey::PauseState,                                   // 16
+        DataKey::ReentrancyLock,                               // 17
+        DataKey::RecipientStreamPage(dummy_addr.clone(), 0),   // 18
+        DataKey::RecipientStreamPageCount(dummy_addr.clone()), // 19
+        DataKey::PendingRecipientUpdate(0),                    // 20
+        DataKey::IdReservation(dummy_addr.clone()),            // 21
+        DataKey::MaxRatePerSecond,                             // 22
+        DataKey::DelegatedWithdrawNonce(dummy_addr.clone()),    // 23
+        DataKey::LastPauseRecord(dummy_pause_kind),            // 24
+        DataKey::RotationHistory(0),                            // 25
+        DataKey::LastAccrualLedgerTimestamp,                   // 26
+        DataKey::PausedStreamCount,                            // 27
+        DataKey::TotalKeeperFeesPaid,                          // 28
+    ];
+
+    // Exhaustive match check to ensure compile-time coverage of all DataKey variants.
+    for k in variants.iter() {
+        match k {
+            DataKey::Config => {}
+            DataKey::NextStreamId => {}
+            DataKey::Stream(_) => {}
+            DataKey::RecipientStreams(_) => {}
+            DataKey::GlobalEmergencyPaused => {}
+            DataKey::CreationPaused => {}
+            DataKey::GlobalPauseReason => {}
+            DataKey::GlobalPauseTimestamp => {}
+            DataKey::GlobalPauseAdmin => {}
+            DataKey::AutoClaimDestination(_) => {}
+            DataKey::NextTemplateId => {}
+            DataKey::ActiveTemplateCount => {}
+            DataKey::StreamTemplate(_) => {}
+            DataKey::OwnerTemplateIds(_) => {}
+            DataKey::TotalLiabilities => {}
+            DataKey::WithdrawNonce(_) => {}
+            DataKey::PauseState => {}
+            DataKey::ReentrancyLock => {}
+            DataKey::RecipientStreamPage(_, _) => {}
+            DataKey::RecipientStreamPageCount(_) => {}
+            DataKey::PendingRecipientUpdate(_) => {}
+            DataKey::IdReservation(_) => {}
+            DataKey::MaxRatePerSecond => {}
+            DataKey::DelegatedWithdrawNonce(_) => {}
+            DataKey::LastPauseRecord(_) => {}
+            DataKey::RotationHistory(_) => {}
+            DataKey::LastAccrualLedgerTimestamp => {}
+            DataKey::PausedStreamCount => {}
+            DataKey::TotalKeeperFeesPaid => {}
+        }
+    }
+
+    variants
+}
+
+/// Machine-checks that `CONTRACT_VERSION` matches the expected `DataKey` variant count.
+///
+/// # Machine-Checked Enforcement
+///
+/// Fails loudly with an explicit error message if the live `DataKey` variant count
+/// diverges from `expected_datakey_count_for_version(CONTRACT_VERSION)`.
+///
+/// Cross-references:
+/// - `contracts/stream/src/checksum.rs`
+/// - `docs/upgrade.md`
+#[test]
+fn test_contract_version_matches_datakey_variant_count() {
+    let env = Env::default();
+    let live_variants = all_live_datakey_variants(&env);
+    let live_count = live_variants.len() as usize;
+
+    let expected_count = expected_datakey_count_for_version(CONTRACT_VERSION);
+
+    assert_eq!(
+        live_count,
+        expected_count,
+        "CRITICAL VERSION DRIFT: CONTRACT_VERSION ({}) expects {} DataKey variants, \
+         but the live DataKey enum has {} variants. \
+         When adding a new DataKey variant, you MUST update: \
+         1. expected_datakey_count_for_version() in contracts/stream/tests/storage_key_compat.rs \
+         2. all_live_datakey_variants() in contracts/stream/tests/storage_key_compat.rs \
+         3. Prose tables & variant count tests in contracts/stream/src/checksum.rs \
+         4. Version history & policy in docs/upgrade.md \
+         5. CONTRACT_VERSION in contracts/stream/src/lib.rs if required by versioning policy.",
+        CONTRACT_VERSION,
+        expected_count,
+        live_count
+    );
+}
+
+/// Edge case: V5 version mapping expected count is 15.
+#[test]
+fn test_expected_datakey_count_mapping_v5() {
+    assert_eq!(expected_datakey_count_for_version(5), 15);
+}
+
+/// Edge case: V6 version mapping expected count is 29.
+#[test]
+fn test_expected_datakey_count_mapping_v6() {
+    assert_eq!(expected_datakey_count_for_version(6), 29);
+}
+
+/// Edge case: Unmapped/future versions trigger panic forcing deliberate mapping update.
+#[test]
+#[should_panic(expected = "Unhandled CONTRACT_VERSION = 999")]
+fn test_expected_datakey_count_mapping_unhandled_version_panics() {
+    expected_datakey_count_for_version(999);
+}
+
+/// Assert exact live variant count is 29 (discriminants 0..=28).
+#[test]
+fn test_datakey_variant_count_exact_29() {
+    let env = Env::default();
+    let live_variants = all_live_datakey_variants(&env);
+    assert_eq!(
+        live_variants.len() as usize,
+        29,
+        "DataKey variant count changed without updating storage_key_compat test suite."
+    );
+}
+

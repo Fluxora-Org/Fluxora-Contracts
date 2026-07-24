@@ -635,6 +635,8 @@ pub struct Stream {
     pub last_withdraw_ledger: u32,
     /// Optional structured metadata emitted for indexer consumption.
     pub metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
+    /// Optional compliance witness authorized to cancel via signed attestation.
+    pub witness: Option<Address>,
     /// Ledger sequence number of the last rate change (or creation).
     /// Used to enforce MIN_RATE_INTERVAL_LEDGERS cooldown.
     pub last_rate_change_ledger: u32,
@@ -673,6 +675,8 @@ pub struct CreateStreamParams {
     pub kind: StreamKind,
     /// Optional structured metadata emitted for indexer consumption.
     pub metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
+    /// Optional compliance witness authorized to cancel via signed attestation.
+    pub witness: Option<Address>,
 }
 
 /// Parameters for creating a payment stream with relative (offset-based) times.
@@ -792,9 +796,14 @@ pub enum DataKey {
     DelegatedWithdrawNonce(Address),
     /// Last pause record for stream-level or protocol-level pause.
     LastPauseRecord(PauseKind),
-    LastAccrualLedgerTimestamp,
-    /// Per-stream rotation audit history.
+    /// Rotation history for recipient/sender changes on a stream.
     RotationHistory(u64),
+    /// Last ledger timestamp observed for accrual clock-regression detection.
+    LastAccrualLedgerTimestamp,
+    /// Protocol-wide count of streams currently in `StreamStatus::Paused` (`u64`, instance storage).
+    PausedStreamCount,
+    /// Aggregate sum of all keeper fees paid out via `keeper_cancel` (`i128`, instance storage).
+    TotalKeeperFeesPaid,
 }
 
 /// Type of pause.

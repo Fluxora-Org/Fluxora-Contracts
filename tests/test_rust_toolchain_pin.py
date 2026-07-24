@@ -61,7 +61,12 @@ def test_parse_rustc_version_rejects_unexpected_output():
 
 
 def test_script_succeeds_when_rustc_matches_pin():
-    env = {**os.environ, "RUSTC_VERSION_OUTPUT": "rustc 1.94.1 (abcdef 2026-01-01)"}
+    env = {
+        **os.environ,
+        "RUSTC_VERSION_OUTPUT": "rustc 1.94.1 (abcdef 2026-01-01)",
+        "RUSTUP_TARGET_LIST_OUTPUT": "wasm32-unknown-unknown",
+        "RUSTUP_COMPONENT_LIST_OUTPUT": "rustfmt\nclippy",
+    }
     result = subprocess.run(
         [sys.executable, str(SCRIPT)],
         capture_output=True,
@@ -73,7 +78,12 @@ def test_script_succeeds_when_rustc_matches_pin():
 
 
 def test_script_fails_when_rustc_does_not_match_pin():
-    env = {**os.environ, "RUSTC_VERSION_OUTPUT": "rustc 1.95.0 (abcdef 2026-02-01)"}
+    env = {
+        **os.environ,
+        "RUSTC_VERSION_OUTPUT": "rustc 1.95.0 (abcdef 2026-02-01)",
+        "RUSTUP_TARGET_LIST_OUTPUT": "wasm32-unknown-unknown",
+        "RUSTUP_COMPONENT_LIST_OUTPUT": "rustfmt\nclippy",
+    }
     result = subprocess.run(
         [sys.executable, str(SCRIPT)],
         capture_output=True,
@@ -84,6 +94,40 @@ def test_script_fails_when_rustc_does_not_match_pin():
     assert "Rust version mismatch: expected 1.94.1, got 1.95.0" in result.stderr
 
 
+def test_script_fails_when_missing_targets():
+    env = {
+        **os.environ,
+        "RUSTC_VERSION_OUTPUT": "rustc 1.94.1 (abcdef 2026-01-01)",
+        "RUSTUP_TARGET_LIST_OUTPUT": "x86_64-unknown-linux-gnu",
+        "RUSTUP_COMPONENT_LIST_OUTPUT": "rustfmt\nclippy",
+    }
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT)],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 1
+    assert "Missing required targets: wasm32-unknown-unknown" in result.stderr
+
+
+def test_script_fails_when_missing_components():
+    env = {
+        **os.environ,
+        "RUSTC_VERSION_OUTPUT": "rustc 1.94.1 (abcdef 2026-01-01)",
+        "RUSTUP_TARGET_LIST_OUTPUT": "wasm32-unknown-unknown",
+        "RUSTUP_COMPONENT_LIST_OUTPUT": "rustfmt",
+    }
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT)],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 1
+    assert "Missing required components: clippy" in result.stderr
+
+
 # The tests above spawn a subprocess to exercise the CLI end-to-end, but code
 # executed in a child process is invisible to the coverage tracer running in
 # this process. The tests below call `main()`/`rustc_version()` directly
@@ -92,6 +136,8 @@ def test_script_fails_when_rustc_does_not_match_pin():
 
 def test_main_succeeds_in_process_when_rustc_matches_pin(monkeypatch, capsys):
     monkeypatch.setenv("RUSTC_VERSION_OUTPUT", "rustc 1.94.1 (abcdef 2026-01-01)")
+    monkeypatch.setenv("RUSTUP_TARGET_LIST_OUTPUT", "wasm32-unknown-unknown")
+    monkeypatch.setenv("RUSTUP_COMPONENT_LIST_OUTPUT", "rustfmt\nclippy")
     assert verify_rust_version.main() == 0
     captured = capsys.readouterr()
     assert "Rust version matches pinned 1.94.1" in captured.out
@@ -99,6 +145,8 @@ def test_main_succeeds_in_process_when_rustc_matches_pin(monkeypatch, capsys):
 
 def test_main_fails_in_process_when_rustc_does_not_match_pin(monkeypatch, capsys):
     monkeypatch.setenv("RUSTC_VERSION_OUTPUT", "rustc 1.95.0 (abcdef 2026-02-01)")
+    monkeypatch.setenv("RUSTUP_TARGET_LIST_OUTPUT", "wasm32-unknown-unknown")
+    monkeypatch.setenv("RUSTUP_COMPONENT_LIST_OUTPUT", "rustfmt\nclippy")
     assert verify_rust_version.main() == 1
     captured = capsys.readouterr()
     assert "Rust version mismatch: expected 1.94.1, got 1.95.0" in captured.err
@@ -106,6 +154,8 @@ def test_main_fails_in_process_when_rustc_does_not_match_pin(monkeypatch, capsys
 
 def test_main_fails_when_rustc_version_output_is_unparseable(monkeypatch, capsys):
     monkeypatch.setenv("RUSTC_VERSION_OUTPUT", "not rust at all")
+    monkeypatch.setenv("RUSTUP_TARGET_LIST_OUTPUT", "wasm32-unknown-unknown")
+    monkeypatch.setenv("RUSTUP_COMPONENT_LIST_OUTPUT", "rustfmt\nclippy")
     assert verify_rust_version.main() == 1
     captured = capsys.readouterr()
     assert "::error::" in captured.err
