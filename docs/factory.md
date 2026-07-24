@@ -109,12 +109,22 @@ forwarded verbatim to `FluxoraStream::create_stream`:
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `stream_kind` | `fluxora_stream::StreamKind` | `StreamKind::Linear` (standard time-vesting) or `StreamKind::CliffOnly` (full deposit unlocked at cliff). |
-| `memo` | `Option<soroban_sdk::Bytes>` | Optional opaque correlation bytes stored on the stream and readable via `get_stream_memo`. Length validation is delegated to the stream contract. |
+| `memo` | `Option<soroban_sdk::Bytes>` | Optional opaque correlation bytes stored on the stream and readable via `get_stream_memo`. Length is validated early by the factory against `fluxora_stream::MAX_MEMO_BYTES` returning `FactoryError::InvalidMemo` before the cross-contract call. |
 
 All policy checks (allowlist, deposit cap, minimum duration, time invariants,
-rate bounds) are enforced **before** the cross-contract call, regardless of
+rate bounds, memo length) are enforced **before** the cross-contract call, regardless of
 `stream_kind`. A `CliffOnly` stream is subject to exactly the same treasury
 policy guards as a `Linear` stream.
+
+## Memo Length Validation
+
+The factory enforces an early memo length guard (Guard 8) on both `create_stream` and `create_streams`:
+
+| Condition | Shared Constant | Rejection Error |
+|-----------|-----------------|-----------------|
+| `memo.len() > fluxora_stream::MAX_MEMO_BYTES` | `fluxora_stream::MAX_MEMO_BYTES` (256 bytes) | `FactoryError::InvalidMemo` |
+
+This guard directly references the shared constant `fluxora_stream::MAX_MEMO_BYTES` at compile time, guaranteeing that any update to the stream contract's maximum memo length is automatically reflected in factory validation without risk of version drift or stale limits. Oversized memos are rejected on the factory error surface before initiating cross-contract calls or side-effects.
 
 For `CliffOnly` streams the `rate_per_second` argument is ignored — the stream
 contract sets the effective rate to `0` internally.
@@ -315,3 +325,33 @@ This document is aligned with the current implementation as follows:
 - `contracts/stream/tests/factory_policy.rs` covers policy input validation,
   factory policy gates, `CliffOnly` kind forwarding, memo forwarding,
   append-only error discriminants, and admin-guarded policy updates.
+
+## Storage Layout & DataKey Collision Audit
+
+The `fluxora_factory` contract uses Soroban storage for configuration and state management. The `DataKey` enum defines all storage keys used by the contract.
+
+### DataKey Enumeration & Parameterization
+
+| DataKey Variant | Storage Type | Payload / Parameter | Value Type | Description |
+|-----------------|--------------|---------------------|------------|-------------|
+| `Admin` | Instance | None (unit variant) | `Address` | Address of the factory administrator. |
+| `StreamContract` | Instance | None (unit variant) | `Address` | Address of the underlying `FluxoraStream` contract primitive. |
+| `MaxDepositCap` | Instance | None (unit variant) | `i128` | Maximum allowable `deposit_amount` per stream or aggregate batch. |
+| `MinDuration` | Instance | None (unit variant) | `u64` | Minimum allowable stream duration (`end_time - start_time`). |
+| `BatchCapEnforced` | Instance | None (unit variant) | `bool` | Flag toggling aggregate batch deposit cap enforcement in `create_streams`. |
+| `CreationPaused` | Instance | None (unit variant) | `bool` | Global pause flag for stream creation via factory. |
+| `MinRatePerSecond` | Instance | None (unit variant) | `i128` | Optional inclusive lower bound on stream rate per second. |
+| `MaxRatePerSecond` | Instance | None (unit variant) | `i128` | Optional inclusive upper bound on stream rate per second. |
+| `Allowlist(Address)` | Persistent | `Address` | `bool` | Per-recipient eligibility flag (`true` if allowlisted). |
+| `FactoryStreamIds` | Persistent | None (unit variant) | `Vec<u64>` | Persistent ordered list of all stream IDs created through this factory. |
+
+### Collision Analysis
+
+Soroban serializes `contracttype` enums by tagging each variant with a distinct discriminant index (0, 1, 2...) combined with its parameter payload during ScVal XDR encoding:
+
+1. **Discriminant Isolation**: Each unit variant (`Admin`, `StreamContract`, `MaxDepositCap`, `MinDuration`, `BatchCapEnforced`, `FactoryStreamIds`, `CreationPaused`, `MinRatePerSecond`, `MaxRatePerSecond`) produces a unique XDR tuple `(VariantTag, ())`.
+2. **Tuple Parameter Isolation**: Parameterized variants (like `Allowlist(Address)`) produce XDR tuples `(VariantTag, Address)`. Because `VariantTag` for `Allowlist` is distinct from all other variants, an `Allowlist(Address)` key can never collide with any unit variant or future parameterized variant with a different tag.
+3. **Parameter Uniqueness**: Within `Allowlist(Address)`, each unique `Address` yields a distinct serialized key.
+
+Therefore, key collisions are mathematically impossible across all valid inputs.
+

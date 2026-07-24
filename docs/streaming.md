@@ -16,8 +16,7 @@ When changing the contract:
 - Update snapshot tests if externally visible behavior changes
 - No behavior change required for doc-only updates
 
-**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `close_cancelled_stream`, `close_completed_stream`, `compute_keeper_fee_split`, `delete_stream_template`, `get_global_emergency_paused`, `get_paused_stream_count`, `get_pending_recipient_update`, `get_protocol_fees_accrued`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `global_resume`, `keeper_cancel`, `set_contract_paused`, `set_global_emergency_paused`, `version`, `migration_v5_to_v6`, `set_max_rate_per_second`.
-**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `delete_stream_template`, `get_global_emergency_paused`, `get_keeper_fee_split`, `get_pending_recipient_update`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `global_resume`, `keeper_cancel`, `set_contract_paused`, `set_global_emergency_paused`, `version`, `migration_v5_to_v6`, `set_max_rate_per_second`.
+**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `close_cancelled_stream`, `close_completed_stream`, `compute_keeper_fee_split`, `delete_stream_template`, `get_auto_renew`, `get_global_emergency_paused`, `get_keeper_fee_split`, `get_paused_stream_count`, `get_pending_recipient_update`, `get_protocol_fees_accrued`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `get_total_liabilities`, `global_resume`, `keeper_cancel`, `migration_v5_to_v6`, `renew_stream`, `set_auto_renew`, `set_contract_paused`, `set_global_emergency_paused`, `set_max_rate_per_second`, `version`.
 
 ## Externally Visible Assurances
 
@@ -95,10 +94,14 @@ From **CONTRACT_VERSION 3**, integrators can register **relative** schedule skel
 From **CONTRACT_VERSION 4**, the contract supports distinct streaming styles, governed by the `StreamKind` field on the stream configuration:
 
 - **Linear** (Default/Legacy): Accrues tokens continuously and linearly over time at `rate_per_second` once the stream has started, subject to a standard cliff window (during which nothing can be withdrawn).
-- **[CliffOnly](#cliff-only-streams)**: A one-shot, instant unlock stream variant. Tokens do not accrue continuously over time. Instead:
+- **CliffOnly**: A one-shot, instant unlock stream variant. Tokens do not accrue continuously over time. Instead:
   - Before the `cliff_time`, `0` tokens are accrued/withdrawable (all funds are locked).
   - At or after the `cliff_time`, the total `deposit_amount` is immediately and fully unlocked and made claimable by the recipient.
   - To enforce the single-unlock model, `rate_per_second` is forced to `0` during creation and all subsequent mutation/adjustment requests are rejected.
+- **CliffSlope**: A post-cliff linear accrual variant. Tokens accrue linearly only after the cliff:
+  - Before the `cliff_time`, `0` tokens are accrued/withdrawable (all funds are locked).
+  - At or after the `cliff_time`, accrual begins from `0` and grows at `rate_per_second` until the `end_time` (or until `deposit_amount` is reached).
+  - Rate changes and schedule mutations are rejected, similar to `CliffOnly`.
 
 ### ID pre-allocation (`reserve_stream_ids`) — issue #584
 
@@ -140,8 +143,11 @@ Off-chain orchestrators and indexers that build payment batches often need to kn
 | **Cancellation** | `cancel_stream` / `cancel_stream_as_admin` / `bulk_cancel_streams` | Refunds unstreamed amount; frozen accrued stays for recipient         |
 | **Withdrawal**   | `withdraw` / `withdraw_to` / `batch_withdraw` | Recipient pulls accrued tokens; allowed on Paused if past `end_time`  |
 | **Completion**   | Automatic                                     | When `withdrawn_amount == deposit_amount`, status becomes `Completed` |
+| **Auto-renewal** | `set_auto_renew` / `renew_stream`             | Sender opts in; anyone can trigger the next identical schedule from the sender's allowance |
 | **Rotation**     | `update_recipient` / `accept_recipient_update` / `cancel_recipient_update` | Sender proposes a new recipient; the current recipient must accept. Pending rotations are queryable via `get_pending_recipient_update`. Acceptance updates both the stream record and recipient indexes atomically. |
+| **Transfer**     | `transfer_claim_ownership`                    | Claim owner (or recipient if not set) transfers the sole withdrawal rights to a new owner immediately. |
 | **Auto-claim**   | `set_auto_claim` / `revoke_auto_claim` / `trigger_auto_claim` | Recipient opts in to permissionless final claim at `end_time` to a chosen destination |
+| **Delegation**   | `delegate_recipient_share`                    | Recipient delegates a portion of their future stream accrual (in basis points) to a new recipient. Creates a child stream and reduces parent rate. Bounded to a maximum depth of 3 to prevent unbounded chains. Cyclical delegation is prevented. |
 
 ### State Transitions
 
@@ -153,6 +159,29 @@ Terminal states: `Completed`, `Cancelled`. Both may be closed via `close_complet
 In this "time-terminal" state, pause/resume is blocked, but withdrawal is always allowed regardless of previous pause status.
 
 **Cancelled stream closure rule**: A `Cancelled` stream may only be closed after the recipient has fully withdrawn the frozen accrued amount. Attempting to close a `Cancelled` stream with remaining claimable balance returns `ContractError::InvalidState`. This prevents storage cleanup from destroying recipient funds.
+
+### Auto-renew subscription streams (CONTRACT_VERSION 7)
+
+Auto-renewal supports recurring payroll and subscription payments without granting a
+relayer authority to redirect funds.
+
+1. The original sender calls `set_auto_renew(stream_id, sender, true)`. Only that sender
+    may enable or disable the setting. Cancelled streams cannot be enabled.
+2. After the recipient has fully withdrawn the stream and its status is `Completed`, any
+    caller may call `renew_stream(stream_id)`.
+3. Renewal pulls exactly the old stream's `deposit_amount` from the original sender to
+    the contract using the sender's pre-approved token allowance. The recipient is copied
+    from the completed stream; the caller supplies no source or destination address.
+4. The new stream starts at the current ledger timestamp and preserves the original
+    duration, rate, cliff offset, stream kind, memo, and withdrawal dust threshold. The
+    new stream is itself auto-renew-enabled.
+
+The consumed old opt-in is disabled before the token interaction. Successful renewal
+therefore cannot be replayed against the same completed stream. If the sender's token
+balance or allowance is insufficient, the call returns the dedicated
+`ContractError::AutoRenewFundingUnavailable` error and creates no new stream or event.
+Token transfer failures are atomic as well: state, liabilities, and the opt-in revert
+together with the failed transaction.
 
 ### Cancellation Semantics (Issue Scope)
 
@@ -281,6 +310,19 @@ stateDiagram-v2
     Cancelled --> [*]
     Completed --> [*]
 ```
+
+### Contract-owned senders (vaults, multisigs)
+
+The `create_stream` function and its variants authenticate the `sender` uniformly via `sender.require_auth()`. This pattern seamlessly supports both externally-owned Stellar accounts and smart contract addresses (such as treasury vaults or multisig contracts) without any special-cased code paths.
+
+When a contract creates a stream:
+- **Authorization**: The calling contract naturally authorizes the action via the standard Soroban authentication framework.
+- **Funding**: Tokens are debited from the contract's token balance (the contract must have sufficient funds).
+- **Management**: The contract acts as the stream's sender for all lifecycle operations, meaning only the contract can call `top_up_stream`, `cancel_stream`, `decrease_rate_per_second`, etc.
+- **Refunds**: If a stream is cancelled or shortened, the unstreamed tokens are refunded directly to the sender's contract address.
+
+**Caveat**: Ensure that `sender == recipient` validation (if enforced off-chain or via UI) and refund logic correctly account for contract addresses exactly as they would for standard accounts. The streaming protocol treats them identically.
+
 
 ### Sequence Diagram
 
@@ -413,6 +455,30 @@ Ledger-backed accrual paths cache the last observed accrual timestamp in instanc
 
 `get_claimable_at(stream_id, timestamp)` is exempt because the timestamp is caller-supplied simulation input rather than `ledger().timestamp()`.
 
+### Ledger Sequence vs. Timestamp: Sequence-Independence Guarantee
+
+**Guarantee:** Stream accrual is defined entirely in terms of `env.ledger().timestamp()` (wall-clock seconds). The ledger sequence number (block height) has **no influence** on the amount accrued or the amount withdrawable.
+
+**Why this matters:** On the Stellar network the ledger sequence number and the UNIX timestamp advance independently. A burst of rapid ledger closes can push the sequence far ahead while the timestamp barely moves (e.g., 10 000 ledger closes in 400 seconds). Conversely, a slow-close period may hold the sequence near-constant while wall-clock time advances normally. Any accidental dependency on `env.ledger().sequence()` inside the accrual path would make recipient payout amounts sensitive to network block-production rate rather than actual elapsed time — a fund-accuracy issue.
+
+**Where sequence numbers are used (intentionally):**
+
+| Usage | Location | Purpose |
+|---|---|---|
+| `MIN_PAUSE_INTERVAL_LEDGERS` | `pause_stream` / `resume_stream` | DoS cooldown: prevents rapid pause/resume toggling (17 ledgers) |
+| `MIN_WITHDRAW_INTERVAL_LEDGERS` | `withdraw` / `batch_withdraw` / `delegated_withdraw` | DoS guard: prevents excessive ledger I/O from high-frequency polling (1 ledger) |
+| `last_withdraw_ledger` | Per-stream storage | Tracks last successful withdrawal for the frequency guard above |
+| `last_pause_toggle_ledger` | Per-stream storage | Tracks last pause/resume toggle for the cooldown guard above |
+
+These are all **operational rate-limiting** mechanisms. None of them affect the mathematical accrual formula in `accrual.rs`.
+
+**Verified by tests (`contracts/stream/tests/clock_monotonicity.rs`):**
+
+- `sequence_advances_fast_timestamp_static_accrual_is_timestamp_only` — advances sequence to 10 000 while holding timestamp at 400 s. Asserts that `calculate_accrued` and `withdraw` both return 400, not 10 000. Any accidental sequence-to-accrual coupling would cause this test to fail.
+- `timestamp_advances_sequence_static_normal_accrual_works` — holds sequence at 1 (the minimum needed to pass the withdrawal-frequency DoS gate) while advancing timestamp to 700 s. Asserts that accrual equals 700 and withdrawal succeeds, confirming that low-sequence environments do not suppress accrual.
+
+**No accidental dependency found:** A review of `contracts/stream/src/accrual.rs` and `contracts/stream/src/lib.rs` confirmed that every call to `calculate_accrued_amount_checkpointed` passes `env.ledger().timestamp()` as the `now` argument. There is no code path that passes `env.ledger().sequence()` (or any function of it) into the accrual formula. The sequence-number usages listed above are in separate, clearly labelled guard blocks.
+
 ### Status-Specific Behavior Matrix
 
 | Status    | Time Source            | Expected Behavior                      |
@@ -456,6 +522,16 @@ From **CONTRACT_VERSION 6**, all withdrawal operations enforce a minimum ledger 
 **Invariant**: `current_ledger >= last_withdraw_ledger` at all times (guaranteed by monotonic ledger progression).
 
 **Example**: If a withdrawal succeeds at ledger 100, the next withdrawal can occur at ledger 117 or later (100 + 17 = 117).
+
+### Rate Adjustment Throttle
+
+From **CONTRACT_VERSION 7** (or with issue #1018), both `update_rate_per_second` and `decrease_rate_per_second` enforce a minimum ledger interval to prevent spam and rapid rate oscillation within a single ledger window.
+
+- **Constant**: `MIN_RATE_INTERVAL_LEDGERS = 17` (approximately 1.5 minutes)
+- **Enforcement**: Checks `current_ledger - last_rate_change_ledger >= MIN_RATE_INTERVAL_LEDGERS`.
+- **Error**: Returns `ContractError::RateCooldownActive` (error code 36) if the throttle is violated.
+- **First Change Exempt**: The throttle does not block the very first rate change on a freshly created stream (`last_rate_change_ledger` is initialized to 0 at stream creation).
+- **State Update**: `last_rate_change_ledger` is updated to `env.ledger().sequence()` only after a successful rate adjustment.
 
 ### Frontend: get_claimable_at (simulation)
 
@@ -757,6 +833,9 @@ contract.create_streams_relative(&sender, &params)?;
 | `cancel_stream_as_admin`  | Admin                         | `admin.require_auth()`                      |
 | `close_completed_stream`  | Anyone                        | None (permissionless terminal cleanup)     |
 | `top_up_stream`           | Funder address                | `funder.require_auth()`                     |
+| `set_auto_renew`          | Original stream sender        | `sender.require_auth()`                     |
+| `renew_stream`            | Anyone                        | None (permissionless; funds fixed to original sender) |
+| `get_auto_renew`          | Anyone                        | None (view)                                 |
 | `update_rate_per_second`  | Sender                        | `sender.require_auth()`                     |
 | `update_recipient`        | Recipient                     | `recipient.require_auth()`                  |
 | `decrease_rate_per_second`| Sender                        | `sender.require_auth()`                     |
@@ -771,6 +850,7 @@ contract.create_streams_relative(&sender, &params)?;
 | `get_delegated_nonce`        | Anyone                     | None (view)                                 |
 | `release_id_reservation`     | Reservation holder         | `holder.require_auth()`                     |
 | `reclaim_expired_id_reservation` | Anyone                 | None (permissionless cleanup)               |
+| `get_total_liabilities`      | Anyone                     | None (view)                                 |
 
 **Note:** Sender-managed functions (`pause_stream`, `resume_stream`, `cancel_stream`) require sender auth. Admin uses separate `_as_admin` entry points.
 
@@ -1243,6 +1323,7 @@ Emitted when a sender successfully updates the streaming rate via `update_rate_p
 | `("rate_upd", stream_id)` | `RateUpdated` (struct payload)                | `update_rate_per_second`                          |
 | `("closed", stream_id)`    | `StreamEvent::StreamClosed(stream_id)`        | `close_completed_stream`                           |
 | `("top_up", stream_id)`    | `StreamToppedUp` (struct payload)             | `top_up_stream`                                    |
+| `("renewed", old_stream_id, new_stream_id)` | `StreamRenewed { old_stream_id, new_stream_id }` | `renew_stream` |
 
 ---
 
@@ -1294,6 +1375,8 @@ errors relevant to stream creation and timing.
 | `ContractError::InvalidState` (2)                                       | `cancel_stream`                    | Cancel completed/cancelled                    |
 | `"invalid state for stream closure"`                                    | `close_completed_stream`           | Close non-terminal (Active/Paused) stream    |
 | `ContractError::InvalidState` (2)                                       | `close_completed_stream`           | Close Cancelled stream with remaining claimable balance |
+| `ContractError::AutoRenewFundingUnavailable` (36)                      | `renew_stream`                     | Original sender balance or allowance is below deposit amount |
+| `ContractError::InvalidState` (2)                                       | `renew_stream`                     | Source is not Completed or auto-renew is disabled |
 | `"contract not initialised: missing config"`                            | Functions requiring config         | Config missing                                |
 
 ## Protocol-Level Pausing
@@ -1470,9 +1553,15 @@ Where:
 
 ### Access Control Table Entry
 
-| Function        | Authorized Caller | Auth Check              |
-| --------------- | ----------------- | ----------------------- |
-| `sweep_excess`  | Admin             | `admin.require_auth()`  |
+| Function                 | Authorized Caller | Auth Check              |
+| ------------------------ | ----------------- | ----------------------- |
+| `sweep_excess`           | Admin             | `admin.require_auth()`  |
+| `get_total_liabilities`  | Anyone            | None (view)             |
+
+`get_total_liabilities` is a read-only view that returns the sum of all outstanding stream
+deposits tracked in `DataKey::TotalLiabilities`. It is used to verify that the contract's
+token balance always covers what it owes across all active streams, and to compute the
+`excess` amount available to `sweep_excess`.
 
 ### Event
 
@@ -1721,3 +1810,211 @@ pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), ContractError>
   caller, plus a legacy `upgrade` topic event for backward-compatible indexers.
   See `docs/events.md` for the exact event shapes.
 
+---
+
+## Offer-Then-Accept Stream Creation
+
+Every existing creation entry point (`create_stream`, `create_streams`, etc.)
+requires only the **sender's** authorization — a stream can be force-created
+onto any recipient address without their consent. The offer-then-accept flow
+adds a two-phase alternative where the **recipient must explicitly accept**
+before accrual begins.
+
+### Motivation
+
+- Recipients may not want unexpected streams added to their index (spam, tax
+  implications, compliance).
+- Senders can propose terms off-chain first, then commit the deposit on-chain.
+- Offers that are never accepted are automatically refundable by the sender.
+
+### Lifecycle
+
+```
+Sender calls create_stream_offer
+    ↓  deposit escrowed, PendingStreamOffer stored, RecipientStreams NOT updated
+    │
+    ├─► Recipient calls accept_stream_offer
+    │       → offer removed, Active Stream created, RecipientStreams updated
+    │         start_time re-anchored to max(offer.start_time, now)
+    │
+    ├─► Recipient calls reject_stream_offer
+    │       → offer removed, deposit refunded to sender
+    │
+    ├─► Sender calls cancel_stream_offer  (any time, including after expiry)
+    │       → offer removed, deposit refunded to sender
+    │
+    └─► expiry_time elapsed
+            → accept_stream_offer returns OfferExpired (36)
+              sender can still cancel; recipient can still reject
+```
+
+### Entry Points
+
+#### `create_stream_offer`
+
+```rust
+pub fn create_stream_offer(
+    env: Env,
+    sender: Address,
+    recipient: Address,
+    deposit_amount: i128,
+    rate_per_second: i128,
+    start_time: u64,
+    cliff_time: u64,
+    end_time: u64,
+    withdraw_dust_threshold: i128,
+    memo: Option<Bytes>,
+    kind: StreamKind,
+    metadata: Option<Map<Bytes, Bytes>>,
+    expiry_time: Option<u64>,
+) -> Result<u64, ContractError>
+```
+
+**Authorization:** `sender.require_auth()`
+
+**Behavior:**
+- Validates all parameters using the same rules as `create_stream`.
+- If `expiry_time` is `Some(t)` and `t <= now`, returns `InvalidParams`.
+- Allocates an `offer_id` from the global stream ID counter.
+- Stores a `StreamOffer` in `DataKey::PendingStreamOffer(offer_id)`.
+- Adds `offer_id` to `DataKey::RecipientPendingOffers(recipient)`.
+- Pulls `deposit_amount` tokens from `sender` into escrow (CEI: state saved first).
+- Emits `StreamOfferCreated` (topic `offr_crt`).
+- Returns the `offer_id`.
+
+**Does NOT:** start accrual, add to `RecipientStreams`, track liabilities.
+
+#### `accept_stream_offer`
+
+```rust
+pub fn accept_stream_offer(
+    env: Env,
+    recipient: Address,
+    offer_id: u64,
+) -> Result<u64, ContractError>
+```
+
+**Authorization:** `recipient.require_auth()`
+
+**Behavior:**
+- Returns `OfferNotFound` if no pending offer exists.
+- Returns `OfferWrongRecipient` if `recipient != offer.recipient`.
+- Returns `OfferExpired` if `now > offer.expiry_time`.
+- Re-anchors timing: `effective_start = max(offer.start_time, now)`. Cliff
+  offset and stream duration are preserved relative to `effective_start`.
+- Removes the offer from storage and the recipient pending-offers index.
+- Creates an `Active` stream using the same `offer_id` as stream ID.
+- Adds stream to `RecipientStreams` index and tracks liability.
+- Emits `StreamCreated` (topic `created`) and `StreamOfferAccepted` (topic `offr_acc`).
+- No token transfer — deposit was already escrowed at offer creation.
+
+#### `reject_stream_offer`
+
+```rust
+pub fn reject_stream_offer(
+    env: Env,
+    recipient: Address,
+    offer_id: u64,
+) -> Result<(), ContractError>
+```
+
+**Authorization:** `recipient.require_auth()`
+
+Removes the offer and pushes the escrowed deposit back to `offer.sender`.
+Emits `StreamOfferCancelled` (topic `offr_cxl`).
+
+#### `cancel_stream_offer`
+
+```rust
+pub fn cancel_stream_offer(
+    env: Env,
+    sender: Address,
+    offer_id: u64,
+) -> Result<(), ContractError>
+```
+
+**Authorization:** `sender.require_auth()`
+
+Returns `OfferWrongSender` if `sender != offer.sender`. Otherwise removes the
+offer and refunds the deposit. Can be called even after `expiry_time` has elapsed.
+Emits `StreamOfferCancelled` (topic `offr_cxl`).
+
+#### `get_stream_offer` (query)
+
+```rust
+pub fn get_stream_offer(env: Env, offer_id: u64) -> Result<StreamOffer, ContractError>
+```
+
+Returns the full `StreamOffer` struct. Returns `OfferNotFound` once the offer
+has been accepted, rejected, or cancelled.
+
+#### `get_recipient_pending_offers` (query)
+
+```rust
+pub fn get_recipient_pending_offers(env: Env, recipient: Address) -> Vec<u64>
+```
+
+Returns the sorted list of pending offer IDs for `recipient`. Empty if none.
+
+### Start-Time Re-Anchoring
+
+When a recipient accepts an offer, the contract re-anchors timing to prevent
+a stream from starting in the past:
+
+```
+effective_start = max(offer.start_time, ledger.timestamp())
+cliff_offset    = offer.cliff_time - offer.start_time
+effective_cliff = effective_start + cliff_offset
+duration        = offer.end_time  - offer.start_time
+effective_end   = effective_start + duration
+```
+
+The cliff offset and duration are **always preserved** regardless of how much
+time has elapsed. This means a 12-month stream with a 6-month cliff will still
+run for exactly 12 months with a 6-month cliff from the acceptance timestamp.
+
+### New Error Codes
+
+| Code | Name | Meaning |
+|------|------|---------|
+| 36 | `OfferNotFound` | No pending offer with this ID |
+| 37 | `OfferExpired` | `now > offer.expiry_time` |
+| 38 | `OfferWrongRecipient` | Caller is not the intended recipient |
+| 39 | `OfferWrongSender` | Caller is not the original sender |
+
+### New Events
+
+| Topic | Payload struct | Emitted by |
+|-------|---------------|------------|
+| `offr_crt` | `StreamOfferCreated` | `create_stream_offer` |
+| `offr_acc` | `StreamOfferAccepted` | `accept_stream_offer` |
+| `offr_cxl` | `StreamOfferCancelled` | `reject_stream_offer`, `cancel_stream_offer` |
+
+### Security Notes
+
+- **CEI ordering** is strictly maintained: all state changes occur before token
+  transfers in every entry point.
+- The offer is removed from storage **before** the stream is created in
+  `accept_stream_offer`, preventing double-acceptance if a malicious token
+  re-enters the contract.
+- Offer IDs share the global stream ID counter, guaranteeing globally unique
+  identifiers with no collision risk between offers and active streams.
+- Unaccepted offers do not appear in `RecipientStreams` and do not contribute
+  to `TotalLiabilities`, so they cannot inflate recipient-facing views or the
+  contract's liability accounting.
+
+---
+
+## Pooled Streams (Multi-Recipient)
+
+Fluxora supports multi-recipient pooled streams where multiple beneficiaries receive pro-rata shares of a single deposited amount.
+
+### `create_pooled_stream`
+
+Creates a pooled stream. The `recipients` list takes pairs of `(Address, u32)` defining the recipient and their share weight. The maximum number of recipients is `MAX_POOL_RECIPIENTS` (100). The stream operates similarly to a single-recipient stream, but its `is_pooled` flag is set to true.
+
+### `withdraw_from_pool`
+
+Withdrawals from a pooled stream are independent. When a recipient calls `withdraw_from_pool(stream_id, caller)`, the contract calculates the total accrued tokens and multiplies by the caller's proportional share `(caller_share / total_shares)`. The contract independently tracks withdrawn amounts for each pool member using `DataKey::PooledStreamWithdrawn`.
+
+**Rounding:** The calculation uses strict integer math (`checked_mul` followed by `checked_div`), rounding down on remainders to avoid over-withdrawing the pool's deposit.

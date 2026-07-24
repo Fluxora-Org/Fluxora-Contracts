@@ -577,6 +577,51 @@ export class WebSocketHub {
 
   // ─── Introspection ───────────────────────────────────────────────────────
 
+  /**
+   * Get the number of clients currently subscribed to a stream.
+   * Returns 0 if the stream has no subscribers or has never been subscribed to.
+   */
+  getSubscriberCount(streamId: string): number {
+    return this.streamSubscriptions.get(streamId)?.size ?? 0;
+  }
+
+  /**
+   * Force-unsubscribe every client from a stream and remove it from hub state.
+   * Each affected client's subscribedStreams set is cleaned up so the client's
+   * subscription state remains consistent. Optionally sends a notification
+   * message to each affected client before removing the subscription.
+   */
+  forceUnsubscribeAll(streamId: string, notify = true): void {
+    const subscribers = this.streamSubscriptions.get(streamId);
+    if (!subscribers || subscribers.size === 0) {
+      this.streamSubscriptions.delete(streamId);
+      return;
+    }
+
+    // Snapshot the set before mutating it
+    const affectedClientIds = Array.from(subscribers);
+
+    for (const clientId of affectedClientIds) {
+      const client = this.clients.get(clientId);
+      if (client) {
+        client.subscribedStreams.delete(streamId);
+        if (notify) {
+          this.sendToClient(clientId, {
+            type: 'stream_unavailable',
+            streamId,
+            payload: { reason: 'Stream is no longer available', streamId }
+          });
+        }
+      }
+    }
+
+    this.streamSubscriptions.delete(streamId);
+    logger.info('Force-unsubscribed all clients from stream', { streamId, clientCount: affectedClientIds.length });
+  }
+
+  /**
+   * Get statistics about the hub
+   */
   getStats(): {
     totalClients: number;
     totalSubscriptions: number;

@@ -27,7 +27,27 @@ Always create a new branch for your work. Do not commit directly to the `main` b
 - **Run Linters:** Ensure your code is properly formatted and passes all linting checks before opening a PR.
 - **Update Documentation:** If you are adding a new feature or changing an API, please update the relevant documentation (and NatSpec comments) alongside your code.
 
-### 4. Snapshot Test Workflow
+### 4. Rust toolchain pin
+
+This repository pins Rust to 1.94.1 in [rust-toolchain.toml](rust-toolchain.toml) so local builds stay aligned with CI and the WASM artifacts remain reproducible. The pin is especially important for Soroban/WASM builds, keeps the checksum verification logic in [contracts/stream/src/checksum.rs](contracts/stream/src/checksum.rs) consistent, and supports the checksum workflow described in [docs/maintainer-security-checklist.md](docs/maintainer-security-checklist.md).
+
+Before you start working locally, install the pinned toolchain and the required components:
+
+```bash
+rustup toolchain install 1.94.1
+rustup component add rustfmt clippy --toolchain 1.94.1
+rustup target add wasm32-unknown-unknown --toolchain 1.94.1
+```
+
+To verify that your local toolchain matches the repository pin, run:
+
+```bash
+python3 script/verify_rust_version.py
+```
+
+If the check fails, install the pinned toolchain and rerun the command before opening a PR. The automated enforcement layer for this workflow lives in [tests/test_rust_toolchain_pin.py](tests/test_rust_toolchain_pin.py).
+
+### 5. Snapshot Test Workflow
 
 When your changes affect contract behavior:
 
@@ -60,7 +80,7 @@ When your changes affect contract behavior:
 
 See [Snapshot Test Documentation](docs/snapshot-tests.md) for complete guidance.
 
-### 5. Opening a Pull Request
+### 6. Opening a Pull Request
 
 1. Push your changes to your fork.
 2. Open a Pull Request against the `main` branch of the upstream repository.

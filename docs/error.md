@@ -38,6 +38,7 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `ReservationNotFound` | 24 | No ID reservation exists for the specified holder | `release_id_reservation`, `reclaim_expired_id_reservation` |
 | `ReservationStillActive` | 25 | Reservation has not yet expired and cannot be reclaimed | `reclaim_expired_id_reservation` |
 | `ReservationNotExpirable` | 26 | Reservation has no expiry and cannot be reclaimed | `reclaim_expired_id_reservation` |
+| `ReservationAlreadyActive` | 34 | A reservation is already active for this caller | `reserve_stream_ids` |
 | `PauseReasonTooLong` | 27 | Pause reason string exceeds `MAX_PAUSE_REASON_BYTES` | `pause_protocol` |
 | `ClockRegression` | 28 | Ledger-backed accrual observed a timestamp lower than the previous accrual timestamp | `calculate_accrued`, `get_withdrawable`, `withdraw`, `withdraw_to`, `batch_withdraw`, `batch_withdraw_to`, rate changes, `cancel_stream`, auto-claim paths |
 | `MetadataTooLarge` | 29 | Stream metadata exceeds size limits | `create_stream`, `create_streams`, `create_streams_partial` |
@@ -45,6 +46,7 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `PauseCooldownActive` | 32 | Stream pause cooldown period is still active | `pause_stream` |
 | `WithdrawalTooFrequent` | 33 | Withdrawal attempted before minimum interval elapsed | `withdraw`, `delegated_withdraw`, `batch_withdraw` |
 | `KeeperGracePeriodNotElapsed` | 34 | Keeper cancellation grace period has not elapsed | `keeper_cancel` |
+| `InvalidDustThreshold` | 35 | Withdraw dust threshold is negative or exceeds deposit amount | `create_stream`, `create_streams`, `create_streams_partial`, `create_stream_relative`, `create_stream_from_template` |
 
 Non-error enum values used by stream creation and accrual:
 
@@ -557,6 +559,7 @@ match client.try_batch_withdraw(&recipient, &stream_ids) {
 - `delegated_withdraw` called with an invalid ed25519 signature
 - Signature has expired (timestamp check failed)
 - Nonce mismatch (replay protection)
+- Cross-stream confusion (signature crafted for a different `stream_id` but submitted against another)
 - Signature does not match the expected payload structure
 
 **Affected Roles**:
@@ -689,6 +692,40 @@ match client.try_delegated_withdraw(&relayer, &stream_id, &signature, &nonce, &e
 **Definition**: `pause_protocol` received a reason string longer than `MAX_PAUSE_REASON_BYTES`.
 
 **Client Action**: Shorten the operator-facing pause reason and retry the pause transaction.
+
+---
+
+### InvalidDustThreshold (35)
+
+**Definition**: Withdraw dust threshold is negative or exceeds deposit amount.
+
+**Trigger Conditions**:
+| Parameter | Invalid When |
+|-----------|--------------|
+| `withdraw_dust_threshold < 0` | Threshold must be non-negative |
+| `withdraw_dust_threshold > deposit_amount` | Threshold cannot exceed total deposit |
+
+**Affected Roles**:
+| Role | Can Trigger | Notes |
+|------|------------|-------|
+| Sender | Yes | `create_stream`, `create_streams`, `create_streams_partial`, `create_stream_relative`, `create_stream_from_template` |
+
+**Client Action**:
+```rust
+match client.try_create_stream(..., &withdraw_dust_threshold, ...) {
+    Ok(stream_id) => { /* success */ }
+    Err(ContractError::InvalidDustThreshold) => {
+        // Ensure withdraw_dust_threshold >= 0
+        // Ensure withdraw_dust_threshold <= deposit_amount
+        // withdraw_dust_threshold == deposit_amount is allowed (boundary case)
+    }
+    Err(e) => { /* handle other errors */ }
+}
+```
+
+**Success Semantics**: Returns `u64` stream_id with valid dust threshold.
+
+**Integrator Note**: The dust threshold enforces a minimum withdrawable amount to prevent dust accumulation. The threshold must be in the range `[0, deposit_amount]`. When `withdraw_dust_threshold == deposit_amount`, withdrawals are only allowed when the full deposit is withdrawable (e.g., at stream end or after final drain).
 
 ---
 
