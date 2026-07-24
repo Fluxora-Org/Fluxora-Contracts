@@ -621,10 +621,7 @@ fn test_keeper_cancel_eligibility_check_reads_live_state_strictly_before_mutatio
     // Confirm live state check prevented any mutation or fee payment
     assert_eq!(ctx.token.balance(&ctx.keeper), keeper_bal_before);
     assert_eq!(ctx.client().get_total_liabilities(), liabilities_before);
-    assert_eq!(
-        ctx.client().get_protocol_fees_accrued(),
-        keeper_fees_before
-    );
+    assert_eq!(ctx.client().get_protocol_fees_accrued(), keeper_fees_before);
 }
 
 #[test]
