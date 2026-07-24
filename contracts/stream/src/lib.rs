@@ -185,7 +185,10 @@ const MIN_PAUSE_INTERVAL_LEDGERS: u32 = 17;
 /// resume/cancel/complete transitions; `get_paused_stream_count()` O(1) view added;
 /// duplicate `ContractError` discriminant 23 resolved and the previously-missing
 /// variants declared.
-pub const CONTRACT_VERSION: u32 = 6;
+///
+/// Bumped to 7: permissionless auto-renewal entrypoints and the append-only
+/// `DataKey::AutoRenewEnabled` opt-in were added.
+pub const CONTRACT_VERSION: u32 = 7;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -413,6 +416,8 @@ pub enum ContractError {
     KeeperGracePeriodNotElapsed = 34,
     /// Withdraw dust threshold is negative or exceeds deposit amount.
     InvalidDustThreshold = 35,
+    /// The sender cannot fund an auto-renewal with the available balance and allowance.
+    AutoRenewFundingUnavailable = 36,
 }
 
 #[contracttype]
@@ -604,6 +609,16 @@ pub struct StreamToppedUp {
     /// `end_time` after the top-up (unchanged by top-up itself; included so
     /// indexers can correlate with any subsequent `extend_stream_end_time` call).
     pub new_end_time: u64,
+}
+
+/// Emitted when a completed stream is renewed with a fresh deposit.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamRenewed {
+    /// The completed stream whose schedule was renewed.
+    pub old_stream_id: u64,
+    /// The newly created stream receiving the fresh deposit.
+    pub new_stream_id: u64,
 }
 
 /// Emitted when the stream sender is rotated via `transfer_sender`.
@@ -994,6 +1009,8 @@ pub enum DataKey {
     ///
     /// Added in issue #623. Appended at the end to preserve existing discriminants.
     TotalKeeperFeesPaid,
+    /// Per-stream auto-renew opt-in flag. Appended to preserve storage discriminants.
+    AutoRenewEnabled(u64),
 }
 
 // ---------------------------------------------------------------------------
@@ -1030,6 +1047,23 @@ fn current_accrual_timestamp(env: &Env) -> Result<u64, ContractError> {
     env.storage().instance().set(&key, &now);
     bump_instance_ttl(env);
     Ok(now)
+}
+
+fn auto_renew_enabled(env: &Env, stream_id: u64) -> bool {
+    env.storage()
+        .persistent()
+        .get(&DataKey::AutoRenewEnabled(stream_id))
+        .unwrap_or(false)
+}
+
+fn set_auto_renew_enabled(env: &Env, stream_id: u64, enabled: bool) {
+    let key = DataKey::AutoRenewEnabled(stream_id);
+    env.storage().persistent().set(&key, &enabled);
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
 }
 
 fn acquire_reentrancy_lock(env: &Env) -> Result<(), ContractError> {
@@ -4739,6 +4773,127 @@ impl FluxoraStream {
         Ok(())
     }
 
+    /// Enable or disable permissionless renewal for a stream.
+    ///
+    /// Only the original sender may change this setting. The setting is stored
+    /// separately from the stream record so existing stream storage remains
+    /// readable after upgrading the contract. A completed stream may be
+    /// enabled before its first renewal; cancelled streams cannot be renewed.
+    pub fn set_auto_renew(
+        env: Env,
+        stream_id: u64,
+        sender: Address,
+        enabled: bool,
+    ) -> Result<(), ContractError> {
+        require_not_globally_paused(&env)?;
+        let stream = load_stream(&env, stream_id)?;
+        sender.require_auth();
+        if stream.status == StreamStatus::Cancelled {
+            return Err(ContractError::InvalidState);
+        }
+        if sender != stream.sender {
+            return Err(ContractError::Unauthorized);
+        }
+
+        set_auto_renew_enabled(&env, stream_id, enabled);
+        Ok(())
+    }
+
+    /// Return whether the sender has enabled permissionless renewal.
+    pub fn get_auto_renew(env: Env, stream_id: u64) -> Result<bool, ContractError> {
+        load_stream(&env, stream_id)?;
+        Ok(auto_renew_enabled(&env, stream_id))
+    }
+
+    /// Renew a completed stream using the original sender's pre-approved funds.
+    ///
+    /// This entrypoint is permissionless: any caller may trigger it after the
+    /// sender has opted in. The only possible source of renewal funds is the
+    /// original sender, and the recipient and schedule are copied from the
+    /// completed stream. The new stream starts at the current ledger timestamp
+    /// with the same duration, rate, cliff offset, deposit, memo, kind, and dust
+    /// threshold. Auto-renew remains enabled on the new stream.
+    ///
+    /// The sender must have both sufficient token balance and allowance for the
+    /// contract. These checks return `AutoRenewFundingUnavailable` before any
+    /// state or token mutation; a transfer failure also reverts the transaction.
+    pub fn renew_stream(env: Env, stream_id: u64) -> Result<u64, ContractError> {
+        require_not_globally_paused(&env)?;
+        let stream = load_stream(&env, stream_id)?;
+
+        if stream.status != StreamStatus::Completed || !auto_renew_enabled(&env, stream_id) {
+            return Err(ContractError::InvalidState);
+        }
+
+        let now = current_accrual_timestamp(&env)?;
+        let duration = stream
+            .end_time
+            .checked_sub(stream.start_time)
+            .ok_or(ContractError::InvalidState)?;
+        let cliff_offset = stream
+            .cliff_time
+            .checked_sub(stream.start_time)
+            .ok_or(ContractError::InvalidState)?;
+        let new_end_time = now
+            .checked_add(duration)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        let new_cliff_time = now
+            .checked_add(cliff_offset)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+
+        Self::validate_stream_params(
+            &env,
+            &stream.sender,
+            &stream.recipient,
+            stream.deposit_amount,
+            stream.rate_per_second,
+            now,
+            now,
+            new_cliff_time,
+            new_end_time,
+            stream.kind,
+        )?;
+
+        let token_address = get_token(&env)?;
+        let token_client = token::Client::new(&env, &token_address);
+        let contract_address = env.current_contract_address();
+        if token_client.balance(&stream.sender) < stream.deposit_amount
+            || token_client.allowance(&stream.sender, &contract_address) < stream.deposit_amount
+        {
+            return Err(ContractError::AutoRenewFundingUnavailable);
+        }
+
+        // Disable the consumed opt-in before the external call. Atomic
+        // transaction rollback restores it if token transfer or persistence fails.
+        set_auto_renew_enabled(&env, stream_id, false);
+        pull_token(&env, &stream.sender, stream.deposit_amount)?;
+
+        let new_stream_id = Self::persist_new_stream(
+            &env,
+            stream.sender.clone(),
+            stream.recipient.clone(),
+            stream.deposit_amount,
+            stream.rate_per_second,
+            now,
+            new_cliff_time,
+            new_end_time,
+            stream.withdraw_dust_threshold,
+            stream.memo.clone(),
+            stream.kind,
+        )?;
+        set_auto_renew_enabled(&env, new_stream_id, true);
+
+        env.events().publish(
+            (symbol_short!("renewed"), stream_id, new_stream_id),
+            StreamRenewed {
+                old_stream_id: stream_id,
+                new_stream_id,
+            },
+        );
+
+        Ok(new_stream_id)
+    }
+
     /// Close (archive) a completed stream to reduce long-term storage.
     ///
     /// Permanently removes the stream's persistent storage entry. Only streams in
@@ -4805,6 +4960,9 @@ impl FluxoraStream {
 
         // Remove stream from recipient's index before deleting the stream
         remove_stream_from_recipient_index(&env, &stream.recipient, stream_id);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::AutoRenewEnabled(stream_id));
         remove_stream(&env, stream_id);
 
         Ok(())
@@ -4865,6 +5023,9 @@ impl FluxoraStream {
 
         // Remove from recipient index and delete stream storage.
         remove_stream_from_recipient_index(&env, &stream.recipient, stream_id);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::AutoRenewEnabled(stream_id));
         remove_stream(&env, stream_id);
 
         Ok(())
