@@ -2,6 +2,7 @@
 name = "fluxora_stream"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.94.1"
 description = "Fluxora USDC streaming contract for Stellar Soroban"
 # Issue #206 — global emergency pause: scaffold branch. Instance pause flag + admin setter to follow.
 

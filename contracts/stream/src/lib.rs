@@ -120,6 +120,10 @@ pub const MAX_METADATA_VALUE_BYTES: u32 = 128;
 /// This matches Stellar's default pause-time precedent (see `docs/cancel-stream-semantics.md`).
 const MIN_PAUSE_INTERVAL_LEDGERS: u32 = 17;
 
+/// Minimum interval (in ledgers) between successive rate adjustment operations.
+/// Prevents rapid rate updates within the same ledger window.
+const MIN_RATE_INTERVAL_LEDGERS: u32 = 17;
+
 // Contract version
 // ---------------------------------------------------------------------------
 
@@ -185,7 +189,10 @@ const MIN_PAUSE_INTERVAL_LEDGERS: u32 = 17;
 /// resume/cancel/complete transitions; `get_paused_stream_count()` O(1) view added;
 /// duplicate `ContractError` discriminant 23 resolved and the previously-missing
 /// variants declared.
-pub const CONTRACT_VERSION: u32 = 6;
+///
+/// Bumped to 7: permissionless auto-renewal entrypoints and the append-only
+/// `DataKey::AutoRenewEnabled` opt-in were added.
+pub const CONTRACT_VERSION: u32 = 7;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -397,6 +404,7 @@ pub enum ContractError {
     ReservationNotFound = 24,
     ReservationNotExpirable = 25,
     ReservationStillActive = 26,
+    ReservationAlreadyActive = 34,
     /// Ledger-backed accrual observed a timestamp lower than the previous accrual timestamp.
     ClockRegression = 28,
     /// Metadata payload exceeds the allowed size.
@@ -413,6 +421,8 @@ pub enum ContractError {
     KeeperGracePeriodNotElapsed = 34,
     /// Withdraw dust threshold is negative or exceeds deposit amount.
     InvalidDustThreshold = 35,
+    /// The sender cannot fund an auto-renewal with the available balance and allowance.
+    AutoRenewFundingUnavailable = 36,
 }
 
 #[contracttype]
@@ -604,6 +614,16 @@ pub struct StreamToppedUp {
     /// `end_time` after the top-up (unchanged by top-up itself; included so
     /// indexers can correlate with any subsequent `extend_stream_end_time` call).
     pub new_end_time: u64,
+}
+
+/// Emitted when a completed stream is renewed with a fresh deposit.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamRenewed {
+    /// The completed stream whose schedule was renewed.
+    pub old_stream_id: u64,
+    /// The newly created stream receiving the fresh deposit.
+    pub new_stream_id: u64,
 }
 
 /// Emitted when the stream sender is rotated via `transfer_sender`.
@@ -832,6 +852,52 @@ pub struct Page {
     /// Next cursor for pagination (0 if no more pages)
     pub next_cursor: u64,
 }
+
+/// Paginated aggregate health report for a sender's entire stream portfolio.
+///
+/// Returned by `get_sender_portfolio_health`. Each call processes up to
+/// `MAX_PAGE_SIZE` (100) streams from the sender's index and accumulates
+/// underfunded, expired, and healthy counts. Clients iterate by passing
+/// `next_cursor` back as `cursor` until `next_cursor == 0`.
+///
+/// # Health classification (per stream, evaluated at query time)
+///
+/// | Classification | Condition |
+/// |---|---|
+/// | `underfunded` | `checkpointed_amount + rate × (end − checkpoint) > deposit_amount` |
+/// | `expired` | `now >= end_time` AND status is `Active` or `Paused` |
+/// | `healthy` | not underfunded AND not expired AND status is `Active` or `Paused` |
+///
+/// Terminal streams (`Completed`, `Cancelled`) are excluded from all three counters
+/// because they no longer represent an ongoing funding obligation.
+///
+/// # Pagination
+///
+/// Mirrors `get_recipient_streams_paginated`: the cursor is the stream ID at
+/// which to resume (inclusive). Start with `cursor = 0` to begin from the first
+/// stream. When `next_cursor == 0` in the response, all pages have been consumed.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PortfolioHealthPage {
+    /// Number of underfunded streams on this page.
+    /// A stream is underfunded when its deposit cannot cover the remaining
+    /// obligations at the current rate through `end_time`.
+    pub underfunded_count: u32,
+    /// Number of expired streams on this page.
+    /// A stream is expired when the current time has passed `end_time` but the
+    /// stream has not yet been closed (status is still `Active` or `Paused`).
+    pub expired_count: u32,
+    /// Number of fully healthy streams on this page.
+    /// A stream is healthy when it is active/paused, not underfunded, and not expired.
+    pub healthy_count: u32,
+    /// Cursor to pass as `cursor` in the next call for continuation.
+    /// `0` when all pages have been returned.
+    pub next_cursor: u64,
+    /// Stream IDs evaluated on this page (sorted ascending, at most `MAX_PAGE_SIZE`).
+    /// Callers that only need aggregate counts can ignore this field.
+    pub stream_ids: soroban_sdk::Vec<u64>,
+}
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct CreateStreamParams {
@@ -995,6 +1061,21 @@ pub enum DataKey {
     ///
     /// Added in issue #623. Appended at the end to preserve existing discriminants.
     TotalKeeperFeesPaid,
+    /// Per-sender stream index (persistent `Vec<u64>`, sorted ascending by stream_id).
+    ///
+    /// Mirrors `RecipientStreams(Address)` on the sender side. Maintained by:
+    /// - `persist_new_stream` / batch flush in `create_streams` (add)
+    /// - `close_completed_stream` / `close_cancelled_stream` (remove)
+    ///
+    /// Only streams that have been fully closed are removed. Streams in `Cancelled`
+    /// state remain in the index until the storage is reclaimed by `close_*_stream`.
+    /// This ensures the portfolio-health view can report on in-flight cancelled
+    /// streams whose recipients have not yet withdrawn accrued funds.
+    ///
+    /// Added in issue #sender-portfolio-health. Appended to preserve existing discriminants.
+    SenderStreams(Address),
+    /// Per-stream auto-renew opt-in flag. Appended to preserve storage discriminants.
+    AutoRenewEnabled(u64),
 }
 
 // ---------------------------------------------------------------------------
@@ -1031,6 +1112,23 @@ fn current_accrual_timestamp(env: &Env) -> Result<u64, ContractError> {
     env.storage().instance().set(&key, &now);
     bump_instance_ttl(env);
     Ok(now)
+}
+
+fn auto_renew_enabled(env: &Env, stream_id: u64) -> bool {
+    env.storage()
+        .persistent()
+        .get(&DataKey::AutoRenewEnabled(stream_id))
+        .unwrap_or(false)
+}
+
+fn set_auto_renew_enabled(env: &Env, stream_id: u64, enabled: bool) {
+    let key = DataKey::AutoRenewEnabled(stream_id);
+    env.storage().persistent().set(&key, &enabled);
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
 }
 
 fn acquire_reentrancy_lock(env: &Env) -> Result<(), ContractError> {
@@ -1378,6 +1476,65 @@ fn remove_stream_from_recipient_index(env: &Env, recipient: &Address, stream_id:
 }
 
 // ---------------------------------------------------------------------------
+// Sender stream index helpers
+// ---------------------------------------------------------------------------
+
+/// Load the sorted list of stream IDs for a sender.
+///
+/// Returns an empty `Vec` when the sender has no indexed streams.
+/// TTL is bumped on every read to keep the entry alive.
+fn load_sender_streams(env: &Env, sender: &Address) -> soroban_sdk::Vec<u64> {
+    let key = DataKey::SenderStreams(sender.clone());
+    let streams: soroban_sdk::Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+
+    if !streams.is_empty() {
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+    streams
+}
+
+/// Persist the sender stream index (maintains sorted order).
+fn save_sender_streams(env: &Env, sender: &Address, streams: &soroban_sdk::Vec<u64>) {
+    let key = DataKey::SenderStreams(sender.clone());
+    env.storage().persistent().set(&key, streams);
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+}
+
+/// Insert a stream ID into the sender's index, maintaining ascending sort order.
+/// No-op if the ID is already present.
+fn add_stream_to_sender_index(env: &Env, sender: &Address, stream_id: u64) {
+    let mut streams = load_sender_streams(env, sender);
+    let insert_pos = match streams.binary_search(stream_id) {
+        Ok(_) => return, // already present – idempotent
+        Err(pos) => pos,
+    };
+    streams.insert(insert_pos, stream_id);
+    save_sender_streams(env, sender, &streams);
+}
+
+/// Remove a stream ID from the sender's index.
+/// No-op if the ID is not present.
+fn remove_stream_from_sender_index(env: &Env, sender: &Address, stream_id: u64) {
+    let mut streams = load_sender_streams(env, sender);
+    if let Ok(idx) = streams.binary_search(stream_id) {
+        streams.remove(idx);
+        save_sender_streams(env, sender, &streams);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Liability tracking (total escrow owed to recipients)
 // ---------------------------------------------------------------------------
 
@@ -1705,12 +1862,15 @@ impl FluxoraStream {
             last_pause_toggle_ledger: 0,
             last_withdraw_ledger: 0,
             metadata: None,
+            last_rate_change_ledger: 0,
         };
 
         save_stream(env, &stream);
 
         // Add stream to recipient's index (maintains sorted order by stream_id)
         add_stream_to_recipient_index(env, &recipient, stream_id, Some(end_time));
+        // Add stream to sender's portfolio index.
+        add_stream_to_sender_index(env, &sender, stream_id);
 
         // Track liability: the full deposit is owed to the recipient until withdrawn/refunded.
         let liabilities = read_total_liabilities(env)
@@ -1785,6 +1945,7 @@ impl FluxoraStream {
             last_pause_toggle_ledger: 0,
             last_withdraw_ledger: 0,
             metadata: None,
+            last_rate_change_ledger: 0,
         };
 
         save_stream(env, &stream);
@@ -2360,6 +2521,19 @@ impl FluxoraStream {
                 existing.insert(insert_pos, id);
             }
             save_recipient_streams(&env, &recipient, &existing, None);
+        }
+
+        // Flush sender index once for the whole batch (O(1) read + write for the sender).
+        {
+            let mut existing = load_sender_streams(&env, &sender);
+            for id in created_ids.iter() {
+                let insert_pos = match existing.binary_search(id) {
+                    Ok(pos) => pos,
+                    Err(pos) => pos,
+                };
+                existing.insert(insert_pos, id);
+            }
+            save_sender_streams(&env, &sender, &existing);
         }
 
         Ok(created_ids)
@@ -3099,12 +3273,18 @@ impl FluxoraStream {
             return Err(ContractError::InvalidState);
         }
 
+        let key = DataKey::PendingRecipientUpdate(stream_id);
         env.storage().persistent().set(
-            &DataKey::PendingRecipientUpdate(stream_id),
+            &key,
             &PendingRecipientUpdate {
                 stream_id,
                 proposed_recipient: new_recipient,
             },
+        );
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
         );
 
         Ok(())
@@ -3169,6 +3349,7 @@ impl FluxoraStream {
     ///
     /// Transition: propose → cancel. Returns `InvalidState` when no pending update exists.
     pub fn cancel_recipient_update(env: Env, stream_id: u64) -> Result<(), ContractError> {
+        require_not_globally_paused(&env)?;
         let stream = load_stream(&env, stream_id)?;
         Self::require_stream_sender(&stream.sender);
         if !env
@@ -3569,7 +3750,9 @@ impl FluxoraStream {
     /// - `stream_id`: Stream to withdraw from.
     /// - `relayer`: Address submitting the transaction (pays fees; no special privilege).
     /// - `recipient_public_key`: Raw 32-byte ed25519 public key of the recipient.
-    /// - `nonce`: Replay-protection counter; must equal the stored nonce for this recipient.
+    /// - `nonce`: Replay-protection counter. Note: nonces are scoped **per-recipient**, not per-stream.
+    ///   A shared nonce counter prevents parallel replays across all streams owned by the recipient.
+    ///   Cross-stream confusion is prevented because the `stream_id` is included in the signed payload.
     /// - `deadline`: Ledger timestamp after which the signature is rejected.
     /// - `expected_minimum_amount`: Minimum withdrawable amount the recipient accepts.
     ///   Pass `0` to accept any positive amount.
@@ -4241,8 +4424,15 @@ impl FluxoraStream {
         require_not_globally_paused(&env)?;
         let mut stream = load_stream(&env, stream_id)?;
 
-        if stream.kind == StreamKind::CliffOnly {
+        if stream.kind != StreamKind::Linear {
             return Err(ContractError::UnsupportedStreamKind);
+        }
+
+        if stream.last_rate_change_ledger > 0 {
+            let min_ledger = stream.last_rate_change_ledger.saturating_add(MIN_RATE_INTERVAL_LEDGERS);
+            if env.ledger().sequence() < min_ledger {
+                return Err(ContractError::RateCooldownActive);
+            }
         }
 
         // Only the original sender can update the rate.
@@ -4305,6 +4495,7 @@ impl FluxoraStream {
         stream.checkpointed_amount = accrued_now;
         stream.checkpointed_at = now;
         stream.rate_per_second = new_rate_per_second;
+        stream.last_rate_change_ledger = env.ledger().sequence();
         save_stream(&env, &stream);
 
         env.events().publish(
@@ -4375,8 +4566,15 @@ impl FluxoraStream {
         require_not_globally_paused(&env)?;
         let mut stream = load_stream(&env, stream_id)?;
 
-        if stream.kind == StreamKind::CliffOnly {
+        if stream.kind != StreamKind::Linear {
             return Err(ContractError::UnsupportedStreamKind);
+        }
+
+        if stream.last_rate_change_ledger > 0 {
+            let min_ledger = stream.last_rate_change_ledger.saturating_add(MIN_RATE_INTERVAL_LEDGERS);
+            if env.ledger().sequence() < min_ledger {
+                return Err(ContractError::RateCooldownActive);
+            }
         }
 
         // Sender-only: only the original creator may reduce the rate.
@@ -4446,6 +4644,7 @@ impl FluxoraStream {
         stream.checkpointed_at = now;
         stream.rate_per_second = new_rate_per_second;
         stream.deposit_amount = new_deposit;
+        stream.last_rate_change_ledger = env.ledger().sequence();
         save_stream(&env, &stream);
 
         // Refund the now-unreachable portion of the deposit to the sender.
@@ -4505,7 +4704,7 @@ impl FluxoraStream {
         require_not_globally_paused(&env)?;
         let mut stream = load_stream(&env, stream_id)?;
 
-        if stream.kind == StreamKind::CliffOnly {
+        if stream.kind != StreamKind::Linear {
             return Err(ContractError::UnsupportedStreamKind);
         }
 
@@ -4622,7 +4821,7 @@ impl FluxoraStream {
         require_not_globally_paused(&env)?;
         let mut stream = load_stream(&env, stream_id)?;
 
-        if stream.kind == StreamKind::CliffOnly {
+        if stream.kind != StreamKind::Linear {
             return Err(ContractError::UnsupportedStreamKind);
         }
 
@@ -4730,7 +4929,7 @@ impl FluxoraStream {
 
         let stream = load_stream(&env, stream_id)?;
 
-        if stream.kind == StreamKind::CliffOnly {
+        if stream.kind != StreamKind::Linear {
             return Err(ContractError::UnsupportedStreamKind);
         }
 
@@ -4785,6 +4984,127 @@ impl FluxoraStream {
             },
         );
         Ok(())
+    }
+
+    /// Enable or disable permissionless renewal for a stream.
+    ///
+    /// Only the original sender may change this setting. The setting is stored
+    /// separately from the stream record so existing stream storage remains
+    /// readable after upgrading the contract. A completed stream may be
+    /// enabled before its first renewal; cancelled streams cannot be renewed.
+    pub fn set_auto_renew(
+        env: Env,
+        stream_id: u64,
+        sender: Address,
+        enabled: bool,
+    ) -> Result<(), ContractError> {
+        require_not_globally_paused(&env)?;
+        let stream = load_stream(&env, stream_id)?;
+        sender.require_auth();
+        if stream.status == StreamStatus::Cancelled {
+            return Err(ContractError::InvalidState);
+        }
+        if sender != stream.sender {
+            return Err(ContractError::Unauthorized);
+        }
+
+        set_auto_renew_enabled(&env, stream_id, enabled);
+        Ok(())
+    }
+
+    /// Return whether the sender has enabled permissionless renewal.
+    pub fn get_auto_renew(env: Env, stream_id: u64) -> Result<bool, ContractError> {
+        load_stream(&env, stream_id)?;
+        Ok(auto_renew_enabled(&env, stream_id))
+    }
+
+    /// Renew a completed stream using the original sender's pre-approved funds.
+    ///
+    /// This entrypoint is permissionless: any caller may trigger it after the
+    /// sender has opted in. The only possible source of renewal funds is the
+    /// original sender, and the recipient and schedule are copied from the
+    /// completed stream. The new stream starts at the current ledger timestamp
+    /// with the same duration, rate, cliff offset, deposit, memo, kind, and dust
+    /// threshold. Auto-renew remains enabled on the new stream.
+    ///
+    /// The sender must have both sufficient token balance and allowance for the
+    /// contract. These checks return `AutoRenewFundingUnavailable` before any
+    /// state or token mutation; a transfer failure also reverts the transaction.
+    pub fn renew_stream(env: Env, stream_id: u64) -> Result<u64, ContractError> {
+        require_not_globally_paused(&env)?;
+        let stream = load_stream(&env, stream_id)?;
+
+        if stream.status != StreamStatus::Completed || !auto_renew_enabled(&env, stream_id) {
+            return Err(ContractError::InvalidState);
+        }
+
+        let now = current_accrual_timestamp(&env)?;
+        let duration = stream
+            .end_time
+            .checked_sub(stream.start_time)
+            .ok_or(ContractError::InvalidState)?;
+        let cliff_offset = stream
+            .cliff_time
+            .checked_sub(stream.start_time)
+            .ok_or(ContractError::InvalidState)?;
+        let new_end_time = now
+            .checked_add(duration)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        let new_cliff_time = now
+            .checked_add(cliff_offset)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+
+        Self::validate_stream_params(
+            &env,
+            &stream.sender,
+            &stream.recipient,
+            stream.deposit_amount,
+            stream.rate_per_second,
+            now,
+            now,
+            new_cliff_time,
+            new_end_time,
+            stream.kind,
+        )?;
+
+        let token_address = get_token(&env)?;
+        let token_client = token::Client::new(&env, &token_address);
+        let contract_address = env.current_contract_address();
+        if token_client.balance(&stream.sender) < stream.deposit_amount
+            || token_client.allowance(&stream.sender, &contract_address) < stream.deposit_amount
+        {
+            return Err(ContractError::AutoRenewFundingUnavailable);
+        }
+
+        // Disable the consumed opt-in before the external call. Atomic
+        // transaction rollback restores it if token transfer or persistence fails.
+        set_auto_renew_enabled(&env, stream_id, false);
+        pull_token(&env, &stream.sender, stream.deposit_amount)?;
+
+        let new_stream_id = Self::persist_new_stream(
+            &env,
+            stream.sender.clone(),
+            stream.recipient.clone(),
+            stream.deposit_amount,
+            stream.rate_per_second,
+            now,
+            new_cliff_time,
+            new_end_time,
+            stream.withdraw_dust_threshold,
+            stream.memo.clone(),
+            stream.kind,
+        )?;
+        set_auto_renew_enabled(&env, new_stream_id, true);
+
+        env.events().publish(
+            (symbol_short!("renewed"), stream_id, new_stream_id),
+            StreamRenewed {
+                old_stream_id: stream_id,
+                new_stream_id,
+            },
+        );
+
+        Ok(new_stream_id)
     }
 
     /// Close (archive) a completed stream to reduce long-term storage.
@@ -4853,6 +5173,11 @@ impl FluxoraStream {
 
         // Remove stream from recipient's index before deleting the stream
         remove_stream_from_recipient_index(&env, &stream.recipient, stream_id);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::AutoRenewEnabled(stream_id));
+        // Remove stream from sender's portfolio index.
+        remove_stream_from_sender_index(&env, &stream.sender, stream_id);
         remove_stream(&env, stream_id);
 
         Ok(())
@@ -4913,6 +5238,11 @@ impl FluxoraStream {
 
         // Remove from recipient index and delete stream storage.
         remove_stream_from_recipient_index(&env, &stream.recipient, stream_id);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::AutoRenewEnabled(stream_id));
+        // Remove stream from sender's portfolio index.
+        remove_stream_from_sender_index(&env, &stream.sender, stream_id);
         remove_stream(&env, stream_id);
 
         Ok(())
@@ -5174,6 +5504,158 @@ impl FluxoraStream {
     /// - Closed streams are not included in the count
     pub fn get_recipient_stream_count(env: Env, recipient: Address) -> u64 {
         load_recipient_streams(&env, &recipient).len() as u64
+    }
+
+    /// Paginated aggregate health view for a sender's entire stream portfolio.
+    ///
+    /// Iterates through `sender`'s streams in the `SenderStreams` index (sorted
+    /// ascending by stream ID), evaluates each stream's health with
+    /// `compute_stream_health`, and returns aggregate counts plus a continuation
+    /// cursor. A single call processes at most `MAX_PAGE_SIZE` (100) streams.
+    ///
+    /// # Parameters
+    /// - `sender`: Address whose portfolio to inspect. No authentication required —
+    ///   the sender index is public information.
+    /// - `cursor`: Stream ID to resume from (inclusive). Pass `0` to start from the
+    ///   beginning. Use the `next_cursor` from the previous response to continue.
+    /// - `limit`: Maximum streams to evaluate per call. Clamped to `MAX_PAGE_SIZE`
+    ///   (100). Pass 0 to use the maximum.
+    ///
+    /// # Returns
+    /// A [`PortfolioHealthPage`] containing:
+    /// - `underfunded_count`: streams where the deposit cannot cover obligations at
+    ///   the current rate through `end_time`.
+    /// - `expired_count`: streams past `end_time` that are still `Active` or `Paused`
+    ///   (pending cleanup or recipient withdrawal).
+    /// - `healthy_count`: active/paused streams that are neither underfunded nor expired.
+    /// - `next_cursor`: cursor to pass in the next call (`0` when all pages returned).
+    /// - `stream_ids`: IDs evaluated on this page (for per-stream follow-up queries).
+    ///
+    /// # Health classification
+    ///
+    /// Terminal streams (`Completed`, `Cancelled`) are **excluded** from all three
+    /// counters. They appear in `stream_ids` but do not increment any counter,
+    /// because they represent settled obligations.
+    ///
+    /// | Status | Underfunded? | Expired? | Outcome |
+    /// |---|---|---|---|
+    /// | `Active` / `Paused`, deposit deficit | yes | no | `underfunded_count++` |
+    /// | `Active` / `Paused`, `now ≥ end_time` | any | yes | `expired_count++` |
+    /// | `Active` / `Paused`, fully funded, not expired | no | no | `healthy_count++` |
+    /// | `Completed` / `Cancelled` | — | — | not counted |
+    ///
+    /// When a stream is both underfunded **and** expired it is counted as **expired**
+    /// (expiry takes priority; the sender cannot top it up anyway).
+    ///
+    /// # Pagination
+    ///
+    /// ```ignore
+    /// let mut cursor = 0u64;
+    /// loop {
+    ///     let page = client.get_sender_portfolio_health(&sender, &cursor, &100u32);
+    ///     // process page.underfunded_count, page.expired_count, page.healthy_count …
+    ///     cursor = page.next_cursor;
+    ///     if cursor == 0 { break; }
+    /// }
+    /// ```
+    ///
+    /// # DoS protection
+    /// - Clamped at `MAX_PAGE_SIZE` (100) per call — consistent with every other
+    ///   paginated view in the contract.
+    /// - O(limit) stream loads per call; index lookup is O(log n) via binary search.
+    /// - No authorization required; read-only and does not modify state.
+    ///
+    /// # Security notes
+    /// - The sender index is maintained by `persist_new_stream` (add) and
+    ///   `close_completed_stream` / `close_cancelled_stream` (remove). Streams
+    ///   in `Cancelled` state remain in the index until their storage is reclaimed.
+    /// - Index entries are persistent storage; TTL is bumped on every read/write.
+    /// - No reentrancy risk: no token transfers occur in this function.
+    pub fn get_sender_portfolio_health(
+        env: Env,
+        sender: Address,
+        cursor: u64,
+        limit: u32,
+    ) -> PortfolioHealthPage {
+        bump_instance_ttl(&env);
+
+        let streams = load_sender_streams(&env, &sender);
+        let total = streams.len();
+
+        // Clamp limit to MAX_PAGE_SIZE; treat 0 as "use the maximum".
+        let effective_limit = if limit == 0 {
+            RECIPIENT_STREAMS_PAGE_LIMIT
+        } else {
+            limit.min(RECIPIENT_STREAMS_PAGE_LIMIT)
+        };
+
+        // Find starting position (inclusive cursor semantics — mirrors
+        // get_recipient_streams_paginated).
+        let start_idx = if cursor == 0 {
+            0usize
+        } else {
+            match streams.binary_search(cursor) {
+                Ok(pos) => pos,  // start AT the cursor stream (inclusive)
+                Err(pos) => pos, // gap: start at the next higher stream
+            }
+        };
+
+        let end_idx = ((start_idx as u32).saturating_add(effective_limit)).min(total as u32);
+
+        // Determine next_cursor: the first stream ID NOT returned on this page.
+        let next_cursor = if (end_idx as usize) < total as usize {
+            streams.get(end_idx).unwrap()
+        } else {
+            0u64
+        };
+
+        let now = env.ledger().timestamp();
+        let mut underfunded_count: u32 = 0;
+        let mut expired_count: u32 = 0;
+        let mut healthy_count: u32 = 0;
+        let mut page_stream_ids = soroban_sdk::Vec::new(&env);
+
+        for i in start_idx..end_idx as usize {
+            let stream_id = streams.get(i as u32).unwrap();
+            page_stream_ids.push_back(stream_id);
+
+            // Load the stream. If it was removed between index write and query
+            // (e.g. by a concurrent close), skip it gracefully.
+            let stream = match load_stream(&env, stream_id) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            // Terminal streams don't count toward any health bucket.
+            if stream.status == StreamStatus::Completed
+                || stream.status == StreamStatus::Cancelled
+            {
+                continue;
+            }
+
+            // Expired: past end_time but not yet closed.
+            let is_expired = now >= stream.end_time;
+
+            // Underfunded: deposit cannot cover obligations at current rate.
+            let (is_underfunded, _, _) = compute_stream_health(&stream, now);
+
+            // Expiry takes priority: a stream that has elapsed cannot be topped up.
+            if is_expired {
+                expired_count = expired_count.saturating_add(1);
+            } else if is_underfunded {
+                underfunded_count = underfunded_count.saturating_add(1);
+            } else {
+                healthy_count = healthy_count.saturating_add(1);
+            }
+        }
+
+        PortfolioHealthPage {
+            underfunded_count,
+            expired_count,
+            healthy_count,
+            next_cursor,
+            stream_ids: page_stream_ids,
+        }
     }
 
     /// Export streams by ID range with bounded page size (operator migration support).
@@ -6848,8 +7330,8 @@ impl FluxoraStream {
     /// database records before the corresponding `create_stream` transactions land on-chain.
     ///
     /// Subsequent `create_stream` calls from `caller` consume IDs from the reservation
-    /// in order. A second call before the first reservation is exhausted **replaces** it
-    /// (unconsumed IDs become permanent gaps; the counter is never rewound).
+    /// in order. A caller may only have one active reservation at a time. A second call
+    /// before the first reservation is released will fail with `ReservationAlreadyActive`.
     ///
     /// # Parameters
     /// - `caller`: Address making the reservation (must authorize)
@@ -6861,6 +7343,7 @@ impl FluxoraStream {
     /// # Errors
     /// - `ReservationCountZero` (17): `count` is 0
     /// - `ReservationLimitExceeded` (18): `count > MAX_ID_RESERVATION`
+    /// - `ReservationAlreadyActive` (28): `caller` already has an active reservation
     ///
     /// # Security
     /// - `count` is capped at `MAX_ID_RESERVATION = 100` to prevent counter-inflation attacks.
@@ -6878,6 +7361,10 @@ impl FluxoraStream {
         }
         if count > MAX_ID_RESERVATION {
             return Err(ContractError::ReservationLimitExceeded);
+        }
+
+        if load_id_reservation(&env, &caller).is_some() {
+            return Err(ContractError::ReservationAlreadyActive);
         }
 
         let start_id = read_stream_count(&env);

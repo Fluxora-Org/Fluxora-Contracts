@@ -57,6 +57,10 @@ For the exhaustive, category-by-category breakdown see **[`docs/ABI_STABILITY.md
 - Adding new entry-points that old clients can safely ignore.
 - Changing TTL bump constants (`INSTANCE_BUMP_AMOUNT`, `PERSISTENT_BUMP_AMOUNT`).
 - Changing internal helper functions with no external surface.
+- Appending new `DataKey` storage variants (append-only; existing entries stay
+  byte-identical and readable). See the "Why `CONTRACT_VERSION` was not bumped
+  to 7" note in `contracts/stream/src/checksum.rs`'s module doc-comment for the
+  full analysis of the V7 additions (discriminants 21–28).
 
 > **Note (transfer_sender):** The `transfer_sender` entry-point is a purely additive
 > new entry-point. Old clients that do not call it are unaffected. `CONTRACT_VERSION`
@@ -188,7 +192,17 @@ Before interacting with any Fluxora contract instance:
 
 ---
 
-## 6. Paginated Export Views (Issue #429)
+## 6. CI Toolchain Verification
+
+The `.github/workflows/ci.yml` workflow includes a step in all Rust-related jobs (`lint`, `build`, `test`, `coverage`) that verifies the `rustc` version in the environment matches the version pinned in the `rust-toolchain.toml` file.
+
+This is a safety net to prevent "toolchain drift", where a change in the CI environment (e.g., an update to the `dtolnay/rust-toolchain@stable` action) could cause the contract to be built or tested with a different compiler version than is specified in the repository.
+
+The verification is performed by the `script/verify_rust_version.py` script. If a mismatch is detected, the script prints an error and exits with a non-zero status code, failing the CI job. This ensures that all builds and tests are performed with the intended, pinned toolchain. This check is independent of, and a safety net for, any future change to which GitHub Action resolves the toolchain.
+
+---
+
+## 7. Paginated Export Views (Issue #429)
 
 Bounded, paginated view entrypoints support off-chain export and migration between contract instances without unbounded loops or memory usage.
 

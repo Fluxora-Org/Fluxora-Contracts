@@ -218,18 +218,62 @@ fn create_stream_after_reservation_exhausted_uses_live_counter() {
 }
 
 #[test]
-fn new_reservation_overwrites_existing() {
+fn new_reservation_fails_if_active() {
     let ctx = Ctx::setup();
     ctx.client.reserve_stream_ids(&ctx.sender, &5u32, &None); // IDs 0..4
-    let ids2 = ctx.client.reserve_stream_ids(&ctx.sender, &5u32, &None); // IDs 5..9
-    assert_eq!(ids2.get(0).unwrap(), 5u64);
+    let result = ctx.client.try_reserve_stream_ids(&ctx.sender, &5u32, &None);
+    assert_eq!(result, Err(Ok(ContractError::ReservationAlreadyActive)));
 
     let res = ctx.client.get_id_reservation(&ctx.sender).unwrap();
-    assert_eq!(res.start_id, 5);
+    assert_eq!(res.start_id, 0);
     assert_eq!(res.consumed, 0);
+}
 
-    let id = ctx.create_stream(&ctx.sender);
-    assert_eq!(id, 5u64);
+#[test]
+fn reserve_stream_ids_overwrites_unreleased_reservation_leaking_ids_regression() {
+    // Regression test for #1021: Pin the current (leaky) behavior where a second 
+    // reservation by the same caller overwrites their first unreleased reservation, 
+    // leaking the first block of IDs permanently.
+    //
+    // Security Rationale / NatSpec:
+    // @dev Currently `save_id_reservation` unconditionally overwrites the single
+    // `DataKey::IdReservation(Address)` entry. The first reservation's ID range 
+    // becomes permanently unreachable via any public entrypoint.
+    // Expected to be updated in a future PR to assert `ContractError::ReservationAlreadyActive`.
+    let ctx = Ctx::setup();
+    
+    // Caller reserves 10 IDs (0..9)
+    ctx.client.reserve_stream_ids(&ctx.sender, &10u32, &None);
+    
+    // Caller reserves 5 more IDs without releasing the first (10..14)
+    ctx.client.reserve_stream_ids(&ctx.sender, &5u32, &None);
+    
+    // Assert get_id_reservation(caller) returns only the second reservation
+    let res = ctx.client.get_id_reservation(&ctx.sender).unwrap();
+    assert_eq!(res.start_id, 10);
+    assert_eq!(res.count, 5);
+    assert_eq!(res.consumed, 0);
+}
+
+#[test]
+fn next_stream_id_reflects_both_bumps_on_overwrite_regression() {
+    // Companion test for #1021 proving that when a reservation is overwritten,
+    // the global NextStreamId counter still correctly reflects both reservations' sizes.
+    // This proves the leak is isolated to tracking, and the counter itself is safely advanced.
+    let ctx = Ctx::setup();
+    
+    // Counter initially 0
+    assert_eq!(ctx.client.get_stream_count(), 0);
+    
+    // Reserve 10 IDs -> counter advances to 10
+    ctx.client.reserve_stream_ids(&ctx.sender, &10u32, &None);
+    assert_eq!(ctx.client.get_stream_count(), 10);
+    
+    // Reserve 5 more IDs -> counter advances to 15
+    ctx.client.reserve_stream_ids(&ctx.sender, &5u32, &None);
+    
+    // Assert counter reflects both bumps (10 + 5 = 15)
+    assert_eq!(ctx.client.get_stream_count(), 15);
 }
 
 #[test]
@@ -374,4 +418,49 @@ fn test_reclaim_twice_errors() {
     // Reclaim second time (errors as it was already deleted)
     let result = ctx.client.try_reclaim_expired_id_reservation(&ctx.sender);
     assert_eq!(result, Err(Ok(ContractError::ReservationNotFound)));
+}
+
+// ---------------------------------------------------------------------------
+// release vs reclaim NextStreamId asymmetry regression tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_release_id_reservation_never_shrinks_next_stream_id() {
+    let ctx = Ctx::setup();
+
+    // NextStreamId is 0. Reserve 5. NextStreamId becomes 5.
+    ctx.client.reserve_stream_ids(&ctx.sender, &5u32, &None);
+    assert_eq!(ctx.client.get_stream_count(), 5);
+
+    // Release immediately via release_id_reservation
+    ctx.client.release_id_reservation(&ctx.sender);
+
+    // Reservation is gone
+    assert!(ctx.client.get_id_reservation(&ctx.sender).is_none());
+
+    // Counter didn't shrink. Next stream gets ID 5.
+    let id = ctx.create_stream(&ctx.sender);
+    assert_eq!(id, 5);
+}
+
+#[test]
+fn test_reclaim_expired_id_reservation_shrinks_next_stream_id() {
+    let ctx = Ctx::setup();
+    let now = ctx.env.ledger().timestamp();
+    let expiry = now + 100;
+
+    // NextStreamId is 0. Reserve 5. NextStreamId becomes 5.
+    ctx.client.reserve_stream_ids(&ctx.sender, &5u32, &Some(expiry));
+    assert_eq!(ctx.client.get_stream_count(), 5);
+
+    // Reclaim after advancing ledger past expiry
+    ctx.env.ledger().set_timestamp(expiry + 1);
+    ctx.client.reclaim_expired_id_reservation(&ctx.sender);
+
+    // Reservation is gone
+    assert!(ctx.client.get_id_reservation(&ctx.sender).is_none());
+
+    // Counter rewinds. Next stream gets ID 0.
+    let id = ctx.create_stream(&ctx.sender);
+    assert_eq!(id, 0);
 }
