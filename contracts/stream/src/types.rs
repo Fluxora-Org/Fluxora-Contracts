@@ -157,6 +157,8 @@ pub enum StreamKind {
     Linear = 0,
     /// Stream that unlocks its full deposit at the cliff time in a one-shot event.
     CliffOnly = 1,
+    /// Stream that accrues linearly from cliff_time to end_time, and nothing before.
+    CliffSlope = 2,
 }
 
 #[soroban_sdk::contracterror]
@@ -212,6 +214,7 @@ pub enum ContractError {
     ReservationNotExpirable = 25,
     ClockRegression = 27,
     ReservationStillActive = 26,
+    ReservationAlreadyActive = 34,
     /// Stream kind does not support this operation (e.g., rate changes on CliffOnly).
     UnsupportedStreamKind = 28,
     /// New rate exceeds the governance-controlled maximum rate per second.
@@ -226,6 +229,8 @@ pub enum ContractError {
     KeeperGracePeriodNotElapsed = 33,
     /// Withdraw dust threshold is negative or exceeds deposit amount.
     InvalidDustThreshold = 35,
+    /// Rate change attempted too soon after a previous rate change.
+    RateCooldownActive = 36,
 }
 
 #[contracttype]
@@ -619,6 +624,9 @@ pub struct Stream {
     pub metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
     /// Optional compliance witness authorized to cancel via signed attestation.
     pub witness: Option<Address>,
+    /// Ledger sequence number of the last rate change (or creation).
+    /// Used to enforce MIN_RATE_INTERVAL_LEDGERS cooldown.
+    pub last_rate_change_ledger: u32,
 }
 
 /// Pagination result for recipient stream listing
@@ -775,9 +783,14 @@ pub enum DataKey {
     DelegatedWithdrawNonce(Address),
     /// Last pause record for stream-level or protocol-level pause.
     LastPauseRecord(PauseKind),
-    LastAccrualLedgerTimestamp,
-    /// Per-stream rotation audit history.
+    /// Rotation history for recipient/sender changes on a stream.
     RotationHistory(u64),
+    /// Last ledger timestamp observed for accrual clock-regression detection.
+    LastAccrualLedgerTimestamp,
+    /// Protocol-wide count of streams currently in `StreamStatus::Paused` (`u64`, instance storage).
+    PausedStreamCount,
+    /// Aggregate sum of all keeper fees paid out via `keeper_cancel` (`i128`, instance storage).
+    TotalKeeperFeesPaid,
 }
 
 /// Type of pause.
