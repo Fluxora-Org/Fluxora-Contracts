@@ -47,6 +47,7 @@ fn create_stream_emits_correct_event() {
         &0,
         &None,
         &crate::StreamKind::Linear,
+        &None,
     );
 
     let events = ctx.env.events().all();
@@ -314,6 +315,7 @@ fn withdraw_at_exact_cliff_time_returns_zero() {
         &0,
         &None,
         &crate::StreamKind::Linear,
+        &None,
     );
 
     // At exact cliff time, nothing is withdrawable yet
@@ -338,6 +340,7 @@ fn withdraw_one_second_after_cliff_returns_accrued() {
         &0,
         &None,
         &crate::StreamKind::Linear,
+        &None,
     );
 
     // One second after cliff, 1 token is accrued
@@ -394,6 +397,7 @@ fn cancel_at_exact_start_time_refunds_full_deposit() {
         &0,
         &None,
         &crate::StreamKind::Linear,
+        &None,
     );
 
     // At exact start time, nothing is accrued yet
@@ -467,6 +471,7 @@ fn create_stream_max_deposit_fails() {
         &0,
         &None,
         &crate::StreamKind::Linear,
+        &None,
     );
 
     assert!(
@@ -492,6 +497,7 @@ fn create_stream_max_rate_fails() {
         &0,
         &None,
         &crate::StreamKind::Linear,
+        &None,
     );
 
     assert!(
@@ -519,6 +525,7 @@ fn create_stream_rate_duration_overflow_fails() {
         &0,
         &None,
         &crate::StreamKind::Linear,
+        &None,
     );
 
     assert!(
@@ -588,6 +595,7 @@ fn shorten_end_time_overflow_fails() {
         &0,
         &None,
         &crate::StreamKind::Linear,
+        &None,
     );
 
     ctx.env.ledger().set_timestamp(100);

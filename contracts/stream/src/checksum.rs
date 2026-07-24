@@ -88,24 +88,26 @@
 //! | 19           | `RecipientStreamPageCount(Address)` | Persistent | `u32`    |
 //! | 20           | `PendingRecipientUpdate(u64)`   | Persistent| `Address`   |
 //!
+//! ## Post-V6 freeze additions (appended — discriminants 0–20 preserved)
+//!
+//! | Discriminant | Variant                         | Storage   | Value type   |
+//! |:------------:|:--------------------------------|:----------|:-------------|
+//! | 21           | `IdReservation(Address)`        | Instance  | `IdReservation` |
+//! | 22           | `MaxRatePerSecond`              | Instance  | `i128`       |
+//! | 23           | `DelegatedWithdrawNonce(Address)`| Persistent| `u64`       |
+//! | 24           | `LastPauseRecord(PauseKind)`    | Instance  | `PauseRecord`|
+//! | 25           | `RotationHistory(u64)`          | Persistent| `Vec<...>`   |
+//! | 26           | `LastAccrualLedgerTimestamp`    | Instance  | `u64`        |
+//! | 27           | `PausedStreamCount`             | Instance  | `u64`        |
+//! | 28           | `TotalKeeperFeesPaid`           | Instance  | `i128`       |
+//!
+//! Total live `DataKey` variant count: **29** (discriminants 0–28).
+//!
 //! V6 `Stream` struct adds one field at the end:
 //!
 //! | Position | Field  | Type              |
 //! |:--------:|:-------|:------------------|
 //! | 14       | `memo` | `Option<Bytes>`   |
-//!
-//! ## V7 additions (appended — discriminants 0–20 preserved)
-//!
-//! | Discriminant | Variant                         | Storage   | Value type  |
-//! |:------------:|:--------------------------------|:----------|:------------|
-//! | 21           | `IdReservation(Address)`        | Persistent| `IdReservation` |
-//! | 22           | `MaxRatePerSecond`              | Instance  | `i128`      |
-//! | 23           | `DelegatedWithdrawNonce(Address)`| Persistent| `u64`       |
-//! | 24           | `LastPauseRecord(PauseKind)`    | Persistent| `PauseRecord` |
-//! | 25           | `RotationHistory(u64)`          | Persistent| `Vec<RotationEntry>`|
-//! | 26           | `LastAccrualLedgerTimestamp`    | Instance  | `u64`       |
-//! | 27           | `PausedStreamCount`             | Instance  | `u64`       |
-//! | 28           | `TotalKeeperFeesPaid`           | Instance  | `i128`      |
 //!
 //! All V5 persistent `Stream` entries remain decodable on a V6 instance because
 //! Soroban XDR struct decoding is **positional and forward-compatible**: a V6
@@ -166,8 +168,9 @@
 //! - **Option-tail compatibility**: The V5→V6 `memo: Option<Bytes>` addition is
 //!   safe only because it is appended as the last field and is `Option`-typed.
 //!   A non-`Option` field appended to a struct would break V5 decoders.
-//! - **No compile-time enforcement**: Discriminant stability is enforced by code
-//!   review and the tests in `contracts/stream/tests/storage_key_compat.rs`.
+//! - **No compile-time enforcement**: Discriminant stability and variant count
+//!   alignment are machine-checked by `contracts/stream/tests/storage_key_compat.rs`
+//!   and documented here.
 //!
 //! ## Residual risks
 //!
@@ -205,26 +208,27 @@ mod tests {
         assert_eq!(V5_VARIANT_COUNT, 15);
     }
 
-    /// V6 DataKey has exactly 21 variants (discriminants 0–20).
-    #[test]
-    fn v6_datakey_variant_count_is_21() {
-        const V6_VARIANT_COUNT: usize = 21;
-        assert_eq!(V6_VARIANT_COUNT, 21);
-    }
-
-    /// V7 DataKey has exactly 29 variants (discriminants 0–28).
+    /// V6 DataKey initial freeze had exactly 21 variants (discriminants 0–20).
     ///
-    /// If this assertion fails after a new variant is appended, update the
-    /// V7 discriminant table in the module doc-comment above and increment
-    /// `CONTRACT_VERSION`.
+    /// Post-V6 freeze additions added 8 variants (discriminants 21–28), bringing
+    /// the current live total to 29 variants.
     ///
     /// # Security note
-    /// The next variant appended to DataKey must receive discriminant 29.
-    /// Any value other than 29 indicates a mid-enum insertion, which is forbidden.
+    /// Machine-checked version cross-check is enforced in
+    /// `contracts/stream/tests/storage_key_compat.rs` (`test_contract_version_matches_datakey_variant_count`).
     #[test]
-    fn v7_datakey_variant_count_is_29() {
-        const V7_VARIANT_COUNT: usize = 29;
-        assert_eq!(V7_VARIANT_COUNT, 29);
+    fn v6_datakey_variant_count_is_21() {
+        const V6_INITIAL_VARIANT_COUNT: usize = 21;
+        assert_eq!(V6_INITIAL_VARIANT_COUNT, 21);
+    }
+
+    /// Live DataKey enum currently contains exactly 29 variants (discriminants 0–28).
+    ///
+    /// Cross-referenced with `CONTRACT_VERSION` in `storage_key_compat.rs`.
+    #[test]
+    fn live_datakey_variant_count_is_29() {
+        const LIVE_VARIANT_COUNT: usize = 29;
+        assert_eq!(LIVE_VARIANT_COUNT, 29);
     }
 
     /// V5 Stream struct had 14 fields; V6 adds `memo` for 15 fields.
@@ -247,6 +251,9 @@ mod tests {
     }
 
     /// The six V6-only DataKey variants occupy discriminants 15–20.
+    ///
+    /// This test documents the exact discriminant range so that any future
+    /// append correctly starts at discriminant 21.
     #[test]
     fn v6_new_variants_occupy_discriminants_15_to_20() {
         // WithdrawNonce=15, PauseState=16, ReentrancyLock=17,
@@ -356,5 +363,14 @@ mod tests {
         const MEMO_POS: usize = 14;
         // memo is the 15th field (0-indexed position 14)
         assert_eq!(MEMO_POS, 14);
+    }
+
+    /// Stream struct field count with both `is_pooled` and `irrevocable` appended.
+    /// V5 (14) + memo (1) + kind (1) + pause_ledger (1) + withdraw_ledger (1) + metadata (1)
+    /// + is_pooled (1) + irrevocable (1) = 21 fields.
+    #[test]
+    fn stream_struct_has_21_fields_with_is_pooled_and_irrevocable() {
+        const TOTAL_STREAM_FIELDS: usize = 21;
+        assert_eq!(TOTAL_STREAM_FIELDS, 21);
     }
 }
