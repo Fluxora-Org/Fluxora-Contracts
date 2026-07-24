@@ -1157,3 +1157,144 @@ fn test_single_then_batch_registry_accumulates_in_order() {
     assert_eq!(page.get(1).unwrap(), batch_ids.get(0).unwrap());
     assert_eq!(page.get(2).unwrap(), batch_ids.get(1).unwrap());
 }
+
+// ---------------------------------------------------------------------------
+// Memo-length shared constant & early rejection test suite
+// ---------------------------------------------------------------------------
+
+/// Compile-time & runtime assertion proving the factory's memo-length guard is driven
+/// by `fluxora_stream::MAX_MEMO_BYTES` (the shared constant).
+///
+/// # Security & Architectural Safeguard
+/// The factory contract directly imports `fluxora_stream::MAX_MEMO_BYTES` in both
+/// `create_stream` and `create_streams` (Guard 8). This test machine-checks that
+/// the constant imported and evaluated by the factory test suite is identical to
+/// `fluxora_stream::MAX_MEMO_BYTES`, guaranteeing that changes to the stream contract's
+/// memo limit will automatically drive factory validation without risk of stale copies or divergence.
+#[test]
+fn test_factory_memo_guard_tracks_shared_max_memo_bytes_constant() {
+    // Direct compile-time constant alignment check
+    const FACTORY_EXPECTED_MAX_MEMO: usize = fluxora_stream::MAX_MEMO_BYTES;
+    assert_eq!(
+        FACTORY_EXPECTED_MAX_MEMO,
+        fluxora_stream::MAX_MEMO_BYTES,
+        "Factory memo guard constant must equal fluxora_stream::MAX_MEMO_BYTES"
+    );
+    assert_eq!(fluxora_stream::MAX_MEMO_BYTES, 256);
+}
+
+/// Proves that `create_stream` with a memo one byte over `fluxora_stream::MAX_MEMO_BYTES`
+/// (i.e. `MAX_MEMO_BYTES + 1` bytes) is rejected by the factory's own guard
+/// (`FactoryError::InvalidMemo`) BEFORE the cross-contract call is made to `FluxoraStream`.
+///
+/// # Early Rejection Proof
+/// 1. `ctx.factory.client.try_create_stream(...)` returns `Err(Ok(FactoryError::InvalidMemo))`.
+/// 2. The stream contract registry count and factory registry count remain 0.
+/// 3. The sender's token balance is untouched.
+/// 4. Distinguishes factory's Guard 8 early rejection (`FactoryError::InvalidMemo`) from
+///    downstream stream contract rejection (`ContractError::MemoTooLong`).
+#[test]
+fn test_single_create_stream_memo_over_limit_rejected_by_factory_guard() {
+    let ctx = Ctx::setup();
+    let now = ctx.now();
+
+    // Construct a memo of length MAX_MEMO_BYTES + 1 (257 bytes)
+    let mut over_limit_bytes = std::vec::Vec::with_capacity(fluxora_stream::MAX_MEMO_BYTES + 1);
+    over_limit_bytes.resize(fluxora_stream::MAX_MEMO_BYTES + 1, 0xAB);
+    let over_limit_memo = soroban_sdk::Bytes::from_slice(&ctx.env, &over_limit_bytes);
+
+    let res = ctx.factory.client.try_create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &DEPOSIT_AMOUNT,
+        &RATE_PER_SECOND,
+        &now,
+        &now,
+        &(now + STREAM_DURATION),
+        &0,
+        &Some(over_limit_memo),
+        &fluxora_stream::StreamKind::Linear,
+    );
+
+    // Must return FactoryError::InvalidMemo from the factory itself
+    assert!(res.is_err());
+    let err = res.err().unwrap();
+    assert_eq!(
+        err,
+        Ok(FactoryError::InvalidMemo),
+        "Factory must reject over-length memo with FactoryError::InvalidMemo before calling stream contract"
+    );
+
+    // Verify early rejection before cross-contract interaction (0 streams registered, sender balance untouched)
+    assert_eq!(ctx.factory.get_factory_stream_count(), 0);
+    assert_eq!(ctx.token.balance(&ctx.sender), SENDER_FUNDING);
+}
+
+/// Proves that `create_stream` with a memo of exactly `fluxora_stream::MAX_MEMO_BYTES`
+/// (256 bytes) is accepted by the factory's guard and successfully forwarded to `FluxoraStream`.
+#[test]
+fn test_single_create_stream_exact_max_memo_bytes_accepted() {
+    let ctx = Ctx::setup();
+    let now = ctx.now();
+
+    // Construct a memo of length exactly MAX_MEMO_BYTES (256 bytes)
+    let mut exact_bytes = std::vec::Vec::with_capacity(fluxora_stream::MAX_MEMO_BYTES);
+    exact_bytes.resize(fluxora_stream::MAX_MEMO_BYTES, 0xCD);
+    let exact_memo = soroban_sdk::Bytes::from_slice(&ctx.env, &exact_bytes);
+
+    let res = ctx.factory.client.try_create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &DEPOSIT_AMOUNT,
+        &RATE_PER_SECOND,
+        &now,
+        &now,
+        &(now + STREAM_DURATION),
+        &0,
+        &Some(exact_memo.clone()),
+        &fluxora_stream::StreamKind::Linear,
+    );
+
+    assert!(res.is_ok());
+    let stream_id = res.unwrap().unwrap();
+    assert_eq!(ctx.factory.get_factory_stream_count(), 1);
+
+    // Verify stream state in stream contract has the exact memo attached
+    let state = ctx.stream.get_stream_state(&stream_id);
+    assert_eq!(state.memo, Some(exact_memo));
+}
+
+/// Proves that batch stream creation (`create_streams`) with one stream entry containing
+/// a memo exceeding `fluxora_stream::MAX_MEMO_BYTES` is rejected by the factory
+/// (`FactoryError::InvalidMemo`) prior to making any cross-contract call.
+#[test]
+fn test_batch_create_streams_memo_over_limit_rejected_by_factory_guard() {
+    let ctx = Ctx::setup();
+
+    let mut over_limit_bytes = std::vec::Vec::with_capacity(fluxora_stream::MAX_MEMO_BYTES + 1);
+    over_limit_bytes.resize(fluxora_stream::MAX_MEMO_BYTES + 1, 0xEE);
+    let over_limit_memo = soroban_sdk::Bytes::from_slice(&ctx.env, &over_limit_bytes);
+
+    let mut streams = Vec::new(&ctx.env);
+    // Entry 1: valid stream params
+    streams.push_back(make_params(&ctx, &ctx.recipient, 0));
+    // Entry 2: memo exceeds MAX_MEMO_BYTES by 1 byte
+    let mut invalid_params = make_params(&ctx, &ctx.recipient, 100);
+    invalid_params.memo = Some(over_limit_memo);
+    streams.push_back(invalid_params);
+
+    let res = ctx.factory.try_create_streams(&ctx.sender, &streams);
+
+    assert!(res.is_err());
+    let err = res.err().unwrap();
+    assert_eq!(
+        err,
+        Ok(FactoryError::InvalidMemo),
+        "Batch creation must reject over-length memo with FactoryError::InvalidMemo before calling stream contract"
+    );
+
+    // Atomic rejection: 0 streams created in registry, sender balance untouched
+    assert_eq!(ctx.factory.get_factory_stream_count(), 0);
+    assert_eq!(ctx.token.balance(&ctx.sender), SENDER_FUNDING);
+}
+

@@ -12,8 +12,12 @@
  *   - Missing / malformed key        → request proceeds without idempotency
  *     protection (key is optional).
  *
- * Amount fields (depositAmount, ratePerSecond) are serialized as decimal
- * strings to preserve precision for on-chain / large-integer values.
+ * Amount fields (depositAmount, ratePerSecond) are serialized as integer
+ * strings (e.g. "1000000") to preserve precision for on-chain i128 values
+ * that may exceed Number.MAX_SAFE_INTEGER in JavaScript.  "Decimal string"
+ * means an integer serialized as a string — NOT a value with a fractional
+ * component.  Fractional values (e.g. "100.5") are rejected because the
+ * on-chain contract declares these fields as i128 (whole base-units only).
  */
 
 import { Router, Request, Response, NextFunction } from 'express';
@@ -64,10 +68,10 @@ const createStreamLimiter = rateLimit({
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-/** Validate that a string represents a positive decimal integer (for amounts). */
+/** Validate that a string represents a positive integer (for on-chain i128 amounts). */
 function isPositiveDecimalString(value: unknown): value is string {
   if (typeof value !== 'string') return false;
-  if (!/^\d+(\.\d+)?$/.test(value)) return false;
+  if (!/^\d+$/.test(value)) return false;
   const n = Number(value);
   return Number.isFinite(n) && n > 0;
 }

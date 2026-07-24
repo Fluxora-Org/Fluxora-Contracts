@@ -6,11 +6,15 @@ use soroban_sdk::{
     Address, Env,
 };
 
+// Grace period (mirrors KEEPER_GRACE_PERIOD_SECONDS in lib.rs).
+const KEEPER_GRACE: u64 = 604_800;
+
 struct TestContext<'a> {
     env: Env,
     client: FluxoraStreamClient<'a>,
     sender: Address,
     recipient: Address,
+    keeper: Address,
 }
 
 impl<'a> TestContext<'a> {
@@ -30,6 +34,7 @@ impl<'a> TestContext<'a> {
         let admin = Address::generate(&env);
         let sender = Address::generate(&env);
         let recipient = Address::generate(&env);
+        let keeper = Address::generate(&env);
 
         client.init(&token_id, &admin);
 
@@ -43,6 +48,7 @@ impl<'a> TestContext<'a> {
             client,
             sender,
             recipient,
+            keeper,
         }
     }
 
@@ -122,4 +128,97 @@ fn test_batch_withdraw_gas() {
 
         println!("GAS_MEASUREMENT: batch_withdraw: {}: {}", size, cost);
     }
+}
+
+// ---------------------------------------------------------------------------
+// keeper_cancel gas measurements
+//
+// Two variants capture the two meaningful cost paths:
+//
+//   partial_accrual — the common keeper incentive case: the stream expired with
+//     an unstreamed balance, so the contract makes three token transfers
+//     (recipient, sender, keeper).  This is the hot path for economically
+//     rational keeper bots and the cost documented in docs/gas.md's
+//     break-even formula.
+//
+//   fully_accrued   — the degenerate case: deposit == rate × duration, so
+//     sender_refund_gross == 0, keeper_fee == 0 and no keeper transfer is
+//     issued.  Only one token transfer (to the recipient) occurs.  Cost is
+//     slightly lower than the partial_accrual variant.
+//
+// Both variants print a GAS_MEASUREMENT line that validate_gas.py picks up
+// and compares against the JSON baseline in docs/gas.md.
+// ---------------------------------------------------------------------------
+
+/// keeper_cancel on a stream that still has an unstreamed balance (3 transfers).
+///
+/// Setup:
+///   deposit = 10 000, rate = 5 token/s, start = 0, end = 1 000
+///   → accrued at end_time = min(5 × 1 000, 10 000) = 5 000
+///   → sender_refund_gross = 5 000
+///   → keeper_fee = 5 000 × 50 / 10 000 = 25
+///   → three token transfers: recipient 5 000, sender 4 975, keeper 25
+#[test]
+fn test_keeper_cancel_gas_partial_accrual() {
+    let ctx = TestContext::setup();
+
+    // Create the stream at t=0.
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client.create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &10_000_i128,
+        &5_i128,
+        &0u64,
+        &0u64,
+        &1_000u64,
+        &0_i128,
+        &None,
+        &StreamKind::Linear,
+    );
+
+    // Advance past end_time + grace period so the stream is eligible.
+    ctx.env.ledger().set_timestamp(1_000 + KEEPER_GRACE + 1);
+
+    let cost = measure_gas(&ctx, |ctx| {
+        ctx.client.keeper_cancel(&stream_id, &ctx.keeper);
+    });
+
+    // Print in the canonical GAS_MEASUREMENT format so validate_gas.py can
+    // parse this line and compare it against the baseline in docs/gas.md.
+    println!("GAS_MEASUREMENT: keeper_cancel: partial_accrual: {}", cost);
+}
+
+/// keeper_cancel on a stream that is fully accrued (1 transfer, keeper fee == 0).
+///
+/// Setup:
+///   deposit = 1 000, rate = 1 token/s, start = 0, end = 1 000
+///   → accrued at end_time = 1 000 == deposit
+///   → sender_refund_gross = 0, keeper_fee = 0
+///   → one token transfer: recipient 1 000; no sender or keeper transfers
+#[test]
+fn test_keeper_cancel_gas_fully_accrued() {
+    let ctx = TestContext::setup();
+
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client.create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1_000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1_000u64,
+        &0_i128,
+        &None,
+        &StreamKind::Linear,
+    );
+
+    ctx.env.ledger().set_timestamp(1_000 + KEEPER_GRACE + 1);
+
+    let cost = measure_gas(&ctx, |ctx| {
+        ctx.client.keeper_cancel(&stream_id, &ctx.keeper);
+    });
+
+    println!("GAS_MEASUREMENT: keeper_cancel: fully_accrued: {}", cost);
 }
