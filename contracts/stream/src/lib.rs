@@ -3097,9 +3097,11 @@ impl FluxoraStream {
                 proposed_recipient: new_recipient,
             },
         );
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
 
         Ok(())
     }

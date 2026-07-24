@@ -393,7 +393,11 @@ fn accept_succeeds_across_archival_threshold() {
         },
     }]);
     let result = ctx.client().try_accept_recipient_update(&stream_id);
-    assert!(result.is_ok(), "accept should succeed with TTL bump: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "accept should succeed with TTL bump: {:?}",
+        result
+    );
 
     // Verify the recipient was actually updated
     let state = ctx.client().get_stream_state(&stream_id);
@@ -429,7 +433,11 @@ fn cancel_succeeds_across_archival_threshold() {
     // mock auth contracts for the same address after large ledger advances
     ctx.env.mock_all_auths();
     let result = ctx.client().try_cancel_recipient_update(&stream_id);
-    assert!(result.is_ok(), "cancel should succeed with TTL bump: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "cancel should succeed with TTL bump: {:?}",
+        result
+    );
 
     // Verify the pending update was cleared
     assert!(ctx
