@@ -33,13 +33,27 @@ vda = _load_module()
 
 MINIMAL_LIB_RS = """\
 #[contractimpl]
-impl MyContract {
+impl FluxoraStream {
     pub fn init(env: Env) -> Result<(), Error> { Ok(()) }
     pub fn create_stream(env: Env) -> Result<u64, Error> { Ok(0) }
     pub fn withdraw(env: Env) -> Result<i128, Error> { Ok(0) }
 }
 pub fn save_stream(env: &Env) {}
 fn private_helper() {}
+"""
+
+MINIMAL_AUDIT_DOC = """\
+# Audit
+
+## Public entrypoints
+
+| Entrypoint | Parameters | Return type | Authorization | Description |
+| --- | --- | --- | --- | --- |
+| `init` | `env: Env` | — | Admin | Init |
+| `create_stream` | `env: Env` | `u64` | Sender | Create |
+| `withdraw` | `env: Env` | `i128` | Recipient | Withdraw |
+
+---
 """
 
 MINIMAL_EVENTS_RS = """\
@@ -78,8 +92,9 @@ def _write_files(
     streaming: str = STREAMING_DOC,
     events: str = EVENTS_DOC,
     error: str = ERROR_DOC,
+    audit: str = MINIMAL_AUDIT_DOC,
 ):
-    """Write all six files to tmp_path and return their paths as a tuple."""
+    """Write all seven files to tmp_path and return their paths as a tuple."""
     data = {
         "lib.rs": lib_rs,
         "events.rs": events_rs,
@@ -87,6 +102,7 @@ def _write_files(
         "streaming.md": streaming,
         "events.md": events,
         "error.md": error,
+        "audit.md": audit,
     }
     paths = {}
     for name, content in data.items():
@@ -100,15 +116,16 @@ def _write_files(
         paths["streaming.md"],
         paths["events.md"],
         paths["error.md"],
+        paths["audit.md"],
     )
 
 
 def _fake_mapping(tmp_path: Path, files: tuple, missing_key: str = None) -> dict:
     """Build a MAPPING dict pointing at real tmp_path files."""
     keys = ["CONTRACT_SRC", "EVENTS_SRC", "ERROR_SRC",
-            "DOC_STREAMING", "DOC_EVENTS", "DOC_ERROR"]
+            "DOC_STREAMING", "DOC_EVENTS", "DOC_ERROR", "DOC_AUDIT"]
     names = ["lib.rs", "events.rs", "error.rs",
-             "streaming.md", "events.md", "error.md"]
+             "streaming.md", "events.md", "error.md", "audit.md"]
     mapping = {}
     for key, name, path in zip(keys, names, files):
         if key == missing_key:
@@ -175,7 +192,7 @@ class TestResolveAll:
         monkeypatch.setattr(vda, "REPO_ROOT", tmp_path)
         resolved, ok = vda.resolve_all()
         assert ok is True
-        assert len(resolved) == 6
+        assert len(resolved) == 7
 
     def test_missing_file_returns_not_ok(self, tmp_path, monkeypatch):
         files = _write_files(tmp_path)
@@ -294,6 +311,54 @@ class TestExtractEntrypoints:
 # extract_event_symbols
 # ---------------------------------------------------------------------------
 
+class TestExtractContractimplEntrypoints:
+    CONTRACTIMPL_SRC = """\
+#[contractimpl]
+impl FluxoraStream {
+    pub fn init(env: Env) -> Result<(), Error> { Ok(()) }
+    pub fn withdraw(env: Env) -> Result<i128, Error> { Ok(0) }
+}
+pub fn upgrade(env: Env) -> Result<(), Error> { Ok(()) }
+pub fn save_stream(env: &Env) {}
+"""
+
+    def test_finds_contractimpl_entrypoints(self):
+        result = vda.extract_contractimpl_entrypoints(self.CONTRACTIMPL_SRC)
+        assert result == {"init", "withdraw"}
+
+    def test_ignores_outside_contractimpl(self):
+        result = vda.extract_contractimpl_entrypoints(self.CONTRACTIMPL_SRC)
+        assert "upgrade" not in result
+        assert "save_stream" not in result
+
+    def test_missing_contractimpl_returns_empty(self):
+        assert vda.extract_contractimpl_entrypoints("pub fn foo() {}") == set()
+
+
+class TestExtractAuditTableEntrypoints:
+    AUDIT_DOC = """\
+## Public entrypoints
+
+| Entrypoint | Parameters | Return type | Authorization | Description |
+| --- | --- | --- | --- | --- |
+| `init` | `env: Env` | — | Admin | Init |
+| `withdraw` | `env: Env` | `i128` | Recipient | Withdraw |
+
+---
+
+## Invariants
+"""
+
+    def test_parses_table_rows(self):
+        assert vda.extract_audit_table_entrypoints(self.AUDIT_DOC) == {
+            "init",
+            "withdraw",
+        }
+
+    def test_missing_section_returns_empty(self):
+        assert vda.extract_audit_table_entrypoints("# No table") == set()
+
+
 class TestExtractEventSymbols:
     def test_finds_symbol_short(self):
         assert "created" in vda.extract_event_symbols(
@@ -390,6 +455,66 @@ class TestCheckMissing:
 class TestValidate:
     def test_passes_on_full_alignment(self, tmp_path):
         assert vda.validate(*_write_files(tmp_path)) == 0
+
+    def test_fails_on_missing_audit_entrypoint(self, tmp_path):
+        paths = _write_files(
+            tmp_path,
+            audit="""\
+## Public entrypoints
+
+| Entrypoint | Parameters | Return type | Authorization | Description |
+| --- | --- | --- | --- | --- |
+| `init` | `env: Env` | — | Admin | Init |
+
+---
+""",
+        )
+        assert vda.validate(*paths) == 1
+
+    def test_fails_on_stale_audit_entrypoint(self, tmp_path):
+        paths = _write_files(
+            tmp_path,
+            audit="""\
+## Public entrypoints
+
+| Entrypoint | Parameters | Return type | Authorization | Description |
+| --- | --- | --- | --- | --- |
+| `init` | `env: Env` | — | Admin | Init |
+| `create_stream` | `env: Env` | `u64` | Sender | Create |
+| `withdraw` | `env: Env` | `i128` | Recipient | Withdraw |
+| `removed_fn` | `env: Env` | — | Anyone | Stale |
+
+---
+""",
+        )
+        assert vda.validate(*paths) == 1
+
+    def test_fails_on_version_contradiction(self, tmp_path):
+        paths = _write_files(
+            tmp_path,
+            audit=MINIMAL_AUDIT_DOC
+            + "\nThere is no `version` entrypoint in the contract.\n",
+        )
+        assert vda.validate(*paths) == 1
+
+    def test_prints_stale_audit_message(self, tmp_path, capsys):
+        paths = _write_files(
+            tmp_path,
+            audit="""\
+## Public entrypoints
+
+| Entrypoint | Parameters | Return type | Authorization | Description |
+| --- | --- | --- | --- | --- |
+| `init` | `env: Env` | — | Admin | Init |
+| `create_stream` | `env: Env` | `u64` | Sender | Create |
+| `withdraw` | `env: Env` | `i128` | Recipient | Withdraw |
+| `removed_fn` | `env: Env` | — | Anyone | Stale |
+
+---
+""",
+        )
+        vda.validate(*paths)
+        assert "STALE DOC:" in capsys.readouterr().out
 
     def test_fails_on_missing_entrypoint(self, tmp_path):
         paths = _write_files(
@@ -514,6 +639,10 @@ class TestMain:
         self._patch(monkeypatch, tmp_path, "DOC_ERROR")
         assert vda.main() == 1
 
+    def test_missing_audit_doc_returns_1(self, tmp_path, monkeypatch):
+        self._patch(monkeypatch, tmp_path, "DOC_AUDIT")
+        assert vda.main() == 1
+
     def test_missing_file_prints_file_missing_tag(
             self, tmp_path, monkeypatch, capsys):
         self._patch(monkeypatch, tmp_path, "CONTRACT_SRC")
@@ -573,6 +702,24 @@ class TestEntrypointAllowlistFullCoverage:
         assert "require_not_globally_paused" not in vda.extract_entrypoints(
             "pub fn require_not_globally_paused(env: &Env) {}"
         )
+
+
+class TestRealRepoAuditAlignment:
+    """Integration guard: docs/audit.md must mirror the live contractimpl surface."""
+
+    def test_audit_table_matches_contractimpl(self):
+        repo_root = Path(__file__).resolve().parent.parent
+        lib_rs = (repo_root / "contracts" / "stream" / "src" / "lib.rs").read_text(
+            encoding="utf-8"
+        )
+        audit_md = (repo_root / "docs" / "audit.md").read_text(encoding="utf-8")
+
+        contractimpl = vda.extract_contractimpl_entrypoints(lib_rs)
+        audit_table = vda.extract_audit_table_entrypoints(audit_md)
+
+        assert len(contractimpl) >= 70
+        assert contractimpl == audit_table
+        assert vda._VERSION_CONTRADICTION not in audit_md
 
 
 # ---------------------------------------------------------------------------

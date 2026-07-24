@@ -4,9 +4,22 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback
+    import tomli as tomllib  # type: ignore[no-redef]
+
 
 SCRIPT = Path(__file__).resolve().parents[1] / "script" / "verify_rust_version.py"
 TOOLCHAIN = Path(__file__).resolve().parents[1] / "rust-toolchain.toml"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+CRATE_MANIFESTS = [
+    REPO_ROOT / "contracts" / "stream" / "Cargo.toml",
+    REPO_ROOT / "contracts" / "factory" / "Cargo.toml",
+    REPO_ROOT / "contracts" / "governance" / "Cargo.toml",
+]
 
 
 def _load_module():
@@ -17,6 +30,14 @@ def _load_module():
 
 
 verify_rust_version = _load_module()
+
+
+def _crate_rust_version(manifest: Path) -> str:
+    data = tomllib.loads(manifest.read_text(encoding="utf-8"))
+    rust_version = data.get("package", {}).get("rust-version")
+    if not isinstance(rust_version, str) or not rust_version:
+        raise AssertionError(f"missing [package].rust-version in {manifest}")
+    return rust_version
 
 
 def test_pinned_channel_reads_rust_toolchain_toml():
@@ -97,3 +118,16 @@ def test_rustc_version_falls_back_to_invoking_real_rustc(monkeypatch):
     monkeypatch.delenv("RUSTC_VERSION_OUTPUT", raising=False)
     version = verify_rust_version.rustc_version()
     assert version
+
+
+# MSRV cross-check: each crate manifest's `rust-version` must track the
+# `rust-toolchain.toml` pin independently of the CI-invoked `rustc --version`
+# comparison above, so `cargo` itself enforces the floor on every invocation
+# (including local developer builds), not just CI.
+
+
+@pytest.mark.parametrize(
+    "manifest", CRATE_MANIFESTS, ids=lambda p: p.relative_to(REPO_ROOT).as_posix()
+)
+def test_crate_rust_version_matches_pinned_toolchain(manifest):
+    assert _crate_rust_version(manifest) == verify_rust_version.pinned_channel(TOOLCHAIN)
