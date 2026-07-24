@@ -157,6 +157,8 @@ pub enum StreamKind {
     Linear = 0,
     /// Stream that unlocks its full deposit at the cliff time in a one-shot event.
     CliffOnly = 1,
+    /// Stream that accrues linearly from cliff_time to end_time, and nothing before.
+    CliffSlope = 2,
 }
 
 #[soroban_sdk::contracterror]
@@ -212,6 +214,7 @@ pub enum ContractError {
     ReservationNotExpirable = 25,
     ClockRegression = 27,
     ReservationStillActive = 26,
+    ReservationAlreadyActive = 34,
     /// Stream kind does not support this operation (e.g., rate changes on CliffOnly).
     UnsupportedStreamKind = 28,
     /// New rate exceeds the governance-controlled maximum rate per second.
@@ -226,6 +229,8 @@ pub enum ContractError {
     KeeperGracePeriodNotElapsed = 33,
     /// Withdraw dust threshold is negative or exceeds deposit amount.
     InvalidDustThreshold = 35,
+    /// Rate change attempted too soon after a previous rate change.
+    RateCooldownActive = 36,
 }
 
 #[contracttype]
@@ -617,6 +622,9 @@ pub struct Stream {
     pub last_withdraw_ledger: u32,
     /// Optional structured metadata emitted for indexer consumption.
     pub metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
+    /// Ledger sequence number of the last rate change (or creation).
+    /// Used to enforce MIN_RATE_INTERVAL_LEDGERS cooldown.
+    pub last_rate_change_ledger: u32,
 }
 
 /// Pagination result for recipient stream listing
