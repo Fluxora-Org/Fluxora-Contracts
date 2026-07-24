@@ -57,6 +57,10 @@ For the exhaustive, category-by-category breakdown see **[`docs/ABI_STABILITY.md
 - Adding new entry-points that old clients can safely ignore.
 - Changing TTL bump constants (`INSTANCE_BUMP_AMOUNT`, `PERSISTENT_BUMP_AMOUNT`).
 - Changing internal helper functions with no external surface.
+- Appending new `DataKey` storage variants (append-only; existing entries stay
+  byte-identical and readable). See the "Why `CONTRACT_VERSION` was not bumped
+  to 7" note in `contracts/stream/src/checksum.rs`'s module doc-comment for the
+  full analysis of the V7 additions (discriminants 21–28).
 
 > **Note (transfer_sender):** The `transfer_sender` entry-point is a purely additive
 > new entry-point. Old clients that do not call it are unaffected. `CONTRACT_VERSION`

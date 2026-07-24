@@ -111,6 +111,21 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-build-
 
+      # Hard gate: Cargo.lock must be committed and unchanged (the "Dependency
+      # resolution" residual risk documented in contracts/stream/src/checksum.rs's
+      # build-reproducibility contract). `cargo update --locked` fails immediately
+      # if resolving the current Cargo.toml manifests would produce a different
+      # Cargo.lock, catching an unpinned `^` dependency silently drifting.
+      - name: Verify Cargo.lock is committed and unchanged
+        run: |
+          set -euo pipefail
+          if ! cargo update --locked --workspace; then
+            echo "::error::Cargo.lock would change on dependency resolution — it is out of sync with the committed Cargo.toml manifests."
+            echo "::error::This breaks the WASM build-reproducibility contract documented in contracts/stream/src/checksum.rs ('Dependency resolution: Cargo.lock must be committed and unchanged')."
+            echo "::error::If this dependency change is intentional, run 'cargo update' locally, review the diff, and commit the updated Cargo.lock alongside your change."
+            exit 1
+          fi
+
       - name: Build release (native)
         run: cargo build --release -p fluxora_stream
 
@@ -194,24 +209,24 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-test-
 
-      # continue-on-error: the testutils feature pulls in two incompatible
-      # major versions of rand_core (same root cause as the Lint job's
-      # clippy exception above) — a live crates.io ecosystem issue, not a
-      # regression from this work. `cargo test --workspace` (below, without
-      # this feature) stays a hard gate.
+      # Hard gate (#1014): the `rand_core` version skew that used to break this
+      # step (rand_core 0.6 via ed25519-dalek vs. rand_core 0.9 via a testutils
+      # dependency) no longer manifests — the only code that unified the two
+      # crates' `CryptoRng` traits lived in test files that are already marked
+      # `test = false` in contracts/stream/Cargo.toml, so `--features testutils`
+      # builds and runs cleanly. Snapshot and gas regressions must fail the build.
       - name: Run tests with snapshot validation
         run: cargo test -p fluxora_stream --features testutils -- --nocapture
         env:
           # Ensure snapshots are validated, not updated
           SOROBAN_SNAPSHOT_UPDATE: ""
-        continue-on-error: true
 
-      # continue-on-error: depends on gas measurements emitted by the
-      # snapshot-validation step above, which is itself continue-on-error
-      # (rand_core version skew) — nothing to validate against right now.
+      # Hard gate (#1014): depends on the snapshot-validation step above, which
+      # is now itself a hard gate. `docs/gas.md`'s baseline block is populated
+      # with real measured costs (was previously all zeros, which made every
+      # diff% compute as 0.00% and silently pass regardless of actual cost).
       - name: Gas Regression Check
         run: python3 script/validate_gas.py
-        continue-on-error: true
 
       # continue-on-error: --features testutils hits the same rand_core
       # version-skew as the other exceptions above (confirmed same root
