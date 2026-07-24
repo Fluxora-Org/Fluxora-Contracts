@@ -832,7 +832,8 @@ impl FluxoraFactory {
     ///   to the stream contract; all policy checks (cap, allowlist, duration) apply
     ///   regardless of kind.
     /// - `memo`: Optional opaque correlation bytes forwarded to the stream contract
-    ///   and stored there. Length bounds are validated by the stream contract.
+    ///   and stored there. Length is validated against `fluxora_stream::MAX_MEMO_BYTES`
+    ///   by the factory prior to making the cross-contract call.
     ///
     /// # Guard order (checked strictly in sequence)
     /// 1. **CreationPaused** — rejects immediately, before any policy read.
@@ -841,7 +842,8 @@ impl FluxoraFactory {
     /// 4. Time-range invariants
     /// 5. Minimum-duration check
     /// 6. Rate-per-second bounds check
-    /// 7. Cross-contract stream creation
+    /// 7. Memo length check (`fluxora_stream::MAX_MEMO_BYTES`)
+    /// 8. Cross-contract stream creation
     ///
     /// On success the returned stream ID is appended to the factory's [`DataKey::FactoryStreamIds`]
     /// registry. The registry is only written **after** the cross-contract call succeeds, so a

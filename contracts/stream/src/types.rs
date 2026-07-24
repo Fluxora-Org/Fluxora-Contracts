@@ -13,6 +13,9 @@ use soroban_sdk::{contracttype, Address, Map};
 // Data types
 // ---------------------------------------------------------------------------
 
+/// Maximum number of recipients allowed in a single pooled stream.
+pub const MAX_POOL_RECIPIENTS: u32 = 100;
+
 /// Global configuration for the Fluxora protocol.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -157,6 +160,8 @@ pub enum StreamKind {
     Linear = 0,
     /// Stream that unlocks its full deposit at the cliff time in a one-shot event.
     CliffOnly = 1,
+    /// Stream that accrues linearly from cliff_time to end_time, and nothing before.
+    CliffSlope = 2,
 }
 
 #[soroban_sdk::contracterror]
@@ -212,6 +217,7 @@ pub enum ContractError {
     ReservationNotExpirable = 25,
     ClockRegression = 27,
     ReservationStillActive = 26,
+    ReservationAlreadyActive = 34,
     /// Stream kind does not support this operation (e.g., rate changes on CliffOnly).
     UnsupportedStreamKind = 28,
     /// New rate exceeds the governance-controlled maximum rate per second.
@@ -226,6 +232,8 @@ pub enum ContractError {
     KeeperGracePeriodNotElapsed = 33,
     /// Withdraw dust threshold is negative or exceeds deposit amount.
     InvalidDustThreshold = 35,
+    /// Rate change attempted too soon after a previous rate change.
+    RateCooldownActive = 36,
 }
 
 #[contracttype]
@@ -325,6 +333,19 @@ pub struct RecipientUpdated {
     pub stream_id: u64,
     pub old_recipient: Address,
     pub new_recipient: Address,
+}
+
+/// Emitted when a recipient delegates a portion of their stream to a new recipient.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecipientShareDelegated {
+    pub parent_stream_id: u64,
+    pub child_stream_id: u64,
+    pub delegator: Address,
+    pub delegatee: Address,
+    pub share_bps: u32,
+    pub new_parent_rate: i128,
+    pub child_rate: i128,
 }
 
 #[contracttype]
@@ -429,6 +450,15 @@ pub struct SenderTransferred {
     pub stream_id: u64,
     pub old_sender: Address,
     pub new_sender: Address,
+}
+
+/// Emitted when a stream's claim ownership is transferred.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaimOwnershipTransferred {
+    pub stream_id: u64,
+    pub old_owner: Option<Address>,
+    pub new_owner: Address,
 }
 
 /// Emitted when a stream's funding health status transitions between
@@ -585,6 +615,7 @@ pub struct Stream {
     pub stream_id: u64,
     pub sender: Address,
     pub recipient: Address,
+    pub claim_owner: Option<Address>,
     pub deposit_amount: i128,
     pub rate_per_second: i128,
     pub start_time: u64,
@@ -617,6 +648,11 @@ pub struct Stream {
     pub last_withdraw_ledger: u32,
     /// Optional structured metadata emitted for indexer consumption.
     pub metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
+    /// Optional compliance witness authorized to cancel via signed attestation.
+    pub witness: Option<Address>,
+    /// Ledger sequence number of the last rate change (or creation).
+    /// Used to enforce MIN_RATE_INTERVAL_LEDGERS cooldown.
+    pub last_rate_change_ledger: u32,
 }
 
 /// Pagination result for recipient stream listing
@@ -652,6 +688,10 @@ pub struct CreateStreamParams {
     pub kind: StreamKind,
     /// Optional structured metadata emitted for indexer consumption.
     pub metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
+    /// If true, the stream cannot be cancelled or shortened. Defaults to false (None).
+    pub irrevocable: Option<bool>,
+    /// Optional compliance witness authorized to cancel via signed attestation.
+    pub witness: Option<Address>,
 }
 
 /// Parameters for creating a payment stream with relative (offset-based) times.
@@ -687,6 +727,8 @@ pub struct CreateStreamRelativeParams {
     /// The architectural style of the stream (Linear or CliffOnly).
     pub kind: StreamKind,
     pub metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
+    /// If true, the stream cannot be cancelled or shortened. Defaults to false (None).
+    pub irrevocable: Option<bool>,
 }
 
 /// Reusable relative schedule (offsets only). Amounts are supplied when creating a stream.
@@ -771,9 +813,14 @@ pub enum DataKey {
     DelegatedWithdrawNonce(Address),
     /// Last pause record for stream-level or protocol-level pause.
     LastPauseRecord(PauseKind),
-    LastAccrualLedgerTimestamp,
-    /// Per-stream rotation audit history.
+    /// Rotation history for recipient/sender changes on a stream.
     RotationHistory(u64),
+    /// Last ledger timestamp observed for accrual clock-regression detection.
+    LastAccrualLedgerTimestamp,
+    /// Protocol-wide count of streams currently in `StreamStatus::Paused` (`u64`, instance storage).
+    PausedStreamCount,
+    /// Aggregate sum of all keeper fees paid out via `keeper_cancel` (`i128`, instance storage).
+    TotalKeeperFeesPaid,
 }
 
 /// Type of pause.

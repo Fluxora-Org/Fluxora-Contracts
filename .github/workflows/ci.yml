@@ -104,6 +104,14 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Verify Rust toolchain version
+        run: python3 script/verify_rust_version.py
+
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -141,6 +149,14 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Verify Rust toolchain version
+        run: python3 script/verify_rust_version.py
+
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -151,6 +167,21 @@ jobs:
           key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-build-
+
+      # Hard gate: Cargo.lock must be committed and unchanged (the "Dependency
+      # resolution" residual risk documented in contracts/stream/src/checksum.rs's
+      # build-reproducibility contract). `cargo update --locked` fails immediately
+      # if resolving the current Cargo.toml manifests would produce a different
+      # Cargo.lock, catching an unpinned `^` dependency silently drifting.
+      - name: Verify Cargo.lock is committed and unchanged
+        run: |
+          set -euo pipefail
+          if ! cargo update --locked --workspace; then
+            echo "::error::Cargo.lock would change on dependency resolution — it is out of sync with the committed Cargo.toml manifests."
+            echo "::error::This breaks the WASM build-reproducibility contract documented in contracts/stream/src/checksum.rs ('Dependency resolution: Cargo.lock must be committed and unchanged')."
+            echo "::error::If this dependency change is intentional, run 'cargo update' locally, review the diff, and commit the updated Cargo.lock alongside your change."
+            exit 1
+          fi
 
       - name: Build release (native)
         run: cargo build --release -p fluxora_stream
@@ -224,6 +255,14 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Verify Rust toolchain version
+        run: python3 script/verify_rust_version.py
+
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -235,24 +274,24 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-test-
 
-      # continue-on-error: the testutils feature pulls in two incompatible
-      # major versions of rand_core (same root cause as the Lint job's
-      # clippy exception above) — a live crates.io ecosystem issue, not a
-      # regression from this work. `cargo test --workspace` (below, without
-      # this feature) stays a hard gate.
+      # Hard gate (#1014): the `rand_core` version skew that used to break this
+      # step (rand_core 0.6 via ed25519-dalek vs. rand_core 0.9 via a testutils
+      # dependency) no longer manifests — the only code that unified the two
+      # crates' `CryptoRng` traits lived in test files that are already marked
+      # `test = false` in contracts/stream/Cargo.toml, so `--features testutils`
+      # builds and runs cleanly. Snapshot and gas regressions must fail the build.
       - name: Run tests with snapshot validation
         run: cargo test -p fluxora_stream --features testutils -- --nocapture
         env:
           # Ensure snapshots are validated, not updated
           SOROBAN_SNAPSHOT_UPDATE: ""
-        continue-on-error: true
 
-      # continue-on-error: depends on gas measurements emitted by the
-      # snapshot-validation step above, which is itself continue-on-error
-      # (rand_core version skew) — nothing to validate against right now.
+      # Hard gate (#1014): depends on the snapshot-validation step above, which
+      # is now itself a hard gate. `docs/gas.md`'s baseline block is populated
+      # with real measured costs (was previously all zeros, which made every
+      # diff% compute as 0.00% and silently pass regardless of actual cost).
       - name: Gas Regression Check
         run: python3 script/validate_gas.py
-        continue-on-error: true
 
       # continue-on-error: --features testutils hits the same rand_core
       # version-skew as the other exceptions above (confirmed same root
@@ -295,6 +334,48 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
 
+      # ── Snapshot Security-Field Diff Gate ─────────────────────────────────
+      # Hard gate (no continue-on-error) for pull_request events.
+      #
+      # Runs check_snapshot_diff.py, which parses every snapshot JSON touched
+      # by the PR and exits 1 if any security-relevant field (auth, events,
+      # error codes, storage) was altered. The exit-code contract forces
+      # "mandatory extra review" before such a PR can be merged.
+      #
+      # Trigger split:
+      #   pull_request → compare against the target branch tip already fetched
+      #                  by actions/checkout (origin/<base_ref>).
+      #   push         → compare against the immediate parent commit (HEAD~1).
+      #   All other events (workflow_dispatch, etc.) → skip via the `if:` guard.
+      #
+      # Security notes:
+      #   • origin/${{ github.base_ref }} is set by the checkout action and is
+      #     read-only; no user input is interpolated into a shell command.
+      #   • The script itself calls `git diff --name-only` and `git show`,
+      #     both of which receive only the two validated ref strings.
+      #   • Fetch depth must be ≥ 2 (the default checkout fetches the full
+      #     history for push; for pull_request it fetches a merge commit with
+      #     both parents available, so origin/<base_ref> is resolvable).
+      - name: Set up Python for snapshot diff gate
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Snapshot security-field diff gate
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="origin/${{ github.base_ref }}"
+          else
+            BASE="HEAD~1"
+          fi
+          echo "Running snapshot diff gate: base=${BASE}"
+          python3 script/check_snapshot_diff.py --base "${BASE}"
+        # No continue-on-error — this step is intentionally a hard gate.
+        # A PR that modifies auth/events/error/storage fields in committed
+        # snapshots will fail CI here and must receive mandatory extra review.
+
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
@@ -308,6 +389,14 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Verify Rust toolchain version
+        run: python3 script/verify_rust_version.py
 
       - name: Cache cargo registry
         uses: actions/cache@v4
