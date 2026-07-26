@@ -421,11 +421,20 @@ fn test_reclaim_twice_errors() {
 }
 
 // ---------------------------------------------------------------------------
-// release vs reclaim NextStreamId asymmetry regression tests
+// release_id_reservation tip-adjacent reclamation (issue #1007)
 // ---------------------------------------------------------------------------
 
+/// Regression test for #1007: release_id_reservation now reclaims tip-adjacent
+/// unused IDs, matching reclaim_expired_id_reservation behavior.
+///
+/// Security Rationale / NatSpec:
+/// @dev Before #1007, release_id_reservation called remove_id_reservation directly
+/// without invoking the release_reservation helper. This permanently orphaned
+/// tip-adjacent ID ranges even when fully unconsumed. The fix routes through
+/// release_reservation which checks reservation_end == current_count and rewinds
+/// the counter when the reservation is at the tip and fully unconsumed.
 #[test]
-fn test_release_id_reservation_never_shrinks_next_stream_id() {
+fn test_release_id_reservation_shrinks_next_stream_id_when_tip_adjacent() {
     let ctx = Ctx::setup();
 
     // NextStreamId is 0. Reserve 5. NextStreamId becomes 5.
@@ -438,9 +447,9 @@ fn test_release_id_reservation_never_shrinks_next_stream_id() {
     // Reservation is gone
     assert!(ctx.client.get_id_reservation(&ctx.sender).is_none());
 
-    // Counter didn't shrink. Next stream gets ID 5.
+    // Counter rewinds. Next stream gets ID 0.
     let id = ctx.create_stream(&ctx.sender);
-    assert_eq!(id, 5);
+    assert_eq!(id, 0);
 }
 
 #[test]
@@ -461,6 +470,167 @@ fn test_reclaim_expired_id_reservation_shrinks_next_stream_id() {
     assert!(ctx.client.get_id_reservation(&ctx.sender).is_none());
 
     // Counter rewinds. Next stream gets ID 0.
+    let id = ctx.create_stream(&ctx.sender);
+    assert_eq!(id, 0);
+}
+
+// ---------------------------------------------------------------------------
+// release_id_reservation edge cases
+// ---------------------------------------------------------------------------
+
+/// When a reservation is not tip-adjacent (IDs were consumed by later create_stream
+/// calls that pushed the counter past reservation_end), release_id_reservation
+/// must NOT rewind the counter. It should just remove the reservation record.
+#[test]
+fn test_release_id_reservation_no_rewind_when_not_tip_adjacent() {
+    let ctx = Ctx::setup();
+
+    // Reserve 3 IDs (0..2). NextStreamId = 3.
+    ctx.client.reserve_stream_ids(&ctx.sender, &3u32, &None);
+    assert_eq!(ctx.client.get_stream_count(), 3);
+
+    // Consume all 3 reserved IDs.
+    let id0 = ctx.create_stream(&ctx.sender);
+    let id1 = ctx.create_stream(&ctx.sender);
+    let id2 = ctx.create_stream(&ctx.sender);
+    assert_eq!(id0, 0);
+    assert_eq!(id1, 1);
+    assert_eq!(id2, 2);
+    assert_eq!(ctx.client.get_stream_count(), 3);
+
+    // Reservation is now fully consumed and removed by create_stream.
+    // Trying to release should error since reservation is already gone.
+    let result = ctx.client.try_release_id_reservation(&ctx.sender);
+    assert_eq!(result, Err(Ok(ContractError::ReservationNotFound)));
+}
+
+/// When a reservation is tip-adjacent but partially consumed, release_id_reservation
+/// rewinds the counter to the first unconsumed ID. The `release_reservation` helper
+/// checks reservation_end == current_count (tip-adjacent) and if unconsumed IDs
+/// exist at the tip, rewinds to unconsumed_start. Since IDs 2..4 are unconsumed
+/// and at the counter tip, rewinding to 2 is safe (no stream uses those IDs).
+#[test]
+fn test_release_id_reservation_no_rewind_when_partially_consumed() {
+    let ctx = Ctx::setup();
+
+    // Reserve 5 IDs (0..4). NextStreamId = 5.
+    ctx.client.reserve_stream_ids(&ctx.sender, &5u32, &None);
+    assert_eq!(ctx.client.get_stream_count(), 5);
+
+    // Consume 2 of the 5 reserved IDs.
+    let id0 = ctx.create_stream(&ctx.sender);
+    let id1 = ctx.create_stream(&ctx.sender);
+    assert_eq!(id0, 0);
+    assert_eq!(id1, 1);
+
+    // Release via release_id_reservation
+    ctx.client.release_id_reservation(&ctx.sender);
+
+    // Reservation is gone
+    assert!(ctx.client.get_id_reservation(&ctx.sender).is_none());
+
+    // Counter rewinds to unconsumed_start = 2. Next stream gets ID 2.
+    let id = ctx.create_stream(&ctx.sender);
+    assert_eq!(id, 2);
+}
+
+/// When a non-tip-adjacent reservation is released, the event is still emitted
+/// with reclaimed = 0, maintaining consistent indexer accounting.
+#[test]
+fn test_release_id_reservation_emits_event_with_zero_reclaimed_when_not_tip_adjacent() {
+    let ctx = Ctx::setup();
+
+    // Reserve 3 IDs (0..2). NextStreamId = 3.
+    ctx.client.reserve_stream_ids(&ctx.sender, &3u32, &None);
+
+    // Consume all 3.
+    ctx.create_stream(&ctx.sender);
+    ctx.create_stream(&ctx.sender);
+    ctx.create_stream(&ctx.sender);
+
+    // Another caller reserves 3 more (3..5). Pushes counter to 6.
+    let sender2 = Address::generate(&ctx.env);
+    ctx.mint(&sender2);
+    ctx.client.reserve_stream_ids(&sender2, &3u32, &None);
+    assert_eq!(ctx.client.get_stream_count(), 6);
+
+    // sender2's reservation is tip-adjacent (reservation_end=6, current_count=6).
+    // sender2 releases: counter should rewind from 6 to 3.
+    ctx.client.release_id_reservation(&sender2);
+    assert!(ctx.client.get_id_reservation(&sender2).is_none());
+
+    // Next stream gets ID 3 (rewound).
+    let id = ctx.create_stream(&ctx.sender);
+    assert_eq!(id, 3);
+}
+
+/// release_id_reservation errors when no reservation exists for the caller.
+#[test]
+fn test_release_id_reservation_nonexistent_errors() {
+    let ctx = Ctx::setup();
+    let result = ctx.client.try_release_id_reservation(&ctx.sender);
+    assert_eq!(result, Err(Ok(ContractError::ReservationNotFound)));
+}
+
+/// Double release_id_reservation errors on second call.
+#[test]
+fn test_release_id_reservation_double_release_errors() {
+    let ctx = Ctx::setup();
+    ctx.client.reserve_stream_ids(&ctx.sender, &3u32, &None);
+
+    // First release succeeds
+    ctx.client.release_id_reservation(&ctx.sender);
+    assert!(ctx.client.get_id_reservation(&ctx.sender).is_none());
+
+    // Second release errors
+    let result = ctx.client.try_release_id_reservation(&ctx.sender);
+    assert_eq!(result, Err(Ok(ContractError::ReservationNotFound)));
+}
+
+/// After voluntary release with reclamation, the counter is correctly reused
+/// by a subsequent reservation.
+#[test]
+fn test_release_id_reservation_counter_reused_by_subsequent_reservation() {
+    let ctx = Ctx::setup();
+
+    // Reserve 5. Counter = 5.
+    ctx.client.reserve_stream_ids(&ctx.sender, &5u32, &None);
+    assert_eq!(ctx.client.get_stream_count(), 5);
+
+    // Release. Counter rewinds to 0.
+    ctx.client.release_id_reservation(&ctx.sender);
+    assert_eq!(ctx.client.get_stream_count(), 0);
+
+    // Reserve 3. Counter advances to 3, starting from 0.
+    let ids = ctx.client.reserve_stream_ids(&ctx.sender, &3u32, &None);
+    assert_eq!(ids.get(0).unwrap(), 0);
+    assert_eq!(ids.get(2).unwrap(), 2);
+    assert_eq!(ctx.client.get_stream_count(), 3);
+}
+
+/// Verify that two independent callers releasing tip-adjacent reservations
+/// each independently reclaim their ranges.
+#[test]
+fn test_two_callers_release_independently_reclaim() {
+    let ctx = Ctx::setup();
+    let sender2 = Address::generate(&ctx.env);
+    ctx.mint(&sender2);
+
+    // Caller 1 reserves 3 (0..2). Counter = 3.
+    ctx.client.reserve_stream_ids(&ctx.sender, &3u32, &None);
+    // Caller 2 reserves 3 (3..5). Counter = 6.
+    ctx.client.reserve_stream_ids(&sender2, &3u32, &None);
+    assert_eq!(ctx.client.get_stream_count(), 6);
+
+    // Caller 2 releases first. Tip-adjacent: rewinds from 6 to 3.
+    ctx.client.release_id_reservation(&sender2);
+    assert_eq!(ctx.client.get_stream_count(), 3);
+
+    // Caller 1 releases. Tip-adjacent: rewinds from 3 to 0.
+    ctx.client.release_id_reservation(&ctx.sender);
+    assert_eq!(ctx.client.get_stream_count(), 0);
+
+    // Next stream gets ID 0.
     let id = ctx.create_stream(&ctx.sender);
     assert_eq!(id, 0);
 }

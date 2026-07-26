@@ -827,6 +827,28 @@ class TestParseMeasurements:
 
 
 # ---------------------------------------------------------------------------
+# build_cargo_test_env
+# ---------------------------------------------------------------------------
+
+class TestBuildCargoTestEnv:
+    def test_prepends_cargo_bin_to_path(self, monkeypatch):
+        monkeypatch.setenv("HOME", "/tmp/testhome")
+        monkeypatch.setenv("PATH", "/usr/bin")
+        env = vg.build_cargo_test_env()
+        assert env["PATH"] == "/tmp/testhome/.cargo/bin:/usr/bin"
+
+    def test_raises_when_home_unset(self, monkeypatch):
+        monkeypatch.delenv("HOME", raising=False)
+        with pytest.raises(RuntimeError, match="HOME is not set"):
+            vg.build_cargo_test_env()
+
+    def test_raises_when_home_empty(self, monkeypatch):
+        monkeypatch.setenv("HOME", "")
+        with pytest.raises(RuntimeError, match="HOME is not set"):
+            vg.build_cargo_test_env()
+
+
+# ---------------------------------------------------------------------------
 # run_tests
 # ---------------------------------------------------------------------------
 

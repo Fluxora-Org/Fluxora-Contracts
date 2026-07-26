@@ -415,6 +415,13 @@ pub struct RateBoundsUpdated {
     pub max_rate: Option<i128>,
 }
 
+/// Emitted when the aggregate batch-cap enforcement is toggled (`batch_cap`).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BatchCapEnforcementUpdated {
+    pub enabled: bool,
+}
+
 /// Emitted when a stream is successfully created through the factory (`fct_strm`).
 /// Provides enough context for indexers to attribute stream creation to a policy-gated path.
 #[contracttype]
@@ -653,6 +660,10 @@ impl FluxoraFactory {
         // Bump instance TTL after successful update.
         bump_instance(&env);
 
+        env.events().publish(
+            (symbol_short!("batch_cap"),),
+            BatchCapEnforcementUpdated { enabled },
+        );
         Ok(())
     }
 

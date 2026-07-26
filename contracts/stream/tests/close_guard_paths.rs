@@ -7,7 +7,8 @@
 //!    index entry is absent (no panic, no partial state left behind).
 
 use fluxora_stream::{
-    ContractError, DataKey, FluxoraStream, FluxoraStreamClient, PauseReason, Stream, StreamKind, StreamStatus,
+    ContractError, FluxoraStream, FluxoraStreamClient, PauseReason, StreamKind, StreamStatus,
+    MAX_RECIPIENT_PAGE_SIZE,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -82,6 +83,15 @@ impl<'a> Ctx<'a> {
             &StreamKind::Linear,
             &Some(true),
         )
+    }
+
+    /// Create `n` streams for `self.recipient`, each with the given duration.
+    fn create_n(&self, n: u32, duration: u64) -> std::vec::Vec<u64> {
+        let mut ids = std::vec::Vec::new();
+        for _ in 0..n {
+            ids.push(self.create_stream(duration));
+        }
+        ids
     }
 }
 
@@ -346,4 +356,112 @@ fn test_irrevocable_stream_rejects_bulk_cancel() {
     let streams = soroban_sdk::vec![&ctx.env, stream_id];
     let result = ctx.client.try_bulk_cancel_streams(&ctx.sender, &streams);
     assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
+}
+
+// ---------------------------------------------------------------------------
+// Paginated-index consistency after close (issue #959)
+// ---------------------------------------------------------------------------
+
+/// Close a stream from the middle of a multi-page recipient index and verify
+/// all remaining pages are consistent (no duplicates, no gaps, correct total).
+#[test]
+fn test_close_removes_from_multi_page_index() {
+    let ctx = Ctx::setup();
+    ctx.env.budget().reset_unlimited();
+
+    let total = MAX_RECIPIENT_PAGE_SIZE + 1;
+    let ids = ctx.create_n(total, 100);
+
+    // Sanity: first page is full, second page has one entry.
+    let page1 = ctx.client.get_recipient_streams(&ctx.recipient);
+    assert_eq!(page1.len() as u32, MAX_RECIPIENT_PAGE_SIZE);
+
+    // Pick a stream from the non-final "page" (position 50 in the sorted
+    // order is well within the first page).
+    let close_id = ids[50 as usize];
+
+    // Complete the stream so close_completed_stream will accept it.
+    ctx.env.ledger().with_mut(|l| {
+        l.timestamp += 101;
+        l.sequence_number += 2;
+    });
+    ctx.client.withdraw(&close_id);
+    ctx.client.close_completed_stream(&close_id);
+
+    // Stream removed from storage.
+    assert!(ctx.client.try_get_stream_state(&close_id).is_err());
+
+    // Paginate through every page and collect all remaining IDs.
+    let mut remaining = soroban_sdk::Vec::<u64>::new(&ctx.env);
+    let mut cursor = 0u64;
+    loop {
+        let page = ctx.client.get_recipient_streams_paginated(
+            &ctx.recipient,
+            &cursor,
+            &MAX_RECIPIENT_PAGE_SIZE,
+        );
+        for i in 0..page.stream_ids.len() {
+            remaining.push_back(page.stream_ids.get(i).unwrap());
+        }
+        if page.next_cursor == 0 {
+            break;
+        }
+        cursor = page.next_cursor;
+    }
+
+    // Total count decreased by exactly one.
+    assert_eq!(remaining.len() as u32, total - 1);
+
+    // The closed stream must not appear in any page.
+    for i in 0..remaining.len() {
+        assert_ne!(remaining.get(i).unwrap(), close_id);
+    }
+
+    // Every original ID except the closed one must still be present.
+    for id in &ids {
+        if *id != close_id {
+            let mut found = false;
+            for i in 0..remaining.len() {
+                if remaining.get(i).unwrap() == *id {
+                    found = true;
+                    break;
+                }
+            }
+            assert!(found, "stream {} missing from index after close", id);
+        }
+    }
+}
+
+/// Close the last (and only) stream for a recipient and confirm the paginated
+/// query returns an empty page gracefully (no panic, next_cursor == 0).
+#[test]
+fn test_close_last_stream_empty_index_graceful() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream(100);
+
+    // Verify the stream is indexed.
+    let index_before = ctx.client.get_recipient_streams(&ctx.recipient);
+    assert_eq!(index_before.len(), 1);
+    assert_eq!(index_before.get(0).unwrap(), stream_id);
+
+    // Complete and close it.
+    ctx.env.ledger().with_mut(|l| {
+        l.timestamp += 101;
+        l.sequence_number += 2;
+    });
+    ctx.client.withdraw(&stream_id);
+    ctx.client.close_completed_stream(&stream_id);
+
+    // Non-paginated query returns empty.
+    let index_after = ctx.client.get_recipient_streams(&ctx.recipient);
+    assert_eq!(index_after.len(), 0);
+
+    // Paginated query also returns empty with next_cursor == 0.
+    let page = ctx.client.get_recipient_streams_paginated(
+        &ctx.recipient,
+        &0,
+        &MAX_RECIPIENT_PAGE_SIZE,
+    );
+    assert_eq!(page.stream_ids.len(), 0);
+    assert_eq!(page.next_cursor, 0);
 }

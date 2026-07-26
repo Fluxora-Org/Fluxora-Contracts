@@ -22,8 +22,11 @@ info:
     ## Amount fields
 
     All on-chain / API amount fields (`depositAmount`, `ratePerSecond`) are
-    serialized as **decimal strings** to preserve precision for values that
-    exceed `Number.MAX_SAFE_INTEGER` in JavaScript.
+    serialized as **integer strings** (base-units / stroops) to preserve
+    precision for i128 values that exceed `Number.MAX_SAFE_INTEGER` in
+    JavaScript.  "Integer string" means a whole non-negative number with no
+    decimal point — fractional values (e.g. `"100.5"`) are rejected because
+    the on-chain contract declares these fields as `i128`.
 
 servers:
   - url: http://localhost:3000/api/v1
@@ -120,16 +123,20 @@ components:
           description: Recipient of the stream.
         depositAmount:
           type: string
-          pattern: '^\d+(\.\d+)?$'
+          pattern: '^\d+$'
           description: |
-            Total deposited amount as a **decimal string**.
-            Serialized as a string to preserve precision for on-chain values.
+            Total deposited amount as an **integer string** (base-units / stroops).
+            Serialized as a string to preserve precision for on-chain i128 values
+            that may exceed Number.MAX_SAFE_INTEGER in JavaScript.
+            Fractional values (e.g. "100.5") are not valid — the on-chain
+            contract uses i128 (whole base-units only).
           example: "1000000"
         ratePerSecond:
           type: string
-          pattern: '^\d+(\.\d+)?$'
+          pattern: '^\d+$'
           description: |
-            Streaming rate per second as a **decimal string**.
+            Streaming rate per second as an **integer string** (base-units / stroops).
+            Must be a whole number; fractional rates have no on-chain representation.
           example: "100"
         startTime:
           type: integer
@@ -521,13 +528,13 @@ components:
           format: uuid
         depositAmount:
           type: string
-          pattern: '^\d+(\.\d+)?$'
-          description: Total deposit as a decimal string.
+          pattern: '^\d+$'
+          description: Total deposit as an integer string (base-units / stroops). Fractional values are rejected.
           example: "1000000"
         ratePerSecond:
           type: string
-          pattern: '^\d+(\.\d+)?$'
-          description: Rate per second as a decimal string.
+          pattern: '^\d+$'
+          description: Rate per second as an integer string (base-units / stroops). Fractional values are rejected.
           example: "100"
         startTime:
           type: integer

@@ -13,6 +13,7 @@ pub mod types;
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env, Map};
 use storage::*;
 use token_check::verify_token_behavior;
+pub use reject_duplicate_ids;
 
 // ---------------------------------------------------------------------------
 // TTL constants
@@ -206,6 +207,40 @@ const MIN_RATE_INTERVAL_LEDGERS: u32 = 17;
 /// append-only `DataKey::AutoRenewEnabled` opt-in, and an irrevocable stream
 /// mode blocking all cancel/shorten paths.
 pub const CONTRACT_VERSION: u32 = 7;
+
+// ---------------------------------------------------------------------------
+// Validation Helpers
+// ---------------------------------------------------------------------------
+
+/// Rejects duplicate stream IDs in a batch using an O(n) soroban_sdk::Map.
+///
+/// # Arguments
+/// * `env` - The Soroban environment
+/// * `ids` - A vector of stream IDs to check for duplicates
+///
+/// # Returns
+/// * `Ok(())` if all IDs are unique
+/// * `Err(ContractError::DuplicateStreamId)` if any duplicate is found
+///
+/// # Performance
+/// * O(n) time complexity vs O(n²) for the previous nested-loop approach
+/// * Uses `soroban_sdk::Map` for O(1) lookups
+///
+/// # Example
+/// ```
+/// let ids = soroban_sdk::vec![&env, 1u64, 2u64, 3u64];
+/// reject_duplicate_ids(&env, &ids)?;
+/// ```
+pub fn reject_duplicate_ids(env: &Env, ids: &soroban_sdk::Vec<u64>) -> Result<(), ContractError> {
+    let mut seen = soroban_sdk::Map::new(env);
+    for id in ids.iter() {
+        if seen.contains_key(&id) {
+            return Err(ContractError::DuplicateStreamId);
+        }
+        seen.set(id, ());
+    }
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -1127,6 +1162,10 @@ pub struct StreamScheduleTemplate {
 ///    migration tooling can determine which entries exist on a given instance.
 ///
 /// Current discriminant assignments (must never change) — see enum definition below for order.
+///
+/// **Doc sync check:** When adding or modifying variants, update *both*:
+/// - `docs/storage.md` — full discriminant table and code block
+/// - `docs/ABI_STABILITY.md` — frozen discriminant table (variants 0–14) and any breaking-change notes
 #[contracttype]
 pub enum DataKey {
     Config,                    // Instance storage for global settings (admin/token).
@@ -3893,27 +3932,30 @@ impl FluxoraStream {
     /// - All streams are processed in order. Any error (stream not found, wrong recipient,
     ///   paused, or duplicate IDs) reverts the whole transaction.
     /// - Completed streams are not an error: they produce amount `0` and no events.
-    pub fn batch_withdraw(
+    pub fn batch_withdraw_to(
         env: Env,
         recipient: Address,
-        stream_ids: soroban_sdk::Vec<u64>,
+        withdrawals: soroban_sdk::Vec<WithdrawToParam>,
     ) -> Result<soroban_sdk::Vec<BatchWithdrawResult>, ContractError> {
         require_not_globally_paused(&env)?;
         recipient.require_auth();
 
-        let n = stream_ids.len();
-        for i in 0..n {
-            let a = stream_ids.get(i).unwrap();
-            let mut j = i + 1;
-            while j < n {
-                if stream_ids.get(j).unwrap() == a {
-                    return Err(ContractError::DuplicateStreamId);
-                }
-                j += 1;
+        // --- Batch validation: reject duplicate stream IDs (O(n)) ---
+        // Extract stream IDs from WithdrawToParam structs
+        let stream_ids: soroban_sdk::Vec<u64> = withdrawals
+            .iter()
+            .map(|param| param.stream_id)
+            .collect();
+        reject_duplicate_ids(&env, &stream_ids)?;
+
+        // Validate destinations
+        for param in withdrawals.iter() {
+            if param.destination == env.current_contract_address() {
+                return Err(ContractError::InvalidParams);
             }
         }
 
-        // Fetch initial contract balance and track remaining safety buffer (#39)
+        // Fetch initial contract balance and track remaining safety buffer
         let token_address = get_token(&env)?;
         let mut contract_balance =
             token::Client::new(&env, &token_address).balance(&env.current_contract_address());
@@ -4145,6 +4187,12 @@ impl FluxoraStream {
                 save_stream(&env, &stream);
                 reconcile_paused_stream_count(&env, previous_status, stream.status);
 
+                // Reduce liabilities as tokens leave the contract.
+                let liabilities = read_total_liabilities(&env)
+                    .checked_sub(withdrawable)
+                    .unwrap_or(0);
+                write_total_liabilities(&env, liabilities);
+
                 push_token(&env, &param.destination, withdrawable)?;
 
                 env.events().publish(
@@ -4331,6 +4379,12 @@ impl FluxoraStream {
         }
         save_stream(&env, &stream);
         reconcile_paused_stream_count(&env, previous_status, stream.status);
+
+        // Reduce liabilities as tokens leave the contract to the recipient.
+        let liabilities = read_total_liabilities(&env)
+            .checked_sub(withdrawable)
+            .unwrap_or(0);
+        write_total_liabilities(&env, liabilities);
 
         // 10. Increment nonce to prevent replay.
         increment_delegated_nonce(&env, &stream.recipient);
@@ -4834,6 +4888,17 @@ impl FluxoraStream {
     /// This view is O(1): it reads the maintained `DataKey::PausedStreamCount` instance key
     /// instead of forcing indexers or dashboards to enumerate every stream.
     ///
+    /// **Scope:** this counter tracks **only** individually-paused streams (via
+    /// `pause_stream`, `pause_stream_as_admin`, or equivalent).  It is **not**
+    /// affected by the protocol-wide `GlobalEmergencyPaused` circuit breaker.
+    /// When the global flag is `true` all user-facing mutations are blocked and
+    /// every stream is effectively frozen, but `get_paused_stream_count` still
+    /// returns the number of streams that are individually `Paused` — which may
+    /// be `0` during a global emergency pause with no individually-paused streams.
+    ///
+    /// Callers that need full pause-state awareness (e.g. dashboards, monitors)
+    /// must check **both** this view **and** [`get_global_emergency_paused`].
+    ///
     /// On upgraded deployments the key may initially be absent, in which case this view
     /// returns `0` until post-upgrade pause/resume/cancel/complete transitions repopulate it.
     pub fn get_paused_stream_count(env: Env) -> u64 {
@@ -5095,6 +5160,11 @@ impl FluxoraStream {
 
         // Refund the now-unreachable portion of the deposit to the sender.
         if refund_amount > 0 {
+            // Reduce liabilities by the refunded portion (no longer owed to recipient).
+            let liabilities = read_total_liabilities(&env)
+                .checked_sub(refund_amount)
+                .unwrap_or(0);
+            write_total_liabilities(&env, liabilities);
             push_token(&env, &stream.sender, refund_amount)?;
         }
 
@@ -7034,6 +7104,9 @@ impl FluxoraStream {
             return Ok(());
         }
 
+        // --- Batch validation: reject duplicate stream IDs (O(n)) ---
+        reject_duplicate_ids(&env, &stream_ids)?;
+
         let current_ledger = env.ledger().sequence();
         let mut streams = soroban_sdk::Vec::<Stream>::new(&env);
 
@@ -7041,13 +7114,7 @@ impl FluxoraStream {
         for i in 0..n {
             let id = stream_ids.get(i).unwrap();
 
-            let mut j = i + 1;
-            while j < n {
-                if stream_ids.get(j).unwrap() == id {
-                    return Err(ContractError::DuplicateStreamId);
-                }
-                j += 1;
-            }
+            // Duplicate detection removed - now handled by reject_duplicate_ids
 
             let stream = load_stream(&env, id)?;
 
@@ -7697,6 +7764,12 @@ impl FluxoraStream {
         save_stream(&env, &stream);
         reconcile_paused_stream_count(&env, previous_status, stream.status);
 
+        // Reduce liabilities as tokens leave the contract.
+        let liabilities = read_total_liabilities(&env)
+            .checked_sub(withdrawable)
+            .unwrap_or(0);
+        write_total_liabilities(&env, liabilities);
+
         // Emit auto-claim triggered event
         env.events().publish(
             (symbol_short!("ac_trig"), stream_id),
@@ -8138,7 +8211,10 @@ impl FluxoraStream {
     pub fn release_id_reservation(env: Env, caller: Address) -> Result<(), ContractError> {
         caller.require_auth();
 
-        remove_id_reservation(&env, &caller);
+        let res =
+            load_id_reservation(&env, &caller).ok_or(ContractError::ReservationNotFound)?;
+
+        Self::release_reservation(&env, &caller, &res);
         Ok(())
     }
 
@@ -8262,20 +8338,16 @@ impl FluxoraStream {
             return Ok(());
         }
 
+        // --- Batch validation: reject duplicate stream IDs (O(n)) ---
+        reject_duplicate_ids(&env, &stream_ids)?;
+
         // ── Phase 1: Validate all stream IDs and ownership ────────────────────
         let mut streams = soroban_sdk::Vec::<Stream>::new(&env);
 
         for i in 0..n {
             let id = stream_ids.get(i).unwrap();
 
-            // Duplicate detection
-            let mut j = i + 1;
-            while j < n {
-                if stream_ids.get(j).unwrap() == id {
-                    return Err(ContractError::DuplicateStreamId);
-                }
-                j += 1;
-            }
+            // Duplicate detection removed - now handled by reject_duplicate_ids
 
             let stream = load_stream(&env, id)?;
 
