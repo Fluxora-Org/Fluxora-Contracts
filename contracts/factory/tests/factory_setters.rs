@@ -971,3 +971,55 @@ fn test_set_admin_same_ledger_multiple_setters() {
     factory.set_batch_cap_enforcement(&false);
     assert_eq!(factory.get_factory_config().batch_cap_enforced, false);
 }
+
+// ---------------------------------------------------------------------------
+// issue #1133 — set_batch_cap_enforcement must emit BatchCapEnforcementUpdated
+// ---------------------------------------------------------------------------
+
+/// `set_batch_cap_enforcement(true)` emits a typed `BatchCapEnforcementUpdated`
+/// event with `enabled == true`.
+#[test]
+fn test_set_batch_cap_enforcement_emits_event_true() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let admin = Address::generate(&env);
+    let sc = Address::generate(&env);
+
+    factory.init(&admin, &sc, &5_000, &200);
+
+    factory.set_batch_cap_enforcement(&true);
+
+    let events = env.events().all();
+    let (_, topics, data) = events.get(events.len() - 1).unwrap();
+    let topic0: soroban_sdk::Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+    assert_eq!(topic0, soroban_sdk::symbol_short!("batch_cap"));
+    let payload: fluxora_factory::BatchCapEnforcementUpdated =
+        data.try_into_val(&env).unwrap();
+    assert_eq!(payload.enabled, true);
+}
+
+/// `set_batch_cap_enforcement(false)` emits the same event with `enabled == false`.
+#[test]
+fn test_set_batch_cap_enforcement_emits_event_false() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let admin = Address::generate(&env);
+    let sc = Address::generate(&env);
+
+    factory.init(&admin, &sc, &5_000, &200);
+    factory.set_batch_cap_enforcement(&true);
+
+    factory.set_batch_cap_enforcement(&false);
+
+    let events = env.events().all();
+    let (_, topics, data) = events.get(events.len() - 1).unwrap();
+    let topic0: soroban_sdk::Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+    assert_eq!(topic0, soroban_sdk::symbol_short!("batch_cap"));
+    let payload: fluxora_factory::BatchCapEnforcementUpdated =
+        data.try_into_val(&env).unwrap();
+    assert_eq!(payload.enabled, false);
+}

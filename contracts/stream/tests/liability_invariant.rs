@@ -6,8 +6,8 @@
 //!
 //! The contract maintains a `TotalLiabilities` counter in instance storage that
 //! is incremented on `create_stream` / `top_up_stream` and decremented on
-//! `withdraw` / `cancel_stream` / `shorten_stream_end_time`.  The sweep
-//! operation transfers out any surplus:
+//! `withdraw` / `cancel_stream` / `shorten_stream_end_time` /
+//! `decrease_rate_per_second`.  The sweep operation transfers out any surplus:
 //!
 //! ```text
 //! excess = contract_balance.saturating_sub(TotalLiabilities)
@@ -25,12 +25,6 @@
 //!   pause/resume)
 //! - Direct token injections that simulate rounding errors or lost refunds
 //! - Time advances that move streams through accrual, completion, and expiry
-//!
-//! **Known discrepancy**: `decrease_rate_per_second` refunds tokens to the
-//! sender **without** reducing `TotalLiabilities`.  After a rate decrease the
-//! invariant `balance >= TotalLiabilities` is therefore violated (the counter
-//! overstates the true obligation).  The proptest will find this, shrink it,
-//! and report the minimal reproduction below.
 //!
 //! Run the harness with:
 //!
@@ -117,6 +111,10 @@ impl TestContext {
 
     fn contract_balance(&self) -> i128 {
         self.token().balance(&self.contract_id)
+    }
+
+    fn sender_balance(&self) -> i128 {
+        self.token().balance(&self.sender)
     }
 
     fn create_stream(
@@ -303,10 +301,7 @@ proptest! {
     ///
     /// The test mirrors `TotalLiabilities` locally by replaying every operation
     /// that the contract counts in that counter (create, withdraw, top-up,
-    /// cancel).  Operations that **do not** update `TotalLiabilities`
-    /// (`decrease_rate_per_second`) are reflected exactly as the contract
-    /// behaves — the local counter is also left untouched, reproducing the
-    /// known accounting discrepancy.
+    /// cancel, rate-decrease).
     #[test]
     fn prop_liability_invariant(
         stream_configs in prop::collection::vec(stream_params(), 1..5),
@@ -385,6 +380,7 @@ proptest! {
                 Op::DecreaseRate(i, new_rate) => {
                     let sid = stream_ids[*i % num_streams];
                     let stream = ctx.client().get_stream_state(&sid);
+                    let sender_before = ctx.sender_balance();
                     let result =
                         ctx.client().try_decrease_rate_per_second(&sid, new_rate);
                     if stream.kind == StreamKind::CliffOnly {
@@ -395,14 +391,12 @@ proptest! {
                             ),
                             "{label}: CliffOnly decrease_rate must be UnsupportedStreamKind, got {result:?}"
                         );
+                    } else if let Ok(Ok(())) = result {
+                        // Track the refund: the contract reduces TotalLiabilities
+                        // by the refunded amount and sends tokens back to the sender.
+                        let refund = ctx.sender_balance() - sender_before;
+                        tracked_liabilities -= refund;
                     }
-                    // Contract does NOT update TotalLiabilities on rate
-                    // decrease.  We mirror that behaviour exactly, which
-                    // means `tracked_liabilities` stays unchanged even though
-                    // the refund left the contract.  The proptest will later
-                    // detect this as a pre-sweep invariant violation.
-                    //
-                    // (decrease_rate_per_second lines 4314-4413)
                 }
 
                 Op::Cancel(i) => {
@@ -471,4 +465,57 @@ proptest! {
             "final",
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Focused regression test
+// ---------------------------------------------------------------------------
+
+/// Regression test: `decrease_rate_per_second` must reduce `TotalLiabilities`
+/// by exactly the refunded amount.  Before the fix, the refund was sent to the
+/// sender via `push_token` but `TotalLiabilities` was left untouched, causing
+/// the `balance >= TotalLiabilities` invariant to be violated.
+#[test]
+fn decrease_rate_per_second_reduces_total_liabilities_by_refund_amount() {
+    let ctx = TestContext::new();
+
+    // Create a Linear stream: rate=2 tokens/sec, deposit=3000, duration=1000s.
+    let stream_id = ctx.create_stream(3_000, 2, 0, 1_000, StreamKind::Linear);
+
+    let liabilities_before = ctx.client().get_total_liabilities();
+    assert_eq!(liabilities_before, 3_000);
+
+    // Advance to t=100 so accrual has happened.
+    ctx.env.ledger().set_timestamp(100);
+    ctx.env.ledger().set_sequence_number(21);
+
+    let sender_before = ctx.sender_balance();
+
+    // Decrease rate from 2 to 1.
+    // accrued at t=100 = 2 * 100 = 200.
+    // remaining = 1000 - 100 = 900.
+    // new_deposit = 200 + 1 * 900 = 1100.
+    // refund = 3000 - 1100 = 1900.
+    ctx.client()
+        .decrease_rate_per_second(&stream_id, &1i128);
+
+    let sender_after = ctx.sender_balance();
+    let actual_refund = sender_after - sender_before;
+    assert_eq!(actual_refund, 1_900, "refund must equal old_deposit - new_deposit");
+
+    let liabilities_after = ctx.client().get_total_liabilities();
+    assert_eq!(
+        liabilities_after,
+        liabilities_before - actual_refund,
+        "TotalLiabilities must decrease by exactly the refund amount"
+    );
+
+    // Invariant: contract_balance >= TotalLiabilities must hold.
+    let balance = ctx.contract_balance();
+    assert!(
+        balance >= liabilities_after,
+        "invariant violated after decrease: balance={} < liabilities={}",
+        balance,
+        liabilities_after,
+    );
 }

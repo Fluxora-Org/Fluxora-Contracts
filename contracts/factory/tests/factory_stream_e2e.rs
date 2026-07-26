@@ -1298,3 +1298,164 @@ fn test_batch_create_streams_memo_over_limit_rejected_by_factory_guard() {
     assert_eq!(ctx.token.balance(&ctx.sender), SENDER_FUNDING);
 }
 
+// ---------------------------------------------------------------------------
+// Trust-boundary bypass: direct stream-contract calls skip factory policy
+//
+// The factory's allowlist, deposit-cap, and minimum-duration policies are
+// enforced entirely within FluxoraFactory. FluxoraStream::create_stream has
+// no awareness of these policies. Any caller with direct access to the stream
+// contract address can create streams that violate every factory-level rule.
+// This section proves the bypass with concrete tests (issue #961).
+// ---------------------------------------------------------------------------
+
+/// Factory rejects a non-allowlisted recipient, but a direct call to
+/// `FluxoraStream::create_stream` with the same parameters succeeds —
+/// proving the allowlist is not enforced at the stream-contract level.
+#[test]
+fn test_direct_stream_call_bypasses_recipient_allowlist() {
+    let ctx = Ctx::setup();
+    let now = ctx.now();
+
+    // Remove the recipient from the factory allowlist.
+    ctx.factory.set_allowlist(&ctx.recipient, &false);
+
+    // Factory rejects: RecipientNotAllowlisted.
+    let res = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &DEPOSIT_AMOUNT,
+        &RATE_PER_SECOND,
+        &now,
+        &now,
+        &(now + STREAM_DURATION),
+        &0,
+    );
+    assert_eq!(res, Err(Ok(FactoryError::RecipientNotAllowlisted)));
+
+    // Direct stream-contract call succeeds — allowlist bypassed.
+    let stream_id = ctx
+        .stream
+        .create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &DEPOSIT_AMOUNT,
+            &RATE_PER_SECOND,
+            &now,
+            &now,
+            &(now + STREAM_DURATION),
+            &0,
+            &None,
+            &StreamKind::Linear,
+            &None,
+            &None,
+        )
+        .unwrap();
+
+    // Stream exists in the stream contract.
+    let state = ctx.stream.get_stream_state(&stream_id);
+    assert_eq!(state.recipient, ctx.recipient);
+
+    // Stream is NOT registered in the factory.
+    assert_eq!(ctx.factory.get_factory_stream_count(), 0);
+
+    // Deposit was pulled from sender.
+    assert_eq!(
+        ctx.token.balance(&ctx.sender),
+        SENDER_FUNDING - DEPOSIT_AMOUNT
+    );
+}
+
+/// Factory rejects a deposit that exceeds the cap, but a direct call to
+/// `FluxoraStream::create_stream` with the same over-cap amount succeeds —
+/// proving the deposit cap is not enforced at the stream-contract level.
+#[test]
+fn test_direct_stream_call_bypasses_deposit_cap() {
+    let ctx = Ctx::setup();
+    let now = ctx.now();
+
+    let over_cap_deposit = MAX_DEPOSIT + 1;
+
+    // Factory rejects: DepositExceedsCap.
+    let res = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &over_cap_deposit,
+        &RATE_PER_SECOND,
+        &now,
+        &now,
+        &(now + STREAM_DURATION),
+        &0,
+    );
+    assert_eq!(res, Err(Ok(FactoryError::DepositExceedsCap)));
+
+    // Direct stream-contract call succeeds — deposit cap bypassed.
+    let stream_id = ctx
+        .stream
+        .create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &over_cap_deposit,
+            &RATE_PER_SECOND,
+            &now,
+            &now,
+            &(now + STREAM_DURATION),
+            &0,
+            &None,
+            &StreamKind::Linear,
+            &None,
+            &None,
+        )
+        .unwrap();
+
+    let state = ctx.stream.get_stream_state(&stream_id);
+    assert_eq!(state.deposit_amount, over_cap_deposit);
+    assert_eq!(ctx.factory.get_factory_stream_count(), 0);
+}
+
+/// Factory rejects a duration below the minimum, but a direct call to
+/// `FluxoraStream::create_stream` with the same short duration succeeds —
+/// proving the minimum-duration policy is not enforced at the stream-contract level.
+#[test]
+fn test_direct_stream_call_bypasses_minimum_duration() {
+    let ctx = Ctx::setup();
+    let now = ctx.now();
+
+    let short_duration = MIN_DURATION - 1;
+
+    // Factory rejects: DurationTooShort.
+    let res = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &DEPOSIT_AMOUNT,
+        &RATE_PER_SECOND,
+        &now,
+        &now,
+        &(now + short_duration),
+        &0,
+    );
+    assert_eq!(res, Err(Ok(FactoryError::DurationTooShort)));
+
+    // Direct stream-contract call succeeds — minimum duration bypassed.
+    let stream_id = ctx
+        .stream
+        .create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &DEPOSIT_AMOUNT,
+            &RATE_PER_SECOND,
+            &now,
+            &now,
+            &(now + short_duration),
+            &0,
+            &None,
+            &StreamKind::Linear,
+            &None,
+            &None,
+        )
+        .unwrap();
+
+    let state = ctx.stream.get_stream_state(&stream_id);
+    assert_eq!(state.end_time - state.start_time, short_duration);
+    assert_eq!(ctx.factory.get_factory_stream_count(), 0);
+}
+

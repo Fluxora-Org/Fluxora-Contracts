@@ -1,0 +1,18 @@
+{
+  "snapshot_name": "event_snapshot_keeper_cancel_has_correct_topics_and_payload",
+  "contract_call": "cancel_stream_as_keeper",
+  "ledger_sequence": 1000042,
+  "stream_id": 7,
+  "events": [
+    {
+      "topics": ["kp_cncl", 7],
+      "data": {
+        "stream_id": 7,
+        "keeper": "GDKEEPERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "keeper_fee": 500000,
+        "recipient_amount": 9000000,
+        "sender_refund": 500000
+      }
+    }
+  ]
+}

@@ -485,3 +485,75 @@ fn test_batch_after_recipient_update_no_stale_index() {
         .try_batch_withdraw(&alice, &vec![&ctx.env, alice_stream]);
     assert!(alice_steal.is_err());
 }
+
+/// Mixed-recipient batch where a stream partway through fails validation:
+/// verifies atomic rollback where no stream is created and no recipient index is mutated.
+#[test]
+fn test_batch_mixed_recipient_partial_failure_rollback() {
+    let ctx = Ctx::setup();
+    let alice = Address::generate(&ctx.env);
+    let bob = Address::generate(&ctx.env);
+
+    // Initial state query: ensure both recipient indexes are empty before batch creation.
+    let alice_index_before = ctx.client.get_recipient_streams(&alice);
+    let bob_index_before = ctx.client.get_recipient_streams(&bob);
+    assert_eq!(alice_index_before.len(), 0);
+    assert_eq!(bob_index_before.len(), 0);
+
+    // 5 streams across 2 recipients, with the 3rd stream (index 2, recipient Bob) deliberately invalid (rate_per_second = 0 for Linear stream).
+    let mut invalid_params = ctx.make_params(&bob, 2_000, 2_000);
+    invalid_params.rate_per_second = 0; // Invalid rate for Linear stream
+
+    let params = vec![
+        &ctx.env,
+        ctx.make_params(&alice, 1_000, 1_000), // 1st: Alice (valid)
+        ctx.make_params(&bob, 2_000, 2_000),   // 2nd: Bob (valid)
+        invalid_params,                         // 3rd: Bob (invalid - rate below min/zero)
+        ctx.make_params(&alice, 3_000, 3_000), // 4th: Alice (valid)
+        ctx.make_params(&bob, 4_000, 4_000),   // 5th: Bob (valid)
+    ];
+
+    // Execution must revert with error / fail
+    let res = ctx.client.try_create_streams(&ctx.sender, &params);
+    assert!(res.is_err());
+
+    // Assert zero mutation of recipient indexes for all involved recipients
+    let alice_index_after = ctx.client.get_recipient_streams(&alice);
+    let bob_index_after = ctx.client.get_recipient_streams(&bob);
+    assert_eq!(alice_index_after.len(), 0);
+    assert_eq!(bob_index_after.len(), 0);
+}
+
+/// Companion test confirming a fully-valid mixed-recipient batch produces correct, complete per-recipient index state.
+#[test]
+fn test_batch_mixed_recipient_fully_valid_success() {
+    let ctx = Ctx::setup();
+    let alice = Address::generate(&ctx.env);
+    let bob = Address::generate(&ctx.env);
+
+    let params = vec![
+        &ctx.env,
+        ctx.make_params(&alice, 1_000, 1_000), // 1st: Alice
+        ctx.make_params(&bob, 2_000, 2_000),   // 2nd: Bob
+        ctx.make_params(&bob, 2_000, 2_000),   // 3rd: Bob
+        ctx.make_params(&alice, 3_000, 3_000), // 4th: Alice
+        ctx.make_params(&bob, 4_000, 4_000),   // 5th: Bob
+    ];
+
+    let ids = ctx.client.create_streams(&ctx.sender, &params);
+    assert_eq!(ids.len(), 5);
+
+    let alice_index = ctx.client.get_recipient_streams(&alice);
+    let bob_index = ctx.client.get_recipient_streams(&bob);
+
+    assert_eq!(alice_index.len(), 2);
+    assert_eq!(bob_index.len(), 3);
+
+    assert!(alice_index.contains(ids.get(0).unwrap()));
+    assert!(alice_index.contains(ids.get(3).unwrap()));
+
+    assert!(bob_index.contains(ids.get(1).unwrap()));
+    assert!(bob_index.contains(ids.get(2).unwrap()));
+    assert!(bob_index.contains(ids.get(4).unwrap()));
+}
+

@@ -110,8 +110,8 @@ When your PR changes snapshots:
 
 - [ ] Run tests locally before pushing
 - [ ] Review every changed `.json` file
-- [ ] Run the security diff script: `python script/check_snapshot_diff.py`
-  - *If it flags security-relevant fields (e.g., auth, events, error codes), ensure these changes receive mandatory extra review per the maintainer security checklist.*
+- [ ] **Run `check_snapshot_diff.py` and record the exit code in your PR description**
+- [ ] If exit code is 1, follow the mandatory extra review steps in `docs/snapshot-security-diff.md`
 - [ ] Verify changes match intended behavior
 - [ ] Update documentation if behavior changed
 - [ ] Add PR comment explaining snapshot changes
@@ -294,13 +294,67 @@ git diff main -- contracts/stream/test_snapshots/
 | `contracts/stream/tests/integration_suite.rs` | Integration tests         |
 | `.github/workflows/ci.yml`                    | CI pipeline configuration |
 | `docs/snapshot-tests.md`                      | Full documentation        |
+| `script/check_snapshot_diff.py`               | Security-relevant field classifier |
+| `docs/snapshot-security-diff.md`             | Security diff reference and reviewer checklist |
+| `tests/test_check_snapshot_diff.py`            | Unit + real-git-repo end-to-end tests for the diff gate |
+| `tests/fixtures/event_snapshots/*.json`        | Real `KeeperCancelled` / `StreamCloned` event payload fixtures used by those tests |
+
+### Test coverage for the diff gate itself
+
+`tests/test_check_snapshot_diff.py` covers `check_snapshot_diff.py` at two levels:
+
+- **Unit tests** exercise `is_security_relevant`, `get_diff_paths`, `get_changed_files`,
+  and `get_file_content` with mocked `subprocess`/file I/O.
+- **End-to-end tests** (`TestMainEndToEndRealGitRepo`) create a throwaway git
+  repository, commit two real revisions of a snapshot JSON file, and invoke
+  `check_snapshot_diff.main()` with the resulting commit SHAs — exercising the
+  script's real `git diff`/`git show` subprocess calls with no mocking.
+- **Real event fixtures** (`TestRealEventFixtures`) load
+  `tests/fixtures/event_snapshots/keeper_cancelled.json` and `stream_cloned.json`
+  — modeled on the `KeeperCancelled` and `StreamCloned` structs in
+  `contracts/stream/src/types.rs` — and confirm a mutated `keeper_fee`,
+  `keeper` address, `recipient`, or `deposit_amount` field is correctly flagged
+  as security-relevant.
+
+Run this suite on its own with:
+
+```bash
+pytest tests/test_check_snapshot_diff.py -v
+```
+
+## Security-Relevant Snapshot Changes
+
+When a snapshot update touches fields that govern authorization, token identity,
+rate caps, or pause state, the change requires **mandatory extra review** before
+merging. Use `script/check_snapshot_diff.py` to detect these fields automatically.
+
+```bash
+# After updating snapshots, compare head against main before committing
+git show origin/main:contracts/stream/test_snapshots/test/test_NAME.1.json \
+  > /tmp/base.json
+
+python script/check_snapshot_diff.py \
+  --base /tmp/base.json \
+  --head contracts/stream/test_snapshots/test/test_NAME.1.json
+```
+
+Exit codes:
+- **0** — no security-relevant changes; proceed with standard review.
+- **1** — security-relevant changes detected; follow the mandatory extra review
+  steps in [`docs/snapshot-security-diff.md`](snapshot-security-diff.md).
+- **2** — script usage error; check file paths and JSON validity.
+
+> **Note:** This check is not yet wired into CI. Run it manually whenever
+> snapshot files change. See [`docs/snapshot-security-diff.md`](snapshot-security-diff.md)
+> for the full field classification reference and reviewer checklist.
 
 ## Getting Help
 
 1. **Read full docs**: `docs/snapshot-tests.md`
-2. **Check CI logs**: GitHub Actions → Failed job → Test step
-3. **Review test code**: `contracts/stream/src/test.rs`
-4. **Ask maintainer**: Open issue or PR comment
+2. **Security diff docs**: `docs/snapshot-security-diff.md`
+3. **Check CI logs**: GitHub Actions → Failed job → Test step
+4. **Review test code**: `contracts/stream/src/test.rs`
+5. **Ask maintainer**: Open issue or PR comment
 
 ## Quick Decision Tree
 
