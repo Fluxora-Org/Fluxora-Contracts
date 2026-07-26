@@ -29,7 +29,7 @@ use fluxora_stream::{FluxoraStream, FluxoraStreamClient};
 use soroban_sdk::{
     testutils::{Address as _, Ledger, Events},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env, Symbol, TryFromVal,
+    Address, Env, TryFromVal,
 };
 
 // ---------------------------------------------------------------------------
@@ -642,6 +642,7 @@ fn test_create_streams_batch_paused_enforcement() {
         end_time: now + STREAM_DURATION,
         withdraw_dust_threshold: Some(0),
         memo: None,
+        metadata: None,
         kind: fluxora_stream::StreamKind::Linear,
     });
 
@@ -691,6 +692,7 @@ fn test_create_streams_batch_emits_correct_events() {
         end_time: now + STREAM_DURATION,
         withdraw_dust_threshold: Some(0),
         memo: None,
+        metadata: None,
         kind: fluxora_stream::StreamKind::Linear,
     });
     streams.push_back(fluxora_stream::CreateStreamParams {
@@ -702,6 +704,7 @@ fn test_create_streams_batch_emits_correct_events() {
         end_time: now + STREAM_DURATION,
         withdraw_dust_threshold: Some(0),
         memo: None,
+        metadata: None,
         kind: fluxora_stream::StreamKind::Linear,
     });
 
