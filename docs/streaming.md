@@ -697,7 +697,7 @@ On failure (`InvalidParams` or `InvalidState`):
 - No arbitrary hard-coded caps (e.g. "max 1M tokens").
 - The technical upper bound is `i128::MAX` or the underlying token's total supply.
 - Rationale: Accrual math (in `accrual.rs`) is already overflow-safe via `checked_mul` and clamping.
-- Application-specific limits should be handled in the frontend or factory contracts.
+- Application-specific limits should be handled in the frontend or factory contracts. Note that the factory's policies (allowlist, deposit cap, minimum duration) only apply when streams are created through the factory — direct calls to this contract bypass them entirely. See [factory.md § Important Bypass Warning](./factory.md#important-bypass-warning).
 
 ### Batch Creation: Atomic vs Partial
 
@@ -1491,6 +1491,7 @@ For a full list of contract errors, see [error.md](./error.md).
 - **Recipient Applications**: See §2 (Accrual Formula), §4 (Withdrawal), §5 (Events)
 - **Indexers**: See §5 (Events), §6 (Error Behavior)
 - **Auditors**: See [protocol-narrative-code-alignment.md](./protocol-narrative-code-alignment.md) for complete verification
+- **Factory/Policy Integrators**: The stream contract enforces no recipient allowlist, deposit cap, or minimum duration. These policies exist only in the factory contract and are bypassed by direct stream-contract calls. See [factory.md § Important Bypass Warning](./factory.md#important-bypass-warning) for details.
 
 ### Verification
 
@@ -1618,9 +1619,15 @@ Where:
 
 ### Access Control Table Entry
 
-| Function        | Authorized Caller | Auth Check              |
-| --------------- | ----------------- | ----------------------- |
-| `sweep_excess`  | Admin             | `admin.require_auth()`  |
+| Function                 | Authorized Caller | Auth Check              |
+| ------------------------ | ----------------- | ----------------------- |
+| `sweep_excess`           | Admin             | `admin.require_auth()`  |
+| `get_total_liabilities`  | Anyone            | None (view)             |
+
+`get_total_liabilities` is a read-only view that returns the sum of all outstanding stream
+deposits tracked in `DataKey::TotalLiabilities`. It is used to verify that the contract's
+token balance always covers what it owes across all active streams, and to compute the
+`excess` amount available to `sweep_excess`.
 
 ### Event
 
@@ -1869,6 +1876,201 @@ pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), ContractError>
   caller, plus a legacy `upgrade` topic event for backward-compatible indexers.
   See `docs/events.md` for the exact event shapes.
 
+---
+
+## Offer-Then-Accept Stream Creation
+
+Every existing creation entry point (`create_stream`, `create_streams`, etc.)
+requires only the **sender's** authorization — a stream can be force-created
+onto any recipient address without their consent. The offer-then-accept flow
+adds a two-phase alternative where the **recipient must explicitly accept**
+before accrual begins.
+
+### Motivation
+
+- Recipients may not want unexpected streams added to their index (spam, tax
+  implications, compliance).
+- Senders can propose terms off-chain first, then commit the deposit on-chain.
+- Offers that are never accepted are automatically refundable by the sender.
+
+### Lifecycle
+
+```
+Sender calls create_stream_offer
+    ↓  deposit escrowed, PendingStreamOffer stored, RecipientStreams NOT updated
+    │
+    ├─► Recipient calls accept_stream_offer
+    │       → offer removed, Active Stream created, RecipientStreams updated
+    │         start_time re-anchored to max(offer.start_time, now)
+    │
+    ├─► Recipient calls reject_stream_offer
+    │       → offer removed, deposit refunded to sender
+    │
+    ├─► Sender calls cancel_stream_offer  (any time, including after expiry)
+    │       → offer removed, deposit refunded to sender
+    │
+    └─► expiry_time elapsed
+            → accept_stream_offer returns OfferExpired (36)
+              sender can still cancel; recipient can still reject
+```
+
+### Entry Points
+
+#### `create_stream_offer`
+
+```rust
+pub fn create_stream_offer(
+    env: Env,
+    sender: Address,
+    recipient: Address,
+    deposit_amount: i128,
+    rate_per_second: i128,
+    start_time: u64,
+    cliff_time: u64,
+    end_time: u64,
+    withdraw_dust_threshold: i128,
+    memo: Option<Bytes>,
+    kind: StreamKind,
+    metadata: Option<Map<Bytes, Bytes>>,
+    expiry_time: Option<u64>,
+) -> Result<u64, ContractError>
+```
+
+**Authorization:** `sender.require_auth()`
+
+**Behavior:**
+- Validates all parameters using the same rules as `create_stream`.
+- If `expiry_time` is `Some(t)` and `t <= now`, returns `InvalidParams`.
+- Allocates an `offer_id` from the global stream ID counter.
+- Stores a `StreamOffer` in `DataKey::PendingStreamOffer(offer_id)`.
+- Adds `offer_id` to `DataKey::RecipientPendingOffers(recipient)`.
+- Pulls `deposit_amount` tokens from `sender` into escrow (CEI: state saved first).
+- Emits `StreamOfferCreated` (topic `offr_crt`).
+- Returns the `offer_id`.
+
+**Does NOT:** start accrual, add to `RecipientStreams`, track liabilities.
+
+#### `accept_stream_offer`
+
+```rust
+pub fn accept_stream_offer(
+    env: Env,
+    recipient: Address,
+    offer_id: u64,
+) -> Result<u64, ContractError>
+```
+
+**Authorization:** `recipient.require_auth()`
+
+**Behavior:**
+- Returns `OfferNotFound` if no pending offer exists.
+- Returns `OfferWrongRecipient` if `recipient != offer.recipient`.
+- Returns `OfferExpired` if `now > offer.expiry_time`.
+- Re-anchors timing: `effective_start = max(offer.start_time, now)`. Cliff
+  offset and stream duration are preserved relative to `effective_start`.
+- Removes the offer from storage and the recipient pending-offers index.
+- Creates an `Active` stream using the same `offer_id` as stream ID.
+- Adds stream to `RecipientStreams` index and tracks liability.
+- Emits `StreamCreated` (topic `created`) and `StreamOfferAccepted` (topic `offr_acc`).
+- No token transfer — deposit was already escrowed at offer creation.
+
+#### `reject_stream_offer`
+
+```rust
+pub fn reject_stream_offer(
+    env: Env,
+    recipient: Address,
+    offer_id: u64,
+) -> Result<(), ContractError>
+```
+
+**Authorization:** `recipient.require_auth()`
+
+Removes the offer and pushes the escrowed deposit back to `offer.sender`.
+Emits `StreamOfferCancelled` (topic `offr_cxl`).
+
+#### `cancel_stream_offer`
+
+```rust
+pub fn cancel_stream_offer(
+    env: Env,
+    sender: Address,
+    offer_id: u64,
+) -> Result<(), ContractError>
+```
+
+**Authorization:** `sender.require_auth()`
+
+Returns `OfferWrongSender` if `sender != offer.sender`. Otherwise removes the
+offer and refunds the deposit. Can be called even after `expiry_time` has elapsed.
+Emits `StreamOfferCancelled` (topic `offr_cxl`).
+
+#### `get_stream_offer` (query)
+
+```rust
+pub fn get_stream_offer(env: Env, offer_id: u64) -> Result<StreamOffer, ContractError>
+```
+
+Returns the full `StreamOffer` struct. Returns `OfferNotFound` once the offer
+has been accepted, rejected, or cancelled.
+
+#### `get_recipient_pending_offers` (query)
+
+```rust
+pub fn get_recipient_pending_offers(env: Env, recipient: Address) -> Vec<u64>
+```
+
+Returns the sorted list of pending offer IDs for `recipient`. Empty if none.
+
+### Start-Time Re-Anchoring
+
+When a recipient accepts an offer, the contract re-anchors timing to prevent
+a stream from starting in the past:
+
+```
+effective_start = max(offer.start_time, ledger.timestamp())
+cliff_offset    = offer.cliff_time - offer.start_time
+effective_cliff = effective_start + cliff_offset
+duration        = offer.end_time  - offer.start_time
+effective_end   = effective_start + duration
+```
+
+The cliff offset and duration are **always preserved** regardless of how much
+time has elapsed. This means a 12-month stream with a 6-month cliff will still
+run for exactly 12 months with a 6-month cliff from the acceptance timestamp.
+
+### New Error Codes
+
+| Code | Name | Meaning |
+|------|------|---------|
+| 36 | `OfferNotFound` | No pending offer with this ID |
+| 37 | `OfferExpired` | `now > offer.expiry_time` |
+| 38 | `OfferWrongRecipient` | Caller is not the intended recipient |
+| 39 | `OfferWrongSender` | Caller is not the original sender |
+
+### New Events
+
+| Topic | Payload struct | Emitted by |
+|-------|---------------|------------|
+| `offr_crt` | `StreamOfferCreated` | `create_stream_offer` |
+| `offr_acc` | `StreamOfferAccepted` | `accept_stream_offer` |
+| `offr_cxl` | `StreamOfferCancelled` | `reject_stream_offer`, `cancel_stream_offer` |
+
+### Security Notes
+
+- **CEI ordering** is strictly maintained: all state changes occur before token
+  transfers in every entry point.
+- The offer is removed from storage **before** the stream is created in
+  `accept_stream_offer`, preventing double-acceptance if a malicious token
+  re-enters the contract.
+- Offer IDs share the global stream ID counter, guaranteeing globally unique
+  identifiers with no collision risk between offers and active streams.
+- Unaccepted offers do not appear in `RecipientStreams` and do not contribute
+  to `TotalLiabilities`, so they cannot inflate recipient-facing views or the
+  contract's liability accounting.
+
+---
+
 ## Pooled Streams (Multi-Recipient)
 
 Fluxora supports multi-recipient pooled streams where multiple beneficiaries receive pro-rata shares of a single deposited amount.
@@ -1882,3 +2084,81 @@ Creates a pooled stream. The `recipients` list takes pairs of `(Address, u32)` d
 Withdrawals from a pooled stream are independent. When a recipient calls `withdraw_from_pool(stream_id, caller)`, the contract calculates the total accrued tokens and multiplies by the caller's proportional share `(caller_share / total_shares)`. The contract independently tracks withdrawn amounts for each pool member using `DataKey::PooledStreamWithdrawn`.
 
 **Rounding:** The calculation uses strict integer math (`checked_mul` followed by `checked_div`), rounding down on remainders to avoid over-withdrawing the pool's deposit.
+
+---
+
+## Balance Conservation Invariants (Property-Based Testing)
+
+### Overview
+
+The protocol's core financial-safety property is token conservation: no
+operation may create or destroy tokens, and the contract must always hold
+enough balance to cover every outstanding stream liability. The
+operation-sequence space (pause/resume, rate changes, top-ups,
+shorten/extend, cancel, withdraw — in any order, at any time) is too large
+to enumerate by hand, so this property is verified with a dedicated
+property-based test harness rather than unit tests alone.
+
+### Core invariant
+
+```
+sender_balance + recipient_balance + contract_balance == initial_mint
+```
+
+Equivalently, per stream:
+
+```
+contract_balance_for_stream == deposit_amount - withdrawn_amount - refunded_amount
+```
+
+### Test harness: `contracts/stream/tests/balance_conservation.rs`
+
+The harness uses `proptest` to generate randomized sequences of mutating
+operations — `Withdraw`, `TopUp`, `DecreaseRate`, `IncreaseRate`, `Shorten`,
+`Extend`, `Pause`, `Resume`, `Cancel` — against both `Linear` and `CliffOnly`
+streams, and asserts after every step that:
+
+1. **Global balance conservation** — `sender + recipient + contract` token
+   balance is constant across the whole sequence.
+2. **Contract solvency** — contract balance equals
+   `total_deposited - total_withdrawn - total_refunded`.
+3. **Accrual boundedness** — `0 <= calculate_accrued <= deposit_amount`.
+4. **Accrual monotonicity** — `calculate_accrued` never decreases as time
+   advances.
+5. **Withdrawal bound** — `0 <= withdrawn_amount <= deposit_amount` and
+   `accrued >= withdrawn`.
+6. **Rate-decrease entitlement preservation** — a successful
+   `decrease_rate_per_second` checkpoint never reduces the same-timestamp
+   withdrawable amount (see §2, Accrual Formula, above).
+7. **`CliffOnly` unsupported-operation guard** — `top_up_stream`,
+   `decrease_rate_per_second`, `update_rate_per_second`,
+   `shorten_stream_end_time`, and `extend_stream_end_time` all return
+   `ContractError::UnsupportedStreamKind` for `CliffOnly` streams.
+
+The randomized property (`prop_random_op_sequences_preserve_invariants`,
+256 cases by default) is paired with deterministic regression tests for
+specific historical scenarios: `regression_rate_decrease_preserves_entitlement`,
+`regression_cliff_only_unsupported_mutations`,
+`regression_completed_stream_accrual_is_deterministic`, and
+`regression_immediate_cancel_refunds_full_deposit`.
+
+### Running the tests
+
+```bash
+# Standard run (256 proptest cases)
+cargo test -p fluxora_stream --features testutils --test balance_conservation
+
+# Deeper local coverage before an audit or release
+PROPTEST_CASES=10000 cargo test -p fluxora_stream --features testutils --test balance_conservation
+```
+
+### Security note for auditors
+
+Balance conservation is the single most important property to verify here —
+a violation means either token minting/burning or a double-spend. Property
+testing complements, but does not replace, the formal Kani proofs on the
+accrual math in `contracts/stream/src/accrual.rs` (`#[cfg(kani)] mod
+kani_proofs`) or a full manual audit. `sweep_excess` (see
+[Admin Recovery](#admin-recovery-sweep_excess) above) is the only entrypoint
+that can move tokens not backed by a stream liability, and it requires admin
+authorization.

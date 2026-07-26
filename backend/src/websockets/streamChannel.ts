@@ -106,20 +106,25 @@ export class StreamChannel {
   }
 
   /**
-   * Get subscription statistics for a stream
+   * Get subscription statistics for a stream.
+   * Returns the real, current subscriber count sourced from hub state.
+   * Returns null if streamId is not a valid UUID.
    */
   getStreamSubscriptionStats(streamId: string): { subscriberCount: number } | null {
-    // This would need access to hub's internal state
-    // For now, return placeholder
-    return { subscriberCount: 0 };
+    if (!StreamChannel.validateStreamId(streamId)) {
+      return null;
+    }
+    return { subscriberCount: this.hub.getSubscriberCount(streamId) };
   }
 
   /**
-   * Clean up stream subscriptions
+   * Clean up all subscriptions for a stream when it is deleted or archived.
+   * Removes the stream from hub state and from each subscribed client's
+   * subscription set. Sends a stream_unavailable notification to every
+   * affected client so they can update their UI accordingly.
    */
   cleanupStreamSubscriptions(streamId: string): void {
-    // This would clean up all subscriptions for a stream
-    // when it's deleted or archived
     logger.info('Cleaning up stream subscriptions', { streamId });
+    this.hub.forceUnsubscribeAll(streamId, true);
   }
 }

@@ -637,7 +637,7 @@ assert!(result.is_ok());
 
 **Key Security Properties:**
 
-1. **No Single Point of Failure**: No individual key can change stream parameters
+1. **No Single Point of Failure**: No individual key can change stream parameters, governance signers, or the approval threshold
 2. **Transparent Process**: All governance actions are recorded on-chain with events
 3. **Time-Delayed Execution**: 48-hour minimum between approval and application
 4. **Immutable Audit Trail**: Proposal content and approvals are permanently stored
@@ -658,9 +658,13 @@ The governance integration is designed to resist several attack vectors:
 - Emergency cancellation available through admin or original proposer
 
 **Admin Key Compromise:**
-- If governance contract key is compromised, attacker still cannot bypass process
-- Parameter changes still require full proposal → approval → timelock → execution flow
-- Admin can only manage co-signer set, not directly change stream parameters
+- If the admin key is compromised, the attacker still cannot bypass the process:
+   adding/removing a signer or changing the threshold requires the same
+  propose → approve (quorum) → 48-hour timelock → execute flow as any
+  target-contract parameter change
+- There is no bare-admin entrypoint for these operations at all — `set_threshold`,
+  `add_signer`, `remove_signer` have no public function; they are reachable
+  only from inside `execute()` via `CallData::GovSetThreshold`/`GovAddSigner`/`GovRemoveSigner`
 
 **Off-chain Executor Compromise:**
 - Executor can only apply governance-approved changes
