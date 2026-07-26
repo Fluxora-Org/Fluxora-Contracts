@@ -5,7 +5,19 @@ import subprocess
 import tempfile
 import pytest
 from unittest.mock import patch
-from script.validate_gas import extract_baselines, parse_measurements, main
+from script.validate_gas import build_cargo_test_env, extract_baselines, parse_measurements, main
+
+
+class TestBuildCargoTestEnv:
+    def test_prepends_cargo_bin(self, monkeypatch):
+        monkeypatch.setenv("HOME", "/home/ci")
+        monkeypatch.setenv("PATH", "/bin")
+        assert build_cargo_test_env()["PATH"] == "/home/ci/.cargo/bin:/bin"
+
+    def test_missing_home_raises(self, monkeypatch):
+        monkeypatch.delenv("HOME", raising=False)
+        with pytest.raises(RuntimeError, match="HOME is not set"):
+            build_cargo_test_env()
 
 
 class TestExtractBaselines:

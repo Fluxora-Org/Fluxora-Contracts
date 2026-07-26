@@ -1,6 +1,6 @@
 use fluxora_stream::{
-    ContractError, DataKey, FluxoraStream, FluxoraStreamClient, PauseReason, StreamKind,
-    StreamStatus,
+    ContractError, CreateStreamParams, DataKey, FluxoraStream, FluxoraStreamClient, PauseReason,
+    StreamKind, StreamStatus,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -65,15 +65,20 @@ impl<'a> Ctx<'a> {
         let now = self.env.ledger().timestamp();
         self.client.create_stream(
             &self.sender,
-            &self.recipient,
-            &(duration as i128),
-            &1,
-            &now,
-            &now,
-            &(now + duration),
-            &0,
-            &None,
-            &StreamKind::Linear,
+            &CreateStreamParams {
+                recipient: self.recipient.clone(),
+                deposit_amount: (duration as i128),
+                rate_per_second: 1,
+                start_time: now,
+                cliff_time: now,
+                end_time: (now + duration),
+                withdraw_dust_threshold: Some(0),
+                memo: None,
+                metadata: None,
+                kind: StreamKind::Linear,
+                irrevocable: None,
+                witness: None,
+            },
         )
     }
 }
@@ -226,4 +231,100 @@ fn paused_stream_count_is_initialised_to_zero() {
     let ctx = Ctx::setup();
     assert_eq!(ctx.client.get_paused_stream_count(), 0);
     assert_eq!(ctx.admin, ctx.client.get_config().admin);
+}
+
+/// `get_paused_stream_count` tracks **only** individually-paused streams — it is
+/// **not** affected by the protocol-wide `GlobalEmergencyPaused` circuit breaker.
+///
+/// When the global flag is raised (`set_global_emergency_paused(true)`) with zero
+/// individually-paused streams, the counter correctly returns `0`.  Callers that
+/// need full pause-state awareness must also query `get_global_emergency_paused()`.
+/// This is intentional: the two mechanisms are orthogonal (per-stream status vs.
+/// protocol-wide gate) and the counter deliberately reflects only the former.
+#[test]
+fn paused_stream_count_is_zero_during_global_emergency_pause() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream(100);
+
+    // Baseline: no individually-paused streams, no global emergency pause.
+    assert_eq!(ctx.client.get_paused_stream_count(), 0);
+    assert!(!ctx.client.get_global_emergency_paused());
+
+    // Raise the global emergency pause — all mutations are now blocked, but the
+    // per-stream counter still reflects zero individually-paused streams.
+    ctx.client.set_global_emergency_paused(&true);
+    assert!(ctx.client.get_global_emergency_paused());
+    assert_eq!(
+        ctx.client.get_paused_stream_count(),
+        0,
+        "counter must remain 0: global pause does not increment PausedStreamCount"
+    );
+
+    // Verify the stream is still Active (not Paused) under the global flag.
+    assert_eq!(
+        ctx.client.get_stream_state(&stream_id).status,
+        StreamStatus::Active
+    );
+
+    // Clear the global pause — counter still 0.
+    ctx.client.set_global_emergency_paused(&false);
+    assert_eq!(
+        ctx.client.get_paused_stream_count(),
+        0,
+        "clearing global pause must not change the counter either"
+    );
+}
+
+/// Confirm that `get_paused_stream_count` is completely independent of the
+/// `GlobalEmergencyPaused` toggle: the counter reflects only individually-paused
+/// streams and does not move when the global flag is raised or cleared.
+#[test]
+fn paused_stream_count_unaffected_by_global_emergency_toggle() {
+    let ctx = Ctx::setup();
+    let stream_a = ctx.create_stream(100);
+    let stream_b = ctx.create_stream(100);
+
+    // Individually pause stream_a → count == 1.
+    ctx.clear_pause_cooldown();
+    ctx.client
+        .pause_stream(&stream_a, &PauseReason::Operational);
+    assert_eq!(ctx.client.get_paused_stream_count(), 1);
+
+    // Raise global emergency pause — count must remain 1 (unchanged).
+    ctx.client.set_global_emergency_paused(&true);
+    assert!(ctx.client.get_global_emergency_paused());
+    assert_eq!(
+        ctx.client.get_paused_stream_count(),
+        1,
+        "global pause on must not alter the per-stream count"
+    );
+
+    // Pause stream_b while global pause is active (admin bypass).
+    ctx.clear_pause_cooldown();
+    ctx.client
+        .pause_stream_as_admin(&stream_b, &PauseReason::Administrative);
+    assert_eq!(
+        ctx.client.get_paused_stream_count(),
+        2,
+        "admin pause should still increment the counter during global pause"
+    );
+
+    // Clear the global emergency pause — count must remain 2.
+    ctx.client.set_global_emergency_paused(&false);
+    assert!(!ctx.client.get_global_emergency_paused());
+    assert_eq!(
+        ctx.client.get_paused_stream_count(),
+        2,
+        "clearing global pause must not change the per-stream count"
+    );
+
+    // Resume stream_a individually → count back to 1.
+    ctx.clear_pause_cooldown();
+    ctx.client.resume_stream(&stream_a);
+    assert_eq!(ctx.client.get_paused_stream_count(), 1);
+
+    // Resume stream_b individually → count back to 0.
+    ctx.clear_pause_cooldown();
+    ctx.client.resume_stream_as_admin(&stream_b);
+    assert_eq!(ctx.client.get_paused_stream_count(), 0);
 }

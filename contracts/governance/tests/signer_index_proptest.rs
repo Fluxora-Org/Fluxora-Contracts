@@ -48,7 +48,10 @@ extern crate std;
 
 use fluxora_governance::{FluxoraGovernance, FluxoraGovernanceClient, GovernanceError};
 use proptest::prelude::*;
-use soroban_sdk::{testutils::{Address as _, Ledger}, vec, Address, Env};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger},
+    vec, Address, Env,
+};
 use std::collections::HashSet;
 use std::vec::Vec as StdVec;
 
@@ -85,7 +88,11 @@ enum Op {
 /// Strategy: one Op over the address pool.
 fn op_strategy() -> impl Strategy<Value = Op> {
     (any::<bool>(), 0usize..POOL_SIZE).prop_map(|(is_add, idx)| {
-        if is_add { Op::Add(idx) } else { Op::Remove(idx) }
+        if is_add {
+            Op::Add(idx)
+        } else {
+            Op::Remove(idx)
+        }
     })
 }
 
@@ -100,6 +107,7 @@ fn op_sequence_strategy() -> impl Strategy<Value = StdVec<Op>> {
 
 /// Self-contained governance environment for proptest cases.
 struct GovEnv {
+    #[allow(dead_code)]
     env: Env,
     /// All POOL_SIZE pre-generated addresses; ops reference these by index.
     pool: StdVec<Address>,
@@ -131,7 +139,12 @@ impl GovEnv {
         let client = FluxoraGovernanceClient::new(&env, &contract_id);
         client.init(&admin, &sdk_signers, &threshold);
 
-        GovEnv { env, pool, client, threshold }
+        GovEnv {
+            env,
+            pool,
+            client,
+            threshold,
+        }
     }
 }
 
@@ -145,6 +158,15 @@ impl GovEnv {
 /// Panics with a descriptive message on any invariant violation; proptest
 /// catches the panic and records it as a test-case failure with shrinking.
 fn check_invariants(gov: &GovEnv, expected: &HashSet<usize>) {
+    // Issue #1166: without resetting the harness budget here, the cumulative
+    // cost of O(expected) try_add_signer probes per check_invariants() call,
+    // invoked once initially and after every op in a 40-step sequence, exhausts
+    // the default test budget and trips HostError::Error(Budget, ExceededLimit)
+    // intermittently — see the committed signer_index_proptest.proptest-regressions
+    // corpus. Matches the pattern at
+    // contracts/stream/tests/bulk_cancel.rs::test_bulk_cancel_large_batch_up_to_max_page_size.
+    gov.env.budget().reset_unlimited();
+
     let on_chain = gov.client.get_signers();
     let on_chain_len = on_chain.len() as usize;
 
@@ -481,6 +503,7 @@ proptest! {
         client.init(&admin, &sdk_signers, &threshold);
 
         let n_removes = n_removes_raw.min(n);
+        #[allow(clippy::needless_range_loop)]
         for i in 0..n_removes {
             let result = client.try_remove_signer(&pool[i]);
             match result {

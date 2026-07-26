@@ -4,6 +4,8 @@ Contract storage architecture, key design, TTL policies, and `DataKey` evolution
 
 **Source of truth:** `contracts/stream/src/lib.rs` (`DataKey` enum, TTL constants, storage helpers)
 
+> **Canonical discriminant reference:** For the frozen discriminant table (variants 0–14) and the full ABI stability contract, see [ABI_STABILITY.md § 2.4](./ABI_STABILITY.md#24-storage-key-discriminants). The table below tracks all variants including post-freeze additions; always cross-check against both this file and `ABI_STABILITY.md` when adding new variants.
+
 ---
 
 ## 1. DataKey Enum
@@ -17,34 +19,37 @@ pub enum DataKey {
     NextStreamId,              // Instance storage for the auto-incrementing ID counter.
     Stream(u64),               // Persistent storage for individual stream data (O(1) lookup).
     RecipientStreams(Address), // Persistent storage for recipient stream index (sorted by stream_id).
-    PauseState,                // Instance storage: protocol-wide pause state (enum).
-    WithdrawNonce(Address),    // Persistent storage: per-recipient nonce for delegated-withdraw replay protection.
-    ReentrancyLock,            // Instance storage: reentrancy guard flag (bool).
+    GlobalEmergencyPaused,
+    CreationPaused,
+    GlobalPauseReason,
+    GlobalPauseTimestamp,
+    GlobalPauseAdmin,
+    AutoClaimDestination(u64),
+    NextTemplateId,
+    ActiveTemplateCount,
+    StreamTemplate(u64),
+    OwnerTemplateIds(Address),
+    TotalLiabilities,
+    WithdrawNonce(Address),
+    PauseState,
+    ReentrancyLock,
+    RecipientStreamPage(Address, u32),
+    RecipientStreamPageCount(Address),
+    PendingRecipientUpdate(u64),
+    IdReservation(Address),
+    MaxRatePerSecond,
+    DelegatedWithdrawNonce(Address),
+    LastPauseRecord(PauseKind),
+    RotationHistory(u64),
+    LastAccrualLedgerTimestamp,
+    PausedStreamCount,
+    TotalKeeperFeesPaid,
+    SenderStreams(Address),
+    AutoRenewEnabled(u64),
+    PendingStreamOffer(u64),
+    RecipientPendingOffers(Address),
 }
 ```
-
-> **Append-only rule**: new variants are always appended at the end to avoid shifting
-> existing discriminant values, which would corrupt live storage on mainnet.
-
-## Storage Types and Usage
-
-    Config,                    // discriminant 0 — instance
-    NextStreamId,              // discriminant 1 — instance
-    Stream(u64),               // discriminant 2 — persistent
-    RecipientStreams(Address), // discriminant 3 — persistent
-    GlobalEmergencyPaused,     // discriminant 4 — instance (DEPRECATED)
-    CreationPaused,            // discriminant 5 — instance (DEPRECATED)
-    GlobalPauseReason,         // discriminant 6 — instance
-    GlobalPauseTimestamp,      // discriminant 7 — instance
-    GlobalPauseAdmin,          // discriminant 8 — instance
-    AutoClaimDestination(u64), // discriminant 9 — persistent
-    StreamMemo(u64),           // discriminant 10 — persistent
-    PauseState,                // discriminant 11 — instance
-    ReentrancyLock,            // discriminant 12 — instance
-
-}
-
-````
 
 ### Current discriminant table
 
@@ -60,9 +65,29 @@ pub enum DataKey {
 | 7 | `GlobalPauseTimestamp` | Instance | `u64` | `pause_protocol` | `resume_protocol` (removes) |
 | 8 | `GlobalPauseAdmin` | Instance | `Address` | `pause_protocol` | `resume_protocol` (removes) |
 | 9 | `AutoClaimDestination(u64)` | Persistent | `Address` | auto-claim opt-in | auto-claim revoke |
-| 10 | `StreamMemo(u64)` | Persistent | `Bytes` (max 64 bytes) | `create_stream`, `create_streams` | `close_completed_stream` (removes) |
-| 11 | `PauseState` | Instance | `PauseState` enum | `set_global_emergency_paused`, `set_contract_paused`, `pause_protocol` | `resume_protocol` (Active) |
-| 12 | `ReentrancyLock` | Instance | `bool` | `acquire_reentrancy_lock` | `release_reentrancy_lock` |
+| 10 | `NextTemplateId` | Instance | `u64` | `init` | `create_stream_template` |
+| 11 | `ActiveTemplateCount` | Instance | `u64` | `init` | `create_stream_template`, `delete_stream_template` |
+| 12 | `StreamTemplate(u64)` | Persistent | `StreamScheduleTemplate` | `create_stream_template` | `delete_stream_template` (removes) |
+| 13 | `OwnerTemplateIds(Address)`| Persistent | `Vec<u64>` | `create_stream_template` | `delete_stream_template` (removes) |
+| 14 | `TotalLiabilities` | Instance | `i128` | `init` | `create_stream`, `withdraw`, `cancel_stream` |
+| 15 | `WithdrawNonce(Address)` | Persistent | `u64` | `delegated_withdraw` (first) | `delegated_withdraw` (increments) |
+| 16 | `PauseState` | Instance | `PauseState` enum | `set_global_emergency_paused`, `set_contract_paused`, `pause_protocol` | `resume_protocol` (Active) |
+| 17 | `ReentrancyLock` | Instance | `bool` | `acquire_reentrancy_lock` | `release_reentrancy_lock` |
+| 18 | `RecipientStreamPage(Address, u32)` | Persistent | `Vec<u64>` | `create_stream` | `close_completed_stream` |
+| 19 | `RecipientStreamPageCount(Address)`| Persistent | `u32` | `create_stream` | `close_completed_stream` |
+| 20 | `PendingRecipientUpdate(u64)` | Persistent | `Address` | `propose_recipient_update` | `accept_recipient_update` (removes) |
+| 21 | `IdReservation(Address)` | Persistent | `IdReservation` | `reserve_stream_ids` | `create_stream`, `create_streams` (removes when exhausted) |
+| 22 | `MaxRatePerSecond` | Instance | `i128` | `set_max_rate_per_second` | `set_max_rate_per_second` |
+| 23 | `DelegatedWithdrawNonce(Address)` | Persistent | `u64` | `delegated_withdraw` | `delegated_withdraw` (increments) |
+| 24 | `LastPauseRecord(PauseKind)` | Persistent | `PauseRecord` | `pause_stream`, `pause_protocol` | `resume_stream`, `resume_protocol` |
+| 25 | `RotationHistory(u64)` | Persistent | `Vec<RotationEntry>` | `accept_recipient_update`, `transfer_sender` | (append-only) |
+| 26 | `LastAccrualLedgerTimestamp` | Instance | `u64` | `current_accrual_timestamp` | `current_accrual_timestamp` |
+| 27 | `PausedStreamCount` | Instance | `u64` | `pause_stream`, `pause_stream_as_admin` | `resume_stream`, `cancel_stream`, `close_completed_stream` |
+| 28 | `TotalKeeperFeesPaid` | Instance | `i128` | `init` | `keeper_cancel` |
+| 29 | `SenderStreams(Address)` | Persistent | `Vec<u64>` (sorted) | `create_stream`, `create_streams` | `close_completed_stream`, `close_cancelled_stream` (removes entry) |
+| 30 | `AutoRenewEnabled(u64)` | Persistent | `bool` | sender opt-in | sender revoke |
+| 31 | `PendingStreamOffer(u64)` | Persistent | `StreamOffer` | `create_stream_offer` | accept/reject/cancel (removes) |
+| 32 | `RecipientPendingOffers(Address)` | Persistent | `Vec<u64>` | `create_stream_offer` | accept/reject/cancel (removes) |
 
 ---
 
@@ -212,6 +237,7 @@ Extended on every `load_stream()` (read) and `save_stream()` (write), and on eve
 - **CEI ordering**: State is always persisted (`save_stream`) before any external token transfer. See `docs/security.md`.
 - **No stale reads**: TTL bumps on reads mean monitoring queries keep data fresh.
 - **Admin rotation**: `set_admin` writes a new `Config` with the updated admin address. The token address is immutable.
+- **ID Reservation Overwrite**: Currently, invoking `reserve_stream_ids` unconditionally overwrites any existing `DataKey::IdReservation(Address)` entry for the caller. The `NextStreamId` global counter accurately tracks the sum of all reserved blocks, meaning the previously reserved but unconsumed IDs are permanently leaked rather than double-allocated. Integrators must avoid creating a new reservation before fully consuming or reclaiming an existing one.
 
 ---
 
@@ -335,3 +361,23 @@ The file `contracts/stream/tests/storage_key_compat.rs` encodes these invariants
 | `discriminant_3_recipient_streams_round_trips`         | RecipientStreams key round-trip                        |
 | `discriminant_14_total_liabilities_round_trips`        | TotalLiabilities key round-trip                        |
 | `version_entry_point_works_on_v5_seeded_instance`      | `version()` callable on V5 state                       |
+
+---
+
+## 9. ID Reservation Reclamation
+
+Both reservation release entrypoints now share a unified reclamation helper (`release_reservation`) that reclaims tip-adjacent unused IDs:
+
+### `release_id_reservation` (Voluntary)
+- **Action**: Immediate, voluntary release of an active reservation by its owner.
+- **Counter Behavior**: If the reservation is **tip-adjacent** (its allocated range ends exactly at the current `NextStreamId`) and **fully or partially unconsumed**, `NextStreamId` is rewound to the first unconsumed ID. If IDs beyond the reservation range were consumed (non-tip-adjacent), the reservation record is simply removed with no counter rewind.
+
+### `reclaim_expired_id_reservation` (Post-Expiry)
+- **Action**: Permissionless reclamation of a reservation that has passed its `expiry` timestamp.
+- **Counter Behavior**: Same as `release_id_reservation` — if the expired reservation is **tip-adjacent** and **unconsumed**, `NextStreamId` is rewound to the first unconsumed ID.
+
+### Security Assumptions (NatSpec / Doc-comment style)
+- **Pre-expiry rejection**: Blocks denial-of-service (DoS) or front-running attacks where an attacker reclaims a user's reservation before they can publish their streams.
+- **At-expiry & post-expiry success**: Ensures that if a holder abandons or loses access to their reservation, the counter space/storage is not permanently locked, maintaining contract liveness.
+- **Tip-adjacent guard**: Counter rewind only occurs when `reservation_end == current_count`, meaning no streams exist beyond the reserved range. This prevents unsafe rewinds that would create ID collisions with already-created streams.
+- **Consistent event shape**: Both paths emit the `res_rel` event with `(start_id, count, consumed, reclaimed)`, ensuring consistent indexer accounting regardless of which release path triggered the reclamation.

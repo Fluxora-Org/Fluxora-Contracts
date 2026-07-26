@@ -1,7 +1,8 @@
 extern crate std;
 
-    ContractError, DataKey, FluxoraStream, FluxoraStreamClient, StreamScheduleTemplate,
-    MAX_GLOBAL_TEMPLATES, MAX_TEMPLATES_PER_OWNER, StreamKind,
+use fluxora_stream::{
+    ContractError, CreateStreamParams, DataKey, FluxoraStream, FluxoraStreamClient, StreamKind,
+    StreamScheduleTemplate, StreamStatus, MAX_GLOBAL_TEMPLATES, MAX_TEMPLATES_PER_OWNER,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -42,8 +43,18 @@ fn template_register_create_delete_happy_path() {
     assert_eq!(stored.cliff_delay, 0);
     assert_eq!(stored.duration, 3600);
 
-    let stream_id = client
-        .create_stream_from_template(&sender, &tid, &recipient, &3600_i128, &1_i128, &0, &None, &None, &StreamKind::Linear);
+    let stream_id = client.create_stream_from_template(
+        &sender,
+        &tid,
+        &recipient,
+        &3600_i128,
+        &1_i128,
+        &0,
+        &None,
+        &None,
+        &StreamKind::Linear,
+        &None,
+    );
     assert_eq!(stream_id, 0u64);
 
     client.delete_stream_template(&owner, &tid);
@@ -93,7 +104,7 @@ fn per_owner_template_cap_enforced() {
     env.ledger().set_timestamp(2_000_000);
 
     for i in 0..MAX_TEMPLATES_PER_OWNER {
-        client.register_stream_template(&owner, &0u64, &0u64, &(3600u64 + u64::from(i)));
+        client.register_stream_template(&owner, &0u64, &0u64, &(3600u64 + i));
     }
 
     let err = client.try_register_stream_template(&owner, &0u64, &0u64, &9999u64);
@@ -146,7 +157,7 @@ fn test_owner_template_cap_exceeded() {
 
     // Register exactly MAX_TEMPLATES_PER_OWNER (64) templates.
     for i in 0..MAX_TEMPLATES_PER_OWNER {
-        client.register_stream_template(&owner, &0u64, &0u64, &(3600u64 + u64::from(i)));
+        client.register_stream_template(&owner, &0u64, &0u64, &(3600u64 + i));
     }
 
     // The 65th registration must fail.
@@ -205,4 +216,115 @@ fn test_global_template_cap_exceeded() {
     client.delete_stream_template(&owner, &last_tid);
     let recovered_tid = client.register_stream_template(&new_owner, &0u64, &0u64, &9999u64);
     assert!(client.try_get_stream_template(&recovered_tid).is_ok());
+}
+
+#[test]
+fn auto_renew_permissionless_preserves_subscription_schedule() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let relayer = Address::generate(&env);
+
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+    client.init(&token_id, &admin);
+    StellarAssetClient::new(&env, &token_id).mint(&sender, &1_000_i128);
+    TokenClient::new(&env, &token_id).approve(&sender, &contract_id, &1_000_i128, &100);
+
+    env.ledger().set_timestamp(1_000);
+    let old_id = client.create_stream(
+        &sender,
+        &CreateStreamParams {
+            recipient: recipient.clone(),
+            deposit_amount: 100_i128,
+            rate_per_second: 1_i128,
+            start_time: 1_000,
+            cliff_time: 1_010,
+            end_time: 1_100,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
+    );
+    client.set_auto_renew(&old_id, &sender, &true);
+
+    env.ledger().set_timestamp(1_100);
+    client.withdraw(&old_id);
+    assert_eq!(
+        client.get_stream_state(&old_id).status,
+        StreamStatus::Completed
+    );
+
+    env.ledger().set_timestamp(1_200);
+    let new_id = client.renew_stream(&old_id);
+    let renewed = client.get_stream_state(&new_id);
+
+    assert_ne!(new_id, old_id);
+    assert_eq!(renewed.sender, sender);
+    assert_eq!(renewed.recipient, recipient);
+    assert_eq!(renewed.deposit_amount, 100);
+    assert_eq!(renewed.rate_per_second, 1);
+    assert_eq!(renewed.start_time, 1_200);
+    assert_eq!(renewed.cliff_time, 1_210);
+    assert_eq!(renewed.end_time, 1_300);
+    assert!(client.get_auto_renew(&new_id));
+    assert!(!client.get_auto_renew(&old_id));
+    assert_eq!(TokenClient::new(&env, &token_id).balance(&relayer), 0);
+}
+
+#[test]
+fn auto_renew_rejects_insufficient_sender_funding_without_new_stream() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+    client.init(&token_id, &admin);
+    StellarAssetClient::new(&env, &token_id).mint(&sender, &100_i128);
+    TokenClient::new(&env, &token_id).approve(&sender, &contract_id, &100_i128, &100);
+
+    env.ledger().set_timestamp(2_000);
+    let old_id = client.create_stream(
+        &sender,
+        &CreateStreamParams {
+            recipient: recipient.clone(),
+            deposit_amount: 100_i128,
+            rate_per_second: 1_i128,
+            start_time: 2_000,
+            cliff_time: 2_000,
+            end_time: 2_100,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
+    );
+    client.set_auto_renew(&old_id, &sender, &true);
+    env.ledger().set_timestamp(2_100);
+    client.withdraw(&old_id);
+
+    let err = client.try_renew_stream(&old_id);
+    assert_eq!(err, Err(Ok(ContractError::AutoRenewFundingUnavailable)));
+    assert_eq!(client.get_stream_count(), 1);
+    assert!(client.get_auto_renew(&old_id));
 }

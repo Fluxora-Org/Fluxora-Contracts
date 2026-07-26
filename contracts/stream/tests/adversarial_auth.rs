@@ -2,7 +2,7 @@ extern crate std;
 
 use ed25519_dalek::{Signer, SigningKey};
 use fluxora_stream::{
-    ContractError, FluxoraStream, FluxoraStreamClient, PauseReason, StreamStatus,
+    ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, PauseReason, StreamStatus,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke},
@@ -94,43 +94,39 @@ impl<'a> Ctx<'a> {
 
     /// Create a standard 1000-unit stream (rate 1/s, 0..1000s, no cliff).
     fn create_stream(&self) -> u64 {
+        let seq = self.env.ledger().sequence();
+        self.env.ledger().set_sequence_number(seq + 10);
         self.env.ledger().set_timestamp(0);
+        let params = CreateStreamParams {
+            recipient: self.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        };
         self.env.mock_auths(&[MockAuth {
             address: &self.sender,
             invoke: &MockAuthInvoke {
                 contract: &self.contract_id,
                 fn_name: "create_stream",
-                args: (
-                    &self.sender,
-                    &self.recipient,
-                    1000_i128,
-                    1_i128,
-                    0u64,
-                    0u64,
-                    1000u64,
-                    0i128,
-                    Option::<soroban_sdk::Bytes>::None,
-                )
-                    .into_val(&self.env),
+                args: (&self.sender, params.clone()).into_val(&self.env),
                 sub_invokes: &[],
             },
         }]);
-        self.client().create_stream(
-            &self.sender,
-            &self.recipient,
-            &1000_i128,
-            &1_i128,
-            &0u64,
-            &0u64,
-            &1000u64,
-            &0,
-            &None,
-            &fluxora_stream::StreamKind::Linear,
-        )
+        self.client().create_stream(&self.sender, &params)
     }
 
     /// Pause a stream as the sender (helper to reach Paused state).
     fn pause_as_sender(&self, stream_id: u64) {
+        let seq = self.env.ledger().sequence();
+        self.env.ledger().set_sequence_number(seq + 10);
         self.env.mock_auths(&[MockAuth {
             address: &self.sender,
             invoke: &MockAuthInvoke {
@@ -980,7 +976,7 @@ fn test_recipient_update_auth_enforcement() {
 #[test]
 fn test_sweep_excess_admin_to_cold_treasury_succeeds() {
     let ctx = Ctx::setup();
-    let stream_id = ctx.create_stream();
+    let _stream_id = ctx.create_stream();
 
     // Add excess tokens to the contract (simulate trapped funds)
     ctx.env.mock_auths(&[MockAuth {
@@ -1028,7 +1024,7 @@ fn test_sweep_excess_admin_to_cold_treasury_succeeds() {
 #[test]
 fn test_sweep_excess_rejects_non_admin() {
     let ctx = Ctx::setup();
-    let stream_id = ctx.create_stream();
+    let _stream_id = ctx.create_stream();
 
     // Add excess
     ctx.env.mock_all_auths();
@@ -1055,7 +1051,7 @@ fn test_sweep_excess_rejects_non_admin() {
 #[test]
 fn test_sweep_excess_zero_excess_is_noop() {
     let ctx = Ctx::setup();
-    let stream_id = ctx.create_stream();
+    let _stream_id = ctx.create_stream();
 
     // No excess — contract balance equals liabilities
     let treasury = Address::generate(&ctx.env);
@@ -1130,7 +1126,7 @@ fn test_sweep_excess_preserves_solvency_invariant() {
 #[test]
 fn test_sweep_excess_to_cold_wallet_no_recipient_interaction() {
     let ctx = Ctx::setup();
-    let stream_id = ctx.create_stream();
+    let _stream_id = ctx.create_stream();
 
     // Add excess via sender transfer (no recipient involvement)
     ctx.env.mock_all_auths();
@@ -1274,15 +1270,20 @@ mod delegated_withdraw_adversarial {
             self.env.ledger().set_timestamp(0);
             self.client().create_stream(
                 &self.sender,
-                &self.recipient_kp.address,
-                &1000_i128,
-                &1_i128,
-                &0u64,
-                &0u64,
-                &1000u64,
-                &0,
-                &None,
-                &fluxora_stream::StreamKind::Linear,
+                &CreateStreamParams {
+                    recipient: self.recipient_kp.address.clone(),
+                    deposit_amount: 1000_i128,
+                    rate_per_second: 1_i128,
+                    start_time: 0u64,
+                    cliff_time: 0u64,
+                    end_time: 1000u64,
+                    withdraw_dust_threshold: Some(0),
+                    memo: None,
+                    metadata: None,
+                    kind: fluxora_stream::StreamKind::Linear,
+                    irrevocable: None,
+                    witness: None,
+                },
             )
         }
 
@@ -1492,6 +1493,7 @@ struct DelegatedCtx<'a> {
     recipient_pk: BytesN<32>,
     signing_key: SigningKey,
     stream_id: u64,
+    sender: Address,
     #[allow(dead_code)]
     sac: soroban_sdk::token::StellarAssetClient<'a>,
 }
@@ -1532,15 +1534,20 @@ impl<'a> DelegatedCtx<'a> {
         // Stream: 1000 tokens, rate 1/s, 0..1000s, no cliff.
         let stream_id = client.create_stream(
             &sender,
-            &recipient,
-            &1000_i128,
-            &1_i128,
-            &0u64,
-            &0u64,
-            &1000u64,
-            &0,
-            &None,
-            &fluxora_stream::StreamKind::Linear,
+            &CreateStreamParams {
+                recipient: recipient.clone(),
+                deposit_amount: 1000_i128,
+                rate_per_second: 1_i128,
+                start_time: 0u64,
+                cliff_time: 0u64,
+                end_time: 1000u64,
+                withdraw_dust_threshold: Some(0),
+                memo: None,
+                metadata: None,
+                kind: fluxora_stream::StreamKind::Linear,
+                irrevocable: None,
+                witness: None,
+            },
         );
 
         DelegatedCtx {
@@ -1550,6 +1557,7 @@ impl<'a> DelegatedCtx<'a> {
             recipient_pk,
             signing_key,
             stream_id,
+            sender,
             sac,
         }
     }
@@ -1752,5 +1760,69 @@ fn delegated_withdraw_below_minimum_rejected() {
         ctx.client().get_delegated_nonce(&recipient_addr),
         0,
         "nonce must not be consumed when BelowMinimumAmount is returned"
+    );
+}
+
+/// Revoking delegation in the same ledger strictly blocks in-flight delegated withdraw attempts.
+#[test]
+fn delegated_withdraw_same_ledger_revocation_race_rejected() {
+    let ctx = DelegatedCtx::setup();
+    ctx.env.ledger().set_timestamp(500);
+
+    let recipient_addr = address_from_pk(&ctx.env, &ctx.signing_key.verifying_key().to_bytes());
+    let sig = ctx.sign(0, 9999, 0);
+
+    // Revoke delegation by incrementing nonce in stored state prior to in-flight withdraw execution
+    ctx.env.as_contract(&ctx.contract_id, || {
+        fluxora_stream::increment_delegated_nonce(&ctx.env, &recipient_addr);
+    });
+
+    // Attempting delegated_withdraw with the revoked signature in the same ledger is rejected
+    let result = ctx.client().try_delegated_withdraw(
+        &ctx.stream_id,
+        &ctx.relayer,
+        &ctx.recipient_pk,
+        &0,
+        &9999,
+        &0,
+        &sig,
+    );
+    assert_eq!(
+        result,
+        Err(Ok(fluxora_stream::ContractError::InvalidSignature)),
+        "just-revoked delegation must be strictly rejected"
+    );
+}
+
+/// Revoking delegation in a prior ledger blocks subsequent delegated withdraw attempts in later ledgers.
+#[test]
+fn delegated_withdraw_later_ledger_revocation_rejected() {
+    let ctx = DelegatedCtx::setup();
+    ctx.env.ledger().set_timestamp(500);
+
+    let recipient_addr = address_from_pk(&ctx.env, &ctx.signing_key.verifying_key().to_bytes());
+    let sig = ctx.sign(0, 9999, 0);
+
+    // Revoke delegation at t=500
+    ctx.env.as_contract(&ctx.contract_id, || {
+        fluxora_stream::increment_delegated_nonce(&ctx.env, &recipient_addr);
+    });
+
+    // Advance to a later ledger
+    ctx.env.ledger().set_timestamp(600);
+
+    let result = ctx.client().try_delegated_withdraw(
+        &ctx.stream_id,
+        &ctx.relayer,
+        &ctx.recipient_pk,
+        &0,
+        &9999,
+        &0,
+        &sig,
+    );
+    assert_eq!(
+        result,
+        Err(Ok(fluxora_stream::ContractError::InvalidSignature)),
+        "delegation revoked in prior ledger must be rejected"
     );
 }

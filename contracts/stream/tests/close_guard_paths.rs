@@ -1,4 +1,4 @@
-﻿//! Tests for issue #522: close guard and recipient-index cleanup paths.
+//! Tests for issue #522: close guard and recipient-index cleanup paths.
 //!
 //! 1. `test_close_non_completed_stream_rejected` — exercises the guard that
 //!    rejects Active/Paused streams passed to `close_completed_stream`.
@@ -7,7 +7,8 @@
 //!    index entry is absent (no panic, no partial state left behind).
 
 use fluxora_stream::{
-    ContractError, FluxoraStream, FluxoraStreamClient, PauseReason, StreamKind, StreamStatus,
+    ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, PauseReason, StreamKind,
+    StreamStatus, MAX_RECIPIENT_PAGE_SIZE,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -56,16 +57,51 @@ impl<'a> Ctx<'a> {
         let now = self.env.ledger().timestamp();
         self.client.create_stream(
             &self.sender,
-            &self.recipient,
-            &(duration as i128),
-            &1,
-            &now,
-            &now,
-            &(now + duration),
-            &0,
-            &None,
-            &StreamKind::Linear,
+            &CreateStreamParams {
+                recipient: self.recipient.clone(),
+                deposit_amount: (duration as i128),
+                rate_per_second: 1,
+                start_time: now,
+                cliff_time: now,
+                end_time: (now + duration),
+                withdraw_dust_threshold: Some(0),
+                memo: None,
+                metadata: None,
+                kind: StreamKind::Linear,
+                irrevocable: None,
+                witness: None,
+            },
         )
+    }
+
+    fn create_irrevocable_stream(&self, duration: u64) -> u64 {
+        let now = self.env.ledger().timestamp();
+        self.client.create_stream(
+            &self.sender,
+            &CreateStreamParams {
+                recipient: self.recipient.clone(),
+                deposit_amount: (duration as i128),
+                rate_per_second: 1,
+                start_time: now,
+                cliff_time: now,
+                end_time: (now + duration),
+                withdraw_dust_threshold: Some(0),
+                memo: None,
+                metadata: None,
+                kind: StreamKind::Linear,
+                irrevocable: Some(true),
+                witness: None,
+            },
+        )
+    }
+
+    /// Create `n` streams for `self.recipient`, each with the given duration.
+    fn create_n(&self, n: u32, duration: u64) -> std::vec::Vec<u64> {
+        let mut ids = std::vec::Vec::new();
+        for _ in 0..n {
+            ids.push(self.create_stream(duration));
+        }
+        ids
     }
 }
 
@@ -129,15 +165,20 @@ fn test_close_cancelled_zero_claimable_ok() {
     // Stream starts in the future → no accrual at cancel time
     let stream_id = ctx.client.create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1_000,
-        &1,
-        &(now + 1_000),
-        &(now + 1_000),
-        &(now + 2_000),
-        &0,
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1_000,
+            rate_per_second: 1,
+            start_time: (now + 1_000),
+            cliff_time: (now + 1_000),
+            end_time: (now + 2_000),
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
     ctx.client.cancel_stream(&stream_id);
     assert_eq!(
@@ -192,15 +233,20 @@ fn test_close_cancelled_stream_ok() {
     // Stream starts in the future → no accrual at cancel time
     let stream_id = ctx.client.create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1_000,
-        &1,
-        &(now + 1_000),
-        &(now + 1_000),
-        &(now + 2_000),
-        &0,
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1_000,
+            rate_per_second: 1,
+            start_time: (now + 1_000),
+            cliff_time: (now + 1_000),
+            end_time: (now + 2_000),
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
     ctx.client.cancel_stream(&stream_id);
     assert_eq!(
@@ -272,4 +318,172 @@ fn test_close_removes_only_target_from_index() {
     let index = ctx.client.get_recipient_streams(&ctx.recipient);
     assert!(!index.contains(id_a));
     assert!(index.contains(id_b));
+}
+
+// ---------------------------------------------------------------------------
+// Irrevocable stream guard
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_irrevocable_stream_rejects_cancel() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_irrevocable_stream(10_000);
+    let result = ctx.client.try_cancel_stream(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
+}
+
+#[test]
+fn test_irrevocable_stream_rejects_admin_cancel() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_irrevocable_stream(10_000);
+
+    // We would test cancel_stream_as_admin, but for simplicity we verify the guard
+    // logic which is shared.
+    let result = ctx.client.try_cancel_stream_as_admin(&stream_id);
+    assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
+}
+
+#[test]
+fn test_irrevocable_stream_rejects_keeper_cancel() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_irrevocable_stream(10_000);
+
+    // Fast-forward past end_time + grace_period
+    ctx.env.ledger().with_mut(|l| {
+        l.timestamp += 10_000 + 7 * 86400; // end_time + 7 days
+    });
+
+    let keeper = Address::generate(&ctx.env);
+    let result = ctx.client.try_keeper_cancel(&stream_id, &keeper);
+    assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
+}
+
+#[test]
+fn test_irrevocable_stream_rejects_shorten_end_time() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_irrevocable_stream(10_000);
+
+    let now = ctx.env.ledger().timestamp();
+    let result = ctx
+        .client
+        .try_shorten_stream_end_time(&stream_id, &(now + 5_000));
+    assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
+}
+
+#[test]
+fn test_irrevocable_stream_rejects_bulk_cancel() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_irrevocable_stream(10_000);
+
+    let streams = soroban_sdk::vec![&ctx.env, stream_id];
+    let result = ctx.client.try_bulk_cancel_streams(&ctx.sender, &streams);
+    assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
+}
+
+// ---------------------------------------------------------------------------
+// Paginated-index consistency after close (issue #959)
+// ---------------------------------------------------------------------------
+
+/// Close a stream from the middle of a multi-page recipient index and verify
+/// all remaining pages are consistent (no duplicates, no gaps, correct total).
+#[test]
+fn test_close_removes_from_multi_page_index() {
+    let ctx = Ctx::setup();
+    ctx.env.budget().reset_unlimited();
+
+    let total = MAX_RECIPIENT_PAGE_SIZE + 1;
+    let ids = ctx.create_n(total, 100);
+
+    // Sanity: first page is full, second page has one entry.
+    let page1 = ctx.client.get_recipient_streams(&ctx.recipient);
+    assert_eq!(page1.len() as u32, MAX_RECIPIENT_PAGE_SIZE);
+
+    // Pick a stream from the non-final "page" (position 50 in the sorted
+    // order is well within the first page).
+    let close_id = ids[50 as usize];
+
+    // Complete the stream so close_completed_stream will accept it.
+    ctx.env.ledger().with_mut(|l| {
+        l.timestamp += 101;
+        l.sequence_number += 2;
+    });
+    ctx.client.withdraw(&close_id);
+    ctx.client.close_completed_stream(&close_id);
+
+    // Stream removed from storage.
+    assert!(ctx.client.try_get_stream_state(&close_id).is_err());
+
+    // Paginate through every page and collect all remaining IDs.
+    let mut remaining = soroban_sdk::Vec::<u64>::new(&ctx.env);
+    let mut cursor = 0u64;
+    loop {
+        let page = ctx.client.get_recipient_streams_paginated(
+            &ctx.recipient,
+            &cursor,
+            &MAX_RECIPIENT_PAGE_SIZE,
+        );
+        for i in 0..page.stream_ids.len() {
+            remaining.push_back(page.stream_ids.get(i).unwrap());
+        }
+        if page.next_cursor == 0 {
+            break;
+        }
+        cursor = page.next_cursor;
+    }
+
+    // Total count decreased by exactly one.
+    assert_eq!(remaining.len() as u32, total - 1);
+
+    // The closed stream must not appear in any page.
+    for i in 0..remaining.len() {
+        assert_ne!(remaining.get(i).unwrap(), close_id);
+    }
+
+    // Every original ID except the closed one must still be present.
+    for id in &ids {
+        if *id != close_id {
+            let mut found = false;
+            for i in 0..remaining.len() {
+                if remaining.get(i).unwrap() == *id {
+                    found = true;
+                    break;
+                }
+            }
+            assert!(found, "stream {} missing from index after close", id);
+        }
+    }
+}
+
+/// Close the last (and only) stream for a recipient and confirm the paginated
+/// query returns an empty page gracefully (no panic, next_cursor == 0).
+#[test]
+fn test_close_last_stream_empty_index_graceful() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream(100);
+
+    // Verify the stream is indexed.
+    let index_before = ctx.client.get_recipient_streams(&ctx.recipient);
+    assert_eq!(index_before.len(), 1);
+    assert_eq!(index_before.get(0).unwrap(), stream_id);
+
+    // Complete and close it.
+    ctx.env.ledger().with_mut(|l| {
+        l.timestamp += 101;
+        l.sequence_number += 2;
+    });
+    ctx.client.withdraw(&stream_id);
+    ctx.client.close_completed_stream(&stream_id);
+
+    // Non-paginated query returns empty.
+    let index_after = ctx.client.get_recipient_streams(&ctx.recipient);
+    assert_eq!(index_after.len(), 0);
+
+    // Paginated query also returns empty with next_cursor == 0.
+    let page = ctx.client.get_recipient_streams_paginated(
+        &ctx.recipient,
+        &0,
+        &MAX_RECIPIENT_PAGE_SIZE,
+    );
+    assert_eq!(page.stream_ids.len(), 0);
+    assert_eq!(page.next_cursor, 0);
 }

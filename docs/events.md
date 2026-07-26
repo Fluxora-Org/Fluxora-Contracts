@@ -31,6 +31,7 @@ Notes:
 | StreamEndShortened | `["end_shrt", stream_id: u64]` | `StreamEndShortened { stream_id: u64, old_end_time: u64, new_end_time: u64, refund_amount: i128 }`                                                       | When `shorten_stream_end_time` successfully shortens a stream.                                                           |
 | StreamEndExtended | `["end_ext", stream_id: u64]`  | `StreamEndExtended { stream_id: u64, old_end_time: u64, new_end_time: u64 }`                                                                              | When `extend_stream_end_time` successfully extends a stream.                                                             |
 | StreamToppedUp   | `["top_up", stream_id: u64]`    | `StreamToppedUp { stream_id: u64, top_up_amount: i128, new_deposit_amount: i128 }`                                                                        | When `top_up_stream` successfully increases a stream's deposit.                                                          |
+| StreamRenewed    | `["renewed", old_stream_id: u64, new_stream_id: u64]` | `StreamRenewed { old_stream_id: u64, new_stream_id: u64 }` | When `renew_stream` successfully creates the next stream from a completed auto-renew-enabled stream. |
 | RecipientUpdated | `["recp_upd", stream_id: u64]` | `RecipientUpdated { stream_id: u64, old_recipient: Address, new_recipient: Address }`                                                                     | When `update_recipient` successfully rotates a stream's receiving address.                                             |
 | AdminUpdated     | `["AdminUpdated"]`              | `(old_admin: Address, new_admin: Address)`                                                                                                                | When the contract admin is rotated via `set_admin`.                                                                     |
 | ContractPaused   | `["paused_ctl"]`                | `bool`                                                                                                                                                    | When the global contract pause state is toggled via `set_contract_paused`.                                              |
@@ -43,9 +44,16 @@ Notes:
 | AutoClaimSet | `["ac_set", stream_id: u64]` | `AutoClaimSet { stream_id: u64, destination: Address }` | When a recipient configures or changes a permissionless final-claim destination via `set_auto_claim`. |
 | AutoClaimRevoked | `["ac_revoke", stream_id: u64]` | `AutoClaimRevoked { stream_id: u64 }` | When a recipient revokes auto-claim configuration via `revoke_auto_claim`. |
 | AutoClaimTriggered | `["ac_trig", stream_id: u64]` | `AutoClaimTriggered { stream_id: u64, destination: Address, amount: i128 }` | When a third party successfully executes a configured final claim via `trigger_auto_claim`. |
-| MigrationCheckpoint | `["migrated"]` | `(from_version: u32, to_version: u32, timestamp: u64)` | When `migration_v5_to_v6` is called as an auditable deployment checkpoint. |
+| MigrationCheckpoint | `["migrated"]` | `(from_version: u32, to_version: u32, timestamp: u64)` | No function currently emits this event. Reserved for future migration checkpoints. |
+| ReservationReleased | `["res_rel", holder: Address]` | `(start_id: u64, count: u64, consumed: u64, reclaimed: u64)` | When a stream ID reservation is voluntarily released or reclaimed after expiry. |
+| ClaimOwnershipTransferred | `["claim_own", stream_id: u64]` | `ClaimOwnershipTransferred { stream_id: u64, old_owner: Address, new_owner: Address }` | When claim ownership of a stream is transferred. |
+| ShareDelegated | `["del_share", stream_id: u64]` | `ShareDelegated { stream_id: u64, delegate: Address, share_bps: u32 }` | When a recipient delegates a percentage yield share. |
+| OfferCreated | `["offr_crt", offer_id: u64]` | `OfferCreated { offer_id: u64, sender: Address, recipient: Address }` | When a stream creation offer is created. |
+| OfferAccepted | `["offr_acc", offer_id: u64]` | `OfferAccepted { offer_id: u64, stream_id: u64 }` | When a stream creation offer is accepted. |
+| OfferCancelled | `["offr_cxl", offer_id: u64]` | `OfferCancelled { offer_id: u64 }` | When a stream creation offer is cancelled or rejected. |
+| ContractUpgraded | `["upgraded"]` | `ContractUpgraded { new_wasm_hash: BytesN<32>, new_version: u32, upgraded_at: u64, upgraded_by: Address }` | When the admin successfully calls `upgrade`. A second, legacy `["upgrade"]` topic event `(new_wasm_hash, old_version, new_version, admin)` is also emitted for backward compatibility with older indexers. |
 
-**Additional topics (validator):** `cloned`, `kp_cncl`, `gl_pause`, `gl_resume`, `rate_dec`, `tmpl_def`, `hlth_chg`, `ex_swept`, `ac_set`, `ac_revoke`, `ac_trig`, `migrated`.
+**Additional topics (validator):** `cloned`, `kp_cncl`, `gl_pause`, `gl_resume`, `rate_dec`, `tmpl_def`, `hlth_chg`, `ex_swept`, `ac_set`, `ac_revoke`, `ac_trig`, `renewed`, `migrated`, `res_rel`.
 
 ---
 | Event name | Topic(s) | Data (shape & types) | When emitted |
@@ -364,6 +372,64 @@ pub struct PauseRecord {
 }
 ```
 
+### 13) KeeperCancelled
+
+Emitted by `keeper_cancel` after all token transfers succeed (CEI-compliant). The
+event carries the full fee breakdown so off-chain indexers can reconstruct keeper
+economics without inspecting individual token transfers.
+
+**Fee accounting identity (always holds):**
+```
+keeper_fee + recipient_amount + sender_refund == deposit_amount - prior_withdrawn_amount
+```
+
+```
+topics: ["kp_cncl", <stream_id: u64>]
+data:   KeeperCancelled {
+          stream_id:        u64,    // stream that was cancelled
+          keeper:           Address, // keeper who triggered cancellation
+          keeper_fee:       i128,   // KEEPER_FEE_BPS (50 bps) of gross sender refund
+          recipient_amount: i128,   // accrued - prior withdrawals (may be 0)
+          sender_refund:    i128,   // unstreamed deposit minus keeper fee
+        }
+```
+
+Example (partial accrual, deposit=10000, accrued=5000):
+
+```json
+{
+  "topics": ["kp_cncl", 7],
+  "data": {
+    "stream_id": 7,
+    "keeper": "G...KEEPER...",
+    "keeper_fee": 25,
+    "recipient_amount": 5000,
+    "sender_refund": 4975
+  }
+}
+```
+
+Example (fully accrued, zero keeper fee):
+
+```json
+{
+  "topics": ["kp_cncl", 12],
+  "data": {
+    "stream_id": 12,
+    "keeper": "G...KEEPER...",
+    "keeper_fee": 0,
+    "recipient_amount": 1000,
+    "sender_refund": 0
+  }
+}
+```
+
+**Indexer notes:**
+- `keeper_fee` is always `floor(unstreamed * 50 / 10000)`.
+- A fully-accrued stream has `sender_refund = 0` and `keeper_fee = 0`.
+- The event is emitted in the same transaction as the state write to `Cancelled`;
+  no `StreamCancelled` event is emitted for keeper-initiated cancellations.
+
 ### 14) StreamHealthChanged
 
 Emitted by `decrease_rate_per_second`, `shorten_stream_end_time`, `top_up_stream`,
@@ -423,6 +489,8 @@ The `remaining_balance` and `seconds_remaining` fields allow precise monitoring 
 
 - Use `topics[0]` to filter by event type; use `topics[1]` to get the `stream_id`
   for all stream-level events.
+- **v9 breaking event-payload change**: Starting from `CONTRACT_VERSION = 9`, the `amount` field on a `Withdrawal` event emitted by `delegated_withdraw` reports the **recipient's net amount** (`gross_withdrawable − relayer_fee`), **not** the gross withdrawable total. Indexers, dashboards, and accounting pipelines built against pre-v9 fixtures need to recompute against this new semantics, otherwise they will under-report by `relayer_fee`. The `Withdrawal.amount` from
+  plain `withdraw` / `withdraw_to` / `batch_withdraw` paths is **unchanged** (still equals the amount transferred). Only the `delegated_withdraw` path now reports the net.
 - For `Withdrawal` and `WithdrawalTo`, the `amount` field is `i128` — use a
   big-int library that supports 128-bit signed integers.
 - `StreamCompleted` is emitted on the **same call** as the final `Withdrawal` that drains
@@ -484,6 +552,25 @@ applicable (e.g. `AdminUpd`).
 
 ---
 
+## Governance contract events (`fluxora_governance`)
+
+All state-changing governance entrypoints emit structured events. Topics are ≤ 9
+characters (`symbol_short!` constraint). 
+
+| Event name | Topic(s) | Data (shape & types) | When emitted |
+|---|---|---|---|
+| ProposalCreated | `["proposed", proposal_id: u32]` | `ProposalCreated { proposal_id: u32, proposer: Address, target: Address }` | When `propose` is called successfully. |
+| ProposalApproved | `["approved", proposal_id: u32]` | `ProposalApproved { proposal_id: u32, approver: Address, approval_count: u32 }` | When a co-signer successfully approves a proposal. |
+| QuorumReached | `["quorum", proposal_id: u32]` | `QuorumReached { proposal_id: u32, quorum_reached_at: u64, executable_after: u64 }` | When a proposal reaches the approval threshold. |
+| ProposalCancelled | `["cancelled", proposal_id: u32]` | `ProposalCancelled { proposal_id: u32, canceller: Address }` | When a proposal is cancelled. |
+| ProposalExecuted | `["executed", proposal_id: u32]` | `ProposalExecuted { proposal_id: u32, executor: Address, target: Address, calldata: Bytes }` | When a proposal is executed successfully. |
+| SignerAdded | `["sgnr_add"]` | `SignerAdded { signer: Address }` | When `add_signer` adds a new co-signer. |
+| SignerRemoved | `["sgnr_rm"]` | `SignerRemoved { signer: Address }` | When `remove_signer` successfully removes a co-signer. |
+| AdminChanged | `["adm_chg"]` | `AdminChanged { old: Address, new: Address }` | When the contract admin is rotated. |
+| QuorumConfig | `["quor_cfg"]` | `QuorumConfig { threshold: u32, signer_count: u32 }` | Emitted after `SignerAdded` and `SignerRemoved` to allow indexers to track quorum health and threshold satisfiability. |
+
+---
+
 ## Keeping this doc in sync
 
 This file is derived from `contracts/stream/src/lib.rs` and `contracts/factory/src/lib.rs` emit calls:
@@ -524,8 +611,17 @@ Commit message suggestion: `docs: add event schema and topics for indexers`
 | `set_auto_claim`                                             | `"ac_set"`      |
 | `trigger_auto_claim`                                         | `"ac_trig"`     |
 | `sweep_excess`                                               | `"ex_swept"`    |
-| `migrate_recipient_index`                                    | `"migrated"`    |
+| `keeper_cancel`                                              | `"kp_cncl"`     |
 | `decrease_rate_per_second`, `shorten_stream_end_time`, `top_up_stream`, `cancel_stream` | `"hlth_chg"` |
 
 If you change event topics or payloads in the contract, update this document and
 include updated example snapshots in the PR.
+
+
+## Additional event topics
+
+- `claim_own`: Emitted when claim ownership is transferred via `transfer_claim_ownership`.
+- `del_share`: Emitted when a recipient delegates a share of their yield via `delegate_recipient_share`.
+- `offr_acc`: Emitted when a `StreamOffer` is accepted by its recipient.
+- `offr_crt`: Emitted when a `StreamOffer` is created by a sender.
+- `offr_cxl`: Emitted when a `StreamOffer` is cancelled by the sender or rejected by the recipient.

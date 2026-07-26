@@ -12,8 +12,12 @@
  *   - Missing / malformed key        → request proceeds without idempotency
  *     protection (key is optional).
  *
- * Amount fields (depositAmount, ratePerSecond) are serialized as decimal
- * strings to preserve precision for on-chain / large-integer values.
+ * Amount fields (depositAmount, ratePerSecond) are serialized as integer
+ * strings (e.g. "1000000") to preserve precision for on-chain i128 values
+ * that may exceed Number.MAX_SAFE_INTEGER in JavaScript.  "Decimal string"
+ * means an integer serialized as a string — NOT a value with a fractional
+ * component.  Fractional values (e.g. "100.5") are rejected because the
+ * on-chain contract declares these fields as i128 (whole base-units only).
  */
 
 import { Router, Request, Response, NextFunction } from 'express';
@@ -31,11 +35,26 @@ const router = Router();
 // Rate limiting — stream creation is a sensitive write operation
 // ---------------------------------------------------------------------------
 
+/**
+ * User-scoped rate limiter for stream creation.
+ *
+ * Keyed by authenticated userId (req.user.id) so that:
+ *  - Each authenticated user gets their own independent budget regardless of
+ *    shared NAT / corporate IP.
+ *  - Rotating source IPs cannot bypass the limit for an authenticated user.
+ *
+ * Falls back to IP for unauthenticated requests (those will be rejected by
+ * `authenticate` immediately after, so this is just a last-resort backstop).
+ *
+ * Placement: runs AFTER `authenticate` so that req.user is always populated
+ * for valid tokens.
+ */
 const createStreamLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: process.env.NODE_ENV === 'test' ? 10_000 : 30,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req) => (req as Request & { user?: { id: string } }).user?.id ?? (req.ip ?? 'unknown'),
   message: {
     success: false,
     error: { message: 'Too many requests', code: 'RATE_LIMIT_EXCEEDED' }
@@ -49,10 +68,10 @@ const createStreamLimiter = rateLimit({
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-/** Validate that a string represents a positive decimal integer (for amounts). */
+/** Validate that a string represents a positive integer (for on-chain i128 amounts). */
 function isPositiveDecimalString(value: unknown): value is string {
   if (typeof value !== 'string') return false;
-  if (!/^\d+(\.\d+)?$/.test(value)) return false;
+  if (!/^\d+$/.test(value)) return false;
   const n = Number(value);
   return Number.isFinite(n) && n > 0;
 }
@@ -231,10 +250,13 @@ async function createStream(
 // Route registration
 // ---------------------------------------------------------------------------
 
+// authenticate runs first so that req.user is populated before the limiter
+// keys by userId. Unauthenticated requests are rejected by authenticate before
+// they ever reach createStreamLimiter.
 router.post(
   '/',
-  createStreamLimiter,
   authenticate,
+  createStreamLimiter,
   idempotency(),
   createStream
 );

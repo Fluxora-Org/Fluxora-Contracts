@@ -203,6 +203,7 @@ occurs and the function returns `0`. This ensures:
 
 - Tokens that back active stream liabilities are never swept.
 - A recipient's withdrawable entitlement is never affected by a sweep.
+- Accrued protocol (keeper) fees are protected (as they are paid out immediately and thus naturally excluded from the contract balance).
 - The contract always remains solvent after a sweep.
 
 ### Security properties
@@ -514,11 +515,11 @@ The CI pipeline verifies that the WASM artifact produced by `cargo build --relea
 
 | Factor                     | How it is pinned                                                |
 |---------------------------|-----------------------------------------------------------------|
-| Rust toolchain            | `rust-toolchain.toml` — channel and targets pinned              |
+| Rust toolchain            | `rust-toolchain.toml` — channel and targets pinned; `rust-version = "1.94.1"` in each crate's `Cargo.toml` gives `cargo` an independent MSRV floor, cross-checked against the toolchain pin by `tests/test_rust_toolchain_pin.py` |
 | soroban-sdk version       | `contracts/stream/Cargo.toml` — `21.7.7` exact version          |
 | Build profile             | `--release` with `wasm32-unknown-unknown` target                |
 | Feature flags             | Only default features during WASM build (`testutils` is test-only) |
-| `Cargo.lock`              | Committed; transitive dependencies locked                       |
+| `Cargo.lock`              | Committed; transitive dependencies locked. CI-enforced: the `build` job runs `cargo update --locked --workspace` before any build step and fails if resolution would change it |
 
 ### CI verification flow
 
