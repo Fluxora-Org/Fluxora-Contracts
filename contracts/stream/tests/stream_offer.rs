@@ -842,3 +842,62 @@ fn accepted_offer_id_is_stable_stream_id() {
     let stream = ctx.client.get_stream_state(&stream_id);
     assert_eq!(stream.stream_id, stream_id);
 }
+
+// ---------------------------------------------------------------------------
+// Regression: accepted-offer Stream has correct values for claim_owner,
+// irrevocable, and witness — fields that were missing from the hand-rolled
+// struct literal in accept_stream_offer.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn accepted_offer_stream_has_claim_owner_irrevocable_witness() {
+    let ctx = Ctx::setup();
+    let now = ctx.env.ledger().timestamp();
+
+    let offer_id = ctx.client.create_stream_offer(
+        &ctx.sender,
+        &ctx.recipient,
+        &1_000_i128,
+        &1_i128,
+        &(now + 10),
+        &(now + 10),
+        &(now + 1_010),
+        &0_i128,
+        &None,
+        &StreamKind::Linear,
+        &None,
+        &None,
+    );
+
+    let stream_id = ctx.client.accept_stream_offer(&ctx.recipient, &offer_id);
+    let stream = ctx.client.get_stream_state(&stream_id);
+
+    // claim_owner is deliberately set to the accepting recipient so they
+    // can transfer ownership or configure the stream explicitly.
+    assert_eq!(
+        stream.claim_owner,
+        Some(ctx.recipient),
+        "accepted offer should set claim_owner to the recipient"
+    );
+
+    // irrevocable defaults to None (false-equivalent) because offers
+    // don't yet carry an irrevocable flag.
+    assert_eq!(
+        stream.irrevocable,
+        None,
+        "accepted offer should default irrevocable to None"
+    );
+
+    // witness defaults to None because offers don't yet carry a witness.
+    assert_eq!(
+        stream.witness,
+        None,
+        "accepted offer should default witness to None"
+    );
+
+    // Sanity-check that pre-existing fields are still correct.
+    assert_eq!(stream.status, StreamStatus::Active);
+    assert_eq!(stream.sender, ctx.sender);
+    assert_eq!(stream.recipient, ctx.recipient);
+    assert_eq!(stream.deposit_amount, 1_000);
+}

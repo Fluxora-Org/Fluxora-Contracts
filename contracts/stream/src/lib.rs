@@ -969,6 +969,10 @@ pub struct Stream {
     /// Optional compliance witness authorized to cancel via signed attestation.
     /// `None` when not configured (default for backward compatibility).
     pub witness: Option<Address>,
+    /// Ledger sequence number of the last rate change (or creation).
+    /// Used to enforce MIN_RATE_INTERVAL_LEDGERS cooldown.
+    /// Initialised to 0 at stream creation.
+    pub last_rate_change_ledger: u32,
 }
 
 /// Pagination result for recipient stream listing
@@ -2092,6 +2096,7 @@ impl FluxoraStream {
             last_pause_toggle_ledger: 0,
             last_withdraw_ledger: 0,
             metadata: None,
+            irrevocable,
             witness: witness.clone(),
             last_rate_change_ledger: 0,
         };
@@ -2178,6 +2183,7 @@ impl FluxoraStream {
             last_pause_toggle_ledger: 0,
             last_withdraw_ledger: 0,
             metadata: None,
+            irrevocable,
             witness: witness.clone(),
             last_rate_change_ledger: 0,
         };
@@ -5698,6 +5704,8 @@ impl FluxoraStream {
             stream.withdraw_dust_threshold,
             stream.memo.clone(),
             stream.kind,
+            stream.irrevocable,
+            stream.witness.clone(),
         )?;
         set_auto_renew_enabled(&env, new_stream_id, true);
 
@@ -8587,6 +8595,10 @@ impl FluxoraStream {
             stream_id: offer_id,
             sender: offer.sender.clone(),
             recipient: offer.recipient.clone(),
+            // The accepting recipient becomes the claim_owner so they can
+            // transfer ownership or configure the stream without relying on
+            // the implicit-recipient fallback.
+            claim_owner: Some(offer.recipient.clone()),
             deposit_amount: offer.deposit_amount,
             rate_per_second: offer.rate_per_second,
             start_time: effective_start,
@@ -8602,7 +8614,13 @@ impl FluxoraStream {
             kind: offer.kind,
             last_pause_toggle_ledger: 0,
             last_withdraw_ledger: 0,
+            // Offers don't carry an irrevocable flag yet, so default to
+            // false-equivalent (None) for full backward compatibility.
+            irrevocable: None,
+            // Offers don't carry a witness yet, so default to None.
+            witness: None,
             metadata: offer.metadata.clone(),
+            last_rate_change_ledger: 0,
         };
 
         save_stream(&env, &stream);
