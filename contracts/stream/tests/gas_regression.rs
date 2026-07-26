@@ -1,5 +1,5 @@
 // See docs/gas.md for the baseline update process and review bar.
-use fluxora_stream::{FluxoraStream, FluxoraStreamClient, StreamKind};
+use fluxora_stream::{CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamKind};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
@@ -61,26 +61,95 @@ impl<'a> TestContext<'a> {
 
         self.client.create_stream(
             &self.sender,
-            &self.recipient,
-            &amount,
-            &rate,
-            &start_time,
-            &cliff_time,
-            &end_time,
-            &0,
-            &None,
-            &StreamKind::Linear,
+            &CreateStreamParams {
+                recipient: self.recipient.clone(),
+                deposit_amount: amount,
+                rate_per_second: rate,
+                start_time: start_time,
+                cliff_time: cliff_time,
+                end_time: end_time,
+                withdraw_dust_threshold: Some(0),
+                memo: None,
+                metadata: None,
+                kind: StreamKind::Linear,
+                irrevocable: None,
+                witness: None,
+            },
         )
     }
 }
 
-fn measure_gas<F>(ctx: &TestContext, f: F) -> u64
+// Grace period (mirrors KEEPER_GRACE_PERIOD_SECONDS in lib.rs).
+const KEEPER_GRACE: u64 = 604_800;
+
+struct KeeperTestContext<'a> {
+    env: Env,
+    client: FluxoraStreamClient<'a>,
+    sender: Address,
+    recipient: Address,
+    keeper: Address,
+}
+
+impl<'a> KeeperTestContext<'a> {
+    fn setup() -> Self {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, FluxoraStream);
+        let client = FluxoraStreamClient::new(&env, &contract_id);
+
+        let token_admin = Address::generate(&env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let sac = StellarAssetClient::new(&env, &token_id);
+
+        let admin = Address::generate(&env);
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let keeper = Address::generate(&env);
+
+        client.init(&token_id, &admin);
+
+        // Fund the sender using the admin's minting power
+        sac.mint(&sender, &1_000_000_i128);
+        // Provide default allowance so create_stream can pull the deposit.
+        TokenClient::new(&env, &token_id).approve(&sender, &contract_id, &i128::MAX, &100_000);
+
+        Self {
+            env,
+            client,
+            sender,
+            recipient,
+            keeper,
+        }
+    }
+}
+
+fn measure_gas<F, C>(ctx: &C, f: F) -> u64
 where
-    F: FnOnce(&TestContext),
+    F: FnOnce(&C),
+    C: HasEnv,
 {
-    ctx.env.budget().reset_unlimited();
+    ctx.env().budget().reset_unlimited();
     f(ctx);
-    ctx.env.budget().cpu_instruction_cost()
+    ctx.env().budget().cpu_instruction_cost()
+}
+
+trait HasEnv {
+    fn env(&self) -> &Env;
+}
+
+impl HasEnv for TestContext<'_> {
+    fn env(&self) -> &Env {
+        &self.env
+    }
+}
+
+impl HasEnv for KeeperTestContext<'_> {
+    fn env(&self) -> &Env {
+        &self.env
+    }
 }
 
 #[test]
@@ -160,21 +229,26 @@ fn test_batch_withdraw_gas() {
 ///   → three token transfers: recipient 5 000, sender 4 975, keeper 25
 #[test]
 fn test_keeper_cancel_gas_partial_accrual() {
-    let ctx = TestContext::setup();
+    let ctx = KeeperTestContext::setup();
 
     // Create the stream at t=0.
     ctx.env.ledger().set_timestamp(0);
     let stream_id = ctx.client.create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &10_000_i128,
-        &5_i128,
-        &0u64,
-        &0u64,
-        &1_000u64,
-        &0_i128,
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 10_000_i128,
+            rate_per_second: 5_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1_000u64,
+            withdraw_dust_threshold: Some(0_i128),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     // Advance past end_time + grace period so the stream is eligible.
@@ -198,20 +272,25 @@ fn test_keeper_cancel_gas_partial_accrual() {
 ///   → one token transfer: recipient 1 000; no sender or keeper transfers
 #[test]
 fn test_keeper_cancel_gas_fully_accrued() {
-    let ctx = TestContext::setup();
+    let ctx = KeeperTestContext::setup();
 
     ctx.env.ledger().set_timestamp(0);
     let stream_id = ctx.client.create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1_000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1_000u64,
-        &0_i128,
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1_000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1_000u64,
+            withdraw_dust_threshold: Some(0_i128),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     ctx.env.ledger().set_timestamp(1_000 + KEEPER_GRACE + 1);
@@ -221,40 +300,4 @@ fn test_keeper_cancel_gas_fully_accrued() {
     });
 
     println!("GAS_MEASUREMENT: keeper_cancel: fully_accrued: {}", cost);
-}
-
-#[test]
-fn test_duplicate_detection_benchmark() {
-    let ctx = TestContext::setup();
-    let mut env = ctx.env.clone();
-
-    // Test with various batch sizes
-    let sizes = [10, 50, 100, 200];
-
-    for &size in &sizes {
-        // Create a vector of unique stream IDs
-        let mut ids = soroban_sdk::Vec::new(&env);
-        for i in 0..size {
-            ids.push_back(i as u64);
-        }
-
-        // Measure gas for duplicate detection
-        let cost = measure_gas(&ctx, |ctx| {
-            // We need to call reject_duplicate_ids directly
-            // Using a small helper function
-            let _ = fluxora_stream::reject_duplicate_ids(&ctx.env, &ids);
-        });
-
-        println!("GAS_MEASUREMENT: duplicate_detection: size_{}: {}", size, cost);
-
-        // Add a duplicate at the end and measure error case
-        let mut ids_with_dup = ids.clone();
-        ids_with_dup.push_back(0u64); // Duplicate of first ID
-
-        let cost_error = measure_gas(&ctx, |ctx| {
-            let _ = fluxora_stream::reject_duplicate_ids(&ctx.env, &ids_with_dup);
-        });
-
-        println!("GAS_MEASUREMENT: duplicate_detection_error: size_{}: {}", size, cost_error);
-    }
 }

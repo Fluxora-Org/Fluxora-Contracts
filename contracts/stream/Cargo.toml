@@ -36,6 +36,7 @@ proptest = "1"
 # Required for constructing Ed25519 keypairs in delegated-withdraw tests
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 rand = "0.8"
+soroban-env-host = "=21.2.1"
 
 # ---------------------------------------------------------------------------
 # Known-broken integration tests (pre-existing, unrelated to CI restoration)
@@ -97,7 +98,7 @@ test = false
 [[test]]
 name = "keeper_cancel"
 path = "tests/keeper_cancel.rs"
-test = false
+required-features = ["testutils"]
 
 [[test]]
 name = "max_rate_per_second"
@@ -189,7 +190,7 @@ test = false
 [[test]]
 name = "liability_invariant"
 path = "tests/liability_invariant.rs"
-test = false
+required-features = ["testutils"]
 
 [[test]]
 name = "event_snapshots_suite"

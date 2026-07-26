@@ -50,15 +50,20 @@ fn create_test_stream(
     env.mock_all_auths();
     client.create_stream(
         sender,
-        recipient,
-        &deposit,
-        &rate,
-        &start,
-        &cliff,
-        &end,
-        &0i128,
-        &None,
-        &fluxora_stream::StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: recipient.clone(),
+            deposit_amount: deposit,
+            rate_per_second: rate,
+            start_time: start,
+            cliff_time: cliff,
+            end_time: end,
+            withdraw_dust_threshold: Some(0i128),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     )
 }
 
@@ -446,15 +451,20 @@ fn test_bulk_cancel_requires_sender_auth() {
     }]);
     let stream_id = client.create_stream(
         &sender,
-        &recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0i128,
-        &None,
-        &fluxora_stream::StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0i128),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     env.set_auths(&[]);

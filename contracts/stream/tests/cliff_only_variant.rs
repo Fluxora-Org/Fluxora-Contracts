@@ -2,13 +2,13 @@
 extern crate std;
 
 use fluxora_stream::{
-    ContractError, FluxoraStream, FluxoraStreamClient, KeeperCancelled, StreamKind, StreamStatus,
-    StreamCancelled,
+    ContractError, FluxoraStream, FluxoraStreamClient, KeeperCancelled, StreamCancelled,
+    StreamKind, StreamStatus,
 };
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env, Symbol, TryFromVal, vec
+    vec, Address, Env, Symbol, TryFromVal,
 };
 
 // Grace period in seconds (mirrors KEEPER_GRACE_PERIOD_SECONDS in lib.rs).
@@ -64,18 +64,30 @@ impl<'a> Ctx<'a> {
         FluxoraStreamClient::new(&self.env, &self.contract_id)
     }
 
-    fn create_cliff_slope_stream(&self, deposit: i128, rate: i128, start: u64, cliff: u64, end: u64) -> u64 {
+    fn create_cliff_slope_stream(
+        &self,
+        deposit: i128,
+        rate: i128,
+        start: u64,
+        cliff: u64,
+        end: u64,
+    ) -> u64 {
         self.client.create_stream(
             &self.sender,
-            &self.recipient,
-            &deposit,
-            &rate,
-            &start,
-            &cliff,
-            &end,
-            &0,
-            &None,
-            &StreamKind::CliffSlope,
+            &CreateStreamParams {
+                recipient: self.recipient.clone(),
+                deposit_amount: deposit,
+                rate_per_second: rate,
+                start_time: start,
+                cliff_time: cliff,
+                end_time: end,
+                withdraw_dust_threshold: Some(0),
+                memo: None,
+                metadata: None,
+                kind: StreamKind::CliffSlope,
+                irrevocable: None,
+                witness: None,
+            },
         )
     }
 }
@@ -109,7 +121,7 @@ fn test_cliffonly_keeper_cancel_after_cliff() {
     ctx.env.ledger().set_timestamp(1000 + GRACE + 1);
 
     let client = ctx.client();
-    
+
     // Initial balances
     let contract_bal_before = ctx.token.balance(&ctx.contract_id);
     assert_eq!(contract_bal_before, deposit);
@@ -123,16 +135,25 @@ fn test_cliffonly_keeper_cancel_after_cliff() {
     let result = client.keeper_cancel(&stream_id, &ctx.keeper);
 
     // Assert return values
-    assert_eq!(result.recipient_amount, deposit, "Recipient gets full deposit");
+    assert_eq!(
+        result.recipient_amount, deposit,
+        "Recipient gets full deposit"
+    );
     assert_eq!(result.sender_refund_gross, 0, "Sender gets nothing");
-    assert_eq!(result.keeper_fee, 0, "Keeper fee is 0 because refund gross is 0");
+    assert_eq!(
+        result.keeper_fee, 0,
+        "Keeper fee is 0 because refund gross is 0"
+    );
     assert_eq!(result.sender_refund_net, 0, "Net refund is 0");
 
     // Balances
     assert_eq!(ctx.token.balance(&ctx.contract_id), 0);
     assert_eq!(client.get_total_liabilities(), 0);
     assert_eq!(ctx.token.balance(&ctx.sender), sender_bal_before);
-    assert_eq!(ctx.token.balance(&ctx.recipient), recipient_bal_before + deposit);
+    assert_eq!(
+        ctx.token.balance(&ctx.recipient),
+        recipient_bal_before + deposit
+    );
     assert_eq!(ctx.token.balance(&ctx.keeper), keeper_bal_before); // Keeper gets 0
 
     // Stream state
@@ -153,16 +174,22 @@ fn test_cliffonly_bulk_cancel_before_cliff() {
 
     let client = ctx.client();
     let streams = vec![&ctx.env, stream_id];
-    
+
     // bulk_cancel_streams is admin only
     let results = client.bulk_cancel_streams(&streams);
     assert_eq!(results.len(), 1);
     let result = results.get(0).unwrap();
 
     assert_eq!(result.recipient_amount, 0, "Recipient gets 0 before cliff");
-    assert_eq!(result.sender_refund_gross, deposit, "Sender gets full refund gross");
+    assert_eq!(
+        result.sender_refund_gross, deposit,
+        "Sender gets full refund gross"
+    );
     assert_eq!(result.keeper_fee, 0, "Admin cancel doesn't take keeper fee");
-    assert_eq!(result.sender_refund_net, deposit, "Sender gets full refund net");
+    assert_eq!(
+        result.sender_refund_net, deposit,
+        "Sender gets full refund net"
+    );
 
     // Balances
     assert_eq!(ctx.token.balance(&ctx.contract_id), 0);
@@ -416,4 +443,3 @@ fn test_cliff_only_withdrawable_after_cliff_capped() {
     let state = ctx.client.get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Completed);
 }
-

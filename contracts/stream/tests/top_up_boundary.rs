@@ -1,8 +1,8 @@
 extern crate std;
 
 use fluxora_stream::{
-    ContractError, DataKey, FluxoraStream, FluxoraStreamClient, PauseReason, StreamKind,
-    StreamStatus,
+    ContractError, CreateStreamParams, DataKey, FluxoraStream, FluxoraStreamClient, PauseReason,
+    StreamKind, StreamStatus,
 };
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
@@ -61,15 +61,20 @@ impl<'a> TestContext<'a> {
         self.env.ledger().set_timestamp(0);
         self.client.create_stream(
             &self.sender,
-            &self.recipient,
-            &1000_i128,
-            &1_i128,
-            &0u64,
-            &0u64,
-            &1000u64,
-            &0,
-            &None,
-            &StreamKind::Linear,
+            &CreateStreamParams {
+                recipient: self.recipient.clone(),
+                deposit_amount: 1000_i128,
+                rate_per_second: 1_i128,
+                start_time: 0u64,
+                cliff_time: 0u64,
+                end_time: 1000u64,
+                withdraw_dust_threshold: Some(0),
+                memo: None,
+                metadata: None,
+                kind: StreamKind::Linear,
+                irrevocable: None,
+                witness: None,
+            },
         )
     }
 }

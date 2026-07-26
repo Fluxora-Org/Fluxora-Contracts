@@ -759,7 +759,9 @@ fn v7_last_pause_record_absent_on_v5_instance() {
             .env
             .storage()
             .persistent()
-            .has(&DataKey::LastPauseRecord(fluxora_stream::PauseKind::Protocol));
+            .has(&DataKey::LastPauseRecord(
+                fluxora_stream::PauseKind::Protocol,
+            ));
         assert!(
             !present,
             "LastPauseRecord must be absent on a V5-seeded instance"
@@ -789,7 +791,11 @@ fn v7_last_accrual_ledger_timestamp_absent_on_v5_instance() {
     let ctx = Ctx::setup();
     let cid = ctx.contract_id.clone();
     ctx.env.as_contract(&cid, || {
-        let present = ctx.env.storage().instance().has(&DataKey::LastAccrualLedgerTimestamp);
+        let present = ctx
+            .env
+            .storage()
+            .instance()
+            .has(&DataKey::LastAccrualLedgerTimestamp);
         assert!(
             !present,
             "LastAccrualLedgerTimestamp must be absent on a V5-seeded instance"
@@ -802,7 +808,11 @@ fn v7_paused_stream_count_absent_on_v5_instance() {
     let ctx = Ctx::setup();
     let cid = ctx.contract_id.clone();
     ctx.env.as_contract(&cid, || {
-        let present = ctx.env.storage().instance().has(&DataKey::PausedStreamCount);
+        let present = ctx
+            .env
+            .storage()
+            .instance()
+            .has(&DataKey::PausedStreamCount);
         assert!(
             !present,
             "PausedStreamCount must be absent on a V5-seeded instance"
@@ -815,7 +825,11 @@ fn v7_total_keeper_fees_paid_absent_on_v5_instance() {
     let ctx = Ctx::setup();
     let cid = ctx.contract_id.clone();
     ctx.env.as_contract(&cid, || {
-        let present = ctx.env.storage().instance().has(&DataKey::TotalKeeperFeesPaid);
+        let present = ctx
+            .env
+            .storage()
+            .instance()
+            .has(&DataKey::TotalKeeperFeesPaid);
         assert!(
             !present,
             "TotalKeeperFeesPaid must be absent on a V5-seeded instance"
@@ -1017,9 +1031,9 @@ pub fn all_live_datakey_variants(env: &Env) -> vec::Vec<DataKey> {
         DataKey::PendingRecipientUpdate(0),                    // 20
         DataKey::IdReservation(dummy_addr.clone()),            // 21
         DataKey::MaxRatePerSecond,                             // 22
-        DataKey::DelegatedWithdrawNonce(dummy_addr.clone()),    // 23
+        DataKey::DelegatedWithdrawNonce(dummy_addr.clone()),   // 23
         DataKey::LastPauseRecord(dummy_pause_kind),            // 24
-        DataKey::RotationHistory(0),                            // 25
+        DataKey::RotationHistory(0),                           // 25
         DataKey::LastAccrualLedgerTimestamp,                   // 26
         DataKey::PausedStreamCount,                            // 27
         DataKey::TotalKeeperFeesPaid,                          // 28
@@ -1082,8 +1096,7 @@ fn test_contract_version_matches_datakey_variant_count() {
     let expected_count = expected_datakey_count_for_version(CONTRACT_VERSION);
 
     assert_eq!(
-        live_count,
-        expected_count,
+        live_count, expected_count,
         "CRITICAL VERSION DRIFT: CONTRACT_VERSION ({}) expects {} DataKey variants, \
          but the live DataKey enum has {} variants. \
          When adding a new DataKey variant, you MUST update: \
@@ -1092,9 +1105,7 @@ fn test_contract_version_matches_datakey_variant_count() {
          3. Prose tables & variant count tests in contracts/stream/src/checksum.rs \
          4. Version history & policy in docs/upgrade.md \
          5. CONTRACT_VERSION in contracts/stream/src/lib.rs if required by versioning policy.",
-        CONTRACT_VERSION,
-        expected_count,
-        live_count
+        CONTRACT_VERSION, expected_count, live_count
     );
 }
 
@@ -1128,4 +1139,3 @@ fn test_datakey_variant_count_exact_29() {
         "DataKey variant count changed without updating storage_key_compat test suite."
     );
 }
-

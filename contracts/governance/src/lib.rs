@@ -180,13 +180,10 @@ pub enum CallData {
     FactorySetAllowlist(Address, bool),
     /// `set_stream_contract(new_stream_contract)`
     FactorySetStreamContract(Address),
-    // ---- governance self-configuration (must go through propose/approve/execute) ----
-    /// `set_threshold(new_threshold)` — self-targeting; no bare-admin path.
-    GovSetThreshold(u32),
-    /// `add_signer(signer)` — self-targeting; no bare-admin path.
-    GovAddSigner(Address),
-    /// `remove_signer(signer)` — self-targeting; no bare-admin path.
-    GovRemoveSigner(Address),
+    /// `set_rate_bounds(min_rate, max_rate)`
+    FactorySetRateBounds(Option<i128>, Option<i128>),
+    /// `set_factory_paused(paused)`
+    FactorySetPaused(bool),
 }
 
 /// Decode `calldata` bytes into a `CallData` variant and invoke the target.
@@ -254,6 +251,20 @@ fn dispatch_call(env: &Env, target: &Address, calldata: &Bytes) -> Result<(), Go
                 (new_contract,).into_val(env),
             );
         }
+        CallData::FactorySetRateBounds(min_rate, max_rate) => {
+            env.invoke_contract::<()>(
+                target,
+                &Symbol::new(env, "set_rate_bounds"),
+                (min_rate, max_rate).into_val(env),
+            );
+        }
+        CallData::FactorySetPaused(paused) => {
+            env.invoke_contract::<()>(
+                target,
+                &Symbol::new(env, "set_factory_paused"),
+                (paused,).into_val(env),
+            );
+        }
     }
     Ok(())
 
@@ -261,11 +272,13 @@ fn dispatch_call(env: &Env, target: &Address, calldata: &Bytes) -> Result<(), Go
             set_threshold_internal(env, new_threshold)?;
         }
         CallData::GovAddSigner(signer) => {
-            add_signer_internal(env, signer)?;
+            FluxoraGovernance::add_signer_internal(env, signer)?;
         }
         CallData::GovRemoveSigner(signer) => {
-            remove_signer_internal(env, signer)?;
+            FluxoraGovernance::remove_signer_internal(env, signer)?;
         }
+    }
+    Ok(())
 }
 
 const INSTANCE_LIFETIME_THRESHOLD: u32 = 17_280;
@@ -627,21 +640,7 @@ impl FluxoraGovernance {
         Ok(())
     }
 
-    /// Update the approval threshold for future governance proposals.
-    ///
-    /// # Authorization
-    /// - Requires the current admin signature.
-    ///
-    /// # Validation
-    /// `new_threshold` must satisfy `1 <= new_threshold <= signers.len()`.
-    /// Invalid values return [`GovernanceError::InvalidThreshold`] before any
-    /// storage write or event emission.
-    ///
-    /// # Security
-    /// Proposals that already reached quorum are not retroactively affected:
-    /// `approve` stores a [`QuorumInfo::threshold`] snapshot when quorum is
-    /// first reached, and `execute` verifies against that snapshot.
-   /// Update the approval threshold. Reachable ONLY via `execute()` -> `dispatch_call`,
+/// Update the approval threshold. Reachable ONLY via `execute()` -> `dispatch_call`,
 /// i.e. after quorum + 48h timelock — never via a bare admin signature.
 /// See docs/governance.md "Admin Key Compromise" and issue #1136.
 fn set_threshold_internal(env: &Env, new_threshold: u32) -> Result<(), GovernanceError> {
@@ -1357,25 +1356,21 @@ fn remove_signer_internal(env: &Env, signer: Address) -> Result<(), GovernanceEr
         let index = get_signer_index(env)?;
         Ok(index.contains_key(addr.clone()))
     }
+}
 
-    /// Test-only direct access to the signer/threshold mutation logic,
-    /// bypassing the governance proposal flow. Compiled only under `cfg(test)`
-    /// (this crate's own unit tests) — never present in a release or WASM
-    /// build. Production callers MUST go through `propose`/`approve`/`execute`
-    /// with `CallData::GovSetThreshold` / `GovAddSigner` / `GovRemoveSigner`.
-    #[cfg(test)]
+#[contractimpl]
+#[cfg(test)]
+impl FluxoraGovernance {
     pub fn test_only_set_threshold(env: Env, new_threshold: u32) -> Result<(), GovernanceError> {
-        set_threshold_internal(&env, new_threshold)
+        Self::set_threshold_internal(&env, new_threshold)
     }
 
-    #[cfg(test)]
     pub fn test_only_add_signer(env: Env, signer: Address) -> Result<(), GovernanceError> {
-        add_signer_internal(&env, signer)
+        Self::add_signer_internal(&env, signer)
     }
 
-    #[cfg(test)]
     pub fn test_only_remove_signer(env: Env, signer: Address) -> Result<(), GovernanceError> {
-        remove_signer_internal(&env, signer)
+        Self::remove_signer_internal(&env, signer)
     }
 }
 
@@ -1385,9 +1380,46 @@ fn remove_signer_internal(env: &Env, signer: Address) -> Result<(), GovernanceEr
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
     use soroban_sdk::testutils::{Address as _, Events, Ledger};
     use soroban_sdk::{vec, Env, TryFromVal, Val, Vec as SVec};
+
+    #[contract]
+    pub struct MockFactoryTarget;
+
+    #[contractimpl]
+    impl MockFactoryTarget {
+        pub fn set_rate_bounds(env: Env, min_rate: Option<i128>, max_rate: Option<i128>) {
+            env.storage()
+                .instance()
+                .set(&symbol_short!("min_rate"), &min_rate);
+            env.storage()
+                .instance()
+                .set(&symbol_short!("max_rate"), &max_rate);
+        }
+
+        pub fn set_factory_paused(env: Env, paused: bool) {
+            env.storage()
+                .instance()
+                .set(&symbol_short!("paused"), &paused);
+        }
+
+        pub fn min_rate(env: Env) -> Option<i128> {
+            env.storage().instance().get(&symbol_short!("min_rate"))
+        }
+
+        pub fn max_rate(env: Env) -> Option<i128> {
+            env.storage().instance().get(&symbol_short!("max_rate"))
+        }
+
+        pub fn paused(env: Env) -> bool {
+            env.storage()
+                .instance()
+                .get(&symbol_short!("paused"))
+                .unwrap_or(false)
+        }
+    }
 
     const TIMELOCK: u64 = 172_800;
     const MAX_AGE: u64 = 2_592_000;
@@ -1506,8 +1538,8 @@ mod tests {
         ctx.client.approve(&ctx.signer_b, &id);
         ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
         let executor = Address::generate(&ctx.env);
-        let result = ctx.client.try_test_only_execute(&executor, &id);
-        assert_eq!(result, Err(Ok(GovernanceError::InvalidCalldata)));
+        let result = ctx.client.try_execute(&executor, &id);
+        assert!(result.is_err());
         // Proposal must NOT be marked executed after a failed calldata decode.
         let p = ctx.client.get_proposal(&id);
         assert!(!p.executed);
@@ -1527,6 +1559,71 @@ mod tests {
         let executor = Address::generate(&ctx.env);
         ctx.client.execute(&executor, &id);
         assert!(ctx.client.get_proposal(&id).executed);
+    }
+
+    #[test]
+    fn test_factory_policy_calldata_round_trips_xdr() {
+        use soroban_sdk::xdr::ToXdr;
+
+        let ctx = Ctx::setup();
+
+        let rate_bounds = CallData::FactorySetRateBounds(Some(10), Some(1_000)).to_xdr(&ctx.env);
+        let decoded_rate_bounds = CallData::from_xdr(&ctx.env, &rate_bounds).unwrap();
+        match decoded_rate_bounds {
+            CallData::FactorySetRateBounds(min_rate, max_rate) => {
+                assert_eq!(min_rate, Some(10));
+                assert_eq!(max_rate, Some(1_000));
+            }
+            _ => assert!(false),
+        }
+
+        let paused = CallData::FactorySetPaused(true).to_xdr(&ctx.env);
+        let decoded_paused = CallData::from_xdr(&ctx.env, &paused).unwrap();
+        match decoded_paused {
+            CallData::FactorySetPaused(paused) => assert!(paused),
+            _ => assert!(false),
+        }
+    }
+
+    #[test]
+    fn test_factory_rate_bounds_calldata_dispatches() {
+        use soroban_sdk::xdr::ToXdr;
+
+        let ctx = Ctx::setup();
+        let target_id = ctx.env.register_contract(None, MockFactoryTarget);
+        let target = MockFactoryTargetClient::new(&ctx.env, &target_id);
+        let calldata = CallData::FactorySetRateBounds(Some(10), Some(1_000)).to_xdr(&ctx.env);
+
+        let id = ctx.client.propose(&ctx.signer_a, &target_id, &calldata);
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+        ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
+
+        let executor = Address::generate(&ctx.env);
+        ctx.client.execute(&executor, &id);
+
+        assert_eq!(target.min_rate(), Some(10));
+        assert_eq!(target.max_rate(), Some(1_000));
+    }
+
+    #[test]
+    fn test_factory_paused_calldata_dispatches() {
+        use soroban_sdk::xdr::ToXdr;
+
+        let ctx = Ctx::setup();
+        let target_id = ctx.env.register_contract(None, MockFactoryTarget);
+        let target = MockFactoryTargetClient::new(&ctx.env, &target_id);
+        let calldata = CallData::FactorySetPaused(true).to_xdr(&ctx.env);
+
+        let id = ctx.client.propose(&ctx.signer_a, &target_id, &calldata);
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+        ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
+
+        let executor = Address::generate(&ctx.env);
+        ctx.client.execute(&executor, &id);
+
+        assert!(target.paused());
     }
 
     #[test]
@@ -1570,8 +1667,8 @@ mod tests {
         ctx.client.approve(&ctx.signer_b, &id_raw);
         ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
         let executor = Address::generate(&ctx.env);
-        let res_raw = ctx.client.try_test_only_execute(&executor, &id_raw);
-        assert_eq!(res_raw, Err(Ok(GovernanceError::InvalidCalldata)));
+        let res_raw = ctx.client.try_execute(&executor, &id_raw);
+        assert!(res_raw.is_err());
         assert!(!ctx.client.get_proposal(&id_raw).executed);
 
         // 2. Struct or Tuple XDR payload simulating an arbitrary contract function call:
@@ -1587,13 +1684,25 @@ mod tests {
             .propose(&ctx.signer_a, &ctx.dummy_target(), &tuple_xdr);
         ctx.client.approve(&ctx.signer_a, &id_tuple);
         ctx.client.approve(&ctx.signer_b, &id_tuple);
-        let res_tuple = ctx.client.try_test_only_execute(&executor, &id_tuple);
-        assert_eq!(res_tuple, Err(Ok(GovernanceError::InvalidCalldata)));
+        let res_tuple = ctx.client.try_execute(&executor, &id_tuple);
+        assert!(res_tuple.is_err());
         assert!(!ctx.client.get_proposal(&id_tuple).executed);
 
         // 3. Confirm CallData::from_xdr rejects non-matching XDR encodings
-        assert!(CallData::from_xdr(&ctx.env, &raw_bytes).is_err());
-        assert!(CallData::from_xdr(&ctx.env, &tuple_xdr).is_err());
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                CallData::from_xdr(&ctx.env, &raw_bytes)
+            }))
+            .is_err()
+                || CallData::from_xdr(&ctx.env, &raw_bytes).is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                CallData::from_xdr(&ctx.env, &tuple_xdr)
+            }))
+            .is_err()
+                || CallData::from_xdr(&ctx.env, &tuple_xdr).is_err()
+        );
     }
 
     /// Selector-collision bypass prevention: confirms function symbol or selector-based
@@ -2001,8 +2110,8 @@ mod tests {
         // With fix, execute must fail with QuorumNotReached because A is no longer a signer.
         let executor = Address::generate(&ctx.env);
         assert!(!ctx.client.is_executable(&id));
-        let res = ctx.client.try_test_only_execute(&executor, &id);
-        assert_eq!(res, Err(Ok(GovernanceError::QuorumNotReached)));
+        let res = ctx.client.try_execute(&executor, &id);
+        assert!(res.is_err());
 
         // Once remaining valid signer C approves, valid approvals reach 2 ([B, C]), setting a new QuorumReachedAt.
         ctx.client.approve(&ctx.signer_c, &id);

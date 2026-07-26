@@ -11,7 +11,9 @@
 
 extern crate std;
 
-use fluxora_stream::{FluxoraStream, FluxoraStreamClient, StreamKind, MAX_RECIPIENT_PAGE_SIZE};
+use fluxora_stream::{
+    CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamKind, MAX_RECIPIENT_PAGE_SIZE,
+};
 use soroban_sdk::{
     testutils::Address as _,
     token::{Client as TokenClient, StellarAssetClient},
@@ -79,15 +81,20 @@ impl Ctx {
         let now = self.env.ledger().timestamp();
         self.client.create_stream(
             &self.sender,
-            &self.recipient,
-            &100,
-            &1,
-            &now,
-            &now,
-            &(now + 100),
-            &0,
-            &None,
-            &StreamKind::Linear,
+            &CreateStreamParams {
+                recipient: self.recipient.clone(),
+                deposit_amount: 100,
+                rate_per_second: 1,
+                start_time: now,
+                cliff_time: now,
+                end_time: (now + 100),
+                withdraw_dust_threshold: Some(0),
+                memo: None,
+                metadata: None,
+                kind: StreamKind::Linear,
+                irrevocable: None,
+                witness: None,
+            },
         )
     }
 
@@ -246,4 +253,51 @@ fn test_bounded_ids_are_sorted() {
             "IDs must be sorted ascending"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// issue #1113 — get_sender_portfolio_health cursor boundary tests
+// mirrors the cursor-boundary coverage already present for
+// get_recipient_streams_paginated. NOTE: this test cannot be *run* while the
+// stream crate fails to compile due to unrelated WIP features on origin/main
+// (pooled/ratecooldown/cliffslope); it is added to satisfy the issue's
+// acceptance criteria and will execute once the crate builds again.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_sender_portfolio_health_cursor_boundaries() {
+    let ctx = Ctx::setup();
+    // create some streams (owned by the recipient in this harness) so the
+    // contract has state; querying by a different sender must not panic.
+    ctx.create_n(MAX_RECIPIENT_PAGE_SIZE + 5);
+
+    // start-of-list cursor (0) returns without panicking
+    let first = ctx
+        .client
+        .get_sender_portfolio_health(&ctx.sender, &0u64, &MAX_RECIPIENT_PAGE_SIZE);
+    // the page may be empty (sender owns none here) but must not error
+    let _ = first.stream_ids;
+
+    // mid-list walk via next_cursor must terminate (no infinite loop / panic)
+    let mut cursor = first.next_cursor;
+    let mut guard = 0u32;
+    while cursor != 0u64 && guard < 20 {
+        let page = ctx
+            .client
+            .get_sender_portfolio_health(&ctx.sender, &cursor, &MAX_RECIPIENT_PAGE_SIZE);
+        cursor = page.next_cursor;
+        guard += 1;
+    }
+
+    // past-end cursor value returns an empty page, not a panic
+    let past_end = ctx.client.get_sender_portfolio_health(
+        &ctx.sender,
+        &0xFFFF_FFFF_FFFF_FFFFu64,
+        &MAX_RECIPIENT_PAGE_SIZE,
+    );
+    assert_eq!(
+        past_end.stream_ids.len(),
+        0,
+        "past-end cursor must yield an empty page"
+    );
 }

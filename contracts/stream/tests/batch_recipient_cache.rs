@@ -72,6 +72,8 @@ impl<'a> Ctx<'a> {
             memo: None,
             metadata: None,
             kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
         }
     }
 }
@@ -139,27 +141,37 @@ fn test_batch_index_matches_sequential_creation() {
     let p2 = ctx1.make_params(&recipient1, 2_000, 2_000);
     ctx1.client.create_stream(
         &ctx1.sender,
-        &p1.recipient,
-        &p1.deposit_amount,
-        &p1.rate_per_second,
-        &p1.start_time,
-        &p1.cliff_time,
-        &p1.end_time,
-        &0,
-        &None,
-        &fluxora_stream::StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: p1.recipient.clone(),
+            deposit_amount: p1.deposit_amount,
+            rate_per_second: p1.rate_per_second,
+            start_time: p1.start_time,
+            cliff_time: p1.cliff_time,
+            end_time: p1.end_time,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
     ctx1.client.create_stream(
         &ctx1.sender,
-        &p2.recipient,
-        &p2.deposit_amount,
-        &p2.rate_per_second,
-        &p2.start_time,
-        &p2.cliff_time,
-        &p2.end_time,
-        &0,
-        &None,
-        &fluxora_stream::StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: p2.recipient.clone(),
+            deposit_amount: p2.deposit_amount,
+            rate_per_second: p2.rate_per_second,
+            start_time: p2.start_time,
+            cliff_time: p2.cliff_time,
+            end_time: p2.end_time,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
     let seq_index = ctx1.client.get_recipient_streams(&recipient1);
 
@@ -508,7 +520,7 @@ fn test_batch_mixed_recipient_partial_failure_rollback() {
         &ctx.env,
         ctx.make_params(&alice, 1_000, 1_000), // 1st: Alice (valid)
         ctx.make_params(&bob, 2_000, 2_000),   // 2nd: Bob (valid)
-        invalid_params,                         // 3rd: Bob (invalid - rate below min/zero)
+        invalid_params,                        // 3rd: Bob (invalid - rate below min/zero)
         ctx.make_params(&alice, 3_000, 3_000), // 4th: Alice (valid)
         ctx.make_params(&bob, 4_000, 4_000),   // 5th: Bob (valid)
     ];
@@ -556,4 +568,3 @@ fn test_batch_mixed_recipient_fully_valid_success() {
     assert!(bob_index.contains(ids.get(2).unwrap()));
     assert!(bob_index.contains(ids.get(4).unwrap()));
 }
-

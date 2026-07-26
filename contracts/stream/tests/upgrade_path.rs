@@ -56,15 +56,20 @@ impl<'a> UpgradeTestCtx<'a> {
 
         self.client.create_stream(
             &self.sender,
-            &self.recipient,
-            &amount,
-            &rate,
-            &start_time,
-            &cliff_time,
-            &end_time,
-            &0,
-            &None,
-            &fluxora_stream::StreamKind::Linear,
+            &CreateStreamParams {
+                recipient: self.recipient.clone(),
+                deposit_amount: amount,
+                rate_per_second: rate,
+                start_time: start_time,
+                cliff_time: cliff_time,
+                end_time: end_time,
+                withdraw_dust_threshold: Some(0),
+                memo: None,
+                metadata: None,
+                kind: fluxora_stream::StreamKind::Linear,
+                irrevocable: None,
+                witness: None,
+            },
         )
     }
 

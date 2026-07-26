@@ -1102,6 +1102,134 @@ fn test_none_memo_results_in_no_memo() {
 }
 
 // ---------------------------------------------------------------------------
+// #892: policy-conflict / grandfathering guarantee
+// ---------------------------------------------------------------------------
+
+/// Policy tightening does not affect existing streams. Create a stream under
+/// permissive policy, tighten all policy dimensions, then confirm existing stream
+/// operations succeed and new stream creation respects the tightened bounds.
+#[test]
+fn test_policy_tightening_grandfathers_existing_streams() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    ctx.factory.set_allowlist(&recipient, &true);
+    let now = ctx.now();
+
+    // ── 1. Create a stream under the initial permissive policy ────────────
+    // initial policy: max_deposit=10_000, min_duration=100, rate bounds unset
+    let existing_id = ctx.factory.create_stream(
+        &ctx.sender,
+        &recipient,
+        &5_000,
+        &10,                     // rate=10 (well within permissive bounds)
+        &now,
+        &now,
+        &(now + 1_000),           // duration=1_000 (well above min_duration=100)
+        &0,
+        &fluxora_stream::StreamKind::Linear,
+        &None,
+    );
+
+    // ── 2. Tighten all policy dimensions ──────────────────────────────────
+    ctx.factory.set_cap(&2_000);              // lower cap: 10_000 → 2_000
+    ctx.factory.set_min_duration(&2_000);     // raise min_duration: 100 → 2_000
+    ctx.factory.set_rate_bounds(&Some(1), &Some(5)); // restrict rate: unset → [1, 5]
+
+    // confirm policy was persisted
+    let config = ctx.factory.get_factory_config();
+    assert_eq!(config.max_deposit, 2_000);
+    assert_eq!(config.min_duration, 2_000);
+
+    // ── 3. Existing stream operations unaffected ──────────────────────────
+    // Verify stream state is still accessible and correct.
+    let state = ctx.stream.get_stream_state(&existing_id);
+    assert_eq!(state.deposit_amount, 5_000);
+    assert_eq!(state.rate_per_second, 10);
+    assert_eq!(state.status, fluxora_stream::StreamStatus::Active);
+
+    // Advance time past the stream's end so the full deposit is withdrawable.
+    ctx.env.ledger().set_timestamp(now + 2_000);
+    let withdrawn = ctx.stream.withdraw(&existing_id);
+    assert_eq!(withdrawn, 5_000);
+
+    // ── 4. New stream creation respects tightened policy ──────────────────
+    // 4a. Deposit over new cap → rejected
+    let over_cap = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &3_000,                  // exceeds new cap of 2_000
+        &3,                      // rate within new bounds
+        &now,
+        &now,
+        &(now + 3_000),          // duration meets new min_duration
+        &0,
+        &fluxora_stream::StreamKind::Linear,
+        &None,
+    );
+    assert_eq!(over_cap, Err(Ok(FactoryError::DepositExceedsCap)));
+
+    // 4b. Duration under new minimum → rejected
+    let too_short = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &500,                    // within new cap
+        &3,                      // rate within new bounds
+        &now,
+        &now,
+        &(now + 500),            // duration=500 < new min_duration=2_000
+        &0,
+        &fluxora_stream::StreamKind::Linear,
+        &None,
+    );
+    assert_eq!(too_short, Err(Ok(FactoryError::DurationTooShort)));
+
+    // 4c. Rate below new minimum → rejected
+    let rate_below = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &500,                    // within new cap
+        &0,                      // rate=0 < new min_rate=1
+        &now,
+        &now,
+        &(now + 3_000),          // duration meets new min_duration
+        &0,
+        &fluxora_stream::StreamKind::Linear,
+        &None,
+    );
+    assert_eq!(rate_below, Err(Ok(FactoryError::RateBelowMin)));
+
+    // 4d. Rate above new maximum → rejected
+    let rate_above = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &500,                    // within new cap
+        &10,                     // rate=10 > new max_rate=5
+        &now,
+        &now,
+        &(now + 3_000),          // duration meets new min_duration
+        &0,
+        &fluxora_stream::StreamKind::Linear,
+        &None,
+    );
+    assert_eq!(rate_above, Err(Ok(FactoryError::RateAboveMax)));
+
+    // 4e. Stream with parameters respecting all tightened bounds → succeeds
+    let new_ok = ctx.factory.try_create_stream(
+        &ctx.sender,
+        &recipient,
+        &1_500,                  // within new cap
+        &3,                      // rate within new bounds [1, 5]
+        &now,
+        &now,
+        &(now + 2_500),          // duration=2_500 ≥ new min_duration=2_000
+        &0,
+        &fluxora_stream::StreamKind::Linear,
+        &None,
+    );
+    assert!(new_ok.is_ok());
+}
+
+// ---------------------------------------------------------------------------
 // #912: DataKey collision audit test
 // ---------------------------------------------------------------------------
 

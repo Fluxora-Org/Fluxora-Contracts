@@ -29,21 +29,33 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # Bumped 3.10 → 3.11: `script/verify_rust_version.py` (and a couple
+      # of other helpers) prefer `tomllib` when available; on 3.10 it
+      # falls back through `tomli` to a regex parser bundled in the script
+      # itself. 3.11 makes stdlib `tomllib` available so the primary path
+      # works without an extra pip dependency.
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
 
       - name: Cache pip
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('tests/test_validator.py') }}
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/test_validator.py', 'script/verify_rust_version.py', '.github/workflows/ci.yml') }}
           restore-keys: |
             ${{ runner.os }}-pip-
 
       - name: Install dependencies
         run: pip install pytest pytest-cov
+
+      # Belt-and-suspenders for stale bytecode. In rare cases CI inherits
+      # `__pycache__/*.pyc` files whose class lists no longer match the
+      # current source (e.g. after a force-push or a partial clone).
+      # Wiping them guarantees pytest picks up the on-disk `.py` source.
+      - name: Clear Python bytecode cache
+        run: find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 
       - name: Run test suite with coverage
         run: pytest tests/ --cov=script/ --cov-fail-under=95 -v --tb=short
@@ -335,6 +347,14 @@ jobs:
           fi
           echo "snapshot_count=$SNAPSHOT_COUNT" >> $GITHUB_OUTPUT
         id: snapshot_check
+
+      # Verify that the pinned rust-toolchain.toml channel matches the rustc
+      # actually installed in this job. Lives here (and not in
+      # docs-alignment-check) because this job already installs Rust and the
+      # script shells out to `rustc --version` unless RUSTC_VERSION_OUTPUT is
+      # set, which would otherwise fail in the Python-only docs job.
+      - name: Verify rust toolchain pin
+        run: python3 script/verify_rust_version.py
 
       - name: Upload snapshot validation report
         if: failure()

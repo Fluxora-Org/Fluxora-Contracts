@@ -78,14 +78,20 @@ impl TestContext {
         // Simple 1000 token stream over 1000 seconds, rate 1 token/s
         self.client.create_stream(
             &self.sender,
-            &self.recipient,
-            &1000_i128,
-            &1_i128,
-            &0_u64,
-            &0_u64,
-            &1000_u64,
-            &0_i128,
-            &None,
+            &CreateStreamParams {
+                recipient: self.recipient.clone(),
+                deposit_amount: 1000_i128,
+                rate_per_second: 1_i128,
+                start_time: 0_u64,
+                cliff_time: 0_u64,
+                end_time: 1000_u64,
+                withdraw_dust_threshold: Some(0_i128),
+                memo: None,
+                metadata: None,
+                kind: fluxora_stream::StreamKind::Linear,
+                irrevocable: None,
+                witness: None,
+            },
         )
     }
 

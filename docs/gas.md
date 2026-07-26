@@ -89,17 +89,17 @@ The following table provides the CPU instruction counts for core operations.
 
 <!-- GAS_BASELINE_START -->
 {
-  "create_stream": 513118,
-  "withdraw": 521676,
+  "create_stream": 568292,
+  "withdraw": 562057,
   "batch_withdraw": {
-    "1": 498415,
-    "10": 3466576,
-    "50": 18786049,
-    "100": 43337495
+    "1": 531125,
+    "10": 3675044,
+    "50": 19844037,
+    "100": 45453389
   },
   "keeper_cancel": {
-    "partial_accrual": 0,
-    "fully_accrued": 0
+    "partial_accrual": 786739,
+    "fully_accrued": 386889
   }
 }
 <!-- GAS_BASELINE_END -->

@@ -859,19 +859,10 @@ impl FluxoraFactory {
     /// On success the returned stream ID is appended to the factory's [`DataKey::FactoryStreamIds`]
     /// registry. The registry is only written **after** the cross-contract call succeeds, so a
     /// downstream failure leaves no orphan index entry.
-    #[allow(clippy::too_many_arguments)]
     pub fn create_stream(
         env: Env,
         sender: Address,
-        recipient: Address,
-        deposit_amount: i128,
-        rate_per_second: i128,
-        start_time: u64,
-        cliff_time: u64,
-        end_time: u64,
-        withdraw_dust_threshold: i128,
-        stream_kind: StreamKind,
-        memo: Option<Bytes>,
+        params: fluxora_stream::CreateStreamParams,
     ) -> Result<u64, FactoryError> {
         // ── Guard 1: load the full policy in one pass ────────────────────────
         // Single chokepoint guarantees the single-path policy set is identical
@@ -890,29 +881,29 @@ impl FluxoraFactory {
         let is_allowed: bool = env
             .storage()
             .persistent()
-            .get(&DataKey::Allowlist(recipient.clone()))
+            .get(&DataKey::Allowlist(params.recipient.clone()))
             .unwrap_or(false);
         if !is_allowed {
             return Err(FactoryError::RecipientNotAllowlisted);
         }
 
         // ── Guard 4: deposit cap ─────────────────────────────────────────────
-        if deposit_amount > policy.max_deposit {
+        if params.deposit_amount > policy.max_deposit {
             return Err(FactoryError::DepositExceedsCap);
         }
 
         // ── Guard 5: time invariants ─────────────────────────────────────────
         // Mirror FluxoraStream time invariants before the cross-contract call so
         // invalid schedules return typed factory errors instead of downstream panics.
-        if start_time >= end_time {
+        if params.start_time >= params.end_time {
             return Err(FactoryError::InvalidTimeRange);
         }
-        if cliff_time < start_time || cliff_time > end_time {
+        if params.cliff_time < params.start_time || params.cliff_time > params.end_time {
             return Err(FactoryError::InvalidCliff);
         }
 
         // ── Guard 6: minimum duration ────────────────────────────────────────
-        let duration = end_time - start_time;
+        let duration = params.end_time - params.start_time;
         if duration < policy.min_duration {
             return Err(FactoryError::DurationTooShort);
         }
@@ -920,13 +911,13 @@ impl FluxoraFactory {
         // ── Guard 7: rate bounds ─────────────────────────────────────────────
         // Unset bounds are permissive. Bounds are inclusive.
         validate_rate_bounds(
-            rate_per_second,
+            params.rate_per_second,
             &policy.min_rate_per_second,
             &policy.max_rate_per_second,
         )?;
 
         // ── Guard 8: memo length ─────────────────────────────────────────────
-        if let Some(ref m) = memo {
+        if let Some(ref m) = params.memo {
             if m.len() as usize > fluxora_stream::MAX_MEMO_BYTES {
                 return Err(FactoryError::InvalidMemo);
             }
@@ -940,18 +931,7 @@ impl FluxoraFactory {
         let stream_contract = policy.stream_contract;
         let stream_client = FluxoraStreamClient::new(&env, &stream_contract);
 
-        match stream_client.try_create_stream(
-            &sender,
-            &recipient,
-            &deposit_amount,
-            &rate_per_second,
-            &start_time,
-            &cliff_time,
-            &end_time,
-            &withdraw_dust_threshold,
-            &memo,
-            &stream_kind,
-        ) {
+        match stream_client.try_create_stream(&sender, &params) {
             Ok(Ok(stream_id)) => {
                 // --- Effect (post-interaction): record only after a successful creation ---
                 // The registry is written only after the cross-contract call succeeds,
@@ -962,9 +942,9 @@ impl FluxoraFactory {
                     FactoryStreamCreated {
                         stream_id,
                         sender,
-                        recipient,
-                        deposit_amount,
-                        rate_per_second,
+                        recipient: params.recipient,
+                        deposit_amount: params.deposit_amount,
+                        rate_per_second: params.rate_per_second,
                     },
                 );
                 Ok(stream_id)

@@ -1,7 +1,9 @@
 #![cfg(test)]
 extern crate std;
 
-use fluxora_stream::{ContractError, FluxoraStream, FluxoraStreamClient, RateCapEnforced};
+use fluxora_stream::{
+    ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, RateCapEnforced,
+};
 use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Events},
@@ -57,14 +59,20 @@ impl TestContext {
     fn create_stream(&self, rate_per_second: i128) -> Result<u64, ContractError> {
         Ok(self.client.create_stream(
             &self.sender,
-            &self.recipient,
-            &1000,
-            &rate_per_second,
-            &0,
-            &0,
-            &1000,
-            &0,
-            &None,
+            &CreateStreamParams {
+                recipient: self.recipient.clone(),
+                deposit_amount: 1000,
+                rate_per_second: rate_per_second,
+                start_time: 0,
+                cliff_time: 0,
+                end_time: 1000,
+                withdraw_dust_threshold: Some(0),
+                memo: None,
+                metadata: None,
+                kind: fluxora_stream::StreamKind::Linear,
+                irrevocable: None,
+                witness: None,
+            },
         ))
     }
 }
@@ -127,15 +135,20 @@ fn test_create_stream_respects_max_rate() {
     // Creating stream with rate > max should fail
     let result = ctx.client.try_create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000,
-        &101, // Exceeds max rate of 100
-        &0,
-        &0,
-        &1000,
-        &0,
-        &None,
-        &fluxora_stream::StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000,
+            rate_per_second: 101,
+            start_time: 0,
+            cliff_time: 0,
+            end_time: 1000,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 }
@@ -189,15 +202,20 @@ fn test_default_max_rate_is_unlimited() {
     let high_rate = i128::MAX / 2; // Use half of max to avoid overflow in duration calc
     let result = ctx.client.try_create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &high_rate, // Use rate as deposit to ensure sufficient deposit
-        &high_rate,
-        &0,
-        &0,
-        &1, // 1 second duration to avoid overflow
-        &0,
-        &None,
-        &fluxora_stream::StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: high_rate,
+            rate_per_second: high_rate,
+            start_time: 0,
+            cliff_time: 0,
+            end_time: 1,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
     assert!(result.is_ok(), "High rates should be allowed by default");
 }
@@ -263,15 +281,20 @@ fn test_max_rate_boundary_conditions() {
     // Rate = 2 should fail
     let result = ctx.client.try_create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000,
-        &2,
-        &0,
-        &0,
-        &1000,
-        &0,
-        &None,
-        &fluxora_stream::StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000,
+            rate_per_second: 2,
+            start_time: 0,
+            cliff_time: 0,
+            end_time: 1000,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 
@@ -282,15 +305,20 @@ fn test_max_rate_boundary_conditions() {
     let high_rate = i128::MAX / 2;
     let result = ctx.client.try_create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &high_rate,
-        &high_rate,
-        &0,
-        &0,
-        &1,
-        &0,
-        &None,
-        &fluxora_stream::StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: high_rate,
+            rate_per_second: high_rate,
+            start_time: 0,
+            cliff_time: 0,
+            end_time: 1,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
     assert!(result.is_ok());
 }
@@ -328,14 +356,20 @@ fn test_rate_cap_with_arithmetic_overflow_protection() {
     // even though rate is within cap
     let result = ctx.client.try_create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000,
-        &1_000_000,
-        &0,
-        &0,
-        &(i64::MAX as u64), // Very long duration
-        &0,
-        &None,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000,
+            rate_per_second: 1_000_000,
+            start_time: 0,
+            cliff_time: 0,
+            end_time: (i64::MAX as u64),
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     // Should fail with InvalidParams (overflow or rate cap violation)

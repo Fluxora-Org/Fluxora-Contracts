@@ -128,15 +128,20 @@ impl TestContext {
         self.env.ledger().set_timestamp(0);
         self.client().create_stream(
             &self.sender,
-            &self.recipient,
-            &deposit,
-            &rate,
-            &0u64,
-            &cliff,
-            &end,
-            &0i128,
-            &None,
-            &kind,
+            &CreateStreamParams {
+                recipient: self.recipient.clone(),
+                deposit_amount: deposit,
+                rate_per_second: rate,
+                start_time: 0u64,
+                cliff_time: cliff,
+                end_time: end,
+                withdraw_dust_threshold: Some(0i128),
+                memo: None,
+                metadata: None,
+                kind: kind,
+                irrevocable: None,
+                witness: None,
+            },
         )
     }
 }

@@ -514,7 +514,7 @@ class TestValidate:
 """,
         )
         vda.validate(*paths)
-        assert "STALE DOC:" in capsys.readouterr().out
+        assert "STALE AUDIT DOC:" in capsys.readouterr().out
 
     def test_fails_on_missing_entrypoint(self, tmp_path):
         paths = _write_files(
@@ -1449,9 +1449,11 @@ def _make_audit_files(tmp_path, audit_content=None):
         "# Streaming\n"
         "`init`, `create_stream`, `withdraw`, `upgrade`, `compute_keeper_fee_split`\n"
     )
-    lib_rs, events_rs, error_rs, streaming, events, error = _write_files(
+    lib_rs, events_rs, error_rs, streaming, events, error, audit_path = _write_files(
         tmp_path, streaming=streaming_doc
     )
+    if audit_content is not None:
+        audit_path.write_text(audit_content, encoding="utf-8")
     if audit_content is None:
         audit_content = _AUDIT_DOC_FULL
     # Rewrite lib.rs to contain the contractimpl block with init/withdraw

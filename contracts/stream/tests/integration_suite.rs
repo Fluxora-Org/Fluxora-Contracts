@@ -169,14 +169,20 @@ fn sweep_excess_after_rate_decrease() {
     ctx.env.ledger().set_timestamp(0);
     let stream_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &10_i128,
-        &0u64,
-        &0u64,
-        &100u64,
-        &0,
-        &None,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 10_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 100u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     assert_eq!(ctx.token.balance(&ctx.contract_id), 1_000);
@@ -311,28 +317,40 @@ fn sweep_excess_with_multiple_streams_complex_scenario() {
     ctx.env.ledger().set_timestamp(0);
     let stream_id_1 = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0,
-        &None,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     // Create second stream: 2000 tokens
     let recipient_2 = Address::generate(&ctx.env);
     let stream_id_2 = ctx.client().create_stream(
         &ctx.sender,
-        &recipient_2,
-        &2000_i128,
-        &2_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0,
-        &None,
+        &CreateStreamParams {
+            recipient: recipient_2.clone(),
+            deposit_amount: 2000_i128,
+            rate_per_second: 2_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     // Contract has 3000 tokens, 3000 liabilities
@@ -460,15 +478,20 @@ fn get_stream_health_returns_correct_summary_underfunded() {
     // Create an underfunded stream: 1000 tokens, but rate 2 for 1000s (needs 2000)
     let stream_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &2_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0,
-        &None,
-        &fluxora_stream::StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 2_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     ctx.env.ledger().set_timestamp(300);
@@ -572,15 +595,20 @@ fn snapshot_event_rate_end_topup_recp() {
     // extend) all stay within deposit bounds.
     let stream_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &5000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0,
-        &None,
-        &fluxora_stream::StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 5000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     // 1. rate_upd
@@ -651,15 +679,20 @@ fn update_rate_accepts_maximum_i128_rate() {
 
     let stream_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &i128::MAX,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1u64,
-        &0,
-        &None,
-        &fluxora_stream::StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: i128::MAX,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     ctx.client().update_rate_per_second(&stream_id, &i128::MAX);
@@ -709,17 +742,22 @@ proptest::proptest! {
         let duration = 10u64;
         let deposit = rates.last().unwrap().checked_mul(duration as i128).unwrap();
         let stream_id = ctx.client().create_stream(
-            &ctx.sender,
-            &ctx.recipient,
-            &deposit,
-            &rates[0],
-            &0u64,
-            &0u64,
-            &duration,
-            &0,
-            &None,
-            &fluxora_stream::StreamKind::Linear,
-            );
+        &ctx.sender,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: deposit,
+            rate_per_second: rates[0],
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: duration,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
+    );
 
         for &next_rate in rates.iter().skip(1) {
             ctx.client().update_rate_per_second(&stream_id, &next_rate);
@@ -763,15 +801,20 @@ fn snapshot_no_event_on_revert() {
     // Reverting call (insufficient deposit)
     let result = ctx.client().try_create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &10_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0,
-        &None,
-        &fluxora_stream::StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 10_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
     assert!(result.is_err());
     assert_eq!(ctx.env.events().all().len(), events_before);
@@ -814,15 +857,20 @@ fn test_accrual_none_checkpoint_returns_zero() {
     ctx.env.ledger().set_timestamp(100);
     let stream_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &100u64,
-        &100u64,
-        &1100u64,
-        &0,
-        &None,
-        &fluxora_stream::StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 100u64,
+            cliff_time: 100u64,
+            end_time: 1100u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     // At start_time the elapsed seconds are 0 → accrued must be 0.
@@ -846,15 +894,20 @@ fn test_accrual_none_checkpoint_before_cliff_returns_zero() {
     ctx.env.ledger().set_timestamp(0);
     let stream_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &500u64,
-        &1000u64,
-        &0,
-        &None,
-        &fluxora_stream::StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 500u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     // Before cliff → 0, regardless of checkpoint state.
@@ -929,14 +982,20 @@ fn sweep_excess_after_rate_decrease() {
     ctx.env.ledger().set_timestamp(0);
     let stream_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &10_i128,
-        &0u64,
-        &0u64,
-        &100u64,
-        &0,
-        &None,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 10_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 100u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     assert_eq!(ctx.token.balance(&ctx.contract_id), 1_000);
@@ -1071,28 +1130,40 @@ fn sweep_excess_with_multiple_streams_complex_scenario() {
     ctx.env.ledger().set_timestamp(0);
     let stream_id_1 = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0,
-        &None,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     // Create second stream: 2000 tokens
     let recipient_2 = Address::generate(&ctx.env);
     let stream_id_2 = ctx.client().create_stream(
         &ctx.sender,
-        &recipient_2,
-        &2000_i128,
-        &2_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0,
-        &None,
+        &CreateStreamParams {
+            recipient: recipient_2.clone(),
+            deposit_amount: 2000_i128,
+            rate_per_second: 2_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     // Contract has 3000 tokens, 3000 liabilities
@@ -1759,33 +1830,29 @@ impl MockVaultContract {
         let client = fluxora_stream::FluxoraStreamClient::new(&env, &stream_contract);
         client.create_stream(
             &env.current_contract_address(),
-            &recipient,
-            &deposit_amount,
-            &rate_per_second,
-            &start_time,
-            &cliff_time,
-            &end_time,
-            &0,
-            &None,
-            &fluxora_stream::types::StreamKind::Linear,
+            &CreateStreamParams {
+                recipient: recipient.clone(),
+                deposit_amount: deposit_amount,
+                rate_per_second: rate_per_second,
+                start_time: start_time,
+                cliff_time: cliff_time,
+                end_time: end_time,
+                withdraw_dust_threshold: Some(0),
+                memo: None,
+                metadata: None,
+                kind: fluxora_stream::types::StreamKind::Linear,
+                irrevocable: None,
+                witness: None,
+            },
         )
     }
 
-    pub fn vault_top_up_stream(
-        env: Env,
-        stream_contract: Address,
-        stream_id: u64,
-        amount: i128,
-    ) {
+    pub fn vault_top_up_stream(env: Env, stream_contract: Address, stream_id: u64, amount: i128) {
         let client = fluxora_stream::FluxoraStreamClient::new(&env, &stream_contract);
         client.top_up_stream(&stream_id, &amount)
     }
 
-    pub fn vault_cancel_stream(
-        env: Env,
-        stream_contract: Address,
-        stream_id: u64,
-    ) {
+    pub fn vault_cancel_stream(env: Env, stream_contract: Address, stream_id: u64) {
         let client = fluxora_stream::FluxoraStreamClient::new(&env, &stream_contract);
         client.cancel_stream(&stream_id)
     }
@@ -1804,7 +1871,9 @@ fn test_contract_owned_vault_sender() {
     let stream_client = FluxoraStreamClient::new(&env, &contract_id);
 
     let token_admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract_v2(token_admin).address();
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
     let token = TokenClient::new(&env, &token_id);
 
     let admin = Address::generate(&env);
@@ -1842,7 +1911,7 @@ fn test_contract_owned_vault_sender() {
 
     let state_after = stream_client.get_stream_state(&stream_id);
     assert_eq!(state_after.status, StreamStatus::Cancelled);
-    
+
     // Vault gets its refund
     let final_balance = token.balance(&vault_id);
     // Initial 100_000 - 15_000 (deposit + topup) + 10_000 (refund for remaining 1000s * 10/s) = 95_000
