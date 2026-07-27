@@ -32,10 +32,28 @@ bash script/check-wasm-size.sh
 bash script/check-wasm-size.sh --optimized
 ```
 
-The `wasm-size-budget` CI job:
+The `wasm-size-budget` CI job (`.github/workflows/ci.yml`):
 1. Builds all three contracts with `cargo build --release --workspace --target wasm32-unknown-unknown`.
 2. Runs `stellar contract optimize` on each artifact (best-effort; failures are non-fatal).
 3. Calls `script/check-wasm-size.sh` — **fails the job** if any artifact exceeds its budget.
+
+### Artifact Integrity
+
+Before an artifact's size is evaluated against its budget, the script checks that it is
+actually a WASM module: it must be at least 8 bytes long and its first 4 bytes must be the
+WASM magic number (`0x00 0x61 0x73 0x6D`). This catches an empty or truncated file left behind
+by an interrupted or failed build — without this check, a 0-byte artifact would be well under
+every budget and silently report "OK" instead of surfacing the real problem (the build didn't
+actually produce a contract). A failure here is reported the same way as an over-budget
+artifact: an `::error::` annotation and a non-zero exit code.
+
+### Determinism
+
+The three contracts are always processed in a fixed order (`fluxora_stream`, `fluxora_factory`,
+`fluxora_governance`) via an ordered list, not a bash associative array. This keeps stdout and
+step-summary row order identical across bash versions, operating systems, and repeated or
+retried runs, and keeps the script compatible with bash 3.2 (macOS's default `/bin/bash`,
+which predates `declare -A`).
 
 ### Updating a Budget
 
