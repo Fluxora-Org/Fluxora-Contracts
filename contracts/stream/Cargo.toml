@@ -164,7 +164,8 @@ required-features = ["testutils"]
 [[test]]
 name = "sweep_liability"
 path = "tests/sweep_liability.rs"
-test = false
+required-features = ["testutils"]
+test = true
 
 [[test]]
 name = "upgrade_path"
