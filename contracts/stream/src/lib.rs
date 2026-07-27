@@ -517,7 +517,6 @@ pub enum ContractError {
     ReservationNotFound = 24,
     ReservationNotExpirable = 25,
     ReservationStillActive = 26,
-    ReservationAlreadyActive = 41,
     /// Ledger-backed accrual observed a timestamp lower than the previous accrual timestamp.
     ClockRegression = 27,
     /// Stream kind is not supported.
@@ -693,18 +692,6 @@ pub struct RateCapEnforced {
     pub stream_id: u64,
     pub attempted_rate: i128,
     pub max_rate_per_second: i128,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RecipientShareDelegated {
-    pub parent_stream_id: u64,
-    pub child_stream_id: u64,
-    pub delegator: Address,
-    pub delegatee: Address,
-    pub share_bps: u32,
-    pub new_parent_rate: i128,
-    pub child_rate: i128,
 }
 
 /// Emitted when the sender safely decreases the streaming rate via `decrease_rate_per_second`.
@@ -1069,65 +1056,6 @@ pub struct RotationEntry {
     pub ledger: u32,
     pub role: RotationRole,
     pub authoriser: Address,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Stream {
-    pub stream_id: u64,
-    pub sender: Address,
-    pub recipient: Address,
-    pub claim_owner: Option<Address>,
-    pub deposit_amount: i128,
-    pub rate_per_second: i128,
-    pub start_time: u64,
-    pub cliff_time: u64,
-    pub end_time: u64,
-    pub withdrawn_amount: i128,
-    pub status: StreamStatus,
-    pub cancelled_at: Option<u64>,
-    /// Total tokens mathematically accrued up to `checkpointed_at` under all
-    /// previous rates. Updated by `decrease_rate_per_second` (and by
-    /// `update_rate_per_second` for symmetry) so that the new rate applies only
-    /// from `checkpointed_at` forward. Initialised to 0 at stream creation.
-    pub checkpointed_amount: i128,
-    /// Ledger timestamp of the last rate change (or `start_time` on creation).
-    /// `calculate_accrued` uses this as the start of the current rate epoch.
-    pub checkpointed_at: u64,
-    /// Optional withdrawal threshold (raw units). Withdrawals below this
-    /// amount are skipped unless they are the final drain or the stream is terminal.
-    pub withdraw_dust_threshold: i128,
-    pub last_pause_toggle_ledger: u32,
-    pub last_withdraw_ledger: u32,
-    /// Ledger timestamp of the last rate change (used by rate-cooldown gating).
-    pub last_rate_change_ledger: u32,
-    /// When true, this stream distributes to multiple recipients pro-rata.
-    pub is_pooled: Option<bool>,
-    /// Optional structured metadata stored alongside the stream.
-    pub metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
-    /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
-    /// Maximum `MAX_MEMO_BYTES` (64) bytes. Pass `None` to omit.
-    pub memo: Option<soroban_sdk::Bytes>,
-    /// The architectural style of the stream (Linear or CliffOnly).
-    pub kind: StreamKind,
-    /// If true, blocks all cancellation and shortening paths (cancel_stream, cancel_stream_as_admin, keeper_cancel, shorten_stream_end_time).
-    /// Defaults to false (None) for full backward compatibility with existing streams.
-    pub irrevocable: Option<bool>,
-    /// Optional compliance witness authorized to cancel via signed attestation.
-    /// `None` when not configured (default for backward compatibility).
-    pub witness: Option<Address>,
-    /// Ledger sequence number of the last rate change.
-    /// Used to enforce the minimum rate-change interval (MIN_RATE_INTERVAL_LEDGERS).
-    /// Zero when no rate change has occurred yet.
-    pub last_rate_change_ledger: u32,
-    /// Whether this stream is a pooled multi-recipient stream.
-    /// `None` / `Some(false)` = normal stream; `Some(true)` = pooled stream.
-    pub is_pooled: Option<bool>,
-    /// Parent stream ID for delegated sub-streams (stream-delegation feature).
-    /// `None` for top-level streams.
-    pub parent_stream_id: Option<u64>,
-    /// Delegation chain depth. 0 for top-level streams, incremented on sub-stream creation.
-    pub delegation_depth: u32,
 }
 
 /// Pagination result for recipient stream listing
