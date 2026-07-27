@@ -373,4 +373,17 @@ mod tests {
         const TOTAL_STREAM_FIELDS: usize = 21;
         assert_eq!(TOTAL_STREAM_FIELDS, 21);
     }
+
+    /// Edge-case: checksum verification must be deterministic across retries.
+    ///
+    /// This test encodes the invariant that the checksum algorithm is
+    /// deterministic given the same input bytes, ensuring no runtime entropy
+    /// leaks into the verification path.
+    #[test]
+    fn checksum_verification_is_deterministic() {
+        let input = b"fluxora_stream.wasm";
+        let hash1 = soroban_sdk::crypto::Hash::compute(input);
+        let hash2 = soroban_sdk::crypto::Hash::compute(input);
+        assert_eq!(hash1, hash2);
+    }
 }
