@@ -82,6 +82,8 @@ and which are unaffected (metadata is not read or written):
 | `delegate_recipient_share` | Unchanged — delegation splits the rate, not metadata. |
 | `clone_stream` | **Inherited** — the cloned stream receives `source.metadata.clone()`. |
 | `create_stream_from_template` | **Passed through** — caller-supplied metadata is validated and stored. |
+| `create_stream_offer` / `accept_stream_offer` | **Inherited** — `create_stream_offer` validates metadata, and `accept_stream_offer` transfers `offer.metadata` into `Stream.metadata`. |
+| `Contract Upgrade (V5 -> V6+)` | **Backward Compatible** — legacy V5 streams without metadata decode to `metadata: None` cleanly; `None` and `Some(empty_map)` remain distinct and deterministic. |
 
 #### Example (Rust client)
 

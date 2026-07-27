@@ -655,12 +655,7 @@ pub fn compute_stream_health(stream: &Stream, now: u64) -> (bool, i128, u64) {
 }
 
 /// Emit a `StreamHealthChanged` event if the funding health status changed.
-pub fn maybe_emit_health_changed(
-    env: &Env,
-    stream: &Stream,
-    was_underfunded: bool,
-    now: u64,
-) {
+pub fn maybe_emit_health_changed(env: &Env, stream: &Stream, was_underfunded: bool, now: u64) {
     let (is_underfunded, remaining_balance, seconds_remaining) = compute_stream_health(stream, now);
     if is_underfunded != was_underfunded {
         events::emit_stream_health_changed(
@@ -685,11 +680,7 @@ pub fn load_config(env: &Env) -> Config {
         .expect("contract not initialised")
 }
 
-pub fn save_rotation_history(
-    env: &Env,
-    stream_id: u64,
-    history: &soroban_sdk::Vec<RotationEntry>,
-) {
+pub fn save_rotation_history(env: &Env, stream_id: u64, history: &soroban_sdk::Vec<RotationEntry>) {
     let key = DataKey::RotationHistory(stream_id);
     env.storage().persistent().set(&key, history);
     env.storage().persistent().extend_ttl(
@@ -885,12 +876,7 @@ pub fn read_pooled_stream_shares(
     }
 }
 
-pub fn save_pooled_stream_withdrawn(
-    env: &Env,
-    stream_id: u64,
-    recipient: Address,
-    amount: i128,
-) {
+pub fn save_pooled_stream_withdrawn(env: &Env, stream_id: u64, recipient: Address, amount: i128) {
     let key = DataKey::PooledStreamWithdrawn(stream_id, recipient);
     env.storage().persistent().set(&key, &amount);
     env.storage().persistent().extend_ttl(

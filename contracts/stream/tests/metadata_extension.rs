@@ -1,5 +1,4 @@
 extern crate std;
-extern crate std;
 
 // Comprehensive tests for per-stream metadata TLV extension (issue #580).
 //
@@ -790,6 +789,7 @@ fn test_metadata_unchanged_after_pause_resume() {
 
     ctx.client()
         .pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.env.ledger().with_mut(|l| l.sequence_number += 100);
     ctx.client().resume_stream(&stream_id);
 
     let got = ctx.client().get_stream_metadata(&stream_id).unwrap();

@@ -32,8 +32,6 @@ pub fn reject_duplicate_ids(env: &Env, ids: &soroban_sdk::Vec<u64>) -> Result<()
     Ok(())
 }
 
-
-
 // ---------------------------------------------------------------------------
 // Pagination limits (DoS prevention)
 // ---------------------------------------------------------------------------
@@ -1447,7 +1445,6 @@ fn check_and_bump_rate_cooldown(env: &Env, stream: &mut Stream) -> Result<(), Co
 // ---------------------------------------------------------------------------
 // Protocol constants
 // ---------------------------------------------------------------------------
-
 
 /// Minimum ledger interval between successive withdrawals for the same stream.
 const MIN_WITHDRAW_INTERVAL_LEDGERS: u32 = 1;
@@ -8432,8 +8429,6 @@ impl FluxoraStream {
         load_recipient_pending_offers(&env, &recipient)
     }
 }
-
-
 
 // ---------------------------------------------------------------------------
 // Upgrade entrypoint
