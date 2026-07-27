@@ -10,7 +10,19 @@ Everything materially related to mainnet deployment: initialization parameters, 
 
 ## Verification Status
 
-✅ **Complete alignment verified** between deployment procedures and protocol semantics as of 2026-03-27.
+> **⚠️ CAVEAT — Alignment unverified since 2026-07-26.** `cargo check -p fluxora_stream`
+> currently fails (compile errors involving pooled-stream fields, delegation-depth
+> scaffolding, rate-cooldown scaffolding, the CliffSlope stream-kind variant, duplicate
+> `DataKey`/`Stream` fields, and other issues tracked in this repo). A workspace that
+> cannot produce a WASM artifact cannot simultaneously have "complete alignment" between
+> its deployment checklist and its protocol semantics. The 2026-07-26 date below marks the
+> **last** date on which a manual re-walk was performed; it does **not** cover any changes
+> merged after that date. Do **not** treat this document as authoritative evidence of
+> alignment until the build is restored and each checklist item is re-walked against the
+> current contract surface.
+
+❌ **Complete alignment NOT verified** as of today. Last verified: 2026-07-26 (pre-dates
+current compile-breaking state).
 
 ---
 
@@ -65,9 +77,14 @@ Everything materially related to mainnet deployment: initialization parameters, 
 
 1. **Storage**: `Config { token, admin }` persisted to instance storage
 2. **Storage**: `NextStreamId` initialized to `0`
-3. **Storage**: TTL extended (17,280 ledgers threshold, 120,960 bump)
-4. **Events**: None (init does not emit events)
-5. **Return**: `Ok(())` on success
+3. **Storage**: `PausedStreamCount` initialized to `0`
+4. **Storage**: `NextTemplateId` initialized to `0`
+5. **Storage**: `ActiveTemplateCount` initialized to `0`
+6. **Storage**: `TotalLiabilities` initialized to `0i128`
+7. **Storage**: `TotalKeeperFeesPaid` initialized to `0i128`
+8. **Storage**: TTL extended (INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT)
+9. **Events**: None (init does not emit events)
+10. **Return**: `Ok(())` on success
 
 **Verification**:
 
@@ -95,7 +112,7 @@ Expected output:
 | Failure Condition        | Error                                 | Side Effects                          | Verification               |
 | ------------------------ | ------------------------------------- | ------------------------------------- | -------------------------- |
 | Admin does not authorize | Auth failure                          | None                                  | Transaction rejected       |
-| Init called twice        | `AlreadyInitialised`                  | None                                  | `try_init` returns error   |
+| Init called twice        | `AlreadyInitialised`                  | None                                  | `init` returns error   |
 | Invalid token address    | None (address validation is external) | Config persisted with invalid address | Subsequent operations fail |
 | Invalid admin address    | None (address validation is external) | Config persisted with invalid address | Admin operations fail      |
 
@@ -273,10 +290,10 @@ stellar contract invoke --id <CONTRACT_ID> --network mainnet -- get_stream_count
 
 # Verify contract version
 stellar contract invoke --id <CONTRACT_ID> --network mainnet -- version
-# Expected: 1
+# Expected: CONTRACT_VERSION (currently 7, as of 2026-07)
 ```
 
-**Code Location**: `contracts/stream/src/lib.rs:665-678, 1493, 1889`
+**Code Location**: `contracts/stream/src/lib.rs` (see `init`, `get_config`, `get_stream_count`, `version`)
 **Doc Reference**: `docs/streaming.md` §4 Access Control
 
 ### First Stream Creation
@@ -780,4 +797,4 @@ When updating documentation:
 4. Run verification tests
 5. Document changes in PR
 
-Last verified: 2026-03-27
+Last verified: 2026-07-26

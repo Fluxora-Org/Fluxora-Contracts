@@ -50,7 +50,7 @@ pub fn assert_ledger_time_monotonic(prev_ts: u64, current_ts: u64) -> Result<(),
 ///
 /// For multi-epoch accrual (after rate changes), the contract uses the
 /// `calculate_accrued_amount_checkpointed` variant directly.
-#[cfg(test)]
+#[cfg(any(test, feature = "testutils"))]
 pub fn calculate_accrued_amount(
     start_time: u64,
     cliff_time: u64,
@@ -166,7 +166,7 @@ pub struct CheckpointState {
     ///
     /// **Invariant**: `deposit_amount >= rate_per_second * (end_time - start_time)`
     pub deposit_amount: i128,
-    /// The kind of stream (Linear or CliffOnly).
+    /// The kind of stream (Linear, CliffOnly, or CliffSlope).
     pub kind: StreamKind,
 }
 
@@ -228,6 +228,9 @@ pub struct CheckpointState {
 /// is floored to integer tokens per second. Within this core math, the operation is exact integer
 /// multiplication, effectively rounding down (floor) any continuous time beyond the whole second boundaries,
 /// though time is already quantized in integer seconds.
+///
+/// See `docs/streaming.md#cliffonly-accrual` for worked `CliffOnly` examples
+/// showing the pre-cliff zero result and the full-deposit lump-sum unlock.
 pub fn calculate_accrued_amount_checkpointed(
     state: CheckpointState,
     rate_per_second: i128,

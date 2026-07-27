@@ -48,6 +48,23 @@ admin is the governance contract, clear the flag via a proposal whose calldata i
 Topic: `gl_resume`  
 Data: `GlobalResumed { resumed_at: u64 }` — ledger timestamp at which the pause was cleared.
 
+## Pause-state introspection during an incident
+
+`get_paused_stream_count()` tracks **only** individually-paused streams — it is **not**
+affected by `set_global_emergency_paused(true)`.  When the global flag is raised the
+counter may return `0` even though every stream is frozen by the circuit breaker.
+
+Dashboards and monitors must check **both** values for accurate pause-state awareness:
+
+| Query                                      | What it reflects                           |
+| ------------------------------------------ | ------------------------------------------ |
+| `get_paused_stream_count()`                | Number of individually-paused streams      |
+| `get_global_emergency_paused()`            | Whether the protocol-wide circuit breaker is active |
+| Both                                       | Full pause-state picture                   |
+
+This separation is intentional: the two mechanisms are orthogonal (per-stream status
+vs. protocol-wide gate) and the counter deliberately reflects only the former.
+
 ## Per-stream recovery after global resume
 
 Clearing the emergency flag does **not** bulk-resume individual streams. Operators (or

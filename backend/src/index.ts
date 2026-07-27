@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import http from 'http';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -6,6 +7,8 @@ import { AppDataSource } from './config/database';
 import userRoutes from './routes/users.routes';
 import streamRoutes from './routes/streams';
 import logger from './utils/logger';
+import { initStreamRealtime, resetStreamRealtime } from './websockets/runtime';
+import { attachWebSocketHub } from './ws/attach';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -26,7 +29,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Health check endpoint
-app.get('/health', (req, res) => {
+app.get('/health', (_req, res) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
@@ -35,7 +38,7 @@ app.use('/api/v1/users', userRoutes);
 app.use('/api/v1/streams', streamRoutes);
 
 // 404 handler
-app.use((req, res) => {
+app.use((_req, res) => {
   res.status(404).json({
     success: false,
     error: {
@@ -46,7 +49,7 @@ app.use((req, res) => {
 });
 
 // Error handler
-app.use((err: Error, req: express.Request, res: express.Response, next: express.NextFunction) => {
+app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   logger.error('Unhandled error', { error: err.message, stack: err.stack });
   
   res.status(500).json({
@@ -67,11 +70,29 @@ async function startServer(): Promise<void> {
     await AppDataSource.initialize();
     logger.info('Database connection established');
 
-    // Start server
-    app.listen(PORT, () => {
+    // Shared realtime stack: hub + StreamChannel (used by stream lifecycle routes)
+    const { hub } = initStreamRealtime();
+
+    // Explicit HTTP server so we can attach a WebSocket upgrade handler
+    const server = http.createServer(app);
+    attachWebSocketHub(server, hub);
+
+    server.listen(PORT, () => {
       logger.info(`Server running on port ${PORT}`);
+      logger.info(`WebSocket endpoint available at /ws`);
       logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
     });
+
+    const shutdown = (signal: string) => {
+      logger.info(`Received ${signal}, shutting down`);
+      resetStreamRealtime();
+      server.close(() => {
+        process.exit(0);
+      });
+    };
+
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT', () => shutdown('SIGINT'));
   } catch (error) {
     logger.error('Failed to start server', { error });
     process.exit(1);

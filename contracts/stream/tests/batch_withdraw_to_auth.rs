@@ -1,7 +1,8 @@
 extern crate std;
 
 use fluxora_stream::{
-    ContractError, FluxoraStream, FluxoraStreamClient, StreamKind, WithdrawToParam,
+    ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamKind,
+    WithdrawToParam,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -124,15 +125,20 @@ fn test_batch_withdraw_to_requires_recipient_auth() {
             fn_name: "create_stream",
             args: (
                 &ctx.sender,
-                &ctx.recipient,
-                1000_i128,
-                1_i128,
-                0u64,
-                0u64,
-                1000u64,
-                0i128,
-                Option::<soroban_sdk::Bytes>::None,
-                StreamKind::Linear,
+                CreateStreamParams {
+                    recipient: ctx.recipient.clone(),
+                    deposit_amount: 1000_i128,
+                    rate_per_second: 1_i128,
+                    start_time: 0u64,
+                    cliff_time: 0u64,
+                    end_time: 1000u64,
+                    withdraw_dust_threshold: Some(0),
+                    memo: None,
+                    metadata: None,
+                    kind: StreamKind::Linear,
+                    irrevocable: None,
+                    witness: None,
+                },
             )
                 .into_val(&ctx.env),
             sub_invokes: &[],
@@ -140,15 +146,20 @@ fn test_batch_withdraw_to_requires_recipient_auth() {
     }]);
     let stream_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0,
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     ctx.env.ledger().set_timestamp(500);
@@ -191,15 +202,20 @@ fn test_batch_withdraw_to_mixed_recipients_reverts_atomically() {
             fn_name: "create_stream",
             args: (
                 &ctx.sender,
-                &ctx.recipient,
-                1000_i128,
-                1_i128,
-                0u64,
-                0u64,
-                1000u64,
-                0i128,
-                Option::<soroban_sdk::Bytes>::None,
-                StreamKind::Linear,
+                CreateStreamParams {
+                    recipient: ctx.recipient.clone(),
+                    deposit_amount: 1000_i128,
+                    rate_per_second: 1_i128,
+                    start_time: 0u64,
+                    cliff_time: 0u64,
+                    end_time: 1000u64,
+                    withdraw_dust_threshold: Some(0),
+                    memo: None,
+                    metadata: None,
+                    kind: StreamKind::Linear,
+                    irrevocable: None,
+                    witness: None,
+                },
             )
                 .into_val(&ctx.env),
             sub_invokes: &[],
@@ -207,15 +223,20 @@ fn test_batch_withdraw_to_mixed_recipients_reverts_atomically() {
     }]);
     let stream_id_a = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0,
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
     ctx.env.mock_auths(&[MockAuth {
         address: &ctx.sender,
@@ -224,15 +245,20 @@ fn test_batch_withdraw_to_mixed_recipients_reverts_atomically() {
             fn_name: "create_stream",
             args: (
                 &ctx.sender,
-                &other_recipient,
-                1000_i128,
-                1_i128,
-                0u64,
-                0u64,
-                1000u64,
-                0i128,
-                Option::<soroban_sdk::Bytes>::None,
-                StreamKind::Linear,
+                CreateStreamParams {
+                    recipient: other_recipient.clone(),
+                    deposit_amount: 1000_i128,
+                    rate_per_second: 1_i128,
+                    start_time: 0u64,
+                    cliff_time: 0u64,
+                    end_time: 1000u64,
+                    withdraw_dust_threshold: Some(0),
+                    memo: None,
+                    metadata: None,
+                    kind: StreamKind::Linear,
+                    irrevocable: None,
+                    witness: None,
+                },
             )
                 .into_val(&ctx.env),
             sub_invokes: &[],
@@ -240,15 +266,20 @@ fn test_batch_withdraw_to_mixed_recipients_reverts_atomically() {
     }]);
     let stream_id_b = ctx.client().create_stream(
         &ctx.sender,
-        &other_recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0,
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: other_recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     ctx.env.ledger().set_timestamp(500);
@@ -295,27 +326,37 @@ fn test_batch_withdraw_to_duplicate_destinations_aggregate_transfers() {
     let ctx = TestContext::setup();
     let stream_id_a = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0,
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
     let stream_id_b = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0,
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     ctx.env.ledger().set_timestamp(500);
@@ -345,15 +386,20 @@ fn test_batch_withdraw_to_rejects_contract_destination() {
     let ctx = TestContext::setup();
     let stream_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0,
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     ctx.env.ledger().set_timestamp(500);
@@ -384,29 +430,39 @@ fn test_batch_withdraw_to_mixed_dust_blocked_non_dust_blocked() {
     // Create stream with high dust threshold (will be dust-blocked)
     let stream_id_dust = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &500, // High dust threshold
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(500),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     // Create stream with zero dust threshold (will not be dust-blocked)
     let stream_id_no_dust = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0, // No dust threshold
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     // Advance time to 100: withdrawable = 100 for both streams
@@ -455,28 +511,38 @@ fn test_batch_withdraw_to_all_dust_blocked() {
     // Create multiple streams with high dust thresholds (all will be dust-blocked)
     let stream_id_dust_1 = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &500, // High dust threshold
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(500),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     let stream_id_dust_2 = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &500, // High dust threshold
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(500),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     // Advance time to 100: withdrawable = 100 for both streams (below threshold of 500)

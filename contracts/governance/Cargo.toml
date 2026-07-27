@@ -18,31 +18,29 @@ soroban-sdk = "21.7.7"
 [dev-dependencies]
 soroban-sdk = { version = "21.7.7", features = ["testutils"] }
 proptest = "1"
+soroban-env-host = "=21.2.1"
 
 # ---------------------------------------------------------------------------
-# Known-broken integration test (pre-existing, unrelated to CI restoration)
+# Gas regression tests (re-enabled — see #1165)
 # ---------------------------------------------------------------------------
-# `tests/gas_regression.rs` predates this commit and was never actually
-# exercised: `main` itself did not compile before this change (a missing
-# `GovernanceError::InvalidCalldata` variant and an unclosed delimiter in
-# `contracts/stream/src/lib.rs`), so no local run or CI run of this file ever
-# succeeded. Once the workspace compiles, 7 of its 11 tests still fail:
-#   - Several of its gas/CPU/memory ceiling assertions are miscalibrated
-#     against the current soroban-env-host 21.2.1 cost model.
-#   - Its `calldata(size)` helper builds `size` zero bytes, which is not a
-#     valid XDR encoding of `CallData` for most sizes. Tests that call
-#     `execute()` (the panicking client method, not `try_execute()`) on a
-#     proposal carrying that dummy calldata trap with a raw
-#     `HostError: Error(Value, InvalidInput)` once `dispatch_call`'s
-#     `CallData::from_xdr` decode fails — a test-fixture bug, not a contract
-#     bug.
-# Disabled here (rather than deleted) so `cargo test --workspace` succeeds;
-# should be repaired (recalibrate thresholds, fix the calldata fixture) in a
-# dedicated follow-up.
+# Fixes applied:
+#   - calldata(size) now produces valid XDR-encoded CallData (Noop for size 0,
+#     StreamBulkResumeAsAdmin with a sized Vec<u64> for larger sizes) instead
+#     of raw zero bytes that fail CallData::from_xdr.
+#   - Execute tests use try_execute() instead of the panicking execute() so
+#     that expected rejections don't trap the test harness.
+#   - test_proposal_expiry_checks_dont_add_hidden_costs fixed a cross-context
+#     capture bug (was using ctx instead of ctx2 in the second measurement).
+#   - test_execute_budget_snapshots no longer calls execute() twice per
+#     measurement (second call always failed with AlreadyExecuted).
+#
+# Thresholds should be recalibrated against the actual soroban-env-host 21.2.1
+# cost model after the first clean CI run; current values are conservative
+# upper bounds carried forward from the original test authoring.
 [[test]]
 name = "gas_regression"
 path = "tests/gas_regression.rs"
-test = false
+test = true
 
 # `tests/signer_index_proptest.rs` likewise predates this commit and was
 # never exercised for the same reason (workspace didn't compile). 3 of its 5

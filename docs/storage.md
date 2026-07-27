@@ -4,6 +4,8 @@ Contract storage architecture, key design, TTL policies, and `DataKey` evolution
 
 **Source of truth:** `contracts/stream/src/lib.rs` (`DataKey` enum, TTL constants, storage helpers)
 
+> **Canonical discriminant reference:** For the frozen discriminant table (variants 0–14) and the full ABI stability contract, see [ABI_STABILITY.md § 2.4](./ABI_STABILITY.md#24-storage-key-discriminants). The table below tracks all variants including post-freeze additions; always cross-check against both this file and `ABI_STABILITY.md` when adding new variants.
+
 ---
 
 ## 1. DataKey Enum
@@ -42,6 +44,13 @@ pub enum DataKey {
     LastAccrualLedgerTimestamp,
     PausedStreamCount,
     TotalKeeperFeesPaid,
+    AutoRenewEnabled(u64),
+    MaxLookbackLedgers(u64),
+    SenderStreams(Address),
+    PendingStreamOffer(u64),
+    RecipientPendingOffers(Address),
+    PooledStreamShares(u64),
+    PooledStreamWithdrawn(u64, Address),
 }
 ```
 
@@ -78,6 +87,13 @@ pub enum DataKey {
 | 26 | `LastAccrualLedgerTimestamp` | Instance | `u64` | `current_accrual_timestamp` | `current_accrual_timestamp` |
 | 27 | `PausedStreamCount` | Instance | `u64` | `pause_stream`, `pause_stream_as_admin` | `resume_stream`, `cancel_stream`, `close_completed_stream` |
 | 28 | `TotalKeeperFeesPaid` | Instance | `i128` | `init` | `keeper_cancel` |
+| 29 | `AutoRenewEnabled(u64)` | Persistent | `bool` | sender opt-in | sender revoke |
+| 30 | `MaxLookbackLedgers(u64)` | Persistent | `u32` | `create_stream_with_lookback` | — |
+| 31 | `SenderStreams(Address)` | Persistent | `Vec<u64>` (sorted) | `create_stream`, `create_streams` | `close_completed_stream`, `close_cancelled_stream` (removes entry) |
+| 32 | `PendingStreamOffer(u64)` | Persistent | `StreamOffer` | `create_stream_offer` | accept/reject/cancel (removes) |
+| 33 | `RecipientPendingOffers(Address)` | Persistent | `Vec<u64>` | `create_stream_offer` | accept/reject/cancel (removes) |
+| 34 | `PooledStreamShares(u64)` | Persistent | `Vec<(Address,u32)>` | pooled stream creation | withdraw / close |
+| 35 | `PooledStreamWithdrawn(u64, Address)` | Persistent | `i128` | pooled withdraw | pooled withdraw (increments) |
 
 ---
 
@@ -112,6 +128,36 @@ Persistent storage is used for individual stream records and per-recipient nonce
 | Change TTL constants | No — no effect on stored data | No version bump required |
 | Change internal helper logic with identical external behaviour | No | No version bump required |
 
+### Current compatibility behavior
+
+The current release is backward-compatible with V5-seeded storage because the
+storage layout is append-only and the V5 `Stream` struct ended before the
+`memo: Option<Bytes>` tail field was introduced. In practice, this means:
+
+- V5 `Stream`, `Config`, `NextStreamId`, `RecipientStreams`, and `TotalLiabilities`
+    entries still decode on V9.
+- V6+ keys remain absent on a V5-seeded instance until the newer code writes
+    them; reads must return `None`, `false`, or zero-like defaults rather than
+    panicking.
+- Read-only calls do not backfill absent storage keys. The compatibility tests
+    only treat explicit writes as state changes.
+- There is no on-chain migration of V5 storage into V9 storage. The guarantee
+    is read compatibility, not state rewriting.
+
+### Regression surface
+
+The storage-key compatibility suite treats the following as the regression
+boundary for this release:
+
+- `DataKey` discriminants 0–35 stay in declaration order.
+- `Stream` fields 0–13 keep their current positions and `memo` remains the
+    last field.
+- `memo` must decode as `None` on older V5-seeded entries.
+- Later keys such as `WithdrawNonce`, `PauseState`, and the V7/V8/V9 append-only
+    keys must stay absent on a V5-seeded instance until explicitly written.
+- Any new storage key must be appended, paired with a `CONTRACT_VERSION`
+    review, and added to the compatibility test suite.
+
 ### Residual risks
 
 - **No on-chain enforcement.** The rules above are enforced by code review and CI only. A developer who reorders variants will not get a compile error — the bug will only surface at runtime when existing entries are read back with the wrong type.
@@ -139,9 +185,19 @@ Used for per-stream data and per-recipient indexes. Grows linearly with stream c
 
 | Key | Description |
 |---|---|
-| `Stream(stream_id)` | Complete stream state: participants, amounts, timing, status, `cancelled_at`. One entry per stream. |
+| `Stream(stream_id)` | Complete stream state: participants, amounts, timing, status, `cancelled_at`, and optional bounded `metadata: Option<Map<Bytes, Bytes>>`. One entry per stream. |
 | `RecipientStreams(address)` | Sorted `Vec<u64>` of stream IDs where `address` is the recipient. Maintained in ascending order. |
 | `AutoClaimDestination(stream_id)` | Recipient-chosen destination `Address` for permissionless auto-claim. Absent when not opted in. Removed by `revoke_auto_claim`. |
+
+### Stream Metadata Storage & Footprint
+
+- **Storage Container**: Embedded directly within the `Stream` struct under `DataKey::Stream(stream_id)`.
+- **Field Type**: `Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>`.
+- **Footprint Bounds**: Bounded by `MAX_METADATA_KEYS = 8`, `MAX_METADATA_KEY_BYTES = 32`, `MAX_METADATA_VALUE_BYTES = 128`, and `MAX_METADATA_BYTES = 512`.
+- **Footprint Impact**:
+  - `None`: Consumes 1 byte XDR variant header (`Option::None`).
+  - `Some(map)`: Maximum persistent byte footprint overhead is capped at 512 bytes + map serialization overhead (~560 bytes total).
+- **TTL Dynamics**: Refreshed automatically whenever `DataKey::Stream(stream_id)` TTL is bumped during stream reads (`load_stream`) or mutations (`save_stream`). Purged when `close_completed_stream` removes `DataKey::Stream(stream_id)`.
 
 ---
 
@@ -158,20 +214,24 @@ const PERSISTENT_BUMP_AMOUNT: u32       = 120_960;
 
 ### Instance TTL
 
-Extended via `bump_instance_ttl()` on **every** entry-point that touches instance storage. This means any contract interaction — read or write — keeps `Config`, `NextStreamId`, `GlobalEmergencyPaused`, and `CreationPaused` alive.
+Extended via `bump_instance_ttl()` on **every** entry-point that touches instance storage (including query entrypoints like `is_global_emergency_paused`, `is_creation_paused`, `get_pause_reason`, `get_max_rate_per_second`, `read_paused_stream_count`, and `read_total_keeper_fees_paid`). This ensures all global settings and metrics remain fresh and protected from expiration under active contract usage.
 
-### Persistent TTL
+### Persistent TTL & Storage Reclamation
 
-Extended on every `load_stream()` (read) and `save_stream()` (write), and on every `load_recipient_streams()` / `save_recipient_streams()` call.
+Extended on every `load_stream()` (read) and `save_stream()` (write), and on index updates (`load_recipient_streams`, `save_recipient_streams`, `load_sender_streams`, `save_sender_streams`).
+
+- **Adaptive TTL Propagation**: When creating or updating streams, `add_stream_to_recipient_index` and `add_stream_to_sender_index` scale index key TTL to the stream's remaining lifetime via `compute_adaptive_ttl(now, end_time)`.
+- **Empty Index Reclamation**: When a recipient or sender index, pending offer index, or template ID index becomes empty (`streams.is_empty()`), the contract explicitly removes the persistent storage key (`env.storage().persistent().remove(&key)`), reclaiming on-chain state while safely returning an empty `Vec` on future reads.
 
 | Scenario                                         | TTL refreshed?                                 |
 | ------------------------------------------------ | ---------------------------------------------- |
-| Stream created                                   | Yes (`save_stream` + `save_recipient_streams`) |
+| Stream created                                   | Yes (`save_stream` + `save_recipient_streams` + `save_sender_streams` adaptive) |
 | Stream read via `get_stream_state`               | Yes (`load_stream`)                            |
 | Stream read via `calculate_accrued`              | Yes (`load_stream`)                            |
 | Stream mutated (pause/resume/cancel/withdraw)    | Yes (`load_stream` + `save_stream`)            |
-| Stream closed via `close_completed_stream`       | Entry removed (no TTL)                         |
+| Stream closed via `close_completed_stream`       | Entry removed; index key removed if empty     |
 | Recipient index read via `get_recipient_streams` | Yes (if non-empty)                             |
+| Sender index read via `get_sender_streams`       | Yes (if non-empty)                             |
 
 ### TTL implications for operators
 
@@ -234,6 +294,9 @@ Extended on every `load_stream()` (read) and `save_stream()` (write), and on eve
 ## 7. Version History
 
 For a full description of what changed between contract versions and how to migrate, see [DEPLOYMENT.md — Version Migration](./DEPLOYMENT.md#version-migration).
+
+For documented storage invariants (TTL, liabilities, CEI, indexes), see
+[storage-invariants.md](./storage-invariants.md).
 
 ---
 
@@ -307,9 +370,26 @@ V6 `Stream` struct adds one field at the end:
 | -------: | :----- | :-------------- | :--------------------------------------------------------------------- |
 |       14 | `memo` | `Option<Bytes>` | Optional indexer correlation memo (max 64 bytes); `None` in V5 entries |
 
+### V6 → V7 transition
+
+V7 appended eight new `DataKey` variants (discriminants 21–28) while preserving all prior discriminants 0–20:
+
+| Discriminant | Variant | Storage type | Value type | Notes |
+|---|---|---|---|---|
+| 21 | `IdReservation(Address)` | Persistent | `IdReservation` | Active caller ID reservation |
+| 22 | `MaxRatePerSecond` | Instance | `i128` | Per-stream max rate cap |
+| 23 | `DelegatedWithdrawNonce(Address)` | Persistent | `u64` | Per-recipient delegated withdraw nonce |
+| 24 | `LastPauseRecord(PauseKind)` | Instance | `PauseRecord` | Last pause record for stream or protocol pause |
+| 25 | `RotationHistory(u64)` | Persistent | `Vec<RotationEntry>` | Recipient/sender rotation audit trail |
+| 26 | `LastAccrualLedgerTimestamp` | Instance | `u64` | Last ledger timestamp for accrual clock regression detection |
+| 27 | `PausedStreamCount` | Instance | `u64` | Protocol-wide count of streams currently in `StreamStatus::Paused` |
+| 28 | `TotalKeeperFeesPaid` | Instance | `i128` | Aggregate keeper fees paid via `keeper_cancel` |
+
+Code-level invariant verification for all 36 variants is maintained in [`contracts/stream/src/checksum.rs`](../contracts/stream/src/checksum.rs).
+
 ### Forward-compatibility guarantee
 
-All V5 persistent `Stream` entries remain decodable on a V6 instance. Soroban XDR struct decoding is **positional and forward-compatible**: a V6 decoder reading a V5-encoded struct decodes the first 14 fields correctly and treats the absent 15th field as `None` (for `Option<Bytes>`).
+All V5 persistent `Stream` entries remain decodable on a V6/V7 instance. Soroban XDR struct decoding is **positional and forward-compatible**: a V6/V7 decoder reading a V5-encoded struct decodes the first 14 fields correctly and treats the absent 15th field as `None` (for `Option<Bytes>`).
 
 This guarantee holds **only** because:
 
@@ -354,19 +434,20 @@ The file `contracts/stream/tests/storage_key_compat.rs` encodes these invariants
 
 ---
 
-## 9. ID Reservation Asymmetry
+## 9. ID Reservation Reclamation
 
-The contract maintains two entrypoints for releasing reservations, with asymmetric counter behaviors:
+Both reservation release entrypoints now share a unified reclamation helper (`release_reservation`) that reclaims tip-adjacent unused IDs:
 
 ### `release_id_reservation` (Voluntary)
 - **Action**: Immediate, voluntary release of an active reservation by its owner.
-- **Counter Behavior**: Never rewinds `NextStreamId`. Released IDs are permanently skipped and will not be reused by subsequent `create_stream` calls, even if the reservation was tip-adjacent and fully unconsumed. This guarantees that once a reservation is made, its ID space is exclusively burned if surrendered voluntarily.
+- **Counter Behavior**: If the reservation is **tip-adjacent** (its allocated range ends exactly at the current `NextStreamId`) and **fully or partially unconsumed**, `NextStreamId` is rewound to the first unconsumed ID. If IDs beyond the reservation range were consumed (non-tip-adjacent), the reservation record is simply removed with no counter rewind.
 
 ### `reclaim_expired_id_reservation` (Post-Expiry)
 - **Action**: Permissionless reclamation of a reservation that has passed its `expiry` timestamp.
-- **Counter Behavior**: If the expired reservation is **tip-adjacent** (its allocated range ends exactly at the current `NextStreamId`) and **fully unconsumed**, reclaiming it will rewind `NextStreamId` to the start of the reservation. This ensures that abandoned or lost reservations at the counter tip do not permanently waste ID space.
+- **Counter Behavior**: Same as `release_id_reservation` — if the expired reservation is **tip-adjacent** and **unconsumed**, `NextStreamId` is rewound to the first unconsumed ID.
 
 ### Security Assumptions (NatSpec / Doc-comment style)
 - **Pre-expiry rejection**: Blocks denial-of-service (DoS) or front-running attacks where an attacker reclaims a user's reservation before they can publish their streams.
 - **At-expiry & post-expiry success**: Ensures that if a holder abandons or loses access to their reservation, the counter space/storage is not permanently locked, maintaining contract liveness.
-- **Voluntary Release Asymmetry**: `release_id_reservation` does not rewind `NextStreamId` to prevent complex re-orgs if off-chain systems assumed those IDs were consumed or burned.
+- **Tip-adjacent guard**: Counter rewind only occurs when `reservation_end == current_count`, meaning no streams exist beyond the reserved range. This prevents unsafe rewinds that would create ID collisions with already-created streams.
+- **Consistent event shape**: Both paths emit the `res_rel` event with `(start_id, count, consumed, reclaimed)`, ensuring consistent indexer accounting regardless of which release path triggered the reclamation.
