@@ -4,15 +4,22 @@ Soroban smart contracts for the Fluxora treasury streaming protocol on Stellar. 
 
 ## Documentation
 
+
+
 - **[Stream contract](docs/streaming.md)** — Lifecycle, accrual formula, cliff/end_time, access control, events, and error codes.
 - **[Dust threshold](docs/dust-threshold.md)** — `withdraw_dust_threshold` formula, USDC examples, validation table, and template guidance.
 - **[Security](docs/security.md)** — CEI ordering, token trust model, authorization paths, overflow protection.
 - **[Upgrade strategy](docs/upgrade.md)** — CONTRACT_VERSION policy, breaking-change classification, migration runbook.
 - **[Deployment](docs/DEPLOYMENT.md)** — Step-by-step testnet deployment checklist.
+- **[Recipient stream index](docs/recipient-stream-index.md)** — `get_recipient_streams` page cap, full-enumeration pattern, and DoS-prevention rationale.
 - **[Storage layout](docs/storage.md)** — Contract storage architecture, key design, and TTL policies.
 - **[Audit preparation](docs/audit.md)** — Entry-points and invariants for auditors.
-- **[Error codes](docs/error.md)** — Full ContractError reference.
+- **[Error codes](docs/error.md)** — Full ContractError reference and the
+  [FactoryError discriminant table](docs/error.md#factoryerror-reference-factory-contract)
+  (factory decisions map to a stable `u32` per variant; the CI guard is
+  `contracts/factory/tests/factory_error_discriminants.rs`).
 - **[Events](docs/events.md)** — Emitted event shapes and topics.
+- **[Stream templates](docs/stream-templates.md)** — Template lifecycle, auth, field mapping, and calldata savings.
 
 ## What's in this repo
 
@@ -68,13 +75,14 @@ The following table lists every public stream contract entry point implemented i
 | `create_stream_from_template` | `sender.require_auth()` (via `create_stream_relative` / `create_stream`) | Create a stream from a registered template |
 | `get_stream_template` | Public / None | Read a saved schedule template |
 | `version` | Public / None | Read current contract version |
-| `get_recipient_streams` | Public / None | List stream IDs for a recipient |
+| `get_recipient_streams` | Public / None | List stream IDs for a recipient (hard-capped at `RECIPIENT_STREAMS_PAGE_LIMIT`; use `get_recipient_streams_paginated` for full enumeration) |
 | `get_recipient_streams_paginated` | Public / None | Paginate recipient stream IDs |
 | `get_recipient_stream_count` | Public / None | Count streams for a recipient |
 | `get_streams_by_id_range` | Public / None | Read streams in an ID range for export |
 | `update_rate` | `caller.require_auth()` (sender or admin) | Update stream rate as sender or admin |
 | `cancel_stream_as_admin` | `admin.require_auth()` | Cancel any stream as contract admin |
 | `keeper_cancel` | `keeper.require_auth()` | Keeper-cancel an eligible stream after grace period |
+| `get_keeper_fee_split` | Public / None | Preview the `(keeper_fee, sender_refund)` split `keeper_cancel` would pay |
 | `pause_stream_as_admin` | `admin.require_auth()` | Pause any stream as contract admin |
 | `resume_stream_as_admin` | `admin.require_auth()` | Resume any paused stream as contract admin |
 | `set_global_emergency_paused` | `admin.require_auth()` | Admin toggle emergency pause |
@@ -108,7 +116,7 @@ This project pins dependencies for **reproducible builds** and **auditor compati
 
 | Component       | Version | Location                      | Purpose                                          |
 | --------------- | ------- | ----------------------------- | ------------------------------------------------ |
-| **Rust**        | 1.75    | `rust-toolchain.toml`         | Ensures consistent WASM compilation              |
+| **Rust**        | 1.94.1  | `rust-toolchain.toml`         | Ensures consistent WASM compilation              |
 | **soroban-sdk** | 21.7.7  | `contracts/stream/Cargo.toml` | Locked to tested Stellar Soroban network version |
 
 When upgrading versions:
@@ -127,21 +135,21 @@ git clone https://github.com/Fluxora-Org/Fluxora-Contracts.git
 cd Fluxora-Contracts
 ```
 
-- **Rust 1.75+** — Pinned in `rust-toolchain.toml` (auto-enforced via `rustup`)
+- **Rust 1.94.1** — Pinned in `rust-toolchain.toml` (auto-enforced via `rustup`)
 - **Soroban SDK 21.7.7** — Pinned in `contracts/stream/Cargo.toml` for reproducible builds
 - [Stellar CLI](https://developers.stellar.org/docs/tools/developer-tools) (optional, for deploy/test on network)
 
 Install dependencies:
 
 ```bash
-rustup update stable
+rustup toolchain install
 rustup target add wasm32-unknown-unknown
 ```
 
 Then verify:
 
 ```bash
-rustc --version       # Should show 1.75 or newer
+rustc --version       # Should show 1.94.1
 cargo --version
 stellar --version     # Only if installing Stellar CLI
 ```
@@ -172,6 +180,19 @@ Test files:
 
 - **Unit tests**: `contracts/stream/src/test.rs` — contract logic, accrual math, auth, edge cases, i128 boundary scenarios, version policy.
 - **Integration tests**: `contracts/stream/tests/integration_suite.rs` — full flows with `init`, `create_stream`, `withdraw`, `get_stream_state`, lifecycle transitions, and edge cases.
+- **Property-based balance-conservation harness**: `contracts/stream/tests/balance_conservation.rs` — randomized sequences of `top_up`, `decrease_rate`, `shorten`, `extend`, `pause/resume`, `cancel`, and `withdraw` on both `Linear` and `CliffOnly` streams. Asserts global token conservation, accrual monotonicity, the rate-decrease checkpoint invariant, and `CliffOnly` unsupported-operation guards. Regression seeds live in `contracts/stream/proptest-regressions/`.
+
+Run the new harness with a bounded case count for CI:
+
+```bash
+cargo test -p fluxora_stream --features testutils --test balance_conservation
+```
+
+For deeper local coverage before an audit or release:
+
+```bash
+PROPTEST_CASES=10000 cargo test -p fluxora_stream --features testutils --test balance_conservation
+```
 
 ### Deploy to Stellar Testnet
 

@@ -18,7 +18,7 @@ interface DecodedToken {
  */
 export function authenticate(
   req: Request,
-  res: Response,
+  _res: Response,
   next: NextFunction
 ): void {
   try {
@@ -71,7 +71,7 @@ export function authenticate(
  * Usage: authorize(['admin', 'mentor'])
  */
 export function authorize(roles: string[]) {
-  return (req: Request, res: Response, next: NextFunction): void => {
+  return (req: Request, _res: Response, next: NextFunction): void => {
     try {
       if (!req.user) {
         throw new UnauthorizedError('User not authenticated');

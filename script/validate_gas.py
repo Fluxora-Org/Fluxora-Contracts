@@ -1,16 +1,57 @@
-import re
 import json
+import os
+import re
 import subprocess
 import sys
-from typing import Dict, Any
+from typing import Any, Dict
+
+BULK_BATCH_BASELINE_SIZES = ("1", "5", "10", "20")
+REQUIRED_BULK_BASELINES = {
+    "bulk_cancel_streams": BULK_BATCH_BASELINE_SIZES,
+    "bulk_resume_streams_as_admin": BULK_BATCH_BASELINE_SIZES,
+}
+
+
+def build_cargo_test_env() -> Dict[str, str]:
+    """Return subprocess env with ~/.cargo/bin prepended to PATH."""
+    home = os.environ.get("HOME")
+    if not home:
+        raise RuntimeError(
+            "HOME is not set; cannot prepend ~/.cargo/bin to PATH for cargo. "
+            "Set HOME in the environment or ensure cargo is on PATH."
+        )
+    inherited_path = os.environ.get("PATH", "")
+    return {"PATH": f"{home}/.cargo/bin:{inherited_path}"}
 
 def extract_baselines(file_path: str) -> Dict[str, Any]:
     with open(file_path, 'r') as f:
         content = f.read()
-        match = re.search(r'<!-- GAS_BASELINE_START -->\s*(\{.*?\})\s*<!-- GAS_BASELINE_END -->', content, re.DOTALL)
-        if not match:
+        start_marker = '<!-- GAS_BASELINE_START -->'
+        end_marker = '<!-- GAS_BASELINE_END -->'
+        start = content.find(start_marker)
+        end = content.find(end_marker)
+        if start == -1 or end == -1 or end <= start:
             raise ValueError("Could not find gas baseline block in docs/gas.md")
-        return json.loads(match.group(1))
+        block = content[start + len(start_marker):end].strip()
+        if not block.startswith('{'):
+            raise ValueError("Could not find gas baseline block in docs/gas.md")
+        return json.loads(block)
+
+def validate_required_baselines(baselines: Dict[str, Any]) -> None:
+    """Ensure CI has every required bulk batch baseline before tests run."""
+    missing = []
+    for func, sizes in REQUIRED_BULK_BASELINES.items():
+        raw = baselines.get(func)
+        if not isinstance(raw, dict):
+            missing.append(f"{func}: all")
+            continue
+        for size in sizes:
+            if size not in raw:
+                missing.append(f"{func}: {size}")
+
+    if missing:
+        joined = ", ".join(missing)
+        raise ValueError(f"Missing required gas baselines: {joined}")
 
 def run_tests() -> str:
     print("Running gas regression tests...")
@@ -18,7 +59,7 @@ def run_tests() -> str:
         ["cargo", "test", "-p", "fluxora_stream", "--test", "gas_regression", "--", "--nocapture"],
         capture_output=True,
         text=True,
-        env={"PATH": f"{subprocess.os.environ.get('HOME', '/Users/aditya')}/.cargo/bin:{subprocess.os.environ.get('PATH', '')}"}
+        env=build_cargo_test_env(),
     )
     # We ignore the return code here because the script handles the actual validation
     return result.stdout
@@ -39,6 +80,7 @@ def parse_measurements(output: str) -> Dict[str, Dict[str, int]]:
 def main():
     try:
         baselines = extract_baselines('docs/gas.md')
+        validate_required_baselines(baselines)
         output = run_tests()
         measured = parse_measurements(output)
 
@@ -53,13 +95,15 @@ def main():
 
         for func, sizes in measured.items():
             for size, cost in sizes.items():
-                # Get baseline value
-                baseline_val = None
-                if func == 'batch_withdraw':
-                    baseline_val = baselines.get('batch_withdraw', {}).get(size)
+                # Get baseline value.
+                # Baseline entries are either:
+                #   - a nested dict  {"variant": value, ...}  (e.g. batch_withdraw, keeper_cancel)
+                #   - a flat integer value                     (e.g. create_stream, withdraw)
+                raw = baselines.get(func)
+                if isinstance(raw, dict):
+                    baseline_val = raw.get(size)
                 else:
-                    # For non-batch functions, 'size' is 'single', we look for the function name key
-                    baseline_val = baselines.get(func)
+                    baseline_val = raw
 
                 if baseline_val is None:
                     print(f"{func:<20} | {size:<10} | {'N/A':<12} | {cost:<12} | {'N/A':<10} | MISSING")
