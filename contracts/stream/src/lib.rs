@@ -5495,14 +5495,26 @@ impl FluxoraStream {
             return Err(ContractError::DelegationDepthExceeded);
         }
 
-        // Prevent cycles by checking if the new_recipient is already in the delegation chain
-        let mut current_ancestor = stream.parent_stream_id;
-        while let Some(ancestor_id) = current_ancestor {
-            let ancestor = load_stream(&env, ancestor_id)?;
-            if ancestor.recipient == new_recipient {
+        // Prevent cycles by walking only the bounded delegation chain. The
+        // current stream is included so callers cannot delegate back to an
+        // ancestor recipient or to the current recipient under another path.
+        let mut current_stream_id = Some(stream_id);
+        let mut checked_depth = 0u32;
+        while let Some(candidate_id) = current_stream_id {
+            if checked_depth > MAX_DELEGATION_DEPTH {
+                return Err(ContractError::DelegationDepthExceeded);
+            }
+
+            let candidate = if candidate_id == stream_id {
+                stream.clone()
+            } else {
+                load_stream(&env, candidate_id)?
+            };
+            if candidate.recipient == new_recipient {
                 return Err(ContractError::CyclicDelegation);
             }
-            current_ancestor = ancestor.parent_stream_id;
+            current_stream_id = candidate.parent_stream_id;
+            checked_depth += 1;
         }
 
         let old_rate = stream.rate_per_second;
@@ -5590,6 +5602,7 @@ impl FluxoraStream {
 
         save_stream(&env, &child_stream);
         add_stream_to_recipient_index(&env, &new_recipient, child_stream_id, Some(stream.end_time));
+        add_stream_to_sender_index(&env, &stream.sender, child_stream_id);
 
         env.events().publish(
             (symbol_short!("del_share"), stream_id),

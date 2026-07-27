@@ -10,7 +10,7 @@
 
 use soroban_sdk::{contracttype, Address, Map};
 
-use crate::{ContractError, PauseReason, StreamKind, StreamStatus};
+use crate::{StreamKind, StreamStatus};
 
 // Data types
 // ---------------------------------------------------------------------------
@@ -506,6 +506,12 @@ pub struct Stream {
     /// Ledger sequence number of the last rate change (or creation).
     /// Used to enforce MIN_RATE_INTERVAL_LEDGERS cooldown.
     pub last_rate_change_ledger: u32,
+    /// Delegation depth of this stream in the recipient-share delegation tree.
+    /// Root streams use depth 0; delegated children increment by one.
+    pub delegation_depth: u32,
+    /// Parent stream id when this stream is a delegated child.
+    /// `None` marks a root stream.
+    pub parent_stream_id: Option<u64>,
     /// If true, the stream is decommissioned and restricted to cancel-or-no-op.
     /// Defaults to false (None) for backward compatibility with existing streams.
     pub decommissioned: Option<bool>,

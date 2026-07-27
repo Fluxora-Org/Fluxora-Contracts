@@ -365,6 +365,22 @@ balance or allowance is insufficient, the call returns the dedicated
 Token transfer failures are atomic as well: state, liabilities, and the opt-in revert
 together with the failed transaction.
 
+### Bounded recipient-share delegation
+
+`delegate_recipient_share(stream_id, recipient, share_bps, new_recipient)` lets the
+current recipient split a bounded basis-point share of future linear accrual into a
+new child stream for `new_recipient`.
+
+Security and accounting rules:
+
+- Only the current `recipient` may authorize the split.
+- `share_bps` must be in `1..=10000`, and the computed child rate must be positive and strictly less than the parent rate.
+- Self-delegation is rejected, and `new_recipient` must not already appear in the bounded parent chain.
+- Child streams increment `delegation_depth`; delegation is rejected once depth reaches `MAX_DELEGATION_DEPTH` (3).
+- The parent is checkpointed at the current ledger timestamp before its rate is reduced, preserving all already-accrued and already-withdrawn entitlement.
+- The child stream starts at the checkpoint timestamp and receives only the delegated future accrual. No hostnames, off-chain identifiers, or private metadata are introduced by the delegation event.
+- The child is indexed for both `new_recipient` and the original sender portfolio, so it behaves as an independent stream for reads and later withdrawals.
+
 ### Cancellation Semantics (Issue Scope)
 
 This section is the protocol-level contract for `cancel_stream` and `cancel_stream_as_admin`.
