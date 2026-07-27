@@ -2333,6 +2333,7 @@ impl FluxoraStream {
             witness,
             delegation_depth: 0,
             parent_stream_id: None,
+            decommissioned: None,
         };
 
         save_stream(env, &stream);
@@ -2431,6 +2432,7 @@ impl FluxoraStream {
             witness,
             delegation_depth: 0,
             parent_stream_id: None,
+            decommissioned: None,
         };
 
         save_stream(env, &stream);
@@ -2803,6 +2805,7 @@ impl FluxoraStream {
             withdraw_dust_threshold,
             params.memo,
             params.kind,
+            params.metadata,
             params.irrevocable,
             params.witness,
             max_lookback_ledgers,
@@ -5577,11 +5580,12 @@ impl FluxoraStream {
             last_rate_change_ledger: 0,
             metadata: stream.metadata.clone(),
             claim_owner: None,
-            witness: None,
-            irrevocable: None,
+            witness: stream.witness.clone(),
+            irrevocable: stream.irrevocable,
             is_pooled: None,
             parent_stream_id: Some(stream_id),
             delegation_depth: stream.delegation_depth + 1,
+            decommissioned: None,
         };
 
         save_stream(&env, &child_stream);
@@ -7893,7 +7897,7 @@ impl FluxoraStream {
         env.storage().persistent().remove(&key);
 
         // Emit event
-        events::emit_auto_claim_revoked(&env, stream_id);
+        events::emit_auto_claim_revoked(&env, stream_id, AutoClaimRevoked { stream_id });
 
         Ok(())
     }
