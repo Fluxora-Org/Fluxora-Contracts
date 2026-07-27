@@ -61,9 +61,10 @@ echo "Rust toolchain: ${TOOLCHAIN_CHANNEL} (from rust-toolchain.toml)"
 # Build all contracts
 # ---------------------------------------------------------------------------
 echo "Building WASM artifacts (release, wasm32-unknown-unknown)..."
-cargo build --release --target wasm32-unknown-unknown \
-  --manifest-path "${REPO_ROOT}/Cargo.toml" \
-  $(for name in "${!CONTRACTS[@]}"; do echo "-p $name"; done)
+for name in "${!CONTRACTS[@]}"; do
+  cargo build --release --target wasm32-unknown-unknown \
+    --manifest-path "${REPO_ROOT}/Cargo.toml" -p "$name"
+done
 
 # ---------------------------------------------------------------------------
 # Compute hashes

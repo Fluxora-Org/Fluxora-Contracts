@@ -158,6 +158,15 @@ impl GovEnv {
 /// Panics with a descriptive message on any invariant violation; proptest
 /// catches the panic and records it as a test-case failure with shrinking.
 fn check_invariants(gov: &GovEnv, expected: &HashSet<usize>) {
+    // Issue #1166: without resetting the harness budget here, the cumulative
+    // cost of O(expected) try_add_signer probes per check_invariants() call,
+    // invoked once initially and after every op in a 40-step sequence, exhausts
+    // the default test budget and trips HostError::Error(Budget, ExceededLimit)
+    // intermittently — see the committed signer_index_proptest.proptest-regressions
+    // corpus. Matches the pattern at
+    // contracts/stream/tests/bulk_cancel.rs::test_bulk_cancel_large_batch_up_to_max_page_size.
+    gov.env.budget().reset_unlimited();
+
     let on_chain = gov.client.get_signers();
     let on_chain_len = on_chain.len() as usize;
 

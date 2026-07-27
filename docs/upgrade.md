@@ -16,7 +16,7 @@ Version policy, migration runbook, and audit notes for operators, integrators, a
 ### Current value
 
 ```
-CONTRACT_VERSION = 7
+CONTRACT_VERSION = 9
 ```
 
 ### Version history
@@ -29,7 +29,9 @@ CONTRACT_VERSION = 7
 | 4 | `TotalLiabilities` instance key for escrow accounting; accrual paths track last observed ledger timestamp for clock-regression detection |
 | 5 | `withdraw_dust_threshold: i128` added to `Stream` struct and creation params; `DataKey::PausedStreamCount` added and maintained across pause/resume/cancel/complete transitions; `get_paused_stream_count()` O(1) view added |
 | 6 | Sweep excess authorization update; added additive `DataKey` variants 15–28 (`WithdrawNonce`, `PauseState`, `ReentrancyLock`, `RecipientStreamPage`, `RecipientStreamPageCount`, `PendingRecipientUpdate`, `IdReservation`, `MaxRatePerSecond`, `DelegatedWithdrawNonce`, `LastPauseRecord`, `RotationHistory`, `LastAccrualLedgerTimestamp`, `PausedStreamCount`, `TotalKeeperFeesPaid`) |
-| 7 | `Stream` and `CreateStreamParams` gained optional `witness: Option<Address>` for off-chain compliance attestation cancellation (`witnessed_cancel_stream` entry-point added); permissionless auto-renewal entrypoints and the append-only `DataKey::AutoRenewEnabled` opt-in were also added |
+| 7 | `Stream` and `CreateStreamParams` gained optional `witness: Option<Address>` for off-chain compliance attestation cancellation (`witnessed_cancel_stream` entry-point added); `DataKey::SenderStreams(Address)` at discriminant 29, `DataKey::AutoRenewEnabled(u64)` at discriminant 30 for auto-renewal; `DataKey::PendingStreamOffer(u64)` at discriminant 31 and `DataKey::RecipientPendingOffers(Address)` at discriminant 32 for two-phase offer-then-accept stream creation; `create_stream_offer`, `accept_stream_offer`, `reject_stream_offer`, `cancel_stream_offer`, `get_stream_offer`, `get_recipient_pending_offers` entrypoints added; new `ContractError` variants `OfferNotFound` (37), `OfferExpired` (38), `OfferWrongRecipient` (39), `OfferWrongSender` (40); `Stream` and `CreateStreamParams` gained optional `irrevocable: Option<bool>` field blocking all cancel/shorten paths |
+| 8 | Additive lookback-bounded creation, configuration (`MaxLookbackLedgers`), and claim calculation support added without changing persisted `Stream` shape |
+| 9 | `delegated_withdraw` accepts optional `relayer_fee: i128` in signed payload; gross/net withdrawal breakdown and `Withdrawal` event payload update |
 
 ### When to increment
 
@@ -97,6 +99,12 @@ For the exhaustive, category-by-category breakdown see **[`docs/ABI_STABILITY.md
 ## 3. Migration Runbook
 
 Soroban contracts are **not upgradeable in-place** by default. A new `CONTRACT_VERSION` means deploying a new contract instance.
+
+The storage-key compatibility rules in `contracts/stream/tests/storage_key_compat.rs`
+cover the read surface of the current release: newer code can still read V5-era
+entries, but it does not migrate or rewrite old state in place. Any change that
+breaks the append-only storage layout still requires a new deployment and a
+fresh operator migration.
 
 ### Step-by-step
 
@@ -192,24 +200,107 @@ Before interacting with any Fluxora contract instance:
 
 5. **Token address immutability.** The token is fixed at `init` time. A new contract version that needs a different token requires a new `init` call with the new token address — existing streams on the old instance are unaffected.
 
-6. **Machine-checked `CONTRACT_VERSION` vs `DataKey` variant count cross-check.** To prevent version drift when new storage keys are appended, `contracts/stream/tests/storage_key_compat.rs` enforces a machine-checked mapping between `CONTRACT_VERSION` and expected `DataKey` variant count (currently 29 for version 7). Whenever a new `DataKey` variant is appended or `CONTRACT_VERSION` is incremented, developers MUST update:
+6. **Machine-checked `CONTRACT_VERSION` vs `DataKey` variant count cross-check.** To prevent version drift when new storage keys are appended, `contracts/stream/tests/storage_key_compat.rs` enforces a machine-checked mapping between `CONTRACT_VERSION` and expected `DataKey` variant count (currently 36 for version 9). Whenever a new `DataKey` variant is appended or `CONTRACT_VERSION` is incremented, developers MUST update:
    - `expected_datakey_count_for_version()` and `all_live_datakey_variants()` in `contracts/stream/tests/storage_key_compat.rs`
    - Discriminant tables & variant count tests in `contracts/stream/src/checksum.rs`
    - Version history & policy table in `docs/upgrade.md`
 
 ---
 
-## 6. CI Toolchain Verification
+## 6. On-Chain Contract Upgrades (`upgrade()` entrypoint)
 
-The `.github/workflows/ci.yml` workflow includes a step in all Rust-related jobs (`lint`, `build`, `test`, `coverage`) that verifies the `rustc` version in the environment matches the version pinned in the `rust-toolchain.toml` file.
+Fluxora supports in-place contract upgrades via the `upgrade()` entrypoint. This allows the protocol to ship security fixes and feature improvements without requiring integrators to migrate to a new contract address.
 
-This is a safety net to prevent "toolchain drift", where a change in the CI environment (e.g., an update to the `dtolnay/rust-toolchain@stable` action) could cause the contract to be built or tested with a different compiler version than is specified in the repository.
+### How It Works
 
-The verification is performed by the `script/verify_rust_version.py` script. If a mismatch is detected, the script prints an error and exits with a non-zero status code, failing the CI job. This ensures that all builds and tests are performed with the intended, pinned toolchain. This check is independent of, and a safety net for, any future change to which GitHub Action resolves the toolchain.
+The `upgrade()` function calls Soroban's `update_current_contract_wasm` host function, which atomically replaces the contract's WASM code in-place. After a successful upgrade, `version()` returns the new `CONTRACT_VERSION` baked into the replacement WASM.
+
+### Authorization
+
+Upgrades are **admin-only**:
+
+- The admin address (set during `init()`) must sign the transaction.
+- In production, the admin should be the governance contract (`fluxora_governance`).
+- Governance requires multi-signer approval (quorum) before the upgrade can execute.
+
+### Storage Compatibility
+
+The upgraded WASM must maintain backward-compatible storage layout:
+
+**Safe Changes (no migration needed):**
+- Add new fields to `Stream` struct (append at end, `Option`-typed for forward compatibility)
+- Add new variants to `DataKey` enum (append at end only)
+- Add new entry-points (additive)
+- Gas optimizations
+
+**Unsafe Changes (will corrupt existing storage):**
+- Reorder `Stream` struct fields
+- Remove `Stream` struct fields
+- Reorder `DataKey` enum variants
+- Remove `DataKey` variants
+- Insert a variant into the middle of the `DataKey` enum
+
+### Upgrade Workflow
+
+1. **Build New WASM:**
+   ```bash
+   cargo build --target wasm32-unknown-unknown --release -p fluxora_stream
+   stellar contract optimize --wasm target/wasm32-unknown-unknown/release/fluxora_stream.wasm
+   ```
+
+2. **Compute the WASM hash:**
+   ```bash
+   stellar contract install --wasm target/wasm32-unknown-unknown/release/fluxora_stream.wasm
+   # Note the hash output — this is the `new_wasm_hash` parameter.
+   ```
+
+3. **Execute the upgrade (via governance or admin):**
+   ```bash
+   stellar contract invoke --id $CONTRACT_ID -- upgrade --new_wasm_hash $WASM_HASH
+   ```
+
+4. **Verify:**
+   ```bash
+   stellar contract invoke --id $CONTRACT_ID -- version
+   # Must return the new CONTRACT_VERSION value
+   ```
+
+### When to use `upgrade()` vs new deployment
+
+| Scenario | Recommended approach |
+|---|---|
+| Storage-compatible change (see safe changes above) | In-place `upgrade()` — preserves all stream state, same `CONTRACT_ID` |
+| Breaking storage layout change | New contract deployment — follow the Migration Runbook (§3) |
+| Security patch | In-place `upgrade()` if storage-compatible; otherwise new deployment |
+| New feature (additive entry-points only) | In-place `upgrade()` |
+
+### Residual risks
+
+1. **Upgrade trap.** If a developer deploys a WASM with an incompatible storage layout via `upgrade()`, every persistent entry on the live instance becomes unreadable. There is no rollback. Mitigation: run the full `storage_key_compat.rs` test suite against the new WASM before upgrading.
+
+2. **Governance gate.** The admin key must be held by a governance contract with multi-sig quorum. A single-key admin can unilaterally upgrade to arbitrary WASM — this is a centralisation risk mitigated by the governance integration tested in `contracts/stream/tests/governance_integration.rs`.
+
+3. **TTL expiry during upgrade.** If an in-place upgrade takes longer than the TTL of persistent entries, those entries may expire mid-upgrade. All persistent entries should be bumped before initiating the upgrade.
+
+4. **Event continuity.** Indexers watching the contract for events will see the `CONTRACT_ID` unchanged after an in-place upgrade. Event schemas must remain backward-compatible across upgrades — any breaking event change requires a new deployment, not an in-place upgrade.
 
 ---
 
-## 7. Paginated Export Views (Issue #429)
+## 7. CI Toolchain Verification
+
+The `.github/workflows/ci.yml` workflow includes a step in all Rust-related jobs (`lint`, `build`, `test`, `coverage`) that verifies the `rustc` version in the environment matches the version pinned in the `rust-toolchain.toml` file.
+
+This is a safety net to prevent "toolchain drift", where a change in the CI environment (e.g., an update to the `dtolnoy/rust-toolchain@stable` action) could cause the contract to be built or tested with a different compiler version than is specified in the repository.
+The verification is performed by the `script/verify_rust_version.py` script. If a mismatch is detected, the script prints an error and exits with a non-zero status code, failing the CI job. This ensures that all builds and tests are performed with the intended, pinned toolchain. This check is independent of, and a safety net for, any future change to which GitHub Action resolves the toolchain.
+
+### MSRV Cross-Check
+
+To ensure `cargo` enforces the Minimum Supported Rust Version (MSRV) on every invocation (including local developer builds), each crate's `Cargo.toml` (`contracts/stream/Cargo.toml`, `contracts/factory/Cargo.toml`, and `contracts/governance/Cargo.toml`) explicitly declares a `rust-version` field. 
+The `tests/test_rust_toolchain_pin.py` test suite asserts that the `rust-version` in each of these `Cargo.toml` manifests matches the pinned channel in `rust-toolchain.toml`, ensuring the MSRV is synchronized across the entire repository.
+
+---
+
+## 8. Paginated Export Views (Issue #429)
 
 Bounded, paginated view entrypoints support off-chain export and migration between contract instances without unbounded loops or memory usage.
 
@@ -332,43 +423,141 @@ See `contracts/stream/src/test.rs` for the complete test suite.
 
 
 
-# On-Chain Contract Upgrades
 
-## Overview
 
-Fluxora supports in-place contract upgrades via the `upgrade()` entrypoint. This allows the protocol to ship security fixes and feature improvements without requiring integrators to migrate to a new contract address.
+## 9. Cargo.lock Determinism
 
-## How It Works
+### Why it matters
 
-The `upgrade()` function calls Soroban's `update_current_contract_wasm` host function, which atomically replaces the contract's WASM code in-place.
+Every WASM binary Fluxora ships must be byte-for-byte reproducible so the
+checksum recorded in `wasm/checksums.sha256` can be independently verified.
+The build depends on a fixed set of compiled dependencies; if any dependency
+version changes between two builds the output WASM changes, invalidating the
+reference checksum and breaking `script/verify-wasm-checksum.sh`.
 
-## Authorization
+`Cargo.lock` is the mechanism that pins every transitive dependency to an
+exact version. It must be:
 
-Upgrades are **admin-only**:
+- **Committed** — present in version control so every `git clone` + build
+  uses the identical dependency set.
+- **Unchanged** — not silently updated by a `cargo update` run that no one
+  reviewed, for example when an unpinned `^` version specifier resolves to a
+  newer compatible release.
 
-- The admin address (set during `init()`) must sign the transaction
-- In production, the admin should be the governance contract (`fluxora_governance`)
-- Governance requires multi-signer approval (quorum) before the upgrade can execute
+This is the "Dependency resolution" residual risk documented in
+`contracts/stream/src/checksum.rs`.
 
-## Storage Compatibility
+### CI enforcement
 
-The upgraded WASM must maintain backward-compatible storage layout.
+The `build` job in `.github/workflows/ci.yml` runs the following step
+**before** any WASM build step:
 
-### Safe Changes
-- Add new fields to `Stream` struct (append at end)
-- Add new variants to `DataKey` enum (append at end)
-- Add new functions to the contract
-- Gas optimizations
+```yaml
+- name: Verify Cargo.lock is committed and unchanged
+  run: |
+    set -euo pipefail
+    if ! cargo update --locked --workspace; then
+      echo "::error::Cargo.lock would change on dependency resolution ..."
+      echo "::error::This breaks the WASM build-reproducibility contract documented
+            in contracts/stream/src/checksum.rs ('Dependency resolution: Cargo.lock
+            must be committed and unchanged')."
+      echo "::error::If this dependency change is intentional, run 'cargo update'
+            locally, review the diff, and commit the updated Cargo.lock alongside
+            your change."
+      exit 1
+    fi
+```
 
-### Unsafe Changes
-- Reorder `Stream` struct fields
-- Remove `Stream` struct fields
-- Reorder `DataKey` enum variants
-- Remove `DataKey` variants
+`cargo update --locked` exits non-zero if satisfying the current `Cargo.toml`
+manifests would require any change to `Cargo.lock`. The step fails the entire
+`build` job before any WASM binary is produced, so no artifact with an
+unverified checksum can be uploaded.
 
-## Upgrade Workflow
+### Structural test suite
 
-### 1. Build New WASM
-```bash
-cargo build --target wasm32-unknown-unknown --release -p fluxora_stream
-stellar contract optimize --wasm target/wasm32-unknown-unknown/release/fluxora_stream.wasm
+`contracts/stream/tests/cargo_lock_determinism.rs` provides a complementary
+layer of always-on structural checks that run during the normal `cargo test`
+flow (no special environment required). The eight tests it contains are:
+
+| Test | What it checks |
+|------|----------------|
+| `cargo_lock_exists_at_workspace_root` | `Cargo.lock` is present at the workspace root |
+| `cargo_lock_is_non_empty_and_contains_packages` | The lockfile is not a stub — it contains at least one `[[package]]` entry |
+| `cargo_lock_records_soroban_sdk` | `soroban-sdk` is recorded in the lockfile |
+| `stream_cargo_toml_soroban_sdk_is_exact_pin` | The `soroban-sdk` version in `contracts/stream/Cargo.toml` is an exact pin with no `^`, `~`, `*`, or `>=` range specifier |
+| `workspace_cargo_toml_has_no_patch_table` | The workspace `Cargo.toml` contains no `[patch]` table |
+| `workspace_cargo_toml_uses_resolver_v2` | The workspace `Cargo.toml` declares `resolver = "2"` |
+| `cargo_lock_has_modern_format_version` | The lockfile declares format version 3 or 4 (generated by Cargo ≥ 1.78) |
+| `cargo_lock_soroban_sdk_version_matches_cargo_toml_pin` | The `soroban-sdk` version in `Cargo.lock` matches the exact pin in `contracts/stream/Cargo.toml` |
+
+These tests provide an earlier, local signal for the same class of violations
+the CI gate catches, and they produce diagnostic messages that point directly
+at this section and at `contracts/stream/src/checksum.rs`.
+
+### Security assumptions
+
+- **Exact version pins.** Every dependency that influences WASM output must be
+  pinned with an exact version string (e.g. `"21.7.7"`), not a caret range
+  (`"^21.7.7"`). A caret range allows `cargo update` to silently resolve to a
+  newer compatible release, changing the WASM without any diff in source code.
+- **No `[patch]` overrides.** A `[patch]` entry in the workspace `Cargo.toml`
+  can substitute a local path or git revision that differs between machines.
+  The resulting WASM may differ between environments, and the lockfile does not
+  capture the substituted source completely enough for `--locked` to enforce
+  byte-for-byte reproducibility.
+- **Resolver version 2.** Without `resolver = "2"`, Cargo can unify features
+  differently across workspace members, potentially activating features in the
+  WASM build target that alter the compiled output.
+- **Modern lockfile format.** A format version 1 or 2 lockfile (produced by
+  Cargo < 1.38) would be silently upgraded on the next `cargo` invocation,
+  making `Cargo.lock` appear modified even though no dependency versions
+  changed. This causes spurious CI failures and masks real drift.
+
+### Recovery procedure
+
+When CI fails the "Verify Cargo.lock is committed and unchanged" step, or
+when the `cargo_lock_determinism` tests fail locally:
+
+1. **Identify the drift.** Run `cargo update --workspace` locally and inspect
+   `git diff Cargo.lock`. Every changed `[[package]]` entry represents a
+   dependency version change that will alter the WASM binary.
+
+2. **Decide intentionality.** If the change is a deliberate upgrade (e.g. a
+   security patch in a transitive dependency), proceed to step 3. If it is
+   unintentional (e.g. a caret range resolving to a new patch release without
+   review), pin the drifting dependency explicitly in the relevant `Cargo.toml`
+   and run `cargo update --workspace` again until the diff is empty.
+
+3. **Regenerate the reference checksum.** Because the WASM binary will change,
+   the checksum in `wasm/checksums.sha256` is now invalid. Regenerate it:
+
+   ```bash
+   cargo build --release -p fluxora_stream --target wasm32-unknown-unknown
+   bash script/update-wasm-checksums.sh
+   ```
+
+4. **Commit atomically.** Commit `Cargo.lock`, `wasm/checksums.sha256`, and
+   any `Cargo.toml` pin changes together in a single commit so the three files
+   remain consistent:
+
+   ```bash
+   git add Cargo.lock wasm/checksums.sha256 contracts/stream/Cargo.toml
+   git commit -m "chore: update Cargo.lock and regenerate WASM checksum after dependency bump"
+   ```
+
+5. **Verify.** Run `cargo build --locked -p fluxora_stream` locally to confirm
+   `cargo build --locked` passes before pushing.
+
+### Relationship to other reproducibility invariants
+
+The Cargo.lock determinism guarantee is one of five invariants that together
+make a build reproducible. The full list is documented in
+`contracts/stream/src/checksum.rs` §"Build reproducibility contract":
+
+| Invariant | Enforcement |
+|-----------|-------------|
+| Rust toolchain pinned | `rust-toolchain.toml`; verified by `script/verify_rust_version.py` in every CI job |
+| `soroban-sdk` version pinned | `contracts/stream/Cargo.toml` exact pin; checked by `cargo_lock_determinism` tests |
+| Build profile is `--release` + `wasm32-unknown-unknown` | CI `build` job `cargo build` invocation |
+| No extra feature flags in WASM build | `testutils` feature excluded from WASM build step |
+| `Cargo.lock` committed and unchanged | CI `build` job "Verify Cargo.lock" step + `cargo_lock_determinism` tests |

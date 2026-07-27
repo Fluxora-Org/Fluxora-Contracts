@@ -1,6 +1,8 @@
 # Recipient Index: Removal on close_completed_stream
 ## Protocol Specification, Implementation, and Verification  
 
+> **Historical completion report (undated).** Test counts and implementation details here may not reflect the current tree. Use `python3 script/count_rust_tests.py` and CI test results for up-to-date verification.
+
 ## EXECUTIVE SUMMARY
 
 This document comprehensively specifies, verifies, and documents the `close_completed_stream` function in the Fluxora streaming contract. It combines protocol specification, implementation details, complete test coverage (14 unit tests + 4 integration tests), audit evidence, and deployment readiness confirmation.

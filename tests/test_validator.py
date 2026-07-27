@@ -514,7 +514,7 @@ class TestValidate:
 """,
         )
         vda.validate(*paths)
-        assert "STALE DOC:" in capsys.readouterr().out
+        assert "STALE AUDIT DOC:" in capsys.readouterr().out
 
     def test_fails_on_missing_entrypoint(self, tmp_path):
         paths = _write_files(
@@ -754,7 +754,9 @@ _BASELINE_BLOCK = textwrap.dedent("""\
     {
         "create_stream": 1000,
         "withdraw": 500,
-        "batch_withdraw": {"small": 200, "large": 800}
+        "batch_withdraw": {"small": 200, "large": 800},
+        "bulk_cancel_streams": {"1": 3000, "5": 7000, "10": 12000, "20": 22000},
+        "bulk_resume_streams_as_admin": {"1": 4000, "5": 8000, "10": 14000, "20": 26000}
     }
     <!-- GAS_BASELINE_END -->
 """)
@@ -774,6 +776,7 @@ class TestExtractBaselines:
         assert result["create_stream"] == 1000
         assert result["withdraw"] == 500
         assert result["batch_withdraw"]["small"] == 200
+        assert result["bulk_cancel_streams"]["20"] == 22000
 
     def test_raises_on_missing_block(self, tmp_path):
         f = tmp_path / "gas.md"
@@ -785,6 +788,32 @@ class TestExtractBaselines:
         f = tmp_path / "gas.md"
         f.write_text(_BASELINE_BLOCK, encoding="utf-8")
         assert isinstance(vg.extract_baselines(str(f)), dict)
+
+
+# ---------------------------------------------------------------------------
+# validate_required_baselines
+# ---------------------------------------------------------------------------
+
+class TestValidateRequiredBaselines:
+    def test_accepts_required_bulk_sizes(self, tmp_path):
+        f = tmp_path / "gas.md"
+        f.write_text(_BASELINE_BLOCK, encoding="utf-8")
+        vg.validate_required_baselines(vg.extract_baselines(str(f)))
+
+    def test_rejects_missing_bulk_size(self):
+        baselines = {
+            "bulk_cancel_streams": {"1": 3000, "5": 7000, "10": 12000},
+            "bulk_resume_streams_as_admin": {"1": 4000, "5": 8000, "10": 14000, "20": 26000},
+        }
+        with pytest.raises(ValueError, match="bulk_cancel_streams: 20"):
+            vg.validate_required_baselines(baselines)
+
+    def test_rejects_missing_bulk_function(self):
+        baselines = {
+            "bulk_cancel_streams": {"1": 3000, "5": 7000, "10": 12000, "20": 22000},
+        }
+        with pytest.raises(ValueError, match="bulk_resume_streams_as_admin: all"):
+            vg.validate_required_baselines(baselines)
 
 
 # ---------------------------------------------------------------------------
@@ -824,6 +853,28 @@ class TestParseMeasurements:
 
     def test_returns_dict(self):
         assert isinstance(vg.parse_measurements(""), dict)
+
+
+# ---------------------------------------------------------------------------
+# build_cargo_test_env
+# ---------------------------------------------------------------------------
+
+class TestBuildCargoTestEnv:
+    def test_prepends_cargo_bin_to_path(self, monkeypatch):
+        monkeypatch.setenv("HOME", "/tmp/testhome")
+        monkeypatch.setenv("PATH", "/usr/bin")
+        env = vg.build_cargo_test_env()
+        assert env["PATH"] == "/tmp/testhome/.cargo/bin:/usr/bin"
+
+    def test_raises_when_home_unset(self, monkeypatch):
+        monkeypatch.delenv("HOME", raising=False)
+        with pytest.raises(RuntimeError, match="HOME is not set"):
+            vg.build_cargo_test_env()
+
+    def test_raises_when_home_empty(self, monkeypatch):
+        monkeypatch.setenv("HOME", "")
+        with pytest.raises(RuntimeError, match="HOME is not set"):
+            vg.build_cargo_test_env()
 
 
 # ---------------------------------------------------------------------------
@@ -886,6 +937,8 @@ class TestGasMain:
             "create_stream": 1000,
             "withdraw": 500,
             "batch_withdraw": {"small": 200, "large": 800},
+            "bulk_cancel_streams": {"1": 3000, "5": 7000, "10": 12000, "20": 22000},
+            "bulk_resume_streams_as_admin": {"1": 4000, "5": 8000, "10": 14000, "20": 26000},
         })
 
     def test_no_regression_exits_0(self, tmp_path, monkeypatch):
@@ -913,7 +966,11 @@ class TestGasMain:
             vg.subprocess, "run",
             lambda *a, **kw: types.SimpleNamespace(stdout=""),
         )
-        monkeypatch.setattr(vg, "extract_baselines", lambda _: {"create_stream": 1000})
+        monkeypatch.setattr(vg, "extract_baselines", lambda _: {
+            "create_stream": 1000,
+            "bulk_cancel_streams": {"1": 3000, "5": 7000, "10": 12000, "20": 22000},
+            "bulk_resume_streams_as_admin": {"1": 4000, "5": 8000, "10": 14000, "20": 26000},
+        })
         with pytest.raises(SystemExit) as exc:
             vg.main()
         assert exc.value.code == 1
@@ -921,7 +978,11 @@ class TestGasMain:
     def test_missing_baseline_key_shows_missing(self, tmp_path, monkeypatch, capsys):
         # Measured function not in baseline -> printed as MISSING
         self._patch(monkeypatch, tmp_path, {"unknown_fn": 999},
-                    baseline_override={"create_stream": 1000})
+                    baseline_override={
+                        "create_stream": 1000,
+                        "bulk_cancel_streams": {"1": 3000, "5": 7000, "10": 12000, "20": 22000},
+                        "bulk_resume_streams_as_admin": {"1": 4000, "5": 8000, "10": 14000, "20": 26000},
+                    })
         with pytest.raises(SystemExit):
             vg.main()
         assert "MISSING" in capsys.readouterr().out
@@ -1133,6 +1194,20 @@ class TestExtractContractimplEntrypoints:
         )
         result = vda.extract_contractimpl_entrypoints(src)
         assert {"alpha", "beta", "gamma"}.issubset(result)
+
+    def test_multiline_cfg_attr_contractimpl_found(self):
+        src = (
+            "#[cfg_attr(\n"
+            "    not(all(target_arch = \"wasm32\", feature = \"import_only\")),\n"
+            "    contractimpl\n"
+            ")]\n"
+            "impl Foo {\n"
+            "    pub fn init(env: Env) {}\n"
+            "    pub fn withdraw(env: Env) {}\n"
+            "}\n"
+        )
+        result = vda.extract_contractimpl_entrypoints(src)
+        assert {"init", "withdraw"} == result
 
     def test_private_fn_inside_contractimpl_not_returned(self):
         src = (
@@ -1427,9 +1502,11 @@ def _make_audit_files(tmp_path, audit_content=None):
         "# Streaming\n"
         "`init`, `create_stream`, `withdraw`, `upgrade`, `compute_keeper_fee_split`\n"
     )
-    lib_rs, events_rs, error_rs, streaming, events, error = _write_files(
+    lib_rs, events_rs, error_rs, streaming, events, error, audit_path = _write_files(
         tmp_path, streaming=streaming_doc
     )
+    if audit_content is not None:
+        audit_path.write_text(audit_content, encoding="utf-8")
     if audit_content is None:
         audit_content = _AUDIT_DOC_FULL
     # Rewrite lib.rs to contain the contractimpl block with init/withdraw
