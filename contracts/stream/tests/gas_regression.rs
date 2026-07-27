@@ -220,11 +220,12 @@ fn test_batch_withdraw_to_gas() {
 ///
 /// Creates streams, pauses each one (advancing the ledger far enough to
 /// clear the pause cooldown), then resumes them all in a single admin-authed
-/// call.  The O(n²) duplicate-ID scan in `reject_duplicate_ids` dominates the
-/// variable cost at large batch sizes.
+/// call. Batch sizes 1, 5, 10, and 20 mirror the documented gas baseline matrix
+/// so `script/validate_gas.py` can compare each measured cost against
+/// `docs/gas.md`.
 #[test]
 fn test_bulk_resume_streams_as_admin_gas() {
-    let sizes = [1, 10, 50, 100];
+    let sizes = [1, 5, 10, 20];
 
     for &size in &sizes {
         let ctx = TestContext::setup();
@@ -235,7 +236,8 @@ fn test_bulk_resume_streams_as_admin_gas() {
             // Advance past the pause/resume cooldown (17 ledgers) so the
             // subsequent pause succeeds even if the ledger sequence is low.
             ctx.env.ledger().with_mut(|l| l.sequence_number += 32);
-            ctx.client.pause_stream_as_admin(&id, &PauseReason::Administrative);
+            ctx.client
+                .pause_stream_as_admin(&id, &PauseReason::Administrative);
             streams.push_back(id);
         }
 
@@ -251,19 +253,22 @@ fn test_bulk_resume_streams_as_admin_gas() {
             PER_INVOCATION_CPU_BUDGET,
         );
 
-        println!("GAS_MEASUREMENT: bulk_resume_streams_as_admin: {}: {}", size, cost);
+        println!(
+            "GAS_MEASUREMENT: bulk_resume_streams_as_admin: {}: {}",
+            size, cost
+        );
     }
 }
 
 /// Gas regression baseline for `bulk_cancel_streams`.
 ///
 /// Creates active streams owned by the sender then cancels them all in a
-/// single call.  The O(n²) duplicate-ID scan in `reject_duplicate_ids`
-/// contributes the variable-cost component that grows quadratically with
-/// batch size.
+/// single call. Batch sizes 1, 5, 10, and 20 mirror the documented gas
+/// baseline matrix so `script/validate_gas.py` can compare each measured cost
+/// against `docs/gas.md`.
 #[test]
 fn test_bulk_cancel_streams_gas() {
-    let sizes = [1, 10, 50, 100];
+    let sizes = [1, 5, 10, 20];
 
     for &size in &sizes {
         let ctx = TestContext::setup();

@@ -867,6 +867,21 @@ From **CONTRACT_VERSION 5**, senders can optionally set a `withdraw_dust_thresho
     - **Final Drain**: If the withdrawal would result in `withdrawn_amount == deposit_amount` (completing the stream), it is allowed even if the amount is below the threshold.
 - **Default**: The threshold defaults to `0` if not specified at creation.
 
+#### Operation compatibility
+
+| Operation | Dust enforced? | Notes |
+|-----------|----------------|-------|
+| `withdraw` | Yes | Blocked payouts return `0` |
+| `withdraw_to` | Yes | Blocked payouts return `0` |
+| `batch_withdraw` | Yes | Per-stream `amount = 0` when blocked |
+| `batch_withdraw_to` | Yes | Per-stream `amount = 0` when blocked |
+| `delegated_withdraw` | No | Uses signed `expected_minimum_amount` instead |
+| `get_withdrawable` / `get_claimable_at` | No | Views report raw accrual minus withdrawn |
+
+Creation validation: `create_stream_offer` rejects out-of-range thresholds with
+`InvalidDustThreshold` (code 35); direct `create_stream` paths currently do not
+validate bounds (see [dust-threshold.md](./dust-threshold.md)).
+
 > **See also:** [dust-threshold.md](./dust-threshold.md) — formula for choosing a safe threshold value, worked USDC examples, a validation table, and guidance for template authors.
 
 ### Withdrawal Frequency Limit (#574)

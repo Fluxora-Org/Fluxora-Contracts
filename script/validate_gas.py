@@ -5,6 +5,12 @@ import subprocess
 import sys
 from typing import Any, Dict
 
+BULK_BATCH_BASELINE_SIZES = ("1", "5", "10", "20")
+REQUIRED_BULK_BASELINES = {
+    "bulk_cancel_streams": BULK_BATCH_BASELINE_SIZES,
+    "bulk_resume_streams_as_admin": BULK_BATCH_BASELINE_SIZES,
+}
+
 
 def build_cargo_test_env() -> Dict[str, str]:
     """Return subprocess env with ~/.cargo/bin prepended to PATH."""
@@ -24,6 +30,22 @@ def extract_baselines(file_path: str) -> Dict[str, Any]:
         if not match:
             raise ValueError("Could not find gas baseline block in docs/gas.md")
         return json.loads(match.group(1))
+
+def validate_required_baselines(baselines: Dict[str, Any]) -> None:
+    """Ensure CI has every required bulk batch baseline before tests run."""
+    missing = []
+    for func, sizes in REQUIRED_BULK_BASELINES.items():
+        raw = baselines.get(func)
+        if not isinstance(raw, dict):
+            missing.append(f"{func}: all")
+            continue
+        for size in sizes:
+            if size not in raw:
+                missing.append(f"{func}: {size}")
+
+    if missing:
+        joined = ", ".join(missing)
+        raise ValueError(f"Missing required gas baselines: {joined}")
 
 def run_tests() -> str:
     print("Running gas regression tests...")
@@ -52,6 +74,7 @@ def parse_measurements(output: str) -> Dict[str, Dict[str, int]]:
 def main():
     try:
         baselines = extract_baselines('docs/gas.md')
+        validate_required_baselines(baselines)
         output = run_tests()
         measured = parse_measurements(output)
 

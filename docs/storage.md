@@ -44,10 +44,13 @@ pub enum DataKey {
     LastAccrualLedgerTimestamp,
     PausedStreamCount,
     TotalKeeperFeesPaid,
-    SenderStreams(Address),
     AutoRenewEnabled(u64),
+    MaxLookbackLedgers(u64),
+    SenderStreams(Address),
     PendingStreamOffer(u64),
     RecipientPendingOffers(Address),
+    PooledStreamShares(u64),
+    PooledStreamWithdrawn(u64, Address),
 }
 ```
 
@@ -84,10 +87,13 @@ pub enum DataKey {
 | 26 | `LastAccrualLedgerTimestamp` | Instance | `u64` | `current_accrual_timestamp` | `current_accrual_timestamp` |
 | 27 | `PausedStreamCount` | Instance | `u64` | `pause_stream`, `pause_stream_as_admin` | `resume_stream`, `cancel_stream`, `close_completed_stream` |
 | 28 | `TotalKeeperFeesPaid` | Instance | `i128` | `init` | `keeper_cancel` |
-| 29 | `SenderStreams(Address)` | Persistent | `Vec<u64>` (sorted) | `create_stream`, `create_streams` | `close_completed_stream`, `close_cancelled_stream` (removes entry) |
-| 30 | `AutoRenewEnabled(u64)` | Persistent | `bool` | sender opt-in | sender revoke |
-| 31 | `PendingStreamOffer(u64)` | Persistent | `StreamOffer` | `create_stream_offer` | accept/reject/cancel (removes) |
-| 32 | `RecipientPendingOffers(Address)` | Persistent | `Vec<u64>` | `create_stream_offer` | accept/reject/cancel (removes) |
+| 29 | `AutoRenewEnabled(u64)` | Persistent | `bool` | sender opt-in | sender revoke |
+| 30 | `MaxLookbackLedgers(u64)` | Persistent | `u32` | `create_stream_with_lookback` | — |
+| 31 | `SenderStreams(Address)` | Persistent | `Vec<u64>` (sorted) | `create_stream`, `create_streams` | `close_completed_stream`, `close_cancelled_stream` (removes entry) |
+| 32 | `PendingStreamOffer(u64)` | Persistent | `StreamOffer` | `create_stream_offer` | accept/reject/cancel (removes) |
+| 33 | `RecipientPendingOffers(Address)` | Persistent | `Vec<u64>` | `create_stream_offer` | accept/reject/cancel (removes) |
+| 34 | `PooledStreamShares(u64)` | Persistent | `Vec<(Address,u32)>` | pooled stream creation | withdraw / close |
+| 35 | `PooledStreamWithdrawn(u64, Address)` | Persistent | `i128` | pooled withdraw | pooled withdraw (increments) |
 
 ---
 
@@ -332,7 +338,7 @@ V7 appended eight new `DataKey` variants (discriminants 21–28) while preservin
 | 27 | `PausedStreamCount` | Instance | `u64` | Protocol-wide count of streams currently in `StreamStatus::Paused` |
 | 28 | `TotalKeeperFeesPaid` | Instance | `i128` | Aggregate keeper fees paid via `keeper_cancel` |
 
-Code-level invariant verification for all 29 variants is maintained in [`contracts/stream/src/checksum.rs`](../contracts/stream/src/checksum.rs).
+Code-level invariant verification for all 36 variants is maintained in [`contracts/stream/src/checksum.rs`](../contracts/stream/src/checksum.rs).
 
 ### Forward-compatibility guarantee
 

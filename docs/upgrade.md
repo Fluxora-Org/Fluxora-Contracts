@@ -194,7 +194,7 @@ Before interacting with any Fluxora contract instance:
 
 5. **Token address immutability.** The token is fixed at `init` time. A new contract version that needs a different token requires a new `init` call with the new token address — existing streams on the old instance are unaffected.
 
-6. **Machine-checked `CONTRACT_VERSION` vs `DataKey` variant count cross-check.** To prevent version drift when new storage keys are appended, `contracts/stream/tests/storage_key_compat.rs` enforces a machine-checked mapping between `CONTRACT_VERSION` and expected `DataKey` variant count (currently 36 for version 9). Whenever a new `DataKey` variant is appended or `CONTRACT_VERSION` is incremented, developers MUST update:
+6. **Machine-checked `CONTRACT_VERSION` vs `DataKey` variant count cross-check.** To prevent version drift when new storage keys are appended, `contracts/stream/tests/storage_key_compat.rs` enforces a machine-checked mapping between `CONTRACT_VERSION` and expected `DataKey` variant count (currently **36** for version 9). Whenever a new `DataKey` variant is appended or `CONTRACT_VERSION` is incremented, developers MUST update:
    - `expected_datakey_count_for_version()` and `all_live_datakey_variants()` in `contracts/stream/tests/storage_key_compat.rs`
    - Discriminant tables & variant count tests in `contracts/stream/src/checksum.rs`
    - Version history & policy table in `docs/upgrade.md`
@@ -208,6 +208,12 @@ The `.github/workflows/ci.yml` workflow includes a step in all Rust-related jobs
 This is a safety net to prevent "toolchain drift", where a change in the CI environment (e.g., an update to the `dtolnay/rust-toolchain@stable` action) could cause the contract to be built or tested with a different compiler version than is specified in the repository.
 
 The verification is performed by the `script/verify_rust_version.py` script. If a mismatch is detected, the script prints an error and exits with a non-zero status code, failing the CI job. This ensures that all builds and tests are performed with the intended, pinned toolchain. This check is independent of, and a safety net for, any future change to which GitHub Action resolves the toolchain.
+
+### MSRV Cross-Check
+
+To ensure `cargo` enforces the Minimum Supported Rust Version (MSRV) on every invocation (including local developer builds), each crate's `Cargo.toml` (`contracts/stream/Cargo.toml`, `contracts/factory/Cargo.toml`, and `contracts/governance/Cargo.toml`) explicitly declares a `rust-version` field. 
+
+The `tests/test_rust_toolchain_pin.py` test suite asserts that the `rust-version` in each of these `Cargo.toml` manifests matches the pinned channel in `rust-toolchain.toml`, ensuring the MSRV is synchronized across the entire repository.
 
 ---
 
