@@ -126,7 +126,7 @@ export async function dismissRecommendation(
 export async function logClick(
   req: Request,
   res: Response,
-  next: NextFunction
+  _next: NextFunction
 ): Promise<void> {
   try {
     // Extract learnerId from authenticated user

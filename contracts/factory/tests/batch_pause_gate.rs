@@ -89,6 +89,8 @@ fn test_create_streams_batch_paused_enforcement() {
         memo: None,
         metadata: None,
         kind: fluxora_stream::StreamKind::Linear,
+        irrevocable: None,
+        witness: None,
     });
 
     let result_non_empty = ctx.factory.try_create_streams(&ctx.sender, &streams);
@@ -131,6 +133,8 @@ fn test_create_streams_succeeds_when_factory_not_paused() {
         memo: None,
         metadata: None,
         kind: fluxora_stream::StreamKind::Linear,
+        irrevocable: None,
+        witness: None,
     });
 
     // Prove the pause gate is not blocking: an allowlist violation means policy

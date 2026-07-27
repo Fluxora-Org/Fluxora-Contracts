@@ -77,6 +77,8 @@ impl<'a> Ctx<'a> {
                     withdraw_dust_threshold: None,
                     memo: None,
                     metadata: None,
+                    irrevocable: None,
+                    witness: None,
                 }
             ],
         );
