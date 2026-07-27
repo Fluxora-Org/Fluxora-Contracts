@@ -9,6 +9,7 @@ pub(crate) mod events;
 pub(crate) mod storage;
 mod token_check;
 mod types;
+pub mod versioning;
 
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env, Map};
