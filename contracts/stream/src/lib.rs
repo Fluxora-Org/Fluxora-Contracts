@@ -2204,6 +2204,35 @@ impl FluxoraStream {
         end_time: u64,
         kind: StreamKind,
     ) -> Result<(), ContractError> {
+        Self::validate_stream_params_with_self_policy(
+            env,
+            sender,
+            recipient,
+            deposit_amount,
+            rate_per_second,
+            current_ledger_timestamp,
+            start_time,
+            cliff_time,
+            end_time,
+            kind,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn validate_stream_params_with_self_policy(
+        env: &Env,
+        sender: &Address,
+        recipient: &Address,
+        deposit_amount: i128,
+        rate_per_second: i128,
+        current_ledger_timestamp: u64,
+        start_time: u64,
+        cliff_time: u64,
+        end_time: u64,
+        kind: StreamKind,
+        allow_self_recipient: bool,
+    ) -> Result<(), ContractError> {
         // Validate positive amounts (#35)
         if deposit_amount <= 0 {
             return Err(ContractError::InvalidParams);
@@ -2228,8 +2257,10 @@ impl FluxoraStream {
             }
         }
 
-        // Validate sender != recipient (#35)
-        if sender == recipient {
+        // Validate sender != recipient (#35). Pooled streams intentionally use
+        // the sender as the aggregate stream recipient while member shares live
+        // in `DataKey::PooledStreamShares`.
+        if !allow_self_recipient && sender == recipient {
             return Err(ContractError::InvalidParams);
         }
 
@@ -2922,6 +2953,23 @@ impl FluxoraStream {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Create one funded stream that pays multiple recipients pro-rata.
+    ///
+    /// The pool stores a bounded `(recipient, share_weight)` table under
+    /// `DataKey::PooledStreamShares(stream_id)`. Each recipient later calls
+    /// [`withdraw_from_pool`](Self::withdraw_from_pool), which computes the
+    /// stream's total checkpointed accrual and applies the caller's share using
+    /// checked arithmetic. Fractional results are rounded down so no participant
+    /// can withdraw more than their proportional entitlement.
+    ///
+    /// # Security
+    /// - Recipient count is capped by `MAX_POOL_RECIPIENTS` to bound storage and
+    ///   iteration cost.
+    /// - Empty pools, zero-share entries, duplicate recipients, and share-sum
+    ///   overflow are rejected.
+    /// - The sender remains the aggregate `recipient` on the base stream record;
+    ///   individual recipient entitlements are held in pooled-share storage and
+    ///   tracked independently via `DataKey::PooledStreamWithdrawn`.
     pub fn create_pooled_stream(
         env: Env,
         sender: Address,
@@ -2943,7 +2991,17 @@ impl FluxoraStream {
         }
 
         let mut total_shares: u32 = 0;
-        for (_, share) in recipients.iter() {
+        let mut seen_recipients = soroban_sdk::Vec::<Address>::new(&env);
+        for (recipient, share) in recipients.iter() {
+            if share == 0 {
+                return Err(ContractError::InvalidParams);
+            }
+            for seen in seen_recipients.iter() {
+                if seen == recipient {
+                    return Err(ContractError::InvalidParams);
+                }
+            }
+            seen_recipients.push_back(recipient);
             total_shares = total_shares
                 .checked_add(share)
                 .ok_or(ContractError::ArithmeticOverflow)?;
@@ -2957,7 +3015,7 @@ impl FluxoraStream {
             final_rate = 0;
         }
 
-        Self::validate_stream_params(
+        Self::validate_stream_params_with_self_policy(
             &env,
             &sender,
             &sender,
@@ -2968,6 +3026,7 @@ impl FluxoraStream {
             cliff_time,
             end_time,
             kind,
+            true,
         )?;
 
         pull_token(&env, &sender, deposit_amount)?;
@@ -3012,6 +3071,10 @@ impl FluxoraStream {
 
         save_stream(&env, &stream);
         save_pooled_stream_shares(&env, stream_id, &recipients);
+        add_stream_to_sender_index(&env, &sender, stream_id);
+        for (recipient, _) in recipients.iter() {
+            add_stream_to_recipient_index(&env, &recipient, stream_id, Some(end_time));
+        }
 
         let liabilities = read_total_liabilities(&env)
             .checked_add(deposit_amount)
@@ -3863,17 +3926,37 @@ impl FluxoraStream {
         let mut total_shares: u32 = 0;
         for (addr, share) in shares.iter() {
             if addr == caller {
-                caller_share += share;
+                caller_share = caller_share
+                    .checked_add(share)
+                    .ok_or(ContractError::ArithmeticOverflow)?;
             }
-            total_shares += share;
+            total_shares = total_shares
+                .checked_add(share)
+                .ok_or(ContractError::ArithmeticOverflow)?;
         }
 
-        if caller_share == 0 {
+        if caller_share == 0 || total_shares == 0 {
             return Err(ContractError::Unauthorized);
         }
 
-        let global_accrued = Self::calculate_accrued(env.clone(), stream_id)?;
+        let now = current_accrual_timestamp(&env)?;
+        let global_accrued = accrual::calculate_accrued_amount_checkpointed(
+            accrual::CheckpointState {
+                checkpointed_amount: stream.checkpointed_amount,
+                checkpointed_at: stream.checkpointed_at,
+                cliff_time: stream.cliff_time,
+                end_time: stream.end_time,
+                deposit_amount: stream.deposit_amount,
+                kind: stream.kind,
+            },
+            stream.rate_per_second,
+            now,
+        );
 
+        // Round down after applying the share fraction. This prevents any
+        // individual pool member from receiving more than their pro-rata claim;
+        // residual rounding dust remains in the pool until swept/closed by
+        // existing residual handling.
         let caller_accrued = (global_accrued as u128)
             .checked_mul(caller_share as u128)
             .and_then(|val| val.checked_div(total_shares as u128))
@@ -3899,7 +3982,6 @@ impl FluxoraStream {
         }
 
         stream.withdrawn_amount += withdrawable;
-        stream.last_withdraw_ledger = env.ledger().sequence();
         save_pooled_stream_withdrawn(
             &env,
             stream_id,

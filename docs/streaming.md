@@ -2419,13 +2419,64 @@ Fluxora supports multi-recipient pooled streams where multiple beneficiaries rec
 
 ### `create_pooled_stream`
 
-Creates a pooled stream. The `recipients` list takes pairs of `(Address, u32)` defining the recipient and their share weight. The maximum number of recipients is `MAX_POOL_RECIPIENTS` (100). The stream operates similarly to a single-recipient stream, but its `is_pooled` flag is set to true.
+Creates a pooled stream from one sender-funded deposit:
+
+```rust
+create_pooled_stream(
+    env,
+    sender,
+    recipients: Vec<(Address, u32)>,
+    deposit_amount,
+    rate_per_second,
+    start_time,
+    cliff_time,
+    end_time,
+    withdraw_dust_threshold,
+    memo,
+    kind,
+)
+```
+
+Each `recipients` entry is an `(Address, u32)` share-weight pair. Weights do
+not need to sum to 10,000; each member receives `member_weight / total_weight`
+of the pool's accrued amount. The recipient table is stored persistently under
+`DataKey::PooledStreamShares(stream_id)`.
+
+Validation keeps creation cost and accounting predictable:
+
+- The recipient table must be non-empty and no longer than `MAX_POOL_RECIPIENTS` (100).
+- Each share weight must be non-zero.
+- Duplicate recipient addresses are rejected, so each member has one independent withdrawal ledger.
+- The share total is computed with checked arithmetic.
+- Standard stream amount, rate, cliff, start, end, pause, memo, and token-pull validation still applies.
+
+The base `Stream` record is marked with `is_pooled = Some(true)` and uses the
+sender as the aggregate internal recipient. Individual beneficiary rights live
+only in the pooled-share table, and recipients are also indexed in
+`RecipientStreams` for discoverability.
 
 ### `withdraw_from_pool`
 
-Withdrawals from a pooled stream are independent. When a recipient calls `withdraw_from_pool(stream_id, caller)`, the contract calculates the total accrued tokens and multiplies by the caller's proportional share `(caller_share / total_shares)`. The contract independently tracks withdrawn amounts for each pool member using `DataKey::PooledStreamWithdrawn`.
+Withdrawals from a pooled stream are independent. When a recipient calls
+`withdraw_from_pool(stream_id, caller)`, the contract:
 
-**Rounding:** The calculation uses strict integer math (`checked_mul` followed by `checked_div`), rounding down on remainders to avoid over-withdrawing the pool's deposit.
+- Requires authorization from `caller`.
+- Verifies the stream is pooled and active or terminal-withdrawable.
+- Walks the bounded share table to find the caller's share.
+- Uses `accrual::calculate_accrued_amount_checkpointed` to compute total pool accrual.
+- Applies the caller's fraction with `checked_mul` followed by `checked_div`.
+- Subtracts the caller's prior withdrawals from `DataKey::PooledStreamWithdrawn(stream_id, caller)`.
+
+**Rounding:** Integer division rounds down. This intentionally favors the pool
+over any single member and prevents over-paying a recipient. Small residual
+rounding dust may remain in the contract until existing close/sweep handling is
+used.
+
+**Security notes:** Pooled withdrawal stores per-recipient withdrawn amounts,
+but keeps aggregate `stream.withdrawn_amount` updated for lifecycle and
+liability accounting. No internal query text, off-chain data, or private
+metadata is exposed by pooled accounting; only addresses and integer shares
+provided by the sender are persisted.
 
 
 ## Additional view entrypoints (v9+)
