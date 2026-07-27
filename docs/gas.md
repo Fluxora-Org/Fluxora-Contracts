@@ -47,6 +47,39 @@ If a deliberate, reviewed feature addition requires more space:
 4. Update the table above with the new value and a note explaining the change.
 5. Include the change in the PR description.
 
+### Per-PR Delta Reporting
+
+Every build also compares the current WASM sizes against the **previous release tag**
+(most recent `v*` tag) and prints a byte-delta for each contract. This makes incremental
+bloat from individual PRs visible immediately, without waiting for the absolute ceiling
+to be approached.
+
+**How it works:**
+
+1. The script finds the most recent `v*` tag in the repository.
+2. For each contract, it reads the WASM file size at that tag from git history.
+3. It computes `current_size - previous_size` and prints the result.
+4. In GitHub Actions CI, `::warning::` annotations are emitted when a contract grows
+   and `::notice::` annotations when it shrinks. These annotations appear on the PR
+   timeline **without failing the build** (budget enforcement still runs independently).
+
+**Example output:**
+
+```
+Previous release tag: v0.9.0
+  vs v0.9.0: +1234 bytes (+1.2 KiB) (was 200000 / 195.3 KiB)
+fluxora_stream: 201234 bytes (196.5 KiB) — OK (headroom: 60.9 KiB)
+```
+
+**Edge cases:**
+
+- **No release tag exists**: Delta reporting is skipped with an informational message.
+- **Previous tag has no WASM file**: The delta is reported as "baseline unavailable".
+- **Budget exceeded**: Delta is still reported even when the contract fails the budget check.
+
+**Step summary:** When running in CI (`GITHUB_STEP_SUMMARY` is set), the script writes
+a delta table to the GitHub Actions step summary alongside the budget report.
+
 ### Optimize step
 
 `stellar contract optimize` runs `wasm-opt -Oz` on the artifact, typically reducing binary
@@ -89,17 +122,17 @@ The following table provides the CPU instruction counts for core operations.
 
 <!-- GAS_BASELINE_START -->
 {
-  "create_stream": 513118,
-  "withdraw": 521676,
+  "create_stream": 568292,
+  "withdraw": 562057,
   "batch_withdraw": {
-    "1": 498415,
-    "10": 3466576,
-    "50": 18786049,
-    "100": 43337495
+    "1": 531125,
+    "10": 3675044,
+    "50": 19844037,
+    "100": 45453389
   },
   "keeper_cancel": {
-    "partial_accrual": 0,
-    "fully_accrued": 0
+    "partial_accrual": 786739,
+    "fully_accrued": 386889
   }
 }
 <!-- GAS_BASELINE_END -->
@@ -326,3 +359,85 @@ Stream creators can use the break-even formula to reason about keeper incentives
 - Formal proofs that `keeper_fee + protocol_remainder == gross` (conservation) and
   that `checked_mul(KEEPER_FEE_BPS)` cannot overflow are described in
   [docs/formal-verification.md](formal-verification.md#keeper-fee-conservation-proofs-new).
+
+---
+
+## Stream Persistent-Entry Size
+
+Every `Stream` struct is written to a Soroban **persistent** ledger entry.  Soroban charges
+rent proportional to the serialized byte size of each entry, so unchecked growth of any
+caller-controlled field inflates the per-stream rent cost for the entire protocol.
+
+### Field breakdown (worst case)
+
+| Category | Fields | Approx. XDR bytes |
+|---|---|---|
+| Fixed scalars | `stream_id` (u64), 3 × i128 amounts, 3 × i128 checkpoints, 3 × u32 ledger stamps, `delegation_depth` (u32) | ~120 |
+| Fixed addresses | `sender`, `recipient` (each 36 bytes) | ~72 |
+| Enum fields | `status` (StreamStatus), `kind` (StreamKind) | ~8 |
+| Optional scalars | `cancelled_at` (Option\<u64\>), `is_pooled` (Option\<bool\>), `irrevocable` (Option\<bool\>), `parent_stream_id` (Option\<u64\>) | ~30 |
+| Optional addresses | `claim_owner` (Option\<Address\>), `witness` (Option\<Address\>) | ~74 |
+| **`memo`** (caller-controlled) | `Option<Bytes>` capped at `MAX_MEMO_BYTES` = 256 | **~268** |
+| **`metadata`** (caller-controlled) | `Option<Map<Bytes,Bytes>>` capped at `MAX_METADATA_BYTES` = 512 aggregate + ScMap framing for up to 8 entries | **~680** |
+| ScVal type tags + XDR padding | per-field overhead from Soroban encoding | ~100 |
+| **Structural total** | | **~1 352** |
+
+### Measured baselines
+
+These values are printed by the regression tests in
+`contracts/stream/tests/gas_regression.rs` (run with `--nocapture`).  Update this
+table whenever the constant or test output changes.
+
+| Variant | Serialized bytes | Test name |
+|---|---|---|
+| Baseline (no optional fields) | ~480 | `test_stream_entry_xdr_size_baseline` |
+| Memo only (`MAX_MEMO_BYTES` = 256 B) | ~760 | `test_stream_entry_xdr_size_memo_only` |
+| Metadata only (`MAX_METADATA_BYTES` = 512 B) | ~1 160 | `test_stream_entry_xdr_size_metadata_only` |
+| **Worst case (memo + metadata + all optionals)** | **~1 352** | `test_stream_entry_xdr_size_worst_case` |
+
+> The values above are estimates derived from the field breakdown.  Run
+> `cargo test -p fluxora_stream --test gas_regression -- --nocapture` to capture
+> the exact figures printed by the tests and update this table.
+
+### Ceiling constant
+
+```rust
+pub const MAX_STREAM_ENTRY_BYTES: usize = 4_096;  // lib.rs
+```
+
+The ceiling is **4 096 bytes** — a ~2.9× safety margin above the ~1 352-byte worst-case
+structural total.  The generous margin accounts for:
+
+- Future additive fields that do not require a `CONTRACT_VERSION` bump
+- Soroban ScVal type tags, XDR padding, and length prefixes that vary by SDK version
+- Host-side encoding overhead not directly observable from Rust test code
+
+### Enforcement
+
+The constant is enforced by:
+
+```bash
+cargo test -p fluxora_stream --test gas_regression -- --nocapture
+```
+
+Four tests run and each asserts `serialized_len <= MAX_STREAM_ENTRY_BYTES`:
+
+| Test | What it covers |
+|---|---|
+| `test_stream_entry_xdr_size_worst_case` | All optional fields at maximum size |
+| `test_stream_entry_xdr_size_baseline` | No optional fields (lower bound) |
+| `test_stream_entry_xdr_size_memo_only` | Only `memo` at `MAX_MEMO_BYTES` |
+| `test_stream_entry_xdr_size_metadata_only` | Only `metadata` at `MAX_METADATA_BYTES` |
+
+### How to update the ceiling
+
+If the `Stream` struct gains new fields and the regression test fails:
+
+1. Run `cargo test -p fluxora_stream --test gas_regression -- --nocapture` and note
+   the printed `STREAM_XDR_SIZE: worst_case: N bytes` value.
+2. Add **~25% headroom**, round up to the next 512-byte boundary.
+3. Update `MAX_STREAM_ENTRY_BYTES` in `contracts/stream/src/lib.rs`.
+4. Update the measured-baselines table above with the new figures.
+5. Confirm the `CONTRACT_VERSION` policy in `lib.rs` has been followed for the
+   struct change (additive fields require a version bump).
+6. Include the change in the PR description with an explicit justification.

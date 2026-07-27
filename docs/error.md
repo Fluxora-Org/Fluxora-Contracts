@@ -34,19 +34,23 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `TemplateNotFound` | 20 | Requested stream template does not exist | `get_stream_template`, `create_stream_from_template`, `delete_stream_template` |
 | `TemplateLimitExceeded` | 21 | Per-owner or global template limit would be exceeded | `register_stream_template` |
 | `TemplateUnauthorized` | 22 | Caller is not authorized to delete a template | `delete_stream_template` |
-| `TokenVerificationFailed` | 23 | Token contract does not expose the expected SEP-41 interface during init | `init` |
+| `PauseReasonTooLong` | 23 | Pause reason string exceeds `MAX_PAUSE_REASON_BYTES` | `pause_protocol` |
 | `ReservationNotFound` | 24 | No ID reservation exists for the specified holder | `release_id_reservation`, `reclaim_expired_id_reservation` |
 | `ReservationStillActive` | 25 | Reservation has not yet expired and cannot be reclaimed | `reclaim_expired_id_reservation` |
 | `ReservationNotExpirable` | 26 | Reservation has no expiry and cannot be reclaimed | `reclaim_expired_id_reservation` |
-| `ReservationAlreadyActive` | 34 | A reservation is already active for this caller | `reserve_stream_ids` |
 | `PauseReasonTooLong` | 27 | Pause reason string exceeds `MAX_PAUSE_REASON_BYTES` | `pause_protocol` |
 | `ClockRegression` | 28 | Ledger-backed accrual observed a timestamp lower than the previous accrual timestamp | `calculate_accrued`, `get_withdrawable`, `withdraw`, `withdraw_to`, `batch_withdraw`, `batch_withdraw_to`, rate changes, `cancel_stream`, auto-claim paths |
 | `MetadataTooLarge` | 29 | Stream metadata exceeds size limits | `create_stream`, `create_streams`, `create_streams_partial` |
 | `RateCapExceeded` | 30 | Rate per second exceeds the configured maximum | `create_stream`, `update_rate_per_second` |
 | `PauseCooldownActive` | 32 | Stream pause cooldown period is still active | `pause_stream` |
 | `WithdrawalTooFrequent` | 33 | Withdrawal attempted before minimum interval elapsed | `withdraw`, `delegated_withdraw`, `batch_withdraw` |
-| `KeeperGracePeriodNotElapsed` | 34 | Keeper cancellation grace period has not elapsed | `keeper_cancel` |
+| `ReservationAlreadyActive` | 34 | A reservation is already active for this caller | `reserve_stream_ids` |
 | `InvalidDustThreshold` | 35 | Withdraw dust threshold is negative or exceeds deposit amount | `create_stream`, `create_streams`, `create_streams_partial`, `create_stream_relative`, `create_stream_from_template` |
+| `AutoRenewFundingUnavailable` | 36 | The sender cannot fund an auto-renewal with the available balance and allowance | `renew_stream` |
+| `OfferNotFound` | 37 | Stream offer not found (accepted, rejected, cancelled, or never existed) | `accept_stream_offer`, `reject_stream_offer`, `cancel_stream_offer`, `get_stream_offer` |
+| `OfferExpired` | 38 | Stream offer `expiry_time` has passed at acceptance | `accept_stream_offer` |
+| `OfferWrongRecipient` | 39 | Caller is not the intended recipient of this offer | `accept_stream_offer`, `reject_stream_offer` |
+| `OfferWrongSender` | 40 | Caller is not the original sender who created this offer | `cancel_stream_offer` |
 
 Non-error enum values used by stream creation and accrual:
 
@@ -54,6 +58,7 @@ Non-error enum values used by stream creation and accrual:
 |------|-------|---------|
 | `Linear` | 0 | A `StreamKind` that accrues continuously over time after the start time. |
 | `CliffOnly` | 1 | A `StreamKind` that unlocks the full deposit at the cliff time in one step. |
+| `CliffSlope` | 2 | A `StreamKind` that accrues linearly from cliff_time to end_time, and nothing before. |
 
 ---
 
@@ -617,7 +622,7 @@ match client.try_delegated_withdraw(&relayer, &stream_id, &signature, &nonce, &e
 
 ---
 
-### ClockRegression (28)
+### ClockRegression (27)
 
 **Definition**: Ledger-backed accrual observed a ledger timestamp lower than the previous accrual timestamp stored for the contract instance.
 
@@ -679,7 +684,7 @@ match client.try_delegated_withdraw(&relayer, &stream_id, &signature, &nonce, &e
 
 ---
 
-### TokenVerificationFailed (23)
+### TokenVerificationFailed (88)
 
 **Definition**: During initialization, the configured token contract did not expose the expected SEP-41 interface.
 
@@ -687,7 +692,7 @@ match client.try_delegated_withdraw(&relayer, &stream_id, &signature, &nonce, &e
 
 ---
 
-### PauseReasonTooLong (27)
+### PauseReasonTooLong (23)
 
 **Definition**: `pause_protocol` received a reason string longer than `MAX_PAUSE_REASON_BYTES`.
 
@@ -728,6 +733,48 @@ match client.try_create_stream(..., &withdraw_dust_threshold, ...) {
 **Integrator Note**: The dust threshold enforces a minimum withdrawable amount to prevent dust accumulation. The threshold must be in the range `[0, deposit_amount]`. When `withdraw_dust_threshold == deposit_amount`, withdrawals are only allowed when the full deposit is withdrawable (e.g., at stream end or after final drain).
 
 ---
+
+### AutoRenewFundingUnavailable (36)
+
+**Definition**: The sender on a stream opted-in to auto-renewal via `set_auto_renew` does not currently have sufficient token balance or allowance to fund a fresh deposit for the renewal.
+
+**Trigger Conditions**:
+
+| Condition | Detection |
+|-----------|-----------|
+| `token.balance(stream.sender) < stream.deposit_amount` | Token client balance read returns less than the required deposit |
+| `token.allowance(stream.sender, contract_address) < stream.deposit_amount` | Token client allowance read returns less than the required deposit |
+
+Either condition causes `renew_stream` to revert before any state mutation or token transfer is attempted, preserving CEI ordering.
+
+**Affected Roles**:
+
+| Role | Can Trigger | Notes |
+|------|------------|-------|
+| Anyone | Yes | `renew_stream` is permissionless once a sender has opted the stream in via `set_auto_renew` |
+| Sender | Yes | Same path; the renewal precondition involves reading the sender's own balance and allowance |
+| Admin | No | Admin cannot pre-fund another sender's renewal balance/allowance through this path |
+
+**Client Action**:
+
+```rust
+match client.try_renew_stream(&stream_id) {
+    Ok(new_stream_id) => { /* success — fresh deposit wired and old stream archived */ }
+    Err(ContractError::AutoRenewFundingUnavailable) => {
+        // The opted-in sender (or topology: anyone triggering the renewal on their behalf)
+        // must refill balance OR increase allowance before retrying.
+        let token_client = soroban_sdk::token::Client::new(&env, &token_address);
+        let balance    = token_client.balance(&stream.sender);
+        let allowance  = token_client.allowance(&stream.sender, &env.current_contract_address());
+        // Notify the sender with the shortfall; expose both numbers for fast UI display.
+    }
+    Err(e) => { /* handle other errors */ }
+}
+```
+
+**Success Semantics**: Returns the newly created `stream_id` from the renewal transaction; the old stream transitions to `Completed` and a `StreamRenewed` event is emitted correlating the two IDs.
+
+**Integrator Note**: This error is **recoverable**. The opt-in survives across failures, so once the sender tops up balance and/or bumps allowance, any caller (including the original sender) can re-invoke `renew_stream` without re-registering the opt-in. Treat surfacing this error to the opted-in sender as a strong signal to surface the current `balance`/`allowance` shortfall inline in the UI; do not auto-retry with exponential backoff because the precondition can only be fixed by an explicit on-chain action by the sender.
 
 ## Previously Panicking Paths (Now Structured Errors)
 
@@ -837,12 +884,14 @@ must be appended at the end so existing on-chain error mappings stay byte-identi
 | 8 | `InvalidCliff` | `cliff_time < start_time` OR `cliff_time > end_time` (cliff must be inside the inclusive start/end window) | `create_stream`, `create_streams` |
 | 9 | `CreationPaused` | `DataKey::CreationPaused == true` (factory-level pause); checked first, before any policy/allowlist read | `create_stream`, `create_streams` |
 | 10 | `StreamContractPaused` | Downstream `FluxoraStream` returned `ContractError::ContractPaused` (creation pause active on the stream contract) | `create_stream` |
-| 11 | `StreamContractError` | **Cross-contract failure wrapper**: downstream `FluxoraStream` rejected creation for any other reason (typed error OR transport-level panic). Also reused by `set_rate_bounds` when `min`/`max` are negative or `min > max`. See [Wrapper Semantics](#streamcontracterror-11-wrapper-semantics) below. | `create_stream` (catch-all), `set_rate_bounds` |
+| 11 | `StreamContractError` | **Cross-contract failure wrapper**: downstream `FluxoraStream` rejected creation for any other reason (typed error OR transport-level panic). See [Wrapper Semantics](#streamcontracterror-11-wrapper-semantics) below. | `create_stream` (catch-all) |
 | 12 | `RateBelowMin` | `rate_per_second < MinRatePerSecond` and a min bound is configured (bounds are inclusive) | `create_stream`, `create_streams` |
 | 13 | `RateAboveMax` | `rate_per_second > MaxRatePerSecond` and a max bound is configured (bounds are inclusive) | `create_stream`, `create_streams` |
 | 14 | `InvalidCap` | `max_deposit <= 0`; accepted range is `1..=i128::MAX` | `init`, `set_cap` |
 | 15 | `InvalidMinDuration` | `min_duration > MAX_MIN_DURATION_SECONDS` (≈ 3_153_600_000, i.e. 100 years × 365 days); accepted range is `0..=MAX_MIN_DURATION_SECONDS` | `init`, `set_min_duration` |
 | 16 | `InvalidMemo` | `memo.len() > fluxora_stream::MAX_MEMO_BYTES` | `create_stream`, `create_streams` |
+| 17 | `InvalidStreamContract` | Supplied `stream_contract` address did not respond to `FluxoraStream::version()` smoke check | `init`, `set_stream_contract` |
+| 18 | `InvalidRateBounds` | `set_rate_bounds` received an invalid configuration (negative bound, or `min > max`) | `set_rate_bounds` |
 
 **Range constants referenced above:**
 

@@ -209,6 +209,28 @@ Comprehensive deterministic event snapshot tests asserting exact topics and payl
 | Paused → Paused          | ❌ No  | ✅       | `test_pause_already_paused_panics`                   |
 | Active → Active (resume) | ❌ No  | ✅       | `test_resume_active_stream_panics`                   |
 
+## Health Matrix (get_stream_health) Coverage
+
+`contracts/stream/tests/health_matrix.rs` exercises `get_stream_health` across the
+stream lifecycle states. This section reconciles what the doc previously implied
+against what `health_matrix.rs` actually asserts (reconciliation for issue #898).
+
+| Stream state under test                       | Test in `health_matrix.rs`                              | Documented? | Status        |
+| --------------------------------------------- | ------------------------------------------------------- | ----------- | ------------- |
+| Active, fully funded, before cliff           | `test_health_matrix_active_fully_funded_before_cliff`   | Partial     | COVERED      |
+| Active, underfunded mid-stream               | `test_health_matrix_active_underfunded_mid`            | Partial     | COVERED      |
+| Paused, underfunded mid-stream               | `test_health_matrix_paused_underfunded_mid`            | Partial     | COVERED      |
+| Expired, not fully withdrawn                 | `test_health_matrix_expired_not_fully_withdrawn`       | Partial     | COVERED      |
+| Completed after end (post-withdraw)          | `test_health_matrix_completed_after_end`               | Partial     | COVERED      |
+| Cancelled mid-stream                        | `test_health_matrix_cancelled_mid`                     | Partial     | COVERED      |
+| Before start (ledger < start_time)           | `test_health_matrix_before_start`                      | No          | COVERED (new)|
+
+**Reconciliation outcome:** every lifecycle state surfaced by `get_stream_health` is
+now asserted by a dedicated test. The previously undocumented `before start` cell is
+closed by `test_health_matrix_before_start`. Larger gaps elsewhere in this matrix
+(batch creation, recipient index) remain documented as `Needs dedicated test` and are
+out of scope for this issue.
+
 ## Coverage Summary
 
 ### Overall Statistics

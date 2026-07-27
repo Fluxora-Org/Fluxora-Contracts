@@ -41,7 +41,8 @@
 extern crate std;
 
 use fluxora_stream::{
-    ContractError, FluxoraStream, FluxoraStreamClient, PauseReason, StreamKind, StreamStatus,
+    ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, PauseReason, StreamKind,
+    StreamStatus,
 };
 use proptest::prelude::*;
 use soroban_sdk::{
@@ -128,15 +129,20 @@ impl TestContext {
         self.env.ledger().set_timestamp(0);
         self.client().create_stream(
             &self.sender,
-            &self.recipient,
-            &deposit,
-            &rate,
-            &0u64,
-            &cliff,
-            &end,
-            &0i128,
-            &None,
-            &kind,
+            &CreateStreamParams {
+                recipient: self.recipient.clone(),
+                deposit_amount: deposit,
+                rate_per_second: rate,
+                start_time: 0u64,
+                cliff_time: cliff,
+                end_time: end,
+                withdraw_dust_threshold: Some(0i128),
+                memo: None,
+                metadata: None,
+                kind: kind,
+                irrevocable: None,
+                witness: None,
+            },
         )
     }
 }
@@ -496,12 +502,14 @@ fn decrease_rate_per_second_reduces_total_liabilities_by_refund_amount() {
     // remaining = 1000 - 100 = 900.
     // new_deposit = 200 + 1 * 900 = 1100.
     // refund = 3000 - 1100 = 1900.
-    ctx.client()
-        .decrease_rate_per_second(&stream_id, &1i128);
+    ctx.client().decrease_rate_per_second(&stream_id, &1i128);
 
     let sender_after = ctx.sender_balance();
     let actual_refund = sender_after - sender_before;
-    assert_eq!(actual_refund, 1_900, "refund must equal old_deposit - new_deposit");
+    assert_eq!(
+        actual_refund, 1_900,
+        "refund must equal old_deposit - new_deposit"
+    );
 
     let liabilities_after = ctx.client().get_total_liabilities();
     assert_eq!(

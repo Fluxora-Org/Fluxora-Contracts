@@ -45,4 +45,4 @@ test = false
 [[test]]
 name = "adversarial_auth"
 path = "tests/adversarial_auth.rs"
-test = false
+required-features = ["testutils"]

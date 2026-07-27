@@ -44,8 +44,13 @@ Notes:
 | AutoClaimSet | `["ac_set", stream_id: u64]` | `AutoClaimSet { stream_id: u64, destination: Address }` | When a recipient configures or changes a permissionless final-claim destination via `set_auto_claim`. |
 | AutoClaimRevoked | `["ac_revoke", stream_id: u64]` | `AutoClaimRevoked { stream_id: u64 }` | When a recipient revokes auto-claim configuration via `revoke_auto_claim`. |
 | AutoClaimTriggered | `["ac_trig", stream_id: u64]` | `AutoClaimTriggered { stream_id: u64, destination: Address, amount: i128 }` | When a third party successfully executes a configured final claim via `trigger_auto_claim`. |
-| MigrationCheckpoint | `["migrated"]` | `(from_version: u32, to_version: u32, timestamp: u64)` | When `migration_v5_to_v6` is called as an auditable deployment checkpoint. |
+| MigrationCheckpoint | `["migrated"]` | `(from_version: u32, to_version: u32, timestamp: u64)` | No function currently emits this event. Reserved for future migration checkpoints. |
 | ReservationReleased | `["res_rel", holder: Address]` | `(start_id: u64, count: u64, consumed: u64, reclaimed: u64)` | When a stream ID reservation is voluntarily released or reclaimed after expiry. |
+| ClaimOwnershipTransferred | `["claim_own", stream_id: u64]` | `ClaimOwnershipTransferred { stream_id: u64, old_owner: Address, new_owner: Address }` | When claim ownership of a stream is transferred. |
+| ShareDelegated | `["del_share", stream_id: u64]` | `ShareDelegated { stream_id: u64, delegate: Address, share_bps: u32 }` | When a recipient delegates a percentage yield share. |
+| OfferCreated | `["offr_crt", offer_id: u64]` | `OfferCreated { offer_id: u64, sender: Address, recipient: Address }` | When a stream creation offer is created. |
+| OfferAccepted | `["offr_acc", offer_id: u64]` | `OfferAccepted { offer_id: u64, stream_id: u64 }` | When a stream creation offer is accepted. |
+| OfferCancelled | `["offr_cxl", offer_id: u64]` | `OfferCancelled { offer_id: u64 }` | When a stream creation offer is cancelled or rejected. |
 | ContractUpgraded | `["upgraded"]` | `ContractUpgraded { new_wasm_hash: BytesN<32>, new_version: u32, upgraded_at: u64, upgraded_by: Address }` | When the admin successfully calls `upgrade`. A second, legacy `["upgrade"]` topic event `(new_wasm_hash, old_version, new_version, admin)` is also emitted for backward compatibility with older indexers. |
 
 **Additional topics (validator):** `cloned`, `kp_cncl`, `gl_pause`, `gl_resume`, `rate_dec`, `tmpl_def`, `hlth_chg`, `ex_swept`, `ac_set`, `ac_revoke`, `ac_trig`, `renewed`, `migrated`, `res_rel`.
@@ -484,6 +489,8 @@ The `remaining_balance` and `seconds_remaining` fields allow precise monitoring 
 
 - Use `topics[0]` to filter by event type; use `topics[1]` to get the `stream_id`
   for all stream-level events.
+- **v9 breaking event-payload change**: Starting from `CONTRACT_VERSION = 9`, the `amount` field on a `Withdrawal` event emitted by `delegated_withdraw` reports the **recipient's net amount** (`gross_withdrawable − relayer_fee`), **not** the gross withdrawable total. Indexers, dashboards, and accounting pipelines built against pre-v9 fixtures need to recompute against this new semantics, otherwise they will under-report by `relayer_fee`. The `Withdrawal.amount` from
+  plain `withdraw` / `withdraw_to` / `batch_withdraw` paths is **unchanged** (still equals the amount transferred). Only the `delegated_withdraw` path now reports the net.
 - For `Withdrawal` and `WithdrawalTo`, the `amount` field is `i128` — use a
   big-int library that supports 128-bit signed integers.
 - `StreamCompleted` is emitted on the **same call** as the final `Withdrawal` that drains
@@ -604,9 +611,17 @@ Commit message suggestion: `docs: add event schema and topics for indexers`
 | `set_auto_claim`                                             | `"ac_set"`      |
 | `trigger_auto_claim`                                         | `"ac_trig"`     |
 | `sweep_excess`                                               | `"ex_swept"`    |
-| `migrate_recipient_index`                                    | `"migrated"`    |
 | `keeper_cancel`                                              | `"kp_cncl"`     |
 | `decrease_rate_per_second`, `shorten_stream_end_time`, `top_up_stream`, `cancel_stream` | `"hlth_chg"` |
 
 If you change event topics or payloads in the contract, update this document and
 include updated example snapshots in the PR.
+
+
+## Additional event topics
+
+- `claim_own`: Emitted when claim ownership is transferred via `transfer_claim_ownership`.
+- `del_share`: Emitted when a recipient delegates a share of their yield via `delegate_recipient_share`.
+- `offr_acc`: Emitted when a `StreamOffer` is accepted by its recipient.
+- `offr_crt`: Emitted when a `StreamOffer` is created by a sender.
+- `offr_cxl`: Emitted when a `StreamOffer` is cancelled by the sender or rejected by the recipient.
