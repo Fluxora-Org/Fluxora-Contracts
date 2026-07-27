@@ -710,19 +710,25 @@ pub(crate) fn push_token(env: &Env, to: &Address, amount: i128) -> Result<(), Co
 // Metadata validation (issue #580)
 // ---------------------------------------------------------------------------
 
-/// Validate an optional per-stream metadata map against all size bounds.
+/// Validate a per-stream metadata map against all size bounds.
 ///
-/// Called from `persist_new_stream` / `persist_new_stream_skip_index` before any
-/// state is written, so a violation never allocates a stream ID.
+/// Called from stream creation paths (`persist_new_stream`, offer creation, etc.)
+/// **before** any stream ID is allocated or tokens are transferred. A violation
+/// therefore never leaves partial state.
 ///
-/// # Invariants checked
-/// - `metadata.len() <= MAX_METADATA_KEYS`
-/// - each key length <= `MAX_METADATA_KEY_BYTES`
-/// - each value length <= `MAX_METADATA_VALUE_BYTES`
-/// - aggregate (sum of all key lengths + all value lengths) <= `MAX_METADATA_BYTES`
+/// # Validation order
+/// 1. Key count `<= MAX_METADATA_KEYS` (8)
+/// 2. Per entry: key length `<= MAX_METADATA_KEY_BYTES` (32)
+/// 3. Per entry: value length `<= MAX_METADATA_VALUE_BYTES` (128)
+/// 4. Running sum of all key + value bytes `<= MAX_METADATA_BYTES` (512)
+///
+/// # Immutability
+/// Metadata validated here is stored on the `Stream` struct and is never modified
+/// by subsequent operations. See [`docs/metadata-extension.md`](../../../docs/metadata-extension.md)
+/// for the full operation compatibility matrix.
 ///
 /// # Errors
-/// Returns `ContractError::MetadataTooLarge` on any bound violation.
+/// Returns [`ContractError::MetadataTooLarge`] on any bound violation.
 pub(crate) fn validate_metadata(
     metadata: &Map<soroban_sdk::Bytes, soroban_sdk::Bytes>,
 ) -> Result<(), ContractError> {

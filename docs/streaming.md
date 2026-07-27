@@ -32,6 +32,9 @@ No hidden rules or implementation details are required to understand protocol be
 
 ### Per-stream metadata (TLV extension, CONTRACT_VERSION 4)
 
+> **Full reference:** [metadata-extension.md](./metadata-extension.md) — bounds table,
+> validation order, compatibility matrix, upgrade notes, and regression commands.
+
 From **CONTRACT_VERSION 4**, every stream may carry an optional bounded key-value map
 (`metadata: Option<Map<Bytes, Bytes>>`) for rich integration data such as invoice IDs,
 project codes, and external reference URIs.
@@ -77,6 +80,11 @@ and which are unaffected (metadata is not read or written):
 | `top_up_stream` | Unchanged — only `deposit_amount` is modified. |
 | `update_rate_per_second` / `decrease_rate_per_second` | Unchanged — rate fields are modified; metadata is untouched. |
 | `extend_stream_end_time` | Unchanged — `end_time` and `deposit_amount` are modified. |
+| `shorten_stream_end_time` | Unchanged — schedule fields modified; metadata untouched. |
+| `create_stream_offer` | **Set on offer** — validated and stored on pending offer. |
+| `accept_stream_offer` | **Copied** — offer metadata becomes stream metadata. |
+| `reject_stream_offer` / `cancel_stream_offer` | Unaffected — no stream created. |
+| `set_auto_renew` / `get_auto_renew` | Unchanged — auto-renew flag only. |
 | `transfer_sender` | Unchanged — only the `sender` field is rotated. |
 | `update_recipient` | Unchanged — only the `recipient` field is rotated. |
 | `delegate_recipient_share` | Unchanged — delegation splits the rate, not metadata. |
