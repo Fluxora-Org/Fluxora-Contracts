@@ -2,7 +2,7 @@
 use fluxora_stream::{
     CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamKind, MAX_MEMO_BYTES,
     MAX_METADATA_BYTES, MAX_METADATA_KEYS, MAX_METADATA_KEY_BYTES, MAX_METADATA_VALUE_BYTES,
-    MAX_STREAM_ENTRY_BYTES,
+    MAX_STREAM_ENTRY_BYTES, WithdrawToParam, PauseReason,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},

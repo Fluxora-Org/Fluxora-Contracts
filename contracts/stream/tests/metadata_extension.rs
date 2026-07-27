@@ -1,5 +1,4 @@
 extern crate std;
-extern crate std;
 
 // Comprehensive tests for per-stream metadata TLV extension (issue #580).
 //
