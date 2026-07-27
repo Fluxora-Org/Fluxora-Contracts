@@ -80,7 +80,11 @@ class TestMain:
     @patch("script.validate_gas.sys.exit")
     def test_main_no_regressions(self, mock_exit, mock_baselines, mock_run_tests):
         """Test successful validation with no regressions."""
-        mock_baselines.return_value = {"transfer": 2000}
+        mock_baselines.return_value = {
+            "transfer": 2000,
+            "bulk_cancel_streams": {"1": 3000, "5": 7000, "10": 12000, "20": 22000},
+            "bulk_resume_streams_as_admin": {"1": 4000, "5": 8000, "10": 14000, "20": 26000},
+        }
         mock_run_tests.return_value = "GAS_MEASUREMENT: transfer: single: 1900"
         main()
         mock_exit.assert_called_with(0)

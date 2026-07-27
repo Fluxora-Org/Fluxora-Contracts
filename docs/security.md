@@ -651,3 +651,164 @@ If a stream is cancelled after opt-in, `trigger_auto_claim` returns `ContractErr
 ### Storage key isolation
 
 Auto-claim destinations are stored under `DataKey::AutoClaimDestination(stream_id)` (discriminant 6), a separate persistent key from `DataKey::Stream(stream_id)` (discriminant 2). There is no cross-stream interference.
+
+---
+
+## Comprehensive Security Checklist
+
+This checklist cross-references every security-relevant property of the stream
+contract against its verification in `contracts/stream/tests/security_invariants.rs`,
+the maintainer checklist (`docs/maintainer-security-checklist.md`), and the audit
+register (`docs/audit.md`).
+
+Use this as the entry point for any security review. Each item is either
+covered by an automated test, a documented invariant, or an explicit risk
+acceptance.
+
+### Legend
+
+| Marking | Meaning |
+|---------|---------|
+| ✅ Test | Validated by an automated test in `tests/security_invariants.rs` |
+| ✅ Doc  | Documented in a referenced doc file (manual review required) |
+| ✅ Both | Both automated test and documentation exist |
+| ⚠️ Manual | Requires manual reviewer verification (no automated test) |
+| 🔒 Accepted | Risk accepted by design (documented rationale) |
+
+### 1. CEI Pattern (Checks-Effects-Interactions)
+
+| # | Property | Coverage | Verification |
+|---|----------|----------|-------------|
+| 1.1 | Withdraw: state saved before token transfer | ✅ Test | `cei_withdraw_state_before_transfer` |
+| 1.2 | Cancel: stream marked Cancelled before refund | ✅ Test | `cei_cancel_state_before_refund` |
+| 1.3 | Top-up: deposit increased before token pull | ✅ Test | `cei_top_up_state_before_pull` |
+| 1.4 | Shorten: deposit reduced before refund | ✅ Test | `cei_shorten_refund_before_transfer` |
+| 1.5 | No `pull_token`/`push_token` before `save_stream` | ⚠️ Manual | Review each entrypoint in `src/lib.rs` |
+| 1.6 | No state mutation after any external token call | ⚠️ Manual | Review each entrypoint in `src/lib.rs` |
+| 1.7 | `cancel_stream` and `cancel_stream_as_admin` share code path | ✅ Doc | `docs/security.md` §cancel_stream |
+| 1.8 | Batch withdraw saves each stream before its `push_token` | ⚠️ Manual | Review `batch_withdraw` in `src/lib.rs` |
+
+### 2. Authorization Boundaries
+
+| # | Property | Coverage | Verification |
+|---|----------|----------|-------------|
+| 2.1 | Sender auth required for `create_stream` | ✅ Both | `docs/security.md`, `tests/adversarial_auth.rs` |
+| 2.2 | Recipient auth required for `withdraw` | ✅ Both | `docs/maintainer-security-checklist.md §2` |
+| 2.3 | Admin auth required for `*_as_admin` operations | ✅ Both | `tests/adversarial_auth.rs` |
+| 2.4 | Non-admin cannot pause/cancel as admin | ✅ Test | `test_admin_pause_rejects_non_admin` |
+| 2.5 | Sender ≠ recipient enforced | ✅ Doc | `validate_stream_params` in `src/lib.rs` |
+| 2.6 | Nonce-based replay protection for delegated withdraw | ✅ Both | `docs/security.md` §Delegated withdraw |
+| 2.7 | `set_admin` requires current admin auth | ⚠️ Manual | Review `set_admin` in `src/lib.rs` |
+| 2.8 | Permissionless entrypoints have no `require_auth()` | ⚠️ Manual | Review `close_completed_stream`, `trigger_auto_claim` |
+
+### 3. Terminal State Gating
+
+| # | Property | Coverage | Verification |
+|---|----------|----------|-------------|
+| 3.1 | Pause rejects Completed and Cancelled | ✅ Test | `terminal_pause_completed_fails` |
+| 3.2 | Cancel rejects Completed | ✅ Test | `terminal_cancel_completed_fails` |
+| 3.3 | Withdraw from Cancelled still works | ✅ Test | `terminal_withdraw_from_cancelled_succeeds` |
+| 3.4 | Rate update rejects Cancelled | ✅ Test | `terminal_rate_update_cancelled_fails` |
+| 3.5 | Top-up rejects Completed | ✅ Test | `terminal_top_up_completed_fails` |
+| 3.6 | All terminal transitions follow state machine | ✅ Both | `docs/security.md`, `tests/security_invariants.rs` |
+| 3.7 | Cancelled streams never transition to Completed | ✅ Doc | `docs/maintainer-security-checklist.md §3.2` |
+
+### 4. Arithmetic Safety
+
+| # | Property | Coverage | Verification |
+|---|----------|----------|-------------|
+| 4.1 | Batch deposit overflow caught | ✅ Test | `arithmetic_batch_deposit_overflow_caught` |
+| 4.2 | Rate × duration overflow caught | ✅ Test | `arithmetic_rate_duration_overflow_caught` |
+| 4.3 | Negative deposit rejected | ✅ Test | `arithmetic_negative_deposit_rejected` |
+| 4.4 | All `checked_mul`/`checked_add` used | ⚠️ Manual | Search for unchecked `*`/`+` on user values |
+| 4.5 | Accrual capped at `deposit_amount` | ✅ Both | `docs/security.md` overflow protection |
+| 4.6 | Fuzz harness passes with `PROPTEST_CASES=10000` | ✅ Doc | `docs/security.md` §Accrual Fuzz Harness |
+
+### 5. Init-Once Semantics
+
+| # | Property | Coverage | Verification |
+|---|----------|----------|-------------|
+| 5.1 | Second init rejected with `AlreadyInitialised` | ✅ Test | `init_twice_rejected` |
+| 5.2 | Failed re-init leaves config unchanged | ✅ Test | `init_config_unchanged_after_failed_reinit` |
+| 5.3 | Init requires admin auth | ✅ Both | `test_init_rejects_wrong_signer_and_has_no_side_effects` |
+| 5.4 | Token verification during init (SEP-41 smoke test) | ✅ Doc | `verify_token_behavior` in `token_check.rs` |
+
+### 6. Duplicate ID Prevention
+
+| # | Property | Coverage | Verification |
+|---|----------|----------|-------------|
+| 6.1 | `batch_withdraw` rejects duplicate stream IDs | ✅ Test | `duplicate_id_batch_withdraw_rejected` |
+| 6.2 | `batch_withdraw_to` rejects duplicate stream IDs | ✅ Test | `duplicate_id_batch_withdraw_to_rejected` |
+| 6.3 | `bulk_cancel_streams` rejects duplicates | ✅ Doc | `docs/gas.md` §O(n²) duplicate-ID scan |
+| 6.4 | `bulk_resume_streams_as_admin` rejects duplicates | ✅ Doc | `docs/gas.md` §O(n²) duplicate-ID scan |
+
+### 7. Pause State Enforcement
+
+| # | Property | Coverage | Verification |
+|---|----------|----------|-------------|
+| 7.1 | Global emergency pause blocks withdrawals | ✅ Test | `pause_global_blocks_withdraw` |
+| 7.2 | Global emergency pause blocks cancellations | ✅ Test | `pause_global_blocks_cancel` |
+| 7.3 | Global emergency pause blocks top-ups | ✅ Test | `pause_global_blocks_top_up` |
+| 7.4 | Creation pause blocks `create_stream` only | ✅ Test | `creation_pause_blocks_create_only` |
+| 7.5 | Admin operations not blocked by pause | ⚠️ Manual | Review `require_not_globally_paused` call sites |
+| 7.6 | `close_completed_stream` not blocked by pause | ✅ Doc | `docs/maintainer-security-checklist.md §8` |
+
+### 8. Accrual Invariants
+
+| # | Property | Coverage | Verification |
+|---|----------|----------|-------------|
+| 8.1 | Accrued never exceeds deposit (boundedness) | ✅ Test | `accrual_bounded_by_deposit` |
+| 8.2 | Withdrawn never exceeds deposit | ✅ Test | `withdrawn_bounded_by_deposit` |
+| 8.3 | Zero accrual before cliff time | ✅ Test | `accrual_zero_before_cliff` |
+| 8.4 | Accrual monotonicity (non-decreasing) | ✅ Both | `tests/balance_conservation.rs`, `docs/security.md` |
+| 8.5 | Cancelled stream accrual frozen at `cancelled_at` | ✅ Both | `docs/security.md` §Cancellation freeze |
+| 8.6 | Saturation: `accrued == deposit` for `t ≥ end_time` when fully funded | ✅ Both | `tests/balance_conservation.rs` |
+
+### 9. Event Compatibility
+
+| # | Property | Coverage | Verification |
+|---|----------|----------|-------------|
+| 9.1 | `create_stream` emits `created` topic | ✅ Test | `event_create_stream_emits_created` |
+| 9.2 | `withdraw` emits `withdrew` topic | ✅ Test | `event_withdraw_emits_withdrew` |
+| 9.3 | `cancel_stream` emits `cancelled` topic | ✅ Test | `event_cancel_emits_cancelled` |
+| 9.4 | No event on no-op paths | ⚠️ Manual | Review each entrypoint for early-return paths |
+| 9.5 | `cancel_stream` and `cancel_stream_as_admin` emit identical events | ✅ Doc | `docs/maintainer-security-checklist.md §5.3` |
+| 9.6 | `pause_stream` and `pause_stream_as_admin` emit identical events | ✅ Doc | `docs/maintainer-security-checklist.md §5.3` |
+
+### 10. Reentrancy Guard (Invariant #13)
+
+| # | Property | Coverage | Verification |
+|---|----------|----------|-------------|
+| 10.1 | Explicit lock acquired before state mutation for locked entrypoints | ✅ Doc | `docs/audit.md` §13.2 |
+| 10.2 | Explicit lock released after token call for locked entrypoints | ✅ Doc | `docs/audit.md` §13.2 |
+| 10.3 | Double-lock detection (revert on re-entry) | ✅ Doc | `acquire_reentrancy_lock` in `storage.rs` |
+| 10.4 | CEI ordering for all other entrypoints | ✅ Test | §1 CEI Pattern tests |
+| 10.5 | CEI-only is accepted posture (risk accepted) | ✅ Doc | `docs/audit.md` §13.4 |
+
+### 11. Release Hardening
+
+| # | Property | Coverage | Verification |
+|---|----------|----------|-------------|
+| 11.1 | WASM size within budget | ✅ Doc | `docs/gas.md` §WASM Size Budgets |
+| 11.2 | Checksums match committed references | ✅ Doc | `docs/security.md` §Reproducible WASM builds |
+| 11.3 | Full test suite passes (`cargo test --workspace`) | ✅ Doc | `docs/maintainer-security-checklist.md §10` |
+| 11.4 | Fuzz harness run before release | ✅ Doc | `docs/security.md` §Accrual Fuzz Harness |
+| 11.5 | Storage key discriminants unchanged | ✅ Test | `datakey_discriminant_count_stable` |
+| 11.6 | Changelog updated with migration notes | ⚠️ Manual | `CHANGELOG.md` |
+| 11.7 | Deployment checklist reviewed | ✅ Doc | `docs/mainnet-deployment-checklist-alignment.md` |
+
+### 12. Irrevocable / Witness Mode
+
+| # | Property | Coverage | Verification |
+|---|----------|----------|-------------|
+| 12.1 | Irrevocable stream rejects cancellation | ✅ Test | `irrevocable_cancel_rejected` |
+| 12.2 | Irrevocable stream rejects shortening | ✅ Test | `irrevocable_shorten_rejected` |
+| 12.3 | Witness-signed cancel requires valid ed25519 | ✅ Doc | `docs/security.md` §Witnessed cancel |
+
+### 13. Liability Solvency
+
+| # | Property | Coverage | Verification |
+|---|----------|----------|-------------|
+| 13.1 | Total liabilities increase by deposit on creation | ✅ Test | `liabilities_created_with_stream` |
+| 13.2 | Sweep only transfers excess over liabilities | ✅ Both | `tests/adversarial_auth.rs`, `docs/security.md` |
+| 13.3 | Post-sweep contract balance ≥ total liabilities | ✅ Both | `test_sweep_excess_preserves_solvency_invariant` |

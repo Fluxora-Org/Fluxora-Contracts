@@ -7,13 +7,11 @@ use soroban_sdk::{
     Address, Env, FromVal, IntoVal, Symbol, TryFromVal, Val, Vec,
 };
 
-
 use crate::{
     ContractError, ContractPauseChanged, CreateStreamParams, FluxoraStream, FluxoraStreamClient,
     GlobalEmergencyPauseChanged, StreamCreated, StreamEndShortened, StreamEvent, StreamPaused,
     StreamStatus, StreamToppedUp, WithdrawToParam, WithdrawalTo,
 };
-
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -29,8 +27,6 @@ pub(crate) struct TestContext<'a> {
     pub(crate) recipient: Address,
     pub(crate) sac: StellarAssetClient<'a>,
 }
-
-
 
 impl<'a> TestContext<'a> {
     pub(crate) fn setup() -> Self {

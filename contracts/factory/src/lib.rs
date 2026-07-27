@@ -1,10 +1,10 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
 
-use fluxora_stream::{ContractError as StreamContractErr, CreateStreamParams, StreamKind};
+use fluxora_stream::{ContractError as StreamContractErr, CreateStreamParams};
 use soroban_sdk::{
     contract, contractclient, contracterror, contractimpl, contracttype, symbol_short, vec,
-    Address, Bytes, Env, Vec,
+    Address, Env, Vec,
 };
 
 #[contractclient(name = "FluxoraStreamClient")]

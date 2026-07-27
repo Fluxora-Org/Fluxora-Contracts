@@ -231,33 +231,55 @@ closed by `test_health_matrix_before_start`. Larger gaps elsewhere in this matri
 (batch creation, recipient index) remain documented as `Needs dedicated test` and are
 out of scope for this issue.
 
+## Portfolio Health (get_sender_portfolio_health) Coverage
+
+`contracts/stream/tests/health_matrix.rs` exercises `get_sender_portfolio_health`
+for aggregate sender-level health reporting. Tests cover cursor pagination, limit
+clamping, terminal-stream exclusion, and mixed health states.
+
+| Scenario                                          | Test in `health_matrix.rs`                                      | Status   |
+| ------------------------------------------------- | --------------------------------------------------------------- | -------- |
+| Sender with no streams                            | `test_portfolio_health_no_streams`                              | COVERED  |
+| Single healthy stream                             | `test_portfolio_health_single_healthy`                          | COVERED  |
+| Single underfunded stream                         | `test_portfolio_health_single_underfunded`                      | COVERED  |
+| Single expired stream                             | `test_portfolio_health_single_expired`                          | COVERED  |
+| Mixed healthy + underfunded + expired              | `test_portfolio_health_mixed_states`                            | COVERED  |
+| Completed/Cancelled excluded from counters        | `test_portfolio_health_excludes_completed_and_cancelled`        | COVERED  |
+| Cursor pagination across page boundary            | `test_portfolio_health_cursor_pagination`                       | COVERED  |
+| limit=0 treated as MAX_PAGE_SIZE                  | `test_portfolio_health_limit_zero_uses_max`                     | COVERED  |
+| limit clamped to MAX_PAGE_SIZE                    | `test_portfolio_health_limit_clamped_to_max`                    | COVERED  |
+| Past-end cursor returns empty page                | `test_portfolio_health_past_end_cursor_returns_empty_page`      | COVERED  |
+| Paused stream counts as healthy when funded       | `test_portfolio_health_paused_stream_counts_as_healthy_when_funded` | COVERED |
+| Paused underfunded stream                         | `test_portfolio_health_paused_underfunded_stream`               | COVERED  |
+
 ## Coverage Summary
 
 ### Overall Statistics
 
-- **Total Scenarios**: 107 (85 operational + 22 event snapshot tests)
-- **Fully Covered**: 100 (93%)
-- **Partially Covered**: 5 (5%)
+- **Total Scenarios**: 119 (97 operational + 22 event snapshot tests)
+- **Fully Covered**: 112 (94%)
+- **Partially Covered**: 5 (4%)
 - **Missing Coverage**: 2 (2%)
 
 ### Coverage by Category
 
-| Category           | Covered | Partial | Missing | Total |
-| ------------------ | ------- | ------- | ------- | ----- |
-| Initialization     | 8       | 0       | 0       | 8     |
-| Stream Creation    | 11      | 0       | 0       | 11    |
-| Batch Creation     | 0       | 3       | 0       | 3     |
-| Accrual            | 8       | 0       | 0       | 8     |
-| Withdrawal         | 13      | 0       | 0       | 13    |
-| Pause/Resume       | 5       | 0       | 0       | 5     |
-| Cancellation       | 4       | 0       | 0       | 4     |
-| State Queries      | 1       | 1       | 0       | 2     |
-| Multiple Streams   | 1       | 2       | 0       | 3     |
-| Authorization      | 1       | 3       | 0       | 4     |
+| Category              | Covered | Partial | Missing | Total |
+| --------------------- | ------- | ------- | ------- | ----- |
+| Initialization        | 8       | 0       | 0       | 8     |
+| Stream Creation       | 11      | 0       | 0       | 11    |
+| Batch Creation        | 0       | 3       | 0       | 3     |
+| Accrual               | 8       | 0       | 0       | 8     |
+| Withdrawal            | 13      | 0       | 0       | 13    |
+| Pause/Resume          | 5       | 0       | 0       | 5     |
+| Cancellation          | 4       | 0       | 0       | 4     |
+| State Queries         | 1       | 1       | 0       | 2     |
+| Multiple Streams      | 1       | 2       | 0       | 3     |
+| Authorization         | 1       | 3       | 0       | 4     |
 | Time Edge Cases    | 4       | 1       | 0       | 5     |
 | Numeric Edge Cases | 3       | 2       | 0       | 5     |
 | Event Snapshots    | 22      | 0       | 0       | 22    |
 | Status Transitions | 9       | 1       | 0       | 10    |
+| Portfolio Health   | 12      | 0       | 0       | 12    |
 
 ## Priority Gaps
 
