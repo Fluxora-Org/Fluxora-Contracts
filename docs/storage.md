@@ -204,20 +204,24 @@ const PERSISTENT_BUMP_AMOUNT: u32       = 120_960;
 
 ### Instance TTL
 
-Extended via `bump_instance_ttl()` on **every** entry-point that touches instance storage. This means any contract interaction — read or write — keeps `Config`, `NextStreamId`, `GlobalEmergencyPaused`, and `CreationPaused` alive.
+Extended via `bump_instance_ttl()` on **every** entry-point that touches instance storage (including query entrypoints like `is_global_emergency_paused`, `is_creation_paused`, `get_pause_reason`, `get_max_rate_per_second`, `read_paused_stream_count`, and `read_total_keeper_fees_paid`). This ensures all global settings and metrics remain fresh and protected from expiration under active contract usage.
 
-### Persistent TTL
+### Persistent TTL & Storage Reclamation
 
-Extended on every `load_stream()` (read) and `save_stream()` (write), and on every `load_recipient_streams()` / `save_recipient_streams()` call.
+Extended on every `load_stream()` (read) and `save_stream()` (write), and on index updates (`load_recipient_streams`, `save_recipient_streams`, `load_sender_streams`, `save_sender_streams`).
+
+- **Adaptive TTL Propagation**: When creating or updating streams, `add_stream_to_recipient_index` and `add_stream_to_sender_index` scale index key TTL to the stream's remaining lifetime via `compute_adaptive_ttl(now, end_time)`.
+- **Empty Index Reclamation**: When a recipient or sender index, pending offer index, or template ID index becomes empty (`streams.is_empty()`), the contract explicitly removes the persistent storage key (`env.storage().persistent().remove(&key)`), reclaiming on-chain state while safely returning an empty `Vec` on future reads.
 
 | Scenario                                         | TTL refreshed?                                 |
 | ------------------------------------------------ | ---------------------------------------------- |
-| Stream created                                   | Yes (`save_stream` + `save_recipient_streams`) |
+| Stream created                                   | Yes (`save_stream` + `save_recipient_streams` + `save_sender_streams` adaptive) |
 | Stream read via `get_stream_state`               | Yes (`load_stream`)                            |
 | Stream read via `calculate_accrued`              | Yes (`load_stream`)                            |
 | Stream mutated (pause/resume/cancel/withdraw)    | Yes (`load_stream` + `save_stream`)            |
-| Stream closed via `close_completed_stream`       | Entry removed (no TTL)                         |
+| Stream closed via `close_completed_stream`       | Entry removed; index key removed if empty     |
 | Recipient index read via `get_recipient_streams` | Yes (if non-empty)                             |
+| Sender index read via `get_sender_streams`       | Yes (if non-empty)                             |
 
 ### TTL implications for operators
 
