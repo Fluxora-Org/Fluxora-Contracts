@@ -82,8 +82,8 @@ class TestMain:
         """Test successful validation with no regressions."""
         mock_baselines.return_value = {
             "transfer": 2000,
-            "bulk_cancel_streams": {"1": 3000, "5": 7000, "10": 12000, "20": 22000},
-            "bulk_resume_streams_as_admin": {"1": 4000, "5": 8000, "10": 14000, "20": 26000},
+            "bulk_cancel_streams": {"1": 3000, "10": 12000, "50": 75000, "100": 150000},
+            "bulk_resume_streams_as_admin": {"1": 4000, "10": 14000, "50": 85000, "100": 170000},
         }
         mock_run_tests.return_value = "GAS_MEASUREMENT: transfer: single: 1900"
         main()

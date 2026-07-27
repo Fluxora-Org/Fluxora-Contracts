@@ -755,8 +755,8 @@ _BASELINE_BLOCK = textwrap.dedent("""\
         "create_stream": 1000,
         "withdraw": 500,
         "batch_withdraw": {"small": 200, "large": 800},
-        "bulk_cancel_streams": {"1": 3000, "5": 7000, "10": 12000, "20": 22000},
-        "bulk_resume_streams_as_admin": {"1": 4000, "5": 8000, "10": 14000, "20": 26000}
+        "bulk_cancel_streams": {"1": 3000, "10": 12000, "50": 75000, "100": 150000},
+        "bulk_resume_streams_as_admin": {"1": 4000, "10": 14000, "50": 85000, "100": 170000}
     }
     <!-- GAS_BASELINE_END -->
 """)
@@ -776,7 +776,7 @@ class TestExtractBaselines:
         assert result["create_stream"] == 1000
         assert result["withdraw"] == 500
         assert result["batch_withdraw"]["small"] == 200
-        assert result["bulk_cancel_streams"]["20"] == 22000
+        assert result["bulk_cancel_streams"]["100"] == 150000
 
     def test_raises_on_missing_block(self, tmp_path):
         f = tmp_path / "gas.md"
@@ -802,15 +802,15 @@ class TestValidateRequiredBaselines:
 
     def test_rejects_missing_bulk_size(self):
         baselines = {
-            "bulk_cancel_streams": {"1": 3000, "5": 7000, "10": 12000},
-            "bulk_resume_streams_as_admin": {"1": 4000, "5": 8000, "10": 14000, "20": 26000},
+            "bulk_cancel_streams": {"1": 3000, "10": 12000, "50": 75000},
+            "bulk_resume_streams_as_admin": {"1": 4000, "10": 14000, "50": 85000, "100": 170000},
         }
-        with pytest.raises(ValueError, match="bulk_cancel_streams: 20"):
+        with pytest.raises(ValueError, match="bulk_cancel_streams: 100"):
             vg.validate_required_baselines(baselines)
 
     def test_rejects_missing_bulk_function(self):
         baselines = {
-            "bulk_cancel_streams": {"1": 3000, "5": 7000, "10": 12000, "20": 22000},
+            "bulk_cancel_streams": {"1": 3000, "10": 12000, "50": 75000, "100": 150000},
         }
         with pytest.raises(ValueError, match="bulk_resume_streams_as_admin: all"):
             vg.validate_required_baselines(baselines)
@@ -937,8 +937,8 @@ class TestGasMain:
             "create_stream": 1000,
             "withdraw": 500,
             "batch_withdraw": {"small": 200, "large": 800},
-            "bulk_cancel_streams": {"1": 3000, "5": 7000, "10": 12000, "20": 22000},
-            "bulk_resume_streams_as_admin": {"1": 4000, "5": 8000, "10": 14000, "20": 26000},
+            "bulk_cancel_streams": {"1": 3000, "10": 12000, "50": 75000, "100": 150000},
+            "bulk_resume_streams_as_admin": {"1": 4000, "10": 14000, "50": 85000, "100": 170000},
         })
 
     def test_no_regression_exits_0(self, tmp_path, monkeypatch):
@@ -968,8 +968,8 @@ class TestGasMain:
         )
         monkeypatch.setattr(vg, "extract_baselines", lambda _: {
             "create_stream": 1000,
-            "bulk_cancel_streams": {"1": 3000, "5": 7000, "10": 12000, "20": 22000},
-            "bulk_resume_streams_as_admin": {"1": 4000, "5": 8000, "10": 14000, "20": 26000},
+            "bulk_cancel_streams": {"1": 3000, "10": 12000, "50": 75000, "100": 150000},
+            "bulk_resume_streams_as_admin": {"1": 4000, "10": 14000, "50": 85000, "100": 170000},
         })
         with pytest.raises(SystemExit) as exc:
             vg.main()
@@ -980,8 +980,8 @@ class TestGasMain:
         self._patch(monkeypatch, tmp_path, {"unknown_fn": 999},
                     baseline_override={
                         "create_stream": 1000,
-                        "bulk_cancel_streams": {"1": 3000, "5": 7000, "10": 12000, "20": 22000},
-                        "bulk_resume_streams_as_admin": {"1": 4000, "5": 8000, "10": 14000, "20": 26000},
+                        "bulk_cancel_streams": {"1": 3000, "10": 12000, "50": 75000, "100": 150000},
+                        "bulk_resume_streams_as_admin": {"1": 4000, "10": 14000, "50": 85000, "100": 170000},
                     })
         with pytest.raises(SystemExit):
             vg.main()

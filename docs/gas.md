@@ -170,7 +170,7 @@ for id in stream_ids.iter() {
 }
 ```
 
-This is O(n²) in the batch size n.  At `MAX_PAGE_SIZE = 100`, the worst case is about 4 950 element comparisons per call (~10 000 inclusive of the outer-loop overhead).  The regression tests measure `batch_withdraw` and `batch_withdraw_to` at the existing large-batch sizes 1, 10, 50, and 100, and measure `bulk_cancel_streams` plus `bulk_resume_streams_as_admin` at issue #1219's baseline sizes 1, 5, 10, and 20. This keeps the newer bulk entrypoints under `validate_gas.py` regression comparison while preserving the existing large-batch coverage for withdrawal paths.
+This is O(n²) in the batch size n.  At `MAX_PAGE_SIZE = 100`, the worst case is about 4 950 element comparisons per call (~10 000 inclusive of the outer-loop overhead).  The gas regression tests measure all four batch entrypoints — `batch_withdraw`, `batch_withdraw_to`, `bulk_resume_streams_as_admin`, and `bulk_cancel_streams` — at batch sizes 1, 10, 50, and 100 up to `MAX_PAGE_SIZE` (100). This ensures full coverage across the full batch capacity while asserting CPU-instruction costs stay well within Soroban's per-invocation CPU limit (`PER_INVOCATION_CPU_BUDGET`).
 
 A companion refactor issue replaces the O(n²) scan with an O(n) helper (e.g. using a `Map<u64,bool>`), after which these baselines are expected to improve significantly, especially at size 100. The budget assertions stay valid regardless; they guard against per-invocation-limit violations, not against algorithmic regressions within the current design.
 
@@ -196,15 +196,15 @@ The following table provides the CPU instruction counts for core operations.
   },
   "bulk_resume_streams_as_admin": {
     "1": 4000000,
-    "5": 10000000,
     "10": 18000000,
-    "20": 36000000
+    "50": 85000000,
+    "100": 170000000
   },
   "bulk_cancel_streams": {
     "1": 3500000,
-    "5": 9000000,
     "10": 16000000,
-    "20": 32000000
+    "50": 75000000,
+    "100": 150000000
   },
   "keeper_cancel": {
     "partial_accrual": 786739,

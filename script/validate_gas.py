@@ -5,7 +5,7 @@ import subprocess
 import sys
 from typing import Any, Dict
 
-BULK_BATCH_BASELINE_SIZES = ("1", "5", "10", "20")
+BULK_BATCH_BASELINE_SIZES = ("1", "10", "50", "100")
 REQUIRED_BULK_BASELINES = {
     "bulk_cancel_streams": BULK_BATCH_BASELINE_SIZES,
     "bulk_resume_streams_as_admin": BULK_BATCH_BASELINE_SIZES,

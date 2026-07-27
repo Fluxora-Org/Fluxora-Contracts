@@ -139,6 +139,19 @@ fn test_withdraw_gas() {
     println!("GAS_MEASUREMENT: withdraw: single: {}", cost);
 }
 
+/// Gas regression baseline for `batch_withdraw`.
+///
+/// Measures CPU instruction cost for `batch_withdraw` across batch sizes 1, 10, 50, and 100
+/// (up to `MAX_PAGE_SIZE`). Exercises the O(n²) duplicate-ID scan (`reject_duplicate_ids`),
+/// which performs ~n*(n-1)/2 element-by-element comparisons (approx ~4,950 comparisons,
+/// ~10,000 loop operations at MAX_PAGE_SIZE = 100).
+///
+/// Asserts that measured CPU instruction cost stays within Soroban's per-invocation CPU budget
+/// (`PER_INVOCATION_CPU_BUDGET = 25,000,000,000`, providing a 75% safety margin under Soroban's
+/// 100B instruction ceiling).
+///
+/// Companion refactor: expected to improve significantly once the companion refactor
+/// replaces the O(n²) scan in `reject_duplicate_ids` with an O(n) helper (e.g. Map/Set lookup).
 #[test]
 fn test_batch_withdraw_gas() {
     let sizes = [1, 10, 50, 100];
@@ -176,6 +189,9 @@ fn test_batch_withdraw_gas() {
 /// scan in `reject_duplicate_ids`.  The O(n²) scan costs roughly
 /// n*(n-1)/2 comparisons at batch size n, so at MAX_PAGE_SIZE (100) the
 /// worst case is ~4 950 element-by-element comparisons inside the helper.
+///
+/// Asserts that measured CPU instruction cost stays within Soroban's per-invocation CPU budget
+/// (`PER_INVOCATION_CPU_BUDGET`). Baseline expected to improve once companion O(n) refactor lands.
 #[test]
 fn test_batch_withdraw_to_gas() {
     let sizes = [1, 10, 50, 100];
@@ -220,12 +236,14 @@ fn test_batch_withdraw_to_gas() {
 ///
 /// Creates streams, pauses each one (advancing the ledger far enough to
 /// clear the pause cooldown), then resumes them all in a single admin-authed
-/// call. Batch sizes 1, 5, 10, and 20 mirror the documented gas baseline matrix
-/// so `script/validate_gas.py` can compare each measured cost against
-/// `docs/gas.md`.
+/// call. Batch sizes 1, 10, 50, and 100 (up to MAX_PAGE_SIZE) mirror the documented gas baseline matrix
+/// and exercise the O(n²) duplicate-ID scan in `reject_duplicate_ids`.
+///
+/// Asserts that measured CPU instruction cost stays within Soroban's per-invocation CPU budget
+/// (`PER_INVOCATION_CPU_BUDGET`). Baseline expected to improve once companion O(n) refactor lands.
 #[test]
 fn test_bulk_resume_streams_as_admin_gas() {
-    let sizes = [1, 5, 10, 20];
+    let sizes = [1, 10, 50, 100];
 
     for &size in &sizes {
         let ctx = TestContext::setup();
@@ -263,12 +281,14 @@ fn test_bulk_resume_streams_as_admin_gas() {
 /// Gas regression baseline for `bulk_cancel_streams`.
 ///
 /// Creates active streams owned by the sender then cancels them all in a
-/// single call. Batch sizes 1, 5, 10, and 20 mirror the documented gas
-/// baseline matrix so `script/validate_gas.py` can compare each measured cost
-/// against `docs/gas.md`.
+/// single call. Batch sizes 1, 10, 50, and 100 (up to MAX_PAGE_SIZE) mirror the documented gas
+/// baseline matrix and exercise the O(n²) duplicate-ID scan in `reject_duplicate_ids`.
+///
+/// Asserts that measured CPU instruction cost stays within Soroban's per-invocation CPU budget
+/// (`PER_INVOCATION_CPU_BUDGET`). Baseline expected to improve once companion O(n) refactor lands.
 #[test]
 fn test_bulk_cancel_streams_gas() {
-    let sizes = [1, 5, 10, 20];
+    let sizes = [1, 10, 50, 100];
 
     for &size in &sizes {
         let ctx = TestContext::setup();
