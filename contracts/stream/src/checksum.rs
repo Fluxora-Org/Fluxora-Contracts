@@ -15,7 +15,7 @@
 //! The following invariants must hold for a build to be reproducible:
 //!
 //! 1. **Rust toolchain** is pinned via `rust-toolchain.toml` to a specific
-//!    channel (`stable`) and target set (`wasm32-unknown-unknown`).
+//!    channel (`1.94.1`) and target set (`wasm32-unknown-unknown`).
 //! 2. **soroban-sdk** version is pinned in `contracts/stream/Cargo.toml`
 //!    (currently `21.7.7`).
 //! 3. **Build profile** is `--release` with `wasm32-unknown-unknown` target.
@@ -29,7 +29,7 @@
 //!
 //! ---
 //!
-//! # Storage key layout invariants (V5 → V6)
+//! # Storage key layout invariants (V5 → V6 → V7)
 //!
 //! `DataKey` is a `#[contracttype]` enum. Soroban serialises enum variants by
 //! their **0-based declaration-order discriminant**. Reordering, inserting, or
@@ -153,7 +153,25 @@
 //!
 //! ## Invariant: discriminants 0–14 are frozen
 //!
-//! No variant at position 0–14 may ever be reordered, renamed, or removed on
+//! | Discriminant | Variant                            | Storage   | Value type           |
+//! |:------------:|:-----------------------------------|:----------|:---------------------|
+//! | 21           | `IdReservation(Address)`           | Persistent| `IdReservation`      |
+//! | 22           | `MaxRatePerSecond`                 | Instance  | `i128`               |
+//! | 23           | `DelegatedWithdrawNonce(Address)`  | Persistent| `u64`                |
+//! | 24           | `LastPauseRecord(PauseKind)`       | Instance  | `PauseRecord`        |
+//! | 25           | `RotationHistory(u64)`             | Persistent| `Vec<RotationEntry>` |
+//! | 26           | `LastAccrualLedgerTimestamp`       | Instance  | `u64`                |
+//! | 27           | `PausedStreamCount`                | Instance  | `u64`                |
+//! | 28           | `TotalKeeperFeesPaid`              | Instance  | `i128`               |
+//!
+//! Total `DataKey` variants in V7: **29** (discriminants 0 through 28).
+//!
+//! See [`docs/storage.md`](../../../docs/storage.md) and [`docs/upgrade.md`](../../../docs/upgrade.md)
+//! for prose documentation, evolution policy, and migration guides.
+//!
+//! ## Invariant: discriminants 0–28 are frozen
+//!
+//! No variant at position 0–28 may ever be reordered, renamed, or removed on
 //! any instance that has processed at least one transaction. Violations are
 //! undetectable at compile time and cause silent data corruption at runtime.
 //!
@@ -189,6 +207,9 @@
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+    use std::string::ToString;
+
     /// Verify the module compiles and the doc-comment invariants are present.
     #[test]
     fn checksum_module_compiles() {}
@@ -372,5 +393,31 @@ mod tests {
     fn stream_struct_has_21_fields_with_is_pooled_and_irrevocable() {
         const TOTAL_STREAM_FIELDS: usize = 21;
         assert_eq!(TOTAL_STREAM_FIELDS, 21);
+    }
+
+    /// Verify the doc-comment's toolchain channel matches `rust-toolchain.toml`.
+    /// This prevents doc drift: if someone bumps the pinned version in the
+    /// toolchain file, this test will fail until the doc-comment is updated too.
+    #[test]
+    fn doc_comment_toolchain_channel_matches_rust_toolchain_toml() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let toolchain_path = std::path::Path::new(manifest_dir).join("../../rust-toolchain.toml");
+        let content =
+            std::fs::read_to_string(&toolchain_path).expect("failed to read rust-toolchain.toml");
+        let expected_channel = content
+            .lines()
+            .find_map(|line| {
+                let line = line.trim();
+                line.strip_prefix("channel")
+                    .and_then(|rest| rest.strip_prefix('='))
+                    .map(|rest| rest.trim().trim_matches('"').to_string())
+            })
+            .expect("no channel found in rust-toolchain.toml");
+        assert!(
+            include_str!("checksum.rs").contains(&expected_channel),
+            "doc-comment toolchain channel drift: checksum.rs does not mention \
+             the current pinned channel ({})",
+            expected_channel
+        );
     }
 }

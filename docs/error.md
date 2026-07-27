@@ -34,11 +34,10 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `TemplateNotFound` | 20 | Requested stream template does not exist | `get_stream_template`, `create_stream_from_template`, `delete_stream_template` |
 | `TemplateLimitExceeded` | 21 | Per-owner or global template limit would be exceeded | `register_stream_template` |
 | `TemplateUnauthorized` | 22 | Caller is not authorized to delete a template | `delete_stream_template` |
-| `TokenVerificationFailed` | 23 | Token contract does not expose the expected SEP-41 interface during init | `init` |
+| `PauseReasonTooLong` | 23 | Pause reason string exceeds `MAX_PAUSE_REASON_BYTES` | `pause_protocol` |
 | `ReservationNotFound` | 24 | No ID reservation exists for the specified holder | `release_id_reservation`, `reclaim_expired_id_reservation` |
 | `ReservationStillActive` | 25 | Reservation has not yet expired and cannot be reclaimed | `reclaim_expired_id_reservation` |
 | `ReservationNotExpirable` | 26 | Reservation has no expiry and cannot be reclaimed | `reclaim_expired_id_reservation` |
-| `ReservationAlreadyActive` | 41 | A reservation is already active for this caller | `reserve_stream_ids` |
 | `PauseReasonTooLong` | 27 | Pause reason string exceeds `MAX_PAUSE_REASON_BYTES` | `pause_protocol` |
 | `ClockRegression` | 28 | Ledger-backed accrual observed a timestamp lower than the previous accrual timestamp | `calculate_accrued`, `get_withdrawable`, `withdraw`, `withdraw_to`, `batch_withdraw`, `batch_withdraw_to`, rate changes, `cancel_stream`, auto-claim paths |
 | `MetadataTooLarge` | 29 | Stream metadata exceeds size limits | `create_stream`, `create_streams`, `create_streams_partial` |
@@ -59,6 +58,7 @@ Non-error enum values used by stream creation and accrual:
 |------|-------|---------|
 | `Linear` | 0 | A `StreamKind` that accrues continuously over time after the start time. |
 | `CliffOnly` | 1 | A `StreamKind` that unlocks the full deposit at the cliff time in one step. |
+| `CliffSlope` | 2 | A `StreamKind` that accrues linearly from cliff_time to end_time, and nothing before. |
 
 ---
 
@@ -622,7 +622,7 @@ match client.try_delegated_withdraw(&relayer, &stream_id, &signature, &nonce, &e
 
 ---
 
-### ClockRegression (28)
+### ClockRegression (27)
 
 **Definition**: Ledger-backed accrual observed a ledger timestamp lower than the previous accrual timestamp stored for the contract instance.
 
@@ -684,7 +684,7 @@ match client.try_delegated_withdraw(&relayer, &stream_id, &signature, &nonce, &e
 
 ---
 
-### TokenVerificationFailed (23)
+### TokenVerificationFailed (88)
 
 **Definition**: During initialization, the configured token contract did not expose the expected SEP-41 interface.
 
@@ -692,7 +692,7 @@ match client.try_delegated_withdraw(&relayer, &stream_id, &signature, &nonce, &e
 
 ---
 
-### PauseReasonTooLong (27)
+### PauseReasonTooLong (23)
 
 **Definition**: `pause_protocol` received a reason string longer than `MAX_PAUSE_REASON_BYTES`.
 
@@ -884,12 +884,14 @@ must be appended at the end so existing on-chain error mappings stay byte-identi
 | 8 | `InvalidCliff` | `cliff_time < start_time` OR `cliff_time > end_time` (cliff must be inside the inclusive start/end window) | `create_stream`, `create_streams` |
 | 9 | `CreationPaused` | `DataKey::CreationPaused == true` (factory-level pause); checked first, before any policy/allowlist read | `create_stream`, `create_streams` |
 | 10 | `StreamContractPaused` | Downstream `FluxoraStream` returned `ContractError::ContractPaused` (creation pause active on the stream contract) | `create_stream` |
-| 11 | `StreamContractError` | **Cross-contract failure wrapper**: downstream `FluxoraStream` rejected creation for any other reason (typed error OR transport-level panic). Also reused by `set_rate_bounds` when `min`/`max` are negative or `min > max`. See [Wrapper Semantics](#streamcontracterror-11-wrapper-semantics) below. | `create_stream` (catch-all), `set_rate_bounds` |
+| 11 | `StreamContractError` | **Cross-contract failure wrapper**: downstream `FluxoraStream` rejected creation for any other reason (typed error OR transport-level panic). See [Wrapper Semantics](#streamcontracterror-11-wrapper-semantics) below. | `create_stream` (catch-all) |
 | 12 | `RateBelowMin` | `rate_per_second < MinRatePerSecond` and a min bound is configured (bounds are inclusive) | `create_stream`, `create_streams` |
 | 13 | `RateAboveMax` | `rate_per_second > MaxRatePerSecond` and a max bound is configured (bounds are inclusive) | `create_stream`, `create_streams` |
 | 14 | `InvalidCap` | `max_deposit <= 0`; accepted range is `1..=i128::MAX` | `init`, `set_cap` |
 | 15 | `InvalidMinDuration` | `min_duration > MAX_MIN_DURATION_SECONDS` (≈ 3_153_600_000, i.e. 100 years × 365 days); accepted range is `0..=MAX_MIN_DURATION_SECONDS` | `init`, `set_min_duration` |
 | 16 | `InvalidMemo` | `memo.len() > fluxora_stream::MAX_MEMO_BYTES` | `create_stream`, `create_streams` |
+| 17 | `InvalidStreamContract` | Supplied `stream_contract` address did not respond to `FluxoraStream::version()` smoke check | `init`, `set_stream_contract` |
+| 18 | `InvalidRateBounds` | `set_rate_bounds` received an invalid configuration (negative bound, or `min > max`) | `set_rate_bounds` |
 
 **Range constants referenced above:**
 

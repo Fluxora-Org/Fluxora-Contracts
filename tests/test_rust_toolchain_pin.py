@@ -161,13 +161,22 @@ def test_main_fails_when_rustc_version_output_is_unparseable(monkeypatch, capsys
     assert "::error::" in captured.err
 
 
-def test_rustc_version_falls_back_to_invoking_real_rustc(monkeypatch):
+def test_rustc_version_falls_back_to_invoking_rustc(monkeypatch):
     # No RUSTC_VERSION_OUTPUT override: exercises the `subprocess.run(["rustc",
-    # "--version"])` fallback path. Requires a real `rustc` on PATH, which is
-    # guaranteed true here since this whole workspace is a Rust CI target.
+    # "--version"])` fallback path without requiring Rust in docs-only CI jobs.
+    class Completed:
+        stdout = "rustc 1.94.1 (abcdef 2026-01-01)"
+
+    def fake_run(args, check, capture_output, text):
+        assert args == ["rustc", "--version"]
+        assert check is True
+        assert capture_output is True
+        assert text is True
+        return Completed()
+
     monkeypatch.delenv("RUSTC_VERSION_OUTPUT", raising=False)
-    version = verify_rust_version.rustc_version()
-    assert version
+    monkeypatch.setattr(verify_rust_version.subprocess, "run", fake_run)
+    assert verify_rust_version.rustc_version() == "1.94.1"
 
 
 def test_pinned_targets_returns_list():
@@ -183,6 +192,20 @@ def test_pinned_components_returns_list():
     assert isinstance(components, list)
     assert "clippy" in components
     assert "rustfmt" in components
+
+
+def test_has_component_accepts_host_qualified_component_names():
+    installed = [
+        "rustfmt-x86_64-unknown-linux-gnu",
+        "clippy-x86_64-unknown-linux-gnu",
+    ]
+    assert verify_rust_version.has_component(installed, "rustfmt")
+    assert verify_rust_version.has_component(installed, "clippy")
+
+
+def test_has_component_rejects_absent_component():
+    installed = ["rustfmt-x86_64-unknown-linux-gnu"]
+    assert not verify_rust_version.has_component(installed, "clippy")
 
 def test_main_fails_in_process_when_missing_targets(monkeypatch, capsys):
     """Test that main() fails when required targets are missing."""
@@ -278,3 +301,18 @@ def test_main_prints_installed_components_message(monkeypatch, capsys):
 )
 def test_crate_rust_version_matches_pinned_toolchain(manifest):
     assert _crate_rust_version(manifest) == verify_rust_version.pinned_channel(TOOLCHAIN)
+
+
+def test_parse_toml_simple_fallback():
+    content = '[toolchain]\nchannel = "1.94.1"\ncomponents = ["rustfmt", "clippy"]\ntargets = ["wasm32-unknown-unknown"]\n'
+    parsed = verify_rust_version._parse_toml_simple(content)
+    assert parsed["toolchain"]["channel"] == "1.94.1"
+    assert parsed["toolchain"]["components"] == ["rustfmt", "clippy"]
+    assert parsed["toolchain"]["targets"] == ["wasm32-unknown-unknown"]
+
+
+def test_load_toolchain_fallback_when_tomllib_none(monkeypatch):
+    monkeypatch.setattr(verify_rust_version, "tomllib", None)
+    data = verify_rust_version._load_toolchain(TOOLCHAIN)
+    assert data["toolchain"]["channel"] == "1.94.1"
+

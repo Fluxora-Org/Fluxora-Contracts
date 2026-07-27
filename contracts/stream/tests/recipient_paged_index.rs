@@ -11,7 +11,9 @@
 
 extern crate std;
 
-use fluxora_stream::{FluxoraStream, FluxoraStreamClient, StreamKind, MAX_RECIPIENT_PAGE_SIZE};
+use fluxora_stream::{
+    CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamKind, MAX_RECIPIENT_PAGE_SIZE,
+};
 use soroban_sdk::{
     testutils::Address as _,
     token::{Client as TokenClient, StellarAssetClient},
@@ -79,15 +81,20 @@ impl Ctx {
         let now = self.env.ledger().timestamp();
         self.client.create_stream(
             &self.sender,
-            &self.recipient,
-            &100,
-            &1,
-            &now,
-            &now,
-            &(now + 100),
-            &0,
-            &None,
-            &StreamKind::Linear,
+            &CreateStreamParams {
+                recipient: self.recipient.clone(),
+                deposit_amount: 100,
+                rate_per_second: 1,
+                start_time: now,
+                cliff_time: now,
+                end_time: (now + 100),
+                withdraw_dust_threshold: Some(0),
+                memo: None,
+                metadata: None,
+                kind: StreamKind::Linear,
+                irrevocable: None,
+                witness: None,
+            },
         )
     }
 
@@ -265,19 +272,19 @@ fn test_sender_portfolio_health_cursor_boundaries() {
     ctx.create_n(MAX_RECIPIENT_PAGE_SIZE + 5);
 
     // start-of-list cursor (0) returns without panicking
-    let first = ctx
-        .client
-        .get_sender_portfolio_health(&ctx.sender, &0u64, &MAX_RECIPIENT_PAGE_SIZE);
+    let first =
+        ctx.client
+            .get_sender_portfolio_health(&ctx.sender, &0u64, &MAX_RECIPIENT_PAGE_SIZE);
     // the page may be empty (sender owns none here) but must not error
-    let _ = first.page_stream_ids;
+    let _ = first.stream_ids;
 
     // mid-list walk via next_cursor must terminate (no infinite loop / panic)
     let mut cursor = first.next_cursor;
     let mut guard = 0u32;
     while cursor != 0u64 && guard < 20 {
-        let page = ctx
-            .client
-            .get_sender_portfolio_health(&ctx.sender, &cursor, &MAX_RECIPIENT_PAGE_SIZE);
+        let page =
+            ctx.client
+                .get_sender_portfolio_health(&ctx.sender, &cursor, &MAX_RECIPIENT_PAGE_SIZE);
         cursor = page.next_cursor;
         guard += 1;
     }
@@ -289,7 +296,7 @@ fn test_sender_portfolio_health_cursor_boundaries() {
         &MAX_RECIPIENT_PAGE_SIZE,
     );
     assert_eq!(
-        past_end.page_stream_ids.len(),
+        past_end.stream_ids.len(),
         0,
         "past-end cursor must yield an empty page"
     );

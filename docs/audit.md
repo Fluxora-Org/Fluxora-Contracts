@@ -78,11 +78,13 @@ The public entrypoint table below is kept in sync with every `pub fn` on the `Fl
 | `pause_stream` | `env: Env`, `stream_id: u64`, `reason: PauseReason` | — | Sender | Set stream status to Paused; Active streams only. |
 | `pause_stream_as_admin` | `env: Env`, `stream_id: u64`, `reason: PauseReason` | — | Admin | Admin override to pause any Active stream. |
 | `reclaim_expired_id_reservation` | `env: Env`, `holder: Address` | — | Anyone | Permissionlessly release an expired ID reservation and reclaim counter space. |
+| `reject_stream_offer` | `env: Env`, `offer_id: u64` | — | Recipient | Reject a pending stream offer and return deposit to sender. |
 | `register_stream_template` | `env: Env`, `owner: Address`, `start_delay: u64`, `cliff_delay: u64`, `duration: u64` | `u64` | Owner | Register a reusable relative schedule template; subject to per-owner and global caps. |
 | `reject_stream_offer` | `env: Env`, `recipient: Address`, `offer_id: u64` | — | Recipient | Reject a pending stream offer; refund escrowed deposit to the sender. |
 | `release_id_reservation` | `env: Env`, `caller: Address` | — | Reservation holder | Voluntarily abandon an unconsumed ID reservation. |
 | `renew_stream` | `env: Env`, `stream_id: u64` | `u64` | Anyone | Permissionless renewal of a completed stream when auto-renew is enabled. |
 | `reserve_stream_ids` | `env: Env`, `caller: Address`, `count: u32`, `expiry: Option<u64>` | `Vec<u64>` | Caller | Pre-allocate contiguous stream IDs for off-chain orchestration. |
+| `set_auto_renew` | `env: Env`, `stream_id: u64`, `enabled: bool` | — | Recipient | Opt in or out of stream auto-renewal. |
 | `resume_protocol` | `env: Env`, `admin: Address` | — | Admin | Resume protocol-level stream creation and clear pause audit trail. |
 | `resume_stream` | `env: Env`, `stream_id: u64` | — | Sender | Set stream status to Active; Paused streams only. |
 | `resume_stream_as_admin` | `env: Env`, `stream_id: u64` | — | Admin | Admin override to resume any Paused stream. |

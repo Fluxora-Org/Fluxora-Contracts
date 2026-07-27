@@ -72,6 +72,7 @@ ENTRYPOINT_ALLOWLIST = frozenset({
     "require_not_globally_paused",
     # Kani formal-proof harness helper — not a contract ABI entrypoint.
     "compute_keeper_fee_split",
+    "reject_duplicate_ids",
 })
 
 # Entry points that exist inside the #[contractimpl] block but are not part of
@@ -358,7 +359,7 @@ def validate(
             except ValueError:
                 display = audit_doc
             print(
-                f"STALE DOC: '{ident}' (audit entrypoint) listed in '{display}' "
+                f"STALE AUDIT DOC: '{ident}' (audit entrypoint) listed in '{display}' "
                 "but not in contractimpl"
             )
             drift_found = True

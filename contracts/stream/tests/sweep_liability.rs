@@ -92,12 +92,20 @@ fn test_sweep_excess_excludes_liabilities_and_fees() {
     // Create stream
     let stream_id = client.create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &deposit_amount,
-        &start_time,
-        &start_time,
-        &end_time,
-        &rate_per_second,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: deposit_amount,
+            rate_per_second: rate_per_second,
+            start_time: start_time,
+            cliff_time: start_time,
+            end_time: end_time,
+            withdraw_dust_threshold: None,
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     // Contract has deposit_amount, all are liabilities
@@ -117,12 +125,20 @@ fn test_sweep_excess_excludes_liabilities_and_fees() {
     // Now, create another stream to cancel via keeper to generate keeper fees
     let stream2_id = client.create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &10_000,
-        &start_time,
-        &start_time,
-        &(start_time + 100),
-        &100,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 10_000,
+            rate_per_second: 100,
+            start_time: start_time,
+            cliff_time: start_time,
+            end_time: (start_time + 100),
+            withdraw_dust_threshold: None,
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     // Cancel the second stream at 50% completion
@@ -214,12 +230,20 @@ fn test_keeper_fee_rounding_non_evenly_divisible_excess() {
 
         let stream_id = client.create_stream(
             &ctx.sender,
-            &ctx.recipient,
-            &total_excess,
-            &start_time,
-            &start_time,
-            &(start_time + 100),
-            &0, // rate = 0 => full deposit is unstreamed excess
+            &CreateStreamParams {
+                recipient: ctx.recipient.clone(),
+                deposit_amount: total_excess,
+                rate_per_second: 0,
+                start_time: start_time,
+                cliff_time: start_time,
+                end_time: (start_time + 100),
+                withdraw_dust_threshold: None,
+                memo: None,
+                metadata: None,
+                kind: fluxora_stream::StreamKind::Linear,
+                irrevocable: None,
+                witness: None,
+            },
         );
 
         // Advance past keeper grace period
@@ -283,12 +307,20 @@ fn test_smallest_possible_excess_one_stroop() {
     let start_time = ctx.env.ledger().timestamp();
     let stream_id = client.create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &total_excess,
-        &start_time,
-        &start_time,
-        &(start_time + 100),
-        &0,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: total_excess,
+            rate_per_second: 0,
+            start_time: start_time,
+            cliff_time: start_time,
+            end_time: (start_time + 100),
+            withdraw_dust_threshold: None,
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     // Advance past grace period
@@ -304,8 +336,14 @@ fn test_smallest_possible_excess_one_stroop() {
     let sender_refunded = ctx.token.balance(&ctx.sender) - sender_before;
 
     // Keeper must receive 0 (not overpaid)
-    assert_eq!(keeper_paid, 0, "keeper must receive 0 fee for 1-stroop excess");
-    assert!(keeper_paid <= total_excess, "keeper fee must not exceed total excess");
+    assert_eq!(
+        keeper_paid, 0,
+        "keeper must receive 0 fee for 1-stroop excess"
+    );
+    assert!(
+        keeper_paid <= total_excess,
+        "keeper fee must not exceed total excess"
+    );
 
     // Full 1 stroop returned to sender / retained
     assert_eq!(sender_refunded, 1, "remainder must equal 1 stroop");
@@ -317,4 +355,3 @@ fn test_smallest_possible_excess_one_stroop() {
         "keeper_paid + sender_refunded must equal 1 stroop exactly"
     );
 }
-

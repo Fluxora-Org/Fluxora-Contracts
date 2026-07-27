@@ -10,7 +10,19 @@ Everything materially related to mainnet deployment: initialization parameters, 
 
 ## Verification Status
 
-✅ **Complete alignment verified** between deployment procedures and protocol semantics as of 2026-07-26.
+> **⚠️ CAVEAT — Alignment unverified since 2026-07-26.** `cargo check -p fluxora_stream`
+> currently fails (compile errors involving pooled-stream fields, delegation-depth
+> scaffolding, rate-cooldown scaffolding, the CliffSlope stream-kind variant, duplicate
+> `DataKey`/`Stream` fields, and other issues tracked in this repo). A workspace that
+> cannot produce a WASM artifact cannot simultaneously have "complete alignment" between
+> its deployment checklist and its protocol semantics. The 2026-07-26 date below marks the
+> **last** date on which a manual re-walk was performed; it does **not** cover any changes
+> merged after that date. Do **not** treat this document as authoritative evidence of
+> alignment until the build is restored and each checklist item is re-walked against the
+> current contract surface.
+
+❌ **Complete alignment NOT verified** as of today. Last verified: 2026-07-26 (pre-dates
+current compile-breaking state).
 
 ---
 

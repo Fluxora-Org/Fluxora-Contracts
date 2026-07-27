@@ -1,8 +1,8 @@
 extern crate std;
 
 use fluxora_stream::{
-    ContractError, DataKey, FluxoraStream, FluxoraStreamClient, StreamKind, StreamScheduleTemplate,
-    StreamStatus, MAX_GLOBAL_TEMPLATES, MAX_TEMPLATES_PER_OWNER,
+    ContractError, CreateStreamParams, DataKey, FluxoraStream, FluxoraStreamClient, StreamKind,
+    StreamScheduleTemplate, StreamStatus, MAX_GLOBAL_TEMPLATES, MAX_TEMPLATES_PER_OWNER,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -53,6 +53,7 @@ fn template_register_create_delete_happy_path() {
         &None,
         &None,
         &StreamKind::Linear,
+        &None,
     );
     assert_eq!(stream_id, 0u64);
 
@@ -240,21 +241,29 @@ fn auto_renew_permissionless_preserves_subscription_schedule() {
     env.ledger().set_timestamp(1_000);
     let old_id = client.create_stream(
         &sender,
-        &recipient,
-        &100_i128,
-        &1_i128,
-        &1_000,
-        &1_010,
-        &1_100,
-        &0,
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: recipient.clone(),
+            deposit_amount: 100_i128,
+            rate_per_second: 1_i128,
+            start_time: 1_000,
+            cliff_time: 1_010,
+            end_time: 1_100,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
     client.set_auto_renew(&old_id, &sender, &true);
 
     env.ledger().set_timestamp(1_100);
     client.withdraw(&old_id);
-    assert_eq!(client.get_stream_state(&old_id).status, StreamStatus::Completed);
+    assert_eq!(
+        client.get_stream_state(&old_id).status,
+        StreamStatus::Completed
+    );
 
     env.ledger().set_timestamp(1_200);
     let new_id = client.renew_stream(&old_id);
@@ -295,25 +304,27 @@ fn auto_renew_rejects_insufficient_sender_funding_without_new_stream() {
     env.ledger().set_timestamp(2_000);
     let old_id = client.create_stream(
         &sender,
-        &recipient,
-        &100_i128,
-        &1_i128,
-        &2_000,
-        &2_000,
-        &2_100,
-        &0,
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: recipient.clone(),
+            deposit_amount: 100_i128,
+            rate_per_second: 1_i128,
+            start_time: 2_000,
+            cliff_time: 2_000,
+            end_time: 2_100,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
     client.set_auto_renew(&old_id, &sender, &true);
     env.ledger().set_timestamp(2_100);
     client.withdraw(&old_id);
 
     let err = client.try_renew_stream(&old_id);
-    assert_eq!(
-        err,
-        Err(Ok(ContractError::AutoRenewFundingUnavailable))
-    );
+    assert_eq!(err, Err(Ok(ContractError::AutoRenewFundingUnavailable)));
     assert_eq!(client.get_stream_count(), 1);
     assert!(client.get_auto_renew(&old_id));
 }

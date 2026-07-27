@@ -46,6 +46,11 @@ Notes:
 | AutoClaimTriggered | `["ac_trig", stream_id: u64]` | `AutoClaimTriggered { stream_id: u64, destination: Address, amount: i128 }` | When a third party successfully executes a configured final claim via `trigger_auto_claim`. |
 | MigrationCheckpoint | `["migrated"]` | `(from_version: u32, to_version: u32, timestamp: u64)` | No function currently emits this event. Reserved for future migration checkpoints. |
 | ReservationReleased | `["res_rel", holder: Address]` | `(start_id: u64, count: u64, consumed: u64, reclaimed: u64)` | When a stream ID reservation is voluntarily released or reclaimed after expiry. |
+| ClaimOwnershipTransferred | `["claim_own", stream_id: u64]` | `ClaimOwnershipTransferred { stream_id: u64, old_owner: Address, new_owner: Address }` | When claim ownership of a stream is transferred. |
+| ShareDelegated | `["del_share", stream_id: u64]` | `ShareDelegated { stream_id: u64, delegate: Address, share_bps: u32 }` | When a recipient delegates a percentage yield share. |
+| OfferCreated | `["offr_crt", offer_id: u64]` | `OfferCreated { offer_id: u64, sender: Address, recipient: Address }` | When a stream creation offer is created. |
+| OfferAccepted | `["offr_acc", offer_id: u64]` | `OfferAccepted { offer_id: u64, stream_id: u64 }` | When a stream creation offer is accepted. |
+| OfferCancelled | `["offr_cxl", offer_id: u64]` | `OfferCancelled { offer_id: u64 }` | When a stream creation offer is cancelled or rejected. |
 | ContractUpgraded | `["upgraded"]` | `ContractUpgraded { new_wasm_hash: BytesN<32>, new_version: u32, upgraded_at: u64, upgraded_by: Address }` | When the admin successfully calls `upgrade`. A second, legacy `["upgrade"]` topic event `(new_wasm_hash, old_version, new_version, admin)` is also emitted for backward compatibility with older indexers. |
 
 **Additional topics (validator):** `cloned`, `kp_cncl`, `gl_pause`, `gl_resume`, `rate_dec`, `tmpl_def`, `hlth_chg`, `ex_swept`, `ac_set`, `ac_revoke`, `ac_trig`, `renewed`, `migrated`, `res_rel`.

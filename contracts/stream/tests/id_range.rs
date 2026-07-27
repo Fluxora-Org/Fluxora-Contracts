@@ -8,11 +8,9 @@
 //!
 //! These tests are critical for ensuring stable and bounded results for operator migration.
 
-extern crate std;
-
-use fluxora_stream::{FluxoraStream, FluxoraStreamClient, StreamKind, MAX_PAGE_SIZE};
+use fluxora_stream::{CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamKind, MAX_PAGE_SIZE};
 use soroban_sdk::{
-    testutils::Address as _,
+    testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
     Address, Env,
 };
@@ -54,7 +52,7 @@ impl Ctx {
             &sender,
             &contract_id,
             &1_000_000_000_000,
-            &9_999_999,
+            &100_000,
         );
 
         // Safety: env lives as long as the returned Ctx; we only hold one Ctx at a time.
@@ -74,17 +72,21 @@ impl Ctx {
         self.client
             .create_stream(
                 &self.sender,
-                &self.recipient,
-                &100,
-                &1,
-                &now,
-                &now,
-                &(now + 100),
-                &0,
-                &None,
-                &StreamKind::Linear,
+                &CreateStreamParams {
+                    recipient: self.recipient.clone(),
+                    deposit_amount: 100,
+                    rate_per_second: 1,
+                    start_time: now,
+                    cliff_time: now,
+                    end_time: now + 100,
+                    withdraw_dust_threshold: Some(0),
+                    memo: None,
+                    metadata: None,
+                    kind: StreamKind::Linear,
+                    irrevocable: None,
+                    witness: None,
+                },
             )
-            .unwrap()
     }
 
     /// Create `n` streams for `self.recipient`.
@@ -113,9 +115,10 @@ fn test_get_streams_by_id_range_holey_ranges() {
     let id2 = ctx.create_one();
     let id3 = ctx.create_one();
 
-    assert_eq!(id1, 1);
-    assert_eq!(id2, 2);
-    assert_eq!(id3, 3);
+    // First stream gets the current `stream_count` (0), then count increments.
+    assert_eq!(id1, 0);
+    assert_eq!(id2, 1);
+    assert_eq!(id3, 2);
 
     // Fast-forward ledger time to let stream 2 complete (duration is 100 sec)
     let now = ctx.env.ledger().timestamp();
@@ -127,12 +130,12 @@ fn test_get_streams_by_id_range_holey_ranges() {
     // Close the completed stream (removes it from storage)
     ctx.client.close_completed_stream(&id2);
 
-    // Query range [1, 3] with limit 10
-    // Result should only contain streams 1 and 3, skipping the hole at ID 2
-    let streams = ctx.client.get_streams_by_id_range(&1, &3, &10);
-    assert_eq!(streams.len(), 2, "Hole at ID 2 must be skipped");
-    assert_eq!(streams.get(0).unwrap().stream_id, 1);
-    assert_eq!(streams.get(1).unwrap().stream_id, 3);
+    // Query range [0, 2] with limit 10
+    // Result should only contain streams 0 and 2, skipping the hole at ID 1 (previously stream 2)
+    let streams = ctx.client.get_streams_by_id_range(&0, &2, &10);
+    assert_eq!(streams.len(), 2, "Hole at ID 1 must be skipped");
+    assert_eq!(streams.get(0).unwrap().stream_id, 0);
+    assert_eq!(streams.get(1).unwrap().stream_id, 2);
 }
 
 /// Edge Case 2: Over-cap limits must be clamped.

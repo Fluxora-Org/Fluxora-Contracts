@@ -8,7 +8,7 @@ use crate::{load_delegated_nonce, load_stream, ContractError};
 ///
 /// Prepended to the signed payload so a witness attestation cannot be replayed
 /// as a `delegated_withdraw` signature (which uses a distinct byte layout).
-pub(crate) const WITNESSED_CANCEL_DOMAIN: &[u8] = b"fluxora_witnessed_cancel";
+pub(crate) const WITNESSED_CANCEL_DOMAIN: &[u8; 24] = b"fluxora_witnessed_cancel";
 
 /// Validate the deadline for a witnessed cancellation attestation.
 ///
@@ -34,7 +34,7 @@ pub(crate) fn build_witnessed_cancel_message(
     deadline: u64,
 ) -> soroban_sdk::Bytes {
     let mut msg = soroban_sdk::Bytes::new(env);
-    msg.extend_from_array(WITNESSED_CANCEL_DOMAIN);
+    msg.extend_from_slice(WITNESSED_CANCEL_DOMAIN);
     msg.extend_from_array(&stream_id.to_be_bytes());
     msg.extend_from_array(&deadline.to_be_bytes());
     msg
@@ -75,7 +75,7 @@ mod tests {
     extern crate std;
 
     use super::*;
-    use crate::{FluxoraStream, FluxoraStreamClient, StreamKind};
+    use crate::{CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamKind};
     use soroban_sdk::{
         testutils::{Address as _, Ledger},
         token::Client as TokenClient,
@@ -105,16 +105,20 @@ mod tests {
         env.ledger().set_timestamp(0);
         let stream_id = client.create_stream(
             &sender,
-            &recipient,
-            &1000_i128,
-            &1_i128,
-            &0u64,
-            &0u64,
-            &1000u64,
-            &0,
-            &None,
-            &StreamKind::Linear,
-            &None,
+            &CreateStreamParams {
+                recipient: recipient.clone(),
+                deposit_amount: 1000_i128,
+                rate_per_second: 1_i128,
+                start_time: 0u64,
+                cliff_time: 0u64,
+                end_time: 1000u64,
+                withdraw_dust_threshold: Some(0),
+                memo: None,
+                metadata: None,
+                kind: StreamKind::Linear,
+                irrevocable: None,
+                witness: None,
+            },
         );
 
         (env, client, stream_id, recipient)
@@ -125,8 +129,8 @@ mod tests {
         let (env, client, stream_id, _recipient) = setup();
         env.ledger().set_timestamp(100);
 
-        let result = env.as_contract(&_client.address, || {
-            validate_delegation_params(&env, stream_id, 0, 100)
+        let result = env.as_contract(&client.address, || {
+            validate_delegation_params(&env, stream_id, 0, 100, 0)
         });
         assert_eq!(result, Ok(()));
     }
@@ -138,7 +142,7 @@ mod tests {
         env.ledger().set_timestamp(101);
 
         let result = env.as_contract(&_client.address, || {
-            validate_delegation_params(&env, stream_id, 0, 100)
+            validate_delegation_params(&env, stream_id, 0, 100, 0)
         });
         assert_eq!(result, Err(ContractError::SignatureDeadlineExpired));
     }
@@ -150,7 +154,7 @@ mod tests {
         env.ledger().set_timestamp(50);
 
         let result = env.as_contract(&_client.address, || {
-            validate_delegation_params(&env, stream_id, 0, 100)
+            validate_delegation_params(&env, stream_id, 0, 100, 0)
         });
         assert_eq!(result, Ok(()));
     }
@@ -162,7 +166,7 @@ mod tests {
         env.ledger().set_timestamp(50);
 
         let result = env.as_contract(&_client.address, || {
-            validate_delegation_params(&env, stream_id, 1, 100)
+            validate_delegation_params(&env, stream_id, 1, 100, 0)
         });
         assert_eq!(result, Err(ContractError::InvalidSignature));
     }
@@ -174,7 +178,7 @@ mod tests {
         env.ledger().set_timestamp(50);
 
         let result = env.as_contract(&_client.address, || {
-            validate_delegation_params(&env, 999, 0, 100)
+            validate_delegation_params(&env, 999, 0, 100, 0)
         });
         assert_eq!(result, Err(ContractError::StreamNotFound));
     }
@@ -188,7 +192,7 @@ mod tests {
         env.ledger().set_timestamp(1);
 
         let result = env.as_contract(&_client.address, || {
-            validate_delegation_params(&env, stream_id, 0, 0)
+            validate_delegation_params(&env, stream_id, 0, 0, 0)
         });
         assert_eq!(result, Err(ContractError::SignatureDeadlineExpired));
     }
@@ -200,7 +204,7 @@ mod tests {
         env.ledger().set_timestamp(100);
 
         let result = env.as_contract(&_client.address, || {
-            validate_delegation_params(&env, stream_id, 0, u64::MAX)
+            validate_delegation_params(&env, stream_id, 0, u64::MAX, 0)
         });
         assert_eq!(result, Ok(()));
     }
@@ -216,7 +220,7 @@ mod tests {
 
         // deadline=100 is expired, nonce=999 is wrong — deadline error first
         let result = env.as_contract(&_client.address, || {
-            validate_delegation_params(&env, stream_id, 999, 100)
+            validate_delegation_params(&env, stream_id, 999, 100, 0)
         });
         assert_eq!(result, Err(ContractError::SignatureDeadlineExpired));
     }
@@ -230,7 +234,7 @@ mod tests {
 
         // stream_id=999 doesn't exist, nonce=999 is wrong — StreamNotFound first
         let result = env.as_contract(&_client.address, || {
-            validate_delegation_params(&env, 999, 999, 100)
+            validate_delegation_params(&env, 999, 999, 100, 0)
         });
         assert_eq!(result, Err(ContractError::StreamNotFound));
     }
@@ -244,7 +248,7 @@ mod tests {
         env.ledger().set_timestamp(50);
 
         let result = env.as_contract(&_client.address, || {
-            validate_delegation_params(&env, stream_id, u64::MAX, 100)
+            validate_delegation_params(&env, stream_id, u64::MAX, 100, 0)
         });
         assert_eq!(result, Err(ContractError::InvalidSignature));
     }
@@ -278,29 +282,37 @@ mod tests {
         env.ledger().set_timestamp(0);
         let stream_a = client.create_stream(
             &sender,
-            &recipient_a,
-            &1000_i128,
-            &1_i128,
-            &0u64,
-            &0u64,
-            &1000u64,
-            &0,
-            &None,
-            &StreamKind::Linear,
-            &None,
+            &CreateStreamParams {
+                recipient: recipient_a.clone(),
+                deposit_amount: 1000_i128,
+                rate_per_second: 1_i128,
+                start_time: 0u64,
+                cliff_time: 0u64,
+                end_time: 1000u64,
+                withdraw_dust_threshold: Some(0),
+                memo: None,
+                metadata: None,
+                kind: StreamKind::Linear,
+                irrevocable: None,
+                witness: None,
+            },
         );
         let _stream_b = client.create_stream(
             &sender,
-            &recipient_b,
-            &1000_i128,
-            &1_i128,
-            &0u64,
-            &0u64,
-            &1000u64,
-            &0,
-            &None,
-            &StreamKind::Linear,
-            &None,
+            &CreateStreamParams {
+                recipient: recipient_b.clone(),
+                deposit_amount: 1000_i128,
+                rate_per_second: 1_i128,
+                start_time: 0u64,
+                cliff_time: 0u64,
+                end_time: 1000u64,
+                withdraw_dust_threshold: Some(0),
+                memo: None,
+                metadata: None,
+                kind: StreamKind::Linear,
+                irrevocable: None,
+                witness: None,
+            },
         );
 
         env.ledger().set_timestamp(50);
@@ -308,13 +320,13 @@ mod tests {
         // Both recipients have default nonce=0; nonce 0 must pass for both
         assert_eq!(
             env.as_contract(&contract_id, || validate_delegation_params(
-                &env, stream_a, 0, 100
+                &env, stream_a, 0, 100, 0
             )),
             Ok(())
         );
         assert_eq!(
             env.as_contract(&contract_id, || validate_delegation_params(
-                &env, _stream_b, 0, 100
+                &env, _stream_b, 0, 100, 0
             )),
             Ok(())
         );
@@ -322,13 +334,13 @@ mod tests {
         // Nonce 1 must fail for both (stored is 0)
         assert_eq!(
             env.as_contract(&contract_id, || validate_delegation_params(
-                &env, stream_a, 1, 100
+                &env, stream_a, 1, 100, 0
             )),
             Err(ContractError::InvalidSignature)
         );
         assert_eq!(
             env.as_contract(&contract_id, || validate_delegation_params(
-                &env, _stream_b, 1, 100
+                &env, _stream_b, 1, 100, 0
             )),
             Err(ContractError::InvalidSignature)
         );
@@ -343,13 +355,13 @@ mod tests {
 
         // First call: wrong nonce → fails
         let result_fail = env.as_contract(&_client.address, || {
-            validate_delegation_params(&env, stream_id, 1, 100)
+            validate_delegation_params(&env, stream_id, 1, 100, 0)
         });
         assert_eq!(result_fail, Err(ContractError::InvalidSignature));
 
         // Second call: correct nonce → must still succeed
         let result_ok = env.as_contract(&_client.address, || {
-            validate_delegation_params(&env, stream_id, 0, 100)
+            validate_delegation_params(&env, stream_id, 0, 100, 0)
         });
         assert_eq!(result_ok, Ok(()));
     }
@@ -414,5 +426,4 @@ mod tests {
         });
         assert_eq!(result, Err(ContractError::InvalidParams));
     }
-}
 }

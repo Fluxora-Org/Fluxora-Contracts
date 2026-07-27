@@ -15,8 +15,8 @@
 extern crate std;
 
 use fluxora_stream::{
-    ContractError, DataKey, FluxoraStream, FluxoraStreamClient, PauseReason, StreamCloned,
-    StreamCreated, StreamKind, StreamStatus,
+    ContractError, CreateStreamParams, DataKey, FluxoraStream, FluxoraStreamClient, PauseReason,
+    StreamCloned, StreamCreated, StreamKind, StreamStatus,
 };
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger, LedgerInfo, MockAuth, MockAuthInvoke},
@@ -97,15 +97,20 @@ impl<'a> Ctx<'a> {
         self.env.ledger().set_timestamp(0);
         self.client().create_stream(
             &self.sender,
-            &self.recipient,
-            &1000_i128,
-            &1_i128,
-            &0u64,
-            &0u64,
-            &1000u64,
-            &0,
-            &None,
-            &StreamKind::Linear,
+            &CreateStreamParams {
+                recipient: self.recipient.clone(),
+                deposit_amount: 1000_i128,
+                rate_per_second: 1_i128,
+                start_time: 0u64,
+                cliff_time: 0u64,
+                end_time: 1000u64,
+                withdraw_dust_threshold: Some(0),
+                memo: None,
+                metadata: None,
+                kind: StreamKind::Linear,
+                irrevocable: None,
+                witness: None,
+            },
         )
     }
 
@@ -114,15 +119,20 @@ impl<'a> Ctx<'a> {
         self.env.ledger().set_timestamp(0);
         self.client().create_stream(
             &self.sender,
-            &self.recipient,
-            &1000_i128,
-            &1_i128,
-            &0u64,
-            &500u64,
-            &1000u64,
-            &0,
-            &None,
-            &StreamKind::Linear,
+            &CreateStreamParams {
+                recipient: self.recipient.clone(),
+                deposit_amount: 1000_i128,
+                rate_per_second: 1_i128,
+                start_time: 0u64,
+                cliff_time: 500u64,
+                end_time: 1000u64,
+                withdraw_dust_threshold: Some(0),
+                memo: None,
+                metadata: None,
+                kind: StreamKind::Linear,
+                irrevocable: None,
+                witness: None,
+            },
         )
     }
 }
@@ -259,15 +269,20 @@ fn clone_inherits_rate_per_second() {
     ctx.env.ledger().set_timestamp(0);
     let source_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &5000_i128,
-        &5_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0,
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 5000_i128,
+            rate_per_second: 5_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     ctx.env.ledger().set_timestamp(1000);
@@ -343,15 +358,20 @@ fn clone_inherits_withdraw_dust_threshold() {
     ctx.env.ledger().set_timestamp(0);
     let source_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &100_i128,
-        &None, // dust threshold = 100
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(100_i128),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     ctx.env.ledger().set_timestamp(1000);
@@ -382,15 +402,20 @@ fn clone_inherits_memo() {
     let memo = Some(soroban_sdk::Bytes::from_slice(&ctx.env, b"payroll-jan"));
     let source_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0,
-        &memo,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: memo,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     ctx.env.ledger().set_timestamp(1000);
@@ -472,15 +497,20 @@ fn clone_sender_authorized_strict() {
     });
     let source_id = client.create_stream(
         &sender,
-        &recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0,
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     env.ledger().set_timestamp(1000);
@@ -530,15 +560,20 @@ fn clone_recipient_unauthorized() {
     env.ledger().set_timestamp(0);
     let source_id = client.create_stream(
         &sender,
-        &recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0,
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     env.ledger().set_timestamp(1000);
@@ -585,15 +620,20 @@ fn clone_third_party_unauthorized() {
     env.ledger().set_timestamp(0);
     let source_id = client.create_stream(
         &sender,
-        &recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0,
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     env.ledger().set_timestamp(1000);
@@ -631,15 +671,20 @@ fn clone_cliff_only_sentinel_rejected_without_force() {
     // Create a stream with the CliffOnly sentinel threshold.
     let source_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &i128::MAX,
-        &None, // sentinel
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(i128::MAX),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     ctx.env.ledger().set_timestamp(1000);
@@ -669,15 +714,20 @@ fn clone_cliff_only_sentinel_allowed_with_force() {
     ctx.env.ledger().set_timestamp(0);
     let source_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &i128::MAX,
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(i128::MAX),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     ctx.env.ledger().set_timestamp(1000);
@@ -1295,15 +1345,20 @@ fn clone_cliff_equals_end_in_source() {
     // cliff == end_time (degenerate but valid).
     let source_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &1000u64,
-        &1000u64, // cliff == end
-        &0,
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 1000u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     ctx.env.ledger().set_timestamp(1000);
@@ -1407,15 +1462,20 @@ fn clone_high_rate_large_deposit_no_overflow() {
 
     let source_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &deposit,
-        &rate,
-        &0u64,
-        &0u64,
-        &duration,
-        &0,
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: deposit,
+            rate_per_second: rate,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: duration,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     ctx.env.ledger().set_timestamp(duration);
@@ -1676,15 +1736,20 @@ fn clone_override_deposit_below_total_streamable_rejected() {
     sac.mint(&ctx.sender, &100_000_i128);
     let source_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &10_000_i128,
-        &10_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0,
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 10_000_i128,
+            rate_per_second: 10_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     ctx.env.ledger().set_timestamp(1000);
@@ -1727,15 +1792,20 @@ fn clone_override_rate_exceeds_governance_cap_rejected() {
     sac.mint(&ctx.sender, &1_000_000_i128);
     let source_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &100_000_i128,
-        &100_i128, // rate = 100/s
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0,
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 100_000_i128,
+            rate_per_second: 100_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     ctx.env.ledger().set_timestamp(1000);
@@ -1775,15 +1845,20 @@ fn clone_override_rate_at_exact_governance_cap_allowed() {
     sac.mint(&ctx.sender, &1_000_000_i128);
     let source_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &100_000_i128,
-        &100_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0,
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 100_000_i128,
+            rate_per_second: 100_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     ctx.env.ledger().set_timestamp(1000);
@@ -1824,15 +1899,20 @@ fn clone_override_computed_cliff_exceeds_end_time_rejected() {
     ctx.env.ledger().set_timestamp(0);
     let source_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &800u64, // cliff at 80% into the stream
-        &1000u64,
-        &0,
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 800u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     ctx.env.ledger().set_timestamp(1000);
@@ -2087,15 +2167,20 @@ fn clone_override_cliff_only_inherits_zero_rate() {
     // StreamKind::CliffOnly is passed as the kind argument.
     let source_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &0_i128,  // rate (ignored / forced to 0 for CliffOnly)
-        &0u64,    // start
-        &500u64,  // cliff
-        &1000u64, // end
-        &0_i128,  // dust threshold
-        &None,
-        &StreamKind::CliffOnly,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 0_i128,
+            start_time: 0u64,
+            cliff_time: 500u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0_i128),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::CliffOnly,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     let snap = StreamSnapshot::capture(&ctx, source_id);
@@ -2137,15 +2222,20 @@ fn clone_override_cliff_offset_overflow_rejected() {
     ctx.env.ledger().set_timestamp(0);
     let source_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &500u64,
-        &1000u64,
-        &0,
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 500u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     ctx.env.ledger().set_timestamp(1000);
@@ -2201,7 +2291,10 @@ fn clone_correctly_updates_total_liabilities() {
             .get(&DataKey::TotalLiabilities)
             .unwrap_or(0)
     });
-    assert_eq!(initial_liabilities, 1000, "initial liabilities must equal source deposit");
+    assert_eq!(
+        initial_liabilities, 1000,
+        "initial liabilities must equal source deposit"
+    );
 
     // Perform clone with new deposit of 1000
     let new_deposit = 1000_i128;
@@ -2217,13 +2310,24 @@ fn clone_correctly_updates_total_liabilities() {
 
     // Verify source is untouched
     let source_after = ctx.client().get_stream_state(&source_id);
-    assert_eq!(source_after, source_before, "source stream must remain unchanged");
+    assert_eq!(
+        source_after, source_before,
+        "source stream must remain unchanged"
+    );
 
     // Verify sender and contract balances
     let sender_balance_after = ctx.token.balance(&ctx.sender);
     let contract_balance_after = ctx.token.balance(&ctx.contract_id);
-    assert_eq!(sender_balance_after, sender_balance_before - new_deposit, "sender balance must decrease by new deposit");
-    assert_eq!(contract_balance_after, contract_balance_before + new_deposit, "contract balance must increase by new deposit");
+    assert_eq!(
+        sender_balance_after,
+        sender_balance_before - new_deposit,
+        "sender balance must decrease by new deposit"
+    );
+    assert_eq!(
+        contract_balance_after,
+        contract_balance_before + new_deposit,
+        "contract balance must increase by new deposit"
+    );
 
     // Verify TotalLiabilities is exactly initial + new_deposit
     let final_liabilities: i128 = ctx.env.as_contract(&cid, || {
@@ -2233,7 +2337,11 @@ fn clone_correctly_updates_total_liabilities() {
             .get(&DataKey::TotalLiabilities)
             .unwrap_or(0)
     });
-    assert_eq!(final_liabilities, initial_liabilities + new_deposit, "liabilities must increase by new deposit");
+    assert_eq!(
+        final_liabilities,
+        initial_liabilities + new_deposit,
+        "liabilities must increase by new deposit"
+    );
 
     // Verify new stream's state
     let new_stream = ctx.client().get_stream_state(&new_id);

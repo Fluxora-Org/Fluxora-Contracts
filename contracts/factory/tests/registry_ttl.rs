@@ -101,15 +101,20 @@ fn test_registry_ttl_single_push() {
     let start = ctx.now();
     ctx.factory.create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &DEPOSIT_AMOUNT,
-        &RATE_PER_SECOND,
-        &start,
-        &start,
-        &(start + STREAM_DURATION),
-        &0,
-        &StreamKind::Linear,
-        &None,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: DEPOSIT_AMOUNT,
+            rate_per_second: RATE_PER_SECOND,
+            start_time: start,
+            cliff_time: start,
+            end_time: start + STREAM_DURATION,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     let live_until = registry_live_until(&ctx.env, &ctx.factory_id);
@@ -147,6 +152,8 @@ fn test_registry_ttl_batch_push() {
             memo: None,
             metadata: None,
             kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
         });
     }
 
