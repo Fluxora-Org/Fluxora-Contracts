@@ -4,6 +4,25 @@
 //! and the DataKey-based CRUD layer. All functions here are `pub(crate)` unless
 //! they need to be called from tests via the `testutils` feature.
 //!
+//! # Storage invariants
+//!
+//! The contract relies on the following storage invariants (see also
+//! [`docs/storage-invariants.md`](../../../docs/storage-invariants.md)):
+//!
+//! - **TTL:** Instance keys are bumped on every entry-point; persistent stream
+//!   keys are bumped on `load_stream` / `save_stream` and index reads/writes.
+//! - **Reentrancy:** `ReentrancyLock` instance flag prevents nested token calls.
+//! - **Liabilities:** `TotalLiabilities` tracks outstanding deposit obligations
+//!   and moves in lockstep with create/top-up vs withdraw/cancel/refund paths.
+//! - **Indexes sorted:** `RecipientStreams` and `SenderStreams` vectors are kept
+//!   in ascending `stream_id` order on insert/remove.
+//! - **CEI:** Stream state is persisted before external token transfers.
+//! - **Terminal state:** Cancelled or past-`end_time` streams bypass dust threshold
+//!   and freeze accrual at cancellation when applicable.
+//! - **Metadata validation:** `validate_metadata` runs before ID allocation.
+//! - **Append-only keys:** `DataKey` variants are never reordered (discriminants
+//!   0–35 frozen per release policy).
+//!
 //! # Security notes
 //! - `DataKey` variant order is append-only and must never be reordered.
 //! - `save_stream` is `pub` so the accrual module can call it directly.
@@ -534,6 +553,15 @@ pub fn increment_delegated_nonce(env: &Env, recipient: &Address) {
         PERSISTENT_LIFETIME_THRESHOLD,
         PERSISTENT_BUMP_AMOUNT,
     );
+}
+
+/// Pub re-export of `increment_delegated_nonce` for test crates under the `testutils` feature.
+///
+/// Allows adversarial auth tests to simulate delegation revocation by bumping
+/// the nonce directly in contract storage via `env.as_contract(...)`.
+#[cfg(any(test, feature = "testutils"))]
+pub fn increment_delegated_nonce_test_only(env: &Env, recipient: &Address) {
+    increment_delegated_nonce(env, recipient);
 }
 
 pub(crate) fn load_rotation_history(env: &Env, stream_id: u64) -> soroban_sdk::Vec<RotationEntry> {

@@ -104,14 +104,14 @@ check remains reproducible without the Stellar CLI installed.
 | `batch_withdraw_to` | 10 | 6M |
 | `batch_withdraw_to` | 50 | 20M |
 | `batch_withdraw_to` | 100 | 35M |
-| `bulk_cancel_streams` | 1 | 0.8M |
-| `bulk_cancel_streams` | 10 | 5M |
-| `bulk_cancel_streams` | 50 | 15M |
-| `bulk_cancel_streams` | 100 | 25M |
-| `bulk_resume_streams_as_admin` | 1 | 0.8M |
-| `bulk_resume_streams_as_admin` | 10 | 5M |
-| `bulk_resume_streams_as_admin` | 50 | 15M |
-| `bulk_resume_streams_as_admin` | 100 | 25M |
+| `bulk_cancel_streams` | 1 | 3.5M |
+| `bulk_cancel_streams` | 5 | 9M |
+| `bulk_cancel_streams` | 10 | 16M |
+| `bulk_cancel_streams` | 20 | 32M |
+| `bulk_resume_streams_as_admin` | 1 | 4M |
+| `bulk_resume_streams_as_admin` | 5 | 10M |
+| `bulk_resume_streams_as_admin` | 10 | 18M |
+| `bulk_resume_streams_as_admin` | 20 | 36M |
 
 ## Hot Path Analysis
 
@@ -158,7 +158,7 @@ for id in stream_ids.iter() {
 }
 ```
 
-This is O(n²) in the batch size n.  At `MAX_PAGE_SIZE = 100`, the worst case is about 4 950 element comparisons per call (~10 000 inclusive of the outer-loop overhead).  The regression tests below measure all four entrypoints at batch sizes 1, 10, 50, and 100 so that any future increase to `MAX_PAGE_SIZE` — or an accidental reintroduction of a less efficient duplicate check — will be caught by the budget assertion in the gas-regression test suite.
+This is O(n²) in the batch size n.  At `MAX_PAGE_SIZE = 100`, the worst case is about 4 950 element comparisons per call (~10 000 inclusive of the outer-loop overhead).  The regression tests measure `batch_withdraw` and `batch_withdraw_to` at the existing large-batch sizes 1, 10, 50, and 100, and measure `bulk_cancel_streams` plus `bulk_resume_streams_as_admin` at issue #1219's baseline sizes 1, 5, 10, and 20. This keeps the newer bulk entrypoints under `validate_gas.py` regression comparison while preserving the existing large-batch coverage for withdrawal paths.
 
 A companion refactor issue replaces the O(n²) scan with an O(n) helper (e.g. using a `Map<u64,bool>`), after which these baselines are expected to improve significantly, especially at size 100. The budget assertions stay valid regardless; they guard against per-invocation-limit violations, not against algorithmic regressions within the current design.
 
@@ -184,15 +184,15 @@ The following table provides the CPU instruction counts for core operations.
   },
   "bulk_resume_streams_as_admin": {
     "1": 4000000,
+    "5": 10000000,
     "10": 18000000,
-    "50": 90000000,
-    "100": 250000000
+    "20": 36000000
   },
   "bulk_cancel_streams": {
     "1": 3500000,
+    "5": 9000000,
     "10": 16000000,
-    "50": 80000000,
-    "100": 220000000
+    "20": 32000000
   },
   "keeper_cancel": {
     "partial_accrual": 786739,

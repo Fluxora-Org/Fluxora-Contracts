@@ -16,9 +16,9 @@ When changing the contract:
 - Update snapshot tests if externally visible behavior changes
 - No behavior change required for doc-only updates
 
-**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `close_cancelled_stream`, `close_completed_stream`, `compute_keeper_fee_split`, `create_stream_with_lookback`, `delete_stream_template`, `get_auto_renew`, `get_global_emergency_paused`, `get_lookback_window`, `get_paused_stream_count`, `get_pending_recipient_update`, `get_protocol_fees_accrued`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `get_total_liabilities`, `global_resume`, `keeper_cancel`, `renew_stream`, `set_auto_renew`, `set_contract_paused`, `set_global_emergency_paused`, `set_lookback_window`, `version`, `migration_v5_to_v6`, `set_max_rate_per_second`.
-**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `delete_stream_template`, `get_auto_renew`, `get_global_emergency_paused`, `get_keeper_fee_split`, `get_pending_recipient_update`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `get_total_liabilities`, `global_resume`, `keeper_cancel`, `renew_stream`, `set_auto_renew`, `set_contract_paused`, `set_global_emergency_paused`, `version`, `migration_v5_to_v6`, `set_max_rate_per_second`.
-**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `close_cancelled_stream`, `close_completed_stream`, `compute_keeper_fee_split`, `delete_stream_template`, `get_auto_renew`, `get_global_emergency_paused`, `get_keeper_fee_split`, `get_paused_stream_count`, `get_pending_recipient_update`, `get_protocol_fees_accrued`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `get_total_liabilities`, `global_resume`, `keeper_cancel`, `migration_v5_to_v6`, `renew_stream`, `set_auto_renew`, `set_contract_paused`, `set_global_emergency_paused`, `set_max_rate_per_second`, `version`.
+**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `close_cancelled_stream`, `close_completed_stream`, `compute_keeper_fee_split`, `create_stream_with_lookback`, `delete_stream_template`, `get_auto_renew`, `get_global_emergency_paused`, `get_lookback_window`, `get_paused_stream_count`, `get_pending_recipient_update`, `get_protocol_fees_accrued`, `get_recipient_stream_count`, `get_sender_portfolio_health`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `get_total_liabilities`, `global_resume`, `keeper_cancel`, `renew_stream`, `set_auto_renew`, `set_contract_paused`, `set_global_emergency_paused`, `set_lookback_window`, `version`, `migration_v5_to_v6`, `set_max_rate_per_second`.
+**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `delete_stream_template`, `get_auto_renew`, `get_global_emergency_paused`, `get_keeper_fee_split`, `get_pending_recipient_update`, `get_recipient_stream_count`, `get_sender_portfolio_health`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `get_total_liabilities`, `global_resume`, `keeper_cancel`, `renew_stream`, `set_auto_renew`, `set_contract_paused`, `set_global_emergency_paused`, `version`, `migration_v5_to_v6`, `set_max_rate_per_second`.
+**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `close_cancelled_stream`, `close_completed_stream`, `compute_keeper_fee_split`, `delete_stream_template`, `get_auto_renew`, `get_global_emergency_paused`, `get_keeper_fee_split`, `get_paused_stream_count`, `get_pending_recipient_update`, `get_protocol_fees_accrued`, `get_recipient_stream_count`, `get_sender_portfolio_health`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `get_total_liabilities`, `global_resume`, `keeper_cancel`, `migration_v5_to_v6`, `renew_stream`, `set_auto_renew`, `set_contract_paused`, `set_global_emergency_paused`, `set_max_rate_per_second`, `version`.
 
 ## Externally Visible Assurances
 
@@ -867,6 +867,21 @@ From **CONTRACT_VERSION 5**, senders can optionally set a `withdraw_dust_thresho
     - **Final Drain**: If the withdrawal would result in `withdrawn_amount == deposit_amount` (completing the stream), it is allowed even if the amount is below the threshold.
 - **Default**: The threshold defaults to `0` if not specified at creation.
 
+#### Operation compatibility
+
+| Operation | Dust enforced? | Notes |
+|-----------|----------------|-------|
+| `withdraw` | Yes | Blocked payouts return `0` |
+| `withdraw_to` | Yes | Blocked payouts return `0` |
+| `batch_withdraw` | Yes | Per-stream `amount = 0` when blocked |
+| `batch_withdraw_to` | Yes | Per-stream `amount = 0` when blocked |
+| `delegated_withdraw` | No | Uses signed `expected_minimum_amount` instead |
+| `get_withdrawable` / `get_claimable_at` | No | Views report raw accrual minus withdrawn |
+
+Creation validation: `create_stream_offer` rejects out-of-range thresholds with
+`InvalidDustThreshold` (code 35); direct `create_stream` paths currently do not
+validate bounds (see [dust-threshold.md](./dust-threshold.md)).
+
 > **See also:** [dust-threshold.md](./dust-threshold.md) — formula for choosing a safe threshold value, worked USDC examples, a validation table, and guidance for template authors.
 
 ### Withdrawal Frequency Limit (#574)
@@ -918,7 +933,71 @@ Behaviour: Active/Paused streams use the given `timestamp` (clamped to schedule)
 
 Use this to show real-time health indicators in UIs, alert senders of underfunding, or notify recipients of expired streams ready for final withdrawal.
 
----
+### Frontend: get_sender_portfolio_health (view aggregate)
+
+`get_sender_portfolio_health(sender, cursor, limit)` returns a paginated aggregate health report across all streams owned by `sender`. This is the single-call solution for operators managing many concurrent streams (e.g. payroll platforms) to obtain a portfolio-wide health snapshot.
+
+#### Parameters
+
+| Parameter | Type | Description |
+|---|---|---|
+| `sender` | `Address` | The sender whose streams to evaluate |
+| `cursor` | `u64` | Stream ID to resume from (inclusive). Pass `0` to start from the beginning. |
+| `limit` | `u32` | Maximum streams to evaluate per call (capped at `MAX_PAGE_SIZE = 100`). Pass `0` for the maximum. |
+
+#### Returns (`PortfolioHealthPage`)
+
+| Field | Type | Description |
+|---|---|---|
+| `underfunded_count` | `u32` | Active/Paused streams whose deposit cannot cover remaining accrual through `end_time` |
+| `expired_count` | `u32` | Active/Paused streams where `ledger.timestamp() >= end_time` (not yet closed) |
+| `healthy_count` | `u32` | Active/Paused streams that are neither underfunded nor expired |
+| `next_cursor` | `u64` | Next cursor for pagination. `0` when all pages have been consumed. |
+| `stream_ids` | `Vec<u64>` | Stream IDs evaluated on this page (ascending, at most `MAX_PAGE_SIZE`) |
+
+#### Health Classification (per stream)
+
+| Classification | Condition |
+|---|---|
+| **expired** | `now >= end_time` AND status is `Active` or `Paused` (expiry takes priority) |
+| **underfunded** | `deposit_amount < rate_per_second * (end_time - start_time)` via `compute_stream_health` |
+| **healthy** | Active/Paused and not underfunded or expired |
+
+Terminal streams (`Completed`, `Cancelled`) are excluded from all three counters because they no longer represent an ongoing funding obligation. They are still returned in the `stream_ids` vector.
+
+#### Pagination Protocol
+
+```text
+1. Call with cursor = 0, limit = MAX_PAGE_SIZE
+2. Process the returned page
+3. If next_cursor != 0, call again with cursor = page.next_cursor
+4. Repeat until next_cursor == 0
+```
+
+#### Example (Rust client)
+
+```rust
+let mut cursor = 0u64;
+loop {
+    let page = client.get_sender_portfolio_health(
+        &sender, &cursor, &100,
+    );
+    println!(
+        "underfunded={} expired={} healthy={}",
+        page.underfunded_count, page.expired_count, page.healthy_count,
+    );
+    if page.next_cursor == 0 { break; }
+    cursor = page.next_cursor;
+}
+```
+
+#### Security Notes
+
+- **Permissionless view**: No authentication required. Any caller can read the portfolio health of any sender.
+- **Read-only**: No state mutation occurs. Only persistent sender index and stream data are read.
+- **Bounded gas**: Per-call gas is O(limit) thanks to `MAX_PAGE_SIZE` cap and sorted index. No unbounded loops.
+- **Graceful degradation**: Streams removed between index write and query (e.g. by concurrent `close_completed_stream`) are silently skipped — no panic or error.
+- **Cursor safety**: A past-end cursor returns an empty page with `next_cursor = 0`, not an error.
 
 ## 3. Cliff and end_time Behavior
 
@@ -1190,6 +1269,7 @@ contract.create_streams_relative(&sender, &params)?;
 | `get_stream_health`       | Anyone                        | None (view)                                 |
 | `get_streams_by_id_range` | Anyone                        | None (view, paginated)                      |
 | `get_recipient_streams_paginated` | Anyone                  | None (view, paginated)                      |
+| `get_sender_portfolio_health` | Anyone                   | None (view, paginated)                      |
 | `pause_stream_as_admin`   | Admin                         | `admin.require_auth()`                      |
 | `resume_stream_as_admin`  | Admin                         | `admin.require_auth()`                      |
 | `bulk_resume_streams_as_admin` | Admin                    | `admin.require_auth()` (once per batch; atomic all-or-nothing) |
