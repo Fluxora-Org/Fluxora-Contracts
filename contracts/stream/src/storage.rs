@@ -536,6 +536,15 @@ pub(crate) fn increment_delegated_nonce(env: &Env, recipient: &Address) {
     );
 }
 
+/// Pub re-export of `increment_delegated_nonce` for test crates under the `testutils` feature.
+///
+/// Allows adversarial auth tests to simulate delegation revocation by bumping
+/// the nonce directly in contract storage via `env.as_contract(...)`.
+#[cfg(any(test, feature = "testutils"))]
+pub fn increment_delegated_nonce_test_only(env: &Env, recipient: &Address) {
+    increment_delegated_nonce(env, recipient);
+}
+
 pub(crate) fn load_rotation_history(env: &Env, stream_id: u64) -> soroban_sdk::Vec<RotationEntry> {
     let key = DataKey::RotationHistory(stream_id);
     env.storage()

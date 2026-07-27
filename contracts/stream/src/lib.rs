@@ -14,6 +14,12 @@ use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Add
 use storage::*;
 use token_check::verify_token_behavior;
 
+/// Re-export for adversarial auth tests: bump a recipient's delegated-withdraw nonce
+/// to simulate in-flight revocation without going through the full contract flow.
+/// Only available when the `testutils` feature is enabled.
+#[cfg(feature = "testutils")]
+pub use storage::increment_delegated_nonce_test_only as increment_delegated_nonce;
+
 // ---------------------------------------------------------------------------
 // TTL constants
 // ---------------------------------------------------------------------------
@@ -363,6 +369,9 @@ pub enum StreamKind {
     Linear = 0,
     /// Stream that unlocks its full deposit at the cliff time in a one-shot event.
     CliffOnly = 1,
+    /// Stream that accrues linearly but only from the cliff time onward.
+    /// Before cliff: no accrual. After cliff: linear accrual from cliff to end_time.
+    CliffSlope = 2,
 }
 
 #[soroban_sdk::contracterror]
@@ -417,7 +426,7 @@ pub enum ContractError {
     ReservationNotFound = 24,
     ReservationNotExpirable = 25,
     ReservationStillActive = 26,
-    ReservationAlreadyActive = 34,
+    ReservationAlreadyActive = 41,
     /// Ledger-backed accrual observed a timestamp lower than the previous accrual timestamp.
     ClockRegression = 28,
     /// Metadata payload exceeds the allowed size.
@@ -444,6 +453,12 @@ pub enum ContractError {
     OfferWrongRecipient = 39,
     /// Caller is not the sender who created this offer.
     OfferWrongSender = 40,
+    /// Operation blocked by a rate-change cooldown.
+    RateCooldownActive = 42,
+    /// Detected a cyclic delegation chain.
+    CyclicDelegation = 43,
+    /// Maximum delegation chain depth exceeded.
+    DelegationDepthExceeded = 44,
 }
 
 #[contracttype]
@@ -701,6 +716,28 @@ pub struct KeeperCancelled {
     pub keeper_fee: i128,
     pub recipient_amount: i128,
     pub sender_refund: i128,
+}
+
+/// Emitted when claim ownership of a stream is transferred to a new address.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ClaimOwnershipTransferred {
+    pub stream_id: u64,
+    pub old_owner: Option<Address>,
+    pub new_owner: Address,
+}
+
+/// Emitted when a recipient delegates a share of their stream to a new recipient.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RecipientShareDelegated {
+    pub parent_stream_id: u64,
+    pub child_stream_id: u64,
+    pub delegator: Address,
+    pub delegatee: Address,
+    pub share_bps: u32,
+    pub new_parent_rate: i128,
+    pub child_rate: i128,
 }
 
 // ---------------------------------------------------------------------------
@@ -969,6 +1006,18 @@ pub struct Stream {
     /// Optional compliance witness authorized to cancel via signed attestation.
     /// `None` when not configured (default for backward compatibility).
     pub witness: Option<Address>,
+    /// Ledger sequence number of the last rate change.
+    /// Used to enforce the minimum rate-change interval (MIN_RATE_INTERVAL_LEDGERS).
+    /// Zero when no rate change has occurred yet.
+    pub last_rate_change_ledger: u32,
+    /// Whether this stream is a pooled multi-recipient stream.
+    /// `None` / `Some(false)` = normal stream; `Some(true)` = pooled stream.
+    pub is_pooled: Option<bool>,
+    /// Parent stream ID for delegated sub-streams (stream-delegation feature).
+    /// `None` for top-level streams.
+    pub parent_stream_id: Option<u64>,
+    /// Delegation chain depth. 0 for top-level streams, incremented on sub-stream creation.
+    pub delegation_depth: u32,
 }
 
 /// Pagination result for recipient stream listing
@@ -1218,6 +1267,12 @@ pub enum DataKey {
     /// Populated on `create_stream_offer`, removed on accept/reject/cancel.
     /// Not updated when an offer is cancelled by the sender (sender index maintained separately).
     RecipientPendingOffers(Address),
+    /// Per-stream share distribution map for pooled streams (stream_id → Vec<(Address, u32)>).
+    /// Maps each recipient address to their basis-point share of the pool.
+    PooledStreamShares(u64),
+    /// Per-stream per-recipient withdrawn amount for pooled streams.
+    /// Keyed by (stream_id, recipient_address); tracks individual withdrawal balances.
+    PooledStreamWithdrawn(u64, Address),
 }
 
 // ---------------------------------------------------------------------------
@@ -1314,6 +1369,11 @@ fn get_config(env: &Env) -> Result<Config, ContractError> {
         .instance()
         .get(&DataKey::Config)
         .ok_or(ContractError::InvalidState) // Not initialised
+}
+
+/// Panicking version of `get_config` for internal use where config is guaranteed to exist.
+fn load_config(env: &Env) -> Config {
+    get_config(env).expect("contract not initialised")
 }
 
 fn get_token(env: &Env) -> Result<Address, ContractError> {
@@ -1967,6 +2027,60 @@ const KEEPER_FEE_BPS: u32 = 50;
 /// Maximum number of rotation entries stored in a per-stream history.
 const MAX_ROTATION_HISTORY: u32 = 50;
 
+/// Maximum number of recipients in a pooled stream.
+pub const MAX_POOL_RECIPIENTS: u32 = 20;
+
+// ---------------------------------------------------------------------------
+// Pooled stream storage helpers
+// ---------------------------------------------------------------------------
+
+/// Load the share distribution for a pooled stream.
+fn read_pooled_stream_shares(
+    env: &Env,
+    stream_id: u64,
+) -> Result<soroban_sdk::Vec<(Address, u32)>, ContractError> {
+    let key = DataKey::PooledStreamShares(stream_id);
+    env.storage()
+        .persistent()
+        .get(&key)
+        .ok_or(ContractError::StreamNotFound)
+}
+
+/// Persist the share distribution for a pooled stream.
+fn save_pooled_stream_shares(
+    env: &Env,
+    stream_id: u64,
+    shares: &soroban_sdk::Vec<(Address, u32)>,
+) {
+    let key = DataKey::PooledStreamShares(stream_id);
+    env.storage().persistent().set(&key, shares);
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+}
+
+/// Load the amount already withdrawn by a specific recipient from a pooled stream.
+fn read_pooled_stream_withdrawn(env: &Env, stream_id: u64, recipient: Address) -> i128 {
+    let key = DataKey::PooledStreamWithdrawn(stream_id, recipient);
+    env.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or(0i128)
+}
+
+/// Persist the amount withdrawn by a specific recipient from a pooled stream.
+fn save_pooled_stream_withdrawn(env: &Env, stream_id: u64, recipient: Address, amount: i128) {
+    let key = DataKey::PooledStreamWithdrawn(stream_id, recipient);
+    env.storage().persistent().set(&key, &amount);
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Internal Helpers
 // ---------------------------------------------------------------------------
@@ -2094,6 +2208,10 @@ impl FluxoraStream {
             metadata: None,
             witness: witness.clone(),
             last_rate_change_ledger: 0,
+            irrevocable,
+            is_pooled: None,
+            parent_stream_id: None,
+            delegation_depth: 0,
         };
 
         save_stream(env, &stream);
@@ -2162,6 +2280,7 @@ impl FluxoraStream {
             stream_id,
             sender: sender.clone(),
             recipient: recipient.clone(),
+            claim_owner: None,
             deposit_amount,
             rate_per_second,
             start_time,
@@ -2180,6 +2299,10 @@ impl FluxoraStream {
             metadata: None,
             witness: witness.clone(),
             last_rate_change_ledger: 0,
+            irrevocable,
+            is_pooled: None,
+            parent_stream_id: None,
+            delegation_depth: 0,
         };
 
         save_stream(env, &stream);
@@ -2396,11 +2519,12 @@ impl FluxoraStream {
         withdraw_dust_threshold: i128,
         memo: Option<soroban_sdk::Bytes>,
         kind: StreamKind,
-        irrevocable: Option<bool>,
-        witness: Option<Address>,
     ) -> Result<u64, ContractError> {
         sender.require_auth();
         require_not_creation_paused(&env)?;
+
+        let irrevocable: Option<bool> = None;
+        let witness: Option<Address> = None;
 
         let mut final_rate = rate_per_second;
         if kind == StreamKind::CliffOnly {
@@ -2548,8 +2672,6 @@ impl FluxoraStream {
             params.withdraw_dust_threshold.unwrap_or(0),
             params.memo,
             params.kind,
-            params.irrevocable,
-            None,
         )
     }
 
@@ -2614,6 +2736,7 @@ impl FluxoraStream {
             stream_id,
             sender: sender.clone(),
             recipient: sender.clone(),
+            claim_owner: None,
             deposit_amount,
             rate_per_second: final_rate,
             start_time,
@@ -2631,6 +2754,11 @@ impl FluxoraStream {
             last_withdraw_ledger: 0,
             metadata: None,
             is_pooled: Some(true),
+            irrevocable: None,
+            witness: None,
+            last_rate_change_ledger: 0,
+            parent_stream_id: None,
+            delegation_depth: 0,
         };
 
         save_stream(&env, &stream);
@@ -2995,6 +3123,7 @@ impl FluxoraStream {
                 memo: rel.memo,
                 metadata: rel.metadata,
                 kind: rel.kind,
+                irrevocable: None,
                 witness: None,
             });
         }
@@ -5229,6 +5358,7 @@ impl FluxoraStream {
             stream_id: child_stream_id,
             sender: stream.sender.clone(),
             recipient: new_recipient.clone(),
+            claim_owner: None,
             deposit_amount: child_deposit,
             rate_per_second: child_rate,
             start_time: now,
@@ -5244,9 +5374,13 @@ impl FluxoraStream {
             kind: stream.kind,
             last_pause_toggle_ledger: 0,
             last_withdraw_ledger: 0,
+            last_rate_change_ledger: 0,
             metadata: stream.metadata.clone(),
             parent_stream_id: Some(stream_id),
             delegation_depth: stream.delegation_depth + 1,
+            irrevocable: None,
+            witness: None,
+            is_pooled: None,
         };
 
         save_stream(&env, &child_stream);
@@ -5698,6 +5832,8 @@ impl FluxoraStream {
             stream.withdraw_dust_threshold,
             stream.memo.clone(),
             stream.kind,
+            stream.irrevocable,
+            stream.witness.clone(),
         )?;
         set_auto_renew_enabled(&env, new_stream_id, true);
 
@@ -6202,8 +6338,8 @@ impl FluxoraStream {
             0usize
         } else {
             match streams.binary_search(cursor) {
-                Ok(pos) => pos,  // start AT the cursor stream (inclusive)
-                Err(pos) => pos, // gap: start at the next higher stream
+                Ok(pos) => pos as usize,  // start AT the cursor stream (inclusive)
+                Err(pos) => pos as usize, // gap: start at the next higher stream
             }
         };
 
@@ -8382,14 +8518,14 @@ impl FluxoraStream {
         start_time: u64,
         cliff_time: u64,
         end_time: u64,
-        withdraw_dust_threshold: i128,
         memo: Option<soroban_sdk::Bytes>,
         kind: StreamKind,
-        metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
         expiry_time: Option<u64>,
     ) -> Result<u64, ContractError> {
         sender.require_auth();
         require_not_creation_paused(&env)?;
+        let withdraw_dust_threshold: i128 = 0;
+        let metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>> = None;
 
         let now = env.ledger().timestamp();
 
@@ -8587,6 +8723,7 @@ impl FluxoraStream {
             stream_id: offer_id,
             sender: offer.sender.clone(),
             recipient: offer.recipient.clone(),
+            claim_owner: None,
             deposit_amount: offer.deposit_amount,
             rate_per_second: offer.rate_per_second,
             start_time: effective_start,
@@ -8603,6 +8740,12 @@ impl FluxoraStream {
             last_pause_toggle_ledger: 0,
             last_withdraw_ledger: 0,
             metadata: offer.metadata.clone(),
+            irrevocable: None,
+            witness: None,
+            last_rate_change_ledger: 0,
+            is_pooled: None,
+            parent_stream_id: None,
+            delegation_depth: 0,
         };
 
         save_stream(&env, &stream);
