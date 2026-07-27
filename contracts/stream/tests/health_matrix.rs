@@ -4,7 +4,10 @@ use fluxora_stream::{
     CreateStreamParams, FluxoraStream, FluxoraStreamClient, PauseReason, StreamKind,
     MAX_RECIPIENT_PAGE_SIZE,
 };
-use soroban_sdk::{testutils::{Address as _, Ledger}, Address, Env};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger},
+    Address, Env,
+};
 
 struct TestContext<'a> {
     env: Env,
@@ -292,13 +295,7 @@ fn test_health_matrix_before_start() {
 // ────────────────────────────────────────────────────────────────────────────
 
 /// Helper: create a linear stream returning the stream_id.
-fn create_linear(
-    ctx: &TestContext,
-    deposit: i128,
-    rate: i128,
-    cliff: u64,
-    end: u64,
-) -> u64 {
+fn create_linear(ctx: &TestContext, deposit: i128, rate: i128, cliff: u64, end: u64) -> u64 {
     ctx.client.create_stream(
         &ctx.sender,
         &CreateStreamParams {
@@ -323,9 +320,7 @@ fn test_portfolio_health_no_streams() {
     let ctx = TestContext::setup();
     let other = Address::generate(&ctx.env);
 
-    let page = ctx
-        .client
-        .get_sender_portfolio_health(&other, &0u64, &10);
+    let page = ctx.client.get_sender_portfolio_health(&other, &0u64, &10);
     assert_eq!(page.underfunded_count, 0);
     assert_eq!(page.expired_count, 0);
     assert_eq!(page.healthy_count, 0);
@@ -445,11 +440,9 @@ fn test_portfolio_health_cursor_pagination() {
     }
 
     ctx.env.ledger().set_timestamp(100);
-    let page1 = ctx.client.get_sender_portfolio_health(
-        &ctx.sender,
-        &0u64,
-        &MAX_RECIPIENT_PAGE_SIZE,
-    );
+    let page1 =
+        ctx.client
+            .get_sender_portfolio_health(&ctx.sender, &0u64, &MAX_RECIPIENT_PAGE_SIZE);
     assert_eq!(page1.stream_ids.len(), MAX_RECIPIENT_PAGE_SIZE as usize);
     assert_ne!(page1.next_cursor, 0u64, "must have more pages");
 
@@ -491,11 +484,9 @@ fn test_portfolio_health_limit_clamped_to_max() {
 
     ctx.env.ledger().set_timestamp(100);
     // limit way above MAX → capped
-    let page = ctx.client.get_sender_portfolio_health(
-        &ctx.sender,
-        &0u64,
-        &(MAX_RECIPIENT_PAGE_SIZE * 3),
-    );
+    let page =
+        ctx.client
+            .get_sender_portfolio_health(&ctx.sender, &0u64, &(MAX_RECIPIENT_PAGE_SIZE * 3));
     assert_eq!(page.stream_ids.len(), 5); // only 5 exist, so all returned
 }
 
@@ -509,11 +500,9 @@ fn test_portfolio_health_past_end_cursor_returns_empty_page() {
     }
 
     ctx.env.ledger().set_timestamp(100);
-    let page = ctx.client.get_sender_portfolio_health(
-        &ctx.sender,
-        &0xFFFF_FFFF_FFFF_FFFFu64,
-        &100,
-    );
+    let page = ctx
+        .client
+        .get_sender_portfolio_health(&ctx.sender, &0xFFFF_FFFF_FFFF_FFFFu64, &100);
     assert_eq!(page.stream_ids.len(), 0);
     assert_eq!(page.next_cursor, 0u64);
 }

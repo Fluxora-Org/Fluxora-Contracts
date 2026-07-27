@@ -45,7 +45,6 @@ pub use storage::increment_delegated_nonce_test_only as increment_delegated_nonc
 // TTL constants
 // ---------------------------------------------------------------------------
 
-
 // ---------------------------------------------------------------------------
 // Pagination limits (DoS prevention)
 // ---------------------------------------------------------------------------
@@ -1680,7 +1679,6 @@ fn check_and_bump_rate_cooldown(env: &Env, stream: &mut Stream) -> Result<(), Co
 // Protocol constants
 // ---------------------------------------------------------------------------
 
-
 /// Minimum ledger interval between successive withdrawals for the same stream.
 const MIN_WITHDRAW_INTERVAL_LEDGERS: u32 = 1;
 
@@ -1713,11 +1711,7 @@ fn read_pooled_stream_shares(
 }
 
 /// Persist the share distribution for a pooled stream.
-fn save_pooled_stream_shares(
-    env: &Env,
-    stream_id: u64,
-    shares: &soroban_sdk::Vec<(Address, u32)>,
-) {
+fn save_pooled_stream_shares(env: &Env, stream_id: u64, shares: &soroban_sdk::Vec<(Address, u32)>) {
     let key = DataKey::PooledStreamShares(stream_id);
     env.storage().persistent().set(&key, shares);
     env.storage().persistent().extend_ttl(
@@ -1730,10 +1724,7 @@ fn save_pooled_stream_shares(
 /// Load the amount already withdrawn by a specific recipient from a pooled stream.
 fn read_pooled_stream_withdrawn(env: &Env, stream_id: u64, recipient: Address) -> i128 {
     let key = DataKey::PooledStreamWithdrawn(stream_id, recipient);
-    env.storage()
-        .persistent()
-        .get(&key)
-        .unwrap_or(0i128)
+    env.storage().persistent().get(&key).unwrap_or(0i128)
 }
 
 /// Persist the amount withdrawn by a specific recipient from a pooled stream.
@@ -1882,7 +1873,6 @@ impl FluxoraStream {
         metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
         irrevocable: Option<bool>,
         witness: Option<Address>,
-        metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
     ) -> Result<u64, ContractError> {
         // Validate memo length before allocating a stream ID.
         if let Some(ref m) = memo {
@@ -1894,16 +1884,6 @@ impl FluxoraStream {
         // Validate metadata size bounds before allocating a stream ID.
         if let Some(ref md) = metadata {
             validate_metadata(md)?;
-        }
-
-        // Validate metadata if present (fail-before-allocate).
-        if let Some(ref meta) = metadata {
-            storage::validate_metadata(meta)?;
-        }
-
-        // Validate metadata if present (fail-before-allocate).
-        if let Some(ref meta) = metadata {
-            storage::validate_metadata(meta)?;
         }
 
         let stream_id = next_stream_id_for(env, &sender);
@@ -1930,7 +1910,6 @@ impl FluxoraStream {
             witness: witness.clone(),
             last_rate_change_ledger: 0,
             is_pooled: None,
-            metadata: metadata.clone(),
             memo: memo.clone(),
             kind,
             irrevocable,
@@ -1995,7 +1974,6 @@ impl FluxoraStream {
         metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
         irrevocable: Option<bool>,
         witness: Option<Address>,
-        metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
     ) -> Result<u64, ContractError> {
         if let Some(ref m) = memo {
             if m.len() as usize > MAX_MEMO_BYTES {
@@ -2032,7 +2010,6 @@ impl FluxoraStream {
             witness: witness.clone(),
             last_rate_change_ledger: 0,
             is_pooled: None,
-            metadata: metadata.clone(),
             memo: memo.clone(),
             kind,
             irrevocable,
@@ -2307,14 +2284,9 @@ impl FluxoraStream {
         metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
         irrevocable: Option<bool>,
         witness: Option<Address>,
-        metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
     ) -> Result<u64, ContractError> {
         sender.require_auth();
         require_not_creation_paused(&env)?;
-        validate_lookback_window(max_lookback_ledgers)?;
-
-        let irrevocable: Option<bool> = None;
-        let witness: Option<Address> = None;
 
         let mut final_rate = rate_per_second;
         if kind == StreamKind::CliffOnly {
@@ -2351,8 +2323,9 @@ impl FluxoraStream {
             metadata,
             irrevocable,
             witness,
-            metadata,
-        )
+        )?;
+
+        Ok(stream_id)
     }
 
     /// Create a new payment stream with relative (offset-based) timing.
@@ -2462,7 +2435,6 @@ impl FluxoraStream {
             params.metadata,
             params.irrevocable,
             None,
-            params.metadata,
         )
     }
 
@@ -7527,11 +7499,7 @@ impl FluxoraStream {
         env.storage().persistent().remove(&key);
 
         // Emit event
-        events::emit_auto_claim_revoked(
-            &env,
-            stream_id,
-            AutoClaimRevoked { stream_id },
-        );
+        events::emit_auto_claim_revoked(&env, stream_id, AutoClaimRevoked { stream_id });
 
         Ok(())
     }
@@ -8801,8 +8769,6 @@ impl FluxoraStream {
         load_recipient_pending_offers(&env, &recipient)
     }
 }
-
-
 
 // ---------------------------------------------------------------------------
 // Upgrade entrypoint

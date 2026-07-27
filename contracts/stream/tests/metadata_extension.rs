@@ -1442,11 +1442,7 @@ fn test_two_streams_independent_metadata() {
 fn test_contract_version_is_current() {
     let ctx = Ctx::setup();
     let v = ctx.client().version();
-    assert!(
-        v >= 7,
-        "CONTRACT_VERSION must be >= 7 (current is {})",
-        v
-    );
+    assert!(v >= 7, "CONTRACT_VERSION must be >= 7 (current is {})", v);
 }
 
 // ---------------------------------------------------------------------------

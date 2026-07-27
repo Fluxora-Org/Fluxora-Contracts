@@ -16,7 +16,7 @@
 //! 3. **Accrual Determinism**: Accrued amounts must be deterministic (timestamp-deterministic,
 //!    checkpoint-preserving, never decreasing).
 
-use soroban_sdk::{Env, panic_with_error};
+use soroban_sdk::{panic_with_error, Env};
 
 /// Version validation error codes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -24,19 +24,19 @@ use soroban_sdk::{Env, panic_with_error};
 pub enum VersioningError {
     /// Contract version mismatch (not expected version).
     VersionMismatch = 1001,
-    
+
     /// Storage entry exceeds maximum allowed size.
     EntryOversized = 1002,
-    
+
     /// DataKey discriminant out of bounds (should be 0-35 or explicitly appended).
     InvalidDiscriminant = 1003,
-    
+
     /// Accrual calculation produced a non-deterministic or non-monotonic result.
     AccrualNonDeterministic = 1004,
-    
+
     /// Stream checkpoint state is invalid (checkpointed_amount > deposit_amount).
     InvalidCheckpointState = 1005,
-    
+
     /// Frozen discriminant was reordered (storage backward-compatibility broken).
     DiscriminantReordered = 1006,
 }
@@ -61,7 +61,11 @@ pub enum VersioningError {
 ///     // ... proceed with withdrawal logic
 /// }
 /// ```
-pub fn validate_version(env: &Env, actual_version: u32, expected_version: u32) -> Result<(), VersioningError> {
+pub fn validate_version(
+    env: &Env,
+    actual_version: u32,
+    expected_version: u32,
+) -> Result<(), VersioningError> {
     if actual_version != expected_version {
         return Err(VersioningError::VersionMismatch);
     }
@@ -187,7 +191,10 @@ pub fn validate_withdrawal_monotonicity(
 ///
 /// # Panics
 /// Panics with `EntryOversized` if the entry size exceeds the limit.
-pub fn validate_entry_size(entry_size_bytes: usize, max_size: usize) -> Result<(), VersioningError> {
+pub fn validate_entry_size(
+    entry_size_bytes: usize,
+    max_size: usize,
+) -> Result<(), VersioningError> {
     if entry_size_bytes > max_size {
         return Err(VersioningError::EntryOversized);
     }
@@ -260,41 +267,41 @@ pub fn validate_entry_size(entry_size_bytes: usize, max_size: usize) -> Result<(
 ///
 /// This is a **critical invariant** and must never be violated.
 pub const FROZEN_DISCRIMINANTS_V9: &[&str] = &[
-    "Config",                           // 0
-    "NextStreamId",                     // 1
-    "Stream(u64)",                      // 2
-    "RecipientStreams(Address)",        // 3
-    "GlobalEmergencyPaused",            // 4
-    "CreationPaused",                   // 5
-    "GlobalPauseReason",                // 6
-    "GlobalPauseTimestamp",             // 7
-    "GlobalPauseAdmin",                 // 8
-    "AutoClaimDestination(u64)",        // 9
-    "NextTemplateId",                   // 10
-    "ActiveTemplateCount",              // 11
-    "StreamTemplate(u64)",              // 12
-    "OwnerTemplateIds(Address)",        // 13
-    "TotalLiabilities",                 // 14
-    "WithdrawNonce(Address)",           // 15 (DEPRECATED)
-    "PauseState",                       // 16
-    "ReentrancyLock",                   // 17
-    "RecipientStreamPage(Address, u32)", // 18
-    "RecipientStreamPageCount(Address)", // 19
-    "PendingRecipientUpdate(u64)",      // 20
-    "IdReservation(Address)",           // 21
-    "MaxRatePerSecond",                 // 22
-    "DelegatedWithdrawNonce(Address)",  // 23
-    "LastPauseRecord(PauseKind)",       // 24
-    "RotationHistory(u64)",             // 25
-    "LastAccrualLedgerTimestamp",       // 26
-    "PausedStreamCount",                // 27
-    "TotalKeeperFeesPaid",              // 28
-    "AutoRenewEnabled(u64)",            // 29
-    "MaxLookbackLedgers(u64)",          // 30
-    "SenderStreams(Address)",           // 31
-    "PendingStreamOffer(u64)",          // 32
-    "RecipientPendingOffers(Address)",  // 33
-    "PooledStreamShares(u64)",          // 34
+    "Config",                              // 0
+    "NextStreamId",                        // 1
+    "Stream(u64)",                         // 2
+    "RecipientStreams(Address)",           // 3
+    "GlobalEmergencyPaused",               // 4
+    "CreationPaused",                      // 5
+    "GlobalPauseReason",                   // 6
+    "GlobalPauseTimestamp",                // 7
+    "GlobalPauseAdmin",                    // 8
+    "AutoClaimDestination(u64)",           // 9
+    "NextTemplateId",                      // 10
+    "ActiveTemplateCount",                 // 11
+    "StreamTemplate(u64)",                 // 12
+    "OwnerTemplateIds(Address)",           // 13
+    "TotalLiabilities",                    // 14
+    "WithdrawNonce(Address)",              // 15 (DEPRECATED)
+    "PauseState",                          // 16
+    "ReentrancyLock",                      // 17
+    "RecipientStreamPage(Address, u32)",   // 18
+    "RecipientStreamPageCount(Address)",   // 19
+    "PendingRecipientUpdate(u64)",         // 20
+    "IdReservation(Address)",              // 21
+    "MaxRatePerSecond",                    // 22
+    "DelegatedWithdrawNonce(Address)",     // 23
+    "LastPauseRecord(PauseKind)",          // 24
+    "RotationHistory(u64)",                // 25
+    "LastAccrualLedgerTimestamp",          // 26
+    "PausedStreamCount",                   // 27
+    "TotalKeeperFeesPaid",                 // 28
+    "AutoRenewEnabled(u64)",               // 29
+    "MaxLookbackLedgers(u64)",             // 30
+    "SenderStreams(Address)",              // 31
+    "PendingStreamOffer(u64)",             // 32
+    "RecipientPendingOffers(Address)",     // 33
+    "PooledStreamShares(u64)",             // 34
     "PooledStreamWithdrawn(u64, Address)", // 35
 ];
 
@@ -333,9 +340,7 @@ mod tests {
     fn test_validate_checkpoint_state_checkpointed_exceeds_deposit() {
         let result = validate_checkpoint_state(
             15000, // exceeds deposit
-            500,
-            1000,
-            10000,
+            500, 1000, 10000,
         );
         assert_eq!(result, Err(VersioningError::InvalidCheckpointState));
     }
@@ -343,10 +348,8 @@ mod tests {
     #[test]
     fn test_validate_checkpoint_state_checkpointed_at_exceeds_end() {
         let result = validate_checkpoint_state(
-            5000,
-            1001, // exceeds end_time
-            1000,
-            10000,
+            5000, 1001, // exceeds end_time
+            1000, 10000,
         );
         assert_eq!(result, Err(VersioningError::InvalidCheckpointState));
     }
@@ -355,9 +358,7 @@ mod tests {
     fn test_validate_checkpoint_state_negative_checkpointed() {
         let result = validate_checkpoint_state(
             -100, // negative
-            500,
-            1000,
-            10000,
+            500, 1000, 10000,
         );
         assert_eq!(result, Err(VersioningError::InvalidCheckpointState));
     }

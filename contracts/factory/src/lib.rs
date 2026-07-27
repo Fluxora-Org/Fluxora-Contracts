@@ -243,11 +243,7 @@ fn append_stream_ids_batch(env: &Env, stream_ids: &Vec<u64>) {
 /// created yet) — the `has` guard avoids writing a TTL extension for a key
 /// that does not exist.
 fn bump_registry_ttl(env: &Env) {
-    if env
-        .storage()
-        .persistent()
-        .has(&DataKey::FactoryStreamIds)
-    {
+    if env.storage().persistent().has(&DataKey::FactoryStreamIds) {
         env.storage().persistent().extend_ttl(
             &DataKey::FactoryStreamIds,
             PERSISTENT_LIFETIME_THRESHOLD,
@@ -1254,8 +1250,8 @@ mod tests {
 
         let (topic, data) = last_contract_event(&ctx.env, &ctx.contract_id);
         assert_eq!(topic, symbol_short!("stm_upd"));
-        let payload =
-            StreamContractUpdated::try_from_val(&ctx.env, &data).expect("decodes to StreamContractUpdated");
+        let payload = StreamContractUpdated::try_from_val(&ctx.env, &data)
+            .expect("decodes to StreamContractUpdated");
         assert_eq!(payload.old_contract, old);
         assert_eq!(payload.new_contract, new_stream);
     }
@@ -1298,9 +1294,7 @@ mod tests {
         let old = ctx.client.get_factory_config().unwrap().stream_contract;
 
         // Register a random contract (a second factory) that does not expose `version()`.
-        let other_factory = ctx
-            .env
-            .register_contract(None, FluxoraFactory);
+        let other_factory = ctx.env.register_contract(None, FluxoraFactory);
         let result = ctx.client.try_set_stream_contract(&other_factory);
         assert_eq!(result, Err(Ok(FactoryError::InvalidStreamContract)));
 

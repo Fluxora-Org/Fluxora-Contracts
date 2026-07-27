@@ -1488,9 +1488,7 @@ mod tests {
         }
 
         pub fn get_stream_contract(env: Env) -> Option<Address> {
-            env.storage()
-                .instance()
-                .get(&symbol_short!("strm_ctr"))
+            env.storage().instance().get(&symbol_short!("strm_ctr"))
         }
     }
 
@@ -1721,8 +1719,7 @@ mod tests {
         ctx.client.execute(&executor, &id);
 
         // Verify the mock factory's stored stream contract was updated.
-        let mock =
-            MockFactoryTargetClient::new(&ctx.env, &mock_factory_id);
+        let mock = MockFactoryTargetClient::new(&ctx.env, &mock_factory_id);
         let stored = mock.get_stream_contract();
         assert_eq!(
             stored,
