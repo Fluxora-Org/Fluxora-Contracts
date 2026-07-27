@@ -1,4 +1,5 @@
 use crate::ContractError;
+use crate::StreamKind;
 
 /// Assert that ledger-backed accrual time has not moved backwards.
 ///
@@ -7,15 +8,20 @@ use crate::ContractError;
 /// non-decreasing timestamps. This guard catches test harnesses, migrations, or
 /// future environments that violate that assumption before withdrawable math can
 /// be evaluated at a retrograde timestamp.
+///
+/// This check is unconditional (not gated behind debug_assertions) because it
+/// is a genuine runtime safetyGuard, not a debug-only sanity check. A retrograde
+/// ledger timestamp would flow straight into withdrawable-amount math with no
+/// safety net, which is exactly the fund-accounting-adjacent failure mode this
+/// guard was written to prevent.
+///
+/// # Units and Precision
+/// - **Units:** `prev_ts` and `current_ts` are measured in seconds.
+/// - **Rounding Direction:** N/A (this is purely a logical check, no arithmetic).
 pub fn assert_ledger_time_monotonic(prev_ts: u64, current_ts: u64) -> Result<(), ContractError> {
-    #[cfg(any(test, debug_assertions))]
-    {
-        if current_ts < prev_ts {
-            return Err(ContractError::ClockRegression);
-        }
+    if current_ts < prev_ts {
+        return Err(ContractError::ClockRegression);
     }
-
-    debug_assert!(current_ts >= prev_ts, "retrograde ledger timestamp");
 
     Ok(())
 }
@@ -32,9 +38,19 @@ pub fn assert_ledger_time_monotonic(prev_ts: u64, current_ts: u64) -> Result<(),
 ///   returns `deposit_amount` (safe upper bound before final clamping).
 /// - Final result is clamped to `[0, deposit_amount]`.
 ///
+/// # Units and Precision
+/// - **Time units:** `start_time`, `cliff_time`, `end_time`, and `current_time` are in **seconds**.
+/// - **Amount units:** `deposit_amount` and the return value are in **base token units**.
+/// - **Rate units:** `rate_per_second` is in **base token units per second**.
+///
+/// # Rounding Direction
+/// Exact integer multiplication. No rounding occurs internally. Any effective rounding
+/// happened prior to this function if an external fractional rate was floored into an integer
+/// tokens-per-second rate. The calculation here is exact and non-fractional.
+///
 /// For multi-epoch accrual (after rate changes), the contract uses the
 /// `calculate_accrued_amount_checkpointed` variant directly.
-#[cfg(test)]
+#[cfg(any(test, feature = "testutils"))]
 pub fn calculate_accrued_amount(
     start_time: u64,
     cliff_time: u64,
@@ -150,12 +166,32 @@ pub struct CheckpointState {
     ///
     /// **Invariant**: `deposit_amount >= rate_per_second * (end_time - start_time)`
     pub deposit_amount: i128,
-    /// The kind of stream (Linear or CliffOnly).
+    /// The kind of stream (Linear, CliffOnly, or CliffSlope).
     pub kind: StreamKind,
 }
 
 /// Checkpoint-aware accrual — the core pure function used by the contract for all
 /// accrual calculations after rate changes.
+///
+/// **Withdrawable math (entitlement-preservation invariant)**
+///
+/// `get_withdrawable(stream_id)` is computed as `accrued(now) − withdrawn_amount`
+/// where `accrued` comes from `calculate_accrued_amount_checkpointed`. The
+/// `withdrawn_amount` is **monotonically non-decreasing across the entire
+/// stream lifecycle** (Active, Paused, rate-modified, Cancelled). A rate
+/// decrease can never:
+/// 1. Reduce `accrued(t)` below `checkpointed_amount` for `t ≤ checkpointed_at`
+///    (already-entitled tokens stay accessible across the rate change);
+/// 2. Reverse or zero out a previous `withdraw` (no double-count, no
+///    retroactive loss of paid-out tokens);
+/// 3. Move the `withdrawn_amount` value backwards (it is appended-only on
+///    successful withdrawals and unchanged by rate mutations).
+///
+/// In plain terms: once a recipient has withdrawn `W` tokens from a stream,
+/// any subsequent rate change, time advance, pause, resume, or decrease
+/// leaves them with at least `accrued(now) − W` claimable, where
+/// `accrued(now)` strictly grows with future time at the *current* rate
+/// (eventually capped by `deposit_amount` after the decrease refund).
 ///
 /// # Parameters
 /// - `_start_time`         – original stream start; reserved for future cliff logic.
@@ -176,6 +212,25 @@ pub struct CheckpointState {
 /// 2. `accrued(checkpointed_at) == checkpointed_amount` — a rate decrease never reduces
 ///    the visible withdrawable amount.
 /// 3. `accrued(t) <= deposit_amount` for all `t`.
+///
+/// # Units and Precision
+/// - **Time units:** `now`, `cliff_time`, `end_time`, and `checkpointed_at` are in **seconds**.
+/// - **Amount units:** `deposit_amount`, `checkpointed_amount`, and the return value are in **base token units**.
+/// - **Rate units:** `rate_per_second` is in **base token units per second**.
+///
+/// # Rounding Direction and Math
+/// This function performs exact integer arithmetic. Since `rate_per_second` is an integer
+/// expressing the number of tokens accrued per full second, there are no fractional seconds
+/// and no fractional tokens computed.
+///
+/// The result of `elapsed_seconds * rate_per_second` is exact. Any precision loss occurs
+/// *before* this function, typically during stream creation when an external rate (e.g., tokens per month)
+/// is floored to integer tokens per second. Within this core math, the operation is exact integer
+/// multiplication, effectively rounding down (floor) any continuous time beyond the whole second boundaries,
+/// though time is already quantized in integer seconds.
+///
+/// See `docs/streaming.md#cliffonly-accrual` for worked `CliffOnly` examples
+/// showing the pre-cliff zero result and the full-deposit lump-sum unlock.
 pub fn calculate_accrued_amount_checkpointed(
     state: CheckpointState,
     rate_per_second: i128,
@@ -185,21 +240,34 @@ pub fn calculate_accrued_amount_checkpointed(
         return 0;
     }
 
-    if deposit_amount <= 0 {
+    if state.deposit_amount <= 0 {
         return 0;
     }
 
-    if kind == StreamKind::CliffOnly {
-        return deposit_amount;
+    if state.kind == StreamKind::CliffOnly {
+        return state.deposit_amount;
+    }
+
+    if state.kind == StreamKind::CliffSlope {
+        let elapsed = now.min(state.end_time).saturating_sub(state.cliff_time) as i128;
+        let accrued = elapsed.saturating_mul(rate_per_second);
+        return accrued.min(state.deposit_amount).max(0);
     }
 
     if rate_per_second < 0 {
         return 0;
     }
 
-    if checkpointed_at >= end_time {
+    if state.checkpointed_at >= state.end_time {
         // Stream already ended; only the checkpointed amount is payable.
-        return checkpointed_amount.min(deposit_amount).max(0);
+        //
+        // This is the **checkpoint preservation** invariant: after a rate decrease
+        // (or any other checkpointing event) the contract locks in the accrued
+        // amount earned up to `checkpointed_at`. Even if `end_time` is reached or
+        // passed, the recipient can never be made worse off by a subsequent rate
+        // change — the result is clamped to `[0, deposit_amount]` and never falls
+        // below the locked-in `checkpointed_amount`.
+        return state.checkpointed_amount.min(state.deposit_amount).max(0);
     }
 
     if state.deposit_amount <= 0 {
@@ -210,18 +278,19 @@ pub fn calculate_accrued_amount_checkpointed(
     let elapsed_seconds: i128 = if elapsed_now <= state.checkpointed_at {
         0
     } else {
-        (elapsed_now - checkpointed_at) as i128
+        (elapsed_now - state.checkpointed_at) as i128
     };
 
     let added = match elapsed_seconds.checked_mul(rate_per_second) {
         Some(amount) => amount,
         // Multiplication overflow: clamp to deposit ceiling.
-        None => deposit_amount,
+        None => state.deposit_amount,
     };
 
-    checkpointed_amount
+    state
+        .checkpointed_amount
         .saturating_add(added)
-        .min(deposit_amount)
+        .min(state.deposit_amount)
         .max(0)
 }
 
@@ -261,11 +330,11 @@ mod kani_proofs {
             cliff_time,
             end_time,
             deposit_amount,
+            kind: StreamKind::Linear,
         };
 
         // Call the function under test. Kani will flag panics or UB.
-        let out =
-            calculate_accrued_amount_checkpointed(state, rate_per_second, deposit_amount, now);
+        let out = calculate_accrued_amount_checkpointed(state, rate_per_second, now);
 
         // Assert bounds: non-negative and <= deposit_amount
         kani::assert!(out >= 0);
@@ -302,10 +371,11 @@ mod kani_proofs {
             cliff_time,
             end_time,
             deposit_amount,
+            kind: StreamKind::Linear,
         };
 
-        let a = calculate_accrued_amount_checkpointed(state, rate_per_second, deposit_amount, t1);
-        let b = calculate_accrued_amount_checkpointed(state, rate_per_second, deposit_amount, t2);
+        let a = calculate_accrued_amount_checkpointed(state, rate_per_second, t1);
+        let b = calculate_accrued_amount_checkpointed(state, rate_per_second, t2);
 
         kani::assert!(a <= b);
     }
@@ -338,24 +408,15 @@ mod kani_proofs {
             cliff_time,
             end_time,
             deposit_amount,
+            kind: StreamKind::Linear,
         };
 
-        let out_before = calculate_accrued_amount_checkpointed(
-            state,
-            rate_per_second,
-            deposit_amount,
-            now_before,
-        );
+        let out_before = calculate_accrued_amount_checkpointed(state, rate_per_second, now_before);
         kani::assert!(out_before == 0);
 
         // at or after end
         kani::assume(now_after >= end_time);
-        let out_after = calculate_accrued_amount_checkpointed(
-            state,
-            rate_per_second,
-            deposit_amount,
-            now_after,
-        );
+        let out_after = calculate_accrued_amount_checkpointed(state, rate_per_second, now_after);
         kani::assert!(out_after >= 0);
         kani::assert!(out_after <= deposit_amount);
     }
@@ -363,7 +424,63 @@ mod kani_proofs {
 
 #[cfg(test)]
 mod tests {
-    use super::calculate_accrued_amount;
+    use super::{assert_ledger_time_monotonic, calculate_accrued_amount};
+    use crate::ContractError;
+
+    // =========================================================================
+    // Tests for assert_ledger_time_monotonic
+    // =========================================================================
+
+    #[test]
+    fn ledger_time_monotonic_equal_times_ok() {
+        let result = assert_ledger_time_monotonic(1000, 1000);
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn ledger_time_monotonic_increasing_times_ok() {
+        let result = assert_ledger_time_monotonic(1000, 1001);
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn ledger_time_monotonic_zero_regression_error() {
+        let result = assert_ledger_time_monotonic(1000, 999);
+        assert_eq!(result, Err(ContractError::ClockRegression));
+    }
+
+    #[test]
+    fn ledger_time_monotonic_large_regression_error() {
+        let result = assert_ledger_time_monotonic(1000, 0);
+        assert_eq!(result, Err(ContractError::ClockRegression));
+    }
+
+    #[test]
+    fn ledger_time_monotonic_u64_max_times() {
+        let result = assert_ledger_time_monotonic(u64::MAX, u64::MAX);
+        assert_eq!(result, Ok(()));
+    }
+
+    /// Test that the ClockRegression check is unconditional (not gated behind debug_assertions).
+    ///
+    /// This is a security-critical check that must always be active in production builds,
+    /// including release wasm32 deployments where debug_assertions is disabled by default.
+    /// A retrograde ledger timestamp would flow straight into withdrawable-amount math with
+    /// no safety net, which is exactly the fund-accounting-adjacent failure mode this guard
+    /// was written to prevent.
+    ///
+    /// This test locks in the always-on behavior independent of debug_assertions settings.
+    #[test]
+    fn clock_regression_check_is_unconditional() {
+        // This test should pass regardless of whether debug_assertions is enabled or not.
+        // The check is now unconditional (not gated behind cfg(any(test, debug_assertions))).
+        let result = assert_ledger_time_monotonic(1000, 999);
+        assert_eq!(
+            result,
+            Err(ContractError::ClockRegression),
+            "ClockRegression check must fire even when debug_assertions is disabled"
+        );
+    }
 
     #[test]
     fn returns_zero_before_cliff() {

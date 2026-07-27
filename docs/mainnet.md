@@ -115,23 +115,25 @@ soroban contract invoke \
 
 ### 5. Verify
 
-- [ ] Verify contract source code on block explorer
+Automation markers: 🤖 = verified by `script/check-mainnet-checklist.py`,  ✋ = manual only
+
+- [ ] Verify contract source code on block explorer ✋
 - [ ] **Protocol Alignment Verification** (see [mainnet-deployment-checklist-alignment.md](./mainnet-deployment-checklist-alignment.md)):
-  - [ ] Verify config: `get_config` returns correct token and admin
-  - [ ] Verify stream count: `get_stream_count` returns 0
-  - [ ] Verify version: `version` returns 1
-  - [ ] Test time boundaries: Create stream with past start_time (should fail with `StartTimeInPast`)
-  - [ ] Test numeric boundaries: Create stream with zero deposit (should fail with `InvalidParams`)
-  - [ ] Test authorization: Non-admin cannot call admin functions (should fail with auth error)
-- [ ] Create a small test stream with minimal funds
-- [ ] Verify stream creation succeeded: `get_stream_state` returns correct values
-- [ ] Verify stream count incremented: `get_stream_count` returns 1
-- [ ] Verify recipient index updated: `get_recipient_streams` contains stream_id
-- [ ] Test withdrawal functionality with test stream
-- [ ] Test pause/resume functionality (if applicable)
-- [ ] Verify all events are emitted correctly (query transaction events)
-- [ ] Verify token transfers work (check token balances)
-- [ ] Monitor contract for first 24-48 hours
+  - [ ] Verify config: `get_config` returns correct token and admin ✋
+  - [ ] Verify stream count: `get_stream_count` returns 0 ✋
+  - [ ] Verify version: `version` returns CONTRACT_VERSION (see source for current value) 🤖
+  - [ ] Test time boundaries: Create stream with past start_time (should fail with `StartTimeInPast`) ✋
+  - [ ] Test numeric boundaries: Create stream with zero deposit (should fail with `InvalidParams`) ✋
+  - [ ] Test authorization: Non-admin cannot call admin functions (should fail with auth error) ✋
+- [ ] Create a small test stream with minimal funds ✋
+- [ ] Verify stream creation succeeded: `get_stream_state` returns correct values ✋
+- [ ] Verify stream count incremented: `get_stream_count` returns 1 (after creating one stream) ✋
+- [ ] Verify recipient index updated: `get_recipient_streams` contains stream_id ✋
+- [ ] Test withdrawal functionality with test stream ✋
+- [ ] Test pause/resume functionality (if applicable) ✋
+- [ ] Verify all events are emitted correctly (query transaction events) ✋
+- [ ] Verify token transfers work (check token balances) ✋
+- [ ] Monitor contract for first 24-48 hours ✋
 
 ### 6. Post-Deployment
 
@@ -200,5 +202,6 @@ This deployment checklist is verified against protocol semantics in [mainnet-dep
 - ✅ All numeric boundaries are tested
 - ✅ All failure modes are documented
 - ✅ Zero contradictions with protocol documentation
+- ✅ Mechanically checkable items validated via `script/check-mainnet-checklist.py`
 
-Last verified: 2026-03-27
+Last verified: 2026-07-26

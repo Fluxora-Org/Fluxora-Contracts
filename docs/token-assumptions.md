@@ -20,7 +20,30 @@ The Fluxora streaming contract interacts with exactly one token contract, fixed 
 4. **Deterministic behavior**: Token operations produce consistent, predictable results given the same inputs and contract state.
 5. **Standard SEP-41 interface**: The token implements the standard Soroban token interface (`transfer`, `transfer_from`, `balance`, `approve`, `allowance`).
 
-- The streaming contract performs an init-time smoke test on the selected token by querying `balance` and exercising a no-op `transfer` to the contract itself. If the token does not expose the expected interface, `init()` reverts.
+### Token Verification Smoke Test and Invariants
+
+During contract initialization (the `init` entrypoint), the streaming contract performs a robust token verification smoke test by invoking the candidate token contract. If this verification fails, initialization reverts with `ContractError::TokenVerificationFailed`.
+
+#### 1. Invariant Validation Sequence
+The verification sequence executes the following operations:
+1. **Initial Balance Query**: Reads the candidate token balance at the current streaming contract's address (`token.balance(contract_address)`).
+2. **Zero-Value Self-Transfer**: Executes a zero-value self-transfer (`token.transfer(contract_address, contract_address, 0)`).
+3. **Final Balance Query**: Reads the token balance at the contract's address again.
+4. **Equality Assertion**: Asserts that `initial_balance == final_balance`.
+
+#### 2. Malformed Balance Rejection
+Asset balances must represent non-negative quantities. A balance value below zero is mathematically invalid. The smoke test explicitly rejects negative balances:
+- If `initial_balance < 0`, verification fails.
+- If `final_balance < 0`, verification fails.
+
+#### 3. Security Rationale
+Enforcing these invariants at initialization safeguards the protocol from integrating with flawed, non-compliant, or malicious token contracts:
+- **Balance Monotonicity**: Verifying that zero-value transfers are strict no-ops prevents integration with custom tokens that artificially inflate or deflate balances during standard transaction flows.
+- **Accounting Divergence**: A mismatch in balances would break the contract's core invariant: that the total token assets held by the contract always equal or exceed the protocol's total liabilities (unwithdrawn deposits).
+- **Mathematical Safety**: Precluding negative balances prevents downstream mathematical anomalies, underflow exploits, or integer overflows during accrual calculations.
+
+#### 4. Zero-Balance / Zero-Allowance Compatibility
+To support a clean, permissionless deployment pipeline, the smoke test relies on a zero-amount self-transfer. Under the SEP-41 standard, a zero-amount transfer does not require the caller to possess any tokens or active allowance. This ensures the smoke test succeeds on clean contract installations before any tokens have been minted or deposited.
 
 ### Why This Assumption Matters
 

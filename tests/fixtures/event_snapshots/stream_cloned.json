@@ -1,0 +1,22 @@
+{
+  "snapshot_name": "event_snapshot_clone_stream_has_correct_topics_and_payload",
+  "contract_call": "clone_stream",
+  "ledger_sequence": 1000099,
+  "stream_id": 12,
+  "events": [
+    {
+      "topics": ["cloned", 12],
+      "data": {
+        "new_stream_id": 12,
+        "source_stream_id": 3,
+        "sender": "GDSENDERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "recipient": "GDRECIPIENTAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "deposit_amount": 20000000,
+        "rate_per_second": 231,
+        "start_time": 1700000000,
+        "cliff_time": 1700000000,
+        "end_time": 1700086600
+      }
+    }
+  ]
+}

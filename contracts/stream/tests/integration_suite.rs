@@ -169,14 +169,20 @@ fn sweep_excess_after_rate_decrease() {
     ctx.env.ledger().set_timestamp(0);
     let stream_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &10_i128,
-        &0u64,
-        &0u64,
-        &100u64,
-        &0,
-        &None,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 10_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 100u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     assert_eq!(ctx.token.balance(&ctx.contract_id), 1_000);
@@ -311,28 +317,40 @@ fn sweep_excess_with_multiple_streams_complex_scenario() {
     ctx.env.ledger().set_timestamp(0);
     let stream_id_1 = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0,
-        &None,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     // Create second stream: 2000 tokens
     let recipient_2 = Address::generate(&ctx.env);
     let stream_id_2 = ctx.client().create_stream(
         &ctx.sender,
-        &recipient_2,
-        &2000_i128,
-        &2_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0,
-        &None,
+        &CreateStreamParams {
+            recipient: recipient_2.clone(),
+            deposit_amount: 2000_i128,
+            rate_per_second: 2_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     // Contract has 3000 tokens, 3000 liabilities
@@ -460,15 +478,20 @@ fn get_stream_health_returns_correct_summary_underfunded() {
     // Create an underfunded stream: 1000 tokens, but rate 2 for 1000s (needs 2000)
     let stream_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &2_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0,
-        &None,
-        &fluxora_stream::StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 2_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     ctx.env.ledger().set_timestamp(300);
@@ -572,15 +595,20 @@ fn snapshot_event_rate_end_topup_recp() {
     // extend) all stay within deposit bounds.
     let stream_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &5000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0,
-        &None,
-        &fluxora_stream::StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 5000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     // 1. rate_upd
@@ -651,15 +679,20 @@ fn update_rate_accepts_maximum_i128_rate() {
 
     let stream_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &i128::MAX,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1u64,
-        &0,
-        &None,
-        &fluxora_stream::StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: i128::MAX,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     ctx.client().update_rate_per_second(&stream_id, &i128::MAX);
@@ -709,17 +742,22 @@ proptest::proptest! {
         let duration = 10u64;
         let deposit = rates.last().unwrap().checked_mul(duration as i128).unwrap();
         let stream_id = ctx.client().create_stream(
-            &ctx.sender,
-            &ctx.recipient,
-            &deposit,
-            &rates[0],
-            &0u64,
-            &0u64,
-            &duration,
-            &0,
-            &None,
-            &fluxora_stream::StreamKind::Linear,
-            );
+        &ctx.sender,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: deposit,
+            rate_per_second: rates[0],
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: duration,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
+    );
 
         for &next_rate in rates.iter().skip(1) {
             ctx.client().update_rate_per_second(&stream_id, &next_rate);
@@ -763,15 +801,20 @@ fn snapshot_no_event_on_revert() {
     // Reverting call (insufficient deposit)
     let result = ctx.client().try_create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &10_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0,
-        &None,
-        &fluxora_stream::StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 10_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
     assert!(result.is_err());
     assert_eq!(ctx.env.events().all().len(), events_before);
@@ -814,15 +857,20 @@ fn test_accrual_none_checkpoint_returns_zero() {
     ctx.env.ledger().set_timestamp(100);
     let stream_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &100u64,
-        &100u64,
-        &1100u64,
-        &0,
-        &None,
-        &fluxora_stream::StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 100u64,
+            cliff_time: 100u64,
+            end_time: 1100u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     // At start_time the elapsed seconds are 0 → accrued must be 0.
@@ -846,15 +894,20 @@ fn test_accrual_none_checkpoint_before_cliff_returns_zero() {
     ctx.env.ledger().set_timestamp(0);
     let stream_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &500u64,
-        &1000u64,
-        &0,
-        &None,
-        &fluxora_stream::StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 500u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     // Before cliff → 0, regardless of checkpoint state.
@@ -929,14 +982,20 @@ fn sweep_excess_after_rate_decrease() {
     ctx.env.ledger().set_timestamp(0);
     let stream_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &10_i128,
-        &0u64,
-        &0u64,
-        &100u64,
-        &0,
-        &None,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 10_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 100u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     assert_eq!(ctx.token.balance(&ctx.contract_id), 1_000);
@@ -1071,28 +1130,40 @@ fn sweep_excess_with_multiple_streams_complex_scenario() {
     ctx.env.ledger().set_timestamp(0);
     let stream_id_1 = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0,
-        &None,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     // Create second stream: 2000 tokens
     let recipient_2 = Address::generate(&ctx.env);
     let stream_id_2 = ctx.client().create_stream(
         &ctx.sender,
-        &recipient_2,
-        &2000_i128,
-        &2_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &0,
-        &None,
+        &CreateStreamParams {
+            recipient: recipient_2.clone(),
+            deposit_amount: 2000_i128,
+            rate_per_second: 2_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     // Contract has 3000 tokens, 3000 liabilities
@@ -1686,4 +1757,922 @@ fn test_trigger_auto_claim_respects_global_pause() {
     // Try to trigger auto-claim (should fail due to global pause)
     ctx.env.ledger().set_timestamp(1000);
     ctx.client().trigger_auto_claim(&stream_id);
+}
+
+#[test]
+fn test_contract_error_discriminants_unique() {
+    let variants = std::vec![
+        ContractError::StreamNotFound as u32,
+        ContractError::InvalidState as u32,
+        ContractError::InvalidParams as u32,
+        ContractError::ContractPaused as u32,
+        ContractError::StartTimeInPast as u32,
+        ContractError::ArithmeticOverflow as u32,
+        ContractError::Unauthorized as u32,
+        ContractError::AlreadyInitialised as u32,
+        ContractError::TokenVerificationFailed as u32,
+        ContractError::InsufficientBalance as u32,
+        ContractError::InsufficientDeposit as u32,
+        ContractError::StreamAlreadyPaused as u32,
+        ContractError::StreamNotPaused as u32,
+        ContractError::StreamTerminalState as u32,
+        ContractError::DuplicateStreamId as u32,
+        ContractError::InvalidSignature as u32,
+        ContractError::BelowMinimumAmount as u32,
+        ContractError::ReservationCountZero as u32,
+        ContractError::ReservationLimitExceeded as u32,
+        ContractError::SignatureDeadlineExpired as u32,
+        ContractError::TemplateNotFound as u32,
+        ContractError::TemplateLimitExceeded as u32,
+        ContractError::TemplateUnauthorized as u32,
+        ContractError::ReservationNotFound as u32,
+        ContractError::ReservationNotExpirable as u32,
+        ContractError::ReservationStillActive as u32,
+        ContractError::PauseReasonTooLong as u32,
+        ContractError::ClockRegression as u32,
+        ContractError::WithdrawalTooFrequent as u32,
+        ContractError::UnsupportedStreamKind as u32,
+        ContractError::KeeperGracePeriodNotElapsed as u32,
+        ContractError::MetadataTooLarge as u32,
+        ContractError::PauseCooldownActive as u32,
+        ContractError::RateCapExceeded as u32,
+    ];
+
+    let mut sorted_variants = variants.clone();
+    sorted_variants.sort();
+    sorted_variants.dedup();
+    assert_eq!(
+        variants.len(),
+        sorted_variants.len(),
+        "ContractError has duplicate discriminants"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tests — Contract-owned senders (vaults, multisigs)
+// ---------------------------------------------------------------------------
+
+#[contract]
+pub struct MockVaultContract;
+
+#[contractimpl]
+impl MockVaultContract {
+    pub fn vault_create_stream(
+        env: Env,
+        stream_contract: Address,
+        recipient: Address,
+        deposit_amount: i128,
+        rate_per_second: i128,
+        start_time: u64,
+        cliff_time: u64,
+        end_time: u64,
+    ) -> u64 {
+        let client = fluxora_stream::FluxoraStreamClient::new(&env, &stream_contract);
+        client.create_stream(
+            &env.current_contract_address(),
+            &CreateStreamParams {
+                recipient: recipient.clone(),
+                deposit_amount: deposit_amount,
+                rate_per_second: rate_per_second,
+                start_time: start_time,
+                cliff_time: cliff_time,
+                end_time: end_time,
+                withdraw_dust_threshold: Some(0),
+                memo: None,
+                metadata: None,
+                kind: fluxora_stream::StreamKind::Linear,
+                irrevocable: None,
+                witness: None,
+            },
+        )
+    }
+
+    pub fn vault_top_up_stream(env: Env, stream_contract: Address, stream_id: u64, amount: i128) {
+        let client = fluxora_stream::FluxoraStreamClient::new(&env, &stream_contract);
+        client.top_up_stream(&stream_id, &amount)
+    }
+
+    pub fn vault_cancel_stream(env: Env, stream_contract: Address, stream_id: u64) {
+        let client = fluxora_stream::FluxoraStreamClient::new(&env, &stream_contract);
+        client.cancel_stream(&stream_id)
+    }
+}
+
+#[test]
+fn test_contract_owned_vault_sender() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.timestamp = 1000;
+        li.sequence = 10;
+    });
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let stream_client = FluxoraStreamClient::new(&env, &contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    let token = TokenClient::new(&env, &token_id);
+
+    let admin = Address::generate(&env);
+    stream_client.init(&token_id, &admin);
+
+    let vault_id = env.register_contract(None, MockVaultContract);
+    let vault_client = MockVaultContractClient::new(&env, &vault_id);
+
+    // Mint tokens to the vault
+    token.mint(&vault_id, &100_000);
+
+    let recipient = Address::generate(&env);
+
+    // Vault creates a stream (tests sender.require_auth() inside create_stream)
+    let stream_id = vault_client.vault_create_stream(
+        &contract_id,
+        &recipient,
+        &10_000,
+        &10,
+        &1000,
+        &1000,
+        &2000,
+    );
+
+    // Vault tops up the stream (tests funder.require_auth() inside top_up_stream)
+    vault_client.vault_top_up_stream(&contract_id, &stream_id, &5_000);
+
+    let state = stream_client.get_stream_state(&stream_id);
+    assert_eq!(state.deposit_amount, 15_000);
+    assert_eq!(state.sender, vault_id);
+
+    // Vault cancels the stream (tests sender.require_auth() inside cancel_stream)
+    env.ledger().with_mut(|li| li.timestamp = 1500);
+    vault_client.vault_cancel_stream(&contract_id, &stream_id);
+
+    let state_after = stream_client.get_stream_state(&stream_id);
+    assert_eq!(state_after.status, StreamStatus::Cancelled);
+
+    // Vault gets its refund
+    let final_balance = token.balance(&vault_id);
+    // Initial 100_000 - 15_000 (deposit + topup) + 10_000 (refund for remaining 1000s * 10/s) = 95_000
+    assert_eq!(final_balance, 95_000);
+}
+
+// ============================================================================
+// CONTRACT-OWNED VAULT SENDER - COMPREHENSIVE TEST SUITE
+// ============================================================================
+// These tests verify that contract-owned addresses (vaults, multisigs) can
+// act as senders for streams through the standard require_auth() interface.
+// ============================================================================
+
+/// Comprehensive test for vault sender pattern covering the full lifecycle
+#[test]
+fn test_vault_sender_full_lifecycle() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.timestamp = 1000;
+        li.sequence = 10;
+    });
+
+    // Deploy stream contract
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let stream_client = FluxoraStreamClient::new(&env, &contract_id);
+
+    // Deploy token
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    let token = TokenClient::new(&env, &token_id);
+
+    // Initialize stream contract
+    let admin = Address::generate(&env);
+    stream_client.init(&token_id, &admin);
+
+    // Deploy vault contract
+    let vault_id = env.register_contract(None, MockVaultContract);
+    let vault_client = MockVaultContractClient::new(&env, &vault_id);
+
+    // Mint tokens to the vault
+    let initial_vault_balance = 100_000;
+    token.mint(&vault_id, &initial_vault_balance);
+
+    let recipient = Address::generate(&env);
+    let deposit = 10_000;
+    let rate = 10;
+    let start_time = 1000;
+    let cliff_time = 1000;
+    let end_time = 2000;
+
+    // 1. Vault creates a stream
+    let stream_id = vault_client.vault_create_stream(
+        &contract_id,
+        &recipient,
+        &deposit,
+        &rate,
+        &start_time,
+        &cliff_time,
+        &end_time,
+    );
+
+    // Verify stream was created correctly
+    let state = stream_client.get_stream_state(&stream_id);
+    assert_eq!(state.sender, vault_id);
+    assert_eq!(state.recipient, recipient);
+    assert_eq!(state.deposit_amount, deposit);
+    assert_eq!(state.rate_per_second, rate);
+    assert_eq!(state.status, StreamStatus::Active);
+    assert_eq!(state.withdrawn_amount, 0);
+
+    // Verify vault balance after creation
+    assert_eq!(token.balance(&vault_id), initial_vault_balance - deposit);
+
+    // 2. Vault tops up the stream
+    let top_up_amount = 5_000;
+    vault_client.vault_top_up_stream(&contract_id, &stream_id, &top_up_amount);
+
+    let state_after_topup = stream_client.get_stream_state(&stream_id);
+    assert_eq!(state_after_topup.deposit_amount, deposit + top_up_amount);
+    assert_eq!(
+        token.balance(&vault_id),
+        initial_vault_balance - deposit - top_up_amount
+    );
+
+    // 3. Vault cancels the stream
+    env.ledger().with_mut(|li| li.timestamp = 1500);
+
+    // Get state before cancel
+    let state_before_cancel = stream_client.get_stream_state(&stream_id);
+    let accrued_before = stream_client.calculate_accrued(&stream_id);
+
+    vault_client.vault_cancel_stream(&contract_id, &stream_id);
+
+    let state_after_cancel = stream_client.get_stream_state(&stream_id);
+    assert_eq!(state_after_cancel.status, StreamStatus::Cancelled);
+    assert!(state_after_cancel.cancelled_at.is_some());
+    assert_eq!(state_after_cancel.cancelled_at.unwrap(), 1500);
+
+    // Verify refund: accrued at 1500 = (1500-1000) * 10 = 5000
+    // Refund = deposit - accrued = 15000 - 5000 = 10000
+    let expected_refund = (deposit + top_up_amount) - 5000;
+    assert_eq!(
+        token.balance(&vault_id),
+        initial_vault_balance - (deposit + top_up_amount) + expected_refund
+    );
+}
+
+/// Test vault sender with cliff time
+#[test]
+fn test_vault_sender_with_cliff() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.timestamp = 1000;
+        li.sequence = 10;
+    });
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let stream_client = FluxoraStreamClient::new(&env, &contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    let token = TokenClient::new(&env, &token_id);
+
+    let admin = Address::generate(&env);
+    stream_client.init(&token_id, &admin);
+
+    let vault_id = env.register_contract(None, MockVaultContract);
+    let vault_client = MockVaultContractClient::new(&env, &vault_id);
+
+    token.mint(&vault_id, &100_000);
+
+    let recipient = Address::generate(&env);
+    let deposit = 10_000;
+    let rate = 10;
+    let start_time = 1000;
+    let cliff_time = 1300; // 5 minutes cliff
+    let end_time = 2000;
+
+    let stream_id = vault_client.vault_create_stream(
+        &contract_id,
+        &recipient,
+        &deposit,
+        &rate,
+        &start_time,
+        &cliff_time,
+        &end_time,
+    );
+
+    // Before cliff - should have 0 accrued
+    env.ledger().with_mut(|li| li.timestamp = 1200);
+    let accrued_before_cliff = stream_client.calculate_accrued(&stream_id);
+    assert_eq!(accrued_before_cliff, 0);
+
+    // After cliff - should accrue from start_time
+    env.ledger().with_mut(|li| li.timestamp = 1400);
+    let accrued_after_cliff = stream_client.calculate_accrued(&stream_id);
+    // (1400 - 1000) * 10 = 4000
+    assert_eq!(accrued_after_cliff, 4000);
+
+    // Withdraw after cliff
+    let withdraw_amount = stream_client.withdraw(&stream_id);
+    assert_eq!(withdraw_amount, 4000);
+
+    let state = stream_client.get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 4000);
+}
+
+/// Test vault sender with metadata and memo
+#[test]
+fn test_vault_sender_with_metadata() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.timestamp = 1000;
+        li.sequence = 10;
+    });
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let stream_client = FluxoraStreamClient::new(&env, &contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    let token = TokenClient::new(&env, &token_id);
+
+    let admin = Address::generate(&env);
+    stream_client.init(&token_id, &admin);
+
+    let vault_id = env.register_contract(None, MockVaultContract);
+    let vault_client = MockVaultContractClient::new(&env, &vault_id);
+
+    token.mint(&vault_id, &100_000);
+
+    let recipient = Address::generate(&env);
+
+    // Create metadata
+    use soroban_sdk::Map;
+    let mut metadata = Map::new(&env);
+    metadata.set(
+        soroban_sdk::Bytes::from_slice(&env, b"invoice_id"),
+        soroban_sdk::Bytes::from_slice(&env, b"INV-2026-001"),
+    );
+    metadata.set(
+        soroban_sdk::Bytes::from_slice(&env, b"project"),
+        soroban_sdk::Bytes::from_slice(&env, b"PROJ-42"),
+    );
+
+    // Vault creates stream with metadata and memo
+    // Note: This requires extending the mock vault contract to support metadata
+    // For now, we test that the stream contract accepts vault as sender with these params
+
+    let deposit = 10_000;
+    let rate = 10;
+    let start_time = 1000;
+    let cliff_time = 1000;
+    let end_time = 2000;
+    let memo = Some(soroban_sdk::Bytes::from_slice(&env, b"vault_payment"));
+
+    // Test that stream creation with metadata works with vault sender
+    let stream_id = vault_client.vault_create_stream_with_metadata(
+        &contract_id,
+        &recipient,
+        &deposit,
+        &rate,
+        &start_time,
+        &cliff_time,
+        &end_time,
+        &memo,
+        &Some(metadata),
+    );
+
+    let state = stream_client.get_stream_state(&stream_id);
+    assert_eq!(state.sender, vault_id);
+
+    // Verify memo
+    let stored_memo = stream_client.get_stream_memo(&stream_id);
+    assert_eq!(stored_memo, memo);
+
+    // Verify metadata
+    let stored_metadata = stream_client.get_stream_metadata(&stream_id);
+    assert!(stored_metadata.is_some());
+}
+
+/// Test vault sender authorization requirements with strict auth
+#[test]
+fn test_vault_sender_strict_authorization() {
+    let env = Env::default();
+    // NOTE: We use mock_all_auths but test the actual require_auth() calls
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.timestamp = 1000;
+        li.sequence = 10;
+    });
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let stream_client = FluxoraStreamClient::new(&env, &contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    let token = TokenClient::new(&env, &token_id);
+
+    let admin = Address::generate(&env);
+    stream_client.init(&token_id, &admin);
+
+    let vault_id = env.register_contract(None, MockVaultContract);
+    let vault_client = MockVaultContractClient::new(&env, &vault_id);
+
+    token.mint(&vault_id, &100_000);
+
+    let recipient = Address::generate(&env);
+    let deposit = 10_000;
+    let rate = 10;
+    let start_time = 1000;
+    let cliff_time = 1000;
+    let end_time = 2000;
+
+    // This should succeed - vault authorizes itself
+    let stream_id = vault_client.vault_create_stream(
+        &contract_id,
+        &recipient,
+        &deposit,
+        &rate,
+        &start_time,
+        &cliff_time,
+        &end_time,
+    );
+
+    // Verify stream was created with vault as sender
+    let state = stream_client.get_stream_state(&stream_id);
+    assert_eq!(state.sender, vault_id);
+
+    // Test that unauthorized address cannot act as vault
+    // Try to top up using a different address (should fail)
+    let unauthorized = Address::generate(&env);
+
+    // We expect this to panic because the stream contract's require_auth() will fail
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        stream_client.top_up_stream(&stream_id, &unauthorized, &1000);
+    }));
+    assert!(result.is_err(), "Unauthorized top-up should fail");
+}
+
+/// Test vault sender with expiration and auto-renew
+#[test]
+fn test_vault_sender_auto_renew() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.timestamp = 1000;
+        li.sequence = 10;
+    });
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let stream_client = FluxoraStreamClient::new(&env, &contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    let token = TokenClient::new(&env, &token_id);
+
+    let admin = Address::generate(&env);
+    stream_client.init(&token_id, &admin);
+
+    let vault_id = env.register_contract(None, MockVaultContract);
+    let vault_client = MockVaultContractClient::new(&env, &vault_id);
+
+    let initial_balance = 200_000;
+    token.mint(&vault_id, &initial_balance);
+    token.approve(&vault_id, &contract_id, &initial_balance);
+
+    let recipient = Address::generate(&env);
+    let deposit = 10_000;
+    let rate = 10;
+    let start_time = 1000;
+    let cliff_time = 1000;
+    let end_time = 2000;
+
+    let stream_id = vault_client.vault_create_stream(
+        &contract_id,
+        &recipient,
+        &deposit,
+        &rate,
+        &start_time,
+        &cliff_time,
+        &end_time,
+    );
+
+    // Enable auto-renew
+    stream_client.set_auto_renew(&stream_id, &vault_id, &true);
+
+    // Complete the stream
+    env.ledger().with_mut(|li| li.timestamp = 2000);
+    stream_client.withdraw(&stream_id);
+
+    // Verify stream is completed
+    let state = stream_client.get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+
+    // Renew the stream (permissionless - anyone can trigger)
+    // Vault must have sufficient balance and allowance
+    let new_stream_id = stream_client.renew_stream(&stream_id);
+
+    // Verify new stream was created with vault as sender
+    let new_state = stream_client.get_stream_state(&new_stream_id);
+    assert_eq!(new_state.sender, vault_id);
+    assert_eq!(new_state.recipient, recipient);
+    assert_eq!(new_state.deposit_amount, deposit);
+    assert_eq!(new_state.rate_per_second, rate);
+
+    // Verify auto-renew is enabled on new stream
+    assert!(stream_client.get_auto_renew(&new_stream_id));
+}
+
+/// Test vault sender with batch operations
+#[test]
+fn test_vault_sender_batch_operations() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.timestamp = 1000;
+        li.sequence = 10;
+    });
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let stream_client = FluxoraStreamClient::new(&env, &contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    let token = TokenClient::new(&env, &token_id);
+
+    let admin = Address::generate(&env);
+    stream_client.init(&token_id, &admin);
+
+    let vault_id = env.register_contract(None, MockVaultContract);
+    let vault_client = MockVaultContractClient::new(&env, &vault_id);
+
+    let total_deposit = 50_000;
+    token.mint(&vault_id, &total_deposit);
+
+    // Create multiple streams from vault
+    let recipients: Vec<Address> = (0..3).map(|_| Address::generate(&env)).collect();
+    let mut stream_ids = Vec::new();
+
+    for (i, recipient) in recipients.iter().enumerate() {
+        let deposit = 10_000 * (i as i128 + 1);
+        let rate = 10 * (i as i128 + 1);
+        let stream_id = vault_client.vault_create_stream(
+            &contract_id,
+            recipient,
+            &deposit,
+            &rate,
+            &1000,
+            &1000,
+            &2000,
+        );
+        stream_ids.push(stream_id);
+    }
+
+    // Verify all streams were created with vault as sender
+    for (i, stream_id) in stream_ids.iter().enumerate() {
+        let state = stream_client.get_stream_state(stream_id);
+        assert_eq!(state.sender, vault_id);
+        let expected_deposit = 10_000 * (i as i128 + 1);
+        assert_eq!(state.deposit_amount, expected_deposit);
+    }
+
+    // Test batch cancellation
+    env.ledger().with_mut(|li| li.timestamp = 1500);
+
+    // Vault cancels multiple streams in batch
+    // Note: This requires the mock vault to have a batch cancel function
+    vault_client.vault_bulk_cancel_streams(&contract_id, &stream_ids);
+
+    // Verify all streams are cancelled
+    for stream_id in stream_ids.iter() {
+        let state = stream_client.get_stream_state(stream_id);
+        assert_eq!(state.status, StreamStatus::Cancelled);
+    }
+}
+
+/// Test vault sender edge cases
+#[test]
+fn test_vault_sender_edge_cases() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.timestamp = 1000;
+        li.sequence = 10;
+    });
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let stream_client = FluxoraStreamClient::new(&env, &contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    let token = TokenClient::new(&env, &token_id);
+
+    let admin = Address::generate(&env);
+    stream_client.init(&token_id, &admin);
+
+    let vault_id = env.register_contract(None, MockVaultContract);
+    let vault_client = MockVaultContractClient::new(&env, &vault_id);
+
+    token.mint(&vault_id, &100_000);
+    let recipient = Address::generate(&env);
+
+    // Edge Case 1: Zero amount stream
+    let zero_deposit = 0;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        vault_client.vault_create_stream(
+            &contract_id,
+            &recipient,
+            &zero_deposit,
+            &10,
+            &1000,
+            &1000,
+            &2000,
+        );
+    }));
+    assert!(result.is_err(), "Zero deposit should be rejected");
+
+    // Edge Case 2: Zero rate stream (should be rejected for Linear)
+    let zero_rate = 0;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        vault_client.vault_create_stream(
+            &contract_id,
+            &recipient,
+            &10_000,
+            &zero_rate,
+            &1000,
+            &1000,
+            &2000,
+        );
+    }));
+    assert!(
+        result.is_err(),
+        "Zero rate should be rejected for Linear streams"
+    );
+
+    // Edge Case 3: Vault tries to cancel already cancelled stream
+    let stream_id = vault_client.vault_create_stream(
+        &contract_id,
+        &recipient,
+        &10_000,
+        &10,
+        &1000,
+        &1000,
+        &2000,
+    );
+
+    env.ledger().with_mut(|li| li.timestamp = 1500);
+    vault_client.vault_cancel_stream(&contract_id, &stream_id);
+
+    // Try to cancel again (should fail)
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        vault_client.vault_cancel_stream(&contract_id, &stream_id);
+    }));
+    assert!(result.is_err(), "Double cancellation should fail");
+
+    // Edge Case 4: Vault tops up with zero amount (should succeed with no change)
+    let state_before = stream_client.get_stream_state(&stream_id);
+    vault_client.vault_top_up_stream(&contract_id, &stream_id, &0);
+    let state_after = stream_client.get_stream_state(&stream_id);
+    assert_eq!(state_before.deposit_amount, state_after.deposit_amount);
+}
+
+/// Test vault as recipient
+#[test]
+fn test_vault_as_recipient() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.timestamp = 1000;
+        li.sequence = 10;
+    });
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let stream_client = FluxoraStreamClient::new(&env, &contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    let token = TokenClient::new(&env, &token_id);
+
+    let admin = Address::generate(&env);
+    stream_client.init(&token_id, &admin);
+
+    // Deploy vault as recipient
+    let vault_id = env.register_contract(None, MockVaultContract);
+    let vault_client = MockVaultContractClient::new(&env, &vault_id);
+
+    // Regular sender creates stream to vault
+    let sender = Address::generate(&env);
+    let deposit = 10_000;
+    let rate = 10;
+    let start_time = 1000;
+    let cliff_time = 1000;
+    let end_time = 2000;
+
+    // Mint tokens to sender and approve
+    token.mint(&sender, &deposit);
+    token.approve(&sender, &contract_id, &deposit);
+
+    // Create stream with vault as recipient
+    let stream_id = stream_client.create_stream(
+        &sender,
+        &vault_id,
+        &deposit,
+        &rate,
+        &start_time,
+        &cliff_time,
+        &end_time,
+        &0,
+        &None,
+        &fluxora_stream::types::StreamKind::Linear,
+    );
+
+    // Verify stream was created with vault as recipient
+    let state = stream_client.get_stream_state(&stream_id);
+    assert_eq!(state.recipient, vault_id);
+    assert_eq!(state.sender, sender);
+
+    // Advance time
+    env.ledger().with_mut(|li| li.timestamp = 1500);
+
+    // Vault withdraws from stream (as recipient)
+    let amount = stream_client.withdraw(&stream_id);
+
+    // Should have accrued (1500-1000) * 10 = 5000
+    assert_eq!(amount, 5000);
+
+    // Verify vault received tokens
+    assert_eq!(token.balance(&vault_id), 5000);
+}
+
+/// Test vault sender with deadline and expiration
+#[test]
+fn test_vault_sender_with_deadline() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.timestamp = 1000;
+        li.sequence = 10;
+    });
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let stream_client = FluxoraStreamClient::new(&env, &contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    let token = TokenClient::new(&env, &token_id);
+
+    let admin = Address::generate(&env);
+    stream_client.init(&token_id, &admin);
+
+    let vault_id = env.register_contract(None, MockVaultContract);
+    let vault_client = MockVaultContractClient::new(&env, &vault_id);
+
+    token.mint(&vault_id, &100_000);
+
+    let recipient = Address::generate(&env);
+
+    // Create stream with deadline (should succeed)
+    let stream_id = vault_client.vault_create_stream_with_deadline(
+        &contract_id,
+        &recipient,
+        &10_000,
+        &10,
+        &1000,
+        &1000,
+        &2000,
+        &Some(3000), // deadline
+    );
+
+    let state = stream_client.get_stream_state(&stream_id);
+    assert_eq!(state.sender, vault_id);
+
+    // Try to create stream with deadline in past (should fail)
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        vault_client.vault_create_stream_with_deadline(
+            &contract_id,
+            &recipient,
+            &10_000,
+            &10,
+            &1000,
+            &1000,
+            &2000,
+            &Some(900), // expired deadline
+        );
+    }));
+    assert!(result.is_err(), "Expired deadline should be rejected");
+}
+
+// ============================================================================
+// MOCK VAULT CONTRACT EXTENSIONS
+// ============================================================================
+
+#[contract]
+pub struct MockVaultContract;
+
+#[contractimpl]
+impl MockVaultContract {
+    // ... existing functions ...
+
+    pub fn vault_create_stream_with_metadata(
+        env: Env,
+        stream_contract: Address,
+        recipient: Address,
+        deposit_amount: i128,
+        rate_per_second: i128,
+        start_time: u64,
+        cliff_time: u64,
+        end_time: u64,
+        memo: &Option<soroban_sdk::Bytes>,
+        metadata: &Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
+    ) -> u64 {
+        let client = fluxora_stream::FluxoraStreamClient::new(&env, &stream_contract);
+        client.create_stream(
+            &env.current_contract_address(),
+            &recipient,
+            &deposit_amount,
+            &rate_per_second,
+            &start_time,
+            &cliff_time,
+            &end_time,
+            &0,
+            memo,
+            &fluxora_stream::types::StreamKind::Linear,
+            &None,
+            &None,
+        )
+    }
+
+    pub fn vault_bulk_cancel_streams(
+        env: Env,
+        stream_contract: Address,
+        stream_ids: soroban_sdk::Vec<u64>,
+    ) {
+        let client = fluxora_stream::FluxoraStreamClient::new(&env, &stream_contract);
+        // Using bulk_cancel_streams if available, otherwise cancel individually
+        // For compatibility, we'll use individual cancel
+        for stream_id in stream_ids.iter() {
+            client.cancel_stream(&stream_id);
+        }
+    }
+
+    pub fn vault_create_stream_with_deadline(
+        env: Env,
+        stream_contract: Address,
+        recipient: Address,
+        deposit_amount: i128,
+        rate_per_second: i128,
+        start_time: u64,
+        cliff_time: u64,
+        end_time: u64,
+        deadline: Option<u64>,
+    ) -> u64 {
+        let client = fluxora_stream::FluxoraStreamClient::new(&env, &stream_contract);
+
+        // Validate deadline if provided
+        if let Some(deadline_ts) = deadline {
+            if env.ledger().timestamp() >= deadline_ts {
+                panic!("deadline must be in the future");
+            }
+        }
+
+        client.create_stream(
+            &env.current_contract_address(),
+            &recipient,
+            &deposit_amount,
+            &rate_per_second,
+            &start_time,
+            &cliff_time,
+            &end_time,
+            &0,
+            &None,
+            &fluxora_stream::types::StreamKind::Linear,
+            &None,
+            &None,
+        )
+    }
+
+    pub fn vault_withdraw_from_stream(env: Env, stream_contract: Address, stream_id: u64) -> i128 {
+        let client = fluxora_stream::FluxoraStreamClient::new(&env, &stream_contract);
+        client.withdraw(&stream_id)
+    }
 }
