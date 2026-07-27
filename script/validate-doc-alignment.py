@@ -172,7 +172,7 @@ _RE_CONTRACT_ERROR_BODY = re.compile(
 )
 
 _RE_CONTRACTIMPL_BLOCK = re.compile(
-    r"#\[(?:cfg_attr\(.*?contractimpl.*?\)|contractimpl)\][\s\S]*?impl\s+[A-Za-z_][A-Za-z0-9_]*\s*\{",
+    r"#\[(?:cfg_attr\([\s\S]*?contractimpl[\s\S]*?\)|contractimpl)\][\s\S]*?impl\s+[A-Za-z_][A-Za-z0-9_]*\s*\{",
     re.MULTILINE,
 )
 

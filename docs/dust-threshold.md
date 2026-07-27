@@ -13,8 +13,8 @@ guidance for template authors.
 `withdraw_dust_threshold` is an optional per-stream minimum withdrawal amount
 expressed in **raw token units** (the smallest indivisible unit of the token).
 
-When a recipient calls `withdraw`, `withdraw_to`, or `batch_withdraw`, the
-contract computes `withdrawable = accrued - withdrawn_amount`. If:
+When a recipient calls `withdraw`, `withdraw_to`, `batch_withdraw`, or
+`batch_withdraw_to`, the contract computes `withdrawable = accrued - withdrawn_amount`. If:
 
 ```
 withdrawable < withdraw_dust_threshold
@@ -26,6 +26,17 @@ This prevents fee and event spam from micro-withdrawals on high-frequency or
 long-running streams where the per-second accrual is very small.
 
 ---
+
+## Entry-point compatibility
+
+| Entry point | Dust threshold enforced? | Notes |
+|-------------|-------------------------|-------|
+| `withdraw` | Yes | Returns `0` when blocked |
+| `withdraw_to` | Yes | Returns `0` when blocked |
+| `batch_withdraw` | Yes | Per-stream `amount = 0` when blocked |
+| `batch_withdraw_to` | Yes | Per-stream `amount = 0` when blocked |
+| `delegated_withdraw` | **No** | Uses `expected_minimum_amount` on net payout instead |
+| `get_withdrawable` / `get_claimable_at` | **No** | View functions report raw withdrawable |
 
 ## Bypass conditions
 
@@ -145,21 +156,30 @@ The table below shows expected behavior for common `(deposit_amount, threshold, 
 
 ## Safety constraint at creation
 
-`withdraw_dust_threshold` must satisfy:
+Recommended bounds:
 
 ```
 0 ≤ withdraw_dust_threshold ≤ deposit_amount
 ```
 
-If `withdraw_dust_threshold > deposit_amount`, the contract rejects creation with
-`ContractError::InvalidDustThreshold` (error code 20). This prevents a
+| Creation path | Validates bounds? | Error |
+|---------------|-------------------|-------|
+| `create_stream` / `create_streams` / relative / template | **No** (current behavior) | — |
+| `create_stream_offer` | **Yes** | `InvalidDustThreshold` (code **35**) |
+
+On **`create_stream_offer`**, if `withdraw_dust_threshold > deposit_amount` or
+`withdraw_dust_threshold < 0`, the contract rejects with
+`ContractError::InvalidDustThreshold` (error code **35**). This prevents a
 misconfiguration where the threshold can never be reached, permanently locking
 the recipient's funds in non-terminal withdrawals.
 
-**Negative values** are also rejected because `withdraw_dust_threshold` is typed
-as `i128` and the contract validates `deposit_amount > 0`; a negative threshold
-would always pass the `withdrawable < threshold` check (since `withdrawable ≥ 0`),
-making it equivalent to `threshold = 0`.
+Direct `create_stream` paths currently accept out-of-range values (documented
+mismatch; see `contracts/stream/tests/dust_threshold.rs`). Integrators should
+still validate `0 ≤ threshold ≤ deposit_amount` client-side.
+
+**Negative values** on direct creation are stored as-is; a negative threshold
+always passes the `withdrawable < threshold` check (since `withdrawable ≥ 0`),
+making it equivalent to `threshold = 0` at withdrawal time.
 
 ---
 
@@ -241,6 +261,6 @@ If you are building a `StreamScheduleTemplate` or a factory contract that sets
 
 | Error | Code | Condition |
 |-------|------|-----------|
-| `ContractError::InvalidDustThreshold` | 20 | `withdraw_dust_threshold > deposit_amount` at creation |
+| `ContractError::InvalidDustThreshold` | **35** | `withdraw_dust_threshold` out of range on `create_stream_offer` (`< 0` or `> deposit_amount`) |
 
 See [error.md](./error.md) for the full error code reference.

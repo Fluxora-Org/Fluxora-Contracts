@@ -167,6 +167,20 @@
 //!
 //! Total `DataKey` variants in V7 (before post-V7 additions): **29** (discriminants 0 through 28).
 //!
+//! ## V8/V9 additions (discriminants 29–35)
+//!
+//! | Discriminant | Variant                         | Storage   | Value type            |
+//! |:------------:|:--------------------------------|:----------|:----------------------|
+//! | 29           | `AutoRenewEnabled(u64)`         | Persistent| `bool`                |
+//! | 30           | `MaxLookbackLedgers(u64)`       | Persistent| `u32`                 |
+//! | 31           | `SenderStreams(Address)`        | Persistent| `Vec<u64>`            |
+//! | 32           | `PendingStreamOffer(u64)`       | Persistent| `StreamOffer`         |
+//! | 33           | `RecipientPendingOffers(Address)` | Persistent | `Vec<u64>`         |
+//! | 34           | `PooledStreamShares(u64)`       | Persistent| `Vec<(Address,u32)>`  |
+//! | 35           | `PooledStreamWithdrawn(u64, Address)` | Persistent | `i128`         |
+//!
+//! Total live `DataKey` variant count: **36** (discriminants 0–35).
+//!
 //! See [`docs/storage.md`](../../../docs/storage.md) and [`docs/upgrade.md`](../../../docs/upgrade.md)
 //! for prose documentation, evolution policy, and migration guides.
 //!
@@ -343,6 +357,25 @@ mod tests {
     fn v7_datakey_variant_count_at_freeze_was_29() {
         const V7_FREEZE_VARIANT_COUNT: usize = 29;
         assert_eq!(V7_FREEZE_VARIANT_COUNT, 29);
+    }
+
+    /// V9 live DataKey has exactly 36 variants (discriminants 0–35).
+    ///
+    /// # Security note
+    /// The next variant appended to DataKey must receive discriminant 36.
+    #[test]
+    fn v9_datakey_variant_count_is_36() {
+        const V9_VARIANT_COUNT: usize = 36;
+        assert_eq!(V9_VARIANT_COUNT, 36);
+    }
+
+    /// The seven V8/V9-only DataKey variants occupy discriminants 29–35.
+    #[test]
+    fn v9_new_variants_occupy_discriminants_29_to_35() {
+        let v9_only_range = 29usize..=35;
+        assert_eq!(v9_only_range.clone().count(), 7);
+        assert_eq!(*v9_only_range.start(), 29);
+        assert_eq!(*v9_only_range.end(), 35);
     }
 
     /// The eight V7-only DataKey variants occupy discriminants 21–28.

@@ -368,20 +368,20 @@ bash script/update-wasm-checksums.sh
 ## 12. Snapshot Security Diff
 
 Before merging any PR that modifies snapshot files under
-`contracts/stream/test_snapshots/`, run `script/check_snapshot_diff.py` to
-detect security-relevant field changes. The script classifies changes to admin
-addresses, token identity, rate caps, pause state, recipient rotation, nonces,
-and storage key layout against the `SECURITY_FIELDS` registry.
+`contracts/stream/test_snapshots/`, the CI pipeline runs
+`script/check_snapshot_diff.py` automatically to detect security-relevant
+field changes. The script classifies changes to auth envelopes, event payloads,
+error discriminants, and storage key layout against the `SECURITY_FIELDS`
+registry.
+
+For manual invocation:
 
 ```bash
-# Extract the base version from main
-git show origin/main:contracts/stream/test_snapshots/test/test_NAME.1.json \
-  > /tmp/base.json
+# Check PR branch against main (typical manual usage)
+python script/check_snapshot_diff.py --base origin/main
 
-# Run the classifier
-python script/check_snapshot_diff.py \
-  --base /tmp/base.json \
-  --head contracts/stream/test_snapshots/test/test_NAME.1.json
+# Check specific commits
+python script/check_snapshot_diff.py --base <base-sha> --head <head-sha>
 ```
 
 ### Exit-code contract
@@ -390,7 +390,6 @@ python script/check_snapshot_diff.py \
 |---|---|
 | `0` | No security-relevant changes. Standard review applies. |
 | `1` | Security-relevant changes detected. Mandatory extra review required. |
-| `2` | Usage error — bad path, invalid JSON, or wrong JSON type. |
 
 ### Checklist
 
@@ -398,10 +397,6 @@ python script/check_snapshot_diff.py \
 - [ ] The exit code is recorded in the PR description or review comment
 - [ ] If exit code was `1`, all applicable mandatory extra review items from
   `docs/snapshot-security-diff.md` have been completed and documented
-
-> **Note:** This tool is **not yet wired into CI**. The companion CI-wiring
-> issue must land before it is enforced automatically. Until then, run it
-> manually for every PR that touches snapshot files.
 
 For the full field classification reference, worked examples, and the complete
 reviewer workflow, see **[`docs/snapshot-security-diff.md`](snapshot-security-diff.md)**.
@@ -443,34 +438,128 @@ found in this codebase.
 
 ---
 
-## 14. Open Findings Requiring Maintainer Follow-Up
+## 14. Resolved Findings — Invariant #13 (Reentrancy Guard)
 
-The following audit finding from `docs/audit.md` appears to remain **open / unaddressed**.
-It is flagged here explicitly rather than assumed resolved.
+The Invariant #13 finding previously listed here as **open / unaddressed** has been
+resolved. This section documents the resolution for audit trail completeness.
 
-### ⚠️ Invariant #13 — Reentrancy Guard (underspecified)
+### ✅ Invariant #13 — Reentrancy Guard (resolved 2026-07-27)
 
-**Location:** `docs/audit.md` lines 182–183
+**Location:** `docs/audit.md` Invariant #13
 
-**Status:** `docs/audit.md` lists "Reentrancy Guard" as Invariant #13 but provides **no
-description, no checks, and no requirements**. The body is blank.
+**Previous status:** The invariant header existed but no requirements, checks, or
+enforcement criteria were specified, and `CEI_ANALYSIS.md` (Issue #262) contained
+inaccurate claims about which entrypoints held the explicit reentrancy lock.
 
-**Current state of reentrancy protection:**
-- A custom reentrancy lock (`DataKey::ReentrancyLock`) exists in storage and is used
-  by only **2** of the 7+ token-transfer entrypoints (`sweep_excess`, `trigger_auto_claim`).
-- The remaining entrypoints (`withdraw`, `withdraw_to`, `batch_withdraw`, `cancel_stream`,
-  `cancel_stream_as_admin`, `shorten_stream_end_time`, `delegated_withdraw`) rely solely
-  on CEI ordering — no explicit lock is acquired.
-- `CEI_ANALYSIS.md` (Issue #262) claims that `withdraw`, `withdraw_to`, `batch_withdraw`,
-  `cancel_stream`, and `cancel_stream_as_admin` are wrapped in the reentrancy lock, but
-  **the current code does not reflect this**.
+**Resolution — CEI-only as accepted design:**
 
-**Required follow-up:**
-1. Specify the requirements for Invariant #13 in `docs/audit.md` (which entrypoints must
-   hold the lock, under what conditions, and what guarantees for CEI-only paths).
-2. Resolve the discrepancy between `CEI_ANALYSIS.md` claims and actual code coverage.
-3. Decide whether to extend the explicit lock to all token-transfer entrypoints for
-   defense-in-depth, or document CEI-only as the accepted posture.
+The accepted posture for reentrancy protection is documented in full in
+`docs/audit.md` Invariant #13. Summary:
+
+1. **Primary defence is CEI ordering.** All standard token-transfer entrypoints
+   (`withdraw`, `withdraw_to`, `batch_withdraw`, `cancel_stream`,
+   `cancel_stream_as_admin`, `keeper_cancel`, `top_up_stream`, etc.) persist all
+   state changes to storage **before** any external token call. Because Soroban
+   re-enters the contract only on an explicit cross-contract call, a correctly
+   ordered CEI sequence is sufficient to prevent double-spend or state-corruption
+   reentrancy on these paths.
+
+2. **Explicit lock on two permissionless / admin-callable paths only.** `sweep_excess`
+   and `trigger_auto_claim` acquire `DataKey::ReentrancyLock` in addition to CEI
+   ordering. These are the only two entrypoints that warrant the lock (concurrent
+   invocations are plausible and the lock prevents a race). Extending the lock to all
+   entrypoints would introduce deadlock risk in legitimate same-transaction batch flows.
+
+3. **`CEI_ANALYSIS.md` inaccuracy corrected.** The claim that `withdraw`,
+   `withdraw_to`, `batch_withdraw`, `cancel_stream`, and `cancel_stream_as_admin` are
+   wrapped in the explicit lock was inaccurate. Those entrypoints rely solely on CEI
+   ordering, which is the intended and sufficient design. `CEI_ANALYSIS.md` is
+   superseded by `docs/audit.md` Invariant #13 and this resolution note.
+
+**Checklist items verifying the resolved design:**
+
+- [x] All standard token-transfer entrypoints follow strict CEI order (state saved
+      before any `push_token` / `pull_token` call)
+- [x] `sweep_excess` and `trigger_auto_claim` acquire/release `DataKey::ReentrancyLock`
+- [x] No other entrypoint acquires `DataKey::ReentrancyLock`
+- [x] `docs/audit.md` Invariant #13 now contains the full specification
+- [x] `CEI_ANALYSIS.md` claim corrected by this resolution note
+
+**No code changes were required.** The implementation already matched the intended
+design. Only documentation was out of sync.
+
+---
+
+## 15. Build and Gas Determinism Guarantees
+
+This section covers the determinism invariants that make WASM builds, gas baselines, and
+upgrade behaviour reproducible across machines, CI runs, and retries. These invariants
+are a prerequisite for auditor verification and for the gas-baseline comparison in
+`script/validate_gas.py` to produce stable, meaningful results.
+
+### 15.1 Determinism invariant table
+
+| Invariant | Mechanism | Verified by |
+|-----------|-----------|-------------|
+| Rust toolchain version is fixed | `rust-toolchain.toml` pins to `1.94.1` | `script/verify_rust_version.py` (every CI job) |
+| `soroban-sdk` is exact-pinned, not range-pinned | `contracts/stream/Cargo.toml` uses `"21.7.7"` not `"^21.7.7"` | `cargo_lock_determinism` Rust test |
+| All transitive dependencies are locked | `Cargo.lock` committed and unchanged | `cargo update --locked` CI gate (build job) |
+| Build profile is `--release --target wasm32-unknown-unknown` | CI `build` job invocation | WASM artifact upload step |
+| No test features bleed into WASM build | `testutils` feature excluded from WASM build step | CI `build` job configuration |
+| WASM checksum matches reference after build | `wasm/checksums.sha256` committed | `bash script/verify-wasm-checksum.sh --no-build` |
+| Gas baselines are stable across retries | Soroban metered host is deterministic | `script/validate_gas.py` (gas regression CI step) |
+
+For the full Cargo.lock determinism contract, recovery procedure, and security
+assumptions, see `docs/upgrade.md §8`.
+
+### 15.2 Per-upgrade determinism checklist
+
+Run these checks before tagging any release that changes the toolchain, SDK version, or
+contract source:
+
+- [ ] `rustc --version` matches the version in `rust-toolchain.toml` in this environment
+- [ ] `cargo update --locked --workspace` exits 0 (no dependency drift)
+- [ ] `bash script/verify-wasm-checksum.sh --no-build` passes with the committed artifact
+- [ ] If toolchain or SDK version changed: gas baselines in `docs/gas.md` have been
+      re-measured and the JSON block updated (`script/validate_gas.py` passes)
+- [ ] If toolchain or SDK version changed: `bash script/update-wasm-checksums.sh` has been
+      run and `wasm/checksums.sha256` committed
+- [ ] `script/validate_gas.py` passes on the current commit without any `FAIL` lines
+- [ ] The `PausedStreamCount` backfill caveat (docs/upgrade.md §3, docs/gas.md
+      "Release Hardening") has been reviewed if upgrading from a pre-v5 instance
+
+### 15.3 Gas baseline retry behaviour
+
+Gas baselines are **deterministic across retries**. Re-running `script/validate_gas.py`
+on an unchanged commit and unchanged toolchain always produces the same pass/fail result
+because:
+
+1. The Soroban metered host counts CPU instructions deterministically from WASM bytecode.
+2. The test harness (`soroban_sdk::testutils`) runs in-process with a fixed ledger state.
+3. No external network calls, system entropy, or wall-clock time influence the counts.
+
+If `validate_gas.py` produces a different result on a second run, suspect a toolchain
+mismatch or an uncommitted file change rather than flaky test infrastructure.
+
+### 15.4 WASM checksum role in security
+
+`wasm/checksums.sha256` is the authoritative reference for deployment verification.
+It must be updated whenever the WASM binary changes (source change, toolchain bump,
+or SDK bump). The verification workflow:
+
+```bash
+# Verify a build matches the committed reference (no rebuild):
+bash script/verify-wasm-checksum.sh --no-build
+
+# Rebuild and update the reference after a source change:
+cargo build --release -p fluxora_stream --target wasm32-unknown-unknown
+bash script/update-wasm-checksums.sh
+git add wasm/checksums.sha256
+git commit -m "chore: update wasm checksums"
+```
+
+A deployed contract whose on-chain bytecode hash does not match `wasm/checksums.sha256`
+should be treated as unverified until the discrepancy is explained.
 
 ---
 

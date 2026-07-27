@@ -10,7 +10,7 @@
 
 use soroban_sdk::{contracttype, Address, Map};
 
-use crate::{ContractError, PauseReason, StreamKind, StreamStatus};
+use crate::{StreamKind, StreamStatus};
 
 // Data types
 // ---------------------------------------------------------------------------
@@ -473,8 +473,20 @@ pub struct Stream {
     /// Ledger timestamp of the last rate change (or `start_time` on creation).
     /// `calculate_accrued` uses this as the start of the current rate epoch.
     pub checkpointed_at: u64,
-    /// Optional withdrawal threshold (raw units). Withdrawals below this
-    /// amount are skipped unless they are the final drain or the stream is terminal.
+    /// Minimum withdrawal amount in raw token units before a non-terminal payout
+    /// is skipped (returns `0`, no transfer).
+    ///
+    /// Enforced on `withdraw`, `withdraw_to`, `batch_withdraw`, and
+    /// `batch_withdraw_to` when `withdrawable < withdraw_dust_threshold`.
+    /// **Not** enforced on `delegated_withdraw` or read-only views.
+    ///
+    /// Bypassed when the stream is in a **terminal state** (`Cancelled` or past
+    /// `end_time`) or when the payout is the **final drain**
+    /// (`withdrawn_amount + withdrawable == deposit_amount`).
+    ///
+    /// See [`docs/dust-threshold.md`](../../../docs/dust-threshold.md) for the
+    /// entry-point matrix and validation rules (`InvalidDustThreshold` = 35 on
+    /// `create_stream_offer` only).
     pub withdraw_dust_threshold: i128,
     /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
     /// Maximum length: `MAX_MEMO_BYTES` (64 bytes). `None` when not supplied.
@@ -494,6 +506,14 @@ pub struct Stream {
     /// Ledger sequence number of the last rate change (or creation).
     /// Used to enforce MIN_RATE_INTERVAL_LEDGERS cooldown.
     pub last_rate_change_ledger: u32,
+    /// When true, this stream distributes to multiple recipients pro-rata.
+    pub is_pooled: Option<bool>,
+    /// Parent stream id when this stream is a delegated child of another stream.
+    /// `None` for root streams.
+    pub parent_stream_id: Option<u64>,
+    /// Delegation depth of this stream in the recipient-share delegation tree
+    /// (0 for a root stream, N for the Nth level of delegated child stream).
+    pub delegation_depth: u32,
     /// If true, the stream is decommissioned and restricted to cancel-or-no-op.
     /// Defaults to false (None) for backward compatibility with existing streams.
     pub decommissioned: Option<bool>,
@@ -673,6 +693,10 @@ pub enum DataKey {
     PausedStreamCount,
     /// Aggregate sum of all keeper fees paid out via `keeper_cancel` (`i128`, instance storage).
     TotalKeeperFeesPaid,
+    /// Pooled stream shares mapping (stream_id → recipient → share_bps).
+    PooledStreamShares(u64),
+    /// Pooled stream withdrawn amounts (stream_id → recipient → withdrawn_amount).
+    PooledStreamWithdrawn(u64, Address),
 }
 
 /// Type of pause.

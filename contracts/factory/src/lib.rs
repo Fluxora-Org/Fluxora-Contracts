@@ -1,10 +1,10 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
 
-use fluxora_stream::{ContractError as StreamContractErr, CreateStreamParams, StreamKind};
+use fluxora_stream::{ContractError as StreamContractErr, CreateStreamParams};
 use soroban_sdk::{
     contract, contractclient, contracterror, contractimpl, contracttype, symbol_short, vec,
-    Address, Bytes, Env, Vec,
+    Address, Env, Vec,
 };
 
 #[contractclient(name = "FluxoraStreamClient")]
@@ -228,6 +228,32 @@ fn append_stream_ids_batch(env: &Env, stream_ids: &Vec<u64>) {
         PERSISTENT_LIFETIME_THRESHOLD,
         PERSISTENT_BUMP_AMOUNT,
     );
+}
+
+/// Bump the persistent TTL on the factory stream ID registry if it exists.
+///
+/// Called during [`set_stream_contract`] migration to ensure the existing
+/// registry of stream IDs (created under the old `stream_contract`) stays
+/// queryable through the new contract without depending on active writes.
+/// Without this bump, a factory that receives no new stream creations during
+/// the migration window could see its registry expire while indexers still
+/// need to enumerate past IDs.
+///
+/// This is a no-op when the registry is empty (i.e. no streams have been
+/// created yet) — the `has` guard avoids writing a TTL extension for a key
+/// that does not exist.
+fn bump_registry_ttl(env: &Env) {
+    if env
+        .storage()
+        .persistent()
+        .has(&DataKey::FactoryStreamIds)
+    {
+        env.storage().persistent().extend_ttl(
+            &DataKey::FactoryStreamIds,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
 }
 
 /// Validate a factory deposit cap before storing it.
@@ -567,20 +593,44 @@ impl FluxoraFactory {
     /// applied in `init` (see [`validate_stream_contract`]), so a later swap
     /// cannot silently install a non-`FluxoraStream` address. On failure the
     /// previously configured `stream_contract` is left untouched.
+    ///
+    /// # No-op on same address
+    /// When `new_stream_contract` equals the currently stored address the call
+    /// returns `Ok(())` without re-running validation, re-writing storage, or
+    /// emitting a `StreamContractUpdated` event.  This prevents unnecessary
+    /// state changes and misleading events when callers inadvertently submit
+    /// the current address.
+    ///
+    /// # Registry TTL
+    /// On a successful migration the persistent stream ID registry's TTL is
+    /// extended so existing entries (created under the old contract) remain
+    /// queryable through the new contract without depending on active writes.
+    /// Indexers and enumeration tooling can therefore rely on the registry
+    /// staying alive across migration windows.
     pub fn set_stream_contract(env: Env, new_stream_contract: Address) -> Result<(), FactoryError> {
-        require_admin(&env)?;
-        validate_stream_contract(&env, &new_stream_contract)?;
-
         let old_contract: Address = env
             .storage()
             .instance()
             .get(&DataKey::StreamContract)
             .ok_or(FactoryError::NotInitialized)?;
 
+        // No-op when the address has not changed: skip validation, storage
+        // write, event emission, and TTL bumps.  Callers that submit the
+        // current address get a clean Ok(()) without side effects.
+        if old_contract == new_stream_contract {
+            return Ok(());
+        }
+
+        require_admin(&env)?;
+        validate_stream_contract(&env, &new_stream_contract)?;
+
         env.storage()
             .instance()
             .set(&DataKey::StreamContract, &new_stream_contract);
 
+        // Extend registry TTL so existing stream IDs from the old contract
+        // remain enumerable through the new contract.
+        bump_registry_ttl(&env);
         // Bump instance TTL after successful update.
         bump_instance(&env);
 
@@ -1097,5 +1147,210 @@ impl FluxoraFactory {
         append_stream_ids_batch(&env, &created_ids);
 
         Ok(created_ids)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+    use super::*;
+    use soroban_sdk::testutils::{Address as _, Events, Ledger};
+    use soroban_sdk::{vec, Env, TryFromVal, Val, Vec as SVec};
+
+    /// Helper: register a `FluxoraStream` contract and return its address.
+    /// The stream does not need `init` — `version()` works before init.
+    fn deploy_stream(env: &Env) -> Address {
+        env.register_contract(None, fluxora_stream::FluxoraStream)
+    }
+
+    struct Ctx {
+        env: Env,
+        contract_id: Address,
+        admin: Address,
+        client: FluxoraFactoryClient<'static>,
+    }
+
+    impl Ctx {
+        fn setup() -> Self {
+            let env = Env::default();
+            env.mock_all_auths();
+            env.ledger().set_timestamp(1_000_000);
+
+            let contract_id = env.register_contract(None, FluxoraFactory);
+            let admin = Address::generate(&env);
+            let stream = deploy_stream(&env);
+
+            let client = FluxoraFactoryClient::new(&env, &contract_id);
+            client.init(&admin, &stream, &1_000_000_000i128, &86_400u64);
+
+            Ctx {
+                env,
+                contract_id,
+                admin,
+                client,
+            }
+        }
+    }
+
+    fn last_contract_event(env: &Env, contract_id: &Address) -> (Symbol, Val) {
+        let events = env.events().all();
+        for i in (0..events.len()).rev() {
+            let (addr, topics, data) = events.get(i).unwrap();
+            if &addr != contract_id {
+                continue;
+            }
+            let topic_values: SVec<Val> = topics;
+            let topic = topic_values.get(0).expect("event has a topic");
+            let symbol = Symbol::try_from_val(env, &topic).expect("topic is a symbol");
+            return (symbol, data);
+        }
+        panic!("no event emitted by the contract");
+    }
+
+    // -----------------------------------------------------------------------
+    // set_stream_contract edge cases
+    // -----------------------------------------------------------------------
+
+    /// Setting to the same address is a no-op: no event emitted, no storage
+    /// write, no validation re-run.
+    #[test]
+    fn test_set_stream_contract_same_address_noop() {
+        let ctx = Ctx::setup();
+        let current = ctx.client.get_factory_config().unwrap().stream_contract;
+
+        let events_before = ctx.env.events().all().len();
+
+        let result = ctx.client.try_set_stream_contract(&current);
+        assert!(result.is_ok());
+
+        // No new events should have been emitted (no stm_upd).
+        assert_eq!(
+            ctx.env.events().all().len(),
+            events_before,
+            "same-address set_stream_contract must not emit any event"
+        );
+
+        // Config unchanged.
+        let config = ctx.client.get_factory_config().unwrap();
+        assert_eq!(config.stream_contract, current);
+    }
+
+    /// Setting to a different valid address succeeds and emits stm_upd.
+    #[test]
+    fn test_set_stream_contract_valid_migration_succeeds() {
+        let ctx = Ctx::setup();
+        let old = ctx.client.get_factory_config().unwrap().stream_contract;
+        let new_stream = deploy_stream(&ctx.env);
+
+        ctx.client.set_stream_contract(&new_stream);
+
+        let config = ctx.client.get_factory_config().unwrap();
+        assert_eq!(config.stream_contract, new_stream);
+        assert_ne!(config.stream_contract, old);
+
+        let (topic, data) = last_contract_event(&ctx.env, &ctx.contract_id);
+        assert_eq!(topic, symbol_short!("stm_upd"));
+        let payload =
+            StreamContractUpdated::try_from_val(&ctx.env, &data).expect("decodes to StreamContractUpdated");
+        assert_eq!(payload.old_contract, old);
+        assert_eq!(payload.new_contract, new_stream);
+    }
+
+    /// `set_stream_contract` before `init` returns NotInitialized.
+    #[test]
+    fn test_set_stream_contract_before_init_errors() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_000_000);
+        let contract_id = env.register_contract(None, FluxoraFactory);
+        let client = FluxoraFactoryClient::new(&env, &contract_id);
+        let stream = deploy_stream(&env);
+
+        let result = client.try_set_stream_contract(&stream);
+        assert_eq!(result, Err(Ok(FactoryError::NotInitialized)));
+    }
+
+    /// `set_stream_contract` with an EOA (externally owned address) that does
+    /// not implement the stream interface returns InvalidStreamContract and
+    /// leaves the existing contract unchanged.
+    #[test]
+    fn test_set_stream_contract_rejects_eoa() {
+        let ctx = Ctx::setup();
+        let old = ctx.client.get_factory_config().unwrap().stream_contract;
+        let eoa = Address::generate(&ctx.env);
+
+        let result = ctx.client.try_set_stream_contract(&eoa);
+        assert_eq!(result, Err(Ok(FactoryError::InvalidStreamContract)));
+
+        let config = ctx.client.get_factory_config().unwrap();
+        assert_eq!(config.stream_contract, old);
+    }
+
+    /// `set_stream_contract` with a contract that does not implement
+    /// `FluxoraStream` (here: the factory itself) returns InvalidStreamContract.
+    #[test]
+    fn test_set_stream_contract_rejects_non_fluxora_stream() {
+        let ctx = Ctx::setup();
+        let old = ctx.client.get_factory_config().unwrap().stream_contract;
+
+        // Register a random contract (a second factory) that does not expose `version()`.
+        let other_factory = ctx
+            .env
+            .register_contract(None, FluxoraFactory);
+        let result = ctx.client.try_set_stream_contract(&other_factory);
+        assert_eq!(result, Err(Ok(FactoryError::InvalidStreamContract)));
+
+        let config = ctx.client.get_factory_config().unwrap();
+        assert_eq!(config.stream_contract, old);
+    }
+
+    // -----------------------------------------------------------------------
+    // Registry persistence across migration
+    // -----------------------------------------------------------------------
+
+    /// After a `set_stream_contract` migration, previously created stream IDs
+    /// in the factory registry remain queryable.
+    #[test]
+    fn test_registry_persists_across_stream_contract_migration() {
+        let ctx = Ctx::setup();
+
+        // We cannot easily create real streams in an inline test (requires
+        // tokens, etc.), but we can simulate registry entries by directly
+        // appending to storage.
+        let simulated_ids = vec![&ctx.env, 1u64, 5u64, 42u64];
+        ctx.env.as_contract(&ctx.contract_id, || {
+            append_stream_ids_batch(&ctx.env, &simulated_ids);
+        });
+
+        // Verify pre-migration: all IDs are queryable.
+        let pre = ctx.client.get_factory_streams_paginated(&0, &100);
+        assert_eq!(pre.len(), 3);
+
+        // Migrate to a new stream contract.
+        let new_stream = deploy_stream(&ctx.env);
+        ctx.client.set_stream_contract(&new_stream);
+
+        // Post-migration: registry entries must still be intact.
+        let post = ctx.client.get_factory_streams_paginated(&0, &100);
+        assert_eq!(
+            post.len(),
+            3,
+            "registry must retain all stream IDs after migration"
+        );
+        for i in 0..3u32 {
+            assert_eq!(
+                post.get(i).unwrap(),
+                simulated_ids.get(i).unwrap(),
+                "registry entry {} must survive migration",
+                i
+            );
+        }
+
+        let config = ctx.client.get_factory_config().unwrap();
+        assert_eq!(config.stream_contract, new_stream);
     }
 }
