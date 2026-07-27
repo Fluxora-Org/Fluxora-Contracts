@@ -482,42 +482,142 @@ fn init_config_unchanged_after_failed_reinit() {
 // §6 Duplicate Stream ID Rejection
 // ---------------------------------------------------------------------------
 
-/// Batch withdraw with duplicate stream IDs must be rejected.
+/// Batch withdraw with duplicate stream IDs must be rejected atomically.
 #[test]
 fn duplicate_id_batch_withdraw_rejected() {
     let ctx = Ctx::setup();
     let stream_id = ctx.create_default_stream();
     ctx.env.ledger().set_timestamp(500);
 
+    let state_before = ctx.client().get_stream_state(&stream_id);
+    let recipient_balance_before = ctx.token().balance(&ctx.recipient);
+    let contract_balance_before = ctx.token().balance(&ctx.contract_id);
+    let liabilities_before = ctx.client().get_total_liabilities();
+
     let ids = vec![&ctx.env, stream_id, stream_id];
-    let result = ctx
-        .client()
-        .try_batch_withdraw(&ctx.recipient, &ids);
+    let result = ctx.client().try_batch_withdraw(&ctx.recipient, &ids);
+
     assert_eq!(result, Err(Ok(ContractError::DuplicateStreamId)));
+    assert_eq!(ctx.client().get_stream_state(&stream_id), state_before);
+    assert_eq!(
+        ctx.token().balance(&ctx.recipient),
+        recipient_balance_before,
+        "a rejected duplicate batch must not pay the recipient"
+    );
+    assert_eq!(
+        ctx.token().balance(&ctx.contract_id),
+        contract_balance_before,
+        "a rejected duplicate batch must not move contract funds"
+    );
+    assert_eq!(
+        ctx.client().get_total_liabilities(),
+        liabilities_before,
+        "a rejected duplicate batch must not change liabilities"
+    );
 }
 
-/// Batch withdraw_to with duplicate stream IDs must be rejected.
+/// Batch withdraw_to with duplicate stream IDs must be rejected atomically.
 #[test]
 fn duplicate_id_batch_withdraw_to_rejected() {
     let ctx = Ctx::setup();
     let stream_id = ctx.create_default_stream();
     ctx.env.ledger().set_timestamp(500);
 
+    let destination = Address::generate(&ctx.env);
+    let state_before = ctx.client().get_stream_state(&stream_id);
+    let destination_balance_before = ctx.token().balance(&destination);
+    let contract_balance_before = ctx.token().balance(&ctx.contract_id);
+    let liabilities_before = ctx.client().get_total_liabilities();
+
     let params = vec![
         &ctx.env,
         fluxora_stream::WithdrawToParam {
             stream_id,
-            destination: ctx.recipient.clone(),
+            destination: destination.clone(),
         },
         fluxora_stream::WithdrawToParam {
             stream_id,
-            destination: ctx.recipient.clone(),
+            destination: destination.clone(),
         },
     ];
-    let result = ctx
-        .client()
-        .try_batch_withdraw_to(&ctx.recipient, &params);
+    let result = ctx.client().try_batch_withdraw_to(&ctx.recipient, &params);
+
     assert_eq!(result, Err(Ok(ContractError::DuplicateStreamId)));
+    assert_eq!(ctx.client().get_stream_state(&stream_id), state_before);
+    assert_eq!(
+        ctx.token().balance(&destination),
+        destination_balance_before,
+        "a rejected duplicate batch must not pay a destination"
+    );
+    assert_eq!(
+        ctx.token().balance(&ctx.contract_id),
+        contract_balance_before,
+        "a rejected duplicate batch must not move contract funds"
+    );
+    assert_eq!(
+        ctx.client().get_total_liabilities(),
+        liabilities_before,
+        "a rejected duplicate batch must not change liabilities"
+    );
+}
+
+/// Bulk cancellation rejects duplicate IDs before changing storage or balances.
+#[test]
+fn duplicate_id_bulk_cancel_rejected_atomically() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_default_stream();
+    ctx.env.ledger().set_timestamp(500);
+
+    let state_before = ctx.client().get_stream_state(&stream_id);
+    let sender_balance_before = ctx.token().balance(&ctx.sender);
+    let recipient_balance_before = ctx.token().balance(&ctx.recipient);
+    let contract_balance_before = ctx.token().balance(&ctx.contract_id);
+    let liabilities_before = ctx.client().get_total_liabilities();
+
+    let ids = vec![&ctx.env, stream_id, stream_id];
+    let result = ctx.client().try_bulk_cancel_streams(&ctx.sender, &ids);
+
+    assert_eq!(result, Err(Ok(ContractError::DuplicateStreamId)));
+    assert_eq!(ctx.client().get_stream_state(&stream_id), state_before);
+    assert_eq!(ctx.token().balance(&ctx.sender), sender_balance_before);
+    assert_eq!(
+        ctx.token().balance(&ctx.recipient),
+        recipient_balance_before
+    );
+    assert_eq!(
+        ctx.token().balance(&ctx.contract_id),
+        contract_balance_before
+    );
+    assert_eq!(ctx.client().get_total_liabilities(), liabilities_before);
+}
+
+/// Bulk admin resume rejects duplicate IDs without partially resuming a stream
+/// or decrementing the paused-stream counter.
+#[test]
+fn duplicate_id_bulk_resume_rejected_atomically() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_default_stream();
+    ctx.env
+        .ledger()
+        .with_mut(|ledger| ledger.sequence_number += 32);
+    ctx.client()
+        .pause_stream_as_admin(&stream_id, &PauseReason::Administrative);
+
+    let state_before = ctx.client().get_stream_state(&stream_id);
+    let paused_count_before = ctx.client().get_paused_stream_count();
+    let liabilities_before = ctx.client().get_total_liabilities();
+
+    let ids = vec![&ctx.env, stream_id, stream_id];
+    let result = ctx.client().try_bulk_resume_streams_as_admin(&ids);
+
+    assert_eq!(result, Err(Ok(ContractError::DuplicateStreamId)));
+    assert_eq!(ctx.client().get_stream_state(&stream_id), state_before);
+    assert_eq!(
+        ctx.client().get_paused_stream_count(),
+        paused_count_before,
+        "a rejected duplicate resume must not change the paused counter"
+    );
+    assert_eq!(ctx.client().get_total_liabilities(), liabilities_before);
 }
 
 // ---------------------------------------------------------------------------

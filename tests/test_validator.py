@@ -883,10 +883,12 @@ class TestBuildCargoTestEnv:
 
 class TestRunTests:
     def test_returns_string(self, monkeypatch):
-        fake_result = types.SimpleNamespace(stdout="GAS_MEASUREMENT: x: single: 1\n")
-        monkeypatch.setattr(
-            vg.subprocess, "run", lambda *a, **kw: fake_result
+        fake_result = types.SimpleNamespace(
+            stdout="GAS_MEASUREMENT: x: single: 1\n",
+            stderr="",
+            returncode=0,
         )
+        monkeypatch.setattr(vg.subprocess, "run", lambda *a, **kw: fake_result)
         output = vg.run_tests()
         assert isinstance(output, str)
         assert "GAS_MEASUREMENT" in output
@@ -896,20 +898,20 @@ class TestRunTests:
 
         def fake_run(cmd, **kwargs):
             captured["cmd"] = cmd
-            return types.SimpleNamespace(stdout="")
+            return types.SimpleNamespace(stdout="", stderr="", returncode=0)
 
         monkeypatch.setattr(vg.subprocess, "run", fake_run)
         vg.run_tests()
         assert "--nocapture" in captured["cmd"]
 
-    def test_ignores_nonzero_returncode(self, monkeypatch):
-        fake_result = types.SimpleNamespace(stdout="some output")
-        monkeypatch.setattr(
-            vg.subprocess, "run", lambda *a, **kw: fake_result
+    def test_nonzero_returncode_is_a_hard_failure(self, monkeypatch):
+        fake_result = types.SimpleNamespace(
+            stdout="partial output", stderr="compile error", returncode=101
         )
-        # Should not raise even if cargo fails
-        result = vg.run_tests()
-        assert result == "some output"
+        monkeypatch.setattr(vg.subprocess, "run", lambda *a, **kw: fake_result)
+
+        with pytest.raises(RuntimeError, match="exit code 101"):
+            vg.run_tests()
 
 
 # ---------------------------------------------------------------------------
@@ -929,8 +931,11 @@ class TestGasMain:
         )
 
         monkeypatch.setattr(
-            vg.subprocess, "run",
-            lambda *a, **kw: types.SimpleNamespace(stdout=raw_output),
+            vg.subprocess,
+            "run",
+            lambda *a, **kw: types.SimpleNamespace(
+                stdout=raw_output, stderr="", returncode=0
+            ),
         )
         # Override file path used by main() via extract_baselines
         monkeypatch.setattr(vg, "extract_baselines", lambda _: baseline_override or {
@@ -963,8 +968,11 @@ class TestGasMain:
 
     def test_no_measurements_exits_1(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
-            vg.subprocess, "run",
-            lambda *a, **kw: types.SimpleNamespace(stdout=""),
+            vg.subprocess,
+            "run",
+            lambda *a, **kw: types.SimpleNamespace(
+                stdout="", stderr="", returncode=0
+            ),
         )
         monkeypatch.setattr(vg, "extract_baselines", lambda _: {
             "create_stream": 1000,
@@ -983,8 +991,9 @@ class TestGasMain:
                         "bulk_cancel_streams": {"1": 3000, "5": 7000, "10": 12000, "20": 22000},
                         "bulk_resume_streams_as_admin": {"1": 4000, "5": 8000, "10": 14000, "20": 26000},
                     })
-        with pytest.raises(SystemExit):
+        with pytest.raises(SystemExit) as exc:
             vg.main()
+        assert exc.value.code == 1
         assert "MISSING" in capsys.readouterr().out
 
     def test_extract_baselines_exception_exits_1(self, tmp_path, monkeypatch):

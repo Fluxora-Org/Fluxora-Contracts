@@ -3,9 +3,19 @@ import os
 import stat
 import subprocess
 import tempfile
+from pathlib import Path
+
 import pytest
 from unittest.mock import patch
-from script.validate_gas import build_cargo_test_env, extract_baselines, parse_measurements, main
+from script.validate_gas import (
+    build_cargo_test_env,
+    extract_baselines,
+    extract_release_hardening_coverage,
+    main,
+    parse_measurements,
+    run_tests,
+    validate_release_hardening_coverage,
+)
 
 
 class TestBuildCargoTestEnv:
@@ -33,6 +43,44 @@ class TestExtractBaselines:
             mock_file.return_value.__enter__.return_value.read.return_value = content
             result = extract_baselines("docs/gas.md")
             assert result == {"batch_withdraw": {"single": 1000}, "transfer": 2000}
+
+    def test_release_edge_case_baselines_are_explicit(self):
+        baselines = extract_baselines("docs/gas.md")
+        expected = {
+            "create_stream_with_cliff": 568292,
+            "create_stream_cliff_only": 564084,
+            "withdraw_partial_accrual": 562057,
+            "withdraw_to_single": 565895,
+            "pause_stream": 237567,
+            "resume_stream": 238111,
+            "create_streams_partial": {
+                "4": 1051967,
+                "8": 2048435,
+                "16": 4056845,
+            },
+            "batch_withdraw_max_page_size": {"100": 45453389},
+        }
+
+        for function, baseline in expected.items():
+            assert baselines[function] == baseline
+
+    def test_release_edge_case_measurements_still_exist(self):
+        source = Path("contracts/stream/tests/gas_regression.rs").read_text(
+            encoding="utf-8"
+        )
+        functions = (
+            "create_stream_with_cliff",
+            "create_stream_cliff_only",
+            "withdraw_partial_accrual",
+            "withdraw_to_single",
+            "pause_stream",
+            "resume_stream",
+            "create_streams_partial",
+            "batch_withdraw_max_page_size",
+        )
+
+        for function in functions:
+            assert f"GAS_MEASUREMENT: {function}:" in source
 
     def test_extract_baselines_missing_block(self):
         """Test error when baseline block is missing."""
@@ -72,6 +120,76 @@ class TestParseMeasurements:
         assert result == {
             "batch_withdraw": {"small": 1000, "large": 5000}
         }
+
+
+class TestRunTests:
+    @patch("script.validate_gas.subprocess.run")
+    def test_nonzero_cargo_exit_is_not_masked(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["cargo", "test"],
+            returncode=101,
+            stdout="",
+            stderr="contract failed to compile",
+        )
+
+        with pytest.raises(RuntimeError, match="exit code 101"):
+            run_tests()
+
+    @patch("script.validate_gas.subprocess.run")
+    def test_success_returns_measurement_output(self, mock_run):
+        output = "GAS_MEASUREMENT: withdraw: single: 100"
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["cargo", "test"], returncode=0, stdout=output, stderr=""
+        )
+
+        assert run_tests() == output
+
+
+class TestReleaseHardeningCoverage:
+    def test_real_document_covers_all_release_surfaces(self):
+        validate_release_hardening_coverage("docs/gas.md")
+
+    def test_missing_markers_are_rejected(self, tmp_path):
+        gas_doc = tmp_path / "gas.md"
+        gas_doc.write_text("# Gas\nNo coverage matrix", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="release-hardening coverage block"):
+            extract_release_hardening_coverage(str(gas_doc))
+
+    def test_missing_dimension_is_rejected(self, tmp_path):
+        gas_doc = tmp_path / "docs" / "gas.md"
+        gas_doc.parent.mkdir()
+        gas_doc.write_text(
+            "<!-- RELEASE_HARDENING_COVERAGE_START -->\n"
+            "`covered.rs`\n"
+            "<!-- RELEASE_HARDENING_COVERAGE_END -->\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "covered.rs").write_text("// fixture", encoding="utf-8")
+
+        required = {"Storage": ("covered.rs",)}
+        with patch(
+            "script.validate_gas.REQUIRED_RELEASE_HARDENING_REFERENCES", required
+        ):
+            with pytest.raises(ValueError, match="missing dimensions: Storage"):
+                validate_release_hardening_coverage(gas_doc, tmp_path)
+
+    def test_missing_or_stale_test_reference_is_rejected(self, tmp_path):
+        gas_doc = tmp_path / "docs" / "gas.md"
+        gas_doc.parent.mkdir()
+        gas_doc.write_text(
+            "<!-- RELEASE_HARDENING_COVERAGE_START -->\n"
+            "| **Storage** | documented |\n"
+            "<!-- RELEASE_HARDENING_COVERAGE_END -->\n",
+            encoding="utf-8",
+        )
+
+        required = {"Storage": ("missing.rs",)}
+        with patch(
+            "script.validate_gas.REQUIRED_RELEASE_HARDENING_REFERENCES", required
+        ):
+            with pytest.raises(ValueError, match="missing test references"):
+                validate_release_hardening_coverage(gas_doc, tmp_path)
 
 
 class TestMain:
@@ -162,25 +280,20 @@ class TestMain:
     @patch("script.validate_gas.run_tests")
     @patch("script.validate_gas.extract_baselines")
     @patch("script.validate_gas.sys.exit")
-    def test_main_missing_baseline_key_prints_missing_not_fail(
+    def test_main_missing_baseline_key_is_a_hard_failure(
         self, mock_exit, mock_baselines, mock_run_tests
     ):
-        """A measured function whose key is absent from the baseline block
-        should be printed as MISSING, not counted as a regression.
+        """Every emitted measurement must be covered by a documented baseline.
 
-        The script currently outputs MISSING and continues without failing CI.
-        This test locks down that behaviour so a future change that turns
-        missing keys into failures is caught explicitly.
+        Treating a new measurement as informational would let a newly added
+        security-sensitive path bypass the regression threshold entirely.
         """
-        # Baseline has "create_stream" but the test output reports "new_op".
         mock_baselines.return_value = {"create_stream": 500000}
-        mock_run_tests.return_value = (
-            "GAS_MEASUREMENT: new_op: single: 100000"
-        )
+        mock_run_tests.return_value = "GAS_MEASUREMENT: new_op: single: 100000"
+
         main()
-        # Missing key → MISSING row, no regression → should exit 0 after
-        # printing the MISSING line (not exit 1).
-        mock_exit.assert_called_with(0)
+
+        mock_exit.assert_called_once_with(1)
 
     @patch("script.validate_gas.run_tests")
     @patch("script.validate_gas.extract_baselines")
