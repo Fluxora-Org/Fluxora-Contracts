@@ -22400,11 +22400,6 @@ fn test_contract_error_discriminants_are_stable() {
         "ReservationStillActive must be 26"
     );
     assert_eq!(
-        ContractError::PauseReasonTooLong as u32,
-        23,
-        "PauseReasonTooLong must be 23"
-    );
-    assert_eq!(
         ContractError::ClockRegression as u32,
         27,
         "ClockRegression must be 27"

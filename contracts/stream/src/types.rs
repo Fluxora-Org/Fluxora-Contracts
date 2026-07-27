@@ -506,6 +506,14 @@ pub struct Stream {
     /// Ledger sequence number of the last rate change (or creation).
     /// Used to enforce MIN_RATE_INTERVAL_LEDGERS cooldown.
     pub last_rate_change_ledger: u32,
+    /// When true, this stream distributes to multiple recipients pro-rata.
+    pub is_pooled: Option<bool>,
+    /// Parent stream id when this stream is a delegated child of another stream.
+    /// `None` for root streams.
+    pub parent_stream_id: Option<u64>,
+    /// Delegation depth of this stream in the recipient-share delegation tree
+    /// (0 for a root stream, N for the Nth level of delegated child stream).
+    pub delegation_depth: u32,
     /// If true, the stream is decommissioned and restricted to cancel-or-no-op.
     /// Defaults to false (None) for backward compatibility with existing streams.
     pub decommissioned: Option<bool>,
@@ -685,6 +693,10 @@ pub enum DataKey {
     PausedStreamCount,
     /// Aggregate sum of all keeper fees paid out via `keeper_cancel` (`i128`, instance storage).
     TotalKeeperFeesPaid,
+    /// Pooled stream shares mapping (stream_id → recipient → share_bps).
+    PooledStreamShares(u64),
+    /// Pooled stream withdrawn amounts (stream_id → recipient → withdrawn_amount).
+    PooledStreamWithdrawn(u64, Address),
 }
 
 /// Type of pause.
