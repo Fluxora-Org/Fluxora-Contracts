@@ -1463,6 +1463,26 @@ mod tests {
                 .get(&symbol_short!("paused"))
                 .unwrap_or(false)
         }
+
+        pub fn set_stream_contract(env: Env, new_contract: Address) {
+            let old: Address = env
+                .storage()
+                .instance()
+                .get(&symbol_short!("strm_ctr"))
+                .unwrap_or_else(|| Address::generate(&env));
+            env.storage()
+                .instance()
+                .set(&symbol_short!("strm_ctr"), &new_contract);
+            let topic = (symbol_short!("stm_upd"),);
+            let data = (old, new_contract);
+            env.events().publish(topic, data);
+        }
+
+        pub fn get_stream_contract(env: Env) -> Option<Address> {
+            env.storage()
+                .instance()
+                .get(&symbol_short!("strm_ctr"))
+        }
     }
 
     const TIMELOCK: u64 = 172_800;
@@ -1668,6 +1688,38 @@ mod tests {
         ctx.client.execute(&executor, &id);
 
         assert!(target.paused());
+    }
+
+    #[test]
+    fn test_factory_set_stream_contract_dispatches_via_governance() {
+        use soroban_sdk::xdr::ToXdr;
+
+        let ctx = Ctx::setup();
+        let mock_factory_id = ctx.env.register_contract(None, MockFactoryTarget);
+        let new_stream = Address::generate(&ctx.env);
+
+        // Propose setting the stream contract on the mock factory.
+        let calldata = CallData::FactorySetStreamContract(new_stream.clone()).to_xdr(&ctx.env);
+
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &mock_factory_id, &calldata);
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+        ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
+
+        let executor = Address::generate(&ctx.env);
+        ctx.client.execute(&executor, &id);
+
+        // Verify the mock factory's stored stream contract was updated.
+        let mock =
+            MockFactoryTargetClient::new(&ctx.env, &mock_factory_id);
+        let stored = mock.get_stream_contract();
+        assert_eq!(
+            stored,
+            Some(new_stream),
+            "FactorySetStreamContract must dispatch set_stream_contract on the target"
+        );
     }
 
     #[test]
