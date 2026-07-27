@@ -34,32 +34,52 @@ From **CONTRACT_VERSION 4**, every stream may carry an optional bounded key-valu
 (`metadata: Option<Map<Bytes, Bytes>>`) for rich integration data such as invoice IDs,
 project codes, and external reference URIs.
 
-#### API
+#### API Entrypoints & Types
 
-| Entrypoint | Description |
+| Entrypoint / Struct | Description |
 |---|---|
 | `create_stream(…, metadata)` | Pass `Some(map)` to attach metadata at creation, or `None` to omit. |
-| `get_stream_metadata(stream_id)` | Returns `Option<Map<Bytes, Bytes>>`. Permissionless read. |
+| `get_stream_metadata(stream_id)` | Permissionless read: returns `Option<Map<Bytes, Bytes>>`. Returns `ContractError::StreamNotFound` for invalid IDs. |
+| `CreateStreamParams.metadata` | Field on batch entrypoint params struct (`create_streams`, `create_streams_partial`). |
+| `CreateStreamRelativeParams.metadata` | Field on relative batch entrypoint params struct (`create_streams_relative`). |
+| `create_stream_from_template(…, metadata)` | Attaches caller-supplied metadata when instantiating a schedule template. |
+| `StreamCreated.metadata` | Emitted in the `StreamCreated` event for off-chain indexer consumption. |
 
-Metadata is also propagated through `create_streams`, `create_streams_relative`,
-`create_streams_partial`, and `create_stream_from_template` via the `metadata` field on
-`CreateStreamParams` / `CreateStreamRelativeParams`.
+#### Size Bounds & Validation Fail-Fast Rules
 
-#### Bounds (enforced at `create_stream` time — `ContractError::MetadataTooLarge` on violation)
+Validation is executed via `validate_metadata()` at creation time before any state or counter mutation. Any violation immediately reverts the call with `ContractError::MetadataTooLarge` (code 32).
 
-| Bound | Constant | Value |
-|---|---|---|
-| Maximum key-value pair count | `MAX_METADATA_KEYS` | 8 |
-| Maximum aggregate (all keys + values) bytes | `MAX_METADATA_BYTES` | 512 |
-| Maximum single key length | `MAX_METADATA_KEY_BYTES` | 32 |
-| Maximum single value length | `MAX_METADATA_VALUE_BYTES` | 128 |
+| Bound | Constant | Value | Enforcement Rule |
+|---|---|---|---|
+| Maximum key-value pair count | `MAX_METADATA_KEYS` | 8 | `metadata.len() <= 8` |
+| Maximum single key length | `MAX_METADATA_KEY_BYTES` | 32 | `key.len() <= 32` |
+| Maximum single value length | `MAX_METADATA_VALUE_BYTES` | 128 | `value.len() <= 128` |
+| Maximum aggregate byte size | `MAX_METADATA_BYTES` | 512 | `sum(key.len() + val.len()) <= 512` |
 
-#### Invariants
+##### Fail-Fast & Validation Sequence
+1. Check key count: `metadata.len() <= 8`.
+2. Iterative entry check: verify each key length <= 32 and each value length <= 128.
+3. Accumulate byte count using checked addition (`checked_add`): fails on overflow or if total > 512 bytes.
+4. **Fail-Before-Allocate Guarantee**: If validation fails, no stream ID counter is incremented, no storage key is written, and no tokens are transferred.
 
-- Validated entirely at creation time; **immutable post-creation**.
-- Stream ID is **not allocated** if metadata validation fails (no partial state written).
-- No token movement occurs if metadata validation fails.
-- `StreamCreated` event includes the `metadata` field for indexer consumption.
+#### Edge Cases & Key-Value Semantics
+
+- **SDK Map Deduplication**: `soroban_sdk::Map` enforces unique keys. If duplicate keys are added, `Map::set` overwrites the existing value. Validation operates on the final deduplicated map state.
+- **Zero-Length Entries**: Empty keys (`b""`) and empty values (`b""`) are syntactically valid and permitted as long as total size bounds are respected.
+- **None vs Empty Map (`Some({})`)**: Both are stored in persistent storage. `None` consumes minimal XDR bytes. `Some(Map::new())` round-trips as `Some(Map::new())` with `len() == 0`.
+
+#### Lifecycle Immutability & Inter-entrypoint Rules
+
+- **Post-Creation Immutability**: Metadata is written once in `persist_new_stream`. All state-mutating entrypoints (`pause_stream`, `resume_stream`, `cancel_stream`, `withdraw`, `update_rate_per_second`, `decrease_rate_per_second`, `top_up_stream`, `extend_stream_end_time`, `shorten_stream_end_time`, `set_auto_renew`, `renew_stream`) leave `stream.metadata` untouched.
+- **Storage Cleanup**: Calling `close_completed_stream` purges the underlying `Stream` persistent storage key, freeing the metadata entry from ledger storage. Subsequent calls to `get_stream_metadata` return `ContractError::StreamNotFound`.
+- **Cloned Streams (`clone_stream`)**: Cloning a stream **resets metadata to `None`** on the newly created stream to prevent accidental duplication of single-use invoice IDs or URIs. The source stream retains its original metadata.
+- **Batch Isolation (`create_streams_partial`)**: In partial batch creation, if an entry fails metadata validation with `MetadataTooLarge`, that specific entry returns `{ success: false, stream_id: None, error: Some(32) }`, while valid entries in the same batch are successfully created.
+
+#### Storage, Gas, & Upgrade Compatibility
+
+- **Storage Key**: Stored as part of the `Stream` struct under `DataKey::Stream(u64)` in persistent storage with standard threshold TTL bumps.
+- **WASM Upgrade Safety**: Pre-v4 streams stored prior to metadata support deserialize cleanly with `metadata: None`. Upgrading contract WASM is fully backward compatible.
+- **Gas Impact**: Bounded at 8 keys / 512 aggregate bytes to ensure negligible CPU and storage footprint overhead during stream creation and queries.
 
 #### Example (Rust client)
 

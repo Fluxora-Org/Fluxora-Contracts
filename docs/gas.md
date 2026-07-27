@@ -68,6 +68,12 @@ check remains reproducible without the Stellar CLI installed.
 | `batch_withdraw` | 50 | 20M |
 | `batch_withdraw` | 100 | 35M |
 
+## Stream Metadata Gas Profile
+
+- **Validation CPU Cost**: Bounded validation iterates over a maximum of 8 key-value pairs (`MAX_METADATA_KEYS = 8`), checking string lengths and accumulating total byte count (`MAX_METADATA_BYTES = 512`). Execution CPU cost is negligible (< 0.05M CPU instructions).
+- **Fail-Fast Early Revert**: Failures during `validate_metadata` short-circuit before any storage key reads/writes or token transfers, avoiding wasted ledger write footprint fees.
+- **Query Cost (`get_stream_metadata`)**: A single read-only persistent storage lookup on `DataKey::Stream(u64)`. Consumes minimal CPU instructions (~0.1M) with no state mutation or token call overhead.
+
 ## Hot Path Analysis
 
 ### `withdraw`

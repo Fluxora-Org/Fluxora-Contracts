@@ -763,3 +763,251 @@ fn test_contract_version_is_6() {
         "CONTRACT_VERSION must be 6 after sweep_excess auth change"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Additional edge-case & regression tests (issue #1294)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_clone_stream_resets_metadata_to_none() {
+    let ctx = Ctx::setup();
+    let mut meta: Map<Bytes, Bytes> = Map::new(&ctx.env);
+    meta.set(ctx.make_key("invoice_id"), ctx.make_val("INV-CLONE-100"));
+
+    let source_id = ctx.create_stream_with_metadata(Some(meta));
+    let new_recipient = Address::generate(&ctx.env);
+
+    // Clone source stream
+    let cloned_id = ctx.client().clone_stream(
+        &source_id,
+        &new_recipient,
+        &100u64,  // start_time
+        &1100u64, // end_time
+        &1000_i128,
+        &false,
+    );
+
+    // Verify source stream retains its original metadata
+    let source_meta = ctx.client().get_stream_metadata(&source_id).unwrap();
+    assert_eq!(
+        source_meta.get(ctx.make_key("invoice_id")).unwrap(),
+        ctx.make_val("INV-CLONE-100")
+    );
+
+    // Verify cloned stream metadata is explicitly reset to None
+    let cloned_meta = ctx.client().get_stream_metadata(&cloned_id);
+    assert!(
+        cloned_meta.is_none(),
+        "Cloned stream must reset metadata to None to prevent single-use ID duplication"
+    );
+}
+
+#[test]
+fn test_metadata_zero_length_key_and_value() {
+    let ctx = Ctx::setup();
+    let mut meta: Map<Bytes, Bytes> = Map::new(&ctx.env);
+    let empty_key = Bytes::from_slice(&ctx.env, b"");
+    let empty_val = Bytes::from_slice(&ctx.env, b"");
+    meta.set(empty_key.clone(), empty_val.clone());
+
+    let stream_id = ctx.create_stream_with_metadata(Some(meta));
+    let got = ctx.client().get_stream_metadata(&stream_id).unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got.get(empty_key).unwrap(), empty_val);
+}
+
+#[test]
+fn test_metadata_duplicate_key_overwrite_byte_calculation() {
+    let ctx = Ctx::setup();
+    let mut meta: Map<Bytes, Bytes> = Map::new(&ctx.env);
+    let key = ctx.make_key("duplicate_key");
+    
+    // Set initial value
+    meta.set(key.clone(), ctx.make_val("initial_val"));
+    // Overwrite with updated value
+    meta.set(key.clone(), ctx.make_val("updated_val"));
+
+    let stream_id = ctx.create_stream_with_metadata(Some(meta));
+    let got = ctx.client().get_stream_metadata(&stream_id).unwrap();
+    assert_eq!(
+        got.len(),
+        1,
+        "soroban_sdk::Map must deduplicate unique keys"
+    );
+    assert_eq!(got.get(key).unwrap(), ctx.make_val("updated_val"));
+}
+
+#[test]
+fn test_close_completed_stream_reclaims_metadata_storage() {
+    let ctx = Ctx::setup();
+    let mut meta: Map<Bytes, Bytes> = Map::new(&ctx.env);
+    meta.set(ctx.make_key("ref"), ctx.make_val("CLOSE-TEST"));
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+        &0_i128,
+        &None,
+        &Some(meta),
+    );
+
+    // Fast-forward past end time and withdraw full deposit to complete stream
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    // Verify stream status is Completed
+    let stream_info = ctx.client().get_stream(&stream_id);
+    assert_eq!(stream_info.status, StreamStatus::Completed);
+
+    // Close the completed stream to reclaim storage
+    ctx.client().close_completed_stream(&stream_id);
+
+    // Querying metadata for closed stream returns StreamNotFound
+    let res = ctx.client().try_get_stream_metadata(&stream_id);
+    match res {
+        Err(Ok(ContractError::StreamNotFound)) => {}
+        _ => panic!("Expected StreamNotFound after closing completed stream, got {:?}", res),
+    }
+}
+
+#[test]
+fn test_create_stream_from_template_with_metadata() {
+    let ctx = Ctx::setup();
+    let template_owner = Address::generate(&ctx.env);
+
+    // Register a schedule template
+    let template_id = ctx.client().register_stream_template(
+        &template_owner,
+        &0u64,    // start_delay
+        &0u64,    // cliff_delay
+        &1000u64, // duration
+    );
+
+    let mut meta: Map<Bytes, Bytes> = Map::new(&ctx.env);
+    meta.set(ctx.make_key("payroll_id"), ctx.make_val("PAYROLL-2026-07"));
+
+    let stream_id = ctx.client().create_stream_from_template(
+        &ctx.sender,
+        &template_id,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0_i128,
+        &None,
+        &Some(meta.clone()),
+    );
+
+    let got = ctx.client().get_stream_metadata(&stream_id).unwrap();
+    assert_eq!(
+        got.get(ctx.make_key("payroll_id")).unwrap(),
+        ctx.make_val("PAYROLL-2026-07")
+    );
+}
+
+#[test]
+fn test_create_streams_partial_metadata_isolation() {
+    let ctx = Ctx::setup();
+    let recipient_1 = Address::generate(&ctx.env);
+    let recipient_2 = Address::generate(&ctx.env);
+
+    let mut valid_meta: Map<Bytes, Bytes> = Map::new(&ctx.env);
+    valid_meta.set(ctx.make_key("valid"), ctx.make_val("meta1"));
+
+    // Invalid metadata exceeding aggregate MAX_METADATA_BYTES (512 bytes)
+    let mut invalid_meta: Map<Bytes, Bytes> = Map::new(&ctx.env);
+    let key = Bytes::from_slice(&ctx.env, &[1u8; 30]);
+    let val_too_large = Bytes::from_slice(&ctx.env, &[2u8; 128]);
+    for i in 0..6 {
+        let k = Bytes::from_slice(&ctx.env, &[i as u8; 30]);
+        invalid_meta.set(k, val_too_large.clone());
+    }
+    // Total bytes = 6 * (30 + 128) = 948 bytes > 512 bytes
+
+    let params = soroban_sdk::vec![
+        &ctx.env,
+        CreateStreamParams {
+            recipient: recipient_1,
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: None,
+            memo: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            metadata: Some(valid_meta),
+            irrevocable: None,
+            witness: None,
+        },
+        CreateStreamParams {
+            recipient: recipient_2,
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: None,
+            memo: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            metadata: Some(invalid_meta),
+            irrevocable: None,
+            witness: None,
+        },
+    ];
+
+    let results = ctx.client().create_streams_partial(&ctx.sender, &params);
+    assert_eq!(results.len(), 2);
+
+    let r1 = results.get(0).unwrap();
+    assert!(r1.success);
+    assert!(r1.stream_id.is_some());
+    assert!(r1.error.is_none());
+
+    let r2 = results.get(1).unwrap();
+    assert!(!r2.success);
+    assert!(r2.stream_id.is_none());
+    assert_eq!(r2.error, Some(32)); // ContractError::MetadataTooLarge (32)
+
+    // Verify valid stream metadata was persisted properly
+    let got1 = ctx
+        .client()
+        .get_stream_metadata(&r1.stream_id.unwrap())
+        .unwrap();
+    assert_eq!(
+        got1.get(ctx.make_key("valid")).unwrap(),
+        ctx.make_val("meta1")
+    );
+}
+
+#[test]
+fn test_metadata_gas_scaling_boundary() {
+    let ctx = Ctx::setup();
+    let mut meta: Map<Bytes, Bytes> = Map::new(&ctx.env);
+
+    // Exactly 8 keys, each with 32-byte key and 32-byte value (total 8 * 64 = 512 bytes == MAX_METADATA_BYTES)
+    for i in 0..MAX_METADATA_KEYS {
+        let key_bytes = [i as u8; 32];
+        let val_bytes = [(i + 10) as u8; 32];
+        meta.set(
+            Bytes::from_slice(&ctx.env, &key_bytes),
+            Bytes::from_slice(&ctx.env, &val_bytes),
+        );
+    }
+
+    let stream_id = ctx.create_stream_with_metadata(Some(meta));
+    let got = ctx.client().get_stream_metadata(&stream_id).unwrap();
+    assert_eq!(got.len(), 8);
+
+    for i in 0..MAX_METADATA_KEYS {
+        let key_bytes = [i as u8; 32];
+        let val_bytes = [(i + 10) as u8; 32];
+        let v = got.get(Bytes::from_slice(&ctx.env, &key_bytes)).unwrap();
+        assert_eq!(v, Bytes::from_slice(&ctx.env, &val_bytes));
+    }
+}
+

@@ -139,9 +139,19 @@ Used for per-stream data and per-recipient indexes. Grows linearly with stream c
 
 | Key | Description |
 |---|---|
-| `Stream(stream_id)` | Complete stream state: participants, amounts, timing, status, `cancelled_at`. One entry per stream. |
+| `Stream(stream_id)` | Complete stream state: participants, amounts, timing, status, `cancelled_at`, and optional bounded `metadata: Option<Map<Bytes, Bytes>>`. One entry per stream. |
 | `RecipientStreams(address)` | Sorted `Vec<u64>` of stream IDs where `address` is the recipient. Maintained in ascending order. |
 | `AutoClaimDestination(stream_id)` | Recipient-chosen destination `Address` for permissionless auto-claim. Absent when not opted in. Removed by `revoke_auto_claim`. |
+
+### Stream Metadata Storage & Footprint
+
+- **Storage Container**: Embedded directly within the `Stream` struct under `DataKey::Stream(stream_id)`.
+- **Field Type**: `Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>`.
+- **Footprint Bounds**: Bounded by `MAX_METADATA_KEYS = 8`, `MAX_METADATA_KEY_BYTES = 32`, `MAX_METADATA_VALUE_BYTES = 128`, and `MAX_METADATA_BYTES = 512`.
+- **Footprint Impact**:
+  - `None`: Consumes 1 byte XDR variant header (`Option::None`).
+  - `Some(map)`: Maximum persistent byte footprint overhead is capped at 512 bytes + map serialization overhead (~560 bytes total).
+- **TTL Dynamics**: Refreshed automatically whenever `DataKey::Stream(stream_id)` TTL is bumped during stream reads (`load_stream`) or mutations (`save_stream`). Purged when `close_completed_stream` removes `DataKey::Stream(stream_id)`.
 
 ---
 
