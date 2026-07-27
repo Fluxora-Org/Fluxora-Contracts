@@ -36,6 +36,12 @@ When quorum is first reached, the current threshold is snapshotted alongside the
 a `QuorumInfo` record. At execution time the proposal is judged against this snapshot, making
 in-flight proposals immune to later threshold changes by the admin.
 
+
+
+### Threshold changes are not timelocked
+
+`set_threshold`, `add_signer`, and `remove_signer` are admin‑only operations that take effect immediately upon a single admin signature. There is no timelock or cooldown; an admin can lower the threshold to 1 or add a single signer and set the threshold to 1 in two consecutive calls, instantly weakening the quorum.
+
 ## Constants
 
 | Constant | Value | Meaning |
@@ -637,7 +643,7 @@ assert!(result.is_ok());
 
 **Key Security Properties:**
 
-1. **No Single Point of Failure**: No individual key can change stream parameters
+1. **No Single Point of Failure**: No individual key can change stream parameters, governance signers, or the approval threshold
 2. **Transparent Process**: All governance actions are recorded on-chain with events
 3. **Time-Delayed Execution**: 48-hour minimum between approval and application
 4. **Immutable Audit Trail**: Proposal content and approvals are permanently stored
@@ -658,9 +664,13 @@ The governance integration is designed to resist several attack vectors:
 - Emergency cancellation available through admin or original proposer
 
 **Admin Key Compromise:**
-- If governance contract key is compromised, attacker still cannot bypass process
-- Parameter changes still require full proposal → approval → timelock → execution flow
-- Admin can only manage co-signer set, not directly change stream parameters
+- If the admin key is compromised, the attacker still cannot bypass the process:
+   adding/removing a signer or changing the threshold requires the same
+  propose → approve (quorum) → 48-hour timelock → execute flow as any
+  target-contract parameter change
+- There is no bare-admin entrypoint for these operations at all — `set_threshold`,
+  `add_signer`, `remove_signer` have no public function; they are reachable
+  only from inside `execute()` via `CallData::GovSetThreshold`/`GovAddSigner`/`GovRemoveSigner`
 
 **Off-chain Executor Compromise:**
 - Executor can only apply governance-approved changes

@@ -16,6 +16,8 @@ When changing the contract:
 - Update snapshot tests if externally visible behavior changes
 - No behavior change required for doc-only updates
 
+**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `close_cancelled_stream`, `close_completed_stream`, `compute_keeper_fee_split`, `create_stream_with_lookback`, `delete_stream_template`, `get_auto_renew`, `get_global_emergency_paused`, `get_lookback_window`, `get_paused_stream_count`, `get_pending_recipient_update`, `get_protocol_fees_accrued`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `get_total_liabilities`, `global_resume`, `keeper_cancel`, `renew_stream`, `set_auto_renew`, `set_contract_paused`, `set_global_emergency_paused`, `set_lookback_window`, `version`, `migration_v5_to_v6`, `set_max_rate_per_second`.
+**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `delete_stream_template`, `get_auto_renew`, `get_global_emergency_paused`, `get_keeper_fee_split`, `get_pending_recipient_update`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `get_total_liabilities`, `global_resume`, `keeper_cancel`, `renew_stream`, `set_auto_renew`, `set_contract_paused`, `set_global_emergency_paused`, `version`, `migration_v5_to_v6`, `set_max_rate_per_second`.
 **Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `close_cancelled_stream`, `close_completed_stream`, `compute_keeper_fee_split`, `delete_stream_template`, `get_auto_renew`, `get_global_emergency_paused`, `get_keeper_fee_split`, `get_paused_stream_count`, `get_pending_recipient_update`, `get_protocol_fees_accrued`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `get_total_liabilities`, `global_resume`, `keeper_cancel`, `migration_v5_to_v6`, `renew_stream`, `set_auto_renew`, `set_contract_paused`, `set_global_emergency_paused`, `set_max_rate_per_second`, `version`.
 
 ## Externally Visible Assurances
@@ -36,10 +38,10 @@ project codes, and external reference URIs.
 
 #### API
 
-| Entrypoint | Description |
-|---|---|
-| `create_stream(…, metadata)` | Pass `Some(map)` to attach metadata at creation, or `None` to omit. |
-| `get_stream_metadata(stream_id)` | Returns `Option<Map<Bytes, Bytes>>`. Permissionless read. |
+| Entrypoint                       | Description                                                         |
+|----------------------------------|---------------------------------------------------------------------|
+| `create_stream(…, metadata)`     | Pass `Some(map)` to attach metadata at creation, or `None` to omit. |
+| `get_stream_metadata(stream_id)` | Returns `Option<Map<Bytes, Bytes>>`. Permissionless read.           |
 
 Metadata is also propagated through `create_streams`, `create_streams_relative`,
 `create_streams_partial`, and `create_stream_from_template` via the `metadata` field on
@@ -47,12 +49,12 @@ Metadata is also propagated through `create_streams`, `create_streams_relative`,
 
 #### Bounds (enforced at `create_stream` time — `ContractError::MetadataTooLarge` on violation)
 
-| Bound | Constant | Value |
-|---|---|---|
-| Maximum key-value pair count | `MAX_METADATA_KEYS` | 8 |
-| Maximum aggregate (all keys + values) bytes | `MAX_METADATA_BYTES` | 512 |
-| Maximum single key length | `MAX_METADATA_KEY_BYTES` | 32 |
-| Maximum single value length | `MAX_METADATA_VALUE_BYTES` | 128 |
+| Bound                                       | Constant                   | Value |
+|---------------------------------------------|----------------------------|-------|
+| Maximum key-value pair count                | `MAX_METADATA_KEYS`        | 8     |
+| Maximum aggregate (all keys + values) bytes | `MAX_METADATA_BYTES`       | 512   |
+| Maximum single key length                   | `MAX_METADATA_KEY_BYTES`   | 32    |
+| Maximum single value length                 | `MAX_METADATA_VALUE_BYTES` | 128   |
 
 #### Invariants
 
@@ -60,6 +62,26 @@ Metadata is also propagated through `create_streams`, `create_streams_relative`,
 - Stream ID is **not allocated** if metadata validation fails (no partial state written).
 - No token movement occurs if metadata validation fails.
 - `StreamCreated` event includes the `metadata` field for indexer consumption.
+
+#### Compatibility rules (which operations preserve metadata)
+
+Metadata is written once at stream creation and **never mutated** by any subsequent
+operation. The table below documents which entry-points preserve the metadata map
+and which are unaffected (metadata is not read or written):
+
+| Operation | Metadata behavior |
+|---|---|
+| `pause_stream` / `resume_stream` | Unchanged — metadata is not read or written. |
+| `cancel_stream` | Unchanged — metadata persists in storage for post-terminal queries. |
+| `withdraw` / `batch_withdraw` | Unchanged — withdrawal only touches `withdrawn_amount`. |
+| `top_up_stream` | Unchanged — only `deposit_amount` is modified. |
+| `update_rate_per_second` / `decrease_rate_per_second` | Unchanged — rate fields are modified; metadata is untouched. |
+| `extend_stream_end_time` | Unchanged — `end_time` and `deposit_amount` are modified. |
+| `transfer_sender` | Unchanged — only the `sender` field is rotated. |
+| `update_recipient` | Unchanged — only the `recipient` field is rotated. |
+| `delegate_recipient_share` | Unchanged — delegation splits the rate, not metadata. |
+| `clone_stream` | **Inherited** — the cloned stream receives `source.metadata.clone()`. |
+| `create_stream_from_template` | **Passed through** — caller-supplied metadata is validated and stored. |
 
 #### Example (Rust client)
 
@@ -89,7 +111,7 @@ From **CONTRACT_VERSION 3**, integrators can register **relative** schedule skel
 - **Caps**: per-owner and global template counts are bounded; see `MAX_TEMPLATES_PER_OWNER` and `MAX_GLOBAL_TEMPLATES` in `contracts/stream/src/lib.rs`.
 - **Errors**: `TemplateNotFound`, `TemplateLimitExceeded`, `TemplateUnauthorized`.
 
-### Stream Kinds (Linear vs. Cliff-Only)
+### Stream Kinds (Linear, CliffOnly, and CliffSlope)
 
 From **CONTRACT_VERSION 4**, the contract supports distinct streaming styles, governed by the `StreamKind` field on the stream configuration:
 
@@ -101,7 +123,167 @@ From **CONTRACT_VERSION 4**, the contract supports distinct streaming styles, go
 - **CliffSlope**: A post-cliff linear accrual variant. Tokens accrue linearly only after the cliff:
   - Before the `cliff_time`, `0` tokens are accrued/withdrawable (all funds are locked).
   - At or after the `cliff_time`, accrual begins from `0` and grows at `rate_per_second` until the `end_time` (or until `deposit_amount` is reached).
-  - Rate changes and schedule mutations are rejected, similar to `CliffOnly`.
+  - The contract validates that `rate_per_second > 0` and that the deposit covers the post-cliff schedule; rate changes and schedule mutations are rejected, similar to `CliffOnly`.
+
+### Lookback-bounded withdrawals (CONTRACT_VERSION 8)
+
+`calculate_accrued(stream_id)` always reports the stream's total lifetime accrual. It is
+deliberately independent of the optional `max_lookback_ledgers` setting. The lookback
+setting affects only the amount currently claimable by `withdraw`, `withdraw_to`, batch
+withdrawal, delegated withdrawal, and auto-claim paths.
+
+Use `create_stream_with_lookback(..., max_lookback_ledgers)` to configure the bound at
+creation, or call `set_lookback_window(stream_id, sender, Some(ledgers))` later. `None`
+clears the bound; `Some(0)` is rejected. One ledger is treated as five seconds, matching
+the contract's ledger timing assumption.
+
+When configured, a single claim is capped to the accrual represented by the most recent
+`N` ledgers. Older unclaimed accrual remains represented by the unchanged
+`withdrawn_amount` and can be claimed by subsequent calls in later windows. This limits
+claim velocity, not entitlement: repeated withdrawals eventually release 100% of the
+accrued amount. `get_withdrawable` and `get_claimable_at` return this bounded claimable
+amount, while `calculate_accrued` continues to return the uncapped lifetime total.
+
+CliffOnly streams are one-shot unlocks. Once the cliff has passed, their full deposit is
+claimable even if the first query occurs after the lookback window; otherwise a missed
+cliff would permanently strand the recipient's entitlement.
+
+#### API
+
+| Entrypoint | Auth | Purpose |
+|---|---|---|
+| `create_stream_with_lookback(..., max_lookback_ledgers)` | sender | Create a stream with an initial bound |
+| `set_lookback_window(stream_id, sender, bound)` | sender only | Set or clear the bound on an existing stream |
+| `get_lookback_window(stream_id)` | anyone (view) | Inspect the current bound, if any |
+| `calculate_accrued(stream_id)` | anyone (view) | Lifetime accrual — **never** affected by the bound |
+| `get_withdrawable(stream_id)` / `get_claimable_at(stream_id, t)` | anyone (view) | Bounded claimable amount |
+
+#### Parameters
+
+- `max_lookback_ledgers: Option<u32>` — number of ledgers back from the current
+  point in time that defines one claim window.
+- One ledger ≈ 5 seconds (matches Soroban ledger close cadence). `max_lookback_ledgers = 10`
+  therefore covers the most recent ~50 seconds of accrual per claim.
+- `None` removes the bound entirely (back to `accrued - withdrawn` per claim).
+- `Some(0)` is rejected with `ContractError::InvalidParams` to avoid a meaningless
+  zero-width window that would prevent any claim.
+
+## Decommission Mode (`set_stream_decommissioned`)
+
+Decommission mode provides a graceful wind-down mechanism for payment streams. When a sender flags a stream as decommissioned (`set_stream_decommissioned`), all mutation and parameter-modification entrypoints are blocked, while leaving withdrawal and termination operations fully functional. This allows recipients to continue withdrawing their accrued balance without risk of the sender changing rates, extending parameters, or topping up the stream.
+
+### Entrypoint Availability Table
+
+| Entrypoint | Allowed when `decommissioned == true`? | Error Code on Block | Notes |
+|---|---|---|---|
+| `set_stream_decommissioned` | Yes | N/A | Sender can toggle `decommissioned` state back to `false` unless `irrevocable` is set. |
+| `withdraw` / `withdraw_to` / `batch_withdraw` | **Yes** | N/A | Recipients can drain accrued balance without restriction. |
+| `pause_stream` / `resume_stream` | **Yes** | N/A | Operational pausing and resuming remain functional. |
+| `cancel_stream` / `cancel_stream_as_admin` | **Yes** | N/A | Stream can still be terminated early, freezing accrual and refunding remaining unstreamed tokens. |
+| `update_rate_per_second` | **No** | `ContractError::InvalidState` | Rate increases are blocked. |
+| `decrease_rate_per_second` | **No** | `ContractError::InvalidState` | Rate decreases are blocked. |
+| `top_up_stream` | **No** | `ContractError::InvalidState` | Additional funding deposits are blocked. |
+| `extend_stream_end_time` | **No** | `ContractError::InvalidState` | Schedule extension is blocked. |
+| `clone_stream` | **No** | `ContractError::InvalidState` | Cloning from a decommissioned source stream is blocked. |
+
+### Reversibility and Irrevocable Precedence
+
+1. **Sender Reversibility**: The stream sender can call `set_stream_decommissioned(env, stream_id, sender, false)` to restore full mutation capabilities.
+2. **Irrevocable Precedence**: If a stream is marked `irrevocable` (`irrevocable == Some(true)`), attempts to clear the decommissioned flag (`decommissioned = false`) return `ContractError::Unauthorized`.
+
+#### Success semantics (observable)
+
+1. **Creation-time configuration**: `create_stream_with_lookback` writes the bound
+   into `DataKey::MaxLookbackLedgers(stream_id)` (persistent storage) atomically
+   with stream creation. The bound is only persisted if the stream itself is created
+   successfully; token transfer failure or validation failure causes both to roll back.
+2. **Setter**: `set_lookback_window` accepts the **current stream sender** as the
+   authorising signer. It enforces:
+   - `sender.require_auth()` — falsified signers cannot mutate the bound.
+   - `sender == stream.sender` — only the original sender may apply a bound
+     (recipients, admins, and third parties all get `ContractError::Unauthorized`).
+   - Stream must not be `Cancelled` (cancelled streams get `ContractError::InvalidState`
+     so post-cancel accounting is preserved verbatim).
+   - `Some(0)` is rejected with `ContractError::InvalidParams`.
+3. **Cap math** (per call to `get_withdrawable` / `get_claimable_at` / `withdraw` /
+   `withdraw_to` / `batch_withdraw` / `batch_withdraw_to` / `delegated_withdraw` /
+   `trigger_auto_claim`):
+   ```
+   window_seconds = max_lookback_ledgers * 5
+   endpoint       = min(effective_time, stream.end_time)
+   window_start   = endpoint.saturating_sub(window_seconds)
+   recent_accrual = saturating_sub(
+                       calculate_accrued_at(endpoint),
+                       calculate_accrued_at(window_start))
+   cap_normal     = max(0, recent_accrual)
+   // CliffOnly bypasses the lookback so a recipient whose first claim
+   // arrives after cliff_time + window_size does not strand funds.
+   // See Security Notes § 2 for the rationale.
+   cap            = if (kind == CliffOnly && accrued > 0) { accrued }
+                    else                             { cap_normal }
+   final          = max(0, min(claimable, cap))
+   ```
+   `calculate_accrued` is reused *twice* — once at the endpoint, once at the
+   window-start — so checkpointing from `decrease_rate_per_second` and `update_rate_per_second`
+   is fully respected. Final clamping is always non-negative even if arithmetic
+   would otherwise underflow.
+
+#### Failure semantics (observable)
+
+| Condition | Error | Triggered by |
+|---|---|---|
+| `max_lookback_ledgers == Some(0)` | `InvalidParams` (3) | `create_stream_with_lookback`, `set_lookback_window` |
+| `stream_id` does not exist | `StreamNotFound` (1) | `get_lookback_window`, `set_lookback_window` |
+| Caller not the original stream sender | `Unauthorized` (7) | `set_lookback_window` |
+| Stream is `Cancelled` | `InvalidState` (2) | `set_lookback_window` |
+| Protocol is globally paused | `ContractPaused` (4) | `set_lookback_window` (admin entrypoints remain open) |
+
+`set_lookback_window` failure is atomic: the bound is never partially written.
+
+#### Lookback Security Notes
+
+1. **No permanent loss invariant**. The cap limits the *velocity* of claims, not the
+   *total* entitlement. Repeated calls across disjoint lookback windows recover 100%
+   of `calculate_accrued(stream_id)`. The lifetime accrual is independent of the bound
+   and is only ever reduced by valid `cancel_stream` / `cancel_stream_as_admin` flows,
+   which freeze it at `cancelled_at`.
+
+2. **CliffOnly bypass**. CliffOnly streams are a one-shot unlocking style — at and
+   after `cliff_time` the entire deposit is claimable in a single round-trip. Forcing
+   a CliffOnly stream to respect the lookback cap would strand the recipient if their
+   first claim occurs after `cliff_time + window_size`. Therefore `apply_lookback_cap`
+   treats `kind == CliffOnly && accrued > 0` as a special case that returns the
+   capped claim without trimming. The `cap` is `accrued` itself in that scenario so the
+   overall `claimable.min(cap)` still respects any other limits (dust threshold,
+   contract balance, dust floor, etc.).
+
+3. **Sender-only authorisation**. The bound is a sender privilege, not a recipient
+   privilege. This prevents a recipient from opting into a generous cap unilaterally,
+   and prevents admins from silently widening a sender's liability profile. The setter
+   requires both `sender.require_auth()` and `sender == stream.sender`.
+
+4. **Rate-limit interaction**. `MIN_WITHDRAW_INTERVAL_LEDGERS` from CONTRACT_VERSION 6
+   still applies on top of the lookback. The recipient cannot bypass either limit by
+   picking narrow or wide windows — the temporal guard forces at least ~17 ledgers
+   (~85 s) between consecutive claims on the same stream regardless of bound.
+
+5. **Time-terminal behaviour**. Once `now >= end_time`, accrual is capped at
+   `deposit_amount`. The cap math uses `endpoint = min(now, end_time)` so a recipient
+   that observes the stream long after `end_time` still has `recent_accrual` reflecting
+   only the last `window_seconds` of deposit saturation, which can be small relative to
+   the full deposit. The recipient can still drain the full deposit by performing enough
+   windows-worth of claims (no permanent loss), but they pay the proportional
+   transaction cost.
+
+6. **Storage hygiene**. The bound lives in a per-stream persistent entry
+   (`DataKey::MaxLookbackLedgers(stream_id)`). When the stream is closed via
+   `close_completed_stream` or `close_cancelled_stream` (or removed by
+   `cancel_stream` flow), the bound entry is removed in the same transaction so no
+   orphaned storage accumulates.
+
+7. **Discriminant ordering preserved**. The new `DataKey::MaxLookbackLedgers` variant
+   is appended *last* to the enum so existing on-chain entries keep their discriminants
+   and remain readable from pre-upgrade deployments (`CONTRACT_VERSION` bumped to 8).
 
 ### ID pre-allocation (`reserve_stream_ids`) — issue #584
 
@@ -133,21 +315,21 @@ Off-chain orchestrators and indexers that build payment batches often need to kn
 
 ### Phases
 
-| Phase            | Action                                        | Notes                                                                 |
-| ---------------- | --------------------------------------------- | --------------------------------------------------------------------- |
-| **Creation**     | `create_stream` / `create_streams_partial` | Sender deposits tokens; stream starts as `Active`                     |
-| **Clone**        | `clone_stream`                                | Copies rate, cliff offset, threshold, and memo from a source stream; accepts new recipient and timing |
-| **Top-up**       | `top_up_stream`                               | Extra deposit locked (sender or admin only); schedule unchanged       |
-| **Pause**        | `pause_stream` / `pause_stream_as_admin`      | Stops withdrawals; accrual continues by time                          |
-| **Resume**       | `resume_stream` / `resume_stream_as_admin` / `bulk_resume_streams_as_admin` | Restores withdrawals; blocked if past `end_time` (Terminal); batch is atomic |
-| **Cancellation** | `cancel_stream` / `cancel_stream_as_admin` / `bulk_cancel_streams` | Refunds unstreamed amount; frozen accrued stays for recipient         |
-| **Withdrawal**   | `withdraw` / `withdraw_to` / `batch_withdraw` | Recipient pulls accrued tokens; allowed on Paused if past `end_time`  |
-| **Completion**   | Automatic                                     | When `withdrawn_amount == deposit_amount`, status becomes `Completed` |
-| **Auto-renewal** | `set_auto_renew` / `renew_stream`             | Sender opts in; anyone can trigger the next identical schedule from the sender's allowance |
-| **Rotation**     | `update_recipient` / `accept_recipient_update` / `cancel_recipient_update` | Sender proposes a new recipient; the current recipient must accept. Pending rotations are queryable via `get_pending_recipient_update`. Acceptance updates both the stream record and recipient indexes atomically. |
-| **Transfer**     | `transfer_claim_ownership`                    | Claim owner (or recipient if not set) transfers the sole withdrawal rights to a new owner immediately. |
-| **Auto-claim**   | `set_auto_claim` / `revoke_auto_claim` / `trigger_auto_claim` | Recipient opts in to permissionless final claim at `end_time` to a chosen destination |
-| **Delegation**   | `delegate_recipient_share`                    | Recipient delegates a portion of their future stream accrual (in basis points) to a new recipient. Creates a child stream and reduces parent rate. Bounded to a maximum depth of 3 to prevent unbounded chains. Cyclical delegation is prevented. |
+| Phase            | Action                                                                      | Notes                                                                                                                                                                                                                                             |
+|------------------|-----------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **Creation**     | `create_stream` / `create_streams_partial`                                  | Sender deposits tokens; stream starts as `Active`                                                                                                                                                                                                 |
+| **Clone**        | `clone_stream`                                                              | Copies rate, cliff offset, threshold, and memo from a source stream; accepts new recipient and timing                                                                                                                                             |
+| **Top-up**       | `top_up_stream`                                                             | Extra deposit locked (sender or admin only); schedule unchanged                                                                                                                                                                                   |
+| **Pause**        | `pause_stream` / `pause_stream_as_admin`                                    | Stops withdrawals; accrual continues by time                                                                                                                                                                                                      |
+| **Resume**       | `resume_stream` / `resume_stream_as_admin` / `bulk_resume_streams_as_admin` | Restores withdrawals; blocked if past `end_time` (Terminal); batch is atomic                                                                                                                                                                      |
+| **Cancellation** | `cancel_stream` / `cancel_stream_as_admin` / `bulk_cancel_streams`          | Refunds unstreamed amount; frozen accrued stays for recipient                                                                                                                                                                                     |
+| **Withdrawal**   | `withdraw` / `withdraw_to` / `batch_withdraw`                               | Recipient pulls accrued tokens; allowed on Paused if past `end_time`                                                                                                                                                                              |
+| **Completion**   | Automatic                                                                   | When `withdrawn_amount == deposit_amount`, status becomes `Completed`                                                                                                                                                                             |
+| **Auto-renewal** | `set_auto_renew` / `renew_stream`                                           | Sender opts in; anyone can trigger the next identical schedule from the sender's allowance                                                                                                                                                        |
+| **Rotation**     | `update_recipient` / `accept_recipient_update` / `cancel_recipient_update`  | Sender proposes a new recipient; the current recipient must accept. Pending rotations are queryable via `get_pending_recipient_update`. Acceptance updates both the stream record and recipient indexes atomically.                               |
+| **Transfer**     | `transfer_claim_ownership`                                                  | Claim owner (or recipient if not set) transfers the sole withdrawal rights to a new owner immediately.                                                                                                                                            |
+| **Auto-claim**   | `set_auto_claim` / `revoke_auto_claim` / `trigger_auto_claim`               | Recipient opts in to permissionless final claim at `end_time` to a chosen destination                                                                                                                                                             |
+| **Delegation**   | `delegate_recipient_share`                                                  | Recipient delegates a portion of their future stream accrual (in basis points) to a new recipient. Creates a child stream and reduces parent rate. Bounded to a maximum depth of 3 to prevent unbounded chains. Cyclical delegation is prevented. |
 
 ### State Transitions
 
@@ -235,6 +417,7 @@ The `keeper_cancel` entrypoint allows any third-party keeper to cancel an expire
 - The contract does **not** retain a protocol split of this fee. The entire fee is transferred directly to the keeper.
 - The view function `get_protocol_fees_accrued` (added in #623) tracks the cumulative total of keeper fees *paid out* of the contract, rather than an internal sweepable balance.
 - **Accounting Invariant**: The contract's token balance must securely cover all remaining liabilities. Since the keeper fee is transferred entirely to the keeper and leaves the contract, the tracked total in `get_protocol_fees_accrued` is strictly monotone and safely independent of the contract's real-time asset/liability ratio.
+- **Total Liabilities View**: The auth-free view function `get_total_liabilities` returns the sum of every stream's remaining (not-yet-withdrawn) balance, sourced from the instance-stored `DataKey::TotalLiabilities` counter. Integrators can cross-check it against the contract's token balance to confirm solvency: a positive gap represents a healthy buffer above the aggregate outstanding payout obligation; a negative gap would indicate under-collateralisation and warrants operator investigation. This view is read-only, requires no parameters, and recomputes lazily on each call.
 
 ### Clone Semantics
 
@@ -265,7 +448,6 @@ This section is the protocol-level contract for the global pause state managed v
 | `is_paused()` | Query if protocol is currently paused (permissionless) |
 | `get_pause_info()` | Query detailed pause info including audit trail (permissionless) |
 | `set_max_rate_per_second(max_rate)` | Admin-only governance entrypoint that sets the maximum allowed stream rate for future rate updates |
-| `migration_v5_to_v6(admin)` | Admin-only deployment checkpoint that emits a `migrated` audit event; no storage transformation is required |
 
 **Pause reason length:** The `reason` string passed to `pause_protocol` is bounded by `MAX_PAUSE_REASON_BYTES = 256`. Strings longer than 256 bytes are rejected with `ContractError::InvalidParams`. This prevents unbounded ledger-entry growth (Issue #513).
 
@@ -323,7 +505,143 @@ When a contract creates a stream:
 
 **Caveat**: Ensure that `sender == recipient` validation (if enforced off-chain or via UI) and refund logic correctly account for contract addresses exactly as they would for standard accounts. The streaming protocol treats them identically.
 
+### Contract-owned Senders Testing Guide
 
+#### Test Coverage Requirements
+
+For production deployments, ensure the following test coverage for contract-owned sender patterns:
+
+| Test Case                | Description                               | Required |
+|--------------------------|-------------------------------------------|----------|
+| **Full Lifecycle**       | Create, top-up, cancel, and verify refund | ✅       |
+| **Cliff Behavior**       | Before/after cliff accrual and withdrawal | ✅       |
+| **Metadata Support**     | Stream creation with metadata and memo    | ✅       |
+| **Strict Authorization** | Unauthorized attempts are rejected        | ✅       |
+| **Auto-Renew**           | Vault sender enables and triggers renewal | ✅       |
+| **Batch Operations**     | Multiple streams from same vault          | ✅       |
+| **Edge Cases**           | Zero amounts, double cancellation, etc.   | ✅       |
+| **Vault as Recipient**   | Contract receives and withdraws funds     | ✅       |
+| **Deadline Validation**  | Expired deadlines are rejected            | ✅       |
+
+#### Running the Tests
+
+```bash
+# Run all integration tests
+cargo test -p fluxora_stream --test integration_suite -- --nocapture
+
+# Run specific vault sender tests
+cargo test -p fluxora_stream test_vault_sender -- --nocapture
+
+# Run with verbose output
+cargo test -p fluxora_stream -- --nocapture --test-threads=1
+
+Expected Test Output
+
+running 9 tests
+test test_vault_sender_full_lifecycle ... ok
+test test_vault_sender_with_cliff ... ok
+test test_vault_sender_with_metadata ... ok
+test test_vault_sender_strict_authorization ... ok
+test test_vault_sender_auto_renew ... ok
+test test_vault_sender_batch_operations ... ok
+test test_vault_sender_edge_cases ... ok
+test test_vault_as_recipient ... ok
+test test_vault_sender_with_deadline ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+Security Considerations
+
+    Authorization: Contract-owned senders must implement proper authorization in their own require_auth() implementation.
+
+    Reentrancy: Vault contracts should implement reentrancy guards when performing complex operations.
+
+    Token Approval: Vaults must approve the stream contract to transfer tokens before calling create_stream.
+
+    Refund Handling: Contract senders must be able to receive token refunds (implement the token interface).
+
+    Gas Costs: Contract calls have higher gas costs than account calls. Batch operations are recommended for multiple streams.
+    
+Integration Example
+rust
+
+// Example: Treasury vault creating payroll streams
+#[contract]
+impl TreasuryVault {
+    pub fn create_payroll_streams(
+        env: Env,
+        stream_contract: Address,
+        employees: soroban_sdk::Vec<(Address, i128, i128)>,
+        start_time: u64,
+        end_time: u64,
+    ) -> soroban_sdk::Vec<u64> {
+        let vault = env.current_contract_address();
+        let client = fluxora_stream::FluxoraStreamClient::new(&env, &stream_contract);
+        
+        let mut stream_ids = soroban_sdk::Vec::new(&env);
+        
+        for (employee, salary, rate) in employees.iter() {
+            let stream_id = client.create_stream(
+                &vault,
+                &employee,
+                &salary,
+                &rate,
+                &start_time,
+                &start_time,
+                &end_time,
+                &0,
+                &None,
+                &fluxora_stream::types::StreamKind::Linear,
+                &None,
+                &None,
+            );
+            stream_ids.push_back(stream_id);
+        }
+        
+        stream_ids
+    }
+}
+
+## 3. Summary of Changes
+
+### Files Modified:
+1. **`contracts/stream/tests/integration_suite.rs`** - Added comprehensive test suite:
+   - `test_vault_sender_full_lifecycle` - Complete lifecycle test
+   - `test_vault_sender_with_cliff` - Cliff behavior testing
+   - `test_vault_sender_with_metadata` - Metadata and memo support
+   - `test_vault_sender_strict_authorization` - Authorization testing
+   - `test_vault_sender_auto_renew` - Auto-renew functionality
+   - `test_vault_sender_batch_operations` - Batch operations
+   - `test_vault_sender_edge_cases` - Edge case coverage
+   - `test_vault_as_recipient` - Vault as recipient
+   - `test_vault_sender_with_deadline` - Deadline validation
+
+2. **`docs/streaming.md`** - Added testing guide and integration examples
+
+### Test Coverage Achieved:
+- ✅ Full stream lifecycle (create → top-up → cancel)
+- ✅ Cliff time handling
+- ✅ Metadata and memo support
+- ✅ Authorization enforcement
+- ✅ Auto-renew functionality
+- ✅ Batch operations
+- ✅ Edge cases (zero amounts, double operations)
+- ✅ Vault as recipient
+- ✅ Deadline validation
+- ✅ Error handling and revert conditions
+
+## 4. Running the Tests
+
+```bash
+# Run the specific vault sender tests
+cargo test -p fluxora_stream test_vault_sender -- --nocapture
+
+# Run all integration tests
+cargo test -p fluxora_stream --test integration_suite -- --nocapture
+
+# Check test coverage (requires tarpaulin)
+cargo tarpaulin -p fluxora_stream --out Html
+    
 ### Sequence Diagram
 
 The following diagram shows the full create → withdraw flow, including optional pause/resume and cancel paths.
@@ -435,6 +753,51 @@ if current_time < cliff_time  → return 0
 else                         → return deposit_amount
 ```
 
+#### CliffOnly accrual
+
+`CliffOnly` streams are lump-sum unlocks, not continuous streams. Unlike
+`Linear` streams, they do not multiply elapsed seconds by `rate_per_second`
+after the cliff. Once `current_time >= cliff_time`, the accrued amount is the
+full `deposit_amount`, clamped to the deposited ceiling. The configured
+`rate_per_second` is therefore not part of CliffOnly accrual; valid CliffOnly
+state stores `rate_per_second = 0` to preserve the one-shot model.
+
+Worked example: before the cliff
+
+```text
+deposit_amount  = 1_000
+rate_per_second = 0
+start_time      = 1_000
+cliff_time      = 1_600
+end_time        = 2_000
+current_time    = 1_599
+
+current_time < cliff_time
+accrued = 0
+```
+
+At `1_599`, the stream has not reached its unlock timestamp. A `Linear` stream
+may have time-based accrual hidden behind the cliff, but a `CliffOnly` stream
+has no partial accrual to expose.
+
+Worked example: at or after the cliff
+
+```text
+deposit_amount  = 1_000
+rate_per_second = 0
+start_time      = 1_000
+cliff_time      = 1_600
+end_time        = 2_000
+current_time    = 1_750
+
+current_time >= cliff_time
+accrued = min(deposit_amount, deposit_amount) = 1_000
+```
+
+At `1_750`, the recipient's lifetime accrual is the full deposit. The result
+remains `1_000` at `end_time` or later. The clamp guarantees CliffOnly accrual
+never exceeds `deposit_amount`.
+
 ### Rules
 
 - **Before cliff:** Returns 0 (no withdrawals allowed)
@@ -463,12 +826,12 @@ Ledger-backed accrual paths cache the last observed accrual timestamp in instanc
 
 **Where sequence numbers are used (intentionally):**
 
-| Usage | Location | Purpose |
-|---|---|---|
-| `MIN_PAUSE_INTERVAL_LEDGERS` | `pause_stream` / `resume_stream` | DoS cooldown: prevents rapid pause/resume toggling (17 ledgers) |
+| Usage                           | Location                                             | Purpose                                                                         |
+|---------------------------------|------------------------------------------------------|---------------------------------------------------------------------------------|
+| `MIN_PAUSE_INTERVAL_LEDGERS`    | `pause_stream` / `resume_stream`                     | DoS cooldown: prevents rapid pause/resume toggling (17 ledgers)                 |
 | `MIN_WITHDRAW_INTERVAL_LEDGERS` | `withdraw` / `batch_withdraw` / `delegated_withdraw` | DoS guard: prevents excessive ledger I/O from high-frequency polling (1 ledger) |
-| `last_withdraw_ledger` | Per-stream storage | Tracks last successful withdrawal for the frequency guard above |
-| `last_pause_toggle_ledger` | Per-stream storage | Tracks last pause/resume toggle for the cooldown guard above |
+| `last_withdraw_ledger`          | Per-stream storage                                   | Tracks last successful withdrawal for the frequency guard above                 |
+| `last_pause_toggle_ledger`      | Per-stream storage                                   | Tracks last pause/resume toggle for the cooldown guard above                    |
 
 These are all **operational rate-limiting** mechanisms. None of them affect the mathematical accrual formula in `accrual.rs`.
 
@@ -503,6 +866,21 @@ From **CONTRACT_VERSION 5**, senders can optionally set a `withdraw_dust_thresho
     - **Terminal State**: Once the stream reaches `end_time` or is `Cancelled`, the threshold is ignored to ensure the recipient can pull all remaining funds.
     - **Final Drain**: If the withdrawal would result in `withdrawn_amount == deposit_amount` (completing the stream), it is allowed even if the amount is below the threshold.
 - **Default**: The threshold defaults to `0` if not specified at creation.
+
+#### Operation compatibility
+
+| Operation | Dust enforced? | Notes |
+|-----------|----------------|-------|
+| `withdraw` | Yes | Blocked payouts return `0` |
+| `withdraw_to` | Yes | Blocked payouts return `0` |
+| `batch_withdraw` | Yes | Per-stream `amount = 0` when blocked |
+| `batch_withdraw_to` | Yes | Per-stream `amount = 0` when blocked |
+| `delegated_withdraw` | No | Uses signed `expected_minimum_amount` instead |
+| `get_withdrawable` / `get_claimable_at` | No | Views report raw accrual minus withdrawn |
+
+Creation validation: `create_stream_offer` rejects out-of-range thresholds with
+`InvalidDustThreshold` (code 35); direct `create_stream` paths currently do not
+validate bounds (see [dust-threshold.md](./dust-threshold.md)).
 
 > **See also:** [dust-threshold.md](./dust-threshold.md) — formula for choosing a safe threshold value, worked USDC examples, a validation table, and guidance for template authors.
 
@@ -632,7 +1010,7 @@ On failure (`InvalidParams` or `InvalidState`):
 - No arbitrary hard-coded caps (e.g. "max 1M tokens").
 - The technical upper bound is `i128::MAX` or the underlying token's total supply.
 - Rationale: Accrual math (in `accrual.rs`) is already overflow-safe via `checked_mul` and clamping.
-- Application-specific limits should be handled in the frontend or factory contracts.
+- Application-specific limits should be handled in the frontend or factory contracts. Note that the factory's policies (allowlist, deposit cap, minimum duration) only apply when streams are created through the factory — direct calls to this contract bypass them entirely. See [factory.md § Important Bypass Warning](./factory.md#important-bypass-warning).
 
 ### Batch Creation: Atomic vs Partial
 
@@ -833,6 +1211,9 @@ contract.create_streams_relative(&sender, &params)?;
 | `cancel_stream_as_admin`  | Admin                         | `admin.require_auth()`                      |
 | `close_completed_stream`  | Anyone                        | None (permissionless terminal cleanup)     |
 | `top_up_stream`           | Funder address                | `funder.require_auth()`                     |
+| `create_stream_with_lookback` | Sender                    | `sender.require_auth()`                     |
+| `set_lookback_window`     | Original stream sender        | `sender.require_auth()`                     |
+| `get_lookback_window`     | Anyone                        | None (view)                                 |
 | `set_auto_renew`          | Original stream sender        | `sender.require_auth()`                     |
 | `renew_stream`            | Anyone                        | None (permissionless; funds fixed to original sender) |
 | `get_auto_renew`          | Anyone                        | None (view)                                 |
@@ -915,11 +1296,11 @@ loop {
 
 **Comparison with Unbounded Views:**
 
-| Function | Use Case | Limit | Risk |
-|----------|----------|-------|------|
-| `get_recipient_streams` | Small portfolios (<100) | None | Memory exhaustion |
-| `get_recipient_streams_paginated` | Large portfolios | 100/page | Bounded, safe |
-| `get_streams_by_id_range` | Full contract export | 100/page | Bounded, safe |
+| Function                          | Use Case                | Limit    | Risk              |
+|-----------------------------------|-------------------------|----------|-------------------|
+| `get_recipient_streams`           | Small portfolios (<100) | None     | Memory exhaustion |
+| `get_recipient_streams_paginated` | Large portfolios        | 100/page | Bounded, safe     |
+| `get_streams_by_id_range`         | Full contract export    | 100/page | Bounded, safe     |
 
 ### top_up_stream: Observable Semantics
 
@@ -1238,13 +1619,38 @@ message = stream_id            (u64,  8 bytes, big-endian)
         | nonce                (u64,  8 bytes, big-endian)
         | deadline             (u64,  8 bytes, big-endian)
         | expected_minimum_amount (i128, 16 bytes, big-endian)
+        | relayer_fee          (i128, 16 bytes, big-endian)
 ```
 
-Total: 40 bytes.
+Total: 40 bytes (v8) / 56 bytes from `CONTRACT_VERSION = 9` (adds the 16-byte `relayer_fee` row).
 
 #### `expected_minimum_amount` — front-running protection
 
 Without this field, a relayer could delay the transaction until the accrued amount is much smaller than the recipient expected (e.g. after a rate decrease or near stream end), constituting a griefing vector. By committing to a minimum, the call reverts with `BelowMinimumAmount` (16) if `withdrawable < expected_minimum_amount`. Pass `0` to accept any positive amount.
+
+#### `expected_minimum_amount` is evaluated against the recipient's **net** amount (`CONTRACT_VERSION = 9`)
+
+Starting from `CONTRACT_VERSION = 9`, `delegated_withdraw` accepts an optional
+signed `relayer_fee: i128` that the recipient authorises as part of the
+signature payload (16 extra bytes appended in big-endian — see the layout table
+above). The contract computes `gross_withdrawable` and
+`net_amount = gross_withdrawable - relayer_fee`, then enforces
+`expected_minimum_amount <= net_amount` (not `expected_minimum_amount <= gross_withdrawable`).
+
+What this means for integrators:
+
+| Scenario | Pre-v9 semantics (gross) | v9 semantics (net = gross − relayer_fee) |
+|----------|--------------------------|------------------------------------------|
+| `expected_minimum_amount = 10`, accrued `= 100`, `relayer_fee = 5` | success (100 ≥ 10) | success (recipient receives 95, relayer 5) |
+| `expected_minimum_amount = 96`, accrued `= 100`, `relayer_fee = 5` | success (100 ≥ 96) | revert with `BelowMinimumAmount` (16) — recipient expected 96 but only receives 95 |
+| `expected_minimum_amount = 99`, accrued `= 100`, `relayer_fee = 5` | success (100 ≥ 99) | revert with `BelowMinimumAmount` (16) — recipient expected 99, net is 95 |
+| `expected_minimum_amount = 0`, accrued `= 100`, `relayer_fee = 50` | success | success (recipient 50, relayer 50) — `0` still means "any positive net" |
+
+The relayer receives `relayer_fee` only when `gross_withdrawable >= relayer_fee`;
+otherwise the whole call reverts with `BelowMinimumAmount` before any token
+transfer is attempted (CEI: recipient's net is evaluated first, then
+`push_token` to recipient, then `push_token` to relayer — two sequential
+calls inside `delegated_withdraw`, in that order).
 
 #### Nonce — replay protection
 
@@ -1252,14 +1658,14 @@ Each recipient has a per-address nonce stored in `DataKey::DelegatedWithdrawNonc
 
 #### Failure semantics
 
-| Condition | Error |
-|-----------|-------|
-| `ledger.timestamp() > deadline` | `InvalidSignature` (15) |
-| `nonce != stored_nonce` | `InvalidSignature` (15) |
-| ed25519 signature invalid | host trap (panic) |
+| Condition                                | Error                     |
+|------------------------------------------|---------------------------|
+| `ledger.timestamp() > deadline`          | `InvalidSignature` (15)   |
+| `nonce != stored_nonce`                  | `InvalidSignature` (15)   |
+| ed25519 signature invalid                | host trap (panic)         |
 | `withdrawable < expected_minimum_amount` | `BelowMinimumAmount` (16) |
-| Stream paused (non-terminal) | `InvalidState` (2) |
-| Stream completed | `InvalidState` (2) |
+| Stream paused (non-terminal)             | `InvalidState` (2)        |
+| Stream completed                         | `InvalidState` (2)        |
 
 ---
 
@@ -1311,19 +1717,19 @@ Emitted when a sender successfully updates the streaming rate via `update_rate_p
 
 #### Other Events
 
-| Topic                      | Payload                                       | When Emitted                                       |
-| -------------------------- | --------------------------------------------- | -------------------------------------------------- |
-| `("created", stream_id)`   | `StreamCreated` (struct payload)              | `create_stream` / `create_streams`                 |
-| `("cloned", stream_id)`    | `StreamCloned` (struct payload)               | `clone_stream` — carries `source_stream_id` for indexer correlation |
-| `("paused", stream_id)`    | `StreamEvent::Paused(stream_id)`              | `pause_stream` / `pause_stream_as_admin`           |
-| `("resumed", stream_id)`   | `StreamEvent::Resumed(stream_id)`             | `resume_stream` / `resume_stream_as_admin` / `bulk_resume_streams_as_admin` |
-| `("cancelled", stream_id)` | `StreamEvent::StreamCancelled(stream_id)`     | `cancel_stream` / `cancel_stream_as_admin`         |
-| `("withdrew", stream_id)`  | `Withdrawal { stream_id, recipient, amount }` | `withdraw`                                         |
-| `("completed", stream_id)` | `StreamEvent::StreamCompleted(stream_id)`     | `withdraw` / `batch_withdraw` (active final drain) |
-| `("rate_upd", stream_id)` | `RateUpdated` (struct payload)                | `update_rate_per_second`                          |
-| `("closed", stream_id)`    | `StreamEvent::StreamClosed(stream_id)`        | `close_completed_stream`                           |
-| `("top_up", stream_id)`    | `StreamToppedUp` (struct payload)             | `top_up_stream`                                    |
-| `("renewed", old_stream_id, new_stream_id)` | `StreamRenewed { old_stream_id, new_stream_id }` | `renew_stream` |
+| Topic                                       | Payload                                          | When Emitted                                                                |
+|---------------------------------------------|--------------------------------------------------|-----------------------------------------------------------------------------|
+| `("created", stream_id)`                    | `StreamCreated` (struct payload)                 | `create_stream` / `create_streams`                                          |
+| `("cloned", stream_id)`                     | `StreamCloned` (struct payload)                  | `clone_stream` — carries `source_stream_id` for indexer correlation         |
+| `("paused", stream_id)`                     | `StreamEvent::Paused(stream_id)`                 | `pause_stream` / `pause_stream_as_admin`                                    |
+| `("resumed", stream_id)`                    | `StreamEvent::Resumed(stream_id)`                | `resume_stream` / `resume_stream_as_admin` / `bulk_resume_streams_as_admin` |
+| `("cancelled", stream_id)`                  | `StreamEvent::StreamCancelled(stream_id)`        | `cancel_stream` / `cancel_stream_as_admin`                                  |
+| `("withdrew", stream_id)`                   | `Withdrawal { stream_id, recipient, amount }`    | `withdraw`                                                                  |
+| `("completed", stream_id)`                  | `StreamEvent::StreamCompleted(stream_id)`        | `withdraw` / `batch_withdraw` (active final drain)                          |
+| `("rate_upd", stream_id)`                   | `RateUpdated` (struct payload)                   | `update_rate_per_second`                                                    |
+| `("closed", stream_id)`                     | `StreamEvent::StreamClosed(stream_id)`           | `close_completed_stream`                                                    |
+| `("top_up", stream_id)`                     | `StreamToppedUp` (struct payload)                | `top_up_stream`                                                             |
+| `("renewed", old_stream_id, new_stream_id)` | `StreamRenewed { old_stream_id, new_stream_id }` | `renew_stream`                                                              |
 
 ---
 
@@ -1331,12 +1737,12 @@ Emitted when a sender successfully updates the streaming rate via `update_rate_p
 
 `withdraw_to(stream_id, destination)` lets the recipient redirect accrued tokens to any address **except the contract itself**.
 
-| Destination                  | Allowed | Error on rejection      |
-| ---------------------------- | ------- | ----------------------- |
-| Contract address (`env.current_contract_address()`) | ❌ No | `ContractError::InvalidParams` |
-| Recipient address (self-redirect) | ✅ Yes | — |
-| Sender address               | ✅ Yes  | —                       |
-| Any other third-party address | ✅ Yes | —                       |
+| Destination                                         | Allowed | Error on rejection             |
+|-----------------------------------------------------|---------|--------------------------------|
+| Contract address (`env.current_contract_address()`) | ❌ No   | `ContractError::InvalidParams` |
+| Recipient address (self-redirect)                   | ✅ Yes  | —                              |
+| Sender address                                      | ✅ Yes  | —                              |
+| Any other third-party address                       | ✅ Yes  | —                              |
 
 **Atomicity guarantee:** If the destination check fails, the call returns `InvalidParams` with **no side effects** — `withdrawn_amount` is not incremented, no token transfer occurs, and no event is emitted. The stream state is identical to its state before the call.
 
@@ -1377,6 +1783,7 @@ errors relevant to stream creation and timing.
 | `ContractError::InvalidState` (2)                                       | `close_completed_stream`           | Close Cancelled stream with remaining claimable balance |
 | `ContractError::AutoRenewFundingUnavailable` (36)                      | `renew_stream`                     | Original sender balance or allowance is below deposit amount |
 | `ContractError::InvalidState` (2)                                       | `renew_stream`                     | Source is not Completed or auto-renew is disabled |
+| `ContractError::InvalidParams` (3)                                      | `create_stream_with_lookback` / `set_lookback_window` | `max_lookback_ledgers == Some(0)` |
 | `"contract not initialised: missing config"`                            | Functions requiring config         | Config missing                                |
 
 ## Protocol-Level Pausing
@@ -1385,10 +1792,10 @@ The protocol supports two distinct pausing modes managed by the contract admin. 
 
 ### Pause Modes Comparison
 
-| Mode | Flag | Blocked Operations | Allowed Operations |
-|---|---|---|---|
-| **Creation Only** | `CreationPaused` | `create_stream`, `create_streams` | `withdraw`, `cancel_stream`, `top_up_stream`, `update_rate_per_second`, `extend_stream_end_time`, `shorten_stream_end_time` |
-| **Global Emergency** | `GlobalEmergencyPaused` | **ALL** mutation operations (Create, Withdraw, Cancel, Update, etc.) | `get_stream_state`, `calculate_accrued`, `close_completed_stream` (read-only and cleanup) |
+| Mode                 | Flag                    | Blocked Operations                                                   | Allowed Operations                                                                                                          |
+|----------------------|-------------------------|----------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------|
+| **Creation Only**    | `CreationPaused`        | `create_stream`, `create_streams`                                    | `withdraw`, `cancel_stream`, `top_up_stream`, `update_rate_per_second`, `extend_stream_end_time`, `shorten_stream_end_time` |
+| **Global Emergency** | `GlobalEmergencyPaused` | **ALL** mutation operations (Create, Withdraw, Cancel, Update, etc.) | `get_stream_state`, `calculate_accrued`, `close_completed_stream` (read-only and cleanup)                                   |
 
 ### Gating Semantics
 
@@ -1426,6 +1833,7 @@ For a full list of contract errors, see [error.md](./error.md).
 - **Recipient Applications**: See §2 (Accrual Formula), §4 (Withdrawal), §5 (Events)
 - **Indexers**: See §5 (Events), §6 (Error Behavior)
 - **Auditors**: See [protocol-narrative-code-alignment.md](./protocol-narrative-code-alignment.md) for complete verification
+- **Factory/Policy Integrators**: The stream contract enforces no recipient allowlist, deposit cap, or minimum duration. These policies exist only in the factory contract and are bypassed by direct stream-contract calls. See [factory.md § Important Bypass Warning](./factory.md#important-bypass-warning) for details.
 
 ### Verification
 
@@ -1613,10 +2021,10 @@ After a stream's `end_time` passes and a configurable grace period elapses, any 
 call `keeper_cancel` to close the stream and collect a small incentive fee.  This prevents
 unclaimed deposits from remaining locked in contract storage indefinitely.
 
-| Constant | Value | Notes |
-| -------- | ----- | ----- |
-| `KEEPER_GRACE_PERIOD_SECONDS` | 604 800 s (7 days) | Seconds after `end_time` before eligibility |
-| `KEEPER_FEE_BPS` | 50 bps (0.5 %) | Fee as a fraction of the unstreamed sender refund |
+| Constant                      | Value              | Notes                                             |
+|-------------------------------|--------------------|---------------------------------------------------|
+| `KEEPER_GRACE_PERIOD_SECONDS` | 604 800 s (7 days) | Seconds after `end_time` before eligibility       |
+| `KEEPER_FEE_BPS`              | 50 bps (0.5 %)     | Fee as a fraction of the unstreamed sender refund |
 
 ### Token distribution on `keeper_cancel`
 
@@ -1633,10 +2041,10 @@ When `sender_refund_gross == 0` (stream fully accrued), the keeper receives no f
 
 **Errors:**
 
-| Error | Condition |
-| ----- | --------- |
-| `StreamNotFound` | `stream_id` does not exist |
-| `InvalidState` | Stream is already `Cancelled` or `Completed` |
+| Error                         | Condition                                      |
+|-------------------------------|------------------------------------------------|
+| `StreamNotFound`              | `stream_id` does not exist                     |
+| `InvalidState`                | Stream is already `Cancelled` or `Completed`   |
 | `KeeperGracePeriodNotElapsed` | `now < end_time + KEEPER_GRACE_PERIOD_SECONDS` |
 
 ### `get_keeper_fee_split` (view)
@@ -1655,12 +2063,12 @@ pub fn get_keeper_fee_split(env: Env, stream_id: u64) -> Result<(i128, i128), Co
 
 **Returns:**
 
-| Condition | Return |
-| --------- | ------ |
-| Grace period not yet elapsed | `Ok((0, 0))` — not yet eligible, no error |
-| Stream is eligible | `Ok((keeper_fee, sender_refund))` matching `keeper_cancel` payouts |
-| Stream is `Cancelled` or `Completed` | `Err(InvalidState)` |
-| Stream does not exist | `Err(StreamNotFound)` |
+| Condition                            | Return                                                             |
+|--------------------------------------|--------------------------------------------------------------------|
+| Grace period not yet elapsed         | `Ok((0, 0))` — not yet eligible, no error                          |
+| Stream is eligible                   | `Ok((keeper_fee, sender_refund))` matching `keeper_cancel` payouts |
+| Stream is `Cancelled` or `Completed` | `Err(InvalidState)`                                                |
+| Stream does not exist                | `Err(StreamNotFound)`                                              |
 
 **Invariants:**
 
@@ -1975,19 +2383,19 @@ run for exactly 12 months with a 6-month cliff from the acceptance timestamp.
 
 ### New Error Codes
 
-| Code | Name | Meaning |
-|------|------|---------|
-| 36 | `OfferNotFound` | No pending offer with this ID |
-| 37 | `OfferExpired` | `now > offer.expiry_time` |
-| 38 | `OfferWrongRecipient` | Caller is not the intended recipient |
-| 39 | `OfferWrongSender` | Caller is not the original sender |
+| Code | Name                  | Meaning                              |
+|------|-----------------------|--------------------------------------|
+| 36   | `OfferNotFound`       | No pending offer with this ID        |
+| 37   | `OfferExpired`        | `now > offer.expiry_time`            |
+| 38   | `OfferWrongRecipient` | Caller is not the intended recipient |
+| 39   | `OfferWrongSender`    | Caller is not the original sender    |
 
 ### New Events
 
-| Topic | Payload struct | Emitted by |
-|-------|---------------|------------|
-| `offr_crt` | `StreamOfferCreated` | `create_stream_offer` |
-| `offr_acc` | `StreamOfferAccepted` | `accept_stream_offer` |
+| Topic      | Payload struct         | Emitted by                                   |
+|------------|------------------------|----------------------------------------------|
+| `offr_crt` | `StreamOfferCreated`   | `create_stream_offer`                        |
+| `offr_acc` | `StreamOfferAccepted`  | `accept_stream_offer`                        |
 | `offr_cxl` | `StreamOfferCancelled` | `reject_stream_offer`, `cancel_stream_offer` |
 
 ### Security Notes
@@ -2018,3 +2426,8 @@ Creates a pooled stream. The `recipients` list takes pairs of `(Address, u32)` d
 Withdrawals from a pooled stream are independent. When a recipient calls `withdraw_from_pool(stream_id, caller)`, the contract calculates the total accrued tokens and multiplies by the caller's proportional share `(caller_share / total_shares)`. The contract independently tracks withdrawn amounts for each pool member using `DataKey::PooledStreamWithdrawn`.
 
 **Rounding:** The calculation uses strict integer math (`checked_mul` followed by `checked_div`), rounding down on remainders to avoid over-withdrawing the pool's deposit.
+
+
+## Additional view entrypoints (v9+)
+
+This contract also exposes: `get_sender_portfolio_health` (paginated aggregate health report for a sender's stream portfolio) and `witnessed_cancel_stream` (compliance-attested cancellation that requires an ed25519 witness signature).

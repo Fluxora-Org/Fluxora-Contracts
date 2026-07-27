@@ -10,16 +10,15 @@
 //!
 //! ## Doc / code mismatches (flagged, not silently fixed)
 //!
-//! 1. **`InvalidDustThreshold` is documented but missing.**
-//!    `docs/dust-threshold.md` says creation must reject
-//!    `withdraw_dust_threshold > deposit_amount` with
-//!    `ContractError::InvalidDustThreshold` (claimed code 20).
-//!    Actual code has no such variant (code 20 is `TemplateNotFound`) and
-//!    does not validate the threshold at creation. See
-//!    `flag_mismatch_create_allows_threshold_above_deposit`.
+//! 1. **`InvalidDustThreshold` (code 35) is enforced on `create_stream_offer` only.**
+//!    `create_stream`, `create_streams`, and template/relative creation paths do
+//!    **not** validate `withdraw_dust_threshold` bounds. See
+//!    `flag_mismatch_create_allows_threshold_above_deposit` and
+//!    `flag_mismatch_create_allows_negative_dust_threshold`.
 //!
-//! 2. **Negative thresholds are documented as rejected but are accepted.**
-//!    See `flag_mismatch_create_allows_negative_dust_threshold`.
+//! 2. **`delegated_withdraw` does not consult the dust threshold.**
+//!    Only `withdraw`, `withdraw_to`, `batch_withdraw`, and `batch_withdraw_to`
+//!    apply the check documented in `docs/dust-threshold.md`.
 //!
 //! 3. **`token_check.rs` does not implement dust-threshold logic.**
 //!    Zero-amount SEP-41 smoke tests live in `token_check::verify_token_behavior`
@@ -28,7 +27,9 @@
 
 extern crate std;
 
-use fluxora_stream::{FluxoraStream, FluxoraStreamClient, StreamKind, WithdrawToParam};
+use fluxora_stream::{
+    CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamKind, WithdrawToParam,
+};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
@@ -85,15 +86,20 @@ impl<'a> TestContext<'a> {
     fn create_linear_stream(&self, deposit: i128, threshold: i128, end_time: u64) -> u64 {
         self.client().create_stream(
             &self.sender,
-            &self.recipient,
-            &deposit,
-            &1_i128,
-            &0u64,
-            &0u64,
-            &end_time,
-            &threshold,
-            &None,
-            &StreamKind::Linear,
+            &CreateStreamParams {
+                recipient: self.recipient.clone(),
+                deposit_amount: deposit,
+                rate_per_second: 1_i128,
+                start_time: 0u64,
+                cliff_time: 0u64,
+                end_time: end_time,
+                withdraw_dust_threshold: Some(threshold),
+                memo: None,
+                metadata: None,
+                kind: StreamKind::Linear,
+                irrevocable: None,
+                witness: None,
+            },
         )
     }
 }
@@ -377,57 +383,132 @@ fn withdraw_dust_threshold_bypassed_past_end_time() {
 // Doc / code mismatch flags (assert actual behavior; do not "fix" production)
 // ---------------------------------------------------------------------------
 
-/// Creating a stream with withdraw_dust_threshold > deposit_amount fails with InvalidDustThreshold.
+/// Doc mismatch: `create_stream` currently accepts threshold > deposit (offer path rejects).
 #[test]
-fn create_rejects_threshold_above_deposit() {
+fn flag_mismatch_create_allows_threshold_above_deposit() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
 
     let deposit = 1_000_i128;
     let oversized = deposit + 1;
-    let result = ctx.client().try_create_stream(
+    let stream_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &deposit,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &oversized,
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: deposit,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(oversized),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
+    let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(
-        result,
-        Err(Ok(fluxora_stream::ContractError::InvalidDustThreshold)),
-        "creation must reject threshold > deposit with InvalidDustThreshold"
+        state.withdraw_dust_threshold, oversized,
+        "create_stream currently accepts threshold > deposit (docs say reject)"
     );
 }
 
-/// Creating a stream with negative withdraw_dust_threshold fails with InvalidDustThreshold.
+/// Doc mismatch: `create_stream` currently accepts negative thresholds (offer path rejects).
 #[test]
-fn create_rejects_negative_dust_threshold() {
+fn flag_mismatch_create_allows_negative_dust_threshold() {
     let ctx = TestContext::setup();
     ctx.env.ledger().set_timestamp(0);
 
-    let result = ctx.client().try_create_stream(
+    let stream_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &-1_i128,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(-1_i128),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
+    );
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(
+        state.withdraw_dust_threshold, -1,
+        "create_stream currently accepts negative threshold (docs say reject)"
+    );
+}
+
+/// `create_stream_offer` rejects threshold > deposit with InvalidDustThreshold (code 35).
+#[test]
+fn create_stream_offer_rejects_threshold_above_deposit() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let deposit = 1_000_i128;
+    let result = ctx.client().try_create_stream_offer(
+        &ctx.sender,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: deposit,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(deposit + 1),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
         &None,
-        &StreamKind::Linear,
     );
 
     assert_eq!(
         result,
         Err(Ok(fluxora_stream::ContractError::InvalidDustThreshold)),
-        "creation must reject negative threshold with InvalidDustThreshold"
+        "create_stream_offer must reject threshold > deposit"
+    );
+}
+
+/// `create_stream_offer` rejects negative threshold with InvalidDustThreshold (code 35).
+#[test]
+fn create_stream_offer_rejects_negative_dust_threshold() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let result = ctx.client().try_create_stream_offer(
+        &ctx.sender,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(-1_i128),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
+        &None,
+    );
+
+    assert_eq!(
+        result,
+        Err(Ok(fluxora_stream::ContractError::InvalidDustThreshold)),
+        "create_stream_offer must reject negative threshold"
     );
 }
 
@@ -441,15 +522,20 @@ fn create_allows_threshold_equal_to_deposit() {
     let threshold = deposit; // threshold == deposit is allowed (boundary case)
     let stream_id = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &deposit,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1000u64,
-        &threshold,
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: deposit,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(threshold),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     let state = ctx.client().get_stream_state(&stream_id);

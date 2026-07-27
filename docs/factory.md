@@ -89,7 +89,7 @@ The factory exposes read-only views so UIs, operators, and indexers can inspect 
 
 | View | Returns | Notes |
 |------|---------|-------|
-| `get_factory_config()` | `FactoryConfig { admin, stream_contract, max_deposit, min_duration, batch_cap_enforced }` | Reads all instance policy fields. Returns `FactoryError::NotInitialized` before `init`. |
+| `get_factory_config()` | `FactoryConfig { admin, stream_contract, max_deposit, min_duration, batch_cap_enforced, creation_paused, min_rate_per_second, max_rate_per_second }` | Reads all instance policy fields. Returns every field tracked by `FactoryPolicy` plus `admin`, matching the single-call completeness of `load_policy`. Returns `FactoryError::NotInitialized` before `init`. |
 | `is_allowlisted(recipient)` | `bool` | Returns `true` only when the recipient currently has an allowlist entry. Missing entries return `false`. |
 
 These views are permissionless and do not mutate factory state.
@@ -97,9 +97,11 @@ These views are permissionless and do not mutate factory state.
 ## Important Bypass Warning
 
 > [!WARNING]
-> Because the underlying `FluxoraStream` contract does not natively enforce these policies, **they are only enforced if the stream is created by routing through the factory contract.** 
-> 
-> If a user (e.g. the treasury multi-sig itself) directly calls `create_stream` on the `FluxoraStream` contract, these policies will be bypassed. To truly lock down treasury funds, the token vault or multi-sig must be configured to *only* approve transactions that invoke the `fluxora_factory` contract.
+> Because the underlying `FluxoraStream` contract does not natively enforce these policies, **they are only enforced if the stream is created by routing through the factory contract.**
+>
+> If a user (e.g. the treasury multi-sig itself) directly calls `create_stream` on the `FluxoraStream` contract, **all** factory-level policies are bypassed — recipient allowlist, deposit cap, minimum duration, rate bounds, creation pause, and aggregate batch cap. The stream contract only enforces its own independent invariants (positive deposit, valid time range, cliff within bounds, deposit covers rate × duration). This behavior is confirmed by regression tests in `contracts/factory/tests/factory_stream_e2e.rs` (`test_direct_stream_call_bypasses_recipient_allowlist`, `test_direct_stream_call_bypasses_deposit_cap`, `test_direct_stream_call_bypasses_minimum_duration`).
+>
+> This is the expected architecture: the factory is an optional policy wrapper, not a security boundary. Anyone who knows the stream contract's address can create streams that violate every factory rule. To truly lock down treasury funds, the token vault or multi-sig must be configured to *only* approve transactions that invoke the `fluxora_factory` contract — not the stream contract directly.
 
 ## Stream Kind and Memo
 
@@ -125,6 +127,8 @@ The factory enforces an early memo length guard (Guard 8) on both `create_stream
 | `memo.len() > fluxora_stream::MAX_MEMO_BYTES` | `fluxora_stream::MAX_MEMO_BYTES` (256 bytes) | `FactoryError::InvalidMemo` |
 
 This guard directly references the shared constant `fluxora_stream::MAX_MEMO_BYTES` at compile time, guaranteeing that any update to the stream contract's maximum memo length is automatically reflected in factory validation without risk of version drift or stale limits. Oversized memos are rejected on the factory error surface before initiating cross-contract calls or side-effects.
+
+Regression coverage for this behavior lives in `contracts/factory/tests/factory_stream_e2e.rs`: the suite now asserts that the factory memo guard tracks the shared `fluxora_stream::MAX_MEMO_BYTES` constant and that a memo one byte over the limit is rejected as `FactoryError::InvalidMemo` before the cross-contract call is made. This protects the factory from silently drifting away from the stream contract's own memo limit if the shared constant is ever changed.
 
 For `CliffOnly` streams the `rate_per_second` argument is ignored — the stream
 contract sets the effective rate to `0` internally.
@@ -268,10 +272,66 @@ the `symbol_short!` constraint.
 | `set_cap` | `cap_upd` | `CapUpdated { old_cap, new_cap }` | Both old and new values are included. |
 | `set_min_duration` | `dur_upd` | `MinDurationUpdated { old_min_duration, new_min_duration }` | Both old and new values are included. |
 | `set_rate_bounds` | `rate_bnd` | `RateBoundsUpdated { min_rate, max_rate }` | Carries the arguments passed by the caller; `None` means "unchanged". |
+| `set_batch_cap_enforcement` | `batch_cap` | `BatchCapEnforcementUpdated { enabled }` | Emits `true` or `false` as set by the admin. |
 | `set_factory_paused` | `factory` + `paused`/`resumed` | `bool` | Pre-existing event, unchanged. |
 | `create_stream` (success) | `fct_strm` | `FactoryStreamCreated { stream_id, sender, recipient, deposit_amount, rate_per_second }` | Emitted only after the cross-contract call succeeds. Lets indexers attribute a stream to the policy-gated factory path. |
 
 See [docs/events.md](events.md) for the complete event catalogue across all contracts.
+
+## Storage Layout
+
+The factory storage key enum is defined in
+`contracts/factory/src/lib.rs:78-92`. The TTL constants used by the factory are
+defined in `contracts/factory/src/lib.rs:18-28`.
+
+At the 5-second ledger cadence referenced by the source comments, the literal
+TTL constants are:
+
+| Constant | Ledgers | Approximate duration | Storage tier |
+|---|---:|---:|---|
+| `INSTANCE_LIFETIME_THRESHOLD` | `17_280` | 1 day | Instance |
+| `INSTANCE_BUMP_AMOUNT` | `120_960` | 7 days | Instance |
+| `PERSISTENT_LIFETIME_THRESHOLD` | `17_280` | 1 day | Persistent |
+| `PERSISTENT_BUMP_AMOUNT` | `120_960` | 7 days | Persistent |
+
+> **Note:** The source comments currently describe `120_960` ledgers as
+> approximately 60 days. Using the same 5-second ledger close assumption stated
+> in the comments, `120_960` ledgers is approximately 7 days. This table
+> documents the literal constants and their computed duration.
+
+| `DataKey` variant | Storage tier | Key encoding | Value type | TTL policy and trigger | Source references |
+|---|---|---|---|---|---|
+| `Admin` | Instance | `DataKey::Admin` | `Address` | Written by `init` and `set_admin`. Instance TTL is extended by `bump_instance()` after those writes; because instance TTL is contract-wide, later successful instance bumps also keep this key alive. | Enum: `lib.rs:78-80`; reads: `lib.rs:100-104`, `760`; writes: `lib.rs:478`, `514`; TTL: `lib.rs:141-144`, `495`, `517` |
+| `StreamContract` | Instance | `DataKey::StreamContract` | `Address` | Written by `init` and `set_stream_contract` after `FluxoraStream::version()` validation. Instance TTL is extended after those writes and after other successful `bump_instance()` calls. | Enum: `lib.rs:80`; reads: `lib.rs:312-316`, `537-545`, `762-766`; writes: `lib.rs:479-481`, `543-545`; TTL: `lib.rs:495`, `548` |
+| `MaxDepositCap` | Instance | `DataKey::MaxDepositCap` | `i128` | Written by `init` and `set_cap` after cap validation. Read by policy loading and config views. Instance TTL is extended after successful writes and batch creation. | Enum: `lib.rs:81`; reads: `lib.rs:317-321`, `586-590`, `767-771`; writes: `lib.rs:482-484`, `592-594`; TTL: `lib.rs:495`, `597`, `1014` |
+| `MinDuration` | Instance | `DataKey::MinDuration` | `u64` | Written by `init` and `set_min_duration` after duration validation. Read by policy loading and config views. Instance TTL is extended after successful writes and batch creation. | Enum: `lib.rs:82`; reads: `lib.rs:322-326`, `616-620`, `772-776`; writes: `lib.rs:485-487`, `622-624`; TTL: `lib.rs:495`, `627`, `1014` |
+| `BatchCapEnforced` | Instance | `DataKey::BatchCapEnforced` | `bool` | Written as `true` by `init` and updated by `set_batch_cap_enforcement`. Read by `load_policy`, `get_factory_config`, and batch creation. Instance TTL is extended after successful writes and batch creation. | Enum: `lib.rs:83`; reads: `lib.rs:327-331`, `777-781`; writes: `lib.rs:488-490`, `643-645`; TTL: `lib.rs:495`, `648`, `1014` |
+| `Allowlist(Address)` | Persistent | `DataKey::Allowlist(recipient)` where `recipient` is the address payload | `bool` when present; missing key means `false` | Written as `true` by `set_allowlist(..., true)` and removed by `set_allowlist(..., false)`. Read by `is_allowlisted`, `create_stream`, and `create_streams`. **Current TTL gap:** no `persistent().extend_ttl(...)` call is made for this key on writes or reads. | Enum: `lib.rs:84`; writes/removal: `lib.rs:561-568`; reads: `lib.rs:786-790`, `871-875`, `1025-1029`; gap verified against `extend_ttl` calls in `lib.rs:186-190`, `209-213` |
+| `FactoryStreamIds` | Persistent | `DataKey::FactoryStreamIds` | `Vec<u64>` | Created lazily when the first factory-created stream ID is appended. Persistent TTL is extended on every single or batch append. Read-only views load the vector but do not extend persistent TTL. | Enum: `lib.rs:85-86`; reads: `lib.rs:148-152`, `794-805`; writes/TTL: `lib.rs:180-190`, `198-213`; append calls: `lib.rs:955`, `1084` |
+| `CreationPaused` | Instance | `DataKey::CreationPaused` | `bool`; missing key means `false` | `init` does not write this key. `set_factory_paused` writes it and bumps instance TTL. `load_policy` and `is_factory_paused` default missing storage to `false`. | Enum: `lib.rs:87-88`; reads: `lib.rs:332-336`, `747-751`; writes: `lib.rs:724-726`; TTL: `lib.rs:729` |
+| `MinRatePerSecond` | Instance | `DataKey::MinRatePerSecond` | `i128` when present; `None` means no lower bound | Written by `set_rate_bounds` only when `min_rate` is `Some`. `None` arguments leave the stored value unchanged. Read by `load_policy`, `set_rate_bounds` invariant checks, and factory creation policy checks. Instance TTL is extended after successful `set_rate_bounds` and batch creation. | Enum: `lib.rs:89-90`; reads: `lib.rs:337-338`, `686`, `903-907`, `1019`; writes: `lib.rs:672-674`; TTL: `lib.rs:695`, `1014` |
+| `MaxRatePerSecond` | Instance | `DataKey::MaxRatePerSecond` | `i128` when present; `None` means no upper bound | Written by `set_rate_bounds` only when `max_rate` is `Some`. `None` arguments leave the stored value unchanged. Read by `load_policy`, `set_rate_bounds` invariant checks, and factory creation policy checks. Instance TTL is extended after successful `set_rate_bounds` and batch creation. | Enum: `lib.rs:91-92`; reads: `lib.rs:339-340`, `687`, `913-917`, `1020`; writes: `lib.rs:680-682`; TTL: `lib.rs:695`, `1014` |
+
+### Indexer reconstruction
+
+An indexer can reconstruct factory state from scratch by combining read views
+with the factory event stream:
+
+1. Read the current policy snapshot with `get_factory_config()`.
+2. Read the creation pause with `is_factory_paused()`.
+3. Page through `get_factory_streams_paginated(start_index, limit)` until all
+   IDs from `get_factory_stream_count()` are collected.
+4. Replay `FactoryInited`, `FactoryAdminUpdated`, `StreamContractUpdated`,
+   `CapUpdated`, `MinDurationUpdated`, `RateBoundsUpdated`, pause/resume, and
+   `FactoryStreamCreated` events from deployment to reconstruct historical
+   changes.
+5. Replay `AllowlistUpdated` events to reconstruct allowlist membership.
+   `is_allowlisted(recipient)` can verify a known recipient, but the contract
+   does not expose an enumerable allowlist view.
+
+For rate bounds, treat `RateBoundsUpdated { min_rate: None }` or
+`{ max_rate: None }` as "unchanged" for that side, matching the
+`set_rate_bounds` implementation.
 
 ## Instance Storage TTL Management
 
@@ -285,20 +345,36 @@ To prevent expiration, the factory implements a `bump_instance` helper that:
 
 ```rust
 const INSTANCE_LIFETIME_THRESHOLD: u32 = 17_280;   // Ledgers below which a bump is triggered
-const INSTANCE_BUMP_AMOUNT: u32 = 120_960;         // Bump target; ~60 days at 5-second ledger close
+const INSTANCE_BUMP_AMOUNT: u32 = 120_960;         // Bump target; ~7 days at 5-second ledger close
 ```
 
 ### When Instance TTL is Bumped
 
 - **`init()`**: Bumps TTL during factory initialization.
-- **Every admin setter**: `set_admin`, `set_stream_contract`, `set_cap`, `set_min_duration`, `set_batch_cap_enforcement`, `set_rate_bounds`, `set_factory_paused` all bump the instance TTL after a successful update.
-- **Stream creation**: Both `create_stream` and `create_streams` bump the instance TTL when called, since they read the factory configuration.
+- **Most instance-storage admin setters**: `set_admin`,
+  `set_stream_contract`, `set_cap`, `set_min_duration`,
+  `set_batch_cap_enforcement`, `set_rate_bounds`, and `set_factory_paused` bump
+  the instance TTL after a successful update.
+- **Batch stream creation**: `create_streams` bumps instance TTL after loading
+  policy and before validating the batch.
+- **Current gaps**: `set_allowlist` writes persistent allowlist entries but does
+  not bump persistent or instance TTL. `create_stream`, `get_factory_config`,
+  `is_factory_paused`, `is_allowlisted`, `get_factory_stream_count`, and
+  `get_factory_streams_paginated` read storage without extending TTL.
 
 ### Why It Matters
 
-A factory that goes idle for longer than the TTL threshold (~60 days) will have its instance entries pruned by the ledger. Subsequent calls to `get_factory_config` or any admin setter will return `FactoryError::NotInitialized`, preventing further operations until the factory is re-initialized—an unrecoverable error on a deployed contract.
+A factory that goes idle until its current instance-storage TTL expires can have
+its instance entries pruned by the ledger. After a bump to `120_960` ledgers,
+that window is approximately 7 days at 5-second ledger close. Subsequent calls
+to `get_factory_config` or any admin setter will return
+`FactoryError::NotInitialized`, preventing further operations until the factory
+is re-initialized—an unrecoverable error on a deployed contract.
 
-By bumping the TTL on every write and read, even a purely inactive factory can survive indefinitely as long as it is occasionally queried or updated. An active factory (regularly creating streams or updating policies) will always keep the instance entries alive.
+With the current implementation, successful instance-storage writes and batch
+creation keep instance entries alive. A purely inactive factory is not kept
+alive by read-only queries alone, and a factory that only receives single
+`create_stream` calls does not currently extend instance TTL on that path.
 
 ### Security Note
 
@@ -310,8 +386,9 @@ This document is aligned with the current implementation as follows:
 
 - `FluxoraFactory::init`, `set_cap`, and `set_min_duration` validate policy
   ranges before writing factory configuration.
-- All setters and stream creation functions call `bump_instance()` to extend
-  instance storage TTL and prevent config expiration during idle periods.
+- Instance-storage setters and `create_streams` call `bump_instance()` to extend
+  instance storage TTL. `set_allowlist`, read-only views, and single
+  `create_stream` do not currently extend TTL.
 - `FluxoraFactory::create_stream` enforces allowlist, cap, and duration checks
   before calling `sender.require_auth()`.
 - The factory forwards `stream_kind` and `memo` verbatim to

@@ -14,6 +14,7 @@ crate-type = ["cdylib", "rlib"]
 doctest = false
 
 [features]
+import_only = []
 testutils = ["soroban-sdk/testutils"]
 
 # Soroban SDK version pinned for reproducible builds.
@@ -55,7 +56,7 @@ soroban-env-host = { version = "=21.2.1", features = ["testutils"] }
 [[test]]
 name = "bulk_cancel"
 path = "tests/bulk_cancel.rs"
-test = false
+test = true
 
 [[test]]
 name = "chaos"
@@ -73,14 +74,19 @@ path = "tests/create_stream_relative.rs"
 test = false
 
 [[test]]
+name = "id_monotonicity_upgrade"
+path = "tests/id_monotonicity_upgrade.rs"
+test = false
+
+[[test]]
 name = "factory_policy"
 path = "tests/factory_policy.rs"
-test = false
+test = true
 
 [[test]]
 name = "formal_verification_smoke"
 path = "tests/formal_verification_smoke.rs"
-test = false
+test = true
 
 [[test]]
 name = "governance_proptest"
@@ -90,27 +96,32 @@ test = false
 [[test]]
 name = "health_matrix"
 path = "tests/health_matrix.rs"
-test = false
+test = true
 
 [[test]]
 name = "id_range"
 path = "tests/id_range.rs"
-test = false
+test = true
+
+[[test]]
+name = "metadata_limits_900"
+path = "tests/metadata_limits_900.rs"
+test = true
 
 [[test]]
 name = "keeper_cancel"
 path = "tests/keeper_cancel.rs"
-test = false
+required-features = ["testutils"]
 
 [[test]]
 name = "max_rate_per_second"
 path = "tests/max_rate_per_second.rs"
-test = false
+test = true
 
 [[test]]
 name = "metadata_extension"
 path = "tests/metadata_extension.rs"
-test = false
+test = true
 
 [[test]]
 name = "stream_offer"
@@ -138,9 +149,19 @@ path = "tests/recipient_update_state_machine.rs"
 test = false
 
 [[test]]
+name = "id_reservation"
+path = "tests/id_reservation.rs"
+test = false
+
+[[test]]
+name = "dust_threshold"
+path = "tests/dust_threshold.rs"
+test = true
+
+[[test]]
 name = "storage_key_compat"
 path = "tests/storage_key_compat.rs"
-test = false
+required-features = ["testutils"]
 
 [[test]]
 name = "sweep_liability"
@@ -150,7 +171,7 @@ test = false
 [[test]]
 name = "upgrade_path"
 path = "tests/upgrade_path.rs"
-test = false
+test = true
 
 [[test]]
 name = "withdrawal_frequency"
@@ -192,19 +213,19 @@ test = true
 [[test]]
 name = "liability_invariant"
 path = "tests/liability_invariant.rs"
-test = false
+required-features = ["testutils"]
 
 [[test]]
 name = "event_snapshots_suite"
 path = "tests/event_snapshots_suite.rs"
-test = false
+test = true
 
 [[test]]
 name = "governance_integration"
 path = "tests/governance_integration.rs"
-test = true
+test = false
 
 [[test]]
 name = "governance_ttl"
 path = "tests/governance_ttl.rs"
-test = true
+test = false

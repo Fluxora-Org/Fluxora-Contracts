@@ -517,6 +517,7 @@ name = "fluxora_governance"
 version = "0.1.0"
 dependencies = [
  "proptest",
+ "soroban-env-host",
  "soroban-sdk",
 ]
 

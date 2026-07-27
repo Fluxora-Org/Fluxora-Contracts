@@ -4,14 +4,12 @@
 //! the `symbol_short!` topic definitions co-located with the payload struct.
 //! This makes ABI review trivial: every event topic is in one file.
 //!
-//! Some helpers here are not yet wired up as the sole call site for their
-//! event (several entry points in `lib.rs` still publish inline pending a
-//! follow-up refactor), so this module is `#[allow(dead_code)]` like `storage.rs`.
-
-#![allow(dead_code)]
+//! Every helper in this module is wired up as the canonical call site for
+//! its corresponding event in `lib.rs` and `storage.rs`.
 
 use crate::*;
-use soroban_sdk::{symbol_short, Env};
+use crate::types::StreamDecommissioned;
+use soroban_sdk::{symbol_short, Address, Env};
 
 /// Emit the `created` event when a new stream is persisted.
 pub(crate) fn emit_stream_created(env: &Env, stream_id: u64, payload: StreamCreated) {
@@ -25,10 +23,10 @@ pub(crate) fn emit_withdrawal(env: &Env, stream_id: u64, payload: Withdrawal) {
         .publish((symbol_short!("withdrew"), stream_id), payload);
 }
 
-/// Emit the `withdrew` event for a `withdraw_to` destination.
+/// Emit the `wdraw_to` event for a `withdraw_to` destination.
 pub(crate) fn emit_withdrawal_to(env: &Env, stream_id: u64, payload: WithdrawalTo) {
     env.events()
-        .publish((symbol_short!("withdrew"), stream_id), payload);
+        .publish((symbol_short!("wdraw_to"), stream_id), payload);
 }
 
 /// Emit the `cancelled` event when a stream is cancelled.
@@ -42,7 +40,7 @@ pub(crate) fn emit_stream_cancelled(env: &Env, stream_id: u64) {
 /// Emit the `completed` event when a stream reaches terminal Completed state.
 pub(crate) fn emit_stream_completed(env: &Env, stream_id: u64) {
     env.events().publish(
-        (symbol_short!("complete"), stream_id),
+        (symbol_short!("completed"), stream_id),
         StreamEvent::StreamCompleted(stream_id),
     );
 }
@@ -99,38 +97,32 @@ pub(crate) fn emit_stream_end_extended(env: &Env, stream_id: u64, payload: Strea
         .publish((symbol_short!("end_ext"), stream_id), payload);
 }
 
-/// Emit the `topped_up` event when a stream is topped up.
+/// Emit the `top_up` event when a stream is topped up.
 pub(crate) fn emit_stream_topped_up(env: &Env, stream_id: u64, payload: StreamToppedUp) {
     env.events()
-        .publish((symbol_short!("toppedup"), stream_id), payload);
+        .publish((symbol_short!("top_up"), stream_id), payload);
 }
 
-/// Emit the `sndr_xfr` event when sender is transferred.
-pub(crate) fn emit_sender_transferred(env: &Env, stream_id: u64, payload: SenderTransferred) {
-    env.events()
-        .publish((symbol_short!("sndr_xfr"), stream_id), payload);
-}
-
-/// Emit the `hlth_chg` event when stream health changes.
+/// Emit the `health` event when stream health changes.
 pub(crate) fn emit_stream_health_changed(env: &Env, stream_id: u64, payload: StreamHealthChanged) {
     env.events()
-        .publish((symbol_short!("hlth_chg"), stream_id), payload);
+        .publish((symbol_short!("health"), stream_id), payload);
 }
 
-/// Emit the `rcpt_upd` event when recipient is updated.
+/// Emit the `recp_upd` event when recipient is updated.
 pub(crate) fn emit_recipient_updated(env: &Env, stream_id: u64, payload: RecipientUpdated) {
     env.events()
-        .publish((symbol_short!("rcpt_upd"), stream_id), payload);
+        .publish((symbol_short!("recp_upd"), stream_id), payload);
 }
 
-/// Emit the `g_paused` event for global emergency pause change.
+/// Emit the `gl_pause` event for global emergency pause change.
 pub(crate) fn emit_global_emergency_pause_changed(env: &Env, payload: GlobalEmergencyPauseChanged) {
-    env.events().publish((symbol_short!("g_paused"),), payload);
+    env.events().publish((symbol_short!("gl_pause"),), payload);
 }
 
-/// Emit the `g_resume` event when global pause is lifted.
+/// Emit the `gl_resume` event when global pause is lifted.
 pub(crate) fn emit_global_resumed(env: &Env, payload: GlobalResumed) {
-    env.events().publish((symbol_short!("g_resume"),), payload);
+    env.events().publish((symbol_short!("gl_resume"),), payload);
 }
 
 /// Emit the `ct_pause` event when creation pause changes.
@@ -139,13 +131,15 @@ pub(crate) fn emit_contract_pause_changed(env: &Env, payload: ContractPauseChang
 }
 
 /// Emit `pr_pause` event when protocol is paused.
-pub(crate) fn emit_protocol_paused(env: &Env, payload: ProtocolPaused) {
-    env.events().publish((symbol_short!("pr_pause"),), payload);
+pub(crate) fn emit_protocol_paused(env: &Env, admin: Address, payload: ProtocolPaused) {
+    env.events()
+        .publish((symbol_short!("pr_pause"), admin), payload);
 }
 
-/// Emit `pr_rsm` event when protocol is resumed.
-pub(crate) fn emit_protocol_resumed(env: &Env, payload: ProtocolResumed) {
-    env.events().publish((symbol_short!("pr_rsm"),), payload);
+/// Emit `pr_resume` event when protocol is resumed.
+pub(crate) fn emit_protocol_resumed(env: &Env, admin: Address, payload: ProtocolResumed) {
+    env.events()
+        .publish((symbol_short!("pr_resume"), admin), payload);
 }
 
 /// Emit `ac_set` event when auto-claim destination is set.
@@ -154,10 +148,10 @@ pub(crate) fn emit_auto_claim_set(env: &Env, stream_id: u64, payload: AutoClaimS
         .publish((symbol_short!("ac_set"), stream_id), payload);
 }
 
-/// Emit `ac_rev` event when auto-claim destination is revoked.
+/// Emit `ac_revoke` event when auto-claim destination is revoked.
 pub(crate) fn emit_auto_claim_revoked(env: &Env, stream_id: u64, payload: AutoClaimRevoked) {
     env.events()
-        .publish((symbol_short!("ac_rev"), stream_id), payload);
+        .publish((symbol_short!("ac_revoke"), stream_id), payload);
 }
 
 /// Emit `ac_trig` event when auto-claim is triggered.
@@ -166,9 +160,10 @@ pub(crate) fn emit_auto_claim_triggered(env: &Env, stream_id: u64, payload: Auto
         .publish((symbol_short!("ac_trig"), stream_id), payload);
 }
 
-/// Emit `excess_sw` event when admin sweeps excess tokens.
-pub(crate) fn emit_excess_swept(env: &Env, payload: ExcessSwept) {
-    env.events().publish((symbol_short!("excess_sw"),), payload);
+/// Emit `ex_swept` event when admin sweeps excess tokens.
+pub(crate) fn emit_excess_swept(env: &Env, recipient: Address, payload: ExcessSwept) {
+    env.events()
+        .publish((symbol_short!("ex_swept"), recipient), payload);
 }
 
 /// Emit the `cloned` event when a stream is cloned.
@@ -181,4 +176,15 @@ pub(crate) fn emit_stream_cloned(env: &Env, stream_id: u64, payload: StreamClone
 pub(crate) fn emit_keeper_cancelled(env: &Env, stream_id: u64, payload: KeeperCancelled) {
     env.events()
         .publish((symbol_short!("kp_cncl"), stream_id), payload);
+}
+
+/// Emit the `decomm` event when a stream's decommissioned state is set.
+pub(crate) fn emit_stream_decommissioned(env: &Env, stream_id: u64, decommissioned: bool) {
+    env.events().publish(
+        (symbol_short!("decomm"), stream_id),
+        StreamDecommissioned {
+            stream_id,
+            decommissioned,
+        },
+    );
 }

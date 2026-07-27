@@ -1,10 +1,20 @@
 // See docs/gas.md for the baseline update process and review bar.
-use fluxora_stream::{FluxoraStream, FluxoraStreamClient, StreamKind};
+use fluxora_stream::{
+    CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamKind, MAX_MEMO_BYTES,
+    MAX_METADATA_BYTES, MAX_METADATA_KEYS, MAX_METADATA_KEY_BYTES, MAX_METADATA_VALUE_BYTES,
+    MAX_STREAM_ENTRY_BYTES,
+};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env,
+    Address, Bytes, Env, Map,
 };
+
+// Per-invocation CPU budget (Soroban limit) with a 75% safety margin.
+// The budget assertion fails if measured cost exceeds this threshold,
+// guarding against inadvertent regressions (e.g. an increased MAX_PAGE_SIZE
+// that worsens the O(n²) duplicate-ID scan).
+const PER_INVOCATION_CPU_BUDGET: u64 = 25_000_000_000;
 
 // Grace period (mirrors KEEPER_GRACE_PERIOD_SECONDS in lib.rs).
 const KEEPER_GRACE: u64 = 604_800;
@@ -61,26 +71,47 @@ impl<'a> TestContext<'a> {
 
         self.client.create_stream(
             &self.sender,
-            &self.recipient,
-            &amount,
-            &rate,
-            &start_time,
-            &cliff_time,
-            &end_time,
-            &0,
-            &None,
-            &StreamKind::Linear,
+            &CreateStreamParams {
+                recipient: self.recipient.clone(),
+                deposit_amount: amount,
+                rate_per_second: rate,
+                start_time: start_time,
+                cliff_time: cliff_time,
+                end_time: end_time,
+                withdraw_dust_threshold: Some(0),
+                memo: None,
+                metadata: None,
+                kind: StreamKind::Linear,
+                irrevocable: None,
+                witness: None,
+            },
         )
     }
 }
 
-fn measure_gas<F>(ctx: &TestContext, f: F) -> u64
+// KeeperTestContext is an alias for TestContext — same setup, same fields.
+// Keeper tests use the identical harness; the type alias keeps the test
+// names readable without duplicating the setup code.
+type KeeperTestContext<'a> = TestContext<'a>;
+
+fn measure_gas<F, C>(ctx: &C, f: F) -> u64
 where
-    F: FnOnce(&TestContext),
+    F: FnOnce(&C),
+    C: HasEnv,
 {
-    ctx.env.budget().reset_unlimited();
+    ctx.env().budget().reset_unlimited();
     f(ctx);
-    ctx.env.budget().cpu_instruction_cost()
+    ctx.env().budget().cpu_instruction_cost()
+}
+
+trait HasEnv {
+    fn env(&self) -> &Env;
+}
+
+impl HasEnv for TestContext<'_> {
+    fn env(&self) -> &Env {
+        &self.env
+    }
 }
 
 #[test]
@@ -126,7 +157,142 @@ fn test_batch_withdraw_gas() {
             ctx.client.batch_withdraw(&ctx.recipient, &streams);
         });
 
+        assert!(
+            cost <= PER_INVOCATION_CPU_BUDGET,
+            "batch_withdraw at size {} exceeded per-invocation CPU budget: {} > {}",
+            size,
+            cost,
+            PER_INVOCATION_CPU_BUDGET,
+        );
+
         println!("GAS_MEASUREMENT: batch_withdraw: {}: {}", size, cost);
+    }
+}
+
+/// Gas regression baseline for `batch_withdraw_to`.
+///
+/// Uses a distinct destination address per withdrawal to exercise the
+/// per-entry destination validation path alongside the O(n²) duplicate-ID
+/// scan in `reject_duplicate_ids`.  The O(n²) scan costs roughly
+/// n*(n-1)/2 comparisons at batch size n, so at MAX_PAGE_SIZE (100) the
+/// worst case is ~4 950 element-by-element comparisons inside the helper.
+#[test]
+fn test_batch_withdraw_to_gas() {
+    let sizes = [1, 10, 50, 100];
+
+    for &size in &sizes {
+        let ctx = TestContext::setup();
+
+        let mut streams = soroban_sdk::Vec::new(&ctx.env);
+        let mut destinations = soroban_sdk::Vec::new(&ctx.env);
+        for _ in 0..size {
+            streams.push_back(ctx.create_default_stream());
+            destinations.push_back(Address::generate(&ctx.env));
+        }
+
+        let mut withdrawals = soroban_sdk::Vec::new(&ctx.env);
+        for i in 0..size {
+            withdrawals.push_back(WithdrawToParam {
+                stream_id: streams.get(i as u32).unwrap(),
+                destination: destinations.get(i as u32).unwrap(),
+            });
+        }
+
+        ctx.env.ledger().set_timestamp(500); // Accrue tokens for all
+
+        let cost = measure_gas(&ctx, |ctx| {
+            ctx.client.batch_withdraw_to(&ctx.recipient, &withdrawals);
+        });
+
+        assert!(
+            cost <= PER_INVOCATION_CPU_BUDGET,
+            "batch_withdraw_to at size {} exceeded per-invocation CPU budget: {} > {}",
+            size,
+            cost,
+            PER_INVOCATION_CPU_BUDGET,
+        );
+
+        println!("GAS_MEASUREMENT: batch_withdraw_to: {}: {}", size, cost);
+    }
+}
+
+/// Gas regression baseline for `bulk_resume_streams_as_admin`.
+///
+/// Creates streams, pauses each one (advancing the ledger far enough to
+/// clear the pause cooldown), then resumes them all in a single admin-authed
+/// call. Batch sizes 1, 5, 10, and 20 mirror the documented gas baseline matrix
+/// so `script/validate_gas.py` can compare each measured cost against
+/// `docs/gas.md`.
+#[test]
+fn test_bulk_resume_streams_as_admin_gas() {
+    let sizes = [1, 5, 10, 20];
+
+    for &size in &sizes {
+        let ctx = TestContext::setup();
+
+        let mut streams = soroban_sdk::Vec::new(&ctx.env);
+        for _ in 0..size {
+            let id = ctx.create_default_stream();
+            // Advance past the pause/resume cooldown (17 ledgers) so the
+            // subsequent pause succeeds even if the ledger sequence is low.
+            ctx.env.ledger().with_mut(|l| l.sequence_number += 32);
+            ctx.client
+                .pause_stream_as_admin(&id, &PauseReason::Administrative);
+            streams.push_back(id);
+        }
+
+        let cost = measure_gas(&ctx, |ctx| {
+            ctx.client.bulk_resume_streams_as_admin(&streams);
+        });
+
+        assert!(
+            cost <= PER_INVOCATION_CPU_BUDGET,
+            "bulk_resume_streams_as_admin at size {} exceeded per-invocation CPU budget: {} > {}",
+            size,
+            cost,
+            PER_INVOCATION_CPU_BUDGET,
+        );
+
+        println!(
+            "GAS_MEASUREMENT: bulk_resume_streams_as_admin: {}: {}",
+            size, cost
+        );
+    }
+}
+
+/// Gas regression baseline for `bulk_cancel_streams`.
+///
+/// Creates active streams owned by the sender then cancels them all in a
+/// single call. Batch sizes 1, 5, 10, and 20 mirror the documented gas
+/// baseline matrix so `script/validate_gas.py` can compare each measured cost
+/// against `docs/gas.md`.
+#[test]
+fn test_bulk_cancel_streams_gas() {
+    let sizes = [1, 5, 10, 20];
+
+    for &size in &sizes {
+        let ctx = TestContext::setup();
+
+        let mut streams = soroban_sdk::Vec::new(&ctx.env);
+        for _ in 0..size {
+            streams.push_back(ctx.create_default_stream());
+        }
+
+        ctx.env.ledger().set_timestamp(500); // Accrue tokens so cancellation is non-trivial
+
+        let cost = measure_gas(&ctx, |ctx| {
+            ctx.client.bulk_cancel_streams(&ctx.sender, &streams);
+        });
+
+        assert!(
+            cost <= PER_INVOCATION_CPU_BUDGET,
+            "bulk_cancel_streams at size {} exceeded per-invocation CPU budget: {} > {}",
+            size,
+            cost,
+            PER_INVOCATION_CPU_BUDGET,
+        );
+
+        println!("GAS_MEASUREMENT: bulk_cancel_streams: {}: {}", size, cost);
     }
 }
 
@@ -160,21 +326,26 @@ fn test_batch_withdraw_gas() {
 ///   → three token transfers: recipient 5 000, sender 4 975, keeper 25
 #[test]
 fn test_keeper_cancel_gas_partial_accrual() {
-    let ctx = TestContext::setup();
+    let ctx = KeeperTestContext::setup();
 
     // Create the stream at t=0.
     ctx.env.ledger().set_timestamp(0);
     let stream_id = ctx.client.create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &10_000_i128,
-        &5_i128,
-        &0u64,
-        &0u64,
-        &1_000u64,
-        &0_i128,
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 10_000_i128,
+            rate_per_second: 5_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1_000u64,
+            withdraw_dust_threshold: Some(0_i128),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     // Advance past end_time + grace period so the stream is eligible.
@@ -198,20 +369,25 @@ fn test_keeper_cancel_gas_partial_accrual() {
 ///   → one token transfer: recipient 1 000; no sender or keeper transfers
 #[test]
 fn test_keeper_cancel_gas_fully_accrued() {
-    let ctx = TestContext::setup();
+    let ctx = KeeperTestContext::setup();
 
     ctx.env.ledger().set_timestamp(0);
     let stream_id = ctx.client.create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &1_000_i128,
-        &1_i128,
-        &0u64,
-        &0u64,
-        &1_000u64,
-        &0_i128,
-        &None,
-        &StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1_000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1_000u64,
+            withdraw_dust_threshold: Some(0_i128),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     ctx.env.ledger().set_timestamp(1_000 + KEEPER_GRACE + 1);
@@ -221,4 +397,365 @@ fn test_keeper_cancel_gas_fully_accrued() {
     });
 
     println!("GAS_MEASUREMENT: keeper_cancel: fully_accrued: {}", cost);
+}
+
+// ---------------------------------------------------------------------------
+// Stream persistent-entry XDR size regression
+//
+// The `Stream` struct is stored as a persistent Soroban ledger entry.  Rent
+// is charged proportionally to the serialized byte size of that entry, so
+// unbounded growth of any caller-controlled field inflates the rent cost for
+// every stream in the protocol.
+//
+// Two optional fields are caller-controlled and can each approach their caps:
+//   • `memo`     — up to MAX_MEMO_BYTES (256) bytes
+//   • `metadata` — up to MAX_METADATA_BYTES (512) bytes of aggregate key+value
+//                  data spread over up to MAX_METADATA_KEYS (8) entries
+//
+// The test below constructs a `Stream` via the contract (not directly), so the
+// value is stored and retrieved through the same serialization path that
+// production ledgers use.  It asserts that the XDR-serialized byte length of
+// the retrieved `Stream` value stays within MAX_STREAM_ENTRY_BYTES (4 096).
+//
+// "Worst case" is defined as:
+//   • all Optional fields populated (claim_owner, cancelled_at, is_pooled,
+//     irrevocable, witness, parent_stream_id, memo, metadata)
+//   • memo filled to MAX_MEMO_BYTES (256) bytes of 0xFF
+//   • metadata has MAX_METADATA_KEYS (8) entries, each key is
+//     MAX_METADATA_KEY_BYTES (32) bytes and each value is
+//     MAX_METADATA_VALUE_BYTES (128) bytes — total raw payload = 1 280 bytes,
+//     which exceeds MAX_METADATA_BYTES (512); the contract therefore rejects
+//     that construction.  The actual worst-case accepted by the validator is
+//     MAX_METADATA_BYTES (512) bytes spread over 8 keys, verified by
+//     `test_stream_entry_xdr_size_worst_case_accepted_metadata` below.
+//   • all i128 fields at i128::MAX, all u64 timestamps at u64::MAX,
+//     delegation_depth = MAX_DELEGATION_DEPTH
+//
+// See docs/gas.md §"Stream Persistent-Entry Size" for the annotated field
+// breakdown and the ceiling update procedure.
+// ---------------------------------------------------------------------------
+
+/// Helper: build a worst-case metadata map that exactly fits within
+/// MAX_METADATA_BYTES.  We use 8 keys of 32 bytes and values sized so that
+/// the aggregate key+value sum ≤ 512.
+///
+/// 8 keys × 32 bytes = 256 bytes of keys.
+/// Remaining budget: 512 − 256 = 256 bytes for 8 values → 32 bytes each.
+fn worst_case_metadata(env: &Env) -> Map<Bytes, Bytes> {
+    let key_len = MAX_METADATA_KEY_BYTES as usize; // 32
+    let total_budget = MAX_METADATA_BYTES as usize; // 512
+    let total_key_bytes = (MAX_METADATA_KEYS as usize) * key_len; // 256
+    let value_budget = total_budget - total_key_bytes; // 256
+    let value_len = value_budget / (MAX_METADATA_KEYS as usize); // 32
+
+    let mut meta: Map<Bytes, Bytes> = Map::new(env);
+    for i in 0..MAX_METADATA_KEYS {
+        // Build a key: 32 bytes, first byte encodes the index so each key is
+        // unique; remaining bytes are 0xAA.
+        let mut key_buf = vec![0xAAu8; key_len];
+        key_buf[0] = i as u8;
+        let key = Bytes::from_slice(env, &key_buf);
+
+        // Value: value_len bytes of 0xBB.
+        let val = Bytes::from_slice(env, &vec![0xBBu8; value_len]);
+        meta.set(key, val);
+    }
+    meta
+}
+
+/// Worst-case Stream XDR size regression.
+///
+/// Constructs a stream via `create_streams` (the only public entry-point that
+/// accepts both `memo` and `metadata`) with all optional fields at their maximum
+/// allowed sizes, then retrieves the stored `Stream` via `get_stream_state` and
+/// serialises it to XDR.  Asserts the serialised length ≤ MAX_STREAM_ENTRY_BYTES.
+///
+/// If this test fails after a `Stream` struct change, follow the update procedure
+/// in docs/gas.md §"Stream Persistent-Entry Size".
+#[test]
+fn test_stream_entry_xdr_size_worst_case() {
+    use soroban_sdk::xdr::ToXdr;
+
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(0);
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    let sac = StellarAssetClient::new(&env, &token_id);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let admin = Address::generate(&env);
+
+    client.init(&token_id, &admin);
+    sac.mint(&sender, &i128::MAX);
+    TokenClient::new(&env, &token_id).approve(&sender, &contract_id, &i128::MAX, &u32::MAX);
+
+    // Memo at maximum allowed size (256 × 0xFF).
+    let memo = Bytes::from_slice(&env, &vec![0xFFu8; MAX_MEMO_BYTES]);
+
+    // Metadata: 8 keys × (32-byte key + 32-byte value) = 512 bytes aggregate —
+    // exactly at MAX_METADATA_BYTES, so the contract must accept it.
+    let metadata = worst_case_metadata(&env);
+
+    // Witness address occupies the optional `witness` field.
+    let witness = Address::generate(&env);
+
+    let deposit: i128 = 1_000_000;
+    let rate: i128 = 1;
+    let start_time: u64 = 0;
+    let cliff_time: u64 = 0;
+    let end_time: u64 = 1_000_000;
+
+    let params = soroban_sdk::vec![
+        &env,
+        CreateStreamParams {
+            recipient: recipient.clone(),
+            deposit_amount: deposit,
+            rate_per_second: rate,
+            start_time,
+            cliff_time,
+            end_time,
+            withdraw_dust_threshold: Some(i128::MAX),
+            memo: Some(memo.clone()),
+            metadata: Some(metadata.clone()),
+            kind: StreamKind::Linear,
+            irrevocable: Some(true),
+            witness: Some(witness.clone()),
+        }
+    ];
+
+    let ids = client.create_streams(&sender, &params);
+    let stream_id = ids.get(0).expect("stream created");
+
+    // Retrieve the persisted Stream struct through the public view.
+    let stream = client.get_stream_state(&stream_id);
+
+    // Serialize the Stream to XDR using the same trait that Soroban uses when
+    // writing to persistent storage (soroban_sdk::xdr::ToXdr).
+    let xdr_bytes = stream.to_xdr(&env);
+    let serialized_len = xdr_bytes.len() as usize;
+
+    println!(
+        "STREAM_XDR_SIZE: worst_case: {} bytes (ceiling: {} bytes, headroom: {} bytes)",
+        serialized_len,
+        MAX_STREAM_ENTRY_BYTES,
+        MAX_STREAM_ENTRY_BYTES - serialized_len
+    );
+
+    assert!(
+        serialized_len <= MAX_STREAM_ENTRY_BYTES,
+        "Stream XDR size {} bytes exceeds MAX_STREAM_ENTRY_BYTES {} bytes. \
+         The Stream struct has grown beyond the documented ceiling. \
+         See docs/gas.md §\"Stream Persistent-Entry Size\" for the update procedure.",
+        serialized_len,
+        MAX_STREAM_ENTRY_BYTES
+    );
+}
+
+/// Baseline (minimal) Stream XDR size — all optional fields absent.
+///
+/// Provides the lower-bound data point printed in docs/gas.md alongside the
+/// worst-case ceiling so operators can reason about the rent cost spread.
+#[test]
+fn test_stream_entry_xdr_size_baseline() {
+    use soroban_sdk::xdr::ToXdr;
+
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(0);
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    let sac = StellarAssetClient::new(&env, &token_id);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let admin = Address::generate(&env);
+
+    client.init(&token_id, &admin);
+    sac.mint(&sender, &1_000_000_i128);
+    TokenClient::new(&env, &token_id).approve(&sender, &contract_id, &i128::MAX, &100_000);
+
+    // No memo, no metadata, no optional fields.
+    let params = soroban_sdk::vec![
+        &env,
+        CreateStreamParams {
+            recipient: recipient.clone(),
+            deposit_amount: 1_000,
+            rate_per_second: 1,
+            start_time: 0,
+            cliff_time: 0,
+            end_time: 1_000,
+            withdraw_dust_threshold: None,
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        }
+    ];
+
+    let ids = client.create_streams(&sender, &params);
+    let stream_id = ids.get(0).expect("stream created");
+
+    let stream = client.get_stream_state(&stream_id);
+    let xdr_bytes = stream.to_xdr(&env);
+    let serialized_len = xdr_bytes.len() as usize;
+
+    println!(
+        "STREAM_XDR_SIZE: baseline (no optional fields): {} bytes",
+        serialized_len
+    );
+
+    // Baseline must be strictly less than the worst-case ceiling.
+    assert!(
+        serialized_len < MAX_STREAM_ENTRY_BYTES,
+        "Baseline Stream XDR size {} bytes should be well below MAX_STREAM_ENTRY_BYTES {}",
+        serialized_len,
+        MAX_STREAM_ENTRY_BYTES
+    );
+}
+
+/// Memo-only worst case — only memo populated, no metadata.
+///
+/// Isolates the memo contribution so docs/gas.md can document it separately.
+#[test]
+fn test_stream_entry_xdr_size_memo_only() {
+    use soroban_sdk::xdr::ToXdr;
+
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(0);
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    let sac = StellarAssetClient::new(&env, &token_id);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let admin = Address::generate(&env);
+
+    client.init(&token_id, &admin);
+    sac.mint(&sender, &1_000_000_i128);
+    TokenClient::new(&env, &token_id).approve(&sender, &contract_id, &i128::MAX, &100_000);
+
+    let memo = Bytes::from_slice(&env, &vec![0xFFu8; MAX_MEMO_BYTES]);
+
+    let params = soroban_sdk::vec![
+        &env,
+        CreateStreamParams {
+            recipient: recipient.clone(),
+            deposit_amount: 1_000,
+            rate_per_second: 1,
+            start_time: 0,
+            cliff_time: 0,
+            end_time: 1_000,
+            withdraw_dust_threshold: None,
+            memo: Some(memo),
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        }
+    ];
+
+    let ids = client.create_streams(&sender, &params);
+    let stream_id = ids.get(0).expect("stream created");
+
+    let stream = client.get_stream_state(&stream_id);
+    let xdr_bytes = stream.to_xdr(&env);
+    let serialized_len = xdr_bytes.len() as usize;
+
+    println!(
+        "STREAM_XDR_SIZE: memo_only ({}B memo): {} bytes",
+        MAX_MEMO_BYTES, serialized_len
+    );
+
+    assert!(
+        serialized_len <= MAX_STREAM_ENTRY_BYTES,
+        "Memo-only Stream XDR size {} bytes exceeds ceiling {}",
+        serialized_len,
+        MAX_STREAM_ENTRY_BYTES
+    );
+}
+
+/// Metadata-only worst case — only metadata populated, no memo.
+///
+/// Isolates the metadata contribution so docs/gas.md can document it separately.
+#[test]
+fn test_stream_entry_xdr_size_metadata_only() {
+    use soroban_sdk::xdr::ToXdr;
+
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(0);
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    let sac = StellarAssetClient::new(&env, &token_id);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let admin = Address::generate(&env);
+
+    client.init(&token_id, &admin);
+    sac.mint(&sender, &1_000_000_i128);
+    TokenClient::new(&env, &token_id).approve(&sender, &contract_id, &i128::MAX, &100_000);
+
+    let metadata = worst_case_metadata(&env);
+
+    let params = soroban_sdk::vec![
+        &env,
+        CreateStreamParams {
+            recipient: recipient.clone(),
+            deposit_amount: 1_000,
+            rate_per_second: 1,
+            start_time: 0,
+            cliff_time: 0,
+            end_time: 1_000,
+            withdraw_dust_threshold: None,
+            memo: None,
+            metadata: Some(metadata),
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        }
+    ];
+
+    let ids = client.create_streams(&sender, &params);
+    let stream_id = ids.get(0).expect("stream created");
+
+    let stream = client.get_stream_state(&stream_id);
+    let xdr_bytes = stream.to_xdr(&env);
+    let serialized_len = xdr_bytes.len() as usize;
+
+    println!(
+        "STREAM_XDR_SIZE: metadata_only ({} entries, {}B aggregate): {} bytes",
+        MAX_METADATA_KEYS, MAX_METADATA_BYTES, serialized_len
+    );
+
+    assert!(
+        serialized_len <= MAX_STREAM_ENTRY_BYTES,
+        "Metadata-only Stream XDR size {} bytes exceeds ceiling {}",
+        serialized_len,
+        MAX_STREAM_ENTRY_BYTES
+    );
 }

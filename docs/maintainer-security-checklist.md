@@ -42,6 +42,13 @@ Every entrypoint that moves tokens must follow this strict ordering:
 - [ ] `batch_withdraw` saves each stream individually before its corresponding `push_token`
 - [ ] `top_up_stream` increments `deposit_amount` and calls `save_stream` **before** `pull_token`
 - [ ] Any new entrypoint that moves tokens has a CEI comment in source and is added to the table above
+- [ ] Every token-transfer entrypoint acquires `acquire_reentrancy_lock` before the external call and releases it with `release_reentrancy_lock` after
+- [ ] `acquire_reentrancy_lock` is called **before** any state mutation that precedes a token transfer
+- [ ] `release_reentrancy_lock` is called after every `push_token` / `pull_token` call completes (or deferred via a guard pattern)
+- [ ] `DataKey::ReentrancyLock` is checked before setting; if already `true` the call reverts with `ContractError::InvalidState`
+- [ ] A new entrypoint that moves tokens uses both CEI ordering **and** the explicit reentrancy lock — CEI alone is insufficient defense-in-depth
+
+> **Note from audit cross-reference:** `CEI_ANALYSIS.md` (Issue #262) documents `withdraw`, `withdraw_to`, `batch_withdraw`, `cancel_stream`, and `cancel_stream_as_admin` as wrapped in the reentrancy lock, but the current code only wraps `sweep_excess` and `trigger_auto_claim`. Audit Invariant #13 (Reentrancy Guard) in `docs/audit.md` remains underspecified. See §14 for the open finding.
 
 ---
 
@@ -126,6 +133,16 @@ Cancelled → (terminal)  withdraw still works (drains accrued_at_cancel); no ot
 - [ ] `trigger_auto_claim` rejects `Completed` and `Cancelled` with `InvalidState`
 - [ ] No entrypoint transitions a `Cancelled` stream to `Completed` (cancelled streams stay `Cancelled` even when fully drained)
 - [ ] `is_terminal_state` helper is used consistently — not reimplemented inline
+
+### 3.3 Cancellation fee audit items
+
+The optional cancellation fee (`cancellation_fee_bps > 0`) applies only to the unstreamed refund, never to the recipient's accrued amount. These items come from the auditor checklist in `docs/security.md`.
+
+- [ ] `fee = (refund × fee_bps) / 10000` truncates down (no rounding up)
+- [ ] Accrued calculation is independent of `cancellation_fee_bps` — fee never reduces `calculate_accrued` output
+- [ ] Recipient's `withdraw` receives full accrued amount, not reduced by the fee
+- [ ] Fee is never applied to or deducted from the accrued (recipient) portion
+- [ ] State is persisted before any token transfer involving fee deduction (CEI compliance)
 
 ---
 
@@ -391,47 +408,69 @@ reviewer workflow, see **[`docs/snapshot-security-diff.md`](snapshot-security-di
 
 ---
 
-## 12. Snapshot Security Diff
+## 13. Historical Audit Invariants
 
-Before merging any PR that modifies snapshot files under
-`contracts/stream/test_snapshots/`, run `script/check_snapshot_diff.py` to
-detect security-relevant field changes. The script classifies changes to admin
-addresses, token identity, rate caps, pause state, recipient rotation, nonces,
-and storage key layout against its `SECURITY_FIELDS` registry.
+The invariants below are extracted from `docs/audit.md` and were validated during the
+initial contract audit. Each invariant that resulted in (or was confirmed by) a code
+change is listed here so future reviewers do not miss a category of issue previously
+found in this codebase.
 
-```bash
-# Extract the base version from main
-git show origin/main:contracts/stream/test_snapshots/test/test_NAME.1.json \
-  > /tmp/base.json
+### 13.1 Invariants with checklist coverage (existing items suffice)
 
-# Run the classifier
-python script/check_snapshot_diff.py \
-  --base /tmp/base.json \
-  --head contracts/stream/test_snapshots/test/test_NAME.1.json
-```
+| # | Invariant | Existing coverage |
+|---|---|---|
+| 1 | Accrued never exceeds deposit (`calculate_accrued` clamped) | §7 Arithmetic Safety |
+| 3 | Only the recipient can withdraw | §2 Auth Boundary |
+| 10 | Pause/resume/cancel authorization per role | §2 Auth Boundary |
+| 11 | Status transitions follow the state machine in §3.1 | §3 Terminal State Gating |
 
-### Exit-code contract
+### 13.2 Invariants requiring explicit checklist items
 
-| Code | Meaning |
-|---|---|
-| `0` | No security-relevant changes. Standard review applies. |
-| `1` | Security-relevant changes detected. Mandatory extra review required. |
-| `2` | Usage error — bad path, invalid JSON, or wrong top-level type. |
+- [ ] **#2 — Withdrawn amount never exceeds deposit**: `withdrawn_amount` is only increased by `withdraw`/`withdraw_to`/`batch_withdraw` by the withdrawable amount (accrued − withdrawn), and `Completed` is set exactly when `withdrawn_amount == deposit_amount`; no further withdrawals allowed after terminal state
+- [ ] **#4 — Stream IDs are unique**: IDs are assigned from a monotonically increasing `NextStreamId` counter; no reuse, no gap-fill, no decrement
+- [ ] **#5 — Sender ≠ recipient**: `create_stream` and all creation entrypoints enforce `sender != recipient`; self-streaming is rejected
+- [ ] **#6 — Deposit covers total streamable amount**: `create_stream` enforces `deposit_amount >= rate_per_second × (end_time − start_time)` with `checked_mul`
+- [ ] **#7 — Deposit sufficiency preserved on extension**: `extend_stream_end_time` re-validates `deposit_amount >= rate_per_second × (new_end_time − start_time)` before mutation; caller must `top_up_stream` first if deposit is insufficient
+- [ ] **#8 — Time bounds**: `start_time < end_time` and `cliff_time ∈ [start_time, end_time]` are enforced in every creation entrypoint
+- [ ] **#9 — Init once (authenticated bootstrap)**: `init` panics if `Config` already exists; requires `admin.require_auth()`; token is immutable after init
+- [ ] **#12 — Cancellation timestamp and refund semantics**: `cancelled_at` is set to current ledger time; accrual is frozen at `cancelled_at`; refund = `deposit_amount − accrued_at(cancelled_at)`; `cancel_stream` and `cancel_stream_as_admin` produce identical state/event semantics
+- [ ] **#12 (cancel parity)** — `cancel_stream` and `cancel_stream_as_admin` route through the same `cancel_stream_internal` helper guaranteeing identical external behaviour
+- [ ] **#14 — Contract balance consistency**: Deposit is pulled only in `create_stream`/`create_streams`/`top_up_stream`; refunds and withdrawals are derived from deposits; no minting, no arbitrary transfers
 
-### Checklist
+### 13.3 Resolved audit findings (from `docs/security.md`)
 
-- [ ] `check_snapshot_diff.py` has been run for every changed snapshot file in this PR
-- [ ] The exit code is recorded in the PR description or review comment
-- [ ] If exit code was `1`, all applicable mandatory extra review items from
-  [`docs/snapshot-security-diff.md`](snapshot-security-diff.md) have been completed
-  and documented in the PR thread
+- [ ] **top_up_stream CEI fix**: `top_up_stream` was previously pulling tokens before persisting state (violating CEI). The fix reversed the order — state is now saved before `pull_token`. Verify any new `top_up_stream`-like entrypoint does not repeat this bug.
 
-> **Note:** This tool is **not yet wired into CI**. The companion CI-wiring
-> issue must land before it is enforced automatically. Until then, run it
-> manually for every PR that touches snapshot files.
+---
 
-For the full field classification reference, worked examples, and the complete
-reviewer workflow, see **[`docs/snapshot-security-diff.md`](snapshot-security-diff.md)**.
+## 14. Open Findings Requiring Maintainer Follow-Up
+
+The following audit finding from `docs/audit.md` appears to remain **open / unaddressed**.
+It is flagged here explicitly rather than assumed resolved.
+
+### ⚠️ Invariant #13 — Reentrancy Guard (underspecified)
+
+**Location:** `docs/audit.md` lines 182–183
+
+**Status:** `docs/audit.md` lists "Reentrancy Guard" as Invariant #13 but provides **no
+description, no checks, and no requirements**. The body is blank.
+
+**Current state of reentrancy protection:**
+- A custom reentrancy lock (`DataKey::ReentrancyLock`) exists in storage and is used
+  by only **2** of the 7+ token-transfer entrypoints (`sweep_excess`, `trigger_auto_claim`).
+- The remaining entrypoints (`withdraw`, `withdraw_to`, `batch_withdraw`, `cancel_stream`,
+  `cancel_stream_as_admin`, `shorten_stream_end_time`, `delegated_withdraw`) rely solely
+  on CEI ordering — no explicit lock is acquired.
+- `CEI_ANALYSIS.md` (Issue #262) claims that `withdraw`, `withdraw_to`, `batch_withdraw`,
+  `cancel_stream`, and `cancel_stream_as_admin` are wrapped in the reentrancy lock, but
+  **the current code does not reflect this**.
+
+**Required follow-up:**
+1. Specify the requirements for Invariant #13 in `docs/audit.md` (which entrypoints must
+   hold the lock, under what conditions, and what guarantees for CEI-only paths).
+2. Resolve the discrepancy between `CEI_ANALYSIS.md` claims and actual code coverage.
+3. Decide whether to extend the explicit lock to all token-transfer entrypoints for
+   defense-in-depth, or document CEI-only as the accepted posture.
 
 ---
 

@@ -4,6 +4,8 @@ Contract storage architecture, key design, TTL policies, and `DataKey` evolution
 
 **Source of truth:** `contracts/stream/src/lib.rs` (`DataKey` enum, TTL constants, storage helpers)
 
+> **Canonical discriminant reference:** For the frozen discriminant table (variants 0–14) and the full ABI stability contract, see [ABI_STABILITY.md § 2.4](./ABI_STABILITY.md#24-storage-key-discriminants). The table below tracks all variants including post-freeze additions; always cross-check against both this file and `ABI_STABILITY.md` when adding new variants.
+
 ---
 
 ## 1. DataKey Enum
@@ -42,6 +44,13 @@ pub enum DataKey {
     LastAccrualLedgerTimestamp,
     PausedStreamCount,
     TotalKeeperFeesPaid,
+    AutoRenewEnabled(u64),
+    MaxLookbackLedgers(u64),
+    SenderStreams(Address),
+    PendingStreamOffer(u64),
+    RecipientPendingOffers(Address),
+    PooledStreamShares(u64),
+    PooledStreamWithdrawn(u64, Address),
 }
 ```
 
@@ -78,6 +87,13 @@ pub enum DataKey {
 | 26 | `LastAccrualLedgerTimestamp` | Instance | `u64` | `current_accrual_timestamp` | `current_accrual_timestamp` |
 | 27 | `PausedStreamCount` | Instance | `u64` | `pause_stream`, `pause_stream_as_admin` | `resume_stream`, `cancel_stream`, `close_completed_stream` |
 | 28 | `TotalKeeperFeesPaid` | Instance | `i128` | `init` | `keeper_cancel` |
+| 29 | `AutoRenewEnabled(u64)` | Persistent | `bool` | sender opt-in | sender revoke |
+| 30 | `MaxLookbackLedgers(u64)` | Persistent | `u32` | `create_stream_with_lookback` | — |
+| 31 | `SenderStreams(Address)` | Persistent | `Vec<u64>` (sorted) | `create_stream`, `create_streams` | `close_completed_stream`, `close_cancelled_stream` (removes entry) |
+| 32 | `PendingStreamOffer(u64)` | Persistent | `StreamOffer` | `create_stream_offer` | accept/reject/cancel (removes) |
+| 33 | `RecipientPendingOffers(Address)` | Persistent | `Vec<u64>` | `create_stream_offer` | accept/reject/cancel (removes) |
+| 34 | `PooledStreamShares(u64)` | Persistent | `Vec<(Address,u32)>` | pooled stream creation | withdraw / close |
+| 35 | `PooledStreamWithdrawn(u64, Address)` | Persistent | `i128` | pooled withdraw | pooled withdraw (increments) |
 
 ---
 
@@ -307,9 +323,26 @@ V6 `Stream` struct adds one field at the end:
 | -------: | :----- | :-------------- | :--------------------------------------------------------------------- |
 |       14 | `memo` | `Option<Bytes>` | Optional indexer correlation memo (max 64 bytes); `None` in V5 entries |
 
+### V6 → V7 transition
+
+V7 appended eight new `DataKey` variants (discriminants 21–28) while preserving all prior discriminants 0–20:
+
+| Discriminant | Variant | Storage type | Value type | Notes |
+|---|---|---|---|---|
+| 21 | `IdReservation(Address)` | Persistent | `IdReservation` | Active caller ID reservation |
+| 22 | `MaxRatePerSecond` | Instance | `i128` | Per-stream max rate cap |
+| 23 | `DelegatedWithdrawNonce(Address)` | Persistent | `u64` | Per-recipient delegated withdraw nonce |
+| 24 | `LastPauseRecord(PauseKind)` | Instance | `PauseRecord` | Last pause record for stream or protocol pause |
+| 25 | `RotationHistory(u64)` | Persistent | `Vec<RotationEntry>` | Recipient/sender rotation audit trail |
+| 26 | `LastAccrualLedgerTimestamp` | Instance | `u64` | Last ledger timestamp for accrual clock regression detection |
+| 27 | `PausedStreamCount` | Instance | `u64` | Protocol-wide count of streams currently in `StreamStatus::Paused` |
+| 28 | `TotalKeeperFeesPaid` | Instance | `i128` | Aggregate keeper fees paid via `keeper_cancel` |
+
+Code-level invariant verification for all 36 variants is maintained in [`contracts/stream/src/checksum.rs`](../contracts/stream/src/checksum.rs).
+
 ### Forward-compatibility guarantee
 
-All V5 persistent `Stream` entries remain decodable on a V6 instance. Soroban XDR struct decoding is **positional and forward-compatible**: a V6 decoder reading a V5-encoded struct decodes the first 14 fields correctly and treats the absent 15th field as `None` (for `Option<Bytes>`).
+All V5 persistent `Stream` entries remain decodable on a V6/V7 instance. Soroban XDR struct decoding is **positional and forward-compatible**: a V6/V7 decoder reading a V5-encoded struct decodes the first 14 fields correctly and treats the absent 15th field as `None` (for `Option<Bytes>`).
 
 This guarantee holds **only** because:
 
@@ -354,19 +387,20 @@ The file `contracts/stream/tests/storage_key_compat.rs` encodes these invariants
 
 ---
 
-## 9. ID Reservation Asymmetry
+## 9. ID Reservation Reclamation
 
-The contract maintains two entrypoints for releasing reservations, with asymmetric counter behaviors:
+Both reservation release entrypoints now share a unified reclamation helper (`release_reservation`) that reclaims tip-adjacent unused IDs:
 
 ### `release_id_reservation` (Voluntary)
 - **Action**: Immediate, voluntary release of an active reservation by its owner.
-- **Counter Behavior**: Never rewinds `NextStreamId`. Released IDs are permanently skipped and will not be reused by subsequent `create_stream` calls, even if the reservation was tip-adjacent and fully unconsumed. This guarantees that once a reservation is made, its ID space is exclusively burned if surrendered voluntarily.
+- **Counter Behavior**: If the reservation is **tip-adjacent** (its allocated range ends exactly at the current `NextStreamId`) and **fully or partially unconsumed**, `NextStreamId` is rewound to the first unconsumed ID. If IDs beyond the reservation range were consumed (non-tip-adjacent), the reservation record is simply removed with no counter rewind.
 
 ### `reclaim_expired_id_reservation` (Post-Expiry)
 - **Action**: Permissionless reclamation of a reservation that has passed its `expiry` timestamp.
-- **Counter Behavior**: If the expired reservation is **tip-adjacent** (its allocated range ends exactly at the current `NextStreamId`) and **fully unconsumed**, reclaiming it will rewind `NextStreamId` to the start of the reservation. This ensures that abandoned or lost reservations at the counter tip do not permanently waste ID space.
+- **Counter Behavior**: Same as `release_id_reservation` — if the expired reservation is **tip-adjacent** and **unconsumed**, `NextStreamId` is rewound to the first unconsumed ID.
 
 ### Security Assumptions (NatSpec / Doc-comment style)
 - **Pre-expiry rejection**: Blocks denial-of-service (DoS) or front-running attacks where an attacker reclaims a user's reservation before they can publish their streams.
 - **At-expiry & post-expiry success**: Ensures that if a holder abandons or loses access to their reservation, the counter space/storage is not permanently locked, maintaining contract liveness.
-- **Voluntary Release Asymmetry**: `release_id_reservation` does not rewind `NextStreamId` to prevent complex re-orgs if off-chain systems assumed those IDs were consumed or burned.
+- **Tip-adjacent guard**: Counter rewind only occurs when `reservation_end == current_count`, meaning no streams exist beyond the reserved range. This prevents unsafe rewinds that would create ID collisions with already-created streams.
+- **Consistent event shape**: Both paths emit the `res_rel` event with `(start_id, count, consumed, reclaimed)`, ensuring consistent indexer accounting regardless of which release path triggered the reclamation.

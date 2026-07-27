@@ -5,7 +5,19 @@ import subprocess
 import tempfile
 import pytest
 from unittest.mock import patch
-from script.validate_gas import extract_baselines, parse_measurements, main
+from script.validate_gas import build_cargo_test_env, extract_baselines, parse_measurements, main
+
+
+class TestBuildCargoTestEnv:
+    def test_prepends_cargo_bin(self, monkeypatch):
+        monkeypatch.setenv("HOME", "/home/ci")
+        monkeypatch.setenv("PATH", "/bin")
+        assert build_cargo_test_env()["PATH"] == "/home/ci/.cargo/bin:/bin"
+
+    def test_missing_home_raises(self, monkeypatch):
+        monkeypatch.delenv("HOME", raising=False)
+        with pytest.raises(RuntimeError, match="HOME is not set"):
+            build_cargo_test_env()
 
 
 class TestExtractBaselines:
@@ -231,3 +243,472 @@ class TestCheckWasmSizeScript:
             capture_output=True, text=True, env=env,
         )
         assert result.returncode == 1
+
+
+# ---------------------------------------------------------------------------
+# WASM size delta reporting tests — exercise delta logic in check-wasm-size.sh
+# ---------------------------------------------------------------------------
+
+
+def _init_git_repo(directory: str) -> None:
+    """Initialize a git repo and configure user for commits."""
+    subprocess.run(["git", "init"], cwd=directory, capture_output=True, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=directory, capture_output=True, check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=directory, capture_output=True, check=True,
+    )
+
+
+def _git_commit(directory: str, message: str) -> None:
+    """Stage all and commit."""
+    subprocess.run(["git", "add", "-A"], cwd=directory, capture_output=True, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", message, "--allow-empty"],
+        cwd=directory, capture_output=True, check=True,
+    )
+
+
+def _git_tag(directory: str, tag: str) -> None:
+    """Create an annotated tag."""
+    subprocess.run(
+        ["git", "tag", "-a", tag, "-m", f"Release {tag}"],
+        cwd=directory, capture_output=True, check=True,
+    )
+
+
+class TestWasmSizeDeltaReporting:
+    """Tests for per-PR WASM size delta reporting in check-wasm-size.sh."""
+
+    def _invoke(
+        self, wasm_dir: str, git_dir: str, optimized: bool = False,
+        github_actions: str = "",
+    ) -> subprocess.CompletedProcess:
+        args = ["--optimized"] if optimized else []
+        env = {
+            **os.environ,
+            "GITHUB_STEP_SUMMARY": "",
+            "WASM_DIR": wasm_dir,
+            "GIT_REPO": git_dir,
+        }
+        if github_actions:
+            env["GITHUB_ACTIONS"] = github_actions
+        return subprocess.run(
+            ["bash", SCRIPT] + args,
+            capture_output=True, text=True, env=env,
+            cwd=git_dir,
+        )
+
+    def test_delta_positive_growth(self, tmp_path):
+        """Positive delta (bloat) is reported when WASM grew since last tag."""
+        # Create a git repo with a tagged release containing smaller WASM.
+        git_dir = str(tmp_path / "repo")
+        os.makedirs(git_dir)
+        _init_git_repo(git_dir)
+
+        # Create initial commit and tag with smaller WASM files.
+        wasm_dir = os.path.join(git_dir, "target", "wasm32-unknown-unknown", "release")
+        os.makedirs(wasm_dir)
+        for contract, size in [
+            ("fluxora_stream", 200000),
+            ("fluxora_factory", 100000),
+            ("fluxora_governance", 100000),
+        ]:
+            _make_wasm(wasm_dir, f"{contract}.wasm", size)
+        _git_commit(git_dir, "baseline")
+        _git_tag(git_dir, "v1.0.0")
+
+        # Now create larger WASM files (simulate PR bloat).
+        for contract, size in [
+            ("fluxora_stream", 210000),   # +10000 bytes
+            ("fluxora_factory", 105000),  # +5000 bytes
+            ("fluxora_governance", 102000),  # +2000 bytes
+        ]:
+            _make_wasm(wasm_dir, f"{contract}.wasm", size)
+        _git_commit(git_dir, "feature: add bloat")
+
+        result = self._invoke(wasm_dir, git_dir)
+        assert result.returncode == 0
+        assert "Previous release tag: v1.0.0" in result.stdout
+        assert "+10000 bytes" in result.stdout or "+9.8 KiB" in result.stdout
+        assert "+5000 bytes" in result.stdout or "+4.9 KiB" in result.stdout
+
+    def test_delta_negative_shrink(self, tmp_path):
+        """Negative delta (shrink) is reported when WASM shrunk since last tag."""
+        git_dir = str(tmp_path / "repo")
+        os.makedirs(git_dir)
+        _init_git_repo(git_dir)
+
+        wasm_dir = os.path.join(git_dir, "target", "wasm32-unknown-unknown", "release")
+        os.makedirs(wasm_dir)
+        for contract, size in [
+            ("fluxora_stream", 250000),
+            ("fluxora_factory", 120000),
+            ("fluxora_governance", 120000),
+        ]:
+            _make_wasm(wasm_dir, f"{contract}.wasm", size)
+        _git_commit(git_dir, "baseline")
+        _git_tag(git_dir, "v2.0.0")
+
+        # Now create smaller WASM files (simulate optimization).
+        for contract, size in [
+            ("fluxora_stream", 240000),   # -10000 bytes
+            ("fluxora_factory", 115000),  # -5000 bytes
+            ("fluxora_governance", 118000),  # -2000 bytes
+        ]:
+            _make_wasm(wasm_dir, f"{contract}.wasm", size)
+        _git_commit(git_dir, "refactor: optimize")
+
+        result = self._invoke(wasm_dir, git_dir)
+        assert result.returncode == 0
+        assert "Previous release tag: v2.0.0" in result.stdout
+        assert "-10000 bytes" in result.stdout or "-9.8 KiB" in result.stdout
+
+    def test_delta_no_change(self, tmp_path):
+        """Zero delta is reported when WASM is unchanged since last tag."""
+        git_dir = str(tmp_path / "repo")
+        os.makedirs(git_dir)
+        _init_git_repo(git_dir)
+
+        wasm_dir = os.path.join(git_dir, "target", "wasm32-unknown-unknown", "release")
+        os.makedirs(wasm_dir)
+        for contract, size in [
+            ("fluxora_stream", 200000),
+            ("fluxora_factory", 100000),
+            ("fluxora_governance", 100000),
+        ]:
+            _make_wasm(wasm_dir, f"{contract}.wasm", size)
+        _git_commit(git_dir, "baseline")
+        _git_tag(git_dir, "v3.0.0")
+
+        # Create identical WASM files (no change).
+        for contract, size in [
+            ("fluxora_stream", 200000),
+            ("fluxora_factory", 100000),
+            ("fluxora_governance", 100000),
+        ]:
+            _make_wasm(wasm_dir, f"{contract}.wasm", size)
+        _git_commit(git_dir, "chore: no-op")
+
+        result = self._invoke(wasm_dir, git_dir)
+        assert result.returncode == 0
+        assert "no change" in result.stdout
+
+    def test_no_previous_tag(self, tmp_path):
+        """Graceful handling when no release tag exists."""
+        git_dir = str(tmp_path / "repo")
+        os.makedirs(git_dir)
+        _init_git_repo(git_dir)
+
+        wasm_dir = os.path.join(git_dir, "target", "wasm32-unknown-unknown", "release")
+        os.makedirs(wasm_dir)
+        for contract, budget in [
+            ("fluxora_stream", 262144),
+            ("fluxora_factory", 131072),
+            ("fluxora_governance", 131072),
+        ]:
+            _make_wasm(wasm_dir, f"{contract}.wasm", budget - 1)
+        _git_commit(git_dir, "initial")
+
+        result = self._invoke(wasm_dir, git_dir)
+        assert result.returncode == 0
+        assert "No previous release tag found" in result.stdout
+
+    def test_previous_tag_no_baseline(self, tmp_path):
+        """Graceful handling when previous tag doesn't have WASM file."""
+        git_dir = str(tmp_path / "repo")
+        os.makedirs(git_dir)
+        _init_git_repo(git_dir)
+
+        wasm_dir = os.path.join(git_dir, "target", "wasm32-unknown-unknown", "release")
+        os.makedirs(wasm_dir)
+
+        # Create a commit with only a README (no WASM files).
+        with open(os.path.join(git_dir, "README.md"), "w") as f:
+            f.write("# Test\n")
+        _git_commit(git_dir, "initial")
+        _git_tag(git_dir, "v0.1.0")
+
+        # Now create WASM files for current build.
+        for contract, budget in [
+            ("fluxora_stream", 262144),
+            ("fluxora_factory", 131072),
+            ("fluxora_governance", 131072),
+        ]:
+            _make_wasm(wasm_dir, f"{contract}.wasm", budget - 1)
+        _git_commit(git_dir, "add wasm")
+
+        result = self._invoke(wasm_dir, git_dir)
+        assert result.returncode == 0
+        assert "baseline not available" in result.stdout
+
+    def test_ci_annotations_positive_delta(self, tmp_path):
+        """CI annotations are emitted for positive delta in GitHub Actions."""
+        git_dir = str(tmp_path / "repo")
+        os.makedirs(git_dir)
+        _init_git_repo(git_dir)
+
+        wasm_dir = os.path.join(git_dir, "target", "wasm32-unknown-unknown", "release")
+        os.makedirs(wasm_dir)
+        for contract, size in [
+            ("fluxora_stream", 200000),
+            ("fluxora_factory", 100000),
+            ("fluxora_governance", 100000),
+        ]:
+            _make_wasm(wasm_dir, f"{contract}.wasm", size)
+        _git_commit(git_dir, "baseline")
+        _git_tag(git_dir, "v1.0.0")
+
+        for contract, size in [
+            ("fluxora_stream", 210000),
+            ("fluxora_factory", 105000),
+            ("fluxora_governance", 102000),
+        ]:
+            _make_wasm(wasm_dir, f"{contract}.wasm", size)
+        _git_commit(git_dir, "bloat")
+
+        result = self._invoke(wasm_dir, git_dir, github_actions="true")
+        assert result.returncode == 0
+        assert "::warning::" in result.stdout
+
+    def test_ci_annotations_negative_delta(self, tmp_path):
+        """CI notice annotations are emitted for negative delta."""
+        git_dir = str(tmp_path / "repo")
+        os.makedirs(git_dir)
+        _init_git_repo(git_dir)
+
+        wasm_dir = os.path.join(git_dir, "target", "wasm32-unknown-unknown", "release")
+        os.makedirs(wasm_dir)
+        for contract, size in [
+            ("fluxora_stream", 250000),
+            ("fluxora_factory", 120000),
+            ("fluxora_governance", 120000),
+        ]:
+            _make_wasm(wasm_dir, f"{contract}.wasm", size)
+        _git_commit(git_dir, "baseline")
+        _git_tag(git_dir, "v1.0.0")
+
+        for contract, size in [
+            ("fluxora_stream", 240000),
+            ("fluxora_factory", 115000),
+            ("fluxora_governance", 118000),
+        ]:
+            _make_wasm(wasm_dir, f"{contract}.wasm", size)
+        _git_commit(git_dir, "optimize")
+
+        result = self._invoke(wasm_dir, git_dir, github_actions="true")
+        assert result.returncode == 0
+        assert "::notice::" in result.stdout
+
+    def test_step_summary_includes_delta_table(self, tmp_path):
+        """Step summary includes the delta table when baseline is available."""
+        git_dir = str(tmp_path / "repo")
+        os.makedirs(git_dir)
+        _init_git_repo(git_dir)
+
+        wasm_dir = os.path.join(git_dir, "target", "wasm32-unknown-unknown", "release")
+        os.makedirs(wasm_dir)
+        for contract, size in [
+            ("fluxora_stream", 200000),
+            ("fluxora_factory", 100000),
+            ("fluxora_governance", 100000),
+        ]:
+            _make_wasm(wasm_dir, f"{contract}.wasm", size)
+        _git_commit(git_dir, "baseline")
+        _git_tag(git_dir, "v1.0.0")
+
+        for contract, size in [
+            ("fluxora_stream", 210000),
+            ("fluxora_factory", 105000),
+            ("fluxora_governance", 102000),
+        ]:
+            _make_wasm(wasm_dir, f"{contract}.wasm", size)
+        _git_commit(git_dir, "bloat")
+
+        summary_file = os.path.join(git_dir, "summary.md")
+        env = {
+            **os.environ,
+            "GITHUB_STEP_SUMMARY": summary_file,
+            "WASM_DIR": wasm_dir,
+            "GIT_REPO": git_dir,
+        }
+        subprocess.run(
+            ["bash", SCRIPT],
+            capture_output=True, text=True, env=env, cwd=git_dir,
+        )
+
+        assert os.path.exists(summary_file)
+        with open(summary_file) as f:
+            content = f.read()
+        assert "WASM Size Delta" in content
+        assert "v1.0.0" in content
+
+    def test_step_summary_no_delta_without_tag(self, tmp_path):
+        """Step summary omits delta table when no release tag exists."""
+        git_dir = str(tmp_path / "repo")
+        os.makedirs(git_dir)
+        _init_git_repo(git_dir)
+
+        wasm_dir = os.path.join(git_dir, "target", "wasm32-unknown-unknown", "release")
+        os.makedirs(wasm_dir)
+        for contract, budget in [
+            ("fluxora_stream", 262144),
+            ("fluxora_factory", 131072),
+            ("fluxora_governance", 131072),
+        ]:
+            _make_wasm(wasm_dir, f"{contract}.wasm", budget - 1)
+        _git_commit(git_dir, "initial")
+
+        summary_file = os.path.join(git_dir, "summary.md")
+        env = {
+            **os.environ,
+            "GITHUB_STEP_SUMMARY": summary_file,
+            "WASM_DIR": wasm_dir,
+            "GIT_REPO": git_dir,
+        }
+        subprocess.run(
+            ["bash", SCRIPT],
+            capture_output=True, text=True, env=env, cwd=git_dir,
+        )
+
+        assert os.path.exists(summary_file)
+        with open(summary_file) as f:
+            content = f.read()
+        assert "WASM Size Delta" not in content
+
+    def test_optimized_delta_uses_optimized_files(self, tmp_path):
+        """--optimized flag compares optimized WASM files for delta."""
+        git_dir = str(tmp_path / "repo")
+        os.makedirs(git_dir)
+        _init_git_repo(git_dir)
+
+        wasm_dir = os.path.join(git_dir, "target", "wasm32-unknown-unknown", "release")
+        os.makedirs(wasm_dir)
+        for contract, size in [
+            ("fluxora_stream", 180000),
+            ("fluxora_factory", 90000),
+            ("fluxora_governance", 90000),
+        ]:
+            _make_wasm(wasm_dir, f"{contract}.optimized.wasm", size)
+        _git_commit(git_dir, "baseline")
+        _git_tag(git_dir, "v1.0.0")
+
+        for contract, size in [
+            ("fluxora_stream", 190000),
+            ("fluxora_factory", 95000),
+            ("fluxora_governance", 92000),
+        ]:
+            _make_wasm(wasm_dir, f"{contract}.optimized.wasm", size)
+        _git_commit(git_dir, "optimized bloat")
+
+        result = self._invoke(wasm_dir, git_dir, optimized=True)
+        assert result.returncode == 0
+        assert "Previous release tag: v1.0.0" in result.stdout
+        assert "+10000 bytes" in result.stdout or "+9.8 KiB" in result.stdout
+
+    def test_over_budget_still_reports_delta(self, tmp_path):
+        """Delta is reported even when contract exceeds budget."""
+        git_dir = str(tmp_path / "repo")
+        os.makedirs(git_dir)
+        _init_git_repo(git_dir)
+
+        wasm_dir = os.path.join(git_dir, "target", "wasm32-unknown-unknown", "release")
+        os.makedirs(wasm_dir)
+        for contract, size in [
+            ("fluxora_stream", 200000),
+            ("fluxora_factory", 100000),
+            ("fluxora_governance", 100000),
+        ]:
+            _make_wasm(wasm_dir, f"{contract}.wasm", size)
+        _git_commit(git_dir, "baseline")
+        _git_tag(git_dir, "v1.0.0")
+
+        # Stream exceeds budget.
+        for contract, size in [
+            ("fluxora_stream", 262145),
+            ("fluxora_factory", 105000),
+            ("fluxora_governance", 102000),
+        ]:
+            _make_wasm(wasm_dir, f"{contract}.wasm", size)
+        _git_commit(git_dir, "over budget")
+
+        result = self._invoke(wasm_dir, git_dir)
+        assert result.returncode == 1
+        # Delta should still be reported even though budget failed.
+        assert "vs v1.0.0" in result.stdout
+
+    def test_multiple_tags_uses_latest(self, tmp_path):
+        """Delta is computed against the most recent release tag."""
+        git_dir = str(tmp_path / "repo")
+        os.makedirs(git_dir)
+        _init_git_repo(git_dir)
+
+        wasm_dir = os.path.join(git_dir, "target", "wasm32-unknown-unknown", "release")
+        os.makedirs(wasm_dir)
+
+        # Create first tag with small WASM.
+        for contract, size in [
+            ("fluxora_stream", 100000),
+            ("fluxora_factory", 50000),
+            ("fluxora_governance", 50000),
+        ]:
+            _make_wasm(wasm_dir, f"{contract}.wasm", size)
+        _git_commit(git_dir, "v1")
+        _git_tag(git_dir, "v1.0.0")
+
+        # Create second tag with medium WASM.
+        for contract, size in [
+            ("fluxora_stream", 150000),
+            ("fluxora_factory", 75000),
+            ("fluxora_governance", 75000),
+        ]:
+            _make_wasm(wasm_dir, f"{contract}.wasm", size)
+        _git_commit(git_dir, "v2")
+        _git_tag(git_dir, "v2.0.0")
+
+        # Current build has larger WASM than v2.0.0.
+        for contract, size in [
+            ("fluxora_stream", 160000),
+            ("fluxora_factory", 80000),
+            ("fluxora_governance", 80000),
+        ]:
+            _make_wasm(wasm_dir, f"{contract}.wasm", size)
+        _git_commit(git_dir, "current")
+
+        result = self._invoke(wasm_dir, git_dir)
+        assert result.returncode == 0
+        # Should compare against v2.0.0, not v1.0.0.
+        assert "Previous release tag: v2.0.0" in result.stdout
+        # Delta should be +10000 from v2.0.0, not +60000 from v1.0.0.
+        assert "+10000 bytes" in result.stdout or "+9.8 KiB" in result.stdout
+
+    def test_missing_artifact_with_delta(self, tmp_path):
+        """Missing artifact shows error in output and delta for other contracts."""
+        git_dir = str(tmp_path / "repo")
+        os.makedirs(git_dir)
+        _init_git_repo(git_dir)
+
+        wasm_dir = os.path.join(git_dir, "target", "wasm32-unknown-unknown", "release")
+        os.makedirs(wasm_dir)
+        for contract, size in [
+            ("fluxora_stream", 200000),
+            ("fluxora_factory", 100000),
+            ("fluxora_governance", 100000),
+        ]:
+            _make_wasm(wasm_dir, f"{contract}.wasm", size)
+        _git_commit(git_dir, "baseline")
+        _git_tag(git_dir, "v1.0.0")
+
+        # Remove governance WASM.
+        os.remove(os.path.join(wasm_dir, "fluxora_governance.wasm"))
+        _git_commit(git_dir, "remove governance")
+
+        result = self._invoke(wasm_dir, git_dir)
+        assert result.returncode == 1
+        # Error should mention the missing artifact.
+        assert "not found" in result.stderr or "Artifact not found" in result.stderr
+        # Delta for present contracts should still be reported.
+        assert "vs v1.0.0" in result.stdout
