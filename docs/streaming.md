@@ -16,9 +16,9 @@ When changing the contract:
 - Update snapshot tests if externally visible behavior changes
 - No behavior change required for doc-only updates
 
-**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `close_cancelled_stream`, `close_completed_stream`, `compute_keeper_fee_split`, `create_stream_with_lookback`, `delete_stream_template`, `get_auto_renew`, `get_global_emergency_paused`, `get_lookback_window`, `get_paused_stream_count`, `get_pending_recipient_update`, `get_protocol_fees_accrued`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `get_total_liabilities`, `global_resume`, `keeper_cancel`, `renew_stream`, `set_auto_renew`, `set_contract_paused`, `set_global_emergency_paused`, `set_lookback_window`, `version`, `migration_v5_to_v6`, `set_max_rate_per_second`.
-**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `delete_stream_template`, `get_auto_renew`, `get_global_emergency_paused`, `get_keeper_fee_split`, `get_pending_recipient_update`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `get_total_liabilities`, `global_resume`, `keeper_cancel`, `renew_stream`, `set_auto_renew`, `set_contract_paused`, `set_global_emergency_paused`, `version`, `migration_v5_to_v6`, `set_max_rate_per_second`.
-**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `close_cancelled_stream`, `close_completed_stream`, `compute_keeper_fee_split`, `delete_stream_template`, `get_auto_renew`, `get_global_emergency_paused`, `get_keeper_fee_split`, `get_paused_stream_count`, `get_pending_recipient_update`, `get_protocol_fees_accrued`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `get_total_liabilities`, `global_resume`, `keeper_cancel`, `migration_v5_to_v6`, `renew_stream`, `set_auto_renew`, `set_contract_paused`, `set_global_emergency_paused`, `set_max_rate_per_second`, `version`.
+**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `close_cancelled_stream`, `close_completed_stream`, `compute_keeper_fee_split`, `create_stream_with_lookback`, `delete_stream_template`, `get_auto_renew`, `get_global_emergency_paused`, `get_lookback_window`, `get_paused_stream_count`, `get_pending_recipient_update`, `get_protocol_fees_accrued`, `get_recipient_stream_count`, `get_sender_portfolio_health`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `get_total_liabilities`, `global_resume`, `keeper_cancel`, `renew_stream`, `set_auto_renew`, `set_contract_paused`, `set_global_emergency_paused`, `set_lookback_window`, `version`, `migration_v5_to_v6`, `set_max_rate_per_second`.
+**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `delete_stream_template`, `get_auto_renew`, `get_global_emergency_paused`, `get_keeper_fee_split`, `get_pending_recipient_update`, `get_recipient_stream_count`, `get_sender_portfolio_health`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `get_total_liabilities`, `global_resume`, `keeper_cancel`, `renew_stream`, `set_auto_renew`, `set_contract_paused`, `set_global_emergency_paused`, `version`, `migration_v5_to_v6`, `set_max_rate_per_second`.
+**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `close_cancelled_stream`, `close_completed_stream`, `compute_keeper_fee_split`, `delete_stream_template`, `get_auto_renew`, `get_global_emergency_paused`, `get_keeper_fee_split`, `get_paused_stream_count`, `get_pending_recipient_update`, `get_protocol_fees_accrued`, `get_recipient_stream_count`, `get_sender_portfolio_health`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `get_total_liabilities`, `global_resume`, `keeper_cancel`, `migration_v5_to_v6`, `renew_stream`, `set_auto_renew`, `set_contract_paused`, `set_global_emergency_paused`, `set_max_rate_per_second`, `version`.
 
 ## Externally Visible Assurances
 
@@ -32,58 +32,59 @@ No hidden rules or implementation details are required to understand protocol be
 
 ### Per-stream metadata (TLV extension, CONTRACT_VERSION 4)
 
+> **Full reference:** [metadata-extension.md](./metadata-extension.md) — bounds table,
+> validation order, compatibility matrix, upgrade notes, and regression commands.
+
 From **CONTRACT_VERSION 4**, every stream may carry an optional bounded key-value map
 (`metadata: Option<Map<Bytes, Bytes>>`) for rich integration data such as invoice IDs,
 project codes, and external reference URIs.
 
-#### API
+#### API Entrypoints & Types
 
-| Entrypoint                       | Description                                                         |
-|----------------------------------|---------------------------------------------------------------------|
-| `create_stream(…, metadata)`     | Pass `Some(map)` to attach metadata at creation, or `None` to omit. |
-| `get_stream_metadata(stream_id)` | Returns `Option<Map<Bytes, Bytes>>`. Permissionless read.           |
-
-Metadata is also propagated through `create_streams`, `create_streams_relative`,
-`create_streams_partial`, and `create_stream_from_template` via the `metadata` field on
-`CreateStreamParams` / `CreateStreamRelativeParams`.
-
-#### Bounds (enforced at `create_stream` time — `ContractError::MetadataTooLarge` on violation)
-
-| Bound                                       | Constant                   | Value |
-|---------------------------------------------|----------------------------|-------|
-| Maximum key-value pair count                | `MAX_METADATA_KEYS`        | 8     |
-| Maximum aggregate (all keys + values) bytes | `MAX_METADATA_BYTES`       | 512   |
-| Maximum single key length                   | `MAX_METADATA_KEY_BYTES`   | 32    |
-| Maximum single value length                 | `MAX_METADATA_VALUE_BYTES` | 128   |
-
-#### Invariants
-
-- Validated entirely at creation time; **immutable post-creation**.
-- Stream ID is **not allocated** if metadata validation fails (no partial state written).
-- No token movement occurs if metadata validation fails.
-- `StreamCreated` event includes the `metadata` field for indexer consumption.
-
-#### Compatibility rules (which operations preserve metadata)
-
-Metadata is written once at stream creation and **never mutated** by any subsequent
-operation. The table below documents which entry-points preserve the metadata map
-and which are unaffected (metadata is not read or written):
-
-| Operation | Metadata behavior |
+| Entrypoint / Struct | Description |
 |---|---|
-| `pause_stream` / `resume_stream` | Unchanged — metadata is not read or written. |
-| `cancel_stream` | Unchanged — metadata persists in storage for post-terminal queries. |
-| `withdraw` / `batch_withdraw` | Unchanged — withdrawal only touches `withdrawn_amount`. |
-| `top_up_stream` | Unchanged — only `deposit_amount` is modified. |
-| `update_rate_per_second` / `decrease_rate_per_second` | Unchanged — rate fields are modified; metadata is untouched. |
-| `extend_stream_end_time` | Unchanged — `end_time` and `deposit_amount` are modified. |
-| `transfer_sender` | Unchanged — only the `sender` field is rotated. |
-| `update_recipient` | Unchanged — only the `recipient` field is rotated. |
-| `delegate_recipient_share` | Unchanged — delegation splits the rate, not metadata. |
-| `clone_stream` | **Inherited** — the cloned stream receives `source.metadata.clone()`. |
-| `create_stream_from_template` | **Passed through** — caller-supplied metadata is validated and stored. |
-| `create_stream_offer` / `accept_stream_offer` | **Inherited** — `create_stream_offer` validates metadata, and `accept_stream_offer` transfers `offer.metadata` into `Stream.metadata`. |
-| `Contract Upgrade (V5 -> V6+)` | **Backward Compatible** — legacy V5 streams without metadata decode to `metadata: None` cleanly; `None` and `Some(empty_map)` remain distinct and deterministic. |
+| `create_stream(…, metadata)` | Pass `Some(map)` to attach metadata at creation, or `None` to omit. |
+| `get_stream_metadata(stream_id)` | Permissionless read: returns `Option<Map<Bytes, Bytes>>`. Returns `ContractError::StreamNotFound` for invalid IDs. |
+| `CreateStreamParams.metadata` | Field on batch entrypoint params struct (`create_streams`, `create_streams_partial`). |
+| `CreateStreamRelativeParams.metadata` | Field on relative batch entrypoint params struct (`create_streams_relative`). |
+| `create_stream_from_template(…, metadata)` | Attaches caller-supplied metadata when instantiating a schedule template. |
+| `StreamCreated.metadata` | Emitted in the `StreamCreated` event for off-chain indexer consumption. |
+
+#### Size Bounds & Validation Fail-Fast Rules
+
+Validation is executed via `validate_metadata()` at creation time before any state or counter mutation. Any violation immediately reverts the call with `ContractError::MetadataTooLarge` (code 32).
+
+| Bound | Constant | Value | Enforcement Rule |
+|---|---|---|---|
+| Maximum key-value pair count | `MAX_METADATA_KEYS` | 8 | `metadata.len() <= 8` |
+| Maximum single key length | `MAX_METADATA_KEY_BYTES` | 32 | `key.len() <= 32` |
+| Maximum single value length | `MAX_METADATA_VALUE_BYTES` | 128 | `value.len() <= 128` |
+| Maximum aggregate byte size | `MAX_METADATA_BYTES` | 512 | `sum(key.len() + val.len()) <= 512` |
+
+##### Fail-Fast & Validation Sequence
+1. Check key count: `metadata.len() <= 8`.
+2. Iterative entry check: verify each key length <= 32 and each value length <= 128.
+3. Accumulate byte count using checked addition (`checked_add`): fails on overflow or if total > 512 bytes.
+4. **Fail-Before-Allocate Guarantee**: If validation fails, no stream ID counter is incremented, no storage key is written, and no tokens are transferred.
+
+#### Edge Cases & Key-Value Semantics
+
+- **SDK Map Deduplication**: `soroban_sdk::Map` enforces unique keys. If duplicate keys are added, `Map::set` overwrites the existing value. Validation operates on the final deduplicated map state.
+- **Zero-Length Entries**: Empty keys (`b""`) and empty values (`b""`) are syntactically valid and permitted as long as total size bounds are respected.
+- **None vs Empty Map (`Some({})`)**: Both are stored in persistent storage. `None` consumes minimal XDR bytes. `Some(Map::new())` round-trips as `Some(Map::new())` with `len() == 0`.
+
+#### Lifecycle Immutability & Inter-entrypoint Rules
+
+- **Post-Creation Immutability**: Metadata is written once in `persist_new_stream`. All state-mutating entrypoints (`pause_stream`, `resume_stream`, `cancel_stream`, `withdraw`, `update_rate_per_second`, `decrease_rate_per_second`, `top_up_stream`, `extend_stream_end_time`, `shorten_stream_end_time`, `set_auto_renew`, `renew_stream`) leave `stream.metadata` untouched.
+- **Storage Cleanup**: Calling `close_completed_stream` purges the underlying `Stream` persistent storage key, freeing the metadata entry from ledger storage. Subsequent calls to `get_stream_metadata` return `ContractError::StreamNotFound`.
+- **Cloned Streams (`clone_stream`)**: Cloning a stream **resets metadata to `None`** on the newly created stream to prevent accidental duplication of single-use invoice IDs or URIs. The source stream retains its original metadata.
+- **Batch Isolation (`create_streams_partial`)**: In partial batch creation, if an entry fails metadata validation with `MetadataTooLarge`, that specific entry returns `{ success: false, stream_id: None, error: Some(32) }`, while valid entries in the same batch are successfully created.
+
+#### Storage, Gas, & Upgrade Compatibility
+
+- **Storage Key**: Stored as part of the `Stream` struct under `DataKey::Stream(u64)` in persistent storage with standard threshold TTL bumps.
+- **WASM Upgrade Safety**: Pre-v4 streams stored prior to metadata support deserialize cleanly with `metadata: None`. Upgrading contract WASM is fully backward compatible.
+- **Gas Impact**: Bounded at 8 keys / 512 aggregate bytes to ensure negligible CPU and storage footprint overhead during stream creation and queries.
 
 #### Example (Rust client)
 
@@ -366,6 +367,22 @@ balance or allowance is insufficient, the call returns the dedicated
 `ContractError::AutoRenewFundingUnavailable` error and creates no new stream or event.
 Token transfer failures are atomic as well: state, liabilities, and the opt-in revert
 together with the failed transaction.
+
+### Bounded recipient-share delegation
+
+`delegate_recipient_share(stream_id, recipient, share_bps, new_recipient)` lets the
+current recipient split a bounded basis-point share of future linear accrual into a
+new child stream for `new_recipient`.
+
+Security and accounting rules:
+
+- Only the current `recipient` may authorize the split.
+- `share_bps` must be in `1..=10000`, and the computed child rate must be positive and strictly less than the parent rate.
+- Self-delegation is rejected, and `new_recipient` must not already appear in the bounded parent chain.
+- Child streams increment `delegation_depth`; delegation is rejected once depth reaches `MAX_DELEGATION_DEPTH` (3).
+- The parent is checkpointed at the current ledger timestamp before its rate is reduced, preserving all already-accrued and already-withdrawn entitlement.
+- The child stream starts at the checkpoint timestamp and receives only the delegated future accrual. No hostnames, off-chain identifiers, or private metadata are introduced by the delegation event.
+- The child is indexed for both `new_recipient` and the original sender portfolio, so it behaves as an independent stream for reads and later withdrawals.
 
 ### Cancellation Semantics (Issue Scope)
 
@@ -935,7 +952,71 @@ Behaviour: Active/Paused streams use the given `timestamp` (clamped to schedule)
 
 Use this to show real-time health indicators in UIs, alert senders of underfunding, or notify recipients of expired streams ready for final withdrawal.
 
----
+### Frontend: get_sender_portfolio_health (view aggregate)
+
+`get_sender_portfolio_health(sender, cursor, limit)` returns a paginated aggregate health report across all streams owned by `sender`. This is the single-call solution for operators managing many concurrent streams (e.g. payroll platforms) to obtain a portfolio-wide health snapshot.
+
+#### Parameters
+
+| Parameter | Type | Description |
+|---|---|---|
+| `sender` | `Address` | The sender whose streams to evaluate |
+| `cursor` | `u64` | Stream ID to resume from (inclusive). Pass `0` to start from the beginning. |
+| `limit` | `u32` | Maximum streams to evaluate per call (capped at `MAX_PAGE_SIZE = 100`). Pass `0` for the maximum. |
+
+#### Returns (`PortfolioHealthPage`)
+
+| Field | Type | Description |
+|---|---|---|
+| `underfunded_count` | `u32` | Active/Paused streams whose deposit cannot cover remaining accrual through `end_time` |
+| `expired_count` | `u32` | Active/Paused streams where `ledger.timestamp() >= end_time` (not yet closed) |
+| `healthy_count` | `u32` | Active/Paused streams that are neither underfunded nor expired |
+| `next_cursor` | `u64` | Next cursor for pagination. `0` when all pages have been consumed. |
+| `stream_ids` | `Vec<u64>` | Stream IDs evaluated on this page (ascending, at most `MAX_PAGE_SIZE`) |
+
+#### Health Classification (per stream)
+
+| Classification | Condition |
+|---|---|
+| **expired** | `now >= end_time` AND status is `Active` or `Paused` (expiry takes priority) |
+| **underfunded** | `deposit_amount < rate_per_second * (end_time - start_time)` via `compute_stream_health` |
+| **healthy** | Active/Paused and not underfunded or expired |
+
+Terminal streams (`Completed`, `Cancelled`) are excluded from all three counters because they no longer represent an ongoing funding obligation. They are still returned in the `stream_ids` vector.
+
+#### Pagination Protocol
+
+```text
+1. Call with cursor = 0, limit = MAX_PAGE_SIZE
+2. Process the returned page
+3. If next_cursor != 0, call again with cursor = page.next_cursor
+4. Repeat until next_cursor == 0
+```
+
+#### Example (Rust client)
+
+```rust
+let mut cursor = 0u64;
+loop {
+    let page = client.get_sender_portfolio_health(
+        &sender, &cursor, &100,
+    );
+    println!(
+        "underfunded={} expired={} healthy={}",
+        page.underfunded_count, page.expired_count, page.healthy_count,
+    );
+    if page.next_cursor == 0 { break; }
+    cursor = page.next_cursor;
+}
+```
+
+#### Security Notes
+
+- **Permissionless view**: No authentication required. Any caller can read the portfolio health of any sender.
+- **Read-only**: No state mutation occurs. Only persistent sender index and stream data are read.
+- **Bounded gas**: Per-call gas is O(limit) thanks to `MAX_PAGE_SIZE` cap and sorted index. No unbounded loops.
+- **Graceful degradation**: Streams removed between index write and query (e.g. by concurrent `close_completed_stream`) are silently skipped — no panic or error.
+- **Cursor safety**: A past-end cursor returns an empty page with `next_cursor = 0`, not an error.
 
 ## 3. Cliff and end_time Behavior
 
@@ -1207,6 +1288,7 @@ contract.create_streams_relative(&sender, &params)?;
 | `get_stream_health`       | Anyone                        | None (view)                                 |
 | `get_streams_by_id_range` | Anyone                        | None (view, paginated)                      |
 | `get_recipient_streams_paginated` | Anyone                  | None (view, paginated)                      |
+| `get_sender_portfolio_health` | Anyone                   | None (view, paginated)                      |
 | `pause_stream_as_admin`   | Admin                         | `admin.require_auth()`                      |
 | `resume_stream_as_admin`  | Admin                         | `admin.require_auth()`                      |
 | `bulk_resume_streams_as_admin` | Admin                    | `admin.require_auth()` (once per batch; atomic all-or-nothing) |
@@ -2421,13 +2503,64 @@ Fluxora supports multi-recipient pooled streams where multiple beneficiaries rec
 
 ### `create_pooled_stream`
 
-Creates a pooled stream. The `recipients` list takes pairs of `(Address, u32)` defining the recipient and their share weight. The maximum number of recipients is `MAX_POOL_RECIPIENTS` (100). The stream operates similarly to a single-recipient stream, but its `is_pooled` flag is set to true.
+Creates a pooled stream from one sender-funded deposit:
+
+```rust
+create_pooled_stream(
+    env,
+    sender,
+    recipients: Vec<(Address, u32)>,
+    deposit_amount,
+    rate_per_second,
+    start_time,
+    cliff_time,
+    end_time,
+    withdraw_dust_threshold,
+    memo,
+    kind,
+)
+```
+
+Each `recipients` entry is an `(Address, u32)` share-weight pair. Weights do
+not need to sum to 10,000; each member receives `member_weight / total_weight`
+of the pool's accrued amount. The recipient table is stored persistently under
+`DataKey::PooledStreamShares(stream_id)`.
+
+Validation keeps creation cost and accounting predictable:
+
+- The recipient table must be non-empty and no longer than `MAX_POOL_RECIPIENTS` (100).
+- Each share weight must be non-zero.
+- Duplicate recipient addresses are rejected, so each member has one independent withdrawal ledger.
+- The share total is computed with checked arithmetic.
+- Standard stream amount, rate, cliff, start, end, pause, memo, and token-pull validation still applies.
+
+The base `Stream` record is marked with `is_pooled = Some(true)` and uses the
+sender as the aggregate internal recipient. Individual beneficiary rights live
+only in the pooled-share table, and recipients are also indexed in
+`RecipientStreams` for discoverability.
 
 ### `withdraw_from_pool`
 
-Withdrawals from a pooled stream are independent. When a recipient calls `withdraw_from_pool(stream_id, caller)`, the contract calculates the total accrued tokens and multiplies by the caller's proportional share `(caller_share / total_shares)`. The contract independently tracks withdrawn amounts for each pool member using `DataKey::PooledStreamWithdrawn`.
+Withdrawals from a pooled stream are independent. When a recipient calls
+`withdraw_from_pool(stream_id, caller)`, the contract:
 
-**Rounding:** The calculation uses strict integer math (`checked_mul` followed by `checked_div`), rounding down on remainders to avoid over-withdrawing the pool's deposit.
+- Requires authorization from `caller`.
+- Verifies the stream is pooled and active or terminal-withdrawable.
+- Walks the bounded share table to find the caller's share.
+- Uses `accrual::calculate_accrued_amount_checkpointed` to compute total pool accrual.
+- Applies the caller's fraction with `checked_mul` followed by `checked_div`.
+- Subtracts the caller's prior withdrawals from `DataKey::PooledStreamWithdrawn(stream_id, caller)`.
+
+**Rounding:** Integer division rounds down. This intentionally favors the pool
+over any single member and prevents over-paying a recipient. Small residual
+rounding dust may remain in the contract until existing close/sweep handling is
+used.
+
+**Security notes:** Pooled withdrawal stores per-recipient withdrawn amounts,
+but keeps aggregate `stream.withdrawn_amount` updated for lifecycle and
+liability accounting. No internal query text, off-chain data, or private
+metadata is exposed by pooled accounting; only addresses and integer shares
+provided by the sender are persisted.
 
 
 ## Additional view entrypoints (v9+)

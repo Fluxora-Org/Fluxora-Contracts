@@ -28,6 +28,7 @@ import { idempotency } from '../middleware/requestProtection';
 import { sendSuccess, sendError, toDecimalString } from '../utils/response';
 import { ValidationError } from '../utils/errors';
 import logger from '../utils/logger';
+import { getStreamChannel } from '../websockets/runtime';
 
 const router = Router();
 
@@ -234,6 +235,10 @@ async function createStream(
       streamId,
       recipientId: input.recipientId
     });
+
+    // Broadcast StreamCreated to any WebSocket clients subscribed to this stream.
+    // No-ops when realtime is not initialized (e.g. isolated route unit tests).
+    getStreamChannel()?.notifyStreamCreated(streamId, stream);
 
     // 201 Created — the idempotency middleware will cache this response
     sendSuccess(res, { stream }, 201);

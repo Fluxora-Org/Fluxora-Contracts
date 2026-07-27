@@ -4,6 +4,25 @@
 //! and the DataKey-based CRUD layer. All functions here are `pub(crate)` unless
 //! they need to be called from tests via the `testutils` feature.
 //!
+//! # Storage invariants
+//!
+//! The contract relies on the following storage invariants (see also
+//! [`docs/storage-invariants.md`](../../../docs/storage-invariants.md)):
+//!
+//! - **TTL:** Instance keys are bumped on every entry-point; persistent stream
+//!   keys are bumped on `load_stream` / `save_stream` and index reads/writes.
+//! - **Reentrancy:** `ReentrancyLock` instance flag prevents nested token calls.
+//! - **Liabilities:** `TotalLiabilities` tracks outstanding deposit obligations
+//!   and moves in lockstep with create/top-up vs withdraw/cancel/refund paths.
+//! - **Indexes sorted:** `RecipientStreams` and `SenderStreams` vectors are kept
+//!   in ascending `stream_id` order on insert/remove.
+//! - **CEI:** Stream state is persisted before external token transfers.
+//! - **Terminal state:** Cancelled or past-`end_time` streams bypass dust threshold
+//!   and freeze accrual at cancellation when applicable.
+//! - **Metadata validation:** `validate_metadata` runs before ID allocation.
+//! - **Append-only keys:** `DataKey` variants are never reordered (discriminants
+//!   0–35 frozen per release policy).
+//!
 //! # Security notes
 //! - `DataKey` variant order is append-only and must never be reordered.
 //! - `save_stream` is `pub` so the accrual module can call it directly.
@@ -630,7 +649,16 @@ pub fn increment_delegated_nonce(env: &Env, recipient: &Address) {
     );
 }
 
-pub fn load_rotation_history(env: &Env, stream_id: u64) -> soroban_sdk::Vec<RotationEntry> {
+/// Pub re-export of `increment_delegated_nonce` for test crates under the `testutils` feature.
+///
+/// Allows adversarial auth tests to simulate delegation revocation by bumping
+/// the nonce directly in contract storage via `env.as_contract(...)`.
+#[cfg(any(test, feature = "testutils"))]
+pub fn increment_delegated_nonce_test_only(env: &Env, recipient: &Address) {
+    increment_delegated_nonce(env, recipient);
+}
+
+pub(crate) fn load_rotation_history(env: &Env, stream_id: u64) -> soroban_sdk::Vec<RotationEntry> {
     let key = DataKey::RotationHistory(stream_id);
     env.storage()
         .persistent()
@@ -655,7 +683,12 @@ pub fn compute_stream_health(stream: &Stream, now: u64) -> (bool, i128, u64) {
 }
 
 /// Emit a `StreamHealthChanged` event if the funding health status changed.
-pub fn maybe_emit_health_changed(env: &Env, stream: &Stream, was_underfunded: bool, now: u64) {
+pub fn maybe_emit_health_changed(
+    env: &Env,
+    stream: &Stream,
+    was_underfunded: bool,
+    now: u64,
+) {
     let (is_underfunded, remaining_balance, seconds_remaining) = compute_stream_health(stream, now);
     if is_underfunded != was_underfunded {
         events::emit_stream_health_changed(
@@ -680,7 +713,11 @@ pub fn load_config(env: &Env) -> Config {
         .expect("contract not initialised")
 }
 
-pub fn save_rotation_history(env: &Env, stream_id: u64, history: &soroban_sdk::Vec<RotationEntry>) {
+pub fn save_rotation_history(
+    env: &Env,
+    stream_id: u64,
+    history: &soroban_sdk::Vec<RotationEntry>,
+) {
     let key = DataKey::RotationHistory(stream_id);
     env.storage().persistent().set(&key, history);
     env.storage().persistent().extend_ttl(
@@ -793,23 +830,34 @@ pub fn push_token(env: &Env, to: &Address, amount: i128) -> Result<(), ContractE
 }
 
 // ---------------------------------------------------------------------------
-// Metadata validation (issue #580)
+// Metadata validation (issue #580, #1294)
 // ---------------------------------------------------------------------------
 
-/// Validate an optional per-stream metadata map against all size bounds.
+/// Validate a per-stream metadata map against all size bounds.
 ///
 /// Called from `persist_new_stream` / `persist_new_stream_skip_index` before any
-/// state is written, so a violation never allocates a stream ID.
+/// state is written, so a violation never allocates a stream ID or transfers tokens.
 ///
-/// # Invariants checked
-/// - `metadata.len() <= MAX_METADATA_KEYS`
-/// - each key length <= `MAX_METADATA_KEY_BYTES`
-/// - each value length <= `MAX_METADATA_VALUE_BYTES`
-/// - aggregate (sum of all key lengths + all value lengths) <= `MAX_METADATA_BYTES`
+/// # Validation Sequence & Fail-Fast Order
+/// 1. Key count check: `metadata.len() <= MAX_METADATA_KEYS` (8)
+/// 2. Iterative key & value bound checks:
+///    - `key.len() <= MAX_METADATA_KEY_BYTES` (32)
+///    - `value.len() <= MAX_METADATA_VALUE_BYTES` (128)
+/// 3. Checked aggregate byte total accumulation:
+///    - `total_bytes = total_bytes + key.len() + value.len()`
+///    - Returns `ContractError::MetadataTooLarge` on arithmetic overflow or if `total_bytes > MAX_METADATA_BYTES` (512)
+///
+/// # Edge Case & Compatibility Semantics
+/// - **Deduplication**: `soroban_sdk::Map` enforces unique keys. Duplicate key insertions overwrite
+///   prior values, so `metadata.len()` reflects unique keys and `total_bytes` reflects unique pair total.
+/// - **Zero-Length Entries**: Empty keys (`b""`) and empty values (`b""`) are syntactically valid
+///   and pass validation provided total bounds are met.
+/// - **Fail-Before-Allocate**: Validation executes before `read_stream_count` / `set_stream_count`
+///   and before `pull_token`, guaranteeing fail-fast security without side effects.
 ///
 /// # Errors
-/// Returns `ContractError::MetadataTooLarge` on any bound violation.
-pub fn validate_metadata(
+/// Returns [`ContractError::MetadataTooLarge`] on any bound violation.
+pub(crate) fn validate_metadata(
     metadata: &Map<soroban_sdk::Bytes, soroban_sdk::Bytes>,
 ) -> Result<(), ContractError> {
     if metadata.len() > MAX_METADATA_KEYS {
@@ -828,7 +876,7 @@ pub fn validate_metadata(
             return Err(ContractError::MetadataTooLarge);
         }
 
-        // Use saturating addition to avoid overflow on adversarial input; the
+        // Use checked addition to avoid overflow on adversarial input; the
         // subsequent aggregate check catches any wrapped values safely.
         total_bytes = total_bytes
             .checked_add(key_len)
@@ -876,7 +924,12 @@ pub fn read_pooled_stream_shares(
     }
 }
 
-pub fn save_pooled_stream_withdrawn(env: &Env, stream_id: u64, recipient: Address, amount: i128) {
+pub fn save_pooled_stream_withdrawn(
+    env: &Env,
+    stream_id: u64,
+    recipient: Address,
+    amount: i128,
+) {
     let key = DataKey::PooledStreamWithdrawn(stream_id, recipient);
     env.storage().persistent().set(&key, &amount);
     env.storage().persistent().extend_ttl(

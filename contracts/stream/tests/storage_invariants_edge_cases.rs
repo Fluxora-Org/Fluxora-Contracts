@@ -9,7 +9,9 @@
 
 extern crate std;
 
-use fluxora_stream::{storage::*, ContractError, DataKey, FluxoraStream, FluxoraStreamClient};
+use fluxora_stream::{
+    storage::*, ContractError, DataKey, FluxoraStream, FluxoraStreamClient,
+};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::StellarAssetClient,
