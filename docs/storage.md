@@ -128,6 +128,36 @@ Persistent storage is used for individual stream records and per-recipient nonce
 | Change TTL constants | No — no effect on stored data | No version bump required |
 | Change internal helper logic with identical external behaviour | No | No version bump required |
 
+### Current compatibility behavior
+
+The current release is backward-compatible with V5-seeded storage because the
+storage layout is append-only and the V5 `Stream` struct ended before the
+`memo: Option<Bytes>` tail field was introduced. In practice, this means:
+
+- V5 `Stream`, `Config`, `NextStreamId`, `RecipientStreams`, and `TotalLiabilities`
+    entries still decode on V9.
+- V6+ keys remain absent on a V5-seeded instance until the newer code writes
+    them; reads must return `None`, `false`, or zero-like defaults rather than
+    panicking.
+- Read-only calls do not backfill absent storage keys. The compatibility tests
+    only treat explicit writes as state changes.
+- There is no on-chain migration of V5 storage into V9 storage. The guarantee
+    is read compatibility, not state rewriting.
+
+### Regression surface
+
+The storage-key compatibility suite treats the following as the regression
+boundary for this release:
+
+- `DataKey` discriminants 0–35 stay in declaration order.
+- `Stream` fields 0–13 keep their current positions and `memo` remains the
+    last field.
+- `memo` must decode as `None` on older V5-seeded entries.
+- Later keys such as `WithdrawNonce`, `PauseState`, and the V7/V8/V9 append-only
+    keys must stay absent on a V5-seeded instance until explicitly written.
+- Any new storage key must be appended, paired with a `CONTRACT_VERSION`
+    review, and added to the compatibility test suite.
+
 ### Residual risks
 
 - **No on-chain enforcement.** The rules above are enforced by code review and CI only. A developer who reorders variants will not get a compile error — the bug will only surface at runtime when existing entries are read back with the wrong type.
@@ -250,6 +280,9 @@ Extended on every `load_stream()` (read) and `save_stream()` (write), and on eve
 ## 7. Version History
 
 For a full description of what changed between contract versions and how to migrate, see [DEPLOYMENT.md — Version Migration](./DEPLOYMENT.md#version-migration).
+
+For documented storage invariants (TTL, liabilities, CEI, indexes), see
+[storage-invariants.md](./storage-invariants.md).
 
 ---
 

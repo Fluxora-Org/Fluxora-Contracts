@@ -246,6 +246,21 @@ fn v5_stream_readable_by_v9_get_stream_state() {
     assert_eq!(state.kind, StreamKind::Linear);
 }
 
+/// The V5-era `memo` field decodes as `None` on V9.
+///
+/// This is the clearest proof that the `Stream` struct kept append-only field
+/// ordering: the V9 decoder must treat the missing tail field as absent rather
+/// than panicking or shifting earlier values.
+#[test]
+fn v5_stream_get_stream_memo_returns_none() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    ctx.seed_v5_stream(0, &recipient);
+
+    let memo = ctx.client.get_stream_memo(&0u64);
+    assert!(memo.is_none(), "V5 stream memo must decode as None");
+}
+
 /// V9 `calculate_accrued` works correctly on a V5-era Stream entry.
 ///
 /// Accrual math depends on `start_time`, `cliff_time`, `end_time`,
