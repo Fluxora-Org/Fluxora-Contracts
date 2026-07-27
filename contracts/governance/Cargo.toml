@@ -18,6 +18,7 @@ soroban-sdk = "21.7.7"
 [dev-dependencies]
 soroban-sdk = { version = "21.7.7", features = ["testutils"] }
 proptest = "1"
+soroban-env-host = "=21.2.1"
 
 # ---------------------------------------------------------------------------
 # Known-broken integration test (pre-existing, unrelated to CI restoration)
@@ -59,4 +60,4 @@ test = false
 [[test]]
 name = "signer_index_proptest"
 path = "tests/signer_index_proptest.rs"
-test = false
+test = true

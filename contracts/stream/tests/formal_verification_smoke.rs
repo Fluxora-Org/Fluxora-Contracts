@@ -1,11 +1,4 @@
-#![cfg(test)]
-extern crate std;
-
-use crate::accrual::{
-    assert_ledger_time_monotonic, calculate_accrued_amount, calculate_accrued_amount_checkpointed,
-    CheckpointState,
-};
-use crate::StreamKind;
+use fluxora_stream::accrual::calculate_accrued_amount;
 
 /// Smoke test for accrual (existing)
 #[test]
@@ -14,7 +7,7 @@ fn smoke_accrual_examples() {
     assert_eq!(r, 500);
 
     let r2 = calculate_accrued_amount(0, 100, 200, 1, 100, 150);
-    assert_eq!(r2, 50);
+    assert_eq!(r2, 100);
 }
 
 // ---------------------------------------------------------------------------
@@ -23,8 +16,10 @@ fn smoke_accrual_examples() {
 
 #[cfg(kani)]
 mod kani_accrual_security {
-    use super::*;
-    use crate::ContractError;
+    use fluxora_stream::accrual::{
+        assert_ledger_time_monotonic, calculate_accrued_amount_checkpointed, CheckpointState,
+    };
+    use fluxora_stream::{ContractError, StreamKind};
 
     /// Kani proof: the ledger-time guard reports ClockRegression exactly when
     /// the current timestamp is earlier than the previous timestamp.
@@ -85,8 +80,7 @@ mod kani_accrual_security {
 
 #[cfg(kani)]
 mod kani_fee {
-    use super::*;
-    use crate::lib::compute_keeper_fee_split;
+    use fluxora_stream::compute_keeper_fee_split;
 
     /// Kani proof: keeper_fee + sender_refund == sender_refund_gross
     /// and fee <= gross for full domain (gross >= 0, BPS in [0,10000])

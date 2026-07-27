@@ -59,13 +59,19 @@ impl<'a> GovCtx<'a> {
         Address::generate(&self.env)
     }
 
-    fn calldata(&self, tag: &str) -> Bytes {
-        Bytes::from_slice(&self.env, tag.as_bytes())
+    /// Returns XDR-encoded `CallData::Noop`. The `tag` parameter is
+    /// accepted only to keep call-sites readable; it has no effect on the
+    /// returned bytes.
+    fn calldata(&self, _tag: &str) -> Bytes {
+        use soroban_sdk::xdr::ToXdr;
+        CallData::Noop.to_xdr(&self.env)
     }
 
     fn propose_and_approve(&self, op: CallData) -> u32 {
         let calldata = op.to_xdr(&self.env);
-        let id = self.client.propose(&self.signer_a, &self.contract_id, &calldata);
+        let id = self
+            .client
+            .propose(&self.signer_a, &self.contract_id, &calldata);
         self.client.approve(&self.signer_a, &id);
         self.client.approve(&self.signer_b, &id);
         let now = self.env.ledger().timestamp();
@@ -793,6 +799,33 @@ fn last_contract_event(env: &Env, contract_id: &Address) -> (Symbol, Val) {
     panic!("no event emitted by the contract");
 }
 
+/// Find the most recent event emitted by `contract_id` whose first topic
+/// matches `expected_topic`, searching newest-first. Useful when a call
+/// emits multiple distinct events (e.g. `add_signer` emits `sgnr_add` then
+/// `quor_cfg`) and the test needs a specific one that isn't necessarily last.
+fn find_contract_event_with_topic(
+    env: &Env,
+    contract_id: &Address,
+    expected_topic: Symbol,
+) -> (Symbol, Val) {
+    let events = env.events().all();
+    for i in (0..events.len()).rev() {
+        let (addr, topics, data) = events.get(i).unwrap();
+        if &addr != contract_id {
+            continue;
+        }
+        let topic0: SVec<Val> = topics;
+        let first = topic0.get(0).expect("event must carry a topic");
+        let symbol = Symbol::try_from_val(env, &first).expect("first topic is a symbol");
+        if symbol == expected_topic {
+            return (symbol, data);
+        }
+    }
+    panic!(
+        "no event with the expected topic emitted by the contract"
+    );
+}
+
 #[test]
 fn test_add_signer_emits_signer_added_event() {
     let ctx = GovCtx::setup();
@@ -800,7 +833,11 @@ fn test_add_signer_emits_signer_added_event() {
 
     ctx.govern(CallData::GovAddSigner(new_signer.clone()));
 
-    let (topic, data) = last_contract_event(&ctx.env, &ctx.contract_id);
+    // add_signer emits sgnr_add then quor_cfg; search backwards for sgnr_add
+    // specifically so this test remains correct even when add_signer emits
+    // additional trailing events.
+    let (topic, data) =
+        find_contract_event_with_topic(&ctx.env, &ctx.contract_id, symbol_short!("sgnr_add"));
     assert_eq!(topic, symbol_short!("sgnr_add"));
     let payload = SignerAdded::try_from_val(&ctx.env, &data).expect("decodes to SignerAdded");
     assert_eq!(payload.signer, new_signer);

@@ -654,6 +654,16 @@ describe('WebSocket Integration', () => {
       let ws2Subscribed = false;
       let ws1ReceivedUpdate = false;
       let ws2ReceivedUpdate = false;
+      let broadcastTriggered = false;
+
+      function triggerBroadcastIfReady() {
+        if (ws1Subscribed && ws2Subscribed && !broadcastTriggered) {
+          broadcastTriggered = true;
+          setTimeout(() => {
+            streamChannel.notifyStreamUpdated(streamId, { test: 'broadcast' });
+          }, 100);
+        }
+      }
 
       ws1.on('open', () => {
         ws1.send(JSON.stringify({ type: 'subscribe', streamId }));
@@ -661,7 +671,10 @@ describe('WebSocket Integration', () => {
 
       ws1.on('message', (data) => {
         const message = JSON.parse(data.toString());
-        if (message.type === 'subscribed') ws1Subscribed = true;
+        if (message.type === 'subscribed') {
+          ws1Subscribed = true;
+          triggerBroadcastIfReady();
+        }
         if (message.type === 'stream_update') {
           expect(message.streamId).toBe(streamId);
           ws1ReceivedUpdate = true;
@@ -677,11 +690,7 @@ describe('WebSocket Integration', () => {
         const message = JSON.parse(data.toString());
         if (message.type === 'subscribed') {
           ws2Subscribed = true;
-          if (ws1Subscribed && ws2Subscribed) {
-            setTimeout(() => {
-              streamChannel.notifyStreamUpdated(streamId, { test: 'broadcast' });
-            }, 100);
-          }
+          triggerBroadcastIfReady();
         }
         if (message.type === 'stream_update') {
           expect(message.streamId).toBe(streamId);

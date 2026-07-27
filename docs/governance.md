@@ -1025,8 +1025,11 @@ cover:
   `bump_proposal`).
 - `execute` succeeds after the full `GOVERNANCE_TIMELOCK_SECONDS` window
   because both `Proposal(id)` and `QuorumReachedAt(id)` are still on chain.
-- A proposal with periodic reads can survive the full
-  `MAX_PROPOSAL_AGE_SECONDS` window before `execute`.
+- A proposal with periodic reads (`get_proposal` + `get_quorum_info` +
+  `proposal_count`) can survive the full `MAX_PROPOSAL_AGE_SECONDS` window
+  before `execute`, because `get_quorum_info` refreshes the
+  `QuorumReachedAt(id)` TTL alongside the `Proposal(id)` and instance
+  storage TTLs.
 - Negative control: executing a non-existent proposal id returns
   `ProposalNotFound`, which is the exact error surface a future bump-policy
   regression would expose.
@@ -1037,8 +1040,18 @@ cover:
 
 ### QuorumReachedAt Entry TTL
 The `QuorumReachedAt(proposal_id)` persistent storage entry is bumped on:
-- Every `approve` call when quorum is reached
-- Every `execute` call when reading the entry
+- Every `approve` call when quorum is reached (write path)
+- Every `get_quorum_info` call (read path)
+- Every `is_executable` call when `QuorumReachedAt` entry exists (read path)
+- Every `execute` call when reading the entry (read path)
+
+To keep `QuorumReachedAt(id)` alive across the full 30-day
+`MAX_PROPOSAL_AGE_SECONDS` window, callers (indexers, dashboards, admin
+tooling) must periodically call `get_quorum_info` or `is_executable` in
+addition to `get_proposal`. The TTL regression test
+`test_proposal_survives_max_proposal_age_with_periodic_reads` verifies this
+three-call schedule: `proposal_count()` + `get_proposal()` +
+`get_quorum_info()` per step.
 
 ### ProposalApprovalIdx Entry TTL
 The `ProposalApprovalIdx(proposal_id)` duplicate-approval index must outlive the
