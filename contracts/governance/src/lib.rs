@@ -24,6 +24,15 @@ const MAX_CALLDATA_BYTES: u32 = 4_096;
 /// non-executable. Default: 30 days.
 const MAX_PROPOSAL_AGE_SECONDS: u64 = 2_592_000;
 
+/// # Registry Migration Edge Cases
+///
+/// The governance contract assumes a stable registry of contract addresses.
+/// During migration:
+/// - The admin must call `set_admin` on the new instance before executing proposals.
+/// - Signer index is rebuilt from scratch on `init`; no state migrates automatically.
+/// - Proposal IDs restart at 0 on a fresh instance; off-chain tooling must handle
+///   ID discontinuity across contract versions.
+
 /// Maximum number of proposals that `get_proposals_by_id_range` will return in
 /// a single call.
 ///
