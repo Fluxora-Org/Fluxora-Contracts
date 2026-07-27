@@ -76,14 +76,37 @@ describe('IdempotencyHelper', () => {
     expect(operationB).toHaveBeenCalledTimes(1);
   });
 
-  it('rejects invalid idempotency keys', async () => {
+  it('rejects invalid idempotency keys and logs warning', async () => {
     const operation = jest.fn();
     
     await expect(helper.execute({ idempotencyKey: '', callerId: 'user-a' }, operation))
       .rejects.toThrow(IdempotencyError);
+    expect(dummyLogger.warn).toHaveBeenCalledWith('Idempotency validation failed: Invalid idempotency key', expect.any(Object));
     
     await expect(helper.execute({ idempotencyKey: '   ', callerId: 'user-a' }, operation))
       .rejects.toThrow(IdempotencyError);
+  });
+
+  it('rejects invalid caller IDs and logs warning', async () => {
+    const operation = jest.fn();
+    
+    await expect(helper.execute({ idempotencyKey: 'key-1', callerId: '' }, operation))
+      .rejects.toThrow(IdempotencyError);
+    expect(dummyLogger.warn).toHaveBeenCalledWith('Idempotency validation failed: Invalid caller ID', expect.any(Object));
+  });
+
+  it('logs error and rethrows when operation fails', async () => {
+    const testError = new Error('Test error');
+    const operation = jest.fn().mockRejectedValue(testError);
+    
+    await expect(helper.execute({ idempotencyKey: 'key-1', callerId: 'user-a' }, operation))
+      .rejects.toThrow(testError);
+      
+    expect(dummyLogger.error).toHaveBeenCalledWith('Operation failed during idempotent execution', expect.objectContaining({
+      idempotencyKey: 'key-1',
+      callerId: 'user-a',
+      error: testError
+    }));
   });
 
   it('throws CONCURRENT_REQUEST when a lock is already held', async () => {

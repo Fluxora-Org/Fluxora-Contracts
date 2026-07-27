@@ -69,7 +69,13 @@ export class IdempotencyHelper {
     const { idempotencyKey, callerId, ttlSeconds = 86400 } = options;
 
     if (!idempotencyKey || typeof idempotencyKey !== 'string' || idempotencyKey.trim() === '') {
+      this.logger.warn('Idempotency validation failed: Invalid idempotency key', { idempotencyKey, callerId });
       throw new IdempotencyError('INVALID_KEY', 'Idempotency key is required and must be a valid string.');
+    }
+
+    if (!callerId || typeof callerId !== 'string' || callerId.trim() === '') {
+      this.logger.warn('Idempotency validation failed: Invalid caller ID', { idempotencyKey, callerId });
+      throw new IdempotencyError('INVALID_CALLER', 'Caller ID is required and must be a valid string.');
     }
 
     // Isolate keys per caller to prevent cross-tenant collisions
@@ -99,6 +105,9 @@ export class IdempotencyHelper {
       await this.store.set(scopedKey, result, ttlSeconds);
       
       return { ...result, cached: false };
+    } catch (error) {
+      this.logger.error('Operation failed during idempotent execution', { idempotencyKey, callerId, error });
+      throw error;
     } finally {
       // 5. Release the lock
       await this.store.releaseLock(lockKey);
