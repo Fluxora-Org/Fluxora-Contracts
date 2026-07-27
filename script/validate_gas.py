@@ -26,10 +26,16 @@ def build_cargo_test_env() -> Dict[str, str]:
 def extract_baselines(file_path: str) -> Dict[str, Any]:
     with open(file_path, 'r') as f:
         content = f.read()
-        match = re.search(r'<!-- GAS_BASELINE_START -->\s*(\{.*?\})\s*<!-- GAS_BASELINE_END -->', content, re.DOTALL)
-        if not match:
+        start_marker = '<!-- GAS_BASELINE_START -->'
+        end_marker = '<!-- GAS_BASELINE_END -->'
+        start = content.find(start_marker)
+        end = content.find(end_marker)
+        if start == -1 or end == -1 or end <= start:
             raise ValueError("Could not find gas baseline block in docs/gas.md")
-        return json.loads(match.group(1))
+        block = content[start + len(start_marker):end].strip()
+        if not block.startswith('{'):
+            raise ValueError("Could not find gas baseline block in docs/gas.md")
+        return json.loads(block)
 
 def validate_required_baselines(baselines: Dict[str, Any]) -> None:
     """Ensure CI has every required bulk batch baseline before tests run."""
