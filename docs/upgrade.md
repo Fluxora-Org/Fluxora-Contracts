@@ -98,6 +98,12 @@ For the exhaustive, category-by-category breakdown see **[`docs/ABI_STABILITY.md
 
 Soroban contracts are **not upgradeable in-place** by default. A new `CONTRACT_VERSION` means deploying a new contract instance.
 
+The storage-key compatibility rules in `contracts/stream/tests/storage_key_compat.rs`
+cover the read surface of the current release: newer code can still read V5-era
+entries, but it does not migrate or rewrite old state in place. Any change that
+breaks the append-only storage layout still requires a new deployment and a
+fresh operator migration.
+
 ### Step-by-step
 
 1. **Increment `CONTRACT_VERSION`** in `contracts/stream/src/lib.rs` before merging the breaking change.
