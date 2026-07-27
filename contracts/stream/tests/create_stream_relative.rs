@@ -86,6 +86,7 @@ fn create_stream_relative_zero_delays_immediate_start() {
             duration: 1000,
             memo: None,
             metadata: None,
+            irrevocable: None,
         },
     );
 
@@ -118,6 +119,7 @@ fn create_stream_relative_positive_delays_future_start() {
             duration: 2000,
             memo: None,
             metadata: None,
+            irrevocable: None,
         },
     );
 
@@ -147,6 +149,7 @@ fn create_stream_relative_zero_duration_rejected() {
             duration: 0,
             memo: None,
             metadata: None,
+            irrevocable: None,
         },
     );
 
@@ -173,6 +176,7 @@ fn create_stream_relative_cliff_less_than_start_rejected() {
             duration: 1000,
             memo: None,
             metadata: None,
+            irrevocable: None,
         },
     );
 
@@ -200,6 +204,7 @@ fn create_stream_relative_cliff_greater_than_end_rejected() {
             duration: 1000,
             memo: None,
             metadata: None,
+            irrevocable: None,
         },
     );
 
@@ -226,6 +231,7 @@ fn create_stream_relative_start_delay_overflow_rejected() {
             duration: 1000,
             memo: None,
             metadata: None,
+            irrevocable: None,
         },
     );
 
@@ -252,6 +258,7 @@ fn create_stream_relative_duration_overflow_rejected() {
             duration: 1000,
             memo: None,
             metadata: None,
+            irrevocable: None,
         },
     );
 
@@ -279,6 +286,7 @@ fn create_stream_relative_never_start_time_in_past() {
             duration: 1000,
             memo: None,
             metadata: None,
+            irrevocable: None,
         },
     );
 
@@ -311,6 +319,7 @@ fn create_stream_relative_insufficient_deposit_rejected() {
             duration: 300,
             memo: None,
             metadata: None,
+            irrevocable: None,
         },
     );
 
@@ -336,6 +345,7 @@ fn create_stream_relative_rejects_self_stream() {
             duration: 1000,
             memo: None,
             metadata: None,
+            irrevocable: None,
         },
     );
 
@@ -365,6 +375,7 @@ fn create_streams_relative_single_entry() {
             duration: 1000,
             memo: None,
             metadata: None,
+            irrevocable: None,
         },
     ];
 
@@ -398,6 +409,7 @@ fn create_streams_relative_multiple_entries_sequential_ids() {
             duration: 1000,
             memo: None,
             metadata: None,
+            irrevocable: None,
         },
         CreateStreamRelativeParams {
             kind: fluxora_stream::StreamKind::Linear,
@@ -410,6 +422,7 @@ fn create_streams_relative_multiple_entries_sequential_ids() {
             duration: 2000,
             memo: None,
             metadata: None,
+            irrevocable: None,
         },
     ];
 
@@ -469,6 +482,7 @@ fn create_streams_relative_invalid_entry_fails_atomically() {
             duration: 1000,
             memo: None,
             metadata: None,
+            irrevocable: None,
         },
         CreateStreamRelativeParams {
             kind: fluxora_stream::StreamKind::Linear,
@@ -481,6 +495,7 @@ fn create_streams_relative_invalid_entry_fails_atomically() {
             duration: 0, // INVALID: duration = 0,
             memo: None,
             metadata: None,
+            irrevocable: None,
         },
     ];
 
@@ -517,6 +532,7 @@ fn create_streams_relative_diverse_schedules() {
             duration: 100,
             memo: None,
             metadata: None,
+            irrevocable: None,
         },
         CreateStreamRelativeParams {
             kind: fluxora_stream::StreamKind::Linear,
@@ -529,6 +545,7 @@ fn create_streams_relative_diverse_schedules() {
             duration: 200,
             memo: None,
             metadata: None,
+            irrevocable: None,
         },
         CreateStreamRelativeParams {
             kind: fluxora_stream::StreamKind::Linear,
@@ -541,6 +558,7 @@ fn create_streams_relative_diverse_schedules() {
             duration: 300,
             memo: None,
             metadata: None,
+            irrevocable: None,
         },
     ];
 
@@ -589,6 +607,7 @@ fn create_streams_relative_independent_cliff_times() {
             duration: 1000,
             memo: None,
             metadata: None,
+            irrevocable: None,
         },
         CreateStreamRelativeParams {
             kind: fluxora_stream::StreamKind::Linear,
@@ -601,6 +620,7 @@ fn create_streams_relative_independent_cliff_times() {
             duration: 1000,
             memo: None,
             metadata: None,
+            irrevocable: None,
         },
     ];
 
@@ -636,6 +656,7 @@ fn create_streams_relative_batch_overflow_detection() {
             duration: 1000,
             memo: None,
             metadata: None,
+            irrevocable: None,
         },
     ];
 
@@ -667,6 +688,7 @@ fn create_streams_relative_batch_validates_amounts() {
             duration: 1000,
             memo: None,
             metadata: None,
+            irrevocable: None,
         },
         CreateStreamRelativeParams {
             kind: fluxora_stream::StreamKind::Linear,
@@ -679,6 +701,7 @@ fn create_streams_relative_batch_validates_amounts() {
             duration: 1000,
             memo: None,
             metadata: None,
+            irrevocable: None,
         },
     ];
 
@@ -781,6 +804,7 @@ fn create_streams_relative_all_elements_share_same_anchor_timestamp() {
             duration: 1_000,
             memo: None,
             metadata: None,
+            irrevocable: None,
         },
         // Element 1: starts 200 s after anchor with a 200 s cliff
         CreateStreamRelativeParams {
@@ -794,6 +818,7 @@ fn create_streams_relative_all_elements_share_same_anchor_timestamp() {
             duration: 800,
             memo: None,
             metadata: None,
+            irrevocable: None,
         },
         // Element 2: starts 500 s after anchor with a 700 s cliff
         CreateStreamRelativeParams {
@@ -807,6 +832,7 @@ fn create_streams_relative_all_elements_share_same_anchor_timestamp() {
             duration: 1_500,
             memo: None,
             metadata: None,
+            irrevocable: None,
         },
     ];
 
@@ -879,6 +905,7 @@ fn create_streams_relative_zero_offset_parity_with_single() {
             duration: 1_000,
             memo: None,
             metadata: None,
+            irrevocable: None,
         },
     );
 
@@ -898,6 +925,7 @@ fn create_streams_relative_zero_offset_parity_with_single() {
                 duration: 1_000,
                 memo: None,
                 metadata: None,
+                irrevocable: None,
             },
         ],
     );

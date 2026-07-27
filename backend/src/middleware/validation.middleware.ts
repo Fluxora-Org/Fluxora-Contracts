@@ -134,7 +134,7 @@ export function validate(schemaName: string) {
     throw new Error(`Validation schema '${schemaName}' not found`);
   }
 
-  return (req: Request, res: Response, next: NextFunction): void => {
+  return (req: Request, _res: Response, next: NextFunction): void => {
     try {
       for (const rule of rules) {
         const value = rule.param

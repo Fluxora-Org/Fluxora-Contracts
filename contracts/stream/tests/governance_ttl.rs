@@ -24,7 +24,7 @@
 
 extern crate std;
 
-use fluxora_governance::{FluxoraGovernance, FluxoraGovernanceClient, GovernanceError};
+use fluxora_governance::{CallData, FluxoraGovernance, FluxoraGovernanceClient, GovernanceError};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     vec, Address, Bytes, Env,
@@ -100,8 +100,12 @@ impl<'a> GovCtx<'a> {
         Address::generate(&self.env)
     }
 
-    fn calldata(&self, tag: &str) -> Bytes {
-        Bytes::from_slice(&self.env, tag.as_bytes())
+    /// Returns XDR-encoded `CallData::Noop`. The `tag` parameter is
+    /// accepted only to keep call-sites readable; it has no effect on the
+    /// returned bytes.
+    fn calldata(&self, _tag: &str) -> Bytes {
+        use soroban_sdk::xdr::ToXdr;
+        CallData::Noop.to_xdr(&self.env)
     }
 
     fn create_proposal(&self) -> u32 {
@@ -214,30 +218,48 @@ fn test_execute_succeeds_at_maximum_timelock_no_archival() {
     assert!(proposal.executed);
 }
 
-/// Admins and indexers regularly call `get_proposal` (which bumps TTL).
+/// Admins and indexers regularly call `get_proposal` (which bumps `Proposal`
+/// TTL) and `get_quorum_info` (which bumps `QuorumReachedAt` TTL).
 /// Across the full `MAX_PROPOSAL_AGE_SECONDS` window (30 days =
-/// `LEDGERS_PER_MAX_AGE` ledgers), a handful of well-placed reads keep the
-/// proposal entry alive long enough to execute.
+/// `LEDGERS_PER_MAX_AGE` ledgers), a handful of well-placed reads keep
+/// both persistent entries alive long enough to execute.
+///
+/// Step size is `PERSISTENT_BUMP_AMOUNT - PERSISTENT_LIFETIME_THRESHOLD`
+/// (= 103,680 ledgers ≈ 6 days). After each advance the remaining instance
+/// and persistent TTLs have fallen to exactly `PERSISTENT_LIFETIME_THRESHOLD`,
+/// so the calls in each iteration trigger the threshold check and re-extend
+/// all three TTLs (instance, Proposal, QuorumReachedAt) to
+/// `PERSISTENT_BUMP_AMOUNT` from the current ledger.
 #[test]
 fn test_proposal_survives_max_proposal_age_with_periodic_reads() {
     let ctx = GovCtx::setup();
     let id = ctx.create_proposal();
     ctx.reach_quorum(id);
 
-    // Step in ~5-day increments (~86,000 ledgers each — well inside the
-    // ~7-day bump window each read resets). Five steps cover the full 30-day
-    // proposal-age window.
-    let step: u32 = 86_000;
+    // Use a step that crosses the re-bump threshold on every iteration so
+    // both instance storage and persistent entries are actually extended on
+    // each periodic read, not left as extend_ttl no-ops.
+    let step: u32 = PERSISTENT_BUMP_AMOUNT - PERSISTENT_LIFETIME_THRESHOLD; // 103,680
     let mut advanced: u32 = 0;
     while advanced + step < LEDGERS_PER_MAX_AGE {
         ctx.advance_ledgers(step);
         advanced += step;
-        // Touch the proposal to re-bump its TTL.
+        // `proposal_count()` bumps instance storage TTL; `get_proposal()`
+        // bumps the persistent Proposal entry TTL; `get_quorum_info()`
+        // bumps the persistent QuorumReachedAt entry TTL so it does not
+        // archive before execution after the full 30-day window.
+        let _ = ctx.client.proposal_count();
         let _ = ctx.client.get_proposal(&id);
+        let _ = ctx.client.get_quorum_info(&id);
     }
-    // Final advance (and read) covering the last chunk.
-    ctx.advance_ledgers(LEDGERS_PER_MAX_AGE - advanced);
-    let _ = ctx.client.get_proposal(&id);
+    // Final advance (and read) covering the remaining ledgers.
+    let remaining = LEDGERS_PER_MAX_AGE - advanced;
+    if remaining > 0 {
+        ctx.advance_ledgers(remaining);
+        let _ = ctx.client.proposal_count();
+        let _ = ctx.client.get_proposal(&id);
+        let _ = ctx.client.get_quorum_info(&id);
+    }
 
     // Bump-boundary probe: the last read above bumped TTL to
     // `PERSISTENT_BUMP_AMOUNT` (120,960) ledgers from the current sequence.
@@ -245,7 +267,9 @@ fn test_proposal_survives_max_proposal_age_with_periodic_reads() {
     // re-reading.  The entry must still be alive — proving the periodic-read
     // schedule lands safely above the archival threshold.
     ctx.advance_ledgers(PERSISTENT_LIFETIME_THRESHOLD + 1);
+    let _ = ctx.client.proposal_count();
     let _ = ctx.client.get_proposal(&id);
+    let _ = ctx.client.get_quorum_info(&id);
 
     // Stop short of expiry: pin the timestamp to `created_at + MAX_AGE - 60`
     // so the policy `now > created_at + MAX_PROPOSAL_AGE_SECONDS` is

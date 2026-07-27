@@ -10,6 +10,8 @@
 
 use soroban_sdk::{contracttype, Address, Map};
 
+use crate::{StreamKind, StreamStatus};
+
 // Data types
 // ---------------------------------------------------------------------------
 
@@ -32,16 +34,6 @@ pub struct IdReservation {
     pub count: u32,
     pub consumed: u32,
     pub expiry: Option<u64>,
-}
-
-/// Reason for a protocol or stream pause.
-#[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PauseReason {
-    Operational = 0,
-    Administrative = 1,
-    Emergency = 2,
-    Compliance = 3,
 }
 
 /// Struct for per-stream or per-protocol pause records.
@@ -82,159 +74,8 @@ pub struct StreamHealth {
 ///
 /// ## Time-Terminal Behavior
 ///
-/// When `current_time >= end_time`, the stream is considered "time-terminal":
-/// - Pause/resume operations are blocked (`StreamTerminalState` error)
-/// - Withdrawals are always allowed regardless of `Paused` status
-/// - This ensures recipients can always claim their full entitlement
-#[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum StreamStatus {
-    /// Stream is operating normally.
-    ///
-    /// **Allowed operations:**
-    /// - Withdrawals (if past `cliff_time`)
-    /// - Pause/resume (if before `end_time`)
-    /// - Rate updates and schedule changes
-    /// - Cancellation
-    /// - Top-ups
-    ///
-    /// **Accrual behavior:** Tokens accrue normally based on elapsed time.
-    Active = 0,
-
-    /// Stream is temporarily suspended by the sender.
-    ///
-    /// **Blocked operations:**
-    /// - Withdrawals (unless past `end_time` - time-terminal override)
-    ///
-    /// **Allowed operations:**
-    /// - Resume (if before `end_time`)
-    /// - Rate updates and schedule changes
-    /// - Cancellation
-    /// - Top-ups
-    ///
-    /// **Accrual behavior:** Tokens continue to accrue normally. Pause only
-    /// blocks withdrawals, not the mathematical accrual of entitlements.
-    ///
-    /// **Time-terminal override:** If `current_time >= end_time`, withdrawals
-    /// are allowed even in `Paused` status to ensure recipient access to funds.
-    Paused = 1,
-
-    /// Stream has been fully withdrawn (terminal state).
-    ///
-    /// **Trigger:** Automatically set when `withdrawn_amount == deposit_amount`
-    ///
-    /// **Allowed operations:**
-    /// - `close_completed_stream` (storage cleanup)
-    /// - Read-only queries
-    ///
-    /// **Blocked operations:** All mutation operations
-    ///
-    /// **Accrual behavior:** Returns `deposit_amount` (deterministic, timestamp-independent)
-    Completed = 2,
-
-    /// Stream was terminated early by sender or admin (terminal state).
-    ///
-    /// **Trigger:** Set by `cancel_stream` or `cancel_stream_as_admin`
-    ///
-    /// **Effects:**
-    /// - Accrual is frozen at `cancelled_at` timestamp
-    /// - Unstreamed portion is refunded to sender
-    /// - Recipient can still withdraw accrued amount up to cancellation
-    ///
-    /// **Allowed operations:**
-    /// - Withdrawals (of frozen accrued amount only)
-    /// - `close_completed_stream` (after full recipient withdrawal)
-    /// - Read-only queries
-    ///
-    /// **Blocked operations:** All other mutation operations
-    ///
-    /// **Accrual behavior:** Frozen at `cancelled_at` - no post-cancellation growth
-    Cancelled = 3,
-}
-
-/// The architectural style of the stream (Linear or CliffOnly).
-#[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum StreamKind {
-    /// Vesting/payment stream that accrues linearly over time.
-    Linear = 0,
-    /// Stream that unlocks its full deposit at the cliff time in a one-shot event.
-    CliffOnly = 1,
-    /// Stream that accrues linearly from cliff_time to end_time, and nothing before.
-    CliffSlope = 2,
-}
-
-#[soroban_sdk::contracterror]
-#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
-#[repr(u32)]
-pub enum ContractError {
-    StreamNotFound = 1,
-    InvalidState = 2,
-    InvalidParams = 3,
-    /// Global emergency pause is active; stream creation is blocked.
-    ContractPaused = 4,
-    /// Start time is before the current ledger timestamp.
-    StartTimeInPast = 5,
-    /// Arithmetic overflow in stream calculations (e.g. deposit total).
-    ArithmeticOverflow = 6,
-    /// Caller is not authorized to perform this operation.
-    Unauthorized = 7,
-    /// Contract is already initialized.
-    AlreadyInitialised = 8,
-    /// The token contract did not expose the expected SEP-41 interface during init.
-    TokenVerificationFailed = 88,
-    /// Token balance or allowance is insufficient (emulated check if possible, otherwise caught by token client).
-    InsufficientBalance = 9,
-    /// Deposit amount does not cover the total streamable amount.
-    InsufficientDeposit = 10,
-    /// Stream is already in Paused state.
-    StreamAlreadyPaused = 11,
-    /// Stream is not in Paused state (e.g. trying to resume an Active stream).
-    StreamNotPaused = 12,
-    /// Stream is in a terminal state (Completed or Cancelled) and cannot be modified.
-    StreamTerminalState = 13,
-    /// Duplicate stream IDs were supplied to a batch operation.
-    DuplicateStreamId = 14,
-    /// Delegated withdrawal signature is invalid or expired.
-    InvalidSignature = 15,
-    /// Accrued amount is below the expected minimum specified in the signed payload.
-    BelowMinimumAmount = 16,
-    /// `reserve_stream_ids` was called with `count = 0`.
-    ReservationCountZero = 17,
-    /// `reserve_stream_ids` was called with `count > MAX_ID_RESERVATION`.
-    ReservationLimitExceeded = 18,
-    /// Delegated withdrawal signature deadline has expired.
-    SignatureDeadlineExpired = 19,
-    /// Template not found.
-    TemplateNotFound = 20,
-    /// Template limit exceeded (per-owner or global).
-    TemplateLimitExceeded = 21,
-    /// Caller not authorized to delete template.
-    TemplateUnauthorized = 22,
-    /// Pause reason string exceeds `MAX_PAUSE_REASON_BYTES`.
-    PauseReasonTooLong = 23,
-    ReservationNotFound = 24,
-    ReservationNotExpirable = 25,
-    ClockRegression = 27,
-    ReservationStillActive = 26,
-    ReservationAlreadyActive = 34,
-    /// Stream kind does not support this operation (e.g., rate changes on CliffOnly).
-    UnsupportedStreamKind = 28,
-    /// New rate exceeds the governance-controlled maximum rate per second.
-    RateCapExceeded = 29,
-    /// Pause/resume toggled too recently; cooldown period not yet elapsed.
-    PauseCooldownActive = 30,
-    /// Withdrawal attempted too soon after the previous withdrawal.
-    WithdrawalTooFrequent = 31,
-    /// Metadata map or individual key/value exceeds the allowed size limit.
-    MetadataTooLarge = 32,
-    /// Keeper attempted to cancel before grace period has elapsed past end_time.
-    KeeperGracePeriodNotElapsed = 33,
-    /// Withdraw dust threshold is negative or exceeds deposit amount.
-    InvalidDustThreshold = 35,
-    /// Rate change attempted too soon after a previous rate change.
-    RateCooldownActive = 36,
-}
+/// Stream status values are imported from the crate root (`lib.rs`) where they
+/// are defined alongside the `#[soroban_sdk::contract]` implementation.
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -632,8 +473,20 @@ pub struct Stream {
     /// Ledger timestamp of the last rate change (or `start_time` on creation).
     /// `calculate_accrued` uses this as the start of the current rate epoch.
     pub checkpointed_at: u64,
-    /// Optional withdrawal threshold (raw units). Withdrawals below this
-    /// amount are skipped unless they are the final drain or the stream is terminal.
+    /// Minimum withdrawal amount in raw token units before a non-terminal payout
+    /// is skipped (returns `0`, no transfer).
+    ///
+    /// Enforced on `withdraw`, `withdraw_to`, `batch_withdraw`, and
+    /// `batch_withdraw_to` when `withdrawable < withdraw_dust_threshold`.
+    /// **Not** enforced on `delegated_withdraw` or read-only views.
+    ///
+    /// Bypassed when the stream is in a **terminal state** (`Cancelled` or past
+    /// `end_time`) or when the payout is the **final drain**
+    /// (`withdrawn_amount + withdrawable == deposit_amount`).
+    ///
+    /// See [`docs/dust-threshold.md`](../../../docs/dust-threshold.md) for the
+    /// entry-point matrix and validation rules (`InvalidDustThreshold` = 35 on
+    /// `create_stream_offer` only).
     pub withdraw_dust_threshold: i128,
     /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
     /// Maximum length: `MAX_MEMO_BYTES` (64 bytes). `None` when not supplied.
@@ -653,6 +506,23 @@ pub struct Stream {
     /// Ledger sequence number of the last rate change (or creation).
     /// Used to enforce MIN_RATE_INTERVAL_LEDGERS cooldown.
     pub last_rate_change_ledger: u32,
+    /// Delegation depth of this stream in the recipient-share delegation tree.
+    /// Root streams use depth 0; delegated children increment by one.
+    pub delegation_depth: u32,
+    /// Parent stream id when this stream is a delegated child.
+    /// `None` marks a root stream.
+    pub parent_stream_id: Option<u64>,
+    /// If true, the stream is decommissioned and restricted to cancel-or-no-op.
+    /// Defaults to false (None) for backward compatibility with existing streams.
+    pub decommissioned: Option<bool>,
+}
+
+/// Event payload emitted when a stream's decommissioned status is updated.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamDecommissioned {
+    pub stream_id: u64,
+    pub decommissioned: bool,
 }
 
 /// Pagination result for recipient stream listing
@@ -821,6 +691,10 @@ pub enum DataKey {
     PausedStreamCount,
     /// Aggregate sum of all keeper fees paid out via `keeper_cancel` (`i128`, instance storage).
     TotalKeeperFeesPaid,
+    /// Pooled stream shares mapping (stream_id → recipient → share_bps).
+    PooledStreamShares(u64),
+    /// Pooled stream withdrawn amounts (stream_id → recipient → withdrawn_amount).
+    PooledStreamWithdrawn(u64, Address),
 }
 
 /// Type of pause.
