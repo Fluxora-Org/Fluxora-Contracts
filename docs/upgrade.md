@@ -31,7 +31,7 @@ CONTRACT_VERSION = 9
 | 6 | Sweep excess authorization update; added additive `DataKey` variants 15–28 (`WithdrawNonce`, `PauseState`, `ReentrancyLock`, `RecipientStreamPage`, `RecipientStreamPageCount`, `PendingRecipientUpdate`, `IdReservation`, `MaxRatePerSecond`, `DelegatedWithdrawNonce`, `LastPauseRecord`, `RotationHistory`, `LastAccrualLedgerTimestamp`, `PausedStreamCount`, `TotalKeeperFeesPaid`) |
 | 7 | `Stream` and `CreateStreamParams` gained optional `witness: Option<Address>` for off-chain compliance attestation cancellation (`witnessed_cancel_stream` entry-point added); `DataKey::SenderStreams(Address)` at discriminant 29, `DataKey::AutoRenewEnabled(u64)` at discriminant 30 for auto-renewal; `DataKey::PendingStreamOffer(u64)` at discriminant 31 and `DataKey::RecipientPendingOffers(Address)` at discriminant 32 for two-phase offer-then-accept stream creation; `create_stream_offer`, `accept_stream_offer`, `reject_stream_offer`, `cancel_stream_offer`, `get_stream_offer`, `get_recipient_pending_offers` entrypoints added; new `ContractError` variants `OfferNotFound` (37), `OfferExpired` (38), `OfferWrongRecipient` (39), `OfferWrongSender` (40); `Stream` and `CreateStreamParams` gained optional `irrevocable: Option<bool>` field blocking all cancel/shorten paths |
 | 8 | Added lookback-bounded withdrawal support with per-stream `MaxLookbackLedgers` storage and additive `DataKey` variants 29–30 (`AutoRenewEnabled`, `MaxLookbackLedgers`) without changing the persisted `Stream` layout |
-| 9 | Added `decommissioned` compatibility and upgrade-safety semantics for delegated/pooled stream flows, plus relayer-fee-aware withdrawal semantics; no storage-layout change was required for existing entries, and the current live `DataKey` surface remains 36 variants (0..=35) |
+| 9 | Added `decommissioned` compatibility and upgrade-safety semantics for delegated/pooled stream flows, plus relayer-fee-aware withdrawal semantics; no storage-layout change was required for existing entries, and the current live `DataKey` surface is **36 variants** (discriminants 0..=35) — seven post-V7 additive variants (29–35: `AutoRenewEnabled`, `MaxLookbackLedgers`, `SenderStreams`, `PendingStreamOffer`, `RecipientPendingOffers`, `PooledStreamShares`, `PooledStreamWithdrawn`) were appended without a version bump per the append-only policy |
 
 ### When to increment
 
@@ -198,6 +198,8 @@ Before interacting with any Fluxora contract instance:
    - `expected_datakey_count_for_version()` and `all_live_datakey_variants()` in `contracts/stream/tests/storage_key_compat.rs`
    - Discriminant tables & variant count tests in `contracts/stream/src/checksum.rs`
    - Version history & policy table in `docs/upgrade.md`
+
+   > **Disagreement flag resolved (2026-07):** `contracts/stream/src/checksum.rs` previously documented exactly 29 live variants (0–28) while `storage_key_compat.rs` tracked 36. The seven post-V7 additive variants (discriminants 29–35) were appended without updating `checksum.rs`. This has been corrected: `checksum.rs` now includes the full post-V7 discriminant table (§ "Post-V7 additive variants (discriminants 29–35)"), the frozen-range invariant boundary has been updated to 0–35, the `live_datakey_variant_count_is_36` test replaces the stale `live_datakey_variant_count_is_29`, and the `post_v7_new_variants_occupy_discriminants_29_to_35` test documents the range explicitly.
 
 ---
 
