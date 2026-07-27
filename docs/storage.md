@@ -251,6 +251,9 @@ Extended on every `load_stream()` (read) and `save_stream()` (write), and on eve
 
 For a full description of what changed between contract versions and how to migrate, see [DEPLOYMENT.md — Version Migration](./DEPLOYMENT.md#version-migration).
 
+For documented storage invariants (TTL, liabilities, CEI, indexes), see
+[storage-invariants.md](./storage-invariants.md).
+
 ---
 
 ## 8. V5 Storage Layout (historical reference)

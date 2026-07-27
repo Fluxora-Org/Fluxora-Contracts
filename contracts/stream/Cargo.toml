@@ -152,6 +152,11 @@ path = "tests/id_reservation.rs"
 test = false
 
 [[test]]
+name = "storage_invariants"
+path = "tests/storage_invariants.rs"
+test = true
+
+[[test]]
 name = "dust_threshold"
 path = "tests/dust_threshold.rs"
 test = true

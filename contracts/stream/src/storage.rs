@@ -4,6 +4,25 @@
 //! and the DataKey-based CRUD layer. All functions here are `pub(crate)` unless
 //! they need to be called from tests via the `testutils` feature.
 //!
+//! # Storage invariants
+//!
+//! The contract relies on the following storage invariants (see also
+//! [`docs/storage-invariants.md`](../../../docs/storage-invariants.md)):
+//!
+//! - **TTL:** Instance keys are bumped on every entry-point; persistent stream
+//!   keys are bumped on `load_stream` / `save_stream` and index reads/writes.
+//! - **Reentrancy:** `ReentrancyLock` instance flag prevents nested token calls.
+//! - **Liabilities:** `TotalLiabilities` tracks outstanding deposit obligations
+//!   and moves in lockstep with create/top-up vs withdraw/cancel/refund paths.
+//! - **Indexes sorted:** `RecipientStreams` and `SenderStreams` vectors are kept
+//!   in ascending `stream_id` order on insert/remove.
+//! - **CEI:** Stream state is persisted before external token transfers.
+//! - **Terminal state:** Cancelled or past-`end_time` streams bypass dust threshold
+//!   and freeze accrual at cancellation when applicable.
+//! - **Metadata validation:** `validate_metadata` runs before ID allocation.
+//! - **Append-only keys:** `DataKey` variants are never reordered (discriminants
+//!   0–35 frozen per release policy).
+//!
 //! # Security notes
 //! - `DataKey` variant order is append-only and must never be reordered.
 //! - `save_stream` is `pub` so the accrual module can call it directly.
