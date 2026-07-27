@@ -17,13 +17,19 @@ use crate::*;
 use soroban_sdk::{token, Address, Env, Map};
 
 /// Minimum remaining TTL (in ledgers) before we bump.  ~1 day at 5 s/ledger.
-const INSTANCE_LIFETIME_THRESHOLD: u32 = 17_280;
+pub const INSTANCE_LIFETIME_THRESHOLD: u32 = 17_280;
 /// Extend to ~7 days of ledgers when bumping instance storage.
-const INSTANCE_BUMP_AMOUNT: u32 = 120_960;
+pub const INSTANCE_BUMP_AMOUNT: u32 = 120_960;
 /// Minimum remaining TTL for persistent (stream) entries.
-const PERSISTENT_LIFETIME_THRESHOLD: u32 = 17_280;
+pub const PERSISTENT_LIFETIME_THRESHOLD: u32 = 17_280;
 /// Extend persistent entries to ~7 days of ledgers.
-const PERSISTENT_BUMP_AMOUNT: u32 = 120_960;
+pub const PERSISTENT_BUMP_AMOUNT: u32 = 120_960;
+/// Approximate seconds per Soroban ledger close.
+pub const LEDGER_CLOSE_TIME: u64 = 5;
+/// Extra ledger buffer added to adaptive TTL bumps to absorb jitter.
+pub const BUFFER_LEDGERS: u32 = 17_280; // ~1 day
+/// Absolute maximum TTL for any storage entry (Soroban platform limit).
+pub const MAX_TTL: u32 = 3_110_400; // ~180 days
 
 // ---------------------------------------------------------------------------
 // Storage helpers
@@ -31,7 +37,7 @@ const PERSISTENT_BUMP_AMOUNT: u32 = 120_960;
 
 /// Extend instance storage TTL so Config and NextStreamId do not expire.
 /// Called on every entry-point that reads or writes instance storage.
-pub(crate) fn bump_instance_ttl(env: &Env) {
+pub fn bump_instance_ttl(env: &Env) {
     env.storage()
         .instance()
         .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
@@ -48,7 +54,7 @@ pub(crate) fn bump_instance_ttl(env: &Env) {
 /// Accrual math assumes ledger timestamps are monotonically non-decreasing. Stellar
 /// enforces this on production ledgers; the stored timestamp is a low-cost tripwire
 /// for test harnesses, migrations, or future environments that violate the assumption.
-pub(crate) fn current_accrual_timestamp(env: &Env) -> Result<u64, ContractError> {
+pub fn current_accrual_timestamp(env: &Env) -> Result<u64, ContractError> {
     let now = env.ledger().timestamp();
     let key = DataKey::LastAccrualLedgerTimestamp;
 
@@ -61,7 +67,7 @@ pub(crate) fn current_accrual_timestamp(env: &Env) -> Result<u64, ContractError>
     Ok(now)
 }
 
-pub(crate) fn acquire_reentrancy_lock(env: &Env) -> Result<(), ContractError> {
+pub fn acquire_reentrancy_lock(env: &Env) -> Result<(), ContractError> {
     let key = DataKey::ReentrancyLock;
     if env.storage().instance().get(&key).unwrap_or(false) {
         return Err(ContractError::InvalidState);
@@ -72,7 +78,7 @@ pub(crate) fn acquire_reentrancy_lock(env: &Env) -> Result<(), ContractError> {
     Ok(())
 }
 
-pub(crate) fn release_reentrancy_lock(env: &Env) {
+pub fn release_reentrancy_lock(env: &Env) {
     env.storage()
         .instance()
         .set(&DataKey::ReentrancyLock, &false);
@@ -88,7 +94,7 @@ pub(crate) fn release_reentrancy_lock(env: &Env) {
 ///   `BUFFER_LEDGERS` so the entry stays alive long enough for the recipient to withdraw.
 /// - The result is always at least `PERSISTENT_BUMP_AMOUNT` to avoid under-bumping
 ///   short-lived streams below the static floor.
-pub(crate) fn compute_adaptive_ttl(now: u64, end_time: u64) -> u32 {
+pub fn compute_adaptive_ttl(now: u64, end_time: u64) -> u32 {
     let remaining_seconds = end_time.saturating_sub(now);
     let ledgers_for_stream = remaining_seconds / LEDGER_CLOSE_TIME;
     let adaptive_u64 = ledgers_for_stream.saturating_add(BUFFER_LEDGERS as u64);
@@ -96,7 +102,7 @@ pub(crate) fn compute_adaptive_ttl(now: u64, end_time: u64) -> u32 {
     clamped as u32
 }
 
-pub(crate) fn get_config(env: &Env) -> Result<Config, ContractError> {
+pub fn get_config(env: &Env) -> Result<Config, ContractError> {
     bump_instance_ttl(env);
     env.storage()
         .instance()
@@ -104,23 +110,25 @@ pub(crate) fn get_config(env: &Env) -> Result<Config, ContractError> {
         .ok_or(ContractError::InvalidState) // Not initialised
 }
 
-pub(crate) fn get_token(env: &Env) -> Result<Address, ContractError> {
+pub fn get_token(env: &Env) -> Result<Address, ContractError> {
     get_config(env).map(|c| c.token)
 }
 
-pub(crate) fn get_admin(env: &Env) -> Result<Address, ContractError> {
+pub fn get_admin(env: &Env) -> Result<Address, ContractError> {
     get_config(env).map(|c| c.admin)
 }
 
 /// Returns whether the contract is in **global emergency pause** (default `false` if unset).
-pub(crate) fn is_global_emergency_paused(env: &Env) -> bool {
+pub fn is_global_emergency_paused(env: &Env) -> bool {
+    bump_instance_ttl(env);
     env.storage()
         .instance()
         .get(&DataKey::GlobalEmergencyPaused)
         .unwrap_or(false)
 }
 
-pub(crate) fn is_creation_paused(env: &Env) -> bool {
+pub fn is_creation_paused(env: &Env) -> bool {
+    bump_instance_ttl(env);
     env.storage()
         .instance()
         .get(&DataKey::CreationPaused)
@@ -129,7 +137,7 @@ pub(crate) fn is_creation_paused(env: &Env) -> bool {
 
 /// Returns `Err(ContractError::ContractPaused)` when [`is_global_emergency_paused`] is true.
 /// Admin/admin-override entrypoints must not call this so operators can still intervene.
-pub(crate) fn require_not_globally_paused(env: &Env) -> Result<(), ContractError> {
+pub fn require_not_globally_paused(env: &Env) -> Result<(), ContractError> {
     if is_global_emergency_paused(env) {
         return Err(ContractError::ContractPaused);
     }
@@ -137,7 +145,7 @@ pub(crate) fn require_not_globally_paused(env: &Env) -> Result<(), ContractError
 }
 
 /// Blocks new stream creation when the emergency pause or creation-only pause is active.
-pub(crate) fn require_not_creation_paused(env: &Env) -> Result<(), ContractError> {
+pub fn require_not_creation_paused(env: &Env) -> Result<(), ContractError> {
     require_not_globally_paused(env)?;
     if is_creation_paused(env) {
         return Err(ContractError::ContractPaused);
@@ -147,27 +155,31 @@ pub(crate) fn require_not_creation_paused(env: &Env) -> Result<(), ContractError
 
 /// Returns whether the protocol is globally paused (checks both GlobalEmergencyPaused and CreationPaused).
 /// Default is false (not paused) if no pause keys are set.
-pub(crate) fn is_protocol_paused(env: &Env) -> bool {
+pub fn is_protocol_paused(env: &Env) -> bool {
     is_global_emergency_paused(env) || is_creation_paused(env)
 }
 
 /// Get the stored pause reason, if any.
-pub(crate) fn get_pause_reason(env: &Env) -> Option<soroban_sdk::String> {
+pub fn get_pause_reason(env: &Env) -> Option<soroban_sdk::String> {
+    bump_instance_ttl(env);
     env.storage().instance().get(&DataKey::GlobalPauseReason)
 }
 
 /// Get the stored pause timestamp, if any.
-pub(crate) fn get_pause_timestamp(env: &Env) -> Option<u64> {
+pub fn get_pause_timestamp(env: &Env) -> Option<u64> {
+    bump_instance_ttl(env);
     env.storage().instance().get(&DataKey::GlobalPauseTimestamp)
 }
 
 /// Get the stored pause admin address, if any.
-pub(crate) fn get_pause_admin(env: &Env) -> Option<Address> {
+pub fn get_pause_admin(env: &Env) -> Option<Address> {
+    bump_instance_ttl(env);
     env.storage().instance().get(&DataKey::GlobalPauseAdmin)
 }
 
 /// Get the governance-controlled maximum rate per second (default: i128::MAX if unset).
-pub(crate) fn get_max_rate_per_second(env: &Env) -> i128 {
+pub fn get_max_rate_per_second(env: &Env) -> i128 {
+    bump_instance_ttl(env);
     env.storage()
         .instance()
         .get(&DataKey::MaxRatePerSecond)
@@ -175,14 +187,14 @@ pub(crate) fn get_max_rate_per_second(env: &Env) -> i128 {
 }
 
 /// Set the governance-controlled maximum rate per second.
-pub(crate) fn set_max_rate_per_second(env: &Env, max_rate: i128) {
+pub fn set_max_rate_per_second(env: &Env, max_rate: i128) {
     env.storage()
         .instance()
         .set(&DataKey::MaxRatePerSecond, &max_rate);
-    env.storage().instance().extend_ttl(100, 518400); // 60 days
+    bump_instance_ttl(env);
 }
 
-pub(crate) fn read_stream_count(env: &Env) -> u64 {
+pub fn read_stream_count(env: &Env) -> u64 {
     bump_instance_ttl(env);
     env.storage()
         .instance()
@@ -190,18 +202,18 @@ pub(crate) fn read_stream_count(env: &Env) -> u64 {
         .unwrap_or(0u64)
 }
 
-pub(crate) fn set_stream_count(env: &Env, count: u64) {
+pub fn set_stream_count(env: &Env, count: u64) {
     env.storage().instance().set(&DataKey::NextStreamId, &count);
     bump_instance_ttl(env);
 }
 
-pub(crate) fn load_id_reservation(env: &Env, caller: &Address) -> Option<IdReservation> {
+pub fn load_id_reservation(env: &Env, caller: &Address) -> Option<IdReservation> {
     env.storage()
         .persistent()
         .get(&DataKey::IdReservation(caller.clone()))
 }
 
-pub(crate) fn save_id_reservation(env: &Env, caller: &Address, res: &IdReservation) {
+pub fn save_id_reservation(env: &Env, caller: &Address, res: &IdReservation) {
     let key = DataKey::IdReservation(caller.clone());
     env.storage().persistent().set(&key, res);
     env.storage().persistent().extend_ttl(
@@ -211,7 +223,7 @@ pub(crate) fn save_id_reservation(env: &Env, caller: &Address, res: &IdReservati
     );
 }
 
-pub(crate) fn remove_id_reservation(env: &Env, caller: &Address) {
+pub fn remove_id_reservation(env: &Env, caller: &Address) {
     env.storage()
         .persistent()
         .remove(&DataKey::IdReservation(caller.clone()));
@@ -222,7 +234,7 @@ pub(crate) fn remove_id_reservation(env: &Env, caller: &Address) {
 /// If the caller has an active reservation, consume the next ID from it.
 /// When the reservation is fully consumed it is deleted.
 /// Otherwise fall through to the live global counter.
-pub(crate) fn next_stream_id_for(env: &Env, caller: &Address) -> u64 {
+pub fn next_stream_id_for(env: &Env, caller: &Address) -> u64 {
     if let Some(mut res) = load_id_reservation(env, caller) {
         let id = res.start_id + res.consumed as u64;
         res.consumed += 1;
@@ -239,7 +251,7 @@ pub(crate) fn next_stream_id_for(env: &Env, caller: &Address) -> u64 {
     }
 }
 
-pub(crate) fn load_stream(env: &Env, stream_id: u64) -> Result<Stream, ContractError> {
+pub fn load_stream(env: &Env, stream_id: u64) -> Result<Stream, ContractError> {
     let key = DataKey::Stream(stream_id);
     let stream: Stream = env
         .storage()
@@ -268,7 +280,7 @@ pub fn save_stream(env: &Env, stream: &Stream) {
         .extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, bump);
 }
 
-pub(crate) fn is_terminal_state(env: &Env, stream: &Stream) -> bool {
+pub fn is_terminal_state(env: &Env, stream: &Stream) -> bool {
     if stream.status == StreamStatus::Completed || stream.status == StreamStatus::Cancelled {
         return true;
     }
@@ -276,7 +288,7 @@ pub(crate) fn is_terminal_state(env: &Env, stream: &Stream) -> bool {
     env.ledger().timestamp() >= stream.end_time
 }
 
-pub(crate) fn remove_stream(env: &Env, stream_id: u64) {
+pub fn remove_stream(env: &Env, stream_id: u64) {
     let key = DataKey::Stream(stream_id);
     env.storage().persistent().remove(&key);
 }
@@ -286,7 +298,7 @@ pub(crate) fn remove_stream(env: &Env, stream_id: u64) {
 // ---------------------------------------------------------------------------
 
 /// Load the list of stream IDs for a recipient (sorted by stream_id).
-pub(crate) fn load_recipient_streams(env: &Env, recipient: &Address) -> soroban_sdk::Vec<u64> {
+pub fn load_recipient_streams(env: &Env, recipient: &Address) -> soroban_sdk::Vec<u64> {
     let key = DataKey::RecipientStreams(recipient.clone());
     let streams: soroban_sdk::Vec<u64> = env
         .storage()
@@ -310,32 +322,36 @@ pub(crate) fn load_recipient_streams(env: &Env, recipient: &Address) -> soroban_
 ///
 /// `end_time`: when provided, the TTL bump is scaled to the stream's remaining
 /// lifetime via `compute_adaptive_ttl`; otherwise falls back to `PERSISTENT_BUMP_AMOUNT`.
-pub(crate) fn save_recipient_streams(
+pub fn save_recipient_streams(
     env: &Env,
     recipient: &Address,
     streams: &soroban_sdk::Vec<u64>,
     end_time: Option<u64>,
 ) {
     let key = DataKey::RecipientStreams(recipient.clone());
-    env.storage().persistent().set(&key, streams);
+    if streams.is_empty() {
+        env.storage().persistent().remove(&key);
+    } else {
+        env.storage().persistent().set(&key, streams);
 
-    // Adaptive TTL bump: scale to the stream's remaining lifetime when known,
-    // otherwise fall back to the static PERSISTENT_BUMP_AMOUNT floor.
-    let bump = end_time
-        .map(|et| compute_adaptive_ttl(env.ledger().timestamp(), et))
-        .unwrap_or(PERSISTENT_BUMP_AMOUNT);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, bump);
+        // Adaptive TTL bump: scale to the stream's remaining lifetime when known,
+        // otherwise fall back to the static PERSISTENT_BUMP_AMOUNT floor.
+        let bump = end_time
+            .map(|et| compute_adaptive_ttl(env.ledger().timestamp(), et))
+            .unwrap_or(PERSISTENT_BUMP_AMOUNT);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, bump);
+    }
 }
 
 /// Add a stream ID to a recipient's index (maintains sorted order).
 /// Assumes stream_id is not already in the list.
-pub(crate) fn add_stream_to_recipient_index(
+pub fn add_stream_to_recipient_index(
     env: &Env,
     recipient: &Address,
     stream_id: u64,
-    _end_time: Option<u64>,
+    end_time: Option<u64>,
 ) {
     let mut streams = load_recipient_streams(env, recipient);
 
@@ -346,11 +362,11 @@ pub(crate) fn add_stream_to_recipient_index(
     };
 
     streams.insert(insert_pos, stream_id);
-    save_recipient_streams(env, recipient, &streams, None);
+    save_recipient_streams(env, recipient, &streams, end_time);
 }
 
 /// Remove a stream ID from a recipient's index.
-pub(crate) fn remove_stream_from_recipient_index(env: &Env, recipient: &Address, stream_id: u64) {
+pub fn remove_stream_from_recipient_index(env: &Env, recipient: &Address, stream_id: u64) {
     let mut streams = load_recipient_streams(env, recipient);
 
     // Find and remove the stream_id
@@ -361,10 +377,84 @@ pub(crate) fn remove_stream_from_recipient_index(env: &Env, recipient: &Address,
 }
 
 // ---------------------------------------------------------------------------
+// Sender stream index helpers
+// ---------------------------------------------------------------------------
+
+/// Load the sorted list of stream IDs for a sender.
+///
+/// Returns an empty `Vec` when the sender has no indexed streams.
+/// TTL is bumped on every read to keep the entry alive.
+pub fn load_sender_streams(env: &Env, sender: &Address) -> soroban_sdk::Vec<u64> {
+    let key = DataKey::SenderStreams(sender.clone());
+    let streams: soroban_sdk::Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+
+    if !streams.is_empty() {
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+    streams
+}
+
+/// Persist the sender stream index (maintains sorted order).
+pub fn save_sender_streams(
+    env: &Env,
+    sender: &Address,
+    streams: &soroban_sdk::Vec<u64>,
+    end_time: Option<u64>,
+) {
+    let key = DataKey::SenderStreams(sender.clone());
+    if streams.is_empty() {
+        env.storage().persistent().remove(&key);
+    } else {
+        env.storage().persistent().set(&key, streams);
+        let bump = end_time
+            .map(|et| compute_adaptive_ttl(env.ledger().timestamp(), et))
+            .unwrap_or(PERSISTENT_BUMP_AMOUNT);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, bump);
+    }
+}
+
+/// Insert a stream ID into the sender's index, maintaining ascending sort order.
+/// No-op if the ID is already present.
+pub fn add_stream_to_sender_index(
+    env: &Env,
+    sender: &Address,
+    stream_id: u64,
+    end_time: Option<u64>,
+) {
+    let mut streams = load_sender_streams(env, sender);
+    let insert_pos = match streams.binary_search(stream_id) {
+        Ok(_) => return, // already present – idempotent
+        Err(pos) => pos,
+    };
+    streams.insert(insert_pos, stream_id);
+    save_sender_streams(env, sender, &streams, end_time);
+}
+
+/// Remove a stream ID from the sender's index.
+/// No-op if the ID is not present.
+pub fn remove_stream_from_sender_index(env: &Env, sender: &Address, stream_id: u64) {
+    let mut streams = load_sender_streams(env, sender);
+    if let Ok(idx) = streams.binary_search(stream_id) {
+        streams.remove(idx);
+        save_sender_streams(env, sender, &streams, None);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Liability tracking (total escrow owed to recipients)
 // ---------------------------------------------------------------------------
 
-pub(crate) fn read_total_liabilities(env: &Env) -> i128 {
+pub fn read_total_liabilities(env: &Env) -> i128 {
     bump_instance_ttl(env);
     env.storage()
         .instance()
@@ -372,7 +462,7 @@ pub(crate) fn read_total_liabilities(env: &Env) -> i128 {
         .unwrap_or(0i128)
 }
 
-pub(crate) fn write_total_liabilities(env: &Env, amount: i128) {
+pub fn write_total_liabilities(env: &Env, amount: i128) {
     env.storage()
         .instance()
         .set(&DataKey::TotalLiabilities, &amount);
@@ -383,7 +473,7 @@ pub(crate) fn write_total_liabilities(env: &Env, amount: i128) {
 // Schedule template registry
 // ---------------------------------------------------------------------------
 
-pub(crate) fn read_next_template_id(env: &Env) -> u64 {
+pub fn read_next_template_id(env: &Env) -> u64 {
     bump_instance_ttl(env);
     env.storage()
         .instance()
@@ -391,12 +481,12 @@ pub(crate) fn read_next_template_id(env: &Env) -> u64 {
         .unwrap_or(0u64)
 }
 
-pub(crate) fn set_next_template_id(env: &Env, id: u64) {
+pub fn set_next_template_id(env: &Env, id: u64) {
     env.storage().instance().set(&DataKey::NextTemplateId, &id);
     bump_instance_ttl(env);
 }
 
-pub(crate) fn read_active_template_count(env: &Env) -> u64 {
+pub fn read_active_template_count(env: &Env) -> u64 {
     bump_instance_ttl(env);
     env.storage()
         .instance()
@@ -404,14 +494,14 @@ pub(crate) fn read_active_template_count(env: &Env) -> u64 {
         .unwrap_or(0u64)
 }
 
-pub(crate) fn set_active_template_count(env: &Env, count: u64) {
+pub fn set_active_template_count(env: &Env, count: u64) {
     env.storage()
         .instance()
         .set(&DataKey::ActiveTemplateCount, &count);
     bump_instance_ttl(env);
 }
 
-pub(crate) fn validate_template_delays(
+pub fn validate_template_delays(
     env: &Env,
     start_delay: u64,
     cliff_delay: u64,
@@ -439,7 +529,7 @@ pub(crate) fn validate_template_delays(
     Ok(())
 }
 
-pub(crate) fn load_owner_template_ids(env: &Env, owner: &Address) -> soroban_sdk::Vec<u64> {
+pub fn load_owner_template_ids(env: &Env, owner: &Address) -> soroban_sdk::Vec<u64> {
     let key = DataKey::OwnerTemplateIds(owner.clone());
     let ids: soroban_sdk::Vec<u64> = env
         .storage()
@@ -456,17 +546,21 @@ pub(crate) fn load_owner_template_ids(env: &Env, owner: &Address) -> soroban_sdk
     ids
 }
 
-pub(crate) fn save_owner_template_ids(env: &Env, owner: &Address, ids: &soroban_sdk::Vec<u64>) {
+pub fn save_owner_template_ids(env: &Env, owner: &Address, ids: &soroban_sdk::Vec<u64>) {
     let key = DataKey::OwnerTemplateIds(owner.clone());
-    env.storage().persistent().set(&key, ids);
-    env.storage().persistent().extend_ttl(
-        &key,
-        PERSISTENT_LIFETIME_THRESHOLD,
-        PERSISTENT_BUMP_AMOUNT,
-    );
+    if ids.is_empty() {
+        env.storage().persistent().remove(&key);
+    } else {
+        env.storage().persistent().set(&key, ids);
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
 }
 
-pub(crate) fn save_stream_template(env: &Env, tpl: &StreamScheduleTemplate) {
+pub fn save_stream_template(env: &Env, tpl: &StreamScheduleTemplate) {
     let key = DataKey::StreamTemplate(tpl.template_id);
     env.storage().persistent().set(&key, tpl);
     env.storage().persistent().extend_ttl(
@@ -476,7 +570,7 @@ pub(crate) fn save_stream_template(env: &Env, tpl: &StreamScheduleTemplate) {
     );
 }
 
-pub(crate) fn load_stream_template(
+pub fn load_stream_template(
     env: &Env,
     template_id: u64,
 ) -> Result<StreamScheduleTemplate, ContractError> {
@@ -494,12 +588,12 @@ pub(crate) fn load_stream_template(
     Ok(tpl)
 }
 
-pub(crate) fn remove_stream_template_storage(env: &Env, template_id: u64) {
+pub fn remove_stream_template_storage(env: &Env, template_id: u64) {
     let key = DataKey::StreamTemplate(template_id);
     env.storage().persistent().remove(&key);
 }
 
-pub(crate) fn remove_template_id_for_owner(
+pub fn remove_template_id_for_owner(
     env: &Env,
     owner: &Address,
     template_id: u64,
@@ -520,7 +614,7 @@ pub(crate) fn remove_template_id_for_owner(
 // ---------------------------------------------------------------------------
 
 /// Load the current nonce for a recipient (0 if never used).
-pub(crate) fn load_delegated_nonce(env: &Env, recipient: &Address) -> u64 {
+pub fn load_delegated_nonce(env: &Env, recipient: &Address) -> u64 {
     let key = DataKey::DelegatedWithdrawNonce(recipient.clone());
     env.storage().persistent().get(&key).unwrap_or(0u64)
 }
@@ -536,7 +630,7 @@ pub fn increment_delegated_nonce(env: &Env, recipient: &Address) {
     );
 }
 
-pub(crate) fn load_rotation_history(env: &Env, stream_id: u64) -> soroban_sdk::Vec<RotationEntry> {
+pub fn load_rotation_history(env: &Env, stream_id: u64) -> soroban_sdk::Vec<RotationEntry> {
     let key = DataKey::RotationHistory(stream_id);
     env.storage()
         .persistent()
@@ -545,7 +639,7 @@ pub(crate) fn load_rotation_history(env: &Env, stream_id: u64) -> soroban_sdk::V
 }
 
 /// Compute stream health: returns (is_underfunded, remaining_deposit, seconds_remaining).
-pub(crate) fn compute_stream_health(stream: &Stream, now: u64) -> (bool, i128, u64) {
+pub fn compute_stream_health(stream: &Stream, now: u64) -> (bool, i128, u64) {
     if stream.status == StreamStatus::Completed || stream.status == StreamStatus::Cancelled {
         return (false, 0i128, 0u64);
     }
@@ -561,7 +655,7 @@ pub(crate) fn compute_stream_health(stream: &Stream, now: u64) -> (bool, i128, u
 }
 
 /// Emit a `StreamHealthChanged` event if the funding health status changed.
-pub(crate) fn maybe_emit_health_changed(
+pub fn maybe_emit_health_changed(
     env: &Env,
     stream: &Stream,
     was_underfunded: bool,
@@ -583,14 +677,15 @@ pub(crate) fn maybe_emit_health_changed(
 }
 
 /// Load the current config or panic (for admin operations).
-pub(crate) fn load_config(env: &Env) -> Config {
+pub fn load_config(env: &Env) -> Config {
+    bump_instance_ttl(env);
     env.storage()
         .instance()
         .get(&DataKey::Config)
         .expect("contract not initialised")
 }
 
-pub(crate) fn save_rotation_history(
+pub fn save_rotation_history(
     env: &Env,
     stream_id: u64,
     history: &soroban_sdk::Vec<RotationEntry>,
@@ -604,7 +699,7 @@ pub(crate) fn save_rotation_history(
     );
 }
 
-pub(crate) fn append_rotation_entry(env: &Env, stream_id: u64, entry: RotationEntry) {
+pub fn append_rotation_entry(env: &Env, stream_id: u64, entry: RotationEntry) {
     let mut history = load_rotation_history(env, stream_id);
     if history.len() as u32 >= MAX_ROTATION_HISTORY {
         history.remove(0);
@@ -646,7 +741,7 @@ pub(crate) fn append_rotation_entry(env: &Env, stream_id: u64, entry: RotationEn
 /// - No silent failures: Token transfer either succeeds or fails explicitly
 ///
 /// See [`token-assumptions.md`](../../docs/token-assumptions.md) for complete token trust model.
-pub(crate) fn pull_token(env: &Env, from: &Address, amount: i128) -> Result<(), ContractError> {
+pub fn pull_token(env: &Env, from: &Address, amount: i128) -> Result<(), ContractError> {
     let token_address = get_token(env)?;
     let token_client = token::Client::new(env, &token_address);
     token_client.transfer_from(
@@ -689,7 +784,7 @@ pub(crate) fn pull_token(env: &Env, from: &Address, amount: i128) -> Result<(), 
 /// - No silent failures: Token transfer either succeeds or fails explicitly
 ///
 /// See [`token-assumptions.md`](../../docs/token-assumptions.md) for complete token trust model.
-pub(crate) fn push_token(env: &Env, to: &Address, amount: i128) -> Result<(), ContractError> {
+pub fn push_token(env: &Env, to: &Address, amount: i128) -> Result<(), ContractError> {
     let token_address = get_token(env)?;
     let token_client = token::Client::new(env, &token_address);
     #[cfg(test)]
@@ -723,7 +818,7 @@ pub(crate) fn push_token(env: &Env, to: &Address, amount: i128) -> Result<(), Co
 ///
 /// # Errors
 /// Returns `ContractError::MetadataTooLarge` on any bound violation.
-pub(crate) fn validate_metadata(
+pub fn validate_metadata(
     metadata: &Map<soroban_sdk::Bytes, soroban_sdk::Bytes>,
 ) -> Result<(), ContractError> {
     if metadata.len() > MAX_METADATA_KEYS {
@@ -759,7 +854,7 @@ pub(crate) fn validate_metadata(
 
 // ---------------------------------------------------------------------------
 
-pub(crate) fn save_pooled_stream_shares(
+pub fn save_pooled_stream_shares(
     env: &Env,
     stream_id: u64,
     shares: &soroban_sdk::Vec<(Address, u32)>,
@@ -773,7 +868,7 @@ pub(crate) fn save_pooled_stream_shares(
     );
 }
 
-pub(crate) fn read_pooled_stream_shares(
+pub fn read_pooled_stream_shares(
     env: &Env,
     stream_id: u64,
 ) -> Result<soroban_sdk::Vec<(Address, u32)>, ContractError> {
@@ -790,7 +885,7 @@ pub(crate) fn read_pooled_stream_shares(
     }
 }
 
-pub(crate) fn save_pooled_stream_withdrawn(
+pub fn save_pooled_stream_withdrawn(
     env: &Env,
     stream_id: u64,
     recipient: Address,
@@ -805,7 +900,7 @@ pub(crate) fn save_pooled_stream_withdrawn(
     );
 }
 
-pub(crate) fn read_pooled_stream_withdrawn(env: &Env, stream_id: u64, recipient: Address) -> i128 {
+pub fn read_pooled_stream_withdrawn(env: &Env, stream_id: u64, recipient: Address) -> i128 {
     let key = DataKey::PooledStreamWithdrawn(stream_id, recipient);
     let amount = env.storage().persistent().get(&key).unwrap_or(0);
     if amount > 0 {
@@ -838,4 +933,215 @@ pub fn reject_duplicate_ids(
         seen.push_back(id);
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Paused stream counter helpers
+// ---------------------------------------------------------------------------
+
+pub fn read_paused_stream_count(env: &Env) -> u64 {
+    bump_instance_ttl(env);
+    env.storage()
+        .instance()
+        .get(&DataKey::PausedStreamCount)
+        .unwrap_or(0u64)
+}
+
+pub fn write_paused_stream_count(env: &Env, count: u64) {
+    env.storage()
+        .instance()
+        .set(&DataKey::PausedStreamCount, &count);
+    bump_instance_ttl(env);
+}
+
+pub fn reconcile_paused_stream_count(env: &Env, previous: StreamStatus, next: StreamStatus) {
+    if previous == next {
+        return;
+    }
+
+    match (previous, next) {
+        (StreamStatus::Paused, StreamStatus::Paused) => {}
+        (StreamStatus::Paused, _) => {
+            write_paused_stream_count(env, read_paused_stream_count(env).saturating_sub(1));
+        }
+        (_, StreamStatus::Paused) => {
+            write_paused_stream_count(env, read_paused_stream_count(env).saturating_add(1));
+        }
+        _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Keeper fee aggregate counter
+// ---------------------------------------------------------------------------
+
+pub fn read_total_keeper_fees_paid(env: &Env) -> i128 {
+    bump_instance_ttl(env);
+    env.storage()
+        .instance()
+        .get(&DataKey::TotalKeeperFeesPaid)
+        .unwrap_or(0i128)
+}
+
+pub fn increment_total_keeper_fees_paid(env: &Env, amount: i128) -> Result<(), ContractError> {
+    let current = read_total_keeper_fees_paid(env);
+    let updated = current
+        .checked_add(amount)
+        .ok_or(ContractError::ArithmeticOverflow)?;
+    env.storage()
+        .instance()
+        .set(&DataKey::TotalKeeperFeesPaid, &updated);
+    bump_instance_ttl(env);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Auto-renew and Lookback storage helpers
+// ---------------------------------------------------------------------------
+
+pub fn auto_renew_enabled(env: &Env, stream_id: u64) -> bool {
+    let key = DataKey::AutoRenewEnabled(stream_id);
+    let val = env.storage().persistent().get(&key).unwrap_or(false);
+    if val {
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+    val
+}
+
+pub fn set_auto_renew_enabled(env: &Env, stream_id: u64, enabled: bool) {
+    let key = DataKey::AutoRenewEnabled(stream_id);
+    env.storage().persistent().set(&key, &enabled);
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+}
+
+pub fn max_lookback_ledgers(env: &Env, stream_id: u64) -> Option<u32> {
+    let key = DataKey::MaxLookbackLedgers(stream_id);
+    let val: Option<u32> = env.storage().persistent().get(&key);
+    if val.is_some() {
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+    val
+}
+
+pub fn set_max_lookback_ledgers(
+    env: &Env,
+    stream_id: u64,
+    max_lookback_ledgers: Option<u32>,
+) -> Result<(), ContractError> {
+    if max_lookback_ledgers == Some(0) {
+        return Err(ContractError::InvalidParams);
+    }
+    let key = DataKey::MaxLookbackLedgers(stream_id);
+    match max_lookback_ledgers {
+        Some(ledgers) => {
+            env.storage().persistent().set(&key, &ledgers);
+            env.storage().persistent().extend_ttl(
+                &key,
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
+        }
+        None => env.storage().persistent().remove(&key),
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Stream offer storage helpers
+// ---------------------------------------------------------------------------
+
+pub fn save_stream_offer(env: &Env, offer: &StreamOffer) {
+    let key = DataKey::PendingStreamOffer(offer.offer_id);
+    env.storage().persistent().set(&key, offer);
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+}
+
+pub fn load_stream_offer(env: &Env, offer_id: u64) -> Result<StreamOffer, ContractError> {
+    let key = DataKey::PendingStreamOffer(offer_id);
+    let offer: StreamOffer = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .ok_or(ContractError::OfferNotFound)?;
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+    Ok(offer)
+}
+
+pub fn remove_stream_offer(env: &Env, offer_id: u64) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::PendingStreamOffer(offer_id));
+}
+
+pub fn load_recipient_pending_offers(env: &Env, recipient: &Address) -> soroban_sdk::Vec<u64> {
+    let key = DataKey::RecipientPendingOffers(recipient.clone());
+    let offers: soroban_sdk::Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+    if !offers.is_empty() {
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+    offers
+}
+
+pub fn save_recipient_pending_offers(
+    env: &Env,
+    recipient: &Address,
+    offers: &soroban_sdk::Vec<u64>,
+) {
+    let key = DataKey::RecipientPendingOffers(recipient.clone());
+    if offers.is_empty() {
+        env.storage().persistent().remove(&key);
+    } else {
+        env.storage().persistent().set(&key, offers);
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+}
+
+pub fn add_offer_to_recipient_pending(env: &Env, recipient: &Address, offer_id: u64) {
+    let mut offers = load_recipient_pending_offers(env, recipient);
+    let insert_pos = match offers.binary_search(offer_id) {
+        Ok(pos) => pos,
+        Err(pos) => pos,
+    };
+    offers.insert(insert_pos, offer_id);
+    save_recipient_pending_offers(env, recipient, &offers);
+}
+
+pub fn remove_offer_from_recipient_pending(env: &Env, recipient: &Address, offer_id: u64) {
+    let mut offers = load_recipient_pending_offers(env, recipient);
+    if let Ok(idx) = offers.binary_search(offer_id) {
+        offers.remove(idx);
+        save_recipient_pending_offers(env, recipient, &offers);
+    }
 }
