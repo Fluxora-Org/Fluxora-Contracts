@@ -769,6 +769,17 @@ pub struct Stream {
     pub memo: Option<soroban_sdk::Bytes>,
     /// The architectural style of the stream (Linear or CliffOnly).
     pub kind: StreamKind,
+    /// Optional structured metadata map for rich integration data (e.g. invoice ID,
+    /// project code, external reference URI).
+    ///
+    /// - At most `MAX_METADATA_KEYS` (8) entries.
+    /// - Each key ≤ `MAX_METADATA_KEY_BYTES` (32 bytes).
+    /// - Each value ≤ `MAX_METADATA_VALUE_BYTES` (128 bytes).
+    /// - Total key+value bytes ≤ `MAX_METADATA_BYTES` (512 bytes).
+    ///
+    /// Validated at `create_stream` time and **immutable** post-creation to prevent
+    /// indexer confusion.
+    pub metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
 }
 
 /// Pagination result for recipient stream listing
@@ -802,6 +813,12 @@ pub struct CreateStreamParams {
     pub memo: Option<soroban_sdk::Bytes>,
     /// The architectural style of the stream (Linear or CliffOnly).
     pub kind: StreamKind,
+    /// Optional structured key-value metadata (TLV extension, issue #580).
+    ///
+    /// Validated at creation: ≤`MAX_METADATA_KEYS` entries, each key ≤`MAX_METADATA_KEY_BYTES`
+    /// bytes, each value ≤`MAX_METADATA_VALUE_BYTES` bytes, total ≤`MAX_METADATA_BYTES` bytes.
+    /// Immutable post-creation. Pass `None` to omit.
+    pub metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
 }
 
 /// Parameters for creating a payment stream with relative (offset-based) times.
@@ -836,6 +853,11 @@ pub struct CreateStreamRelativeParams {
     pub memo: Option<soroban_sdk::Bytes>,
     /// The architectural style of the stream (Linear or CliffOnly).
     pub kind: StreamKind,
+    /// Optional structured key-value metadata (TLV extension, issue #580).
+    ///
+    /// Same validation rules as `CreateStreamParams.metadata`.
+    /// Immutable post-creation. Pass `None` to omit.
+    pub metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
 }
 
 /// Reusable relative schedule (offsets only). Amounts are supplied when creating a stream.
@@ -1687,12 +1709,18 @@ impl FluxoraStream {
         withdraw_dust_threshold: i128,
         memo: Option<soroban_sdk::Bytes>,
         kind: StreamKind,
+        metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
     ) -> Result<u64, ContractError> {
         // Validate memo length before allocating a stream ID.
         if let Some(ref m) = memo {
             if m.len() as usize > MAX_MEMO_BYTES {
                 return Err(ContractError::InvalidParams);
             }
+        }
+
+        // Validate metadata bounds before allocating a stream ID.
+        if let Some(ref meta) = metadata {
+            validate_metadata(meta)?;
         }
 
         let stream_id = next_stream_id_for(env, &sender);
@@ -1714,6 +1742,7 @@ impl FluxoraStream {
             withdraw_dust_threshold,
             memo: memo.clone(),
             kind,
+            metadata,
         };
 
         save_stream(env, &stream);
@@ -1740,6 +1769,7 @@ impl FluxoraStream {
                 end_time,
                 withdraw_dust_threshold,
                 memo,
+                metadata: stream.metadata,
             },
         );
 
@@ -1764,11 +1794,17 @@ impl FluxoraStream {
         withdraw_dust_threshold: i128,
         memo: Option<soroban_sdk::Bytes>,
         kind: StreamKind,
+        metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
     ) -> Result<u64, ContractError> {
         if let Some(ref m) = memo {
             if m.len() as usize > MAX_MEMO_BYTES {
                 return Err(ContractError::InvalidParams);
             }
+        }
+
+        // Validate metadata bounds before allocating a stream ID.
+        if let Some(ref meta) = metadata {
+            validate_metadata(meta)?;
         }
 
         let stream_id = next_stream_id_for(env, &sender);
@@ -1790,6 +1826,7 @@ impl FluxoraStream {
             withdraw_dust_threshold,
             memo: memo.clone(),
             kind,
+            metadata,
         };
 
         save_stream(env, &stream);
@@ -1814,6 +1851,7 @@ impl FluxoraStream {
                 end_time,
                 withdraw_dust_threshold,
                 memo,
+                metadata: stream.metadata,
             },
         );
 
@@ -2021,6 +2059,8 @@ impl FluxoraStream {
 
         pull_token(&env, &sender, deposit_amount)?;
 
+        // Single-stream creation does not accept metadata; use create_streams
+        // or create_streams_partial with CreateStreamParams for metadata.
         Self::persist_new_stream(
             &env,
             sender,
@@ -2033,6 +2073,7 @@ impl FluxoraStream {
             withdraw_dust_threshold,
             memo,
             kind,
+            None,
         )
     }
 
@@ -2132,7 +2173,8 @@ impl FluxoraStream {
             final_rate = 0;
         }
 
-        // Delegate to standard create_stream with computed absolute times
+        // Delegate to standard create_stream with computed absolute times.
+        // metadata is passed through only via batch APIs (create_streams_relative).
         Self::create_stream(
             env,
             sender,
@@ -2332,6 +2374,7 @@ impl FluxoraStream {
                 params.withdraw_dust_threshold.unwrap_or(0),
                 params.memo,
                 params.kind,
+                params.metadata,
             )?;
             created_ids.push_back(stream_id);
 
@@ -2464,6 +2507,7 @@ impl FluxoraStream {
                 withdraw_dust_threshold: rel.withdraw_dust_threshold,
                 memo: rel.memo,
                 kind: rel.kind,
+                metadata: rel.metadata,
             });
         }
 
@@ -2552,6 +2596,7 @@ impl FluxoraStream {
                 params.withdraw_dust_threshold.unwrap_or(0),
                 params.memo,
                 params.kind,
+                params.metadata,
             );
 
             match stream_id {
@@ -4800,6 +4845,7 @@ impl FluxoraStream {
                 duration: tpl.duration,
                 withdraw_dust_threshold: Some(withdraw_dust_threshold),
                 memo,
+                kind: StreamKind::Linear,
                 metadata,
             },
         )

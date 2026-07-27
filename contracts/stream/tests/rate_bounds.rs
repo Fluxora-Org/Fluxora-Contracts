@@ -1,4 +1,7 @@
-use fluxora_stream::{ContractError, FluxoraStream, StreamStatus};
+use fluxora_stream::{
+    ContractError, CreateStreamParams, CreateStreamRelativeParams, FluxoraStream, StreamKind,
+    StreamStatus,
+};
 use soroban_sdk::{testutils::Address as _, Address, Env, String};
 
 fn setup() -> (Env, FluxoraStreamClient, Address, Address, Address) {
@@ -168,6 +171,8 @@ fn test_create_streams_with_mixed_rates_fails_atomically() {
             end_time,
             withdraw_dust_threshold: None,
             memo: None,
+            kind: StreamKind::Linear,
+            metadata: None,
         },
         CreateStreamParams {
             recipient: recipient.clone(),
@@ -178,6 +183,8 @@ fn test_create_streams_with_mixed_rates_fails_atomically() {
             end_time,
             withdraw_dust_threshold: None,
             memo: None,
+            kind: StreamKind::Linear,
+            metadata: None,
         },
     ];
 
@@ -205,6 +212,8 @@ fn test_create_streams_all_valid_rates_succeeds() {
             end_time,
             withdraw_dust_threshold: None,
             memo: None,
+            kind: StreamKind::Linear,
+            metadata: None,
         },
         CreateStreamParams {
             recipient: recipient.clone(),
@@ -215,6 +224,8 @@ fn test_create_streams_all_valid_rates_succeeds() {
             end_time,
             withdraw_dust_threshold: None,
             memo: None,
+            kind: StreamKind::Linear,
+            metadata: None,
         },
     ];
 
@@ -238,6 +249,8 @@ fn test_create_stream_relative_below_min_rate_fails() {
         duration: 1000,
         withdraw_dust_threshold: None,
         memo: None,
+        kind: StreamKind::Linear,
+        metadata: None,
     };
 
     let result = client.try_create_stream_relative(&sender, &params);
@@ -257,6 +270,8 @@ fn test_create_stream_relative_at_min_rate_succeeds() {
         duration: 1000,
         withdraw_dust_threshold: None,
         memo: None,
+        kind: StreamKind::Linear,
+        metadata: None,
     };
 
     let stream_id = client.create_stream_relative(&sender, &params).unwrap();

@@ -58,6 +58,7 @@ impl<'a> Ctx<'a> {
             withdraw_dust_threshold: None,
             memo: None,
             kind: fluxora_stream::StreamKind::Linear,
+            metadata: None,
         }
     }
 }

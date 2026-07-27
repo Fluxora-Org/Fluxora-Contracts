@@ -762,6 +762,8 @@ proptest! {
                 end_time: *end,
                 withdraw_dust_threshold: Some(0),
                 memo: None,
+                kind: fluxora_stream::StreamKind::Linear,
+                metadata: None,
             });
             expected_total_deposit += *deposit;
         }
