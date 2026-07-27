@@ -691,6 +691,10 @@ pub enum DataKey {
     PausedStreamCount,
     /// Aggregate sum of all keeper fees paid out via `keeper_cancel` (`i128`, instance storage).
     TotalKeeperFeesPaid,
+    /// Pooled stream shares mapping (stream_id → recipient → share_bps).
+    PooledStreamShares(u64),
+    /// Pooled stream withdrawn amounts (stream_id → recipient → withdrawn_amount).
+    PooledStreamWithdrawn(u64, Address),
 }
 
 /// Type of pause.

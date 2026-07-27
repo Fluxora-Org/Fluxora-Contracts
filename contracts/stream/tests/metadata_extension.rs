@@ -1,7 +1,6 @@
 extern crate std;
-extern crate std;
 
-// Comprehensive tests for per-stream metadata TLV extension (issue #580).
+// Comprehensive tests for per-stream metadata TLV extension.
 //
 // # What this file covers
 //
@@ -88,7 +87,7 @@ extern crate std;
 
 use fluxora_stream::{
     ContractError, CreateStreamParams, CreateStreamRelativeParams, FluxoraStream,
-    FluxoraStreamClient, StreamKind, MAX_METADATA_BYTES, MAX_METADATA_KEYS,
+    FluxoraStreamClient, StreamKind, StreamStatus, MAX_METADATA_BYTES, MAX_METADATA_KEYS,
     MAX_METADATA_KEY_BYTES, MAX_METADATA_VALUE_BYTES, MAX_STREAM_ENTRY_BYTES,
 };
 use soroban_sdk::{
@@ -218,7 +217,7 @@ impl<'a> Ctx<'a> {
         Bytes::from_slice(&self.env, s.as_bytes())
     }
 
-    /// Build a metadata map with `count` entries "k0"→"v0", "k1"→"v1", …
+    /// Build a metadata map with `count` entries "k0"->"v0", "k1"->"v1", ...
     fn metadata_n(&self, count: u32) -> Map<Bytes, Bytes> {
         let mut m: Map<Bytes, Bytes> = Map::new(&self.env);
         for i in 0..count {
@@ -489,10 +488,7 @@ fn test_metadata_aggregate_one_byte_over_limit_rejected() {
     }
     // Last entry: 8-byte key + 121-byte value = 129 bytes  →  total = 3×128 + 129 = 513 > 512
     let value_over = Bytes::from_slice(&ctx.env, &vec![3u8; 121].as_slice());
-    meta.set(
-        Bytes::from_slice(&ctx.env, b"key00003"),
-        value_over,
-    );
+    meta.set(Bytes::from_slice(&ctx.env, b"key00003"), value_over);
     let result = ctx.client().try_create_stream(
         &ctx.sender,
         &CreateStreamParams {
@@ -562,10 +558,7 @@ fn test_metadata_aggregate_exceeds_limit_rejected() {
 fn test_metadata_single_entry_aggregate_exceeds_limit_early_exit() {
     let ctx = Ctx::setup();
     // value alone = MAX_METADATA_BYTES bytes; key = 1 byte → total = MAX_METADATA_BYTES + 1 > limit.
-    let value = Bytes::from_slice(
-        &ctx.env,
-        &vec![0u8; MAX_METADATA_BYTES as usize].as_slice(),
-    );
+    let value = Bytes::from_slice(&ctx.env, &vec![0u8; MAX_METADATA_BYTES as usize].as_slice());
     // MAX_METADATA_VALUE_BYTES is 128, so value above is 512 bytes which already exceeds
     // MAX_METADATA_VALUE_BYTES (128).  Use a value of exactly MAX_METADATA_VALUE_BYTES bytes
     // and pad the key to push the aggregate over the limit.
@@ -645,8 +638,14 @@ fn test_metadata_inline_on_stream_struct_not_separate_key() {
     let accessor_meta = ctx.client().get_stream_metadata(&stream_id);
 
     // Both must be Some.
-    assert!(state_meta.is_some(), "get_stream_state().metadata must be Some");
-    assert!(accessor_meta.is_some(), "get_stream_metadata() must be Some");
+    assert!(
+        state_meta.is_some(),
+        "get_stream_state().metadata must be Some"
+    );
+    assert!(
+        accessor_meta.is_some(),
+        "get_stream_metadata() must be Some"
+    );
 
     // Both must agree on content.
     let state_map = state_meta.unwrap();
@@ -699,7 +698,10 @@ fn test_none_vs_empty_map_distinct_at_storage_layer() {
     let acc_empty = ctx.client().get_stream_metadata(&id_empty);
 
     assert!(acc_none.is_none(), "get_stream_metadata() must be None");
-    assert!(acc_empty.is_some(), "get_stream_metadata() must be Some(empty)");
+    assert!(
+        acc_empty.is_some(),
+        "get_stream_metadata() must be Some(empty)"
+    );
     assert_eq!(acc_empty.unwrap().len(), 0);
 }
 
@@ -785,8 +787,11 @@ fn test_metadata_unchanged_after_pause_resume() {
     meta.set(ctx.make_key("ref"), ctx.make_val("PAUSE_TEST"));
     let stream_id = ctx.create_stream_with_metadata(Some(meta.clone()));
 
+    // First pause requires ledger sequence >= MIN_PAUSE_INTERVAL when counter is 0.
+    ctx.env.ledger().with_mut(|l| l.sequence_number += 17);
     ctx.client()
         .pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
+    ctx.env.ledger().with_mut(|l| l.sequence_number += 17);
     ctx.client().resume_stream(&stream_id);
 
     let got = ctx.client().get_stream_metadata(&stream_id).unwrap();
@@ -803,9 +808,7 @@ fn test_metadata_unchanged_after_cancel() {
     meta.set(ctx.make_key("ref"), ctx.make_val("CANCEL_TEST"));
     let stream_id = ctx.create_stream_with_metadata(Some(meta.clone()));
 
-    ctx.env
-        .ledger()
-        .set_timestamp(LEDGER_START_TIMESTAMP + 100);
+    ctx.env.ledger().set_timestamp(LEDGER_START_TIMESTAMP + 100);
     ctx.client().cancel_stream(&stream_id);
 
     let got = ctx.client().get_stream_metadata(&stream_id).unwrap();
@@ -823,9 +826,7 @@ fn test_metadata_unchanged_after_partial_withdraw() {
     meta.set(ctx.make_key("ref"), ctx.make_val("WITHDRAW_TEST"));
     let stream_id = ctx.create_stream_with_metadata(Some(meta.clone()));
 
-    ctx.env
-        .ledger()
-        .set_timestamp(LEDGER_START_TIMESTAMP + 200);
+    ctx.env.ledger().set_timestamp(LEDGER_START_TIMESTAMP + 200);
     ctx.client().withdraw(&stream_id);
 
     let got = ctx.client().get_stream_metadata(&stream_id).unwrap();
@@ -1044,7 +1045,10 @@ fn test_stream_with_metadata_readable_after_client_reattach() {
     let new_client = FluxoraStreamClient::new(&ctx.env, &ctx.contract_id);
 
     let stream = new_client.get_stream_state(&stream_id);
-    assert!(stream.metadata.is_some(), "metadata must survive client re-attach");
+    assert!(
+        stream.metadata.is_some(),
+        "metadata must survive client re-attach"
+    );
 
     let got = new_client.get_stream_metadata(&stream_id).unwrap();
     assert_eq!(
@@ -1079,7 +1083,10 @@ fn test_legacy_and_metadata_streams_coexist() {
     );
 
     // IDs are strictly increasing (monotone allocator).
-    assert!(meta_id > legacy_id, "stream IDs must be monotonically increasing");
+    assert!(
+        meta_id > legacy_id,
+        "stream IDs must be monotonically increasing"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1120,8 +1127,8 @@ fn test_aggregate_math_sum_of_all_entries() {
 
     // 4 entries exactly at the limit.
     for i in 0u8..4 {
-        let key_str = std::format!("key{:05}", i);  // 8 bytes
-        let value = Bytes::from_slice(&ctx.env, &vec![i; 120]);  // 120 bytes
+        let key_str = std::format!("key{:05}", i); // 8 bytes
+        let value = Bytes::from_slice(&ctx.env, &vec![i; 120]); // 120 bytes
         meta.set(Bytes::from_slice(&ctx.env, key_str.as_bytes()), value);
     }
     // 5th entry: 1-byte key + 1-byte value → aggregate = 512 + 2 = 514 > 512.
@@ -1204,11 +1211,23 @@ fn test_create_streams_batch_each_entry_stores_own_metadata() {
     let ids = ctx.client().create_streams(&ctx.sender, &params);
     assert_eq!(ids.len(), 2);
 
-    let got_a = ctx.client().get_stream_metadata(&ids.get(0).unwrap()).unwrap();
-    let got_b = ctx.client().get_stream_metadata(&ids.get(1).unwrap()).unwrap();
+    let got_a = ctx
+        .client()
+        .get_stream_metadata(&ids.get(0).unwrap())
+        .unwrap();
+    let got_b = ctx
+        .client()
+        .get_stream_metadata(&ids.get(1).unwrap())
+        .unwrap();
 
-    assert_eq!(got_a.get(ctx.make_key("stream")).unwrap(), ctx.make_val("A"));
-    assert_eq!(got_b.get(ctx.make_key("stream")).unwrap(), ctx.make_val("B"));
+    assert_eq!(
+        got_a.get(ctx.make_key("stream")).unwrap(),
+        ctx.make_val("A")
+    );
+    assert_eq!(
+        got_b.get(ctx.make_key("stream")).unwrap(),
+        ctx.make_val("B")
+    );
 }
 
 #[test]
@@ -1236,7 +1255,10 @@ fn test_create_streams_batch_none_metadata_stored_as_none() {
 
     let ids = ctx.client().create_streams(&ctx.sender, &params);
     assert_eq!(ids.len(), 1);
-    assert!(ctx.client().get_stream_metadata(&ids.get(0).unwrap()).is_none());
+    assert!(ctx
+        .client()
+        .get_stream_metadata(&ids.get(0).unwrap())
+        .is_none());
 }
 
 #[test]
@@ -1267,8 +1289,14 @@ fn test_create_streams_relative_with_metadata() {
     let ids = ctx.client().create_streams_relative(&ctx.sender, &params);
     assert_eq!(ids.len(), 1);
 
-    let got = ctx.client().get_stream_metadata(&ids.get(0).unwrap()).unwrap();
-    assert_eq!(got.get(ctx.make_key("src")).unwrap(), ctx.make_val("relative"));
+    let got = ctx
+        .client()
+        .get_stream_metadata(&ids.get(0).unwrap())
+        .unwrap();
+    assert_eq!(
+        got.get(ctx.make_key("src")).unwrap(),
+        ctx.make_val("relative")
+    );
 }
 
 #[test]
@@ -1321,9 +1349,7 @@ fn test_metadata_inherited_by_clone_stream() {
     let source_id = ctx.create_stream_with_metadata(Some(meta.clone()));
 
     // Advance past start so cloning is valid.
-    ctx.env
-        .ledger()
-        .set_timestamp(LEDGER_START_TIMESTAMP + 1);
+    ctx.env.ledger().set_timestamp(LEDGER_START_TIMESTAMP + 1);
     let new_recipient = Address::generate(&ctx.env);
     let cloned_id = ctx.client().clone_stream(
         &source_id,
@@ -1352,9 +1378,9 @@ fn test_metadata_from_template() {
 
     let template_id = ctx.client().register_stream_template(
         &ctx.sender,
-        &0_u64,      // start_delay
-        &0_u64,      // cliff_delay
-        &1_000_u64,  // duration
+        &0_u64,     // start_delay
+        &0_u64,     // cliff_delay
+        &1_000_u64, // duration
     );
 
     let mut meta: Map<Bytes, Bytes> = Map::new(&ctx.env);
@@ -1436,8 +1462,14 @@ fn test_two_streams_independent_metadata() {
     let got_a = ctx.client().get_stream_metadata(&id_a).unwrap();
     let got_b = ctx.client().get_stream_metadata(&id_b).unwrap();
 
-    assert_eq!(got_a.get(ctx.make_key("id")).unwrap(), ctx.make_val("stream-A"));
-    assert_eq!(got_b.get(ctx.make_key("id")).unwrap(), ctx.make_val("stream-B"));
+    assert_eq!(
+        got_a.get(ctx.make_key("id")).unwrap(),
+        ctx.make_val("stream-A")
+    );
+    assert_eq!(
+        got_b.get(ctx.make_key("id")).unwrap(),
+        ctx.make_val("stream-B")
+    );
     assert_ne!(
         got_a.get(ctx.make_key("id")).unwrap(),
         got_b.get(ctx.make_key("id")).unwrap(),
@@ -1543,5 +1575,96 @@ fn test_double_init_does_not_corrupt_stream_count() {
     assert_eq!(
         count_before, count_after,
         "stream count must be unchanged after a failed double-init"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Stream offer: metadata round-trip via accept
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_metadata_round_trips_via_stream_offer_accept() {
+    let ctx = Ctx::setup();
+    let now = ctx.env.ledger().timestamp();
+
+    let mut meta: Map<Bytes, Bytes> = Map::new(&ctx.env);
+    meta.set(ctx.make_key("offer_ref"), ctx.make_val("OFFER-42"));
+
+    let offer_id = ctx.client().create_stream_offer(
+        &ctx.sender,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: now + 10,
+            cliff_time: now + 10,
+            end_time: now + 1010,
+            withdraw_dust_threshold: Some(0_i128),
+            memo: None,
+            metadata: Some(meta.clone()),
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
+        &None,
+    );
+
+    ctx.env.ledger().set_timestamp(now + 5);
+    let stream_id = ctx.client().accept_stream_offer(&ctx.recipient, &offer_id);
+    let got = ctx.client().get_stream_metadata(&stream_id).unwrap();
+    assert_eq!(
+        got.get(ctx.make_key("offer_ref")).unwrap(),
+        ctx.make_val("OFFER-42"),
+        "metadata must copy from offer to stream on accept"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cancelled stream: metadata still readable via get_stream_metadata
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_stream_metadata_readable_on_cancelled_stream() {
+    let ctx = Ctx::setup();
+    let mut meta: Map<Bytes, Bytes> = Map::new(&ctx.env);
+    meta.set(ctx.make_key("status"), ctx.make_val("pre-cancel"));
+    let stream_id = ctx.create_stream_with_metadata(Some(meta));
+
+    ctx.env.ledger().set_timestamp(100);
+    ctx.client().cancel_stream(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+
+    let got = ctx.client().get_stream_metadata(&stream_id).unwrap();
+    assert_eq!(
+        got.get(ctx.make_key("status")).unwrap(),
+        ctx.make_val("pre-cancel"),
+        "get_stream_metadata must work on cancelled streams"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// shorten_stream_end_time: metadata unchanged
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_metadata_unchanged_after_shorten_stream_end_time() {
+    let ctx = Ctx::setup();
+    let mut meta: Map<Bytes, Bytes> = Map::new(&ctx.env);
+    meta.set(ctx.make_key("ref"), ctx.make_val("SHORTEN_TEST"));
+    let stream_id = ctx.create_stream_with_metadata(Some(meta));
+
+    ctx.env
+        .ledger()
+        .set_timestamp(LEDGER_START_TIMESTAMP + 200);
+    ctx.client()
+        .shorten_stream_end_time(&stream_id, &(LEDGER_START_TIMESTAMP + 500));
+
+    let got = ctx.client().get_stream_metadata(&stream_id).unwrap();
+    assert_eq!(
+        got.get(ctx.make_key("ref")).unwrap(),
+        ctx.make_val("SHORTEN_TEST"),
+        "metadata must survive shorten_stream_end_time"
     );
 }

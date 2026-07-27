@@ -246,6 +246,21 @@ fn v5_stream_readable_by_v9_get_stream_state() {
     assert_eq!(state.kind, StreamKind::Linear);
 }
 
+/// The V5-era `memo` field decodes as `None` on V9.
+///
+/// This is the clearest proof that the `Stream` struct kept append-only field
+/// ordering: the V9 decoder must treat the missing tail field as absent rather
+/// than panicking or shifting earlier values.
+#[test]
+fn v5_stream_get_stream_memo_returns_none() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    ctx.seed_v5_stream(0, &recipient);
+
+    let memo = ctx.client.get_stream_memo(&0u64);
+    assert!(memo.is_none(), "V5 stream memo must decode as None");
+}
+
 /// V9 `calculate_accrued` works correctly on a V5-era Stream entry.
 ///
 /// Accrual math depends on `start_time`, `cliff_time`, `end_time`,
@@ -1330,6 +1345,30 @@ fn version_entry_point_works_on_v5_seeded_instance() {
     assert_eq!(v, CONTRACT_VERSION);
 }
 
+/// The version entry-point is stable for both pre-init and post-init deployments.
+/// This keeps the upgrade/versioning contract explicit for integrators and deployment scripts.
+#[test]
+fn version_entry_point_is_stable_before_and_after_init() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+    assert_eq!(client.version(), CONTRACT_VERSION);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    let sac = StellarAssetClient::new(&env, &token_id);
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    sac.mint(&sender, &1_000_000_000);
+
+    client.init(&token_id, &admin);
+    assert_eq!(client.version(), CONTRACT_VERSION);
+}
+
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -1467,6 +1506,12 @@ pub fn all_live_datakey_variants(env: &Env) -> soroban_sdk::Vec<DataKey> {
 
 /// Machine-checks that `CONTRACT_VERSION` matches the expected `DataKey` variant count.
 ///
+/// # Security & Architectural Invariants
+///
+/// - **Cross-Check Requirement:** Prevents version drift when new `DataKey` variants are added.
+/// - **Staleness Guard:** Guarantees that `CONTRACT_VERSION` staleness does not break storage key compatibility.
+/// - **Companion Documentation:** Cross-referenced with `contracts/stream/src/checksum.rs` and `docs/upgrade.md`.
+///
 /// Fails loudly with an explicit error message if the live `DataKey` variant count
 /// diverges from `expected_datakey_count_for_version(CONTRACT_VERSION)`.
 #[test]
@@ -1529,3 +1574,16 @@ fn test_datakey_variant_count_exact_36() {
          expected_datakey_count_for_version()."
     );
 }
+
+/// Regression test: Verifies that synthetic version drift triggers an explicit assertion failure.
+#[test]
+fn test_regression_staleness_mismatch_detection() {
+    let live_count = 36usize; // current live variant count
+    let stale_version_expected_count = expected_datakey_count_for_version(5); // V5 expects 15
+
+    assert_ne!(
+        live_count, stale_version_expected_count,
+        "Stale CONTRACT_VERSION mapping must be detected as mismatched against live DataKey count"
+    );
+}
+

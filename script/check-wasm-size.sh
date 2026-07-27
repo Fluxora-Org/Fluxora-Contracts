@@ -252,5 +252,22 @@ if [ "$FAILED" -ne 0 ]; then
   exit 1
 fi
 
+# Edge-case: warn when headroom drops below 10% of budget.
+for CONTRACT in "${!BUDGETS[@]}"; do
+  BUDGET="${BUDGETS[$CONTRACT]}"
+  if [ "$OPTIMIZED" -eq 1 ]; then
+    WASM_FILE="${WASM_DIR}/${CONTRACT}.optimized.wasm"
+  else
+    WASM_FILE="${WASM_DIR}/${CONTRACT}.wasm"
+  fi
+  if [ -f "$WASM_FILE" ]; then
+    SIZE=$(wc -c < "$WASM_FILE")
+    THRESHOLD=$(( BUDGET * 90 / 100 ))
+    if [ "$SIZE" -gt "$THRESHOLD" ]; then
+      echo "::warning::${CONTRACT}.wasm is within 10% of budget — consider expanding budget or reducing binary size." >&2
+    fi
+  fi
+done
+
 echo ""
 echo "All contracts within WASM size budget."

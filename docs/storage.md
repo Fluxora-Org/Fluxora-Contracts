@@ -128,6 +128,36 @@ Persistent storage is used for individual stream records and per-recipient nonce
 | Change TTL constants | No — no effect on stored data | No version bump required |
 | Change internal helper logic with identical external behaviour | No | No version bump required |
 
+### Current compatibility behavior
+
+The current release is backward-compatible with V5-seeded storage because the
+storage layout is append-only and the V5 `Stream` struct ended before the
+`memo: Option<Bytes>` tail field was introduced. In practice, this means:
+
+- V5 `Stream`, `Config`, `NextStreamId`, `RecipientStreams`, and `TotalLiabilities`
+    entries still decode on V9.
+- V6+ keys remain absent on a V5-seeded instance until the newer code writes
+    them; reads must return `None`, `false`, or zero-like defaults rather than
+    panicking.
+- Read-only calls do not backfill absent storage keys. The compatibility tests
+    only treat explicit writes as state changes.
+- There is no on-chain migration of V5 storage into V9 storage. The guarantee
+    is read compatibility, not state rewriting.
+
+### Regression surface
+
+The storage-key compatibility suite treats the following as the regression
+boundary for this release:
+
+- `DataKey` discriminants 0–35 stay in declaration order.
+- `Stream` fields 0–13 keep their current positions and `memo` remains the
+    last field.
+- `memo` must decode as `None` on older V5-seeded entries.
+- Later keys such as `WithdrawNonce`, `PauseState`, and the V7/V8/V9 append-only
+    keys must stay absent on a V5-seeded instance until explicitly written.
+- Any new storage key must be appended, paired with a `CONTRACT_VERSION`
+    review, and added to the compatibility test suite.
+
 ### Residual risks
 
 - **No on-chain enforcement.** The rules above are enforced by code review and CI only. A developer who reorders variants will not get a compile error — the bug will only surface at runtime when existing entries are read back with the wrong type.
@@ -155,9 +185,19 @@ Used for per-stream data and per-recipient indexes. Grows linearly with stream c
 
 | Key | Description |
 |---|---|
-| `Stream(stream_id)` | Complete stream state: participants, amounts, timing, status, `cancelled_at`. One entry per stream. |
+| `Stream(stream_id)` | Complete stream state: participants, amounts, timing, status, `cancelled_at`, and optional bounded `metadata: Option<Map<Bytes, Bytes>>`. One entry per stream. |
 | `RecipientStreams(address)` | Sorted `Vec<u64>` of stream IDs where `address` is the recipient. Maintained in ascending order. |
 | `AutoClaimDestination(stream_id)` | Recipient-chosen destination `Address` for permissionless auto-claim. Absent when not opted in. Removed by `revoke_auto_claim`. |
+
+### Stream Metadata Storage & Footprint
+
+- **Storage Container**: Embedded directly within the `Stream` struct under `DataKey::Stream(stream_id)`.
+- **Field Type**: `Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>`.
+- **Footprint Bounds**: Bounded by `MAX_METADATA_KEYS = 8`, `MAX_METADATA_KEY_BYTES = 32`, `MAX_METADATA_VALUE_BYTES = 128`, and `MAX_METADATA_BYTES = 512`.
+- **Footprint Impact**:
+  - `None`: Consumes 1 byte XDR variant header (`Option::None`).
+  - `Some(map)`: Maximum persistent byte footprint overhead is capped at 512 bytes + map serialization overhead (~560 bytes total).
+- **TTL Dynamics**: Refreshed automatically whenever `DataKey::Stream(stream_id)` TTL is bumped during stream reads (`load_stream`) or mutations (`save_stream`). Purged when `close_completed_stream` removes `DataKey::Stream(stream_id)`.
 
 ---
 
@@ -174,20 +214,24 @@ const PERSISTENT_BUMP_AMOUNT: u32       = 120_960;
 
 ### Instance TTL
 
-Extended via `bump_instance_ttl()` on **every** entry-point that touches instance storage. This means any contract interaction — read or write — keeps `Config`, `NextStreamId`, `GlobalEmergencyPaused`, and `CreationPaused` alive.
+Extended via `bump_instance_ttl()` on **every** entry-point that touches instance storage (including query entrypoints like `is_global_emergency_paused`, `is_creation_paused`, `get_pause_reason`, `get_max_rate_per_second`, `read_paused_stream_count`, and `read_total_keeper_fees_paid`). This ensures all global settings and metrics remain fresh and protected from expiration under active contract usage.
 
-### Persistent TTL
+### Persistent TTL & Storage Reclamation
 
-Extended on every `load_stream()` (read) and `save_stream()` (write), and on every `load_recipient_streams()` / `save_recipient_streams()` call.
+Extended on every `load_stream()` (read) and `save_stream()` (write), and on index updates (`load_recipient_streams`, `save_recipient_streams`, `load_sender_streams`, `save_sender_streams`).
+
+- **Adaptive TTL Propagation**: When creating or updating streams, `add_stream_to_recipient_index` and `add_stream_to_sender_index` scale index key TTL to the stream's remaining lifetime via `compute_adaptive_ttl(now, end_time)`.
+- **Empty Index Reclamation**: When a recipient or sender index, pending offer index, or template ID index becomes empty (`streams.is_empty()`), the contract explicitly removes the persistent storage key (`env.storage().persistent().remove(&key)`), reclaiming on-chain state while safely returning an empty `Vec` on future reads.
 
 | Scenario                                         | TTL refreshed?                                 |
 | ------------------------------------------------ | ---------------------------------------------- |
-| Stream created                                   | Yes (`save_stream` + `save_recipient_streams`) |
+| Stream created                                   | Yes (`save_stream` + `save_recipient_streams` + `save_sender_streams` adaptive) |
 | Stream read via `get_stream_state`               | Yes (`load_stream`)                            |
 | Stream read via `calculate_accrued`              | Yes (`load_stream`)                            |
 | Stream mutated (pause/resume/cancel/withdraw)    | Yes (`load_stream` + `save_stream`)            |
-| Stream closed via `close_completed_stream`       | Entry removed (no TTL)                         |
+| Stream closed via `close_completed_stream`       | Entry removed; index key removed if empty     |
 | Recipient index read via `get_recipient_streams` | Yes (if non-empty)                             |
+| Sender index read via `get_sender_streams`       | Yes (if non-empty)                             |
 
 ### TTL implications for operators
 
@@ -250,6 +294,9 @@ Extended on every `load_stream()` (read) and `save_stream()` (write), and on eve
 ## 7. Version History
 
 For a full description of what changed between contract versions and how to migrate, see [DEPLOYMENT.md — Version Migration](./DEPLOYMENT.md#version-migration).
+
+For documented storage invariants (TTL, liabilities, CEI, indexes), see
+[storage-invariants.md](./storage-invariants.md).
 
 ---
 
