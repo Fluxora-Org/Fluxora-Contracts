@@ -104,14 +104,14 @@ check remains reproducible without the Stellar CLI installed.
 | `batch_withdraw_to` | 10 | 6M |
 | `batch_withdraw_to` | 50 | 20M |
 | `batch_withdraw_to` | 100 | 35M |
-| `bulk_cancel_streams` | 1 | 0.8M |
-| `bulk_cancel_streams` | 10 | 5M |
-| `bulk_cancel_streams` | 50 | 15M |
-| `bulk_cancel_streams` | 100 | 25M |
-| `bulk_resume_streams_as_admin` | 1 | 0.8M |
-| `bulk_resume_streams_as_admin` | 10 | 5M |
-| `bulk_resume_streams_as_admin` | 50 | 15M |
-| `bulk_resume_streams_as_admin` | 100 | 25M |
+| `bulk_cancel_streams` | 1 | 3.5M |
+| `bulk_cancel_streams` | 5 | 9M |
+| `bulk_cancel_streams` | 10 | 16M |
+| `bulk_cancel_streams` | 20 | 32M |
+| `bulk_resume_streams_as_admin` | 1 | 4M |
+| `bulk_resume_streams_as_admin` | 5 | 10M |
+| `bulk_resume_streams_as_admin` | 10 | 18M |
+| `bulk_resume_streams_as_admin` | 20 | 36M |
 
 ## Hot Path Analysis
 
@@ -158,7 +158,7 @@ for id in stream_ids.iter() {
 }
 ```
 
-This is O(n²) in the batch size n.  At `MAX_PAGE_SIZE = 100`, the worst case is about 4 950 element comparisons per call (~10 000 inclusive of the outer-loop overhead).  The regression tests below measure all four entrypoints at batch sizes 1, 10, 50, and 100 so that any future increase to `MAX_PAGE_SIZE` — or an accidental reintroduction of a less efficient duplicate check — will be caught by the budget assertion in the gas-regression test suite.
+This is O(n²) in the batch size n.  At `MAX_PAGE_SIZE = 100`, the worst case is about 4 950 element comparisons per call (~10 000 inclusive of the outer-loop overhead).  The regression tests measure `batch_withdraw` and `batch_withdraw_to` at the existing large-batch sizes 1, 10, 50, and 100, and measure `bulk_cancel_streams` plus `bulk_resume_streams_as_admin` at issue #1219's baseline sizes 1, 5, 10, and 20. This keeps the newer bulk entrypoints under `validate_gas.py` regression comparison while preserving the existing large-batch coverage for withdrawal paths.
 
 A companion refactor issue replaces the O(n²) scan with an O(n) helper (e.g. using a `Map<u64,bool>`), after which these baselines are expected to improve significantly, especially at size 100. The budget assertions stay valid regardless; they guard against per-invocation-limit violations, not against algorithmic regressions within the current design.
 
@@ -184,15 +184,15 @@ The following table provides the CPU instruction counts for core operations.
   },
   "bulk_resume_streams_as_admin": {
     "1": 4000000,
+    "5": 10000000,
     "10": 18000000,
-    "50": 90000000,
-    "100": 250000000
+    "20": 36000000
   },
   "bulk_cancel_streams": {
     "1": 3500000,
+    "5": 9000000,
     "10": 16000000,
-    "50": 80000000,
-    "100": 220000000
+    "20": 32000000
   },
   "keeper_cancel": {
     "partial_accrual": 786739,
@@ -291,6 +291,124 @@ Four entrypoints that use an O(n²) duplicate-ID scan (`reject_duplicate_ids`) h
 cargo test -p fluxora_stream gas_regression -- --nocapture 2>&1 | grep GAS_MEASUREMENT
 ```
 
+
+---
+
+## Release Hardening
+
+### Gas Baseline Determinism Contract
+
+Gas baselines in the JSON block above are **deterministic** given a fixed toolchain and
+SDK pin. Two successive runs on the same machine with the same toolchain produce
+byte-identical CPU instruction counts because:
+
+1. **Soroban's metered host uses deterministic CPU accounting.** Instruction counts are
+   a property of the compiled WASM bytecode plus the host execution model — not of wall
+   time, system load, or OS scheduling. Two runs on the same WASM binary and the same
+   `soroban-env-host` version always produce the same integer count.
+
+2. **Rust toolchain is pinned.** `rust-toolchain.toml` pins the compiler to a specific
+   version (currently `1.94.1`). A different compiler version can produce a different
+   WASM codegen, changing instruction counts. The toolchain pin ensures every CI run and
+   local run uses the same compiler.
+
+3. **`soroban-sdk` version is pinned with an exact specifier.** `contracts/stream/Cargo.toml`
+   uses an exact version string (e.g. `"21.7.7"`) rather than a caret range (`"^21.7.7"`).
+   `Cargo.lock` is committed and validated by the `cargo update --locked` CI gate before
+   any WASM build step.
+
+4. **Retry behaviour is identical.** If `script/validate_gas.py` is re-run without any
+   code change, it produces the same pass/fail result. The `run_tests()` call re-invokes
+   `cargo test`, which re-runs the metered tests with the same binary and the same host
+   version. There is no accumulated state between runs.
+
+**Implication for upgrades:** When upgrading the Rust toolchain or `soroban-sdk` version,
+the baselines in the JSON block above **must be re-measured and updated** even if no
+contract logic changed. A toolchain or SDK change can shift instruction counts by a small
+but non-zero amount due to codegen differences. Follow the baseline update procedure in
+the [Baseline Update Process](#baseline-update-process) section below.
+
+**Implication for CI flakiness:** If `validate_gas.py` reports a regression that was not
+present on the previous run with the same commit, the most likely cause is a toolchain or
+environment mismatch. Verify that `rustc --version` matches `rust-toolchain.toml` and that
+`cargo test` passes with `--locked`.
+
+### WASM-Size Budget Headroom Update Procedure
+
+The WASM size budgets in `script/check-wasm-size.sh` are set with ~25% headroom above the
+sizes measured during the June 2026 baseline audit. When a deliberate feature addition
+causes the raw artifact to approach or exceed the current budget:
+
+1. **Build the release WASM locally:**
+   ```bash
+   cargo build --release -p fluxora_stream --target wasm32-unknown-unknown
+   ```
+
+2. **Measure the new raw size:**
+   ```bash
+   wc -c target/wasm32-unknown-unknown/release/fluxora_stream.wasm
+   ```
+
+3. **Compute the new budget:** Add ~25% headroom to the measured size and round up to the
+   nearest 64 KiB boundary:
+   ```python
+   import math
+   measured = <size_in_bytes>
+   headroom = math.ceil(measured * 1.25 / 65536) * 65536
+   print(f"New budget: {headroom} bytes ({headroom // 1024} KiB)")
+   ```
+
+4. **Update `script/check-wasm-size.sh`** with the new budget constant.
+
+5. **Update the budget table in `docs/gas.md`** (the table under "WASM Size Budgets")
+   with the new value and a note explaining the change.
+
+6. **Regenerate the WASM checksum:**
+   ```bash
+   bash script/update-wasm-checksums.sh
+   git add wasm/checksums.sha256
+   ```
+
+7. **Include in the PR description:** State the measured old size, the new budget, and
+   which feature caused the growth.
+
+### Paused-Stream Counter Backfill Edge Case (v5 upgrades)
+
+This edge case is documented in full in `docs/upgrade.md §3` ("Paused-stream counter
+backfill caveat"). The gas and operational implications are summarised here:
+
+**Background:** `CONTRACT_VERSION = 5` introduced `DataKey::PausedStreamCount` — an
+instance-level O(1) counter of how many streams are currently in `Paused` status. This
+counter is maintained by `pause_stream`, `pause_stream_as_admin`, `resume_stream`,
+`resume_stream_as_admin`, `cancel_stream`, `cancel_stream_as_admin`, and
+`close_completed_stream`.
+
+**What happens on upgrade from v4 to v5 (or v6/v7):**
+
+- An instance upgraded from v4 starts with `PausedStreamCount` unset (reads as 0).
+- Legacy streams that were `Paused` before the upgrade are **not** counted.
+- The counter becomes accurate only for streams that experience a pause/resume/cancel
+  transition _after_ the upgrade.
+- `resume_*` and `cancel_*` applied to a pre-upgrade paused stream do **not** decrement
+  below zero — the implementation uses saturating subtraction.
+
+**Gas implications:**
+
+- `get_paused_stream_count()` is O(1) and its cost does not change with the number of
+  paused streams. It reads a single instance storage entry.
+- The saturation guard in `cancel_*` / `resume_*` for legacy paused streams adds one
+  additional instance storage read (to load the current counter before the saturating
+  decrement). This is negligible (~1 instruction) and is not separately measured in the
+  gas baselines above.
+
+**Operational requirement:**
+
+If an exact paused-stream count is required immediately after upgrading a live instance
+from v4, reconstruct it off-chain by enumerating all stream states and treat
+`get_paused_stream_count()` as authoritative only for post-upgrade transitions. See
+`docs/upgrade.md §3` for the full recovery procedure.
+
+---
 
 ## Baseline Update Process
 

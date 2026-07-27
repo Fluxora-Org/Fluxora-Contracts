@@ -44,10 +44,13 @@ pub enum DataKey {
     LastAccrualLedgerTimestamp,
     PausedStreamCount,
     TotalKeeperFeesPaid,
-    SenderStreams(Address),
     AutoRenewEnabled(u64),
+    MaxLookbackLedgers(u64),
+    SenderStreams(Address),
     PendingStreamOffer(u64),
     RecipientPendingOffers(Address),
+    PooledStreamShares(u64),
+    PooledStreamWithdrawn(u64, Address),
 }
 ```
 
@@ -84,10 +87,13 @@ pub enum DataKey {
 | 26 | `LastAccrualLedgerTimestamp` | Instance | `u64` | `current_accrual_timestamp` | `current_accrual_timestamp` |
 | 27 | `PausedStreamCount` | Instance | `u64` | `pause_stream`, `pause_stream_as_admin` | `resume_stream`, `cancel_stream`, `close_completed_stream` |
 | 28 | `TotalKeeperFeesPaid` | Instance | `i128` | `init` | `keeper_cancel` |
-| 29 | `SenderStreams(Address)` | Persistent | `Vec<u64>` (sorted) | `create_stream`, `create_streams` | `close_completed_stream`, `close_cancelled_stream` (removes entry) |
-| 30 | `AutoRenewEnabled(u64)` | Persistent | `bool` | sender opt-in | sender revoke |
-| 31 | `PendingStreamOffer(u64)` | Persistent | `StreamOffer` | `create_stream_offer` | accept/reject/cancel (removes) |
-| 32 | `RecipientPendingOffers(Address)` | Persistent | `Vec<u64>` | `create_stream_offer` | accept/reject/cancel (removes) |
+| 29 | `AutoRenewEnabled(u64)` | Persistent | `bool` | sender opt-in | sender revoke |
+| 30 | `MaxLookbackLedgers(u64)` | Persistent | `u32` | `create_stream_with_lookback` | — |
+| 31 | `SenderStreams(Address)` | Persistent | `Vec<u64>` (sorted) | `create_stream`, `create_streams` | `close_completed_stream`, `close_cancelled_stream` (removes entry) |
+| 32 | `PendingStreamOffer(u64)` | Persistent | `StreamOffer` | `create_stream_offer` | accept/reject/cancel (removes) |
+| 33 | `RecipientPendingOffers(Address)` | Persistent | `Vec<u64>` | `create_stream_offer` | accept/reject/cancel (removes) |
+| 34 | `PooledStreamShares(u64)` | Persistent | `Vec<(Address,u32)>` | pooled stream creation | withdraw / close |
+| 35 | `PooledStreamWithdrawn(u64, Address)` | Persistent | `i128` | pooled withdraw | pooled withdraw (increments) |
 
 ---
 
@@ -121,6 +127,36 @@ Persistent storage is used for individual stream records and per-recipient nonce
 | Append a new variant at the end | No — existing entries unaffected | Increment `CONTRACT_VERSION` (conservative) |
 | Change TTL constants | No — no effect on stored data | No version bump required |
 | Change internal helper logic with identical external behaviour | No | No version bump required |
+
+### Current compatibility behavior
+
+The current release is backward-compatible with V5-seeded storage because the
+storage layout is append-only and the V5 `Stream` struct ended before the
+`memo: Option<Bytes>` tail field was introduced. In practice, this means:
+
+- V5 `Stream`, `Config`, `NextStreamId`, `RecipientStreams`, and `TotalLiabilities`
+    entries still decode on V9.
+- V6+ keys remain absent on a V5-seeded instance until the newer code writes
+    them; reads must return `None`, `false`, or zero-like defaults rather than
+    panicking.
+- Read-only calls do not backfill absent storage keys. The compatibility tests
+    only treat explicit writes as state changes.
+- There is no on-chain migration of V5 storage into V9 storage. The guarantee
+    is read compatibility, not state rewriting.
+
+### Regression surface
+
+The storage-key compatibility suite treats the following as the regression
+boundary for this release:
+
+- `DataKey` discriminants 0–35 stay in declaration order.
+- `Stream` fields 0–13 keep their current positions and `memo` remains the
+    last field.
+- `memo` must decode as `None` on older V5-seeded entries.
+- Later keys such as `WithdrawNonce`, `PauseState`, and the V7/V8/V9 append-only
+    keys must stay absent on a V5-seeded instance until explicitly written.
+- Any new storage key must be appended, paired with a `CONTRACT_VERSION`
+    review, and added to the compatibility test suite.
 
 ### Residual risks
 
@@ -245,6 +281,9 @@ Extended on every `load_stream()` (read) and `save_stream()` (write), and on eve
 
 For a full description of what changed between contract versions and how to migrate, see [DEPLOYMENT.md — Version Migration](./DEPLOYMENT.md#version-migration).
 
+For documented storage invariants (TTL, liabilities, CEI, indexes), see
+[storage-invariants.md](./storage-invariants.md).
+
 ---
 
 ## 8. V5 Storage Layout (historical reference)
@@ -332,7 +371,7 @@ V7 appended eight new `DataKey` variants (discriminants 21–28) while preservin
 | 27 | `PausedStreamCount` | Instance | `u64` | Protocol-wide count of streams currently in `StreamStatus::Paused` |
 | 28 | `TotalKeeperFeesPaid` | Instance | `i128` | Aggregate keeper fees paid via `keeper_cancel` |
 
-Code-level invariant verification for all 29 variants is maintained in [`contracts/stream/src/checksum.rs`](../contracts/stream/src/checksum.rs).
+Code-level invariant verification for all 36 variants is maintained in [`contracts/stream/src/checksum.rs`](../contracts/stream/src/checksum.rs).
 
 ### Forward-compatibility guarantee
 
