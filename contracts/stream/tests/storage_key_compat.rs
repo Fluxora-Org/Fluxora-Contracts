@@ -1278,6 +1278,30 @@ fn version_entry_point_works_on_v5_seeded_instance() {
     assert_eq!(v, CONTRACT_VERSION);
 }
 
+/// The version entry-point is stable for both pre-init and post-init deployments.
+/// This keeps the upgrade/versioning contract explicit for integrators and deployment scripts.
+#[test]
+fn version_entry_point_is_stable_before_and_after_init() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+    assert_eq!(client.version(), CONTRACT_VERSION);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    let sac = StellarAssetClient::new(&env, &token_id);
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    sac.mint(&sender, &1_000_000_000);
+
+    client.init(&token_id, &admin);
+    assert_eq!(client.version(), CONTRACT_VERSION);
+}
+
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------

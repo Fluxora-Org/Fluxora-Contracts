@@ -15,6 +15,8 @@ use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Add
 pub use storage::*;
 use token_check::verify_token_behavior;
 
+use crate::types::{ClaimOwnershipTransferred, MAX_POOL_RECIPIENTS};
+
 pub fn reject_duplicate_ids(env: &Env, ids: &soroban_sdk::Vec<u64>) -> Result<(), ContractError> {
     let mut seen = soroban_sdk::Vec::<u64>::new(env);
     for id in ids.iter() {
@@ -283,6 +285,13 @@ const MIN_RATE_INTERVAL_LEDGERS: u32 = 17;
 /// documented CONTRACT_VERSION bump policy at the top of this file, since
 /// existing indexers, dashboards, and accounting pipelines built against
 /// pre-v9 snapshots will under-report by the relayer fee.
+///
+/// The current live storage layout remains append-only and backward-compatible
+/// for existing deployments: `Stream` fields are only appended at the end, and
+/// `DataKey` variants are appended at the end of the enum. The current live
+/// `DataKey` surface is 36 variants (discriminants 0..=35), so any future
+/// storage-key change must preserve the existing discriminants and update the
+/// versioning tests in `contracts/stream/tests/storage_key_compat.rs`.
 ///
 /// Bumped to 7 (historical detail; the `AutoRenewEnabled` portion is also
 /// captured in the existing "Bumped to 7" line above): two-phase
@@ -2331,6 +2340,7 @@ impl FluxoraStream {
             witness,
             delegation_depth: 0,
             parent_stream_id: None,
+            decommissioned: None,
         };
 
         save_stream(env, &stream);
@@ -2429,6 +2439,7 @@ impl FluxoraStream {
             witness,
             delegation_depth: 0,
             parent_stream_id: None,
+            decommissioned: None,
         };
 
         save_stream(env, &stream);
@@ -2801,6 +2812,7 @@ impl FluxoraStream {
             withdraw_dust_threshold,
             params.memo,
             params.kind,
+            params.metadata,
             params.irrevocable,
             params.witness,
             max_lookback_ledgers,
@@ -5580,6 +5592,7 @@ impl FluxoraStream {
             is_pooled: None,
             parent_stream_id: Some(stream_id),
             delegation_depth: stream.delegation_depth + 1,
+            decommissioned: None,
         };
 
         save_stream(&env, &child_stream);
@@ -7891,7 +7904,11 @@ impl FluxoraStream {
         env.storage().persistent().remove(&key);
 
         // Emit event
-        events::emit_auto_claim_revoked(&env, stream_id);
+        events::emit_auto_claim_revoked(
+            &env,
+            stream_id,
+            AutoClaimRevoked { stream_id },
+        );
 
         Ok(())
     }
