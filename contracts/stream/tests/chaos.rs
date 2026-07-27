@@ -119,7 +119,7 @@ impl TestContext {
 /// contract returns an error, which `apply_op` silently absorbs via
 /// `catch_unwind` — matching how the existing ops already handle inapplicable
 /// states.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Op {
     Cancel,
     Pause,

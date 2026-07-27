@@ -359,7 +359,7 @@ def validate(
             except ValueError:
                 display = audit_doc
             print(
-                f"STALE DOC: '{ident}' (audit entrypoint) listed in '{display}' "
+                f"STALE AUDIT DOC: '{ident}' (audit entrypoint) listed in '{display}' "
                 "but not in contractimpl"
             )
             drift_found = True

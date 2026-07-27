@@ -3,7 +3,7 @@ extern crate std;
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env, FromVal, IntoVal, Symbol, TryFromVal, Val, Vec,
+    xdr::ToXdr, Address, Env, FromVal, IntoVal, Symbol, TryFromVal, Val, Vec,
 };
 
 use crate::{
@@ -22489,4 +22489,54 @@ fn test_contract_error_discriminants_are_stable() {
         44,
         "DelegationDepthExceeded must be 44"
     );
+}
+
+#[test]
+fn xdr_pubkey_extraction_offset_is_correct() {
+    let env = Env::default();
+
+    // Create an account Address from a valid G... strkey.
+    // GCM5WPR4DDR24FSAX5LIEM4J7AI3KOWJYANSXEPKYXCSZOTAYXE75AFN is a
+    // well-known Stellar test strkey.
+    let addr = Address::from_string(&soroban_sdk::String::from_str(
+        &env,
+        "GCM5WPR4DDR24FSAX5LIEM4J7AI3KOWJYANSXEPKYXCSZOTAYXE75AFN",
+    ));
+
+    let xdr = addr.clone().to_xdr(&env);
+
+    // Account Address XDR should be exactly 44 bytes:
+    //   ScVal::Address disc (4B) + ScAddress::Account disc (4B)
+    //   + PublicKeyTypeEd25519 disc (4B) + ed25519 pubkey (32B)
+    assert_eq!(xdr.len(), 44);
+
+    // ScVal discriminant for the Address variant = 18 (u32 big-endian)
+    assert_eq!(xdr.get_unchecked(0), 0, "byte 0 = ScVal.Address tag high byte");
+    assert_eq!(xdr.get_unchecked(3), 18, "byte 3 = ScVal.Address tag low byte");
+
+    // ScAddress discriminant for Account = 0
+    assert_eq!(xdr.get_unchecked(4), 0);
+    assert_eq!(xdr.get_unchecked(7), 0);
+
+    // PublicKey discriminant for PublicKeyTypeEd25519 = 0
+    assert_eq!(xdr.get_unchecked(8), 0);
+    assert_eq!(xdr.get_unchecked(11), 0);
+
+    // Bytes 12..=43 should form a valid 32-byte ed25519 pubkey (non-zero).
+    for i in 12..44 {
+        assert!(
+            xdr.get_unchecked(i) != 0,
+            "pubkey byte at XDR offset {i} is unexpectedly zero"
+        );
+    }
+
+    // The helper must extract the same bytes as XDR indices 12..44.
+    let extracted = FluxoraStream::ed25519_pubkey_from_address(&env, &addr);
+    for (i, byte) in extracted.iter().enumerate() {
+        assert_eq!(
+            *byte,
+            xdr.get_unchecked((i as u32) + 12),
+            "mismatch at helper output index {i}"
+        );
+    }
 }

@@ -1840,7 +1840,7 @@ impl MockVaultContract {
                 withdraw_dust_threshold: Some(0),
                 memo: None,
                 metadata: None,
-                kind: fluxora_stream::types::StreamKind::Linear,
+                kind: fluxora_stream::StreamKind::Linear,
                 irrevocable: None,
                 witness: None,
             },

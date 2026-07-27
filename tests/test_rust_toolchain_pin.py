@@ -161,13 +161,22 @@ def test_main_fails_when_rustc_version_output_is_unparseable(monkeypatch, capsys
     assert "::error::" in captured.err
 
 
-def test_rustc_version_falls_back_to_invoking_real_rustc(monkeypatch):
+def test_rustc_version_falls_back_to_invoking_rustc(monkeypatch):
     # No RUSTC_VERSION_OUTPUT override: exercises the `subprocess.run(["rustc",
-    # "--version"])` fallback path. Requires a real `rustc` on PATH, which is
-    # guaranteed true here since this whole workspace is a Rust CI target.
+    # "--version"])` fallback path without requiring Rust in docs-only CI jobs.
+    class Completed:
+        stdout = "rustc 1.94.1 (abcdef 2026-01-01)"
+
+    def fake_run(args, check, capture_output, text):
+        assert args == ["rustc", "--version"]
+        assert check is True
+        assert capture_output is True
+        assert text is True
+        return Completed()
+
     monkeypatch.delenv("RUSTC_VERSION_OUTPUT", raising=False)
-    version = verify_rust_version.rustc_version()
-    assert version
+    monkeypatch.setattr(verify_rust_version.subprocess, "run", fake_run)
+    assert verify_rust_version.rustc_version() == "1.94.1"
 
 
 def test_pinned_targets_returns_list():
@@ -183,6 +192,20 @@ def test_pinned_components_returns_list():
     assert isinstance(components, list)
     assert "clippy" in components
     assert "rustfmt" in components
+
+
+def test_has_component_accepts_host_qualified_component_names():
+    installed = [
+        "rustfmt-x86_64-unknown-linux-gnu",
+        "clippy-x86_64-unknown-linux-gnu",
+    ]
+    assert verify_rust_version.has_component(installed, "rustfmt")
+    assert verify_rust_version.has_component(installed, "clippy")
+
+
+def test_has_component_rejects_absent_component():
+    installed = ["rustfmt-x86_64-unknown-linux-gnu"]
+    assert not verify_rust_version.has_component(installed, "clippy")
 
 def test_main_fails_in_process_when_missing_targets(monkeypatch, capsys):
     """Test that main() fails when required targets are missing."""

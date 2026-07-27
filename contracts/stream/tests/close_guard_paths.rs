@@ -479,11 +479,9 @@ fn test_close_last_stream_empty_index_graceful() {
     assert_eq!(index_after.len(), 0);
 
     // Paginated query also returns empty with next_cursor == 0.
-    let page = ctx.client.get_recipient_streams_paginated(
-        &ctx.recipient,
-        &0,
-        &MAX_RECIPIENT_PAGE_SIZE,
-    );
+    let page =
+        ctx.client
+            .get_recipient_streams_paginated(&ctx.recipient, &0, &MAX_RECIPIENT_PAGE_SIZE);
     assert_eq!(page.stream_ids.len(), 0);
     assert_eq!(page.next_cursor, 0);
 }

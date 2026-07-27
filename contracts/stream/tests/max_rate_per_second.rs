@@ -241,6 +241,8 @@ fn test_max_rate_applies_to_all_create_functions() {
             withdraw_dust_threshold: Some(0),
             memo: None,
             metadata: None,
+            irrevocable: None,
+            witness: None,
         },
     ];
 
@@ -259,6 +261,7 @@ fn test_max_rate_applies_to_all_create_functions() {
         withdraw_dust_threshold: Some(0),
         memo: None,
         metadata: None,
+        irrevocable: None,
     };
 
     let result = ctx
@@ -333,16 +336,21 @@ fn test_rate_cap_does_not_affect_existing_streams() {
     // Set lower max rate
     ctx.client.set_max_rate_per_second(&100);
 
-    // Existing stream should still be queryable and functional
+    // Existing stream should still be queryable and functional (grandfathered)
     let stream = ctx.client.get_stream_state(&stream_id);
     assert_eq!(stream.rate_per_second, 1000);
 
-    // But updates to higher rates should be blocked
+    // Updates above the cap should fail with RateCapExceeded
     let result = ctx.client.try_update_rate_per_second(&stream_id, &1001);
-    assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
+    assert_eq!(result, Err(Ok(ContractError::RateCapExceeded)));
 
-    // Updates within the cap should work
-    ctx.client.update_rate_per_second(&stream_id, &1100); // Still higher than old rate
+    // Higher rates above cap also blocked
+    let result = ctx.client.try_update_rate_per_second(&stream_id, &1100);
+    assert_eq!(result, Err(Ok(ContractError::RateCapExceeded)));
+
+    // Grandfathered stream rate unchanged
+    let stream = ctx.client.get_stream_state(&stream_id);
+    assert_eq!(stream.rate_per_second, 1000);
 }
 
 #[test]

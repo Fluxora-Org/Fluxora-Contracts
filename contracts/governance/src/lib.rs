@@ -184,6 +184,131 @@ pub enum CallData {
     FactorySetRateBounds(Option<i128>, Option<i128>),
     /// `set_factory_paused(paused)`
     FactorySetPaused(bool),
+
+    // ---- governance-self operations (issue #1136 hardening) ----
+    // These wire to the *_internal helpers in lib.rs.  They are reachable
+    // **only** via `propose -> approve -> execute -> dispatch_call`, never
+    // via a bare admin signature: the security invariant tested by
+    // `mod tests::test_admin_cannot_collapse_threshold_alone` is that an
+    // attacker holding only the admin key cannot reach any of these without
+    // quorum + the 48h timelock.
+    /// `set_threshold(new_threshold)` — the four formula values
+    /// (`1 <= new_threshold <= signers.len()`) are re-checked inside
+    /// `set_threshold_internal`.
+    GovSetThreshold(u32),
+    /// `add_signer(new_signer)` — DuplicateSigner and TooManySigners guards
+    /// are re-applied inside `add_signer_internal`.
+    GovAddSigner(Address),
+    /// `remove_signer(signer)` — silent no-op when not registered (matches
+    /// the `remove_signer_internal` early-return contract). QuorumWouldBreak
+    /// is re-applied inside.
+    GovRemoveSigner(Address),
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Internal helpers callable from both the contractimpl impl block AND from `dispatch_call`.
+//
+// These were originally placed inside the `#[contractimpl] impl FluxoraGovernance { ... }` block, but
+// that made them `private impl methods` of FluxoraGovernance — invisible to module-top-level
+// `dispatch_call`. Per the Cargo.toml commentary on `set_threshold_internal` they are
+// "Reachable ONLY via execute() → dispatch_call", so they must be callable from module scope.
+// The fix lifts them out of the impl while keeping the same semantic bodies.  The
+// `test_only_*` impl block (#[contractimpl] #[cfg(test)] impl FluxoraGovernance) drops
+// `Self::` and now calls them directly.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// Update the approval threshold. Reachable ONLY via `execute()` -> `dispatch_call`,
+/// i.e. after quorum + 48h timelock — never via a bare admin signature.
+/// See docs/governance.md "Admin Key Compromise" and issue #1136.
+fn set_threshold_internal(env: &Env, new_threshold: u32) -> Result<(), GovernanceError> {
+    let signers = get_signers(env)?;
+    if new_threshold == 0 || new_threshold > signers.len() {
+        return Err(GovernanceError::InvalidThreshold);
+    }
+    let old_threshold = get_threshold(env)?;
+    env.storage()
+        .instance()
+        .set(&DataKey::Threshold, &new_threshold);
+    bump_instance(env);
+
+    env.events().publish(
+        (symbol_short!("thr_upd"),),
+        ThresholdUpdated {
+            old_threshold,
+            new_threshold,
+        },
+    );
+    env.events().publish(
+        (symbol_short!("quor_cfg"),),
+        QuorumConfig {
+            threshold: new_threshold,
+            signer_count: signers.len(),
+        },
+    );
+    Ok(())
+}
+
+/// Add a co-signer. Reachable ONLY via `execute()` -> `dispatch_call` — see
+/// `set_threshold_internal` doc comment.
+fn add_signer_internal(env: &Env, signer: Address) -> Result<(), GovernanceError> {
+    let mut signers = get_signers(env)?;
+    let mut signer_index = get_signer_index(env)?;
+
+    if signer_index.contains_key(signer.clone()) {
+        return Err(GovernanceError::DuplicateSigner);
+    }
+    if signers.len() >= MAX_SIGNERS {
+        return Err(GovernanceError::TooManySigners);
+    }
+    signers.push_back(signer.clone());
+    signer_index.set(signer.clone(), true);
+    env.storage().instance().set(&DataKey::Signers, &signers);
+    save_signer_index(env, &signer_index);
+    bump_instance(env);
+
+    env.events()
+        .publish((symbol_short!("sgnr_add"),), SignerAdded { signer });
+    let threshold = get_threshold(env)?;
+    env.events().publish(
+        (symbol_short!("quor_cfg"),),
+        QuorumConfig {
+            threshold,
+            signer_count: signers.len(),
+        },
+    );
+    Ok(())
+}
+
+/// Remove a co-signer. Reachable ONLY via `execute()` -> `dispatch_call` — see
+/// `set_threshold_internal` doc comment.
+fn remove_signer_internal(env: &Env, signer: Address) -> Result<(), GovernanceError> {
+    let mut signer_index = get_signer_index(env)?;
+
+    if !signer_index.contains_key(signer.clone()) {
+        return Ok(()); // silent no-op, matches old public behaviour
+    }
+
+    let mut signers = get_signers(env)?;
+    let threshold = get_threshold(env)?;
+    if signers.len() - 1 < threshold {
+        return Err(GovernanceError::QuorumWouldBreak);
+    }
+
+    for i in 0..signers.len() {
+        if signers.get(i).is_some_and(|candidate| candidate == signer) {
+            signers.remove(i);
+            break;
+        }
+    }
+
+    signer_index.remove(signer.clone());
+    env.storage().instance().set(&DataKey::Signers, &signers);
+    save_signer_index(env, &signer_index);
+    bump_instance(env);
+
+    env.events()
+        .publish((symbol_short!("sgnr_rm"),), SignerRemoved { signer });
+    Ok(())
 }
 
 /// Decode `calldata` bytes into a `CallData` variant and invoke the target.
@@ -265,17 +390,17 @@ fn dispatch_call(env: &Env, target: &Address, calldata: &Bytes) -> Result<(), Go
                 (paused,).into_val(env),
             );
         }
-    }
-    Ok(())
-
-    CallData::GovSetThreshold(new_threshold) => {
+        // Self-dispatch: governance-self operations are private lib-internal
+        // helpers, NOT external contract entrypoints.  `target` parameter is
+        // ignored for these arms — we call the helpers directly in-process.
+        CallData::GovSetThreshold(new_threshold) => {
             set_threshold_internal(env, new_threshold)?;
         }
         CallData::GovAddSigner(signer) => {
-            FluxoraGovernance::add_signer_internal(env, signer)?;
+            add_signer_internal(env, signer)?;
         }
         CallData::GovRemoveSigner(signer) => {
-            FluxoraGovernance::remove_signer_internal(env, signer)?;
+            remove_signer_internal(env, signer)?;
         }
     }
     Ok(())
@@ -639,87 +764,6 @@ impl FluxoraGovernance {
 
         Ok(())
     }
-
-/// Update the approval threshold. Reachable ONLY via `execute()` -> `dispatch_call`,
-/// i.e. after quorum + 48h timelock — never via a bare admin signature.
-/// See docs/governance.md "Admin Key Compromise" and issue #1136.
-fn set_threshold_internal(env: &Env, new_threshold: u32) -> Result<(), GovernanceError> {
-    let signers = get_signers(env)?;
-    if new_threshold == 0 || new_threshold > signers.len() {
-        return Err(GovernanceError::InvalidThreshold);
-    }
-    let old_threshold = get_threshold(env)?;
-    env.storage().instance().set(&DataKey::Threshold, &new_threshold);
-    bump_instance(env);
-
-    env.events().publish(
-        (symbol_short!("thr_upd"),),
-        ThresholdUpdated { old_threshold, new_threshold },
-    );
-    env.events().publish(
-        (symbol_short!("quor_cfg"),),
-        QuorumConfig { threshold: new_threshold, signer_count: signers.len() },
-    );
-    Ok(())
-}
-
-/// Add a co-signer. Reachable ONLY via `execute()` -> `dispatch_call` — see
-/// `set_threshold_internal` doc comment.
-fn add_signer_internal(env: &Env, signer: Address) -> Result<(), GovernanceError> {
-    let mut signers = get_signers(env)?;
-    let mut signer_index = get_signer_index(env)?;
-
-    if signer_index.contains_key(signer.clone()) {
-        return Err(GovernanceError::DuplicateSigner);
-    }
-    if signers.len() >= MAX_SIGNERS {
-        return Err(GovernanceError::TooManySigners);
-    }
-    signers.push_back(signer.clone());
-    signer_index.set(signer.clone(), true);
-    env.storage().instance().set(&DataKey::Signers, &signers);
-    save_signer_index(env, &signer_index);
-    bump_instance(env);
-
-    env.events().publish((symbol_short!("sgnr_add"),), SignerAdded { signer });
-    let threshold = get_threshold(env)?;
-    env.events().publish(
-        (symbol_short!("quor_cfg"),),
-        QuorumConfig { threshold, signer_count: signers.len() },
-    );
-    Ok(())
-}
-
-/// Remove a co-signer. Reachable ONLY via `execute()` -> `dispatch_call` — see
-/// `set_threshold_internal` doc comment.
-fn remove_signer_internal(env: &Env, signer: Address) -> Result<(), GovernanceError> {
-    let mut signer_index = get_signer_index(env)?;
-
-    if !signer_index.contains_key(signer.clone()) {
-        return Ok(()); // silent no-op, matches old public behaviour
-    }
-
-    let mut signers = get_signers(env)?;
-    let threshold = get_threshold(env)?;
-    if signers.len() - 1 < threshold {
-        return Err(GovernanceError::QuorumWouldBreak);
-    }
-
-    for i in 0..signers.len() {
-        if signers.get(i).is_some_and(|candidate| candidate == signer) {
-            signers.remove(i);
-            break;
-        }
-    }
-
-    signer_index.remove(signer.clone());
-    env.storage().instance().set(&DataKey::Signers, &signers);
-    save_signer_index(env, &signer_index);
-    bump_instance(env);
-
-    env.events().publish((symbol_short!("sgnr_rm"),), SignerRemoved { signer });
-    Ok(())
-}
 
     /// Submit a new governance proposal.
     ///
@@ -1986,7 +2030,7 @@ mod tests {
         assert_eq!(ctx.client.get_threshold(), 2);
     }
 
-   /// Reproduces the exact attack sequence from issue #1136: a compromised
+    /// Reproduces the exact attack sequence from issue #1136: a compromised
     /// admin key adds itself as a co-signer, collapses the threshold to 1,
     /// then solo proposes+approves. Confirms the attack now FAILS because
     /// there is no public entrypoint for add_signer/set_threshold that
@@ -2019,7 +2063,9 @@ mod tests {
         // collapsing the threshold still requires a second signer's approval
         // and the 48h timelock — solo propose+approve is insufficient.
         let collapse_calldata = CallData::GovSetThreshold(1u32).to_xdr(&ctx.env);
-        let id = ctx.client.propose(&ctx.signer_a, &ctx.contract_id, &collapse_calldata);
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &ctx.contract_id, &collapse_calldata);
         ctx.client.approve(&ctx.signer_a, &id);
         // Only 1 of 2 required approvals — quorum not reached.
         let executor = Address::generate(&ctx.env);
@@ -2035,12 +2081,12 @@ mod tests {
         ctx.client.execute(&executor, &id);
         assert_eq!(ctx.client.get_threshold(), 1);
     }
-    
+
     #[test]
     fn test_set_threshold_after_signer_removal_respects_current_count() {
         let ctx = Ctx::setup(); // 3 signers, threshold=2
         ctx.client.test_only_remove_signer(&ctx.signer_c); // Now 2 signers
-                                                 // Setting threshold to 2 should succeed (2 <= 2)
+                                                           // Setting threshold to 2 should succeed (2 <= 2)
         ctx.client.test_only_set_threshold(&2u32);
         assert_eq!(ctx.client.get_threshold(), 2);
         // Setting threshold to 3 should fail (3 > 2)
@@ -2067,7 +2113,7 @@ mod tests {
     fn test_remove_signer_below_threshold_errors() {
         let ctx = Ctx::setup(); // 3 signers, threshold=2
         ctx.client.test_only_remove_signer(&ctx.signer_c); // 2 signers left
-                                                 // Trying to remove another signer would leave 1 < threshold=2
+                                                           // Trying to remove another signer would leave 1 < threshold=2
         let result = ctx.client.try_test_only_remove_signer(&ctx.signer_b);
         assert_eq!(result, Err(Ok(GovernanceError::QuorumWouldBreak)));
         // Verify signer set is unchanged.

@@ -10,13 +10,15 @@
 //! 3. **Only the factory-level auth** — without the required cross-contract
 //!    sub-invocation — fails the auth check.
 //! 4. The happy path with correct dual-auth succeeds.
+//! 5. Auth issued for a different recipient fails (mismatched sub-invocation args).
+//! 6. A third-party relay attack fails.
 
 #![cfg(test)]
 
 extern crate std;
 
 use fluxora_factory::{FluxoraFactory, FluxoraFactoryClient};
-use fluxora_stream::{FluxoraStream, FluxoraStreamClient};
+use fluxora_stream::{CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamKind};
 use soroban_sdk::{
     testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke},
     token::{Client as TokenClient, StellarAssetClient},
@@ -39,17 +41,17 @@ const NOW: u64 = 1_000_000_000;
 // Test context — real contracts, no mock boundaries
 // ---------------------------------------------------------------------------
 
-struct Ctx {
+struct Ctx<'a> {
     env: Env,
-    factory: FluxoraFactoryClient,
-    stream: FluxoraStreamClient,
+    factory: FluxoraFactoryClient<'a>,
+    stream: FluxoraStreamClient<'a>,
     sender: Address,
     recipient: Address,
     factory_id: Address,
     stream_id: Address,
 }
 
-impl Ctx {
+impl<'a> Ctx<'a> {
     fn setup() -> Self {
         let env = Env::default();
         env.ledger().set_timestamp(NOW);
@@ -70,10 +72,10 @@ impl Ctx {
         let sender = Address::generate(&env);
         let recipient = Address::generate(&env);
 
-        stellar_asset.mint(&sender, &SENDER_FUNDING);
-
         // Init both contracts under mock_all_auths, then drop it.
         env.mock_all_auths();
+        stellar_asset.mint(&sender, &SENDER_FUNDING);
+        TokenClient::new(&env, &token_addr).approve(&sender, &stream_id, &SENDER_FUNDING, &100_000);
         stream.init(&token_addr, &stream_id);
         factory.init(&admin, &stream_id, &MAX_DEPOSIT, &MIN_DURATION);
         factory.set_allowlist(&recipient, &true);
@@ -95,57 +97,30 @@ impl Ctx {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: build the full dual-auth that `create_stream` legitimately requires.
-//
-// The sender must authorize:
-//   1. The factory invocation (`create_stream` on `factory_id`).
-//   2. The cross-contract sub-invocation (`create_stream` on `stream_id`).
+// Helper: build a CreateStreamParams with sensible defaults for tests.
 // ---------------------------------------------------------------------------
-fn dual_auth<'a>(
-    env: &'a Env,
-    sender: &'a Address,
-    factory_id: &'a Address,
-    stream_id: &'a Address,
+
+fn make_params(
+    recipient: &Address,
     deposit: i128,
     rate: i128,
     start: u64,
     cliff: u64,
     end: u64,
-    recipient: &'a Address,
-) -> MockAuth<'a> {
-    MockAuth {
-        address: sender,
-        invoke: &MockAuthInvoke {
-            contract: factory_id,
-            fn_name: "create_stream",
-            args: (
-                sender.clone(),
-                recipient.clone(),
-                deposit,
-                rate,
-                start,
-                cliff,
-                end,
-                0i128,
-            )
-                .into_val(env),
-            sub_invokes: &[MockAuthInvoke {
-                contract: stream_id,
-                fn_name: "create_stream",
-                args: (
-                    sender.clone(),
-                    recipient.clone(),
-                    deposit,
-                    rate,
-                    start,
-                    cliff,
-                    end,
-                    0i128,
-                )
-                    .into_val(env),
-                sub_invokes: &[],
-            }],
-        },
+) -> CreateStreamParams {
+    CreateStreamParams {
+        recipient: recipient.clone(),
+        deposit_amount: deposit,
+        rate_per_second: rate,
+        start_time: start,
+        cliff_time: cliff,
+        end_time: end,
+        withdraw_dust_threshold: None,
+        memo: None,
+        metadata: None,
+        kind: StreamKind::Linear,
+        irrevocable: None,
+        witness: None,
     }
 }
 
@@ -153,30 +128,27 @@ fn dual_auth<'a>(
 // Test 1: No auth supplied — must fail
 // ---------------------------------------------------------------------------
 
-/// Calling `create_stream` with **no** authorization at all must panic/fail.
-/// Soroban `require_auth` panics when the auth tree is empty.
+/// Calling `create_stream` with **no** authorization at all must fail.
+/// Soroban `require_auth` raises a host error when the auth tree is empty.
 #[test]
 fn test_create_stream_no_auth_fails() {
     let ctx = Ctx::setup();
-    // Explicitly supply an empty auth list — no MockAuth entries.
     ctx.env.mock_auths(&[]);
 
     let start = ctx.start();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.factory.try_create_stream(
-            &ctx.sender,
-            &ctx.recipient,
-            &DEPOSIT,
-            &RATE,
-            &start,
-            &start,
-            &(start + DURATION),
-            &0,
-        )
-    }));
+    let params = make_params(
+        &ctx.recipient,
+        DEPOSIT,
+        RATE,
+        start,
+        start,
+        start + DURATION,
+    );
+
+    let result = ctx.factory.try_create_stream(&ctx.sender, &params);
 
     assert!(
-        result.is_err(),
+        result.is_err() || result.unwrap().is_err(),
         "create_stream must fail when no auth is provided"
     );
 }
@@ -194,42 +166,29 @@ fn test_create_stream_spoofed_sender_fails() {
     let attacker = Address::generate(&ctx.env);
     let start = ctx.start();
 
-    // Auth is for `attacker`, but the factory will require auth for `sender`.
+    let params = make_params(
+        &ctx.recipient,
+        DEPOSIT,
+        RATE,
+        start,
+        start,
+        start + DURATION,
+    );
+
     ctx.env.mock_auths(&[MockAuth {
         address: &attacker,
         invoke: &MockAuthInvoke {
             contract: &ctx.factory_id,
             fn_name: "create_stream",
-            args: (
-                ctx.sender.clone(),
-                ctx.recipient.clone(),
-                DEPOSIT,
-                RATE,
-                start,
-                start,
-                start + DURATION,
-                0i128,
-            )
-                .into_val(&ctx.env),
+            args: (ctx.sender.clone(), params.clone()).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
 
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.factory.try_create_stream(
-            &ctx.sender,
-            &ctx.recipient,
-            &DEPOSIT,
-            &RATE,
-            &start,
-            &start,
-            &(start + DURATION),
-            &0,
-        )
-    }));
+    let result = ctx.factory.try_create_stream(&ctx.sender, &params);
 
     assert!(
-        result.is_err(),
+        result.is_err() || result.unwrap().is_err(),
         "create_stream must fail when auth is for a different (spoofed) address"
     );
 }
@@ -246,42 +205,29 @@ fn test_create_stream_missing_sub_invocation_auth_fails() {
     let ctx = Ctx::setup();
     let start = ctx.start();
 
-    // Auth covers only the factory wrapper — no sub_invokes entry for the stream contract.
+    let params = make_params(
+        &ctx.recipient,
+        DEPOSIT,
+        RATE,
+        start,
+        start,
+        start + DURATION,
+    );
+
     ctx.env.mock_auths(&[MockAuth {
         address: &ctx.sender,
         invoke: &MockAuthInvoke {
             contract: &ctx.factory_id,
             fn_name: "create_stream",
-            args: (
-                ctx.sender.clone(),
-                ctx.recipient.clone(),
-                DEPOSIT,
-                RATE,
-                start,
-                start,
-                start + DURATION,
-                0i128,
-            )
-                .into_val(&ctx.env),
+            args: (ctx.sender.clone(), params.clone()).into_val(&ctx.env),
             sub_invokes: &[], // <-- missing the stream sub-invocation
         },
     }]);
 
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.factory.try_create_stream(
-            &ctx.sender,
-            &ctx.recipient,
-            &DEPOSIT,
-            &RATE,
-            &start,
-            &start,
-            &(start + DURATION),
-            &0,
-        )
-    }));
+    let result = ctx.factory.try_create_stream(&ctx.sender, &params);
 
     assert!(
-        result.is_err(),
+        result.is_err() || result.unwrap().is_err(),
         "create_stream must fail when the cross-contract sub-invocation auth is missing"
     );
 }
@@ -297,32 +243,34 @@ fn test_create_stream_correct_dual_auth_succeeds() {
     let ctx = Ctx::setup();
     let start = ctx.start();
 
-    ctx.env.mock_auths(&[dual_auth(
-        &ctx.env,
-        &ctx.sender,
-        &ctx.factory_id,
-        &ctx.stream_id,
+    let params = make_params(
+        &ctx.recipient,
         DEPOSIT,
         RATE,
         start,
         start,
         start + DURATION,
-        &ctx.recipient,
-    )]);
-
-    let result = ctx.factory.try_create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &DEPOSIT,
-        &RATE,
-        &start,
-        &start,
-        &(start + DURATION),
-        &0,
     );
 
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.factory_id,
+            fn_name: "create_stream",
+            args: (ctx.sender.clone(), params.clone()).into_val(&ctx.env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &ctx.stream_id,
+                fn_name: "create_stream",
+                args: (ctx.sender.clone(), params.clone()).into_val(&ctx.env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+
+    let result = ctx.factory.try_create_stream(&ctx.sender, &params);
+
     assert!(
-        result.is_ok(),
+        matches!(result, Ok(Ok(_))),
         "create_stream must succeed with correct dual-auth: {:?}",
         result
     );
@@ -341,35 +289,42 @@ fn test_create_stream_auth_recipient_mismatch_fails() {
     let start = ctx.start();
     let wrong_recipient = Address::generate(&ctx.env);
 
-    // Auth is constructed for `wrong_recipient`, but the call uses `ctx.recipient`.
-    ctx.env.mock_auths(&[dual_auth(
-        &ctx.env,
-        &ctx.sender,
-        &ctx.factory_id,
-        &ctx.stream_id,
+    let params = make_params(
+        &ctx.recipient,
         DEPOSIT,
         RATE,
         start,
         start,
         start + DURATION,
+    );
+    let wrong_params = make_params(
         &wrong_recipient,
-    )]);
+        DEPOSIT,
+        RATE,
+        start,
+        start,
+        start + DURATION,
+    );
 
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.factory.try_create_stream(
-            &ctx.sender,
-            &ctx.recipient, // does not match what was authorized
-            &DEPOSIT,
-            &RATE,
-            &start,
-            &start,
-            &(start + DURATION),
-            &0,
-        )
-    }));
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.factory_id,
+            fn_name: "create_stream",
+            args: (ctx.sender.clone(), wrong_params).into_val(&ctx.env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &ctx.stream_id,
+                fn_name: "create_stream",
+                args: (ctx.sender.clone(), params.clone()).into_val(&ctx.env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+
+    let result = ctx.factory.try_create_stream(&ctx.sender, &params);
 
     assert!(
-        result.is_err(),
+        result.is_err() || result.unwrap().is_err(),
         "create_stream must fail when auth was issued for a different recipient"
     );
 }
@@ -388,42 +343,29 @@ fn test_create_stream_third_party_relay_fails() {
     let attacker = Address::generate(&ctx.env);
     let start = ctx.start();
 
-    // Attacker signs their own address — but caller passes `ctx.sender`.
+    let params = make_params(
+        &ctx.recipient,
+        DEPOSIT,
+        RATE,
+        start,
+        start,
+        start + DURATION,
+    );
+
     ctx.env.mock_auths(&[MockAuth {
         address: &attacker,
         invoke: &MockAuthInvoke {
             contract: &ctx.factory_id,
             fn_name: "create_stream",
-            args: (
-                attacker.clone(), // attacker claims to be the sender
-                ctx.recipient.clone(),
-                DEPOSIT,
-                RATE,
-                start,
-                start,
-                start + DURATION,
-                0i128,
-            )
-                .into_val(&ctx.env),
+            args: (attacker.clone(), params.clone()).into_val(&ctx.env),
             sub_invokes: &[],
         },
     }]);
 
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.factory.try_create_stream(
-            &ctx.sender, // actual sender argument is ctx.sender, not attacker
-            &ctx.recipient,
-            &DEPOSIT,
-            &RATE,
-            &start,
-            &start,
-            &(start + DURATION),
-            &0,
-        )
-    }));
+    let result = ctx.factory.try_create_stream(&ctx.sender, &params);
 
     assert!(
-        result.is_err(),
+        result.is_err() || result.unwrap().is_err(),
         "create_stream must fail when a third party tries to relay a stream creation for sender"
     );
 }

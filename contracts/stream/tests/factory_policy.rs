@@ -70,6 +70,35 @@ impl<'a> Ctx<'a> {
     fn now(&self) -> u64 {
         self.env.ledger().timestamp()
     }
+
+    /// Build a `CreateStreamParams` with common defaults filled in.
+    fn params(
+        &self,
+        recipient: &Address,
+        deposit_amount: i128,
+        rate_per_second: i128,
+        start_time: u64,
+        cliff_time: u64,
+        end_time: u64,
+        withdraw_dust_threshold: Option<i128>,
+        memo: Option<Bytes>,
+        kind: StreamKind,
+    ) -> CreateStreamParams {
+        CreateStreamParams {
+            recipient: recipient.clone(),
+            deposit_amount,
+            rate_per_second,
+            start_time,
+            cliff_time,
+            end_time,
+            withdraw_dust_threshold,
+            memo,
+            metadata: None,
+            kind,
+            irrevocable: None,
+            witness: None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -372,15 +401,17 @@ fn test_create_stream_recipient_not_allowlisted() {
 
     let result = ctx.factory.try_create_stream(
         &ctx.sender,
-        &recipient,
-        &1_000,
-        &1,
-        &now,
-        &now,
-        &(now + 200),
-        &0,
-        &fluxora_stream::StreamKind::Linear,
-        &None,
+        &ctx.params(
+            &recipient,
+            1_000,
+            1,
+            now,
+            now,
+            now + 200,
+            Some(0),
+            None,
+            StreamKind::Linear,
+        ),
     );
     assert_eq!(result, Err(Ok(FactoryError::RecipientNotAllowlisted)));
 }
@@ -395,15 +426,17 @@ fn test_create_stream_supports_cliff_only_and_memo() {
 
     let result = ctx.factory.try_create_stream(
         &ctx.sender,
-        &recipient,
-        &1_000,
-        &0,
-        &now,
-        &now,
-        &(now + 200),
-        &0,
-        &StreamKind::CliffOnly,
-        &memo,
+        &ctx.params(
+            &recipient,
+            1_000,
+            0,
+            now,
+            now,
+            now + 200,
+            Some(0),
+            memo.clone(),
+            StreamKind::CliffOnly,
+        ),
     );
     assert!(result.is_ok());
 
@@ -434,6 +467,8 @@ fn test_create_streams_batch_allows_all_valid_entries_atomically() {
         memo: Some(Bytes::from_slice(&ctx.env, b"batch-1")),
         metadata: None,
         kind: StreamKind::CliffOnly,
+        irrevocable: None,
+        witness: None,
     });
     streams.push_back(CreateStreamParams {
         recipient: recipient1.clone(),
@@ -446,6 +481,8 @@ fn test_create_streams_batch_allows_all_valid_entries_atomically() {
         memo: Some(Bytes::from_slice(&ctx.env, b"batch-2")),
         metadata: None,
         kind: StreamKind::Linear,
+        irrevocable: None,
+        witness: None,
     });
 
     let result = ctx.factory.try_create_streams(&ctx.sender, &streams);
@@ -483,6 +520,8 @@ fn test_create_streams_batch_reverts_if_any_recipient_not_allowlisted() {
         memo: None,
         metadata: None,
         kind: StreamKind::Linear,
+        irrevocable: None,
+        witness: None,
     });
     streams.push_back(CreateStreamParams {
         recipient: recipient1.clone(),
@@ -495,6 +534,8 @@ fn test_create_streams_batch_reverts_if_any_recipient_not_allowlisted() {
         memo: None,
         metadata: None,
         kind: StreamKind::Linear,
+        irrevocable: None,
+        witness: None,
     });
 
     let result = ctx.factory.try_create_streams(&ctx.sender, &streams);
@@ -522,6 +563,8 @@ fn test_create_streams_batch_rejects_aggregate_deposit_over_cap() {
         memo: None,
         metadata: None,
         kind: StreamKind::CliffOnly,
+        irrevocable: None,
+        witness: None,
     });
     streams.push_back(CreateStreamParams {
         recipient: recipient1.clone(),
@@ -534,6 +577,8 @@ fn test_create_streams_batch_rejects_aggregate_deposit_over_cap() {
         memo: None,
         metadata: None,
         kind: StreamKind::Linear,
+        irrevocable: None,
+        witness: None,
     });
 
     let result = ctx.factory.try_create_streams(&ctx.sender, &streams);
@@ -551,15 +596,17 @@ fn test_create_stream_rejects_over_length_memo() {
 
     let result = ctx.factory.try_create_stream(
         &ctx.sender,
-        &recipient,
-        &1_000,
-        &1,
-        &now,
-        &now,
-        &(now + 200),
-        &0,
-        &StreamKind::Linear,
-        &memo,
+        &ctx.params(
+            &recipient,
+            1_000,
+            1,
+            now,
+            now,
+            now + 200,
+            Some(0),
+            memo,
+            StreamKind::Linear,
+        ),
     );
     assert_eq!(result, Err(Ok(FactoryError::InvalidMemo)));
 }
@@ -577,15 +624,17 @@ fn test_create_stream_deposit_exceeds_cap() {
 
     let result = ctx.factory.try_create_stream(
         &ctx.sender,
-        &recipient,
-        &10_001,
-        &1, // exceeds max_deposit=10_000
-        &now,
-        &now,
-        &(now + 200),
-        &0,
-        &fluxora_stream::StreamKind::Linear,
-        &None,
+        &ctx.params(
+            &recipient,
+            10_001, // exceeds max_deposit=10_000
+            1,
+            now,
+            now,
+            now + 200,
+            Some(0),
+            None,
+            StreamKind::Linear,
+        ),
     );
     assert_eq!(result, Err(Ok(FactoryError::DepositExceedsCap)));
 }
@@ -600,15 +649,17 @@ fn test_create_stream_deposit_at_cap_ok() {
 
     let result = ctx.factory.try_create_stream(
         &ctx.sender,
-        &recipient,
-        &10_000,
-        &1, // exactly at cap
-        &now,
-        &now,
-        &(now + 10_000),
-        &0,
-        &fluxora_stream::StreamKind::Linear,
-        &None,
+        &ctx.params(
+            &recipient,
+            10_000, // exactly at cap
+            1,
+            now,
+            now,
+            now + 10_000,
+            Some(0),
+            None,
+            StreamKind::Linear,
+        ),
     );
     // May fail for stream-contract reasons (e.g. token transfer) but not DepositExceedsCap
     assert_ne!(result, Err(Ok(FactoryError::DepositExceedsCap)));
@@ -627,15 +678,17 @@ fn test_create_stream_duration_too_short() {
 
     let result = ctx.factory.try_create_stream(
         &ctx.sender,
-        &recipient,
-        &1_000,
-        &1,
-        &now,
-        &now,
-        &(now + 50), // duration=50 < min_duration=100
-        &0,
-        &fluxora_stream::StreamKind::Linear,
-        &None,
+        &ctx.params(
+            &recipient,
+            1_000,
+            1,
+            now,
+            now,
+            now + 50, // duration=50 < min_duration=100
+            Some(0),
+            None,
+            StreamKind::Linear,
+        ),
     );
     assert_eq!(result, Err(Ok(FactoryError::DurationTooShort)));
 }
@@ -650,15 +703,17 @@ fn test_create_stream_duration_at_minimum_ok() {
 
     let result = ctx.factory.try_create_stream(
         &ctx.sender,
-        &recipient,
-        &100,
-        &1,
-        &now,
-        &now,
-        &(now + 100), // duration=100 == min_duration
-        &0,
-        &fluxora_stream::StreamKind::Linear,
-        &None,
+        &ctx.params(
+            &recipient,
+            100,
+            1,
+            now,
+            now,
+            now + 100, // duration=100 == min_duration
+            Some(0),
+            None,
+            StreamKind::Linear,
+        ),
     );
     assert_ne!(result, Err(Ok(FactoryError::DurationTooShort)));
 }
@@ -676,15 +731,17 @@ fn test_create_stream_rejects_end_before_start() {
 
     let result = ctx.factory.try_create_stream(
         &ctx.sender,
-        &recipient,
-        &1_000,
-        &1,
-        &(now + 200),
-        &(now + 200),
-        &(now + 100),
-        &0,
-        &fluxora_stream::StreamKind::Linear,
-        &None,
+        &ctx.params(
+            &recipient,
+            1_000,
+            1,
+            now + 200,
+            now + 200,
+            now + 100,
+            Some(0),
+            None,
+            StreamKind::Linear,
+        ),
     );
     assert_eq!(result, Err(Ok(FactoryError::InvalidTimeRange)));
 }
@@ -698,15 +755,17 @@ fn test_create_stream_rejects_end_equal_start() {
 
     let result = ctx.factory.try_create_stream(
         &ctx.sender,
-        &recipient,
-        &1_000,
-        &1,
-        &now,
-        &now,
-        &now,
-        &0,
-        &fluxora_stream::StreamKind::Linear,
-        &None,
+        &ctx.params(
+            &recipient,
+            1_000,
+            1,
+            now,
+            now,
+            now,
+            Some(0),
+            None,
+            StreamKind::Linear,
+        ),
     );
     assert_eq!(result, Err(Ok(FactoryError::InvalidTimeRange)));
 }
@@ -720,15 +779,17 @@ fn test_create_stream_rejects_cliff_before_start() {
 
     let result = ctx.factory.try_create_stream(
         &ctx.sender,
-        &recipient,
-        &1_000,
-        &1,
-        &(now + 100),
-        &now,
-        &(now + 300),
-        &0,
-        &fluxora_stream::StreamKind::Linear,
-        &None,
+        &ctx.params(
+            &recipient,
+            1_000,
+            1,
+            now + 100,
+            now,
+            now + 300,
+            Some(0),
+            None,
+            StreamKind::Linear,
+        ),
     );
     assert_eq!(result, Err(Ok(FactoryError::InvalidCliff)));
 }
@@ -742,15 +803,17 @@ fn test_create_stream_rejects_cliff_after_end() {
 
     let result = ctx.factory.try_create_stream(
         &ctx.sender,
-        &recipient,
-        &1_000,
-        &1,
-        &now,
-        &(now + 300),
-        &(now + 200),
-        &0,
-        &fluxora_stream::StreamKind::Linear,
-        &None,
+        &ctx.params(
+            &recipient,
+            1_000,
+            1,
+            now,
+            now + 300,
+            now + 200,
+            Some(0),
+            None,
+            StreamKind::Linear,
+        ),
     );
     assert_eq!(result, Err(Ok(FactoryError::InvalidCliff)));
 }
@@ -769,18 +832,24 @@ fn test_factory_not_initialized_returns_error() {
     let recipient = Address::generate(&env);
     let now = env.ledger().timestamp();
 
-    // No init called — create_stream should return NotInitialized
+    // No init called — create_stream should return error
+    // Guard order: policy load fails with NotInitialized before allowlist check
     let result = factory.try_create_stream(
         &sender,
-        &recipient,
-        &1_000,
-        &1,
-        &now,
-        &now,
-        &(now + 200),
-        &0,
-        &fluxora_stream::StreamKind::Linear,
-        &None,
+        &CreateStreamParams {
+            recipient: recipient.clone(),
+            deposit_amount: 1_000,
+            rate_per_second: 1,
+            start_time: now,
+            cliff_time: now,
+            end_time: now + 200,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
     assert_eq!(result, Err(Ok(FactoryError::NotInitialized)));
 }
@@ -882,15 +951,17 @@ fn test_set_cap_enforced() {
 
     let result = ctx.factory.try_create_stream(
         &ctx.sender,
-        &recipient,
-        &6_000,
-        &1,
-        &now,
-        &now,
-        &(now + 200),
-        &0,
-        &fluxora_stream::StreamKind::Linear,
-        &None,
+        &ctx.params(
+            &recipient,
+            6_000,
+            1,
+            now,
+            now,
+            now + 200,
+            Some(0),
+            None,
+            StreamKind::Linear,
+        ),
     );
     assert_eq!(result, Err(Ok(FactoryError::DepositExceedsCap)));
 }
@@ -906,15 +977,17 @@ fn test_set_min_duration_enforced() {
 
     let result = ctx.factory.try_create_stream(
         &ctx.sender,
-        &recipient,
-        &200,
-        &1,
-        &now,
-        &now,
-        &(now + 200), // duration=200 < new min=500
-        &0,
-        &fluxora_stream::StreamKind::Linear,
-        &None,
+        &ctx.params(
+            &recipient,
+            200,
+            1,
+            now,
+            now,
+            now + 200, // duration=200 < new min=500
+            Some(0),
+            None,
+            StreamKind::Linear,
+        ),
     );
     assert_eq!(result, Err(Ok(FactoryError::DurationTooShort)));
 }
@@ -930,15 +1003,17 @@ fn test_set_allowlist_remove_enforced() {
 
     let result = ctx.factory.try_create_stream(
         &ctx.sender,
-        &recipient,
-        &1_000,
-        &1,
-        &now,
-        &now,
-        &(now + 200),
-        &0,
-        &fluxora_stream::StreamKind::Linear,
-        &None,
+        &ctx.params(
+            &recipient,
+            1_000,
+            1,
+            now,
+            now,
+            now + 200,
+            Some(0),
+            None,
+            StreamKind::Linear,
+        ),
     );
     assert_eq!(result, Err(Ok(FactoryError::RecipientNotAllowlisted)));
 }
@@ -959,15 +1034,17 @@ fn test_create_stream_cliff_only_via_factory() {
     let end = now + 200;
     let stream_id = ctx.factory.create_stream(
         &ctx.sender,
-        &recipient,
-        &1_000,
-        &0, // rate ignored for CliffOnly
-        &now,
-        &end, // cliff == end
-        &end,
-        &0,
-        &fluxora_stream::StreamKind::CliffOnly,
-        &None,
+        &ctx.params(
+            &recipient,
+            1_000,
+            0, // rate ignored for CliffOnly
+            now,
+            end, // cliff == end
+            end,
+            Some(0),
+            None,
+            StreamKind::CliffOnly,
+        ),
     );
 
     let state = ctx.stream.get_stream_state(&stream_id);
@@ -987,15 +1064,17 @@ fn test_cliff_only_via_factory_still_enforces_cap() {
 
     let result = ctx.factory.try_create_stream(
         &ctx.sender,
-        &recipient,
-        &10_001, // exceeds cap
-        &0,
-        &now,
-        &end,
-        &end,
-        &0,
-        &fluxora_stream::StreamKind::CliffOnly,
-        &None,
+        &ctx.params(
+            &recipient,
+            10_001, // exceeds cap
+            0,
+            now,
+            end,
+            end,
+            Some(0),
+            None,
+            StreamKind::CliffOnly,
+        ),
     );
     assert_eq!(result, Err(Ok(FactoryError::DepositExceedsCap)));
 }
@@ -1010,15 +1089,17 @@ fn test_cliff_only_via_factory_still_enforces_min_duration() {
 
     let result = ctx.factory.try_create_stream(
         &ctx.sender,
-        &recipient,
-        &1_000,
-        &0,
-        &now,
-        &(now + 50),
-        &(now + 50), // duration=50 < min_duration=100
-        &0,
-        &fluxora_stream::StreamKind::CliffOnly,
-        &None,
+        &ctx.params(
+            &recipient,
+            1_000,
+            0,
+            now,
+            now + 50, // duration=50 < min_duration=100
+            now + 50,
+            Some(0),
+            None,
+            StreamKind::CliffOnly,
+        ),
     );
     assert_eq!(result, Err(Ok(FactoryError::DurationTooShort)));
 }
@@ -1033,15 +1114,17 @@ fn test_cliff_only_via_factory_still_enforces_allowlist() {
 
     let result = ctx.factory.try_create_stream(
         &ctx.sender,
-        &recipient,
-        &1_000,
-        &0,
-        &now,
-        &end,
-        &end,
-        &0,
-        &fluxora_stream::StreamKind::CliffOnly,
-        &None,
+        &ctx.params(
+            &recipient,
+            1_000,
+            0,
+            now,
+            end,
+            end,
+            Some(0),
+            None,
+            StreamKind::CliffOnly,
+        ),
     );
     assert_eq!(result, Err(Ok(FactoryError::RecipientNotAllowlisted)));
 }
@@ -1061,15 +1144,17 @@ fn test_memo_forwarded_and_stored() {
     let memo = Bytes::from_slice(&ctx.env, b"invoice-42");
     let stream_id = ctx.factory.create_stream(
         &ctx.sender,
-        &recipient,
-        &1_000,
-        &1,
-        &now,
-        &now,
-        &(now + 200),
-        &0,
-        &fluxora_stream::StreamKind::Linear,
-        &Some(memo.clone()),
+        &ctx.params(
+            &recipient,
+            1_000,
+            1,
+            now,
+            now,
+            now + 200,
+            Some(0),
+            Some(memo.clone()),
+            StreamKind::Linear,
+        ),
     );
 
     let stored = ctx.stream.get_stream_memo(&stream_id);
@@ -1086,15 +1171,17 @@ fn test_none_memo_results_in_no_memo() {
 
     let stream_id = ctx.factory.create_stream(
         &ctx.sender,
-        &recipient,
-        &1_000,
-        &1,
-        &now,
-        &now,
-        &(now + 200),
-        &0,
-        &fluxora_stream::StreamKind::Linear,
-        &None,
+        &ctx.params(
+            &recipient,
+            1_000,
+            1,
+            now,
+            now,
+            now + 200,
+            Some(0),
+            None,
+            StreamKind::Linear,
+        ),
     );
 
     let stored = ctx.stream.get_stream_memo(&stream_id);
@@ -1119,20 +1206,22 @@ fn test_policy_tightening_grandfathers_existing_streams() {
     // initial policy: max_deposit=10_000, min_duration=100, rate bounds unset
     let existing_id = ctx.factory.create_stream(
         &ctx.sender,
-        &recipient,
-        &5_000,
-        &10,                     // rate=10 (well within permissive bounds)
-        &now,
-        &now,
-        &(now + 1_000),           // duration=1_000 (well above min_duration=100)
-        &0,
-        &fluxora_stream::StreamKind::Linear,
-        &None,
+        &ctx.params(
+            &recipient,
+            5_000,
+            10, // rate=10 (well within permissive bounds)
+            now,
+            now,
+            now + 1_000, // duration=1_000 (well above min_duration=100)
+            Some(0),
+            None,
+            StreamKind::Linear,
+        ),
     );
 
     // ── 2. Tighten all policy dimensions ──────────────────────────────────
-    ctx.factory.set_cap(&2_000);              // lower cap: 10_000 → 2_000
-    ctx.factory.set_min_duration(&2_000);     // raise min_duration: 100 → 2_000
+    ctx.factory.set_cap(&2_000); // lower cap: 10_000 → 2_000
+    ctx.factory.set_min_duration(&2_000); // raise min_duration: 100 → 2_000
     ctx.factory.set_rate_bounds(&Some(1), &Some(5)); // restrict rate: unset → [1, 5]
 
     // confirm policy was persisted
@@ -1156,75 +1245,85 @@ fn test_policy_tightening_grandfathers_existing_streams() {
     // 4a. Deposit over new cap → rejected
     let over_cap = ctx.factory.try_create_stream(
         &ctx.sender,
-        &recipient,
-        &3_000,                  // exceeds new cap of 2_000
-        &3,                      // rate within new bounds
-        &now,
-        &now,
-        &(now + 3_000),          // duration meets new min_duration
-        &0,
-        &fluxora_stream::StreamKind::Linear,
-        &None,
+        &ctx.params(
+            &recipient,
+            3_000, // exceeds new cap of 2_000
+            3,     // rate within new bounds
+            now,
+            now,
+            now + 3_000, // duration meets new min_duration
+            Some(0),
+            None,
+            StreamKind::Linear,
+        ),
     );
     assert_eq!(over_cap, Err(Ok(FactoryError::DepositExceedsCap)));
 
     // 4b. Duration under new minimum → rejected
     let too_short = ctx.factory.try_create_stream(
         &ctx.sender,
-        &recipient,
-        &500,                    // within new cap
-        &3,                      // rate within new bounds
-        &now,
-        &now,
-        &(now + 500),            // duration=500 < new min_duration=2_000
-        &0,
-        &fluxora_stream::StreamKind::Linear,
-        &None,
+        &ctx.params(
+            &recipient,
+            500, // within new cap
+            3,   // rate within new bounds
+            now,
+            now,
+            now + 500, // duration=500 < new min_duration=2_000
+            Some(0),
+            None,
+            StreamKind::Linear,
+        ),
     );
     assert_eq!(too_short, Err(Ok(FactoryError::DurationTooShort)));
 
     // 4c. Rate below new minimum → rejected
     let rate_below = ctx.factory.try_create_stream(
         &ctx.sender,
-        &recipient,
-        &500,                    // within new cap
-        &0,                      // rate=0 < new min_rate=1
-        &now,
-        &now,
-        &(now + 3_000),          // duration meets new min_duration
-        &0,
-        &fluxora_stream::StreamKind::Linear,
-        &None,
+        &ctx.params(
+            &recipient,
+            500, // within new cap
+            0,   // rate=0 < new min_rate=1
+            now,
+            now,
+            now + 3_000, // duration meets new min_duration
+            Some(0),
+            None,
+            StreamKind::Linear,
+        ),
     );
     assert_eq!(rate_below, Err(Ok(FactoryError::RateBelowMin)));
 
     // 4d. Rate above new maximum → rejected
     let rate_above = ctx.factory.try_create_stream(
         &ctx.sender,
-        &recipient,
-        &500,                    // within new cap
-        &10,                     // rate=10 > new max_rate=5
-        &now,
-        &now,
-        &(now + 3_000),          // duration meets new min_duration
-        &0,
-        &fluxora_stream::StreamKind::Linear,
-        &None,
+        &ctx.params(
+            &recipient,
+            500, // within new cap
+            10,  // rate=10 > new max_rate=5
+            now,
+            now,
+            now + 3_000, // duration meets new min_duration
+            Some(0),
+            None,
+            StreamKind::Linear,
+        ),
     );
     assert_eq!(rate_above, Err(Ok(FactoryError::RateAboveMax)));
 
     // 4e. Stream with parameters respecting all tightened bounds → succeeds
     let new_ok = ctx.factory.try_create_stream(
         &ctx.sender,
-        &recipient,
-        &1_500,                  // within new cap
-        &3,                      // rate within new bounds [1, 5]
-        &now,
-        &now,
-        &(now + 2_500),          // duration=2_500 ≥ new min_duration=2_000
-        &0,
-        &fluxora_stream::StreamKind::Linear,
-        &None,
+        &ctx.params(
+            &recipient,
+            1_500, // within new cap
+            3,     // rate within new bounds [1, 5]
+            now,
+            now,
+            now + 2_500, // duration=2_500 ≥ new min_duration=2_000
+            Some(0),
+            None,
+            StreamKind::Linear,
+        ),
     );
     assert!(new_ok.is_ok());
 }

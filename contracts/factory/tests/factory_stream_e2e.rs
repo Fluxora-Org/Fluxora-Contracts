@@ -90,20 +90,22 @@ impl<'a> FactoryClientWrapper<'a> {
         cliff_time: &u64,
         end_time: &u64,
         withdraw_dust_threshold: &i128,
+        stream_kind: &StreamKind,
+        memo: &Option<soroban_sdk::Bytes>,
     ) -> u64 {
         self.client.create_stream(
             sender,
             &fluxora_stream::CreateStreamParams {
                 recipient: recipient.clone(),
-                deposit_amount: deposit_amount,
-                rate_per_second: rate_per_second,
-                start_time: start_time,
-                cliff_time: cliff_time,
-                end_time: end_time,
-                withdraw_dust_threshold: Some(withdraw_dust_threshold),
-                memo: fluxora_stream::StreamKind::Linear,
+                deposit_amount: *deposit_amount,
+                rate_per_second: *rate_per_second,
+                start_time: *start_time,
+                cliff_time: *cliff_time,
+                end_time: *end_time,
+                withdraw_dust_threshold: Some(*withdraw_dust_threshold),
+                memo: memo.clone(),
                 metadata: None,
-                kind: None,
+                kind: *stream_kind,
                 irrevocable: None,
                 witness: None,
             },
@@ -120,21 +122,23 @@ impl<'a> FactoryClientWrapper<'a> {
         cliff_time: &u64,
         end_time: &u64,
         withdraw_dust_threshold: &i128,
+        stream_kind: &StreamKind,
+        memo: &Option<soroban_sdk::Bytes>,
     ) -> Result<Result<u64, soroban_sdk::Error>, Result<FactoryError, soroban_sdk::InvokeError>>
     {
         self.client.try_create_stream(
             sender,
             &fluxora_stream::CreateStreamParams {
                 recipient: recipient.clone(),
-                deposit_amount: deposit_amount,
-                rate_per_second: rate_per_second,
-                start_time: start_time,
-                cliff_time: cliff_time,
-                end_time: end_time,
-                withdraw_dust_threshold: Some(withdraw_dust_threshold),
-                memo: fluxora_stream::StreamKind::Linear,
+                deposit_amount: *deposit_amount,
+                rate_per_second: *rate_per_second,
+                start_time: *start_time,
+                cliff_time: *cliff_time,
+                end_time: *end_time,
+                withdraw_dust_threshold: Some(*withdraw_dust_threshold),
+                memo: memo.clone(),
                 metadata: None,
-                kind: None,
+                kind: *stream_kind,
                 irrevocable: None,
                 witness: None,
             },
@@ -175,8 +179,6 @@ impl<'a> FactoryClientWrapper<'a> {
 
 struct Ctx<'a> {
     env: Env,
-    factory: FluxoraFactoryClient<'a>,
-    stream: FluxoraStreamClient<'a>,
     #[expect(dead_code)]
     factory: FactoryClientWrapper<'a>,
     stream: FluxoraStreamClient<'a>,
@@ -293,14 +295,6 @@ fn test_create_stream_happy_path() {
         &cliff,
         &end,
         &dust,
-        &ctx.sender,
-        &ctx.recipient,
-        &deposit,
-        &rate,
-        &start,
-        &cliff,
-        &end,
-        &dust,
         &fluxora_stream::StreamKind::Linear,
         &None,
     );
@@ -359,14 +353,6 @@ fn test_create_stream_recipient_not_allowlisted() {
         &cliff,
         &end,
         &dust,
-        &ctx.sender,
-        &unknown,
-        &dep,
-        &rate,
-        &start,
-        &cliff,
-        &end,
-        &dust,
         &fluxora_stream::StreamKind::Linear,
         &None,
     );
@@ -392,14 +378,6 @@ fn test_create_stream_deposit_exceeds_cap() {
         &cliff,
         &end,
         &dust,
-        &ctx.sender,
-        &ctx.recipient,
-        &over_cap,
-        &rate,
-        &start,
-        &cliff,
-        &end,
-        &dust,
         &fluxora_stream::StreamKind::Linear,
         &None,
     );
@@ -413,14 +391,6 @@ fn test_create_stream_deposit_at_cap_ok() {
     let (_, rate, start, cliff, end, dust) = ctx.default_params();
 
     let result = ctx.factory.try_create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &MAX_DEPOSIT,
-        &rate,
-        &start,
-        &cliff,
-        &end,
-        &dust,
         &ctx.sender,
         &ctx.recipient,
         &MAX_DEPOSIT,
@@ -454,14 +424,6 @@ fn test_create_stream_duration_too_short() {
         &start,
         &(start + short_duration),
         &0,
-        &ctx.sender,
-        &ctx.recipient,
-        &DEPOSIT_AMOUNT,
-        &RATE_PER_SECOND,
-        &start,
-        &start,
-        &(start + short_duration),
-        &0,
         &fluxora_stream::StreamKind::Linear,
         &None,
     );
@@ -475,14 +437,6 @@ fn test_create_stream_duration_at_minimum_ok() {
     let start = ctx.now();
 
     let result = ctx.factory.try_create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &DEPOSIT_AMOUNT,
-        &RATE_PER_SECOND,
-        &start,
-        &start,
-        &(start + MIN_DURATION),
-        &0,
         &ctx.sender,
         &ctx.recipient,
         &DEPOSIT_AMOUNT,
@@ -515,14 +469,6 @@ fn test_create_stream_invalid_time_range_end_before_start() {
         &(now + 200),
         &(now + 100),
         &0,
-        &ctx.sender,
-        &ctx.recipient,
-        &DEPOSIT_AMOUNT,
-        &RATE_PER_SECOND,
-        &(now + 200),
-        &(now + 200),
-        &(now + 100),
-        &0,
         &fluxora_stream::StreamKind::Linear,
         &None,
     );
@@ -535,14 +481,6 @@ fn test_create_stream_invalid_time_range_end_equal_start() {
     let now = ctx.now();
 
     let result = ctx.factory.try_create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &DEPOSIT_AMOUNT,
-        &RATE_PER_SECOND,
-        &now,
-        &now,
-        &now,
-        &0,
         &ctx.sender,
         &ctx.recipient,
         &DEPOSIT_AMOUNT,
@@ -571,14 +509,6 @@ fn test_create_stream_invalid_cliff_before_start() {
         &now,
         &(now + 300),
         &0,
-        &ctx.sender,
-        &ctx.recipient,
-        &DEPOSIT_AMOUNT,
-        &RATE_PER_SECOND,
-        &(now + 100),
-        &now,
-        &(now + 300),
-        &0,
         &fluxora_stream::StreamKind::Linear,
         &None,
     );
@@ -591,14 +521,6 @@ fn test_create_stream_invalid_cliff_after_end() {
     let now = ctx.now();
 
     let result = ctx.factory.try_create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &DEPOSIT_AMOUNT,
-        &RATE_PER_SECOND,
-        &now,
-        &(now + 300),
-        &(now + 200),
-        &0,
         &ctx.sender,
         &ctx.recipient,
         &DEPOSIT_AMOUNT,
@@ -632,14 +554,6 @@ fn test_create_stream_cliff_at_start() {
         &now,
         &(now + STREAM_DURATION),
         &0,
-        &ctx.sender,
-        &ctx.recipient,
-        &DEPOSIT_AMOUNT,
-        &RATE_PER_SECOND,
-        &now,
-        &now,
-        &(now + STREAM_DURATION),
-        &0,
         &fluxora_stream::StreamKind::Linear,
         &None,
     );
@@ -657,14 +571,6 @@ fn test_create_stream_cliff_at_end() {
     let end = now + STREAM_DURATION;
 
     let stream_id = ctx.factory.create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &DEPOSIT_AMOUNT,
-        &RATE_PER_SECOND,
-        &now,
-        &end,
-        &end,
-        &0,
         &ctx.sender,
         &ctx.recipient,
         &DEPOSIT_AMOUNT,
@@ -1027,6 +933,8 @@ fn make_params(ctx: &Ctx, recipient: &Address, start_offset: u64) -> CreateStrea
         memo: None,
         metadata: None,
         kind: StreamKind::Linear,
+        irrevocable: None,
+        witness: None,
     }
 }
 
@@ -1172,15 +1080,16 @@ fn test_single_then_batch_registry_accumulates_in_order() {
 // Memo-length shared constant & early rejection test suite
 // ---------------------------------------------------------------------------
 
-/// Compile-time & runtime assertion proving the factory's memo-length guard is driven
-/// by `fluxora_stream::MAX_MEMO_BYTES` (the shared constant).
+/// Compile-time and runtime assertion proving the factory's memo-length guard
+/// is driven by `fluxora_stream::MAX_MEMO_BYTES` (the shared constant).
 ///
 /// # Security & Architectural Safeguard
-/// The factory contract directly imports `fluxora_stream::MAX_MEMO_BYTES` in both
-/// `create_stream` and `create_streams` (Guard 8). This test machine-checks that
-/// the constant imported and evaluated by the factory test suite is identical to
-/// `fluxora_stream::MAX_MEMO_BYTES`, guaranteeing that changes to the stream contract's
-/// memo limit will automatically drive factory validation without risk of stale copies or divergence.
+/// The factory contract directly imports `fluxora_stream::MAX_MEMO_BYTES` in
+/// both `create_stream` and `create_streams` (Guard 8). This test
+/// machine-checks that the constant imported and evaluated by the factory test
+/// suite is identical to `fluxora_stream::MAX_MEMO_BYTES`, guaranteeing that
+/// changes to the stream contract's memo limit will automatically drive
+/// factory validation without risk of stale copies or divergence.
 #[test]
 fn test_factory_memo_guard_tracks_shared_max_memo_bytes_constant() {
     // Direct compile-time constant alignment check
@@ -1193,16 +1102,19 @@ fn test_factory_memo_guard_tracks_shared_max_memo_bytes_constant() {
     assert_eq!(fluxora_stream::MAX_MEMO_BYTES, 256);
 }
 
-/// Proves that `create_stream` with a memo one byte over `fluxora_stream::MAX_MEMO_BYTES`
-/// (i.e. `MAX_MEMO_BYTES + 1` bytes) is rejected by the factory's own guard
-/// (`FactoryError::InvalidMemo`) BEFORE the cross-contract call is made to `FluxoraStream`.
+/// Proves that `create_stream` with a memo one byte over
+/// `fluxora_stream::MAX_MEMO_BYTES` (i.e. `MAX_MEMO_BYTES + 1` bytes) is
+/// rejected by the factory's own guard (`FactoryError::InvalidMemo`) BEFORE
+/// the cross-contract call is made to `FluxoraStream`.
 ///
 /// # Early Rejection Proof
-/// 1. `ctx.factory.client.try_create_stream(...)` returns `Err(Ok(FactoryError::InvalidMemo))`.
+/// 1. `ctx.factory.client.try_create_stream(...)` returns
+///    `Err(Ok(FactoryError::InvalidMemo))`.
 /// 2. The stream contract registry count and factory registry count remain 0.
 /// 3. The sender's token balance is untouched.
-/// 4. Distinguishes factory's Guard 8 early rejection (`FactoryError::InvalidMemo`) from
-///    downstream stream contract rejection (`ContractError::MemoTooLong`).
+/// 4. Distinguishes factory's Guard 8 early rejection
+///    (`FactoryError::InvalidMemo`) from downstream stream contract rejection
+///    (`ContractError::MemoTooLong`).
 #[test]
 fn test_single_create_stream_memo_over_limit_rejected_by_factory_guard() {
     let ctx = Ctx::setup();
@@ -1211,24 +1123,18 @@ fn test_single_create_stream_memo_over_limit_rejected_by_factory_guard() {
     // Construct a memo of length MAX_MEMO_BYTES + 1 (257 bytes)
     let mut over_limit_bytes = std::vec::Vec::with_capacity(fluxora_stream::MAX_MEMO_BYTES + 1);
     over_limit_bytes.resize(fluxora_stream::MAX_MEMO_BYTES + 1, 0xAB);
-    let over_limit_memo = soroban_sdk::Bytes::from_slice(&ctx.env, &over_limit_bytes);
 
-    let res = ctx.factory.client.try_create_stream(
+    let res = ctx.factory.try_create_stream(
         &ctx.sender,
-        &fluxora_stream::CreateStreamParams {
-            recipient: ctx.recipient.clone(),
-            deposit_amount: DEPOSIT_AMOUNT,
-            rate_per_second: RATE_PER_SECOND,
-            start_time: now,
-            cliff_time: now,
-            end_time: (now + STREAM_DURATION),
-            withdraw_dust_threshold: Some(0),
-            memo: fluxora_stream::StreamKind::Linear,
-            metadata: None,
-            kind: Some(over_limit_memo),
-            irrevocable: None,
-            witness: None,
-        },
+        &ctx.recipient,
+        &DEPOSIT_AMOUNT,
+        &RATE_PER_SECOND,
+        &now,
+        &now,
+        &(now + STREAM_DURATION),
+        &0,
+        &StreamKind::Linear,
+        &Some(soroban_sdk::Bytes::from_slice(&ctx.env, &over_limit_bytes)),
     );
 
     // Must return FactoryError::InvalidMemo from the factory itself
@@ -1240,13 +1146,15 @@ fn test_single_create_stream_memo_over_limit_rejected_by_factory_guard() {
         "Factory must reject over-length memo with FactoryError::InvalidMemo before calling stream contract"
     );
 
-    // Verify early rejection before cross-contract interaction (0 streams registered, sender balance untouched)
+    // Verify early rejection before cross-contract interaction (0 streams
+    // registered, sender balance untouched)
     assert_eq!(ctx.factory.get_factory_stream_count(), 0);
     assert_eq!(ctx.token.balance(&ctx.sender), SENDER_FUNDING);
 }
 
-/// Proves that `create_stream` with a memo of exactly `fluxora_stream::MAX_MEMO_BYTES`
-/// (256 bytes) is accepted by the factory's guard and successfully forwarded to `FluxoraStream`.
+/// Proves that `create_stream` with a memo of exactly
+/// `fluxora_stream::MAX_MEMO_BYTES` (256 bytes) is accepted by the factory's
+/// guard and successfully forwarded to `FluxoraStream`.
 #[test]
 fn test_single_create_stream_exact_max_memo_bytes_accepted() {
     let ctx = Ctx::setup();
@@ -1257,22 +1165,17 @@ fn test_single_create_stream_exact_max_memo_bytes_accepted() {
     exact_bytes.resize(fluxora_stream::MAX_MEMO_BYTES, 0xCD);
     let exact_memo = soroban_sdk::Bytes::from_slice(&ctx.env, &exact_bytes);
 
-    let res = ctx.factory.client.try_create_stream(
+    let res = ctx.factory.try_create_stream(
         &ctx.sender,
-        &fluxora_stream::CreateStreamParams {
-            recipient: ctx.recipient.clone(),
-            deposit_amount: DEPOSIT_AMOUNT,
-            rate_per_second: RATE_PER_SECOND,
-            start_time: now,
-            cliff_time: now,
-            end_time: (now + STREAM_DURATION),
-            withdraw_dust_threshold: Some(0),
-            memo: fluxora_stream::StreamKind::Linear,
-            metadata: None,
-            kind: Some(exact_memo.clone()),
-            irrevocable: None,
-            witness: None,
-        },
+        &ctx.recipient,
+        &DEPOSIT_AMOUNT,
+        &RATE_PER_SECOND,
+        &now,
+        &now,
+        &(now + STREAM_DURATION),
+        &0,
+        &StreamKind::Linear,
+        &Some(exact_memo.clone()),
     );
 
     assert!(res.is_ok());
@@ -1284,9 +1187,10 @@ fn test_single_create_stream_exact_max_memo_bytes_accepted() {
     assert_eq!(state.memo, Some(exact_memo));
 }
 
-/// Proves that batch stream creation (`create_streams`) with one stream entry containing
-/// a memo exceeding `fluxora_stream::MAX_MEMO_BYTES` is rejected by the factory
-/// (`FactoryError::InvalidMemo`) prior to making any cross-contract call.
+/// Proves that batch stream creation (`create_streams`) with one stream entry
+/// containing a memo exceeding `fluxora_stream::MAX_MEMO_BYTES` is rejected by
+/// the factory (`FactoryError::InvalidMemo`) prior to making any
+/// cross-contract call.
 #[test]
 fn test_batch_create_streams_memo_over_limit_rejected_by_factory_guard() {
     let ctx = Ctx::setup();
@@ -1349,6 +1253,8 @@ fn test_direct_stream_call_bypasses_recipient_allowlist() {
         &now,
         &(now + STREAM_DURATION),
         &0,
+        &StreamKind::Linear,
+        &None,
     );
     assert_eq!(res, Err(Ok(FactoryError::RecipientNotAllowlisted)));
 
@@ -1408,6 +1314,8 @@ fn test_direct_stream_call_bypasses_deposit_cap() {
         &now,
         &(now + STREAM_DURATION),
         &0,
+        &StreamKind::Linear,
+        &None,
     );
     assert_eq!(res, Err(Ok(FactoryError::DepositExceedsCap)));
 
@@ -1458,6 +1366,8 @@ fn test_direct_stream_call_bypasses_minimum_duration() {
         &now,
         &(now + short_duration),
         &0,
+        &StreamKind::Linear,
+        &None,
     );
     assert_eq!(res, Err(Ok(FactoryError::DurationTooShort)));
 
@@ -1488,4 +1398,108 @@ fn test_direct_stream_call_bypasses_minimum_duration() {
     assert_eq!(ctx.factory.get_factory_stream_count(), 0);
 }
 
+// ---------------------------------------------------------------------------
+// Non-positive deposit rejection
+// ---------------------------------------------------------------------------
 
+/// Factory must reject a stream with deposit_amount == 0.
+#[test]
+fn test_create_stream_zero_deposit_rejected() {
+    let ctx = Ctx::setup();
+    let now = ctx.now();
+
+    let res = ctx.factory.client.try_create_stream(
+        &ctx.sender,
+        &fluxora_stream::CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 0,
+            rate_per_second: RATE_PER_SECOND,
+            start_time: now,
+            cliff_time: now,
+            end_time: now + STREAM_DURATION,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
+    );
+    assert_eq!(res, Err(Ok(FactoryError::InvalidCap)));
+}
+
+/// Factory must reject a stream with negative deposit_amount.
+#[test]
+fn test_create_stream_negative_deposit_rejected() {
+    let ctx = Ctx::setup();
+    let now = ctx.now();
+
+    let res = ctx.factory.client.try_create_stream(
+        &ctx.sender,
+        &fluxora_stream::CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: -1,
+            rate_per_second: RATE_PER_SECOND,
+            start_time: now,
+            cliff_time: now,
+            end_time: now + STREAM_DURATION,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
+    );
+    assert_eq!(res, Err(Ok(FactoryError::InvalidCap)));
+}
+
+/// Factory must reject a batch containing ANY entry with non-positive deposit,
+/// even if another entry has a legitimate deposit. The batch must be atomically
+/// rejected (no partial state changes).
+#[test]
+fn test_create_streams_negative_deposit_rejected() {
+    let ctx = Ctx::setup();
+    let now = ctx.now();
+
+    // One valid stream + one with negative deposit
+    let mut streams = Vec::new(&ctx.env);
+    streams.push_back(fluxora_stream::CreateStreamParams {
+        recipient: ctx.recipient.clone(),
+        deposit_amount: DEPOSIT_AMOUNT,
+        rate_per_second: RATE_PER_SECOND,
+        start_time: now,
+        cliff_time: now,
+        end_time: now + STREAM_DURATION,
+        withdraw_dust_threshold: Some(0),
+        memo: None,
+        metadata: None,
+        kind: StreamKind::Linear,
+        irrevocable: None,
+        witness: None,
+    });
+    streams.push_back(fluxora_stream::CreateStreamParams {
+        recipient: ctx.recipient.clone(),
+        deposit_amount: -1,
+        rate_per_second: RATE_PER_SECOND,
+        start_time: now,
+        cliff_time: now,
+        end_time: now + STREAM_DURATION,
+        withdraw_dust_threshold: Some(0),
+        memo: None,
+        metadata: None,
+        kind: StreamKind::Linear,
+        irrevocable: None,
+        witness: None,
+    });
+
+    let sender_balance_before = ctx.token.balance(&ctx.sender);
+    let factory_count_before = ctx.factory.get_factory_stream_count();
+
+    let res = ctx.factory.client.try_create_streams(&ctx.sender, &streams);
+    assert_eq!(res, Err(Ok(FactoryError::InvalidCap)));
+
+    // Atomic rejection: no streams created, sender balance untouched
+    assert_eq!(ctx.factory.get_factory_stream_count(), factory_count_before);
+    assert_eq!(ctx.token.balance(&ctx.sender), sender_balance_before);
+}

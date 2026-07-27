@@ -2,6 +2,30 @@
 
 This document describes the Kani proof harnesses in Fluxora Contracts.
 
+## Coverage status (gap analysis)
+
+The table below maps every property described in this document to what
+`contracts/stream/tests/formal_verification_smoke.rs` actually exercises.
+
+| # | Property (doc section) | Smoke-test status | Notes |
+|---|------------------------|-------------------|-------|
+| 1 | Accrual result bounds (`accrual.rs` original) | **partial** | `formal_verification_smoke.rs` only has `smoke_accrual_examples` (2 concrete numeric cases). The original Kani bounds/monotonicity/clamping proofs described here are **not** present in the smoke harness — they live in `accrual.rs` unit tests, not under `#[cfg(kani)]`. |
+| 2 | Accrual monotonicity (original) | **not exercised by smoke** | No `kani::proof` for `calculate_accrued_amount` monotonicity in the smoke harness. Covered only by non-symbolic unit tests in `accrual.rs`. |
+| 3 | Accrual clamping (original) | **not exercised by smoke** | Same as above. |
+| 4 | `ledger_time_monotonic_guard` (clock regression) | **covered** | `kani::proof` in `kani_accrual_security` — full symbolic `u64` domain, iff `current_ts < prev_ts`. |
+| 5 | `cliff_only_accrual_exact_and_bounded` | **covered** | `kani::proof` — exact payout at/after cliff, zero before, bounded in `[0, deposit]` over symbolic domain. |
+| 6 | `keeper_fee_conservation` | **covered** | `kani::proof` — conservation + non-negativity + `fee <= gross`, full `i128`/`u32` domain. |
+| 7 | `keeper_fee_no_mul_overflow` | **covered** | `kani::proof` — `checked_mul` before `/ 10_000` never overflows. |
+| 8 | `governance_quorum_monotonic_and_timelock_safe` | **covered (simulated)** | `kani::proof` uses a local `TIMELOCK` constant (must be kept in sync with `governance.rs`). It does not call the real governance entry point, so it verifies the arithmetic shape, not the on-chain state machine. |
+| 9 | `governance_executed_stays_executed` | **covered (simulated)** | `kani::proof` asserts a local `bool` stays `true`; it models intent, not the actual `proposal.executed` storage guard. |
+
+### Smallest gaps closed in this change
+
+- None beyond documentation. The accrual original proofs (rows 1–3) remain
+  aspirational in the smoke harness; closing them would require extracting pure
+  accrual helpers (as done for `compute_keeper_fee_split`) and adding
+  `#[cfg(kani)]` harnesses — out of scope per the issue.
+
 ## Accrual proofs (original)
 - Located in `contracts/stream/src/accrual.rs` (and exercised via tests).
 - Proofs cover result bounds, monotonicity, and clamping.

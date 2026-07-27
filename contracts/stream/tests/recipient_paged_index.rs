@@ -272,9 +272,9 @@ fn test_sender_portfolio_health_cursor_boundaries() {
     ctx.create_n(MAX_RECIPIENT_PAGE_SIZE + 5);
 
     // start-of-list cursor (0) returns without panicking
-    let first = ctx
-        .client
-        .get_sender_portfolio_health(&ctx.sender, &0u64, &MAX_RECIPIENT_PAGE_SIZE);
+    let first =
+        ctx.client
+            .get_sender_portfolio_health(&ctx.sender, &0u64, &MAX_RECIPIENT_PAGE_SIZE);
     // the page may be empty (sender owns none here) but must not error
     let _ = first.stream_ids;
 
@@ -282,9 +282,9 @@ fn test_sender_portfolio_health_cursor_boundaries() {
     let mut cursor = first.next_cursor;
     let mut guard = 0u32;
     while cursor != 0u64 && guard < 20 {
-        let page = ctx
-            .client
-            .get_sender_portfolio_health(&ctx.sender, &cursor, &MAX_RECIPIENT_PAGE_SIZE);
+        let page =
+            ctx.client
+                .get_sender_portfolio_health(&ctx.sender, &cursor, &MAX_RECIPIENT_PAGE_SIZE);
         cursor = page.next_cursor;
         guard += 1;
     }

@@ -14,7 +14,7 @@ extern crate std;
 
 use fluxora_stream::{
     ContractError, CreateStreamParams, CreateStreamRelativeParams, FluxoraStream,
-    FluxoraStreamClient, StreamStatus, MAX_METADATA_BYTES, MAX_METADATA_KEYS,
+    FluxoraStreamClient, StreamKind, StreamStatus, MAX_METADATA_BYTES, MAX_METADATA_KEYS,
     MAX_METADATA_KEY_BYTES, MAX_METADATA_VALUE_BYTES,
 };
 use soroban_sdk::{
@@ -105,8 +105,8 @@ impl<'a> Ctx<'a> {
                 end_time: 1000u64,
                 withdraw_dust_threshold: Some(0_i128),
                 memo: None,
-                metadata: None,
-                kind: metadata,
+                metadata,
+                kind: StreamKind::Linear,
                 irrevocable: None,
                 witness: None,
             },
@@ -201,8 +201,8 @@ fn test_metadata_too_many_keys_rejected() {
             end_time: 1000u64,
             withdraw_dust_threshold: Some(0_i128),
             memo: None,
-            metadata: None,
-            kind: Some(meta),
+            metadata: Some(meta),
+            kind: StreamKind::Linear,
             irrevocable: None,
             witness: None,
         },
@@ -252,8 +252,8 @@ fn test_metadata_key_exceeds_limit_rejected() {
             end_time: 1000u64,
             withdraw_dust_threshold: Some(0_i128),
             memo: None,
-            metadata: None,
-            kind: Some(meta),
+            metadata: Some(meta),
+            kind: StreamKind::Linear,
             irrevocable: None,
             witness: None,
         },
@@ -301,8 +301,8 @@ fn test_metadata_value_exceeds_limit_rejected() {
             end_time: 1000u64,
             withdraw_dust_threshold: Some(0_i128),
             memo: None,
-            metadata: None,
-            kind: Some(meta),
+            metadata: Some(meta),
+            kind: StreamKind::Linear,
             irrevocable: None,
             witness: None,
         },
@@ -353,8 +353,8 @@ fn test_metadata_aggregate_exceeds_limit_rejected() {
             end_time: 1000u64,
             withdraw_dust_threshold: Some(0_i128),
             memo: None,
-            metadata: None,
-            kind: Some(meta),
+            metadata: Some(meta),
+            kind: StreamKind::Linear,
             irrevocable: None,
             witness: None,
         },
@@ -485,6 +485,9 @@ fn test_create_streams_batch_each_entry_stores_own_metadata() {
             withdraw_dust_threshold: None,
             memo: None,
             metadata: Some(meta_a.clone()),
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
         },
         CreateStreamParams {
             recipient: recipient_b.clone(),
@@ -496,6 +499,9 @@ fn test_create_streams_batch_each_entry_stores_own_metadata() {
             withdraw_dust_threshold: None,
             memo: None,
             metadata: Some(meta_b.clone()),
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
         },
     ];
 
@@ -538,6 +544,9 @@ fn test_create_streams_batch_none_metadata_stored_as_none() {
             withdraw_dust_threshold: None,
             memo: None,
             metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
         },
     ];
 
@@ -573,6 +582,8 @@ fn test_create_streams_relative_with_metadata() {
             withdraw_dust_threshold: None,
             memo: None,
             metadata: Some(meta.clone()),
+            kind: StreamKind::Linear,
+            irrevocable: None,
         },
     ];
 
@@ -618,6 +629,9 @@ fn test_create_streams_partial_invalid_metadata_fails_entry() {
             withdraw_dust_threshold: None,
             memo: None,
             metadata: Some(bad_meta),
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
         },
     ];
 
@@ -659,8 +673,8 @@ fn test_metadata_validation_failure_does_not_allocate_stream_id() {
             end_time: 1000u64,
             withdraw_dust_threshold: Some(0_i128),
             memo: None,
-            metadata: None,
-            kind: Some(bad_meta),
+            metadata: Some(bad_meta),
+            kind: StreamKind::Linear,
             irrevocable: None,
             witness: None,
         },
@@ -695,8 +709,8 @@ fn test_metadata_validation_failure_no_token_movement() {
             end_time: 1000u64,
             withdraw_dust_threshold: Some(0_i128),
             memo: None,
-            metadata: None,
-            kind: Some(meta),
+            metadata: Some(meta),
+            kind: StreamKind::Linear,
             irrevocable: None,
             witness: None,
         },
@@ -750,8 +764,8 @@ fn test_two_streams_independent_metadata() {
             end_time: 1000u64,
             withdraw_dust_threshold: Some(0_i128),
             memo: None,
-            metadata: None,
-            kind: Some(meta_a),
+            metadata: Some(meta_a),
+            kind: StreamKind::Linear,
             irrevocable: None,
             witness: None,
         },
@@ -768,8 +782,8 @@ fn test_two_streams_independent_metadata() {
             end_time: 1000u64,
             withdraw_dust_threshold: Some(0_i128),
             memo: None,
-            metadata: None,
-            kind: Some(meta_b),
+            metadata: Some(meta_b),
+            kind: StreamKind::Linear,
             irrevocable: None,
             witness: None,
         },
@@ -800,11 +814,7 @@ fn test_two_streams_independent_metadata() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_contract_version_is_6() {
+fn test_contract_version_is_9() {
     let ctx = Ctx::setup();
-    assert_eq!(
-        ctx.client().version(),
-        6,
-        "CONTRACT_VERSION must be 6 after sweep_excess auth change"
-    );
+    assert_eq!(ctx.client().version(), 9, "CONTRACT_VERSION must be 9");
 }

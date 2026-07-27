@@ -317,9 +317,26 @@ V6 `Stream` struct adds one field at the end:
 | -------: | :----- | :-------------- | :--------------------------------------------------------------------- |
 |       14 | `memo` | `Option<Bytes>` | Optional indexer correlation memo (max 64 bytes); `None` in V5 entries |
 
+### V6 → V7 transition
+
+V7 appended eight new `DataKey` variants (discriminants 21–28) while preserving all prior discriminants 0–20:
+
+| Discriminant | Variant | Storage type | Value type | Notes |
+|---|---|---|---|---|
+| 21 | `IdReservation(Address)` | Persistent | `IdReservation` | Active caller ID reservation |
+| 22 | `MaxRatePerSecond` | Instance | `i128` | Per-stream max rate cap |
+| 23 | `DelegatedWithdrawNonce(Address)` | Persistent | `u64` | Per-recipient delegated withdraw nonce |
+| 24 | `LastPauseRecord(PauseKind)` | Instance | `PauseRecord` | Last pause record for stream or protocol pause |
+| 25 | `RotationHistory(u64)` | Persistent | `Vec<RotationEntry>` | Recipient/sender rotation audit trail |
+| 26 | `LastAccrualLedgerTimestamp` | Instance | `u64` | Last ledger timestamp for accrual clock regression detection |
+| 27 | `PausedStreamCount` | Instance | `u64` | Protocol-wide count of streams currently in `StreamStatus::Paused` |
+| 28 | `TotalKeeperFeesPaid` | Instance | `i128` | Aggregate keeper fees paid via `keeper_cancel` |
+
+Code-level invariant verification for all 29 variants is maintained in [`contracts/stream/src/checksum.rs`](../contracts/stream/src/checksum.rs).
+
 ### Forward-compatibility guarantee
 
-All V5 persistent `Stream` entries remain decodable on a V6 instance. Soroban XDR struct decoding is **positional and forward-compatible**: a V6 decoder reading a V5-encoded struct decodes the first 14 fields correctly and treats the absent 15th field as `None` (for `Option<Bytes>`).
+All V5 persistent `Stream` entries remain decodable on a V6/V7 instance. Soroban XDR struct decoding is **positional and forward-compatible**: a V6/V7 decoder reading a V5-encoded struct decodes the first 14 fields correctly and treats the absent 15th field as `None` (for `Option<Bytes>`).
 
 This guarantee holds **only** because:
 

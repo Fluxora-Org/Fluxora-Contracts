@@ -816,3 +816,25 @@ pub(crate) fn read_pooled_stream_withdrawn(env: &Env, stream_id: u64, recipient:
     }
     amount
 }
+
+/// Check a vector of stream IDs for duplicates and return `ContractError::DuplicateStreamId`
+/// if any ID appears more than once.
+///
+/// # Security
+/// Batch operations (batch_withdraw, batch_withdraw_to) call this to prevent a caller from
+/// supplying the same stream ID twice and double-counting withdrawals.
+pub fn reject_duplicate_ids(
+    env: &Env,
+    stream_ids: &soroban_sdk::Vec<u64>,
+) -> Result<(), ContractError> {
+    let mut seen = soroban_sdk::Vec::<u64>::new(env);
+    for id in stream_ids.iter() {
+        for s in seen.iter() {
+            if s == id {
+                return Err(ContractError::DuplicateStreamId);
+            }
+        }
+        seen.push_back(id);
+    }
+    Ok(())
+}

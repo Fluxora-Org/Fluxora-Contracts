@@ -72,6 +72,11 @@ pub enum FactoryError {
     /// Returned by `init` and `set_stream_contract` instead of letting an
     /// invalid address be persisted and later host-trap inside `create_stream`.
     InvalidStreamContract = 17,
+    /// `set_rate_bounds` received an invalid rate-bounds configuration
+    /// (negative bound, or min > max). Distinct from
+    /// [`StreamContractError`] so callers can distinguish admin input
+    /// validation failures from genuine downstream cross-contract errors.
+    InvalidRateBounds = 18,
 }
 
 #[contracttype]
@@ -240,6 +245,10 @@ fn validate_min_duration(min_duration: u64) -> Result<(), FactoryError> {
 }
 
 /// Read-only snapshot of the factory policy stored in instance storage.
+///
+/// Mirrors every field in [`FactoryPolicy`] plus `admin`, so a single
+/// `get_factory_config()` call returns the complete effective factory
+/// configuration without requiring additional view calls.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FactoryConfig {
@@ -248,6 +257,12 @@ pub struct FactoryConfig {
     pub max_deposit: i128,
     pub min_duration: u64,
     pub batch_cap_enforced: bool,
+    /// Whether factory stream creation is currently paused.
+    pub creation_paused: bool,
+    /// Optional inclusive lower bound on `rate_per_second`. `None` is permissive.
+    pub min_rate_per_second: Option<i128>,
+    /// Optional inclusive upper bound on `rate_per_second`. `None` is permissive.
+    pub max_rate_per_second: Option<i128>,
 }
 
 /// Full snapshot of the factory policy required by both creation paths.
@@ -683,8 +698,7 @@ impl FluxoraFactory {
 
         if let Some(min_v) = min_rate {
             if min_v < 0 {
-                // rates are non-negative by domain convention; reject negative explicitly
-                return Err(FactoryError::StreamContractError); // reuse or could add new, but keep minimal
+                return Err(FactoryError::InvalidRateBounds);
             }
             env.storage()
                 .instance()
@@ -692,7 +706,7 @@ impl FluxoraFactory {
         }
         if let Some(max_v) = max_rate {
             if max_v < 0 {
-                return Err(FactoryError::StreamContractError);
+                return Err(FactoryError::InvalidRateBounds);
             }
             env.storage()
                 .instance()
@@ -704,7 +718,7 @@ impl FluxoraFactory {
         let current_max: Option<i128> = env.storage().instance().get(&DataKey::MaxRatePerSecond);
         if let (Some(mn), Some(mx)) = (current_min, current_max) {
             if mn > mx {
-                return Err(FactoryError::StreamContractError);
+                return Err(FactoryError::InvalidRateBounds);
             }
         }
 
@@ -769,33 +783,26 @@ impl FluxoraFactory {
     }
 
     /// Return the current factory policy configuration.
+    ///
+    /// Returns every field tracked by [`FactoryPolicy`] plus `admin`, so a
+    /// single call reconstructs the complete effective policy without
+    /// additional calls to `is_factory_paused()` or probing rate bounds.
     pub fn get_factory_config(env: Env) -> Result<FactoryConfig, FactoryError> {
+        let policy = load_policy(&env)?;
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(FactoryError::NotInitialized)?;
         Ok(FactoryConfig {
-            admin: env
-                .storage()
-                .instance()
-                .get(&DataKey::Admin)
-                .ok_or(FactoryError::NotInitialized)?,
-            stream_contract: env
-                .storage()
-                .instance()
-                .get(&DataKey::StreamContract)
-                .ok_or(FactoryError::NotInitialized)?,
-            max_deposit: env
-                .storage()
-                .instance()
-                .get(&DataKey::MaxDepositCap)
-                .ok_or(FactoryError::NotInitialized)?,
-            min_duration: env
-                .storage()
-                .instance()
-                .get(&DataKey::MinDuration)
-                .ok_or(FactoryError::NotInitialized)?,
-            batch_cap_enforced: env
-                .storage()
-                .instance()
-                .get(&DataKey::BatchCapEnforced)
-                .ok_or(FactoryError::NotInitialized)?,
+            admin,
+            stream_contract: policy.stream_contract,
+            max_deposit: policy.max_deposit,
+            min_duration: policy.min_duration,
+            batch_cap_enforced: policy.batch_cap_enforced,
+            creation_paused: policy.creation_paused,
+            min_rate_per_second: policy.min_rate_per_second,
+            max_rate_per_second: policy.max_rate_per_second,
         })
     }
 
@@ -838,8 +845,9 @@ impl FluxoraFactory {
     /// Creates a new stream via the FluxoraStream contract after enforcing treasury policies.
     ///
     /// # Parameters
-    /// - `stream_kind`: [`StreamKind::Linear`] for a standard vesting stream or
-    ///   [`StreamKind::CliffOnly`] for a one-shot cliff unlock. Forwarded verbatim
+    /// - `stream_kind`: [`StreamKind::Linear`] for a standard vesting stream,
+    ///   [`StreamKind::CliffOnly`] for a one-shot cliff unlock, or
+    ///   [`StreamKind::CliffSlope`] for post-cliff linear accrual. Forwarded verbatim
     ///   to the stream contract; all policy checks (cap, allowlist, duration) apply
     ///   regardless of kind.
     /// - `memo`: Optional opaque correlation bytes forwarded to the stream contract
@@ -887,7 +895,12 @@ impl FluxoraFactory {
             return Err(FactoryError::RecipientNotAllowlisted);
         }
 
-        // ── Guard 4: deposit cap ─────────────────────────────────────────────
+        // ── Guard 4: deposit must be positive ───────────────────────────────
+        if params.deposit_amount <= 0 {
+            return Err(FactoryError::InvalidCap);
+        }
+
+        // ── Guard 5: deposit cap ─────────────────────────────────────────────
         if params.deposit_amount > policy.max_deposit {
             return Err(FactoryError::DepositExceedsCap);
         }
@@ -1013,6 +1026,10 @@ impl FluxoraFactory {
                 .unwrap_or(false);
             if !is_allowed {
                 return Err(FactoryError::RecipientNotAllowlisted);
+            }
+
+            if params.deposit_amount <= 0 {
+                return Err(FactoryError::InvalidCap);
             }
 
             if params.deposit_amount > max_deposit {

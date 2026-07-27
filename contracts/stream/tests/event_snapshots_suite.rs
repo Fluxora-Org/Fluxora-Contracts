@@ -29,9 +29,10 @@
 extern crate std;
 
 use fluxora_stream::{
-    ContractPauseChanged, CreateStreamParams, DataKey, FluxoraStream, FluxoraStreamClient, PauseReason, RateUpdated,
-    RecipientUpdated, Stream, StreamCreated, StreamEndExtended, StreamEndShortened,
-    StreamHealthChanged, StreamPaused, StreamToppedUp, Withdrawal, WithdrawalTo,
+    ContractPauseChanged, CreateStreamParams, DataKey, FluxoraStream, FluxoraStreamClient,
+    PauseReason, RateUpdated, RecipientUpdated, Stream, StreamCreated, StreamEndExtended,
+    StreamEndShortened, StreamHealthChanged, StreamPaused, StreamToppedUp, Withdrawal,
+    WithdrawalTo,
 };
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
@@ -1419,7 +1420,6 @@ fn set_stream_deposit_in_storage(ctx: &EventTestContext, stream_id: u64, amount:
         ctx.env.storage().persistent().set(&key, &stream);
     });
 }
-
 
 /// No health event emitted when health status does not change (stays funded).
 /// StreamHealthChanged is only emitted by keeper_cancel in the current contract;
