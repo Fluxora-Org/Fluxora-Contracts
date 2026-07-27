@@ -4,6 +4,25 @@
 //! and the DataKey-based CRUD layer. All functions here are `pub(crate)` unless
 //! they need to be called from tests via the `testutils` feature.
 //!
+//! # Storage invariants
+//!
+//! The contract relies on the following storage invariants (see also
+//! [`docs/storage-invariants.md`](../../../docs/storage-invariants.md)):
+//!
+//! - **TTL:** Instance keys are bumped on every entry-point; persistent stream
+//!   keys are bumped on `load_stream` / `save_stream` and index reads/writes.
+//! - **Reentrancy:** `ReentrancyLock` instance flag prevents nested token calls.
+//! - **Liabilities:** `TotalLiabilities` tracks outstanding deposit obligations
+//!   and moves in lockstep with create/top-up vs withdraw/cancel/refund paths.
+//! - **Indexes sorted:** `RecipientStreams` and `SenderStreams` vectors are kept
+//!   in ascending `stream_id` order on insert/remove.
+//! - **CEI:** Stream state is persisted before external token transfers.
+//! - **Terminal state:** Cancelled or past-`end_time` streams bypass dust threshold
+//!   and freeze accrual at cancellation when applicable.
+//! - **Metadata validation:** `validate_metadata` runs before ID allocation.
+//! - **Append-only keys:** `DataKey` variants are never reordered (discriminants
+//!   0–35 frozen per release policy).
+//!
 //! # Security notes
 //! - `DataKey` variant order is append-only and must never be reordered.
 //! - `save_stream` is `pub` so the accrual module can call it directly.
@@ -630,7 +649,16 @@ pub fn increment_delegated_nonce(env: &Env, recipient: &Address) {
     );
 }
 
-pub fn load_rotation_history(env: &Env, stream_id: u64) -> soroban_sdk::Vec<RotationEntry> {
+/// Pub re-export of `increment_delegated_nonce` for test crates under the `testutils` feature.
+///
+/// Allows adversarial auth tests to simulate delegation revocation by bumping
+/// the nonce directly in contract storage via `env.as_contract(...)`.
+#[cfg(any(test, feature = "testutils"))]
+pub fn increment_delegated_nonce_test_only(env: &Env, recipient: &Address) {
+    increment_delegated_nonce(env, recipient);
+}
+
+pub(crate) fn load_rotation_history(env: &Env, stream_id: u64) -> soroban_sdk::Vec<RotationEntry> {
     let key = DataKey::RotationHistory(stream_id);
     env.storage()
         .persistent()
@@ -805,20 +833,26 @@ pub fn push_token(env: &Env, to: &Address, amount: i128) -> Result<(), ContractE
 // Metadata validation (issue #580)
 // ---------------------------------------------------------------------------
 
-/// Validate an optional per-stream metadata map against all size bounds.
+/// Validate a per-stream metadata map against all size bounds.
 ///
-/// Called from `persist_new_stream` / `persist_new_stream_skip_index` before any
-/// state is written, so a violation never allocates a stream ID.
+/// Called from stream creation paths (`persist_new_stream`, offer creation, etc.)
+/// **before** any stream ID is allocated or tokens are transferred. A violation
+/// therefore never leaves partial state.
 ///
-/// # Invariants checked
-/// - `metadata.len() <= MAX_METADATA_KEYS`
-/// - each key length <= `MAX_METADATA_KEY_BYTES`
-/// - each value length <= `MAX_METADATA_VALUE_BYTES`
-/// - aggregate (sum of all key lengths + all value lengths) <= `MAX_METADATA_BYTES`
+/// # Validation order
+/// 1. Key count `<= MAX_METADATA_KEYS` (8)
+/// 2. Per entry: key length `<= MAX_METADATA_KEY_BYTES` (32)
+/// 3. Per entry: value length `<= MAX_METADATA_VALUE_BYTES` (128)
+/// 4. Running sum of all key + value bytes `<= MAX_METADATA_BYTES` (512)
+///
+/// # Immutability
+/// Metadata validated here is stored on the `Stream` struct and is never modified
+/// by subsequent operations. See [`docs/metadata-extension.md`](../../../docs/metadata-extension.md)
+/// for the full operation compatibility matrix.
 ///
 /// # Errors
-/// Returns `ContractError::MetadataTooLarge` on any bound violation.
-pub fn validate_metadata(
+/// Returns [`ContractError::MetadataTooLarge`] on any bound violation.
+pub(crate) fn validate_metadata(
     metadata: &Map<soroban_sdk::Bytes, soroban_sdk::Bytes>,
 ) -> Result<(), ContractError> {
     if metadata.len() > MAX_METADATA_KEYS {

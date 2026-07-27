@@ -32,6 +32,15 @@ pub fn reject_duplicate_ids(env: &Env, ids: &soroban_sdk::Vec<u64>) -> Result<()
     Ok(())
 }
 
+/// Re-export for adversarial auth tests: bump a recipient's delegated-withdraw nonce
+/// to simulate in-flight revocation without going through the full contract flow.
+/// Only available when the `testutils` feature is enabled.
+#[cfg(feature = "testutils")]
+pub use storage::increment_delegated_nonce_test_only as increment_delegated_nonce;
+
+// ---------------------------------------------------------------------------
+// TTL constants
+// ---------------------------------------------------------------------------
 
 
 // ---------------------------------------------------------------------------
@@ -499,6 +508,7 @@ pub enum ContractError {
     ReservationNotFound = 24,
     ReservationNotExpirable = 25,
     ReservationStillActive = 26,
+    ReservationAlreadyActive = 41,
     /// Ledger-backed accrual observed a timestamp lower than the previous accrual timestamp.
     ClockRegression = 27,
     /// Stream kind is not supported.
@@ -805,6 +815,28 @@ pub struct KeeperCancelled {
     pub sender_refund: i128,
 }
 
+/// Emitted when claim ownership of a stream is transferred to a new address.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ClaimOwnershipTransferred {
+    pub stream_id: u64,
+    pub old_owner: Option<Address>,
+    pub new_owner: Address,
+}
+
+/// Emitted when a recipient delegates a share of their stream to a new recipient.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RecipientShareDelegated {
+    pub parent_stream_id: u64,
+    pub child_stream_id: u64,
+    pub delegator: Address,
+    pub delegatee: Address,
+    pub share_bps: u32,
+    pub new_parent_rate: i128,
+    pub child_rate: i128,
+}
+
 // ---------------------------------------------------------------------------
 // Offer-then-accept types (two-phase stream creation)
 // ---------------------------------------------------------------------------
@@ -1075,15 +1107,18 @@ pub struct Stream {
     /// Optional compliance witness authorized to cancel via signed attestation.
     /// `None` when not configured (default for backward compatibility).
     pub witness: Option<Address>,
-    /// Delegation depth of this stream in the recipient-share delegation tree
-    /// (0 for a root stream, N for the Nth level of delegated child stream).
-    pub delegation_depth: u32,
-    /// Parent stream id when this stream is a delegated child of another stream.
-    /// `None` for root streams.
+    /// Ledger sequence number of the last rate change.
+    /// Used to enforce the minimum rate-change interval (MIN_RATE_INTERVAL_LEDGERS).
+    /// Zero when no rate change has occurred yet.
+    pub last_rate_change_ledger: u32,
+    /// Whether this stream is a pooled multi-recipient stream.
+    /// `None` / `Some(false)` = normal stream; `Some(true)` = pooled stream.
+    pub is_pooled: Option<bool>,
+    /// Parent stream ID for delegated sub-streams (stream-delegation feature).
+    /// `None` for top-level streams.
     pub parent_stream_id: Option<u64>,
-    /// If true, the stream is decommissioned and restricted to cancel-or-no-op.
-    /// Defaults to false (None) for backward compatibility with existing streams.
-    pub decommissioned: Option<bool>,
+    /// Delegation chain depth. 0 for top-level streams, incremented on sub-stream creation.
+    pub delegation_depth: u32,
 }
 
 /// Pagination result for recipient stream listing
@@ -1425,6 +1460,193 @@ fn apply_lookback_cap(
     claimable.min(cap).max(0)
 }
 
+fn acquire_reentrancy_lock(env: &Env) -> Result<(), ContractError> {
+    let key = DataKey::ReentrancyLock;
+    if env.storage().instance().get(&key).unwrap_or(false) {
+        return Err(ContractError::InvalidState);
+    }
+
+    env.storage().instance().set(&key, &true);
+    bump_instance_ttl(env);
+    Ok(())
+}
+
+fn release_reentrancy_lock(env: &Env) {
+    env.storage()
+        .instance()
+        .set(&DataKey::ReentrancyLock, &false);
+    bump_instance_ttl(env);
+}
+
+/// Compute an adaptive TTL bump amount proportional to a stream's remaining lifetime.
+///
+/// `adaptive_ttl = min(MAX_TTL, remaining_seconds / LEDGER_CLOSE_TIME + BUFFER_LEDGERS)`
+///
+/// - When `end_time` is far in the future the bump is large, keeping the entry alive.
+/// - When `end_time` has already passed (or `now >= end_time`) the bump falls back to
+///   `BUFFER_LEDGERS` so the entry stays alive long enough for the recipient to withdraw.
+/// - The result is always at least `PERSISTENT_BUMP_AMOUNT` to avoid under-bumping
+///   short-lived streams below the static floor.
+fn compute_adaptive_ttl(now: u64, end_time: u64) -> u32 {
+    let remaining_seconds = end_time.saturating_sub(now);
+    let ledgers_for_stream = remaining_seconds / LEDGER_CLOSE_TIME;
+    let adaptive_u64 = ledgers_for_stream.saturating_add(BUFFER_LEDGERS as u64);
+    let clamped = adaptive_u64.clamp(PERSISTENT_BUMP_AMOUNT as u64, MAX_TTL as u64);
+    clamped as u32
+}
+
+fn get_config(env: &Env) -> Result<Config, ContractError> {
+    bump_instance_ttl(env);
+    env.storage()
+        .instance()
+        .get(&DataKey::Config)
+        .ok_or(ContractError::InvalidState) // Not initialised
+}
+
+/// Panicking version of `get_config` for internal use where config is guaranteed to exist.
+fn load_config(env: &Env) -> Config {
+    get_config(env).expect("contract not initialised")
+}
+
+fn get_token(env: &Env) -> Result<Address, ContractError> {
+    get_config(env).map(|c| c.token)
+}
+
+fn get_admin(env: &Env) -> Result<Address, ContractError> {
+    get_config(env).map(|c| c.admin)
+}
+
+/// Returns whether the contract is in **global emergency pause** (default `false` if unset).
+fn is_global_emergency_paused(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&DataKey::GlobalEmergencyPaused)
+        .unwrap_or(false)
+}
+
+fn is_creation_paused(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&DataKey::CreationPaused)
+        .unwrap_or(false)
+}
+
+/// Returns `Err(ContractError::ContractPaused)` when [`is_global_emergency_paused`] is true.
+/// Admin/admin-override entrypoints must not call this so operators can still intervene.
+fn require_not_globally_paused(env: &Env) -> Result<(), ContractError> {
+    if is_global_emergency_paused(env) {
+        return Err(ContractError::ContractPaused);
+    }
+    Ok(())
+}
+
+/// Blocks new stream creation when the emergency pause or creation-only pause is active.
+fn require_not_creation_paused(env: &Env) -> Result<(), ContractError> {
+    require_not_globally_paused(env)?;
+    if is_creation_paused(env) {
+        return Err(ContractError::ContractPaused);
+    }
+    Ok(())
+}
+
+/// Returns whether the protocol is globally paused (checks both GlobalEmergencyPaused and CreationPaused).
+/// Default is false (not paused) if no pause keys are set.
+fn is_protocol_paused(env: &Env) -> bool {
+    is_global_emergency_paused(env) || is_creation_paused(env)
+}
+
+/// Get the stored pause reason, if any.
+fn get_pause_reason(env: &Env) -> Option<soroban_sdk::String> {
+    env.storage().instance().get(&DataKey::GlobalPauseReason)
+}
+
+/// Get the stored pause timestamp, if any.
+fn get_pause_timestamp(env: &Env) -> Option<u64> {
+    env.storage().instance().get(&DataKey::GlobalPauseTimestamp)
+}
+
+/// Get the stored pause admin address, if any.
+fn get_pause_admin(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKey::GlobalPauseAdmin)
+}
+
+/// Get the governance-controlled maximum rate per second (default: i128::MAX if unset).
+fn get_max_rate_per_second(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&DataKey::MaxRatePerSecond)
+        .unwrap_or(i128::MAX)
+}
+
+/// Set the governance-controlled maximum rate per second.
+fn set_max_rate_per_second(env: &Env, max_rate: i128) {
+    env.storage()
+        .instance()
+        .set(&DataKey::MaxRatePerSecond, &max_rate);
+    env.storage().instance().extend_ttl(100, 518400); // 60 days
+}
+
+fn read_stream_count(env: &Env) -> u64 {
+    bump_instance_ttl(env);
+    env.storage()
+        .instance()
+        .get(&DataKey::NextStreamId)
+        .unwrap_or(0u64)
+}
+
+fn set_stream_count(env: &Env, count: u64) {
+    env.storage().instance().set(&DataKey::NextStreamId, &count);
+    bump_instance_ttl(env);
+}
+
+/// Read the protocol-wide count of streams currently in `StreamStatus::Paused`.
+/// Returns `0` when the key is absent (pre-upgrade deployments).
+fn read_paused_stream_count(env: &Env) -> u64 {
+    bump_instance_ttl(env);
+    env.storage()
+        .instance()
+        .get(&DataKey::PausedStreamCount)
+        .unwrap_or(0u64)
+}
+
+fn write_paused_stream_count(env: &Env, count: u64) {
+    env.storage()
+        .instance()
+        .set(&DataKey::PausedStreamCount, &count);
+    bump_instance_ttl(env);
+}
+
+/// Maintain the global paused-stream counter from a single stream status transition.
+///
+/// The counter changes only when a stream actually crosses the `Paused` boundary:
+/// - `!= Paused -> Paused` increments by 1
+/// - `Paused -> != Paused` decrements by 1 (saturating at 0 for upgrade safety)
+/// - all other transitions leave the counter unchanged
+fn reconcile_paused_stream_count(env: &Env, previous: StreamStatus, next: StreamStatus) {
+    if previous == next {
+        return;
+    }
+
+    match (previous, next) {
+        (StreamStatus::Paused, StreamStatus::Paused) => {}
+        (StreamStatus::Paused, _) => {
+            write_paused_stream_count(env, read_paused_stream_count(env).saturating_sub(1));
+        }
+        (_, StreamStatus::Paused) => {
+            write_paused_stream_count(env, read_paused_stream_count(env).saturating_add(1));
+        }
+        _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IdReservation storage helpers — delegated to storage.rs
+// ---------------------------------------------------------------------------
+
+use storage::{
+    load_id_reservation, next_stream_id_for, remove_id_reservation, save_id_reservation,
+};
+
 /// Enforce the rate-change cooldown and record the current ledger as the last change.
 ///
 /// Shared by `update_rate_per_second` and `decrease_rate_per_second` so the
@@ -1460,6 +1682,60 @@ const KEEPER_FEE_BPS: u32 = 50;
 
 /// Maximum number of rotation entries stored in a per-stream history.
 const MAX_ROTATION_HISTORY: u32 = 50;
+
+/// Maximum number of recipients in a pooled stream.
+pub const MAX_POOL_RECIPIENTS: u32 = 20;
+
+// ---------------------------------------------------------------------------
+// Pooled stream storage helpers
+// ---------------------------------------------------------------------------
+
+/// Load the share distribution for a pooled stream.
+fn read_pooled_stream_shares(
+    env: &Env,
+    stream_id: u64,
+) -> Result<soroban_sdk::Vec<(Address, u32)>, ContractError> {
+    let key = DataKey::PooledStreamShares(stream_id);
+    env.storage()
+        .persistent()
+        .get(&key)
+        .ok_or(ContractError::StreamNotFound)
+}
+
+/// Persist the share distribution for a pooled stream.
+fn save_pooled_stream_shares(
+    env: &Env,
+    stream_id: u64,
+    shares: &soroban_sdk::Vec<(Address, u32)>,
+) {
+    let key = DataKey::PooledStreamShares(stream_id);
+    env.storage().persistent().set(&key, shares);
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+}
+
+/// Load the amount already withdrawn by a specific recipient from a pooled stream.
+fn read_pooled_stream_withdrawn(env: &Env, stream_id: u64, recipient: Address) -> i128 {
+    let key = DataKey::PooledStreamWithdrawn(stream_id, recipient);
+    env.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or(0i128)
+}
+
+/// Persist the amount withdrawn by a specific recipient from a pooled stream.
+fn save_pooled_stream_withdrawn(env: &Env, stream_id: u64, recipient: Address, amount: i128) {
+    let key = DataKey::PooledStreamWithdrawn(stream_id, recipient);
+    env.storage().persistent().set(&key, &amount);
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+}
 
 // ---------------------------------------------------------------------------
 // Internal Helpers
@@ -1980,6 +2256,9 @@ impl FluxoraStream {
         require_not_creation_paused(&env)?;
         validate_lookback_window(max_lookback_ledgers)?;
 
+        let irrevocable: Option<bool> = None;
+        let witness: Option<Address> = None;
+
         let mut final_rate = rate_per_second;
         if kind == StreamKind::CliffOnly {
             final_rate = 0;
@@ -2259,6 +2538,7 @@ impl FluxoraStream {
             stream_id,
             sender: sender.clone(),
             recipient: sender.clone(),
+            claim_owner: None,
             deposit_amount,
             rate_per_second: final_rate,
             start_time,
@@ -4837,6 +5117,7 @@ impl FluxoraStream {
             stream_id: child_stream_id,
             sender: stream.sender.clone(),
             recipient: new_recipient.clone(),
+            claim_owner: None,
             deposit_amount: child_deposit,
             rate_per_second: child_rate,
             start_time: now,
@@ -4855,8 +5136,8 @@ impl FluxoraStream {
             last_rate_change_ledger: 0,
             metadata: stream.metadata.clone(),
             claim_owner: None,
-            witness: None,
-            irrevocable: None,
+            witness: stream.witness.clone(),
+            irrevocable: stream.irrevocable,
             is_pooled: None,
             parent_stream_id: Some(stream_id),
             delegation_depth: stream.delegation_depth + 1,
@@ -7745,6 +8026,12 @@ impl FluxoraStream {
     ///
     /// # Security
     /// - Authorization required .
+    ///
+    /// # Note (issue #1180)
+    /// This function delegates to `release_reservation()` which reclaims
+    /// tip-adjacent unused IDs by rewinding `NextStreamId`. Previously it
+    /// called `remove_id_reservation()` directly, permanently orphaning
+    /// the unconsumed ID range.
     pub fn release_id_reservation(env: Env, caller: Address) -> Result<(), ContractError> {
         caller.require_auth();
 
@@ -8044,6 +8331,8 @@ impl FluxoraStream {
     ) -> Result<u64, ContractError> {
         sender.require_auth();
         require_not_creation_paused(&env)?;
+        let withdraw_dust_threshold: i128 = 0;
+        let metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>> = None;
 
         let now = env.ledger().timestamp();
 
@@ -8242,6 +8531,7 @@ impl FluxoraStream {
             stream_id: offer_id,
             sender: offer.sender.clone(),
             recipient: offer.recipient.clone(),
+            claim_owner: None,
             deposit_amount: offer.deposit_amount,
             rate_per_second: offer.rate_per_second,
             start_time: effective_start,
