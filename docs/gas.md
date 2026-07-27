@@ -306,6 +306,147 @@ cargo test -p fluxora_stream gas_regression -- --nocapture 2>&1 | grep GAS_MEASU
 
 ---
 
+## Edge-Case Gas Coverage
+
+The following tests in `contracts/stream/tests/gas_regression.rs` explicitly document gas costs
+for paths that are implicit in the baseline tests above. Each test prints a `GAS_MEASUREMENT`
+line and asserts the measured cost stays within `PER_INVOCATION_CPU_BUDGET` (25 billion
+CPU instructions — 25 % of the Soroban per-invocation ceiling).
+
+### cancel_stream (single)
+
+`cancel_stream` by the stream sender on a partially-accrued active stream.  Issues two
+token transfers (accrued portion → recipient; unstreamed refund → sender) and freezes
+the stream state at `Cancelled` with a `cancelled_at` timestamp.
+
+| Aspect | Detail |
+|---|---|
+| Token transfers | 2 (recipient + sender refund) |
+| Cost relative to peers | More than `withdraw` (1 transfer); less than `keeper_cancel` (3 transfers + fee arithmetic) |
+| Test name | `test_cancel_stream_single_gas` |
+| Setup | 1 000-token linear stream; t=500 → 500 accrued, 500 refunded |
+
+### withdraw (zero accrual / pre-cliff)
+
+`withdraw` called before `cliff_time` is reached.  `calculate_accrued_amount` returns 0
+immediately; the contract skips all token-transfer and storage-mutation work and returns 0.
+Captures the cost of the short-circuit path.
+
+| Aspect | Detail |
+|---|---|
+| Token transfers | 0 (short-circuit return) |
+| Cost relative to peers | Lower than a normal `withdraw` (no transfer, no state write) |
+| Test name | `test_withdraw_zero_accrual_gas` |
+| Setup | 1 000-token stream with cliff at t=500; ledger at t=100 → 0 accrued |
+
+### update_rate_per_second
+
+`update_rate_per_second` (rate increase) on an active stream.  Checkpoints accrual under
+the old rate, validates the new rate against the governance cap and deposit ceiling, and
+saves the updated stream.  No token transfer occurs.
+
+| Aspect | Detail |
+|---|---|
+| Token transfers | 0 (deposit already locked) |
+| Additional work | Accrual checkpoint write + rate-cooldown ledger bump |
+| Test name | `test_update_rate_per_second_gas` |
+| Setup | 2 000-token stream (rate=1/s, 0→1 000); increase to rate=2 at t=300 |
+
+### decrease_rate_per_second
+
+`decrease_rate_per_second` on an active stream.  Checkpoints accrual under the old rate,
+computes the sender refund from the reduced deposit ceiling, persists updated state (CEI
+ordering), and issues one token transfer back to the sender.
+
+| Aspect | Detail |
+|---|---|
+| Token transfers | 1 (sender refund) |
+| Additional work | Accrual checkpoint write + refund calculation + rate-cooldown bump |
+| Test name | `test_decrease_rate_per_second_gas` |
+| Setup | 2 000-token stream (rate=2/s, 0→1 000); decrease to rate=1 at t=300 → 700-token refund |
+
+### top_up_stream
+
+`top_up_stream` adds deposit to an active stream.  Pulls tokens from the funder, increases
+`deposit_amount`, and increments the global `TotalLiabilities` counter.  No schedule
+change occurs.
+
+| Aspect | Detail |
+|---|---|
+| Token transfers | 1 (pull from funder) |
+| Additional work | `TotalLiabilities` read + write |
+| Test name | `test_top_up_stream_gas` |
+| Setup | Default 1 000-token stream at t=300; top-up of 500 tokens |
+
+### shorten_stream_end_time
+
+`shorten_stream_end_time` truncates an active stream's schedule, checkpoints accrual,
+computes a sender refund for the unstreamed portion, persists the new schedule (CEI), and
+issues one token transfer back to the sender.
+
+| Aspect | Detail |
+|---|---|
+| Token transfers | 1 (sender refund for truncated portion) |
+| Additional work | Accrual checkpoint + `TotalLiabilities` decrement |
+| Test name | `test_shorten_stream_end_time_gas` |
+| Setup | 1 000-token stream (rate=1/s, 0→1 000); shorten to end=600 at t=300 → 400-token refund |
+
+### extend_stream_end_time
+
+`extend_stream_end_time` moves the stream's end time forward.  Validates that the existing
+deposit covers the extended schedule at the current rate.  No token transfer occurs.
+
+| Aspect | Detail |
+|---|---|
+| Token transfers | 0 (deposit already sufficient) |
+| Additional work | Single `save_stream` write after parameter validation |
+| Test name | `test_extend_stream_end_time_gas` |
+| Setup | 2 000-token stream (rate=1/s, 0→1 000); extend to end=1 500 at t=300 |
+
+### create_stream (emergency pause guard)
+
+`create_stream` attempted while `set_global_emergency_paused(true)` is active.  The call
+reads `GlobalEmergencyPaused` from instance storage and returns `GloballyPaused` before
+any stream validation, token transfer, or storage write occurs.  Captures the cost of the
+early-exit guard path.
+
+| Aspect | Detail |
+|---|---|
+| Token transfers | 0 (reverts before any transfer) |
+| Cost relative to peers | Much lower than a successful `create_stream` — only 1 instance-storage read |
+| Test name | `test_create_stream_under_emergency_pause_gas` |
+| Setup | Emergency pause activated; valid `create_stream` params submitted |
+
+### Summary: all edge-case tests
+
+| Test name | Entry point | Token transfers | Key coverage point |
+|---|---|---|---|
+| `test_cancel_stream_single_gas` | `cancel_stream` | 2 | Single-stream cancel cost isolated from bulk variant |
+| `test_withdraw_zero_accrual_gas` | `withdraw` | 0 | Pre-cliff / zero-withdrawable short-circuit path |
+| `test_update_rate_per_second_gas` | `update_rate_per_second` | 0 | Accrual checkpoint + rate increase |
+| `test_decrease_rate_per_second_gas` | `decrease_rate_per_second` | 1 | Checkpoint + refund calculation + rate decrease |
+| `test_top_up_stream_gas` | `top_up_stream` | 1 | Token pull + liabilities increment |
+| `test_shorten_stream_end_time_gas` | `shorten_stream_end_time` | 1 | Truncated schedule + sender refund |
+| `test_extend_stream_end_time_gas` | `extend_stream_end_time` | 0 | Extended schedule, no extra deposit |
+| `test_create_stream_under_emergency_pause_gas` | `create_stream` | 0 | Emergency-pause early-exit guard cost |
+| `test_create_stream_with_cliff_gas` | `create_stream` | 1 | Cliff-validation branch overhead |
+| `test_create_stream_cliff_only_gas` | `create_stream` | 1 | `CliffOnly` kind branch vs `Linear` |
+| `test_withdraw_partial_accrual_gas` | `withdraw` | 1 | Mid-stream accrual formula path |
+| `test_withdraw_to_single_gas` | `withdraw_to` | 1 | Custom destination routing branch |
+| `test_pause_then_resume_single_gas` | `pause_stream` / `resume_stream` | 0 | Pause/resume state-machine cost (both legs) |
+| `test_create_streams_partial_gas` | `create_streams_partial` | varies | Per-entry isolation overhead on mixed batches |
+| `test_batch_withdraw_max_page_size_gas` | `batch_withdraw` | varies | O(n²) scan at `MAX_PAGE_SIZE` boundary |
+
+These edge-case tests complement the baseline tests in the JSON block above.  They are
+intentionally **not** included in the JSON baseline comparison (validate_gas.py only
+compares measurements that have a corresponding baseline entry) — their purpose is to
+document the current cost and fail via `assert!` if any measurement exceeds
+`PER_INVOCATION_CPU_BUDGET`.  To promote any of these measurements to a tracked baseline,
+add the corresponding key/value pair to the JSON block and follow the
+[baseline update process](#baseline-update-process).
+
+---
+
 ## Release Hardening
 
 ### Gas Baseline Determinism Contract
