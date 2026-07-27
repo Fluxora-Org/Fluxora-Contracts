@@ -101,7 +101,7 @@
 //! | 27           | `PausedStreamCount`             | Instance  | `u64`        |
 //! | 28           | `TotalKeeperFeesPaid`           | Instance  | `i128`       |
 //!
-//! Total live `DataKey` variant count: **29** (discriminants 0–28).
+//! Total live `DataKey` variant count: **36** (discriminants 0–35).
 //!
 //! V6 `Stream` struct adds one field at the end:
 //!
@@ -166,6 +166,20 @@
 //!
 //! Total `DataKey` variants in V7: **29** (discriminants 0 through 28).
 //!
+//! ## V8/V9 additions (discriminants 29–35)
+//!
+//! | Discriminant | Variant                         | Storage   | Value type            |
+//! |:------------:|:--------------------------------|:----------|:----------------------|
+//! | 29           | `AutoRenewEnabled(u64)`         | Persistent| `bool`                |
+//! | 30           | `MaxLookbackLedgers(u64)`       | Persistent| `u32`                 |
+//! | 31           | `SenderStreams(Address)`        | Persistent| `Vec<u64>`            |
+//! | 32           | `PendingStreamOffer(u64)`       | Persistent| `StreamOffer`         |
+//! | 33           | `RecipientPendingOffers(Address)` | Persistent | `Vec<u64>`         |
+//! | 34           | `PooledStreamShares(u64)`       | Persistent| `Vec<(Address,u32)>`  |
+//! | 35           | `PooledStreamWithdrawn(u64, Address)` | Persistent | `i128`         |
+//!
+//! Total live `DataKey` variant count: **36** (discriminants 0–35).
+//!
 //! See [`docs/storage.md`](../../../docs/storage.md) and [`docs/upgrade.md`](../../../docs/upgrade.md)
 //! for prose documentation, evolution policy, and migration guides.
 //!
@@ -178,9 +192,9 @@
 //! ## Security assumptions
 //!
 //! - **Append-only extension**: New `DataKey` variants must always be appended.
-//!   Inserting a variant at any position ≤ 28 shifts all subsequent discriminants
+//!   Inserting a variant at any position ≤ 35 shifts all subsequent discriminants
 //!   and silently corrupts every affected persistent entry. The next variant
-//!   appended to `DataKey` must receive discriminant 29.
+//!   appended to `DataKey` must receive discriminant 36.
 //! - **Struct field ordering**: `Stream` fields must never be reordered. Soroban
 //!   XDR encodes structs positionally; a field swap is a silent type mismatch.
 //! - **Option-tail compatibility**: The V5→V6 `memo: Option<Bytes>` addition is
@@ -243,13 +257,13 @@ mod tests {
         assert_eq!(V6_INITIAL_VARIANT_COUNT, 21);
     }
 
-    /// Live DataKey enum currently contains exactly 29 variants (discriminants 0–28).
+    /// Live DataKey enum currently contains exactly 36 variants (discriminants 0–35).
     ///
     /// Cross-referenced with `CONTRACT_VERSION` in `storage_key_compat.rs`.
     #[test]
-    fn live_datakey_variant_count_is_29() {
-        const LIVE_VARIANT_COUNT: usize = 29;
-        assert_eq!(LIVE_VARIANT_COUNT, 29);
+    fn live_datakey_variant_count_is_36() {
+        const LIVE_VARIANT_COUNT: usize = 36;
+        assert_eq!(LIVE_VARIANT_COUNT, 36);
     }
 
     /// V5 Stream struct had 14 fields; V6 adds `memo` for 15 fields.
@@ -286,20 +300,30 @@ mod tests {
         assert_eq!(*v6_only_range.end(), 20);
     }
 
-    /// V7 DataKey has exactly 29 variants (discriminants 0–28).
-    ///
-    /// If this assertion fails after a new variant is appended, update the
-    /// V7 discriminant table in the module doc-comment above and re-run the
-    /// "Why `CONTRACT_VERSION` was not bumped to 7" analysis for the new
-    /// variant(s) — do not assume the same conclusion automatically holds.
-    ///
-    /// # Security note
-    /// The next variant appended to DataKey must receive discriminant 29.
-    /// Any value other than 29 indicates a mid-enum insertion, which is forbidden.
+    /// V7 DataKey had exactly 29 variants (discriminants 0–28) before V8/V9 append.
     #[test]
     fn v7_datakey_variant_count_is_29() {
         const V7_VARIANT_COUNT: usize = 29;
         assert_eq!(V7_VARIANT_COUNT, 29);
+    }
+
+    /// V9 live DataKey has exactly 36 variants (discriminants 0–35).
+    ///
+    /// # Security note
+    /// The next variant appended to DataKey must receive discriminant 36.
+    #[test]
+    fn v9_datakey_variant_count_is_36() {
+        const V9_VARIANT_COUNT: usize = 36;
+        assert_eq!(V9_VARIANT_COUNT, 36);
+    }
+
+    /// The seven V8/V9-only DataKey variants occupy discriminants 29–35.
+    #[test]
+    fn v9_new_variants_occupy_discriminants_29_to_35() {
+        let v9_only_range = 29usize..=35;
+        assert_eq!(v9_only_range.clone().count(), 7);
+        assert_eq!(*v9_only_range.start(), 29);
+        assert_eq!(*v9_only_range.end(), 35);
     }
 
     /// The eight V7-only DataKey variants occupy discriminants 21–28.

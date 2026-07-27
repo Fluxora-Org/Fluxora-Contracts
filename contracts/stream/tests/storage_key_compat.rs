@@ -14,13 +14,14 @@
 //! 4. Cross-checking `CONTRACT_VERSION` against the live `DataKey` variant count
 //!    (currently 36) to ensure versioning discipline when new variants are added.
 //!
-//! # Discriminant Table Overview (29 variants: 0–28)
+//! # Discriminant Table Overview (36 variants: 0–35)
 //!
 //! | Disc | Variant                     | Storage    | Added |
 //! |-----:|:----------------------------|:-----------|:------|
 //! | 0–14 | V5 Frozen Keys              | Mixed      | V5    |
 //! |15–20 | V6 Extension Keys           | Mixed      | V6    |
 //! |21–28 | V7 Storage & Auditing Keys  | Mixed      | V7    |
+//! |29–35 | V8/V9 Additive Keys         | Mixed      | V8/V9 |
 //!
 //! # V6 discriminant table (discriminants 15–20)
 //!
@@ -46,11 +47,7 @@
 //! |   27 | `PausedStreamCount`                | Instance   |
 //! |   28 | `TotalKeeperFeesPaid`              | Instance   |
 //!
-//! # Post-V7 additive variants (discriminants 29–35) — NOT yet in checksum.rs
-//!
-//! These variants were appended after the checksum.rs V7 table was written.
-//! They do not affect any existing discriminant; each is append-only.
-//! A follow-up issue should update checksum.rs to document them here.
+//! # Post-V7 additive variants (discriminants 29–35)
 //!
 //! | Disc | Variant                                | Storage    |
 //! |-----:|:---------------------------------------|:-----------|
@@ -61,14 +58,6 @@
 //! |   33 | `RecipientPendingOffers(Address)`      | Persistent |
 //! |   34 | `PooledStreamShares(u64)`              | Persistent |
 //! |   35 | `PooledStreamWithdrawn(u64, Address)`  | Persistent |
-//!
-//! **DISAGREEMENT FLAG**: checksum.rs documents exactly 29 live variants
-//! (discriminants 0–28), but the current DataKey enum has 36 variants
-//! (discriminants 0–35). The 7 variants at positions 29–35 were added
-//! without updating checksum.rs. This is not a storage-corruption bug
-//! (all additions are strictly append-only), but checksum.rs should be
-//! updated in a follow-up to document discriminants 29–35.
-//! See: the append-only invariant in checksum.rs §"Security assumptions".
 //!
 //! Total live `DataKey` variant count: **36** (discriminants 0–35).
 //!
@@ -1258,6 +1247,69 @@ fn discriminant_35_pooled_stream_withdrawn_round_trips() {
             .expect("PooledStreamWithdrawn must round-trip at discriminant 35");
         assert_eq!(val, 500_i128);
     });
+}
+
+/// Discriminant 30 (MaxLookbackLedgers) round-trips correctly.
+#[test]
+fn discriminant_30_max_lookback_ledgers_round_trips() {
+    let ctx = Ctx::setup();
+    let cid = ctx.contract_id.clone();
+    ctx.env.as_contract(&cid, || {
+        ctx.env
+            .storage()
+            .persistent()
+            .set(&DataKey::MaxLookbackLedgers(7u64), &17u32);
+        let val: u32 = ctx
+            .env
+            .storage()
+            .persistent()
+            .get(&DataKey::MaxLookbackLedgers(7u64))
+            .expect("MaxLookbackLedgers must round-trip at discriminant 30");
+        assert_eq!(val, 17u32);
+    });
+}
+
+/// Discriminant 34 (PooledStreamShares) round-trips correctly.
+#[test]
+fn discriminant_34_pooled_stream_shares_round_trips() {
+    let ctx = Ctx::setup();
+    let addr = Address::generate(&ctx.env);
+    let cid = ctx.contract_id.clone();
+    let shares = soroban_sdk::vec![&ctx.env, (addr.clone(), 500u32)];
+    ctx.env.as_contract(&cid, || {
+        ctx.env
+            .storage()
+            .persistent()
+            .set(&DataKey::PooledStreamShares(2u64), &shares);
+        let val: soroban_sdk::Vec<(Address, u32)> = ctx
+            .env
+            .storage()
+            .persistent()
+            .get(&DataKey::PooledStreamShares(2u64))
+            .expect("PooledStreamShares must round-trip at discriminant 34");
+        assert_eq!(val.len(), 1);
+        assert_eq!(val.get(0).unwrap().0, addr);
+    });
+}
+
+/// V5-seeded stream remains readable after a V9-only index key is written elsewhere.
+#[test]
+fn v5_stream_readable_after_v9_sender_streams_index_write() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    ctx.seed_v5_stream(42, &recipient);
+
+    let sender = Address::generate(&ctx.env);
+    let cid = ctx.contract_id.clone();
+    ctx.env.as_contract(&cid, || {
+        ctx.env.storage().persistent().set(
+            &DataKey::SenderStreams(sender.clone()),
+            &vec![&ctx.env, 99u64],
+        );
+    });
+
+    let state = ctx.client.get_stream_state(&42u64);
+    assert_eq!(state.recipient, recipient);
 }
 
 // ---------------------------------------------------------------------------
