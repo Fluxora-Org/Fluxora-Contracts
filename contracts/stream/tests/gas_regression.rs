@@ -1,8 +1,8 @@
 // See docs/gas.md for the baseline update process and review bar.
 use fluxora_stream::{
-    CreateStreamParams, FluxoraStream, FluxoraStreamClient, PauseReason, StreamKind, WithdrawToParam,
-    MAX_MEMO_BYTES, MAX_METADATA_BYTES, MAX_METADATA_KEYS, MAX_METADATA_KEY_BYTES,
-    MAX_METADATA_VALUE_BYTES, MAX_STREAM_ENTRY_BYTES, MAX_PAGE_SIZE,
+    CreateStreamParams, FluxoraStream, FluxoraStreamClient, PauseReason, StreamKind,
+    WithdrawToParam, MAX_MEMO_BYTES, MAX_METADATA_BYTES, MAX_METADATA_KEYS, MAX_METADATA_KEY_BYTES,
+    MAX_PAGE_SIZE, MAX_STREAM_ENTRY_BYTES,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -240,6 +240,11 @@ fn test_bulk_resume_streams_as_admin_gas() {
                 .pause_stream_as_admin(&id, &PauseReason::Administrative);
             streams.push_back(id);
         }
+
+        // The final stream was paused at the current sequence. Advance once
+        // more so every stream (including that final item) clears the 17-ledger
+        // resume cooldown before the measured batch call.
+        ctx.env.ledger().with_mut(|l| l.sequence_number += 32);
 
         let cost = measure_gas(&ctx, |ctx| {
             ctx.client.bulk_resume_streams_as_admin(&streams);
@@ -494,7 +499,9 @@ fn test_stream_entry_xdr_size_worst_case() {
 
     client.init(&token_id, &admin);
     sac.mint(&sender, &i128::MAX);
-    TokenClient::new(&env, &token_id).approve(&sender, &contract_id, &i128::MAX, &u32::MAX);
+    // Keep the allowance inside the test ledger's configured max live-until
+    // bound (6,312,000 in soroban-sdk 21.7.7).
+    TokenClient::new(&env, &token_id).approve(&sender, &contract_id, &i128::MAX, &6_000_000);
 
     // Memo at maximum allowed size (256 × 0xFF).
     let memo = Bytes::from_slice(&env, &vec![0xFFu8; MAX_MEMO_BYTES]);
@@ -814,7 +821,7 @@ fn test_create_stream_with_cliff_gas() {
                 deposit_amount: 1_000_i128,
                 rate_per_second: 1_i128,
                 start_time: 0u64,
-                cliff_time: 500u64,  // non-zero cliff: exercises the cliff-validation branch
+                cliff_time: 500u64, // non-zero cliff: exercises the cliff-validation branch
                 end_time: 1_000u64,
                 withdraw_dust_threshold: Some(0_i128),
                 memo: None,
@@ -833,7 +840,10 @@ fn test_create_stream_with_cliff_gas() {
         PER_INVOCATION_CPU_BUDGET,
     );
 
-    println!("GAS_MEASUREMENT: create_stream_with_cliff: single: {}", cost);
+    println!(
+        "GAS_MEASUREMENT: create_stream_with_cliff: single: {}",
+        cost
+    );
 }
 
 /// Gas baseline for `create_stream` with `StreamKind::CliffOnly`.
@@ -855,7 +865,7 @@ fn test_create_stream_cliff_only_gas() {
                 deposit_amount: 1_000_i128,
                 rate_per_second: 0_i128, // CliffOnly: rate is forced to 0 by the contract
                 start_time: 0u64,
-                cliff_time: 1_000u64,   // cliff == end_time: full deposit released at cliff
+                cliff_time: 1_000u64, // cliff == end_time: full deposit released at cliff
                 end_time: 1_000u64,
                 withdraw_dust_threshold: Some(0_i128),
                 memo: None,
@@ -874,7 +884,10 @@ fn test_create_stream_cliff_only_gas() {
         PER_INVOCATION_CPU_BUDGET,
     );
 
-    println!("GAS_MEASUREMENT: create_stream_cliff_only: single: {}", cost);
+    println!(
+        "GAS_MEASUREMENT: create_stream_cliff_only: single: {}",
+        cost
+    );
 }
 
 /// Gas baseline for `withdraw` when only a partial amount has accrued.
@@ -926,7 +939,10 @@ fn test_withdraw_partial_accrual_gas() {
         PER_INVOCATION_CPU_BUDGET,
     );
 
-    println!("GAS_MEASUREMENT: withdraw_partial_accrual: single: {}", cost);
+    println!(
+        "GAS_MEASUREMENT: withdraw_partial_accrual: single: {}",
+        cost
+    );
 }
 
 /// Gas baseline for `withdraw_to` (single stream, custom destination).

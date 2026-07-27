@@ -139,13 +139,16 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      # continue-on-error: --all-features currently pulls in two incompatible
-      # major versions of rand_core (0.6 via ed25519-dalek, 0.9 via a
-      # soroban-sdk testutils dependency) whose CryptoRng traits don't unify
-      # under -D warnings. cargo build/test (without --all-features) are
-      # unaffected and stay a hard gate below. Needs an upstream version
-      # bump or a narrower feature set in a follow-up.
-      - name: Run Clippy
+      # Production warning gate: this is intentionally narrower than the
+      # all-target workspace pass below. It covers the deployed stream library
+      # without pulling test-only rand_core versions through dev-dependencies.
+      # No continue-on-error: every rustc/Clippy warning on this path is fatal.
+      - name: Enforce warning-free stream library
+        run: cargo clippy -p fluxora_stream --lib -- -D warnings
+
+      # The wider workspace/test-target pass remains advisory while test-only
+      # dependency and legacy-target warnings are cleaned up independently.
+      - name: Run workspace Clippy (advisory)
         run: cargo clippy --all-targets -- -D warnings
         continue-on-error: true
 

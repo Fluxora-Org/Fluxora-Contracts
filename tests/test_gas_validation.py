@@ -8,6 +8,15 @@ from unittest.mock import patch
 from script.validate_gas import build_cargo_test_env, extract_baselines, parse_measurements, main
 
 
+# main() validates that these mandatory matrix entries exist before comparing
+# measurements. Include them in focused mocks so each test reaches the behavior
+# it intends to exercise instead of failing during baseline-shape validation.
+REQUIRED_BULK_FIXTURE = {
+    "bulk_cancel_streams": {"1": 1, "5": 1, "10": 1, "20": 1},
+    "bulk_resume_streams_as_admin": {"1": 1, "5": 1, "10": 1, "20": 1},
+}
+
+
 class TestBuildCargoTestEnv:
     def test_prepends_cargo_bin(self, monkeypatch):
         monkeypatch.setenv("HOME", "/home/ci")
@@ -94,7 +103,7 @@ class TestMain:
     @patch("script.validate_gas.sys.exit")
     def test_main_with_regression(self, mock_exit, mock_baselines, mock_run_tests):
         """Test failure when gas regression is detected."""
-        mock_baselines.return_value = {"transfer": 1000}
+        mock_baselines.return_value = {**REQUIRED_BULK_FIXTURE, "transfer": 1000}
         mock_run_tests.return_value = "GAS_MEASUREMENT: transfer: single: 1100"
         main()
         mock_exit.assert_called_with(1)
@@ -104,7 +113,7 @@ class TestMain:
     @patch("script.validate_gas.sys.exit")
     def test_main_no_measurements(self, mock_exit, mock_baselines, mock_run_tests):
         """Test error when no measurements found."""
-        mock_baselines.return_value = {"transfer": 2000}
+        mock_baselines.return_value = {**REQUIRED_BULK_FIXTURE, "transfer": 2000}
         mock_run_tests.return_value = "No measurements"
         main()
         mock_exit.assert_any_call(1)
@@ -133,7 +142,7 @@ class TestMain:
         baseline = 1000
         # Exactly +5 % → diff = 0.05 exactly, NOT > 0.05 → should PASS
         exactly_five_pct = int(baseline * 1.05)
-        mock_baselines.return_value = {"withdraw": baseline}
+        mock_baselines.return_value = {**REQUIRED_BULK_FIXTURE, "withdraw": baseline}
         mock_run_tests.return_value = (
             f"GAS_MEASUREMENT: withdraw: single: {exactly_five_pct}"
         )
@@ -152,7 +161,7 @@ class TestMain:
         """
         baseline = 1000
         one_over = int(baseline * 1.05) + 1  # 1051
-        mock_baselines.return_value = {"withdraw": baseline}
+        mock_baselines.return_value = {**REQUIRED_BULK_FIXTURE, "withdraw": baseline}
         mock_run_tests.return_value = (
             f"GAS_MEASUREMENT: withdraw: single: {one_over}"
         )
@@ -173,7 +182,7 @@ class TestMain:
         missing keys into failures is caught explicitly.
         """
         # Baseline has "create_stream" but the test output reports "new_op".
-        mock_baselines.return_value = {"create_stream": 500000}
+        mock_baselines.return_value = {**REQUIRED_BULK_FIXTURE, "create_stream": 500000}
         mock_run_tests.return_value = (
             "GAS_MEASUREMENT: new_op: single: 100000"
         )
@@ -199,6 +208,7 @@ class TestMain:
         ``baselines["keeper_cancel"]["partial_accrual"]`` etc.
         """
         mock_baselines.return_value = {
+            **REQUIRED_BULK_FIXTURE,
             "keeper_cancel": {
                 "partial_accrual": 786739,
                 "fully_accrued": 386889,
@@ -225,6 +235,7 @@ class TestMain:
         dict would break flat-int lookup.
         """
         mock_baselines.return_value = {
+            **REQUIRED_BULK_FIXTURE,
             "create_stream": 568292,
             "withdraw": 562057,
         }
