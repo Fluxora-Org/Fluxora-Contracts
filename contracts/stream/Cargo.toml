@@ -112,6 +112,11 @@ path = "tests/keeper_cancel.rs"
 required-features = ["testutils"]
 
 [[test]]
+name = "security_invariants"
+path = "tests/security_invariants.rs"
+test = true
+
+[[test]]
 name = "max_rate_per_second"
 path = "tests/max_rate_per_second.rs"
 test = true

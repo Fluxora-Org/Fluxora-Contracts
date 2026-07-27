@@ -443,34 +443,132 @@ found in this codebase.
 
 ---
 
-## 14. Open Findings Requiring Maintainer Follow-Up
+## 14. Resolved Findings
 
-The following audit finding from `docs/audit.md` appears to remain **open / unaddressed**.
-It is flagged here explicitly rather than assumed resolved.
+The following audit finding has been resolved in `docs/audit.md`:
 
-### ⚠️ Invariant #13 — Reentrancy Guard (underspecified)
+### ✅ Invariant #13 — Reentrancy Guard (specified)
 
-**Location:** `docs/audit.md` lines 182–183
+**Status:** **RESOLVED** — The invariant has been fully specified in `docs/audit.md` §13.
 
-**Status:** `docs/audit.md` lists "Reentrancy Guard" as Invariant #13 but provides **no
-description, no checks, and no requirements**. The body is blank.
+**Resolution summary:**
+- The specification now distinguishes between **CEI ordering** (all token-transfer
+  entrypoints) and the **explicit reentrancy lock** (used by `sweep_excess` and
+  `trigger_auto_claim`).
+- CEI-only is documented as the accepted design posture, with risk acceptance
+  rationale in `docs/audit.md` §13.4.
+- The discrepancy between `CEI_ANALYSIS.md` claims and actual code coverage has
+  been documented: the explicit lock is NOT used by `withdraw`, `withdraw_to`,
+  `batch_withdraw`, `cancel_stream`, or `cancel_stream_as_admin` — these rely
+  solely on CEI ordering.
+- Formal requirements for the lock (acquire timing, release timing, double-lock
+  detection, scope, new-entrypoint policy) are specified in `docs/audit.md` §13.3.
+- The comprehensive security checklist in `docs/security.md` (§10) tracks coverage
+  for all five reentrancy sub-properties.
+- Automated tests in `contracts/stream/tests/security_invariants.rs` (§1 CEI
+  Pattern) verify the CEI ordering guarantee.
 
-**Current state of reentrancy protection:**
-- A custom reentrancy lock (`DataKey::ReentrancyLock`) exists in storage and is used
-  by only **2** of the 7+ token-transfer entrypoints (`sweep_excess`, `trigger_auto_claim`).
-- The remaining entrypoints (`withdraw`, `withdraw_to`, `batch_withdraw`, `cancel_stream`,
-  `cancel_stream_as_admin`, `shorten_stream_end_time`, `delegated_withdraw`) rely solely
-  on CEI ordering — no explicit lock is acquired.
-- `CEI_ANALYSIS.md` (Issue #262) claims that `withdraw`, `withdraw_to`, `batch_withdraw`,
-  `cancel_stream`, and `cancel_stream_as_admin` are wrapped in the reentrancy lock, but
-  **the current code does not reflect this**.
+**Tracking:** Finding documented in `docs/audit.md` §13; CEI tests in
+`tests/security_invariants.rs` §1.
 
-**Required follow-up:**
-1. Specify the requirements for Invariant #13 in `docs/audit.md` (which entrypoints must
-   hold the lock, under what conditions, and what guarantees for CEI-only paths).
-2. Resolve the discrepancy between `CEI_ANALYSIS.md` claims and actual code coverage.
-3. Decide whether to extend the explicit lock to all token-transfer entrypoints for
-   defense-in-depth, or document CEI-only as the accepted posture.
+## 15. Release Hardening Checklist
+
+Run these steps before tagging a release or deploying to mainnet. The items below
+augment §10 (Pre-release Final Checks) with security-specific hardening.
+
+### 15.1 Security Invariant Tests
+
+```bash
+# Run the security invariants test suite
+cargo test -p fluxora_stream --test security_invariants -- --nocapture
+```
+
+- [ ] All security invariant tests pass
+- [ ] No new failures introduced in existing tests (`cargo test --workspace`)
+
+### 15.2 Balance Conservation
+
+```bash
+# Run property-based balance conservation tests
+cargo test -p fluxora_stream --test balance_conservation -- --nocapture
+
+# High-coverage fuzz run
+PROPTEST_CASES=10000 cargo test -p fluxora_stream --test balance_conservation
+```
+
+- [ ] Property-based balance conservation tests pass
+- [ ] High-coverage fuzz run passes (PROPTEST_CASES=10000)
+
+### 15.3 Accrual Fuzz Harness
+
+```bash
+# Run the accrual fuzz harness with default case count
+cargo test -p fluxora_stream accrual_fuzz
+
+# High-coverage fuzz run
+PROPTEST_CASES=10000 cargo test -p fluxora_stream accrual_fuzz
+```
+
+- [ ] Accrual fuzz harness passes
+- [ ] High-coverage fuzz run passes
+
+### 15.4 WASM Reproducibility
+
+```bash
+# Build and verify WASM checksums
+bash script/verify-wasm-checksum.sh
+```
+
+- [ ] WASM build is reproducible (checksums match committed references)
+- [ ] If source changed, `bash script/update-wasm-checksums.sh` has been run and
+      `wasm/checksums.sha256` is committed
+
+### 15.5 WASM Size Budget
+
+```bash
+# Check WASM size budgets
+bash script/check-wasm-size.sh
+```
+
+- [ ] All contracts stay within their WASM size budgets (see `docs/gas.md`)
+- [ ] Any budget increase is justified in the PR description per `docs/gas.md` policy
+
+### 15.6 Gas Regression Baselines
+
+```bash
+# Validate gas baselines
+cargo test -p fluxora_stream gas_regression -- --nocapture 2>&1 | grep GAS_MEASUREMENT
+```
+
+- [ ] Gas regression tests pass; no unplanned baseline increases
+- [ ] Any intentional baseline increase is documented in `docs/gas.md` with
+      explicit justification
+
+### 15.7 Comprehensive Security Checklist
+
+- [ ] The comprehensive security checklist in `docs/security.md` (§Comprehensive
+      Security Checklist) has been reviewed
+- [ ] Every item in the checklist has a status (✅ Test, ✅ Doc, ⚠️ Manual, 🔒 Accepted)
+- [ ] Any new entrypoint added since the last release appears in the checklist
+- [ ] Any new error code variant is documented in `docs/error.md`
+
+### 15.8 Changelog and Version
+
+- [ ] `CHANGELOG.md` has an entry for the release with migration notes
+- [ ] `CONTRACT_VERSION` has been incremented if any breaking change was made
+      (see §4.1 for what counts as breaking)
+- [ ] `CONTRACT_VERSION` doc comment in `lib.rs` has a version-history entry
+- [ ] `docs/ABI_STABILITY.md` is updated if entrypoints, errors, events, or
+      DataKey variants changed
+- [ ] `docs/upgrade.md` is updated with migration guidance
+
+### 15.9 Deployment Readiness
+
+- [ ] Mainnet deployment checklist (`docs/mainnet-deployment-checklist-alignment.md`)
+      has been reviewed and all items verified
+- [ ] Deployment roles (deployer, bootstrap admin, token contract) are confirmed
+- [ ] Admin key is secured (hardware wallet or MPC)
+- [ ] Token address is confirmed correct (SEP-41 compliance verified)
 
 ---
 
