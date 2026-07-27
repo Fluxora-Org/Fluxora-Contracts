@@ -109,7 +109,7 @@ def pinned_channel_via_toml(toolchain_file: Path) -> str | None:
     channel = data.get("toolchain", {}).get("channel")
     if not isinstance(channel, str) or not channel:
         return None
-    return channe
+    return channel
 
 
 def pinned_channel(toolchain_file: Path | None = None) -> str:
