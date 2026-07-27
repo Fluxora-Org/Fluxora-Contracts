@@ -223,6 +223,7 @@ fn test_renew_stream_inherits_irrevocable() {
 
     ctx.client.set_auto_renew(&stream_id, &ctx.sender, &true);
     ctx.env.ledger().set_timestamp(1100);
+    ctx.client.withdraw(&stream_id);
 
     let new_stream_id = ctx.client.renew_stream(&stream_id);
     let renewed_stream = ctx.client.get_stream_state(&new_stream_id);
@@ -256,8 +257,8 @@ fn test_clone_stream_inherits_irrevocable() {
     let new_stream_id = ctx.client.clone_stream(
         &stream_id,
         &new_recipient,
-        &0u64,
-        &1000u64,
+        &100u64,
+        &1100u64,
         &1000_i128,
         &false,
     );

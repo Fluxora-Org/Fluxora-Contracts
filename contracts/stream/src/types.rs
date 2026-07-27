@@ -10,7 +10,7 @@
 
 use soroban_sdk::{contracttype, Address, Map};
 
-use crate::{ContractError, PauseReason, StreamKind, StreamStatus};
+use crate::{StreamKind, StreamStatus};
 
 // Data types
 // ---------------------------------------------------------------------------
