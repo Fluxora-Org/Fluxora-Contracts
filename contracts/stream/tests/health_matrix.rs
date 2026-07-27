@@ -2,6 +2,7 @@
 
 use fluxora_stream::{
     CreateStreamParams, FluxoraStream, FluxoraStreamClient, PauseReason, StreamKind,
+    MAX_RECIPIENT_PAGE_SIZE,
 };
 use soroban_sdk::{testutils::Address as _, Address, Env};
 
@@ -284,4 +285,268 @@ fn test_health_matrix_before_start() {
     assert_eq!(health.remaining_deposit, 1000);
     // No accrual yet, so depletion timer is undefined -> None.
     assert_eq!(health.seconds_until_depletion, None);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Portfolio-level tests: get_sender_portfolio_health
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Helper: create a linear stream returning the stream_id.
+fn create_linear(
+    ctx: &TestContext,
+    deposit: i128,
+    rate: i128,
+    cliff: u64,
+    end: u64,
+) -> u64 {
+    ctx.client.create_stream(
+        &ctx.sender,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: deposit,
+            rate_per_second: rate,
+            start_time: 0u64,
+            cliff_time: cliff,
+            end_time: end,
+            withdraw_dust_threshold: Some(0_i128),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
+    )
+}
+
+#[test]
+fn test_portfolio_health_no_streams() {
+    let ctx = TestContext::setup();
+    let other = Address::generate(&ctx.env);
+
+    let page = ctx
+        .client
+        .get_sender_portfolio_health(&other, &0u64, &10);
+    assert_eq!(page.underfunded_count, 0);
+    assert_eq!(page.expired_count, 0);
+    assert_eq!(page.healthy_count, 0);
+    assert_eq!(page.next_cursor, 0u64);
+    assert_eq!(page.stream_ids.len(), 0);
+}
+
+#[test]
+fn test_portfolio_health_single_healthy() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let sid = create_linear(&ctx, 1000, 1, 0, 1000);
+
+    ctx.env.ledger().set_timestamp(100);
+    let page = ctx
+        .client
+        .get_sender_portfolio_health(&ctx.sender, &0u64, &100);
+
+    assert_eq!(page.underfunded_count, 0);
+    assert_eq!(page.expired_count, 0);
+    assert_eq!(page.healthy_count, 1);
+    assert_eq!(page.next_cursor, 0u64);
+    assert!(page.stream_ids.iter().any(|id| id == sid));
+}
+
+#[test]
+fn test_portfolio_health_single_underfunded() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    create_linear(&ctx, 1000, 2, 0, 1000);
+    // at t=300, accrued = 600, deposit = 1000, need = 2×1000 = 2000 → underfunded
+    ctx.env.ledger().set_timestamp(300);
+
+    let page = ctx
+        .client
+        .get_sender_portfolio_health(&ctx.sender, &0u64, &100);
+    assert_eq!(page.underfunded_count, 1);
+    assert_eq!(page.expired_count, 0);
+    assert_eq!(page.healthy_count, 0);
+}
+
+#[test]
+fn test_portfolio_health_single_expired() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    create_linear(&ctx, 1000, 1, 0, 100);
+
+    ctx.env.ledger().set_timestamp(200); // past end_time, not withdrawn → expired
+    let page = ctx
+        .client
+        .get_sender_portfolio_health(&ctx.sender, &0u64, &100);
+    assert_eq!(page.underfunded_count, 0);
+    assert_eq!(page.expired_count, 1);
+    assert_eq!(page.healthy_count, 0);
+}
+
+#[test]
+fn test_portfolio_health_mixed_states() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // healthy: rate 1, end 10000
+    create_linear(&ctx, 10_000, 1, 0, 10_000);
+    // underfunded: rate 2, deposit 1000, end 1000 → needs 2000
+    create_linear(&ctx, 1000, 2, 0, 1000);
+    // expired: end 100
+    create_linear(&ctx, 1000, 1, 0, 100);
+
+    ctx.env.ledger().set_timestamp(200);
+    let page = ctx
+        .client
+        .get_sender_portfolio_health(&ctx.sender, &0u64, &100);
+    assert_eq!(page.underfunded_count, 1);
+    assert_eq!(page.expired_count, 1);
+    assert_eq!(page.healthy_count, 1);
+    assert_eq!(page.stream_ids.len(), 3);
+}
+
+#[test]
+fn test_portfolio_health_excludes_completed_and_cancelled() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let active = create_linear(&ctx, 10_000, 1, 0, 10_000);
+    let to_cancel = create_linear(&ctx, 1000, 1, 0, 1000);
+
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client.cancel_stream(&to_cancel);
+
+    // Withdraw fully from the first stream to complete it
+    ctx.env.ledger().set_timestamp(10_000);
+    ctx.client.withdraw(&active);
+
+    ctx.env.ledger().set_timestamp(10_100);
+    let page = ctx
+        .client
+        .get_sender_portfolio_health(&ctx.sender, &0u64, &100);
+    // Both terminal → excluded from all buckets
+    assert_eq!(page.underfunded_count, 0);
+    assert_eq!(page.expired_count, 0);
+    assert_eq!(page.healthy_count, 0);
+    // Terminal streams are still listed in stream_ids
+    assert_eq!(page.stream_ids.len(), 2);
+}
+
+#[test]
+fn test_portfolio_health_cursor_pagination() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Create MAX+5 streams to force two pages
+    for _ in 0..(MAX_RECIPIENT_PAGE_SIZE + 5) {
+        create_linear(&ctx, 10_000, 1, 0, 10_000);
+    }
+
+    ctx.env.ledger().set_timestamp(100);
+    let page1 = ctx.client.get_sender_portfolio_health(
+        &ctx.sender,
+        &0u64,
+        &MAX_RECIPIENT_PAGE_SIZE,
+    );
+    assert_eq!(page1.stream_ids.len(), MAX_RECIPIENT_PAGE_SIZE as usize);
+    assert_ne!(page1.next_cursor, 0u64, "must have more pages");
+
+    let page2 = ctx.client.get_sender_portfolio_health(
+        &ctx.sender,
+        &page1.next_cursor,
+        &MAX_RECIPIENT_PAGE_SIZE,
+    );
+    assert_eq!(page2.stream_ids.len(), 5);
+    assert_eq!(page2.next_cursor, 0u64, "last page → next_cursor == 0");
+}
+
+#[test]
+fn test_portfolio_health_limit_zero_uses_max() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    for _ in 0..5 {
+        create_linear(&ctx, 10_000, 1, 0, 10_000);
+    }
+
+    ctx.env.ledger().set_timestamp(100);
+    // limit=0 → treated as MAX_PAGE_SIZE
+    let page = ctx
+        .client
+        .get_sender_portfolio_health(&ctx.sender, &0u64, &0);
+    assert_eq!(page.stream_ids.len(), 5);
+    assert_eq!(page.healthy_count, 5);
+}
+
+#[test]
+fn test_portfolio_health_limit_clamped_to_max() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    for _ in 0..5 {
+        create_linear(&ctx, 10_000, 1, 0, 10_000);
+    }
+
+    ctx.env.ledger().set_timestamp(100);
+    // limit way above MAX → capped
+    let page = ctx.client.get_sender_portfolio_health(
+        &ctx.sender,
+        &0u64,
+        &(MAX_RECIPIENT_PAGE_SIZE * 3),
+    );
+    assert_eq!(page.stream_ids.len(), 5); // only 5 exist, so all returned
+}
+
+#[test]
+fn test_portfolio_health_past_end_cursor_returns_empty_page() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    for _ in 0..3 {
+        create_linear(&ctx, 1000, 1, 0, 1000);
+    }
+
+    ctx.env.ledger().set_timestamp(100);
+    let page = ctx.client.get_sender_portfolio_health(
+        &ctx.sender,
+        &0xFFFF_FFFF_FFFF_FFFFu64,
+        &100,
+    );
+    assert_eq!(page.stream_ids.len(), 0);
+    assert_eq!(page.next_cursor, 0u64);
+}
+
+#[test]
+fn test_portfolio_health_paused_stream_counts_as_healthy_when_funded() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let sid = create_linear(&ctx, 10_000, 1, 0, 10_000);
+    ctx.client.pause_stream(&sid, &PauseReason::Operational);
+
+    ctx.env.ledger().set_timestamp(100);
+    let page = ctx
+        .client
+        .get_sender_portfolio_health(&ctx.sender, &0u64, &100);
+    assert_eq!(page.healthy_count, 1);
+    assert_eq!(page.underfunded_count, 0);
+    assert_eq!(page.expired_count, 0);
+}
+
+#[test]
+fn test_portfolio_health_paused_underfunded_stream() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let sid = create_linear(&ctx, 1000, 2, 0, 1000);
+    ctx.env.ledger().set_timestamp(300);
+    ctx.client.pause_stream(&sid, &PauseReason::Operational);
+
+    let page = ctx
+        .client
+        .get_sender_portfolio_health(&ctx.sender, &0u64, &100);
+    assert_eq!(page.underfunded_count, 1);
+    assert_eq!(page.healthy_count, 0);
 }
