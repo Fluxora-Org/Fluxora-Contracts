@@ -368,20 +368,20 @@ bash script/update-wasm-checksums.sh
 ## 12. Snapshot Security Diff
 
 Before merging any PR that modifies snapshot files under
-`contracts/stream/test_snapshots/`, run `script/check_snapshot_diff.py` to
-detect security-relevant field changes. The script classifies changes to admin
-addresses, token identity, rate caps, pause state, recipient rotation, nonces,
-and storage key layout against the `SECURITY_FIELDS` registry.
+`contracts/stream/test_snapshots/`, the CI pipeline runs
+`script/check_snapshot_diff.py` automatically to detect security-relevant
+field changes. The script classifies changes to auth envelopes, event payloads,
+error discriminants, and storage key layout against the `SECURITY_FIELDS`
+registry.
+
+For manual invocation:
 
 ```bash
-# Extract the base version from main
-git show origin/main:contracts/stream/test_snapshots/test/test_NAME.1.json \
-  > /tmp/base.json
+# Check PR branch against main (typical manual usage)
+python script/check_snapshot_diff.py --base origin/main
 
-# Run the classifier
-python script/check_snapshot_diff.py \
-  --base /tmp/base.json \
-  --head contracts/stream/test_snapshots/test/test_NAME.1.json
+# Check specific commits
+python script/check_snapshot_diff.py --base <base-sha> --head <head-sha>
 ```
 
 ### Exit-code contract
@@ -390,7 +390,6 @@ python script/check_snapshot_diff.py \
 |---|---|
 | `0` | No security-relevant changes. Standard review applies. |
 | `1` | Security-relevant changes detected. Mandatory extra review required. |
-| `2` | Usage error — bad path, invalid JSON, or wrong JSON type. |
 
 ### Checklist
 
@@ -398,10 +397,6 @@ python script/check_snapshot_diff.py \
 - [ ] The exit code is recorded in the PR description or review comment
 - [ ] If exit code was `1`, all applicable mandatory extra review items from
   `docs/snapshot-security-diff.md` have been completed and documented
-
-> **Note:** This tool is **not yet wired into CI**. The companion CI-wiring
-> issue must land before it is enforced automatically. Until then, run it
-> manually for every PR that touches snapshot files.
 
 For the full field classification reference, worked examples, and the complete
 reviewer workflow, see **[`docs/snapshot-security-diff.md`](snapshot-security-diff.md)**.
