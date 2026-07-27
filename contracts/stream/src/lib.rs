@@ -2053,6 +2053,7 @@ impl FluxoraStream {
         kind: StreamKind,
         irrevocable: Option<bool>,
         witness: Option<Address>,
+        metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
     ) -> Result<u64, ContractError> {
         // Validate memo length before allocating a stream ID.
         if let Some(ref m) = memo {
@@ -2067,6 +2068,11 @@ impl FluxoraStream {
         }
         if withdraw_dust_threshold > deposit_amount {
             return Err(ContractError::InvalidDustThreshold);
+        }
+
+        // Validate metadata if present (fail-before-allocate).
+        if let Some(ref meta) = metadata {
+            storage::validate_metadata(meta)?;
         }
 
         let stream_id = next_stream_id_for(env, &sender);
@@ -2091,7 +2097,7 @@ impl FluxoraStream {
             kind,
             last_pause_toggle_ledger: 0,
             last_withdraw_ledger: 0,
-            metadata: None,
+            metadata: metadata.clone(),
             witness: witness.clone(),
             last_rate_change_ledger: 0,
         };
@@ -2122,7 +2128,7 @@ impl FluxoraStream {
                 end_time,
                 withdraw_dust_threshold,
                 memo,
-                metadata: None,
+                metadata,
             },
         );
 
@@ -2149,6 +2155,7 @@ impl FluxoraStream {
         kind: StreamKind,
         irrevocable: Option<bool>,
         witness: Option<Address>,
+        metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
     ) -> Result<u64, ContractError> {
         if let Some(ref m) = memo {
             if m.len() as usize > MAX_MEMO_BYTES {
@@ -2162,6 +2169,7 @@ impl FluxoraStream {
             stream_id,
             sender: sender.clone(),
             recipient: recipient.clone(),
+            claim_owner: None,
             deposit_amount,
             rate_per_second,
             start_time,
@@ -2177,7 +2185,7 @@ impl FluxoraStream {
             kind,
             last_pause_toggle_ledger: 0,
             last_withdraw_ledger: 0,
-            metadata: None,
+            metadata: metadata.clone(),
             witness: witness.clone(),
             last_rate_change_ledger: 0,
         };
@@ -2204,7 +2212,7 @@ impl FluxoraStream {
                 end_time,
                 withdraw_dust_threshold,
                 memo,
-                metadata: None,
+                metadata,
             },
         );
 
@@ -2398,6 +2406,7 @@ impl FluxoraStream {
         kind: StreamKind,
         irrevocable: Option<bool>,
         witness: Option<Address>,
+        metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
     ) -> Result<u64, ContractError> {
         sender.require_auth();
         require_not_creation_paused(&env)?;
@@ -2436,6 +2445,7 @@ impl FluxoraStream {
             kind,
             irrevocable,
             witness,
+            metadata,
         )
     }
 
@@ -2550,6 +2560,7 @@ impl FluxoraStream {
             params.kind,
             params.irrevocable,
             None,
+            params.metadata,
         )
     }
 
@@ -2817,6 +2828,11 @@ impl FluxoraStream {
             total_deposit = total_deposit
                 .checked_add(params.deposit_amount)
                 .ok_or(ContractError::ArithmeticOverflow)?;
+
+            // Validate metadata if present (fail-before-allocate).
+            if let Some(ref meta) = params.metadata {
+                storage::validate_metadata(meta)?;
+            }
         }
 
         // Bulk transfer tokens from sender to this contract atomically to save gas.
@@ -2849,6 +2865,7 @@ impl FluxoraStream {
                 params.kind,
                 params.irrevocable,
                 params.witness.clone(),
+                params.metadata.clone(),
             )?;
             created_ids.push_back(stream_id);
 
@@ -2995,6 +3012,7 @@ impl FluxoraStream {
                 memo: rel.memo,
                 metadata: rel.metadata,
                 kind: rel.kind,
+                irrevocable: rel.irrevocable,
                 witness: None,
             });
         }
@@ -3060,6 +3078,18 @@ impl FluxoraStream {
                 continue;
             }
 
+            // Validate metadata if present (fail-before-transfer).
+            if let Some(ref meta) = params.metadata {
+                if let Err(e) = storage::validate_metadata(meta) {
+                    results.push_back(CreateStreamResult {
+                        success: false,
+                        stream_id: None,
+                        error: Some(e as u32),
+                    });
+                    continue;
+                }
+            }
+
             // Attempt transfer (per-entry isolation)
             let transfer = pull_token(&env, &sender, params.deposit_amount);
             if transfer.is_err() {
@@ -3086,6 +3116,7 @@ impl FluxoraStream {
                 params.kind,
                 params.irrevocable,
                 params.witness,
+                params.metadata,
             );
 
             match stream_id {
@@ -5698,6 +5729,9 @@ impl FluxoraStream {
             stream.withdraw_dust_threshold,
             stream.memo.clone(),
             stream.kind,
+            stream.irrevocable,
+            stream.witness.clone(),
+            stream.metadata.clone(),
         )?;
         set_auto_renew_enabled(&env, new_stream_id, true);
 
@@ -7966,6 +8000,7 @@ impl FluxoraStream {
             source.kind,
             source.irrevocable,
             source.witness.clone(),
+            None, // Clone resets metadata to prevent single-use ID duplication
         )?;
 
         // ── 9. Emit clone-specific event for indexer correlation ──────────────
