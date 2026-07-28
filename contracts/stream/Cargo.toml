@@ -156,7 +156,7 @@ test = true
 [[test]]
 name = "recipient_update_state_machine"
 path = "tests/recipient_update_state_machine.rs"
-test = false
+test = true
 
 [[test]]
 name = "id_reservation"
