@@ -182,6 +182,37 @@ fn test_batch_withdraw_gas() {
 fn test_batch_withdraw_to_gas() {
     let sizes = [1, 10, 50, 100];
 
+    for &size in &sizes {
+        let ctx = TestContext::setup();
+
+        let mut params = soroban_sdk::Vec::new(&ctx.env);
+        for _ in 0..size {
+            let stream_id = ctx.create_default_stream();
+            let destination = Address::generate(&ctx.env);
+            params.push_back(WithdrawToParam {
+                stream_id,
+                destination,
+            });
+        }
+
+        ctx.env.ledger().set_timestamp(500); // Accrue tokens for all
+
+        let cost = measure_gas(&ctx, |ctx| {
+            ctx.client.batch_withdraw_to(&params);
+        });
+
+        assert!(
+            cost <= PER_INVOCATION_CPU_BUDGET,
+            "batch_withdraw_to at size {} exceeded per-invocation CPU budget: {} > {}",
+            size,
+            cost,
+            PER_INVOCATION_CPU_BUDGET,
+        );
+
+        println!("GAS_MEASUREMENT: batch_withdraw_to: {}: {}", size, cost);
+    }
+}
+
 /// Helper: build a metadata map with `count` entries "k0"→"v0", … "kN"→"vN".
 fn metadata_n(env: &Env, count: u32) -> Map<Bytes, Bytes> {
     let mut m: Map<Bytes, Bytes> = Map::new(env);
@@ -206,6 +237,82 @@ fn metadata_n(env: &Env, count: u32) -> Map<Bytes, Bytes> {
 fn test_bulk_resume_streams_as_admin_gas() {
     let sizes = [1, 10, 50, 100];
 
+    for &size in &sizes {
+        let ctx = TestContext::setup();
+
+        let mut streams = soroban_sdk::Vec::new(&ctx.env);
+        for _ in 0..size {
+            streams.push_back(ctx.create_default_stream());
+        }
+
+        // Pause all streams
+        for stream_id in streams.iter() {
+            ctx.client.pause_stream(&stream_id, &PauseReason::Emergency);
+        }
+
+        // The final stream was paused at the current sequence. Advance once
+        // more so every stream (including that final item) clears the 17-ledger
+        // resume cooldown before the measured batch call.
+        ctx.env.ledger().with_mut(|l| l.sequence_number += 32);
+
+        let cost = measure_gas(&ctx, |ctx| {
+            ctx.client.bulk_resume_streams_as_admin(&streams);
+        });
+
+        assert!(
+            cost <= PER_INVOCATION_CPU_BUDGET,
+            "bulk_resume_streams_as_admin at size {} exceeded per-invocation CPU budget: {} > {}",
+            size,
+            cost,
+            PER_INVOCATION_CPU_BUDGET,
+        );
+
+        println!("GAS_MEASUREMENT: bulk_resume_streams_as_admin: {}: {}", size, cost);
+    }
+}
+
+/// Gas regression baseline for `bulk_cancel_streams`.
+///
+/// Creates active streams owned by the sender then cancels them all in a
+/// single call. Batch sizes 1, 10, 50, and 100 (up to MAX_PAGE_SIZE) mirror the documented gas
+/// baseline matrix and exercise the O(n²) duplicate-ID scan in `reject_duplicate_ids`.
+///
+/// Asserts that measured CPU instruction cost stays within Soroban's per-invocation CPU budget
+/// (`PER_INVOCATION_CPU_BUDGET`). Baseline expected to improve once companion O(n) refactor lands.
+#[test]
+fn test_bulk_cancel_streams_gas() {
+    let sizes = [1, 10, 50, 100];
+
+    for &size in &sizes {
+        let ctx = TestContext::setup();
+
+        let mut streams = soroban_sdk::Vec::new(&ctx.env);
+        for _ in 0..size {
+            streams.push_back(ctx.create_default_stream());
+        }
+
+        ctx.env.ledger().set_timestamp(500);
+
+        let cost = measure_gas(&ctx, |ctx| {
+            ctx.client.bulk_cancel_streams(&streams);
+        });
+
+        assert!(
+            cost <= PER_INVOCATION_CPU_BUDGET,
+            "bulk_cancel_streams at size {} exceeded per-invocation CPU budget: {} > {}",
+            size,
+            cost,
+            PER_INVOCATION_CPU_BUDGET,
+        );
+
+        println!("GAS_MEASUREMENT: bulk_cancel_streams: {}: {}", size, cost);
+    }
+}
+
+#[test]
+fn test_create_streams_partial_metadata_gas() {
+    let ctx = TestContext::setup();
+
     // Full metadata: MAX_METADATA_KEYS × (32-byte key + 128-byte value) at max aggregate.
     let meta = metadata_n(&ctx.env, fluxora_stream::MAX_METADATA_KEYS);
     let recipient = Address::generate(&ctx.env);
@@ -222,6 +329,8 @@ fn test_bulk_resume_streams_as_admin_gas() {
             memo: None,
             kind: StreamKind::Linear,
             metadata: Some(meta),
+            irrevocable: None,
+            witness: None,
         },
     ];
 
@@ -230,19 +339,16 @@ fn test_bulk_resume_streams_as_admin_gas() {
             .create_streams_partial(&ctx.sender, &params);
     });
 
-        // The final stream was paused at the current sequence. Advance once
-        // more so every stream (including that final item) clears the 17-ledger
-        // resume cooldown before the measured batch call.
-        ctx.env.ledger().with_mut(|l| l.sequence_number += 32);
-
-        let cost = measure_gas(&ctx, |ctx| {
-            ctx.client.bulk_resume_streams_as_admin(&streams);
-        });
+    println!(
+        "GAS_MEASUREMENT: create_stream_with_metadata: baseline: {}",
+        cost
+    );
 
     // Also measure without metadata for comparison
-    let recipient2 = Address::generate(&ctx.env);
+    let ctx2 = TestContext::setup();
+    let recipient2 = Address::generate(&ctx2.env);
     let params_no_meta = soroban_sdk::vec![
-        &ctx.env,
+        &ctx2.env,
         CreateStreamParams {
             recipient: recipient2,
             deposit_amount: 1000,
@@ -254,12 +360,14 @@ fn test_bulk_resume_streams_as_admin_gas() {
             memo: None,
             kind: StreamKind::Linear,
             metadata: None,
+            irrevocable: None,
+            witness: None,
         },
     ];
 
-    let cost_no_meta = measure_gas(&ctx, |ctx| {
-        ctx.client
-            .create_streams_partial(&ctx.sender, &params_no_meta);
+    let cost_no_meta = measure_gas(&ctx2, |ctx| {
+        ctx2.client
+            .create_streams_partial(&ctx2.sender, &params_no_meta);
     });
 
     println!(
@@ -268,17 +376,9 @@ fn test_bulk_resume_streams_as_admin_gas() {
     );
 }
 
-/// Gas regression baseline for `bulk_cancel_streams`.
-///
-/// Creates active streams owned by the sender then cancels them all in a
-/// single call. Batch sizes 1, 10, 50, and 100 (up to MAX_PAGE_SIZE) mirror the documented gas
-/// baseline matrix and exercise the O(n²) duplicate-ID scan in `reject_duplicate_ids`.
-///
-/// Asserts that measured CPU instruction cost stays within Soroban's per-invocation CPU budget
-/// (`PER_INVOCATION_CPU_BUDGET`). Baseline expected to improve once companion O(n) refactor lands.
 #[test]
-fn test_bulk_cancel_streams_gas() {
-    let sizes = [1, 10, 50, 100];
+fn test_get_stream_metadata_gas() {
+    let ctx = TestContext::setup();
 
     // Create a stream with metadata so we can read it back
     let meta = metadata_n(&ctx.env, fluxora_stream::MAX_METADATA_KEYS);
@@ -296,6 +396,8 @@ fn test_bulk_cancel_streams_gas() {
             memo: None,
             kind: StreamKind::Linear,
             metadata: Some(meta),
+            irrevocable: None,
+            witness: None,
         },
     ];
     let results = ctx
