@@ -168,6 +168,35 @@ fn test_batch_withdraw_gas() {
     }
 }
 
+/// Gas baseline for `batch_withdraw` with an empty input.
+///
+/// Empty batches are a valid no-op path: the call must still authorize the
+/// recipient, but it must not process any streams, transfer tokens, or emit
+/// events. This test protects the empty-vector early-exit path from future
+/// regressions.
+#[test]
+fn test_batch_withdraw_empty_batch_gas() {
+    let ctx = TestContext::setup();
+    let streams = soroban_sdk::Vec::new(&ctx.env);
+
+    let cost = measure_gas(&ctx, |ctx| {
+        let results = ctx
+            .client
+            .batch_withdraw(&ctx.recipient, &streams)
+            .expect("empty batch should succeed");
+        assert_eq!(results.len(), 0, "empty batch must return zero results");
+    });
+
+    assert!(
+        cost <= PER_INVOCATION_CPU_BUDGET,
+        "batch_withdraw (empty batch) exceeded per-invocation CPU budget: {} > {}",
+        cost,
+        PER_INVOCATION_CPU_BUDGET,
+    );
+
+    println!("GAS_MEASUREMENT: batch_withdraw_empty_batch: {}", cost);
+}
+
 /// Gas regression baseline for `batch_withdraw_to`.
 ///
 /// Uses a distinct destination address per withdrawal to exercise the
@@ -267,7 +296,10 @@ fn test_bulk_resume_streams_as_admin_gas() {
             PER_INVOCATION_CPU_BUDGET,
         );
 
-        println!("GAS_MEASUREMENT: bulk_resume_streams_as_admin: {}: {}", size, cost);
+        println!(
+            "GAS_MEASUREMENT: bulk_resume_streams_as_admin: {}: {}",
+            size, cost
+        );
     }
 }
 
@@ -335,8 +367,7 @@ fn test_create_streams_partial_metadata_gas() {
     ];
 
     let cost = measure_gas(&ctx, |ctx| {
-        ctx.client
-            .create_streams_partial(&ctx.sender, &params);
+        ctx.client.create_streams_partial(&ctx.sender, &params);
     });
 
     println!(
@@ -400,19 +431,14 @@ fn test_get_stream_metadata_gas() {
             witness: None,
         },
     ];
-    let results = ctx
-        .client
-        .create_streams_partial(&ctx.sender, &params);
+    let results = ctx.client.create_streams_partial(&ctx.sender, &params);
     let stream_id = results.get(0).unwrap().stream_id.unwrap();
 
     let cost = measure_gas(&ctx, |ctx| {
         ctx.client.get_stream_metadata(&stream_id);
     });
 
-    println!(
-        "GAS_MEASUREMENT: get_stream_metadata: full: {}",
-        cost
-    );
+    println!("GAS_MEASUREMENT: get_stream_metadata: full: {}", cost);
 }
 
 // ---------------------------------------------------------------------------
@@ -575,7 +601,7 @@ fn test_update_rate_per_second_gas() {
         &CreateStreamParams {
             recipient: ctx.recipient.clone(),
             deposit_amount: 2_000_i128,
-            rate_per_second: 1_i128,  // start at rate=1
+            rate_per_second: 1_i128, // start at rate=1
             start_time: 0u64,
             cliff_time: 0u64,
             end_time: 1_000u64,
@@ -630,7 +656,7 @@ fn test_decrease_rate_per_second_gas() {
         &ctx.sender,
         &CreateStreamParams {
             recipient: ctx.recipient.clone(),
-            deposit_amount: 2_000_i128,  // covers rate=2 × duration=1000
+            deposit_amount: 2_000_i128, // covers rate=2 × duration=1000
             rate_per_second: 2_i128,
             start_time: 0u64,
             cliff_time: 0u64,
@@ -660,7 +686,10 @@ fn test_decrease_rate_per_second_gas() {
         PER_INVOCATION_CPU_BUDGET,
     );
 
-    println!("GAS_MEASUREMENT: decrease_rate_per_second: single: {}", cost);
+    println!(
+        "GAS_MEASUREMENT: decrease_rate_per_second: single: {}",
+        cost
+    );
 }
 
 /// Gas baseline for `top_up_stream` (add deposit to an active stream).
@@ -745,7 +774,7 @@ fn test_extend_stream_end_time_gas() {
         &ctx.sender,
         &CreateStreamParams {
             recipient: ctx.recipient.clone(),
-            deposit_amount: 2_000_i128,  // covers rate=1 × end=1500
+            deposit_amount: 2_000_i128, // covers rate=1 × end=1500
             rate_per_second: 1_i128,
             start_time: 0u64,
             cliff_time: 0u64,
@@ -1508,10 +1537,7 @@ fn test_batch_withdraw_max_page_size_gas() {
         PER_INVOCATION_CPU_BUDGET,
     );
 
-    println!(
-        "GAS_MEASUREMENT: withdraw_partial_accrual: single: {}",
-        cost
-    );
+    println!("GAS_MEASUREMENT: batch_withdraw_max_page_size: {}", cost);
 }
 
 /// Gas baseline for the emergency-pause guard on `create_stream`.
