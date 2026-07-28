@@ -139,6 +139,34 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      # Hard gate: guard against reintroducing duplicate IdReservation storage
+      # helpers. `save_id_reservation` / `load_id_reservation` /
+      # `remove_id_reservation` were once defined twice (storage.rs + lib.rs) with
+      # identical bodies — a persistence-drift hazard. They now live only in
+      # storage.rs; lib.rs imports them. This step fails if any of the three is
+      # defined more than once across contracts/stream/src/, catching a
+      # reintroduced copy even if the Rust guard test in
+      # contracts/stream/tests/id_reservation.rs is removed. Matches `fn <name>(`
+      # so call sites, imports, and doc comments are not counted.
+      - name: Guard against duplicate IdReservation storage helpers
+        run: |
+          set -euo pipefail
+          SRC_DIR="contracts/stream/src"
+          STATUS=0
+          for helper in save_id_reservation load_id_reservation remove_id_reservation; do
+            # -h: no filename prefix, so awk sees only match lines. Word boundary
+            # via the literal "fn <helper>(" token avoids matching substrings.
+            COUNT=$(grep -rho "fn ${helper}(" "$SRC_DIR" | wc -l | tr -d ' ')
+            if [ "$COUNT" -ne 1 ]; then
+              echo "::error::DEDUPE REGRESSION: 'fn ${helper}' is defined ${COUNT} time(s) under ${SRC_DIR} (expected exactly 1)."
+              echo "::error::The IdReservation storage helpers must live only in storage.rs; lib.rs must import and call through to that single implementation."
+              STATUS=1
+            else
+              echo "OK: 'fn ${helper}' defined exactly once under ${SRC_DIR}."
+            fi
+          done
+          exit "$STATUS"
+
       # continue-on-error: --all-features currently pulls in two incompatible
       # major versions of rand_core (0.6 via ed25519-dalek, 0.9 via a
       # soroban-sdk testutils dependency) whose CryptoRng traits don't unify

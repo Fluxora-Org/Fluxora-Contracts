@@ -451,3 +451,39 @@ Both reservation release entrypoints now share a unified reclamation helper (`re
 - **At-expiry & post-expiry success**: Ensures that if a holder abandons or loses access to their reservation, the counter space/storage is not permanently locked, maintaining contract liveness.
 - **Tip-adjacent guard**: Counter rewind only occurs when `reservation_end == current_count`, meaning no streams exist beyond the reserved range. This prevents unsafe rewinds that would create ID collisions with already-created streams.
 - **Consistent event shape**: Both paths emit the `res_rel` event with `(start_id, count, consumed, reclaimed)`, ensuring consistent indexer accounting regardless of which release path triggered the reclamation.
+
+### Single source of truth for the storage helpers
+
+The three IdReservation storage helpers have exactly one definition each, all in
+[`contracts/stream/src/storage.rs`](../contracts/stream/src/storage.rs):
+
+| Helper                          | Persistence action                                                                                     |
+| :------------------------------ | :----------------------------------------------------------------------------------------------------- |
+| `load_id_reservation(env, caller)`  | Reads `DataKey::IdReservation(caller)` from persistent storage (no TTL bump on read).             |
+| `save_id_reservation(env, caller, res)` | Writes the reservation and bumps its TTL by `PERSISTENT_LIFETIME_THRESHOLD` / `PERSISTENT_BUMP_AMOUNT`. |
+| `remove_id_reservation(env, caller)` | Removes `DataKey::IdReservation(caller)` from persistent storage.                                    |
+
+`contracts/stream/src/lib.rs` **imports** these from the `storage` module
+(`use storage::{ load_id_reservation, next_stream_id_for, remove_id_reservation, save_id_reservation };`)
+and calls through — it does **not** redefine them.
+
+**Why this matters.** These functions previously existed as two identical copies
+(one in `storage.rs`, one in `lib.rs`). Two independent copies of the same
+persistence logic are a drift hazard: a future change to the TTL policy
+(`extend_ttl` bump amounts) or the `DataKey` key shape applied to only one copy
+would silently produce inconsistent persistence — reservations that expire early
+or key under a shape the reader cannot find. Because `next_stream_id_for`
+consumes reservations to assign stream IDs, a divergent copy could orphan
+pre-allocated ID ranges or, in the worst case, contribute to stream-ID reuse.
+
+**Regression guard.** The single-definition invariant is enforced two ways:
+
+| Guard                                                                 | Where it runs                                    | What it checks                                                                                 |
+| :-------------------------------------------------------------------- | :----------------------------------------------- | :--------------------------------------------------------------------------------------------- |
+| `id_reservation_helpers_defined_exactly_once` (`#[test]`)             | `cargo test` — CI **Test** job (hard gate)       | Each helper is defined (`fn <name>(`) exactly once across `contracts/stream/src/`, and in `storage.rs`. |
+| `lib_rs_imports_id_reservation_helpers_from_storage` (`#[test]`)      | `cargo test` — CI **Test** job (hard gate)       | `lib.rs` keeps a `use storage::{ … }` import wiring the shared implementation into scope.       |
+| "Guard against duplicate IdReservation storage helpers" (grep step)   | CI **Lint** job (hard gate)                      | Belt-and-suspenders: fails if any helper's `fn <name>(` count under `contracts/stream/src/` ≠ 1, even if the Rust tests are removed. |
+
+Both live alongside the reservation behavior tests in
+[`contracts/stream/tests/id_reservation.rs`](../contracts/stream/tests/id_reservation.rs);
+the grep step is defined in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml).
