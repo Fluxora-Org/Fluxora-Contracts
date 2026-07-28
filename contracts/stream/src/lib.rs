@@ -3683,6 +3683,39 @@ impl FluxoraStream {
         Self::cancel_stream_internal(&env, &mut stream)
     }
 
+    pub fn delegated_cancel(
+        env: Env,
+        stream_id: u64,
+        relayer: Address,
+        sender_public_key: soroban_sdk::BytesN<32>,
+        nonce: u64,
+        deadline: u64,
+        signature: soroban_sdk::BytesN<64>,
+    ) -> Result<(), ContractError> {
+        require_not_globally_paused(&env)?;
+        relayer.require_auth();
+
+        delegation::validate_delegated_cancel_params(&env, stream_id, nonce, deadline)?;
+
+        let mut stream = load_stream(&env, stream_id)?;
+
+        if Self::ed25519_pubkey_from_address(&env, &stream.sender) != sender_public_key.to_array() {
+            return Err(ContractError::InvalidSignature);
+        }
+
+        let mut msg = soroban_sdk::Bytes::new(&env);
+        msg.extend_from_slice(delegation::DELEGATED_CANCEL_DOMAIN);
+        msg.extend_from_array(&stream_id.to_be_bytes());
+        msg.extend_from_array(&nonce.to_be_bytes());
+        msg.extend_from_array(&deadline.to_be_bytes());
+
+        env.crypto().ed25519_verify(&sender_public_key, &msg, &signature);
+
+        crate::storage::increment_delegated_cancel_nonce(&env, &stream.sender);
+
+        Self::cancel_stream_internal(&env, &mut stream)
+    }
+
     /// Withdraw accrued tokens from a payment stream to the recipient.
     ///
     /// Transfers all accrued-but-not-yet-withdrawn tokens to the stream's recipient.

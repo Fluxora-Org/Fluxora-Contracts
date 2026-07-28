@@ -536,6 +536,26 @@ pub fn increment_delegated_nonce(env: &Env, recipient: &Address) {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Delegated-cancel nonce helpers
+// ---------------------------------------------------------------------------
+
+pub(crate) fn load_delegated_cancel_nonce(env: &Env, sender: &Address) -> u64 {
+    let key = DataKey::DelegatedCancelNonce(sender.clone());
+    env.storage().persistent().get(&key).unwrap_or(0u64)
+}
+
+pub(crate) fn increment_delegated_cancel_nonce(env: &Env, sender: &Address) {
+    let current = load_delegated_cancel_nonce(env, sender);
+    let key = DataKey::DelegatedCancelNonce(sender.clone());
+    env.storage().persistent().set(&key, &(current + 1));
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+}
+
 pub(crate) fn load_rotation_history(env: &Env, stream_id: u64) -> soroban_sdk::Vec<RotationEntry> {
     let key = DataKey::RotationHistory(stream_id);
     env.storage()

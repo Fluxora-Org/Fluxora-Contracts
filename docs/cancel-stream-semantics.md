@@ -121,6 +121,48 @@ Identical to `cancel_stream` on success:
 3. Double cancellation fails with `InvalidState` (signature replay after success is harmless).
 4. CEI ordering inherited from shared `cancel_stream_internal` implementation.
 
+## Delegated cancellation (`delegated_cancel`)
+
+### Purpose
+
+Allows a trusted relayer (e.g. a treasury ops bot) to cancel a sender's stream under specific conditions without requiring the sender to hand over full account control or rely on the protocol admin.
+
+### Signature payload
+
+Domain-separated from both `delegated_withdraw` and `witnessed_cancel_stream` to prevent cross-protocol replay:
+
+```
+fluxora_delegated_cancel | stream_id (8 bytes BE) | nonce (8 bytes BE) | deadline (8 bytes BE)
+```
+
+The sender signs with their ed25519 private key. The submitter (relayer) passes `sender_public_key`, `nonce`, `deadline`, and `signature`. The public key must derive to the stored `sender` address.
+
+### Behavior
+
+Identical to `cancel_stream` on success:
+
+1. Allowed only for `Active` or `Paused` streams.
+2. Refund to sender: `deposit_amount - accrued_at(cancelled_at)`.
+3. Event: topic `("cancelled", stream_id)` with `StreamEvent::StreamCancelled(stream_id)`.
+4. The relayer authorizes the transaction and pays gas (`relayer.require_auth()`); the sender's authorization is the signature check.
+
+### Errors
+
+| Condition | Error |
+| --- | --- |
+| Expired deadline | `SignatureDeadlineExpired` |
+| Nonce mismatch | `InvalidSignature` |
+| Public key mismatch | `InvalidSignature` |
+| Invalid stream status | `InvalidState` |
+| Missing stream | `StreamNotFound` |
+
+### Security invariants
+
+1. Signatures cannot be replayed (each cancellation strictly increments the sender-keyed `DelegatedCancelNonce`).
+2. Domain separation ensures signatures cannot be replayed as `delegated_withdraw` or `witnessed_cancel_stream` authorizations.
+3. Double cancellation fails with `InvalidState`.
+4. CEI ordering inherited from shared `cancel_stream_internal` implementation.
+
 ## Evidence in tests
 
 Unit tests (`contracts/stream/src/test.rs`):

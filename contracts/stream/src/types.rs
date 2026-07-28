@@ -673,6 +673,8 @@ pub enum DataKey {
     PausedStreamCount,
     /// Aggregate sum of all keeper fees paid out via `keeper_cancel` (`i128`, instance storage).
     TotalKeeperFeesPaid,
+    /// Per-sender nonce for delegated-cancel replay protection.
+    DelegatedCancelNonce(Address),
 }
 
 /// Type of pause.
