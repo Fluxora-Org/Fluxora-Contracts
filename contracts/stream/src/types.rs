@@ -494,15 +494,6 @@ pub struct StreamDecommissioned {
     pub decommissioned: bool,
 }
 
-/// Emitted when claim ownership is transferred on a stream.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ClaimOwnershipTransferred {
-    pub stream_id: u64,
-    pub old_owner: Option<Address>,
-    pub new_owner: Address,
-}
-
 /// Emitted when a recipient delegates a share of their stream.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]

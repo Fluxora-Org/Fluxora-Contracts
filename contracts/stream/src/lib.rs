@@ -3586,10 +3586,18 @@ impl FluxoraStream {
         Ok(())
     }
 
-    /// Transfer claim ownership to a new address.
+    /// Transfer a stream's withdrawal right to `new_owner`.
     ///
-    /// Changes the sole source of truth for `withdraw` authorization from the recipient
-    /// (or the current claim_owner) to the `new_owner`.
+    /// A newly created stream has no explicit claim owner, so its `recipient` remains
+    /// the withdrawal authorizer for backwards compatibility. The first successful
+    /// transfer records `Some(new_owner)`; thereafter that field is the sole authority
+    /// for `withdraw`, `withdraw_to`, and batched withdrawals. This is deliberately
+    /// distinct from `update_recipient`, which is a sender-initiated, recipient-accepted
+    /// change to the stream's recipient field.
+    ///
+    /// `current_owner` must equal the recorded claim owner, or the stream recipient
+    /// when ownership has not yet been transferred, and must authorize this call.
+    /// The sender has no authority in this flow.
     pub fn transfer_claim_ownership(
         env: Env,
         stream_id: u64,

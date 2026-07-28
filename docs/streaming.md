@@ -343,6 +343,26 @@ Off-chain orchestrators and indexers that build payment batches often need to kn
 Terminal states: `Completed`, `Cancelled`. Both may be closed via `close_completed_stream` to reclaim storage and index space. A stream is also considered technically terminal if `ledger.timestamp() >= end_time`.
 In this "time-terminal" state, pause/resume is blocked, but withdrawal is always allowed regardless of previous pause status.
 
+### Transferable claim ownership
+
+`transfer_claim_ownership(stream_id, current_owner, new_owner)` separates the
+right to withdraw a stream's accrued funds from its `recipient` field. New and
+legacy streams start with `claim_owner = None`, so the recipient continues to
+authorize withdrawals exactly as before. On the first transfer, the recipient
+must supply and authorize `current_owner`; the contract stores
+`claim_owner = Some(new_owner)` and emits `ClaimOwnershipTransferred`.
+
+After that point, the recorded claim owner is the sole withdrawal authority for
+`withdraw`, `withdraw_to`, and batched withdrawals. Each later transfer must be
+authorized by that current owner. The sender cannot transfer or revoke claim
+ownership. This transfer does not alter the recipient index, stream schedule,
+or accrued balance.
+
+This is intentionally different from `update_recipient`: recipient rotation is
+initiated by the sender and accepted by the current recipient, whereas claim
+ownership is initiated directly by the current claimant and never involves the
+sender.
+
 **Cancelled stream closure rule**: A `Cancelled` stream may only be closed after the recipient has fully withdrawn the frozen accrued amount. Attempting to close a `Cancelled` stream with remaining claimable balance returns `ContractError::InvalidState`. This prevents storage cleanup from destroying recipient funds.
 
 ### Auto-renew subscription streams (CONTRACT_VERSION 7)
