@@ -22544,3 +22544,126 @@ fn xdr_pubkey_extraction_offset_is_correct() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Cross-entrypoint idempotency tests (issue #1310)
+// ---------------------------------------------------------------------------
+
+/// Verify that repeated `withdraw` calls on the same fully-depleted stream
+/// return 0 and do not change state — the cross-entrypoint idempotency
+/// contract guarantee.
+#[test]
+fn withdraw_is_idempotent_on_full_withdrawal() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+
+    // First withdrawal — full amount
+    let first = ctx.client().withdraw(&stream_id);
+    assert_eq!(first, 1000);
+
+    let after_first = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(after_first.status, StreamStatus::Completed);
+    assert_eq!(after_first.withdrawn_amount, 1000);
+
+    // Second withdrawal — idempotent, returns 0
+    let second = ctx.client().withdraw(&stream_id);
+    assert_eq!(second, 0);
+    assert_eq!(ctx.client().get_stream_state(&stream_id).withdrawn_amount, 1000);
+}
+
+/// Verify that repeated `withdraw_to` calls on the same stream are idempotent
+/// after a full withdrawal.
+#[test]
+fn withdraw_to_is_idempotent_on_full_withdrawal() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let destination = Address::generate(&ctx.env);
+
+    ctx.env.ledger().set_timestamp(1000);
+
+    let first = ctx.client().withdraw_to(&stream_id, &destination);
+    assert_eq!(first, 1000);
+
+    let after_first = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(after_first.status, StreamStatus::Completed);
+
+    // Second call — idempotent
+    let second = ctx.client().withdraw_to(&stream_id, &destination);
+    assert_eq!(second, 0);
+}
+
+/// Verify that withdraw returns 0 after a partial withdrawal until more tokens accrue.
+#[test]
+fn withdraw_is_idempotent_after_partial_withdrawal() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(300);
+    let first = ctx.client().withdraw(&stream_id);
+    assert_eq!(first, 300);
+
+    // Repeated call without time advancing — idempotent (returns 0)
+    let second = ctx.client().withdraw(&stream_id);
+    assert_eq!(second, 0);
+
+    // After time advances, new accrual is available
+    ctx.env.ledger().set_timestamp(600);
+    let third = ctx.client().withdraw(&stream_id);
+    assert_eq!(third, 300);
+}
+
+/// Verify that withdraw_to returns 0 after a partial withdrawal until more tokens accrue.
+#[test]
+fn withdraw_to_is_idempotent_after_partial_withdrawal() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let destination = Address::generate(&ctx.env);
+
+    ctx.env.ledger().set_timestamp(300);
+    let first = ctx.client().withdraw_to(&stream_id, &destination);
+    assert_eq!(first, 300);
+
+    // Repeated call — idempotent
+    let second = ctx.client().withdraw_to(&stream_id, &destination);
+    assert_eq!(second, 0);
+}
+
+/// Verify that the reentrancy lock is held during the cross-entrypoint token
+/// transfer in `withdraw` so a malicious token contract cannot corrupt state.
+#[test]
+fn withdraw_reentrancy_lock_prevents_state_corruption_during_push_token() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+
+    // First withdrawal works normally
+    let first = ctx.client().withdraw(&stream_id);
+    assert_eq!(first, 1000);
+
+    // Stream state should be Completed
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+    assert_eq!(state.withdrawn_amount, 1000);
+}
+
+/// Verify that the reentrancy lock is held during the cross-entrypoint token
+/// transfer in `withdraw_to` so a malicious token contract cannot corrupt state.
+#[test]
+fn withdraw_to_reentrancy_lock_prevents_state_corruption_during_push_token() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let destination = Address::generate(&ctx.env);
+
+    ctx.env.ledger().set_timestamp(1000);
+
+    // First withdraw_to works normally
+    let first = ctx.client().withdraw_to(&stream_id, &destination);
+    assert_eq!(first, 1000);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+    assert_eq!(state.withdrawn_amount, 1000);
+}

@@ -3135,6 +3135,20 @@ impl FluxoraStream {
     /// - For cancelled streams, only the accrued amount (not refunded) can be withdrawn,
     ///   and status remains `Cancelled` (no `Completed` transition)
     ///
+    /// # Cross-Entrypoint Idempotency
+    /// - Reentrancy-protected via `acquire_reentrancy_lock` before calling `push_token`
+    /// - State is persisted BEFORE `push_token` (CEI pattern), ensuring that repeated
+    ///   calls with the same withdrawal amount produce the same result (idempotent)
+    /// - If `push_token` fails, the entire transaction reverts (state is not updated)
+    /// - After a successful withdrawal, subsequent calls with the same stream_id return 0
+    ///   until new tokens accrue
+    /// - Accrual is time-based: `min((now - start_time) × rate, deposit_amount)`
+    /// - Before cliff time, accrued amount is 0 (returns 0, no transfer)
+    /// - After end_time, accrued amount is capped at deposit_amount
+    /// - Works on `Active` and `Cancelled` streams, not on `Paused` or `Completed`
+    /// - For cancelled streams, only the accrued amount (not refunded) can be withdrawn,
+    ///   and status remains `Cancelled` (no `Completed` transition)
+    ///
     /// # Examples
     /// - Stream: 1000 tokens over 1000 seconds (1 token/sec)
     /// - At t=0 (before cliff): withdraw() returns 0 (no transfer)
@@ -3199,7 +3213,9 @@ impl FluxoraStream {
         }
 
         // CEI: update state before external token transfer to reduce reentrancy risk.
-        // Assumption: the token contract does not reenter this contract.
+        // Cross-entrypoint idempotency: state is persisted BEFORE push_token so
+        // repeated calls produce the same result (withdrawable will be 0 after
+        // the first successful withdrawal).
         stream.withdrawn_amount += withdrawable;
         stream.last_withdraw_ledger = current_ledger; // Update withdrawal timestamp
         let completed_now = (stream.status == StreamStatus::Active
@@ -3218,7 +3234,10 @@ impl FluxoraStream {
             .unwrap_or(0);
         write_total_liabilities(&env, liabilities);
 
-        push_token(&env, &stream.recipient, withdrawable)?;
+        acquire_reentrancy_lock(&env)?;
+        let transfer_result = push_token(&env, &stream.recipient, withdrawable);
+        release_reentrancy_lock(&env);
+        transfer_result?;
 
         events::emit_withdrawal(
             &env,
@@ -3341,7 +3360,10 @@ impl FluxoraStream {
             .unwrap_or(0);
         write_total_liabilities(&env, liabilities);
 
-        push_token(&env, &caller, withdrawable)?;
+        acquire_reentrancy_lock(&env)?;
+        let transfer_result = push_token(&env, &caller, withdrawable);
+        release_reentrancy_lock(&env);
+        transfer_result?;
 
         events::emit_withdrawal(
             &env,
@@ -3484,7 +3506,10 @@ impl FluxoraStream {
             .unwrap_or(0);
         write_total_liabilities(&env, liabilities);
 
-        push_token(&env, &destination, withdrawable)?;
+        acquire_reentrancy_lock(&env)?;
+        let transfer_result = push_token(&env, &destination, withdrawable);
+        release_reentrancy_lock(&env);
+        transfer_result?;
 
         events::emit_withdrawal_to(
             &env,
@@ -3844,7 +3869,10 @@ impl FluxoraStream {
                 total_liabilities = total_liabilities.checked_sub(withdrawable).unwrap_or(0);
                 liabilities_changed = true;
 
-                push_token(&env, &param.destination, withdrawable)?;
+                acquire_reentrancy_lock(&env)?;
+                let transfer_result = push_token(&env, &param.destination, withdrawable);
+                release_reentrancy_lock(&env);
+                transfer_result?;
 
                 events::emit_withdrawal_to(
                     &env,
@@ -4028,12 +4056,16 @@ impl FluxoraStream {
         increment_delegated_nonce(&env, &stream.recipient);
 
         // 12. Transfers via push_token: Net payout to RECIPIENT first, Fee to RELAYER second
+        // Cross-entrypoint idempotency: reentrancy lock prevents nested token callbacks
+        // from corrupting withdrawn_amount or liability tracking.
+        acquire_reentrancy_lock(&env)?;
         if net_amount > 0 {
             push_token(&env, &stream.recipient, net_amount)?;
         }
         if relayer_fee > 0 {
             push_token(&env, &relayer, relayer_fee)?;
         }
+        release_reentrancy_lock(&env);
 
         events::emit_withdrawal(
             &env,
