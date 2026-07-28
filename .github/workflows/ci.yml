@@ -117,13 +117,14 @@ jobs:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
 
+      # Hard gate: the installed compiler must match rust-toolchain.toml.
+      - name: Verify Rust toolchain version
+        run: python3 script/verify_rust_version.py
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-
-      - name: Verify Rust toolchain version
-        run: python3 script/verify_rust_version.py
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -166,13 +167,14 @@ jobs:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
 
+      # Hard gate: the installed compiler must match rust-toolchain.toml.
+      - name: Verify Rust toolchain version
+        run: python3 script/verify_rust_version.py
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-
-      - name: Verify Rust toolchain version
-        run: python3 script/verify_rust_version.py
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -342,13 +344,14 @@ jobs:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
 
+      # Hard gate: the installed compiler must match rust-toolchain.toml.
+      - name: Verify Rust toolchain version
+        run: python3 script/verify_rust_version.py
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-
-      - name: Verify Rust toolchain version
-        run: python3 script/verify_rust_version.py
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -500,13 +503,14 @@ jobs:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
 
+      # Hard gate: the installed compiler must match rust-toolchain.toml.
+      - name: Verify Rust toolchain version
+        run: python3 script/verify_rust_version.py
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-
-      - name: Verify Rust toolchain version
-        run: python3 script/verify_rust_version.py
 
       - name: Cache cargo registry
         uses: actions/cache@v4
