@@ -997,6 +997,7 @@ fn clone_emits_created_and_cloned_events() {
             assert_eq!(payload.rate_per_second, 1);
             assert_eq!(payload.start_time, 1000);
             assert_eq!(payload.end_time, 2000);
+            assert_eq!(payload.withdraw_dust_threshold, 0);
             saw_cloned = true;
         }
     }

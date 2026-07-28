@@ -135,6 +135,8 @@ pub struct StreamCloned {
     pub cliff_time: u64,
     /// End time of the new stream.
     pub end_time: u64,
+    /// Withdrawal threshold inherited from the source stream.
+    pub withdraw_dust_threshold: i128,
 }
 
 /// Result of a single stream creation attempt in a partial batch.
