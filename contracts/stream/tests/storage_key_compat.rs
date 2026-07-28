@@ -16,12 +16,44 @@
 //!
 //! # Discriminant Table Overview (36 variants: 0–35)
 //!
-//! | Disc | Variant                     | Storage    | Added |
-//! |-----:|:----------------------------|:-----------|:------|
-//! | 0–14 | V5 Frozen Keys              | Mixed      | V5    |
-//! |15–20 | V6 Extension Keys           | Mixed      | V6    |
-//! |21–28 | V7 Storage & Auditing Keys  | Mixed      | V7    |
-//! |29–35 | V8/V9 Additive Keys         | Mixed      | V8/V9 |
+//! | Disc | Variant                     | Storage    | Added in |
+//! |-----:|:----------------------------|:-----------|:----------|
+//! |    0 | `Config`                    | Instance   | V0        |
+//! |    1 | `NextStreamId`              | Instance   | V0        |
+//! |    2 | `Stream(u64)`               | Persistent | V0        |
+//! |    3 | `RecipientStreams(Address)`  | Persistent | V0        |
+//! |    4 | `GlobalEmergencyPaused`     | Instance   | V0        |
+//! |    5 | `CreationPaused`            | Instance   | V0        |
+//! |    6 | `GlobalPauseReason`         | Instance   | V0        |
+//! |    7 | `GlobalPauseTimestamp`      | Instance   | V0        |
+//! |    8 | `GlobalPauseAdmin`          | Instance   | V0        |
+//! |    9 | `AutoClaimDestination(u64)` | Persistent | V0        |
+//! |   10 | `NextTemplateId`            | Instance   | V0        |
+//! |   11 | `ActiveTemplateCount`       | Instance   | V0        |
+//! |   12 | `StreamTemplate(u64)`       | Persistent | V0        |
+//! |   13 | `OwnerTemplateIds(Address)` | Persistent | V0        |
+//! |   14 | `TotalLiabilities`          | Instance   | V0        |
+//!
+//! # Discriminant stability (V6+ additions, appended at end)
+//!
+//! | Disc | Variant                     | Storage    | Added in |
+//! |-----:|:----------------------------|:-----------|:----------|
+//! |   15 | `WithdrawNonce(Address)`    | Persistent | V6        |
+//! |   16 | `PauseState`                | Instance   | V6        |
+//! |   17 | `ReentrancyLock`            | Instance   | V6        |
+//! |   18 | `RecipientStreamPage(Address, u32)` | Persistent | V6 |
+//! |   19 | `RecipientStreamPageCount(Address)` | Persistent | V6 |
+//! |   20 | `PendingRecipientUpdate(u64)` | Persistent | V6        |
+//! |   21 | `IdReservation(Address)`    | Persistent | V6        |
+//! |   22 | `MaxRatePerSecond`          | Instance   | V6        |
+//! |   23 | `DelegatedWithdrawNonce(Address)` | Persistent | V6   |
+//! |   24 | `LastPauseRecord(PauseKind)` | Instance   | V6        |
+//!
+//! # Note on metadata (issue #580)
+//!
+//! The per-stream `metadata` field is stored **inline** within the `Stream` struct
+//! (discriminant 2). No new `DataKey` variant is required, so the discriminant
+//! table is unchanged. Metadata is additive: an absent XDR field decodes as `None`.
 //!
 //! # V6 discriminant table (discriminants 15–20)
 //!
@@ -73,21 +105,30 @@
 //! - `contracts/stream/src/checksum.rs` (WASM checksum & key layout documentation)
 //! - `docs/upgrade.md` (CONTRACT_VERSION policy & upgrade runbook)
 //!
+//! # V6 Stream struct (16 fields, no `metadata`)
+//!
+//! V6 added `memo` and `kind` fields. V7 adds `metadata` as field 17.
+//! A V6-era `Stream` entry is represented in V7 as a `Stream` with `metadata: None`.
+//! XDR forward-compatibility ensures the absent 17th field decodes as `None`.
+//!
+//! Since `metadata` is stored **inside** the `Stream` struct (discriminant 2),
+//! no new `DataKey` variant is required. This means metadata does not change the
+//! discriminant table and imposes no additional storage key migration burden.
+//!
 //! # Security assumptions tested
 //!
-//! - V5 `Stream` entries (many fields absent) decode correctly on V9.
-//! - V5 instance keys (`Config`, `NextStreamId`, pause flags) are readable on V9.
-//! - V5 persistent keys (`RecipientStreams`, `AutoClaimDestination`) are readable.
+//! - V5 `Stream` entries (memo absent) decode correctly on V6/V7 with `memo == None`.
+//! - V6 `Stream` entries (metadata absent) decode correctly on V7 with `metadata == None`.
+//! - V5 instance keys (`Config`, `NextStreamId`, pause flags) are readable on V6/V7.
+//! - V5/V6 persistent keys (`RecipientStreams`, `AutoClaimDestination`) are readable.
 //! - V6-only keys (discriminants 15–20) return absent/default on a V5-seeded instance.
-//! - Post-V6 keys (discriminants 21–35) return absent/default on a V5-seeded instance.
-//! - No `None`-unwrap panics occur on any V9 read path when given V5 storage.
-//! - `CONTRACT_VERSION` matches the expected `DataKey` variant count (36).
+//! - No `None`-unwrap panics occur on any read path when given earlier-version storage.
 
 extern crate std;
 
 use fluxora_stream::{
-    Config, DataKey, FluxoraStream, FluxoraStreamClient, PauseKind, Stream, StreamKind,
-    StreamStatus, CONTRACT_VERSION,
+    Config, DataKey, FluxoraStream, FluxoraStreamClient, Stream, StreamKind, StreamStatus,
+    CONTRACT_VERSION,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -174,18 +215,9 @@ impl<'a> Ctx<'a> {
             checkpointed_amount: 0,
             checkpointed_at: now,
             withdraw_dust_threshold: 0,
-            last_pause_toggle_ledger: 0,
-            last_withdraw_ledger: 0,
-            last_rate_change_ledger: 0,
-            is_pooled: None,
-            metadata: None,
-            memo: None,
+            memo: None, // V5 had no memo field
             kind: StreamKind::Linear,
-            irrevocable: None,
-            witness: None,
-            delegation_depth: 0,
-            parent_stream_id: None,
-            decommissioned: None,
+            metadata: None, // V6 had no metadata field
         };
         let cid = self.contract_id.clone();
         self.env.as_contract(&cid, || {
@@ -368,11 +400,7 @@ fn v5_cancelled_stream_readable_accrual_frozen() {
                 metadata: None,
                 memo: None,
                 kind: StreamKind::Linear,
-                irrevocable: None,
-                witness: None,
-                delegation_depth: 0,
-                parent_stream_id: None,
-                decommissioned: None,
+                metadata: None,
             },
         );
     });
@@ -429,11 +457,7 @@ fn v5_stream_with_checkpoint_readable() {
                 metadata: None,
                 memo: None,
                 kind: StreamKind::Linear,
-                irrevocable: None,
-                witness: None,
-                delegation_depth: 0,
-                parent_stream_id: None,
-                decommissioned: None,
+                metadata: None,
             },
         );
     });
@@ -443,6 +467,58 @@ fn v5_stream_with_checkpoint_readable() {
     let state = ctx.client.get_stream_state(&0u64);
     assert_eq!(state.checkpointed_amount, 500);
     assert!(state.memo.is_none());
+}
+
+/// A V6-era Stream (no `metadata`) is readable by V7, returning `metadata == None`.
+///
+/// V6 Stream struct had 16 fields (ending with `kind`) and did not include `metadata`.
+/// V7 adds `metadata` as field 17. XDR forward-compatibility ensures the absent
+/// field decodes as `None` — this test guards against any regression in that path.
+#[test]
+fn v6_stream_metadata_decodes_as_none() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+    let now = ctx.env.ledger().timestamp();
+
+    let cid = ctx.contract_id.clone();
+    ctx.env.as_contract(&cid, || {
+        ctx.env.storage().persistent().set(
+            &DataKey::Stream(0u64),
+            &Stream {
+                stream_id: 0,
+                sender: ctx.sender.clone(),
+                recipient: recipient.clone(),
+                deposit_amount: 86_400,
+                rate_per_second: 1,
+                start_time: now,
+                cliff_time: now,
+                end_time: now + 86_400,
+                withdrawn_amount: 0,
+                status: StreamStatus::Active,
+                cancelled_at: None,
+                checkpointed_amount: 0,
+                checkpointed_at: now,
+                withdraw_dust_threshold: 0,
+                memo: None,
+                kind: StreamKind::Linear,
+                metadata: None, // V6 had no metadata; None simulates absent XDR field
+            },
+        );
+    });
+
+    // V7 `get_stream_metadata` must decode the V6-era entry and return None
+    let meta = ctx.client.get_stream_metadata(&0u64);
+    assert!(
+        meta.is_none(),
+        "V6-era stream (no metadata) must decode as metadata=None on V7"
+    );
+
+    // V7 `get_stream_state` must also carry metadata=None
+    let state = ctx.client.get_stream_state(&0u64);
+    assert!(
+        state.metadata.is_none(),
+        "V6-era Stream struct must decode with metadata=None"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -511,10 +587,8 @@ fn v5_global_emergency_paused_readable_by_v9() {
                 end_time: now + 1000,
                 withdraw_dust_threshold: None,
                 memo: None,
-                metadata: None,
                 kind: StreamKind::Linear,
-                irrevocable: None,
-                witness: None,
+                metadata: None,
             },
         ],
     );
@@ -552,10 +626,8 @@ fn v5_creation_paused_readable_by_v9() {
                 end_time: now + 1000,
                 withdraw_dust_threshold: None,
                 memo: None,
-                metadata: None,
                 kind: StreamKind::Linear,
-                irrevocable: None,
-                witness: None,
+                metadata: None,
             },
         ],
     );
@@ -1586,4 +1658,3 @@ fn test_regression_staleness_mismatch_detection() {
         "Stale CONTRACT_VERSION mapping must be detected as mismatched against live DataKey count"
     );
 }
-

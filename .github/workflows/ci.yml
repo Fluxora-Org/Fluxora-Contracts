@@ -139,13 +139,16 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      # continue-on-error: --all-features currently pulls in two incompatible
-      # major versions of rand_core (0.6 via ed25519-dalek, 0.9 via a
-      # soroban-sdk testutils dependency) whose CryptoRng traits don't unify
-      # under -D warnings. cargo build/test (without --all-features) are
-      # unaffected and stay a hard gate below. Needs an upstream version
-      # bump or a narrower feature set in a follow-up.
-      - name: Run Clippy
+      # Production warning gate: this is intentionally narrower than the
+      # all-target workspace pass below. It covers the deployed stream library
+      # without pulling test-only rand_core versions through dev-dependencies.
+      # No continue-on-error: every rustc/Clippy warning on this path is fatal.
+      - name: Enforce warning-free stream library
+        run: cargo clippy -p fluxora_stream --lib -- -D warnings
+
+      # The wider workspace/test-target pass remains advisory while test-only
+      # dependency and legacy-target warnings are cleaned up independently.
+      - name: Run workspace Clippy (advisory)
         run: cargo clippy --all-targets -- -D warnings
         continue-on-error: true
 
@@ -249,6 +252,81 @@ jobs:
             target/wasm32-unknown-unknown/release/fluxora_stream.optimized.wasm
           retention-days: 30
           if-no-files-found: warn
+
+  wasm-size-budget:
+    name: WASM Size Budget
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.94.1
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Verify Rust toolchain version
+        run: python3 script/verify_rust_version.py
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-wasm-size-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-wasm-size-
+
+      # docs/gas.md documents the budget check against all three workspace
+      # contracts, so all three must actually be built here (the `build` job
+      # above only produces fluxora_stream, which is what it needs for the
+      # reproducibility/checksum pipeline).
+      - name: Build all contracts (release, wasm32)
+        run: cargo build --release --workspace --target wasm32-unknown-unknown
+
+      - name: Install Stellar CLI (pinned)
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          ARCHIVE="stellar-cli-${STELLAR_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          URL="https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/${ARCHIVE}"
+          curl -sSfL "$URL" -o "$ARCHIVE"
+          tar -xzf "$ARCHIVE"
+          mv stellar "$HOME/.local/bin/stellar"
+          chmod +x "$HOME/.local/bin/stellar"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          stellar --version
+
+      # Best-effort: optimized budgets are informational only (see below),
+      # so a failure here must not fail the job.
+      - name: Optimize WASM (best-effort)
+        continue-on-error: true
+        run: |
+          for c in fluxora_stream fluxora_factory fluxora_governance; do
+            stellar contract optimize --wasm "target/wasm32-unknown-unknown/release/${c}.wasm" || \
+              echo "::warning::stellar contract optimize failed for ${c} — skipping optimized-size check for it."
+          done
+
+      # Hard gate: the raw release artifact is what actually gets uploaded
+      # to the network, so it's what the budget must be enforced against.
+      - name: Check raw WASM size budgets
+        run: bash script/check-wasm-size.sh
+
+      # Informational only: optimized sizes are reported (bloat/shrink
+      # annotations, step summary) but never fail the job — see
+      # docs/gas.md#optimize-step for why the hard gate stays on raw
+      # artifacts (reproducible without depending on the Stellar CLI).
+      - name: Check optimized WASM size budgets (informational)
+        continue-on-error: true
+        run: bash script/check-wasm-size.sh --optimized
 
   test:
     name: Test

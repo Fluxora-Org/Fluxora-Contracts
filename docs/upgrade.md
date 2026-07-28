@@ -563,3 +563,14 @@ make a build reproducible. The full list is documented in
 | Build profile is `--release` + `wasm32-unknown-unknown` | CI `build` job `cargo build` invocation |
 | No extra feature flags in WASM build | `testutils` feature excluded from WASM build step |
 | `Cargo.lock` committed and unchanged | CI `build` job "Verify Cargo.lock" step + `cargo_lock_determinism` tests |
+
+---
+
+## 6. Compile-Time Warning Stabilization & Module Hygiene
+
+To ensure clean, reproducible builds and prevent subtle behavioral shifts during upgrades:
+
+1. **Zero Compiler Warnings Invariant**: Every contract crate (`fluxora_stream`, `fluxora_factory`, `fluxora_governance`) must compile without unused imports, duplicate symbols, or redundant declarations.
+2. **Explicit Module Hygiene**: Top-level and inner module `use` statements must avoid duplicate symbol re-exports. `pub use storage::*;` re-exports storage helpers; duplicate imports within submodules must not be introduced.
+3. **Upgrade & Retry Determinism**: Compile-time warning reduction preserves exact storage layout discriminants (0..=35), gas bounds, and event topic/payload contracts. All state transitions, reads, and retry operations remain strictly deterministic across versions and retries.
+

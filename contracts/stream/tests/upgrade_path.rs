@@ -208,8 +208,14 @@ fn test_version_idempotent_after_multiple_reads() {
     let v2 = ctx.client.version();
     let v3 = ctx.client.version();
 
-    assert_eq!(v1, v2, "version() must return the same value on repeated calls");
-    assert_eq!(v2, v3, "version() must return the same value on repeated calls");
+    assert_eq!(
+        v1, v2,
+        "version() must return the same value on repeated calls"
+    );
+    assert_eq!(
+        v2, v3,
+        "version() must return the same value on repeated calls"
+    );
     assert_eq!(v1, fluxora_stream::CONTRACT_VERSION);
 }
 

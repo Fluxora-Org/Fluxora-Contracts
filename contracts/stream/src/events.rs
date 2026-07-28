@@ -8,7 +8,6 @@
 //! its corresponding event in `lib.rs` and `storage.rs`.
 
 use crate::types::StreamDecommissioned;
-use crate::*;
 use crate::types::StreamDecommissioned;
 use crate::*;
 use soroban_sdk::{symbol_short, Address, Env};

@@ -6,8 +6,6 @@
 //!
 //! See `docs/storage.md` for the full module map and TTL policy.
 
-#![allow(clippy::too_many_arguments)]
-
 use soroban_sdk::{contracttype, Address, Map};
 
 use crate::{StreamKind, StreamStatus};
@@ -16,7 +14,7 @@ use crate::{StreamKind, StreamStatus};
 // ---------------------------------------------------------------------------
 
 /// Maximum number of recipients allowed in a single pooled stream.
-pub const MAX_POOL_RECIPIENTS: u32 = 100;
+pub const MAX_POOL_RECIPIENTS: u32 = 20;
 
 /// Global configuration for the Fluxora protocol.
 #[contracttype]
@@ -503,6 +501,9 @@ pub struct Stream {
     pub metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
     /// Optional compliance witness authorized to cancel via signed attestation.
     pub witness: Option<Address>,
+    /// Whether this stream is a pooled multi-recipient stream.
+    /// `None` / `Some(false)` = normal stream; `Some(true)` = pooled stream.
+    pub is_pooled: Option<bool>,
     /// Ledger sequence number of the last rate change (or creation).
     /// Used to enforce MIN_RATE_INTERVAL_LEDGERS cooldown.
     pub last_rate_change_ledger: u32,
