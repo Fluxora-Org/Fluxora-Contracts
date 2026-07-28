@@ -1088,11 +1088,15 @@ with QuorumNotReached — the timelock is never silently re-opened.
 
 ## Property-Based Tests
 
-`contracts/stream/tests/governance_proptest.rs` contains a proptest-driven
-test suite that randomises signer-set sizes, approval orderings, and time
-advances to assert core safety invariants that example-based tests can miss.
+Two proptest suites guard governance correctness:
 
-### Invariants
+- `contracts/governance/tests/signer_index_proptest.rs` — tests the signer-list /
+  signer-index agreement invariant (see [Signer-Index Invariant](#signer-index-invariant)
+  below).
+- `contracts/stream/tests/governance_proptest.rs` — tests proposal lifecycle
+  invariants (quorum, timelock, execution guards).
+
+### Governance lifecycle invariants
 
 | # | Invariant | Assertion |
 |---|-----------|-----------|
@@ -1139,3 +1143,55 @@ automatically replayed on every CI run.
 To reproduce a specific failure, copy the failing seed from the test output
 into `proptest-regressions/governance_proptest.rs.txt` or pass it via
 `PROPTEST_SEED`.
+
+### Signer-Index Invariant
+
+The governance contract maintains two parallel data structures for the
+registered co-signer set:
+
+| Structure | Type | Purpose |
+|-----------|------|---------|
+| `Signers` | `Vec<Address>` (instance) | Ordered list for iteration and quorum counting |
+| `SignerIndex` | `Map<Address, bool>` (instance) | O(1) membership index for duplicate-approval detection |
+
+#### Invariant
+
+After every `add_signer` / `remove_signer` mutation:
+
+1. **List/index agreement** — every address in `get_signers()` is present in
+   `SignerIndex`, and no address outside `get_signers()` appears in the index.
+2. **Duplicate-free list** — `get_signers()` never contains the same address
+   more than once.
+3. **Quorum safety** — `get_signers().len() >= threshold` always holds (or the
+   triggering operation returned `QuorumWouldBreak`).
+
+A desync between the two structures would break duplicate-approval detection:
+an address absent from `SignerIndex` could approve multiple times, allowing a
+proposal to pass with fewer unique signers than the threshold requires.
+
+#### How to run
+
+```bash
+# Run the full signer-index proptest (256 cases per property):
+cargo test --test signer_index_proptest --package fluxora_governance
+
+# Run a single property:
+cargo test --test signer_index_proptest prop_add_duplicate_always_rejected
+
+# Run pinned regression tests:
+cargo test --test signer_index_proptest regression_
+```
+
+#### Regression cases
+
+`contracts/governance/tests/signer_index_proptest.rs` contains explicit unit
+tests for each pinned regression seed in
+`signer_index_proptest.proptest-regressions`:
+
+| Seed | Property | Shrink | What it caught |
+|------|----------|--------|----------------|
+| `5e6b3729` | `prop_add_remove_same_address_maintains_consistency` | `n_signers=2, threshold=1, rounds=15` | Budget exhaustion under long add/remove sequences (fixed by `budget.reset_unlimited()`) |
+| `f6b317e9` | `prop_signer_list_index_invariants` | `init_count=2, threshold=1, 14-op sequence` | Edge case in `DuplicateSigner` vs `TooManySigners` prioritisation |
+
+These tests are always run during CI so that a previously-fixed bug cannot
+silently regress if the proptest seed or configuration changes.

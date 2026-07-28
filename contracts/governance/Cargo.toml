@@ -57,4 +57,4 @@ test = true
 [[test]]
 name = "signer_index_proptest"
 path = "tests/signer_index_proptest.rs"
-test = false
+test = true
