@@ -1,0 +1,31 @@
+diff --git a/script/README.md b/script/README.md
+index d4d2944..3aba3e1 100644
+--- a/script/README.md
++++ b/script/README.md
+@@ -30,7 +30,7 @@ Implementation is scaffolded; storage, token transfers, and events are left for
+ fluxora-contracts/
+   Cargo.toml                        # workspace
+   .env.example                      # env var template (copy → .env, never commit)
+-  scripts/
++  script/
+     deploy-testnet.sh               # ← build + deploy + init script (see below)
+   contracts/
+     stream/
+@@ -113,7 +113,7 @@ cp .env.example .env
+ 
+ ```bash
+ source .env
+-bash scripts/deploy-testnet.sh
++bash script/deploy-testnet.sh
+ ```
+ 
+ The script will:
+@@ -136,7 +136,7 @@ The script stores the deployed WASM ID in `.wasm_id` and the contract ID in `.co
+ ### 4. Skip init (if already initialised)
+ 
+ ```bash
+-SKIP_INIT=1 bash scripts/deploy-testnet.sh
++SKIP_INIT=1 bash script/deploy-testnet.sh
+ ```
+ 
+ ### 5. Invoke contract methods after deploy

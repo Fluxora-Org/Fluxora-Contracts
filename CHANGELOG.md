@@ -1,5 +1,7 @@
 # Changelog
 
+
+
 All notable changes to Fluxora Contracts will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
@@ -17,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bumped `CONTRACT_VERSION` to `5` due to breaking ABI changes in error discriminants.
 
 ### Fixed
+- Stabilize storage key compatibility and migration safety.
 - Assigned unique `u32` discriminants to all `ContractError` variants to resolve the collision on code 23.
 - Declared previously missing error variants: `ClockRegression`, `WithdrawalTooFrequent`, `UnsupportedStreamKind`, `KeeperGracePeriodNotElapsed`, `MetadataTooLarge`, `PauseCooldownActive`, and `RateCapExceeded`.
 
