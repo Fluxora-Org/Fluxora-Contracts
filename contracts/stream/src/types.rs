@@ -65,8 +65,9 @@ pub struct StreamCreated {
     pub start_time: u64,
     pub cliff_time: u64,
     pub end_time: u64,
-    /// Optional withdrawal threshold (raw units). Withdrawals below this
-    /// amount are skipped unless they are the final drain or the stream is terminal.
+    /// Optional withdrawal threshold (raw units) utilized by threshold monitors.
+    /// Withdrawals below this amount are skipped unless they are the final drain 
+    /// or the stream is terminal. Used to prevent dust sweep spam.
     pub withdraw_dust_threshold: i128,
     /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
     /// `None` when no memo was supplied at creation time.
@@ -102,7 +103,8 @@ pub struct StreamCloned {
     pub cliff_time: u64,
     /// End time of the new stream.
     pub end_time: u64,
-    /// Withdrawal threshold inherited from the source stream.
+    /// Withdrawal threshold inherited from the source stream, 
+    /// ensuring threshold monitors continue to respect the same boundary.
     pub withdraw_dust_threshold: i128,
 }
 
@@ -444,6 +446,17 @@ pub struct Stream {
     pub checkpointed_at: u64,
     /// Minimum withdrawal amount in raw token units before a non-terminal
     /// payout is skipped (returns `0`, no transfer).
+    ///
+    /// ## Threshold Monitor Behavior
+    /// This threshold dictates when indexers and external bot monitors should trigger a `batch_withdraw_to`
+    /// sweep. It affects the relevant state model by preserving CPU/gas and preventing dust withdrawal spam.
+    ///
+    /// ## Edge Cases & State Model
+    /// - **Storage/Gas**: Prevents storage state growth and gas exhaustion by rejecting micro-withdrawals.
+    /// - **Upgrade/Compat**: `withdraw_dust_threshold` defaults to `0` (or `None` in `CreateStreamParams`)
+    ///   for legacy v1 streams to guarantee backward compatibility during contract upgrades.
+    /// - **Terminal Streams**: This threshold is intentionally bypassed if the stream reaches a terminal state
+    ///   (`Completed`, `Cancelled`) or if it's the final drain.
     pub withdraw_dust_threshold: i128,
     /// Optional bounded memo for indexer correlation.
     pub memo: Option<soroban_sdk::Bytes>,
