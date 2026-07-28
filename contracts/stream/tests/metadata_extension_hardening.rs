@@ -1,5 +1,3 @@
-extern crate std;
-
 //! Hardened metadata extension regression suite — issue #1292.
 //!
 //! This file complements `contracts/stream/tests/metadata_extension.rs` with
@@ -111,7 +109,10 @@ impl<'a> Ctx<'a> {
     fn metadata_fixed(&self, count: u32) -> Map<Bytes, Bytes> {
         let mut m: Map<Bytes, Bytes> = Map::new(&self.env);
         for i in 0..count {
-            m.set(self.key(&std::format!("k{}", i)), self.val(&std::format!("v{}", i)));
+            m.set(
+                self.key(&std::format!("k{}", i)),
+                self.val(&std::format!("v{}", i)),
+            );
         }
         m
     }
@@ -449,14 +450,23 @@ fn test_create_stream_offer_metadata_valid_round_trips() {
     let stream_id = ctx.client().accept_stream_offer(&ctx.recipient, &offer_id);
 
     let got = ctx.client().get_stream_metadata(&stream_id).unwrap();
-    assert_eq!(got.len(), 4, "stream must have 4 metadata entries after accept");
+    assert_eq!(
+        got.len(),
+        4,
+        "stream must have 4 metadata entries after accept"
+    );
 
     // Cross-check: key/value contents match.
     for i in 0u8..4u8 {
         let key_str = std::format!("key{:05}", i);
         let expected_value = Bytes::from_slice(&ctx.env, &vec![i; 120]);
-        let actual = got.get(Bytes::from_slice(&ctx.env, key_str.as_bytes())).unwrap();
-        assert_eq!(actual, expected_value, "metadata entry contents must survive offer→accept");
+        let actual = got
+            .get(Bytes::from_slice(&ctx.env, key_str.as_bytes()))
+            .unwrap();
+        assert_eq!(
+            actual, expected_value,
+            "metadata entry contents must survive offer→accept"
+        );
     }
 }
 
@@ -486,7 +496,11 @@ fn test_metadata_at_max_survives_pause_resume_cycle() {
     let stream_id = ctx.create_with_memo_and_metadata(None, Some(meta));
 
     // Initial size baseline.
-    let initial_size = ctx.client().get_stream_state(&stream_id).to_xdr(&ctx.env).len();
+    let initial_size = ctx
+        .client()
+        .get_stream_state(&stream_id)
+        .to_xdr(&ctx.env)
+        .len();
     assert!(
         initial_size <= MAX_STREAM_ENTRY_BYTES,
         "metadata-full entry ({} bytes) exceeds ceiling ({}) before any operation",
@@ -498,7 +512,11 @@ fn test_metadata_at_max_survives_pause_resume_cycle() {
     ctx.env.ledger().with_mut(|l| l.sequence_number += 17);
     ctx.client()
         .pause_stream(&stream_id, &fluxora_stream::PauseReason::Operational);
-    let after_pause = ctx.client().get_stream_state(&stream_id).to_xdr(&ctx.env).len();
+    let after_pause = ctx
+        .client()
+        .get_stream_state(&stream_id)
+        .to_xdr(&ctx.env)
+        .len();
     assert!(
         after_pause <= MAX_STREAM_ENTRY_BYTES,
         "pause must not inflate entry size (was {} bytes, now {} bytes)",
@@ -509,7 +527,11 @@ fn test_metadata_at_max_survives_pause_resume_cycle() {
     // Resume.
     ctx.env.ledger().with_mut(|l| l.sequence_number += 17);
     ctx.client().resume_stream(&stream_id);
-    let after_resume = ctx.client().get_stream_state(&stream_id).to_xdr(&ctx.env).len();
+    let after_resume = ctx
+        .client()
+        .get_stream_state(&stream_id)
+        .to_xdr(&ctx.env)
+        .len();
     assert!(
         after_resume <= MAX_STREAM_ENTRY_BYTES,
         "resume must not inflate entry size (was {} bytes, now {} bytes)",
@@ -596,7 +618,10 @@ fn test_legacy_none_metadata_unchanged_after_re_read() {
     // Multiple reads, across calls — should always be None.
     for _ in 0..5 {
         let m = ctx.client().get_stream_metadata(&stream_id);
-        assert!(m.is_none(), "legacy None metadata must remain None across reads");
+        assert!(
+            m.is_none(),
+            "legacy None metadata must remain None across reads"
+        );
         assert!(
             ctx.client().get_stream_state(&stream_id).metadata.is_none(),
             "state-layer metadata must remain None across reads"
@@ -614,14 +639,21 @@ fn test_legacy_none_metadata_unchanged_after_re_read() {
 #[test]
 fn test_metadata_constants_are_pinned_at_current_values() {
     assert_eq!(MAX_METADATA_KEYS, 8_u32, "MAX_METADATA_KEYS pin changed");
-    assert_eq!(MAX_METADATA_BYTES, 512_u32, "MAX_METADATA_BYTES pin changed");
-    assert_eq!(MAX_METADATA_KEY_BYTES, 32_u32, "MAX_METADATA_KEY_BYTES pin changed");
+    assert_eq!(
+        MAX_METADATA_BYTES, 512_u32,
+        "MAX_METADATA_BYTES pin changed"
+    );
+    assert_eq!(
+        MAX_METADATA_KEY_BYTES, 32_u32,
+        "MAX_METADATA_KEY_BYTES pin changed"
+    );
     assert_eq!(
         MAX_METADATA_VALUE_BYTES, 128_u32,
         "MAX_METADATA_VALUE_BYTES pin changed"
     );
     assert!(
-        MAX_METADATA_KEYS as u32 * (MAX_METADATA_KEY_BYTES + MAX_METADATA_VALUE_BYTES) > MAX_METADATA_BYTES,
+        MAX_METADATA_KEYS as u32 * (MAX_METADATA_KEY_BYTES + MAX_METADATA_VALUE_BYTES)
+            > MAX_METADATA_BYTES,
         "MAX_METADATA_BYTES is no longer the binding aggregate cap (per-entry max > aggregate max)"
     );
 }
