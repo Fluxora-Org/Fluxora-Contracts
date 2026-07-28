@@ -3,6 +3,7 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any, Dict
 
 BULK_BATCH_BASELINE_SIZES = ("1", "5", "10", "20")
@@ -11,123 +12,237 @@ REQUIRED_BULK_BASELINES = {
     "bulk_resume_streams_as_admin": BULK_BATCH_BASELINE_SIZES,
 }
 
+RELEASE_HARDENING_START = "<!-- RELEASE_HARDENING_COVERAGE_START -->"
+RELEASE_HARDENING_END = "<!-- RELEASE_HARDENING_COVERAGE_END -->"
+REQUIRED_RELEASE_HARDENING_REFERENCES = {
+    "Storage": (
+        "contracts/stream/tests/storage_invariants_edge_cases.rs",
+        "contracts/stream/tests/storage_key_compat.rs",
+        "contracts/stream/tests/security_invariants.rs",
+    ),
+    "Gas": (
+        "contracts/stream/tests/gas_regression.rs",
+        "tests/test_gas_validation.py",
+        "script/check-wasm-size.sh",
+    ),
+    "Upgrade": (
+        "contracts/stream/tests/upgrade_path.rs",
+        "contracts/stream/tests/storage_key_compat.rs",
+    ),
+    "Compatibility": (
+        "contracts/stream/tests/storage_key_compat.rs",
+        "contracts/stream/tests/security_invariants.rs",
+        "contracts/stream/tests/event_snapshots_suite.rs",
+    ),
+}
+
 
 def build_cargo_test_env() -> Dict[str, str]:
-    """Return subprocess env with ~/.cargo/bin prepended to PATH."""
+    """Return the inherited environment with ~/.cargo/bin prepended to PATH."""
     home = os.environ.get("HOME")
     if not home:
         raise RuntimeError(
             "HOME is not set; cannot prepend ~/.cargo/bin to PATH for cargo. "
             "Set HOME in the environment or ensure cargo is on PATH."
         )
-    inherited_path = os.environ.get("PATH", "")
-    return {"PATH": f"{home}/.cargo/bin:{inherited_path}"}
+    env = os.environ.copy()
+    env["PATH"] = f"{home}/.cargo/bin:{env.get('PATH', '')}"
+    return env
+
 
 def extract_baselines(file_path: str) -> Dict[str, Any]:
-    with open(file_path, 'r') as f:
-        content = f.read()
-        start_marker = '<!-- GAS_BASELINE_START -->'
-        end_marker = '<!-- GAS_BASELINE_END -->'
-        start = content.find(start_marker)
-        end = content.find(end_marker)
-        if start == -1 or end == -1 or end <= start:
-            raise ValueError("Could not find gas baseline block in docs/gas.md")
-        block = content[start + len(start_marker):end].strip()
-        if not block.startswith('{'):
-            raise ValueError("Could not find gas baseline block in docs/gas.md")
-        return json.loads(block)
+    with open(file_path, "r", encoding="utf-8") as file:
+        content = file.read()
+    start_marker = "<!-- GAS_BASELINE_START -->"
+    end_marker = "<!-- GAS_BASELINE_END -->"
+    start = content.find(start_marker)
+    end = content.find(end_marker)
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError("Could not find gas baseline block in docs/gas.md")
+    block = content[start + len(start_marker) : end].strip()
+    if not block.startswith("{"):
+        raise ValueError("Could not find gas baseline block in docs/gas.md")
+    baselines = json.loads(block)
+    if not isinstance(baselines, dict):
+        raise ValueError("Gas baseline block must contain a JSON object")
+    return baselines
+
 
 def validate_required_baselines(baselines: Dict[str, Any]) -> None:
-    """Ensure CI has every required bulk batch baseline before tests run."""
+    """Ensure every legacy bulk-batch size has a documented baseline."""
     missing = []
-    for func, sizes in REQUIRED_BULK_BASELINES.items():
-        raw = baselines.get(func)
+    for function, sizes in REQUIRED_BULK_BASELINES.items():
+        raw = baselines.get(function)
         if not isinstance(raw, dict):
-            missing.append(f"{func}: all")
+            missing.append(f"{function}: all")
             continue
         for size in sizes:
             if size not in raw:
-                missing.append(f"{func}: {size}")
+                missing.append(f"{function}: {size}")
 
     if missing:
-        joined = ", ".join(missing)
-        raise ValueError(f"Missing required gas baselines: {joined}")
+        raise ValueError(f"Missing required gas baselines: {', '.join(missing)}")
+
+
+def extract_release_hardening_coverage(file_path: str) -> str:
+    """Extract the machine-guarded release-hardening coverage matrix."""
+    content = Path(file_path).read_text(encoding="utf-8")
+    start = content.find(RELEASE_HARDENING_START)
+    end = content.find(RELEASE_HARDENING_END)
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError("Could not find release-hardening coverage block in docs/gas.md")
+    return content[start + len(RELEASE_HARDENING_START) : end].strip()
+
+
+def validate_release_hardening_coverage(
+    file_path: str, repo_root: str | Path | None = None
+) -> None:
+    """Guard the storage/gas/upgrade/compatibility coverage map against drift."""
+    section = extract_release_hardening_coverage(file_path)
+    root = (
+        Path(repo_root)
+        if repo_root is not None
+        else Path(file_path).resolve().parent.parent
+    )
+
+    missing_dimensions = []
+    missing_references = []
+    missing_files = []
+    for dimension, references in REQUIRED_RELEASE_HARDENING_REFERENCES.items():
+        if f"**{dimension}**" not in section:
+            missing_dimensions.append(dimension)
+        for reference in references:
+            if f"`{reference}`" not in section:
+                missing_references.append(f"{dimension}: {reference}")
+            if not (root / reference).is_file():
+                missing_files.append(reference)
+
+    errors = []
+    if missing_dimensions:
+        errors.append("missing dimensions: " + ", ".join(missing_dimensions))
+    if missing_references:
+        errors.append("missing test references: " + ", ".join(missing_references))
+    if missing_files:
+        errors.append("referenced files do not exist: " + ", ".join(sorted(set(missing_files))))
+    if errors:
+        raise ValueError("Incomplete release-hardening coverage: " + "; ".join(errors))
+
 
 def run_tests() -> str:
+    """Run the metered Rust suite and return stdout, failing on build/test errors."""
     print("Running gas regression tests...")
     result = subprocess.run(
-        ["cargo", "test", "-p", "fluxora_stream", "--test", "gas_regression", "--", "--nocapture"],
+        [
+            "cargo",
+            "test",
+            "-p",
+            "fluxora_stream",
+            "--test",
+            "gas_regression",
+            "--",
+            "--nocapture",
+        ],
         capture_output=True,
         text=True,
         env=build_cargo_test_env(),
     )
-    # We ignore the return code here because the script handles the actual validation
+    if result.returncode != 0:
+        details = (result.stderr or result.stdout).strip()
+        if len(details) > 4000:
+            details = details[-4000:]
+        raise RuntimeError(
+            f"gas regression test command failed with exit code {result.returncode}"
+            + (f":\n{details}" if details else "")
+        )
     return result.stdout
 
+
 def parse_measurements(output: str) -> Dict[str, Dict[str, int]]:
-    measurements = {}
-    # Pattern: GAS_MEASUREMENT: <function>: <size|single>: <cost>
-    pattern = re.compile(r'GAS_MEASUREMENT: ([^:]+): ([^:]+): (\d+)')
+    measurements: Dict[str, Dict[str, int]] = {}
+    pattern = re.compile(r"GAS_MEASUREMENT: ([^:]+): ([^:]+): (\d+)")
     for line in output.splitlines():
         match = pattern.search(line)
         if match:
-            func, size, cost = match.groups()
-            if func not in measurements:
-                measurements[func] = {}
-            measurements[func][size] = int(cost)
+            function, size, cost = match.groups()
+            measurements.setdefault(function, {})[size] = int(cost)
     return measurements
 
-def main():
+
+def main() -> None:
     try:
-        baselines = extract_baselines('docs/gas.md')
-        validate_required_baselines(baselines)
+        gas_doc = "docs/gas.md"
+        baselines = extract_baselines(gas_doc)
+        validate_release_hardening_coverage(gas_doc)
         output = run_tests()
         measured = parse_measurements(output)
 
         if not measured:
-            print("Error: No gas measurements found in test output.")
-            sys.exit(1)
+            raise ValueError("No gas measurements found in test output")
 
         regressions = []
+        missing_baselines = []
+        invalid_baselines = []
         print("\nGas Cost Report:")
-        print(f"{'Function':<20} | {'Size':<10} | {'Baseline':<12} | {'Measured':<12} | {'Diff %':<10} | {'Status'}")
-        print("-" * 80)
+        print(
+            f"{'Function':<38} | {'Size':<10} | {'Baseline':<12} | "
+            f"{'Measured':<12} | {'Diff %':<10} | Status"
+        )
+        print("-" * 110)
 
-        for func, sizes in measured.items():
+        for function, sizes in measured.items():
             for size, cost in sizes.items():
-                # Get baseline value.
-                # Baseline entries are either:
-                #   - a nested dict  {"variant": value, ...}  (e.g. batch_withdraw, keeper_cancel)
-                #   - a flat integer value                     (e.g. create_stream, withdraw)
-                raw = baselines.get(func)
-                if isinstance(raw, dict):
-                    baseline_val = raw.get(size)
-                else:
-                    baseline_val = raw
+                raw = baselines.get(function)
+                baseline = raw.get(size) if isinstance(raw, dict) else raw
 
-                if baseline_val is None:
-                    print(f"{func:<20} | {size:<10} | {'N/A':<12} | {cost:<12} | {'N/A':<10} | MISSING")
+                if baseline is None:
+                    missing_baselines.append((function, size))
+                    print(
+                        f"{function:<38} | {size:<10} | {'N/A':<12} | "
+                        f"{cost:<12} | {'N/A':<10} | MISSING"
+                    )
+                    continue
+                if not isinstance(baseline, int) or isinstance(baseline, bool) or baseline <= 0:
+                    invalid_baselines.append((function, size, baseline))
+                    print(
+                        f"{function:<38} | {size:<10} | {str(baseline):<12} | "
+                        f"{cost:<12} | {'N/A':<10} | INVALID"
+                    )
                     continue
 
-                diff = (cost - baseline_val) / baseline_val if baseline_val != 0 else 0
-                status = "FAIL" if diff > 0.05 else "PASS"
-                if status == "FAIL":
-                    regressions.append((func, size, diff))
+                diff = (cost - baseline) / baseline
+                # Preserve the documented strict boundary without float rounding:
+                # exactly +5% passes; one instruction over the boundary fails.
+                failed = cost * 100 > baseline * 105
+                status = "FAIL" if failed else "PASS"
+                if failed:
+                    regressions.append((function, size, diff))
+                print(
+                    f"{function:<38} | {size:<10} | {baseline:<12} | "
+                    f"{cost:<12} | {diff:>8.2%} | {status}"
+                )
 
-                print(f"{func:<20} | {size:<10} | {baseline_val:<12} | {cost:<12} | {diff:>8.2%} | {status}")
-
+        if missing_baselines:
+            print("\nFAILED: Measurements without a documented gas baseline:")
+            for function, size in missing_baselines:
+                print(f"- {function} ({size})")
+        if invalid_baselines:
+            print("\nFAILED: Gas baselines must be positive integers:")
+            for function, size, baseline in invalid_baselines:
+                print(f"- {function} ({size}): {baseline!r}")
         if regressions:
-            print("\nFAILED: Gas regression detected (> 5% increase) in the following functions:")
-            for func, size, diff in regressions:
-                print(f"- {func} ({size}): {diff:.2%}")
-            sys.exit(1)
-        else:
-            print("\nSUCCESS: No gas regressions detected.")
-            sys.exit(0)
+            print("\nFAILED: Gas regression detected (> 5% increase):")
+            for function, size, diff in regressions:
+                print(f"- {function} ({size}): {diff:.2%}")
 
-    except Exception as e:
-        print(f"Error during validation: {e}")
-        sys.exit(1)
+        if missing_baselines or invalid_baselines or regressions:
+            return sys.exit(1)
+
+        print("\nSUCCESS: Every measurement has a valid baseline and no gas regression was detected.")
+        return sys.exit(0)
+    except Exception as error:
+        print(f"Error during validation: {error}")
+        return sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

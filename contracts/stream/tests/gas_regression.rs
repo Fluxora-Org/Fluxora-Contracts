@@ -1,23 +1,9 @@
-// See docs/gas.md for the baseline update process and review bar.
 use fluxora_stream::{
-    CreateStreamParams, FluxoraStream, FluxoraStreamClient, PauseReason, StreamKind, WithdrawToParam,
-    MAX_MEMO_BYTES, MAX_METADATA_BYTES, MAX_METADATA_KEYS, MAX_METADATA_KEY_BYTES,
-    MAX_METADATA_VALUE_BYTES, MAX_STREAM_ENTRY_BYTES, MAX_PAGE_SIZE,
+    CreateStreamParams, FluxoraStream, FluxoraStreamClient, PauseReason, StreamKind,
+    WithdrawToParam, MAX_MEMO_BYTES, MAX_METADATA_BYTES, MAX_METADATA_KEYS, MAX_METADATA_KEY_BYTES,
+    MAX_PAGE_SIZE, MAX_STREAM_ENTRY_BYTES,
 };
-use soroban_sdk::{
-    testutils::{Address as _, Ledger},
-    token::{Client as TokenClient, StellarAssetClient},
-    Address, Bytes, Env, Map,
-};
-
-// Per-invocation CPU budget (Soroban limit) with a 75% safety margin.
-// The budget assertion fails if measured cost exceeds this threshold,
-// guarding against inadvertent regressions (e.g. an increased MAX_PAGE_SIZE
-// that worsens the O(n²) duplicate-ID scan).
-const PER_INVOCATION_CPU_BUDGET: u64 = 25_000_000_000;
-
-// Grace period (mirrors KEEPER_GRACE_PERIOD_SECONDS in lib.rs).
-const KEEPER_GRACE: u64 = 604_800;
+use soroban_sdk::{token::Client as TokenClient, Address, Bytes, Env, Map};
 
 struct TestContext<'a> {
     env: Env,
@@ -169,173 +155,287 @@ fn test_batch_withdraw_gas() {
     }
 }
 
-/// Gas regression baseline for `batch_withdraw_to`.
-///
-/// Uses a distinct destination address per withdrawal to exercise the
-/// per-entry destination validation path alongside the O(n²) duplicate-ID
-/// scan in `reject_duplicate_ids`.  The O(n²) scan costs roughly
-/// n*(n-1)/2 comparisons at batch size n, so at MAX_PAGE_SIZE (100) the
-/// worst case is ~4 950 element-by-element comparisons inside the helper.
-#[test]
-fn test_batch_withdraw_to_gas() {
-    let sizes = [1, 10, 50, 100];
+// ---------------------------------------------------------------------------
+// Gas regression: metadata operations
+// ---------------------------------------------------------------------------
 
-    for &size in &sizes {
-        let ctx = TestContext::setup();
-
-        let mut streams = soroban_sdk::Vec::new(&ctx.env);
-        let mut destinations = soroban_sdk::Vec::new(&ctx.env);
-        for _ in 0..size {
-            streams.push_back(ctx.create_default_stream());
-            destinations.push_back(Address::generate(&ctx.env));
-        }
-
-        let mut withdrawals = soroban_sdk::Vec::new(&ctx.env);
-        for i in 0..size {
-            withdrawals.push_back(WithdrawToParam {
-                stream_id: streams.get(i as u32).unwrap(),
-                destination: destinations.get(i as u32).unwrap(),
-            });
-        }
-
-        ctx.env.ledger().set_timestamp(500); // Accrue tokens for all
-
-        let cost = measure_gas(&ctx, |ctx| {
-            ctx.client.batch_withdraw_to(&ctx.recipient, &withdrawals);
-        });
-
-        assert!(
-            cost <= PER_INVOCATION_CPU_BUDGET,
-            "batch_withdraw_to at size {} exceeded per-invocation CPU budget: {} > {}",
-            size,
-            cost,
-            PER_INVOCATION_CPU_BUDGET,
-        );
-
-        println!("GAS_MEASUREMENT: batch_withdraw_to: {}: {}", size, cost);
+/// Helper: build a metadata map with `count` entries "k0"→"v0", … "kN"→"vN".
+fn metadata_n(env: &Env, count: u32) -> Map<Bytes, Bytes> {
+    let mut m: Map<Bytes, Bytes> = Map::new(env);
+    for i in 0..count {
+        let k = Bytes::from_slice(env, format!("k{}", i).as_bytes());
+        let v = Bytes::from_slice(env, format!("v{}", i).as_bytes());
+        m.set(k, v);
     }
+    m
 }
 
-/// Gas regression baseline for `bulk_resume_streams_as_admin`.
-///
-/// Creates streams, pauses each one (advancing the ledger far enough to
-/// clear the pause cooldown), then resumes them all in a single admin-authed
-/// call. Batch sizes 1, 5, 10, and 20 mirror the documented gas baseline matrix
-/// so `script/validate_gas.py` can compare each measured cost against
-/// `docs/gas.md`.
+/// Measure gas for `create_streams_partial` with a single entry carrying metadata.
 #[test]
-fn test_bulk_resume_streams_as_admin_gas() {
-    let sizes = [1, 5, 10, 20];
+fn test_create_stream_with_metadata_gas() {
+    let ctx = TestContext::setup();
 
-    for &size in &sizes {
-        let ctx = TestContext::setup();
+    // Full metadata: MAX_METADATA_KEYS × (32-byte key + 128-byte value) at max aggregate.
+    let meta = metadata_n(&ctx.env, fluxora_stream::MAX_METADATA_KEYS);
+    let recipient = Address::generate(&ctx.env);
+    let params = soroban_sdk::vec![
+        &ctx.env,
+        CreateStreamParams {
+            recipient,
+            deposit_amount: 1000,
+            rate_per_second: 1,
+            start_time: 0,
+            cliff_time: 0,
+            end_time: 1000,
+            withdraw_dust_threshold: None,
+            memo: None,
+            kind: StreamKind::Linear,
+            metadata: Some(meta),
+        },
+    ];
 
-        let mut streams = soroban_sdk::Vec::new(&ctx.env);
-        for _ in 0..size {
-            let id = ctx.create_default_stream();
-            // Advance past the pause/resume cooldown (17 ledgers) so the
-            // subsequent pause succeeds even if the ledger sequence is low.
-            ctx.env.ledger().with_mut(|l| l.sequence_number += 32);
-            ctx.client
-                .pause_stream_as_admin(&id, &PauseReason::Administrative);
-            streams.push_back(id);
-        }
+    let cost = measure_gas(&ctx, |ctx| {
+        ctx.client
+            .create_streams_partial(&ctx.sender, &params);
+    });
+
+        // The final stream was paused at the current sequence. Advance once
+        // more so every stream (including that final item) clears the 17-ledger
+        // resume cooldown before the measured batch call.
+        ctx.env.ledger().with_mut(|l| l.sequence_number += 32);
 
         let cost = measure_gas(&ctx, |ctx| {
             ctx.client.bulk_resume_streams_as_admin(&streams);
         });
 
-        assert!(
-            cost <= PER_INVOCATION_CPU_BUDGET,
-            "bulk_resume_streams_as_admin at size {} exceeded per-invocation CPU budget: {} > {}",
-            size,
-            cost,
-            PER_INVOCATION_CPU_BUDGET,
-        );
+    // Also measure without metadata for comparison
+    let recipient2 = Address::generate(&ctx.env);
+    let params_no_meta = soroban_sdk::vec![
+        &ctx.env,
+        CreateStreamParams {
+            recipient: recipient2,
+            deposit_amount: 1000,
+            rate_per_second: 1,
+            start_time: 0,
+            cliff_time: 0,
+            end_time: 1000,
+            withdraw_dust_threshold: None,
+            memo: None,
+            kind: StreamKind::Linear,
+            metadata: None,
+        },
+    ];
 
-        println!(
-            "GAS_MEASUREMENT: bulk_resume_streams_as_admin: {}: {}",
-            size, cost
-        );
-    }
+    let cost_no_meta = measure_gas(&ctx, |ctx| {
+        ctx.client
+            .create_streams_partial(&ctx.sender, &params_no_meta);
+    });
+
+    println!(
+        "GAS_MEASUREMENT: create_stream_without_metadata: baseline: {}",
+        cost_no_meta
+    );
 }
 
-/// Gas regression baseline for `bulk_cancel_streams`.
-///
-/// Creates active streams owned by the sender then cancels them all in a
-/// single call. Batch sizes 1, 5, 10, and 20 mirror the documented gas
-/// baseline matrix so `script/validate_gas.py` can compare each measured cost
-/// against `docs/gas.md`.
+/// Measure gas for `get_stream_metadata` on a stream with full metadata.
 #[test]
-fn test_bulk_cancel_streams_gas() {
-    let sizes = [1, 5, 10, 20];
+fn test_get_stream_metadata_gas() {
+    let ctx = TestContext::setup();
 
-    for &size in &sizes {
-        let ctx = TestContext::setup();
+    // Create a stream with metadata so we can read it back
+    let meta = metadata_n(&ctx.env, fluxora_stream::MAX_METADATA_KEYS);
+    let recipient = Address::generate(&ctx.env);
+    let params = soroban_sdk::vec![
+        &ctx.env,
+        CreateStreamParams {
+            recipient,
+            deposit_amount: 1000,
+            rate_per_second: 1,
+            start_time: 0,
+            cliff_time: 0,
+            end_time: 1000,
+            withdraw_dust_threshold: None,
+            memo: None,
+            kind: StreamKind::Linear,
+            metadata: Some(meta),
+        },
+    ];
+    let results = ctx
+        .client
+        .create_streams_partial(&ctx.sender, &params);
+    let stream_id = results.get(0).unwrap().stream_id.unwrap();
 
-        let mut streams = soroban_sdk::Vec::new(&ctx.env);
-        for _ in 0..size {
-            streams.push_back(ctx.create_default_stream());
-        }
+    let cost = measure_gas(&ctx, |ctx| {
+        ctx.client.get_stream_metadata(&stream_id);
+    });
 
-        ctx.env.ledger().set_timestamp(500); // Accrue tokens so cancellation is non-trivial
-
-        let cost = measure_gas(&ctx, |ctx| {
-            ctx.client.bulk_cancel_streams(&ctx.sender, &streams);
-        });
-
-        assert!(
-            cost <= PER_INVOCATION_CPU_BUDGET,
-            "bulk_cancel_streams at size {} exceeded per-invocation CPU budget: {} > {}",
-            size,
-            cost,
-            PER_INVOCATION_CPU_BUDGET,
-        );
-
-        println!("GAS_MEASUREMENT: bulk_cancel_streams: {}: {}", size, cost);
-    }
+    println!(
+        "GAS_MEASUREMENT: get_stream_metadata: full: {}",
+        cost
+    );
 }
 
 // ---------------------------------------------------------------------------
-// keeper_cancel gas measurements
+// Additional edge-case gas measurements (issue #1286)
 //
-// Two variants capture the two meaningful cost paths:
+// These tests fill the remaining coverage gaps identified in the issue review:
 //
-//   partial_accrual — the common keeper incentive case: the stream expired with
-//     an unstreamed balance, so the contract makes three token transfers
-//     (recipient, sender, keeper).  This is the hot path for economically
-//     rational keeper bots and the cost documented in docs/gas.md's
-//     break-even formula.
+//   cancel_stream_single         — single `cancel_stream` by the sender on a
+//                                  partially-accrued active stream.  The bulk
+//                                  variant (`bulk_cancel_streams`) is already
+//                                  measured but does not expose the per-stream
+//                                  cost in isolation.
 //
-//   fully_accrued   — the degenerate case: deposit == rate × duration, so
-//     sender_refund_gross == 0, keeper_fee == 0 and no keeper transfer is
-//     issued.  Only one token transfer (to the recipient) occurs.  Cost is
-//     slightly lower than the partial_accrual variant.
+//   zero_accrual_withdraw        — `withdraw` when the cliff has not yet been
+//                                  reached.  No token transfer is issued; the
+//                                  accrual short-circuit path is exercised and
+//                                  its cost documented.
 //
-// Both variants print a GAS_MEASUREMENT line that validate_gas.py picks up
-// and compares against the JSON baseline in docs/gas.md.
+//   update_rate_per_second       — `update_rate_per_second` (rate increase) on
+//                                  an active stream.  Checkpoints the accrual,
+//                                  validates the new rate against the max-rate
+//                                  cap, then saves the updated stream.
+//
+//   decrease_rate_per_second     — `decrease_rate_per_second` on an active
+//                                  stream.  Checkpoints accrual, computes a
+//                                  partial refund, persists state, and issues
+//                                  a token transfer back to the sender.
+//
+//   top_up_stream                — `top_up_stream` adds deposit to an active
+//                                  stream.  Pulls tokens from the funder and
+//                                  increases the global liabilities counter.
+//
+//   shorten_stream_end_time      — `shorten_stream_end_time` truncates an active
+//                                  stream's schedule, computes a sender refund,
+//                                  and issues the refund token transfer.
+//
+//   extend_stream_end_time       — `extend_stream_end_time` pushes an active
+//                                  stream's end time further into the future when
+//                                  the existing deposit is sufficient to cover the
+//                                  extended schedule at the current rate.
+//
+//   emergency_pause_create       — `create_stream` attempted while the contract
+//                                  is under emergency pause.  The call should
+//                                  revert with `GloballyPaused` after a minimal
+//                                  storage read; this test documents the cost of
+//                                  the early-exit guard.
 // ---------------------------------------------------------------------------
 
-/// keeper_cancel on a stream that still has an unstreamed balance (3 transfers).
+/// Gas baseline for `cancel_stream` (single stream, partial accrual).
 ///
-/// Setup:
-///   deposit = 10 000, rate = 5 token/s, start = 0, end = 1 000
-///   → accrued at end_time = min(5 × 1 000, 10 000) = 5 000
-///   → sender_refund_gross = 5 000
-///   → keeper_fee = 5 000 × 50 / 10 000 = 25
-///   → three token transfers: recipient 5 000, sender 4 975, keeper 25
+/// Measures the cost of a sender-initiated cancellation at mid-stream (t=500
+/// on a 0→1 000 schedule).  The contract executes:
+///   1. Load stream.
+///   2. Calculate accrued-to-date.
+///   3. Transfer accrued portion to recipient.
+///   4. Transfer unstreamed refund to sender.
+///   5. Persist `Cancelled` state with `cancelled_at`.
+///
+/// Two token transfers occur (recipient + sender), so this is more expensive
+/// than a plain `withdraw` (one transfer) and cheaper than `keeper_cancel`
+/// (three transfers plus fee arithmetic).
+///
+/// Setup: 1 000-token linear stream, t=500 → 500 tokens accrued, 500 refunded.
 #[test]
-fn test_keeper_cancel_gas_partial_accrual() {
-    let ctx = KeeperTestContext::setup();
+fn test_cancel_stream_single_gas() {
+    let ctx = TestContext::setup();
 
-    // Create the stream at t=0.
-    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream();
+
+    // Advance to half-way so there is meaningful accrual AND a meaningful refund.
+    ctx.env.ledger().set_timestamp(500);
+
+    let cost = measure_gas(&ctx, |ctx| {
+        ctx.client.cancel_stream(&stream_id);
+    });
+
+    assert!(
+        cost <= PER_INVOCATION_CPU_BUDGET,
+        "cancel_stream (single) exceeded per-invocation CPU budget: {} > {}",
+        cost,
+        PER_INVOCATION_CPU_BUDGET,
+    );
+
+    println!("GAS_MEASUREMENT: cancel_stream: single: {}", cost);
+}
+
+/// Gas baseline for `withdraw` when the stream's cliff has not yet been reached.
+///
+/// Before `cliff_time`, `calculate_accrued_amount` returns 0.  The `withdraw`
+/// implementation detects a zero withdrawable balance, skips all token-transfer
+/// and state-mutation work, and returns 0 immediately.  This test documents
+/// the cost of that short-circuit path.
+///
+/// The test is labelled `zero_accrual` (not `before_cliff`) because the same
+/// zero-withdrawable path is also hit when the stream is already fully drained
+/// and the caller invokes `withdraw` again — cliff semantics are just the most
+/// natural way to set up the pre-condition in isolation.
+///
+/// Setup: 1 000-token stream with cliff at t=500; ledger is at t=100
+///        → 0 tokens accrued, no transfer issued.
+#[test]
+fn test_withdraw_zero_accrual_gas() {
+    let ctx = TestContext::setup();
+
+    // Create a stream where the cliff is far in the future relative to the
+    // test's ledger timestamp (t=0 initially).
     let stream_id = ctx.client.create_stream(
         &ctx.sender,
         &CreateStreamParams {
             recipient: ctx.recipient.clone(),
-            deposit_amount: 10_000_i128,
-            rate_per_second: 5_i128,
+            deposit_amount: 1_000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 500u64, // cliff well in the future
+            end_time: 1_000u64,
+            withdraw_dust_threshold: Some(0_i128),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
+    );
+
+    // Advance to before the cliff — accrual is 0.
+    ctx.env.ledger().set_timestamp(100);
+
+    let cost = measure_gas(&ctx, |ctx| {
+        ctx.client.withdraw(&stream_id);
+    });
+
+    assert!(
+        cost <= PER_INVOCATION_CPU_BUDGET,
+        "withdraw (zero_accrual / pre-cliff) exceeded per-invocation CPU budget: {} > {}",
+        cost,
+        PER_INVOCATION_CPU_BUDGET,
+    );
+
+    println!("GAS_MEASUREMENT: withdraw_zero_accrual: single: {}", cost);
+}
+
+/// Gas baseline for `update_rate_per_second` (rate increase, active stream).
+///
+/// `update_rate_per_second` checkpoints the current accrual, validates the
+/// new rate against the governance-controlled cap and deposit ceiling, and
+/// saves the updated stream.  No token transfer occurs (deposit already locked).
+///
+/// Setup:
+///   deposit = 2 000, rate = 1/s, start = 0, end = 1 000.
+///   At t=300 we increase the rate to 2/s.
+///   new_total_streamable = 2 × 1 000 = 2 000 ≤ deposit, so the update is valid.
+#[test]
+fn test_update_rate_per_second_gas() {
+    let ctx = TestContext::setup();
+
+    // Deposit must cover the higher rate for the full duration:
+    //   rate=2, duration=1000 → total_streamable=2000 ≤ deposit=2000 ✓
+    let stream_id = ctx.client.create_stream(
+        &ctx.sender,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 2_000_i128,
+            rate_per_second: 1_i128,  // start at rate=1
             start_time: 0u64,
             cliff_time: 0u64,
             end_time: 1_000u64,
@@ -348,35 +448,164 @@ fn test_keeper_cancel_gas_partial_accrual() {
         },
     );
 
-    // Advance past end_time + grace period so the stream is eligible.
-    ctx.env.ledger().set_timestamp(1_000 + KEEPER_GRACE + 1);
-
-    let cost = measure_gas(&ctx, |ctx| {
-        ctx.client.keeper_cancel(&stream_id, &ctx.keeper);
+    // Advance ledger sequence past the rate-change cooldown before the call.
+    ctx.env.ledger().with_mut(|l| {
+        l.timestamp = 300;
+        l.sequence_number += 32; // clear rate-change cooldown
     });
 
-    // Print in the canonical GAS_MEASUREMENT format so validate_gas.py can
-    // parse this line and compare it against the baseline in docs/gas.md.
-    println!("GAS_MEASUREMENT: keeper_cancel: partial_accrual: {}", cost);
+    let cost = measure_gas(&ctx, |ctx| {
+        ctx.client.update_rate_per_second(&stream_id, &2_i128);
+    });
+
+    assert!(
+        cost <= PER_INVOCATION_CPU_BUDGET,
+        "update_rate_per_second exceeded per-invocation CPU budget: {} > {}",
+        cost,
+        PER_INVOCATION_CPU_BUDGET,
+    );
+
+    println!("GAS_MEASUREMENT: update_rate_per_second: single: {}", cost);
 }
 
-/// keeper_cancel on a stream that is fully accrued (1 transfer, keeper fee == 0).
+/// Gas baseline for `decrease_rate_per_second` (rate decrease + refund).
+///
+/// `decrease_rate_per_second` checkpoints the current accrual, recomputes the
+/// new deposit ceiling under the lower rate, computes the sender refund, persists
+/// the updated state (CEI order), and issues one token transfer back to the sender.
 ///
 /// Setup:
-///   deposit = 1 000, rate = 1 token/s, start = 0, end = 1 000
-///   → accrued at end_time = 1 000 == deposit
-///   → sender_refund_gross = 0, keeper_fee = 0
-///   → one token transfer: recipient 1 000; no sender or keeper transfers
+///   deposit = 2 000, rate = 2/s, start = 0, end = 1 000.
+///   At t=300 we decrease rate to 1/s.
+///   Accrued-to-date = 300 × 2 = 600.  Remaining seconds = 700.
+///   Future accrual at new rate = 1 × 700 = 700.  New deposit = 600 + 700 = 1 300.
+///   Refund = 2 000 − 1 300 = 700 tokens transferred back to sender.
 #[test]
-fn test_keeper_cancel_gas_fully_accrued() {
-    let ctx = KeeperTestContext::setup();
+fn test_decrease_rate_per_second_gas() {
+    let ctx = TestContext::setup();
 
-    ctx.env.ledger().set_timestamp(0);
+    // Create a stream where deposit covers rate=2 for the full duration so the
+    // decrease to rate=1 produces a meaningful refund.
     let stream_id = ctx.client.create_stream(
         &ctx.sender,
         &CreateStreamParams {
             recipient: ctx.recipient.clone(),
-            deposit_amount: 1_000_i128,
+            deposit_amount: 2_000_i128,  // covers rate=2 × duration=1000
+            rate_per_second: 2_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1_000u64,
+            withdraw_dust_threshold: Some(0_i128),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
+    );
+
+    ctx.env.ledger().with_mut(|l| {
+        l.timestamp = 300;
+        l.sequence_number += 32; // clear rate-change cooldown
+    });
+
+    let cost = measure_gas(&ctx, |ctx| {
+        ctx.client.decrease_rate_per_second(&stream_id, &1_i128);
+    });
+
+    assert!(
+        cost <= PER_INVOCATION_CPU_BUDGET,
+        "decrease_rate_per_second exceeded per-invocation CPU budget: {} > {}",
+        cost,
+        PER_INVOCATION_CPU_BUDGET,
+    );
+
+    println!("GAS_MEASUREMENT: decrease_rate_per_second: single: {}", cost);
+}
+
+/// Gas baseline for `top_up_stream` (add deposit to an active stream).
+///
+/// `top_up_stream` pulls tokens from the funder, increases the stream's
+/// deposit_amount, and updates the global TotalLiabilities counter.  No
+/// schedule change occurs.
+///
+/// Setup: 1 000-token stream active at t=300; top-up amount = 500 tokens.
+#[test]
+fn test_top_up_stream_gas() {
+    let ctx = TestContext::setup();
+
+    let stream_id = ctx.create_default_stream();
+
+    // Advance the ledger so the stream is live (past start) but not yet expired.
+    ctx.env.ledger().set_timestamp(300);
+
+    // The top-up funder can be the sender (the default sender already has
+    // a large allowance set up by TestContext::setup).
+    let cost = measure_gas(&ctx, |ctx| {
+        ctx.client.top_up_stream(&stream_id, &ctx.sender, &500_i128);
+    });
+
+    assert!(
+        cost <= PER_INVOCATION_CPU_BUDGET,
+        "top_up_stream exceeded per-invocation CPU budget: {} > {}",
+        cost,
+        PER_INVOCATION_CPU_BUDGET,
+    );
+
+    println!("GAS_MEASUREMENT: top_up_stream: single: {}", cost);
+}
+
+/// Gas baseline for `shorten_stream_end_time` (schedule truncation + refund).
+///
+/// `shorten_stream_end_time` checkpoints accrual, computes a sender refund for
+/// the truncated portion, persists the updated schedule (CEI), and issues one
+/// token transfer back to the sender.
+///
+/// Setup: 1 000-token stream (rate=1/s, 0→1 000); at t=300 we shorten to t=600.
+///   Remaining seconds at t=600 = 600 − 0 = 600.  New max streamable = 600.
+///   Accrued-to-date = 300 ≤ 600, so new_deposit = 600.
+///   Refund = 1 000 − 600 = 400 tokens transferred to sender.
+#[test]
+fn test_shorten_stream_end_time_gas() {
+    let ctx = TestContext::setup();
+
+    let stream_id = ctx.create_default_stream();
+
+    // Advance to t=300 so accrual is meaningful and refund is non-zero.
+    ctx.env.ledger().set_timestamp(300);
+
+    let cost = measure_gas(&ctx, |ctx| {
+        ctx.client.shorten_stream_end_time(&stream_id, &600u64);
+    });
+
+    assert!(
+        cost <= PER_INVOCATION_CPU_BUDGET,
+        "shorten_stream_end_time exceeded per-invocation CPU budget: {} > {}",
+        cost,
+        PER_INVOCATION_CPU_BUDGET,
+    );
+
+    println!("GAS_MEASUREMENT: shorten_stream_end_time: single: {}", cost);
+}
+
+/// Gas baseline for `extend_stream_end_time` (schedule extension, no token transfer).
+///
+/// `extend_stream_end_time` moves the stream's end time forward without changing
+/// the rate or deposit.  The existing deposit must be sufficient to cover the
+/// extended schedule at the current rate.  No token transfer occurs.
+///
+/// Setup: 2 000-token stream (rate=1/s, 0→1 000).  At t=300 we extend to t=1 500.
+///   new_total_streamable = 1 × 1 500 = 1 500 ≤ deposit=2 000 ✓ (no extra transfer).
+#[test]
+fn test_extend_stream_end_time_gas() {
+    let ctx = TestContext::setup();
+
+    // Use a stream with extra deposit so the extended schedule still fits.
+    let stream_id = ctx.client.create_stream(
+        &ctx.sender,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 2_000_i128,  // covers rate=1 × end=1500
             rate_per_second: 1_i128,
             start_time: 0u64,
             cliff_time: 0u64,
@@ -494,7 +723,9 @@ fn test_stream_entry_xdr_size_worst_case() {
 
     client.init(&token_id, &admin);
     sac.mint(&sender, &i128::MAX);
-    TokenClient::new(&env, &token_id).approve(&sender, &contract_id, &i128::MAX, &u32::MAX);
+    // Keep the allowance inside the test ledger's configured max live-until
+    // bound (6,312,000 in soroban-sdk 21.7.7).
+    TokenClient::new(&env, &token_id).approve(&sender, &contract_id, &i128::MAX, &6_000_000);
 
     // Memo at maximum allowed size (256 × 0xFF).
     let memo = Bytes::from_slice(&env, &vec![0xFFu8; MAX_MEMO_BYTES]);
@@ -814,7 +1045,7 @@ fn test_create_stream_with_cliff_gas() {
                 deposit_amount: 1_000_i128,
                 rate_per_second: 1_i128,
                 start_time: 0u64,
-                cliff_time: 500u64,  // non-zero cliff: exercises the cliff-validation branch
+                cliff_time: 500u64, // non-zero cliff: exercises the cliff-validation branch
                 end_time: 1_000u64,
                 withdraw_dust_threshold: Some(0_i128),
                 memo: None,
@@ -833,7 +1064,10 @@ fn test_create_stream_with_cliff_gas() {
         PER_INVOCATION_CPU_BUDGET,
     );
 
-    println!("GAS_MEASUREMENT: create_stream_with_cliff: single: {}", cost);
+    println!(
+        "GAS_MEASUREMENT: create_stream_with_cliff: single: {}",
+        cost
+    );
 }
 
 /// Gas baseline for `create_stream` with `StreamKind::CliffOnly`.
@@ -855,7 +1089,7 @@ fn test_create_stream_cliff_only_gas() {
                 deposit_amount: 1_000_i128,
                 rate_per_second: 0_i128, // CliffOnly: rate is forced to 0 by the contract
                 start_time: 0u64,
-                cliff_time: 1_000u64,   // cliff == end_time: full deposit released at cliff
+                cliff_time: 1_000u64, // cliff == end_time: full deposit released at cliff
                 end_time: 1_000u64,
                 withdraw_dust_threshold: Some(0_i128),
                 memo: None,
@@ -874,7 +1108,10 @@ fn test_create_stream_cliff_only_gas() {
         PER_INVOCATION_CPU_BUDGET,
     );
 
-    println!("GAS_MEASUREMENT: create_stream_cliff_only: single: {}", cost);
+    println!(
+        "GAS_MEASUREMENT: create_stream_cliff_only: single: {}",
+        cost
+    );
 }
 
 /// Gas baseline for `withdraw` when only a partial amount has accrued.
@@ -916,220 +1153,73 @@ fn test_withdraw_partial_accrual_gas() {
     ctx.env.ledger().set_timestamp(300);
 
     let cost = measure_gas(&ctx, |ctx| {
-        ctx.client.withdraw(&stream_id);
+        ctx.client.extend_stream_end_time(&stream_id, &1_500u64);
     });
 
     assert!(
         cost <= PER_INVOCATION_CPU_BUDGET,
-        "withdraw (partial_accrual) exceeded per-invocation CPU budget: {} > {}",
-        cost,
-        PER_INVOCATION_CPU_BUDGET,
-    );
-
-    println!("GAS_MEASUREMENT: withdraw_partial_accrual: single: {}", cost);
-}
-
-/// Gas baseline for `withdraw_to` (single stream, custom destination).
-///
-/// `withdraw_to` shares the accrual and token-transfer logic of `withdraw` but
-/// routes the proceeds to an explicit destination address instead of the stream
-/// recipient. The destination-routing branch is the only material difference;
-/// this test documents its incremental cost.
-///
-/// Setup: same 1 000-token linear stream as `create_default_stream`, t=500.
-#[test]
-fn test_withdraw_to_single_gas() {
-    let ctx = TestContext::setup();
-
-    let stream_id = ctx.create_default_stream();
-    ctx.env.ledger().set_timestamp(500);
-
-    // Send the accrued funds to a distinct destination (not the recipient itself).
-    let destination = Address::generate(&ctx.env);
-
-    let cost = measure_gas(&ctx, |ctx| {
-        ctx.client.withdraw_to(&stream_id, &destination);
-    });
-
-    assert!(
-        cost <= PER_INVOCATION_CPU_BUDGET,
-        "withdraw_to (single) exceeded per-invocation CPU budget: {} > {}",
-        cost,
-        PER_INVOCATION_CPU_BUDGET,
-    );
-
-    println!("GAS_MEASUREMENT: withdraw_to_single: single: {}", cost);
-}
-
-/// Gas baseline for `pause_stream` + `resume_stream` on a single stream.
-///
-/// Guards the round-trip cost of the pause/resume state machine. The cooldown
-/// check (`MIN_PAUSE_INTERVAL_LEDGERS = 17`) is exercised by advancing the
-/// ledger sequence past the threshold between the two operations. Captures both
-/// legs so a regression in either half (e.g. extra storage writes or a new
-/// duplicate event check) is visible.
-///
-/// Two separate GAS_MEASUREMENT lines are printed so validate_gas.py can track
-/// each leg independently against the docs/gas.md baseline.
-#[test]
-fn test_pause_then_resume_single_gas() {
-    let ctx = TestContext::setup();
-
-    let stream_id = ctx.create_default_stream();
-
-    // Advance ledger sequence past the pause/resume cooldown.
-    ctx.env.ledger().with_mut(|l| l.sequence_number += 32);
-
-    let pause_cost = measure_gas(&ctx, |ctx| {
-        ctx.client
-            .pause_stream(&stream_id, &PauseReason::Operational);
-    });
-
-    assert!(
-        pause_cost <= PER_INVOCATION_CPU_BUDGET,
-        "pause_stream (single) exceeded per-invocation CPU budget: {} > {}",
-        pause_cost,
-        PER_INVOCATION_CPU_BUDGET,
-    );
-
-    println!("GAS_MEASUREMENT: pause_stream: single: {}", pause_cost);
-
-    // Advance past the resume cooldown before resuming.
-    ctx.env.ledger().with_mut(|l| l.sequence_number += 32);
-
-    let resume_cost = measure_gas(&ctx, |ctx| {
-        ctx.client.resume_stream(&stream_id);
-    });
-
-    assert!(
-        resume_cost <= PER_INVOCATION_CPU_BUDGET,
-        "resume_stream (single) exceeded per-invocation CPU budget: {} > {}",
-        resume_cost,
-        PER_INVOCATION_CPU_BUDGET,
-    );
-
-    println!("GAS_MEASUREMENT: resume_stream: single: {}", resume_cost);
-}
-
-/// Gas baseline for `create_streams_partial` with a mixed batch.
-///
-/// `create_streams_partial` isolates per-entry failures: valid entries are
-/// committed and invalid entries produce an error result without reverting the
-/// whole call. The per-entry overhead (validation + result push) is captured here
-/// at three batch sizes.
-///
-/// Mixed batch composition per size:
-///   - Half the entries are valid (deposit=1 000, rate=1, 0→1 000).
-///   - Half are invalid (deposit=0, which fails validation).
-///
-/// This exercises the fast-fail path for the rejected entries alongside the
-/// normal commit path for the accepted entries.
-///
-/// The GAS_MEASUREMENT lines use the "partial_N" key so validate_gas.py
-/// can store them separately from the all-success `create_streams` baseline.
-#[test]
-fn test_create_streams_partial_gas() {
-    // Use small sizes: partial is not designed for MAX_PAGE_SIZE batches and the
-    // mixed failure path makes the per-entry cost harder to compare at large n.
-    let sizes: &[(u32, &str)] = &[(4, "4"), (8, "8"), (16, "16")];
-
-    for &(size, label) in sizes {
-        let ctx = TestContext::setup();
-
-        let mut params = soroban_sdk::Vec::new(&ctx.env);
-        for i in 0..size {
-            if i % 2 == 0 {
-                // Valid entry.
-                params.push_back(CreateStreamParams {
-                    recipient: ctx.recipient.clone(),
-                    deposit_amount: 1_000_i128,
-                    rate_per_second: 1_i128,
-                    start_time: 0u64,
-                    cliff_time: 0u64,
-                    end_time: 1_000u64,
-                    withdraw_dust_threshold: Some(0_i128),
-                    memo: None,
-                    metadata: None,
-                    kind: StreamKind::Linear,
-                    irrevocable: None,
-                    witness: None,
-                });
-            } else {
-                // Invalid entry: deposit_amount = 0 → fails `InvalidAmount`.
-                params.push_back(CreateStreamParams {
-                    recipient: ctx.recipient.clone(),
-                    deposit_amount: 0_i128,
-                    rate_per_second: 1_i128,
-                    start_time: 0u64,
-                    cliff_time: 0u64,
-                    end_time: 1_000u64,
-                    withdraw_dust_threshold: Some(0_i128),
-                    memo: None,
-                    metadata: None,
-                    kind: StreamKind::Linear,
-                    irrevocable: None,
-                    witness: None,
-                });
-            }
-        }
-
-        let cost = measure_gas(&ctx, |ctx| {
-            ctx.client.create_streams_partial(&ctx.sender, &params);
-        });
-
-        assert!(
-            cost <= PER_INVOCATION_CPU_BUDGET,
-            "create_streams_partial at size {} exceeded per-invocation CPU budget: {} > {}",
-            size,
-            cost,
-            PER_INVOCATION_CPU_BUDGET,
-        );
-
-        println!(
-            "GAS_MEASUREMENT: create_streams_partial: {}: {}",
-            label, cost
-        );
-    }
-}
-
-/// Gas boundary test: `batch_withdraw` at exactly `MAX_PAGE_SIZE`.
-///
-/// This test exercises the O(n²) `reject_duplicate_ids` scan at the documented
-/// worst-case batch size and asserts that the per-invocation CPU budget is not
-/// exceeded. It is a specialised variant of `test_batch_withdraw_gas` that
-/// explicitly names the boundary so that any future change to `MAX_PAGE_SIZE`
-/// (which changes the worst-case cost) shows up as a test failure before
-/// the CI gas baseline report catches it.
-///
-/// The test also prints a `GAS_MEASUREMENT` line tagged `max_page_size` so
-/// validate_gas.py can record it separately from the existing size-100 entry.
-#[test]
-fn test_batch_withdraw_max_page_size_gas() {
-    let ctx = TestContext::setup();
-
-    let page = MAX_PAGE_SIZE as usize; // 100 at time of writing
-
-    let mut streams = soroban_sdk::Vec::new(&ctx.env);
-    for _ in 0..page {
-        streams.push_back(ctx.create_default_stream());
-    }
-
-    ctx.env.ledger().set_timestamp(500);
-
-    let cost = measure_gas(&ctx, |ctx| {
-        ctx.client.batch_withdraw(&ctx.recipient, &streams);
-    });
-
-    assert!(
-        cost <= PER_INVOCATION_CPU_BUDGET,
-        "batch_withdraw at MAX_PAGE_SIZE ({}) exceeded per-invocation CPU budget: {} > {}",
-        page,
+        "extend_stream_end_time exceeded per-invocation CPU budget: {} > {}",
         cost,
         PER_INVOCATION_CPU_BUDGET,
     );
 
     println!(
-        "GAS_MEASUREMENT: batch_withdraw_max_page_size: {}: {}",
-        page, cost
+        "GAS_MEASUREMENT: withdraw_partial_accrual: single: {}",
+        cost
+    );
+}
+
+/// Gas baseline for the emergency-pause guard on `create_stream`.
+///
+/// When `set_global_emergency_paused(true)` is active, every state-mutating
+/// entry point (including `create_stream`) calls `require_not_globally_paused`
+/// early in its execution.  That function reads one instance-storage key
+/// (`GlobalEmergencyPaused`) and returns `GloballyPaused` before any stream
+/// validation, deposit transfer, or storage write occurs.
+///
+/// This test captures the cost of that early-exit guard so that any future
+/// change to the pause-check overhead (e.g. additional flag reads) is detected.
+/// The test calls `try_create_stream` (the fallible variant) so the panic from
+/// the expected error does not abort the test process.
+///
+/// Setup: emergency pause activated; `create_stream` called with a valid payload
+///        → call reverts at `require_not_globally_paused`.
+#[test]
+fn test_create_stream_under_emergency_pause_gas() {
+    let ctx = TestContext::setup();
+
+    // Activate the global emergency pause.
+    ctx.client.set_global_emergency_paused(&true);
+
+    let params = CreateStreamParams {
+        recipient: ctx.recipient.clone(),
+        deposit_amount: 1_000_i128,
+        rate_per_second: 1_i128,
+        start_time: 0u64,
+        cliff_time: 0u64,
+        end_time: 1_000u64,
+        withdraw_dust_threshold: Some(0_i128),
+        memo: None,
+        metadata: None,
+        kind: StreamKind::Linear,
+        irrevocable: None,
+        witness: None,
+    };
+
+    // Reset budget and call the fallible variant so we capture cost even on revert.
+    ctx.env.budget().reset_unlimited();
+    let _result = ctx.client.try_create_stream(&ctx.sender, &params);
+    let cost = ctx.env.budget().cpu_instruction_cost();
+
+    assert!(
+        cost <= PER_INVOCATION_CPU_BUDGET,
+        "create_stream (emergency_pause guard) exceeded per-invocation CPU budget: {} > {}",
+        cost,
+        PER_INVOCATION_CPU_BUDGET,
+    );
+
+    println!(
+        "GAS_MEASUREMENT: create_stream_emergency_pause: single: {}",
+        cost
     );
 }

@@ -1,5 +1,8 @@
 #![no_std]
-#![allow(clippy::too_many_arguments)]
+#![allow(
+    clippy::too_many_arguments,
+    reason = "Soroban contract clients mirror the stable public ABI; changing arity would be breaking"
+)]
 
 pub mod accrual;
 #[cfg(test)]
@@ -11,7 +14,6 @@ pub mod storage;
 #[cfg(not(any(test, feature = "testutils")))]
 pub(crate) mod storage;
 mod token_check;
-mod types;
 pub mod versioning;
 
 use soroban_sdk::xdr::ToXdr;
@@ -1101,10 +1103,12 @@ pub struct CreateStreamParams {
     pub metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
     /// The architectural style of the stream (Linear, CliffOnly, or CliffSlope).
     pub kind: StreamKind,
-    /// If true, the stream cannot be cancelled or shortened. Defaults to false (None).
-    pub irrevocable: Option<bool>,
-    /// Optional compliance witness authorized to cancel via signed attestation.
-    pub witness: Option<Address>,
+    /// Optional structured key-value metadata (TLV extension, issue #580).
+    ///
+    /// Validated at creation: ≤`MAX_METADATA_KEYS` entries, each key ≤`MAX_METADATA_KEY_BYTES`
+    /// bytes, each value ≤`MAX_METADATA_VALUE_BYTES` bytes, total ≤`MAX_METADATA_BYTES` bytes.
+    /// Immutable post-creation. Pass `None` to omit.
+    pub metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
 }
 
 #[contracttype]
@@ -1126,10 +1130,11 @@ pub struct CreateStreamOptions {
     pub withdraw_dust_threshold: Option<i128>,
     /// The architectural style of the stream (Linear, CliffOnly, or CliffSlope).
     pub kind: StreamKind,
-    /// If true, the stream cannot be cancelled or shortened. Defaults to false (None).
-    pub irrevocable: Option<bool>,
-    /// Optional compliance witness authorized to cancel via signed attestation.
-    pub witness: Option<Address>,
+    /// Optional structured key-value metadata (TLV extension, issue #580).
+    ///
+    /// Same validation rules as `CreateStreamParams.metadata`.
+    /// Immutable post-creation. Pass `None` to omit.
+    pub metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
 }
 
 /// Reusable relative schedule (offsets only). Amounts are supplied when creating a stream.
@@ -1298,6 +1303,9 @@ pub enum DataKey {
 // ---------------------------------------------------------------------------
 // Storage helpers
 // ---------------------------------------------------------------------------
+//
+// Shared storage and TTL primitives live in `storage.rs` and are re-exported
+// above. Only behavior specific to the contract implementation remains here.
 
 const SECONDS_PER_LEDGER: u64 = 5;
 
@@ -1360,193 +1368,6 @@ fn apply_lookback_cap(
     claimable.min(cap).max(0)
 }
 
-fn acquire_reentrancy_lock(env: &Env) -> Result<(), ContractError> {
-    let key = DataKey::ReentrancyLock;
-    if env.storage().instance().get(&key).unwrap_or(false) {
-        return Err(ContractError::InvalidState);
-    }
-
-    env.storage().instance().set(&key, &true);
-    bump_instance_ttl(env);
-    Ok(())
-}
-
-fn release_reentrancy_lock(env: &Env) {
-    env.storage()
-        .instance()
-        .set(&DataKey::ReentrancyLock, &false);
-    bump_instance_ttl(env);
-}
-
-/// Compute an adaptive TTL bump amount proportional to a stream's remaining lifetime.
-///
-/// `adaptive_ttl = min(MAX_TTL, remaining_seconds / LEDGER_CLOSE_TIME + BUFFER_LEDGERS)`
-///
-/// - When `end_time` is far in the future the bump is large, keeping the entry alive.
-/// - When `end_time` has already passed (or `now >= end_time`) the bump falls back to
-///   `BUFFER_LEDGERS` so the entry stays alive long enough for the recipient to withdraw.
-/// - The result is always at least `PERSISTENT_BUMP_AMOUNT` to avoid under-bumping
-///   short-lived streams below the static floor.
-fn compute_adaptive_ttl(now: u64, end_time: u64) -> u32 {
-    let remaining_seconds = end_time.saturating_sub(now);
-    let ledgers_for_stream = remaining_seconds / LEDGER_CLOSE_TIME;
-    let adaptive_u64 = ledgers_for_stream.saturating_add(BUFFER_LEDGERS as u64);
-    let clamped = adaptive_u64.clamp(PERSISTENT_BUMP_AMOUNT as u64, MAX_TTL as u64);
-    clamped as u32
-}
-
-fn get_config(env: &Env) -> Result<Config, ContractError> {
-    bump_instance_ttl(env);
-    env.storage()
-        .instance()
-        .get(&DataKey::Config)
-        .ok_or(ContractError::InvalidState) // Not initialised
-}
-
-/// Panicking version of `get_config` for internal use where config is guaranteed to exist.
-fn load_config(env: &Env) -> Config {
-    get_config(env).expect("contract not initialised")
-}
-
-fn get_token(env: &Env) -> Result<Address, ContractError> {
-    get_config(env).map(|c| c.token)
-}
-
-fn get_admin(env: &Env) -> Result<Address, ContractError> {
-    get_config(env).map(|c| c.admin)
-}
-
-/// Returns whether the contract is in **global emergency pause** (default `false` if unset).
-fn is_global_emergency_paused(env: &Env) -> bool {
-    env.storage()
-        .instance()
-        .get(&DataKey::GlobalEmergencyPaused)
-        .unwrap_or(false)
-}
-
-fn is_creation_paused(env: &Env) -> bool {
-    env.storage()
-        .instance()
-        .get(&DataKey::CreationPaused)
-        .unwrap_or(false)
-}
-
-/// Returns `Err(ContractError::ContractPaused)` when [`is_global_emergency_paused`] is true.
-/// Admin/admin-override entrypoints must not call this so operators can still intervene.
-fn require_not_globally_paused(env: &Env) -> Result<(), ContractError> {
-    if is_global_emergency_paused(env) {
-        return Err(ContractError::ContractPaused);
-    }
-    Ok(())
-}
-
-/// Blocks new stream creation when the emergency pause or creation-only pause is active.
-fn require_not_creation_paused(env: &Env) -> Result<(), ContractError> {
-    require_not_globally_paused(env)?;
-    if is_creation_paused(env) {
-        return Err(ContractError::ContractPaused);
-    }
-    Ok(())
-}
-
-/// Returns whether the protocol is globally paused (checks both GlobalEmergencyPaused and CreationPaused).
-/// Default is false (not paused) if no pause keys are set.
-fn is_protocol_paused(env: &Env) -> bool {
-    is_global_emergency_paused(env) || is_creation_paused(env)
-}
-
-/// Get the stored pause reason, if any.
-fn get_pause_reason(env: &Env) -> Option<soroban_sdk::String> {
-    env.storage().instance().get(&DataKey::GlobalPauseReason)
-}
-
-/// Get the stored pause timestamp, if any.
-fn get_pause_timestamp(env: &Env) -> Option<u64> {
-    env.storage().instance().get(&DataKey::GlobalPauseTimestamp)
-}
-
-/// Get the stored pause admin address, if any.
-fn get_pause_admin(env: &Env) -> Option<Address> {
-    env.storage().instance().get(&DataKey::GlobalPauseAdmin)
-}
-
-/// Get the governance-controlled maximum rate per second (default: i128::MAX if unset).
-fn get_max_rate_per_second(env: &Env) -> i128 {
-    env.storage()
-        .instance()
-        .get(&DataKey::MaxRatePerSecond)
-        .unwrap_or(i128::MAX)
-}
-
-/// Set the governance-controlled maximum rate per second.
-fn set_max_rate_per_second(env: &Env, max_rate: i128) {
-    env.storage()
-        .instance()
-        .set(&DataKey::MaxRatePerSecond, &max_rate);
-    env.storage().instance().extend_ttl(100, 518400); // 60 days
-}
-
-fn read_stream_count(env: &Env) -> u64 {
-    bump_instance_ttl(env);
-    env.storage()
-        .instance()
-        .get(&DataKey::NextStreamId)
-        .unwrap_or(0u64)
-}
-
-fn set_stream_count(env: &Env, count: u64) {
-    env.storage().instance().set(&DataKey::NextStreamId, &count);
-    bump_instance_ttl(env);
-}
-
-/// Read the protocol-wide count of streams currently in `StreamStatus::Paused`.
-/// Returns `0` when the key is absent (pre-upgrade deployments).
-fn read_paused_stream_count(env: &Env) -> u64 {
-    bump_instance_ttl(env);
-    env.storage()
-        .instance()
-        .get(&DataKey::PausedStreamCount)
-        .unwrap_or(0u64)
-}
-
-fn write_paused_stream_count(env: &Env, count: u64) {
-    env.storage()
-        .instance()
-        .set(&DataKey::PausedStreamCount, &count);
-    bump_instance_ttl(env);
-}
-
-/// Maintain the global paused-stream counter from a single stream status transition.
-///
-/// The counter changes only when a stream actually crosses the `Paused` boundary:
-/// - `!= Paused -> Paused` increments by 1
-/// - `Paused -> != Paused` decrements by 1 (saturating at 0 for upgrade safety)
-/// - all other transitions leave the counter unchanged
-fn reconcile_paused_stream_count(env: &Env, previous: StreamStatus, next: StreamStatus) {
-    if previous == next {
-        return;
-    }
-
-    match (previous, next) {
-        (StreamStatus::Paused, StreamStatus::Paused) => {}
-        (StreamStatus::Paused, _) => {
-            write_paused_stream_count(env, read_paused_stream_count(env).saturating_sub(1));
-        }
-        (_, StreamStatus::Paused) => {
-            write_paused_stream_count(env, read_paused_stream_count(env).saturating_add(1));
-        }
-        _ => {}
-    }
-}
-
-// ---------------------------------------------------------------------------
-// IdReservation storage helpers — delegated to storage.rs
-// ---------------------------------------------------------------------------
-
-use storage::{
-    load_id_reservation, next_stream_id_for, remove_id_reservation, save_id_reservation,
-};
-
 /// Enforce the rate-change cooldown and record the current ledger as the last change.
 ///
 /// Shared by `update_rate_per_second` and `decrease_rate_per_second` so the
@@ -1570,7 +1391,6 @@ fn check_and_bump_rate_cooldown(env: &Env, stream: &mut Stream) -> Result<(), Co
 // Protocol constants
 // ---------------------------------------------------------------------------
 
-
 /// Minimum ledger interval between successive withdrawals for the same stream.
 const MIN_WITHDRAW_INTERVAL_LEDGERS: u32 = 1;
 
@@ -1584,58 +1404,9 @@ const KEEPER_FEE_BPS: u32 = 50;
 const MAX_ROTATION_HISTORY: u32 = 50;
 
 /// Maximum number of recipients in a pooled stream.
-pub const MAX_POOL_RECIPIENTS: u32 = 20;
+pub const MAX_POOL_RECIPIENTS: u32 = 100;
 
-// ---------------------------------------------------------------------------
-// Pooled stream storage helpers
-// ---------------------------------------------------------------------------
-
-/// Load the share distribution for a pooled stream.
-fn read_pooled_stream_shares(
-    env: &Env,
-    stream_id: u64,
-) -> Result<soroban_sdk::Vec<(Address, u32)>, ContractError> {
-    let key = DataKey::PooledStreamShares(stream_id);
-    env.storage()
-        .persistent()
-        .get(&key)
-        .ok_or(ContractError::StreamNotFound)
-}
-
-/// Persist the share distribution for a pooled stream.
-fn save_pooled_stream_shares(
-    env: &Env,
-    stream_id: u64,
-    shares: &soroban_sdk::Vec<(Address, u32)>,
-) {
-    let key = DataKey::PooledStreamShares(stream_id);
-    env.storage().persistent().set(&key, shares);
-    env.storage().persistent().extend_ttl(
-        &key,
-        PERSISTENT_LIFETIME_THRESHOLD,
-        PERSISTENT_BUMP_AMOUNT,
-    );
-}
-
-/// Load the amount already withdrawn by a specific recipient from a pooled stream.
-fn read_pooled_stream_withdrawn(env: &Env, stream_id: u64, recipient: Address) -> i128 {
-    let key = DataKey::PooledStreamWithdrawn(stream_id, recipient);
-    env.storage()
-        .persistent()
-        .get(&key)
-        .unwrap_or(0i128)
-}
-
-/// Persist the amount withdrawn by a specific recipient from a pooled stream.
-fn save_pooled_stream_withdrawn(env: &Env, stream_id: u64, recipient: Address, amount: i128) {
-    let key = DataKey::PooledStreamWithdrawn(stream_id, recipient);
-    env.storage().persistent().set(&key, &amount);
-    env.storage().persistent().extend_ttl(
-        &key,
-        PERSISTENT_LIFETIME_THRESHOLD,
-        PERSISTENT_BUMP_AMOUNT,
-    );
-}
+// Pooled-stream storage helpers are canonical in `storage.rs`.
 
 // ---------------------------------------------------------------------------
 // Internal Helpers
@@ -1844,7 +1615,7 @@ impl FluxoraStream {
                 end_time,
                 withdraw_dust_threshold,
                 memo,
-                metadata,
+                metadata: stream.metadata,
             },
         );
 
@@ -1879,9 +1650,9 @@ impl FluxoraStream {
             }
         }
 
-        // Validate metadata size bounds before allocating a stream ID.
-        if let Some(ref md) = metadata {
-            validate_metadata(md)?;
+        // Validate metadata bounds before allocating a stream ID.
+        if let Some(ref meta) = metadata {
+            validate_metadata(meta)?;
         }
 
         let stream_id = next_stream_id_for(env, &sender);
@@ -1939,7 +1710,7 @@ impl FluxoraStream {
                 end_time,
                 withdraw_dust_threshold,
                 memo,
-                metadata,
+                metadata: stream.metadata,
             },
         );
 
@@ -2314,9 +2085,10 @@ impl FluxoraStream {
             .checked_add(params.duration)
             .ok_or(ContractError::InvalidParams)?;
 
-        // Delegate to standard create_stream with computed absolute times
-        Self::persist_new_stream(
-            &env,
+        // Delegate to the standard creation path so auth, pause checks,
+        // validation, token transfer, and persistence remain identical.
+        Self::create_stream_internal(
+            env,
             sender,
             params.recipient,
             params.deposit_amount,
@@ -2452,7 +2224,7 @@ impl FluxoraStream {
 
         save_stream(&env, &stream);
         save_pooled_stream_shares(&env, stream_id, &recipients);
-        add_stream_to_sender_index(&env, &sender, stream_id);
+        add_stream_to_sender_index(&env, &sender, stream_id, Some(end_time));
         for (recipient, _) in recipients.iter() {
             add_stream_to_recipient_index(&env, &recipient, stream_id, Some(end_time));
         }
@@ -2823,8 +2595,7 @@ impl FluxoraStream {
                 memo: rel.memo,
                 metadata: rel.metadata,
                 kind: rel.kind,
-                irrevocable: rel.irrevocable,
-                witness: None,
+                metadata: rel.metadata,
             });
         }
 
@@ -3977,7 +3748,6 @@ impl FluxoraStream {
     /// - `BelowMinimumAmount` (16): Withdrawable amount is below `expected_minimum_amount`.
     /// - `InvalidState`: Stream is paused (non-terminal) or completed.
     /// - `StreamNotFound`: `stream_id` does not exist.
-
     pub fn delegated_withdraw(
         env: Env,
         stream_id: u64,
@@ -5072,7 +4842,6 @@ impl FluxoraStream {
             last_withdraw_ledger: 0,
             last_rate_change_ledger: 0,
             metadata: stream.metadata.clone(),
-            claim_owner: None,
             witness: stream.witness.clone(),
             irrevocable: stream.irrevocable,
             is_pooled: None,
@@ -5083,7 +4852,7 @@ impl FluxoraStream {
 
         save_stream(&env, &child_stream);
         add_stream_to_recipient_index(&env, &new_recipient, child_stream_id, Some(stream.end_time));
-        add_stream_to_sender_index(&env, &stream.sender, child_stream_id);
+        add_stream_to_sender_index(&env, &stream.sender, child_stream_id, Some(stream.end_time));
 
         env.events().publish(
             (symbol_short!("del_share"), stream_id),
@@ -5839,6 +5608,7 @@ impl FluxoraStream {
                 duration: tpl.duration,
                 withdraw_dust_threshold: Some(withdraw_dust_threshold),
                 memo,
+                kind: StreamKind::Linear,
                 metadata,
                 kind,
                 irrevocable,
@@ -6103,8 +5873,8 @@ impl FluxoraStream {
             0u32
         } else {
             match streams.binary_search(cursor) {
-                Ok(pos) => pos as u32,  // start AT the cursor stream (inclusive)
-                Err(pos) => pos as u32, // gap: start at the next higher stream
+                Ok(pos) => pos,  // start AT the cursor stream (inclusive)
+                Err(pos) => pos, // gap: start at the next higher stream
             }
         };
 
@@ -7391,11 +7161,7 @@ impl FluxoraStream {
         env.storage().persistent().remove(&key);
 
         // Emit event
-        events::emit_auto_claim_revoked(
-            &env,
-            stream_id,
-            AutoClaimRevoked { stream_id },
-        );
+        events::emit_auto_claim_revoked(&env, stream_id, AutoClaimRevoked { stream_id });
 
         Ok(())
     }
@@ -8273,9 +8039,6 @@ impl FluxoraStream {
     ) -> Result<u64, ContractError> {
         sender.require_auth();
         require_not_creation_paused(&env)?;
-        let withdraw_dust_threshold: i128 = 0;
-        let metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>> = None;
-
         let now = env.ledger().timestamp();
 
         // Validate expiry is in the future if provided.
@@ -8663,8 +8426,6 @@ impl FluxoraStream {
         load_recipient_pending_offers(&env, &recipient)
     }
 }
-
-
 
 // ---------------------------------------------------------------------------
 // Upgrade entrypoint

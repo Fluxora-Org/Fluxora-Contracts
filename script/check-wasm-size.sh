@@ -28,6 +28,19 @@
 #
 # Update these budgets when a deliberate feature addition is landed; document
 # the change in docs/gas.md and in the PR description.
+#
+# Artifact integrity: every artifact is also checked for the 4-byte WASM
+# magic number (0x00 0x61 0x73 0x6D) and a minimum size before its budget is
+# evaluated. This catches empty, truncated, or otherwise corrupted build
+# outputs (e.g. a build interrupted mid-write) that would otherwise silently
+# "pass" the budget check by virtue of being suspiciously small.
+#
+# Determinism: contract processing order is a fixed list (see CONTRACTS
+# below), not a bash associative-array key iteration, so output order (and
+# therefore step-summary row order) is identical across bash versions,
+# platforms, and repeated/retried runs. This also keeps the script
+# compatible with bash 3.2 (macOS's default `/bin/bash`), which predates
+# `declare -A`.
 
 set -euo pipefail
 
@@ -47,13 +60,25 @@ for arg in "$@"; do
 done
 
 # ---------------------------------------------------------------------------
-# Budget table: contract_name -> max_bytes
+# Budget table: fixed-order contract list + lookup function.
+#
+# Deliberately not a bash associative array (`declare -A`): associative-array
+# key iteration order is an implementation detail of the bash build (and
+# `declare -A` itself requires bash 4+, which macOS's shipped `/bin/bash`
+# does not have). An ordered array plus a `case`-based lookup keeps contract
+# processing order — and therefore all printed/step-summary output — fixed
+# and reproducible everywhere.
 # ---------------------------------------------------------------------------
-declare -A BUDGETS=(
-  [fluxora_stream]=262144       # 256 KiB
-  [fluxora_factory]=131072      # 128 KiB
-  [fluxora_governance]=131072   # 128 KiB
-)
+CONTRACTS=(fluxora_stream fluxora_factory fluxora_governance)
+
+budget_for() {
+  case "$1" in
+    fluxora_stream) echo 262144 ;;      # 256 KiB
+    fluxora_factory) echo 131072 ;;     # 128 KiB
+    fluxora_governance) echo 131072 ;;  # 128 KiB
+    *) echo "" ;;
+  esac
+}
 
 # ---------------------------------------------------------------------------
 # Helper: find the previous release tag (most recent v* tag before HEAD)
@@ -70,37 +95,14 @@ find_previous_release_tag() {
 }
 
 # ---------------------------------------------------------------------------
-# Helper: get WASM file size at a given git ref
-# Returns the size in bytes, or empty string if unavailable.
-# ---------------------------------------------------------------------------
-get_wasm_size_at_ref() {
-  local ref="$1"
-  local contract="$2"
-  local suffix=".wasm"
-
-  if [ "$OPTIMIZED" -eq 1 ]; then
-    suffix=".optimized.wasm"
-  fi
-
-  local path="target/wasm32-unknown-unknown/release/${contract}${suffix}"
-
-  # Try to retrieve the blob size from git history.
-  local size
-  size=$(git -C "$GIT_REPO" cat-file -s "${ref}:${path}" 2>/dev/null) || true
-
-  # If the exact path isn't in the tree, try alternative common locations.
-  if [ -z "$size" ]; then
-    # Some tags may store WASM in a different directory structure.
-    size=$(git -C "$GIT_REPO" ls-tree -r -l "${ref}" 2>/dev/null \
-      | awk -v pat="${contract}${suffix}" '$4 == pat { print $4 }' \
-      | head -n 1) || true
-  fi
-
-  echo "$size"
-}
-
-# ---------------------------------------------------------------------------
-# Helper: get blob size from ls-tree output (fallback when cat-file fails)
+# Helper: get a WASM blob's size at a given git ref from `ls-tree`.
+# Returns the size in bytes, or empty string if the ref/path isn't found.
+#
+# This is the single lookup path for delta reporting (an earlier
+# `get_wasm_size_at_ref` helper that tried `git cat-file -s` first has been
+# removed: it was never called, and its own `ls-tree` fallback compared the
+# blob-size column against the filename pattern instead of the path column,
+# so it could not have worked if it had been wired in).
 # ---------------------------------------------------------------------------
 get_blob_size_from_ls_tree() {
   local ref="$1"
@@ -140,8 +142,8 @@ else
   echo "No previous release tag found — delta reporting disabled."
 fi
 
-for CONTRACT in "${!BUDGETS[@]}"; do
-  BUDGET="${BUDGETS[$CONTRACT]}"
+for CONTRACT in "${CONTRACTS[@]}"; do
+  BUDGET="$(budget_for "$CONTRACT")"
 
   if [ "$OPTIMIZED" -eq 1 ]; then
     WASM_FILE="${WASM_DIR}/${CONTRACT}.optimized.wasm"
@@ -160,6 +162,25 @@ for CONTRACT in "${!BUDGETS[@]}"; do
   fi
 
   SIZE=$(wc -c < "$WASM_FILE")
+
+  # Artifact-integrity check: reject empty/truncated/non-WASM files before
+  # they can be evaluated against the byte budget. Without this, a 0-byte
+  # or partial artifact from an interrupted build would silently "pass"
+  # with maximal headroom instead of failing loudly.
+  if [ "$SIZE" -lt 8 ]; then
+    echo "::error::${WASM_FILE} is only ${SIZE} bytes — too small to be a valid WASM module (empty or truncated build artifact?)." >&2
+    FAILED=1
+    SUMMARY_ROWS+=("| ${CONTRACT} | ${SIZE} bytes | ${BUDGET} | ❌ INVALID (too small) |")
+    continue
+  fi
+  MAGIC=$(od -An -tx1 -N4 "$WASM_FILE" | tr -d ' \n')
+  if [ "$MAGIC" != "0061736d" ]; then
+    echo "::error::${WASM_FILE} does not start with the WASM magic number (expected 0061736d, got ${MAGIC}) — not a valid WASM module." >&2
+    FAILED=1
+    SUMMARY_ROWS+=("| ${CONTRACT} | ${SIZE} bytes | ${BUDGET} | ❌ INVALID (bad magic) |")
+    continue
+  fi
+
   BUDGET_KIB=$(( BUDGET / 1024 ))
   SIZE_KIB=$(awk "BEGIN { printf \"%.1f\", ${SIZE}/1024 }")
 
@@ -253,8 +274,8 @@ if [ "$FAILED" -ne 0 ]; then
 fi
 
 # Edge-case: warn when headroom drops below 10% of budget.
-for CONTRACT in "${!BUDGETS[@]}"; do
-  BUDGET="${BUDGETS[$CONTRACT]}"
+for CONTRACT in "${CONTRACTS[@]}"; do
+  BUDGET="$(budget_for "$CONTRACT")"
   if [ "$OPTIMIZED" -eq 1 ]; then
     WASM_FILE="${WASM_DIR}/${CONTRACT}.optimized.wasm"
   else

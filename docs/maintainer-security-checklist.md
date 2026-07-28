@@ -335,7 +335,8 @@ bash script/update-wasm-checksums.sh
 ### Checklist
 
 - [ ] All tests pass (`cargo test --workspace`)
-- [ ] No new compiler warnings introduced
+- [ ] No new compiler warnings introduced (enforce zero unused/duplicate imports and clean module hygiene)
+- [ ] Compile-time warning reduction verified deterministic across upgrades and retries
 - [ ] `wasm/checksums.sha256` updated and committed
 - [ ] `CONTRACT_VERSION` incremented if any breaking change was made (see §4)
 - [ ] `CHANGELOG.md` entry written with migration notes for integrators
