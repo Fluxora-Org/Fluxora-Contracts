@@ -20,7 +20,6 @@ pub use storage::*;
 use token_check::verify_token_behavior;
 use types::{ClaimOwnershipTransferred, MAX_POOL_RECIPIENTS};
 
-use crate::types::{ClaimOwnershipTransferred, MAX_POOL_RECIPIENTS};
 
 pub fn reject_duplicate_ids(env: &Env, ids: &soroban_sdk::Vec<u64>) -> Result<(), ContractError> {
     let mut seen = soroban_sdk::Vec::<u64>::new(env);
@@ -1653,9 +1652,6 @@ fn reconcile_paused_stream_count(env: &Env, previous: StreamStatus, next: Stream
 // IdReservation storage helpers — delegated to storage.rs
 // ---------------------------------------------------------------------------
 
-use storage::{
-    load_id_reservation, next_stream_id_for, remove_id_reservation, save_id_reservation,
-};
 
 /// Enforce the rate-change cooldown and record the current ledger as the last change.
 ///

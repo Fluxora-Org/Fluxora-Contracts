@@ -22,7 +22,7 @@
 
 #![cfg(test)]
 
-use fluxora_factory::FactoryError;
+use fluxora_factory::FactoryError::*;
 
 /// Compile-time + cheap runtime stability check.
 ///
@@ -66,7 +66,7 @@ fn test_factory_error_discriminants_are_stable() {
 /// assignments (e.g. two variants pasted with the same `= N` value).
 #[test]
 fn test_factory_error_discriminants_are_unique() {
-    use FactoryError::*;
+
     let all = [
         AlreadyInitialized,
         NotInitialized,
@@ -101,7 +101,7 @@ fn test_factory_error_discriminants_are_unique() {
 /// mis-typed numbering. Documented range is `1..=16`.
 #[test]
 fn test_factory_error_discriminants_are_dense_no_gaps() {
-    use FactoryError::*;
+
     let all = [
         AlreadyInitialized,
         NotInitialized,
