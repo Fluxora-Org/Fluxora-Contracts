@@ -72,8 +72,7 @@ impl<'a> Ctx<'a> {
             memo: None,
             metadata: None,
             kind: fluxora_stream::StreamKind::Linear,
-            irrevocable: None,
-            witness: None,
+            metadata: None,
         }
     }
 }
