@@ -262,6 +262,7 @@ fn test_max_rate_applies_to_all_create_functions() {
         memo: None,
         metadata: None,
         irrevocable: None,
+        witness: None,
     };
 
     let result = ctx

@@ -20,7 +20,7 @@
 //! imported by a test crate that depends on a concrete type path. All other
 //! types belong at the crate root.
 
-use soroban_sdk::{contracttype, Address};
+use soroban_sdk::{contracttype, Address, Map};
 
 /// The canonical persistent record for a single payment/vesting stream.
 ///

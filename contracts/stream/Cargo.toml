@@ -144,6 +144,11 @@ path = "tests/rate_decrease_after_withdraw.rs"
 test = true
 
 [[test]]
+name = "dynamic_pricing_edge_cases"
+path = "tests/dynamic_pricing_edge_cases.rs"
+test = true
+
+[[test]]
 name = "witnessed_cancel"
 path = "tests/witnessed_cancel.rs"
 test = true
@@ -194,6 +199,11 @@ name = "pause_semantics"
 path = "tests/pause_semantics.rs"
 test = true
 
+[[test]]
+name = "dynamic_pricing_edge_cases"
+path = "tests/dynamic_pricing_edge_cases.rs"
+test = true
+
 # ---------------------------------------------------------------------------
 # Known-broken integration tests, second batch (compile fine, fail at runtime)
 # ---------------------------------------------------------------------------
@@ -234,6 +244,11 @@ required-features = ["testutils"]
 [[test]]
 name = "event_snapshots_suite"
 path = "tests/event_snapshots_suite.rs"
+test = true
+
+[[test]]
+name = "event_schema_consistency"
+path = "tests/event_schema_consistency.rs"
 test = true
 
 [[test]]
