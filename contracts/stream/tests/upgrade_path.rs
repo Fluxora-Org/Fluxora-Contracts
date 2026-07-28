@@ -26,7 +26,7 @@
 //! marked `#[ignore]` and are ready to be enabled when a test
 //! environment with deployable WASM artifacts is available.
 
-use fluxora_stream::{ContractError, FluxoraStream, FluxoraStreamClient};
+use fluxora_stream::{ContractError, ContractUpgraded, FluxoraStream, FluxoraStreamClient};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
@@ -352,4 +352,107 @@ fn test_upgrade_preserves_stream_state() {
     let stream_after = ctx.client.get_stream_state(&stream_id);
     assert_eq!(stream_after.sender, ctx.sender);
     assert_eq!(stream_after.recipient, ctx.recipient);
+}
+
+/// Test that the `ContractUpgraded` event struct has the expected field types.
+/// This is a compile-time safety net — if the struct definition changes, this
+/// test fails to compile, forcing an explicit review of the event schema.
+#[test]
+fn test_contract_upgraded_event_struct_layout() {
+    let env = Env::default();
+    let addr = Address::generate(&env);
+    let hash = BytesN::from_array(&env, &[1u8; 32]);
+
+    let event = fluxora_stream::ContractUpgraded {
+        new_wasm_hash: hash.clone(),
+        new_version: 42,
+        upgraded_at: 1_000_000,
+        upgraded_by: addr.clone(),
+    };
+
+    // Verify field types and ordering
+    assert_eq!(event.new_version, 42);
+    assert_eq!(event.upgraded_at, 1_000_000);
+    assert_eq!(event.upgraded_by, addr);
+    assert_eq!(event.new_wasm_hash, hash);
+}
+
+// -----------------------------------------------------------------------
+// Edge case tests (do not call `update_current_contract_wasm`)
+// -----------------------------------------------------------------------
+
+/// Test that version() returns the same value before and after a failed
+/// upgrade attempt. This locks down the "no storage corruption" guarantee.
+#[test]
+fn test_version_stable_after_failed_upgrade() {
+    let ctx = UpgradeTestCtx::setup();
+
+    let v_before = ctx.client.version();
+
+    // Attempt upgrade with invalid hash — must trap/panic
+    let invalid_hash = BytesN::from_array(&ctx.env, &[0u8; 32]);
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.env.as_contract(&ctx.contract_id, || {
+            fluxora_stream::upgrade(ctx.env.clone(), invalid_hash)
+        })
+    }));
+
+    let v_after = ctx.client.version();
+    assert_eq!(
+        v_before, v_after,
+        "version() must be stable after a failed upgrade attempt"
+    );
+    assert_eq!(v_after, fluxora_stream::CONTRACT_VERSION);
+}
+
+/// Test that the contract remains fully operational after a failed upgrade
+/// attempt — creating a stream, reading config, and calling views all work.
+#[test]
+fn test_contract_usable_after_failed_upgrade() {
+    let ctx = UpgradeTestCtx::setup();
+
+    // Attempt upgrade with invalid hash
+    let invalid_hash = BytesN::from_array(&ctx.env, &[0u8; 32]);
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.env.as_contract(&ctx.contract_id, || {
+            fluxora_stream::upgrade(ctx.env.clone(), invalid_hash)
+        })
+    }));
+
+    // Post-upgrade-attempt operations must succeed
+    let stream_id = ctx.create_test_stream();
+    let stream = ctx.client.get_stream_state(&stream_id);
+    assert_eq!(stream.sender, ctx.sender);
+    assert_eq!(stream.recipient, ctx.recipient);
+
+    let count = ctx.client.get_stream_count();
+    assert_eq!(count, 1, "stream count must reflect newly created stream");
+
+    let config = ctx.client.get_config();
+    assert!(config.admin != Address::default(), "config must still be readable");
+}
+
+/// Test that `set_admin` works after a failed upgrade attempt.
+/// Admin continuity is critical for scheduling a follow-up upgrade.
+#[test]
+fn test_admin_rotation_possible_after_failed_upgrade() {
+    let ctx = UpgradeTestCtx::setup();
+    let new_admin = Address::generate(&ctx.env);
+
+    // Attempt upgrade with invalid hash
+    let invalid_hash = BytesN::from_array(&ctx.env, &[0u8; 32]);
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.env.as_contract(&ctx.contract_id, || {
+            fluxora_stream::upgrade(ctx.env.clone(), invalid_hash)
+        })
+    }));
+
+    // Must be able to rotate admin after failed upgrade
+    ctx.client.set_admin(&new_admin);
+
+    let config_after = ctx.client.get_config();
+    assert_eq!(
+        config_after.admin, new_admin,
+        "admin rotation must succeed after failed upgrade"
+    );
 }
