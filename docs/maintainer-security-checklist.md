@@ -42,6 +42,13 @@ Every entrypoint that moves tokens must follow this strict ordering:
 - [ ] `batch_withdraw` saves each stream individually before its corresponding `push_token`
 - [ ] `top_up_stream` increments `deposit_amount` and calls `save_stream` **before** `pull_token`
 - [ ] Any new entrypoint that moves tokens has a CEI comment in source and is added to the table above
+- [ ] Every token-transfer entrypoint acquires `acquire_reentrancy_lock` before the external call and releases it with `release_reentrancy_lock` after
+- [ ] `acquire_reentrancy_lock` is called **before** any state mutation that precedes a token transfer
+- [ ] `release_reentrancy_lock` is called after every `push_token` / `pull_token` call completes (or deferred via a guard pattern)
+- [ ] `DataKey::ReentrancyLock` is checked before setting; if already `true` the call reverts with `ContractError::InvalidState`
+- [ ] A new entrypoint that moves tokens uses both CEI ordering **and** the explicit reentrancy lock — CEI alone is insufficient defense-in-depth
+
+> **Note from audit cross-reference:** `CEI_ANALYSIS.md` (Issue #262) documents `withdraw`, `withdraw_to`, `batch_withdraw`, `cancel_stream`, and `cancel_stream_as_admin` as wrapped in the reentrancy lock, but the current code only wraps `sweep_excess` and `trigger_auto_claim`. Audit Invariant #13 (Reentrancy Guard) in `docs/audit.md` remains underspecified. See §14 for the open finding.
 
 ---
 
@@ -126,6 +133,16 @@ Cancelled → (terminal)  withdraw still works (drains accrued_at_cancel); no ot
 - [ ] `trigger_auto_claim` rejects `Completed` and `Cancelled` with `InvalidState`
 - [ ] No entrypoint transitions a `Cancelled` stream to `Completed` (cancelled streams stay `Cancelled` even when fully drained)
 - [ ] `is_terminal_state` helper is used consistently — not reimplemented inline
+
+### 3.3 Cancellation fee audit items
+
+The optional cancellation fee (`cancellation_fee_bps > 0`) applies only to the unstreamed refund, never to the recipient's accrued amount. These items come from the auditor checklist in `docs/security.md`.
+
+- [ ] `fee = (refund × fee_bps) / 10000` truncates down (no rounding up)
+- [ ] Accrued calculation is independent of `cancellation_fee_bps` — fee never reduces `calculate_accrued` output
+- [ ] Recipient's `withdraw` receives full accrued amount, not reduced by the fee
+- [ ] Fee is never applied to or deducted from the accrued (recipient) portion
+- [ ] State is persisted before any token transfer involving fee deduction (CEI compliance)
 
 ---
 
@@ -318,7 +335,8 @@ bash script/update-wasm-checksums.sh
 ### Checklist
 
 - [ ] All tests pass (`cargo test --workspace`)
-- [ ] No new compiler warnings introduced
+- [ ] No new compiler warnings introduced (enforce zero unused/duplicate imports and clean module hygiene)
+- [ ] Compile-time warning reduction verified deterministic across upgrades and retries
 - [ ] `wasm/checksums.sha256` updated and committed
 - [ ] `CONTRACT_VERSION` incremented if any breaking change was made (see §4)
 - [ ] `CHANGELOG.md` entry written with migration notes for integrators
@@ -343,6 +361,206 @@ bash script/update-wasm-checksums.sh
 | TTL constants                                   | No version bump; document in `CHANGELOG.md`                                   |
 | Factory policy (cap, duration, allowlist logic) | Update factory tests, update §9 of this document                              |
 | Token address or trust model                    | Update `docs/token-assumptions.md` and `docs/security.md`                     |
+
+---
+
+---
+
+## 12. Snapshot Security Diff
+
+Before merging any PR that modifies snapshot files under
+`contracts/stream/test_snapshots/`, the CI pipeline runs
+`script/check_snapshot_diff.py` automatically to detect security-relevant
+field changes. The script classifies changes to auth envelopes, event payloads,
+error discriminants, and storage key layout against the `SECURITY_FIELDS`
+registry.
+
+For manual invocation:
+
+```bash
+# Check PR branch against main (typical manual usage)
+python script/check_snapshot_diff.py --base origin/main
+
+# Check specific commits
+python script/check_snapshot_diff.py --base <base-sha> --head <head-sha>
+```
+
+### Exit-code contract
+
+| Code | Meaning |
+|---|---|
+| `0` | No security-relevant changes. Standard review applies. |
+| `1` | Security-relevant changes detected. Mandatory extra review required. |
+
+### Checklist
+
+- [ ] `check_snapshot_diff.py` has been run for every changed snapshot file in this PR
+- [ ] The exit code is recorded in the PR description or review comment
+- [ ] If exit code was `1`, all applicable mandatory extra review items from
+  `docs/snapshot-security-diff.md` have been completed and documented
+
+For the full field classification reference, worked examples, and the complete
+reviewer workflow, see **[`docs/snapshot-security-diff.md`](snapshot-security-diff.md)**.
+
+---
+
+## 13. Historical Audit Invariants
+
+The invariants below are extracted from `docs/audit.md` and were validated during the
+initial contract audit. Each invariant that resulted in (or was confirmed by) a code
+change is listed here so future reviewers do not miss a category of issue previously
+found in this codebase.
+
+### 13.1 Invariants with checklist coverage (existing items suffice)
+
+| # | Invariant | Existing coverage |
+|---|---|---|
+| 1 | Accrued never exceeds deposit (`calculate_accrued` clamped) | §7 Arithmetic Safety |
+| 3 | Only the recipient can withdraw | §2 Auth Boundary |
+| 10 | Pause/resume/cancel authorization per role | §2 Auth Boundary |
+| 11 | Status transitions follow the state machine in §3.1 | §3 Terminal State Gating |
+
+### 13.2 Invariants requiring explicit checklist items
+
+- [ ] **#2 — Withdrawn amount never exceeds deposit**: `withdrawn_amount` is only increased by `withdraw`/`withdraw_to`/`batch_withdraw` by the withdrawable amount (accrued − withdrawn), and `Completed` is set exactly when `withdrawn_amount == deposit_amount`; no further withdrawals allowed after terminal state
+- [ ] **#4 — Stream IDs are unique**: IDs are assigned from a monotonically increasing `NextStreamId` counter; no reuse, no gap-fill, no decrement
+- [ ] **#5 — Sender ≠ recipient**: `create_stream` and all creation entrypoints enforce `sender != recipient`; self-streaming is rejected
+- [ ] **#6 — Deposit covers total streamable amount**: `create_stream` enforces `deposit_amount >= rate_per_second × (end_time − start_time)` with `checked_mul`
+- [ ] **#7 — Deposit sufficiency preserved on extension**: `extend_stream_end_time` re-validates `deposit_amount >= rate_per_second × (new_end_time − start_time)` before mutation; caller must `top_up_stream` first if deposit is insufficient
+- [ ] **#8 — Time bounds**: `start_time < end_time` and `cliff_time ∈ [start_time, end_time]` are enforced in every creation entrypoint
+- [ ] **#9 — Init once (authenticated bootstrap)**: `init` panics if `Config` already exists; requires `admin.require_auth()`; token is immutable after init
+- [ ] **#12 — Cancellation timestamp and refund semantics**: `cancelled_at` is set to current ledger time; accrual is frozen at `cancelled_at`; refund = `deposit_amount − accrued_at(cancelled_at)`; `cancel_stream` and `cancel_stream_as_admin` produce identical state/event semantics
+- [ ] **#12 (cancel parity)** — `cancel_stream` and `cancel_stream_as_admin` route through the same `cancel_stream_internal` helper guaranteeing identical external behaviour
+- [ ] **#14 — Contract balance consistency**: Deposit is pulled only in `create_stream`/`create_streams`/`top_up_stream`; refunds and withdrawals are derived from deposits; no minting, no arbitrary transfers
+
+### 13.3 Resolved audit findings (from `docs/security.md`)
+
+- [ ] **top_up_stream CEI fix**: `top_up_stream` was previously pulling tokens before persisting state (violating CEI). The fix reversed the order — state is now saved before `pull_token`. Verify any new `top_up_stream`-like entrypoint does not repeat this bug.
+
+---
+
+## 14. Resolved Findings — Invariant #13 (Reentrancy Guard)
+
+The Invariant #13 finding previously listed here as **open / unaddressed** has been
+resolved. This section documents the resolution for audit trail completeness.
+
+### ✅ Invariant #13 — Reentrancy Guard (resolved 2026-07-27)
+
+**Location:** `docs/audit.md` Invariant #13
+
+**Previous status:** The invariant header existed but no requirements, checks, or
+enforcement criteria were specified, and `CEI_ANALYSIS.md` (Issue #262) contained
+inaccurate claims about which entrypoints held the explicit reentrancy lock.
+
+**Resolution — CEI-only as accepted design:**
+
+The accepted posture for reentrancy protection is documented in full in
+`docs/audit.md` Invariant #13. Summary:
+
+1. **Primary defence is CEI ordering.** All standard token-transfer entrypoints
+   (`withdraw`, `withdraw_to`, `batch_withdraw`, `cancel_stream`,
+   `cancel_stream_as_admin`, `keeper_cancel`, `top_up_stream`, etc.) persist all
+   state changes to storage **before** any external token call. Because Soroban
+   re-enters the contract only on an explicit cross-contract call, a correctly
+   ordered CEI sequence is sufficient to prevent double-spend or state-corruption
+   reentrancy on these paths.
+
+2. **Explicit lock on two permissionless / admin-callable paths only.** `sweep_excess`
+   and `trigger_auto_claim` acquire `DataKey::ReentrancyLock` in addition to CEI
+   ordering. These are the only two entrypoints that warrant the lock (concurrent
+   invocations are plausible and the lock prevents a race). Extending the lock to all
+   entrypoints would introduce deadlock risk in legitimate same-transaction batch flows.
+
+3. **`CEI_ANALYSIS.md` inaccuracy corrected.** The claim that `withdraw`,
+   `withdraw_to`, `batch_withdraw`, `cancel_stream`, and `cancel_stream_as_admin` are
+   wrapped in the explicit lock was inaccurate. Those entrypoints rely solely on CEI
+   ordering, which is the intended and sufficient design. `CEI_ANALYSIS.md` is
+   superseded by `docs/audit.md` Invariant #13 and this resolution note.
+
+**Checklist items verifying the resolved design:**
+
+- [x] All standard token-transfer entrypoints follow strict CEI order (state saved
+      before any `push_token` / `pull_token` call)
+- [x] `sweep_excess` and `trigger_auto_claim` acquire/release `DataKey::ReentrancyLock`
+- [x] No other entrypoint acquires `DataKey::ReentrancyLock`
+- [x] `docs/audit.md` Invariant #13 now contains the full specification
+- [x] `CEI_ANALYSIS.md` claim corrected by this resolution note
+
+**No code changes were required.** The implementation already matched the intended
+design. Only documentation was out of sync.
+
+---
+
+## 15. Build and Gas Determinism Guarantees
+
+This section covers the determinism invariants that make WASM builds, gas baselines, and
+upgrade behaviour reproducible across machines, CI runs, and retries. These invariants
+are a prerequisite for auditor verification and for the gas-baseline comparison in
+`script/validate_gas.py` to produce stable, meaningful results.
+
+### 15.1 Determinism invariant table
+
+| Invariant | Mechanism | Verified by |
+|-----------|-----------|-------------|
+| Rust toolchain version is fixed | `rust-toolchain.toml` pins to `1.94.1` | `script/verify_rust_version.py` (every CI job) |
+| `soroban-sdk` is exact-pinned, not range-pinned | `contracts/stream/Cargo.toml` uses `"21.7.7"` not `"^21.7.7"` | `cargo_lock_determinism` Rust test |
+| All transitive dependencies are locked | `Cargo.lock` committed and unchanged | `cargo update --locked` CI gate (build job) |
+| Build profile is `--release --target wasm32-unknown-unknown` | CI `build` job invocation | WASM artifact upload step |
+| No test features bleed into WASM build | `testutils` feature excluded from WASM build step | CI `build` job configuration |
+| WASM checksum matches reference after build | `wasm/checksums.sha256` committed | `bash script/verify-wasm-checksum.sh --no-build` |
+| Gas baselines are stable across retries | Soroban metered host is deterministic | `script/validate_gas.py` (gas regression CI step) |
+
+For the full Cargo.lock determinism contract, recovery procedure, and security
+assumptions, see `docs/upgrade.md §8`.
+
+### 15.2 Per-upgrade determinism checklist
+
+Run these checks before tagging any release that changes the toolchain, SDK version, or
+contract source:
+
+- [ ] `rustc --version` matches the version in `rust-toolchain.toml` in this environment
+- [ ] `cargo update --locked --workspace` exits 0 (no dependency drift)
+- [ ] `bash script/verify-wasm-checksum.sh --no-build` passes with the committed artifact
+- [ ] If toolchain or SDK version changed: gas baselines in `docs/gas.md` have been
+      re-measured and the JSON block updated (`script/validate_gas.py` passes)
+- [ ] If toolchain or SDK version changed: `bash script/update-wasm-checksums.sh` has been
+      run and `wasm/checksums.sha256` committed
+- [ ] `script/validate_gas.py` passes on the current commit without any `FAIL` lines
+- [ ] The `PausedStreamCount` backfill caveat (docs/upgrade.md §3, docs/gas.md
+      "Release Hardening") has been reviewed if upgrading from a pre-v5 instance
+
+### 15.3 Gas baseline retry behaviour
+
+Gas baselines are **deterministic across retries**. Re-running `script/validate_gas.py`
+on an unchanged commit and unchanged toolchain always produces the same pass/fail result
+because:
+
+1. The Soroban metered host counts CPU instructions deterministically from WASM bytecode.
+2. The test harness (`soroban_sdk::testutils`) runs in-process with a fixed ledger state.
+3. No external network calls, system entropy, or wall-clock time influence the counts.
+
+If `validate_gas.py` produces a different result on a second run, suspect a toolchain
+mismatch or an uncommitted file change rather than flaky test infrastructure.
+
+### 15.4 WASM checksum role in security
+
+`wasm/checksums.sha256` is the authoritative reference for deployment verification.
+It must be updated whenever the WASM binary changes (source change, toolchain bump,
+or SDK bump). The verification workflow:
+
+```bash
+# Verify a build matches the committed reference (no rebuild):
+bash script/verify-wasm-checksum.sh --no-build
+
+# Rebuild and update the reference after a source change:
+cargo build --release -p fluxora_stream --target wasm32-unknown-unknown
+bash script/update-wasm-checksums.sh
+git add wasm/checksums.sha256
+git commit -m "chore: update wasm checksums"
+```
+
+A deployed contract whose on-chain bytecode hash does not match `wasm/checksums.sha256`
+should be treated as unverified until the discrepancy is explained.
 
 ---
 

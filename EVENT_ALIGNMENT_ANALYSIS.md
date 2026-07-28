@@ -1,5 +1,7 @@
 # Event Catalog Alignment Analysis
 
+> **Historical snapshot (undated).** This file is a point-in-time review. Function line numbers, emission inventory, and alignment statuses may no longer match `contracts/stream/src/lib.rs`. For current doc/ABI alignment, run `python3 script/validate-doc-alignment.py` and use `docs/events.md` as the catalog source of truth.
+
 ## Issue Summary
 
 Events catalog: align symbol names with docs/events.md

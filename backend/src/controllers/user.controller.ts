@@ -34,7 +34,7 @@ export async function getCurrentUser(
  * PATCH /api/v1/users/me
  */
 export async function updateUser(
-  req: Request,
+  _req: Request,
   res: Response,
   next: NextFunction
 ): Promise<void> {
@@ -80,7 +80,7 @@ export async function getUserById(
  * DELETE /api/v1/users/me
  */
 export async function deleteUser(
-  req: Request,
+  _req: Request,
   res: Response,
   next: NextFunction
 ): Promise<void> {
@@ -102,7 +102,7 @@ export async function deleteUser(
  * PATCH /api/v1/users/me/learner-profile
  */
 export async function updateLearnerProfile(
-  req: Request,
+  _req: Request,
   res: Response,
   next: NextFunction
 ): Promise<void> {
@@ -124,7 +124,7 @@ export async function updateLearnerProfile(
  * GET /api/v1/users/me/budget
  */
 export async function getLearnerBudget(
-  req: Request,
+  _req: Request,
   res: Response,
   next: NextFunction
 ): Promise<void> {
@@ -147,7 +147,7 @@ export async function getLearnerBudget(
  * GET /api/v1/users
  */
 export async function listUsers(
-  req: Request,
+  _req: Request,
   res: Response,
   next: NextFunction
 ): Promise<void> {
