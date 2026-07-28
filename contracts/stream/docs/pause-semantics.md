@@ -1,6 +1,6 @@
 # Pause Semantics
 
-> **Issue reference:** #1329  
+> **Issue reference:** #1329, #1327  
 > **Contract:** `contracts/stream/src/lib.rs`  
 > **Status:** Normative — describes current deployed behavior.
 
@@ -146,25 +146,47 @@ Atomically resumes a batch of paused streams. Two-phase: **validate all first, t
 
 ### What the global pause blocks
 
-All calls that invoke `require_not_globally_paused` fail with `ContractError::ContractPaused`:
+All calls that invoke `require_not_globally_paused` (directly, or transitively via
+`require_not_creation_paused` / `batch_withdraw` → `batch_withdraw_to`) fail with
+`ContractError::ContractPaused`:
 
-- `create_stream`, `create_streams`, `create_streams_partial`
-- `withdraw`, `withdraw_to`, `batch_withdraw`, `withdraw_from_pool`
-- `cancel_stream`
-- `update_rate_per_second`, `decrease_rate_per_second`
+- `create_stream`, `create_streams`, `create_streams_partial`, `clone_stream`
+- `withdraw`, `withdraw_to`, `batch_withdraw`, `batch_withdraw_to`, `withdraw_from_pool`, `delegated_withdraw`
+- `cancel_stream`, `witnessed_cancel_stream`, `bulk_cancel_streams`
+- `update_rate_per_second`, `decrease_rate_per_second`, `delegate_recipient_share`
 - `shorten_stream_end_time`, `extend_stream_end_time`
 - `top_up_stream`
-- `set_admin`, `transfer_claim_ownership`
-- `accept_recipient_update`, `cancel_recipient_update`
-- `accept_stream_offer`, `reject_stream_offer`
+- `transfer_claim_ownership`
+- `update_recipient`, `accept_recipient_update`, `cancel_recipient_update`
+- `accept_stream_offer`
+- `set_lookback_window`, `set_stream_decommissioned`, `set_auto_renew`, `renew_stream`
+- `trigger_auto_claim`
+
+This list is verified against
+`grep -n "require_not_globally_paused\|require_not_creation_paused" contracts/stream/src/lib.rs`
+— re-run that grep after adding a new mutating entrypoint and update this list in the
+same PR, so it does not silently drift the way it previously had (see below).
 
 ### What the global pause does NOT block
 
 - `pause_stream`, `resume_stream` — sender can still manage their own streams.
 - All `*_as_admin` entrypoints — admin retains full control.
 - `global_resume`, `set_global_emergency_paused` — to allow clearing the pause.
+- `set_admin` — admin rotation is intentionally left available so a compromised
+  or unresponsive admin key can be replaced during an active emergency pause.
+- `reject_stream_offer` — recipients can always decline a pending offer; declining
+  returns escrowed funds to the sender and cannot be abused to move funds out
+  under pause.
 - All read-only / view functions.
 - `close_completed_stream`.
+
+> **Correction:** an earlier version of this table listed `set_admin` and
+> `reject_stream_offer` as blocked by the global pause. Neither entrypoint calls
+> `require_not_globally_paused`; both continue to work during an emergency pause.
+> `batch_withdraw_to` and several newer entrypoints (`delegate_recipient_share`,
+> `witnessed_cancel_stream`, `trigger_auto_claim`, `bulk_cancel_streams`, `clone_stream`,
+> and others listed above) were previously missing from this table entirely. Fixed
+> as part of #1327.
 
 ### Counter orthogonality
 
@@ -257,7 +279,7 @@ Both are stored in the `DataKey::Stream(stream_id)` persistent entry.
 
 ### Withdrawal from Paused
 
-`withdraw`, `withdraw_to`, `batch_withdraw`, and `withdraw_from_pool` all gate on:
+`withdraw`, `withdraw_to`, `batch_withdraw`, `batch_withdraw_to`, and `withdraw_from_pool` all gate on:
 
 ```rust
 if stream.status == StreamStatus::Paused && !is_terminal_state(&env, &stream) {
@@ -269,6 +291,10 @@ This means:
 - Withdrawal is **blocked** on a `Paused` stream that is not yet time-terminal.
 - Withdrawal is **allowed** on a `Paused` stream once `current_time >= end_time` (time-terminal override).
 - If the time-terminal withdrawal fully drains the stream, status transitions `Paused → Completed` and `PausedStreamCount` is decremented.
+- `batch_withdraw_to` (the keeper/auto-claim sweep path) applies the identical
+  per-item gate inside its batch loop — a stream cannot bypass its individual
+  pause by being swept through the batch entrypoint instead of `withdraw`.
+  Regression-pinned by `pause_semantics.rs::batch_withdraw_to_blocked_while_paused`.
 
 ### Top-up on Paused
 
@@ -277,6 +303,14 @@ This means:
 ### Rate and schedule changes on Paused
 
 `update_rate_per_second`, `decrease_rate_per_second`, `shorten_stream_end_time`, `extend_stream_end_time` all operate on non-terminal streams and are allowed while the stream is `Paused` (subject to their own cooldowns and validations).
+
+### Delegation on Paused
+
+`delegate_recipient_share` does not check `stream.status == Paused` — it only rejects `Completed`/`Cancelled` (terminal) and `now >= end_time`. A recipient can therefore split off a delegated child stream from a `Paused` parent:
+- The parent's `status` is left untouched (stays `Paused`) — only `checkpointed_amount`, `checkpointed_at`, `rate_per_second`, and `deposit_amount` are updated.
+- The child stream is always created with `status: Active`, regardless of the parent's status.
+
+This is consistent with the "rate and schedule changes on Paused" behavior above — pause gates withdrawals, not configuration/allocation changes. Regression-pinned by `pause_semantics.rs::delegate_recipient_share_allowed_while_paused`.
 
 ---
 
@@ -323,3 +357,5 @@ The following behaviors must not change across refactors. Each has at least one 
 | bulk_resume validates atomically | `bulk_resume_as_admin.rs::bulk_resume_mixed_cancelled_is_atomic` |
 | bulk_resume rejects duplicates | `bulk_resume_as_admin.rs::bulk_resume_rejects_duplicate_ids` |
 | bulk_resume rejects cooldown violation | `bulk_resume_as_admin.rs::bulk_resume_rejects_pause_cooldown` |
+| `batch_withdraw_to` blocks a Paused, non-time-terminal stream | `pause_semantics.rs::batch_withdraw_to_blocked_while_paused` |
+| `delegate_recipient_share` is unaffected by parent's Paused status | `pause_semantics.rs::delegate_recipient_share_allowed_while_paused` |
