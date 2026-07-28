@@ -91,7 +91,7 @@ pub fn reject_duplicate_ids(env: &Env, ids: &soroban_sdk::Vec<u64>) -> Result<()
 /// to simulate in-flight revocation without going through the full contract flow.
 /// Only available when the `testutils` feature is enabled.
 #[cfg(feature = "testutils")]
-pub use storage::increment_delegated_nonce as increment_delegated_nonce;
+pub use storage::increment_delegated_nonce;
 
 // ---------------------------------------------------------------------------
 // TTL constants
@@ -721,7 +721,6 @@ pub struct StreamCreated {
     /// Mirrors the validated `metadata` field stored on the stream.
     pub metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
 }
-
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3149,7 +3148,8 @@ impl FluxoraStream {
         msg.extend_from_array(&nonce.to_be_bytes());
         msg.extend_from_array(&deadline.to_be_bytes());
 
-        env.crypto().ed25519_verify(&sender_public_key, &msg, &signature);
+        env.crypto()
+            .ed25519_verify(&sender_public_key, &msg, &signature);
 
         crate::storage::increment_delegated_cancel_nonce(&env, &stream.sender);
 

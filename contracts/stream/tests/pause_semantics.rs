@@ -84,9 +84,7 @@ impl<'a> Ctx<'a> {
 
     /// Advance ledger sequence past the pause/resume cooldown window (17 ledgers).
     fn clear_pause_cooldown(&self) {
-        self.env
-            .ledger()
-            .with_mut(|l| l.sequence_number += 32);
+        self.env.ledger().with_mut(|l| l.sequence_number += 32);
     }
 
     /// Create a linear stream with `deposit_amount == duration` (1 token/sec).
@@ -165,19 +163,26 @@ fn pause_cooldown_blocks_rapid_retoggle() {
     // First pause — advance past cooldown.
     ctx.clear_pause_cooldown();
     ctx.client.pause_stream(&id, &PauseReason::Operational);
-    assert_eq!(ctx.client.get_stream_state(&id).status, StreamStatus::Paused);
+    assert_eq!(
+        ctx.client.get_stream_state(&id).status,
+        StreamStatus::Paused
+    );
 
     // Advance past cooldown again, resume.
     ctx.clear_pause_cooldown();
     ctx.client.resume_stream(&id);
-    assert_eq!(ctx.client.get_stream_state(&id).status, StreamStatus::Active);
+    assert_eq!(
+        ctx.client.get_stream_state(&id).status,
+        StreamStatus::Active
+    );
 
     // Attempt immediate re-pause (no cooldown advance) — must be rejected.
-    let err = ctx
-        .client
-        .try_pause_stream(&id, &PauseReason::Operational);
+    let err = ctx.client.try_pause_stream(&id, &PauseReason::Operational);
     assert_eq!(err, Err(Ok(ContractError::PauseCooldownActive)));
-    assert_eq!(ctx.client.get_stream_state(&id).status, StreamStatus::Active);
+    assert_eq!(
+        ctx.client.get_stream_state(&id).status,
+        StreamStatus::Active
+    );
 }
 
 /// The cooldown also applies to resume: immediately re-resuming after a
@@ -193,7 +198,10 @@ fn resume_cooldown_blocks_rapid_re_resume() {
 
     let err = ctx.client.try_resume_stream(&id);
     assert_eq!(err, Err(Ok(ContractError::PauseCooldownActive)));
-    assert_eq!(ctx.client.get_stream_state(&id).status, StreamStatus::Paused);
+    assert_eq!(
+        ctx.client.get_stream_state(&id).status,
+        StreamStatus::Paused
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -210,7 +218,10 @@ fn withdraw_blocked_while_paused() {
     ctx.env.ledger().with_mut(|l| l.timestamp += 100);
 
     ctx.sender_pause(id);
-    assert_eq!(ctx.client.get_stream_state(&id).status, StreamStatus::Paused);
+    assert_eq!(
+        ctx.client.get_stream_state(&id).status,
+        StreamStatus::Paused
+    );
 
     let err = ctx.client.try_withdraw(&id);
     assert_eq!(err, Err(Ok(ContractError::InvalidState)));
@@ -262,7 +273,10 @@ fn withdraw_allowed_on_paused_stream_past_end_time() {
     let id = ctx.create_stream(100);
 
     ctx.sender_pause(id);
-    assert_eq!(ctx.client.get_stream_state(&id).status, StreamStatus::Paused);
+    assert_eq!(
+        ctx.client.get_stream_state(&id).status,
+        StreamStatus::Paused
+    );
 
     // Advance past end_time — time-terminal override kicks in.
     ctx.env.ledger().with_mut(|l| l.timestamp += 101);
@@ -309,11 +323,12 @@ fn pause_rejected_on_time_terminal_stream() {
     ctx.env.ledger().with_mut(|l| l.timestamp += 11);
     ctx.clear_pause_cooldown();
 
-    let err = ctx
-        .client
-        .try_pause_stream(&id, &PauseReason::Operational);
+    let err = ctx.client.try_pause_stream(&id, &PauseReason::Operational);
     assert_eq!(err, Err(Ok(ContractError::StreamTerminalState)));
-    assert_eq!(ctx.client.get_stream_state(&id).status, StreamStatus::Active);
+    assert_eq!(
+        ctx.client.get_stream_state(&id).status,
+        StreamStatus::Active
+    );
 }
 
 /// `resume_stream` on a Paused stream that has since passed end_time must
@@ -324,7 +339,10 @@ fn resume_rejected_on_time_terminal_paused_stream() {
     let id = ctx.create_stream(100);
 
     ctx.sender_pause(id);
-    assert_eq!(ctx.client.get_stream_state(&id).status, StreamStatus::Paused);
+    assert_eq!(
+        ctx.client.get_stream_state(&id).status,
+        StreamStatus::Paused
+    );
 
     // Advance past end_time while stream is still Paused.
     ctx.env.ledger().with_mut(|l| l.timestamp += 101);
@@ -333,7 +351,10 @@ fn resume_rejected_on_time_terminal_paused_stream() {
     let err = ctx.client.try_resume_stream(&id);
     assert_eq!(err, Err(Ok(ContractError::StreamTerminalState)));
     // Status must remain Paused — no state change on error.
-    assert_eq!(ctx.client.get_stream_state(&id).status, StreamStatus::Paused);
+    assert_eq!(
+        ctx.client.get_stream_state(&id).status,
+        StreamStatus::Paused
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -353,9 +374,7 @@ fn pause_rejected_on_cancelled_stream() {
     );
 
     ctx.clear_pause_cooldown();
-    let err = ctx
-        .client
-        .try_pause_stream(&id, &PauseReason::Operational);
+    let err = ctx.client.try_pause_stream(&id, &PauseReason::Operational);
     assert_eq!(err, Err(Ok(ContractError::StreamTerminalState)));
 }
 
@@ -374,9 +393,7 @@ fn pause_rejected_on_completed_stream() {
     );
 
     ctx.clear_pause_cooldown();
-    let err = ctx
-        .client
-        .try_pause_stream(&id, &PauseReason::Operational);
+    let err = ctx.client.try_pause_stream(&id, &PauseReason::Operational);
     // Completed is caught by the terminal-state check (status == Completed).
     assert_eq!(err, Err(Ok(ContractError::StreamTerminalState)));
 }
@@ -508,7 +525,10 @@ fn global_pause_does_not_block_sender_pause() {
 
     // Must succeed.
     ctx.client.pause_stream(&id, &PauseReason::Operational);
-    assert_eq!(ctx.client.get_stream_state(&id).status, StreamStatus::Paused);
+    assert_eq!(
+        ctx.client.get_stream_state(&id).status,
+        StreamStatus::Paused
+    );
 }
 
 /// `resume_stream` (sender path) is NOT blocked by the global emergency pause.
@@ -523,7 +543,10 @@ fn global_pause_does_not_block_sender_resume() {
 
     // Resume must succeed even while globally paused.
     ctx.client.resume_stream(&id);
-    assert_eq!(ctx.client.get_stream_state(&id).status, StreamStatus::Active);
+    assert_eq!(
+        ctx.client.get_stream_state(&id).status,
+        StreamStatus::Active
+    );
 }
 
 /// After `global_resume`, `withdraw` is unblocked again.
@@ -618,9 +641,7 @@ fn double_pause_returns_stream_already_paused() {
     assert_eq!(ctx.client.get_paused_stream_count(), 1);
 
     ctx.clear_pause_cooldown();
-    let err = ctx
-        .client
-        .try_pause_stream(&id, &PauseReason::Operational);
+    let err = ctx.client.try_pause_stream(&id, &PauseReason::Operational);
     assert_eq!(err, Err(Ok(ContractError::StreamAlreadyPaused)));
     // Counter must be unchanged.
     assert_eq!(ctx.client.get_paused_stream_count(), 1);
@@ -633,7 +654,10 @@ fn resume_active_stream_returns_stream_not_paused() {
     let ctx = Ctx::setup();
     let id = ctx.create_stream(1_000);
     // Stream is Active — no pause has occurred.
-    assert_eq!(ctx.client.get_stream_state(&id).status, StreamStatus::Active);
+    assert_eq!(
+        ctx.client.get_stream_state(&id).status,
+        StreamStatus::Active
+    );
 
     ctx.clear_pause_cooldown();
     let err = ctx.client.try_resume_stream(&id);

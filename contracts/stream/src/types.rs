@@ -66,7 +66,7 @@ pub struct StreamCreated {
     pub cliff_time: u64,
     pub end_time: u64,
     /// Optional withdrawal threshold (raw units) utilized by threshold monitors.
-    /// Withdrawals below this amount are skipped unless they are the final drain 
+    /// Withdrawals below this amount are skipped unless they are the final drain
     /// or the stream is terminal. Used to prevent dust sweep spam.
     pub withdraw_dust_threshold: i128,
     /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
@@ -103,7 +103,7 @@ pub struct StreamCloned {
     pub cliff_time: u64,
     /// End time of the new stream.
     pub end_time: u64,
-    /// Withdrawal threshold inherited from the source stream, 
+    /// Withdrawal threshold inherited from the source stream,
     /// ensuring threshold monitors continue to respect the same boundary.
     pub withdraw_dust_threshold: i128,
 }
@@ -493,7 +493,6 @@ pub struct StreamDecommissioned {
     pub stream_id: u64,
     pub decommissioned: bool,
 }
-
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -1,9 +1,9 @@
 extern crate std;
 
 use fluxora_stream::{
-    ContractError, CreateStreamParams, DataKey, DOCUMENTED_TEMPLATES, FluxoraStream,
-    FluxoraStreamClient, StreamKind, StreamScheduleTemplate, StreamStatus, TemplateSpec,
-    MAX_GLOBAL_TEMPLATES, MAX_TEMPLATES_PER_OWNER,
+    ContractError, CreateStreamParams, DataKey, FluxoraStream, FluxoraStreamClient, StreamKind,
+    StreamScheduleTemplate, StreamStatus, TemplateSpec, DOCUMENTED_TEMPLATES, MAX_GLOBAL_TEMPLATES,
+    MAX_TEMPLATES_PER_OWNER,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -445,8 +445,7 @@ fn documented_templates_match_code() {
 
     // 1. Verify every documented template is registrable and has the right params.
     for (name, start_delay, cliff_delay, duration) in DOC_ENTRIES {
-        let tid =
-            client.register_stream_template(&owner, start_delay, cliff_delay, duration);
+        let tid = client.register_stream_template(&owner, start_delay, cliff_delay, duration);
         let stored: StreamScheduleTemplate = client.get_stream_template(&tid);
         assert_eq!(
             stored.start_delay, *start_delay,
@@ -456,10 +455,7 @@ fn documented_templates_match_code() {
             stored.cliff_delay, *cliff_delay,
             "{name}: cliff_delay mismatch"
         );
-        assert_eq!(
-            stored.duration, *duration,
-            "{name}: duration mismatch"
-        );
+        assert_eq!(stored.duration, *duration, "{name}: duration mismatch");
     }
 
     // 2. Surface code‑defined templates that are NOT documented (non‑failing).

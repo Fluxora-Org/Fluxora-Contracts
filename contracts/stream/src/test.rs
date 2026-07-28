@@ -22570,7 +22570,10 @@ fn withdraw_is_idempotent_on_full_withdrawal() {
     // Second withdrawal — idempotent, returns 0
     let second = ctx.client().withdraw(&stream_id);
     assert_eq!(second, 0);
-    assert_eq!(ctx.client().get_stream_state(&stream_id).withdrawn_amount, 1000);
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).withdrawn_amount,
+        1000
+    );
 }
 
 /// Verify that repeated `withdraw_to` calls on the same stream are idempotent

@@ -532,8 +532,14 @@ fn delegated_cancel_increments_nonce() {
 
     // Cancel second stream with correct nonce 1.
     let sig2_ok = ctx.sign_cancel(stream_id2, 1, 9999);
-    ctx.client()
-        .delegated_cancel(&stream_id2, &ctx.relayer, &ctx.sender_pk, &1, &9999, &sig2_ok);
+    ctx.client().delegated_cancel(
+        &stream_id2,
+        &ctx.relayer,
+        &ctx.sender_pk,
+        &1,
+        &9999,
+        &sig2_ok,
+    );
     assert_eq!(
         ctx.client().get_stream_state(&stream_id2).status,
         StreamStatus::Cancelled
@@ -564,7 +570,10 @@ fn delegated_cancel_replay_rejected() {
         &9999,
         &sig,
     );
-    assert!(replay.is_err(), "replay of a consumed nonce must be rejected");
+    assert!(
+        replay.is_err(),
+        "replay of a consumed nonce must be rejected"
+    );
 }
 
 #[test]
@@ -644,14 +653,9 @@ fn delegated_cancel_expired_deadline_rejected() {
     ctx.env.ledger().set_timestamp(5000);
     let sig = ctx.sign_cancel(stream_id, 0, 100); // deadline 100 < now 5000
 
-    let result = ctx.client().try_delegated_cancel(
-        &stream_id,
-        &ctx.relayer,
-        &ctx.sender_pk,
-        &0,
-        &100,
-        &sig,
-    );
+    let result =
+        ctx.client()
+            .try_delegated_cancel(&stream_id, &ctx.relayer, &ctx.sender_pk, &0, &100, &sig);
     assert_eq!(
         result,
         Err(Ok(ContractError::SignatureDeadlineExpired)),
@@ -770,7 +774,7 @@ fn delegated_cancel_wrong_nonce_in_signature_rejected() {
         &stream_id,
         &ctx.relayer,
         &ctx.sender_pk,
-        &1,   // wrong nonce passed to function — won't match stored 0
+        &1, // wrong nonce passed to function — won't match stored 0
         &9999,
         &sig_for_nonce1,
     );
@@ -882,14 +886,9 @@ fn delegated_cancel_stream_not_found() {
     ctx.env.ledger().set_timestamp(100);
 
     let sig = ctx.sign_cancel(999, 0, 9999);
-    let result = ctx.client().try_delegated_cancel(
-        &999,
-        &ctx.relayer,
-        &ctx.sender_pk,
-        &0,
-        &9999,
-        &sig,
-    );
+    let result =
+        ctx.client()
+            .try_delegated_cancel(&999, &ctx.relayer, &ctx.sender_pk, &0, &9999, &sig);
     assert_eq!(
         result,
         Err(Ok(ContractError::StreamNotFound)),
@@ -1040,14 +1039,9 @@ fn delegated_cancel_state_change_atomic_no_partial_update() {
     ctx.env.ledger().set_timestamp(1000);
     let sig = ctx.sign_cancel(stream_id, 0, 50); // expired
 
-    let _ = ctx.client().try_delegated_cancel(
-        &stream_id,
-        &ctx.relayer,
-        &ctx.sender_pk,
-        &0,
-        &50,
-        &sig,
-    );
+    let _ =
+        ctx.client()
+            .try_delegated_cancel(&stream_id, &ctx.relayer, &ctx.sender_pk, &0, &50, &sig);
 
     let stream = ctx.client().get_stream_state(&stream_id);
     assert_eq!(stream.status, StreamStatus::Active);

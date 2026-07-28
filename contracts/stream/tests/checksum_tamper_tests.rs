@@ -22,8 +22,7 @@
 #![cfg(test)]
 
 use fluxora_stream::{
-    checksum, FluxoraStream, FluxoraStreamClient, StreamKind, StreamStatus,
-    CreateStreamParams,
+    checksum, CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamKind, StreamStatus,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -118,7 +117,10 @@ fn test_checksum_basic_functionality() {
 
     // Same stream should produce same checksum
     let checksum2 = compute_stream_checksum(&ctx.env, &stream);
-    assert_eq!(checksum1, checksum2, "Same stream should produce same checksum");
+    assert_eq!(
+        checksum1, checksum2,
+        "Same stream should produce same checksum"
+    );
 }
 
 // ============================================================================
@@ -160,7 +162,7 @@ fn test_tamper_detection_stream_id() {
 fn compute_stream_checksum(env: &Env, stream: &fluxora_stream::Stream) -> [u8; 32] {
     // This is a placeholder that should be replaced with the actual
     // checksum function from the checksum module.
-    // 
+    //
     // For now, we hash all fields as a demonstration of what the
     // tamper-detection tests expect.
     use soroban_sdk::crypto::sha256;
@@ -341,8 +343,9 @@ fn test_all_included_fields_detect_tampering() {
         TestCase::new("withdrawn_amount", |s| s.withdrawn_amount += 100),
         TestCase::new("checkpointed_amount", |s| s.checkpointed_amount += 100),
         TestCase::new("checkpointed_at", |s| s.checkpointed_at += 1),
-        TestCase::new("withdraw_dust_threshold", |s| s.withdraw_dust_threshold += 10),
-
+        TestCase::new("withdraw_dust_threshold", |s| {
+            s.withdraw_dust_threshold += 10
+        }),
         // Status field
         TestCase::new("status", |s| {
             s.status = match s.status {
@@ -351,7 +354,6 @@ fn test_all_included_fields_detect_tampering() {
                 _ => StreamStatus::Active,
             }
         }),
-
         // Option fields
         TestCase::new("cancelled_at", |s| {
             s.cancelled_at = Some(s.cancelled_at.unwrap_or(0) + 1);
@@ -365,7 +367,6 @@ fn test_all_included_fields_detect_tampering() {
         TestCase::new("parent_stream_id", |s| {
             s.parent_stream_id = Some(s.parent_stream_id.unwrap_or(0) + 1);
         }),
-
         // Kind field
         TestCase::new("kind", |s| {
             s.kind = match s.kind {

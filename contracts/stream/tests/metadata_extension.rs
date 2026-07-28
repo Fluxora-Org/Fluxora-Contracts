@@ -1553,7 +1553,9 @@ fn test_many_streams_independent_metadata() {
         });
     }
 
-    let results = ctx.client().create_streams_partial(&ctx.sender, &params_vec);
+    let results = ctx
+        .client()
+        .create_streams_partial(&ctx.sender, &params_vec);
     assert_eq!(results.len(), count as u32);
 
     // Verify each stream's metadata is independent

@@ -172,4 +172,3 @@ fn final_drain_bypasses_dust_threshold() {
     );
     assert_eq!(ctx.token.balance(&ctx.recipient), 1_000);
 }
-
