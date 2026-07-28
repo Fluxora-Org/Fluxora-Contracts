@@ -194,6 +194,11 @@ name = "pause_semantics"
 path = "tests/pause_semantics.rs"
 test = true
 
+[[test]]
+name = "dynamic_pricing_edge_cases"
+path = "tests/dynamic_pricing_edge_cases.rs"
+test = true
+
 # ---------------------------------------------------------------------------
 # Known-broken integration tests, second batch (compile fine, fail at runtime)
 # ---------------------------------------------------------------------------
