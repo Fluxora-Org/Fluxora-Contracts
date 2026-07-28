@@ -237,6 +237,11 @@ path = "tests/event_snapshots_suite.rs"
 test = true
 
 [[test]]
+name = "event_schema_consistency"
+path = "tests/event_schema_consistency.rs"
+test = true
+
+[[test]]
 name = "governance_integration"
 path = "tests/governance_integration.rs"
 test = false
