@@ -15,6 +15,44 @@ pub mod storage;
 pub(crate) mod storage;
 mod token_check;
 pub mod types;
+/// Manifest versioning module.
+///
+/// Provides validation primitives that lock down the contract's versioning
+/// contract, covering upgrade compatibility, storage-key stability, and
+/// regression guards around accrual, checkpoint, and entry-size invariants.
+///
+/// The module enforces:
+/// - **Contract version** – [`CONTRACT_VERSION`] (currently `9`) is the
+///   compile-time constant returned by the permissionless `version()` view.
+///   See [`CONTRACT_VERSION`] for the versioning policy table and bump
+///   checklist.
+/// - **Frozen discriminants** – `FROZEN_DISCRIMINANTS_V9` records all 36
+///   `DataKey` discriminants (0..=35) that are append-only and must never
+///   be reordered or removed. The compile-time check
+///   `validate_discriminants_frozen` catches regressions.
+/// - **Storage entry size** – `validate_entry_size` enforces the per-entry
+///   byte cap (`MAX_STREAM_ENTRY_BYTES` ≈ 4 KiB), preventing gas-DoS through
+///   oversized storage writes.
+/// - **Upgrade path** – `validate_version` detects version mismatches during
+///   migrations; integration tests in `tests/upgrade_path.rs` pin V5→V6
+///   compatibility and verify that `version()` is idempotent, gas-free, and
+///   callable before `init`.
+/// - **State invariants** – `validate_checkpoint_state`, `validate_accrual_bounds`,
+///   and `validate_withdrawal_monotonicity` catch retrograde clocks, negative
+///   accrual, and non-monotonic withdrawals at validation time.
+///
+/// ## References
+/// - Full documentation: [`docs/manifest-versioning.md`](docs/manifest-versioning.md)
+/// - ABI stability policy: [`docs/ABI_STABILITY.md`](docs/ABI_STABILITY.md)
+/// - Storage layout & DataKey evolution: [`docs/storage.md`](docs/storage.md)
+///
+/// ## Regression surface
+/// - Any change to `DataKey` variants must preserve existing discriminants
+///   and update `FROZEN_DISCRIMINANTS_V9` + `frozen_discriminant_count()`.
+/// - Any change to `CONTRACT_VERSION` must follow the bump checklist in
+///   [`CONTRACT_VERSION`]'s doc comment.
+/// - New entry-points that read storage must use the existing key layout;
+///   new keys must be appended at the end of the `DataKey` enum.
 pub mod versioning;
 
 use soroban_sdk::xdr::ToXdr;
