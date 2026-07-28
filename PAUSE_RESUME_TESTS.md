@@ -1,5 +1,7 @@
 # Integration Tests: Pause/Resume/Withdraw Lifecycle
 
+> **Historical snapshot.** This document references branch `test/integration-pause-resume-withdraw`, commit `61979e5`, and stale suite sizes (e.g. **152 unit / 25–27 integration** tests). Do not use those counts for onboarding or due diligence. Regenerate inventory with `python3 script/count_rust_tests.py` and use CI for pass/fail status.
+
 ## Overview
 
 This document summarizes the four new integration tests added for the pause/resume/withdraw flow in the Fluxora streaming contracts. These tests verify the correctness of pausing streams, accrual semantics, and withdrawal behavior during different stream states.

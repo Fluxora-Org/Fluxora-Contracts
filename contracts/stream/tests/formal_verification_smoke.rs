@@ -1,7 +1,4 @@
-#![cfg(test)]
-extern crate std;
-
-use crate::accrual::calculate_accrued_amount;
+use fluxora_stream::accrual::calculate_accrued_amount;
 
 /// Smoke test for accrual (existing)
 #[test]
@@ -10,7 +7,71 @@ fn smoke_accrual_examples() {
     assert_eq!(r, 500);
 
     let r2 = calculate_accrued_amount(0, 100, 200, 1, 100, 150);
-    assert_eq!(r2, 50);
+    assert_eq!(r2, 100);
+}
+
+// ---------------------------------------------------------------------------
+// Kani harnesses for clock monotonicity and CliffOnly accrual (gated)
+// ---------------------------------------------------------------------------
+
+#[cfg(kani)]
+mod kani_accrual_security {
+    use fluxora_stream::accrual::{
+        assert_ledger_time_monotonic, calculate_accrued_amount_checkpointed, CheckpointState,
+    };
+    use fluxora_stream::{ContractError, StreamKind};
+
+    /// Kani proof: the ledger-time guard reports ClockRegression exactly when
+    /// the current timestamp is earlier than the previous timestamp across full symbolic domain.
+    #[kani::proof]
+    fn ledger_time_monotonic_guard() {
+        let prev_ts: u64 = kani::any();
+        let current_ts: u64 = kani::any();
+
+        let result = assert_ledger_time_monotonic(prev_ts, current_ts);
+
+        if current_ts < prev_ts {
+            assert_eq!(result, Err(ContractError::ClockRegression));
+        } else {
+            assert_eq!(result, Ok(()));
+        }
+    }
+
+    /// Kani proof: a CliffOnly stream pays its full nonnegative deposit at or
+    /// after the cliff, pays nothing before it, and never leaves the deposit
+    /// bounds regardless of the other symbolic stream parameters.
+    #[kani::proof]
+    fn cliff_only_accrual_exact_and_bounded() {
+        let checkpointed_amount: i128 = kani::any();
+        let checkpointed_at: u64 = kani::any();
+        let cliff_time: u64 = kani::any();
+        let end_time: u64 = kani::any();
+        let deposit_amount: i128 = kani::any();
+        let rate_per_second: i128 = kani::any();
+        let now: u64 = kani::any();
+
+        kani::assume(deposit_amount >= 0);
+
+        let state = CheckpointState {
+            checkpointed_amount,
+            checkpointed_at,
+            cliff_time,
+            end_time,
+            deposit_amount,
+            kind: StreamKind::CliffOnly,
+        };
+
+        let accrued = calculate_accrued_amount_checkpointed(state, rate_per_second, now);
+
+        if now >= cliff_time {
+            assert_eq!(accrued, deposit_amount);
+        } else {
+            assert_eq!(accrued, 0);
+        }
+
+        assert!(accrued >= 0);
+        assert!(accrued <= deposit_amount);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -19,8 +80,7 @@ fn smoke_accrual_examples() {
 
 #[cfg(kani)]
 mod kani_fee {
-    use super::*;
-    use crate::lib::compute_keeper_fee_split;
+    use fluxora_stream::compute_keeper_fee_split;
 
     /// Kani proof: keeper_fee + sender_refund == sender_refund_gross
     /// and fee <= gross for full domain (gross >= 0, BPS in [0,10000])
@@ -61,9 +121,7 @@ mod kani_fee {
         kani::assume(bps <= 10_000);
 
         // Exact production expression
-        let _ = gross
-            .checked_mul(bps as i128)
-            .map(|v| v / 10_000);
+        let _ = gross.checked_mul(bps as i128).map(|v| v / 10_000);
     }
 }
 

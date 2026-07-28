@@ -4,7 +4,7 @@
 //! and no allowed in-policy input is wrongly rejected.
 
 use fluxora_factory::{FactoryError, FluxoraFactory, FluxoraFactoryClient};
-use fluxora_stream::{FluxoraStream, FluxoraStreamClient};
+use fluxora_stream::{CreateStreamParams, FluxoraStream, FluxoraStreamClient};
 use proptest::prelude::*;
 use soroban_sdk::{
     testutils::Address as _,
@@ -15,77 +15,55 @@ use soroban_sdk::{
 struct Ctx<'a> {
     env: Env,
     factory: FluxoraFactoryClient<'a>,
-    #[allow(dead_code)]
-    stream: FluxoraStreamClient<'a>,
-    admin: Address,
     sender: Address,
-    #[allow(dead_code)]
-    token: TokenClient<'a>,
+    _token: TokenClient<'a>,
 }
 
 impl<'a> Ctx<'a> {
-    fn setup(max_deposit: i128, min_duration: u64) -> Self {
+    fn setup(cap: i128, min_duration: u64) -> Self {
         let env = Env::default();
         env.mock_all_auths();
 
-        // Deploy stream contract
-        let stream_id = env.register_contract(None, FluxoraStream);
-        let stream = FluxoraStreamClient::new(&env, &stream_id);
+        let stream_cid = env.register_contract(None, FluxoraStream);
+        let stream_client = FluxoraStreamClient::new(&env, &stream_cid);
 
-        // Deploy factory contract
-        let factory_id = env.register_contract(None, FluxoraFactory);
-        let factory = FluxoraFactoryClient::new(&env, &factory_id);
+        let factory_cid = env.register_contract(None, FluxoraFactory);
+        let factory = FluxoraFactoryClient::new(&env, &factory_cid);
 
-        // Token setup
         let token_admin = Address::generate(&env);
-        let token_contract_id = env
-            .register_stellar_asset_contract_v2(token_admin.clone())
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
             .address();
-        let token = TokenClient::new(&env, &token_contract_id);
-        let stellar_asset = StellarAssetClient::new(&env, &token_contract_id);
+        let token = TokenClient::new(&env, &token_id);
+        let stellar_asset = StellarAssetClient::new(&env, &token_id);
 
         let admin = Address::generate(&env);
         let sender = Address::generate(&env);
-        // Mint ample tokens to the sender
-        stellar_asset.mint(&sender, &1_000_000_000_000);
 
-        // Init stream contract
-        stream.init(&token_contract_id, &stream_id);
+        stellar_asset.mint(&sender, &1_000_000_000_i128);
+        stream_client.init(&token_id, &admin);
+        token.approve(&sender, &stream_cid, &i128::MAX, &100_000);
 
-        // Approve stream contract to pull tokens from sender (avoiding InsufficientBalance/Allowance)
-        token.approve(&sender, &stream_id, &1_000_000_000_000, &9999);
-
-        // Init factory with specified policy values
-        factory.init(&admin, &stream_id, &max_deposit, &min_duration);
+        factory.init(&admin, &stream_cid, &cap, &min_duration);
 
         Self {
             env,
             factory,
-            stream,
-            admin,
             sender,
-            token,
+            _token: token,
         }
     }
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(200))]
-
-    /// Property-based test asserting that exactly the documented rejection conditions
-    /// hold on the factory create_stream policy checks, and no valid input is rejected.
     #[test]
-    fn test_create_stream_policy_properties(
-        is_allowlisted in any::<bool>(),
-        deposit_amount in 1_000i128..15_000i128,
-        duration in 10u64..500u64,
-        start_time in 1_000u64..10_000u64,
+    fn prop_factory_policy_enforced(
+        cap in 100i128..1_000_000i128,
+        min_duration in 10u64..3600u64,
+        deposit_amount in 1i128..2_000_000i128,
+        duration in 1u64..7200u64,
+        is_allowlisted in proptest::bool::ANY,
     ) {
-        let cap = 10_000i128;
-        let min_duration = 100u64;
-        let end_time = start_time + duration;
-
-        // Perform setup and optionally allowlist the recipient
         let ctx = Ctx::setup(cap, min_duration);
         let recipient = Address::generate(&ctx.env);
 
@@ -93,16 +71,26 @@ proptest! {
             ctx.factory.set_allowlist(&recipient, &true);
         }
 
+        let start_time = ctx.env.ledger().timestamp();
+        let end_time = start_time + duration;
+
         // Invoke factory's create_stream entrypoint
         let result = ctx.factory.try_create_stream(
             &ctx.sender,
-            &recipient,
-            &deposit_amount,
-            &1i128, // rate_per_second
-            &start_time,
-            &start_time, // cliff_time == start_time
-            &end_time,
-            &0i128, // withdraw_dust_threshold
+            &CreateStreamParams {
+                recipient: recipient.clone(),
+                deposit_amount,
+                rate_per_second: 1i128,
+                start_time,
+                cliff_time: start_time,
+                end_time,
+                withdraw_dust_threshold: Some(0i128),
+                memo: None,
+                metadata: None,
+                kind: fluxora_stream::StreamKind::Linear,
+                irrevocable: None,
+                witness: None,
+            },
         );
 
         // Property 1: RecipientNotAllowlisted iff !is_allowlisted
