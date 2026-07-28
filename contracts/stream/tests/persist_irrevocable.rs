@@ -162,6 +162,7 @@ fn test_create_stream_relative_irrevocable() {
             kind: StreamKind::Linear,
             metadata: None,
             irrevocable: Some(true),
+            witness: None,
         },
     );
 

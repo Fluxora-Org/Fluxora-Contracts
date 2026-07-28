@@ -20,7 +20,7 @@
 //! imported by a test crate that depends on a concrete type path. All other
 //! types belong at the crate root.
 
-use soroban_sdk::{contracttype, Address};
+use soroban_sdk::{contracttype, Address, Map};
 
 /// The canonical persistent record for a single payment/vesting stream.
 ///
@@ -494,29 +494,7 @@ pub struct StreamDecommissioned {
     pub decommissioned: bool,
 }
 
-/// Emitted when claim ownership is transferred on a stream.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ClaimOwnershipTransferred {
-    pub stream_id: u64,
-    pub old_owner: Option<Address>,
-    pub new_owner: Address,
-}
 
-/// Emitted when a recipient delegates a share of their stream.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RecipientShareDelegated {
-    pub parent_stream_id: u64,
-    pub child_stream_id: u64,
-    pub delegator: Address,
-    pub delegatee: Address,
-    pub share_bps: u32,
-    pub new_parent_rate: i128,
-    pub child_rate: i128,
-}
-
-/// Pagination result for paginated stream listings.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Page {

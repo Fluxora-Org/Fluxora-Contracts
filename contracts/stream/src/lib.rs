@@ -600,35 +600,7 @@ pub struct StreamCreated {
     pub metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
 }
 
-/// Emitted when a stream is cloned via `clone_stream`.
-///
-/// Carries both the source stream ID (for audit trail) and the full parameters
-/// of the newly created stream so indexers can correlate the two without a
-/// separate `get_stream_state` call.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct StreamCloned {
-    /// The newly created stream's ID.
-    pub new_stream_id: u64,
-    /// The source stream that was cloned.
-    pub source_stream_id: u64,
-    /// Sender of the new stream (same as the caller / original sender).
-    pub sender: Address,
-    /// Recipient of the new stream (may differ from the source stream's recipient).
-    pub recipient: Address,
-    /// Deposit amount locked into the new stream.
-    pub deposit_amount: i128,
-    /// Rate per second inherited from the source stream.
-    pub rate_per_second: i128,
-    /// Absolute start time of the new stream.
-    pub start_time: u64,
-    /// Cliff time of the new stream (preserves the source cliff offset).
-    pub cliff_time: u64,
-    /// End time of the new stream.
-    pub end_time: u64,
-}
 
-/// Result of a single stream creation attempt in a partial batch.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreateStreamResult {
@@ -4570,6 +4542,12 @@ impl FluxoraStream {
             return Err(ContractError::InvalidParams);
         }
 
+        // Reject rate changes on expired streams: no remaining duration can accrue.
+        let now = current_accrual_timestamp(&env)?;
+        if now >= stream.end_time {
+            return Err(ContractError::InvalidState);
+        }
+
         // Enforce governance-controlled maximum rate per second cap.
         let max_rate = get_max_rate_per_second(&env);
         if new_rate_per_second > max_rate {
@@ -4597,7 +4575,6 @@ impl FluxoraStream {
         }
 
         // Checkpoint accrued-to-date so the rate increase applies forward-only.
-        let now = current_accrual_timestamp(&env)?;
         let accrued_now = accrual::calculate_accrued_amount_checkpointed(
             accrual::CheckpointState {
                 checkpointed_amount: stream.checkpointed_amount,
@@ -6184,6 +6161,14 @@ impl FluxoraStream {
             return Err(ContractError::StreamTerminalState);
         }
 
+        if stream.decommissioned.unwrap_or(false) {
+            return Err(ContractError::InvalidState);
+        }
+
+        if stream.kind != StreamKind::Linear {
+            return Err(ContractError::UnsupportedStreamKind);
+        }
+
         // Only sender or admin can update rate
         let admin = get_admin(&env)?;
         if caller != stream.sender && caller != admin {
@@ -6196,6 +6181,12 @@ impl FluxoraStream {
         }
 
         let old_rate = stream.rate_per_second;
+
+        // Reject rate changes on expired streams (no remaining accrual possible).
+        let now = current_accrual_timestamp(&env)?;
+        if now >= stream.end_time {
+            return Err(ContractError::InvalidState);
+        }
 
         // 🔑 IMPORTANT: Do NOT touch withdrawn_amount
         // This preserves correctness after partial withdrawals
@@ -6212,7 +6203,7 @@ impl FluxoraStream {
                 stream_id,
                 old_rate_per_second: old_rate,
                 new_rate_per_second,
-                effective_time: env.ledger().timestamp(),
+                effective_time: now,
             },
         );
 
