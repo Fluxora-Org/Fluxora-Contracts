@@ -32,12 +32,12 @@ Security guarantees under test
 
 import copy
 import json
+import os
+import runpy
 import subprocess
 import sys
-import os
 import tempfile
-import runpy
-from unittest.mock import patch, mock_open, MagicMock, call
+from unittest.mock import call, MagicMock, mock_open, patch
 
 import pytest
 

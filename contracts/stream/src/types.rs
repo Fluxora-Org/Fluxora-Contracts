@@ -1,61 +1,28 @@
 //! Type definitions for the Fluxora stream contract.
 //!
-//! Contains all `#[contracttype]` structs, enums, and the `ContractError`
-//! definition used across the contract. The `DataKey` enum (storage key
-//! discriminants) is also defined here — **variant order must never change**.
+//! This module defines the `Stream` persistent-storage struct and a small set
+//! of supplementary event/pagination structs that must live in a dedicated
+//! submodule (for Soroban `#[contracttype]` codegen determinism and so they
+//! can be imported from sibling modules such as `accrual` or `storage`
+//! without creating cycles).
 //!
-//! See `docs/storage.md` for the full module map and TTL policy.
+//! All other contract types — including `ContractError`, `DataKey` (with its
+//! frozen 0–35 discriminants), `Config`, the event payloads, `PauseKind`,
+//! `StreamKind`, `StreamStatus`, `CreateStreamParams`, and similar enums —
+//! live at the crate root in `lib.rs`. The `DataKey` variant order is the
+//! single source of truth for storage discriminant stability; do **not**
+//! duplicate those definitions here.
+//!
+//! # Adding a new struct to this module
+//!
+//! Only place a struct here when (a) it needs `#[contracttype]` and (b) it is
+//! referenced by more than one other file in `src/`, or (c) it must be
+//! imported by a test crate that depends on a concrete type path. All other
+//! types belong at the crate root.
 
-#![allow(clippy::too_many_arguments)]
+use soroban_sdk::{contracttype, Address};
 
-use soroban_sdk::{contracttype, Address, Map};
-
-use crate::{ContractError, PauseReason, StreamKind, StreamStatus};
-
-// Data types
-// ---------------------------------------------------------------------------
-
-/// Maximum number of recipients allowed in a single pooled stream.
-pub const MAX_POOL_RECIPIENTS: u32 = 100;
-
-/// Global configuration for the Fluxora protocol.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Config {
-    pub token: Address,
-    pub admin: Address,
-}
-
-/// An active ID reservation held by a caller after `reserve_stream_ids`.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct IdReservation {
-    pub start_id: u64,
-    pub count: u32,
-    pub consumed: u32,
-    pub expiry: Option<u64>,
-}
-
-/// Struct for per-stream or per-protocol pause records.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StreamPaused {
-    pub stream_id: u64,
-    pub reason: soroban_sdk::String,
-}
-
-/// Health report for a stream.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StreamHealth {
-    pub is_underfunded: bool,
-    pub is_expired: bool,
-    pub accrued_to_date: u128,
-    pub remaining_deposit: u128,
-    pub seconds_until_depletion: Option<u64>,
-}
-
-/// Operational status of a stream, determining which operations are allowed.
+/// The canonical persistent record for a single payment/vesting stream.
 ///
 /// The status controls the stream's lifecycle and affects both accrual calculation
 /// and operation availability. Status transitions follow strict rules to maintain
@@ -98,8 +65,9 @@ pub struct StreamCreated {
     pub start_time: u64,
     pub cliff_time: u64,
     pub end_time: u64,
-    /// Optional withdrawal threshold (raw units). Withdrawals below this
-    /// amount are skipped unless they are the final drain or the stream is terminal.
+    /// Optional withdrawal threshold (raw units) utilized by threshold monitors.
+    /// Withdrawals below this amount are skipped unless they are the final drain 
+    /// or the stream is terminal. Used to prevent dust sweep spam.
     pub withdraw_dust_threshold: i128,
     /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
     /// `None` when no memo was supplied at creation time.
@@ -135,6 +103,9 @@ pub struct StreamCloned {
     pub cliff_time: u64,
     /// End time of the new stream.
     pub end_time: u64,
+    /// Withdrawal threshold inherited from the source stream, 
+    /// ensuring threshold monitors continue to respect the same boundary.
+    pub withdraw_dust_threshold: i128,
 }
 
 /// Result of a single stream creation attempt in a partial batch.
@@ -463,7 +434,7 @@ pub struct Stream {
     pub cliff_time: u64,
     pub end_time: u64,
     pub withdrawn_amount: i128,
-    pub status: StreamStatus,
+    pub status: crate::StreamStatus,
     pub cancelled_at: Option<u64>,
     /// Total tokens mathematically accrued up to `checkpointed_at` under all
     /// previous rates. Updated by `decrease_rate_per_second` (and by
@@ -473,30 +444,46 @@ pub struct Stream {
     /// Ledger timestamp of the last rate change (or `start_time` on creation).
     /// `calculate_accrued` uses this as the start of the current rate epoch.
     pub checkpointed_at: u64,
-    /// Optional withdrawal threshold (raw units). Withdrawals below this
-    /// amount are skipped unless they are the final drain or the stream is terminal.
+    /// Minimum withdrawal amount in raw token units before a non-terminal
+    /// payout is skipped (returns `0`, no transfer).
+    ///
+    /// ## Threshold Monitor Behavior
+    /// This threshold dictates when indexers and external bot monitors should trigger a `batch_withdraw_to`
+    /// sweep. It affects the relevant state model by preserving CPU/gas and preventing dust withdrawal spam.
+    ///
+    /// ## Edge Cases & State Model
+    /// - **Storage/Gas**: Prevents storage state growth and gas exhaustion by rejecting micro-withdrawals.
+    /// - **Upgrade/Compat**: `withdraw_dust_threshold` defaults to `0` (or `None` in `CreateStreamParams`)
+    ///   for legacy v1 streams to guarantee backward compatibility during contract upgrades.
+    /// - **Terminal Streams**: This threshold is intentionally bypassed if the stream reaches a terminal state
+    ///   (`Completed`, `Cancelled`) or if it's the final drain.
     pub withdraw_dust_threshold: i128,
-    /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
-    /// Maximum length: `MAX_MEMO_BYTES` (64 bytes). `None` when not supplied.
+    /// Optional bounded memo for indexer correlation.
     pub memo: Option<soroban_sdk::Bytes>,
-    /// The architectural style of the stream (Linear or CliffOnly).
-    pub kind: StreamKind,
+    /// The architectural style of the stream (Linear, CliffOnly, or CliffSlope).
+    pub kind: crate::StreamKind,
     /// Ledger sequence number of the last pause or resume toggle.
-    /// Used to enforce MIN_PAUSE_INTERVAL_LEDGERS cooldown.
     pub last_pause_toggle_ledger: u32,
     /// Ledger sequence number of the last recipient withdrawal.
-    /// Used to enforce MIN_WITHDRAW_INTERVAL_LEDGERS cooldown.
     pub last_withdraw_ledger: u32,
     /// Optional structured metadata emitted for indexer consumption.
     pub metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
     /// Optional compliance witness authorized to cancel via signed attestation.
     pub witness: Option<Address>,
+    /// Whether this stream is a pooled multi-recipient stream.
+    pub is_pooled: Option<bool>,
     /// Ledger sequence number of the last rate change (or creation).
-    /// Used to enforce MIN_RATE_INTERVAL_LEDGERS cooldown.
     pub last_rate_change_ledger: u32,
+    /// Delegation depth in the recipient-share delegation tree (root = 0).
+    pub delegation_depth: u32,
+    /// Parent stream id when this stream is a delegated child.
+    pub parent_stream_id: Option<u64>,
     /// If true, the stream is decommissioned and restricted to cancel-or-no-op.
     /// Defaults to false (None) for backward compatibility with existing streams.
     pub decommissioned: Option<bool>,
+    /// If true, the sender cannot cancel or shorten the stream. Defaults to
+    /// false (None) for streams created before this field was appended.
+    pub irrevocable: Option<bool>,
 }
 
 /// Event payload emitted when a stream's decommissioned status is updated.
@@ -507,13 +494,35 @@ pub struct StreamDecommissioned {
     pub decommissioned: bool,
 }
 
-/// Pagination result for recipient stream listing
+/// Emitted when claim ownership is transferred on a stream.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaimOwnershipTransferred {
+    pub stream_id: u64,
+    pub old_owner: Option<Address>,
+    pub new_owner: Address,
+}
+
+/// Emitted when a recipient delegates a share of their stream.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecipientShareDelegated {
+    pub parent_stream_id: u64,
+    pub child_stream_id: u64,
+    pub delegator: Address,
+    pub delegatee: Address,
+    pub share_bps: u32,
+    pub new_parent_rate: i128,
+    pub child_rate: i128,
+}
+
+/// Pagination result for paginated stream listings.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Page {
-    /// Stream IDs for this page (sorted ascending)
+    /// Stream IDs for this page (sorted ascending).
     pub stream_ids: soroban_sdk::Vec<u64>,
-    /// Next cursor for pagination (0 if no more pages)
+    /// Next cursor for pagination (0 if no more pages).
     pub next_cursor: u64,
 }
 #[contracttype]

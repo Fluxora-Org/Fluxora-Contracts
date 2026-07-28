@@ -36,6 +36,12 @@ When quorum is first reached, the current threshold is snapshotted alongside the
 a `QuorumInfo` record. At execution time the proposal is judged against this snapshot, making
 in-flight proposals immune to later threshold changes by the admin.
 
+
+
+### Threshold changes are not timelocked
+
+`set_threshold`, `add_signer`, and `remove_signer` are admin‑only operations that take effect immediately upon a single admin signature. There is no timelock or cooldown; an admin can lower the threshold to 1 or add a single signer and set the threshold to 1 in two consecutive calls, instantly weakening the quorum.
+
 ## Constants
 
 | Constant | Value | Meaning |

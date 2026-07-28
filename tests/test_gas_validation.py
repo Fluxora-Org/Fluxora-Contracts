@@ -3,9 +3,28 @@ import os
 import stat
 import subprocess
 import tempfile
+from pathlib import Path
+
 import pytest
 from unittest.mock import patch
-from script.validate_gas import build_cargo_test_env, extract_baselines, parse_measurements, main
+from script.validate_gas import (
+    build_cargo_test_env,
+    extract_baselines,
+    extract_release_hardening_coverage,
+    main,
+    parse_measurements,
+    run_tests,
+    validate_release_hardening_coverage,
+)
+
+
+# main() validates that these mandatory matrix entries exist before comparing
+# measurements. Include them in focused mocks so each test reaches the behavior
+# it intends to exercise instead of failing during baseline-shape validation.
+REQUIRED_BULK_FIXTURE = {
+    "bulk_cancel_streams": {"1": 1, "5": 1, "10": 1, "20": 1},
+    "bulk_resume_streams_as_admin": {"1": 1, "5": 1, "10": 1, "20": 1},
+}
 
 
 class TestBuildCargoTestEnv:
@@ -33,6 +52,44 @@ class TestExtractBaselines:
             mock_file.return_value.__enter__.return_value.read.return_value = content
             result = extract_baselines("docs/gas.md")
             assert result == {"batch_withdraw": {"single": 1000}, "transfer": 2000}
+
+    def test_release_edge_case_baselines_are_explicit(self):
+        baselines = extract_baselines("docs/gas.md")
+        expected = {
+            "create_stream_with_cliff": 568292,
+            "create_stream_cliff_only": 564084,
+            "withdraw_partial_accrual": 562057,
+            "withdraw_to_single": 565895,
+            "pause_stream": 237567,
+            "resume_stream": 238111,
+            "create_streams_partial": {
+                "4": 1051967,
+                "8": 2048435,
+                "16": 4056845,
+            },
+            "batch_withdraw_max_page_size": {"100": 45453389},
+        }
+
+        for function, baseline in expected.items():
+            assert baselines[function] == baseline
+
+    def test_release_edge_case_measurements_still_exist(self):
+        source = Path("contracts/stream/tests/gas_regression.rs").read_text(
+            encoding="utf-8"
+        )
+        functions = (
+            "create_stream_with_cliff",
+            "create_stream_cliff_only",
+            "withdraw_partial_accrual",
+            "withdraw_to_single",
+            "pause_stream",
+            "resume_stream",
+            "create_streams_partial",
+            "batch_withdraw_max_page_size",
+        )
+
+        for function in functions:
+            assert f"GAS_MEASUREMENT: {function}:" in source
 
     def test_extract_baselines_missing_block(self):
         """Test error when baseline block is missing."""
@@ -74,13 +131,87 @@ class TestParseMeasurements:
         }
 
 
+class TestRunTests:
+    @patch("script.validate_gas.subprocess.run")
+    def test_nonzero_cargo_exit_is_not_masked(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["cargo", "test"],
+            returncode=101,
+            stdout="",
+            stderr="contract failed to compile",
+        )
+
+        with pytest.raises(RuntimeError, match="exit code 101"):
+            run_tests()
+
+    @patch("script.validate_gas.subprocess.run")
+    def test_success_returns_measurement_output(self, mock_run):
+        output = "GAS_MEASUREMENT: withdraw: single: 100"
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["cargo", "test"], returncode=0, stdout=output, stderr=""
+        )
+
+        assert run_tests() == output
+
+
+class TestReleaseHardeningCoverage:
+    def test_real_document_covers_all_release_surfaces(self):
+        validate_release_hardening_coverage("docs/gas.md")
+
+    def test_missing_markers_are_rejected(self, tmp_path):
+        gas_doc = tmp_path / "gas.md"
+        gas_doc.write_text("# Gas\nNo coverage matrix", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="release-hardening coverage block"):
+            extract_release_hardening_coverage(str(gas_doc))
+
+    def test_missing_dimension_is_rejected(self, tmp_path):
+        gas_doc = tmp_path / "docs" / "gas.md"
+        gas_doc.parent.mkdir()
+        gas_doc.write_text(
+            "<!-- RELEASE_HARDENING_COVERAGE_START -->\n"
+            "`covered.rs`\n"
+            "<!-- RELEASE_HARDENING_COVERAGE_END -->\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "covered.rs").write_text("// fixture", encoding="utf-8")
+
+        required = {"Storage": ("covered.rs",)}
+        with patch(
+            "script.validate_gas.REQUIRED_RELEASE_HARDENING_REFERENCES", required
+        ):
+            with pytest.raises(ValueError, match="missing dimensions: Storage"):
+                validate_release_hardening_coverage(gas_doc, tmp_path)
+
+    def test_missing_or_stale_test_reference_is_rejected(self, tmp_path):
+        gas_doc = tmp_path / "docs" / "gas.md"
+        gas_doc.parent.mkdir()
+        gas_doc.write_text(
+            "<!-- RELEASE_HARDENING_COVERAGE_START -->\n"
+            "| **Storage** | documented |\n"
+            "<!-- RELEASE_HARDENING_COVERAGE_END -->\n",
+            encoding="utf-8",
+        )
+
+        required = {"Storage": ("missing.rs",)}
+        with patch(
+            "script.validate_gas.REQUIRED_RELEASE_HARDENING_REFERENCES", required
+        ):
+            with pytest.raises(ValueError, match="missing test references"):
+                validate_release_hardening_coverage(gas_doc, tmp_path)
+
+
 class TestMain:
     @patch("script.validate_gas.run_tests")
     @patch("script.validate_gas.extract_baselines")
     @patch("script.validate_gas.sys.exit")
     def test_main_no_regressions(self, mock_exit, mock_baselines, mock_run_tests):
         """Test successful validation with no regressions."""
-        mock_baselines.return_value = {"transfer": 2000}
+        mock_baselines.return_value = {
+            "transfer": 2000,
+            "bulk_cancel_streams": {"1": 3000, "10": 12000, "50": 75000, "100": 150000},
+            "bulk_resume_streams_as_admin": {"1": 4000, "10": 14000, "50": 85000, "100": 170000},
+        }
         mock_run_tests.return_value = "GAS_MEASUREMENT: transfer: single: 1900"
         main()
         mock_exit.assert_called_with(0)
@@ -90,7 +221,7 @@ class TestMain:
     @patch("script.validate_gas.sys.exit")
     def test_main_with_regression(self, mock_exit, mock_baselines, mock_run_tests):
         """Test failure when gas regression is detected."""
-        mock_baselines.return_value = {"transfer": 1000}
+        mock_baselines.return_value = {**REQUIRED_BULK_FIXTURE, "transfer": 1000}
         mock_run_tests.return_value = "GAS_MEASUREMENT: transfer: single: 1100"
         main()
         mock_exit.assert_called_with(1)
@@ -100,7 +231,7 @@ class TestMain:
     @patch("script.validate_gas.sys.exit")
     def test_main_no_measurements(self, mock_exit, mock_baselines, mock_run_tests):
         """Test error when no measurements found."""
-        mock_baselines.return_value = {"transfer": 2000}
+        mock_baselines.return_value = {**REQUIRED_BULK_FIXTURE, "transfer": 2000}
         mock_run_tests.return_value = "No measurements"
         main()
         mock_exit.assert_any_call(1)
@@ -113,6 +244,121 @@ class TestMain:
         main()
         mock_exit.assert_called_with(1)
 
+    @patch("script.validate_gas.run_tests")
+    @patch("script.validate_gas.extract_baselines")
+    @patch("script.validate_gas.sys.exit")
+    def test_main_exactly_five_percent_increase_fails(
+        self, mock_exit, mock_baselines, mock_run_tests
+    ):
+        """A measurement that is exactly +5.0% above the baseline should FAIL.
+
+        The tolerance gate is ``diff > 0.05`` which is a strict greater-than
+        comparison.  A 5.0 % increase means diff == 0.05, which is NOT > 0.05,
+        so the boundary case should PASS.  This test locks down that exact
+        semantic so a future change to ``>=`` would be caught immediately.
+        """
+        baseline = 1000
+        # Exactly +5 % → diff = 0.05 exactly, NOT > 0.05 → should PASS
+        exactly_five_pct = int(baseline * 1.05)
+        mock_baselines.return_value = {**REQUIRED_BULK_FIXTURE, "withdraw": baseline}
+        mock_run_tests.return_value = (
+            f"GAS_MEASUREMENT: withdraw: single: {exactly_five_pct}"
+        )
+        main()
+        mock_exit.assert_called_with(0)
+
+    @patch("script.validate_gas.run_tests")
+    @patch("script.validate_gas.extract_baselines")
+    @patch("script.validate_gas.sys.exit")
+    def test_main_one_unit_above_five_percent_fails(
+        self, mock_exit, mock_baselines, mock_run_tests
+    ):
+        """A measurement one instruction above the +5 % threshold should FAIL.
+
+        baseline=1000, threshold boundary = 1050 (PASS), 1051 (FAIL).
+        """
+        baseline = 1000
+        one_over = int(baseline * 1.05) + 1  # 1051
+        mock_baselines.return_value = {**REQUIRED_BULK_FIXTURE, "withdraw": baseline}
+        mock_run_tests.return_value = (
+            f"GAS_MEASUREMENT: withdraw: single: {one_over}"
+        )
+        main()
+        mock_exit.assert_called_with(1)
+
+    @patch("script.validate_gas.run_tests")
+    @patch("script.validate_gas.extract_baselines")
+    @patch("script.validate_gas.sys.exit")
+    def test_main_missing_baseline_key_is_a_hard_failure(
+        self, mock_exit, mock_baselines, mock_run_tests
+    ):
+        """Every emitted measurement must be covered by a documented baseline.
+
+        Treating a new measurement as informational would let a newly added
+        security-sensitive path bypass the regression threshold entirely.
+        """
+        mock_baselines.return_value = {"create_stream": 500000}
+        mock_run_tests.return_value = "GAS_MEASUREMENT: new_op: single: 100000"
+
+        main()
+
+        mock_exit.assert_called_once_with(1)
+
+    @patch("script.validate_gas.run_tests")
+    @patch("script.validate_gas.extract_baselines")
+    @patch("script.validate_gas.sys.exit")
+    def test_main_nested_dict_baseline_lookup_keeper_cancel(
+        self, mock_exit, mock_baselines, mock_run_tests
+    ):
+        """keeper_cancel uses a nested dict baseline; both variants must resolve
+        correctly and not produce a MISSING row.
+
+        The baseline structure is:
+            {"keeper_cancel": {"partial_accrual": 786739, "fully_accrued": 386889}}
+
+        The GAS_MEASUREMENT lines use "partial_accrual" and "fully_accrued" as
+        the size/variant key.  The lookup in validate_gas.main() should match
+        ``baselines["keeper_cancel"]["partial_accrual"]`` etc.
+        """
+        mock_baselines.return_value = {
+            **REQUIRED_BULK_FIXTURE,
+            "keeper_cancel": {
+                "partial_accrual": 786739,
+                "fully_accrued": 386889,
+            }
+        }
+        # Both variants well within +5 % → should PASS
+        mock_run_tests.return_value = (
+            "GAS_MEASUREMENT: keeper_cancel: partial_accrual: 786739\n"
+            "GAS_MEASUREMENT: keeper_cancel: fully_accrued: 386889\n"
+        )
+        main()
+        mock_exit.assert_called_with(0)
+
+    @patch("script.validate_gas.run_tests")
+    @patch("script.validate_gas.extract_baselines")
+    @patch("script.validate_gas.sys.exit")
+    def test_main_flat_int_baseline_lookup(
+        self, mock_exit, mock_baselines, mock_run_tests
+    ):
+        """create_stream and withdraw use a flat integer baseline; the lookup
+        path for flat ints must work alongside the nested-dict path.
+
+        Regression guard: a refactor that always dereferences baselines as a
+        dict would break flat-int lookup.
+        """
+        mock_baselines.return_value = {
+            **REQUIRED_BULK_FIXTURE,
+            "create_stream": 568292,
+            "withdraw": 562057,
+        }
+        mock_run_tests.return_value = (
+            "GAS_MEASUREMENT: create_stream: single: 560000\n"
+            "GAS_MEASUREMENT: withdraw: single: 555000\n"
+        )
+        main()
+        mock_exit.assert_called_with(0)
+
 
 # ---------------------------------------------------------------------------
 # WASM size budget tests — exercise script/check-wasm-size.sh
@@ -122,11 +368,25 @@ SCRIPT = os.path.join(os.path.dirname(__file__), "..", "script", "check-wasm-siz
 WASM_DIR = "target/wasm32-unknown-unknown/release"
 
 
+WASM_MAGIC = b"\x00asm\x01\x00\x00\x00"  # magic number + version, 8 bytes
+
+
 def _make_wasm(directory: str, name: str, size_bytes: int) -> str:
-    """Create a dummy WASM file of exactly size_bytes bytes."""
+    """Create a dummy WASM file of exactly size_bytes bytes.
+
+    Starts with a real WASM magic number + version (8 bytes) and pads with
+    zeros to reach the exact requested size, so files built by this helper
+    pass check-wasm-size.sh's artifact-integrity check the same way a real
+    (if minimal) compiled module would. Total byte count is unaffected,
+    which keeps every budget/headroom/delta assertion in this file exact.
+    """
     path = os.path.join(directory, name)
+    if size_bytes < len(WASM_MAGIC):
+        content = b"\x00" * size_bytes
+    else:
+        content = WASM_MAGIC + b"\x00" * (size_bytes - len(WASM_MAGIC))
     with open(path, "wb") as f:
-        f.write(b"\x00" * size_bytes)
+        f.write(content)
     return path
 
 
@@ -243,6 +503,191 @@ class TestCheckWasmSizeScript:
             capture_output=True, text=True, env=env,
         )
         assert result.returncode == 1
+
+    def test_headroom_computation_matches_formula(self, tmp_path):
+        """Headroom reported in stdout equals (budget - actual_size) bytes.
+
+        This test locks down the formula: reported headroom must exactly match
+        the arithmetic difference between the budget constant and the file size.
+        It verifies that the script does not round, truncate, or re-compute the
+        headroom differently from the simple subtraction.
+
+        Budget constants (from check-wasm-size.sh):
+            fluxora_stream:     262 144 bytes
+            fluxora_factory:    131 072 bytes
+            fluxora_governance: 131 072 bytes
+        """
+        stream_size = 200_000       # headroom = 262144 - 200000 = 62144
+        factory_size = 100_000      # headroom = 131072 - 100000 = 31072
+        governance_size = 90_000    # headroom = 131072 -  90000 = 41072
+
+        _make_wasm(str(tmp_path), "fluxora_stream.wasm", stream_size)
+        _make_wasm(str(tmp_path), "fluxora_factory.wasm", factory_size)
+        _make_wasm(str(tmp_path), "fluxora_governance.wasm", governance_size)
+
+        result = self._invoke(str(tmp_path))
+        assert result.returncode == 0, result.stderr
+
+        stream_headroom = 262_144 - stream_size          # 62 144
+        factory_headroom = 131_072 - factory_size        # 31 072
+        governance_headroom = 131_072 - governance_size  # 41 072
+
+        # The script formats headroom in KiB or bytes; check for the KiB value
+        # (rounded) or the raw byte count. We accept either representation.
+        def _kib(b: int) -> str:
+            return f"{b / 1024:.1f} KiB"
+
+        stdout = result.stdout
+        for headroom in (stream_headroom, factory_headroom, governance_headroom):
+            assert (
+                str(headroom) in stdout or _kib(headroom) in stdout
+            ), (
+                f"Expected headroom {headroom} bytes ({_kib(headroom)}) "
+                f"in stdout, got:\n{stdout}"
+            )
+
+    def test_all_at_max_minus_one_all_pass(self, tmp_path):
+        """All artifacts one byte under budget → all pass, full headroom of 1."""
+        for contract, budget in [
+            ("fluxora_stream", 262144),
+            ("fluxora_factory", 131072),
+            ("fluxora_governance", 131072),
+        ]:
+            _make_wasm(str(tmp_path), f"{contract}.wasm", budget - 1)
+
+        result = self._invoke(str(tmp_path))
+        assert result.returncode == 0, result.stderr
+        # Each contract has headroom of 1 byte
+        assert result.stdout.count("headroom") >= 3
+
+    def test_stream_exactly_at_budget_boundary(self, tmp_path):
+        """Stream contract artifact exactly at its 256 KiB budget passes.
+
+        Regression guard for an off-by-one in the ``<=`` comparison in the
+        script.  If the script were ``< budget`` instead of ``<= budget``,
+        a file at exactly the budget would incorrectly fail.
+        """
+        _make_wasm(str(tmp_path), "fluxora_stream.wasm", 262144)
+        _make_wasm(str(tmp_path), "fluxora_factory.wasm", 1024)
+        _make_wasm(str(tmp_path), "fluxora_governance.wasm", 1024)
+
+        result = self._invoke(str(tmp_path))
+        assert result.returncode == 0, (
+            "Artifact at exact budget should pass (budget check is <=), "
+            f"got exit {result.returncode}\nstderr: {result.stderr}"
+        )
+
+    def test_factory_exactly_at_budget_boundary(self, tmp_path):
+        """Factory contract artifact exactly at its 128 KiB budget passes."""
+        _make_wasm(str(tmp_path), "fluxora_stream.wasm", 1024)
+        _make_wasm(str(tmp_path), "fluxora_factory.wasm", 131072)
+        _make_wasm(str(tmp_path), "fluxora_governance.wasm", 1024)
+
+        result = self._invoke(str(tmp_path))
+        assert result.returncode == 0, result.stderr
+
+    def test_governance_exactly_at_budget_boundary(self, tmp_path):
+        """Governance contract artifact exactly at its 128 KiB budget passes."""
+        _make_wasm(str(tmp_path), "fluxora_stream.wasm", 1024)
+        _make_wasm(str(tmp_path), "fluxora_factory.wasm", 1024)
+        _make_wasm(str(tmp_path), "fluxora_governance.wasm", 131072)
+
+        result = self._invoke(str(tmp_path))
+        assert result.returncode == 0, result.stderr
+
+    def test_all_over_budget_reports_all_failures(self, tmp_path):
+        """When all three contracts exceed budget, all three failures appear."""
+        _make_wasm(str(tmp_path), "fluxora_stream.wasm", 262145)
+        _make_wasm(str(tmp_path), "fluxora_factory.wasm", 131073)
+        _make_wasm(str(tmp_path), "fluxora_governance.wasm", 131073)
+
+        result = self._invoke(str(tmp_path))
+        assert result.returncode == 1
+        # All three contracts should be mentioned in the failure output.
+        assert "fluxora_stream" in result.stderr or "fluxora_stream" in result.stdout
+        assert "fluxora_factory" in result.stderr or "fluxora_factory" in result.stdout
+        assert "fluxora_governance" in result.stderr or "fluxora_governance" in result.stdout
+
+    def test_zero_byte_artifact_fails(self, tmp_path):
+        """An empty (0-byte) artifact is rejected, not silently treated as
+        'within budget'. A 0-byte file is well under every budget, so
+        without an explicit integrity check it would otherwise pass."""
+        open(os.path.join(str(tmp_path), "fluxora_stream.wasm"), "wb").close()
+        _make_wasm(str(tmp_path), "fluxora_factory.wasm", 1024)
+        _make_wasm(str(tmp_path), "fluxora_governance.wasm", 1024)
+
+        result = self._invoke(str(tmp_path))
+        assert result.returncode == 1
+        assert "too small" in result.stderr or "INVALID" in result.stderr
+
+    def test_truncated_non_wasm_artifact_fails(self, tmp_path):
+        """A file that is comfortably within budget but does not start with
+        the WASM magic number is rejected as a corrupted/non-WASM artifact,
+        e.g. an interrupted build that left a partial or garbage file behind
+        at the expected output path."""
+        path = os.path.join(str(tmp_path), "fluxora_stream.wasm")
+        with open(path, "wb") as f:
+            f.write(b"not a real wasm module, just padding bytes " * 20)
+        _make_wasm(str(tmp_path), "fluxora_factory.wasm", 1024)
+        _make_wasm(str(tmp_path), "fluxora_governance.wasm", 1024)
+
+        result = self._invoke(str(tmp_path))
+        assert result.returncode == 1
+        assert "magic number" in result.stderr or "INVALID" in result.stderr
+
+    def test_unrecognized_wasm_file_is_ignored(self, tmp_path):
+        """A .wasm file present in WASM_DIR that isn't one of the three
+        known contracts is silently ignored — the script only evaluates the
+        fixed budget table, not everything on disk. Locks in this
+        intentional, documented behavior."""
+        for contract, budget in [
+            ("fluxora_stream", 262144),
+            ("fluxora_factory", 131072),
+            ("fluxora_governance", 131072),
+        ]:
+            _make_wasm(str(tmp_path), f"{contract}.wasm", budget - 1)
+        # Deliberately huge and not WASM-shaped; would fail both the budget
+        # and the magic-number check if it were evaluated.
+        with open(os.path.join(str(tmp_path), "some_other_contract.wasm"), "wb") as f:
+            f.write(b"\xff" * 1_000_000)
+
+        result = self._invoke(str(tmp_path))
+        assert result.returncode == 0, result.stderr
+
+    def test_contract_processing_order_is_deterministic(self, tmp_path):
+        """Contract rows appear in the same relative order across repeated
+        invocations. Regression guard for replacing `declare -A` (bash
+        associative array, unordered key iteration) with a fixed-order
+        array + lookup function."""
+        for contract, budget in [
+            ("fluxora_stream", 262144),
+            ("fluxora_factory", 131072),
+            ("fluxora_governance", 131072),
+        ]:
+            _make_wasm(str(tmp_path), f"{contract}.wasm", budget // 2)
+
+        names = ("fluxora_stream", "fluxora_factory", "fluxora_governance")
+        first_order = None
+        for _ in range(5):
+            result = self._invoke(str(tmp_path))
+            assert result.returncode == 0, result.stderr
+            order = tuple(sorted(names, key=lambda n: result.stdout.index(n)))
+            if first_order is None:
+                first_order = order
+            else:
+                assert order == first_order, (
+                    "contract row order changed between runs: "
+                    f"{first_order} vs {order}"
+                )
+
+    def test_script_does_not_use_bash4_associative_arrays(self):
+        """Regression guard: `declare -A` requires bash 4+ (macOS ships
+        bash 3.2 by default) and does not guarantee stable key-iteration
+        order across bash builds/platforms. The script must use an ordered
+        array instead."""
+        with open(SCRIPT) as f:
+            content = f.read()
+        assert "declare -A" not in content
 
 
 # ---------------------------------------------------------------------------

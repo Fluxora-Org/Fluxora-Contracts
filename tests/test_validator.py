@@ -754,7 +754,9 @@ _BASELINE_BLOCK = textwrap.dedent("""\
     {
         "create_stream": 1000,
         "withdraw": 500,
-        "batch_withdraw": {"small": 200, "large": 800}
+        "batch_withdraw": {"small": 200, "large": 800},
+        "bulk_cancel_streams": {"1": 3000, "10": 12000, "50": 75000, "100": 150000},
+        "bulk_resume_streams_as_admin": {"1": 4000, "10": 14000, "50": 85000, "100": 170000}
     }
     <!-- GAS_BASELINE_END -->
 """)
@@ -774,6 +776,7 @@ class TestExtractBaselines:
         assert result["create_stream"] == 1000
         assert result["withdraw"] == 500
         assert result["batch_withdraw"]["small"] == 200
+        assert result["bulk_cancel_streams"]["100"] == 150000
 
     def test_raises_on_missing_block(self, tmp_path):
         f = tmp_path / "gas.md"
@@ -785,6 +788,32 @@ class TestExtractBaselines:
         f = tmp_path / "gas.md"
         f.write_text(_BASELINE_BLOCK, encoding="utf-8")
         assert isinstance(vg.extract_baselines(str(f)), dict)
+
+
+# ---------------------------------------------------------------------------
+# validate_required_baselines
+# ---------------------------------------------------------------------------
+
+class TestValidateRequiredBaselines:
+    def test_accepts_required_bulk_sizes(self, tmp_path):
+        f = tmp_path / "gas.md"
+        f.write_text(_BASELINE_BLOCK, encoding="utf-8")
+        vg.validate_required_baselines(vg.extract_baselines(str(f)))
+
+    def test_rejects_missing_bulk_size(self):
+        baselines = {
+            "bulk_cancel_streams": {"1": 3000, "10": 12000, "50": 75000},
+            "bulk_resume_streams_as_admin": {"1": 4000, "10": 14000, "50": 85000, "100": 170000},
+        }
+        with pytest.raises(ValueError, match="bulk_cancel_streams: 100"):
+            vg.validate_required_baselines(baselines)
+
+    def test_rejects_missing_bulk_function(self):
+        baselines = {
+            "bulk_cancel_streams": {"1": 3000, "10": 12000, "50": 75000, "100": 150000},
+        }
+        with pytest.raises(ValueError, match="bulk_resume_streams_as_admin: all"):
+            vg.validate_required_baselines(baselines)
 
 
 # ---------------------------------------------------------------------------
@@ -854,10 +883,12 @@ class TestBuildCargoTestEnv:
 
 class TestRunTests:
     def test_returns_string(self, monkeypatch):
-        fake_result = types.SimpleNamespace(stdout="GAS_MEASUREMENT: x: single: 1\n")
-        monkeypatch.setattr(
-            vg.subprocess, "run", lambda *a, **kw: fake_result
+        fake_result = types.SimpleNamespace(
+            stdout="GAS_MEASUREMENT: x: single: 1\n",
+            stderr="",
+            returncode=0,
         )
+        monkeypatch.setattr(vg.subprocess, "run", lambda *a, **kw: fake_result)
         output = vg.run_tests()
         assert isinstance(output, str)
         assert "GAS_MEASUREMENT" in output
@@ -867,20 +898,20 @@ class TestRunTests:
 
         def fake_run(cmd, **kwargs):
             captured["cmd"] = cmd
-            return types.SimpleNamespace(stdout="")
+            return types.SimpleNamespace(stdout="", stderr="", returncode=0)
 
         monkeypatch.setattr(vg.subprocess, "run", fake_run)
         vg.run_tests()
         assert "--nocapture" in captured["cmd"]
 
-    def test_ignores_nonzero_returncode(self, monkeypatch):
-        fake_result = types.SimpleNamespace(stdout="some output")
-        monkeypatch.setattr(
-            vg.subprocess, "run", lambda *a, **kw: fake_result
+    def test_nonzero_returncode_is_a_hard_failure(self, monkeypatch):
+        fake_result = types.SimpleNamespace(
+            stdout="partial output", stderr="compile error", returncode=101
         )
-        # Should not raise even if cargo fails
-        result = vg.run_tests()
-        assert result == "some output"
+        monkeypatch.setattr(vg.subprocess, "run", lambda *a, **kw: fake_result)
+
+        with pytest.raises(RuntimeError, match="exit code 101"):
+            vg.run_tests()
 
 
 # ---------------------------------------------------------------------------
@@ -900,14 +931,19 @@ class TestGasMain:
         )
 
         monkeypatch.setattr(
-            vg.subprocess, "run",
-            lambda *a, **kw: types.SimpleNamespace(stdout=raw_output),
+            vg.subprocess,
+            "run",
+            lambda *a, **kw: types.SimpleNamespace(
+                stdout=raw_output, stderr="", returncode=0
+            ),
         )
         # Override file path used by main() via extract_baselines
         monkeypatch.setattr(vg, "extract_baselines", lambda _: baseline_override or {
             "create_stream": 1000,
             "withdraw": 500,
             "batch_withdraw": {"small": 200, "large": 800},
+            "bulk_cancel_streams": {"1": 3000, "10": 12000, "50": 75000, "100": 150000},
+            "bulk_resume_streams_as_admin": {"1": 4000, "10": 14000, "50": 85000, "100": 170000},
         })
 
     def test_no_regression_exits_0(self, tmp_path, monkeypatch):
@@ -932,10 +968,17 @@ class TestGasMain:
 
     def test_no_measurements_exits_1(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
-            vg.subprocess, "run",
-            lambda *a, **kw: types.SimpleNamespace(stdout=""),
+            vg.subprocess,
+            "run",
+            lambda *a, **kw: types.SimpleNamespace(
+                stdout="", stderr="", returncode=0
+            ),
         )
-        monkeypatch.setattr(vg, "extract_baselines", lambda _: {"create_stream": 1000})
+        monkeypatch.setattr(vg, "extract_baselines", lambda _: {
+            "create_stream": 1000,
+            "bulk_cancel_streams": {"1": 3000, "10": 12000, "50": 75000, "100": 150000},
+            "bulk_resume_streams_as_admin": {"1": 4000, "10": 14000, "50": 85000, "100": 170000},
+        })
         with pytest.raises(SystemExit) as exc:
             vg.main()
         assert exc.value.code == 1
@@ -943,9 +986,14 @@ class TestGasMain:
     def test_missing_baseline_key_shows_missing(self, tmp_path, monkeypatch, capsys):
         # Measured function not in baseline -> printed as MISSING
         self._patch(monkeypatch, tmp_path, {"unknown_fn": 999},
-                    baseline_override={"create_stream": 1000})
-        with pytest.raises(SystemExit):
+                    baseline_override={
+                        "create_stream": 1000,
+                        "bulk_cancel_streams": {"1": 3000, "10": 12000, "50": 75000, "100": 150000},
+                        "bulk_resume_streams_as_admin": {"1": 4000, "10": 14000, "50": 85000, "100": 170000},
+                    })
+        with pytest.raises(SystemExit) as exc:
             vg.main()
+        assert exc.value.code == 1
         assert "MISSING" in capsys.readouterr().out
 
     def test_extract_baselines_exception_exits_1(self, tmp_path, monkeypatch):
@@ -1155,6 +1203,20 @@ class TestExtractContractimplEntrypoints:
         )
         result = vda.extract_contractimpl_entrypoints(src)
         assert {"alpha", "beta", "gamma"}.issubset(result)
+
+    def test_multiline_cfg_attr_contractimpl_found(self):
+        src = (
+            "#[cfg_attr(\n"
+            "    not(all(target_arch = \"wasm32\", feature = \"import_only\")),\n"
+            "    contractimpl\n"
+            ")]\n"
+            "impl Foo {\n"
+            "    pub fn init(env: Env) {}\n"
+            "    pub fn withdraw(env: Env) {}\n"
+            "}\n"
+        )
+        result = vda.extract_contractimpl_entrypoints(src)
+        assert {"init", "withdraw"} == result
 
     def test_private_fn_inside_contractimpl_not_returned(self):
         src = (

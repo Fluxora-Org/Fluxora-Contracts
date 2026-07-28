@@ -37,7 +37,9 @@ proptest = "1"
 # Required for constructing Ed25519 keypairs in delegated-withdraw tests
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 rand = "0.8"
-soroban-env-host = "=21.2.1"
+# Required for injecting Classic Stellar AccountEntry + TrustLineEntry into the
+# host ledger storage in adversarial_auth tests (ed25519 recipient trustline setup).
+soroban-env-host = { version = "=21.2.1", features = ["testutils"] }
 
 # ---------------------------------------------------------------------------
 # Known-broken integration tests (pre-existing, unrelated to CI restoration)
@@ -112,6 +114,11 @@ path = "tests/keeper_cancel.rs"
 required-features = ["testutils"]
 
 [[test]]
+name = "security_invariants"
+path = "tests/security_invariants.rs"
+test = true
+
+[[test]]
 name = "max_rate_per_second"
 path = "tests/max_rate_per_second.rs"
 test = true
@@ -152,6 +159,16 @@ path = "tests/id_reservation.rs"
 test = false
 
 [[test]]
+name = "storage_invariants"
+path = "tests/storage_invariants.rs"
+test = true
+
+[[test]]
+name = "dust_threshold"
+path = "tests/dust_threshold.rs"
+test = true
+
+[[test]]
 name = "storage_key_compat"
 path = "tests/storage_key_compat.rs"
 required-features = ["testutils"]
@@ -159,7 +176,8 @@ required-features = ["testutils"]
 [[test]]
 name = "sweep_liability"
 path = "tests/sweep_liability.rs"
-test = false
+required-features = ["testutils"]
+test = true
 
 [[test]]
 name = "upgrade_path"
@@ -170,6 +188,11 @@ test = true
 name = "withdrawal_frequency"
 path = "tests/withdrawal_frequency.rs"
 test = false
+
+[[test]]
+name = "pause_semantics"
+path = "tests/pause_semantics.rs"
+test = true
 
 # ---------------------------------------------------------------------------
 # Known-broken integration tests, second batch (compile fine, fail at runtime)
@@ -201,7 +224,7 @@ test = false
 [[test]]
 name = "adversarial_auth"
 path = "tests/adversarial_auth.rs"
-test = false
+test = true
 
 [[test]]
 name = "liability_invariant"
@@ -222,3 +245,9 @@ test = false
 name = "governance_ttl"
 path = "tests/governance_ttl.rs"
 test = false
+
+[[test]]
+name = "compile_warning_determinism"
+path = "tests/compile_warning_determinism.rs"
+test = true
+required-features = ["testutils"]

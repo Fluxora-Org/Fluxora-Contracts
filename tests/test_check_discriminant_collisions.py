@@ -40,6 +40,7 @@ cdc = _load_module()
 # Helpers: build synthetic docs/error.md content
 # ---------------------------------------------------------------------------
 
+
 def _stream_table(*rows: tuple[int, str]) -> str:
     """Emit the stream ContractError section header + table rows."""
     lines = [
@@ -52,6 +53,7 @@ def _stream_table(*rows: tuple[int, str]) -> str:
     return "\n".join(lines)
 
 
+
 def _factory_table(*rows: tuple[int, str]) -> str:
     """Emit the FactoryError Reference (Factory Contract) section header + rows."""
     lines = [
@@ -62,6 +64,7 @@ def _factory_table(*rows: tuple[int, str]) -> str:
     for code, name in rows:
         lines.append(f"| {code} | `{name}` | cond | func |")
     return "\n".join(lines)
+
 
 
 def _governance_table(*rows: tuple[int, str]) -> str:
