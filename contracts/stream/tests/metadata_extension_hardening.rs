@@ -296,7 +296,7 @@ fn test_metadata_validation_failure_does_not_consume_reserved_ids() {
     let ctx = Ctx::setup();
 
     // Reserve 2 IDs ahead of time.
-    ctx.client().reserve_stream_ids(&ctx.sender, &2_u32);
+    ctx.client().reserve_stream_ids(&ctx.sender, &2_u32, &None);
 
     // Read the current reservation slot; we can't read it directly, so infer
     // by counting stream IDs after the failed attempt.
@@ -502,7 +502,7 @@ fn test_metadata_at_max_survives_pause_resume_cycle() {
         .to_xdr(&ctx.env)
         .len();
     assert!(
-        initial_size <= MAX_STREAM_ENTRY_BYTES,
+        initial_size <= MAX_STREAM_ENTRY_BYTES as u32,
         "metadata-full entry ({} bytes) exceeds ceiling ({}) before any operation",
         initial_size,
         MAX_STREAM_ENTRY_BYTES
@@ -518,7 +518,7 @@ fn test_metadata_at_max_survives_pause_resume_cycle() {
         .to_xdr(&ctx.env)
         .len();
     assert!(
-        after_pause <= MAX_STREAM_ENTRY_BYTES,
+        after_pause <= MAX_STREAM_ENTRY_BYTES as u32,
         "pause must not inflate entry size (was {} bytes, now {} bytes)",
         initial_size,
         after_pause
@@ -533,7 +533,7 @@ fn test_metadata_at_max_survives_pause_resume_cycle() {
         .to_xdr(&ctx.env)
         .len();
     assert!(
-        after_resume <= MAX_STREAM_ENTRY_BYTES,
+        after_resume <= MAX_STREAM_ENTRY_BYTES as u32,
         "resume must not inflate entry size (was {} bytes, now {} bytes)",
         initial_size,
         after_resume
