@@ -91,7 +91,7 @@ pub fn reject_duplicate_ids(env: &Env, ids: &soroban_sdk::Vec<u64>) -> Result<()
 /// to simulate in-flight revocation without going through the full contract flow.
 /// Only available when the `testutils` feature is enabled.
 #[cfg(feature = "testutils")]
-pub use storage::increment_delegated_nonce_test_only as increment_delegated_nonce;
+pub use storage::increment_delegated_nonce as increment_delegated_nonce;
 
 // ---------------------------------------------------------------------------
 // TTL constants
@@ -1328,6 +1328,20 @@ pub enum DataKey {
     PooledStreamShares(u64),
     /// Per-recipient withdrawn amount for a pooled stream.
     PooledStreamWithdrawn(u64, Address),
+    /// Per-sender nonce counter for `delegated_cancel` replay protection.
+    ///
+    /// Keyed by the stream **sender** address (distinct from the recipient-keyed
+    /// `DelegatedWithdrawNonce`). Incremented atomically inside `delegated_cancel`
+    /// after signature verification, before returning, so every successfully-executed
+    /// cancellation consumes exactly one nonce value and the same signed payload
+    /// cannot be submitted twice.
+    ///
+    /// Domain-separated from `DelegatedWithdrawNonce` at both the storage level
+    /// (different `DataKey` variant) and the signature level (distinct
+    /// `DELEGATED_CANCEL_DOMAIN` tag prepended to the payload).
+    ///
+    /// Appended at the end to preserve all existing discriminants.
+    DelegatedCancelNonce(Address),
 }
 
 // ---------------------------------------------------------------------------
@@ -4062,6 +4076,22 @@ impl FluxoraStream {
     /// The nonce is incremented on every successful `delegated_withdraw` call.
     pub fn get_delegated_nonce(env: Env, recipient: Address) -> u64 {
         load_delegated_nonce(&env, &recipient)
+    }
+
+    /// Return the current delegated-cancel nonce for a sender.
+    ///
+    /// Relayers must include this value in the signed cancel-message to prevent
+    /// replay attacks. The nonce is per-sender (keyed by `DataKey::DelegatedCancelNonce`)
+    /// and is incremented on every successful `delegated_cancel` call, independent of
+    /// the recipient-keyed `DelegatedWithdrawNonce`.
+    ///
+    /// # Parameters
+    /// - `sender`: The stream sender whose cancel-delegation nonce is queried.
+    ///
+    /// # Returns
+    /// Current `u64` nonce; starts at `0` before the first `delegated_cancel` call.
+    pub fn get_delegated_cancel_nonce(env: Env, sender: Address) -> u64 {
+        crate::storage::load_delegated_cancel_nonce(&env, &sender)
     }
 
     /// Calculate the total amount accrued to the recipient at the current time.

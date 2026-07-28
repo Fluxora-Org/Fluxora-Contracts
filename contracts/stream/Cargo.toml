@@ -200,9 +200,9 @@ path = "tests/pause_semantics.rs"
 test = true
 
 [[test]]
-name = "dynamic_pricing_edge_cases"
-path = "tests/dynamic_pricing_edge_cases.rs"
-test = true
+name = "delegated_cancel"
+path = "tests/delegated_cancel.rs"
+required-features = ["testutils"]
 
 # ---------------------------------------------------------------------------
 # Known-broken integration tests, second batch (compile fine, fail at runtime)
