@@ -1,10 +1,9 @@
 #![cfg(test)]
 
-use fluxora_stream::{
-    ContractError, CreateStreamParams, FluxoraStreamClient, StreamKind, StreamStatus,
-};
+use fluxora_stream::{ContractError, CreateStreamParams, FluxoraStreamClient, StreamKind};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
+    token::Client as TokenClient,
     Address, Env,
 };
 
@@ -79,6 +78,72 @@ fn test_delegate_recipient_share_success() {
     assert_eq!(child_state.recipient, recipient2);
     assert_eq!(child_state.parent_stream_id, Some(stream_id));
     assert_eq!(child_state.delegation_depth, 1);
+
+    let recipient2_streams = client.get_recipient_streams(&recipient2);
+    assert!(recipient2_streams.iter().any(|id| id == child_id));
+
+    let sender_portfolio = client.get_sender_portfolio_health(&sender, &0, &100);
+    assert!(sender_portfolio.stream_ids.iter().any(|id| id == stream_id));
+    assert!(sender_portfolio.stream_ids.iter().any(|id| id == child_id));
+}
+
+#[test]
+fn test_delegate_recipient_share_preserves_checkpoint_after_withdraw() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.timestamp = 1000;
+        li.sequence_number = 10;
+    });
+
+    let contract_id = env.register_contract(None, fluxora_stream::FluxoraStream {});
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract(token_admin);
+
+    client.init(&token_id, &Address::generate(&env));
+
+    let sender = Address::generate(&env);
+    let recipient1 = Address::generate(&env);
+    let recipient2 = Address::generate(&env);
+
+    let stream_id = create_stream(&env, &client, &token_id, &sender, &recipient1, 10);
+    let token = TokenClient::new(&env, &token_id);
+
+    env.ledger().with_mut(|li| {
+        li.timestamp = 1010;
+        li.sequence_number = 20;
+    });
+    assert_eq!(client.withdraw(&stream_id), 100);
+    assert_eq!(token.balance(&recipient1), 100);
+
+    let child_id = client.delegate_recipient_share(&stream_id, &recipient1, &5000, &recipient2);
+    let parent = client.get_stream_state(&stream_id);
+    let child = client.get_stream_state(&child_id);
+
+    assert_eq!(parent.checkpointed_at, 1010);
+    assert_eq!(parent.checkpointed_amount, 100);
+    assert_eq!(parent.withdrawn_amount, 100);
+    assert_eq!(parent.rate_per_second, 5);
+    assert_eq!(parent.deposit_amount, 5050);
+
+    assert_eq!(child.start_time, 1010);
+    assert_eq!(child.checkpointed_at, 1010);
+    assert_eq!(child.checkpointed_amount, 0);
+    assert_eq!(child.withdrawn_amount, 0);
+    assert_eq!(child.rate_per_second, 5);
+    assert_eq!(child.deposit_amount, 4950);
+
+    assert_eq!(client.get_withdrawable(&stream_id), 0);
+    assert_eq!(client.get_withdrawable(&child_id), 0);
+
+    env.ledger().with_mut(|li| {
+        li.timestamp = 1020;
+        li.sequence_number = 30;
+    });
+    assert_eq!(client.get_withdrawable(&stream_id), 50);
+    assert_eq!(client.get_withdrawable(&child_id), 50);
 }
 
 #[test]

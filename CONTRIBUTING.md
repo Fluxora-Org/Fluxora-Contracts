@@ -29,23 +29,37 @@ Always create a new branch for your work. Do not commit directly to the `main` b
 
 ### 4. Rust toolchain pin
 
-This repository pins Rust to 1.94.1 in [rust-toolchain.toml](rust-toolchain.toml) so local builds stay aligned with CI and the WASM artifacts remain reproducible. The pin is especially important for Soroban/WASM builds, keeps the checksum verification logic in [contracts/stream/src/checksum.rs](contracts/stream/src/checksum.rs) consistent, and supports the checksum workflow described in [docs/maintainer-security-checklist.md](docs/maintainer-security-checklist.md).
+This repository pins Rust to channel `1.94.1` in [rust-toolchain.toml](rust-toolchain.toml) to guarantee local build determinism, align development environments with CI pipelines, and preserve Soroban WASM artifact reproducibility.
 
-Before you start working locally, install the pinned toolchain and the required components:
+> **Security & Reproducibility Note:**
+> Soroban smart contract WASM bytecode checksums depend on compiler code generation. Compiler version drift alters compiled bytecode hashes, breaking the checksum verification logic implemented in [`contracts/stream/src/checksum.rs`](contracts/stream/src/checksum.rs) and invalidating security release procedures outlined in [`docs/maintainer-security-checklist.md`](docs/maintainer-security-checklist.md).
+
+#### Installation Procedure
+
+Before developing locally or opening pull requests, install the pinned Rust toolchain and required components:
 
 ```bash
+# 1. Install pinned toolchain channel
 rustup toolchain install 1.94.1
+
+# 2. Add required code formatting and linting tools
 rustup component add rustfmt clippy --toolchain 1.94.1
+
+# 3. Add target architecture for WebAssembly contract builds
 rustup target add wasm32-unknown-unknown --toolchain 1.94.1
 ```
 
-To verify that your local toolchain matches the repository pin, run:
+#### Self-Verification & Automated Enforcement
+
+To self-check local toolchain compliance before committing code:
 
 ```bash
+# Execute local toolchain verification script
 python3 script/verify_rust_version.py
 ```
 
-If the check fails, install the pinned toolchain and rerun the command before opening a PR. The automated enforcement layer for this workflow lives in [tests/test_rust_toolchain_pin.py](tests/test_rust_toolchain_pin.py).
+- **Automated Enforcement Layer:** The repository enforces toolchain compliance via [`script/verify_rust_version.py`](script/verify_rust_version.py) in CI workflows and maintains comprehensive test coverage in [`tests/test_rust_toolchain_pin.py`](tests/test_rust_toolchain_pin.py).
+- **Failure Mitigation:** If the self-check fails, execute the `rustup` installation commands above to synchronize your local environment with `1.94.1`.
 
 ### 5. Snapshot Test Workflow
 
