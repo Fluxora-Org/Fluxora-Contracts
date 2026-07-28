@@ -126,6 +126,90 @@ pub const MAX_TEMPLATES_PER_OWNER: u64 = 50;
 /// Maximum number of templates stored globally.
 pub const MAX_GLOBAL_TEMPLATES: u64 = 1_000;
 
+/// A pre-configured template specification for common stream scheduling patterns.
+///
+/// Each entry defines a named profile with documented `start_delay`, `cliff_delay`,
+/// and `duration` values. The list in [`DOCUMENTED_TEMPLATES`] is the source of truth
+/// cross-referenced by the doc cross-check test in
+/// `contracts/stream/tests/stream_templates.rs`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TemplateSpec {
+    pub name: &'static str,
+    pub start_delay: u64,
+    pub cliff_delay: u64,
+    pub duration: u64,
+}
+
+/// Quick-pay template: stream starts immediately, no cliff, runs for 1 hour.
+pub const TEMPLATE_QUICK_PAY: TemplateSpec = TemplateSpec {
+    name: "Quick Pay",
+    start_delay: 0,
+    cliff_delay: 0,
+    duration: 3600,
+};
+
+/// Daily template: stream starts immediately, no cliff, runs for 24 hours.
+pub const TEMPLATE_DAILY: TemplateSpec = TemplateSpec {
+    name: "Daily",
+    start_delay: 0,
+    cliff_delay: 0,
+    duration: 86400,
+};
+
+/// Weekly template: stream starts immediately, 1-day cliff, runs for 7 days.
+pub const TEMPLATE_WEEKLY: TemplateSpec = TemplateSpec {
+    name: "Weekly",
+    start_delay: 0,
+    cliff_delay: 86400,
+    duration: 604800,
+};
+
+/// Biweekly template: stream starts immediately, 1-day cliff, runs for 14 days.
+pub const TEMPLATE_BIWEEKLY: TemplateSpec = TemplateSpec {
+    name: "Biweekly",
+    start_delay: 0,
+    cliff_delay: 86400,
+    duration: 1_209_600,
+};
+
+/// Monthly template: stream starts immediately, 2-day cliff, runs for 30 days.
+pub const TEMPLATE_MONTHLY: TemplateSpec = TemplateSpec {
+    name: "Monthly",
+    start_delay: 0,
+    cliff_delay: 172_800,
+    duration: 2_592_000,
+};
+
+/// Quarterly template: stream starts immediately, 7-day cliff, runs for 90 days.
+pub const TEMPLATE_QUARTERLY: TemplateSpec = TemplateSpec {
+    name: "Quarterly",
+    start_delay: 0,
+    cliff_delay: 604_800,
+    duration: 7_776_000,
+};
+
+/// Annual template: stream starts immediately, 7-day cliff, runs for 365 days.
+pub const TEMPLATE_ANNUAL: TemplateSpec = TemplateSpec {
+    name: "Annual",
+    start_delay: 0,
+    cliff_delay: 604_800,
+    duration: 31_536_000,
+};
+
+/// All documented pre-configured templates, in declaration order.
+///
+/// Used by the doc cross-check test to verify that every template listed in
+/// `docs/stream-templates.md` is registered with the expected parameters.
+pub const DOCUMENTED_TEMPLATES: &[TemplateSpec] = &[
+    TEMPLATE_QUICK_PAY,
+    TEMPLATE_DAILY,
+    TEMPLATE_WEEKLY,
+    TEMPLATE_BIWEEKLY,
+    TEMPLATE_MONTHLY,
+    TEMPLATE_QUARTERLY,
+    TEMPLATE_ANNUAL,
+];
+
 /// Maximum number of stream IDs that can be reserved in a single `reserve_stream_ids` call.
 pub const MAX_ID_RESERVATION: u32 = 100;
 
