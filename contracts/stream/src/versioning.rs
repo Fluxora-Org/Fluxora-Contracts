@@ -16,7 +16,7 @@
 //! 3. **Accrual Determinism**: Accrued amounts must be deterministic (timestamp-deterministic,
 //!    checkpoint-preserving, never decreasing).
 
-use soroban_sdk::{panic_with_error, Env};
+use soroban_sdk::Env;
 
 /// Version validation error codes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -62,7 +62,7 @@ pub enum VersioningError {
 /// }
 /// ```
 pub fn validate_version(
-    env: &Env,
+    _env: &Env,
     actual_version: u32,
     expected_version: u32,
 ) -> Result<(), VersioningError> {
