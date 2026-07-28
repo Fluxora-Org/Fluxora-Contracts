@@ -14,6 +14,7 @@ use soroban_sdk::{
     token::{Client as TokenClient, StellarAssetClient},
     Address, Env,
 };
+use std::path::{Path, PathBuf};
 
 struct Ctx<'a> {
     env: Env,
@@ -626,4 +627,112 @@ fn test_two_callers_release_independently_reclaim() {
     // Next stream gets ID 0.
     let id = ctx.create_stream(&ctx.sender);
     assert_eq!(id, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Single-definition guard (dedupe regression)
+// ---------------------------------------------------------------------------
+//
+// The IdReservation storage helpers `save_id_reservation`, `load_id_reservation`,
+// and `remove_id_reservation` were once defined twice — once in
+// `contracts/stream/src/storage.rs` and again in `contracts/stream/src/lib.rs`
+// with identical bodies. Two independent copies of the same persistence logic
+// are a drift hazard: a TTL-policy or key-shape change applied to one copy but
+// not the other silently reintroduces inconsistent persistence for
+// `IdReservation` entries.
+//
+// The duplicates in `lib.rs` were removed; `lib.rs` now imports the single
+// implementation from `storage.rs`. The tests below fail the `cargo test` hard
+// gate (the CI "Test" job) if a second definition of any of these helpers is
+// reintroduced anywhere under `contracts/stream/src/`, and assert that `lib.rs`
+// still routes through the shared `storage` implementation.
+//
+// This complements the belt-and-suspenders grep step in `.github/workflows/ci.yml`
+// (Lint job, "Guard against duplicate IdReservation storage helpers"), so the
+// invariant is enforced even if CI configuration changes.
+
+/// The IdReservation storage helpers that must have exactly one definition.
+const ID_RESERVATION_HELPERS: [&str; 3] = [
+    "save_id_reservation",
+    "load_id_reservation",
+    "remove_id_reservation",
+];
+
+/// Resolves `<workspace_root>/contracts/stream/src` from this test crate's
+/// manifest directory. `CARGO_MANIFEST_DIR` is `<workspace_root>/contracts/stream`.
+fn stream_src_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
+}
+
+/// Count how many times a helper is *defined* (`fn <name>(`) in `source`.
+///
+/// We match on the `fn <name>(` prefix rather than a bare substring so that call
+/// sites (`load_id_reservation(&env, ...)`), imports (`use storage::{...}`), and
+/// doc-comment mentions do not inflate the count. A `pub`/`pub(crate)` qualifier
+/// or leading whitespace before `fn` does not affect the match because we search
+/// for the `fn <name>(` token itself.
+fn count_definitions(source: &str, helper: &str) -> usize {
+    let needle = std::format!("fn {helper}(");
+    source.match_indices(&needle).count()
+}
+
+/// Each IdReservation helper must be defined exactly once across the entire
+/// `contracts/stream/src/` tree.
+///
+/// # Security / correctness rationale
+/// A second copy of `save_id_reservation` that omitted the
+/// `extend_ttl(PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT)` call, or
+/// keyed on a different `DataKey` shape, would persist reservations that expire
+/// early or become unreadable — silently orphaning pre-allocated ID ranges and
+/// (via `next_stream_id_for`) risking stream-ID reuse. Enforcing a single
+/// definition keeps the persistence policy authoritative in one place.
+#[test]
+fn id_reservation_helpers_defined_exactly_once() {
+    let src = stream_src_dir();
+    let storage_rs =
+        std::fs::read_to_string(src.join("storage.rs")).expect("read contracts/stream/src/storage.rs");
+    let lib_rs =
+        std::fs::read_to_string(src.join("lib.rs")).expect("read contracts/stream/src/lib.rs");
+
+    for helper in ID_RESERVATION_HELPERS {
+        let in_storage = count_definitions(&storage_rs, helper);
+        let in_lib = count_definitions(&lib_rs, helper);
+        let total = in_storage + in_lib;
+
+        assert_eq!(
+            total, 1,
+            "DEDUPE REGRESSION: `fn {helper}` must be defined exactly once, but found \
+             {total} definitions ({in_storage} in storage.rs, {in_lib} in lib.rs). \
+             The IdReservation storage helpers must live only in storage.rs; lib.rs must \
+             import and call through to that single implementation. A second copy is a \
+             persistence-drift hazard (see the module comment above this test)."
+        );
+        // The single definition must live in storage.rs, not lib.rs.
+        assert_eq!(
+            in_storage, 1,
+            "DEDUPE REGRESSION: the single `fn {helper}` definition must live in \
+             contracts/stream/src/storage.rs (found {in_storage} there, {in_lib} in lib.rs)."
+        );
+    }
+}
+
+/// `lib.rs` must import the IdReservation helpers from `storage` rather than
+/// redefining them, so a reviewer sees the delegation explicitly.
+#[test]
+fn lib_rs_imports_id_reservation_helpers_from_storage() {
+    let lib_rs = std::fs::read_to_string(stream_src_dir().join("lib.rs"))
+        .expect("read contracts/stream/src/lib.rs");
+
+    for helper in ID_RESERVATION_HELPERS {
+        assert!(
+            lib_rs.contains(helper),
+            "lib.rs no longer references `{helper}`; it must import it from `storage` \
+             (see the `use storage::{{ ... }}` block) so the shared implementation stays wired up."
+        );
+    }
+    assert!(
+        lib_rs.contains("use storage::"),
+        "lib.rs must keep a `use storage::{{ ... }}` import that brings the IdReservation \
+         helpers into scope from the single storage.rs implementation."
+    );
 }

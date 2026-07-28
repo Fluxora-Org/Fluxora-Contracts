@@ -255,11 +255,25 @@ SCRIPT = os.path.join(os.path.dirname(__file__), "..", "script", "check-wasm-siz
 WASM_DIR = "target/wasm32-unknown-unknown/release"
 
 
+WASM_MAGIC = b"\x00asm\x01\x00\x00\x00"  # magic number + version, 8 bytes
+
+
 def _make_wasm(directory: str, name: str, size_bytes: int) -> str:
-    """Create a dummy WASM file of exactly size_bytes bytes."""
+    """Create a dummy WASM file of exactly size_bytes bytes.
+
+    Starts with a real WASM magic number + version (8 bytes) and pads with
+    zeros to reach the exact requested size, so files built by this helper
+    pass check-wasm-size.sh's artifact-integrity check the same way a real
+    (if minimal) compiled module would. Total byte count is unaffected,
+    which keeps every budget/headroom/delta assertion in this file exact.
+    """
     path = os.path.join(directory, name)
+    if size_bytes < len(WASM_MAGIC):
+        content = b"\x00" * size_bytes
+    else:
+        content = WASM_MAGIC + b"\x00" * (size_bytes - len(WASM_MAGIC))
     with open(path, "wb") as f:
-        f.write(b"\x00" * size_bytes)
+        f.write(content)
     return path
 
 
@@ -480,6 +494,87 @@ class TestCheckWasmSizeScript:
         assert "fluxora_stream" in result.stderr or "fluxora_stream" in result.stdout
         assert "fluxora_factory" in result.stderr or "fluxora_factory" in result.stdout
         assert "fluxora_governance" in result.stderr or "fluxora_governance" in result.stdout
+
+    def test_zero_byte_artifact_fails(self, tmp_path):
+        """An empty (0-byte) artifact is rejected, not silently treated as
+        'within budget'. A 0-byte file is well under every budget, so
+        without an explicit integrity check it would otherwise pass."""
+        open(os.path.join(str(tmp_path), "fluxora_stream.wasm"), "wb").close()
+        _make_wasm(str(tmp_path), "fluxora_factory.wasm", 1024)
+        _make_wasm(str(tmp_path), "fluxora_governance.wasm", 1024)
+
+        result = self._invoke(str(tmp_path))
+        assert result.returncode == 1
+        assert "too small" in result.stderr or "INVALID" in result.stderr
+
+    def test_truncated_non_wasm_artifact_fails(self, tmp_path):
+        """A file that is comfortably within budget but does not start with
+        the WASM magic number is rejected as a corrupted/non-WASM artifact,
+        e.g. an interrupted build that left a partial or garbage file behind
+        at the expected output path."""
+        path = os.path.join(str(tmp_path), "fluxora_stream.wasm")
+        with open(path, "wb") as f:
+            f.write(b"not a real wasm module, just padding bytes " * 20)
+        _make_wasm(str(tmp_path), "fluxora_factory.wasm", 1024)
+        _make_wasm(str(tmp_path), "fluxora_governance.wasm", 1024)
+
+        result = self._invoke(str(tmp_path))
+        assert result.returncode == 1
+        assert "magic number" in result.stderr or "INVALID" in result.stderr
+
+    def test_unrecognized_wasm_file_is_ignored(self, tmp_path):
+        """A .wasm file present in WASM_DIR that isn't one of the three
+        known contracts is silently ignored — the script only evaluates the
+        fixed budget table, not everything on disk. Locks in this
+        intentional, documented behavior."""
+        for contract, budget in [
+            ("fluxora_stream", 262144),
+            ("fluxora_factory", 131072),
+            ("fluxora_governance", 131072),
+        ]:
+            _make_wasm(str(tmp_path), f"{contract}.wasm", budget - 1)
+        # Deliberately huge and not WASM-shaped; would fail both the budget
+        # and the magic-number check if it were evaluated.
+        with open(os.path.join(str(tmp_path), "some_other_contract.wasm"), "wb") as f:
+            f.write(b"\xff" * 1_000_000)
+
+        result = self._invoke(str(tmp_path))
+        assert result.returncode == 0, result.stderr
+
+    def test_contract_processing_order_is_deterministic(self, tmp_path):
+        """Contract rows appear in the same relative order across repeated
+        invocations. Regression guard for replacing `declare -A` (bash
+        associative array, unordered key iteration) with a fixed-order
+        array + lookup function."""
+        for contract, budget in [
+            ("fluxora_stream", 262144),
+            ("fluxora_factory", 131072),
+            ("fluxora_governance", 131072),
+        ]:
+            _make_wasm(str(tmp_path), f"{contract}.wasm", budget // 2)
+
+        names = ("fluxora_stream", "fluxora_factory", "fluxora_governance")
+        first_order = None
+        for _ in range(5):
+            result = self._invoke(str(tmp_path))
+            assert result.returncode == 0, result.stderr
+            order = tuple(sorted(names, key=lambda n: result.stdout.index(n)))
+            if first_order is None:
+                first_order = order
+            else:
+                assert order == first_order, (
+                    "contract row order changed between runs: "
+                    f"{first_order} vs {order}"
+                )
+
+    def test_script_does_not_use_bash4_associative_arrays(self):
+        """Regression guard: `declare -A` requires bash 4+ (macOS ships
+        bash 3.2 by default) and does not guarantee stable key-iteration
+        order across bash builds/platforms. The script must use an ordered
+        array instead."""
+        with open(SCRIPT) as f:
+            content = f.read()
+        assert "declare -A" not in content
 
 
 # ---------------------------------------------------------------------------

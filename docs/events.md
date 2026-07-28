@@ -33,8 +33,8 @@ Notes:
 | StreamToppedUp   | `["top_up", stream_id: u64]`    | `StreamToppedUp { stream_id: u64, top_up_amount: i128, new_deposit_amount: i128 }`                                                                        | When `top_up_stream` successfully increases a stream's deposit.                                                          |
 | StreamRenewed    | `["renewed", old_stream_id: u64, new_stream_id: u64]` | `StreamRenewed { old_stream_id: u64, new_stream_id: u64 }` | When `renew_stream` successfully creates the next stream from a completed auto-renew-enabled stream. |
 | RecipientUpdated | `["recp_upd", stream_id: u64]` | `RecipientUpdated { stream_id: u64, old_recipient: Address, new_recipient: Address }`                                                                     | When `update_recipient` successfully rotates a stream's receiving address.                                             |
-| AdminUpdated     | `["AdminUpdated"]`              | `(old_admin: Address, new_admin: Address)`                                                                                                                | When the contract admin is rotated via `set_admin`.                                                                     |
-| ContractPaused   | `["paused_ctl"]`                | `bool`                                                                                                                                                    | When the global contract pause state is toggled via `set_contract_paused`.                                              |
+| AdminUpdated     | `["AdminUpd"]`              | `(old_admin: Address, new_admin: Address)`                                                                                                                | When the contract admin is rotated via `set_admin`.                                                                     |
+| ContractPaused   | `["paused_ctl"]`                | `ContractPauseChanged { paused: bool }`                                                                                                                   | When the global contract pause state is toggled via `set_contract_paused`.                                              |
 | ProtocolPaused   | `["pr_pause", admin: Address]`  | `ProtocolPaused { reason: String, paused_at: u64 }`                                                                                                       | When `pause_protocol` successfully pauses the protocol. Not emitted on idempotent calls.                               |
 | ProtocolResumed  | `["pr_resume", admin: Address]` | `ProtocolResumed { resumed_at: u64 }`                                                                                                                     | When `resume_protocol` successfully resumes the protocol. Not emitted on idempotent calls.                             |
 | SenderTransferred | `["sndr_xfr", stream_id: u64]` | `SenderTransferred { stream_id: u64, old_sender: Address, new_sender: Address }`                                                                          | When `transfer_sender` successfully rotates the stream sender. Emitted after state is persisted. Not emitted on failure. |
@@ -54,17 +54,6 @@ Notes:
 | ContractUpgraded | `["upgraded"]` | `ContractUpgraded { new_wasm_hash: BytesN<32>, new_version: u32, upgraded_at: u64, upgraded_by: Address }` | When the admin successfully calls `upgrade`. A second, legacy `["upgrade"]` topic event `(new_wasm_hash, old_version, new_version, admin)` is also emitted for backward compatibility with older indexers. |
 
 **Additional topics (validator):** `cloned`, `kp_cncl`, `gl_pause`, `gl_resume`, `rate_dec`, `tmpl_def`, `hlth_chg`, `ex_swept`, `ac_set`, `ac_revoke`, `ac_trig`, `renewed`, `migrated`, `res_rel`.
-
----
-| Event name | Topic(s) | Data (shape & types) | When emitted |
-|---|---:|---|---|
-| StreamCreated | ["created", stream_id] | StreamCreated { stream_id: u64, sender: Address, recipient: Address, deposit_amount: i128, rate_per_second: i128, start_time: u64, cliff_time: u64, end_time: u64 } | When a stream is successfully created (after tokens transferred). The `stream_id` is the newly assigned stream id (u64). The event is published in `persist_new_stream`. Not emitted on failed creation (e.g., `StartTimeInPast`).
-| Withdrawal | ["withdrew", stream_id] | Withdrawal { stream_id: u64, recipient: Address, amount: i128 } | When a recipient successfully withdraws accrued tokens. Only emitted when amount > 0.
-| StreamPaused | ["paused", stream_id] | StreamEvent::Paused(stream_id) — enum wrapper containing the u64 stream id | When a stream is paused by the sender or admin.
-| StreamResumed | ["resumed", stream_id] | StreamEvent::Resumed(stream_id) — enum wrapper containing the u64 stream id | When a paused stream is resumed by the sender or admin.
-| StreamCancelled | ["cancelled", stream_id] | StreamEvent::StreamCancelled(stream_id) — enum wrapper containing the u64 stream id | When a stream is cancelled by the sender or admin.
-| AdminUpdated | ["admin", "updated"] | (old_admin: Address, new_admin: Address) | When contract admin is rotated via `set_admin`.
-| ContractPaused | ["paused_ctl"] | bool | When global pause is set to true or false.
 
 ## Exact Soroban event structure
 
@@ -602,7 +591,7 @@ Commit message suggestion: `docs: add event schema and topics for indexers`
 | `shorten_stream_end_time`                                    | `"end_shrt"`    |
 | `extend_stream_end_time`                                     | `"end_ext"`     |
 | `top_up_stream`                                              | `"top_up"`      |
-| `set_admin`                                                  | `"AdminUpdated"`|
+| `set_admin`                                                  | `"AdminUpd"`|
 | `set_contract_paused`                                        | `"paused_ctl"`  |
 | `pause_protocol`                                             | `"pr_pause"`    |
 | `resume_protocol`                                            | `"pr_resume"`   |

@@ -1177,10 +1177,12 @@ pub struct CreateStreamParams {
     pub metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
     /// The architectural style of the stream (Linear, CliffOnly, or CliffSlope).
     pub kind: StreamKind,
-    /// If true, the stream cannot be cancelled or shortened. Defaults to false (None).
-    pub irrevocable: Option<bool>,
-    /// Optional compliance witness authorized to cancel via signed attestation.
-    pub witness: Option<Address>,
+    /// Optional structured key-value metadata (TLV extension, issue #580).
+    ///
+    /// Validated at creation: ≤`MAX_METADATA_KEYS` entries, each key ≤`MAX_METADATA_KEY_BYTES`
+    /// bytes, each value ≤`MAX_METADATA_VALUE_BYTES` bytes, total ≤`MAX_METADATA_BYTES` bytes.
+    /// Immutable post-creation. Pass `None` to omit.
+    pub metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
 }
 
 #[contracttype]
@@ -1202,10 +1204,11 @@ pub struct CreateStreamOptions {
     pub withdraw_dust_threshold: Option<i128>,
     /// The architectural style of the stream (Linear, CliffOnly, or CliffSlope).
     pub kind: StreamKind,
-    /// If true, the stream cannot be cancelled or shortened. Defaults to false (None).
-    pub irrevocable: Option<bool>,
-    /// Optional compliance witness authorized to cancel via signed attestation.
-    pub witness: Option<Address>,
+    /// Optional structured key-value metadata (TLV extension, issue #580).
+    ///
+    /// Same validation rules as `CreateStreamParams.metadata`.
+    /// Immutable post-creation. Pass `None` to omit.
+    pub metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
 }
 
 /// Reusable relative schedule (offsets only). Amounts are supplied when creating a stream.
@@ -1653,11 +1656,7 @@ impl FluxoraStream {
             metadata: metadata.clone(),
             memo: memo.clone(),
             kind,
-            irrevocable,
-            witness,
-            delegation_depth: 0,
-            parent_stream_id: None,
-            decommissioned: None,
+            metadata,
         };
 
         save_stream(env, &stream);
@@ -1687,7 +1686,7 @@ impl FluxoraStream {
                 end_time,
                 withdraw_dust_threshold,
                 memo,
-                metadata,
+                metadata: stream.metadata,
             },
         );
 
@@ -1722,9 +1721,9 @@ impl FluxoraStream {
             }
         }
 
-        // Validate metadata size bounds before allocating a stream ID.
-        if let Some(ref md) = metadata {
-            validate_metadata(md)?;
+        // Validate metadata bounds before allocating a stream ID.
+        if let Some(ref meta) = metadata {
+            validate_metadata(meta)?;
         }
 
         let stream_id = next_stream_id_for(env, &sender);
@@ -1752,11 +1751,7 @@ impl FluxoraStream {
             metadata: metadata.clone(),
             memo: memo.clone(),
             kind,
-            irrevocable,
-            witness,
-            delegation_depth: 0,
-            parent_stream_id: None,
-            decommissioned: None,
+            metadata,
         };
 
         save_stream(env, &stream);
@@ -1782,7 +1777,7 @@ impl FluxoraStream {
                 end_time,
                 withdraw_dust_threshold,
                 memo,
-                metadata,
+                metadata: stream.metadata,
             },
         );
 
@@ -2050,7 +2045,9 @@ impl FluxoraStream {
 
         pull_token(&env, &sender, deposit_amount)?;
 
-        let stream_id = Self::persist_new_stream(
+        // Single-stream creation does not accept metadata; use create_streams
+        // or create_streams_partial with CreateStreamParams for metadata.
+        Self::persist_new_stream(
             &env,
             sender,
             recipient,
@@ -2738,8 +2735,7 @@ impl FluxoraStream {
                 memo: rel.memo,
                 metadata: rel.metadata,
                 kind: rel.kind,
-                irrevocable: rel.irrevocable,
-                witness: None,
+                metadata: rel.metadata,
             });
         }
 
@@ -5752,6 +5748,7 @@ impl FluxoraStream {
                 duration: tpl.duration,
                 withdraw_dust_threshold: Some(withdraw_dust_threshold),
                 memo,
+                kind: StreamKind::Linear,
                 metadata,
                 kind,
                 irrevocable,
