@@ -56,6 +56,29 @@ The contract’s test suite validates the entire lifecycle:
 
 All these tests live in `contracts/stream/tests/stream_templates.rs`.
 
+## Pre-configured Templates
+
+The contract ships with a set of canonical template profiles covering common
+payroll and subscription patterns.  Every profile listed below is verified
+by the doc–code cross-check test (`documented_templates_match_code` in
+`contracts/stream/tests/stream_templates.rs`); any rename or value change
+in either source must be mirrored in the other or the test fails.
+
+| Name | `start_delay` | `cliff_delay` | `duration` | Typical use case |
+|------|--------------:|--------------:|-----------:|------------------|
+| **Quick Pay** | 0 | 0 | 3 600 (1 h) | Instant micro‑payments, one‑off tips |
+| **Daily** | 0 | 0 | 86 400 (24 h) | Daily allowances, per‑diems |
+| **Weekly** | 0 | 86 400 (1 d) | 604 800 (7 d) | Weekly payroll with a 1‑day cliff |
+| **Biweekly** | 0 | 86 400 (1 d) | 1 209 600 (14 d) | Fortnightly salary |
+| **Monthly** | 0 | 172 800 (2 d) | 2 592 000 (30 d) | Subscription services, rent |
+| **Quarterly** | 0 | 604 800 (7 d) | 7 776 000 (90 d) | Dividend payouts, quarterly fees |
+| **Annual** | 0 | 604 800 (7 d) | 31 536 000 (365 d) | Membership dues, insurance premiums |
+
+Each template is registered with `register_stream_template` using the
+`start_delay`, `cliff_delay`, and `duration` values shown above.  The
+`owner` and `template_id` are assigned at registration time; see the
+usage example below for the full call pattern.
+
 ## Usage Example (Rust client)
 ```rust
 let tid = client.register_stream_template(&owner, &0u64, &0u64, &3600u64);
