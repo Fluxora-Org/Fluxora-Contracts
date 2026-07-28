@@ -129,6 +129,11 @@ path = "tests/metadata_extension.rs"
 test = true
 
 [[test]]
+name = "metadata_extension_hardening"
+path = "tests/metadata_extension_hardening.rs"
+test = true
+
+[[test]]
 name = "stream_offer"
 path = "tests/stream_offer.rs"
 test = true
