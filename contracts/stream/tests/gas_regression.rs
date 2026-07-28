@@ -759,13 +759,20 @@ fn test_extend_stream_end_time_gas() {
         },
     );
 
-    ctx.env.ledger().set_timestamp(1_000 + KEEPER_GRACE + 1);
+    ctx.env.ledger().set_timestamp(300);
 
     let cost = measure_gas(&ctx, |ctx| {
-        ctx.client.keeper_cancel(&stream_id, &ctx.keeper);
+        ctx.client.extend_stream_end_time(&stream_id, &1_500u64);
     });
 
-    println!("GAS_MEASUREMENT: keeper_cancel: fully_accrued: {}", cost);
+    assert!(
+        cost <= PER_INVOCATION_CPU_BUDGET,
+        "extend_stream_end_time exceeded per-invocation CPU budget: {} > {}",
+        cost,
+        PER_INVOCATION_CPU_BUDGET,
+    );
+
+    println!("GAS_MEASUREMENT: extend_stream_end_time: single: {}", cost);
 }
 
 // ---------------------------------------------------------------------------
@@ -1293,7 +1300,7 @@ fn test_withdraw_partial_accrual_gas() {
     ctx.env.ledger().set_timestamp(300);
 
     let cost = measure_gas(&ctx, |ctx| {
-        ctx.client.extend_stream_end_time(&stream_id, &1_500u64);
+        ctx.client.withdraw(&stream_id);
     });
 
     assert!(
@@ -1509,7 +1516,7 @@ fn test_batch_withdraw_max_page_size_gas() {
     );
 
     println!(
-        "GAS_MEASUREMENT: withdraw_partial_accrual: single: {}",
+        "GAS_MEASUREMENT: batch_withdraw_max_page_size: 100: {}",
         cost
     );
 }
