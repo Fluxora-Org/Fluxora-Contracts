@@ -475,6 +475,15 @@ The `keeper_cancel` entrypoint allows any third-party keeper to cancel an expire
 - **Accounting Invariant**: The contract's token balance must securely cover all remaining liabilities. Since the keeper fee is transferred entirely to the keeper and leaves the contract, the tracked total in `get_protocol_fees_accrued` is strictly monotone and safely independent of the contract's real-time asset/liability ratio.
 - **Total Liabilities View**: The auth-free view function `get_total_liabilities` returns the sum of every stream's remaining (not-yet-withdrawn) balance, sourced from the instance-stored `DataKey::TotalLiabilities` counter. Integrators can cross-check it against the contract's token balance to confirm solvency: a positive gap represents a healthy buffer above the aggregate outstanding payout obligation; a negative gap would indicate under-collateralisation and warrants operator investigation. This view is read-only, requires no parameters, and recomputes lazily on each call.
 
+### Factory-Created Stream Top-up Lifecycle & Solvency Verification (#1478)
+
+The integration suite `contracts/stream/tests/factory_topup_lifecycle.rs` verifies the end-to-end lifecycle of factory-created streams across multiple top-up cycles through to completion:
+
+1. **Factory Creation**: Streams created via `FluxoraFactory::create_stream` undergo policy enforcement (allowlists, caps, duration checks) and delegate creation directly to the downstream `FluxoraStream` contract.
+2. **Top-Up Cycles & Invariant Preservation**: During a stream's active life, `top_up_stream` may be invoked repeatedly at distinct ledger timestamps interspersed with recipient partial withdrawals (`withdraw`). After every top-up and withdrawal, `TotalLiabilities` tracked in instance storage stays strictly equal to `contract_token_balance` and matches `sum(deposit_amount - withdrawn_amount)`.
+3. **Completion & Post-Completion Rejection**: When total withdrawals reach total deposits (`withdrawn_amount == deposit_amount`), the stream transitions to `StreamStatus::Completed` and `TotalLiabilities` for the stream drops to `0`. Any subsequent `top_up_stream` attempt on a completed stream is safely rejected with `ContractError::InvalidState`.
+
+
 ### Clone Semantics
 
 This section defines the success and failure behavior of `clone_stream`.

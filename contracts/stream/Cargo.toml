@@ -84,6 +84,12 @@ path = "tests/factory_policy.rs"
 test = true
 
 [[test]]
+name = "factory_topup_lifecycle"
+path = "tests/factory_topup_lifecycle.rs"
+test = true
+
+
+[[test]]
 name = "formal_verification_smoke"
 path = "tests/formal_verification_smoke.rs"
 test = true
