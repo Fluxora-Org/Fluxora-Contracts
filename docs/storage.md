@@ -130,6 +130,29 @@ Persistent storage is used for individual stream records and per-recipient nonce
 | Change TTL constants | No — no effect on stored data | No version bump required |
 | Change internal helper logic with identical external behaviour | No | No version bump required |
 
+### CI enforcement
+
+Every PR is checked by ``script/check_storage_layout_diff.py`` (wired into
+``.github/workflows/ci.yml`` as the required ``storage-layout-diff`` job).
+The script:
+
+1. Parses the ``DataKey`` enum from both ``contracts/stream/src/lib.rs`` and
+   ``contracts/factory/src/lib.rs`` at the PR head and the merge-base
+   (``origin/main``).
+2. Compares variants position-by-position (0-based discriminant).
+3. **Fails** (exit 1) if any of the following occurred:
+   - An existing variant was renamed (name changed at same index).
+   - An existing variant was removed (fewer variants in head than base).
+   - An existing variant's field shape changed (e.g. ``Stream(u64)`` →
+     ``Stream(Address)``).
+   - A new variant was inserted in the middle (pushes subsequent variants).
+4. **Passes** (exit 0) for strictly-additive changes (new variants appended
+   at the end after all original variants).
+
+See the script's docstring for the full specification and security
+assumptions.  This check is in addition to the Rust compile-time checks in
+``contracts/stream/src/checksum.rs`` and the versioning module.
+
 ### Current compatibility behavior
 
 The current release is backward-compatible with V5-seeded storage because the
