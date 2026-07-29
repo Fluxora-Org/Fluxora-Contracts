@@ -689,8 +689,8 @@ fn count_definitions(source: &str, helper: &str) -> usize {
 #[test]
 fn id_reservation_helpers_defined_exactly_once() {
     let src = stream_src_dir();
-    let storage_rs =
-        std::fs::read_to_string(src.join("storage.rs")).expect("read contracts/stream/src/storage.rs");
+    let storage_rs = std::fs::read_to_string(src.join("storage.rs"))
+        .expect("read contracts/stream/src/storage.rs");
     let lib_rs =
         std::fs::read_to_string(src.join("lib.rs")).expect("read contracts/stream/src/lib.rs");
 

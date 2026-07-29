@@ -6,24 +6,10 @@ on:
   pull_request:
     branches: [main, develop]
   workflow_dispatch:
-    inputs:
-      deploy_target:
-        description: "Deployment target"
-        required: true
-        default: "testnet"
-        type: choice
-        options:
-          - testnet
-          - mainnet
-
-env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
-  STELLAR_CLI_VERSION: "25.2.0"
 
 jobs:
-  docs-alignment-check:
-    name: Docs Alignment Check
+  ci:
+    name: CI
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository

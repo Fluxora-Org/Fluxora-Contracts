@@ -20,7 +20,7 @@
 //! imported by a test crate that depends on a concrete type path. All other
 //! types belong at the crate root.
 
-use soroban_sdk::{contracttype, Address};
+use soroban_sdk::{contracttype, Address, Map};
 
 /// The canonical persistent record for a single payment/vesting stream.
 ///
@@ -66,7 +66,7 @@ pub struct StreamCreated {
     pub cliff_time: u64,
     pub end_time: u64,
     /// Optional withdrawal threshold (raw units) utilized by threshold monitors.
-    /// Withdrawals below this amount are skipped unless they are the final drain 
+    /// Withdrawals below this amount are skipped unless they are the final drain
     /// or the stream is terminal. Used to prevent dust sweep spam.
     pub withdraw_dust_threshold: i128,
     /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
@@ -103,7 +103,7 @@ pub struct StreamCloned {
     pub cliff_time: u64,
     /// End time of the new stream.
     pub end_time: u64,
-    /// Withdrawal threshold inherited from the source stream, 
+    /// Withdrawal threshold inherited from the source stream,
     /// ensuring threshold monitors continue to respect the same boundary.
     pub withdraw_dust_threshold: i128,
 }
@@ -494,29 +494,6 @@ pub struct StreamDecommissioned {
     pub decommissioned: bool,
 }
 
-/// Emitted when claim ownership is transferred on a stream.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ClaimOwnershipTransferred {
-    pub stream_id: u64,
-    pub old_owner: Option<Address>,
-    pub new_owner: Address,
-}
-
-/// Emitted when a recipient delegates a share of their stream.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RecipientShareDelegated {
-    pub parent_stream_id: u64,
-    pub child_stream_id: u64,
-    pub delegator: Address,
-    pub delegatee: Address,
-    pub share_bps: u32,
-    pub new_parent_rate: i128,
-    pub child_rate: i128,
-}
-
-/// Pagination result for paginated stream listings.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Page {
@@ -546,7 +523,7 @@ pub struct CreateStreamParams {
     /// Maximum `MAX_MEMO_BYTES` (64) bytes. Pass `None` to omit.
     pub memo: Option<soroban_sdk::Bytes>,
     /// The architectural style of the stream (Linear or CliffOnly).
-    pub kind: StreamKind,
+    pub kind: crate::StreamKind,
     /// Optional structured metadata emitted for indexer consumption.
     pub metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
     /// If true, the stream cannot be cancelled or shortened. Defaults to false (None).
@@ -586,7 +563,7 @@ pub struct CreateStreamRelativeParams {
     /// Maximum `MAX_MEMO_BYTES` (64) bytes. Pass `None` to omit.
     pub memo: Option<soroban_sdk::Bytes>,
     /// The architectural style of the stream (Linear or CliffOnly).
-    pub kind: StreamKind,
+    pub kind: crate::StreamKind,
     pub metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
     /// If true, the stream cannot be cancelled or shortened. Defaults to false (None).
     pub irrevocable: Option<bool>,

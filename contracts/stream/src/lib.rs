@@ -15,6 +15,44 @@ pub mod storage;
 pub(crate) mod storage;
 mod token_check;
 pub mod types;
+/// Manifest versioning module.
+///
+/// Provides validation primitives that lock down the contract's versioning
+/// contract, covering upgrade compatibility, storage-key stability, and
+/// regression guards around accrual, checkpoint, and entry-size invariants.
+///
+/// The module enforces:
+/// - **Contract version** – [`CONTRACT_VERSION`] (currently `9`) is the
+///   compile-time constant returned by the permissionless `version()` view.
+///   See [`CONTRACT_VERSION`] for the versioning policy table and bump
+///   checklist.
+/// - **Frozen discriminants** – `FROZEN_DISCRIMINANTS_V9` records all 36
+///   `DataKey` discriminants (0..=35) that are append-only and must never
+///   be reordered or removed. The compile-time check
+///   `validate_discriminants_frozen` catches regressions.
+/// - **Storage entry size** – `validate_entry_size` enforces the per-entry
+///   byte cap (`MAX_STREAM_ENTRY_BYTES` ≈ 4 KiB), preventing gas-DoS through
+///   oversized storage writes.
+/// - **Upgrade path** – `validate_version` detects version mismatches during
+///   migrations; integration tests in `tests/upgrade_path.rs` pin V5→V6
+///   compatibility and verify that `version()` is idempotent, gas-free, and
+///   callable before `init`.
+/// - **State invariants** – `validate_checkpoint_state`, `validate_accrual_bounds`,
+///   and `validate_withdrawal_monotonicity` catch retrograde clocks, negative
+///   accrual, and non-monotonic withdrawals at validation time.
+///
+/// ## References
+/// - Full documentation: [`docs/manifest-versioning.md`](docs/manifest-versioning.md)
+/// - ABI stability policy: [`docs/ABI_STABILITY.md`](docs/ABI_STABILITY.md)
+/// - Storage layout & DataKey evolution: [`docs/storage.md`](docs/storage.md)
+///
+/// ## Regression surface
+/// - Any change to `DataKey` variants must preserve existing discriminants
+///   and update `FROZEN_DISCRIMINANTS_V9` + `frozen_discriminant_count()`.
+/// - Any change to `CONTRACT_VERSION` must follow the bump checklist in
+///   [`CONTRACT_VERSION`]'s doc comment.
+/// - New entry-points that read storage must use the existing key layout;
+///   new keys must be appended at the end of the `DataKey` enum.
 pub mod versioning;
 
 use soroban_sdk::xdr::ToXdr;
@@ -36,24 +74,11 @@ pub use crate::types::{
 // resolves them without a separate `use crate::types::*` line.
 pub use crate::types::*;
 
-pub fn reject_duplicate_ids(env: &Env, ids: &soroban_sdk::Vec<u64>) -> Result<(), ContractError> {
-    let mut seen = soroban_sdk::Vec::<u64>::new(env);
-    for id in ids.iter() {
-        for existing in seen.iter() {
-            if existing == id {
-                return Err(ContractError::DuplicateStreamId);
-            }
-        }
-        seen.push_back(id);
-    }
-    Ok(())
-}
-
 /// Re-export for adversarial auth tests: bump a recipient's delegated-withdraw nonce
 /// to simulate in-flight revocation without going through the full contract flow.
 /// Only available when the `testutils` feature is enabled.
 #[cfg(feature = "testutils")]
-pub use storage::increment_delegated_nonce_test_only as increment_delegated_nonce;
+pub use storage::increment_delegated_nonce;
 
 // ---------------------------------------------------------------------------
 // TTL constants
@@ -87,6 +112,90 @@ pub const MAX_TEMPLATES_PER_OWNER: u64 = 50;
 
 /// Maximum number of templates stored globally.
 pub const MAX_GLOBAL_TEMPLATES: u64 = 1_000;
+
+/// A pre-configured template specification for common stream scheduling patterns.
+///
+/// Each entry defines a named profile with documented `start_delay`, `cliff_delay`,
+/// and `duration` values. The list in [`DOCUMENTED_TEMPLATES`] is the source of truth
+/// cross-referenced by the doc cross-check test in
+/// `contracts/stream/tests/stream_templates.rs`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TemplateSpec {
+    pub name: &'static str,
+    pub start_delay: u64,
+    pub cliff_delay: u64,
+    pub duration: u64,
+}
+
+/// Quick-pay template: stream starts immediately, no cliff, runs for 1 hour.
+pub const TEMPLATE_QUICK_PAY: TemplateSpec = TemplateSpec {
+    name: "Quick Pay",
+    start_delay: 0,
+    cliff_delay: 0,
+    duration: 3600,
+};
+
+/// Daily template: stream starts immediately, no cliff, runs for 24 hours.
+pub const TEMPLATE_DAILY: TemplateSpec = TemplateSpec {
+    name: "Daily",
+    start_delay: 0,
+    cliff_delay: 0,
+    duration: 86400,
+};
+
+/// Weekly template: stream starts immediately, 1-day cliff, runs for 7 days.
+pub const TEMPLATE_WEEKLY: TemplateSpec = TemplateSpec {
+    name: "Weekly",
+    start_delay: 0,
+    cliff_delay: 86400,
+    duration: 604800,
+};
+
+/// Biweekly template: stream starts immediately, 1-day cliff, runs for 14 days.
+pub const TEMPLATE_BIWEEKLY: TemplateSpec = TemplateSpec {
+    name: "Biweekly",
+    start_delay: 0,
+    cliff_delay: 86400,
+    duration: 1_209_600,
+};
+
+/// Monthly template: stream starts immediately, 2-day cliff, runs for 30 days.
+pub const TEMPLATE_MONTHLY: TemplateSpec = TemplateSpec {
+    name: "Monthly",
+    start_delay: 0,
+    cliff_delay: 172_800,
+    duration: 2_592_000,
+};
+
+/// Quarterly template: stream starts immediately, 7-day cliff, runs for 90 days.
+pub const TEMPLATE_QUARTERLY: TemplateSpec = TemplateSpec {
+    name: "Quarterly",
+    start_delay: 0,
+    cliff_delay: 604_800,
+    duration: 7_776_000,
+};
+
+/// Annual template: stream starts immediately, 7-day cliff, runs for 365 days.
+pub const TEMPLATE_ANNUAL: TemplateSpec = TemplateSpec {
+    name: "Annual",
+    start_delay: 0,
+    cliff_delay: 604_800,
+    duration: 31_536_000,
+};
+
+/// All documented pre-configured templates, in declaration order.
+///
+/// Used by the doc cross-check test to verify that every template listed in
+/// `docs/stream-templates.md` is registered with the expected parameters.
+pub const DOCUMENTED_TEMPLATES: &[TemplateSpec] = &[
+    TEMPLATE_QUICK_PAY,
+    TEMPLATE_DAILY,
+    TEMPLATE_WEEKLY,
+    TEMPLATE_BIWEEKLY,
+    TEMPLATE_MONTHLY,
+    TEMPLATE_QUARTERLY,
+    TEMPLATE_ANNUAL,
+];
 
 /// Maximum number of stream IDs that can be reserved in a single `reserve_stream_ids` call.
 pub const MAX_ID_RESERVATION: u32 = 100;
@@ -600,35 +709,6 @@ pub struct StreamCreated {
     pub metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
 }
 
-/// Emitted when a stream is cloned via `clone_stream`.
-///
-/// Carries both the source stream ID (for audit trail) and the full parameters
-/// of the newly created stream so indexers can correlate the two without a
-/// separate `get_stream_state` call.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct StreamCloned {
-    /// The newly created stream's ID.
-    pub new_stream_id: u64,
-    /// The source stream that was cloned.
-    pub source_stream_id: u64,
-    /// Sender of the new stream (same as the caller / original sender).
-    pub sender: Address,
-    /// Recipient of the new stream (may differ from the source stream's recipient).
-    pub recipient: Address,
-    /// Deposit amount locked into the new stream.
-    pub deposit_amount: i128,
-    /// Rate per second inherited from the source stream.
-    pub rate_per_second: i128,
-    /// Absolute start time of the new stream.
-    pub start_time: u64,
-    /// Cliff time of the new stream (preserves the source cliff offset).
-    pub cliff_time: u64,
-    /// End time of the new stream.
-    pub end_time: u64,
-}
-
-/// Result of a single stream creation attempt in a partial batch.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreateStreamResult {
@@ -1318,6 +1398,20 @@ pub enum DataKey {
     PooledStreamShares(u64),
     /// Per-recipient withdrawn amount for a pooled stream.
     PooledStreamWithdrawn(u64, Address),
+    /// Per-sender nonce counter for `delegated_cancel` replay protection.
+    ///
+    /// Keyed by the stream **sender** address (distinct from the recipient-keyed
+    /// `DelegatedWithdrawNonce`). Incremented atomically inside `delegated_cancel`
+    /// after signature verification, before returning, so every successfully-executed
+    /// cancellation consumes exactly one nonce value and the same signed payload
+    /// cannot be submitted twice.
+    ///
+    /// Domain-separated from `DelegatedWithdrawNonce` at both the storage level
+    /// (different `DataKey` variant) and the signature level (distinct
+    /// `DELEGATED_CANCEL_DOMAIN` tag prepended to the payload).
+    ///
+    /// Appended at the end to preserve all existing discriminants.
+    DelegatedCancelNonce(Address),
 }
 
 // ---------------------------------------------------------------------------
@@ -3041,7 +3135,8 @@ impl FluxoraStream {
         msg.extend_from_array(&nonce.to_be_bytes());
         msg.extend_from_array(&deadline.to_be_bytes());
 
-        env.crypto().ed25519_verify(&sender_public_key, &msg, &signature);
+        env.crypto()
+            .ed25519_verify(&sender_public_key, &msg, &signature);
 
         crate::storage::increment_delegated_cancel_nonce(&env, &stream.sender);
 
@@ -3090,6 +3185,20 @@ impl FluxoraStream {
     ///
     /// # Usage Notes
     /// - Can be called multiple times to withdraw incrementally
+    /// - Accrual is time-based: `min((now - start_time) × rate, deposit_amount)`
+    /// - Before cliff time, accrued amount is 0 (returns 0, no transfer)
+    /// - After end_time, accrued amount is capped at deposit_amount
+    /// - Works on `Active` and `Cancelled` streams, not on `Paused` or `Completed`
+    /// - For cancelled streams, only the accrued amount (not refunded) can be withdrawn,
+    ///   and status remains `Cancelled` (no `Completed` transition)
+    ///
+    /// # Cross-Entrypoint Idempotency
+    /// - Reentrancy-protected via `acquire_reentrancy_lock` before calling `push_token`
+    /// - State is persisted BEFORE `push_token` (CEI pattern), ensuring that repeated
+    ///   calls with the same withdrawal amount produce the same result (idempotent)
+    /// - If `push_token` fails, the entire transaction reverts (state is not updated)
+    /// - After a successful withdrawal, subsequent calls with the same stream_id return 0
+    ///   until new tokens accrue
     /// - Accrual is time-based: `min((now - start_time) × rate, deposit_amount)`
     /// - Before cliff time, accrued amount is 0 (returns 0, no transfer)
     /// - After end_time, accrued amount is capped at deposit_amount
@@ -3161,7 +3270,9 @@ impl FluxoraStream {
         }
 
         // CEI: update state before external token transfer to reduce reentrancy risk.
-        // Assumption: the token contract does not reenter this contract.
+        // Cross-entrypoint idempotency: state is persisted BEFORE push_token so
+        // repeated calls produce the same result (withdrawable will be 0 after
+        // the first successful withdrawal).
         stream.withdrawn_amount += withdrawable;
         stream.last_withdraw_ledger = current_ledger; // Update withdrawal timestamp
         let completed_now = (stream.status == StreamStatus::Active
@@ -3180,7 +3291,10 @@ impl FluxoraStream {
             .unwrap_or(0);
         write_total_liabilities(&env, liabilities);
 
-        push_token(&env, &stream.recipient, withdrawable)?;
+        acquire_reentrancy_lock(&env)?;
+        let transfer_result = push_token(&env, &stream.recipient, withdrawable);
+        release_reentrancy_lock(&env);
+        transfer_result?;
 
         events::emit_withdrawal(
             &env,
@@ -3303,7 +3417,10 @@ impl FluxoraStream {
             .unwrap_or(0);
         write_total_liabilities(&env, liabilities);
 
-        push_token(&env, &caller, withdrawable)?;
+        acquire_reentrancy_lock(&env)?;
+        let transfer_result = push_token(&env, &caller, withdrawable);
+        release_reentrancy_lock(&env);
+        transfer_result?;
 
         events::emit_withdrawal(
             &env,
@@ -3446,7 +3563,10 @@ impl FluxoraStream {
             .unwrap_or(0);
         write_total_liabilities(&env, liabilities);
 
-        push_token(&env, &destination, withdrawable)?;
+        acquire_reentrancy_lock(&env)?;
+        let transfer_result = push_token(&env, &destination, withdrawable);
+        release_reentrancy_lock(&env);
+        transfer_result?;
 
         events::emit_withdrawal_to(
             &env,
@@ -3806,7 +3926,10 @@ impl FluxoraStream {
                 total_liabilities = total_liabilities.checked_sub(withdrawable).unwrap_or(0);
                 liabilities_changed = true;
 
-                push_token(&env, &param.destination, withdrawable)?;
+                acquire_reentrancy_lock(&env)?;
+                let transfer_result = push_token(&env, &param.destination, withdrawable);
+                release_reentrancy_lock(&env);
+                transfer_result?;
 
                 events::emit_withdrawal_to(
                     &env,
@@ -3990,12 +4113,16 @@ impl FluxoraStream {
         increment_delegated_nonce(&env, &stream.recipient);
 
         // 12. Transfers via push_token: Net payout to RECIPIENT first, Fee to RELAYER second
+        // Cross-entrypoint idempotency: reentrancy lock prevents nested token callbacks
+        // from corrupting withdrawn_amount or liability tracking.
+        acquire_reentrancy_lock(&env)?;
         if net_amount > 0 {
             push_token(&env, &stream.recipient, net_amount)?;
         }
         if relayer_fee > 0 {
             push_token(&env, &relayer, relayer_fee)?;
         }
+        release_reentrancy_lock(&env);
 
         events::emit_withdrawal(
             &env,
@@ -4020,6 +4147,22 @@ impl FluxoraStream {
     /// The nonce is incremented on every successful `delegated_withdraw` call.
     pub fn get_delegated_nonce(env: Env, recipient: Address) -> u64 {
         load_delegated_nonce(&env, &recipient)
+    }
+
+    /// Return the current delegated-cancel nonce for a sender.
+    ///
+    /// Relayers must include this value in the signed cancel-message to prevent
+    /// replay attacks. The nonce is per-sender (keyed by `DataKey::DelegatedCancelNonce`)
+    /// and is incremented on every successful `delegated_cancel` call, independent of
+    /// the recipient-keyed `DelegatedWithdrawNonce`.
+    ///
+    /// # Parameters
+    /// - `sender`: The stream sender whose cancel-delegation nonce is queried.
+    ///
+    /// # Returns
+    /// Current `u64` nonce; starts at `0` before the first `delegated_cancel` call.
+    pub fn get_delegated_cancel_nonce(env: Env, sender: Address) -> u64 {
+        crate::storage::load_delegated_cancel_nonce(&env, &sender)
     }
 
     /// Calculate the total amount accrued to the recipient at the current time.
@@ -4603,6 +4746,12 @@ impl FluxoraStream {
             return Err(ContractError::InvalidParams);
         }
 
+        // Reject rate changes on expired streams: no remaining duration can accrue.
+        let now = current_accrual_timestamp(&env)?;
+        if now >= stream.end_time {
+            return Err(ContractError::InvalidState);
+        }
+
         // Enforce governance-controlled maximum rate per second cap.
         let max_rate = get_max_rate_per_second(&env);
         if new_rate_per_second > max_rate {
@@ -4630,7 +4779,6 @@ impl FluxoraStream {
         }
 
         // Checkpoint accrued-to-date so the rate increase applies forward-only.
-        let now = current_accrual_timestamp(&env)?;
         let accrued_now = accrual::calculate_accrued_amount_checkpointed(
             accrual::CheckpointState {
                 checkpointed_amount: stream.checkpointed_amount,
@@ -4779,16 +4927,18 @@ impl FluxoraStream {
             .checked_add(future_accrual)
             .ok_or(ContractError::ArithmeticOverflow)?;
 
-        // new_deposit must fit within the old deposit (guaranteed by lower rate * same duration).
+        // new_deposit must fit within the old deposit. A lower rate should never
+        // increase the maximum payable amount for the remaining duration. If state
+        // is inconsistent (e.g. a pre-upgrade or manually-mutated deposit ceiling),
+        // reject deterministically with ArithmeticOverflow instead of silently
+        // treating the condition as a generic invalid state.
         let old_deposit = stream.deposit_amount;
+        if new_deposit > old_deposit {
+            return Err(ContractError::ArithmeticOverflow);
+        }
         let refund_amount = old_deposit
             .checked_sub(new_deposit)
             .ok_or(ContractError::ArithmeticOverflow)?;
-
-        // Sanity: refund must be non-negative (lower rate → smaller max payable).
-        if refund_amount < 0 {
-            return Err(ContractError::InvalidState);
-        }
 
         // ── CEI: persist state before token transfer ───────────────────────────────
         stream.checkpointed_amount = accrued_now;
@@ -6217,6 +6367,14 @@ impl FluxoraStream {
             return Err(ContractError::StreamTerminalState);
         }
 
+        if stream.decommissioned.unwrap_or(false) {
+            return Err(ContractError::InvalidState);
+        }
+
+        if stream.kind != StreamKind::Linear {
+            return Err(ContractError::UnsupportedStreamKind);
+        }
+
         // Only sender or admin can update rate
         let admin = get_admin(&env)?;
         if caller != stream.sender && caller != admin {
@@ -6229,6 +6387,12 @@ impl FluxoraStream {
         }
 
         let old_rate = stream.rate_per_second;
+
+        // Reject rate changes on expired streams (no remaining accrual possible).
+        let now = current_accrual_timestamp(&env)?;
+        if now >= stream.end_time {
+            return Err(ContractError::InvalidState);
+        }
 
         // 🔑 IMPORTANT: Do NOT touch withdrawn_amount
         // This preserves correctness after partial withdrawals
@@ -6245,7 +6409,7 @@ impl FluxoraStream {
                 stream_id,
                 old_rate_per_second: old_rate,
                 new_rate_per_second,
-                effective_time: env.ledger().timestamp(),
+                effective_time: now,
             },
         );
 

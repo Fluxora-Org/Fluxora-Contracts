@@ -276,15 +276,108 @@ The upgraded WASM must maintain backward-compatible storage layout:
 | Security patch | In-place `upgrade()` if storage-compatible; otherwise new deployment |
 | New feature (additive entry-points only) | In-place `upgrade()` |
 
+### Gas Cost
+
+The `upgrade()` entrypoint performs the following operations, each with associated cost:
+
+| Operation | Cost category |
+|---|---|
+| Admin auth check (`admin.require_auth()`) | Signature verification |
+| `update_current_contract_wasm` host call | WASM blob installation (proportional to WASM size) |
+| `bump_instance_ttl` | Instance storage TTL extension |
+| Two event emissions (`ContractUpgraded` + legacy `upgrade`) | Event publication |
+
+`upgrade()` is intentionally **not** a hot-path function — it is called at most a handful of times over a contract's lifetime. Gas costs are dominated by the WASM installation and storage bump, not by the entrypoint logic itself.
+
+**Estimated cost breakdown (mainnet):**
+- Auth verification: ~5,000–10,000 units
+- WASM installation via `update_current_contract_wasm`: ~50,000–200,000 units (depends on WASM binary size)
+- Instance TTL bump: ~5,000–10,000 units
+- Two events: ~1,000–2,000 units each
+
+Total estimated range: **~60,000–225,000 units**. Actual cost varies with network congestion and WASM size.
+
+### Event Schema
+
+The `upgrade()` entrypoint emits two events:
+
+#### `ContractUpgraded` (primary event — topic `"upgraded"`)
+
+```text
+Topic: (symbol_short!("upgraded"),)
+Data: ContractUpgraded {
+    new_wasm_hash: BytesN<32>,   // SHA-256 hash of the replacement WASM
+    new_version: u32,             // CONTRACT_VERSION baked into replacement WASM
+    upgraded_at: u64,             // Ledger timestamp of the upgrade
+    upgraded_by: Address,         // Admin address that authorised the upgrade
+}
+```
+
+#### Legacy `upgrade` event (topic `"upgrade"`)
+
+Preserved for backward compatibility with indexers that predate the `ContractUpgraded` struct:
+
+```text
+Topic: (symbol_short!("upgrade"),)
+Data: (BytesN<32>, u32, u32, Address)
+// Fields: (new_wasm_hash, old_version, new_version, upgraded_by)
+```
+
+**Indexer migration note:** New indexers should subscribe to the `"upgraded"` topic. The legacy `"upgrade"` event may be removed in a future `CONTRACT_VERSION` bump.
+
+### TTL Management After Upgrade
+
+The `upgrade()` entrypoint calls `bump_instance_ttl(&env)` immediately after the WASM replacement. This ensures the contract's instance storage entries (Config, paused-stream counter, TotalLiabilities, etc.) do not expire due to the upgrade transaction itself.
+
+**What the TTL bump covers:**
+- All instance storage keys (`DataKey` variants 0, 1, 4–8, 10, 11, 14, 16, 17, 22, 24, 26, 27, 28)
+- The contract code entry (implicitly preserved by the host during WASM replacement)
+
+**What it does NOT cover:**
+- Persistent storage entries (stream data, recipient indices, etc.) — these must be bumped separately if nearing TTL expiry before the upgrade.
+- The admin should run a TTL-scanning tool (e.g., `stellar contract bump --all`) before scheduling an upgrade if any persistent entries are approaching expiry.
+
+### Pre-Upgrade Verification Checklist
+
+Before executing an in-place upgrade:
+
+- [ ] Run `cargo test --test storage_key_compat` against the new WASM to confirm all existing storage keys remain readable.
+- [ ] Run the full integration test suite (`cargo test --workspace`) with the new WASM.
+- [ ] Confirm the new `CONTRACT_VERSION` value is correct (if bumped).
+- [ ] Verify the new WASM binary is installed on the network (`stellar contract install` succeeds).
+- [ ] Ensure all persistent stream entries have sufficient TTL remaining (bump if < 7 days).
+- [ ] Notify integrators and indexers of the planned upgrade window.
+- [ ] If governance-controlled: confirm governance quorum has pre-approved the upgrade hash.
+- [ ] Prepare a rollback WASM (previous version) in case the upgrade introduces an unforeseen issue.
+
+### Rollback Procedure
+
+If an in-place upgrade introduces a bug or regression:
+
+1. **Build and install** the previous (known-good) WASM binary.
+2. **Call `upgrade()` again** with the previous WASM hash — the admin auth gate remains the same, and no special rollback entrypoint is needed.
+3. **Verify** `version()` returns the previous `CONTRACT_VERSION`.
+4. **Check** that all streams are still readable (`get_stream_state` for a sample of stream IDs).
+
+> **Caution:** Rollback is only safe if the previous WASM maintained storage compatibility with the intermediate version. If the upgrade changed storage layout, rolling back may corrupt entries written between the upgrade and the rollback.
+
 ### Residual risks
 
-1. **Upgrade trap.** If a developer deploys a WASM with an incompatible storage layout via `upgrade()`, every persistent entry on the live instance becomes unreadable. There is no rollback. Mitigation: run the full `storage_key_compat.rs` test suite against the new WASM before upgrading.
+1. **Upgrade trap.** If a developer deploys a WASM with an incompatible storage layout via `upgrade()`, every persistent entry on the live instance becomes unreadable. There is no automatic rollback. Mitigation: run the full `storage_key_compat.rs` test suite against the new WASM before upgrading.
 
 2. **Governance gate.** The admin key must be held by a governance contract with multi-sig quorum. A single-key admin can unilaterally upgrade to arbitrary WASM — this is a centralisation risk mitigated by the governance integration tested in `contracts/stream/tests/governance_integration.rs`.
 
-3. **TTL expiry during upgrade.** If an in-place upgrade takes longer than the TTL of persistent entries, those entries may expire mid-upgrade. All persistent entries should be bumped before initiating the upgrade.
+3. **TTL expiry during upgrade.** If an in-place upgrade takes longer than the TTL of persistent entries, those entries may expire mid-upgrade. All persistent entries should be bumped before initiating the upgrade. The `upgrade()` entrypoint bumps instance TTL but does NOT bump persistent entries automatically.
 
 4. **Event continuity.** Indexers watching the contract for events will see the `CONTRACT_ID` unchanged after an in-place upgrade. Event schemas must remain backward-compatible across upgrades — any breaking event change requires a new deployment, not an in-place upgrade.
+
+5. **Invalid WASM hash.** If the `new_wasm_hash` parameter does not correspond to a WASM blob previously installed on the network, the host call to `update_current_contract_wasm` traps and the entire transaction reverts. There is no partial-upgrade state. Mitigation: always run `stellar contract install` before invoking `upgrade()`.
+
+6. **Upgrade during active governance proposal.** If the admin is a governance contract, calling `upgrade()` while a conflicting governance proposal is executing may produce unexpected interleaving. Mitigation: governance upgrades should be atomic governance proposals that include the `upgrade()` call as the final action.
+
+7. **WASM hash collision.** The `new_wasm_hash` is a 32-byte SHA-256 hash. While collision-resistant, a malicious deployer could craft two WASM binaries with the same hash (practical collision attack against SHA-256 is currently infeasible). Mitigation: governance approval of the hash provides a social layer of verification.
+
+8. **Unauthorised upgrade attempt gas cost.** If a non-admin caller invokes `upgrade()`, the admin auth check fails before any host function is called. The caller pays for the failed auth check (~5,000 units) but not for WASM installation. This prevents gas-based DoS attacks on the admin.
 
 ---
 
@@ -566,7 +659,7 @@ make a build reproducible. The full list is documented in
 
 ---
 
-## 6. Compile-Time Warning Stabilization & Module Hygiene
+## 10. Compile-Time Warning Stabilization & Module Hygiene
 
 To ensure clean, reproducible builds and prevent subtle behavioral shifts during upgrades:
 

@@ -121,9 +121,9 @@ These mitigations conflict with the protocol's goals of gas efficiency, simplici
 
 **Specific risks**:
 
-- **Direct transfers to contract**: Tokens could be sent directly to the streaming contract address without going through `create_stream` or `top_up_stream`. These tokens would be locked permanently with no recovery path.
-- **Token recovery**: The contract has no mechanism to recover tokens sent directly to it outside of stream operations.
-- **Balance reconciliation**: The contract does not verify that `contract_balance >= sum(deposit_amount - withdrawn_amount)` across all streams.
+- **Direct transfers to contract**: Tokens sent directly to the streaming contract address without going through `create_stream` or `top_up_stream` increase the contract's token balance without increasing `TotalLiabilities`. These tokens become part of unallocated excess balance (`contract_balance - total_liabilities`) and are recoverable by the contract admin via `sweep_excess`.
+- **Token recovery**: Directly-transferred tokens are recoverable via `sweep_excess`, but recovery requires manual admin action (it is not automatic or permissionless). Recovered tokens are sent to an admin-specified recipient address rather than automatically returned to the original sender.
+- **Balance reconciliation**: The contract does not verify that `contract_balance >= sum(deposit_amount - withdrawn_amount)` across all streams on every operation; instead, it maintains `TotalLiabilities` and exposes `sweep_excess` for administrative balance management.
 
 **Rationale**: Balance verification would require:
 
@@ -137,7 +137,7 @@ The current design:
 - Assumes token transfers succeed or fail explicitly
 - Places responsibility on operators to avoid direct transfers
 
-**Residual risk**: Tokens sent directly to the contract address are permanently locked. Operators should never transfer tokens directly to the streaming contract address.
+**Residual risk**: Tokens sent directly to the contract address require manual admin intervention via `sweep_excess` for recovery. The original sender cannot reclaim directly-transferred tokens permissionlessly.
 
 ### 5. Token Allowance Management
 
@@ -284,7 +284,7 @@ The following scenarios cannot be automatically tested and require manual audit:
 ### Residual Risks
 
 1. **Non-standard tokens**: If a token violates SEP-41 guarantees, the streaming contract's behavior may become unpredictable. Mitigation: Use only well-audited, standard SEP-41 tokens.
-2. **Direct transfers**: Tokens sent directly to the contract address are permanently locked. Mitigation: Operator education and wallet/tooling warnings.
+2. **Direct transfers**: Tokens sent directly to the contract address increase unallocated excess balance. They are recoverable by the contract admin via `sweep_excess`, but cannot be permissionlessly reclaimed by the original sender. Mitigation: Operator education, wallet/tooling warnings, and admin oversight.
 3. **Token upgrades**: If a token contract is upgraded to violate SEP-41 guarantees, the streaming contract's behavior may change. Mitigation: Use stable, non-upgradeable tokens or accept upgrade risk.
 
 ## Integration Guidelines

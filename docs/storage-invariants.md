@@ -29,13 +29,26 @@ coverage: `contracts/stream/tests/storage_invariants.rs`.
 - Incremented on `create_stream`, `top_up_stream`, and similar funding paths.
 - Decremented on successful `withdraw`, `cancel_stream`, `keeper_cancel`, and
   refund-modifying operations (`shorten_stream_end_time`, `decrease_rate_per_second`).
+- Guaranteed non-negative (`>= 0`) via floor checks on liability storage writes.
 - `get_total_liabilities()` exposes the counter read-only.
 
-## Indexes (sorted)
+## Indexes (sorted & unique)
 
-- `RecipientStreams(Address)` and `SenderStreams(Address)` store `Vec<u64>` sorted
-  ascending by `stream_id`.
-- Inserts use binary-search position; removals preserve order.
+- `RecipientStreams(Address)`, `SenderStreams(Address)`, and `RecipientPendingOffers(Address)` store `Vec<u64>` sorted
+  ascending by `stream_id` / `offer_id`.
+- Inserts use binary-search position and early-return if present (idempotent set-uniqueness); removals preserve order.
+- Reclaims persistent storage keys when index vectors become empty.
+
+## Stream Structural Validation
+
+- `validate_stream_invariants` validates all field constraints prior to storage persistence (`save_stream`):
+  - `start_time <= end_time`
+  - `cliff_time >= start_time` and `cliff_time <= end_time`
+  - `deposit_amount >= 0`
+  - `withdrawn_amount >= 0` and `withdrawn_amount <= deposit_amount`
+  - `checkpointed_amount >= 0` and `checkpointed_amount <= deposit_amount`
+  - `checkpointed_at <= end_time`
+  - `rate_per_second >= 0` and `withdraw_dust_threshold >= 0`
 
 ## CEI (Checks-Effects-Interactions)
 

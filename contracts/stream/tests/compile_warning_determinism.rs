@@ -6,8 +6,8 @@
 //! 3. Storage layout and discriminant preservation under compile-time cleanup
 
 use fluxora_stream::{
-    CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamKind, StreamStatus, ContractError,
-    CONTRACT_VERSION,
+    ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamKind,
+    StreamStatus, CONTRACT_VERSION,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
