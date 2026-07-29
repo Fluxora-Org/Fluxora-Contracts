@@ -125,6 +125,7 @@ struct Ctx<'a> {
     /// Token client used for balance / allowance assertions.
     token: TokenClient<'a>,
     /// The admin address — kept for double-init idempotency tests.
+    #[allow(dead_code)]
     admin: Address,
     /// The token address — kept for double-init idempotency tests.
     token_id: Address,
@@ -249,6 +250,30 @@ impl<'a> Ctx<'a> {
         )
     }
 
+    /// Create a stream and immediately verify the metadata round-trips correctly.
+    ///
+    /// This is the recommended helper for most tests because it hardens the
+    /// fixture by catching storage-layer failures at the earliest point.
+    fn create_with_metadata_and_verify(
+        &self,
+        metadata: Option<Map<Bytes, Bytes>>,
+    ) -> u64 {
+        let stream_id = self.create_stream_with_metadata(metadata.clone());
+        let got = self.client().get_stream_metadata(&stream_id);
+        assert_eq!(
+            got, metadata,
+            "FIXTURE: create_stream_with_metadata round-trip failed: expected {:?}, got {:?}",
+            metadata, got
+        );
+        // Also verify via get_stream_state for storage-layer agreement.
+        let state = self.client().get_stream_state(&stream_id);
+        assert_eq!(
+            state.metadata, metadata,
+            "FIXTURE: get_stream_state().metadata must match input"
+        );
+        stream_id
+    }
+
     /// Assert the sender's current balance equals `expected`.
     fn assert_sender_balance(&self, expected: i128, msg: &str) {
         assert_eq!(self.token.balance(&self.sender), expected, "{}", msg);
@@ -258,6 +283,56 @@ impl<'a> Ctx<'a> {
     fn assert_no_token_movement(&self, balance_before: i128, msg: &str) {
         self.assert_sender_balance(balance_before, msg);
     }
+}
+
+/// Fixture-harness invariants are part of the regression surface.
+///
+/// `Ctx::setup` must start each test from an isolated, deterministic state:
+/// - no streams have been created yet
+/// - sender balance is exactly `INITIAL_SENDER_BALANCE`
+/// - sender allowance to the contract is exactly `i128::MAX`
+/// - ledger timestamp and sequence are pinned to the hard-coded baseline
+///
+/// The first stream created after setup should therefore observe an empty
+/// pre-existing state and a single increment to the stream counter.
+#[test]
+fn test_fixture_setup_provides_isolated_deterministic_state() {
+    let ctx = Ctx::setup();
+
+    assert_eq!(
+        ctx.client().get_stream_count(),
+        0,
+        "fixture setup must leave the stream counter at zero"
+    );
+    assert_eq!(
+        ctx.token.balance(&ctx.sender),
+        INITIAL_SENDER_BALANCE,
+        "fixture setup must mint the expected initial sender balance"
+    );
+    assert_eq!(
+        ctx.token.allowance(&ctx.sender, &ctx.contract_id),
+        i128::MAX,
+        "fixture setup must approve the contract for i128::MAX"
+    );
+    assert_eq!(
+        ctx.env.ledger().timestamp(),
+        LEDGER_START_TIMESTAMP,
+        "fixture setup must pin the ledger timestamp"
+    );
+    assert_eq!(
+        ctx.env.ledger().sequence(),
+        LEDGER_START_SEQUENCE,
+        "fixture setup must pin the ledger sequence"
+    );
+
+    let stream_id = ctx.create_stream_with_metadata(None);
+
+    assert_eq!(
+        ctx.client().get_stream_count(),
+        1,
+        "the first created stream should be the only stream visible after setup"
+    );
+    assert!(ctx.client().get_stream_metadata(&stream_id).is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -557,8 +632,9 @@ fn test_metadata_aggregate_exceeds_limit_rejected() {
 #[test]
 fn test_metadata_single_entry_aggregate_exceeds_limit_early_exit() {
     let ctx = Ctx::setup();
-    // value alone = MAX_METADATA_BYTES bytes; key = 1 byte → total = MAX_METADATA_BYTES + 1 > limit.
-    let value = Bytes::from_slice(&ctx.env, &vec![0u8; MAX_METADATA_BYTES as usize].as_slice());
+    // This value declaration is kept for documentation clarity; the actual test
+    // uses the oversized_value below for the per-field early-exit path.
+    let _value = Bytes::from_slice(&ctx.env, &vec![0u8; MAX_METADATA_BYTES as usize].as_slice());
     // MAX_METADATA_VALUE_BYTES is 128, so value above is 512 bytes which already exceeds
     // MAX_METADATA_VALUE_BYTES (128).  Use a value of exactly MAX_METADATA_VALUE_BYTES bytes
     // and pad the key to push the aggregate over the limit.
@@ -1339,7 +1415,7 @@ fn test_create_streams_partial_invalid_metadata_fails_entry() {
 }
 
 // ---------------------------------------------------------------------------
-// clone_stream: metadata is inherited by the cloned stream
+// clone_stream: metadata is reset to None on the cloned stream
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1361,7 +1437,7 @@ fn test_metadata_inherited_by_clone_stream() {
         &false,
     );
 
-    // On the hardened contract, clone_stream resets metadata to None.
+    // Current contract behavior: clone_stream resets metadata to None.
     let cloned_meta = ctx.client().get_stream_metadata(&cloned_id);
     assert!(
         cloned_meta.is_none(),
@@ -1667,3 +1743,515 @@ fn test_metadata_unchanged_after_shorten_stream_end_time() {
         "metadata must survive shorten_stream_end_time"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Fixture hardening: storage consistency across multiple reads
+// ---------------------------------------------------------------------------
+
+/// Reading metadata multiple times from the same stream must return the same
+/// value every time (no implicit mutation, no deserialization drift).
+#[test]
+fn test_metadata_read_idempotent() {
+    let ctx = Ctx::setup();
+    let mut meta: Map<Bytes, Bytes> = Map::new(&ctx.env);
+    meta.set(ctx.make_key("id"), ctx.make_val("idempotent"));
+
+    let stream_id = ctx.create_with_metadata_and_verify(Some(meta.clone()));
+
+    // Read via get_stream_metadata ten times — all must agree.
+    for i in 0..10 {
+        let got = ctx.client().get_stream_metadata(&stream_id);
+        assert_eq!(
+            got,
+            Some(meta.clone()),
+            "get_stream_metadata must be idempotent across reads (iteration {})",
+            i
+        );
+    }
+
+    // Read via get_stream_state ten times — all must agree.
+    for i in 0..10 {
+        let got = ctx.client().get_stream_state(&stream_id).metadata;
+        assert_eq!(
+            got,
+            Some(meta.clone()),
+            "get_stream_state().metadata must be idempotent across reads (iteration {})",
+            i
+        );
+    }
+}
+
+/// Reading metadata on a None-metadata stream multiple times must consistently
+/// return None (no implicit None→Some coercion).
+#[test]
+fn test_metadata_none_read_idempotent() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_with_metadata_and_verify(None);
+
+    for i in 0..10 {
+        assert!(
+            ctx.client().get_stream_metadata(&stream_id).is_none(),
+            "None metadata must be idempotent (iteration {})",
+            i
+        );
+        assert!(
+            ctx.client().get_stream_state(&stream_id).metadata.is_none(),
+            "state-layer None metadata must be idempotent (iteration {})",
+            i
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Duplicate key handling
+// ---------------------------------------------------------------------------
+
+/// A metadata map with the same key inserted twice must only store one entry
+/// (Soroban Map deduplicates by key). The most recently set value wins.
+#[test]
+fn test_metadata_duplicate_key_contract() {
+    let ctx = Ctx::setup();
+    let mut meta: Map<Bytes, Bytes> = Map::new(&ctx.env);
+    meta.set(ctx.make_key("dup"), ctx.make_val("first"));
+    meta.set(ctx.make_key("dup"), ctx.make_val("second"));
+
+    assert_eq!(meta.len(), 1, "duplicate key must collapse to one entry");
+
+    let stream_id = ctx.create_with_metadata_and_verify(Some(meta.clone()));
+
+    let got = ctx.client().get_stream_metadata(&stream_id).unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(
+        got.get(ctx.make_key("dup")).unwrap(),
+        ctx.make_val("second"),
+        "most recently set value must win on duplicate key"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Binary data in keys and values
+// ---------------------------------------------------------------------------
+
+/// Metadata keys and values are opaque Bytes — all byte values (including 0x00)
+/// must round-trip correctly.
+#[test]
+fn test_metadata_binary_keys_and_values() {
+    let ctx = Ctx::setup();
+
+    let mut meta: Map<Bytes, Bytes> = Map::new(&ctx.env);
+    // Key and value with binary content including null byte.
+    let binary_key = Bytes::from_slice(&ctx.env, &[0x00, 0xFF, 0xAB, 0x00, 0x7F]);
+    let binary_val = Bytes::from_slice(&ctx.env, &[0xDE, 0xAD, 0x00, 0xBE, 0xEF]);
+    meta.set(binary_key.clone(), binary_val.clone());
+
+    let stream_id = ctx.create_with_metadata_and_verify(Some(meta));
+
+    let got = ctx.client().get_stream_metadata(&stream_id).unwrap();
+    assert_eq!(
+        got.get(binary_key.clone()).unwrap(),
+        binary_val,
+        "binary metadata must round-trip exactly"
+    );
+}
+
+/// Metadata with all-zero keys and values must round-trip without error.
+#[test]
+fn test_metadata_all_zero_bytes() {
+    let ctx = Ctx::setup();
+    let mut meta: Map<Bytes, Bytes> = Map::new(&ctx.env);
+
+    let zero_key = Bytes::from_slice(&ctx.env, &[0u8; 4]);
+    let zero_val = Bytes::from_slice(&ctx.env, &[0u8; 8]);
+    meta.set(zero_key.clone(), zero_val.clone());
+
+    let stream_id = ctx.create_with_metadata_and_verify(Some(meta));
+
+    let got = ctx.client().get_stream_metadata(&stream_id).unwrap();
+    assert_eq!(got.get(zero_key).unwrap(), zero_val);
+}
+
+// ---------------------------------------------------------------------------
+// Creation paths: None metadata through offers and templates
+// ---------------------------------------------------------------------------
+
+/// create_stream_offer with None metadata must carry through to the accepted
+/// stream as None.
+#[test]
+fn test_metadata_none_through_offer_accept() {
+    let ctx = Ctx::setup();
+    let now = ctx.env.ledger().timestamp();
+
+    let offer_id = ctx.client().create_stream_offer(
+        &ctx.sender,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1_000_i128,
+            rate_per_second: 1_i128,
+            start_time: now + 10,
+            cliff_time: now + 10,
+            end_time: now + 1_010,
+            withdraw_dust_threshold: Some(0_i128),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
+        &None,
+    );
+
+    let offer = ctx.client().get_stream_offer(&offer_id);
+    assert!(
+        offer.metadata.is_none(),
+        "offer metadata must be None when created with None"
+    );
+
+    ctx.env.ledger().set_timestamp(now + 5);
+    let stream_id = ctx.client().accept_stream_offer(&ctx.recipient, &offer_id);
+    assert!(
+        ctx.client().get_stream_metadata(&stream_id).is_none(),
+        "accepted stream must have None metadata when offer had None"
+    );
+}
+
+/// create_stream_from_template with None metadata must store None on the
+/// resulting stream.
+#[test]
+fn test_metadata_none_through_template() {
+    let ctx = Ctx::setup();
+
+    let template_id = ctx.client().register_stream_template(
+        &ctx.sender,
+        &0_u64,
+        &0_u64,
+        &1_000_u64,
+    );
+
+    let stream_id = ctx.client().create_stream_from_template(
+        &ctx.sender,
+        &template_id,
+        &ctx.recipient,
+        &1_000_i128,
+        &1_i128,
+        &0_i128,
+        &None,
+        &None,
+        &StreamKind::Linear,
+        &None,
+    );
+
+    assert!(
+        ctx.client().get_stream_metadata(&stream_id).is_none(),
+        "stream created from template with None metadata must store None"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Partial batch: mixed valid and invalid metadata
+// ---------------------------------------------------------------------------
+
+/// create_streams_partial with a valid metadata entry must succeed.
+#[test]
+fn test_metadata_partial_batch_valid_entry() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+
+    let mut meta: Map<Bytes, Bytes> = Map::new(&ctx.env);
+    meta.set(ctx.make_key("k"), ctx.make_val("v"));
+
+    let params = soroban_sdk::vec![
+        &ctx.env,
+        CreateStreamParams {
+            recipient: recipient.clone(),
+            deposit_amount: 1_000,
+            rate_per_second: 1,
+            start_time: LEDGER_START_TIMESTAMP,
+            cliff_time: LEDGER_START_TIMESTAMP,
+            end_time: LEDGER_START_TIMESTAMP + 1_000,
+            withdraw_dust_threshold: None,
+            memo: None,
+            metadata: Some(meta.clone()),
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
+    ];
+
+    let results = ctx.client().create_streams_partial(&ctx.sender, &params);
+    assert_eq!(results.len(), 1);
+    let r = results.get(0).unwrap();
+    assert!(r.success, "valid metadata in partial batch must succeed");
+    assert!(r.stream_id.is_some());
+    assert!(r.error.is_none());
+
+    let got = ctx
+        .client()
+        .get_stream_metadata(&r.stream_id.unwrap())
+        .unwrap();
+    assert_eq!(got.get(ctx.make_key("k")).unwrap(), ctx.make_val("v"));
+}
+
+/// create_streams_partial with mixed valid and invalid metadata entries must
+/// succeed for the valid entries and fail only for the invalid ones.
+#[test]
+fn test_metadata_partial_batch_mixed_valid_and_invalid() {
+    let ctx = Ctx::setup();
+    let recipient_a = Address::generate(&ctx.env);
+    let recipient_b = Address::generate(&ctx.env);
+
+    // First entry: valid metadata.
+    let mut valid_meta: Map<Bytes, Bytes> = Map::new(&ctx.env);
+    valid_meta.set(ctx.make_key("ok"), ctx.make_val("valid"));
+
+    // Second entry: invalid metadata (oversized key).
+    let oversized_key = Bytes::from_slice(
+        &ctx.env,
+        &vec![0u8; (MAX_METADATA_KEY_BYTES + 1) as usize],
+    );
+    let mut invalid_meta: Map<Bytes, Bytes> = Map::new(&ctx.env);
+    invalid_meta.set(oversized_key, ctx.make_val("v"));
+
+    let params = soroban_sdk::vec![
+        &ctx.env,
+        CreateStreamParams {
+            recipient: recipient_a.clone(),
+            deposit_amount: 1_000,
+            rate_per_second: 1,
+            start_time: LEDGER_START_TIMESTAMP,
+            cliff_time: LEDGER_START_TIMESTAMP,
+            end_time: LEDGER_START_TIMESTAMP + 1_000,
+            withdraw_dust_threshold: None,
+            memo: None,
+            metadata: Some(valid_meta.clone()),
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
+        CreateStreamParams {
+            recipient: recipient_b.clone(),
+            deposit_amount: 1_000,
+            rate_per_second: 1,
+            start_time: LEDGER_START_TIMESTAMP,
+            cliff_time: LEDGER_START_TIMESTAMP,
+            end_time: LEDGER_START_TIMESTAMP + 1_000,
+            withdraw_dust_threshold: None,
+            memo: None,
+            metadata: Some(invalid_meta),
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
+    ];
+
+    let results = ctx.client().create_streams_partial(&ctx.sender, &params);
+    assert_eq!(results.len(), 2);
+
+    // First entry must succeed.
+    let r0 = results.get(0).unwrap();
+    assert!(r0.success, "first entry with valid metadata must succeed");
+    assert!(r0.stream_id.is_some());
+    let got0 = ctx
+        .client()
+        .get_stream_metadata(&r0.stream_id.unwrap())
+        .unwrap();
+    assert_eq!(got0.get(ctx.make_key("ok")).unwrap(), ctx.make_val("valid"));
+
+    // Second entry must fail.
+    let r1 = results.get(1).unwrap();
+    assert!(!r1.success, "second entry with invalid metadata must fail");
+    assert!(r1.stream_id.is_none());
+    assert!(r1.error.is_some());
+}
+
+/// create_streams_partial with Some(empty map) metadata must succeed.
+#[test]
+fn test_metadata_partial_batch_empty_map() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+
+    let empty: Map<Bytes, Bytes> = Map::new(&ctx.env);
+
+    let params = soroban_sdk::vec![
+        &ctx.env,
+        CreateStreamParams {
+            recipient: recipient.clone(),
+            deposit_amount: 1_000,
+            rate_per_second: 1,
+            start_time: LEDGER_START_TIMESTAMP,
+            cliff_time: LEDGER_START_TIMESTAMP,
+            end_time: LEDGER_START_TIMESTAMP + 1_000,
+            withdraw_dust_threshold: None,
+            memo: None,
+            metadata: Some(empty.clone()),
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
+    ];
+
+    let results = ctx.client().create_streams_partial(&ctx.sender, &params);
+    assert_eq!(results.len(), 1);
+    let r = results.get(0).unwrap();
+    assert!(r.success, "empty map metadata in partial batch must succeed");
+    let got = ctx
+        .client()
+        .get_stream_metadata(&r.stream_id.unwrap())
+        .unwrap();
+    assert_eq!(got.len(), 0, "empty map must remain empty after partial batch");
+}
+
+// ---------------------------------------------------------------------------
+// create_streams batch with mixed Some/None metadata entries
+// ---------------------------------------------------------------------------
+
+/// Batch create_streams with entries where one has Some(metadata) and another
+/// has None. Each entry must independently store its own metadata.
+#[test]
+fn test_create_streams_batch_mixed_some_and_none_metadata() {
+    let ctx = Ctx::setup();
+    let recipient_a = Address::generate(&ctx.env);
+    let recipient_b = Address::generate(&ctx.env);
+
+    let mut meta: Map<Bytes, Bytes> = Map::new(&ctx.env);
+    meta.set(ctx.make_key("tag"), ctx.make_val("batch-mixed"));
+
+    let params = soroban_sdk::vec![
+        &ctx.env,
+        CreateStreamParams {
+            recipient: recipient_a.clone(),
+            deposit_amount: 1_000,
+            rate_per_second: 1,
+            start_time: LEDGER_START_TIMESTAMP,
+            cliff_time: LEDGER_START_TIMESTAMP,
+            end_time: LEDGER_START_TIMESTAMP + 1_000,
+            withdraw_dust_threshold: None,
+            memo: None,
+            metadata: Some(meta.clone()),
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
+        CreateStreamParams {
+            recipient: recipient_b.clone(),
+            deposit_amount: 1_000,
+            rate_per_second: 1,
+            start_time: LEDGER_START_TIMESTAMP,
+            cliff_time: LEDGER_START_TIMESTAMP,
+            end_time: LEDGER_START_TIMESTAMP + 1_000,
+            withdraw_dust_threshold: None,
+            memo: None,
+            metadata: None,
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
+    ];
+
+    let ids = ctx.client().create_streams(&ctx.sender, &params);
+    assert_eq!(ids.len(), 2);
+
+    let got_a = ctx
+        .client()
+        .get_stream_metadata(&ids.get(0).unwrap())
+        .unwrap();
+    assert_eq!(
+        got_a.get(ctx.make_key("tag")).unwrap(),
+        ctx.make_val("batch-mixed")
+    );
+
+    let got_b = ctx
+        .client()
+        .get_stream_metadata(&ids.get(1).unwrap());
+    assert!(got_b.is_none(), "second entry with None metadata must remain None");
+}
+
+// ---------------------------------------------------------------------------
+// Metadata is readable after stream completion (natural end_time elapsed)
+// ---------------------------------------------------------------------------
+
+/// A stream that has naturally completed (end_time has passed, balance fully
+/// withdrawn) must still expose its metadata via get_stream_metadata.
+#[test]
+fn test_metadata_readable_after_stream_completion() {
+    let ctx = Ctx::setup();
+    let mut meta: Map<Bytes, Bytes> = Map::new(&ctx.env);
+    meta.set(ctx.make_key("lifecycle"), ctx.make_val("completed"));
+
+    // Stream with 1_000 deposit, rate 1/second, runs for 1_000 seconds.
+    // At end_time: 1_000 tokens streamed, full balance available.
+    let stream_id = ctx.create_with_metadata_and_verify(Some(meta.clone()));
+
+    // Jump past end_time.
+    ctx.env.ledger().set_timestamp(LEDGER_START_TIMESTAMP + 1_001);
+
+    // Withdraw all available tokens to mark the stream as completed.
+    ctx.client().withdraw(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(
+        state.status,
+        StreamStatus::Completed,
+        "stream must be Completed after full withdrawal past end_time"
+    );
+
+    let got = ctx.client().get_stream_metadata(&stream_id).unwrap();
+    assert_eq!(
+        got.get(ctx.make_key("lifecycle")).unwrap(),
+        ctx.make_val("completed"),
+        "metadata must remain readable on a completed stream"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// create_stream_offer with Some(empty map) round-trip
+// ---------------------------------------------------------------------------
+
+/// A stream offer created with Some(empty map) must carry through to the
+/// accepted stream as Some(empty map), not None.
+#[test]
+fn test_metadata_empty_map_through_offer_accept() {
+    let ctx = Ctx::setup();
+    let now = ctx.env.ledger().timestamp();
+    let empty: Map<Bytes, Bytes> = Map::new(&ctx.env);
+
+    let offer_id = ctx.client().create_stream_offer(
+        &ctx.sender,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1_000_i128,
+            rate_per_second: 1_i128,
+            start_time: now + 10,
+            cliff_time: now + 10,
+            end_time: now + 1_010,
+            withdraw_dust_threshold: Some(0_i128),
+            memo: None,
+            metadata: Some(empty.clone()),
+            kind: StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
+        &None,
+    );
+
+    let offer = ctx.client().get_stream_offer(&offer_id);
+    assert!(
+        offer.metadata.is_some(),
+        "offer metadata must be Some(empty), not None"
+    );
+    assert_eq!(
+        offer.metadata.unwrap().len(),
+        0,
+        "offer metadata must be empty"
+    );
+
+    ctx.env.ledger().set_timestamp(now + 5);
+    let stream_id = ctx.client().accept_stream_offer(&ctx.recipient, &offer_id);
+    let got = ctx.client().get_stream_metadata(&stream_id);
+    assert!(
+        got.is_some(),
+        "accepted stream must have Some(empty), not None"
+    );
+    assert_eq!(got.unwrap().len(), 0, "metadata must be empty after accept");
+}
+
+
