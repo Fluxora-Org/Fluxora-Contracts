@@ -1845,7 +1845,8 @@ impl FluxoraStream {
             delegation_depth: 0,
             parent_stream_id: None,
             decommissioned: None,
-            irrevocable,
+            paused_at_timestamp: 0,
+            cumulative_paused_duration: 0,
         };
 
         save_stream(env, &stream);
@@ -1950,7 +1951,8 @@ impl FluxoraStream {
             delegation_depth: 0,
             parent_stream_id: None,
             decommissioned: None,
-            irrevocable,
+            paused_at_timestamp: 0,
+            cumulative_paused_duration: 0,
         };
 
         save_stream(env, &stream);
@@ -2560,6 +2562,8 @@ impl FluxoraStream {
             parent_stream_id: None,
             irrevocable: None,
             decommissioned: None,
+            paused_at_timestamp: 0,
+            cumulative_paused_duration: 0,
         };
 
         save_stream(&env, &stream);
@@ -3118,6 +3122,7 @@ impl FluxoraStream {
         let previous_status = stream.status;
         stream.status = StreamStatus::Paused;
         stream.last_pause_toggle_ledger = current_ledger;
+        stream.paused_at_timestamp = env.ledger().timestamp();
         save_stream(&env, &stream);
         reconcile_paused_stream_count(&env, previous_status, stream.status);
 
@@ -3188,6 +3193,12 @@ impl FluxoraStream {
         }
 
         let previous_status = stream.status;
+        let paused_duration = env.ledger().timestamp().saturating_sub(stream.paused_at_timestamp);
+        stream.cumulative_paused_duration = stream
+            .cumulative_paused_duration
+            .checked_add(paused_duration)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        stream.paused_at_timestamp = 0;
         stream.status = StreamStatus::Active;
         stream.last_pause_toggle_ledger = current_ledger;
         save_stream(&env, &stream);
@@ -4696,55 +4707,25 @@ impl FluxoraStream {
         load_stream(&env, stream_id)
     }
 
-    /// Returns the ancestry chain of a stream, from the root ancestor down to
-    /// `stream_id` itself (inclusive), in root-to-leaf order.
+    /// Returns the total duration (in seconds) the stream has been in Paused state.
     ///
-    /// Streams produced by `delegate_recipient_share` record their origin in
-    /// `parent_stream_id`; this view walks that chain so indexers, auditors, and
-    /// downstream contracts can reconstruct a stream's lineage in a single call.
-    /// A stream with no parent returns a single-element vector holding only its
-    /// own id.
-    ///
-    /// The walk is bounded by [`MAX_LINEAGE_DEPTH`], so the read cost is capped
-    /// even against an unexpectedly long or malformed parent chain. The
-    /// delegation tree is itself depth-bounded and cycle-free by construction
-    /// (see `delegate_recipient_share`), so a well-formed lineage is never
-    /// truncated by this bound.
+    /// This includes all past pause cycles. If the stream is currently paused,
+    /// the ongoing pause duration is included in the returned value.
     ///
     /// # Parameters
-    /// - `stream_id`: Unique identifier of the stream whose lineage is requested.
+    /// - `stream_id`: Unique identifier of the stream.
     ///
     /// # Returns
-    /// - `Ok(Vec<u64>)`: ancestor ids from root to leaf, ending with `stream_id`.
-    ///
-    /// # Errors
-    /// - Propagates the `load_stream` error if `stream_id` does not exist.
-    pub fn get_stream_lineage(
-        env: Env,
-        stream_id: u64,
-    ) -> Result<soroban_sdk::Vec<u64>, ContractError> {
-        // Walk up the parent chain, collecting leaf-first, bounded by depth.
-        let mut leaf_first: soroban_sdk::Vec<u64> = soroban_sdk::Vec::new(&env);
-        let mut current = Some(stream_id);
-        let mut depth: u32 = 0;
-        while let Some(id) = current {
-            if depth >= MAX_LINEAGE_DEPTH {
-                break;
-            }
-            let stream = load_stream(&env, id)?;
-            leaf_first.push_back(id);
-            current = stream.parent_stream_id;
-            depth += 1;
-        }
-
-        // Reverse into root-to-leaf order for the returned chain.
-        let mut root_first: soroban_sdk::Vec<u64> = soroban_sdk::Vec::new(&env);
-        let mut i = leaf_first.len();
-        while i > 0 {
-            i -= 1;
-            root_first.push_back(leaf_first.get(i).unwrap());
-        }
-        Ok(root_first)
+    /// Total paused duration in seconds.
+    pub fn get_paused_duration(env: Env, stream_id: u64) -> Result<u64, ContractError> {
+        let stream = load_stream(&env, stream_id)?;
+        let total = if stream.status == StreamStatus::Paused {
+            let current = env.ledger().timestamp().saturating_sub(stream.paused_at_timestamp);
+            stream.cumulative_paused_duration.saturating_add(current)
+        } else {
+            stream.cumulative_paused_duration
+        };
+        Ok(total)
     }
 
     /// Returns a structured health summary for a stream.
@@ -6552,7 +6533,17 @@ impl FluxoraStream {
                 .checked_sub(refund_amount)
                 .unwrap_or(0);
             write_total_liabilities(env, liabilities);
-            push_token(env, &stream.sender, refund_amount)?;
+
+            // Reentrancy guard around the external token transfer, mirroring
+            // `withdraw`/`delegated_withdraw`. Terminal state is already persisted
+            // above (CEI), so a malicious token re-entering any cancel or
+            // withdraw path during this transfer hits the held lock and reverts.
+            // Capture the result, always release, then propagate so the lock is
+            // never left stuck on a failed transfer.
+            acquire_reentrancy_lock(env)?;
+            let transfer_result = push_token(env, &stream.sender, refund_amount);
+            release_reentrancy_lock(env);
+            transfer_result?;
         }
 
         events::emit_stream_cancelled(env, stream.stream_id);
@@ -7010,6 +7001,7 @@ impl FluxoraStream {
         let previous_status = stream.status;
         stream.status = StreamStatus::Paused;
         stream.last_pause_toggle_ledger = current_ledger;
+        stream.paused_at_timestamp = env.ledger().timestamp();
         save_stream(&env, &stream);
         reconcile_paused_stream_count(&env, previous_status, stream.status);
 
@@ -7086,6 +7078,12 @@ impl FluxoraStream {
         }
 
         let previous_status = stream.status;
+        let paused_duration = env.ledger().timestamp().saturating_sub(stream.paused_at_timestamp);
+        stream.cumulative_paused_duration = stream
+            .cumulative_paused_duration
+            .checked_add(paused_duration)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        stream.paused_at_timestamp = 0;
         stream.status = StreamStatus::Active;
         stream.last_pause_toggle_ledger = current_ledger;
         save_stream(&env, &stream);
@@ -7171,10 +7169,17 @@ impl FluxoraStream {
         }
 
         // ── Phase 2: Apply resumes ───────────────────────────────────────────
+        let now = env.ledger().timestamp();
         for i in 0..n {
             let mut stream = streams.get(i).unwrap();
             let stream_id = stream.stream_id;
             let previous_status = stream.status;
+            let paused_duration = now.saturating_sub(stream.paused_at_timestamp);
+            stream.cumulative_paused_duration = stream
+                .cumulative_paused_duration
+                .checked_add(paused_duration)
+                .ok_or(ContractError::ArithmeticOverflow)?;
+            stream.paused_at_timestamp = 0;
             stream.status = StreamStatus::Active;
             stream.last_pause_toggle_ledger = current_ledger;
             save_stream(&env, &stream);
@@ -8765,6 +8770,8 @@ impl FluxoraStream {
             parent_stream_id: None,
             irrevocable: None,
             decommissioned: None,
+            paused_at_timestamp: 0,
+            cumulative_paused_duration: 0,
         };
 
         save_stream(&env, &stream);

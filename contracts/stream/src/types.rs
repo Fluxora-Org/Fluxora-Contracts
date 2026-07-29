@@ -481,9 +481,10 @@ pub struct Stream {
     /// If true, the stream is decommissioned and restricted to cancel-or-no-op.
     /// Defaults to false (None) for backward compatibility with existing streams.
     pub decommissioned: Option<bool>,
-    /// If true, the sender cannot cancel or shorten the stream. Defaults to
-    /// false (None) for streams created before this field was appended.
-    pub irrevocable: Option<bool>,
+    /// Ledger timestamp when the stream was last paused (0 if not paused).
+    pub paused_at_timestamp: u64,
+    /// Total seconds the stream has been in Paused state across all pause cycles.
+    pub cumulative_paused_duration: u64,
 }
 
 /// Event payload emitted when a stream's decommissioned status is updated.

@@ -30,8 +30,6 @@ CONTRACT_VERSION = 9
 | 5 | `withdraw_dust_threshold: i128` added to `Stream` struct and creation params; `DataKey::PausedStreamCount` added and maintained across pause/resume/cancel/complete transitions; `get_paused_stream_count()` O(1) view added |
 | 6 | Sweep excess authorization update; added additive `DataKey` variants 15–28 (`WithdrawNonce`, `PauseState`, `ReentrancyLock`, `RecipientStreamPage`, `RecipientStreamPageCount`, `PendingRecipientUpdate`, `IdReservation`, `MaxRatePerSecond`, `DelegatedWithdrawNonce`, `LastPauseRecord`, `RotationHistory`, `LastAccrualLedgerTimestamp`, `PausedStreamCount`, `TotalKeeperFeesPaid`) |
 | 7 | `Stream` and `CreateStreamParams` gained optional `witness: Option<Address>` for off-chain compliance attestation cancellation (`witnessed_cancel_stream` entry-point added); `DataKey::SenderStreams(Address)` at discriminant 29, `DataKey::AutoRenewEnabled(u64)` at discriminant 30 for auto-renewal; `DataKey::PendingStreamOffer(u64)` at discriminant 31 and `DataKey::RecipientPendingOffers(Address)` at discriminant 32 for two-phase offer-then-accept stream creation; `create_stream_offer`, `accept_stream_offer`, `reject_stream_offer`, `cancel_stream_offer`, `get_stream_offer`, `get_recipient_pending_offers` entrypoints added; new `ContractError` variants `OfferNotFound` (37), `OfferExpired` (38), `OfferWrongRecipient` (39), `OfferWrongSender` (40); `Stream` and `CreateStreamParams` gained optional `irrevocable: Option<bool>` field blocking all cancel/shorten paths |
-| 8 | Added lookback-bounded withdrawal support with per-stream `MaxLookbackLedgers` storage and additive `DataKey` variants 29–30 (`AutoRenewEnabled`, `MaxLookbackLedgers`) without changing the persisted `Stream` layout |
-| 9 | Added `decommissioned` compatibility and upgrade-safety semantics for delegated/pooled stream flows, plus relayer-fee-aware withdrawal semantics. Existing entries remain readable. The current live `DataKey` surface is **37 variants** (discriminants 0..=36): eight post-V7 additive variants (29–36: `AutoRenewEnabled`, `MaxLookbackLedgers`, `SenderStreams`, `PendingStreamOffer`, `RecipientPendingOffers`, `PooledStreamShares`, `PooledStreamWithdrawn`, `DelegatedCancelNonce`) were appended without a separate version bump under the append-only policy. |
 
 ### When to increment
 
@@ -62,9 +60,9 @@ For the exhaustive, category-by-category breakdown see **[`docs/ABI_STABILITY.md
 - Changing TTL bump constants (`INSTANCE_BUMP_AMOUNT`, `PERSISTENT_BUMP_AMOUNT`).
 - Changing internal helper functions with no external surface.
 - Appending new `DataKey` storage variants (append-only; existing entries stay
-  byte-identical and readable). See the "Why `CONTRACT_VERSION` was not bumped
-  to 7" note in `contracts/stream/src/checksum.rs`'s module doc-comment for the
-  full analysis of the V7 additions (discriminants 21–28).
+  byte-identical and readable). See the version-specific rationale in
+  `contracts/stream/src/checksum.rs`'s module doc-comment for why some additive
+  `DataKey` growth did not require an immediate version bump.
 
 > **Note (transfer_sender):** The `transfer_sender` entry-point is a purely additive
 > new entry-point. Old clients that do not call it are unaffected. `CONTRACT_VERSION`
@@ -96,26 +94,9 @@ For the exhaustive, category-by-category breakdown see **[`docs/ABI_STABILITY.md
 
 ---
 
-## 3. New-Instance Migration Runbook
+## 3. Migration Runbook
 
-Fluxora supports two distinct release paths:
-
-1. **In-place WASM upgrade** through the admin-only `upgrade()` entrypoint when
-   the replacement is storage-, ABI-, and event-compatible (see §6). The
-   `CONTRACT_ID` and existing ledger entries are retained.
-2. **New-instance migration** when compatibility cannot be guaranteed, when the
-   token address must change, or when operators intentionally want a new
-   `CONTRACT_ID`. This section describes that path.
-
-A `CONTRACT_VERSION` bump does **not** by itself require a new instance; the
-compatibility review determines the path. Conversely, leaving the version
-unchanged does not make an incompatible WASM safe to install.
-
-The storage-key compatibility rules in
-`contracts/stream/tests/storage_key_compat.rs` cover the current read surface:
-newer code can still read V5-era entries, but compatibility reads do not
-migrate or rewrite old state. Any change that cannot preserve those reads
-requires a new deployment and an operator-managed migration.
+Soroban contracts are **not upgradeable in-place** by default. A new `CONTRACT_VERSION` means deploying a new contract instance.
 
 ### Step-by-step
 
@@ -155,9 +136,7 @@ requires a new deployment and an operator-managed migration.
 
 ### Stream migration
 
-There is no on-chain state-copy path **between contract instances**. An in-place
-upgrade retains state automatically; a new-instance migration requires streams
-to remain on the old instance or be settled and recreated. Options:
+There is no on-chain migration path for stream state between contract versions. Options:
 
 | Stream status | Recommended action |
 |---|---|
@@ -176,7 +155,7 @@ Because existing deployments do **not** have historical pause state materialized
 instance key, an upgraded instance starts with the counter effectively unset / `0`.
 
 Operational consequences:
-- Fresh deployments initialized on v5 or later (including the current v9 release) track the exact live paused-stream count immediately.
+- Fresh deployments initialised on v7 track the exact live paused-stream count immediately.
 - Upgraded deployments report `0` until post-upgrade stream transitions repopulate the counter.
 - Legacy streams that were already paused before the upgrade are **not** backfilled.
 - The first post-upgrade `resume_*`, `cancel_*`, or terminal completion of such a legacy paused
@@ -207,300 +186,43 @@ Before interacting with any Fluxora contract instance:
 
 2. **TTL expiry.** Persistent stream entries have a finite TTL. If an old contract instance is abandoned without being bumped, stream entries may expire before recipients withdraw. Operators must ensure recipients are notified well before TTL expiry.
 
-3. **No state-copy path between instances.** In-place upgrades retain in-flight streams, but streams cannot be copied to a different `CONTRACT_ID` on-chain. New-instance migration windows must be long enough for old-instance streams to settle or be cancelled and recreated.
+3. **No upgrade path for in-flight streams.** Streams created on v1 cannot be migrated to v2 on-chain. This is a deliberate design choice (simplicity, auditability) but means migration windows must be long enough for all streams to settle.
 
 4. **Admin key continuity.** The admin address is set at `init` time and is immutable via `init`. Use `set_admin` to rotate the admin key before migrating to a new instance, and call `init` on the new instance with the new admin address.
 
 5. **Token address immutability.** The token is fixed at `init` time. A new contract version that needs a different token requires a new `init` call with the new token address — existing streams on the old instance are unaffected.
 
-6. **Machine-checked `CONTRACT_VERSION` vs `DataKey` variant count cross-check.** To prevent version drift when new storage keys are appended, `contracts/stream/tests/storage_key_compat.rs` enforces a machine-checked mapping between `CONTRACT_VERSION` and expected `DataKey` variant count (currently 37 for version 9). Whenever a new `DataKey` variant is appended or `CONTRACT_VERSION` is incremented, developers MUST update:
+6. **Machine-checked `CONTRACT_VERSION` vs `DataKey` variant count cross-check.** To prevent version drift when new storage keys are appended, `contracts/stream/tests/storage_key_compat.rs` enforces a machine-checked mapping between `CONTRACT_VERSION` and expected `DataKey` variant count (currently **36** for `CONTRACT_VERSION = 9`). Whenever a new `DataKey` variant is appended or `CONTRACT_VERSION` is incremented, developers MUST update:
    - `expected_datakey_count_for_version()` and `all_live_datakey_variants()` in `contracts/stream/tests/storage_key_compat.rs`
    - Discriminant tables & variant count tests in `contracts/stream/src/checksum.rs`
    - Version history & policy table in `docs/upgrade.md`
 
-   The current boundary includes `DelegatedCancelNonce(Address)` at discriminant 36. The exhaustive match in `all_live_datakey_variants()` deliberately fails to compile if a future variant is added without updating the compatibility map and documentation.
-
 ---
 
-## 6. In-Place Contract Upgrades (`upgrade()` entrypoint)
-
-Fluxora exposes `upgrade(new_wasm_hash)` in the generated contract ABI. It is
-an additive, admin-only path for replacing WASM while retaining the same
-`CONTRACT_ID` and ledger state. Use it only when the replacement can read and
-preserve every live entry and can maintain the current public ABI and events.
-Use the new-instance runbook in §3 otherwise.
-
-### Execution and failure ordering
-
-A call executes in this order:
-
-1. `get_admin()` loads `DataKey::Config` and bumps the current instance/code TTL.
-   An uninitialized instance returns `ContractError::InvalidState` here.
-2. `admin.require_auth()` requires authorization from the configured admin.
-   Missing authorization is a host auth error, not
-   `ContractError::Unauthorized`.
-3. `update_current_contract_wasm(new_wasm_hash)` asks the host to switch the
-   instance to an already-uploaded WASM and emits the host's system executable
-   update event.
-4. `bump_instance_ttl()` extends the updated instance and replacement code, then
-   the contract emits its two compatibility application events.
-
-The transaction is atomic. An auth failure, missing/archived WASM hash, budget
-failure, or later trap rolls back the executable update, TTL changes, storage
-writes, and events. There is no partially upgraded state.
-
-The replacement code is used by **later invocations**. The current call frame
-continues running the old WASM after `update_current_contract_wasm`, which is
-important for event-version interpretation below.
-
-### Authorization
-
-- The address stored in `Config.admin` must authorize the exact `upgrade` call.
-- Production deployments should use reviewed multisig/governance control rather
-  than a single operator key.
-- Rotating the admin before an upgrade is a separate `set_admin` transaction.
-  Verify that rotation before approving the WASM hash.
-- The contract does not inspect or attest the replacement WASM. Admin approval
-  and off-chain review are the policy boundary.
-
-### Compatibility and migration expectations
-
-An in-place upgrade preserves bytes; it does not run constructors, `init`, or an
-automatic migration hook. The replacement must tolerate the state exactly as it
-exists when the transaction lands.
-
-| Change | In-place expectation |
-|---|---|
-| Internal refactor or gas optimization with identical observable behavior | Safe after regression tests |
-| Additive entrypoint | Usually safe; review version and client generation |
-| Append-only `DataKey` variant | Existing keys stay readable; define an absent-key default and add compatibility coverage |
-| Append optional persisted fields | Safe only where the old encoded form is proven readable by `storage_key_compat.rs`; do not assume this generically |
-| Change an existing key's discriminant, payload type, or durability | Unsafe; use a new instance or an explicit, tested migration |
-| Reorder/remove persisted struct fields or enum variants | Unsafe |
-| Change entrypoint arguments/results, error codes, or event shape | Breaking; follow `docs/ABI_STABILITY.md` and normally use a new instance |
-| Require a new instance key | Replacement must handle absence or provide a separately reviewed idempotent migration/backfill |
-
-The current v9 layout contains 37 `DataKey` variants (0..=36).
-`DelegatedCancelNonce(Address)` is the append-only variant at discriminant 36.
-It is absent until first use and therefore adds no rewrite requirement for older
-entries. The exhaustive compatibility suite locks this boundary.
-
-`CONTRACT_VERSION` is a client-visible signal, not an on-chain compatibility
-proof. A successful host update does not validate the target version, storage
-layout, token assumptions, or migration readiness.
-
-### Upgrade workflow
-
-1. **Build and test the exact candidate:**
-
-   ```bash
-   cargo test --locked -p fluxora_stream --test upgrade_path
-   cargo test --locked -p fluxora_stream --test storage_key_compat
-   cargo test --locked --workspace
-   cargo build --locked --release -p fluxora_stream --target wasm32-unknown-unknown
-   ```
-
-2. **Select the exact artifact.** If optimization is part of the release, install
-   and approve the optimized artifact—not the unoptimized input—and record its
-   SHA-256/WASM hash in the release manifest.
-
-3. **Upload/install the WASM before the upgrade call:**
-
-   ```bash
-   WASM=target/wasm32-unknown-unknown/release/fluxora_stream.wasm
-   WASM_HASH=$(stellar contract install --wasm "$WASM" \
-     --network mainnet --source "$DEPLOYER_KEY")
-   ```
-
-4. **Simulate the exact invocation** with the production network, source,
-   contract ID, and hash. Review CPU, memory, ledger read/write bytes, footprint,
-   rent, and the transaction resource fee produced by simulation.
-
-5. **Execute through the configured admin/governance path:**
-
-   ```bash
-   stellar contract invoke --id "$CONTRACT_ID" \
-     --network mainnet --source "$ADMIN_KEY" -- \
-     upgrade --new_wasm_hash "$WASM_HASH"
-   ```
-
-6. **After finality, verify from a new invocation:**
-
-   ```bash
-   stellar contract invoke --id "$CONTRACT_ID" \
-     --network mainnet --source "$READ_ONLY_SOURCE" -- version
-   ```
-
-   Also verify `get_config()`, representative old and new stream records,
-   balances/liabilities, expected events, and any absent-key defaults/backfills.
-
-### Resource and fee behavior
-
-Do not use a hard-coded "gas units" estimate for production approval. Soroban
-charges multiple resource dimensions and their prices/limits can change with
-network configuration. Uploading the WASM and invoking `upgrade()` are separate
-transactions:
-
-| Transaction/path | Main cost drivers |
-|---|---|
-| WASM upload (`stellar contract install`) | WASM bytes, upload instructions, ledger write/rent |
-| Successful `upgrade()` | Config read, admin auth, executable update, two instance/code TTL checks, host system event, and two application events |
-| Missing admin auth | Config read and auth work; all TTL effects roll back; no WASM update or surviving event |
-| Unknown/archived hash | Config/auth work plus failed host lookup; all effects roll back |
-| `version()` verification | Contract invocation overhead only; the function performs no storage, auth, token, or event operation |
-
-The regression test compares `version()` against the storage-backed
-`get_config()` view using the pinned host cost model. For the upgrade itself,
-release tooling must use RPC simulation because a realistic successful test
-requires the exact uploaded candidate WASM and current network cost model.
-
-### Event schema and ordering
-
-A successful host update produces one host system event and two Fluxora
-application events:
-
-1. **System event** emitted by `update_current_contract_wasm`:
-   topics identify `executable_update` plus the old and new executables. This is
-   the authoritative on-chain notification that the executable reference
-   changed.
-2. **Primary application event** (topic `"upgraded"`):
-
-   ```text
-   ContractUpgraded {
-       new_wasm_hash: BytesN<32>,
-       new_version: u32,
-       upgraded_at: u64,
-       upgraded_by: Address,
-   }
-   ```
-
-3. **Legacy application event** (topic `"upgrade"`):
-
-   ```text
-   (new_wasm_hash, old_version, new_version, upgraded_by)
-   ```
-
-For backward compatibility, the field/topic names and tuple shape are frozen.
-However, both application-event version values are produced by the WASM that is
-executing the upgrade call. In the current implementation:
-
-```text
-ContractUpgraded.new_version == executing CONTRACT_VERSION
-legacy.old_version == legacy.new_version == executing CONTRACT_VERSION
-```
-
-They are **not** an introspection of the replacement hash. Indexers must use the
-hash/system event to track the executable change and call `version()` after
-finality to record the replacement's declared version. A failed transaction
-leaves none of these events.
-
-### TTL behavior
-
-`env.storage().instance().extend_ttl(...)` extends the contract instance and its
-current code. Because admin lookup bumps before the host update and `upgrade()`
-bumps again afterward, a successful transaction covers the old call frame and
-the replacement executable under the current SDK behavior.
-
-It does **not** enumerate or extend persistent entries such as streams, recipient
-indexes, offers, nonces, or rotation histories. Operators must inspect those
-entries and extend each required key explicitly. For composite `DataKey` values,
-use the key's base64 XDR form, for example:
-
-```bash
-stellar contract extend --id "$CONTRACT_ID" --key-xdr "$KEY_XDR" \
-  --durability persistent --ledgers-to-extend "$LEDGERS" \
-  --network mainnet --source "$OPERATOR_KEY"
-```
-
-There is no `stellar contract bump --all` guarantee in this runbook. A complete
-persistent-state extension requires an inventory of live keys. Archived entries
-must be restored before the replacement attempts to read them.
-
-### Pre-upgrade checklist
-
-- [ ] Candidate source, lockfile, toolchain, WASM, and hash are reproducible and recorded.
-- [ ] `upgrade_path`, `storage_key_compat`, event snapshots, gas/resource, and full workspace tests pass.
-- [ ] Every old key/value and struct form used on the live instance is readable by the candidate.
-- [ ] New keys have explicit absent-key defaults or an idempotent, tested migration plan.
-- [ ] ABI, error discriminants, and both existing application event schemas remain compatible.
-- [ ] RPC simulation succeeds for the exact hash and admin/governance invocation.
-- [ ] Instance/code and persistent-entry TTLs are sufficient for the upgrade and observation window.
-- [ ] Integrators know whether `CONTRACT_VERSION` changes and how to verify it after finality.
-- [ ] Emergency response is executable by the replacement (admin key and `upgrade` entrypoint preserved).
-- [ ] A known-good forward-fix WASM is uploaded and approved; rollback compatibility is assessed separately.
-
-### Recovery and rollback
-
-A second call to `upgrade()` can install a fixed or previous WASM only if the
-currently running replacement still exposes a working `upgrade` entrypoint,
-can decode `Config.admin`, and accepts the required authorization. Do not assume
-those properties survive a faulty upgrade.
-
-Prefer a forward fix. Reinstalling the previous WASM is safe only when it can
-read **all** state that may have been written by the intermediate version. If
-new keys are merely additive, older code may ignore them; if existing values
-were rewritten in a new shape, rollback can make live entries unreadable even
-though the executable switch succeeds.
-
-Recovery procedure:
-
-1. Pause user-facing writes if the replacement still permits it.
-2. Identify the last known-good state schema and inspect writes since upgrade.
-3. Simulate the recovery hash against a representative ledger snapshot.
-4. Execute the second upgrade through the current admin path.
-5. Verify `version()`, config/admin continuity, balances/liabilities, old and
-   newly written entries, TTLs, and system/application events.
-6. If the replacement cannot execute `upgrade()`, follow the incident/governance
-   process; there is no automatic rollback or privileged bypass in this contract.
-
-### Edge-case regression matrix
-
-| Behavior | Expected result | Coverage |
-|---|---|---|
-| `version()` before `init` | Returns v9; no storage/auth | `test_version_works_before_init` |
-| `upgrade()` before `init` | `InvalidState`; host update not reached | `test_upgrade_fails_if_not_initialized` |
-| Missing admin authorization | Host auth rejection; no update | `test_upgrade_rejected_for_non_admin` |
-| Unknown WASM hash | Atomic failure; config/version/events unchanged | `test_failed_upgrade_rolls_back_events_and_config`, `test_version_stable_after_failed_upgrade` |
-| Post-failure use | Stream creation and admin rotation still work | `test_contract_usable_after_failed_upgrade`, `test_admin_rotation_possible_after_failed_upgrade` |
-| Version resource path | Cheaper than storage-backed config view under pinned host | `test_version_budget_is_lower_than_storage_backed_view` |
-| V5 state read by v9 | Existing entries remain readable without rewrite | `contracts/stream/tests/storage_key_compat.rs` |
-| Current key boundary | 37 variants, discriminants 0..=36, exhaustive match | `test_contract_version_matches_datakey_variant_count` |
-
-### Residual risks
-
-1. Admin/governance can install arbitrary code; audits and hash approval are off-chain controls.
-2. Storage compatibility tests cover known fixtures, not every possible live byte pattern.
-3. A replacement can remove/break its own recovery path.
-4. Persistent entries can archive independently of instance/code TTL.
-5. Application-event version fields do not attest the replacement version.
-6. Concurrent submissions can be simulated against stale state; verify finality and executable hash.
-7. Network resource pricing and limits can invalidate old fee estimates.
-8. Token-contract upgrades remain outside Fluxora's upgrade controls.
-
----
-
-## 7. CI Toolchain Verification
+## 6. CI Toolchain Verification
 
 The `.github/workflows/ci.yml` workflow includes a step in all Rust-related jobs (`lint`, `build`, `test`, `coverage`) that verifies the `rustc` version in the environment matches the version pinned in the `rust-toolchain.toml` file.
 
-This is a safety net to prevent "toolchain drift", where a change in the CI environment (e.g., an update to the `dtolnoy/rust-toolchain@stable` action) could cause the contract to be built or tested with a different compiler version than is specified in the repository.
+This is a safety net to prevent "toolchain drift", where a change in the CI environment (e.g., an update to the `dtolnay/rust-toolchain@stable` action) could cause the contract to be built or tested with a different compiler version than is specified in the repository.
+
 The verification is performed by the `script/verify_rust_version.py` script. If a mismatch is detected, the script prints an error and exits with a non-zero status code, failing the CI job. This ensures that all builds and tests are performed with the intended, pinned toolchain. This check is independent of, and a safety net for, any future change to which GitHub Action resolves the toolchain.
 
 ### MSRV Cross-Check
 
 To ensure `cargo` enforces the Minimum Supported Rust Version (MSRV) on every invocation (including local developer builds), each crate's `Cargo.toml` (`contracts/stream/Cargo.toml`, `contracts/factory/Cargo.toml`, and `contracts/governance/Cargo.toml`) explicitly declares a `rust-version` field. 
+
 The `tests/test_rust_toolchain_pin.py` test suite asserts that the `rust-version` in each of these `Cargo.toml` manifests matches the pinned channel in `rust-toolchain.toml`, ensuring the MSRV is synchronized across the entire repository.
 
 ---
 
-## 8. Paginated Export Views (Issue #429)
+## 7. Paginated Export Views (Issue #429)
 
 Bounded, paginated view entrypoints support off-chain export and migration between contract instances without unbounded loops or memory usage.
 
 ### Motivation
 
 Operators need to export stream data for:
-- New-instance migration (no on-chain state-copy path exists between contract IDs)
+- Migration between contract versions (no on-chain upgrade path exists)
 - Off-chain analytics and reporting
 - Backup and audit trails
 - Integration with external systems
@@ -616,9 +338,51 @@ See `contracts/stream/src/test.rs` for the complete test suite.
 
 
 
+# On-Chain Contract Upgrades
 
+## Overview
 
-## 9. Cargo.lock Determinism
+Fluxora supports in-place contract upgrades via the `upgrade()` entrypoint. This allows the protocol to ship security fixes and feature improvements without requiring integrators to migrate to a new contract address.
+
+## How It Works
+
+The `upgrade()` function calls Soroban's `update_current_contract_wasm` host function, which atomically replaces the contract's WASM code in-place.
+
+## Authorization
+
+Upgrades are **admin-only**:
+
+- The admin address (set during `init()`) must sign the transaction
+- In production, the admin should be the governance contract (`fluxora_governance`)
+- Governance requires multi-signer approval (quorum) before the upgrade can execute
+
+## Storage Compatibility
+
+The upgraded WASM must maintain backward-compatible storage layout.
+
+### Safe Changes
+- Add new fields to `Stream` struct (append at end)
+- Add new variants to `DataKey` enum (append at end)
+- Add new functions to the contract
+- Gas optimizations
+
+### Unsafe Changes
+- Reorder `Stream` struct fields
+- Remove `Stream` struct fields
+- Reorder `DataKey` enum variants
+- Remove `DataKey` variants
+
+## Upgrade Workflow
+
+### 1. Build New WASM
+```bash
+cargo build --target wasm32-unknown-unknown --release -p fluxora_stream
+stellar contract optimize --wasm target/wasm32-unknown-unknown/release/fluxora_stream.wasm
+```
+
+---
+
+## 8. Cargo.lock Determinism
 
 ### Why it matters
 
@@ -754,14 +518,3 @@ make a build reproducible. The full list is documented in
 | Build profile is `--release` + `wasm32-unknown-unknown` | CI `build` job `cargo build` invocation |
 | No extra feature flags in WASM build | `testutils` feature excluded from WASM build step |
 | `Cargo.lock` committed and unchanged | CI `build` job "Verify Cargo.lock" step + `cargo_lock_determinism` tests |
-
----
-
-## 10. Compile-Time Warning Stabilization & Module Hygiene
-
-To ensure clean, reproducible builds and prevent subtle behavioral shifts during upgrades:
-
-1. **Zero Compiler Warnings Invariant**: Every contract crate (`fluxora_stream`, `fluxora_factory`, `fluxora_governance`) must compile without unused imports, duplicate symbols, or redundant declarations.
-2. **Explicit Module Hygiene**: Top-level and inner module `use` statements must avoid duplicate symbol re-exports. `pub use storage::*;` re-exports storage helpers; duplicate imports within submodules must not be introduced.
-3. **Upgrade & Retry Determinism**: Compile-time warning reduction preserves exact storage layout discriminants (0..=36), resource bounds, and event topic/payload contracts. All state transitions, reads, and retry operations remain strictly deterministic across versions and retries.
-

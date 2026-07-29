@@ -805,6 +805,19 @@ This file is derived from `contracts/stream/src/lib.rs`, `contracts/stream/src/e
 
 Event emit helpers are in `contracts/stream/src/events.rs`. The test in `tests/event_schema_consistency.rs` cross-checks every event struct against the documented shapes below. Both the test and this document must be updated when event payloads change.
 
+## Event schema evolution policy
+
+The contract follows an **additive-only backward-compatibility policy** for all
+event payloads. See [`docs/event-schema-evolution.md`](./event-schema-evolution.md)
+for the complete rules:
+
+- New optional fields may only be appended at the end of existing structs
+- Existing fields must never change type, name, or position
+- Topic symbols are permanent once released
+- Deprecation follows a three-phase lifecycle (announce → signal → remove)
+
+All changes to event payloads must comply with this policy.
+
 If you change event topics or payloads in the contract, please update this
 document to match and include example snapshots.
 
