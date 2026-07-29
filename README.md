@@ -44,6 +44,8 @@ batch_withdraw	recipient.require_auth()	Withdraw accrued tokens from many stream
 batch_withdraw_to	recipient.require_auth()	Withdraw accrued tokens from many streams to destinations
 delegated_withdraw	relayer.require_auth()	Relayer-executed withdrawal using recipient signature
 get_delegated_nonce	Public / None	Read the delegated withdrawal nonce for a recipient
+delegated_cancel	relayer.require_auth()	Relayer-executed cancellation using sender ed25519 signature with per-sender replay-protection nonce
+get_delegated_cancel_nonce	Public / None	Read the delegated-cancel nonce for a sender
 calculate_accrued	Public / None	Compute accrued amount for a stream
 get_withdrawable	Public / None	Compute current withdrawable balance for a stream
 get_claimable_at	Public / None	Query claimable amount at a target timestamp

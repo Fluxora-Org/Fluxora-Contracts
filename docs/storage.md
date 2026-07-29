@@ -353,7 +353,7 @@ Discriminants 0–14 are **permanently frozen**. No variant at these positions m
 
 ### V5 → V6 transition
 
-V6 appended six new `DataKey` variants (discriminants 15–20) and one new `Stream` field:
+V6 and later upgrades appended new `DataKey` variants (discriminants 15–28) and one new `Stream` field:
 
 | Discriminant | Variant                             | Storage    | Value type   | Notes                                                      |
 | -----------: | :---------------------------------- | :--------- | :----------- | :--------------------------------------------------------- |
@@ -363,6 +363,14 @@ V6 appended six new `DataKey` variants (discriminants 15–20) and one new `Stre
 |           18 | `RecipientStreamPage(Address, u32)` | Persistent | `Vec<u64>`   | Paged recipient index (page → IDs)                         |
 |           19 | `RecipientStreamPageCount(Address)` | Persistent | `u32`        | Number of pages in recipient's index                       |
 |           20 | `PendingRecipientUpdate(u64)`       | Persistent | `Address`    | Pending recipient rotation proposal                        |
+|           21 | `IdReservation(Address)`            | Persistent | `IdReservation`| Active ID reservation for a caller                       |
+|           22 | `MaxRatePerSecond`                  | Instance   | `i128`       | Per-stream max rate cap                                    |
+|           23 | `DelegatedWithdrawNonce(Address)`   | Persistent | `u64`        | Per-recipient nonce for delegated-withdraw                 |
+|           24 | `LastPauseRecord(PauseKind)`        | Instance   | `PauseRecord`| Last pause record for stream or protocol                   |
+|           25 | `RotationHistory(u64)`              | Persistent | `Vec<RotationEntry>` | Rotation history for recipient/sender changes      |
+|           26 | `LastAccrualLedgerTimestamp`        | Instance   | `u64`        | Last ledger timestamp observed for accrual clock-regression|
+|           27 | `PausedStreamCount`                 | Instance   | `u64`        | Protocol-wide count of streams currently in `StreamStatus::Paused` |
+|           28 | `TotalKeeperFeesPaid`               | Instance   | `i128`       | Aggregate sum of all keeper fees paid out via `keeper_cancel` |
 
 V6 `Stream` struct adds one field at the end:
 

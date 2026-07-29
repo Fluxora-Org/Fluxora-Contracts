@@ -129,6 +129,11 @@ path = "tests/metadata_extension.rs"
 test = true
 
 [[test]]
+name = "metadata_extension_hardening"
+path = "tests/metadata_extension_hardening.rs"
+test = true
+
+[[test]]
 name = "stream_offer"
 path = "tests/stream_offer.rs"
 test = true
@@ -156,7 +161,7 @@ test = true
 [[test]]
 name = "recipient_update_state_machine"
 path = "tests/recipient_update_state_machine.rs"
-test = false
+test = true
 
 [[test]]
 name = "id_reservation"
@@ -197,11 +202,6 @@ test = false
 [[test]]
 name = "pause_semantics"
 path = "tests/pause_semantics.rs"
-test = true
-
-[[test]]
-name = "dynamic_pricing_edge_cases"
-path = "tests/dynamic_pricing_edge_cases.rs"
 test = true
 
 # ---------------------------------------------------------------------------

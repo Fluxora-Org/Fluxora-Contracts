@@ -31,8 +31,7 @@
 //! - CliffOnly and CliffSlope streams reject rate changes
 
 use fluxora_stream::{
-    ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamKind,
-    StreamStatus,
+    ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamKind, StreamStatus,
 };
 use soroban_sdk::{
     symbol_short,
@@ -414,7 +413,9 @@ fn decrease_rate_per_second_negative_rate_fails() {
     ctx.env.ledger().set_timestamp(0);
     let stream_id = ctx.create_default_stream();
 
-    let result = ctx.client.try_decrease_rate_per_second(&stream_id, &-5_i128);
+    let result = ctx
+        .client
+        .try_decrease_rate_per_second(&stream_id, &-5_i128);
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 }
 
@@ -567,7 +568,8 @@ fn top_up_then_rate_increase_succeeds() {
     let stream_id = ctx.create_default_stream();
 
     // Top up so deposit rises from 1000 to 2000.
-    ctx.client.top_up_stream(&stream_id, &ctx.sender, &1000_i128);
+    ctx.client
+        .top_up_stream(&stream_id, &ctx.sender, &1000_i128);
     let state = ctx.client.get_stream_state(&stream_id);
     assert_eq!(state.deposit_amount, 2000);
 
@@ -585,7 +587,8 @@ fn top_up_then_rate_decrease_refund_correct() {
     ctx.env.ledger().set_timestamp(0);
     let stream_id = ctx.create_rate2_stream();
 
-    ctx.client.top_up_stream(&stream_id, &ctx.sender, &1000_i128);
+    ctx.client
+        .top_up_stream(&stream_id, &ctx.sender, &1000_i128);
 
     ctx.env.ledger().set_timestamp(500);
     let sender_before = ctx.token.balance(&ctx.sender);
@@ -607,7 +610,8 @@ fn rate_increase_then_top_up_preserves_new_rate() {
 
     ctx.advance_ledger(17);
     ctx.client.update_rate_per_second(&stream_id, &4_i128);
-    ctx.client.top_up_stream(&stream_id, &ctx.sender, &1000_i128);
+    ctx.client
+        .top_up_stream(&stream_id, &ctx.sender, &1000_i128);
 
     let state = ctx.client.get_stream_state(&stream_id);
     assert_eq!(state.rate_per_second, 4);
@@ -624,12 +628,14 @@ fn extend_then_rate_increase_succeeds() {
 
     ctx.env.ledger().set_timestamp(100);
     // Top up first to cover the extended duration deposit requirement
-    ctx.client.top_up_stream(&stream_id, &ctx.sender, &1000_i128);
+    ctx.client
+        .top_up_stream(&stream_id, &ctx.sender, &1000_i128);
     ctx.client.extend_stream_end_time(&stream_id, &2000u64);
 
     // Original deposit=2000 (after top-up), rate=1. Extended duration=2000, needs deposit>=2000.
     // Top up more to allow rate=2: 2*2000=4000.
-    ctx.client.top_up_stream(&stream_id, &ctx.sender, &2000_i128);
+    ctx.client
+        .top_up_stream(&stream_id, &ctx.sender, &2000_i128);
     ctx.advance_ledger(17);
     let result = ctx.client.try_update_rate_per_second(&stream_id, &2_i128);
     assert_eq!(result, Ok(Ok(())));
@@ -663,7 +669,8 @@ fn rate_decrease_then_extend_succeeds() {
     // deposit becomes 1500
 
     // Top up so extension is possible
-    ctx.client.top_up_stream(&stream_id, &ctx.sender, &1000_i128);
+    ctx.client
+        .top_up_stream(&stream_id, &ctx.sender, &1000_i128);
     // deposit = 2500, rate=1, extend to 2000: needs 1*2000=2000 <= 2500
 
     ctx.client.extend_stream_end_time(&stream_id, &2000u64);
@@ -679,7 +686,8 @@ fn rate_decrease_then_extend_with_sufficient_deposit() {
     let stream_id = ctx.create_rate2_stream();
 
     // Top up to have room for extension
-    ctx.client.top_up_stream(&stream_id, &ctx.sender, &1000_i128);
+    ctx.client
+        .top_up_stream(&stream_id, &ctx.sender, &1000_i128);
     // deposit = 3000
     ctx.env.ledger().set_timestamp(500);
     ctx.client.decrease_rate_per_second(&stream_id, &1_i128);
@@ -750,7 +758,9 @@ fn legacy_update_rate_negative_rate_rejected() {
     ctx.env.ledger().set_timestamp(0);
     let stream_id = ctx.create_default_stream();
 
-    let result = ctx.client.try_update_rate(&stream_id, &-1_i128, &ctx.sender);
+    let result = ctx
+        .client
+        .try_update_rate(&stream_id, &-1_i128, &ctx.sender);
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 }
 
@@ -971,7 +981,8 @@ fn rate_increase_preserves_lookback_window() {
     ctx.env.ledger().set_timestamp(0);
     let stream_id = ctx.create_stream_with_rate(2, 4000, 1000);
 
-    ctx.client.set_lookback_window(&stream_id, &ctx.sender, &Some(10));
+    ctx.client
+        .set_lookback_window(&stream_id, &ctx.sender, &Some(10));
 
     ctx.env.ledger().set_timestamp(500);
     ctx.advance_ledger(17);
@@ -987,7 +998,8 @@ fn rate_decrease_preserves_lookback_window() {
     ctx.env.ledger().set_timestamp(0);
     let stream_id = ctx.create_rate2_stream();
 
-    ctx.client.set_lookback_window(&stream_id, &ctx.sender, &Some(20));
+    ctx.client
+        .set_lookback_window(&stream_id, &ctx.sender, &Some(20));
 
     ctx.env.ledger().set_timestamp(500);
     ctx.client.decrease_rate_per_second(&stream_id, &1_i128);
@@ -1017,7 +1029,8 @@ fn rate_cap_lowering_does_not_break_existing_streams() {
     assert_eq!(state.rate_per_second, 2);
 
     // Top up to cover rate=5: 5*1000=5000, need 3000 more
-    ctx.client.top_up_stream(&stream_id, &ctx.sender, &3000_i128);
+    ctx.client
+        .top_up_stream(&stream_id, &ctx.sender, &3000_i128);
 
     // Increase to 5 (within new cap) succeeds.
     ctx.advance_ledger(17);
@@ -1233,10 +1246,7 @@ fn get_claimable_at_after_rate_increase_matches_math() {
     ctx.client.update_rate_per_second(&stream_id, &4_i128);
 
     // At t=300: accrued = 400 (checkpoint: 200*2) + 4*100 = 800.
-    assert_eq!(
-        ctx.client.get_claimable_at(&stream_id, &300),
-        800
-    );
+    assert_eq!(ctx.client.get_claimable_at(&stream_id, &300), 800);
 }
 
 #[test]
@@ -1249,10 +1259,7 @@ fn get_claimable_at_after_rate_decrease_matches_math() {
     ctx.client.decrease_rate_per_second(&stream_id, &1_i128);
 
     // At t=400: accrued = 400 (checkpoint: 200*2) + 1*200 = 600.
-    assert_eq!(
-        ctx.client.get_claimable_at(&stream_id, &400),
-        600
-    );
+    assert_eq!(ctx.client.get_claimable_at(&stream_id, &400), 600);
 }
 
 // ===========================================================================

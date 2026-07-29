@@ -2,7 +2,7 @@
 
 use soroban_sdk::Env;
 
-use crate::{load_delegated_nonce, load_delegated_cancel_nonce, load_stream, ContractError};
+use crate::{load_delegated_cancel_nonce, load_delegated_nonce, load_stream, ContractError};
 
 /// Domain-separation tag for witnessed cancellation signatures.
 ///
@@ -454,3 +454,4 @@ mod tests {
         assert_eq!(result, Err(ContractError::InvalidParams));
     }
 }
+

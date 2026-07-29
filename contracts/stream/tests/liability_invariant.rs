@@ -796,3 +796,186 @@ fn total_liabilities_and_sweep_excess_gas_determinism() {
 
     assert_eq!(ctx.client().get_total_liabilities(), l1);
 }
+
+/// Edge-case test: paused streams contribute to TotalLiabilities (pause does
+/// not change the deposit amount, only withdrawal behavior). Verifies that
+/// the liability invariant holds while a stream is paused and after it resumes.
+#[test]
+fn total_liabilities_invariant_holds_across_pause_resume_cycles() {
+    let ctx = TestContext::new();
+    let treasury = Address::generate(&ctx.env);
+
+    let deposit = 6_000i128;
+    let stream_id = ctx.create_stream(deposit, 6, 0, 1_000, StreamKind::Linear);
+
+    let liabilities = ctx.client().get_total_liabilities();
+    assert_eq!(liabilities, deposit);
+    assert!(ctx.contract_balance() >= liabilities);
+
+    // Advance time and pause
+    ctx.env.ledger().set_timestamp(100);
+    ctx.env.ledger().set_sequence_number(21);
+    ctx.client()
+        .pause_stream(&stream_id, &PauseReason::Operational);
+
+    // Liability must still equal deposit while paused (pause doesn't change deposit)
+    let liabilities_paused = ctx.client().get_total_liabilities();
+    assert_eq!(
+        liabilities_paused, deposit,
+        "TotalLiabilities unchanged after pause"
+    );
+    assert!(ctx.contract_balance() >= liabilities_paused);
+    check_sweep_invariant(&ctx, liabilities_paused, &treasury, "paused");
+
+    // Resume after cooldown
+    ctx.env.ledger().with_mut(|l| l.sequence_number += 17);
+    ctx.client().resume_stream(&stream_id);
+
+    let liabilities_resumed = ctx.client().get_total_liabilities();
+    assert_eq!(
+        liabilities_resumed, deposit,
+        "TotalLiabilities unchanged after resume"
+    );
+    assert!(ctx.contract_balance() >= liabilities_resumed);
+    check_sweep_invariant(&ctx, liabilities_resumed, &treasury, "resumed");
+
+    // Withdraw after resume
+    ctx.env.ledger().set_timestamp(200);
+    ctx.client().withdraw(&stream_id);
+
+    let liabilities_after_withdraw = ctx.client().get_total_liabilities();
+    assert!(
+        liabilities_after_withdraw <= deposit,
+        "TotalLiabilities must not increase after withdraw"
+    );
+    assert!(ctx.contract_balance() >= liabilities_after_withdraw);
+}
+
+/// Edge-case test: top_up followed by partial withdraw preserves the liability
+/// invariant. Multiple sequential top-ups must each increase TotalLiabilities.
+#[test]
+fn multiple_top_ups_correctly_increase_total_liabilities() {
+    let ctx = TestContext::new();
+    let treasury = Address::generate(&ctx.env);
+
+    let initial_deposit = 5_000i128;
+    let stream_id = ctx.create_stream(initial_deposit, 5, 0, 1_000, StreamKind::Linear);
+
+    assert_eq!(ctx.client().get_total_liabilities(), initial_deposit);
+
+    // Top-up #1
+    ctx.client()
+        .top_up_stream(&stream_id, &ctx.sender, &2_000i128);
+    assert_eq!(
+        ctx.client().get_total_liabilities(),
+        initial_deposit + 2_000
+    );
+    assert!(ctx.contract_balance() >= ctx.client().get_total_liabilities());
+    check_sweep_invariant(
+        &ctx,
+        ctx.client().get_total_liabilities(),
+        &treasury,
+        "after topup1",
+    );
+
+    // Top-up #2
+    ctx.client()
+        .top_up_stream(&stream_id, &ctx.sender, &1_500i128);
+    assert_eq!(
+        ctx.client().get_total_liabilities(),
+        initial_deposit + 2_000 + 1_500
+    );
+    assert!(ctx.contract_balance() >= ctx.client().get_total_liabilities());
+    check_sweep_invariant(
+        &ctx,
+        ctx.client().get_total_liabilities(),
+        &treasury,
+        "after topup2",
+    );
+
+    // Advance time and withdraw
+    ctx.env.ledger().set_timestamp(200);
+    ctx.client().withdraw(&stream_id);
+
+    let liabilities_after_withdraw = ctx.client().get_total_liabilities();
+    assert!(
+        liabilities_after_withdraw < initial_deposit + 2_000 + 1_500,
+        "TotalLiabilities must decrease after withdraw"
+    );
+    assert!(ctx.contract_balance() >= liabilities_after_withdraw);
+}
+
+/// CliffSlope stream kind: liability invariant must hold for CliffSlope streams.
+#[test]
+fn cliff_slope_stream_liability_invariant() {
+    let ctx = TestContext::new();
+    let treasury = Address::generate(&ctx.env);
+
+    // Create a CliffSlope stream with cliff at t=200, end at t=1000
+    let stream_id = ctx.create_stream(8_000, 10, 200, 1_000, StreamKind::CliffSlope);
+
+    let liabilities = ctx.client().get_total_liabilities();
+    assert_eq!(liabilities, 8_000);
+    assert!(ctx.contract_balance() >= liabilities);
+    check_sweep_invariant(&ctx, liabilities, &treasury, "cliffslope initial");
+
+    // Withdraw before cliff (should succeed with 0 accrued - or some minimal amount)
+    ctx.env.ledger().set_timestamp(100);
+    let _ = ctx.client().try_withdraw(&stream_id);
+
+    let liabilities_post = ctx.client().get_total_liabilities();
+    assert!(ctx.contract_balance() >= liabilities_post);
+    check_sweep_invariant(
+        &ctx,
+        liabilities_post,
+        &treasury,
+        "cliffslope pre-cliff withdraw",
+    );
+
+    // Withdraw after cliff
+    ctx.env.ledger().set_timestamp(500);
+    ctx.client().withdraw(&stream_id);
+
+    let liabilities_after = ctx.client().get_total_liabilities();
+    assert!(ctx.contract_balance() >= liabilities_after);
+    check_sweep_invariant(
+        &ctx,
+        liabilities_after,
+        &treasury,
+        "cliffslope post-cliff withdraw",
+    );
+}
+
+/// Batch withdraw liability tracking: withdrawing from multiple streams must
+/// reduce total liabilities by the correct aggregate amount.
+#[test]
+fn batch_withdraw_liability_invariant() {
+    let ctx = TestContext::new();
+    let treasury = Address::generate(&ctx.env);
+
+    // Create multiple streams
+    let id1 = ctx.create_stream(3_000, 3, 0, 1_000, StreamKind::Linear);
+    let id2 = ctx.create_stream(5_000, 5, 0, 1_000, StreamKind::Linear);
+    let id3 = ctx.create_stream(2_000, 2, 0, 1_000, StreamKind::Linear);
+
+    let total_deposit = 3_000 + 5_000 + 2_000;
+    assert_eq!(ctx.client().get_total_liabilities(), total_deposit);
+
+    // Advance time
+    ctx.env.ledger().set_timestamp(200);
+
+    // Withdraw from each stream individually
+    let w1 = ctx.client().withdraw(&id1);
+    let w2 = ctx.client().withdraw(&id2);
+    let w3 = ctx.client().withdraw(&id3);
+
+    let total_withdrawn = w1 + w2 + w3;
+    let liabilities_after = ctx.client().get_total_liabilities();
+    assert_eq!(
+        liabilities_after,
+        total_deposit - total_withdrawn,
+        "TotalLiabilities must decrease by sum of individual withdrawals"
+    );
+    assert!(ctx.contract_balance() >= liabilities_after);
+    check_sweep_invariant(&ctx, liabilities_after, &treasury, "batch withdraw");
+}

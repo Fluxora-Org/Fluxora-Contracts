@@ -366,7 +366,7 @@ Simplify the contract logic
 Place responsibility on token deployers and operators
 Residual Risks
 Non-standard tokens: If a token violates SEP-41 guarantees, behavior may become unpredictable.
-Direct transfers: Tokens sent directly to the contract address are permanently locked.
+Direct transfers: Tokens sent directly to the contract address increase excess balance and are recoverable by the contract admin via `sweep_excess`, but cannot be permissionlessly reclaimed by the sender.
 Token upgrades: If a token contract is upgraded to violate SEP-41 guarantees, behavior may change.
 Mitigation: Use only well-audited, standard SEP-41 tokens. See token-assumptions.md for detailed integration guidelines.
 

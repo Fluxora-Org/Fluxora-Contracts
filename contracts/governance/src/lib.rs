@@ -1794,9 +1794,7 @@ mod tests {
         let new_stream = Address::generate(&ctx.env);
 
         let calldata = CallData::FactorySetStreamContract(new_stream).to_xdr(&ctx.env);
-        let id = ctx
-            .client
-            .propose(&ctx.signer_a, &eoa_target, &calldata);
+        let id = ctx.client.propose(&ctx.signer_a, &eoa_target, &calldata);
         ctx.client.approve(&ctx.signer_a, &id);
         ctx.client.approve(&ctx.signer_b, &id);
         ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
