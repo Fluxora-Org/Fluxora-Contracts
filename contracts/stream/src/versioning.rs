@@ -8,7 +8,7 @@
 //! The module enforces three key invariants:
 //!
 //! 1. **DataKey Discriminant Stability**: All DataKey variants must maintain frozen discriminants
-//!    (0-35) and only append new variants after discriminant 35.
+//!    (0-36) and only append new variants after discriminant 36.
 //!
 //! 2. **Storage Entry Size Bounds**: Individual stream entries must not exceed `MAX_STREAM_ENTRY_BYTES`
 //!    (4,096 bytes) to enforce bounded rent costs.
@@ -28,7 +28,7 @@ pub enum VersioningError {
     /// Storage entry exceeds maximum allowed size.
     EntryOversized = 1002,
 
-    /// DataKey discriminant out of bounds (should be 0-35 or explicitly appended).
+    /// DataKey discriminant out of bounds (should be 0-36 or explicitly appended).
     InvalidDiscriminant = 1003,
 
     /// Accrual calculation produced a non-deterministic or non-monotonic result.
@@ -255,8 +255,9 @@ pub fn validate_entry_size(
 /// | 33 | RecipientPendingOffers(Address) | V7 |
 /// | 34 | PooledStreamShares(u64) | V9 |
 /// | 35 | PooledStreamWithdrawn(u64, Address) | V9 |
+/// | 36 | DelegatedCancelNonce(Address) | V9 |
 ///
-/// **Future variants MUST be appended after discriminant 35 with strictly increasing values.**
+/// **Future variants MUST be appended after discriminant 36 with strictly increasing values.**
 ///
 /// # Violations
 ///
@@ -303,6 +304,7 @@ pub const FROZEN_DISCRIMINANTS_V9: &[&str] = &[
     "RecipientPendingOffers(Address)",     // 33
     "PooledStreamShares(u64)",             // 34
     "PooledStreamWithdrawn(u64, Address)", // 35
+    "DelegatedCancelNonce(Address)",       // 36
 ];
 
 /// Return the count of frozen discriminants in this version.
@@ -419,7 +421,7 @@ mod tests {
 
     #[test]
     fn test_frozen_discriminant_count_v9() {
-        assert_eq!(frozen_discriminant_count(), 36); // 0-35 inclusive
+        assert_eq!(frozen_discriminant_count(), 37); // 0-36 inclusive
     }
 
     #[test]

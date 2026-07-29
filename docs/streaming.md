@@ -2324,10 +2324,13 @@ pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), ContractError>
 
 - Calls `env.deployer().update_current_contract_wasm(new_wasm_hash)`, which is
   atomic — if the new WASM is invalid, the call reverts and no state changes.
-- Bumps instance TTL after the upgrade so the contract does not expire.
-- Emits `ContractUpgraded` (topic `upgraded`) with the new hash, version, and
-  caller, plus a legacy `upgrade` topic event for backward-compatible indexers.
-  See `docs/events.md` for the exact event shapes.
+- Bumps the updated instance/code TTL. Persistent stream/index entries retain
+  independent TTLs and are not enumerated by this call.
+- The host emits `executable_update`; Fluxora emits `ContractUpgraded` (topic
+  `upgraded`) plus the legacy `upgrade` event. Their version fields contain the
+  executing WASM's `CONTRACT_VERSION`, not an introspected replacement version.
+  Verify the replacement with a later `version()` call. See `docs/upgrade.md`
+  and `docs/events.md` for exact failure, TTL, and event semantics.
 
 ---
 

@@ -632,3 +632,69 @@ class TestRealErrorMd:
         repo_root = Path(__file__).resolve().parent.parent
         rc = cdc.main(["--docs", str(repo_root / "docs" / "error.md")])
         assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: source ContractError enum parsing/regression guard
+# ---------------------------------------------------------------------------
+
+
+class TestSourceContractErrorParsing:
+    def _write_source(self, tmp_path, body: str) -> Path:
+        src = tmp_path / "lib.rs"
+        src.write_text(
+            "#[repr(u32)]\n"
+            "pub enum ContractError {\n"
+            f"{body}"
+            "}\n",
+            encoding="utf-8",
+        )
+        return src
+
+    def test_parse_source_contract_error(self, tmp_path):
+        src = self._write_source(
+            tmp_path,
+            "    StreamNotFound = 1,\n    KeeperGracePeriodNotElapsed = 33,\n",
+        )
+        entries = cdc._parse_source_contract_error(src)
+        assert entries[0].name == "StreamNotFound"
+        assert entries[0].code == 1
+        assert entries[1].name == "KeeperGracePeriodNotElapsed"
+        assert entries[1].code == 33
+
+    def test_source_duplicate_discriminant_detected(self, tmp_path):
+        src = self._write_source(
+            tmp_path,
+            "    ReservationAlreadyActive = 34,\n"
+            "    KeeperGracePeriodNotElapsed = 34,\n",
+        )
+        entries = cdc._parse_source_contract_error(src)
+        msgs = cdc._find_intra_collisions("source", entries)
+        assert len(msgs) == 1
+        assert "ReservationAlreadyActive" in msgs[0]
+        assert "KeeperGracePeriodNotElapsed" in msgs[0]
+        assert "code 34" in msgs[0]
+
+    def test_main_returns_one_on_source_duplicate(self, tmp_path):
+        doc = _write_doc(tmp_path, _full_doc(
+            [(1, "StreamNotFound")],
+            [(1, "AlreadyInitialized")],
+        ))
+        src = self._write_source(
+            tmp_path,
+            "    ReservationAlreadyActive = 34,\n"
+            "    KeeperGracePeriodNotElapsed = 34,\n",
+        )
+        rc = cdc.main(["--docs", str(doc), "--source", str(src)])
+        assert rc == 1
+
+    def test_real_source_has_no_contract_error_collisions(self):
+        repo_root = Path(__file__).resolve().parent.parent
+        src = repo_root / "contracts" / "stream" / "src" / "lib.rs"
+        entries = cdc._parse_source_contract_error(src)
+        msgs = cdc._find_intra_collisions("ContractError source", entries)
+        assert msgs == []
+        by_name = {e.name: e.code for e in entries}
+        assert by_name["KeeperGracePeriodNotElapsed"] == 33
+        assert by_name["ReservationAlreadyActive"] == 34
+        assert by_name["KeeperGracePeriodNotElapsed"] != by_name["ReservationAlreadyActive"]

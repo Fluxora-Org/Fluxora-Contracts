@@ -7,7 +7,7 @@
 //! without creating cycles).
 //!
 //! All other contract types — including `ContractError`, `DataKey` (with its
-//! frozen 0–35 discriminants), `Config`, the event payloads, `PauseKind`,
+//! frozen 0–36 discriminants), `Config`, the event payloads, `PauseKind`,
 //! `StreamKind`, `StreamStatus`, `CreateStreamParams`, and similar enums —
 //! live at the crate root in `lib.rs`. The `DataKey` variant order is the
 //! single source of truth for storage discriminant stability; do **not**

@@ -54,7 +54,7 @@ Notes:
 | StreamOfferCreated | `["offr_crt", offer_id: u64]` | `StreamOfferCreated { offer_id: u64, sender: Address, recipient: Address, deposit_amount: i128, rate_per_second: i128, start_time: u64, cliff_time: u64, end_time: u64, expiry_time: Option<u64>, created_at: u64 }` | When a stream creation offer is created. |
 | StreamOfferAccepted | `["offr_acc", offer_id: u64]` | `StreamOfferAccepted { offer_id: u64, effective_start_time: u64, recipient: Address }` | When a stream creation offer is accepted. |
 | StreamOfferCancelled | `["offr_cxl", offer_id: u64]` | `StreamOfferCancelled { offer_id: u64, by: Address, refund_amount: i128 }` | When a stream creation offer is cancelled or rejected. |
-| ContractUpgraded | `["upgraded"]` | `ContractUpgraded { new_wasm_hash: BytesN<32>, new_version: u32, upgraded_at: u64, upgraded_by: Address }` | When the admin successfully calls `upgrade`. A second, legacy `["upgrade"]` topic event `(new_wasm_hash, old_version, new_version, admin)` is also emitted for backward compatibility with older indexers. |
+| ContractUpgraded | `["upgraded"]` | `ContractUpgraded { new_wasm_hash: BytesN<32>, new_version: u32, upgraded_at: u64, upgraded_by: Address }` | After a successful admin `upgrade`. The host also emits `executable_update`, and Fluxora emits legacy `["upgrade"]` data `(new_wasm_hash, old_version, new_version, admin)`. Compatibility note: application-event version slots report the WASM executing the upgrade call; query `version()` after finality for the replacement version. |
 
 **Additional topics (validator):** `cloned`, `kp_cncl`, `gl_pause`, `gl_resume`, `rate_dec`, `tmpl_def`, `health`, `ex_swept`, `ac_set`, `ac_revoke`, `ac_trig`, `renewed`, `migrated`, `res_rel`.
 
@@ -702,6 +702,13 @@ data:   ContractUpgraded {
           upgraded_by:   Address,
         }
 ```
+
+The historical `new_version` name does not mean the replacement WASM was
+introspected. The current invocation continues executing the pre-update code,
+so `ContractUpgraded.new_version` and both legacy tuple version slots equal the
+executing `CONTRACT_VERSION`. Treat the host `executable_update` event and
+`new_wasm_hash` as the executable-change record, then call `version()` after
+transaction finality. Failed upgrades leave no events.
 
 ---
 

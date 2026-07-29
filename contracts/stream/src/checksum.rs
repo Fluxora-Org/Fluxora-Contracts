@@ -102,7 +102,7 @@
 //! | 28           | `TotalKeeperFeesPaid`           | Instance  | `i128`       |
 //!
 //! Total live `DataKey` variant count in V7 (before post-V7 additions): **29** (discriminants 0–28).
-//! Current live `DataKey` variant count: **36** (discriminants 0–35) — see post-V7 additions below.
+//! Current live `DataKey` variant count: **37** (discriminants 0–36) — see post-V7 additions below.
 //!
 //! V6 `Stream` struct adds one field at the end:
 //!
@@ -167,59 +167,38 @@
 //!
 //! Total `DataKey` variants in V7 (before post-V7 additions): **29** (discriminants 0 through 28).
 //!
-//! ## V8/V9 additions (discriminants 29–35)
+//! ## V8/V9 additions (discriminants 29–36)
 //!
-//! | Discriminant | Variant                         | Storage   | Value type            |
-//! |:------------:|:--------------------------------|:----------|:----------------------|
-//! | 29           | `AutoRenewEnabled(u64)`         | Persistent| `bool`                |
-//! | 30           | `MaxLookbackLedgers(u64)`       | Persistent| `u32`                 |
-//! | 31           | `SenderStreams(Address)`        | Persistent| `Vec<u64>`            |
-//! | 32           | `PendingStreamOffer(u64)`       | Persistent| `StreamOffer`         |
-//! | 33           | `RecipientPendingOffers(Address)` | Persistent | `Vec<u64>`         |
-//! | 34           | `PooledStreamShares(u64)`       | Persistent| `Vec<(Address,u32)>`  |
-//! | 35           | `PooledStreamWithdrawn(u64, Address)` | Persistent | `i128`         |
+//! | Discriminant | Variant                              | Storage    | Value type           |
+//! |:------------:|:-------------------------------------|:-----------|:---------------------|
+//! | 29           | `AutoRenewEnabled(u64)`              | Persistent | `bool`               |
+//! | 30           | `MaxLookbackLedgers(u64)`            | Persistent | `u32`                |
+//! | 31           | `SenderStreams(Address)`             | Persistent | `Vec<u64>`           |
+//! | 32           | `PendingStreamOffer(u64)`            | Persistent | `StreamOffer`        |
+//! | 33           | `RecipientPendingOffers(Address)`    | Persistent | `Vec<u64>`           |
+//! | 34           | `PooledStreamShares(u64)`            | Persistent | `Vec<(Address,u32)>` |
+//! | 35           | `PooledStreamWithdrawn(u64,Address)` | Persistent | `i128`               |
+//! | 36           | `DelegatedCancelNonce(Address)`      | Persistent | `u64`                |
 //!
-//! Total live `DataKey` variant count: **36** (discriminants 0–35).
+//! These variants are strictly append-only: no existing discriminant 0–28 was
+//! changed. The live v9 total is **37** variants (0–36), and the next safe append
+//! position is 37. Additive keys may remain under the current contract version,
+//! but their absent-key behavior and the exhaustive compatibility map must be
+//! updated in the same change.
 //!
-//! See [`docs/storage.md`](../../../docs/storage.md) and [`docs/upgrade.md`](../../../docs/upgrade.md)
-//! for prose documentation, evolution policy, and migration guides.
+//! See [`docs/storage.md`](../../../docs/storage.md) and
+//! [`docs/upgrade.md`](../../../docs/upgrade.md) for policy and runbooks.
 //!
-//! ## Post-V7 additive variants (discriminants 29–35)
+//! ## Invariant: discriminants 0–36 are frozen
 //!
-//! These variants were appended after the V7 table above was written. All are strictly
-//! append-only: no existing discriminant (0–28) was touched. The total live variant count
-//! is therefore **36** (discriminants 0–35). `CONTRACT_VERSION` was not bumped for each
-//! individual addition; the same "append-only / no existing-entry breakage" rationale
-//! documented in "Why `CONTRACT_VERSION` was not bumped to 7" applies.
-//!
-//! | Discriminant | Variant                                | Storage    | Value type    |
-//! |:------------:|:---------------------------------------|:-----------|:--------------|
-//! | 29           | `AutoRenewEnabled(u64)`                | Persistent | `bool`        |
-//! | 30           | `MaxLookbackLedgers(u64)`              | Persistent | `u32`         |
-//! | 31           | `SenderStreams(Address)`               | Persistent | `Vec<u64>`    |
-//! | 32           | `PendingStreamOffer(u64)`              | Persistent | `StreamOffer` |
-//! | 33           | `RecipientPendingOffers(Address)`      | Persistent | `Vec<u64>`    |
-//! | 34           | `PooledStreamShares(u64)`              | Persistent | `i128`        |
-//! | 35           | `PooledStreamWithdrawn(u64, Address)`  | Persistent | `i128`        |
-//!
-//! **Total live `DataKey` variant count: 36** (discriminants 0–35).
-//!
-//! The next variant appended to `DataKey` must receive discriminant **36**.
-//! The machine-checked cross-check in `contracts/stream/tests/storage_key_compat.rs`
-//! (`test_contract_version_matches_datakey_variant_count`) enforces this at test time.
-//!
-//! ## Invariant: discriminants 0–35 are frozen
-//!
-//! No variant at position 0–35 may ever be reordered, renamed, or removed on
-//! any instance that has processed at least one transaction. Violations are
-//! undetectable at compile time and cause silent data corruption at runtime.
+//! No variant at position 0–36 may ever be reordered, renamed, or removed on
+//! an instance that may contain that key. Violations cause storage corruption.
 //!
 //! ## Security assumptions
 //!
 //! - **Append-only extension**: New `DataKey` variants must always be appended.
-//!   Inserting a variant at any position ≤ 35 shifts all subsequent discriminants
-//!   and silently corrupts every affected persistent entry. The next variant
-//!   appended to `DataKey` must receive discriminant 36.
+//!   Inserting at any position ≤ 36 shifts subsequent discriminants. The next
+//!   variant must receive discriminant 37.
 //! - **Struct field ordering**: `Stream` fields must never be reordered. Soroban
 //!   XDR encodes structs positionally; a field swap is a silent type mismatch.
 //! - **Option-tail compatibility**: The V5→V6 `memo: Option<Bytes>` addition is
@@ -296,31 +275,24 @@ mod tests {
         assert_eq!(V6_INITIAL_VARIANT_COUNT, 21);
     }
 
-    /// Live DataKey enum currently contains exactly 36 variants (discriminants 0–35).
-    ///
-    /// This was 29 when the V7 table was first written. Seven post-V7 additive variants
-    /// (discriminants 29–35) were appended since then without updating this test — now fixed.
-    /// Cross-referenced with `CONTRACT_VERSION` in `storage_key_compat.rs`.
+    /// Live DataKey contains 37 variants (discriminants 0–36).
     #[test]
-    fn live_datakey_variant_count_is_36() {
-        const LIVE_VARIANT_COUNT: usize = 36;
-        assert_eq!(LIVE_VARIANT_COUNT, 36);
+    fn live_datakey_variant_count_is_37() {
+        const LIVE_VARIANT_COUNT: usize = 37;
+        assert_eq!(LIVE_VARIANT_COUNT, 37);
     }
 
-    /// The seven post-V7 additive variants occupy discriminants 29–35.
-    ///
-    /// All seven were appended after the V7 discriminant table above was written.
-    /// None of them affected existing discriminants 0–28; the append-only invariant holds.
-    /// The next variant appended to `DataKey` must receive discriminant 36.
+    /// Eight post-V7 additive variants occupy discriminants 29–36.
     #[test]
-    fn post_v7_new_variants_occupy_discriminants_29_to_35() {
+    fn post_v7_new_variants_occupy_discriminants_29_to_36() {
         // AutoRenewEnabled=29, MaxLookbackLedgers=30, SenderStreams=31,
         // PendingStreamOffer=32, RecipientPendingOffers=33,
-        // PooledStreamShares=34, PooledStreamWithdrawn=35
-        let post_v7_range = 29usize..=35;
-        assert_eq!(post_v7_range.clone().count(), 7);
+        // PooledStreamShares=34, PooledStreamWithdrawn=35,
+        // DelegatedCancelNonce=36.
+        let post_v7_range = 29usize..=36;
+        assert_eq!(post_v7_range.clone().count(), 8);
         assert_eq!(*post_v7_range.start(), 29);
-        assert_eq!(*post_v7_range.end(), 35);
+        assert_eq!(*post_v7_range.end(), 36);
     }
 
     /// V5 Stream struct had 14 fields; V6 adds `memo` for 15 fields.
@@ -357,39 +329,27 @@ mod tests {
         assert_eq!(*v6_only_range.end(), 20);
     }
 
-    /// At the V7 freeze point the DataKey enum had exactly 29 variants (discriminants 0–28).
-    /// Seven post-V7 additive variants were appended later, bringing the live total to 36.
-    ///
-    /// If this assertion fails after a new variant is appended, update the
-    /// post-V7 discriminant table in the module doc-comment above and add the variant
-    /// to the post_v7_new_variants_occupy_discriminants_29_to_35 test.
-    ///
-    /// # Security note
-    /// At the V7 freeze the next safe append position was discriminant 29.
-    /// The current next safe append position is 36 (see `live_datakey_variant_count_is_36`).
+    /// At the V7 freeze point DataKey had 29 variants (0–28).
     #[test]
     fn v7_datakey_variant_count_at_freeze_was_29() {
         const V7_FREEZE_VARIANT_COUNT: usize = 29;
         assert_eq!(V7_FREEZE_VARIANT_COUNT, 29);
     }
 
-    /// V9 live DataKey has exactly 36 variants (discriminants 0–35).
-    ///
-    /// # Security note
-    /// The next variant appended to DataKey must receive discriminant 36.
+    /// V9 live DataKey has 37 variants (0–36); next append is 37.
     #[test]
-    fn v9_datakey_variant_count_is_36() {
-        const V9_VARIANT_COUNT: usize = 36;
-        assert_eq!(V9_VARIANT_COUNT, 36);
+    fn v9_datakey_variant_count_is_37() {
+        const V9_VARIANT_COUNT: usize = 37;
+        assert_eq!(V9_VARIANT_COUNT, 37);
     }
 
-    /// The seven V8/V9-only DataKey variants occupy discriminants 29–35.
+    /// The eight V8/V9-only keys occupy discriminants 29–36.
     #[test]
-    fn v9_new_variants_occupy_discriminants_29_to_35() {
-        let v9_only_range = 29usize..=35;
-        assert_eq!(v9_only_range.clone().count(), 7);
+    fn v9_new_variants_occupy_discriminants_29_to_36() {
+        let v9_only_range = 29usize..=36;
+        assert_eq!(v9_only_range.clone().count(), 8);
         assert_eq!(*v9_only_range.start(), 29);
-        assert_eq!(*v9_only_range.end(), 35);
+        assert_eq!(*v9_only_range.end(), 36);
     }
 
     /// The eight V7-only DataKey variants occupy discriminants 21–28.
