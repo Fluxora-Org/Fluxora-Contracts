@@ -177,21 +177,42 @@ The following table provides the CPU instruction counts for core operations.
 
 <!-- GAS_BASELINE_START -->
 {
-  "create_stream": 0,
+  "create_stream": 568292,
   "create_streams": {
-    "1": 0,
-    "5": 0,
-    "10": 0
+    "1": 1500000,
+    "5": 10000000,
+    "10": 40000000
   },
-  "withdraw": 0,
+  "withdraw": 562057,
   "batch_withdraw": {
-    "1": 0,
-    "10": 0,
-    "50": 0,
-    "100": 0,
-    "mixed-state": 0
+    "1": 531125,
+    "10": 3675044,
+    "50": 19844037,
+    "100": 45453389,
+    "mixed-state": 1500000
+  },
+  "batch_withdraw_to": {
+    "1": 545000,
+    "10": 3750000,
+    "50": 20500000,
+    "100": 47000000
+  },
+  "bulk_resume_streams_as_admin": {
+    "1": 4000000,
+    "10": 18000000,
+    "50": 90000000,
+    "100": 180000000
+  },
+  "bulk_cancel_streams": {
+    "1": 3500000,
+    "10": 16000000,
+    "50": 80000000,
+    "100": 160000000
+  },
+  "keeper_cancel": {
+    "partial_accrual": 786739,
+    "fully_accrued": 386889
   }
-}
 }
 
 <!-- GAS_BASELINE_END -->
