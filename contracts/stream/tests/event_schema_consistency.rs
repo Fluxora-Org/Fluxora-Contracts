@@ -140,10 +140,7 @@ fn stream_event_registry() -> Vec<EventSchema> {
         },
         EventSchema {
             struct_name: "StreamRenewed".into(),
-            fields: vec![
-                field("old_stream_id", "u64"),
-                field("new_stream_id", "u64"),
-            ],
+            fields: vec![field("old_stream_id", "u64"), field("new_stream_id", "u64")],
         },
         EventSchema {
             struct_name: "SenderTransferred".into(),
@@ -164,16 +161,11 @@ fn stream_event_registry() -> Vec<EventSchema> {
         },
         EventSchema {
             struct_name: "GlobalEmergencyPauseChanged".into(),
-            fields: vec![
-                field("paused", "bool"),
-            ],
+            fields: vec![field("paused", "bool")],
         },
         EventSchema {
             struct_name: "ExcessSwept".into(),
-            fields: vec![
-                field("to", "Address"),
-                field("amount", "i128"),
-            ],
+            fields: vec![field("to", "Address"), field("amount", "i128")],
         },
         EventSchema {
             struct_name: "KeeperCancelled".into(),
@@ -187,48 +179,31 @@ fn stream_event_registry() -> Vec<EventSchema> {
         },
         EventSchema {
             struct_name: "StreamPaused".into(),
-            fields: vec![
-                field("stream_id", "u64"),
-                field("reason", "String"),
-            ],
+            fields: vec![field("stream_id", "u64"), field("reason", "String")],
         },
         EventSchema {
             struct_name: "GlobalResumed".into(),
-            fields: vec![
-                field("resumed_at", "u64"),
-            ],
+            fields: vec![field("resumed_at", "u64")],
         },
         EventSchema {
             struct_name: "ContractPauseChanged".into(),
-            fields: vec![
-                field("paused", "bool"),
-            ],
+            fields: vec![field("paused", "bool")],
         },
         EventSchema {
             struct_name: "ProtocolPaused".into(),
-            fields: vec![
-                field("reason", "String"),
-                field("paused_at", "u64"),
-            ],
+            fields: vec![field("reason", "String"), field("paused_at", "u64")],
         },
         EventSchema {
             struct_name: "ProtocolResumed".into(),
-            fields: vec![
-                field("resumed_at", "u64"),
-            ],
+            fields: vec![field("resumed_at", "u64")],
         },
         EventSchema {
             struct_name: "AutoClaimSet".into(),
-            fields: vec![
-                field("stream_id", "u64"),
-                field("destination", "Address"),
-            ],
+            fields: vec![field("stream_id", "u64"), field("destination", "Address")],
         },
         EventSchema {
             struct_name: "AutoClaimRevoked".into(),
-            fields: vec![
-                field("stream_id", "u64"),
-            ],
+            fields: vec![field("stream_id", "u64")],
         },
         EventSchema {
             struct_name: "AutoClaimTriggered".into(),
@@ -248,10 +223,7 @@ fn stream_event_registry() -> Vec<EventSchema> {
         },
         EventSchema {
             struct_name: "StreamDecommissioned".into(),
-            fields: vec![
-                field("stream_id", "u64"),
-                field("decommissioned", "bool"),
-            ],
+            fields: vec![field("stream_id", "u64"), field("decommissioned", "bool")],
         },
         EventSchema {
             struct_name: "RecipientShareDelegated".into(),
@@ -309,7 +281,10 @@ fn stream_event_registry() -> Vec<EventSchema> {
 }
 
 fn field(name: &str, typ: &str) -> EventField {
-    EventField { name: name.into(), typ: typ.into() }
+    EventField {
+        name: name.into(),
+        typ: typ.into(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -320,9 +295,7 @@ fn field(name: &str, typ: &str) -> EventField {
 fn normalize_type(raw: &str) -> String {
     let s = raw.trim();
     // Strip leading colons and common prefixes
-    let s = s
-        .replace("soroban_sdk::", "")
-        .replace("crate::", "");
+    let s = s.replace("soroban_sdk::", "").replace("crate::", "");
     // Collapse whitespace inside generics
     let s = s.replace(" >", ">").replace("> ", ">");
     let s = s.replace(" ,", ",").replace(", ", ",");
@@ -331,9 +304,7 @@ fn normalize_type(raw: &str) -> String {
 }
 
 /// Parse lines inside a fenced code block for `pub struct <Name>` definitions.
-fn parse_struct_from_code_block(
-    lines: &[String],
-) -> Option<EventSchema> {
+fn parse_struct_from_code_block(lines: &[String]) -> Option<EventSchema> {
     let text: String = lines.join("\n");
     let text = text.as_str();
 
@@ -372,13 +343,14 @@ fn parse_struct_from_code_block(
         }
     }
 
-    Some(EventSchema { struct_name, fields })
+    Some(EventSchema {
+        struct_name,
+        fields,
+    })
 }
 
 /// Parse lines inside a fenced code block for `pub enum <Name>` with tuple variants.
-fn parse_enum_from_code_block(
-    lines: &[String],
-) -> Option<EventSchema> {
+fn parse_enum_from_code_block(lines: &[String]) -> Option<EventSchema> {
     let text: String = lines.join("\n");
     let text = text.as_str();
 
@@ -418,13 +390,14 @@ fn parse_enum_from_code_block(
         }
     }
 
-    Some(EventSchema { struct_name: enum_name, fields })
+    Some(EventSchema {
+        struct_name: enum_name,
+        fields,
+    })
 }
 
 /// Find struct definitions in `data: StructName { ... }` inline blocks.
-fn parse_inline_struct(
-    lines: &[String],
-) -> Option<EventSchema> {
+fn parse_inline_struct(lines: &[String]) -> Option<EventSchema> {
     let text: String = lines.join("\n");
     let text = text.as_str();
 
@@ -489,7 +462,10 @@ fn parse_inline_struct(
         return None;
     }
 
-    Some(EventSchema { struct_name, fields })
+    Some(EventSchema {
+        struct_name,
+        fields,
+    })
 }
 
 /// Collect all struct definitions from docs/events.md content.
@@ -607,8 +583,13 @@ fn test_event_schemas_consistent_with_docs() {
                         errors.push(format!(
                             "FIELD '{}.{}: {}' exists in code but NOT in docs/events.md.\n\
                              Documented fields: {:?}",
-                            reg.struct_name, rf.name, rf.typ,
-                            doc.fields.iter().map(|f| format!("{}:{}", f.name, f.typ)).collect::<Vec<_>>()
+                            reg.struct_name,
+                            rf.name,
+                            rf.typ,
+                            doc.fields
+                                .iter()
+                                .map(|f| format!("{}:{}", f.name, f.typ))
+                                .collect::<Vec<_>>()
                         ));
                     }
                 }
@@ -637,11 +618,21 @@ fn test_event_schemas_consistent_with_docs() {
             // Only flag structs that look like stream event payloads
             // (skip things like PauseReason, Stream, StreamOffer, etc.)
             let known_non_events = [
-                "PauseReason", "PauseRecord", "PauseInfo", "Stream", "StreamOffer",
-                "CreateStreamResult", "BatchWithdrawResult", "WithdrawToParam",
-                "AutoClaimValidPayload", "AutoClaimInvalidPayload", "RotationEntry",
-                "PendingRecipientUpdate", "StreamHealth",
-                "Reservation", "Page",
+                "PauseReason",
+                "PauseRecord",
+                "PauseInfo",
+                "Stream",
+                "StreamOffer",
+                "CreateStreamResult",
+                "BatchWithdrawResult",
+                "WithdrawToParam",
+                "AutoClaimValidPayload",
+                "AutoClaimInvalidPayload",
+                "RotationEntry",
+                "PendingRecipientUpdate",
+                "StreamHealth",
+                "Reservation",
+                "Page",
             ];
             if !known_non_events.contains(doc_name) {
                 errors.push(format!(

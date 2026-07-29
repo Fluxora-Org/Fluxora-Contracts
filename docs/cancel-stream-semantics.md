@@ -193,6 +193,55 @@ Witnessed cancel tests (`contracts/stream/tests/witnessed_cancel.rs`):
 8. `witnessed_cancel_from_paused_stream_succeeds`
 9. `witnessed_cancel_already_cancelled_rejected`
 
+Delegated cancel tests (`contracts/stream/tests/delegated_cancel.rs`):
+
+Happy-path and refund correctness:
+
+1. `delegated_cancel_valid_signature_cancels_stream` — stream transitions to Cancelled
+2. `delegated_cancel_sets_cancelled_at_to_current_timestamp` — frozen timestamp correct
+3. `delegated_cancel_refund_amount_correct` — refund = deposit − accrued at cancel time
+4. `delegated_cancel_fully_accrued_zero_refund` — cancel past end_time gives sender 0 refund
+5. `delegated_cancel_before_cliff_full_refund` — cancel before cliff refunds full deposit
+6. `delegated_cancel_from_paused_stream` — Paused streams are cancellable
+7. `delegated_cancel_recipient_can_withdraw_after_cancel` — frozen accrual remains claimable
+8. `delegated_cancel_emits_stream_cancelled_event` — StreamCancelled event emitted
+9. `delegated_cancel_get_delegated_cancel_nonce_view` — nonce view increments after cancel
+10. `delegated_cancel_accrued_and_refund_sum_to_deposit` — conservation invariant
+
+Replay protection:
+
+11. `delegated_cancel_increments_nonce` — stale nonce rejected after first use
+12. `delegated_cancel_replay_rejected` — re-submitting same payload fails
+13. `delegated_cancel_nonce_is_per_sender` — each sender has an independent nonce
+14. `delegated_cancel_failed_call_does_not_consume_nonce` — failed calls leave nonce unchanged
+
+Deadline:
+
+15. `delegated_cancel_expired_deadline_rejected` — past deadline returns SignatureDeadlineExpired
+16. `delegated_cancel_deadline_exactly_now_passes` — deadline == now is accepted
+17. `delegated_cancel_deadline_max_u64_passes` — u64::MAX deadline accepted
+
+Signature binding and domain separation:
+
+18. `delegated_cancel_wrong_public_key_rejected` — key not matching stream.sender rejected
+19. `delegated_cancel_wrong_stream_id_in_signature_rejected` — tampered stream_id rejected
+20. `delegated_cancel_wrong_nonce_in_signature_rejected` — mismatched nonce rejected
+21. `delegated_cancel_wrong_deadline_in_signature_rejected` — tampered deadline rejected
+22. `delegated_cancel_delegated_withdraw_payload_not_replayable` — cross-domain replay blocked
+23. `delegated_cancel_witnessed_cancel_payload_not_replayable` — cross-domain replay blocked
+
+Error paths:
+
+24. `delegated_cancel_stream_not_found` — StreamNotFound for unknown stream_id
+25. `delegated_cancel_already_cancelled_stream_rejected` — InvalidState on double-cancel
+26. `delegated_cancel_completed_stream_rejected` — InvalidState on Completed stream
+27. `delegated_cancel_irrevocable_stream_rejected` — Unauthorized on irrevocable stream
+
+Security invariants:
+
+28. `delegated_cancel_nonce_scope_independent_of_withdraw_nonce` — cancel nonce and withdraw nonce are orthogonal counters
+29. `delegated_cancel_state_change_atomic_no_partial_update` — failed call leaves all state unchanged
+
 ## Optional Cancellation Fee
 
 All streams may specify an optional cancellation fee (in basis points, where 1 bps = 0.01% and 10000 bps = 100%).

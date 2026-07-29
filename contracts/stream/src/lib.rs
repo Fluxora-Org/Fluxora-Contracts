@@ -74,24 +74,11 @@ pub use crate::types::{
 // resolves them without a separate `use crate::types::*` line.
 pub use crate::types::*;
 
-pub fn reject_duplicate_ids(env: &Env, ids: &soroban_sdk::Vec<u64>) -> Result<(), ContractError> {
-    let mut seen = soroban_sdk::Vec::<u64>::new(env);
-    for id in ids.iter() {
-        for existing in seen.iter() {
-            if existing == id {
-                return Err(ContractError::DuplicateStreamId);
-            }
-        }
-        seen.push_back(id);
-    }
-    Ok(())
-}
-
 /// Re-export for adversarial auth tests: bump a recipient's delegated-withdraw nonce
 /// to simulate in-flight revocation without going through the full contract flow.
 /// Only available when the `testutils` feature is enabled.
 #[cfg(feature = "testutils")]
-pub use storage::increment_delegated_nonce_test_only as increment_delegated_nonce;
+pub use storage::increment_delegated_nonce;
 
 // ---------------------------------------------------------------------------
 // TTL constants
@@ -125,6 +112,90 @@ pub const MAX_TEMPLATES_PER_OWNER: u64 = 50;
 
 /// Maximum number of templates stored globally.
 pub const MAX_GLOBAL_TEMPLATES: u64 = 1_000;
+
+/// A pre-configured template specification for common stream scheduling patterns.
+///
+/// Each entry defines a named profile with documented `start_delay`, `cliff_delay`,
+/// and `duration` values. The list in [`DOCUMENTED_TEMPLATES`] is the source of truth
+/// cross-referenced by the doc cross-check test in
+/// `contracts/stream/tests/stream_templates.rs`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TemplateSpec {
+    pub name: &'static str,
+    pub start_delay: u64,
+    pub cliff_delay: u64,
+    pub duration: u64,
+}
+
+/// Quick-pay template: stream starts immediately, no cliff, runs for 1 hour.
+pub const TEMPLATE_QUICK_PAY: TemplateSpec = TemplateSpec {
+    name: "Quick Pay",
+    start_delay: 0,
+    cliff_delay: 0,
+    duration: 3600,
+};
+
+/// Daily template: stream starts immediately, no cliff, runs for 24 hours.
+pub const TEMPLATE_DAILY: TemplateSpec = TemplateSpec {
+    name: "Daily",
+    start_delay: 0,
+    cliff_delay: 0,
+    duration: 86400,
+};
+
+/// Weekly template: stream starts immediately, 1-day cliff, runs for 7 days.
+pub const TEMPLATE_WEEKLY: TemplateSpec = TemplateSpec {
+    name: "Weekly",
+    start_delay: 0,
+    cliff_delay: 86400,
+    duration: 604800,
+};
+
+/// Biweekly template: stream starts immediately, 1-day cliff, runs for 14 days.
+pub const TEMPLATE_BIWEEKLY: TemplateSpec = TemplateSpec {
+    name: "Biweekly",
+    start_delay: 0,
+    cliff_delay: 86400,
+    duration: 1_209_600,
+};
+
+/// Monthly template: stream starts immediately, 2-day cliff, runs for 30 days.
+pub const TEMPLATE_MONTHLY: TemplateSpec = TemplateSpec {
+    name: "Monthly",
+    start_delay: 0,
+    cliff_delay: 172_800,
+    duration: 2_592_000,
+};
+
+/// Quarterly template: stream starts immediately, 7-day cliff, runs for 90 days.
+pub const TEMPLATE_QUARTERLY: TemplateSpec = TemplateSpec {
+    name: "Quarterly",
+    start_delay: 0,
+    cliff_delay: 604_800,
+    duration: 7_776_000,
+};
+
+/// Annual template: stream starts immediately, 7-day cliff, runs for 365 days.
+pub const TEMPLATE_ANNUAL: TemplateSpec = TemplateSpec {
+    name: "Annual",
+    start_delay: 0,
+    cliff_delay: 604_800,
+    duration: 31_536_000,
+};
+
+/// All documented pre-configured templates, in declaration order.
+///
+/// Used by the doc cross-check test to verify that every template listed in
+/// `docs/stream-templates.md` is registered with the expected parameters.
+pub const DOCUMENTED_TEMPLATES: &[TemplateSpec] = &[
+    TEMPLATE_QUICK_PAY,
+    TEMPLATE_DAILY,
+    TEMPLATE_WEEKLY,
+    TEMPLATE_BIWEEKLY,
+    TEMPLATE_MONTHLY,
+    TEMPLATE_QUARTERLY,
+    TEMPLATE_ANNUAL,
+];
 
 /// Maximum number of stream IDs that can be reserved in a single `reserve_stream_ids` call.
 pub const MAX_ID_RESERVATION: u32 = 100;
@@ -637,7 +708,6 @@ pub struct StreamCreated {
     /// Mirrors the validated `metadata` field stored on the stream.
     pub metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
 }
-
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1328,6 +1398,20 @@ pub enum DataKey {
     PooledStreamShares(u64),
     /// Per-recipient withdrawn amount for a pooled stream.
     PooledStreamWithdrawn(u64, Address),
+    /// Per-sender nonce counter for `delegated_cancel` replay protection.
+    ///
+    /// Keyed by the stream **sender** address (distinct from the recipient-keyed
+    /// `DelegatedWithdrawNonce`). Incremented atomically inside `delegated_cancel`
+    /// after signature verification, before returning, so every successfully-executed
+    /// cancellation consumes exactly one nonce value and the same signed payload
+    /// cannot be submitted twice.
+    ///
+    /// Domain-separated from `DelegatedWithdrawNonce` at both the storage level
+    /// (different `DataKey` variant) and the signature level (distinct
+    /// `DELEGATED_CANCEL_DOMAIN` tag prepended to the payload).
+    ///
+    /// Appended at the end to preserve all existing discriminants.
+    DelegatedCancelNonce(Address),
 }
 
 // ---------------------------------------------------------------------------
@@ -3051,7 +3135,8 @@ impl FluxoraStream {
         msg.extend_from_array(&nonce.to_be_bytes());
         msg.extend_from_array(&deadline.to_be_bytes());
 
-        env.crypto().ed25519_verify(&sender_public_key, &msg, &signature);
+        env.crypto()
+            .ed25519_verify(&sender_public_key, &msg, &signature);
 
         crate::storage::increment_delegated_cancel_nonce(&env, &stream.sender);
 
@@ -4072,6 +4157,22 @@ impl FluxoraStream {
         load_delegated_nonce(&env, &recipient)
     }
 
+    /// Return the current delegated-cancel nonce for a sender.
+    ///
+    /// Relayers must include this value in the signed cancel-message to prevent
+    /// replay attacks. The nonce is per-sender (keyed by `DataKey::DelegatedCancelNonce`)
+    /// and is incremented on every successful `delegated_cancel` call, independent of
+    /// the recipient-keyed `DelegatedWithdrawNonce`.
+    ///
+    /// # Parameters
+    /// - `sender`: The stream sender whose cancel-delegation nonce is queried.
+    ///
+    /// # Returns
+    /// Current `u64` nonce; starts at `0` before the first `delegated_cancel` call.
+    pub fn get_delegated_cancel_nonce(env: Env, sender: Address) -> u64 {
+        crate::storage::load_delegated_cancel_nonce(&env, &sender)
+    }
+
     /// Calculate the total amount accrued to the recipient at the current time.
     ///
     /// # Behaviour by status
@@ -4834,16 +4935,18 @@ impl FluxoraStream {
             .checked_add(future_accrual)
             .ok_or(ContractError::ArithmeticOverflow)?;
 
-        // new_deposit must fit within the old deposit (guaranteed by lower rate * same duration).
+        // new_deposit must fit within the old deposit. A lower rate should never
+        // increase the maximum payable amount for the remaining duration. If state
+        // is inconsistent (e.g. a pre-upgrade or manually-mutated deposit ceiling),
+        // reject deterministically with ArithmeticOverflow instead of silently
+        // treating the condition as a generic invalid state.
         let old_deposit = stream.deposit_amount;
+        if new_deposit > old_deposit {
+            return Err(ContractError::ArithmeticOverflow);
+        }
         let refund_amount = old_deposit
             .checked_sub(new_deposit)
             .ok_or(ContractError::ArithmeticOverflow)?;
-
-        // Sanity: refund must be non-negative (lower rate → smaller max payable).
-        if refund_amount < 0 {
-            return Err(ContractError::InvalidState);
-        }
 
         // ── CEI: persist state before token transfer ───────────────────────────────
         stream.checkpointed_amount = accrued_now;
