@@ -38,9 +38,25 @@ pub enum DataKey {
     GlobalPauseTimestamp,      // discriminant 7 — instance
     GlobalPauseAdmin,          // discriminant 8 — instance
     AutoClaimDestination(u64), // discriminant 9 — persistent
-    StreamMemo(u64),           // discriminant 10 — persistent
-    PauseState,                // discriminant 11 — instance
-    ReentrancyLock,            // discriminant 12 — instance
+    NextTemplateId,            // discriminant 10 — instance
+    ActiveTemplateCount,       // discriminant 11 — instance
+    StreamTemplate(u64),       // discriminant 12 — persistent
+    OwnerTemplateIds(Address), // discriminant 13 — persistent
+    TotalLiabilities,          // discriminant 14 — instance
+    WithdrawNonce(Address),    // discriminant 15 — persistent
+    PauseState,                // discriminant 16 — instance
+    ReentrancyLock,            // discriminant 17 — instance
+    RecipientStreamPage(Address, u32), // discriminant 18 — persistent
+    RecipientStreamPageCount(Address), // discriminant 19 — persistent
+    PendingRecipientUpdate(u64), // discriminant 20 — persistent
+    IdReservation(Address),    // discriminant 21 — persistent
+    MaxRatePerSecond,          // discriminant 22 — instance
+    DelegatedWithdrawNonce(Address), // discriminant 23 — persistent
+    LastPauseRecord(PauseKind), // discriminant 24 — instance
+    RotationHistory(u64),      // discriminant 25 — persistent
+    LastAccrualLedgerTimestamp, // discriminant 26 — instance
+    PausedStreamCount,         // discriminant 27 — instance
+    TotalKeeperFeesPaid,       // discriminant 28 — instance
 
 }
 
@@ -60,9 +76,25 @@ pub enum DataKey {
 | 7 | `GlobalPauseTimestamp` | Instance | `u64` | `pause_protocol` | `resume_protocol` (removes) |
 | 8 | `GlobalPauseAdmin` | Instance | `Address` | `pause_protocol` | `resume_protocol` (removes) |
 | 9 | `AutoClaimDestination(u64)` | Persistent | `Address` | auto-claim opt-in | auto-claim revoke |
-| 10 | `StreamMemo(u64)` | Persistent | `Bytes` (max 64 bytes) | `create_stream`, `create_streams` | `close_completed_stream` (removes) |
-| 11 | `PauseState` | Instance | `PauseState` enum | `set_global_emergency_paused`, `set_contract_paused`, `pause_protocol` | `resume_protocol` (Active) |
-| 12 | `ReentrancyLock` | Instance | `bool` | `acquire_reentrancy_lock` | `release_reentrancy_lock` |
+| 10 | `NextTemplateId` | Instance | `u64` | `register_template` | `register_template` |
+| 11 | `ActiveTemplateCount` | Instance | `u64` | `register_template` | `deregister_template` |
+| 12 | `StreamTemplate(u64)` | Persistent | `StreamScheduleTemplate` | `register_template` | `deregister_template` |
+| 13 | `OwnerTemplateIds(Address)` | Persistent | `Vec<u64>` | `register_template` | `deregister_template` |
+| 14 | `TotalLiabilities` | Instance | `i128` | `create_stream` | `withdraw`, `cancel_stream` |
+| 15 | `WithdrawNonce(Address)` | Persistent | `u64` | `delegated_withdraw` | `delegated_withdraw` |
+| 16 | `PauseState` | Instance | `PauseState` enum | `set_global_emergency_paused`, `set_contract_paused`, `pause_protocol` | `resume_protocol` (Active) |
+| 17 | `ReentrancyLock` | Instance | `bool` | `acquire_reentrancy_lock` | `release_reentrancy_lock` |
+| 18 | `RecipientStreamPage(Address, u32)` | Persistent | `Vec<u64>` | `create_stream` | `close_completed_stream` |
+| 19 | `RecipientStreamPageCount(Address)` | Persistent | `u32` | `create_stream` | `close_completed_stream` |
+| 20 | `PendingRecipientUpdate(u64)` | Persistent | `Address` | `propose_recipient_update` | `accept_recipient_update` |
+| 21 | `IdReservation(Address)` | Persistent | `IdReservation` | `reserve_stream_ids` | `create_stream` |
+| 22 | `MaxRatePerSecond` | Instance | `i128` | `set_max_rate_per_second` | `set_max_rate_per_second` |
+| 23 | `DelegatedWithdrawNonce(Address)` | Persistent | `u64` | `delegated_withdraw` | `delegated_withdraw` |
+| 24 | `LastPauseRecord(PauseKind)` | Instance | `PauseRecord` | `pause_stream`, `pause_protocol` | `resume_stream`, `resume_protocol` |
+| 25 | `RotationHistory(u64)` | Persistent | `Vec<RotationEntry>` | `transfer_sender`, `accept_recipient_update` | (Append only) |
+| 26 | `LastAccrualLedgerTimestamp` | Instance | `u64` | accrual hooks | accrual hooks |
+| 27 | `PausedStreamCount` | Instance | `u64` | `pause_stream` | `resume_stream`, `cancel_stream` |
+| 28 | `TotalKeeperFeesPaid` | Instance | `i128` | `keeper_cancel` | `keeper_cancel` |
 
 ---
 
@@ -274,7 +306,7 @@ Discriminants 0–14 are **permanently frozen**. No variant at these positions m
 
 ### V5 → V6 transition
 
-V6 appended six new `DataKey` variants (discriminants 15–20) and one new `Stream` field:
+V6 and later upgrades appended new `DataKey` variants (discriminants 15–28) and one new `Stream` field:
 
 | Discriminant | Variant                             | Storage    | Value type   | Notes                                                      |
 | -----------: | :---------------------------------- | :--------- | :----------- | :--------------------------------------------------------- |
@@ -284,6 +316,14 @@ V6 appended six new `DataKey` variants (discriminants 15–20) and one new `Stre
 |           18 | `RecipientStreamPage(Address, u32)` | Persistent | `Vec<u64>`   | Paged recipient index (page → IDs)                         |
 |           19 | `RecipientStreamPageCount(Address)` | Persistent | `u32`        | Number of pages in recipient's index                       |
 |           20 | `PendingRecipientUpdate(u64)`       | Persistent | `Address`    | Pending recipient rotation proposal                        |
+|           21 | `IdReservation(Address)`            | Persistent | `IdReservation`| Active ID reservation for a caller                       |
+|           22 | `MaxRatePerSecond`                  | Instance   | `i128`       | Per-stream max rate cap                                    |
+|           23 | `DelegatedWithdrawNonce(Address)`   | Persistent | `u64`        | Per-recipient nonce for delegated-withdraw                 |
+|           24 | `LastPauseRecord(PauseKind)`        | Instance   | `PauseRecord`| Last pause record for stream or protocol                   |
+|           25 | `RotationHistory(u64)`              | Persistent | `Vec<RotationEntry>` | Rotation history for recipient/sender changes      |
+|           26 | `LastAccrualLedgerTimestamp`        | Instance   | `u64`        | Last ledger timestamp observed for accrual clock-regression|
+|           27 | `PausedStreamCount`                 | Instance   | `u64`        | Protocol-wide count of streams currently in `StreamStatus::Paused` |
+|           28 | `TotalKeeperFeesPaid`               | Instance   | `i128`       | Aggregate sum of all keeper fees paid out via `keeper_cancel` |
 
 V6 `Stream` struct adds one field at the end:
 
