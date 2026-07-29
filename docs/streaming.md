@@ -403,6 +403,23 @@ Security and accounting rules:
 - The parent is checkpointed at the current ledger timestamp before its rate is reduced, preserving all already-accrued and already-withdrawn entitlement.
 - The child stream starts at the checkpoint timestamp and receives only the delegated future accrual. No hostnames, off-chain identifiers, or private metadata are introduced by the delegation event.
 - The child is indexed for both `new_recipient` and the original sender portfolio, so it behaves as an independent stream for reads and later withdrawals.
+- Each child records its origin in `parent_stream_id` (regular non-delegated streams leave it `None`), and the `RecipientShareDelegated` event carries both `parent_stream_id` and `child_stream_id`, so indexers can reconstruct lineage without a second read.
+
+### Stream lineage (`get_stream_lineage`)
+
+`get_stream_lineage(stream_id) -> Vec<u64>` returns a stream's ancestry chain in
+**root-to-leaf** order, inclusive of the queried stream, by following the
+`parent_stream_id` links recorded on delegated child streams.
+
+- A root stream (no parent) returns a single-element vector `[stream_id]`.
+- A delegated child returns `[root, …, stream_id]`, e.g. a stream two delegations
+  deep returns `[root, child1, child2]`.
+- The walk is bounded by `MAX_LINEAGE_DEPTH` (`MAX_DELEGATION_DEPTH + 1 = 4`) so
+  read cost is capped even against a malformed chain; because the delegation tree
+  is depth-bounded and cycle-free by construction, a well-formed lineage is never
+  truncated.
+- Querying a non-existent `stream_id` returns the standard `load_stream` error
+  rather than panicking.
 
 ### Cancellation Semantics (Issue Scope)
 
