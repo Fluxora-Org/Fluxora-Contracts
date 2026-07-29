@@ -24,7 +24,7 @@
 //! - **Stream layout validation:** `validate_stream_invariants` validates field boundaries
 //!   (deposit, withdrawal, timestamps, checkpoints) before stream state persistence.
 //! - **Append-only keys:** `DataKey` variants are never reordered (discriminants
-//!   0–35 frozen per release policy).
+//!   0–36 frozen per release policy).
 //!
 //! # Security notes
 //! - `DataKey` variant order is append-only and must never be reordered.

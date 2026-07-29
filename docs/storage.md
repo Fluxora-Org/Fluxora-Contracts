@@ -51,6 +51,7 @@ pub enum DataKey {
     RecipientPendingOffers(Address),
     PooledStreamShares(u64),
     PooledStreamWithdrawn(u64, Address),
+    DelegatedCancelNonce(Address),
 }
 ```
 
@@ -94,6 +95,7 @@ pub enum DataKey {
 | 33 | `RecipientPendingOffers(Address)` | Persistent | `Vec<u64>` | `create_stream_offer` | accept/reject/cancel (removes) |
 | 34 | `PooledStreamShares(u64)` | Persistent | `Vec<(Address,u32)>` | pooled stream creation | withdraw / close |
 | 35 | `PooledStreamWithdrawn(u64, Address)` | Persistent | `i128` | pooled withdraw | pooled withdraw (increments) |
+| 36 | `DelegatedCancelNonce(Address)` | Persistent | `u64` | absent/0 until delegated cancel | successful `delegated_cancel` (increments) |
 
 ---
 
@@ -113,7 +115,7 @@ Persistent storage is used for individual stream records and per-recipient nonce
 1. **Never reorder** existing variants. The discriminant table above is immutable for the lifetime of any deployed instance.
 2. **Never remove** a variant that has ever been written to a live network. Mark it `#[deprecated]` in a doc comment and stop writing to it; do not delete it.
 3. **Always append** new variants at the end of the enum.
-4. **Increment `CONTRACT_VERSION`** whenever a new variant is added or an existing variant's associated value type changes — both are breaking changes for off-chain tools that read storage directly.
+4. **Review `CONTRACT_VERSION`** whenever a variant is appended. Changing an existing variant or value type requires a bump and a migration/new deployment. A strictly append-only key may remain under the current version only when absent-key behavior, direct-storage-reader impact, compatibility tests, and release notes are updated together.
 5. **Document the ledger** at which each new variant is first deployed so that migration tooling can determine which entries exist on a given instance.
 
 ### What counts as a breaking storage change
@@ -124,7 +126,7 @@ Persistent storage is used for individual stream records and per-recipient nonce
 | Insert variant in the middle | Yes — shifts discriminants | Never do this |
 | Remove an existing variant | Yes — existing entries become orphaned | Deprecate instead |
 | Change the value type of an existing variant | Yes — existing entries become undecodable | Increment `CONTRACT_VERSION` |
-| Append a new variant at the end | No — existing entries unaffected | Increment `CONTRACT_VERSION` (conservative) |
+| Append a new variant at the end | No for existing on-chain entries; direct storage readers must update | Review version; document absent default and add compatibility tests |
 | Change TTL constants | No — no effect on stored data | No version bump required |
 | Change internal helper logic with identical external behaviour | No | No version bump required |
 
@@ -149,7 +151,7 @@ storage layout is append-only and the V5 `Stream` struct ended before the
 The storage-key compatibility suite treats the following as the regression
 boundary for this release:
 
-- `DataKey` discriminants 0–35 stay in declaration order.
+- `DataKey` discriminants 0–36 stay in declaration order.
 - `Stream` fields 0–13 keep their current positions and `memo` remains the
     last field.
 - `memo` must decode as `None` on older V5-seeded entries.
@@ -393,7 +395,7 @@ V7 appended eight new `DataKey` variants (discriminants 21–28) while preservin
 | 27 | `PausedStreamCount` | Instance | `u64` | Protocol-wide count of streams currently in `StreamStatus::Paused` |
 | 28 | `TotalKeeperFeesPaid` | Instance | `i128` | Aggregate keeper fees paid via `keeper_cancel` |
 
-Code-level invariant verification for all 36 variants is maintained in [`contracts/stream/src/checksum.rs`](../contracts/stream/src/checksum.rs).
+Code-level invariant verification for all 37 variants is maintained in [`contracts/stream/src/checksum.rs`](../contracts/stream/src/checksum.rs).
 
 ### Forward-compatibility guarantee
 
