@@ -21,9 +21,11 @@ use soroban_sdk::{
 
 struct TestCtx<'a> {
     env: Env,
+    #[allow(dead_code)]
     contract_id: Address,
     client: FluxoraStreamClient<'a>,
     token_id: Address,
+    #[allow(dead_code)]
     sac: StellarAssetClient<'a>,
     admin: Address,
     sender: Address,

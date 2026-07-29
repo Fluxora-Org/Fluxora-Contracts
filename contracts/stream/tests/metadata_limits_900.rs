@@ -11,7 +11,7 @@ extern crate std;
 
 use fluxora_stream::{
     ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamCreated,
-    MAX_METADATA_BYTES, MAX_METADATA_KEY_BYTES, MAX_METADATA_VALUE_BYTES,
+    MAX_METADATA_VALUE_BYTES,
 };
 use soroban_sdk::{
     symbol_short,
@@ -25,6 +25,7 @@ struct Ctx<'a> {
     client: FluxoraStreamClient<'a>,
     sender: Address,
     recipient: Address,
+    #[allow(dead_code)]
     token: TokenClient<'a>,
 }
 
