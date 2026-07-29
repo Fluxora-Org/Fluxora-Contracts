@@ -125,6 +125,7 @@ struct Ctx<'a> {
     /// Token client used for balance / allowance assertions.
     token: TokenClient<'a>,
     /// The admin address — kept for double-init idempotency tests.
+    #[allow(dead_code)]
     admin: Address,
     /// The token address — kept for double-init idempotency tests.
     token_id: Address,
@@ -258,6 +259,56 @@ impl<'a> Ctx<'a> {
     fn assert_no_token_movement(&self, balance_before: i128, msg: &str) {
         self.assert_sender_balance(balance_before, msg);
     }
+}
+
+/// Fixture-harness invariants are part of the regression surface.
+///
+/// `Ctx::setup` must start each test from an isolated, deterministic state:
+/// - no streams have been created yet
+/// - sender balance is exactly `INITIAL_SENDER_BALANCE`
+/// - sender allowance to the contract is exactly `i128::MAX`
+/// - ledger timestamp and sequence are pinned to the hard-coded baseline
+///
+/// The first stream created after setup should therefore observe an empty
+/// pre-existing state and a single increment to the stream counter.
+#[test]
+fn test_fixture_setup_provides_isolated_deterministic_state() {
+    let ctx = Ctx::setup();
+
+    assert_eq!(
+        ctx.client().get_stream_count(),
+        0,
+        "fixture setup must leave the stream counter at zero"
+    );
+    assert_eq!(
+        ctx.token.balance(&ctx.sender),
+        INITIAL_SENDER_BALANCE,
+        "fixture setup must mint the expected initial sender balance"
+    );
+    assert_eq!(
+        ctx.token.allowance(&ctx.sender, &ctx.contract_id),
+        i128::MAX,
+        "fixture setup must approve the contract for i128::MAX"
+    );
+    assert_eq!(
+        ctx.env.ledger().timestamp(),
+        LEDGER_START_TIMESTAMP,
+        "fixture setup must pin the ledger timestamp"
+    );
+    assert_eq!(
+        ctx.env.ledger().sequence(),
+        LEDGER_START_SEQUENCE,
+        "fixture setup must pin the ledger sequence"
+    );
+
+    let stream_id = ctx.create_stream_with_metadata(None);
+
+    assert_eq!(
+        ctx.client().get_stream_count(),
+        1,
+        "the first created stream should be the only stream visible after setup"
+    );
+    assert!(ctx.client().get_stream_metadata(&stream_id).is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -557,8 +608,9 @@ fn test_metadata_aggregate_exceeds_limit_rejected() {
 #[test]
 fn test_metadata_single_entry_aggregate_exceeds_limit_early_exit() {
     let ctx = Ctx::setup();
-    // value alone = MAX_METADATA_BYTES bytes; key = 1 byte → total = MAX_METADATA_BYTES + 1 > limit.
-    let value = Bytes::from_slice(&ctx.env, &vec![0u8; MAX_METADATA_BYTES as usize].as_slice());
+    // This value declaration is kept for documentation clarity; the actual test
+    // uses the oversized_value below for the per-field early-exit path.
+    let _value = Bytes::from_slice(&ctx.env, &vec![0u8; MAX_METADATA_BYTES as usize].as_slice());
     // MAX_METADATA_VALUE_BYTES is 128, so value above is 512 bytes which already exceeds
     // MAX_METADATA_VALUE_BYTES (128).  Use a value of exactly MAX_METADATA_VALUE_BYTES bytes
     // and pad the key to push the aggregate over the limit.
@@ -1339,7 +1391,7 @@ fn test_create_streams_partial_invalid_metadata_fails_entry() {
 }
 
 // ---------------------------------------------------------------------------
-// clone_stream: metadata is inherited by the cloned stream
+// clone_stream: metadata is reset to None on the cloned stream
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1361,7 +1413,7 @@ fn test_metadata_inherited_by_clone_stream() {
         &false,
     );
 
-    // On the hardened contract, clone_stream resets metadata to None.
+    // Current contract behavior: clone_stream resets metadata to None.
     let cloned_meta = ctx.client().get_stream_metadata(&cloned_id);
     assert!(
         cloned_meta.is_none(),
