@@ -654,6 +654,7 @@ pub enum ContractError {
     MetadataTooLarge = 32,
     /// Keeper attempted to close a stream before the grace period elapsed.
     KeeperGracePeriodNotElapsed = 33,
+    /// ID reservation is active; 34 is distinct from keeper grace errors.
     ReservationAlreadyActive = 34,
     /// Withdraw dust threshold is negative or exceeds deposit amount.
     InvalidDustThreshold = 35,
