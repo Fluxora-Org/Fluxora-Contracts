@@ -6346,7 +6346,17 @@ impl FluxoraStream {
                 .checked_sub(refund_amount)
                 .unwrap_or(0);
             write_total_liabilities(env, liabilities);
-            push_token(env, &stream.sender, refund_amount)?;
+
+            // Reentrancy guard around the external token transfer, mirroring
+            // `withdraw`/`delegated_withdraw`. Terminal state is already persisted
+            // above (CEI), so a malicious token re-entering any cancel or
+            // withdraw path during this transfer hits the held lock and reverts.
+            // Capture the result, always release, then propagate so the lock is
+            // never left stuck on a failed transfer.
+            acquire_reentrancy_lock(env)?;
+            let transfer_result = push_token(env, &stream.sender, refund_amount);
+            release_reentrancy_lock(env);
+            transfer_result?;
         }
 
         events::emit_stream_cancelled(env, stream.stream_id);
