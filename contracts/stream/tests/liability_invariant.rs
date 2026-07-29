@@ -815,11 +815,15 @@ fn total_liabilities_invariant_holds_across_pause_resume_cycles() {
     // Advance time and pause
     ctx.env.ledger().set_timestamp(100);
     ctx.env.ledger().set_sequence_number(21);
-    ctx.client().pause_stream(&stream_id, &PauseReason::Operational);
+    ctx.client()
+        .pause_stream(&stream_id, &PauseReason::Operational);
 
     // Liability must still equal deposit while paused (pause doesn't change deposit)
     let liabilities_paused = ctx.client().get_total_liabilities();
-    assert_eq!(liabilities_paused, deposit, "TotalLiabilities unchanged after pause");
+    assert_eq!(
+        liabilities_paused, deposit,
+        "TotalLiabilities unchanged after pause"
+    );
     assert!(ctx.contract_balance() >= liabilities_paused);
     check_sweep_invariant(&ctx, liabilities_paused, &treasury, "paused");
 
@@ -828,7 +832,10 @@ fn total_liabilities_invariant_holds_across_pause_resume_cycles() {
     ctx.client().resume_stream(&stream_id);
 
     let liabilities_resumed = ctx.client().get_total_liabilities();
-    assert_eq!(liabilities_resumed, deposit, "TotalLiabilities unchanged after resume");
+    assert_eq!(
+        liabilities_resumed, deposit,
+        "TotalLiabilities unchanged after resume"
+    );
     assert!(ctx.contract_balance() >= liabilities_resumed);
     check_sweep_invariant(&ctx, liabilities_resumed, &treasury, "resumed");
 
@@ -857,16 +864,34 @@ fn multiple_top_ups_correctly_increase_total_liabilities() {
     assert_eq!(ctx.client().get_total_liabilities(), initial_deposit);
 
     // Top-up #1
-    ctx.client().top_up_stream(&stream_id, &ctx.sender, &2_000i128);
-    assert_eq!(ctx.client().get_total_liabilities(), initial_deposit + 2_000);
+    ctx.client()
+        .top_up_stream(&stream_id, &ctx.sender, &2_000i128);
+    assert_eq!(
+        ctx.client().get_total_liabilities(),
+        initial_deposit + 2_000
+    );
     assert!(ctx.contract_balance() >= ctx.client().get_total_liabilities());
-    check_sweep_invariant(&ctx, ctx.client().get_total_liabilities(), &treasury, "after topup1");
+    check_sweep_invariant(
+        &ctx,
+        ctx.client().get_total_liabilities(),
+        &treasury,
+        "after topup1",
+    );
 
     // Top-up #2
-    ctx.client().top_up_stream(&stream_id, &ctx.sender, &1_500i128);
-    assert_eq!(ctx.client().get_total_liabilities(), initial_deposit + 2_000 + 1_500);
+    ctx.client()
+        .top_up_stream(&stream_id, &ctx.sender, &1_500i128);
+    assert_eq!(
+        ctx.client().get_total_liabilities(),
+        initial_deposit + 2_000 + 1_500
+    );
     assert!(ctx.contract_balance() >= ctx.client().get_total_liabilities());
-    check_sweep_invariant(&ctx, ctx.client().get_total_liabilities(), &treasury, "after topup2");
+    check_sweep_invariant(
+        &ctx,
+        ctx.client().get_total_liabilities(),
+        &treasury,
+        "after topup2",
+    );
 
     // Advance time and withdraw
     ctx.env.ledger().set_timestamp(200);
@@ -900,7 +925,12 @@ fn cliff_slope_stream_liability_invariant() {
 
     let liabilities_post = ctx.client().get_total_liabilities();
     assert!(ctx.contract_balance() >= liabilities_post);
-    check_sweep_invariant(&ctx, liabilities_post, &treasury, "cliffslope pre-cliff withdraw");
+    check_sweep_invariant(
+        &ctx,
+        liabilities_post,
+        &treasury,
+        "cliffslope pre-cliff withdraw",
+    );
 
     // Withdraw after cliff
     ctx.env.ledger().set_timestamp(500);
@@ -908,7 +938,12 @@ fn cliff_slope_stream_liability_invariant() {
 
     let liabilities_after = ctx.client().get_total_liabilities();
     assert!(ctx.contract_balance() >= liabilities_after);
-    check_sweep_invariant(&ctx, liabilities_after, &treasury, "cliffslope post-cliff withdraw");
+    check_sweep_invariant(
+        &ctx,
+        liabilities_after,
+        &treasury,
+        "cliffslope post-cliff withdraw",
+    );
 }
 
 /// Batch withdraw liability tracking: withdrawing from multiple streams must

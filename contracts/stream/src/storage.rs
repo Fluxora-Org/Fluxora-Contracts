@@ -959,14 +959,12 @@ pub fn reject_duplicate_ids(
     env: &Env,
     stream_ids: &soroban_sdk::Vec<u64>,
 ) -> Result<(), ContractError> {
-    let mut seen = soroban_sdk::Vec::<u64>::new(env);
+    let mut seen = soroban_sdk::Map::<u64, ()>::new(env);
     for id in stream_ids.iter() {
-        for s in seen.iter() {
-            if s == id {
-                return Err(ContractError::DuplicateStreamId);
-            }
+        if seen.contains_key(id) {
+            return Err(ContractError::DuplicateStreamId);
         }
-        seen.push_back(id);
+        seen.set(id, ());
     }
     Ok(())
 }

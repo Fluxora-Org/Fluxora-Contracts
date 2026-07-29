@@ -1656,9 +1656,7 @@ fn test_metadata_unchanged_after_shorten_stream_end_time() {
     meta.set(ctx.make_key("ref"), ctx.make_val("SHORTEN_TEST"));
     let stream_id = ctx.create_stream_with_metadata(Some(meta));
 
-    ctx.env
-        .ledger()
-        .set_timestamp(LEDGER_START_TIMESTAMP + 200);
+    ctx.env.ledger().set_timestamp(LEDGER_START_TIMESTAMP + 200);
     ctx.client()
         .shorten_stream_end_time(&stream_id, &(LEDGER_START_TIMESTAMP + 500));
 

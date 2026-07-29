@@ -74,19 +74,6 @@ pub use crate::types::{
 // resolves them without a separate `use crate::types::*` line.
 pub use crate::types::*;
 
-pub fn reject_duplicate_ids(env: &Env, ids: &soroban_sdk::Vec<u64>) -> Result<(), ContractError> {
-    let mut seen = soroban_sdk::Vec::<u64>::new(env);
-    for id in ids.iter() {
-        for existing in seen.iter() {
-            if existing == id {
-                return Err(ContractError::DuplicateStreamId);
-            }
-        }
-        seen.push_back(id);
-    }
-    Ok(())
-}
-
 /// Re-export for adversarial auth tests: bump a recipient's delegated-withdraw nonce
 /// to simulate in-flight revocation without going through the full contract flow.
 /// Only available when the `testutils` feature is enabled.
