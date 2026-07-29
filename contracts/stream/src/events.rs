@@ -9,7 +9,6 @@
 
 use crate::types::StreamDecommissioned;
 use crate::*;
-use crate::types::StreamDecommissioned;
 use soroban_sdk::{symbol_short, Address, Env};
 
 /// Emit the `created` event when a new stream is persisted.

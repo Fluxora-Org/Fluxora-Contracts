@@ -16,7 +16,11 @@ pub trait FluxoraStreamInterface {
         sender: Address,
         params: CreateStreamParams,
     ) -> Result<u64, fluxora_stream::ContractError>;
-    fn create_streams(env: Env, sender: Address, streams: Vec<CreateStreamParams>) -> Vec<u64>;
+    fn create_streams(
+        env: Env,
+        sender: Address,
+        streams: Vec<CreateStreamParams>,
+    ) -> Result<Vec<u64>, fluxora_stream::ContractError>;
 }
 
 /// Maximum number of stream IDs returned per page in `get_factory_streams_paginated`.
@@ -1139,7 +1143,15 @@ impl FluxoraFactory {
         }
 
         // --- Interaction ---
-        let created_ids = stream_client.create_streams(&sender, &wrapped_streams);
+        let created_ids = match stream_client.try_create_streams(&sender, &wrapped_streams) {
+            Ok(Ok(ids)) => ids,
+            Ok(Err(_)) => return Err(FactoryError::StreamContractError),
+            Err(Ok(StreamContractErr::ContractPaused)) => {
+                return Err(FactoryError::StreamContractPaused)
+            }
+            Err(Ok(_)) => return Err(FactoryError::StreamContractError),
+            Err(Err(_)) => return Err(FactoryError::StreamContractError),
+        };
 
         // --- Effect (post-interaction): register all batch IDs in creation order ---
         // Written only after the cross-contract call succeeds; a downstream failure
@@ -1159,7 +1171,7 @@ mod tests {
     extern crate std;
     use super::*;
     use soroban_sdk::testutils::{Address as _, Events, Ledger};
-    use soroban_sdk::{vec, Env, TryFromVal, Val, Vec as SVec};
+    use soroban_sdk::{vec, Env, Symbol, TryFromVal, Val, Vec as SVec};
 
     /// Helper: register a `FluxoraStream` contract and return its address.
     /// The stream does not need `init` — `version()` works before init.
@@ -1220,7 +1232,7 @@ mod tests {
     #[test]
     fn test_set_stream_contract_same_address_noop() {
         let ctx = Ctx::setup();
-        let current = ctx.client.get_factory_config().unwrap().stream_contract;
+        let current = ctx.client.get_factory_config().stream_contract;
 
         let events_before = ctx.env.events().all().len();
 
@@ -1235,7 +1247,7 @@ mod tests {
         );
 
         // Config unchanged.
-        let config = ctx.client.get_factory_config().unwrap();
+        let config = ctx.client.get_factory_config();
         assert_eq!(config.stream_contract, current);
     }
 
@@ -1243,12 +1255,12 @@ mod tests {
     #[test]
     fn test_set_stream_contract_valid_migration_succeeds() {
         let ctx = Ctx::setup();
-        let old = ctx.client.get_factory_config().unwrap().stream_contract;
+        let old = ctx.client.get_factory_config().stream_contract;
         let new_stream = deploy_stream(&ctx.env);
 
         ctx.client.set_stream_contract(&new_stream);
 
-        let config = ctx.client.get_factory_config().unwrap();
+        let config = ctx.client.get_factory_config();
         assert_eq!(config.stream_contract, new_stream);
         assert_ne!(config.stream_contract, old);
 
@@ -1280,13 +1292,13 @@ mod tests {
     #[test]
     fn test_set_stream_contract_rejects_eoa() {
         let ctx = Ctx::setup();
-        let old = ctx.client.get_factory_config().unwrap().stream_contract;
+        let old = ctx.client.get_factory_config().stream_contract;
         let eoa = Address::generate(&ctx.env);
 
         let result = ctx.client.try_set_stream_contract(&eoa);
         assert_eq!(result, Err(Ok(FactoryError::InvalidStreamContract)));
 
-        let config = ctx.client.get_factory_config().unwrap();
+        let config = ctx.client.get_factory_config();
         assert_eq!(config.stream_contract, old);
     }
 
@@ -1295,7 +1307,7 @@ mod tests {
     #[test]
     fn test_set_stream_contract_rejects_non_fluxora_stream() {
         let ctx = Ctx::setup();
-        let old = ctx.client.get_factory_config().unwrap().stream_contract;
+        let old = ctx.client.get_factory_config().stream_contract;
 
         // Register a random contract (a second factory) that does not expose `version()`.
         let other_factory = ctx
@@ -1304,7 +1316,7 @@ mod tests {
         let result = ctx.client.try_set_stream_contract(&other_factory);
         assert_eq!(result, Err(Ok(FactoryError::InvalidStreamContract)));
 
-        let config = ctx.client.get_factory_config().unwrap();
+        let config = ctx.client.get_factory_config();
         assert_eq!(config.stream_contract, old);
     }
 
@@ -1350,7 +1362,7 @@ mod tests {
             );
         }
 
-        let config = ctx.client.get_factory_config().unwrap();
+        let config = ctx.client.get_factory_config();
         assert_eq!(config.stream_contract, new_stream);
     }
 }
