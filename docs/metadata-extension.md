@@ -54,6 +54,25 @@ Creation paths that call validation: `create_stream`, `create_streams`,
 
 ---
 
+## Fixture harness invariants
+
+The regression suite uses a dedicated harness in
+`contracts/stream/tests/metadata_extension.rs` to keep fixture behavior explicit.
+Each test begins from a fresh Soroban environment with a newly registered
+contract and token, and the harness asserts that setup is deterministic before
+any test body runs:
+
+- the sender balance is minted to `INITIAL_SENDER_BALANCE`
+- the contract allowance is pinned to `i128::MAX`
+- the ledger timestamp and sequence are set to fixed baseline values
+- no stream is created during setup, so the stream counter starts at zero
+- helper assertions such as `assert_sender_balance` / `assert_no_token_movement`
+  guard against accidental token movement on failed validation paths
+
+This keeps the fixture contract stable across future metadata changes and makes
+it clear that the regression surface is not just the contract logic itself, but
+also the test harness assumptions that every metadata test depends on.
+
 ## Compatibility matrix
 
 Metadata is written at creation and **never mutated**. Operations either ignore
@@ -76,7 +95,7 @@ metadata or copy it to a new stream.
 | `extend_stream_end_time` / `shorten_stream_end_time` | Unchanged |
 | `transfer_sender` / recipient rotation | Unchanged |
 | `set_auto_renew` / `get_auto_renew` | Unchanged — auto-renew flag only |
-| `clone_stream` | **Inherited** — clone receives `source.metadata.clone()` |
+| `clone_stream` | **Reset** — cloned stream metadata is explicitly `None` |
 | `close_completed_stream` / `close_cancelled_stream` | Entry removed — metadata no longer queryable |
 
 ---
@@ -126,7 +145,7 @@ The following operations have been pinned to leave `metadata` invariant:
 |-----------|-------------------|
 | `extend_stream_end_time` | Unchanged |
 | `pause_stream` / `resume_stream` | Unchanged |
-| `clone_stream` (clone-of-clone) | Inherited and identical to source |
+| `clone_stream` (clone-of-clone) | Reset to `None` for the new stream |
 | `create_stream_offer` → `accept_stream_offer` | Carried over byte-for-byte |
 | `get_stream_metadata` on pre-V4 streams (legacy `None`) | `None` across reads |
 
@@ -157,6 +176,14 @@ Executable coverage lives in `contracts/stream/tests/metadata_extension.rs`:
 - Offer accept round-trip
 - Post-`shorten_stream_end_time` readability
 - `get_stream_metadata` on cancelled streams
+- **Fixture hardening** — `create_with_metadata_and_verify` helper asserts storage round-trip at creation time
+- **Storage consistency** — metadata reads are idempotent across 10 successive calls (both `get_stream_metadata` and `get_stream_state`)
+- **Binary safety** — all byte values (including `0x00`) round-trip through metadata keys/values
+- **Duplicate keys** — Soroban Map deduplication does not corrupt the stored map
+- **Partial batch mixed** — `create_streams_partial` correctly handles mixed valid/invalid metadata entries
+- **None metadata through offers and templates** — `create_stream_offer` / `create_stream_from_template` with `None` metadata
+- **Empty map through offers** — `Some(empty map)` retains its identity through offer→accept
+- **Post-completion readability** — metadata survives end_time elapse and full withdrawal
 
 Run:
 
