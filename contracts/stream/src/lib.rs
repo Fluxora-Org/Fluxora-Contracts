@@ -5400,16 +5400,18 @@ impl FluxoraStream {
             .checked_add(future_accrual)
             .ok_or(ContractError::ArithmeticOverflow)?;
 
-        // new_deposit must fit within the old deposit (guaranteed by lower rate * same duration).
+        // new_deposit must fit within the old deposit. A lower rate should never
+        // increase the maximum payable amount for the remaining duration. If state
+        // is inconsistent (e.g. a pre-upgrade or manually-mutated deposit ceiling),
+        // reject deterministically with ArithmeticOverflow instead of silently
+        // treating the condition as a generic invalid state.
         let old_deposit = stream.deposit_amount;
+        if new_deposit > old_deposit {
+            return Err(ContractError::ArithmeticOverflow);
+        }
         let refund_amount = old_deposit
             .checked_sub(new_deposit)
             .ok_or(ContractError::ArithmeticOverflow)?;
-
-        // Sanity: refund must be non-negative (lower rate → smaller max payable).
-        if refund_amount < 0 {
-            return Err(ContractError::InvalidState);
-        }
 
         // ── CEI: persist state before token transfer ───────────────────────────────
         stream.checkpointed_amount = accrued_now;

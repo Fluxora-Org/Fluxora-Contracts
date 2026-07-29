@@ -11967,6 +11967,38 @@ fn test_update_rate_per_second_with_partial_withdrawal() {
 }
 
 #[test]
+fn test_decrease_rate_per_second_returns_arithmetic_overflow_when_new_deposit_exceeds_existing_deposit() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1_000_i128,
+            rate_per_second: 10_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 100u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: crate::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
+    );
+
+    ctx.env.ledger().set_timestamp(10);
+    let mut stream = crate::load_stream(&ctx.env, stream_id).unwrap();
+    stream.deposit_amount = 100;
+    stream.checkpointed_amount = 0;
+    stream.checkpointed_at = 0;
+    crate::save_stream(&ctx.env, &stream);
+
+    let result = ctx.client().try_decrease_rate_per_second(&stream_id, &5_i128);
+    assert_eq!(result, Err(Ok(ContractError::ArithmeticOverflow)));
+}
+
+#[test]
 fn test_update_rate_per_second_emits_event() {
     let ctx = TestContext::setup();
 
