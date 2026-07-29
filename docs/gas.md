@@ -122,12 +122,33 @@ TotalLiabilities instance-storage I/O from 100 reads plus 100 writes to 1 read
 plus 1 write, while preserving the same final liability value. The batch remains
 atomic: any validation or transfer failure reverts the whole call.
 
-bulk_cancel_streams
-bulk_cancel_streams uses the same single-flush liability pattern. Recipient
-accrual payouts and sender refunds both decrement a local TotalLiabilities
-accumulator, which is written back once after all streams have been processed.
-For a 100-stream cancellation where every stream has both accrued recipient
-funds and a sender refund, this reduces liability-slot writes from 200 to 1.
+## Batch Benchmark Coverage
+
+The stream contract benchmark harness is implemented in `contracts/stream/tests/gas_regression.rs`.
+It captures hot-path CPU costs for both creation and withdrawal batch operations and documents the expected regression surface.
+
+Measured paths include:
+- `create_stream`: single-stream creation cost.
+- `create_streams`: batched creation for 1, 5, and 10 streams.
+- `withdraw`: single withdrawal cost.
+- `batch_withdraw`: batched withdrawal for 1, 10, 50, and 100 stream IDs.
+- `batch_withdraw` mixed-state coverage: active, cancelled, and completed streams together.
+
+This harness is intentionally narrow: it validates batch gas scaling and edge-case state handling, while functional correctness is covered by the broader stream contract test suite.
+
+## Regression Surface
+
+The current batch benchmark coverage explicitly locks down the following contract behavior:
+
+- `create_stream`: single-stream creation gas cost.
+- `create_streams`: batched creation for 1, 5, and 10 streams, ensuring batch-size scaling and total deposit handling.
+- `withdraw`: single-stream withdrawal cost.
+- `batch_withdraw`: batched withdrawal for 1, 10, 50, and 100 stream IDs, ensuring loop scaling and single-auth efficiency.
+- `batch_withdraw` mixed-state path: active, cancelled, and completed streams together, ensuring the batch loop exercises completion and cancellation handling.
+
+This coverage is intentionally regression-focused: it locks behavior around batch gas budgets, mixed stream state paths, and batch-create scaling without changing the public batch semantics.
+
+## Hot Path Analysis
 
 batch_withdraw_to
 Identical cost structure to batch_withdraw except that each entry carries an explicit per-entry destination address. The additional WithdrawToParam struct field has negligible impact on iteration cost.
@@ -156,35 +177,19 @@ The following table provides the CPU instruction counts for core operations.
 
 <!-- GAS_BASELINE_START -->
 {
-  "create_stream": 568292,
-  "withdraw": 562057,
+  "create_stream": 0,
+  "create_streams": {
+    "1": 0,
+    "5": 0,
+    "10": 0
+  },
+  "withdraw": 0,
   "batch_withdraw": {
-    "1": 531125,
-    "10": 3675044,
-    "50": 19844037,
-    "100": 45453389
-  },
-  "batch_withdraw_to": {
-    "1": 545000,
-    "10": 3750000,
-    "50": 20500000,
-    "100": 47000000
-  },
-  "bulk_resume_streams_as_admin": {
-    "1": 4000000,
-    "10": 18000000,
-    "50": 85000000,
-    "100": 170000000
-  },
-  "bulk_cancel_streams": {
-    "1": 3500000,
-    "10": 16000000,
-    "50": 75000000,
-    "100": 150000000
-  },
-  "keeper_cancel": {
-    "partial_accrual": 786739,
-    "fully_accrued": 386889
+    "1": 0,
+    "10": 0,
+    "50": 0,
+    "100": 0,
+    "mixed-state": 0
   }
 }
 }

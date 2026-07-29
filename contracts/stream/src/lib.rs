@@ -2782,6 +2782,7 @@ impl FluxoraStream {
                 end_time,
                 withdraw_dust_threshold: rel.withdraw_dust_threshold,
                 memo: rel.memo,
+                metadata: rel.metadata,
                 kind: rel.kind,
                 metadata: rel.metadata,
                 irrevocable: rel.irrevocable,
