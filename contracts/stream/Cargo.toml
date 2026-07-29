@@ -266,3 +266,8 @@ name = "compile_warning_determinism"
 path = "tests/compile_warning_determinism.rs"
 test = true
 required-features = ["testutils"]
+
+[[test]]
+name = "delegated_flow_reentrancy"
+path = "tests/delegated_flow_reentrancy.rs"
+required-features = ["testutils"]

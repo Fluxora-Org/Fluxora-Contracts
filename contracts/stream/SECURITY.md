@@ -308,7 +308,38 @@ Every state-changing operation emits exactly one primary event:
 - `withdraw`: updates `withdrawn_amount` → then `push_token`
 - `top_up_stream`: updates `deposit_amount` → then `pull_token`
 
-**Reentrancy**: Soroban token contract assumed non-reentrant; CEI provides defense-in-depth.
+**Reentrancy lock**: Beyond CEI, external token transfers are wrapped by an
+explicit `DataKey::ReentrancyLock` (instance storage). `acquire_reentrancy_lock`
+returns `InvalidState` if the lock is already held, so any nested token callback
+that re-enters a transferring entrypoint reverts before a second transfer runs.
+The token contract itself is still assumed non-reentrant (out of scope, see §1);
+the lock is defense-in-depth against a malicious or buggy token.
+
+#### 7.1.1 Delegated-flow reentrancy coverage (audit)
+
+The signature-authorized, relayer-submitted paths were audited to confirm they
+acquire/release the lock around every reachable `push_token`, matching the direct
+`withdraw` / `cancel_stream` paths:
+
+- **`delegated_withdraw`** — already covered: both the recipient net payout and
+  the relayer fee transfer run inside `acquire_reentrancy_lock` /
+  `release_reentrancy_lock`, with state, nonce increment, and events written
+  first (CEI).
+- **`delegated_cancel`** — routes through `cancel_stream_internal`, whose
+  unstreamed-refund `push_token(sender, …)` was **not** lock-wrapped. Fixed: the
+  refund transfer now acquires the lock, captures the result, always releases,
+  then propagates the result. Because `cancel_stream`, `cancel_stream_as_admin`,
+  and `witnessed_cancel_stream` all route through the same helper, this hardens
+  them too. No caller of `cancel_stream_internal` holds the lock beforehand, so
+  there is no double-acquire regression.
+
+An adversarial test (`tests/delegated_flow_reentrancy.rs`) installs a malicious
+token that re-enters `delegated_withdraw` during its payout transfer and asserts
+the nested call reverts with `InvalidState` (blocked by the held lock).
+
+**Follow-ups (out of this issue's scope):** `keeper_cancel` and
+`bulk_cancel_streams` perform their own token transfers outside
+`cancel_stream_internal`; their lock coverage should be audited separately.
 
 ### 7.2 Input Validation
 

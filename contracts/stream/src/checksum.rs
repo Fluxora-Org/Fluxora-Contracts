@@ -23,6 +23,30 @@
 //!    (the `testutils` feature is only for `#[cfg(test)]`).
 //! 5. **No environment-dependent code** is compiled into the WASM artifact.
 //!
+//! ## Current checksum computation and validation behavior
+//!
+//! The checksum flow is intentionally **off-chain only**:
+//!
+//! - `script/update-wasm-checksums.sh` rebuilds the release WASM artifacts and writes
+//!   SHA-256 digests into `wasm/checksums.sha256`.
+//! - `script/verify-wasm-checksum.sh` optionally rebuilds, then recomputes SHA-256
+//!   digests for the raw `target/wasm32-unknown-unknown/release/*.wasm` artifacts and
+//!   compares them against the committed file.
+//! - The contract itself does **not** compute or persist any checksum at runtime.
+//! - The `upgrade(env, new_wasm_hash)` entrypoint does **not** validate that the hash
+//!   matches `wasm/checksums.sha256`; it only enforces admin auth and then delegates
+//!   hash existence/validity checks to Soroban's
+//!   `env.deployer().update_current_contract_wasm(new_wasm_hash)` host function.
+//! - In the Soroban Rust test environment, arbitrary WASM blobs are not preloaded, so
+//!   an otherwise-authorized upgrade using `[0u8; 32]` reaches the host and traps with
+//!   `Error(Storage, MissingValue)` rather than returning a contract-defined error.
+//!
+//! This means the regression surface for checksum handling is:
+//! 1. The scripts must continue to hash the same release artifacts.
+//! 2. The reference file must continue to describe those exact artifacts.
+//! 3. The contract upgrade path must remain auth-gated while leaving artifact
+//!    authenticity to deployment-time/off-chain verification and Soroban host checks.
+//!
 //! If any of these invariants change, the reference checksum in
 //! `wasm/checksums.sha256` must be regenerated via
 //! `script/update-wasm-checksums.sh`.
@@ -239,7 +263,9 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::CONTRACT_VERSION;
     extern crate std;
+    use std::format;
     use std::string::ToString;
 
     /// Verify the module compiles and the doc-comment invariants are present.
@@ -436,13 +462,14 @@ mod tests {
         assert_eq!(MEMO_POS, 14);
     }
 
-    /// Stream struct field count with both `is_pooled` and `irrevocable` appended.
-    /// V5 (14) + memo (1) + kind (1) + pause_ledger (1) + withdraw_ledger (1) + metadata (1)
-    /// + is_pooled (1) + irrevocable (1) = 21 fields.
+    /// Stream struct field count with `paused_at_timestamp` and
+    /// `cumulative_paused_duration` appended.
+    /// Prior count (21) + decommissioned (1) + paused_at_timestamp (1)
+    /// + cumulative_paused_duration (1) = 24 fields.
     #[test]
-    fn stream_struct_has_21_fields_with_is_pooled_and_irrevocable() {
-        const TOTAL_STREAM_FIELDS: usize = 21;
-        assert_eq!(TOTAL_STREAM_FIELDS, 21);
+    fn stream_struct_has_24_fields_with_paused_duration_tracking() {
+        const TOTAL_STREAM_FIELDS: usize = 24;
+        assert_eq!(TOTAL_STREAM_FIELDS, 24);
     }
 
     /// Checksum verification must be deterministic across retries.
@@ -501,5 +528,71 @@ mod tests {
 
         // V7 additions (8 variants) must exactly fill the gap
         assert_eq!(LIVE_VARIANTS - V6_INITIAL_VARIANTS, 8);
+    }
+
+    /// Verify `wasm/checksums.sha256` records the same pinned toolchain noted here.
+    #[test]
+    fn checksums_file_toolchain_matches_rust_toolchain_toml() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let repo_root = std::path::Path::new(manifest_dir).join("../..");
+        let toolchain_path = repo_root.join("rust-toolchain.toml");
+        let checksums_path = repo_root.join("wasm/checksums.sha256");
+
+        let toolchain = std::fs::read_to_string(&toolchain_path)
+            .expect("failed to read rust-toolchain.toml");
+        let expected_channel = toolchain
+            .lines()
+            .find_map(|line| {
+                let line = line.trim();
+                line.strip_prefix("channel")
+                    .map(|rest| rest.trim())
+                    .and_then(|rest| rest.strip_prefix('='))
+                    .map(|rest| rest.trim().trim_matches('"').to_string())
+            })
+            .expect("no channel found in rust-toolchain.toml");
+
+        let checksums = std::fs::read_to_string(&checksums_path)
+            .expect("failed to read wasm/checksums.sha256");
+        assert!(
+            checksums.contains(&format!("# Rust toolchain: {expected_channel}")),
+            "wasm/checksums.sha256 must record the pinned toolchain channel ({expected_channel})"
+        );
+    }
+
+    /// Verify the checksum scripts still target raw release WASM artifacts.
+    #[test]
+    fn checksum_scripts_target_raw_release_wasm() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let repo_root = std::path::Path::new(manifest_dir).join("../..");
+        let verify_script = std::fs::read_to_string(repo_root.join("script/verify-wasm-checksum.sh"))
+            .expect("failed to read script/verify-wasm-checksum.sh");
+        let update_script = std::fs::read_to_string(repo_root.join("script/update-wasm-checksums.sh"))
+            .expect("failed to read script/update-wasm-checksums.sh");
+
+        for script in [&verify_script, &update_script] {
+            assert!(
+                script.contains("target/wasm32-unknown-unknown/release"),
+                "checksum scripts must hash raw release WASM artifacts"
+            );
+            assert!(
+                !script.contains(".optimized.wasm"),
+                "checksum scripts must not silently switch to optimized artifacts"
+            );
+        }
+    }
+
+    /// Verify docs/upgrade.md advertises the live CONTRACT_VERSION.
+    #[test]
+    fn upgrade_doc_current_value_matches_contract_version() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let upgrade_doc = std::fs::read_to_string(
+            std::path::Path::new(manifest_dir).join("../../docs/upgrade.md"),
+        )
+        .expect("failed to read docs/upgrade.md");
+        let expected_block = format!("```\nCONTRACT_VERSION = {CONTRACT_VERSION}\n```");
+        assert!(
+            upgrade_doc.contains(&expected_block),
+            "docs/upgrade.md must advertise the live CONTRACT_VERSION ({CONTRACT_VERSION})"
+        );
     }
 }

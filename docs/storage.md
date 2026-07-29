@@ -80,10 +80,10 @@ pub enum DataKey {
 | 18 | `RecipientStreamPage(Address, u32)` | Persistent | `Vec<u64>` | `create_stream` | `close_completed_stream` |
 | 19 | `RecipientStreamPageCount(Address)`| Persistent | `u32` | `create_stream` | `close_completed_stream` |
 | 20 | `PendingRecipientUpdate(u64)` | Persistent | `Address` | `propose_recipient_update` | `accept_recipient_update` (removes) |
-| 21 | `IdReservation(Address)` | Persistent | `IdReservation` | `reserve_stream_ids` | `create_stream`, `create_streams` (removes when exhausted) |
+| 21 | `IdReservation(Address)` | Persistent | `IdReservation` | `reserve_stream_ids` | `create_stream`, `create_streams`, `release_id_reservation`, `reclaim_expired_id_reservation` |
 | 22 | `MaxRatePerSecond` | Instance | `i128` | `set_max_rate_per_second` | `set_max_rate_per_second` |
 | 23 | `DelegatedWithdrawNonce(Address)` | Persistent | `u64` | `delegated_withdraw` | `delegated_withdraw` (increments) |
-| 24 | `LastPauseRecord(PauseKind)` | Persistent | `PauseRecord` | `pause_stream`, `pause_protocol` | `resume_stream`, `resume_protocol` |
+| 24 | `LastPauseRecord(PauseKind)` | Instance | `PauseRecord` | `pause_stream`, `pause_protocol` | `resume_stream`, `resume_protocol` |
 | 25 | `RotationHistory(u64)` | Persistent | `Vec<RotationEntry>` | `accept_recipient_update`, `transfer_sender` | (append-only) |
 | 26 | `LastAccrualLedgerTimestamp` | Instance | `u64` | `current_accrual_timestamp` | `current_accrual_timestamp` |
 | 27 | `PausedStreamCount` | Instance | `u64` | `pause_stream`, `pause_stream_as_admin` | `resume_stream`, `cancel_stream`, `close_completed_stream` |
@@ -115,7 +115,10 @@ Persistent storage is used for individual stream records and per-recipient nonce
 1. **Never reorder** existing variants. The discriminant table above is immutable for the lifetime of any deployed instance.
 2. **Never remove** a variant that has ever been written to a live network. Mark it `#[deprecated]` in a doc comment and stop writing to it; do not delete it.
 3. **Always append** new variants at the end of the enum.
-4. **Review `CONTRACT_VERSION`** whenever a variant is appended. Changing an existing variant or value type requires a bump and a migration/new deployment. A strictly append-only key may remain under the current version only when absent-key behavior, direct-storage-reader impact, compatibility tests, and release notes are updated together.
+4. **Increment `CONTRACT_VERSION` only when required by the public versioning policy.**
+   Appending a new variant at the end preserves on-chain readability for existing
+   entries, so it is storage-compatible for the contract itself even though
+   off-chain storage readers must still update their decoders.
 5. **Document the ledger** at which each new variant is first deployed so that migration tooling can determine which entries exist on a given instance.
 
 ### What counts as a breaking storage change
@@ -126,7 +129,7 @@ Persistent storage is used for individual stream records and per-recipient nonce
 | Insert variant in the middle | Yes — shifts discriminants | Never do this |
 | Remove an existing variant | Yes — existing entries become orphaned | Deprecate instead |
 | Change the value type of an existing variant | Yes — existing entries become undecodable | Increment `CONTRACT_VERSION` |
-| Append a new variant at the end | No for existing on-chain entries; direct storage readers must update | Review version; document absent default and add compatibility tests |
+| Append a new variant at the end | No — existing entries unaffected | Update docs/tests; bump `CONTRACT_VERSION` only if another integrator-visible policy trigger applies |
 | Change TTL constants | No — no effect on stored data | No version bump required |
 | Change internal helper logic with identical external behaviour | No | No version bump required |
 
