@@ -21,9 +21,11 @@ It verifies that all cancellation paths strictly enforce:
 - [x] Test coverage & validator index alignment
 - [ ] Refactoring (no functional changes)
 
+Closes #1185
+
 ## Related Issues
 
-Closes #1185
+- Closes #1185
 
 ## Changes Made
 
