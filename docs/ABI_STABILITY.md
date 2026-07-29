@@ -3,7 +3,7 @@
 Canonical reference for what the Fluxora protocol guarantees to remain stable across deployments, and what constitutes a breaking change for indexers, wallets, and other integrators.
 
 **Source of truth:** `contracts/stream/src/lib.rs`
-**Current version:** `CONTRACT_VERSION = 7`
+**Current version:** `CONTRACT_VERSION = 9`
 **See also:** [`docs/upgrade.md`](./upgrade.md) for the migration runbook and version history.
 
 ---
@@ -44,50 +44,53 @@ A new contract deployment (new `CONTRACT_ID`) is required to change any of the a
 `ContractError` variants are identified by their `u32` discriminant value. The mapping between variant name and discriminant is **frozen** for any deployed instance:
 
 ```
-StreamNotFound           = 1
-InvalidState             = 2
-InvalidParams            = 3
-ContractPaused           = 4
-StartTimeInPast          = 5
-ArithmeticOverflow       = 6
-Unauthorized             = 7
-AlreadyInitialised       = 8
-InsufficientBalance      = 9
-InsufficientDeposit      = 10
-StreamAlreadyPaused      = 11
-StreamNotPaused          = 12
-StreamTerminalState      = 13
-DuplicateStreamId        = 14
-InvalidSignature         = 15
-BelowMinimumAmount       = 16
-ReservationCountZero     = 17
-ReservationLimitExceeded = 18
-SignatureDeadlineExpired = 19
-TemplateNotFound         = 20
-TemplateLimitExceeded    = 21
-TemplateUnauthorized     = 22
-TokenVerificationFailed  = 23
-ReservationNotFound      = 24
-ReservationNotExpirable  = 25
-ReservationStillActive   = 26
-PauseReasonTooLong       = 27
-ClockRegression          = 28
-MetadataTooLarge         = 29
-UnsupportedStreamKind    = 30
-RateCapExceeded          = 31
-PauseCooldownActive      = 32
-WithdrawalTooFrequent         = 33
-ReservationAlreadyActive      = 34  // NOTE: collides with KeeperGracePeriodNotElapsed (same discriminant)
-KeeperGracePeriodNotElapsed   = 34  // NOTE: collides with ReservationAlreadyActive (same discriminant)
-InvalidDustThreshold          = 35
-AutoRenewFundingUnavailable = 36
-OfferNotFound            = 37
-OfferExpired             = 38
-OfferWrongRecipient      = 39
-OfferWrongSender         = 40
+StreamNotFound              = 1
+InvalidState                = 2
+InvalidParams               = 3
+ContractPaused              = 4
+StartTimeInPast             = 5
+ArithmeticOverflow          = 6
+Unauthorized                = 7
+AlreadyInitialised          = 8
+InsufficientBalance         = 9
+InsufficientDeposit         = 10
+StreamAlreadyPaused         = 11
+StreamNotPaused             = 12
+StreamTerminalState         = 13
+DuplicateStreamId           = 14
+InvalidSignature            = 15
+BelowMinimumAmount          = 16
+ReservationCountZero        = 17
+ReservationLimitExceeded    = 18
+SignatureDeadlineExpired    = 19
+TemplateNotFound            = 20
+TemplateLimitExceeded       = 21
+TemplateUnauthorized        = 22
+PauseReasonTooLong          = 23
+ReservationNotFound         = 24
+ReservationNotExpirable     = 25
+ReservationStillActive      = 26
+ClockRegression             = 27
+UnsupportedStreamKind       = 28
+RateCapExceeded             = 29
+PauseCooldownActive         = 30
+WithdrawalTooFrequent       = 31
+MetadataTooLarge            = 32
+KeeperGracePeriodNotElapsed = 33
+ReservationAlreadyActive    = 34
+InvalidDustThreshold        = 35
+RateCooldownActive          = 36
+AutoRenewFundingUnavailable = 37
+OfferNotFound               = 38
+OfferExpired                = 39
+OfferWrongRecipient         = 40
+OfferWrongSender            = 41
+CyclicDelegation            = 43
+DelegationDepthExceeded     = 44
+TokenVerificationFailed     = 88
 ```
 
-> **Note:** Discriminant 34 is shared by both `ReservationAlreadyActive` and `KeeperGracePeriodNotElapsed`. This is a known collision in the current source. Clients should be aware that both error conditions produce the same wire code.
+`KeeperGracePeriodNotElapsed` and `ReservationAlreadyActive` are intentionally distinct (`33` and `34` respectively); CI checks now audit both docs and source for duplicate error codes.
 
 Clients MUST match on the numeric discriminant, not the variant name string, because Soroban encodes errors as `u32` values on the wire.
 

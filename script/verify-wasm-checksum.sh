@@ -54,11 +54,15 @@ if [ "$BUILD" = true ]; then
     exit 1
   fi
   echo "Building WASM artifacts (release, wasm32-unknown-unknown)..."
-  cargo build --release --target wasm32-unknown-unknown \
-    --manifest-path "${REPO_ROOT}/Cargo.toml" \
-    -p fluxora_stream \
-    -p fluxora_factory \
-    -p fluxora_governance
+  # Build separately and rebuild stream last. Building stream and factory in a
+  # single Cargo invocation unifies factory's `fluxora_stream/import_only`
+  # feature into the top-level stream artifact, which is not the deployable WASM
+  # hashed by update-wasm-checksums.sh.
+  for package in fluxora_factory fluxora_governance fluxora_stream; do
+    cargo build --release --target wasm32-unknown-unknown \
+      --manifest-path "${REPO_ROOT}/Cargo.toml" \
+      -p "$package"
+  done
 fi
 
 # ---------------------------------------------------------------------------

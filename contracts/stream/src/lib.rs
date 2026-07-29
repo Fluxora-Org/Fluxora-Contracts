@@ -26,8 +26,8 @@ pub mod types;
 ///   compile-time constant returned by the permissionless `version()` view.
 ///   See [`CONTRACT_VERSION`] for the versioning policy table and bump
 ///   checklist.
-/// - **Frozen discriminants** – `FROZEN_DISCRIMINANTS_V9` records all 36
-///   `DataKey` discriminants (0..=35) that are append-only and must never
+/// - **Frozen discriminants** – `FROZEN_DISCRIMINANTS_V9` records all 37
+///   `DataKey` discriminants (0..=36) that are append-only and must never
 ///   be reordered or removed. The compile-time check
 ///   `validate_discriminants_frozen` catches regressions.
 /// - **Storage entry size** – `validate_entry_size` enforces the per-entry
@@ -55,8 +55,10 @@ pub mod types;
 ///   new keys must be appended at the end of the `DataKey` enum.
 pub mod versioning;
 
+#[cfg(not(all(target_arch = "wasm32", feature = "import_only")))]
+use soroban_sdk::contractimpl;
 use soroban_sdk::xdr::ToXdr;
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env, Map};
+use soroban_sdk::{contract, contracttype, symbol_short, token, Address, Env, Map};
 pub use storage::*;
 use token_check::verify_token_behavior;
 // NOTE: `crate::types` is intentionally minimal — it holds the `Stream`
@@ -414,7 +416,7 @@ const MIN_RATE_INTERVAL_LEDGERS: u32 = 17;
 /// The current live storage layout remains append-only and backward-compatible
 /// for existing deployments: `Stream` fields are only appended at the end, and
 /// `DataKey` variants are appended at the end of the enum. The current live
-/// `DataKey` surface is 36 variants (discriminants 0..=35), so any future
+/// `DataKey` surface is 37 variants (discriminants 0..=36), so any future
 /// storage-key change must preserve the existing discriminants and update the
 /// versioning tests in `contracts/stream/tests/storage_key_compat.rs`.
 ///
@@ -654,6 +656,7 @@ pub enum ContractError {
     MetadataTooLarge = 32,
     /// Keeper attempted to close a stream before the grace period elapsed.
     KeeperGracePeriodNotElapsed = 33,
+    /// ID reservation is active; 34 is distinct from keeper grace errors.
     ReservationAlreadyActive = 34,
     /// Withdraw dust threshold is negative or exceeds deposit amount.
     InvalidDustThreshold = 35,
@@ -1291,9 +1294,10 @@ pub struct CreateStreamRelativeParams {
 /// 2. **Never remove** a variant that has ever been written to a live network.
 ///    Mark it deprecated in a doc comment instead and stop writing to it.
 /// 3. **Always append** new variants at the end of the enum.
-/// 4. **Increment `CONTRACT_VERSION`** whenever a new variant is added or an
-///    existing variant's associated type changes — both are breaking changes
-///    for any off-chain tool that reads storage directly.
+/// 4. **Review `CONTRACT_VERSION`** for every append. Changing an existing
+///    discriminant or value type requires a bump and migration. A strictly
+///    append-only key may keep the current version only when its absent default,
+///    direct-reader impact, compatibility tests, and release notes are updated.
 /// 5. Document the ledger at which each variant was first deployed so that
 ///    migration tooling can determine which entries exist on a given instance.
 ///
@@ -2782,7 +2786,6 @@ impl FluxoraStream {
                 end_time,
                 withdraw_dust_threshold: rel.withdraw_dust_threshold,
                 memo: rel.memo,
-                metadata: rel.metadata,
                 kind: rel.kind,
                 metadata: rel.metadata,
                 irrevocable: rel.irrevocable,
@@ -8720,13 +8723,30 @@ impl FluxoraStream {
     pub fn get_recipient_pending_offers(env: Env, recipient: Address) -> soroban_sdk::Vec<u64> {
         load_recipient_pending_offers(&env, &recipient)
     }
+
+    /// Replace this contract instance's WASM with an already-uploaded module.
+    ///
+    /// This wrapper keeps `upgrade` in the generated contract specification and
+    /// client. The implementation remains in the module-level [`crate::upgrade`]
+    /// function so existing native Rust callers retain their current API.
+    /// Authorization, atomic failure, TTL, and event semantics are documented in
+    /// `docs/upgrade.md`.
+    pub fn upgrade(env: Env, new_wasm_hash: soroban_sdk::BytesN<32>) -> Result<(), ContractError> {
+        crate::upgrade(env, new_wasm_hash)
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Upgrade entrypoint
+// Upgrade implementation
 // ---------------------------------------------------------------------------
 
-/// Event emitted when the contract is upgraded via `upgrade()`.
+/// Application event emitted when an in-place WASM update is scheduled.
+///
+/// The historical field name `new_version` is retained for event-schema
+/// compatibility. It contains the `CONTRACT_VERSION` of the WASM executing the
+/// upgrade call, not a value introspected from `new_wasm_hash`; Soroban does not
+/// execute the replacement module in the current call frame. Consumers must call
+/// `version()` after transaction finality to learn the replacement's version.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct ContractUpgraded {
@@ -8754,9 +8774,14 @@ pub struct ContractUpgraded {
 ///   Must match the hash of a deployed WASM blob on the network.
 ///
 /// # Behavior
-/// 1. Validates caller is the contract admin.
+/// 1. Loads the configured admin and requires that address's authorization.
 /// 2. Calls `env.deployer().update_current_contract_wasm(new_wasm_hash)`.
-/// 3. Emits `ContractUpgraded` event with the new hash and version.
+/// 3. Bumps instance TTL and emits the compatibility application events.
+///
+/// The current invocation continues running this WASM after the host update is
+/// requested. Consequently, event version fields contain this WASM's
+/// `CONTRACT_VERSION`; callers must verify the replacement with a subsequent
+/// `version()` invocation after transaction finality.
 ///
 /// # Storage Compatibility
 /// The upgraded WASM must maintain backward-compatible storage layout:
@@ -8773,11 +8798,18 @@ pub struct ContractUpgraded {
 /// must deploy a fixed WASM and call `upgrade()` again with the fixed hash.
 ///
 /// # Errors
-/// - `ContractError::Unauthorized`: Caller is not the admin.
-/// - Host error: If the WASM hash is invalid or not deployed.
+/// - `ContractError::InvalidState`: The contract has not been initialized, so
+///   no admin is available.
+/// - Host authorization error: The configured admin did not authorize the call.
+/// - Host storage error: The WASM hash was not uploaded or is unavailable.
+///
+/// Every failure reverts the entire invocation, including TTL changes and events.
 ///
 /// # Events
-/// - Emits `ContractUpgraded` with the new hash, version, timestamp, and caller.
+/// - The host emits its `executable_update` system event.
+/// - The contract emits `ContractUpgraded` (`upgraded`) and the legacy `upgrade`
+///   event. Both application events report the executing version; verify the
+///   replacement version with a later `version()` call.
 ///
 /// # Security Notes
 /// This is the highest-privilege operation in the protocol. It should only be
@@ -8796,8 +8828,10 @@ pub fn upgrade(env: Env, new_wasm_hash: soroban_sdk::BytesN<32>) -> Result<(), C
     let admin = get_admin(&env)?;
     admin.require_auth();
 
-    // Store the old version before upgrade (for the event)
-    let old_version = CONTRACT_VERSION;
+    // The current call frame continues to execute this WASM even after the host
+    // schedules the replacement. Keep this value explicit so event consumers do
+    // not mistake it for an introspected property of `new_wasm_hash`.
+    let executing_version = CONTRACT_VERSION;
 
     // Call the Soroban host function to replace the WASM
     // This is safe because:
@@ -8810,24 +8844,25 @@ pub fn upgrade(env: Env, new_wasm_hash: soroban_sdk::BytesN<32>) -> Result<(), C
     // Bump TTL after upgrade to ensure the contract stays alive
     bump_instance_ttl(&env);
 
-    // Emit upgrade event
-    // Note: The new version is read from the upgraded contract's constant.
-    // We read it after the upgrade so it reflects the new code.
-    let new_version = CONTRACT_VERSION;
+    // Emit the existing application event schema. `new_version` is a legacy
+    // field name: the replacement cannot be introspected from this call frame,
+    // so it reports the executing version. Post-upgrade tooling must call
+    // `version()` in a later invocation.
     env.events().publish(
         (symbol_short!("upgraded"),),
         ContractUpgraded {
             new_wasm_hash: new_wasm_hash.clone(),
-            new_version,
+            new_version: executing_version,
             upgraded_at: env.ledger().timestamp(),
             upgraded_by: admin.clone(),
         },
     );
 
-    // Also emit a legacy event for backward compatibility with indexers
+    // Preserve the legacy tuple shape. Both version slots are equal by design
+    // because both are produced by the pre-update call frame.
     env.events().publish(
         (symbol_short!("upgrade"),),
-        (new_wasm_hash, old_version, new_version, admin),
+        (new_wasm_hash, executing_version, executing_version, admin),
     );
 
     Ok(())

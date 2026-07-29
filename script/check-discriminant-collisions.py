@@ -3,11 +3,14 @@
 script/check-discriminant-collisions.py
 ========================================
 
-Cross-file discriminant-collision audit for docs/error.md.
+Cross-file discriminant-collision audit for docs/error.md and the stream
+ContractError source enum.
 
 Parses the discriminant tables from all three contract sections of
 docs/error.md (ContractError / stream, FactoryError / factory, and
-GovernanceError / governance) and reports:
+GovernanceError / governance).  When run without --docs, it also parses
+contracts/stream/src/lib.rs directly and fails if the source ContractError enum
+contains duplicate explicit discriminants.  It reports:
 
   1. Intra-section collisions — two *different* variant names assigned the
      same numeric code within one enum (a docs bug, not necessarily a code
@@ -24,10 +27,12 @@ GovernanceError / governance) and reports:
 
 Usage
 -----
-    python3 script/check-discriminant-collisions.py [--docs PATH]
+    python3 script/check-discriminant-collisions.py [--docs PATH] [--source PATH]
 
-    --docs PATH   Path to docs/error.md (default: docs/error.md relative to
-                  the repo root, auto-detected from this script's location).
+    --docs PATH    Path to docs/error.md (default: docs/error.md relative to
+                   the repo root, auto-detected from this script's location).
+    --source PATH  Optional path to contracts/stream/src/lib.rs.  If omitted,
+                   the source enum is auto-checked only when --docs is omitted.
 
 Exit codes
 ----------
@@ -83,6 +88,10 @@ _ROW_NAME_FIRST   = re.compile(r"^\|\s*`([A-Za-z_][A-Za-z0-9_]*)`\s*\|\s*(\d+)\s
 
 # Markdown table separator row (the |---|---| divider line).
 _TABLE_SEP = re.compile(r"^\|[-|: ]+\|")
+
+# Source parser for explicit enum discriminants, e.g. `FooBar = 123,`.
+_SOURCE_ENUM = re.compile(r"pub\s+enum\s+ContractError\s*\{(?P<body>.*?)^\}", re.S | re.M)
+_SOURCE_VARIANT = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(\d+)\s*,", re.M)
 
 # Column-header rows that identify a *discriminant* table vs. a plain enum table.
 # We only parse rows from tables whose header contains one of these keywords.
@@ -201,6 +210,37 @@ def _parse_docs(path: Path) -> Section:
     return sections
 
 
+def _parse_source_contract_error(path: Path) -> List[Entry]:
+    """
+    Parse explicit discriminant assignments from the source ContractError enum.
+
+    The check intentionally reads the Rust source rather than relying only on
+    Rust's E0081 compile-time error so CI can fail fast in lightweight
+    documentation/tooling jobs that do not run `cargo check`.
+    """
+    text = path.read_text(encoding="utf-8")
+    match = _SOURCE_ENUM.search(text)
+    if not match:
+        raise ValueError(f"ContractError enum not found in {path}")
+
+    # Precompute line number of the enum body start so diagnostics point at the
+    # exact variant line in the source file.
+    body_start = match.start("body")
+    body_start_line = text.count("\n", 0, body_start) + 1
+    body = match.group("body")
+
+    entries: List[Entry] = []
+    for m in _SOURCE_VARIANT.finditer(body):
+        variant = m.group(1)
+        code = int(m.group(2))
+        rel_line = body.count("\n", 0, m.start())
+        entries.append(Entry(code=code, name=variant, line_no=body_start_line + rel_line))
+
+    if not entries:
+        raise ValueError(f"No explicit ContractError discriminants found in {path}")
+    return entries
+
+
 # ---------------------------------------------------------------------------
 # Analysis
 # ---------------------------------------------------------------------------
@@ -282,6 +322,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Path to docs/error.md (auto-detected if not given)",
     )
+    p.add_argument(
+        "--source",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Path to contracts/stream/src/lib.rs. If omitted, source is "
+            "auto-checked only when --docs is omitted."
+        ),
+    )
     return p
 
 
@@ -289,23 +338,38 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_arg_parser().parse_args(argv)
 
     # ── Locate docs/error.md ────────────────────────────────────────────
+    auto_check_source = args.docs is None
     if args.docs:
         docs_path = Path(args.docs)
+        repo_root = docs_path.resolve().parent.parent if docs_path.name == "error.md" else Path.cwd()
     else:
         # Walk up from this script's location until we find docs/error.md.
         here = Path(__file__).resolve().parent
-        candidate = here.parent / "docs" / "error.md"
+        repo_root = here.parent
+        candidate = repo_root / "docs" / "error.md"
         if not candidate.exists():
             # Try cwd as a fallback.
-            candidate = Path("docs") / "error.md"
+            repo_root = Path.cwd()
+            candidate = repo_root / "docs" / "error.md"
         docs_path = candidate
 
-    print(f"Auditing discriminant tables in: {docs_path}\n")
+    if args.source:
+        source_path: Path | None = Path(args.source)
+    elif auto_check_source:
+        source_path = repo_root / "contracts" / "stream" / "src" / "lib.rs"
+    else:
+        source_path = None
+
+    print(f"Auditing discriminant tables in: {docs_path}")
+    if source_path is not None:
+        print(f"Auditing source ContractError enum in: {source_path}")
+    print()
 
     try:
         sections = _parse_docs(docs_path)
-    except FileNotFoundError:
-        print(f"ERROR: File not found: {docs_path}", file=sys.stderr)
+        source_entries = _parse_source_contract_error(source_path) if source_path is not None else None
+    except FileNotFoundError as exc:
+        print(f"ERROR: File not found: {exc.filename}", file=sys.stderr)
         return 2
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -316,6 +380,12 @@ def main(argv: list[str] | None = None) -> int:
     for label, entries in sections.items():
         codes = sorted({e.code for e in entries})
         print(f"  {label}: {len(entries)} entries, codes {codes[0]}–{codes[-1]}")
+    if source_entries is not None:
+        codes = sorted({e.code for e in source_entries})
+        print(
+            "  ContractError source (contracts/stream/src/lib.rs): "
+            f"{len(source_entries)} entries, codes {codes[0]}–{codes[-1]}"
+        )
     print()
 
     intra_msgs: List[str] = []
@@ -325,6 +395,14 @@ def main(argv: list[str] | None = None) -> int:
         intra_msgs.extend(_find_intra_collisions(label, entries))
         order_msgs.extend(_find_ordering_issues(label, entries))
 
+    if source_entries is not None:
+        source_label = "ContractError source (contracts/stream/src/lib.rs)"
+        intra_msgs.extend(_find_intra_collisions(source_label, source_entries))
+        order_msgs.extend(_find_ordering_issues(source_label, source_entries))
+
+    # Cross-section overlap warnings are meaningful for the three documented
+    # contract namespaces only.  Do not compare docs/error.md to the source enum
+    # as if it were a fourth independent contract namespace.
     cross_msgs = _find_cross_collisions(sections)
 
     # ── Shared-decoder finding ───────────────────────────────────────────
