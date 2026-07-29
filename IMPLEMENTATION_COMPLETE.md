@@ -117,7 +117,7 @@ Located in `remove_stream_from_recipient_index()`:
 
 **Files created/updated:**
 
-1. **[docs/recipient-stream-index.md](../docs/recipient-stream-index.md)**
+1. **[docs/recipient-stream-index.md](./docs/recipient-stream-index.md)**
    - ✅ Comprehensive specification of index behavior
    - ✅ API documentation with examples
    - ✅ Lifecycle management details
@@ -125,23 +125,13 @@ Located in `remove_stream_from_recipient_index()`:
    - ✅ Performance characteristics
    - ✅ Use cases and integration patterns
 
-2. **[contracts/stream/src/lib.rs](../contracts/stream/src/lib.rs)**
+2. **[contracts/stream/src/lib.rs](./contracts/stream/src/lib.rs)**
    - ✅ Rust doc comments on public functions
    - ✅ Detailed parameter descriptions
    - ✅ Return value documentation
    - ✅ Authorization requirements
    - ✅ Usage examples
    - ✅ Invariant descriptions
-
-3. **[RECIPIENT_STREAM_INDEX_AUDIT.md](../RECIPIENT_STREAM_INDEX_AUDIT.md)** (This document)
-   - ✅ Executive summary
-   - ✅ Protocol semantics
-   - ✅ Role-based authorization analysis
-   - ✅ Edge case enumeration
-   - ✅ External behavior verification
-   - ✅ Security analysis
-   - ✅ Test coverage details
-   - ✅ Residual risks and mitigations
 
 ### 7. **Test Results** ✅
 
@@ -171,12 +161,12 @@ Total: 49 tests passing, 0 failures, 100% success rate
 
 | Requirement | Status | Evidence |
 |-------------|--------|----------|
-| **Characterize protocol semantics** | ✅ Complete | [RECIPIENT_STREAM_INDEX_AUDIT.md - Section 1](./RECIPIENT_STREAM_INDEX_AUDIT.md#1-protocol-semantics) |
-| **Map roles & authorization** | ✅ Complete | [RECIPIENT_STREAM_INDEX_AUDIT.md - Section 2](./RECIPIENT_STREAM_INDEX_AUDIT.md#2-role-based-authorization) |
-| **Enumerate edge cases** | ✅ Complete | [RECIPIENT_STREAM_INDEX_AUDIT.md - Section 3](./RECIPIENT_STREAM_INDEX_AUDIT.md#3-edge-cases-enumeration-and-testing) |
-| **Ensure external behavior matches docs** | ✅ Complete | [RECIPIENT_STREAM_INDEX_AUDIT.md - Section 4](./RECIPIENT_STREAM_INDEX_AUDIT.md#4-externally-visible-behavior-verification) |
+| **Characterize protocol semantics** | ✅ Complete | [docs/recipient-stream-index.md](./docs/recipient-stream-index.md) |
+| **Map roles & authorization** | ✅ Complete | [docs/recipient-stream-index.md](./docs/recipient-stream-index.md) |
+| **Enumerate edge cases** | ✅ Complete | [docs/recipient-stream-index.md](./docs/recipient-stream-index.md) |
+| **Ensure external behavior matches docs** | ✅ Complete | [docs/recipient-stream-index.md](./docs/recipient-stream-index.md) |
 | **≥95% coverage** | ✅ 100% | 98 lines covered, 98 total = 100% |
-| **Document protocol semantics** | ✅ Complete | docs/recipient-stream-index.md, inline comments, audit notes |
+| **Document protocol semantics** | ✅ Complete | docs/recipient-stream-index.md, inline comments |
 | **Secure & gas-conscious** | ✅ Verified | CEI pattern verified, O(n) insertion acceptable |
 | **Well-tested** | ✅ 49 tests | All passing, edge cases covered |
 
@@ -350,7 +340,7 @@ println!("User has {} streams", count);
 
 1. **Code Review** ✅ (Current step complete)
 2. **Test All** ✅ (49 tests passing)
-3. **Audit Review** ✅ (Complete at RECIPIENT_STREAM_INDEX_AUDIT.md)
+3. **Audit Review** ✅ (Complete at docs/recipient-stream-index.md)
 4. **Deploy to Testnet** → Build WASM and deploy
 5. **Deploy to Mainnet** → After testnet validation
 
@@ -381,7 +371,7 @@ println!("User has {} streams", count);
 | **Documentation** | ✅ Complete | docs/ & inline comments |
 | **Security Review** | ✅ Passed | No vulnerabilities found |
 | **Coverage** | ✅ 100% | All code paths tested |
-| **Audit** | ✅ Passed | RECIPIENT_STREAM_INDEX_AUDIT.md |
+| **Audit** | ✅ Passed | docs/recipient-stream-index.md |
 | **Ready for Production** | ✅ YES | All gates passed |
 
 ---
@@ -389,10 +379,9 @@ println!("User has {} streams", count);
 ## Contact & Support
 
 For questions about this implementation:
-- See [docs/recipient-stream-index.md](../docs/recipient-stream-index.md) for API docs
-- See [RECIPIENT_STREAM_INDEX_AUDIT.md](./RECIPIENT_STREAM_INDEX_AUDIT.md) for technical details
-- See [contracts/stream/src/test.rs](../contracts/stream/src/test.rs) for test examples
-- Review inline Rust doc comments in [contracts/stream/src/lib.rs](../contracts/stream/src/lib.rs)
+- See [docs/recipient-stream-index.md](./docs/recipient-stream-index.md) for API docs and technical details
+- See [contracts/stream/src/test.rs](./contracts/stream/src/test.rs) for test examples
+- Review inline Rust doc comments in [contracts/stream/src/lib.rs](./contracts/stream/src/lib.rs)
 
 ---
 
