@@ -415,6 +415,182 @@ fn test_bulk_cancel_rejects_global_pause() {
     assert_eq!(result, Err(Ok(ContractError::ContractPaused)));
 }
 
+// ===========================================================================
+// CliffOnly-specific bulk_cancel tests (issue #1193)
+// ===========================================================================
+
+/// CliffOnly stream bulk-cancelled before cliff: recipient gets 0,
+/// sender gets full deposit refund. The binary nature of CliffOnly accrual
+/// means accrued == 0 before cliff_time.
+#[test]
+fn test_bulk_cancel_cliff_only_before_cliff_full_refund() {
+    let (env, client, _admin, sender, recipient) = setup_env();
+    env.ledger().set_timestamp(0);
+
+    let stream_id = client.create_stream(
+        &sender,
+        &CreateStreamParams {
+            recipient: recipient.clone(),
+            deposit_amount: 1000,
+            rate_per_second: 0, // CliffOnly requires rate=0
+            start_time: 0,
+            cliff_time: 500,
+            end_time: 1000,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::CliffOnly,
+            irrevocable: None,
+            witness: None,
+        },
+    );
+
+    // t=200, before cliff=500
+    advance_time(&env, 200);
+
+    let token = TokenClient::new(&env, &client.get_config().token);
+    let sender_before = token.balance(&sender);
+    let recipient_before = token.balance(&recipient);
+
+    env.mock_all_auths();
+    client.bulk_cancel_streams(&sender, &vec![&env, stream_id]);
+
+    let recipient_delta = token.balance(&recipient) - recipient_before;
+    let sender_delta = token.balance(&sender) - sender_before;
+
+    assert_eq!(recipient_delta, 0, "recipient gets 0 before cliff");
+    assert_eq!(sender_delta, 1000, "sender gets full deposit refund");
+
+    let stream = client.get_stream_state(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Cancelled);
+    assert_eq!(stream.withdrawn_amount, 0);
+}
+
+/// CliffOnly stream bulk-cancelled after cliff: recipient gets full
+/// deposit, sender gets 0. The binary accrual means the full deposit is
+/// accrued once cliff_time is reached.
+#[test]
+fn test_bulk_cancel_cliff_only_after_cliff_recipient_gets_all() {
+    let (env, client, _admin, sender, recipient) = setup_env();
+    env.ledger().set_timestamp(0);
+
+    let stream_id = client.create_stream(
+        &sender,
+        &CreateStreamParams {
+            recipient: recipient.clone(),
+            deposit_amount: 1000,
+            rate_per_second: 0,
+            start_time: 0,
+            cliff_time: 500,
+            end_time: 1000,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::CliffOnly,
+            irrevocable: None,
+            witness: None,
+        },
+    );
+
+    // t=700, after cliff=500
+    advance_time(&env, 700);
+
+    let token = TokenClient::new(&env, &client.get_config().token);
+    let sender_before = token.balance(&sender);
+    let recipient_before = token.balance(&recipient);
+    let liabilities_before = client.get_total_liabilities();
+
+    env.mock_all_auths();
+    client.bulk_cancel_streams(&sender, &vec![&env, stream_id]);
+
+    let recipient_delta = token.balance(&recipient) - recipient_before;
+    let sender_delta = token.balance(&sender) - sender_before;
+
+    assert_eq!(recipient_delta, 1000, "recipient gets full deposit after cliff");
+    assert_eq!(sender_delta, 0, "sender gets 0 (fully accrued)");
+
+    let stream = client.get_stream_state(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Cancelled);
+    assert_eq!(stream.withdrawn_amount, 1000);
+
+    assert_eq!(
+        client.get_total_liabilities(),
+        liabilities_before - 1000,
+        "TotalLiabilities must decrease by deposit"
+    );
+}
+
+/// Multiple CliffOnly streams in a single bulk_cancel, mixed before/after cliff.
+#[test]
+fn test_bulk_cancel_cliff_only_mixed_cliff() {
+    let (env, client, _admin, sender, recipient) = setup_env();
+    env.ledger().set_timestamp(0);
+
+    // s1: cliff=1000, end=2000 → before cliff at t=500
+    let s1 = client.create_stream(
+        &sender,
+        &CreateStreamParams {
+            recipient: recipient.clone(),
+            deposit_amount: 500,
+            rate_per_second: 0,
+            start_time: 0,
+            cliff_time: 1000,
+            end_time: 2000,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::CliffOnly,
+            irrevocable: None,
+            witness: None,
+        },
+    );
+
+    // s2: cliff=400, end=1000 → after cliff at t=500
+    let s2 = client.create_stream(
+        &sender,
+        &CreateStreamParams {
+            recipient: recipient.clone(),
+            deposit_amount: 1000,
+            rate_per_second: 0,
+            start_time: 0,
+            cliff_time: 400,
+            end_time: 1000,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::CliffOnly,
+            irrevocable: None,
+            witness: None,
+        },
+    );
+
+    // t=500: before s1.cliff, after s2.cliff
+    advance_time(&env, 500);
+
+    let token = TokenClient::new(&env, &client.get_config().token);
+    let sender_before = token.balance(&sender);
+    let recipient_before = token.balance(&recipient);
+
+    env.mock_all_auths();
+    client.bulk_cancel_streams(&sender, &vec![&env, s1, s2]);
+
+    // s1: full refund to sender (before cliff), s2: full payment to recipient (after cliff)
+    let recipient_delta = token.balance(&recipient) - recipient_before;
+    let sender_delta = token.balance(&sender) - sender_before;
+
+    assert_eq!(recipient_delta, 1000, "only s2 (after cliff) pays recipient");
+    assert_eq!(sender_delta, 500, "only s1 (before cliff) refunds sender");
+
+    assert_eq!(
+        client.get_stream_state(&s1).status,
+        StreamStatus::Cancelled
+    );
+    assert_eq!(
+        client.get_stream_state(&s2).status,
+        StreamStatus::Cancelled
+    );
+}
+
 #[test]
 fn test_bulk_cancel_requires_sender_auth() {
     // mock_all_auths() is sticky in soroban-sdk 21.7.7 and cannot be undone

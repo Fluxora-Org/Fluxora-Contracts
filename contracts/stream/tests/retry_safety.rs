@@ -104,20 +104,30 @@ fn retry_safety_create_stream_idempotent() {
     };
 
     // First create
-    let stream_id_1 = ctx.client.create_stream(&ctx.sender, &params)
+    let stream_id_1 = ctx
+        .client
+        .create_stream(&ctx.sender, &params)
         .expect("first create should succeed");
 
     // Verify stream is persisted
-    let stream_1 = ctx.client.get_stream_state(&stream_id_1).expect("stream should exist");
+    let stream_1 = ctx
+        .client
+        .get_stream_state(&stream_id_1)
+        .expect("stream should exist");
     assert_eq!(stream_1.deposit_amount, 5000);
 
     // Second create with same parameters should produce a NEW stream_id (not idempotent on input,
     // but the sequence of operations is deterministic)
-    let stream_id_2 = ctx.client.create_stream(&ctx.sender, &params)
+    let stream_id_2 = ctx
+        .client
+        .create_stream(&ctx.sender, &params)
         .expect("second create should succeed");
 
     // Both streams should exist and be retrievable
-    let stream_2 = ctx.client.get_stream_state(&stream_id_2).expect("stream should exist");
+    let stream_2 = ctx
+        .client
+        .get_stream_state(&stream_id_2)
+        .expect("stream should exist");
     assert_eq!(stream_2.deposit_amount, 5000);
 
     // Both should have identical parameters (but different IDs)
@@ -144,16 +154,26 @@ fn retry_safety_withdraw_deterministic_timestamp() {
     ctx.env.ledger().set_timestamp(500);
 
     // First withdraw
-    let withdrawable_1 = ctx.client.get_withdrawable(&stream_id).expect("should exist");
+    let withdrawable_1 = ctx
+        .client
+        .get_withdrawable(&stream_id)
+        .expect("should exist");
     assert_eq!(withdrawable_1, 5000);
 
-    ctx.client.withdraw(&stream_id).expect("first withdraw should succeed");
-    let withdrawn_after_1 = ctx.client.get_stream_state(&stream_id)
+    ctx.client
+        .withdraw(&stream_id)
+        .expect("first withdraw should succeed");
+    let withdrawn_after_1 = ctx
+        .client
+        .get_stream_state(&stream_id)
         .expect("stream should exist")
         .withdrawn_amount;
 
     // Retry at same timestamp (after CCU would be idempotent, but we just query state)
-    let withdrawable_2 = ctx.client.get_withdrawable(&stream_id).expect("should exist");
+    let withdrawable_2 = ctx
+        .client
+        .get_withdrawable(&stream_id)
+        .expect("should exist");
     // After first withdraw, withdrawable should be 0 (already withdrawn 5000 out of 5000 accrued)
     assert_eq!(withdrawable_2, 0);
 
@@ -171,9 +191,14 @@ fn retry_safety_multiple_withdraws_monotonic() {
 
     for t in [100u64, 200, 300].iter() {
         ctx.env.ledger().set_timestamp(*t);
-        ctx.client.withdraw(&stream_id).expect("withdraw should succeed");
+        ctx.client
+            .withdraw(&stream_id)
+            .expect("withdraw should succeed");
 
-        let stream = ctx.client.get_stream_state(&stream_id).expect("stream should exist");
+        let stream = ctx
+            .client
+            .get_stream_state(&stream_id)
+            .expect("stream should exist");
         assert!(stream.withdrawn_amount >= previous_withdrawn);
         previous_withdrawn = stream.withdrawn_amount;
     }
@@ -262,11 +287,16 @@ fn retry_safety_pause_deterministic_ledger() {
         .pause_stream(&stream_id, &PauseReason::Operational)
         .expect("first pause should succeed");
 
-    let stream_1 = ctx.client.get_stream_state(&stream_id).expect("should exist");
+    let stream_1 = ctx
+        .client
+        .get_stream_state(&stream_id)
+        .expect("should exist");
     assert_eq!(stream_1.status as u32, 1); // Paused
 
     // Attempt to pause again at same ledger should fail (already paused)
-    let pause_result = ctx.client.pause_stream(&stream_id, &PauseReason::Operational);
+    let pause_result = ctx
+        .client
+        .pause_stream(&stream_id, &PauseReason::Operational);
     assert!(pause_result.is_err());
 
     // Advance past cooldown
@@ -277,7 +307,10 @@ fn retry_safety_pause_deterministic_ledger() {
         .resume_stream(&stream_id)
         .expect("resume should succeed");
 
-    let stream_2 = ctx.client.get_stream_state(&stream_id).expect("should exist");
+    let stream_2 = ctx
+        .client
+        .get_stream_state(&stream_id)
+        .expect("should exist");
     assert_eq!(stream_2.status as u32, 0); // Active
 }
 
@@ -294,7 +327,10 @@ fn retry_safety_rate_decrease_checkpoint_deterministic() {
     ctx.env.ledger().set_timestamp(500);
 
     // Get accrued before rate decrease
-    let accrued_before = ctx.client.calculate_accrued(&stream_id).expect("should exist");
+    let accrued_before = ctx
+        .client
+        .calculate_accrued(&stream_id)
+        .expect("should exist");
     assert_eq!(accrued_before, 5000);
 
     // Decrease rate
@@ -302,7 +338,10 @@ fn retry_safety_rate_decrease_checkpoint_deterministic() {
         .decrease_rate_per_second(&stream_id, 5)
         .expect("first decrease should succeed");
 
-    let stream_after_1 = ctx.client.get_stream_state(&stream_id).expect("should exist");
+    let stream_after_1 = ctx
+        .client
+        .get_stream_state(&stream_id)
+        .expect("should exist");
     assert_eq!(stream_after_1.checkpointed_amount, 5000);
     assert_eq!(stream_after_1.checkpointed_at, 500);
 
@@ -312,14 +351,20 @@ fn retry_safety_rate_decrease_checkpoint_deterministic() {
         .decrease_rate_per_second(&stream_id, 3)
         .expect("second decrease should succeed");
 
-    let stream_after_2 = ctx.client.get_stream_state(&stream_id).expect("should exist");
+    let stream_after_2 = ctx
+        .client
+        .get_stream_state(&stream_id)
+        .expect("should exist");
     // Checkpoint should be based on accrual at t=500 with rate=5 (unchanged)
     assert_eq!(stream_after_2.checkpointed_amount, 5000);
     assert_eq!(stream_after_2.checkpointed_at, 500);
 
     // Advance time and verify accrual uses new rate consistently
     ctx.env.ledger().set_timestamp(600);
-    let accrued_at_600 = ctx.client.calculate_accrued(&stream_id).expect("should exist");
+    let accrued_at_600 = ctx
+        .client
+        .calculate_accrued(&stream_id)
+        .expect("should exist");
     // checkpoint(5000) + 3*(600-500) = 5000 + 300 = 5300
     assert_eq!(accrued_at_600, 5300);
 }
@@ -339,7 +384,10 @@ fn retry_safety_validation_fails_no_partial_mutation() {
     ctx.env.ledger().set_timestamp(500);
 
     // Record initial state
-    let initial = ctx.client.get_stream_state(&stream_id).expect("should exist");
+    let initial = ctx
+        .client
+        .get_stream_state(&stream_id)
+        .expect("should exist");
     let initial_withdrawn = initial.withdrawn_amount;
     assert_eq!(initial_withdrawn, 0);
 
@@ -352,7 +400,10 @@ fn retry_safety_validation_fails_no_partial_mutation() {
     assert!(result.is_err());
 
     // Verify state is unchanged (no partial mutation)
-    let after_failed = ctx.client.get_stream_state(&stream_id).expect("should exist");
+    let after_failed = ctx
+        .client
+        .get_stream_state(&stream_id)
+        .expect("should exist");
     assert_eq!(after_failed.withdrawn_amount, initial_withdrawn);
 }
 
@@ -372,15 +423,22 @@ fn retry_safety_terminal_state_idempotent_rejection() {
     ctx.client.withdraw(&stream_id).expect("should succeed");
 
     // Stream is now Completed
-    let stream = ctx.client.get_stream_state(&stream_id).expect("should exist");
+    let stream = ctx
+        .client
+        .get_stream_state(&stream_id)
+        .expect("should exist");
     assert_eq!(stream.status as u32, 2); // Completed
 
     // First pause attempt should fail
-    let pause_1 = ctx.client.pause_stream(&stream_id, &PauseReason::Operational);
+    let pause_1 = ctx
+        .client
+        .pause_stream(&stream_id, &PauseReason::Operational);
     assert!(pause_1.is_err());
 
     // Retry pause should fail identically
-    let pause_2 = ctx.client.pause_stream(&stream_id, &PauseReason::Operational);
+    let pause_2 = ctx
+        .client
+        .pause_stream(&stream_id, &PauseReason::Operational);
     assert!(pause_2.is_err());
 
     // First top-up attempt should fail
@@ -405,23 +463,41 @@ fn retry_safety_queries_no_side_effects() {
     ctx.env.ledger().set_timestamp(300);
 
     // Query withdrawable multiple times
-    let w1 = ctx.client.get_withdrawable(&stream_id).expect("should exist");
-    let w2 = ctx.client.get_withdrawable(&stream_id).expect("should exist");
-    let w3 = ctx.client.get_withdrawable(&stream_id).expect("should exist");
+    let w1 = ctx
+        .client
+        .get_withdrawable(&stream_id)
+        .expect("should exist");
+    let w2 = ctx
+        .client
+        .get_withdrawable(&stream_id)
+        .expect("should exist");
+    let w3 = ctx
+        .client
+        .get_withdrawable(&stream_id)
+        .expect("should exist");
 
     assert_eq!(w1, 1500);
     assert_eq!(w2, 1500);
     assert_eq!(w3, 1500);
 
     // Query accrued multiple times
-    let a1 = ctx.client.calculate_accrued(&stream_id).expect("should exist");
-    let a2 = ctx.client.calculate_accrued(&stream_id).expect("should exist");
+    let a1 = ctx
+        .client
+        .calculate_accrued(&stream_id)
+        .expect("should exist");
+    let a2 = ctx
+        .client
+        .calculate_accrued(&stream_id)
+        .expect("should exist");
 
     assert_eq!(a1, 1500);
     assert_eq!(a2, 1500);
 
     // Verify state is unchanged
-    let stream = ctx.client.get_stream_state(&stream_id).expect("should exist");
+    let stream = ctx
+        .client
+        .get_stream_state(&stream_id)
+        .expect("should exist");
     assert_eq!(stream.withdrawn_amount, 0);
 }
 
@@ -490,9 +566,18 @@ fn regression_accrual_determinism() {
         ctx.env.ledger().set_timestamp(*t);
 
         // Query 3 times at same timestamp
-        let a1 = ctx.client.calculate_accrued(&stream_id).expect("should exist");
-        let a2 = ctx.client.calculate_accrued(&stream_id).expect("should exist");
-        let a3 = ctx.client.calculate_accrued(&stream_id).expect("should exist");
+        let a1 = ctx
+            .client
+            .calculate_accrued(&stream_id)
+            .expect("should exist");
+        let a2 = ctx
+            .client
+            .calculate_accrued(&stream_id)
+            .expect("should exist");
+        let a3 = ctx
+            .client
+            .calculate_accrued(&stream_id)
+            .expect("should exist");
 
         assert_eq!(a1, a2);
         assert_eq!(a2, a3);
@@ -512,7 +597,10 @@ fn regression_monotonic_withdrawn() {
         ctx.env.ledger().set_timestamp(t);
         ctx.client.withdraw(&stream_id).expect("should succeed");
 
-        let stream = ctx.client.get_stream_state(&stream_id).expect("should exist");
+        let stream = ctx
+            .client
+            .get_stream_state(&stream_id)
+            .expect("should exist");
         assert!(stream.withdrawn_amount >= previous);
         previous = stream.withdrawn_amount;
     }

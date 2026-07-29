@@ -215,3 +215,60 @@ fn test_delegate_recipient_share_cyclic() {
         .unwrap();
     assert_eq!(err2, ContractError::CyclicDelegation);
 }
+
+#[test]
+fn test_get_stream_lineage_walks_root_to_leaf() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.timestamp = 1000;
+        li.sequence_number = 10;
+    });
+
+    let contract_id = env.register_contract(None, fluxora_stream::FluxoraStream {});
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract(token_admin);
+    client.init(&token_id, &Address::generate(&env));
+
+    let sender = Address::generate(&env);
+    let recipient1 = Address::generate(&env);
+    let recipient2 = Address::generate(&env);
+    let recipient3 = Address::generate(&env);
+
+    let root = create_stream(&env, &client, &token_id, &sender, &recipient1, 10000);
+
+    // A root stream (no parent) is its own single-element lineage.
+    assert_eq!(client.get_stream_lineage(&root), soroban_sdk::vec![&env, root]);
+
+    // Delegate twice to build the chain root -> child1 -> child2.
+    let child1 = client.delegate_recipient_share(&root, &recipient1, &5000, &recipient2);
+    let child2 = client.delegate_recipient_share(&child1, &recipient2, &5000, &recipient3);
+
+    // Lineage is returned root-to-leaf, inclusive of the queried stream.
+    assert_eq!(
+        client.get_stream_lineage(&child1),
+        soroban_sdk::vec![&env, root, child1]
+    );
+    assert_eq!(
+        client.get_stream_lineage(&child2),
+        soroban_sdk::vec![&env, root, child1, child2]
+    );
+}
+
+#[test]
+fn test_get_stream_lineage_unknown_stream_errors() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, fluxora_stream::FluxoraStream {});
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+    client.init(
+        &env.register_stellar_asset_contract(Address::generate(&env)),
+        &Address::generate(&env),
+    );
+
+    // A non-existent stream id has no lineage and errors rather than panicking.
+    assert!(client.try_get_stream_lineage(&999u64).is_err());
+}

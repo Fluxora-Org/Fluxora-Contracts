@@ -7,7 +7,6 @@
 //! Every helper in this module is wired up as the canonical call site for
 //! its corresponding event in `lib.rs` and `storage.rs`.
 
-use crate::types::StreamDecommissioned;
 use crate::*;
 use soroban_sdk::{symbol_short, Address, Env};
 

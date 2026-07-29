@@ -1544,15 +1544,14 @@ impl<'a> DelegatedCtx<'a> {
         // mirroring what register_stellar_asset_contract_v2 does for the issuer account.
         // This is the correct testutils pattern for ed25519 account recipients.
         {
-            use std::rc::Rc;
             use soroban_env_host::budget::AsBudget;
             use soroban_sdk::xdr::{
-                AccountEntry, AccountEntryExt, AlphaNum4, AssetCode4,
-                LedgerEntry, LedgerEntryData, LedgerEntryExt, LedgerKey,
-                LedgerKeyAccount, LedgerKeyTrustLine, SequenceNumber, Thresholds,
-                TrustLineAsset, TrustLineEntry, TrustLineEntryExt, TrustLineFlags,
+                AccountEntry, AccountEntryExt, AlphaNum4, AssetCode4, LedgerEntry, LedgerEntryData,
+                LedgerEntryExt, LedgerKey, LedgerKeyAccount, LedgerKeyTrustLine, SequenceNumber,
+                Thresholds, TrustLineAsset, TrustLineEntry, TrustLineEntryExt, TrustLineFlags,
                 VecM,
             };
+            use std::rc::Rc;
 
             // The SAC asset is always CreditAlphanum4("aaa\0", issuer).
             // Extract the issuer AccountId from the StellarAssetContract we registered.

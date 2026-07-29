@@ -2,7 +2,8 @@ extern crate std;
 
 use fluxora_stream::{
     ContractError, CreateStreamParams, DataKey, FluxoraStream, FluxoraStreamClient, StreamKind,
-    StreamScheduleTemplate, StreamStatus, MAX_GLOBAL_TEMPLATES, MAX_TEMPLATES_PER_OWNER,
+    StreamScheduleTemplate, StreamStatus, TemplateSpec, DOCUMENTED_TEMPLATES, MAX_GLOBAL_TEMPLATES,
+    MAX_TEMPLATES_PER_OWNER,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -390,4 +391,82 @@ fn auto_renew_inherits_irrevocable_and_witness_settings() {
     assert_ne!(new_id, old_id);
     assert_eq!(renewed.irrevocable, Some(true));
     assert_eq!(renewed.witness, Some(witness));
+}
+
+/// Cross-check every template documented in `docs/stream-templates.md` against the
+/// actual contract implementation.
+///
+/// # What it verifies
+/// 1. `DOC_ENTRIES` is hand-enumerated from the markdown table and acts as the
+///    doc's source of truth.
+/// 2. For each entry, we register the template via [`register_stream_template`]
+///    and assert the stored [`StreamScheduleTemplate`] matches the documented values
+///    exactly.
+/// 3. After all documented templates pass, any template present in the code
+///    constant [`DOCUMENTED_TEMPLATES`] but absent from the hand-enumerated list
+///    is surfaced via `eprintln!` (non-failing) so maintainers can decide whether
+///    the doc or the code constant needs updating.
+///
+/// # Drift categories caught
+/// | Scenario | Behaviour |
+/// |----------|-----------|
+/// | Doc lists a template that doesn't compile | ❌ **Test fails** — `register_stream_template` panics or `get_stream_template` returns unexpected params |
+/// | Doc lists a template but params differ | ❌ **Test fails** — `assert_eq!` on params |
+/// | Code has a template not in doc | ⚠️ Noted via `eprintln!` — non‑failing |
+#[test]
+fn documented_templates_match_code() {
+    // Hand‑enumerated from docs/stream-templates.md § "Pre-configured Templates".
+    // When updating the doc table, update this list too — the test will fail if
+    // they diverge.  Keep entries in the same order as the markdown table.
+    const DOC_ENTRIES: &[(&str, u64, u64, u64)] = &[
+        ("Quick Pay", 0, 0, 3_600),
+        ("Daily", 0, 0, 86_400),
+        ("Weekly", 0, 86_400, 604_800),
+        ("Biweekly", 0, 86_400, 1_209_600),
+        ("Monthly", 0, 172_800, 2_592_000),
+        ("Quarterly", 0, 604_800, 7_776_000),
+        ("Annual", 0, 604_800, 31_536_000),
+    ];
+
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    let admin = Address::generate(&env);
+    let owner = Address::generate(&env);
+
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+    client.init(&token_id, &admin);
+    env.ledger().set_timestamp(1_000_000);
+
+    // 1. Verify every documented template is registrable and has the right params.
+    for (name, start_delay, cliff_delay, duration) in DOC_ENTRIES {
+        let tid = client.register_stream_template(&owner, start_delay, cliff_delay, duration);
+        let stored: StreamScheduleTemplate = client.get_stream_template(&tid);
+        assert_eq!(
+            stored.start_delay, *start_delay,
+            "{name}: start_delay mismatch"
+        );
+        assert_eq!(
+            stored.cliff_delay, *cliff_delay,
+            "{name}: cliff_delay mismatch"
+        );
+        assert_eq!(stored.duration, *duration, "{name}: duration mismatch");
+    }
+
+    // 2. Surface code‑defined templates that are NOT documented (non‑failing).
+    for code_tpl in DOCUMENTED_TEMPLATES {
+        let found = DOC_ENTRIES.iter().any(|(n, _, _, _)| *n == code_tpl.name);
+        if !found {
+            eprintln!(
+                "NOTE: Template \"{}\" exists in code (DOCUMENTED_TEMPLATES) \
+                 but is not listed in docs/stream-templates.md — doc may need updating",
+                code_tpl.name,
+            );
+        }
+    }
 }

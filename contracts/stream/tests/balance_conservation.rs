@@ -497,9 +497,125 @@ proptest! {
                 }
             }
 
-            (last_time, last_accrued, last_withdrawn) = assert_invariants(
-                &ctx, stream_id, total_deposited, total_withdrawn, total_refunded,
-                last_time, last_accrued, last_withdrawn, &label,
+            // After every operation, verify invariants
+            assert_stream_balance_conservation(&ctx, stream_id);
+            assert_global_balance_conservation(&ctx);
+            assert_accrual_consistency(&ctx, stream_id, expected_deposit);
+        }
+
+        // Final verification: total tokens accounted for
+        let final_contract_balance = ctx.contract_balance();
+        let final_sender_balance = ctx.token.balance(&ctx.sender);
+        let final_recipient_balance = ctx.token.balance(&ctx.recipient);
+
+        // Total tokens in the system (sender + recipient + contract) should equal initial mint
+        let total_tokens = final_sender_balance + final_recipient_balance + final_contract_balance;
+        let initial_mint = 2_000_000_000_000_i128; // minted to sender + recipient
+        assert_eq!(
+            total_tokens, initial_mint,
+            "Total token supply must be conserved (no tokens created/destroyed)"
+        );
+    }
+}
+
+proptest! {
+    //! Test batch stream creation and batch withdrawal preserve balance conservation.
+
+    #![proptest_config(ProptestConfig {
+        cases: 128,
+        max_shrink_iters: 30,
+        ..ProptestConfig::default()
+    })]
+
+    /// Property: Creating multiple streams in a batch and then withdrawing from
+    /// them preserves the global balance conservation invariant.
+    #[test]
+    fn prop_batch_streams_balance_conservation(
+        streams in prop::collection::vec(valid_stream_params(), 1..10)
+    ) {
+        let ctx = TestContext::setup();
+        ctx.set_time(0);
+
+        let sender_balance_before = ctx.token.balance(&ctx.sender);
+        let contract_balance_before = ctx.contract_balance();
+
+        // Build batch params
+        let mut batch_params = vec![&ctx.env];
+        let mut expected_total_deposit = 0i128;
+        for (deposit, rate, start, cliff, end) in &streams {
+            batch_params.push_back(CreateStreamParams {
+                recipient: ctx.recipient.clone(),
+                deposit_amount: *deposit,
+                rate_per_second: *rate,
+                start_time: *start,
+                cliff_time: *cliff,
+                end_time: *end,
+                withdraw_dust_threshold: Some(0),
+                memo: None,
+                kind: fluxora_stream::StreamKind::Linear,
+                metadata: None,
+            });
+            expected_total_deposit += *deposit;
+        }
+
+        // Create streams in batch
+        let stream_ids = ctx.client.create_streams(&ctx.sender, &batch_params);
+        assert_eq!(stream_ids.len() as usize, streams.len());
+
+        // Verify total deposit transferred
+        let sender_balance_after_create = ctx.token.balance(&ctx.sender);
+        let contract_balance_after_create = ctx.contract_balance();
+        assert_eq!(
+            sender_balance_before - sender_balance_after_create,
+            expected_total_deposit,
+            "Batch creation must transfer exactly total deposit"
+        );
+        assert_eq!(
+            contract_balance_after_create - contract_balance_before,
+            expected_total_deposit,
+            "Contract must receive exactly total deposit"
+        );
+
+        // Advance time past all end times and withdraw all
+        let max_end = streams.iter().map(|(_, _, _, _, end)| *end).max().unwrap_or(0);
+        ctx.set_time(max_end + 100);
+
+        // Build batch withdraw params
+        let mut withdraw_ids = vec![&ctx.env];
+        for id in stream_ids.iter() {
+            withdraw_ids.push_back(id);
+        }
+
+        let recipient_balance_before = ctx.token.balance(&ctx.recipient);
+        let contract_balance_before_withdraw = ctx.contract_balance();
+
+        let withdraw_results = ctx.client.batch_withdraw(&ctx.recipient, &withdraw_ids);
+
+        let total_withdrawn: i128 = withdraw_results.iter().map(|r| r.amount).sum();
+        let recipient_balance_after = ctx.token.balance(&ctx.recipient);
+        let contract_balance_after_withdraw = ctx.contract_balance();
+
+        // Verify withdrawal amounts transferred correctly
+        assert_eq!(
+            recipient_balance_after - recipient_balance_before,
+            total_withdrawn,
+            "Batch withdraw must transfer exactly total withdrawn to recipient"
+        );
+        assert_eq!(
+            contract_balance_before_withdraw - contract_balance_after_withdraw,
+            total_withdrawn,
+            "Contract balance must decrease by total withdrawn"
+        );
+
+        // Verify global conservation
+        assert_global_balance_conservation(&ctx);
+
+        // All streams should be completed
+        for id in stream_ids.iter() {
+            let stream = ctx.client.get_stream_state(&id);
+            assert_eq!(
+                stream.status, StreamStatus::Completed,
+                "Stream {} should be Completed after full withdrawal", id
             );
 
             // Stop once the stream reaches a terminal state; any further mutating

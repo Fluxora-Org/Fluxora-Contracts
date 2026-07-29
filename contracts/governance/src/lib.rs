@@ -26,12 +26,59 @@ const MAX_PROPOSAL_AGE_SECONDS: u64 = 2_592_000;
 
 /// # Registry Migration Edge Cases
 ///
-/// The governance contract assumes a stable registry of contract addresses.
-/// During migration:
+/// The governance contract assumes a stable registry of contract addresses.  It supports
+/// triggering a **registry migration** on a `FluxoraFactory` target via the
+/// [`FactorySetStreamContract`](CallData::FactorySetStreamContract) `CallData` variant.
+/// This causes the factory to point new stream creations at a different
+/// `FluxoraStream` instance while existing streams on the old instance continue
+/// running independently.
+///
+/// ## Governance-specific migration behaviour
+///
+/// - **Dispatch mechanism**: `FactorySetStreamContract(new_stream_contract)` encodes to XDR
+///   and is dispatched by `dispatch_call` → `env.invoke_contract(target, "set_stream_contract", ...)`.
+///   The target factory runs its full `set_stream_contract` logic including
+///   `validate_stream_contract`, registry TTL bump, and `stm_upd` event emission.
+/// - **Same-address no-op (E1)**: If `new_stream_contract == current_address`, the factory
+///   returns `Ok(())` with no side effects (no storage write, no event, no TTL bump).
+///   The governance proposal is still marked as executed — it succeeds without
+///   producing a `stm_upd` event.  Indexers must not assume every executed
+///   `FactorySetStreamContract` proposal emits `stm_upd`.
+/// - **Non-factory target (E6)**: If the proposal's `target` is not a `FluxoraFactory`
+///   (or does not expose `set_stream_contract`), the cross-contract call traps and the
+///   entire governance `execute()` transaction reverts.  The proposal remains
+///   unexecuted and can be re-submitted with the correct target address.
+/// - **Admin continuity**: The factory's admin stays unchanged by the migration.
+///   The governance contract must remain the factory admin (or be replaced via a
+///   separate `FactorySetAdmin` proposal) for post-migration governance operations.
+/// - **Registry TTL bump**: The factory bumps its stream-ID registry TTL during
+///   `set_stream_contract` via `bump_registry_ttl`, giving indexers a ~7 day window
+///   post-migration without requiring active writes.
+///
+/// ## Fresh-instance migration (new governance deployment)
+///
+/// When deploying a **new** governance contract instance alongside a registry migration:
 /// - The admin must call `set_admin` on the new instance before executing proposals.
 /// - Signer index is rebuilt from scratch on `init`; no state migrates automatically.
 /// - Proposal IDs restart at 0 on a fresh instance; off-chain tooling must handle
 ///   ID discontinuity across contract versions.
+///
+/// ## Backward compatibility
+///
+/// All changes in this area are additive.  Existing `CallData` variants keep their
+/// discriminant values; existing proposals remain executable; existing event schemas
+/// are unchanged.  The same-address no-op (E1) was hardened in a previous release to
+/// suppress misleading `stm_upd` events — indexers should handle both cases.
+///
+/// ## See also
+///
+/// - [`docs/registry-migration.md`](../docs/registry-migration.md) — full edge-case
+///   catalogue, gas profile, and regression surface.
+/// - [`test_factory_set_stream_contract_dispatches_via_governance`] — governance
+///   dispatch integration test.
+/// - [`test_governance_registry_migration_same_address`] — same-address no-op test.
+/// - [`test_governance_registry_migration_non_factory_target_reverts`] — non-factory
+///   target revert test.
 
 /// Maximum number of proposals that `get_proposals_by_id_range` will return in
 /// a single call.
@@ -1488,9 +1535,7 @@ mod tests {
         }
 
         pub fn get_stream_contract(env: Env) -> Option<Address> {
-            env.storage()
-                .instance()
-                .get(&symbol_short!("strm_ctr"))
+            env.storage().instance().get(&symbol_short!("strm_ctr"))
         }
     }
 
@@ -1721,13 +1766,152 @@ mod tests {
         ctx.client.execute(&executor, &id);
 
         // Verify the mock factory's stored stream contract was updated.
-        let mock =
-            MockFactoryTargetClient::new(&ctx.env, &mock_factory_id);
+        let mock = MockFactoryTargetClient::new(&ctx.env, &mock_factory_id);
         let stored = mock.get_stream_contract();
         assert_eq!(
             stored,
             Some(new_stream),
             "FactorySetStreamContract must dispatch set_stream_contract on the target"
+        );
+    }
+
+    // =======================================================================
+    // Registry migration edge cases (see docs/registry-migration.md)
+    // =======================================================================
+
+    /// Verifies that a `FactorySetStreamContract` proposal whose target address
+    /// is an EOA (no contract) traps during `execute()` and leaves the proposal
+    /// unexecuted.  This confirms E6 from docs/registry-migration.md — a
+    /// governance migration proposal cannot execute against a non-factory target.
+    #[test]
+    fn test_governance_registry_migration_non_factory_target_reverts() {
+        use soroban_sdk::xdr::ToXdr;
+
+        let ctx = Ctx::setup();
+        // An EOA (non-contract address) as the target — cannot dispatch
+        // set_stream_contract on an address that has no contract.
+        let eoa_target = Address::generate(&ctx.env);
+        let new_stream = Address::generate(&ctx.env);
+
+        let calldata = CallData::FactorySetStreamContract(new_stream).to_xdr(&ctx.env);
+        let id = ctx.client.propose(&ctx.signer_a, &eoa_target, &calldata);
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+        ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
+
+        let executor = Address::generate(&ctx.env);
+        let result = ctx.client.try_execute(&executor, &id);
+
+        // The cross-contract call to set_stream_contract on an EOA traps,
+        // reverting the entire execute transaction — the proposal stays
+        // unexecuted so it can be retried with the correct target.
+        assert!(
+            result.is_err(),
+            "execute against non-factory target must revert"
+        );
+        let p = ctx.client.get_proposal(&id);
+        assert!(
+            !p.executed,
+            "proposal must NOT be marked executed when target is not a factory"
+        );
+    }
+
+    /// Verifies that a `FactorySetStreamContract` proposal with the *current*
+    /// stream contract address executes successfully (E1 / E7 from
+    /// docs/registry-migration.md).  The governance proposal is still marked
+    /// executed even though the factory's stored address is unchanged.  In the
+    /// real factory a same-address call is a no-op (no event, no storage write);
+    /// this test exercises the governance path end-to-end for that scenario.
+    #[test]
+    fn test_governance_registry_migration_same_address() {
+        use soroban_sdk::xdr::ToXdr;
+
+        let ctx = Ctx::setup();
+        let mock_factory_id = ctx.env.register_contract(None, MockFactoryTarget);
+        let mock = MockFactoryTargetClient::new(&ctx.env, &mock_factory_id);
+
+        // First, set the initial stream contract on the mock factory.
+        let current_stream = Address::generate(&ctx.env);
+        mock.set_stream_contract(&current_stream);
+        assert_eq!(
+            mock.get_stream_contract(),
+            Some(current_stream.clone()),
+            "initial stream contract must be set"
+        );
+
+        // Now propose setting the SAME stream contract (same-address no-op).
+        let calldata = CallData::FactorySetStreamContract(current_stream.clone()).to_xdr(&ctx.env);
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &mock_factory_id, &calldata);
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+        ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
+
+        let executor = Address::generate(&ctx.env);
+        ctx.client.execute(&executor, &id);
+
+        // The governance proposal is marked executed.
+        let p = ctx.client.get_proposal(&id);
+        assert!(p.executed, "governance proposal must be marked executed");
+
+        // The factory's stored stream contract is unchanged.
+        let stored = mock.get_stream_contract();
+        assert_eq!(
+            stored,
+            Some(current_stream),
+            "same-address migration must leave factory state unchanged"
+        );
+    }
+
+    /// Verifies that executing a `FactorySetStreamContract` proposal emits the
+    /// expected `ProposalExecuted` event with the correct `target` and
+    /// `calldata` fields, and that the factory emits its own `stm_upd` event
+    /// when the contract address actually changes.
+    #[test]
+    fn test_governance_registry_migration_emits_correct_events() {
+        use soroban_sdk::xdr::ToXdr;
+
+        let ctx = Ctx::setup();
+        let mock_factory_id = ctx.env.register_contract(None, MockFactoryTarget);
+        let mock = MockFactoryTargetClient::new(&ctx.env, &mock_factory_id);
+
+        // Set initial address.
+        let old_stream = Address::generate(&ctx.env);
+        mock.set_stream_contract(&old_stream);
+
+        let new_stream = Address::generate(&ctx.env);
+        let calldata = CallData::FactorySetStreamContract(new_stream.clone()).to_xdr(&ctx.env);
+
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &mock_factory_id, &calldata);
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+        ctx.env.ledger().set_timestamp(1_000_000 + TIMELOCK + 1);
+
+        let executor = Address::generate(&ctx.env);
+        ctx.client.execute(&executor, &id);
+
+        // Verify governance ProposalExecuted event
+        let (topic, data) = nth_last_contract_event_with_topic(
+            &ctx.env,
+            &ctx.contract_id,
+            symbol_short!("executed"),
+        );
+        assert_eq!(topic, symbol_short!("executed"));
+        let exec_event: ProposalExecuted =
+            ProposalExecuted::try_from_val(&ctx.env, &data).expect("decodes to ProposalExecuted");
+        assert_eq!(exec_event.proposal_id, id);
+        assert_eq!(exec_event.target, mock_factory_id);
+        assert_eq!(exec_event.calldata, calldata);
+
+        // Verify the factory's stored stream contract was updated.
+        let stored = mock.get_stream_contract();
+        assert_eq!(
+            stored,
+            Some(new_stream),
+            "FactorySetStreamContract must update the target factory"
         );
     }
 

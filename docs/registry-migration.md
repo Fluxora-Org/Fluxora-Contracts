@@ -348,6 +348,9 @@ by separate subsystems:
 | Test | Coverage |
 |---|---|
 | `test_factory_set_stream_contract_dispatches_via_governance` | Path 2 + R7 |
+| `test_governance_registry_migration_non_factory_target_reverts` | E6 — non-factory target reverts |
+| `test_governance_registry_migration_same_address` | E7 — same-address no-op via governance |
+| `test_governance_registry_migration_emits_correct_events` | Event verification for governance dispatch |
 | `test_calldata_variants_roundtrip` | R11 |
 | `test_calldata_shape_validation_disallowed_target_functions_rejected` | R12 |
 | `test_calldata_shape_validation_no_selector_collision_bypass` | R12 |

@@ -51,6 +51,7 @@ pub enum DataKey {
     RecipientPendingOffers(Address),
     PooledStreamShares(u64),
     PooledStreamWithdrawn(u64, Address),
+    DelegatedCancelNonce(Address),
 }
 ```
 
@@ -94,6 +95,7 @@ pub enum DataKey {
 | 33 | `RecipientPendingOffers(Address)` | Persistent | `Vec<u64>` | `create_stream_offer` | accept/reject/cancel (removes) |
 | 34 | `PooledStreamShares(u64)` | Persistent | `Vec<(Address,u32)>` | pooled stream creation | withdraw / close |
 | 35 | `PooledStreamWithdrawn(u64, Address)` | Persistent | `i128` | pooled withdraw | pooled withdraw (increments) |
+| 36 | `DelegatedCancelNonce(Address)` | Persistent | `u64` | absent/0 until delegated cancel | successful `delegated_cancel` (increments) |
 
 ---
 
@@ -113,7 +115,7 @@ Persistent storage is used for individual stream records and per-recipient nonce
 1. **Never reorder** existing variants. The discriminant table above is immutable for the lifetime of any deployed instance.
 2. **Never remove** a variant that has ever been written to a live network. Mark it `#[deprecated]` in a doc comment and stop writing to it; do not delete it.
 3. **Always append** new variants at the end of the enum.
-4. **Increment `CONTRACT_VERSION`** whenever a new variant is added or an existing variant's associated value type changes — both are breaking changes for off-chain tools that read storage directly.
+4. **Review `CONTRACT_VERSION`** whenever a variant is appended. Changing an existing variant or value type requires a bump and a migration/new deployment. A strictly append-only key may remain under the current version only when absent-key behavior, direct-storage-reader impact, compatibility tests, and release notes are updated together.
 5. **Document the ledger** at which each new variant is first deployed so that migration tooling can determine which entries exist on a given instance.
 
 ### What counts as a breaking storage change
@@ -124,7 +126,7 @@ Persistent storage is used for individual stream records and per-recipient nonce
 | Insert variant in the middle | Yes — shifts discriminants | Never do this |
 | Remove an existing variant | Yes — existing entries become orphaned | Deprecate instead |
 | Change the value type of an existing variant | Yes — existing entries become undecodable | Increment `CONTRACT_VERSION` |
-| Append a new variant at the end | No — existing entries unaffected | Increment `CONTRACT_VERSION` (conservative) |
+| Append a new variant at the end | No for existing on-chain entries; direct storage readers must update | Review version; document absent default and add compatibility tests |
 | Change TTL constants | No — no effect on stored data | No version bump required |
 | Change internal helper logic with identical external behaviour | No | No version bump required |
 
@@ -149,7 +151,7 @@ storage layout is append-only and the V5 `Stream` struct ended before the
 The storage-key compatibility suite treats the following as the regression
 boundary for this release:
 
-- `DataKey` discriminants 0–35 stay in declaration order.
+- `DataKey` discriminants 0–36 stay in declaration order.
 - `Stream` fields 0–13 keep their current positions and `memo` remains the
     last field.
 - `memo` must decode as `None` on older V5-seeded entries.
@@ -353,7 +355,7 @@ Discriminants 0–14 are **permanently frozen**. No variant at these positions m
 
 ### V5 → V6 transition
 
-V6 appended six new `DataKey` variants (discriminants 15–20) and one new `Stream` field:
+V6 and later upgrades appended new `DataKey` variants (discriminants 15–28) and one new `Stream` field:
 
 | Discriminant | Variant                             | Storage    | Value type   | Notes                                                      |
 | -----------: | :---------------------------------- | :--------- | :----------- | :--------------------------------------------------------- |
@@ -363,6 +365,14 @@ V6 appended six new `DataKey` variants (discriminants 15–20) and one new `Stre
 |           18 | `RecipientStreamPage(Address, u32)` | Persistent | `Vec<u64>`   | Paged recipient index (page → IDs)                         |
 |           19 | `RecipientStreamPageCount(Address)` | Persistent | `u32`        | Number of pages in recipient's index                       |
 |           20 | `PendingRecipientUpdate(u64)`       | Persistent | `Address`    | Pending recipient rotation proposal                        |
+|           21 | `IdReservation(Address)`            | Persistent | `IdReservation`| Active ID reservation for a caller                       |
+|           22 | `MaxRatePerSecond`                  | Instance   | `i128`       | Per-stream max rate cap                                    |
+|           23 | `DelegatedWithdrawNonce(Address)`   | Persistent | `u64`        | Per-recipient nonce for delegated-withdraw                 |
+|           24 | `LastPauseRecord(PauseKind)`        | Instance   | `PauseRecord`| Last pause record for stream or protocol                   |
+|           25 | `RotationHistory(u64)`              | Persistent | `Vec<RotationEntry>` | Rotation history for recipient/sender changes      |
+|           26 | `LastAccrualLedgerTimestamp`        | Instance   | `u64`        | Last ledger timestamp observed for accrual clock-regression|
+|           27 | `PausedStreamCount`                 | Instance   | `u64`        | Protocol-wide count of streams currently in `StreamStatus::Paused` |
+|           28 | `TotalKeeperFeesPaid`               | Instance   | `i128`       | Aggregate sum of all keeper fees paid out via `keeper_cancel` |
 
 V6 `Stream` struct adds one field at the end:
 
@@ -385,7 +395,7 @@ V7 appended eight new `DataKey` variants (discriminants 21–28) while preservin
 | 27 | `PausedStreamCount` | Instance | `u64` | Protocol-wide count of streams currently in `StreamStatus::Paused` |
 | 28 | `TotalKeeperFeesPaid` | Instance | `i128` | Aggregate keeper fees paid via `keeper_cancel` |
 
-Code-level invariant verification for all 36 variants is maintained in [`contracts/stream/src/checksum.rs`](../contracts/stream/src/checksum.rs).
+Code-level invariant verification for all 37 variants is maintained in [`contracts/stream/src/checksum.rs`](../contracts/stream/src/checksum.rs).
 
 ### Forward-compatibility guarantee
 
@@ -451,3 +461,39 @@ Both reservation release entrypoints now share a unified reclamation helper (`re
 - **At-expiry & post-expiry success**: Ensures that if a holder abandons or loses access to their reservation, the counter space/storage is not permanently locked, maintaining contract liveness.
 - **Tip-adjacent guard**: Counter rewind only occurs when `reservation_end == current_count`, meaning no streams exist beyond the reserved range. This prevents unsafe rewinds that would create ID collisions with already-created streams.
 - **Consistent event shape**: Both paths emit the `res_rel` event with `(start_id, count, consumed, reclaimed)`, ensuring consistent indexer accounting regardless of which release path triggered the reclamation.
+
+### Single source of truth for the storage helpers
+
+The three IdReservation storage helpers have exactly one definition each, all in
+[`contracts/stream/src/storage.rs`](../contracts/stream/src/storage.rs):
+
+| Helper                          | Persistence action                                                                                     |
+| :------------------------------ | :----------------------------------------------------------------------------------------------------- |
+| `load_id_reservation(env, caller)`  | Reads `DataKey::IdReservation(caller)` from persistent storage (no TTL bump on read).             |
+| `save_id_reservation(env, caller, res)` | Writes the reservation and bumps its TTL by `PERSISTENT_LIFETIME_THRESHOLD` / `PERSISTENT_BUMP_AMOUNT`. |
+| `remove_id_reservation(env, caller)` | Removes `DataKey::IdReservation(caller)` from persistent storage.                                    |
+
+`contracts/stream/src/lib.rs` **imports** these from the `storage` module
+(`use storage::{ load_id_reservation, next_stream_id_for, remove_id_reservation, save_id_reservation };`)
+and calls through — it does **not** redefine them.
+
+**Why this matters.** These functions previously existed as two identical copies
+(one in `storage.rs`, one in `lib.rs`). Two independent copies of the same
+persistence logic are a drift hazard: a future change to the TTL policy
+(`extend_ttl` bump amounts) or the `DataKey` key shape applied to only one copy
+would silently produce inconsistent persistence — reservations that expire early
+or key under a shape the reader cannot find. Because `next_stream_id_for`
+consumes reservations to assign stream IDs, a divergent copy could orphan
+pre-allocated ID ranges or, in the worst case, contribute to stream-ID reuse.
+
+**Regression guard.** The single-definition invariant is enforced two ways:
+
+| Guard                                                                 | Where it runs                                    | What it checks                                                                                 |
+| :-------------------------------------------------------------------- | :----------------------------------------------- | :--------------------------------------------------------------------------------------------- |
+| `id_reservation_helpers_defined_exactly_once` (`#[test]`)             | `cargo test` — CI **Test** job (hard gate)       | Each helper is defined (`fn <name>(`) exactly once across `contracts/stream/src/`, and in `storage.rs`. |
+| `lib_rs_imports_id_reservation_helpers_from_storage` (`#[test]`)      | `cargo test` — CI **Test** job (hard gate)       | `lib.rs` keeps a `use storage::{ … }` import wiring the shared implementation into scope.       |
+| "Guard against duplicate IdReservation storage helpers" (grep step)   | CI **Lint** job (hard gate)                      | Belt-and-suspenders: fails if any helper's `fn <name>(` count under `contracts/stream/src/` ≠ 1, even if the Rust tests are removed. |
+
+Both live alongside the reservation behavior tests in
+[`contracts/stream/tests/id_reservation.rs`](../contracts/stream/tests/id_reservation.rs);
+the grep step is defined in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml).

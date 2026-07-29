@@ -12,16 +12,48 @@
 //! 3. Asserting that V6-only keys (discriminants 15–20) are absent on a
 //!    V5-seeded instance, confirming no phantom reads.
 //! 4. Cross-checking `CONTRACT_VERSION` against the live `DataKey` variant count
-//!    (currently 36) to ensure versioning discipline when new variants are added.
+//!    (currently 37) to ensure versioning discipline when new variants are added.
 //!
-//! # Discriminant Table Overview (36 variants: 0–35)
+//! # Discriminant Table Overview (37 variants: 0–36)
 //!
-//! | Disc | Variant                     | Storage    | Added |
-//! |-----:|:----------------------------|:-----------|:------|
-//! | 0–14 | V5 Frozen Keys              | Mixed      | V5    |
-//! |15–20 | V6 Extension Keys           | Mixed      | V6    |
-//! |21–28 | V7 Storage & Auditing Keys  | Mixed      | V7    |
-//! |29–35 | V8/V9 Additive Keys         | Mixed      | V8/V9 |
+//! | Disc | Variant                     | Storage    | Added in |
+//! |-----:|:----------------------------|:-----------|:----------|
+//! |    0 | `Config`                    | Instance   | V0        |
+//! |    1 | `NextStreamId`              | Instance   | V0        |
+//! |    2 | `Stream(u64)`               | Persistent | V0        |
+//! |    3 | `RecipientStreams(Address)`  | Persistent | V0        |
+//! |    4 | `GlobalEmergencyPaused`     | Instance   | V0        |
+//! |    5 | `CreationPaused`            | Instance   | V0        |
+//! |    6 | `GlobalPauseReason`         | Instance   | V0        |
+//! |    7 | `GlobalPauseTimestamp`      | Instance   | V0        |
+//! |    8 | `GlobalPauseAdmin`          | Instance   | V0        |
+//! |    9 | `AutoClaimDestination(u64)` | Persistent | V0        |
+//! |   10 | `NextTemplateId`            | Instance   | V0        |
+//! |   11 | `ActiveTemplateCount`       | Instance   | V0        |
+//! |   12 | `StreamTemplate(u64)`       | Persistent | V0        |
+//! |   13 | `OwnerTemplateIds(Address)` | Persistent | V0        |
+//! |   14 | `TotalLiabilities`          | Instance   | V0        |
+//!
+//! # Discriminant stability (V6+ additions, appended at end)
+//!
+//! | Disc | Variant                     | Storage    | Added in |
+//! |-----:|:----------------------------|:-----------|:----------|
+//! |   15 | `WithdrawNonce(Address)`    | Persistent | V6        |
+//! |   16 | `PauseState`                | Instance   | V6        |
+//! |   17 | `ReentrancyLock`            | Instance   | V6        |
+//! |   18 | `RecipientStreamPage(Address, u32)` | Persistent | V6 |
+//! |   19 | `RecipientStreamPageCount(Address)` | Persistent | V6 |
+//! |   20 | `PendingRecipientUpdate(u64)` | Persistent | V6        |
+//! |   21 | `IdReservation(Address)`    | Persistent | V6        |
+//! |   22 | `MaxRatePerSecond`          | Instance   | V6        |
+//! |   23 | `DelegatedWithdrawNonce(Address)` | Persistent | V6   |
+//! |   24 | `LastPauseRecord(PauseKind)` | Instance   | V6        |
+//!
+//! # Note on metadata (issue #580)
+//!
+//! The per-stream `metadata` field is stored **inline** within the `Stream` struct
+//! (discriminant 2). No new `DataKey` variant is required, so the discriminant
+//! table is unchanged. Metadata is additive: an absent XDR field decodes as `None`.
 //!
 //! # V6 discriminant table (discriminants 15–20)
 //!
@@ -47,7 +79,7 @@
 //! |   27 | `PausedStreamCount`                | Instance   |
 //! |   28 | `TotalKeeperFeesPaid`              | Instance   |
 //!
-//! # Post-V7 additive variants (discriminants 29–35)
+//! # Post-V7 additive variants (discriminants 29–36)
 //!
 //! | Disc | Variant                                | Storage    |
 //! |-----:|:---------------------------------------|:-----------|
@@ -58,8 +90,9 @@
 //! |   33 | `RecipientPendingOffers(Address)`      | Persistent |
 //! |   34 | `PooledStreamShares(u64)`              | Persistent |
 //! |   35 | `PooledStreamWithdrawn(u64, Address)`  | Persistent |
+//! |   36 | `DelegatedCancelNonce(Address)`        | Persistent |
 //!
-//! Total live `DataKey` variant count: **36** (discriminants 0–35).
+//! Total live `DataKey` variant count: **37** (discriminants 0–36).
 //!
 //! # Version Mapping Table (`CONTRACT_VERSION` => Expected DataKey Count)
 //!
@@ -67,21 +100,30 @@
 //! |------------------|------------------------|---------------|-------|
 //! | 5                | 15                     | 0..=14        | V5 frozen layout |
 //! | 6                | 29                     | 0..=28        | V6 freeze + 8 post-freeze additive variants |
-//! | 9                | 36                     | 0..=35        | Current live count |
+//! | 9                | 37                     | 0..=36        | Current live count |
 //!
 //! # Companion Documentation
 //! - `contracts/stream/src/checksum.rs` (WASM checksum & key layout documentation)
 //! - `docs/upgrade.md` (CONTRACT_VERSION policy & upgrade runbook)
 //!
+//! # V6 Stream struct (16 fields, no `metadata`)
+//!
+//! V6 added `memo` and `kind` fields. V7 adds `metadata` as field 17.
+//! A V6-era `Stream` entry is represented in V7 as a `Stream` with `metadata: None`.
+//! XDR forward-compatibility ensures the absent 17th field decodes as `None`.
+//!
+//! Since `metadata` is stored **inside** the `Stream` struct (discriminant 2),
+//! no new `DataKey` variant is required. This means metadata does not change the
+//! discriminant table and imposes no additional storage key migration burden.
+//!
 //! # Security assumptions tested
 //!
-//! - V5 `Stream` entries (many fields absent) decode correctly on V9.
-//! - V5 instance keys (`Config`, `NextStreamId`, pause flags) are readable on V9.
-//! - V5 persistent keys (`RecipientStreams`, `AutoClaimDestination`) are readable.
+//! - V5 `Stream` entries (memo absent) decode correctly on V6/V7 with `memo == None`.
+//! - V6 `Stream` entries (metadata absent) decode correctly on V7 with `metadata == None`.
+//! - V5 instance keys (`Config`, `NextStreamId`, pause flags) are readable on V6/V7.
+//! - V5/V6 persistent keys (`RecipientStreams`, `AutoClaimDestination`) are readable.
 //! - V6-only keys (discriminants 15–20) return absent/default on a V5-seeded instance.
-//! - Post-V6 keys (discriminants 21–35) return absent/default on a V5-seeded instance.
-//! - No `None`-unwrap panics occur on any V9 read path when given V5 storage.
-//! - `CONTRACT_VERSION` matches the expected `DataKey` variant count (36).
+//! - No `None`-unwrap panics occur on any read path when given earlier-version storage.
 
 extern crate std;
 
@@ -156,9 +198,9 @@ impl<'a> Ctx<'a> {
     /// - `parent_stream_id: None` — not present in V5
     /// - `last_pause_toggle_ledger: 0`, `last_withdraw_ledger: 0`,
     ///   `last_rate_change_ledger: 0` — not present in V5
-    fn seed_v5_stream(&self, stream_id: u64, recipient: &Address) {
+    fn legacy_stream(&self, stream_id: u64, recipient: &Address) -> Stream {
         let now = self.env.ledger().timestamp();
-        let stream = Stream {
+        Stream {
             stream_id,
             sender: self.sender.clone(),
             recipient: recipient.clone(),
@@ -174,19 +216,23 @@ impl<'a> Ctx<'a> {
             checkpointed_amount: 0,
             checkpointed_at: now,
             withdraw_dust_threshold: 0,
-            last_pause_toggle_ledger: 0,
-            last_withdraw_ledger: 0,
-            last_rate_change_ledger: 0,
-            is_pooled: None,
-            metadata: None,
             memo: None,
             kind: StreamKind::Linear,
-            irrevocable: None,
+            last_pause_toggle_ledger: 0,
+            last_withdraw_ledger: 0,
+            metadata: None,
             witness: None,
+            is_pooled: None,
+            last_rate_change_ledger: 0,
             delegation_depth: 0,
             parent_stream_id: None,
             decommissioned: None,
-        };
+            irrevocable: None,
+        }
+    }
+
+    fn seed_v5_stream(&self, stream_id: u64, recipient: &Address) {
+        let stream = self.legacy_stream(stream_id, recipient);
         let cid = self.contract_id.clone();
         self.env.as_contract(&cid, || {
             self.env
@@ -339,42 +385,17 @@ fn v5_cancelled_stream_readable_accrual_frozen() {
     let recipient = Address::generate(&ctx.env);
     let now = ctx.env.ledger().timestamp();
 
-    // Seed a cancelled V5 stream: cancelled 50 s into the stream
+    // Seed a cancelled V5 stream: cancelled 50 s into the stream.
     let cancelled_at = now + 50;
+    let mut stream = ctx.legacy_stream(0, &recipient);
+    stream.status = StreamStatus::Cancelled;
+    stream.cancelled_at = Some(cancelled_at);
     let cid = ctx.contract_id.clone();
     ctx.env.as_contract(&cid, || {
-        ctx.env.storage().persistent().set(
-            &DataKey::Stream(0u64),
-            &Stream {
-                stream_id: 0,
-                sender: ctx.sender.clone(),
-                recipient: recipient.clone(),
-                claim_owner: None,
-                deposit_amount: 86_400,
-                rate_per_second: 1,
-                start_time: now,
-                cliff_time: now,
-                end_time: now + 86_400,
-                withdrawn_amount: 0,
-                status: StreamStatus::Cancelled,
-                cancelled_at: Some(cancelled_at),
-                checkpointed_amount: 0,
-                checkpointed_at: now,
-                withdraw_dust_threshold: 0,
-                last_pause_toggle_ledger: 0,
-                last_withdraw_ledger: 0,
-                last_rate_change_ledger: 0,
-                is_pooled: None,
-                metadata: None,
-                memo: None,
-                kind: StreamKind::Linear,
-                irrevocable: None,
-                witness: None,
-                delegation_depth: 0,
-                parent_stream_id: None,
-                decommissioned: None,
-            },
-        );
+        ctx.env
+            .storage()
+            .persistent()
+            .set(&DataKey::Stream(0u64), &stream);
     });
 
     // Advance well past cancelled_at
@@ -402,40 +423,17 @@ fn v5_stream_with_checkpoint_readable() {
     let recipient = Address::generate(&ctx.env);
     let now = ctx.env.ledger().timestamp();
 
+    let mut stream = ctx.legacy_stream(0, &recipient);
+    stream.deposit_amount = 10_000;
+    stream.rate_per_second = 2;
+    stream.end_time = now + 5_000;
+    stream.checkpointed_amount = 500; // accrued under a prior rate
     let cid = ctx.contract_id.clone();
     ctx.env.as_contract(&cid, || {
-        ctx.env.storage().persistent().set(
-            &DataKey::Stream(0u64),
-            &Stream {
-                stream_id: 0,
-                sender: ctx.sender.clone(),
-                recipient: recipient.clone(),
-                claim_owner: None,
-                deposit_amount: 10_000,
-                rate_per_second: 2,
-                start_time: now,
-                cliff_time: now,
-                end_time: now + 5_000,
-                withdrawn_amount: 0,
-                status: StreamStatus::Active,
-                cancelled_at: None,
-                checkpointed_amount: 500, // accrued under a prior rate
-                checkpointed_at: now,
-                withdraw_dust_threshold: 0,
-                last_pause_toggle_ledger: 0,
-                last_withdraw_ledger: 0,
-                last_rate_change_ledger: 0,
-                is_pooled: None,
-                metadata: None,
-                memo: None,
-                kind: StreamKind::Linear,
-                irrevocable: None,
-                witness: None,
-                delegation_depth: 0,
-                parent_stream_id: None,
-                decommissioned: None,
-            },
-        );
+        ctx.env
+            .storage()
+            .persistent()
+            .set(&DataKey::Stream(0u64), &stream);
     });
 
     ctx.env.ledger().with_mut(|l| l.timestamp += 100);
@@ -443,6 +441,40 @@ fn v5_stream_with_checkpoint_readable() {
     let state = ctx.client.get_stream_state(&0u64);
     assert_eq!(state.checkpointed_amount, 500);
     assert!(state.memo.is_none());
+}
+
+/// A V6-era Stream (no `metadata`) is readable by V7, returning `metadata == None`.
+///
+/// V6 Stream struct had 16 fields (ending with `kind`) and did not include `metadata`.
+/// V7 adds `metadata` as field 17. XDR forward-compatibility ensures the absent
+/// field decodes as `None` — this test guards against any regression in that path.
+#[test]
+fn v6_stream_metadata_decodes_as_none() {
+    let ctx = Ctx::setup();
+    let recipient = Address::generate(&ctx.env);
+
+    let stream = ctx.legacy_stream(0, &recipient);
+    let cid = ctx.contract_id.clone();
+    ctx.env.as_contract(&cid, || {
+        ctx.env
+            .storage()
+            .persistent()
+            .set(&DataKey::Stream(0u64), &stream);
+    });
+
+    // V7 `get_stream_metadata` must decode the V6-era entry and return None
+    let meta = ctx.client.get_stream_metadata(&0u64);
+    assert!(
+        meta.is_none(),
+        "V6-era stream (no metadata) must decode as metadata=None on V7"
+    );
+
+    // V7 `get_stream_state` must also carry metadata=None
+    let state = ctx.client.get_stream_state(&0u64);
+    assert!(
+        state.metadata.is_none(),
+        "V6-era Stream struct must decode with metadata=None"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -511,8 +543,8 @@ fn v5_global_emergency_paused_readable_by_v9() {
                 end_time: now + 1000,
                 withdraw_dust_threshold: None,
                 memo: None,
-                metadata: None,
                 kind: StreamKind::Linear,
+                metadata: None,
                 irrevocable: None,
                 witness: None,
             },
@@ -552,8 +584,8 @@ fn v5_creation_paused_readable_by_v9() {
                 end_time: now + 1000,
                 withdraw_dust_threshold: None,
                 memo: None,
-                metadata: None,
                 kind: StreamKind::Linear,
+                metadata: None,
                 irrevocable: None,
                 witness: None,
             },
@@ -1048,6 +1080,27 @@ fn post_v7_pooled_stream_withdrawn_absent_on_v5_instance() {
     });
 }
 
+/// `DelegatedCancelNonce` (discriminant 36) is absent on legacy state and its
+/// public read path must apply the documented zero default without backfilling.
+#[test]
+fn v9_delegated_cancel_nonce_absent_defaults_to_zero_without_write() {
+    let ctx = Ctx::setup();
+    let sender = Address::generate(&ctx.env);
+    let key = DataKey::DelegatedCancelNonce(sender.clone());
+    let cid = ctx.contract_id.clone();
+
+    ctx.env.as_contract(&cid, || {
+        assert!(!ctx.env.storage().persistent().has(&key));
+    });
+    assert_eq!(ctx.client.get_delegated_cancel_nonce(&sender), 0);
+    ctx.env.as_contract(&cid, || {
+        assert!(
+            !ctx.env.storage().persistent().has(&key),
+            "read-only default must not backfill DelegatedCancelNonce"
+        );
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Discriminant stability smoke tests
 // ---------------------------------------------------------------------------
@@ -1243,7 +1296,7 @@ fn discriminant_29_auto_renew_enabled_round_trips() {
 }
 
 /// Discriminant 35 (PooledStreamWithdrawn) round-trips correctly.
-/// Last live variant; confirms the full discriminant range 0–35 is stable.
+/// Former last variant; confirms the previously frozen discriminant 35 remains stable.
 #[test]
 fn discriminant_35_pooled_stream_withdrawn_round_trips() {
     let ctx = Ctx::setup();
@@ -1261,6 +1314,25 @@ fn discriminant_35_pooled_stream_withdrawn_round_trips() {
             .get(&DataKey::PooledStreamWithdrawn(3u64, addr.clone()))
             .expect("PooledStreamWithdrawn must round-trip at discriminant 35");
         assert_eq!(val, 500_i128);
+    });
+}
+
+/// Discriminant 36 (DelegatedCancelNonce) is append-only and persistent.
+#[test]
+fn discriminant_36_delegated_cancel_nonce_round_trips() {
+    let ctx = Ctx::setup();
+    let sender = Address::generate(&ctx.env);
+    let cid = ctx.contract_id.clone();
+    ctx.env.as_contract(&cid, || {
+        let key = DataKey::DelegatedCancelNonce(sender.clone());
+        ctx.env.storage().persistent().set(&key, &9u64);
+        let value: u64 = ctx
+            .env
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("DelegatedCancelNonce must round-trip at discriminant 36");
+        assert_eq!(value, 9);
     });
 }
 
@@ -1383,7 +1455,7 @@ fn version_entry_point_is_stable_before_and_after_init() {
 /// |------------------|--------------------------------|--------------------|-------|
 /// | 5                | 15                             | 0..=14             | V5 release freeze |
 /// | 6                | 29                             | 0..=28             | V6 freeze (21) + 8 post-freeze additive variants |
-/// | 9                | 36                             | 0..=35             | Current live count |
+/// | 9                | 37                             | 0..=36             | Current live count |
 ///
 /// # Security Safeguard & Maintenance Protocol
 /// When a new `DataKey` variant is appended or `CONTRACT_VERSION` is bumped:
@@ -1395,10 +1467,10 @@ pub fn expected_datakey_count_for_version(version: u32) -> usize {
     match version {
         5 => 15,
         6 => 29,
-        // V7/V8/V9: additive variants were appended without individual version bumps
-        // (see checksum.rs "Why CONTRACT_VERSION was not bumped to 7" rationale).
-        // CONTRACT_VERSION 9 corresponds to 36 live DataKey variants (0..=35).
-        7 | 8 | 9 => 36,
+        // Historical V7/V8 mappings remain at the previous 36-key boundary.
+        7 | 8 => 36,
+        // V9 includes append-only DelegatedCancelNonce at discriminant 36.
+        9 => 37,
         other => panic!(
             "Unhandled CONTRACT_VERSION = {other} in expected_datakey_count_for_version. \
              When incrementing CONTRACT_VERSION, you must update the version mapping table in \
@@ -1408,7 +1480,7 @@ pub fn expected_datakey_count_for_version(version: u32) -> usize {
     }
 }
 
-/// Constructs a vector containing sample instances of all 36 live `DataKey`
+/// Constructs a vector containing sample instances of all 37 live `DataKey`
 /// variants in declaration order.
 ///
 /// Includes an exhaustive `match` on `DataKey` so that adding any new variant
@@ -1455,6 +1527,7 @@ pub fn all_live_datakey_variants(env: &Env) -> soroban_sdk::Vec<DataKey> {
         DataKey::RecipientPendingOffers(dummy_addr.clone()),   // 33
         DataKey::PooledStreamShares(0),                        // 34
         DataKey::PooledStreamWithdrawn(0, dummy_addr.clone()), // 35
+        DataKey::DelegatedCancelNonce(dummy_addr.clone()),     // 36
     ];
 
     // Exhaustive match check — compile error if any DataKey variant is missing here.
@@ -1497,6 +1570,7 @@ pub fn all_live_datakey_variants(env: &Env) -> soroban_sdk::Vec<DataKey> {
         DataKey::RecipientPendingOffers(_) => {}
         DataKey::PooledStreamShares(_) => {}
         DataKey::PooledStreamWithdrawn(_, _) => {}
+        DataKey::DelegatedCancelNonce(_) => {}
     };
     // Suppress unused-variable warning — the closure is only here for compile-time exhaustiveness.
     let _ = _check_exhaustive;
@@ -1548,10 +1622,10 @@ fn test_expected_datakey_count_mapping_v6() {
     assert_eq!(expected_datakey_count_for_version(6), 29);
 }
 
-/// Edge case: V9 version mapping expected count is 36.
+/// Edge case: V9 version mapping expected count is 37.
 #[test]
 fn test_expected_datakey_count_mapping_v9() {
-    assert_eq!(expected_datakey_count_for_version(9), 36);
+    assert_eq!(expected_datakey_count_for_version(9), 37);
 }
 
 /// Edge case: Unmapped/future versions trigger panic forcing deliberate mapping update.
@@ -1561,14 +1635,14 @@ fn test_expected_datakey_count_mapping_unhandled_version_panics() {
     expected_datakey_count_for_version(999);
 }
 
-/// Assert exact live variant count is 36 (discriminants 0..=35).
+/// Assert exact live variant count is 37 (discriminants 0..=36).
 #[test]
-fn test_datakey_variant_count_exact_36() {
+fn test_datakey_variant_count_exact_37() {
     let env = Env::default();
     let live_variants = all_live_datakey_variants(&env);
     assert_eq!(
         live_variants.len() as usize,
-        36,
+        37,
         "DataKey variant count changed without updating storage_key_compat test suite. \
          Add the new variant to all_live_datakey_variants() and update \
          expected_datakey_count_for_version()."
@@ -1578,7 +1652,7 @@ fn test_datakey_variant_count_exact_36() {
 /// Regression test: Verifies that synthetic version drift triggers an explicit assertion failure.
 #[test]
 fn test_regression_staleness_mismatch_detection() {
-    let live_count = 36usize; // current live variant count
+    let live_count = 37usize; // current live variant count
     let stale_version_expected_count = expected_datakey_count_for_version(5); // V5 expects 15
 
     assert_ne!(
@@ -1586,4 +1660,3 @@ fn test_regression_staleness_mismatch_detection() {
         "Stale CONTRACT_VERSION mapping must be detected as mismatched against live DataKey count"
     );
 }
-

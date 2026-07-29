@@ -151,3 +151,69 @@ fn terminal_cancelled_stream_bypasses_dust_threshold() {
     );
     assert_eq!(ctx.token.balance(&ctx.recipient), 50);
 }
+
+#[test]
+fn final_drain_bypasses_dust_threshold() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_linear(&ctx.recipient, 1_000, 500, 1_000);
+
+    // Advance to withdraw 900, which is above the threshold (500).
+    ctx.env.ledger().set_timestamp(900);
+    let withdrawn1 = ctx.client.withdraw(&stream_id);
+    assert_eq!(withdrawn1, 900);
+
+    // Advance to end of stream. 100 tokens remain, which is below the threshold (500).
+    // Because it's the final drain (remaining balance = 100), the withdrawal should bypass the threshold.
+    ctx.env.ledger().set_timestamp(1_000);
+    let withdrawn2 = ctx.client.withdraw(&stream_id);
+    assert_eq!(
+        withdrawn2, 100,
+        "final drain must bypass dust threshold (100 < 500)"
+    );
+    assert_eq!(ctx.token.balance(&ctx.recipient), 1_000);
+}
+
+#[test]
+fn recipient_index_insertion_is_idempotent() {
+    let ctx = Ctx::setup();
+    let r = ctx.recipient.clone();
+    let id = ctx.create_linear(&r, 1_000, 0, 1_000);
+
+    let ids_before = ctx.client.get_recipient_streams(&r);
+    assert_eq!(ids_before.len(), 1);
+
+    // Manually attempt to re-add the same stream ID to the recipient index
+    ctx.env.as_contract(&ctx.client.address, || {
+        fluxora_stream::storage::add_stream_to_recipient_index(&ctx.env, &r, id, Some(1_000));
+    });
+
+    let ids_after = ctx.client.get_recipient_streams(&r);
+    assert_eq!(ids_after.len(), 1, "Duplicate stream ID must not be inserted into recipient index");
+}
+
+#[test]
+fn stream_structural_invariants_validation() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_linear(&ctx.recipient, 1_000, 0, 1_000);
+
+    ctx.env.as_contract(&ctx.client.address, || {
+        let mut stream = fluxora_stream::storage::load_stream(&ctx.env, stream_id).unwrap();
+
+        // Valid stream passes
+        assert!(fluxora_stream::storage::validate_stream_invariants(&stream).is_ok());
+
+        // Invalid: start_time > end_time
+        stream.start_time = 2_000;
+        assert!(fluxora_stream::storage::validate_stream_invariants(&stream).is_err());
+        stream.start_time = 0;
+
+        // Invalid: withdrawn_amount > deposit_amount
+        stream.withdrawn_amount = 2_000;
+        assert!(fluxora_stream::storage::validate_stream_invariants(&stream).is_err());
+        stream.withdrawn_amount = 0;
+
+        // Invalid: negative deposit_amount
+        stream.deposit_amount = -500;
+        assert!(fluxora_stream::storage::validate_stream_invariants(&stream).is_err());
+    });
+}

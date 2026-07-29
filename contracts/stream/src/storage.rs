@@ -14,14 +14,17 @@
 //! - **Reentrancy:** `ReentrancyLock` instance flag prevents nested token calls.
 //! - **Liabilities:** `TotalLiabilities` tracks outstanding deposit obligations
 //!   and moves in lockstep with create/top-up vs withdraw/cancel/refund paths.
-//! - **Indexes sorted:** `RecipientStreams` and `SenderStreams` vectors are kept
-//!   in ascending `stream_id` order on insert/remove.
+//!   Value is guaranteed non-negative (`>= 0`).
+//! - **Indexes sorted & unique:** `RecipientStreams`, `SenderStreams`, and `RecipientPendingOffers`
+//!   vectors are kept in ascending order without duplicate IDs on insert/remove (idempotent insertion).
 //! - **CEI:** Stream state is persisted before external token transfers.
 //! - **Terminal state:** Cancelled or past-`end_time` streams bypass dust threshold
 //!   and freeze accrual at cancellation when applicable.
 //! - **Metadata validation:** `validate_metadata` runs before ID allocation.
+//! - **Stream layout validation:** `validate_stream_invariants` validates field boundaries
+//!   (deposit, withdrawal, timestamps, checkpoints) before stream state persistence.
 //! - **Append-only keys:** `DataKey` variants are never reordered (discriminants
-//!   0–35 frozen per release policy).
+//!   0–36 frozen per release policy).
 //!
 //! # Security notes
 //! - `DataKey` variant order is append-only and must never be reordered.
@@ -288,7 +291,45 @@ pub fn load_stream(env: &Env, stream_id: u64) -> Result<Stream, ContractError> {
     Ok(stream)
 }
 
+/// Validate structural storage layout invariants for a `Stream` instance.
+///
+/// Ensures all fields satisfy fundamental invariants before persistence:
+/// - `start_time <= end_time`
+/// - `cliff_time >= start_time && cliff_time <= end_time`
+/// - `deposit_amount >= 0`
+/// - `withdrawn_amount >= 0 && withdrawn_amount <= deposit_amount`
+/// - `checkpointed_amount >= 0 && checkpointed_amount <= deposit_amount`
+/// - `checkpointed_at <= end_time`
+/// - `rate_per_second >= 0 && withdraw_dust_threshold >= 0`
+pub fn validate_stream_invariants(stream: &Stream) -> Result<(), ContractError> {
+    if stream.start_time > stream.end_time {
+        return Err(ContractError::InvalidParams);
+    }
+    if stream.cliff_time < stream.start_time || stream.cliff_time > stream.end_time {
+        return Err(ContractError::InvalidParams);
+    }
+    if stream.deposit_amount < 0 || stream.withdrawn_amount < 0 {
+        return Err(ContractError::InvalidParams);
+    }
+    if stream.withdrawn_amount > stream.deposit_amount {
+        return Err(ContractError::InvalidState);
+    }
+    if stream.checkpointed_amount < 0 || stream.checkpointed_amount > stream.deposit_amount {
+        return Err(ContractError::InvalidState);
+    }
+    if stream.checkpointed_at > stream.end_time {
+        return Err(ContractError::InvalidState);
+    }
+    if stream.rate_per_second < 0 || stream.withdraw_dust_threshold < 0 {
+        return Err(ContractError::InvalidParams);
+    }
+    Ok(())
+}
+
 pub fn save_stream(env: &Env, stream: &Stream) {
+    if let Err(err) = validate_stream_invariants(stream) {
+        panic!("stream storage invariant violation: {:?}", err);
+    }
     let key = DataKey::Stream(stream.stream_id);
     env.storage().persistent().set(&key, stream);
     // Adaptive TTL bump on write: scale to remaining stream lifetime.
@@ -364,8 +405,8 @@ pub fn save_recipient_streams(
     }
 }
 
-/// Add a stream ID to a recipient's index (maintains sorted order).
-/// Assumes stream_id is not already in the list.
+/// Add a stream ID to a recipient's index (maintains sorted, unique order).
+/// Idempotent: no-op if stream_id is already present.
 pub fn add_stream_to_recipient_index(
     env: &Env,
     recipient: &Address,
@@ -376,7 +417,7 @@ pub fn add_stream_to_recipient_index(
 
     // Insert in sorted order (binary search for insertion point)
     let insert_pos = match streams.binary_search(stream_id) {
-        Ok(pos) => pos,
+        Ok(_) => return, // already present – idempotent
         Err(pos) => pos,
     };
 
@@ -482,9 +523,10 @@ pub fn read_total_liabilities(env: &Env) -> i128 {
 }
 
 pub fn write_total_liabilities(env: &Env, amount: i128) {
+    let safe_amount = if amount < 0 { 0 } else { amount };
     env.storage()
         .instance()
-        .set(&DataKey::TotalLiabilities, &amount);
+        .set(&DataKey::TotalLiabilities, &safe_amount);
     bump_instance_ttl(env);
 }
 
@@ -649,13 +691,24 @@ pub fn increment_delegated_nonce(env: &Env, recipient: &Address) {
     );
 }
 
-/// Pub re-export of `increment_delegated_nonce` for test crates under the `testutils` feature.
-///
-/// Allows adversarial auth tests to simulate delegation revocation by bumping
-/// the nonce directly in contract storage via `env.as_contract(...)`.
-#[cfg(any(test, feature = "testutils"))]
-pub fn increment_delegated_nonce_test_only(env: &Env, recipient: &Address) {
-    increment_delegated_nonce(env, recipient);
+// ---------------------------------------------------------------------------
+// Delegated-cancel nonce helpers
+// ---------------------------------------------------------------------------
+
+pub(crate) fn load_delegated_cancel_nonce(env: &Env, sender: &Address) -> u64 {
+    let key = DataKey::DelegatedCancelNonce(sender.clone());
+    env.storage().persistent().get(&key).unwrap_or(0u64)
+}
+
+pub(crate) fn increment_delegated_cancel_nonce(env: &Env, sender: &Address) {
+    let current = load_delegated_cancel_nonce(env, sender);
+    let key = DataKey::DelegatedCancelNonce(sender.clone());
+    env.storage().persistent().set(&key, &(current + 1));
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
 }
 
 pub(crate) fn load_rotation_history(env: &Env, stream_id: u64) -> soroban_sdk::Vec<RotationEntry> {
@@ -683,12 +736,7 @@ pub fn compute_stream_health(stream: &Stream, now: u64) -> (bool, i128, u64) {
 }
 
 /// Emit a `StreamHealthChanged` event if the funding health status changed.
-pub fn maybe_emit_health_changed(
-    env: &Env,
-    stream: &Stream,
-    was_underfunded: bool,
-    now: u64,
-) {
+pub fn maybe_emit_health_changed(env: &Env, stream: &Stream, was_underfunded: bool, now: u64) {
     let (is_underfunded, remaining_balance, seconds_remaining) = compute_stream_health(stream, now);
     if is_underfunded != was_underfunded {
         events::emit_stream_health_changed(
@@ -713,11 +761,7 @@ pub fn load_config(env: &Env) -> Config {
         .expect("contract not initialised")
 }
 
-pub fn save_rotation_history(
-    env: &Env,
-    stream_id: u64,
-    history: &soroban_sdk::Vec<RotationEntry>,
-) {
+pub fn save_rotation_history(env: &Env, stream_id: u64, history: &soroban_sdk::Vec<RotationEntry>) {
     let key = DataKey::RotationHistory(stream_id);
     env.storage().persistent().set(&key, history);
     env.storage().persistent().extend_ttl(
@@ -924,12 +968,7 @@ pub fn read_pooled_stream_shares(
     }
 }
 
-pub fn save_pooled_stream_withdrawn(
-    env: &Env,
-    stream_id: u64,
-    recipient: Address,
-    amount: i128,
-) {
+pub fn save_pooled_stream_withdrawn(env: &Env, stream_id: u64, recipient: Address, amount: i128) {
     let key = DataKey::PooledStreamWithdrawn(stream_id, recipient);
     env.storage().persistent().set(&key, &amount);
     env.storage().persistent().extend_ttl(
@@ -962,14 +1001,12 @@ pub fn reject_duplicate_ids(
     env: &Env,
     stream_ids: &soroban_sdk::Vec<u64>,
 ) -> Result<(), ContractError> {
-    let mut seen = soroban_sdk::Vec::<u64>::new(env);
+    let mut seen = soroban_sdk::Map::<u64, ()>::new(env);
     for id in stream_ids.iter() {
-        for s in seen.iter() {
-            if s == id {
-                return Err(ContractError::DuplicateStreamId);
-            }
+        if seen.contains_key(id) {
+            return Err(ContractError::DuplicateStreamId);
         }
-        seen.push_back(id);
+        seen.set(id, ());
     }
     Ok(())
 }
@@ -1170,7 +1207,7 @@ pub fn save_recipient_pending_offers(
 pub fn add_offer_to_recipient_pending(env: &Env, recipient: &Address, offer_id: u64) {
     let mut offers = load_recipient_pending_offers(env, recipient);
     let insert_pos = match offers.binary_search(offer_id) {
-        Ok(pos) => pos,
+        Ok(_) => return, // already present – idempotent
         Err(pos) => pos,
     };
     offers.insert(insert_pos, offer_id);

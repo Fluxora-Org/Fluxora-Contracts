@@ -9,9 +9,7 @@
 
 extern crate std;
 
-use fluxora_stream::{
-    storage::*, ContractError, DataKey, FluxoraStream, FluxoraStreamClient,
-};
+use fluxora_stream::{storage::*, ContractError, DataKey, FluxoraStream, FluxoraStreamClient};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::StellarAssetClient,
@@ -215,5 +213,38 @@ fn test_id_reservation_and_monotonic_stream_ids() {
         let id2 = next_stream_id_for(env, &ctx.sender);
         assert_eq!(id2, 0);
         assert_eq!(read_stream_count(env), 1);
+    });
+}
+
+#[test]
+fn test_total_liabilities_non_negative_floor() {
+    let ctx = TestCtx::setup();
+    let env = &ctx.env;
+
+    env.as_contract(&ctx.contract_id, || {
+        write_total_liabilities(env, 500);
+        assert_eq!(read_total_liabilities(env), 500);
+
+        // Attempting to write a negative amount saturates/clamps to 0
+        write_total_liabilities(env, -100);
+        assert_eq!(read_total_liabilities(env), 0, "TotalLiabilities must be non-negative");
+    });
+}
+
+#[test]
+fn test_offer_index_insertion_is_idempotent() {
+    let ctx = TestCtx::setup();
+    let env = &ctx.env;
+
+    env.as_contract(&ctx.contract_id, || {
+        add_offer_to_recipient_pending(env, &ctx.recipient, 7);
+        assert_eq!(load_recipient_pending_offers(env, &ctx.recipient).len(), 1);
+
+        // Re-adding same offer ID must be idempotent
+        add_offer_to_recipient_pending(env, &ctx.recipient, 7);
+        assert_eq!(
+            load_recipient_pending_offers(env, &ctx.recipient).len(), 1,
+            "Recipient pending offers index must not accept duplicate IDs"
+        );
     });
 }

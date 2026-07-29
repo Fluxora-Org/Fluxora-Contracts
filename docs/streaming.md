@@ -16,9 +16,9 @@ When changing the contract:
 - Update snapshot tests if externally visible behavior changes
 - No behavior change required for doc-only updates
 
-**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `close_cancelled_stream`, `close_completed_stream`, `compute_keeper_fee_split`, `create_stream_with_lookback`, `delete_stream_template`, `get_auto_renew`, `get_global_emergency_paused`, `get_lookback_window`, `get_paused_stream_count`, `get_pending_recipient_update`, `get_protocol_fees_accrued`, `get_recipient_stream_count`, `get_sender_portfolio_health`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `get_total_liabilities`, `global_resume`, `keeper_cancel`, `renew_stream`, `set_auto_renew`, `set_contract_paused`, `set_global_emergency_paused`, `set_lookback_window`, `version`, `migration_v5_to_v6`, `set_max_rate_per_second`.
-**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `delete_stream_template`, `get_auto_renew`, `get_global_emergency_paused`, `get_keeper_fee_split`, `get_pending_recipient_update`, `get_recipient_stream_count`, `get_sender_portfolio_health`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `get_total_liabilities`, `global_resume`, `keeper_cancel`, `renew_stream`, `set_auto_renew`, `set_contract_paused`, `set_global_emergency_paused`, `version`, `migration_v5_to_v6`, `set_max_rate_per_second`.
-**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `close_cancelled_stream`, `close_completed_stream`, `compute_keeper_fee_split`, `delete_stream_template`, `get_auto_renew`, `get_global_emergency_paused`, `get_keeper_fee_split`, `get_paused_stream_count`, `get_pending_recipient_update`, `get_protocol_fees_accrued`, `get_recipient_stream_count`, `get_sender_portfolio_health`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `get_total_liabilities`, `global_resume`, `keeper_cancel`, `migration_v5_to_v6`, `renew_stream`, `set_auto_renew`, `set_contract_paused`, `set_global_emergency_paused`, `set_max_rate_per_second`, `version`.
+**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `close_cancelled_stream`, `close_completed_stream`, `compute_keeper_fee_split`, `create_stream_with_lookback`, `delegated_cancel`, `delete_stream_template`, `get_auto_renew`, `get_delegated_cancel_nonce`, `get_global_emergency_paused`, `get_lookback_window`, `get_paused_stream_count`, `get_pending_recipient_update`, `get_protocol_fees_accrued`, `get_recipient_stream_count`, `get_sender_portfolio_health`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `get_total_liabilities`, `global_resume`, `keeper_cancel`, `renew_stream`, `set_auto_renew`, `set_contract_paused`, `set_global_emergency_paused`, `set_lookback_window`, `version`, `migration_v5_to_v6`, `set_max_rate_per_second`.
+**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `delegated_cancel`, `delete_stream_template`, `get_auto_renew`, `get_delegated_cancel_nonce`, `get_global_emergency_paused`, `get_keeper_fee_split`, `get_pending_recipient_update`, `get_recipient_stream_count`, `get_sender_portfolio_health`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `get_total_liabilities`, `global_resume`, `keeper_cancel`, `renew_stream`, `set_auto_renew`, `set_contract_paused`, `set_global_emergency_paused`, `version`, `migration_v5_to_v6`, `set_max_rate_per_second`.
+**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `close_cancelled_stream`, `close_completed_stream`, `compute_keeper_fee_split`, `delegated_cancel`, `delete_stream_template`, `get_auto_renew`, `get_delegated_cancel_nonce`, `get_global_emergency_paused`, `get_keeper_fee_split`, `get_paused_stream_count`, `get_pending_recipient_update`, `get_protocol_fees_accrued`, `get_recipient_stream_count`, `get_sender_portfolio_health`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `get_total_liabilities`, `global_resume`, `keeper_cancel`, `migration_v5_to_v6`, `renew_stream`, `set_auto_renew`, `set_contract_paused`, `set_global_emergency_paused`, `set_max_rate_per_second`, `version`.
 
 ## Externally Visible Assurances
 
@@ -343,6 +343,26 @@ Off-chain orchestrators and indexers that build payment batches often need to kn
 Terminal states: `Completed`, `Cancelled`. Both may be closed via `close_completed_stream` to reclaim storage and index space. A stream is also considered technically terminal if `ledger.timestamp() >= end_time`.
 In this "time-terminal" state, pause/resume is blocked, but withdrawal is always allowed regardless of previous pause status.
 
+### Transferable claim ownership
+
+`transfer_claim_ownership(stream_id, current_owner, new_owner)` separates the
+right to withdraw a stream's accrued funds from its `recipient` field. New and
+legacy streams start with `claim_owner = None`, so the recipient continues to
+authorize withdrawals exactly as before. On the first transfer, the recipient
+must supply and authorize `current_owner`; the contract stores
+`claim_owner = Some(new_owner)` and emits `ClaimOwnershipTransferred`.
+
+After that point, the recorded claim owner is the sole withdrawal authority for
+`withdraw`, `withdraw_to`, and batched withdrawals. Each later transfer must be
+authorized by that current owner. The sender cannot transfer or revoke claim
+ownership. This transfer does not alter the recipient index, stream schedule,
+or accrued balance.
+
+This is intentionally different from `update_recipient`: recipient rotation is
+initiated by the sender and accepted by the current recipient, whereas claim
+ownership is initiated directly by the current claimant and never involves the
+sender.
+
 **Cancelled stream closure rule**: A `Cancelled` stream may only be closed after the recipient has fully withdrawn the frozen accrued amount. Attempting to close a `Cancelled` stream with remaining claimable balance returns `ContractError::InvalidState`. This prevents storage cleanup from destroying recipient funds.
 
 ### Auto-renew subscription streams (CONTRACT_VERSION 7)
@@ -383,6 +403,23 @@ Security and accounting rules:
 - The parent is checkpointed at the current ledger timestamp before its rate is reduced, preserving all already-accrued and already-withdrawn entitlement.
 - The child stream starts at the checkpoint timestamp and receives only the delegated future accrual. No hostnames, off-chain identifiers, or private metadata are introduced by the delegation event.
 - The child is indexed for both `new_recipient` and the original sender portfolio, so it behaves as an independent stream for reads and later withdrawals.
+- Each child records its origin in `parent_stream_id` (regular non-delegated streams leave it `None`), and the `RecipientShareDelegated` event carries both `parent_stream_id` and `child_stream_id`, so indexers can reconstruct lineage without a second read.
+
+### Stream lineage (`get_stream_lineage`)
+
+`get_stream_lineage(stream_id) -> Vec<u64>` returns a stream's ancestry chain in
+**root-to-leaf** order, inclusive of the queried stream, by following the
+`parent_stream_id` links recorded on delegated child streams.
+
+- A root stream (no parent) returns a single-element vector `[stream_id]`.
+- A delegated child returns `[root, …, stream_id]`, e.g. a stream two delegations
+  deep returns `[root, child1, child2]`.
+- The walk is bounded by `MAX_LINEAGE_DEPTH` (`MAX_DELEGATION_DEPTH + 1 = 4`) so
+  read cost is capped even against a malformed chain; because the delegation tree
+  is depth-bounded and cycle-free by construction, a well-formed lineage is never
+  truncated.
+- Querying a non-existent `stream_id` returns the standard `load_stream` error
+  rather than panicking.
 
 ### Cancellation Semantics (Issue Scope)
 
@@ -1408,7 +1445,7 @@ A naive decrease would retroactively lower the recipient's accrued tokens. To pr
 - **Check-Effects-Interactions (CEI)**: Computes accrual, reduces deposit amount, persists stream state, and finally refunds the difference to the sender.
 - **Rate Validation**: `0 < new_rate_per_second < current rate_per_second`.
 - **Refund**: The sender receives a refund of `old_deposit - new_deposit`, where `new_deposit = checkpointed_amount + new_rate * remaining_seconds`.
-- **Refund-non-negativity invariant**: The refund maths uses `checked_sub` (`old_deposit - new_deposit`), not `saturating_sub`. Any rate change whose `new_deposit` would **exceed** `old_deposit` — i.e. the new schedule streamable amount is *larger* than what has already been deposited — is rejected with `ContractError::ArithmeticOverflow`. The contract never silently grows a stream's deposit ceiling via `decrease_rate_per_second`; only `top_up_stream` adds new deposit, and `update_rate_per_second` re-prices under the existing ceiling. See `contracts/stream/tests/rate_decrease_after_withdraw.rs` for the regression coverage of this invariant.
+- **Refund-non-negativity invariant**: The refund maths uses `checked_sub` (`old_deposit - new_deposit`), not `saturating_sub`. Any rate change whose `new_deposit` would **exceed** `old_deposit` — i.e. the new schedule streamable amount is *larger* than what has already been deposited — is rejected with `ContractError::ArithmeticOverflow`. The contract never silently grows a stream's deposit ceiling via `decrease_rate_per_second`; only `top_up_stream` adds new deposit, and `update_rate_per_second` re-prices under the existing ceiling. This boundary is deterministic even for retries or partially-mutated state because no stream state is persisted on the failing path. See `contracts/stream/tests/rate_decrease_after_withdraw.rs` and `contracts/stream/src/test.rs` for the regression coverage of this invariant.
 
 #### Failures
 - **Unauthorized**: Caller is not the original sender.
@@ -1475,9 +1512,16 @@ Treasury key rotation: when a treasury wallet is being rotated, the operator cal
 
 ### batch_withdraw: completed stream behavior
 
-`batch_withdraw` processes each stream ID in order. A stream with status `Completed` **does not error** — it contributes a zero-amount result (`BatchWithdrawResult { stream_id, amount: 0 }`) and is skipped silently. No token transfer and no event are emitted for that entry. This allows callers to pass a mixed list of active and already-completed streams without pre-filtering.
+`batch_withdraw` processes each stream ID in order. The operation has the following explicit semantics:
 
-A `Paused` stream **does** return `ContractError::InvalidState` and reverts the entire batch.
+- A stream with status `Completed` **does not error** — it contributes a zero-amount result (`BatchWithdrawResult { stream_id, amount: 0 }`) and is skipped silently.
+- A stream with status `Cancelled` is processed normally: the transferred amount equals `accrued_at_cancel - withdrawn_amount`, and the stream remains `Cancelled` after the call.
+- A stream with status `Paused` causes the entire batch to abort with `ContractError::InvalidState`.
+- Duplicate stream IDs are rejected with `ContractError::DuplicateStreamId` and revert the whole batch.
+- An empty `stream_ids` vector returns `Ok(Vec::new())` with no transfers, no events, and no state change.
+- Mixed-state batches are supported for active, cancelled, and completed streams as long as no paused stream appears in the batch.
+
+This allows callers to submit mixed active/completed/cancelled batches safely while still preserving deterministic failure modes for invalid or duplicate inputs.
 
 ### One-Shot Init and Immutable Bootstrap
 
@@ -2297,10 +2341,13 @@ pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), ContractError>
 
 - Calls `env.deployer().update_current_contract_wasm(new_wasm_hash)`, which is
   atomic — if the new WASM is invalid, the call reverts and no state changes.
-- Bumps instance TTL after the upgrade so the contract does not expire.
-- Emits `ContractUpgraded` (topic `upgraded`) with the new hash, version, and
-  caller, plus a legacy `upgrade` topic event for backward-compatible indexers.
-  See `docs/events.md` for the exact event shapes.
+- Bumps the updated instance/code TTL. Persistent stream/index entries retain
+  independent TTLs and are not enumerated by this call.
+- The host emits `executable_update`; Fluxora emits `ContractUpgraded` (topic
+  `upgraded`) plus the legacy `upgrade` event. Their version fields contain the
+  executing WASM's `CONTRACT_VERSION`, not an introspected replacement version.
+  Verify the replacement with a later `version()` call. See `docs/upgrade.md`
+  and `docs/events.md` for exact failure, TTL, and event semantics.
 
 ---
 

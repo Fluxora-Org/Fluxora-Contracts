@@ -2,7 +2,7 @@
 
 use soroban_sdk::Env;
 
-use crate::{load_delegated_nonce, load_stream, ContractError};
+use crate::{load_delegated_cancel_nonce, load_delegated_nonce, load_stream, ContractError};
 
 /// Domain-separation tag for witnessed cancellation signatures.
 ///
@@ -63,6 +63,33 @@ pub(crate) fn validate_delegation_params(
 
     let stream = load_stream(env, stream_id)?;
     let current_nonce = load_delegated_nonce(env, &stream.recipient);
+    if nonce != current_nonce {
+        return Err(ContractError::InvalidSignature);
+    }
+
+    Ok(())
+}
+
+/// Domain-separation tag for delegated cancellation signatures.
+pub(crate) const DELEGATED_CANCEL_DOMAIN: &[u8; 24] = b"fluxora_delegated_cancel";
+
+/// Validate the delegation parameters for a delegated-cancel call.
+///
+/// Checks, in order:
+/// 1. `deadline >= env.ledger().timestamp()` — rejects expired signatures.
+/// 2. `nonce == current_nonce(stream.sender)` — rejects replays.
+pub(crate) fn validate_delegated_cancel_params(
+    env: &Env,
+    stream_id: u64,
+    nonce: u64,
+    deadline: u64,
+) -> Result<(), ContractError> {
+    if env.ledger().timestamp() > deadline {
+        return Err(ContractError::SignatureDeadlineExpired);
+    }
+
+    let stream = load_stream(env, stream_id)?;
+    let current_nonce = load_delegated_cancel_nonce(env, &stream.sender);
     if nonce != current_nonce {
         return Err(ContractError::InvalidSignature);
     }
@@ -427,3 +454,4 @@ mod tests {
         assert_eq!(result, Err(ContractError::InvalidParams));
     }
 }
+

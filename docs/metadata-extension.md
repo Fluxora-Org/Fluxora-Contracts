@@ -54,6 +54,25 @@ Creation paths that call validation: `create_stream`, `create_streams`,
 
 ---
 
+## Fixture harness invariants
+
+The regression suite uses a dedicated harness in
+`contracts/stream/tests/metadata_extension.rs` to keep fixture behavior explicit.
+Each test begins from a fresh Soroban environment with a newly registered
+contract and token, and the harness asserts that setup is deterministic before
+any test body runs:
+
+- the sender balance is minted to `INITIAL_SENDER_BALANCE`
+- the contract allowance is pinned to `i128::MAX`
+- the ledger timestamp and sequence are set to fixed baseline values
+- no stream is created during setup, so the stream counter starts at zero
+- helper assertions such as `assert_sender_balance` / `assert_no_token_movement`
+  guard against accidental token movement on failed validation paths
+
+This keeps the fixture contract stable across future metadata changes and makes
+it clear that the regression surface is not just the contract logic itself, but
+also the test harness assumptions that every metadata test depends on.
+
 ## Compatibility matrix
 
 Metadata is written at creation and **never mutated**. Operations either ignore
@@ -76,7 +95,7 @@ metadata or copy it to a new stream.
 | `extend_stream_end_time` / `shorten_stream_end_time` | Unchanged |
 | `transfer_sender` / recipient rotation | Unchanged |
 | `set_auto_renew` / `get_auto_renew` | Unchanged — auto-renew flag only |
-| `clone_stream` | **Inherited** — clone receives `source.metadata.clone()` |
+| `clone_stream` | **Reset** — cloned stream metadata is explicitly `None` |
 | `close_completed_stream` / `close_cancelled_stream` | Entry removed — metadata no longer queryable |
 
 ---
@@ -85,6 +104,65 @@ metadata or copy it to a new stream.
 
 V5 `Stream` entries had no `metadata` field. Soroban XDR decoding is forward-compatible:
 V5-encoded streams decode with `metadata == None`. No migration is required.
+
+---
+
+## Hardened edge cases (issue #1292 regression surface)
+
+The following edge cases were explicitly pinned down in
+`contracts/stream/tests/metadata_extension_hardening.rs` (the canonical
+behavioural surface for `validate_metadata` + downstream immutability):
+
+### Combined XDR size budget
+
+`memo` (max `MAX_MEMO_BYTES`) and `metadata` (max `MAX_METADATA_BYTES`) may
+both approach their independent maxima simultaneously. The full serialized
+`Stream` entry must remain within `MAX_STREAM_ENTRY_BYTES` (4 096). The current
+worst-case total is ≈ 1 696 bytes (see measured `XDR_SIZE_MEASUREMENT` lines
+in CI logs for the actual byte count).
+
+### Pre-allocation invariant under ID reservations
+
+`validate_metadata` runs **before** `next_stream_id_for`. With an active
+`reserve_stream_ids`, a failing validation must not consume a reserved ID.
+Mirrors the behaviour already enforced for the global counter.
+
+### `create_stream_offer` validation
+
+`create_stream_offer` calls `validate_metadata` on its `metadata` map the
+same way `create_stream` does. A failing validation rejects the offer and
+must not pre-allocate an `offer_id` (i.e. must not advance
+`next_stream_id_for`). The accepted offer's metadata is carried over to the
+resulting `Stream` via `accept_stream_offer`; both views
+(`get_stream_offer(...).metadata` and the resulting
+`get_stream_metadata(stream_id)`) must agree.
+
+### Operation coverage matrix
+
+The following operations have been pinned to leave `metadata` invariant:
+
+| Operation | Metadata behaviour |
+|-----------|-------------------|
+| `extend_stream_end_time` | Unchanged |
+| `pause_stream` / `resume_stream` | Unchanged |
+| `clone_stream` (clone-of-clone) | Reset to `None` for the new stream |
+| `create_stream_offer` → `accept_stream_offer` | Carried over byte-for-byte |
+| `get_stream_metadata` on pre-V4 streams (legacy `None`) | `None` across reads |
+
+### Adversarial u32 overflow safety
+
+The validator uses `checked_add` for `key_len + val_len` accumulation and
+returns `MetadataTooLarge` on overflow rather than wrapping. Inputs that
+exceed `MAX_METADATA_VALUE_BYTES` are rejected by the per-field guard
+before the aggregate check runs, so partial sums cannot mask an oversized
+entry.
+
+### Constant pinning
+
+The metadata constants are pinned at their current values
+(`MAX_METADATA_KEYS=8`, `MAX_METADATA_BYTES=512`,
+`MAX_METADATA_KEY_BYTES=32`, `MAX_METADATA_VALUE_BYTES=128`). An accidental
+bump surfaces as a CI failure.
 
 ---
 
@@ -98,6 +176,14 @@ Executable coverage lives in `contracts/stream/tests/metadata_extension.rs`:
 - Offer accept round-trip
 - Post-`shorten_stream_end_time` readability
 - `get_stream_metadata` on cancelled streams
+- **Fixture hardening** — `create_with_metadata_and_verify` helper asserts storage round-trip at creation time
+- **Storage consistency** — metadata reads are idempotent across 10 successive calls (both `get_stream_metadata` and `get_stream_state`)
+- **Binary safety** — all byte values (including `0x00`) round-trip through metadata keys/values
+- **Duplicate keys** — Soroban Map deduplication does not corrupt the stored map
+- **Partial batch mixed** — `create_streams_partial` correctly handles mixed valid/invalid metadata entries
+- **None metadata through offers and templates** — `create_stream_offer` / `create_stream_from_template` with `None` metadata
+- **Empty map through offers** — `Some(empty map)` retains its identity through offer→accept
+- **Post-completion readability** — metadata survives end_time elapse and full withdrawal
 
 Run:
 

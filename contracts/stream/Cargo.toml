@@ -129,6 +129,11 @@ path = "tests/metadata_extension.rs"
 test = true
 
 [[test]]
+name = "metadata_extension_hardening"
+path = "tests/metadata_extension_hardening.rs"
+test = true
+
+[[test]]
 name = "stream_offer"
 path = "tests/stream_offer.rs"
 test = true
@@ -144,6 +149,11 @@ path = "tests/rate_decrease_after_withdraw.rs"
 test = true
 
 [[test]]
+name = "dynamic_pricing_edge_cases"
+path = "tests/dynamic_pricing_edge_cases.rs"
+test = true
+
+[[test]]
 name = "witnessed_cancel"
 path = "tests/witnessed_cancel.rs"
 test = true
@@ -151,7 +161,7 @@ test = true
 [[test]]
 name = "recipient_update_state_machine"
 path = "tests/recipient_update_state_machine.rs"
-test = false
+test = true
 
 [[test]]
 name = "id_reservation"
@@ -188,6 +198,11 @@ test = true
 name = "withdrawal_frequency"
 path = "tests/withdrawal_frequency.rs"
 test = false
+
+[[test]]
+name = "pause_semantics"
+path = "tests/pause_semantics.rs"
+test = true
 
 # ---------------------------------------------------------------------------
 # Known-broken integration tests, second batch (compile fine, fail at runtime)
@@ -232,6 +247,11 @@ path = "tests/event_snapshots_suite.rs"
 test = true
 
 [[test]]
+name = "event_schema_consistency"
+path = "tests/event_schema_consistency.rs"
+test = true
+
+[[test]]
 name = "governance_integration"
 path = "tests/governance_integration.rs"
 test = false
@@ -240,3 +260,9 @@ test = false
 name = "governance_ttl"
 path = "tests/governance_ttl.rs"
 test = false
+
+[[test]]
+name = "compile_warning_determinism"
+path = "tests/compile_warning_determinism.rs"
+test = true
+required-features = ["testutils"]
