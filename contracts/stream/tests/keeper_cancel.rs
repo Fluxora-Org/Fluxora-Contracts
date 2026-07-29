@@ -724,11 +724,13 @@ proptest! {
         };
 
         // ── Read TotalLiabilities and contract balance BEFORE keeper_cancel ──
-        // We proxy TotalLiabilities through sweep_excess: run a dry-read by
-        // observing the contract balance, which equals TotalLiabilities when
-        // no excess tokens have been injected (this harness never injects any).
+        let liabilities_before = ctx.client().get_total_liabilities();
         let contract_bal_before = ctx.contract_balance();
         let outstanding_before = deposit - withdrawn_before;
+        prop_assert_eq!(
+            liabilities_before, outstanding_before,
+            "TotalLiabilities must equal deposit minus prior withdrawals"
+        );
         // Sanity: contract must hold exactly the outstanding balance.
         prop_assert_eq!(
             contract_bal_before, outstanding_before,
@@ -784,10 +786,16 @@ proptest! {
             );
 
             // ── III. TotalLiabilities decreased by outstanding_before ─────────
-            let swept = ctx.client().sweep_excess(&ctx.admin);
+            let liabilities_after = ctx.client().get_total_liabilities();
             prop_assert_eq!(
-                swept, 0,
-                "sweep must return 0 (no excess) after keeper_cancel"
+                liabilities_before - liabilities_after,
+                outstanding_before,
+                "TotalLiabilities must decrease by exactly the outstanding balance"
+            );
+            prop_assert_eq!(
+                liabilities_after,
+                0,
+                "TotalLiabilities must be zero after keeper_cancel"
             );
 
             // ── IV. Non-negativity of keeper fee ─────────────────────────────

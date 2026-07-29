@@ -494,6 +494,20 @@ pub struct StreamDecommissioned {
     pub decommissioned: bool,
 }
 
+/// Emitted when a recipient delegates a share of their stream.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecipientShareDelegated {
+    pub parent_stream_id: u64,
+    pub child_stream_id: u64,
+    pub delegator: Address,
+    pub delegatee: Address,
+    pub share_bps: u32,
+    pub new_parent_rate: i128,
+    pub child_rate: i128,
+}
+
+/// Pagination result for paginated stream listings.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Page {

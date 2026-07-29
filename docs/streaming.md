@@ -343,6 +343,26 @@ Off-chain orchestrators and indexers that build payment batches often need to kn
 Terminal states: `Completed`, `Cancelled`. Both may be closed via `close_completed_stream` to reclaim storage and index space. A stream is also considered technically terminal if `ledger.timestamp() >= end_time`.
 In this "time-terminal" state, pause/resume is blocked, but withdrawal is always allowed regardless of previous pause status.
 
+### Transferable claim ownership
+
+`transfer_claim_ownership(stream_id, current_owner, new_owner)` separates the
+right to withdraw a stream's accrued funds from its `recipient` field. New and
+legacy streams start with `claim_owner = None`, so the recipient continues to
+authorize withdrawals exactly as before. On the first transfer, the recipient
+must supply and authorize `current_owner`; the contract stores
+`claim_owner = Some(new_owner)` and emits `ClaimOwnershipTransferred`.
+
+After that point, the recorded claim owner is the sole withdrawal authority for
+`withdraw`, `withdraw_to`, and batched withdrawals. Each later transfer must be
+authorized by that current owner. The sender cannot transfer or revoke claim
+ownership. This transfer does not alter the recipient index, stream schedule,
+or accrued balance.
+
+This is intentionally different from `update_recipient`: recipient rotation is
+initiated by the sender and accepted by the current recipient, whereas claim
+ownership is initiated directly by the current claimant and never involves the
+sender.
+
 **Cancelled stream closure rule**: A `Cancelled` stream may only be closed after the recipient has fully withdrawn the frozen accrued amount. Attempting to close a `Cancelled` stream with remaining claimable balance returns `ContractError::InvalidState`. This prevents storage cleanup from destroying recipient funds.
 
 ### Auto-renew subscription streams (CONTRACT_VERSION 7)
@@ -383,6 +403,23 @@ Security and accounting rules:
 - The parent is checkpointed at the current ledger timestamp before its rate is reduced, preserving all already-accrued and already-withdrawn entitlement.
 - The child stream starts at the checkpoint timestamp and receives only the delegated future accrual. No hostnames, off-chain identifiers, or private metadata are introduced by the delegation event.
 - The child is indexed for both `new_recipient` and the original sender portfolio, so it behaves as an independent stream for reads and later withdrawals.
+- Each child records its origin in `parent_stream_id` (regular non-delegated streams leave it `None`), and the `RecipientShareDelegated` event carries both `parent_stream_id` and `child_stream_id`, so indexers can reconstruct lineage without a second read.
+
+### Stream lineage (`get_stream_lineage`)
+
+`get_stream_lineage(stream_id) -> Vec<u64>` returns a stream's ancestry chain in
+**root-to-leaf** order, inclusive of the queried stream, by following the
+`parent_stream_id` links recorded on delegated child streams.
+
+- A root stream (no parent) returns a single-element vector `[stream_id]`.
+- A delegated child returns `[root, …, stream_id]`, e.g. a stream two delegations
+  deep returns `[root, child1, child2]`.
+- The walk is bounded by `MAX_LINEAGE_DEPTH` (`MAX_DELEGATION_DEPTH + 1 = 4`) so
+  read cost is capped even against a malformed chain; because the delegation tree
+  is depth-bounded and cycle-free by construction, a well-formed lineage is never
+  truncated.
+- Querying a non-existent `stream_id` returns the standard `load_stream` error
+  rather than panicking.
 
 ### Cancellation Semantics (Issue Scope)
 
