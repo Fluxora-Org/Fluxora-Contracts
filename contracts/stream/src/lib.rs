@@ -205,6 +205,13 @@ pub const MAX_ID_RESERVATION: u32 = 100;
 /// Maximum allowed depth for recursive stream delegation.
 pub const MAX_DELEGATION_DEPTH: u32 = 3;
 
+/// Maximum number of ancestors `get_stream_lineage` will walk. A delegated
+/// stream tree is depth-bounded by `MAX_DELEGATION_DEPTH`, so the longest
+/// possible root-to-leaf chain is `MAX_DELEGATION_DEPTH + 1` streams. Bounding
+/// the walk caps the lineage read cost even against an unexpectedly long or
+/// malformed parent chain.
+pub const MAX_LINEAGE_DEPTH: u32 = MAX_DELEGATION_DEPTH + 1;
+
 /// Maximum byte length for pause-reason strings passed to `pause_stream`,
 /// `pause_stream_as_admin`, and `pause_protocol`.
 ///
@@ -4539,6 +4546,57 @@ impl FluxoraStream {
     ///   - `Cancelled`: Terminated early, unstreamed tokens refunded, terminal state
     pub fn get_stream_state(env: Env, stream_id: u64) -> Result<Stream, ContractError> {
         load_stream(&env, stream_id)
+    }
+
+    /// Returns the ancestry chain of a stream, from the root ancestor down to
+    /// `stream_id` itself (inclusive), in root-to-leaf order.
+    ///
+    /// Streams produced by `delegate_recipient_share` record their origin in
+    /// `parent_stream_id`; this view walks that chain so indexers, auditors, and
+    /// downstream contracts can reconstruct a stream's lineage in a single call.
+    /// A stream with no parent returns a single-element vector holding only its
+    /// own id.
+    ///
+    /// The walk is bounded by [`MAX_LINEAGE_DEPTH`], so the read cost is capped
+    /// even against an unexpectedly long or malformed parent chain. The
+    /// delegation tree is itself depth-bounded and cycle-free by construction
+    /// (see `delegate_recipient_share`), so a well-formed lineage is never
+    /// truncated by this bound.
+    ///
+    /// # Parameters
+    /// - `stream_id`: Unique identifier of the stream whose lineage is requested.
+    ///
+    /// # Returns
+    /// - `Ok(Vec<u64>)`: ancestor ids from root to leaf, ending with `stream_id`.
+    ///
+    /// # Errors
+    /// - Propagates the `load_stream` error if `stream_id` does not exist.
+    pub fn get_stream_lineage(
+        env: Env,
+        stream_id: u64,
+    ) -> Result<soroban_sdk::Vec<u64>, ContractError> {
+        // Walk up the parent chain, collecting leaf-first, bounded by depth.
+        let mut leaf_first: soroban_sdk::Vec<u64> = soroban_sdk::Vec::new(&env);
+        let mut current = Some(stream_id);
+        let mut depth: u32 = 0;
+        while let Some(id) = current {
+            if depth >= MAX_LINEAGE_DEPTH {
+                break;
+            }
+            let stream = load_stream(&env, id)?;
+            leaf_first.push_back(id);
+            current = stream.parent_stream_id;
+            depth += 1;
+        }
+
+        // Reverse into root-to-leaf order for the returned chain.
+        let mut root_first: soroban_sdk::Vec<u64> = soroban_sdk::Vec::new(&env);
+        let mut i = leaf_first.len();
+        while i > 0 {
+            i -= 1;
+            root_first.push_back(leaf_first.get(i).unwrap());
+        }
+        Ok(root_first)
     }
 
     /// Returns a structured health summary for a stream.
