@@ -3,6 +3,7 @@
  */
 
 import { EventType, RecommendationEvent } from '../../src/models/RecommendationEvent';
+import { SessionStatus } from '../../src/models/Session';
 import { UserRole } from '../../src/models/User';
 import { NotFoundError } from '../../src/utils/errors';
 
@@ -200,6 +201,49 @@ describe('RecommendationService', () => {
   describe('getRecommendations', () => {
     const learnerId = '11111111-1111-1111-1111-111111111111';
 
+    const setUpPriorSessionCount = (sessionCount: string, mentorId: string) => {
+      mockUserRepository.findOne.mockResolvedValueOnce({
+        id: learnerId,
+        role: UserRole.LEARNER,
+        goals: ['TypeScript'],
+        skillGaps: [],
+        budget: 100,
+        pricePreference: 'standard'
+      });
+      mockEventRepository.find.mockResolvedValueOnce([]);
+
+      const mockQueryBuilder = {
+        leftJoin: jest.fn(),
+        from: jest.fn().mockReturnThis(),
+        select: jest.fn().mockReturnThis(),
+        addSelect: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        groupBy: jest.fn().mockReturnThis(),
+        getRawAndEntities: jest.fn().mockResolvedValueOnce({
+          entities: [{
+            id: mentorId,
+            skills: ['TypeScript'],
+            averageRating: 4.8,
+            hourlyRate: 80,
+            isAvailable: true,
+            availabilitySlots: ['slot1'],
+            availabilityCount: 1
+          }],
+          raw: [{ sessionCount }]
+        })
+      };
+      mockQueryBuilder.leftJoin.mockImplementation((subqueryFactory: (queryBuilder: any) => unknown) => {
+        subqueryFactory(mockQueryBuilder);
+        return mockQueryBuilder;
+      });
+
+      mockMentorRepository.createQueryBuilder.mockReturnValue(mockQueryBuilder);
+      mockEventRepository.save.mockResolvedValue([]);
+
+      return mockQueryBuilder;
+    };
+
     it('returns cached result on cache hit', async () => {
       const cached = {
         recommendations: [],
@@ -296,6 +340,28 @@ describe('RecommendationService', () => {
       // mentor-4 is filtered out due to max prior sessions
       expect(result.recommendations.length).toBe(3);
       expect(result.recommendations[0].rank).toBe(1);
+    });
+
+    it('counts only completed sessions so cancelled-only histories remain eligible', async () => {
+      const mockQueryBuilder = setUpPriorSessionCount('0', 'cancelled-only-mentor');
+
+      const result = await service.getRecommendations(learnerId);
+
+      expect(mockQueryBuilder.andWhere).toHaveBeenCalledWith(
+        'session.status = :completedStatus',
+        { completedStatus: SessionStatus.COMPLETED }
+      );
+      expect(result.recommendations.map(recommendation => recommendation.mentorId))
+        .toContain('cancelled-only-mentor');
+    });
+
+    it('still excludes mentors at the completed-session cap', async () => {
+      setUpPriorSessionCount('3', 'completed-history-mentor');
+
+      const result = await service.getRecommendations(learnerId);
+
+      expect(result.recommendations.map(recommendation => recommendation.mentorId))
+        .not.toContain('completed-history-mentor');
     });
 
     it('handles learner without goals/skillGaps and pricePreference strings', async () => {

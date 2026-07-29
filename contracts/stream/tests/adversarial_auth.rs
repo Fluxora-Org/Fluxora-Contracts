@@ -2,7 +2,8 @@ extern crate std;
 
 use ed25519_dalek::{Signer, SigningKey};
 use fluxora_stream::{
-    ContractError, FluxoraStream, FluxoraStreamClient, PauseReason, StreamStatus,
+    ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, PauseReason,
+    StreamStatus,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke},
@@ -94,43 +95,39 @@ impl<'a> Ctx<'a> {
 
     /// Create a standard 1000-unit stream (rate 1/s, 0..1000s, no cliff).
     fn create_stream(&self) -> u64 {
+        let seq = self.env.ledger().sequence();
+        self.env.ledger().set_sequence_number(seq + 10);
         self.env.ledger().set_timestamp(0);
+        let params = CreateStreamParams {
+            recipient: self.recipient.clone(),
+            deposit_amount: 1000_i128,
+            rate_per_second: 1_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 1000u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        };
         self.env.mock_auths(&[MockAuth {
             address: &self.sender,
             invoke: &MockAuthInvoke {
                 contract: &self.contract_id,
                 fn_name: "create_stream",
-                args: (
-                    &self.sender,
-                    &self.recipient,
-                    1000_i128,
-                    1_i128,
-                    0u64,
-                    0u64,
-                    1000u64,
-                    0i128,
-                    Option::<soroban_sdk::Bytes>::None,
-                )
-                    .into_val(&self.env),
+                args: (&self.sender, params.clone()).into_val(&self.env),
                 sub_invokes: &[],
             },
         }]);
-        self.client().create_stream(
-            &self.sender,
-            &self.recipient,
-            &1000_i128,
-            &1_i128,
-            &0u64,
-            &0u64,
-            &1000u64,
-            &0,
-            &None,
-            &fluxora_stream::StreamKind::Linear,
-        )
+        self.client().create_stream(&self.sender, &params)
     }
 
     /// Pause a stream as the sender (helper to reach Paused state).
     fn pause_as_sender(&self, stream_id: u64) {
+        let seq = self.env.ledger().sequence();
+        self.env.ledger().set_sequence_number(seq + 10);
         self.env.mock_auths(&[MockAuth {
             address: &self.sender,
             invoke: &MockAuthInvoke {
@@ -353,6 +350,10 @@ fn test_admin_resume_paused_stream_succeeds() {
     let ctx = Ctx::setup();
     let stream_id = ctx.create_stream();
     ctx.pause_as_sender(stream_id);
+
+    // Advance ledger sequence to clear the pause cooldown (MIN_PAUSE_INTERVAL_LEDGERS = 17).
+    let seq = ctx.env.ledger().sequence();
+    ctx.env.ledger().set_sequence_number(seq + 20);
 
     ctx.env.mock_auths(&[MockAuth {
         address: &ctx.admin,
@@ -735,6 +736,10 @@ fn test_admin_resume_twice_fails() {
     let ctx = Ctx::setup();
     let stream_id = ctx.create_stream();
     ctx.pause_as_sender(stream_id);
+
+    // Advance ledger sequence to clear the pause cooldown (MIN_PAUSE_INTERVAL_LEDGERS = 17).
+    let seq = ctx.env.ledger().sequence();
+    ctx.env.ledger().set_sequence_number(seq + 20);
 
     // First resume — succeeds.
     ctx.env.mock_auths(&[MockAuth {
@@ -1274,15 +1279,20 @@ mod delegated_withdraw_adversarial {
             self.env.ledger().set_timestamp(0);
             self.client().create_stream(
                 &self.sender,
-                &self.recipient_kp.address,
-                &1000_i128,
-                &1_i128,
-                &0u64,
-                &0u64,
-                &1000u64,
-                &0,
-                &None,
-                &fluxora_stream::StreamKind::Linear,
+                &CreateStreamParams {
+                    recipient: self.recipient_kp.address.clone(),
+                    deposit_amount: 1000_i128,
+                    rate_per_second: 1_i128,
+                    start_time: 0u64,
+                    cliff_time: 0u64,
+                    end_time: 1000u64,
+                    withdraw_dust_threshold: Some(0),
+                    memo: None,
+                    metadata: None,
+                    kind: fluxora_stream::StreamKind::Linear,
+                    irrevocable: None,
+                    witness: None,
+                },
             )
         }
 
@@ -1492,6 +1502,7 @@ struct DelegatedCtx<'a> {
     recipient_pk: BytesN<32>,
     signing_key: SigningKey,
     stream_id: u64,
+    sender: Address,
     #[allow(dead_code)]
     sac: soroban_sdk::token::StellarAssetClient<'a>,
 }
@@ -1504,9 +1515,10 @@ impl<'a> DelegatedCtx<'a> {
 
         let contract_id = env.register_contract(None, fluxora_stream::FluxoraStream);
         let token_admin = Address::generate(&env);
-        let token_id = env
-            .register_stellar_asset_contract_v2(token_admin)
-            .address();
+        // Keep the full StellarAssetContract so we can extract the issuer AccountId
+        // needed to build the trustline key for the ed25519 recipient below.
+        let sac_contract = env.register_stellar_asset_contract_v2(token_admin);
+        let token_id = sac_contract.address();
         let admin = Address::generate(&env);
         let sender = Address::generate(&env);
         let relayer = Address::generate(&env);
@@ -1515,6 +1527,9 @@ impl<'a> DelegatedCtx<'a> {
         let signing_key = SigningKey::from_bytes(&[0xABu8; 32]);
         let pk_arr = signing_key.verifying_key().to_bytes();
         let recipient_pk = BytesN::from_array(&env, &pk_arr);
+        let recipient_account_id = soroban_sdk::xdr::AccountId(
+            soroban_sdk::xdr::PublicKey::PublicKeyTypeEd25519(soroban_sdk::xdr::Uint256(pk_arr)),
+        );
         let recipient = address_from_pk(&env, &pk_arr);
 
         let client = FluxoraStreamClient::new(&env, &contract_id);
@@ -1522,6 +1537,97 @@ impl<'a> DelegatedCtx<'a> {
 
         let sac = soroban_sdk::token::StellarAssetClient::new(&env, &token_id);
         sac.mint(&sender, &10_000_i128);
+
+        // The SAC requires a Classic Stellar trustline for any ed25519 account recipient.
+        // SAC.mint() alone cannot create it — the trustline must exist first.
+        // We inject AccountEntry + TrustLineEntry directly into the host ledger storage,
+        // mirroring what register_stellar_asset_contract_v2 does for the issuer account.
+        // This is the correct testutils pattern for ed25519 account recipients.
+        {
+            use soroban_env_host::budget::AsBudget;
+            use soroban_sdk::xdr::{
+                AccountEntry, AccountEntryExt, AlphaNum4, AssetCode4, LedgerEntry, LedgerEntryData,
+                LedgerEntryExt, LedgerKey, LedgerKeyAccount, LedgerKeyTrustLine, SequenceNumber,
+                Thresholds, TrustLineAsset, TrustLineEntry, TrustLineEntryExt, TrustLineFlags,
+                VecM,
+            };
+            use std::rc::Rc;
+
+            // The SAC asset is always CreditAlphanum4("aaa\0", issuer).
+            // Extract the issuer AccountId from the StellarAssetContract we registered.
+            let issuer_addr = sac_contract.issuer().address();
+            let issuer_xdr: soroban_sdk::xdr::AccountId =
+                match soroban_sdk::xdr::ScAddress::from(&issuer_addr) {
+                    soroban_sdk::xdr::ScAddress::Account(id) => id,
+                    other => panic!("expected Account, got {:?}", other),
+                };
+
+            let asset = TrustLineAsset::CreditAlphanum4(AlphaNum4 {
+                asset_code: AssetCode4([b'a', b'a', b'a', 0]),
+                issuer: issuer_xdr,
+            });
+
+            env.host()
+                .with_mut_storage(|storage| {
+                    let budget = soroban_env_host::budget::AsBudget::as_budget(env.host());
+
+                    // 1. AccountEntry for the ed25519 recipient.
+                    let acct_key = Rc::new(LedgerKey::Account(LedgerKeyAccount {
+                        account_id: recipient_account_id.clone(),
+                    }));
+                    if !storage.has(&acct_key, budget)? {
+                        storage.put(
+                            &acct_key,
+                            &Rc::new(LedgerEntry {
+                                data: LedgerEntryData::Account(AccountEntry {
+                                    account_id: recipient_account_id.clone(),
+                                    balance: 0,
+                                    flags: 0,
+                                    home_domain: Default::default(),
+                                    inflation_dest: None,
+                                    num_sub_entries: 0,
+                                    seq_num: SequenceNumber(0),
+                                    thresholds: Thresholds([1; 4]),
+                                    signers: VecM::default(),
+                                    ext: AccountEntryExt::V0,
+                                }),
+                                last_modified_ledger_seq: 0,
+                                ext: LedgerEntryExt::V0,
+                            }),
+                            None,
+                            budget,
+                        )?;
+                    }
+
+                    // 2. TrustLineEntry for (recipient, asset) — authorised, max limit.
+                    let tl_key = Rc::new(LedgerKey::Trustline(LedgerKeyTrustLine {
+                        account_id: recipient_account_id.clone(),
+                        asset: asset.clone(),
+                    }));
+                    if !storage.has(&tl_key, budget)? {
+                        storage.put(
+                            &tl_key,
+                            &Rc::new(LedgerEntry {
+                                data: LedgerEntryData::Trustline(TrustLineEntry {
+                                    account_id: recipient_account_id.clone(),
+                                    asset,
+                                    balance: 0,
+                                    limit: i64::MAX,
+                                    flags: TrustLineFlags::AuthorizedFlag as u32,
+                                    ext: TrustLineEntryExt::V0,
+                                }),
+                                last_modified_ledger_seq: 0,
+                                ext: LedgerEntryExt::V0,
+                            }),
+                            None,
+                            budget,
+                        )?;
+                    }
+                    Ok(())
+                })
+                .expect("trustline setup must succeed");
+        }
+
         soroban_sdk::token::Client::new(&env, &token_id).approve(
             &sender,
             &contract_id,
@@ -1532,15 +1638,20 @@ impl<'a> DelegatedCtx<'a> {
         // Stream: 1000 tokens, rate 1/s, 0..1000s, no cliff.
         let stream_id = client.create_stream(
             &sender,
-            &recipient,
-            &1000_i128,
-            &1_i128,
-            &0u64,
-            &0u64,
-            &1000u64,
-            &0,
-            &None,
-            &fluxora_stream::StreamKind::Linear,
+            &CreateStreamParams {
+                recipient: recipient.clone(),
+                deposit_amount: 1000_i128,
+                rate_per_second: 1_i128,
+                start_time: 0u64,
+                cliff_time: 0u64,
+                end_time: 1000u64,
+                withdraw_dust_threshold: Some(0),
+                memo: None,
+                metadata: None,
+                kind: fluxora_stream::StreamKind::Linear,
+                irrevocable: None,
+                witness: None,
+            },
         );
 
         DelegatedCtx {
@@ -1550,6 +1661,7 @@ impl<'a> DelegatedCtx<'a> {
             recipient_pk,
             signing_key,
             stream_id,
+            sender,
             sac,
         }
     }
@@ -1818,4 +1930,3 @@ fn delegated_withdraw_later_ledger_revocation_rejected() {
         "delegation revoked in prior ledger must be rejected"
     );
 }
-

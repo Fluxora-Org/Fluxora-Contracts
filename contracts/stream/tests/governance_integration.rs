@@ -1,8 +1,8 @@
 extern crate std;
 
 use fluxora_governance::{
-    AdminChanged, FluxoraGovernance, FluxoraGovernanceClient, GovernanceError, SignerAdded,
-    SignerRemoved,
+    AdminChanged, CallData, FluxoraGovernance, FluxoraGovernanceClient, GovernanceError,
+    SignerAdded, SignerRemoved,
 };
 use soroban_sdk::{
     symbol_short,
@@ -59,8 +59,40 @@ impl<'a> GovCtx<'a> {
         Address::generate(&self.env)
     }
 
-    fn calldata(&self, tag: &str) -> Bytes {
-        Bytes::from_slice(&self.env, tag.as_bytes())
+    /// Returns XDR-encoded `CallData::Noop`. The `tag` parameter is
+    /// accepted only to keep call-sites readable; it has no effect on the
+    /// returned bytes.
+    fn calldata(&self, _tag: &str) -> Bytes {
+        use soroban_sdk::xdr::ToXdr;
+        CallData::Noop.to_xdr(&self.env)
+    }
+
+    fn propose_and_approve(&self, op: CallData) -> u32 {
+        let calldata = op.to_xdr(&self.env);
+        let id = self
+            .client
+            .propose(&self.signer_a, &self.contract_id, &calldata);
+        self.client.approve(&self.signer_a, &id);
+        self.client.approve(&self.signer_b, &id);
+        let now = self.env.ledger().timestamp();
+        self.env.ledger().set_timestamp(now + TIMELOCK + 1);
+        id
+    }
+
+    fn govern(&self, op: CallData) {
+        let id = self.propose_and_approve(op);
+        let executor = Address::generate(&self.env);
+        self.client.execute(&executor, &id);
+    }
+
+    fn govern_try(&self, op: CallData) -> Result<(), GovernanceError> {
+        let id = self.propose_and_approve(op);
+        let executor = Address::generate(&self.env);
+        match self.client.try_execute(&executor, &id) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(_) => panic!("execute host error"),
+        }
     }
 }
 
@@ -332,11 +364,11 @@ fn test_add_remove_signer() {
     let ctx = GovCtx::setup();
     let new_signer = Address::generate(&ctx.env);
 
-    ctx.client.add_signer(&new_signer);
+    ctx.govern(CallData::GovAddSigner(new_signer.clone()));
     let signers = ctx.client.get_signers();
     assert_eq!(signers.len(), 4);
 
-    ctx.client.remove_signer(&new_signer);
+    ctx.govern(CallData::GovRemoveSigner(new_signer.clone()));
     let signers = ctx.client.get_signers();
     assert_eq!(signers.len(), 3);
 }
@@ -344,9 +376,9 @@ fn test_add_remove_signer() {
 #[test]
 fn test_add_duplicate_signer_errors() {
     let ctx = GovCtx::setup();
-    let result = ctx.client.try_add_signer(&ctx.signer_a);
+    let result = ctx.govern_try(CallData::GovAddSigner(ctx.signer_a.clone()));
 
-    assert_eq!(result, Err(Ok(GovernanceError::DuplicateSigner)));
+    assert_eq!(result, Err(GovernanceError::DuplicateSigner));
 }
 
 #[test]
@@ -357,7 +389,7 @@ fn test_add_signer_unauthorized_errors() {
     // to isolate the Unauthorized path we would need to disable mock_all_auths.
     // This test verifies a signer can still propose after being added.
     let new_signer = Address::generate(&ctx.env);
-    ctx.client.add_signer(&new_signer);
+    ctx.govern(CallData::GovAddSigner(new_signer.clone()));
     // New signer can now propose
     let id = ctx
         .client
@@ -403,9 +435,9 @@ fn test_init_rejects_threshold_above_signer_count() {
 #[test]
 fn test_remove_signer_below_threshold_errors() {
     let ctx = GovCtx::setup(); // 3 signers, threshold=2
-    ctx.client.remove_signer(&ctx.signer_c); // 2 signers left
-    let result = ctx.client.try_remove_signer(&ctx.signer_b);
-    assert_eq!(result, Err(Ok(GovernanceError::QuorumWouldBreak)));
+    ctx.govern(CallData::GovRemoveSigner(ctx.signer_c.clone())); // 2 signers left
+    let result = ctx.govern_try(CallData::GovRemoveSigner(ctx.signer_b.clone()));
+    assert_eq!(result, Err(GovernanceError::QuorumWouldBreak));
     let signers = ctx.client.get_signers();
     assert_eq!(signers.len(), 2);
 }
@@ -432,7 +464,7 @@ fn test_quorum_threshold_respected_after_add_signer() {
     // With threshold=2 and 4 signers, still need exactly 2 approvals.
     let ctx = GovCtx::setup(); // 3 signers, threshold=2
     let extra = Address::generate(&ctx.env);
-    ctx.client.add_signer(&extra);
+    ctx.govern(CallData::GovAddSigner(extra));
     assert_eq!(ctx.client.get_signers().len(), 4);
     assert_eq!(ctx.client.quorum(), 2); // threshold unchanged
 
@@ -767,14 +799,43 @@ fn last_contract_event(env: &Env, contract_id: &Address) -> (Symbol, Val) {
     panic!("no event emitted by the contract");
 }
 
+/// Find the most recent event emitted by `contract_id` whose first topic
+/// matches `expected_topic`, searching newest-first. Useful when a call
+/// emits multiple distinct events (e.g. `add_signer` emits `sgnr_add` then
+/// `quor_cfg`) and the test needs a specific one that isn't necessarily last.
+fn find_contract_event_with_topic(
+    env: &Env,
+    contract_id: &Address,
+    expected_topic: Symbol,
+) -> (Symbol, Val) {
+    let events = env.events().all();
+    for i in (0..events.len()).rev() {
+        let (addr, topics, data) = events.get(i).unwrap();
+        if &addr != contract_id {
+            continue;
+        }
+        let topic0: SVec<Val> = topics;
+        let first = topic0.get(0).expect("event must carry a topic");
+        let symbol = Symbol::try_from_val(env, &first).expect("first topic is a symbol");
+        if symbol == expected_topic {
+            return (symbol, data);
+        }
+    }
+    panic!("no event with the expected topic emitted by the contract");
+}
+
 #[test]
 fn test_add_signer_emits_signer_added_event() {
     let ctx = GovCtx::setup();
     let new_signer = Address::generate(&ctx.env);
 
-    ctx.client.add_signer(&new_signer);
+    ctx.govern(CallData::GovAddSigner(new_signer.clone()));
 
-    let (topic, data) = last_contract_event(&ctx.env, &ctx.contract_id);
+    // add_signer emits sgnr_add then quor_cfg; search backwards for sgnr_add
+    // specifically so this test remains correct even when add_signer emits
+    // additional trailing events.
+    let (topic, data) =
+        find_contract_event_with_topic(&ctx.env, &ctx.contract_id, symbol_short!("sgnr_add"));
     assert_eq!(topic, symbol_short!("sgnr_add"));
     let payload = SignerAdded::try_from_val(&ctx.env, &data).expect("decodes to SignerAdded");
     assert_eq!(payload.signer, new_signer);
@@ -784,7 +845,7 @@ fn test_add_signer_emits_signer_added_event() {
 fn test_remove_signer_emits_signer_removed_event() {
     let ctx = GovCtx::setup(); // 3 signers, threshold=2
 
-    ctx.client.remove_signer(&ctx.signer_c);
+    ctx.govern(CallData::GovRemoveSigner(ctx.signer_c.clone()));
 
     let (topic, data) = last_contract_event(&ctx.env, &ctx.contract_id);
     assert_eq!(topic, symbol_short!("sgnr_rm"));
@@ -797,11 +858,14 @@ fn test_remove_nonexistent_signer_emits_no_event() {
     let ctx = GovCtx::setup();
     let stranger = Address::generate(&ctx.env);
 
+    let id = ctx.propose_and_approve(CallData::GovRemoveSigner(stranger));
+    let executor = Address::generate(&ctx.env);
+
     let events_before = ctx.env.events().all().len();
-    let result = ctx.client.try_remove_signer(&stranger);
+    let result = ctx.client.try_execute(&executor, &id);
     assert!(result.is_ok());
 
-    // Removing a non-registered address is a no-op and must emit no event.
+    // Removing a non-registered address is a no-op and must emit no event during execution.
     let events_after = ctx.env.events().all().len();
     assert_eq!(events_before, events_after);
 }
@@ -809,11 +873,14 @@ fn test_remove_nonexistent_signer_emits_no_event() {
 #[test]
 fn test_remove_signer_quorum_would_break_emits_no_event() {
     let ctx = GovCtx::setup(); // 3 signers, threshold=2
-    ctx.client.remove_signer(&ctx.signer_c); // 2 signers left
+    ctx.govern(CallData::GovRemoveSigner(ctx.signer_c.clone())); // 2 signers left
+
+    let id = ctx.propose_and_approve(CallData::GovRemoveSigner(ctx.signer_b.clone()));
+    let executor = Address::generate(&ctx.env);
 
     let events_before = ctx.env.events().all().len();
-    // Removing another signer would leave 1 < threshold=2 — rejected, no event.
-    let result = ctx.client.try_remove_signer(&ctx.signer_b);
+    // Removing another signer would leave 1 < threshold=2 — rejected, no event during execution.
+    let result = ctx.client.try_execute(&executor, &id);
     assert_eq!(result, Err(Ok(GovernanceError::QuorumWouldBreak)));
 
     let events_after = ctx.env.events().all().len();
@@ -824,8 +891,11 @@ fn test_remove_signer_quorum_would_break_emits_no_event() {
 fn test_add_duplicate_signer_emits_no_event() {
     let ctx = GovCtx::setup();
 
+    let id = ctx.propose_and_approve(CallData::GovAddSigner(ctx.signer_a.clone()));
+    let executor = Address::generate(&ctx.env);
+
     let events_before = ctx.env.events().all().len();
-    let result = ctx.client.try_add_signer(&ctx.signer_a);
+    let result = ctx.client.try_execute(&executor, &id);
     assert_eq!(result, Err(Ok(GovernanceError::DuplicateSigner)));
 
     let events_after = ctx.env.events().all().len();

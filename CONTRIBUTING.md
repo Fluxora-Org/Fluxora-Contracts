@@ -27,7 +27,41 @@ Always create a new branch for your work. Do not commit directly to the `main` b
 - **Run Linters:** Ensure your code is properly formatted and passes all linting checks before opening a PR.
 - **Update Documentation:** If you are adding a new feature or changing an API, please update the relevant documentation (and NatSpec comments) alongside your code.
 
-### 4. Snapshot Test Workflow
+### 4. Rust toolchain pin
+
+This repository pins Rust to channel `1.94.1` in [rust-toolchain.toml](rust-toolchain.toml) to guarantee local build determinism, align development environments with CI pipelines, and preserve Soroban WASM artifact reproducibility.
+
+> **Security & Reproducibility Note:**
+> Soroban smart contract WASM bytecode checksums depend on compiler code generation. Compiler version drift alters compiled bytecode hashes, breaking the checksum verification logic implemented in [`contracts/stream/src/checksum.rs`](contracts/stream/src/checksum.rs) and invalidating security release procedures outlined in [`docs/maintainer-security-checklist.md`](docs/maintainer-security-checklist.md).
+
+#### Installation Procedure
+
+Before developing locally or opening pull requests, install the pinned Rust toolchain and required components:
+
+```bash
+# 1. Install pinned toolchain channel
+rustup toolchain install 1.94.1
+
+# 2. Add required code formatting and linting tools
+rustup component add rustfmt clippy --toolchain 1.94.1
+
+# 3. Add target architecture for WebAssembly contract builds
+rustup target add wasm32-unknown-unknown --toolchain 1.94.1
+```
+
+#### Self-Verification & Automated Enforcement
+
+To self-check local toolchain compliance before committing code:
+
+```bash
+# Execute local toolchain verification script
+python3 script/verify_rust_version.py
+```
+
+- **Automated Enforcement Layer:** The repository enforces toolchain compliance via [`script/verify_rust_version.py`](script/verify_rust_version.py) in CI workflows and maintains comprehensive test coverage in [`tests/test_rust_toolchain_pin.py`](tests/test_rust_toolchain_pin.py).
+- **Failure Mitigation:** If the self-check fails, execute the `rustup` installation commands above to synchronize your local environment with `1.94.1`.
+
+### 5. Snapshot Test Workflow
 
 When your changes affect contract behavior:
 
@@ -60,7 +94,7 @@ When your changes affect contract behavior:
 
 See [Snapshot Test Documentation](docs/snapshot-tests.md) for complete guidance.
 
-### 5. Opening a Pull Request
+### 6. Opening a Pull Request
 
 1. Push your changes to your fork.
 2. Open a Pull Request against the `main` branch of the upstream repository.

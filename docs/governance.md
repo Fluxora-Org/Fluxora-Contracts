@@ -36,6 +36,12 @@ When quorum is first reached, the current threshold is snapshotted alongside the
 a `QuorumInfo` record. At execution time the proposal is judged against this snapshot, making
 in-flight proposals immune to later threshold changes by the admin.
 
+
+
+### Threshold changes are not timelocked
+
+`set_threshold`, `add_signer`, and `remove_signer` are admin‑only operations that take effect immediately upon a single admin signature. There is no timelock or cooldown; an admin can lower the threshold to 1 or add a single signer and set the threshold to 1 in two consecutive calls, instantly weakening the quorum.
+
 ## Constants
 
 | Constant | Value | Meaning |
@@ -140,6 +146,7 @@ Removes a co-signer from the governance set. The admin must authorize the call.
 - Removing a non-existent signer is a no-op and emits **no** event.
 - Emits `SignerRemoved` with topic `("sgnr_rm",)` only when a registered signer is
   actually removed.
+- Stale approvals: Removing a co-signer does not mutate historical proposal records, but approvals from removed signers are filtered out at evaluation time during `approve`, `execute`, and `is_executable`. A proposal that relies on a removed signer's approval to reach threshold cannot be executed unless sufficient active co-signers approve.
 
 ### `set_threshold(threshold)`
 
@@ -636,7 +643,7 @@ assert!(result.is_ok());
 
 **Key Security Properties:**
 
-1. **No Single Point of Failure**: No individual key can change stream parameters
+1. **No Single Point of Failure**: No individual key can change stream parameters, governance signers, or the approval threshold
 2. **Transparent Process**: All governance actions are recorded on-chain with events
 3. **Time-Delayed Execution**: 48-hour minimum between approval and application
 4. **Immutable Audit Trail**: Proposal content and approvals are permanently stored
@@ -657,9 +664,13 @@ The governance integration is designed to resist several attack vectors:
 - Emergency cancellation available through admin or original proposer
 
 **Admin Key Compromise:**
-- If governance contract key is compromised, attacker still cannot bypass process
-- Parameter changes still require full proposal → approval → timelock → execution flow
-- Admin can only manage co-signer set, not directly change stream parameters
+- If the admin key is compromised, the attacker still cannot bypass the process:
+   adding/removing a signer or changing the threshold requires the same
+  propose → approve (quorum) → 48-hour timelock → execute flow as any
+  target-contract parameter change
+- There is no bare-admin entrypoint for these operations at all — `set_threshold`,
+  `add_signer`, `remove_signer` have no public function; they are reachable
+  only from inside `execute()` via `CallData::GovSetThreshold`/`GovAddSigner`/`GovRemoveSigner`
 
 **Off-chain Executor Compromise:**
 - Executor can only apply governance-approved changes
@@ -1020,8 +1031,11 @@ cover:
   `bump_proposal`).
 - `execute` succeeds after the full `GOVERNANCE_TIMELOCK_SECONDS` window
   because both `Proposal(id)` and `QuorumReachedAt(id)` are still on chain.
-- A proposal with periodic reads can survive the full
-  `MAX_PROPOSAL_AGE_SECONDS` window before `execute`.
+- A proposal with periodic reads (`get_proposal` + `get_quorum_info` +
+  `proposal_count`) can survive the full `MAX_PROPOSAL_AGE_SECONDS` window
+  before `execute`, because `get_quorum_info` refreshes the
+  `QuorumReachedAt(id)` TTL alongside the `Proposal(id)` and instance
+  storage TTLs.
 - Negative control: executing a non-existent proposal id returns
   `ProposalNotFound`, which is the exact error surface a future bump-policy
   regression would expose.
@@ -1032,8 +1046,18 @@ cover:
 
 ### QuorumReachedAt Entry TTL
 The `QuorumReachedAt(proposal_id)` persistent storage entry is bumped on:
-- Every `approve` call when quorum is reached
-- Every `execute` call when reading the entry
+- Every `approve` call when quorum is reached (write path)
+- Every `get_quorum_info` call (read path)
+- Every `is_executable` call when `QuorumReachedAt` entry exists (read path)
+- Every `execute` call when reading the entry (read path)
+
+To keep `QuorumReachedAt(id)` alive across the full 30-day
+`MAX_PROPOSAL_AGE_SECONDS` window, callers (indexers, dashboards, admin
+tooling) must periodically call `get_quorum_info` or `is_executable` in
+addition to `get_proposal`. The TTL regression test
+`test_proposal_survives_max_proposal_age_with_periodic_reads` verifies this
+three-call schedule: `proposal_count()` + `get_proposal()` +
+`get_quorum_info()` per step.
 
 ### ProposalApprovalIdx Entry TTL
 The `ProposalApprovalIdx(proposal_id)` duplicate-approval index must outlive the
@@ -1064,11 +1088,15 @@ with QuorumNotReached — the timelock is never silently re-opened.
 
 ## Property-Based Tests
 
-`contracts/stream/tests/governance_proptest.rs` contains a proptest-driven
-test suite that randomises signer-set sizes, approval orderings, and time
-advances to assert core safety invariants that example-based tests can miss.
+Two proptest suites guard governance correctness:
 
-### Invariants
+- `contracts/governance/tests/signer_index_proptest.rs` — tests the signer-list /
+  signer-index agreement invariant (see [Signer-Index Invariant](#signer-index-invariant)
+  below).
+- `contracts/stream/tests/governance_proptest.rs` — tests proposal lifecycle
+  invariants (quorum, timelock, execution guards).
+
+### Governance lifecycle invariants
 
 | # | Invariant | Assertion |
 |---|-----------|-----------|
@@ -1115,3 +1143,55 @@ automatically replayed on every CI run.
 To reproduce a specific failure, copy the failing seed from the test output
 into `proptest-regressions/governance_proptest.rs.txt` or pass it via
 `PROPTEST_SEED`.
+
+### Signer-Index Invariant
+
+The governance contract maintains two parallel data structures for the
+registered co-signer set:
+
+| Structure | Type | Purpose |
+|-----------|------|---------|
+| `Signers` | `Vec<Address>` (instance) | Ordered list for iteration and quorum counting |
+| `SignerIndex` | `Map<Address, bool>` (instance) | O(1) membership index for duplicate-approval detection |
+
+#### Invariant
+
+After every `add_signer` / `remove_signer` mutation:
+
+1. **List/index agreement** — every address in `get_signers()` is present in
+   `SignerIndex`, and no address outside `get_signers()` appears in the index.
+2. **Duplicate-free list** — `get_signers()` never contains the same address
+   more than once.
+3. **Quorum safety** — `get_signers().len() >= threshold` always holds (or the
+   triggering operation returned `QuorumWouldBreak`).
+
+A desync between the two structures would break duplicate-approval detection:
+an address absent from `SignerIndex` could approve multiple times, allowing a
+proposal to pass with fewer unique signers than the threshold requires.
+
+#### How to run
+
+```bash
+# Run the full signer-index proptest (256 cases per property):
+cargo test --test signer_index_proptest --package fluxora_governance
+
+# Run a single property:
+cargo test --test signer_index_proptest prop_add_duplicate_always_rejected
+
+# Run pinned regression tests:
+cargo test --test signer_index_proptest regression_
+```
+
+#### Regression cases
+
+`contracts/governance/tests/signer_index_proptest.rs` contains explicit unit
+tests for each pinned regression seed in
+`signer_index_proptest.proptest-regressions`:
+
+| Seed | Property | Shrink | What it caught |
+|------|----------|--------|----------------|
+| `5e6b3729` | `prop_add_remove_same_address_maintains_consistency` | `n_signers=2, threshold=1, rounds=15` | Budget exhaustion under long add/remove sequences (fixed by `budget.reset_unlimited()`) |
+| `f6b317e9` | `prop_signer_list_index_invariants` | `init_count=2, threshold=1, 14-op sequence` | Edge case in `DuplicateSigner` vs `TooManySigners` prioritisation |
+
+These tests are always run during CI so that a previously-fixed bug cannot
+silently regress if the proptest seed or configuration changes.

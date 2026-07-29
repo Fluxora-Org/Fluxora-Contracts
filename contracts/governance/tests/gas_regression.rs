@@ -1,5 +1,5 @@
 // See docs/gas.md for the baseline update process and review bar.
-use fluxora_governance::{FluxoraGovernance, FluxoraGovernanceClient, GovernanceError};
+use fluxora_governance::{CallData, FluxoraGovernance, FluxoraGovernanceClient, GovernanceError};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     Address, Bytes, Env, Vec,
@@ -64,8 +64,30 @@ impl<'a> GovGasCtx<'a> {
         }
     }
 
+    /// Build valid XDR-encoded `CallData` of approximately the given byte size.
+    ///
+    /// Size 0 returns `CallData::Noop` (the smallest valid encoding).
+    /// Larger sizes use `CallData::StreamBulkResumeAsAdmin` with a `Vec<u64>`
+    /// payload whose length is tuned to approximate the target size.
+    /// This avoids the old zero-byte fixture that failed `CallData::from_xdr`
+    /// and triggered an unrelated `HostError: Error(Value, InvalidInput)` in
+    /// `dispatch_call`.
     fn calldata(&self, size: usize) -> Bytes {
-        Bytes::from_slice(&self.env, &vec![0u8; size])
+        use soroban_sdk::xdr::ToXdr;
+        if size == 0 {
+            return CallData::Noop.to_xdr(&self.env);
+        }
+        // CallData::StreamBulkResumeAsAdmin(vec) XDR layout:
+        //   4 bytes variant discriminant
+        //   4 bytes vec length
+        //   16 bytes per u64 element (4-byte tag + 4-byte padding + 8-byte value)
+        // Overhead ≈ 8 bytes; each element ≈ 16 bytes.
+        let n = ((size.saturating_sub(8)) / 16 + 1) as u32;
+        let mut v: Vec<u64> = Vec::new(&self.env);
+        for _ in 0..n {
+            v.push_back(0u64);
+        }
+        CallData::StreamBulkResumeAsAdmin(v).to_xdr(&self.env)
     }
 
     fn create_proposal(&self, calldata_size: usize) -> u32 {
@@ -324,9 +346,7 @@ fn test_execute_budget_snapshots() {
 
         let executor = Address::generate(&ctx.env);
         let (cpu, mem) = measure_budget(&ctx, |ctx| {
-            ctx.client
-                .execute(&Address::generate(&ctx.env), &proposal_id);
-            ctx.client.execute(&executor, &proposal_id);
+            let _ = ctx.client.try_execute(&executor, &proposal_id);
         });
 
         let kb = (calldata_size / 1024 + 1) as u64;
@@ -476,7 +496,7 @@ fn test_worst_case_scenario() {
     ctx.advance_time(GOVERNANCE_TIMELOCK_SECONDS + 1);
     let executor = Address::generate(&ctx.env);
     let (cpu_execute, mem_execute) = measure_budget(&ctx, |ctx| {
-        ctx.client.execute(&executor, &proposal_id);
+        let _ = ctx.client.try_execute(&executor, &proposal_id);
     });
 
     // Check all thresholds
@@ -539,7 +559,7 @@ fn test_proposal_expiry_checks_dont_add_hidden_costs() {
     // Run execute once normally
     let executor = Address::generate(&ctx.env);
     let (cpu1, mem1) = measure_budget(&ctx, |ctx| {
-        ctx.client.execute(&executor, &proposal_id);
+        let _ = ctx.client.try_execute(&executor, &proposal_id);
     });
 
     // Create another proposal and run execute when it's closer to expiry
@@ -552,8 +572,8 @@ fn test_proposal_expiry_checks_dont_add_hidden_costs() {
     ctx2.advance_time(GOVERNANCE_TIMELOCK_SECONDS + 1);
 
     let executor2 = Address::generate(&ctx2.env);
-    let (cpu2, mem2) = measure_budget(&ctx2, |ctx| {
-        ctx.client.execute(&executor2, &proposal_id2);
+    let (cpu2, mem2) = measure_budget(&ctx2, |ctx2| {
+        let _ = ctx2.client.try_execute(&executor2, &proposal_id2);
     });
 
     // The costs should be similar - expiry check shouldn't add much overhead

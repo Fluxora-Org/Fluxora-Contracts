@@ -2,6 +2,7 @@
 name = "fluxora_stream"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.94.1"
 description = "Fluxora USDC streaming contract for Stellar Soroban"
 # Issue #206 — global emergency pause: scaffold branch. Instance pause flag + admin setter to follow.
 
@@ -13,6 +14,7 @@ crate-type = ["cdylib", "rlib"]
 doctest = false
 
 [features]
+import_only = []
 testutils = ["soroban-sdk/testutils"]
 
 # Soroban SDK version pinned for reproducible builds.
@@ -35,6 +37,9 @@ proptest = "1"
 # Required for constructing Ed25519 keypairs in delegated-withdraw tests
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 rand = "0.8"
+# Required for injecting Classic Stellar AccountEntry + TrustLineEntry into the
+# host ledger storage in adversarial_auth tests (ed25519 recipient trustline setup).
+soroban-env-host = { version = "=21.2.1", features = ["testutils"] }
 
 # ---------------------------------------------------------------------------
 # Known-broken integration tests (pre-existing, unrelated to CI restoration)
@@ -51,7 +56,7 @@ rand = "0.8"
 [[test]]
 name = "bulk_cancel"
 path = "tests/bulk_cancel.rs"
-test = false
+test = true
 
 [[test]]
 name = "chaos"
@@ -69,14 +74,19 @@ path = "tests/create_stream_relative.rs"
 test = false
 
 [[test]]
+name = "id_monotonicity_upgrade"
+path = "tests/id_monotonicity_upgrade.rs"
+test = false
+
+[[test]]
 name = "factory_policy"
 path = "tests/factory_policy.rs"
-test = false
+test = true
 
 [[test]]
 name = "formal_verification_smoke"
 path = "tests/formal_verification_smoke.rs"
-test = false
+test = true
 
 [[test]]
 name = "governance_proptest"
@@ -86,62 +96,113 @@ test = false
 [[test]]
 name = "health_matrix"
 path = "tests/health_matrix.rs"
-test = false
+test = true
 
 [[test]]
 name = "id_range"
 path = "tests/id_range.rs"
-test = false
+test = true
+
+[[test]]
+name = "metadata_limits_900"
+path = "tests/metadata_limits_900.rs"
+test = true
 
 [[test]]
 name = "keeper_cancel"
 path = "tests/keeper_cancel.rs"
-test = false
+required-features = ["testutils"]
+
+[[test]]
+name = "security_invariants"
+path = "tests/security_invariants.rs"
+test = true
 
 [[test]]
 name = "max_rate_per_second"
 path = "tests/max_rate_per_second.rs"
-test = false
+test = true
 
 [[test]]
 name = "metadata_extension"
 path = "tests/metadata_extension.rs"
-test = false
+test = true
+
+[[test]]
+name = "metadata_extension_hardening"
+path = "tests/metadata_extension_hardening.rs"
+test = true
+
+[[test]]
+name = "stream_offer"
+path = "tests/stream_offer.rs"
+test = true
 
 [[test]]
 name = "rate_bounds"
 path = "tests/rate_bounds.rs"
-test = false
+test = true
 
 [[test]]
 name = "rate_decrease_after_withdraw"
 path = "tests/rate_decrease_after_withdraw.rs"
-test = false
+test = true
+
+[[test]]
+name = "dynamic_pricing_edge_cases"
+path = "tests/dynamic_pricing_edge_cases.rs"
+test = true
+
+[[test]]
+name = "witnessed_cancel"
+path = "tests/witnessed_cancel.rs"
+test = true
 
 [[test]]
 name = "recipient_update_state_machine"
 path = "tests/recipient_update_state_machine.rs"
+test = true
+
+[[test]]
+name = "id_reservation"
+path = "tests/id_reservation.rs"
 test = false
+
+[[test]]
+name = "storage_invariants"
+path = "tests/storage_invariants.rs"
+test = true
+
+[[test]]
+name = "dust_threshold"
+path = "tests/dust_threshold.rs"
+test = true
 
 [[test]]
 name = "storage_key_compat"
 path = "tests/storage_key_compat.rs"
-test = false
+required-features = ["testutils"]
 
 [[test]]
 name = "sweep_liability"
 path = "tests/sweep_liability.rs"
-test = false
+required-features = ["testutils"]
+test = true
 
 [[test]]
 name = "upgrade_path"
 path = "tests/upgrade_path.rs"
-test = false
+test = true
 
 [[test]]
 name = "withdrawal_frequency"
 path = "tests/withdrawal_frequency.rs"
 test = false
+
+[[test]]
+name = "pause_semantics"
+path = "tests/pause_semantics.rs"
+test = true
 
 # ---------------------------------------------------------------------------
 # Known-broken integration tests, second batch (compile fine, fail at runtime)
@@ -173,17 +234,22 @@ test = false
 [[test]]
 name = "adversarial_auth"
 path = "tests/adversarial_auth.rs"
-test = false
+test = true
 
 [[test]]
 name = "liability_invariant"
 path = "tests/liability_invariant.rs"
-test = false
+required-features = ["testutils"]
 
 [[test]]
 name = "event_snapshots_suite"
 path = "tests/event_snapshots_suite.rs"
-test = false
+test = true
+
+[[test]]
+name = "event_schema_consistency"
+path = "tests/event_schema_consistency.rs"
+test = true
 
 [[test]]
 name = "governance_integration"
@@ -194,3 +260,9 @@ test = false
 name = "governance_ttl"
 path = "tests/governance_ttl.rs"
 test = false
+
+[[test]]
+name = "compile_warning_determinism"
+path = "tests/compile_warning_determinism.rs"
+test = true
+required-features = ["testutils"]

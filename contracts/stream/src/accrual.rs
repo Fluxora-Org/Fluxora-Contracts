@@ -9,18 +9,19 @@ use crate::StreamKind;
 /// future environments that violate that assumption before withdrawable math can
 /// be evaluated at a retrograde timestamp.
 ///
+/// This check is unconditional (not gated behind debug_assertions) because it
+/// is a genuine runtime safetyGuard, not a debug-only sanity check. A retrograde
+/// ledger timestamp would flow straight into withdrawable-amount math with no
+/// safety net, which is exactly the fund-accounting-adjacent failure mode this
+/// guard was written to prevent.
+///
 /// # Units and Precision
 /// - **Units:** `prev_ts` and `current_ts` are measured in seconds.
 /// - **Rounding Direction:** N/A (this is purely a logical check, no arithmetic).
 pub fn assert_ledger_time_monotonic(prev_ts: u64, current_ts: u64) -> Result<(), ContractError> {
-    #[cfg(any(test, debug_assertions))]
-    {
-        if current_ts < prev_ts {
-            return Err(ContractError::ClockRegression);
-        }
+    if current_ts < prev_ts {
+        return Err(ContractError::ClockRegression);
     }
-
-    debug_assert!(current_ts >= prev_ts, "retrograde ledger timestamp");
 
     Ok(())
 }
@@ -49,7 +50,7 @@ pub fn assert_ledger_time_monotonic(prev_ts: u64, current_ts: u64) -> Result<(),
 ///
 /// For multi-epoch accrual (after rate changes), the contract uses the
 /// `calculate_accrued_amount_checkpointed` variant directly.
-#[cfg(test)]
+#[cfg(any(test, feature = "testutils"))]
 pub fn calculate_accrued_amount(
     start_time: u64,
     cliff_time: u64,
@@ -165,7 +166,7 @@ pub struct CheckpointState {
     ///
     /// **Invariant**: `deposit_amount >= rate_per_second * (end_time - start_time)`
     pub deposit_amount: i128,
-    /// The kind of stream (Linear or CliffOnly).
+    /// The kind of stream (Linear, CliffOnly, or CliffSlope).
     pub kind: StreamKind,
 }
 
@@ -227,6 +228,9 @@ pub struct CheckpointState {
 /// is floored to integer tokens per second. Within this core math, the operation is exact integer
 /// multiplication, effectively rounding down (floor) any continuous time beyond the whole second boundaries,
 /// though time is already quantized in integer seconds.
+///
+/// See `docs/streaming.md#cliffonly-accrual` for worked `CliffOnly` examples
+/// showing the pre-cliff zero result and the full-deposit lump-sum unlock.
 pub fn calculate_accrued_amount_checkpointed(
     state: CheckpointState,
     rate_per_second: i128,
@@ -242,6 +246,12 @@ pub fn calculate_accrued_amount_checkpointed(
 
     if state.kind == StreamKind::CliffOnly {
         return state.deposit_amount;
+    }
+
+    if state.kind == StreamKind::CliffSlope {
+        let elapsed = now.min(state.end_time).saturating_sub(state.cliff_time) as i128;
+        let accrued = elapsed.saturating_mul(rate_per_second);
+        return accrued.min(state.deposit_amount).max(0);
     }
 
     if rate_per_second < 0 {
@@ -449,6 +459,27 @@ mod tests {
     fn ledger_time_monotonic_u64_max_times() {
         let result = assert_ledger_time_monotonic(u64::MAX, u64::MAX);
         assert_eq!(result, Ok(()));
+    }
+
+    /// Test that the ClockRegression check is unconditional (not gated behind debug_assertions).
+    ///
+    /// This is a security-critical check that must always be active in production builds,
+    /// including release wasm32 deployments where debug_assertions is disabled by default.
+    /// A retrograde ledger timestamp would flow straight into withdrawable-amount math with
+    /// no safety net, which is exactly the fund-accounting-adjacent failure mode this guard
+    /// was written to prevent.
+    ///
+    /// This test locks in the always-on behavior independent of debug_assertions settings.
+    #[test]
+    fn clock_regression_check_is_unconditional() {
+        // This test should pass regardless of whether debug_assertions is enabled or not.
+        // The check is now unconditional (not gated behind cfg(any(test, debug_assertions))).
+        let result = assert_ledger_time_monotonic(1000, 999);
+        assert_eq!(
+            result,
+            Err(ContractError::ClockRegression),
+            "ClockRegression check must fire even when debug_assertions is disabled"
+        );
     }
 
     #[test]

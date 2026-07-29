@@ -7,7 +7,8 @@
 #![cfg(test)]
 
 use fluxora_stream::{
-    ContractError, FluxoraStream, FluxoraStreamClient, PauseReason, StreamKind, StreamStatus,
+    ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, PauseReason, StreamKind,
+    StreamStatus,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -63,15 +64,20 @@ impl<'a> Ctx<'a> {
         let now = self.env.ledger().timestamp();
         self.client.create_stream(
             &self.sender,
-            &self.recipient,
-            &(duration as i128),
-            &1,
-            &now,
-            &now,
-            &(now + duration),
-            &0,
-            &None,
-            &StreamKind::Linear,
+            &CreateStreamParams {
+                recipient: self.recipient.clone(),
+                deposit_amount: (duration as i128),
+                rate_per_second: 1,
+                start_time: now,
+                cliff_time: now,
+                end_time: (now + duration),
+                withdraw_dust_threshold: Some(0),
+                memo: None,
+                metadata: None,
+                kind: StreamKind::Linear,
+                irrevocable: None,
+                witness: None,
+            },
         )
     }
 

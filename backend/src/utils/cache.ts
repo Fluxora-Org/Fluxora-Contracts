@@ -69,7 +69,11 @@ class CacheWrapper {
   async set<T>(key: string, value: T, ttlSeconds: number): Promise<void> {
     try {
       const serialized = JSON.stringify(value);
-      await this.client.set(key, serialized, ttlSeconds);
+      if (this.useRedis) {
+        await (this.client as Redis).setex(key, ttlSeconds, serialized);
+      } else {
+        await (this.client as InMemoryCache).set(key, serialized, ttlSeconds);
+      }
     } catch (error) {
       logger.error('Cache set error', { key, error });
     }

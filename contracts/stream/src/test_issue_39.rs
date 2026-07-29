@@ -1,6 +1,4 @@
-#[cfg(test)]
-use crate::test::TestContext;
-use crate::StreamStatus;
+use crate::{test::TestContext, CreateStreamParams, StreamStatus};
 use soroban_sdk::{testutils::Address as _, testutils::Ledger, Address};
 
 #[test]
@@ -117,27 +115,37 @@ fn test_batch_withdraw_running_balance_cap() {
     // Create two streams with 500 each
     let id1 = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &500,
-        &1,
-        &0,
-        &500,
-        &500,
-        &0,
-        &None,
-        &crate::StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 500,
+            rate_per_second: 1,
+            start_time: 0,
+            cliff_time: 500,
+            end_time: 500,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: crate::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
     let id2 = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &500,
-        &1,
-        &0,
-        &500,
-        &500,
-        &0,
-        &None,
-        &crate::StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 500,
+            rate_per_second: 1,
+            start_time: 0,
+            cliff_time: 500,
+            end_time: 500,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: crate::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     ctx.env.ledger().set_timestamp(500); // both fully accrued

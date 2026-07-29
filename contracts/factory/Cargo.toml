@@ -2,6 +2,7 @@
 name = "fluxora_factory"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.94.1"
 description = "Fluxora Treasury Factory Policy Wrapper"
 
 [lib]
@@ -12,11 +13,11 @@ testutils = ["soroban-sdk/testutils", "fluxora_stream/testutils"]
 
 [dependencies]
 soroban-sdk = "21.7.7"
-fluxora_stream = { path = "../stream" }
+fluxora_stream = { path = "../stream", features = ["import_only"] }
 
 [dev-dependencies]
 soroban-sdk = { version = "21.7.7", features = ["testutils"] }
-fluxora_stream = { path = "../stream", features = ["testutils"] }
+fluxora_stream = { path = "../stream", features = ["import_only", "testutils"] }
 soroban-env-host = "=21.2.1"
 
 # ---------------------------------------------------------------------------
@@ -44,4 +45,5 @@ test = false
 [[test]]
 name = "adversarial_auth"
 path = "tests/adversarial_auth.rs"
+required-features = ["testutils"]
 test = false
