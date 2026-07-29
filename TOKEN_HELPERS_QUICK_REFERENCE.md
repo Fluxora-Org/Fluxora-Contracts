@@ -308,8 +308,8 @@ When reviewing token transfer code:
 
 ## Additional Resources
 
-- Full audit report: `TOKEN_HELPERS_AUDIT.md`
-- Implementation checklist: `TOKEN_HELPERS_IMPLEMENTATION_CHECKLIST.md`
+- Token assumptions and architecture: `docs/token-assumptions.md`
+- Open work items and audit findings: `docs/token-assumptions.md` → "Open Work Items" section
 - Contract documentation: `docs/streaming.md`
 - Security guidelines: `docs/security.md`
 
