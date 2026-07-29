@@ -2,6 +2,7 @@
 name = "fluxora_governance"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.94.1"
 description = "Minimal timelock governance contract for Fluxora protocol parameter changes"
 
 [lib]
@@ -16,3 +17,44 @@ soroban-sdk = "21.7.7"
 
 [dev-dependencies]
 soroban-sdk = { version = "21.7.7", features = ["testutils"] }
+proptest = "1"
+soroban-env-host = "=21.2.1"
+
+# ---------------------------------------------------------------------------
+# Gas regression tests (re-enabled — see #1165)
+# ---------------------------------------------------------------------------
+# Fixes applied:
+#   - calldata(size) now produces valid XDR-encoded CallData (Noop for size 0,
+#     StreamBulkResumeAsAdmin with a sized Vec<u64> for larger sizes) instead
+#     of raw zero bytes that fail CallData::from_xdr.
+#   - Execute tests use try_execute() instead of the panicking execute() so
+#     that expected rejections don't trap the test harness.
+#   - test_proposal_expiry_checks_dont_add_hidden_costs fixed a cross-context
+#     capture bug (was using ctx instead of ctx2 in the second measurement).
+#   - test_execute_budget_snapshots no longer calls execute() twice per
+#     measurement (second call always failed with AlreadyExecuted).
+#
+# Thresholds should be recalibrated against the actual soroban-env-host 21.2.1
+# cost model after the first clean CI run; current values are conservative
+# upper bounds carried forward from the original test authoring.
+[[test]]
+name = "gas_regression"
+path = "tests/gas_regression.rs"
+test = true
+
+# `tests/signer_index_proptest.rs` likewise predates this commit and was
+# never exercised for the same reason (workspace didn't compile). 3 of its 5
+# properties always pass; the other 2 (`prop_signer_list_index_invariants`,
+# `prop_add_remove_same_address_maintains_consistency`) intermittently trip
+# `HostError: Error(Budget, ExceededLimit)`. Root cause is the test harness,
+# not the contract: `check_invariants()` issues one extra `try_add_signer`
+# probe call per currently-registered signer, on every step of a sequence of
+# up to 40 add/remove ops, and the `Env`'s budget does not reset between
+# those probe calls — so a long enough sequence exhausts it. The committed
+# `signer_index_proptest.proptest-regressions` corpus already pins the
+# minimal failing seeds for whoever recalibrates this (e.g. by resetting the
+# budget per probe, or shrinking MAX ops/MAX signer-set size).
+[[test]]
+name = "signer_index_proptest"
+path = "tests/signer_index_proptest.rs"
+test = true

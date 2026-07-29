@@ -21,7 +21,7 @@ impl<'a> TestContext<'a> {
         let token_id = env
             .register_stellar_asset_contract_v2(token_admin)
             .address();
-        let token = TokenClient::new(&env, &token_id);
+        let sac = StellarAssetClient::new(&env, &token_id);
 
         let admin = Address::generate(&env);
         let sender = Address::generate(&env);
@@ -30,7 +30,9 @@ impl<'a> TestContext<'a> {
         client.init(&token_id, &admin);
 
         // Fund the sender using the admin's minting power
-        token.mint(&sender, &1_000_000_i128);
+        sac.mint(&sender, &1_000_000_i128);
+        // Provide default allowance so create_stream can pull the deposit.
+        TokenClient::new(&env, &token_id).approve(&sender, &contract_id, &i128::MAX, &100_000);
 
         Self {
             env,
@@ -62,13 +64,29 @@ impl<'a> TestContext<'a> {
     }
 }
 
-fn measure_gas<F>(ctx: &TestContext, f: F) -> u64
+// KeeperTestContext is an alias for TestContext — same setup, same fields.
+// Keeper tests use the identical harness; the type alias keeps the test
+// names readable without duplicating the setup code.
+type KeeperTestContext<'a> = TestContext<'a>;
+
+fn measure_gas<F, C>(ctx: &C, f: F) -> u64
 where
-    F: FnOnce(&TestContext),
+    F: FnOnce(&C),
+    C: HasEnv,
 {
-    ctx.env.budget().reset_unlimited();
+    ctx.env().budget().reset_unlimited();
     f(ctx);
-    ctx.env.budget().cpu_instruction_cost()
+    ctx.env().budget().cpu_instruction_cost()
+}
+
+trait HasEnv {
+    fn env(&self) -> &Env;
+}
+
+impl HasEnv for TestContext<'_> {
+    fn env(&self) -> &Env {
+        &self.env
+    }
 }
 
 #[test]
@@ -126,6 +144,19 @@ fn test_withdraw_gas() {
     println!("GAS_MEASUREMENT: withdraw: single: {}", cost);
 }
 
+/// Gas regression baseline for `batch_withdraw`.
+///
+/// Measures CPU instruction cost for `batch_withdraw` across batch sizes 1, 10, 50, and 100
+/// (up to `MAX_PAGE_SIZE`). Exercises the O(n²) duplicate-ID scan (`reject_duplicate_ids`),
+/// which performs ~n*(n-1)/2 element-by-element comparisons (approx ~4,950 comparisons,
+/// ~10,000 loop operations at MAX_PAGE_SIZE = 100).
+///
+/// Asserts that measured CPU instruction cost stays within Soroban's per-invocation CPU budget
+/// (`PER_INVOCATION_CPU_BUDGET = 25,000,000,000`, providing a 75% safety margin under Soroban's
+/// 100B instruction ceiling).
+///
+/// Companion refactor: expected to improve significantly once the companion refactor
+/// replaces the O(n²) scan in `reject_duplicate_ids` with an O(n) helper (e.g. Map/Set lookup).
 #[test]
 fn test_batch_withdraw_gas() {
     let sizes = [1, 10, 50, 100];
@@ -133,17 +164,24 @@ fn test_batch_withdraw_gas() {
     for &size in &sizes {
         let ctx = TestContext::setup();
 
-        let mut streams = Vec::new();
+        let mut streams = soroban_sdk::Vec::new(&ctx.env);
         for _ in 0..size {
-            streams.push(ctx.create_default_stream());
+            streams.push_back(ctx.create_default_stream());
         }
 
         ctx.env.ledger().set_timestamp(500); // Accrue tokens for all
 
         let cost = measure_gas(&ctx, |ctx| {
-            let streams_val = streams.clone().into_val(&ctx.env);
-            ctx.client.batch_withdraw(&streams_val);
+            ctx.client.batch_withdraw(&ctx.recipient, &streams);
         });
+
+        assert!(
+            cost <= PER_INVOCATION_CPU_BUDGET,
+            "batch_withdraw at size {} exceeded per-invocation CPU budget: {} > {}",
+            size,
+            cost,
+            PER_INVOCATION_CPU_BUDGET,
+        );
 
         println!("GAS_MEASUREMENT: batch_withdraw: {}: {}", size, cost);
     }
