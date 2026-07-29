@@ -393,13 +393,74 @@ recipient-index bloat once the recipient's claims are fully settled.
 
 When `StreamKind::CliffOnly` streams are cancelled (via `cancel_stream`, `cancel_stream_as_admin`, `bulk_cancel_streams`, or `keeper_cancel`), they exhibit distinct mathematical edge cases compared to `Linear` streams because partial accrual is impossible:
 
-1. **Before the cliff time:** The recipient's accrued amount is strictly 0. 
-   - A cancellation refunds the **full** `deposit_amount` back to the sender (`sender_refund_gross == deposit_amount`).
-   - For a `bulk_cancel_streams` (admin only) or sender cancellation, the sender receives the entire deposit minus any configured cancellation fee. The recipient receives nothing.
+### Binary Accrual Model
 
-2. **At or after the cliff time:** The recipient's accrued amount is the **full** `deposit_amount`.
-   - A cancellation (e.g. via `keeper_cancel` after `end_time + GRACE`) calculates `sender_refund_gross = 0`.
-   - Because `sender_refund_gross` is 0, the `keeper_fee` evaluates to 0, and the sender receives a net refund of 0.
-   - The recipient is fully entitled to the `deposit_amount` and can withdraw it at their leisure.
+`CliffOnly` streams unlock their entire `deposit_amount` at the `cliff_time` in a single event.
+Before `cliff_time`, `calculate_accrued_amount_checkpointed` returns `0`. At or after `cliff_time`,
+it returns `deposit_amount`. There is never a partial accrual.
 
-In all paths, `TotalLiabilities`, `KeeperCancelled`, and `StreamCancelled` events operate correctly, preserving the structural invariants proven in adversarial test suites (`contracts/stream/tests/cliff_only_variant.rs`).
+### Cancellation Before Cliff (`now < cliff_time`)
+
+1. **Sender-side cancellation** (`cancel_stream`, `bulk_cancel_streams`):
+   - Accrued amount is `0` → `recipient_amount == 0`.
+   - `sender_refund_gross == deposit_amount` → full deposit refunded to sender.
+   - No keeper fee is taken (sender-initiated cancellation).
+   - `TotalLiabilities` decreases by the full `deposit_amount`.
+
+2. **Keeper cancellation** is structurally impossible before the cliff:
+   - `keeper_cancel` requires `now >= end_time + GRACE`.
+   - Stream validation requires `cliff_time <= end_time`.
+   - Therefore `now >= end_time + GRACE >= cliff_time + GRACE > cliff_time`.
+   - The keeper can never cancel a `CliffOnly` stream before the cliff.
+
+### Cancellation After Cliff (`now >= cliff_time`)
+
+1. **Keeper cancellation** (`keeper_cancel`):
+   - Accrued amount is `deposit_amount` → `recipient_amount = deposit_amount - withdrawn`.
+   - `sender_refund_gross == 0` → `keeper_fee == 0`, `sender_refund == 0`.
+   - The keeper receives no incentive because there is no unstreamed portion.
+   - This is a critical adversarial edge case: a stream past `end_time + GRACE`
+     with a past cliff offers no keeper incentive, meaning it may remain uncancelled
+     indefinitely despite being eligible.
+
+2. **Sender-side cancellation** (`cancel_stream`, `bulk_cancel_streams`):
+   - Accrued amount is `deposit_amount` → all flows to recipient.
+   - `sender_refund_gross == 0` → sender receives nothing.
+   - The recipient's `withdrawn_amount` is set to `deposit_amount`.
+
+### Keeper Fee Edge Cases
+
+The keeper fee formula `sender_refund_gross × KEEPER_FEE_BPS / 10_000` produces only two
+possible outcomes for `CliffOnly` streams:
+
+| Scenario | accrued | sender_refund_gross | keeper_fee |
+|---|---|---|---|
+| Before cliff (sender cancel only) | 0 | deposit_amount | N/A (sender cancel, no keeper) |
+| After cliff (keeper_cancel) | deposit_amount | 0 | 0 |
+
+There is never a non-zero keeper fee for `CliffOnly` streams because `keeper_cancel` can
+only fire after the cliff (where `sender_refund_gross == 0`).
+
+### Conservation Invariant
+
+For all cancellation paths, the conservation invariant holds:
+
+```text
+recipient_amount + sender_refund + keeper_fee == deposit_amount - withdrawn_before
+```
+
+For `CliffOnly` this reduces to either:
+- Before cliff: `0 + deposit_amount + 0 == deposit_amount` (via sender cancel)
+- After cliff: `deposit_amount + 0 + 0 == deposit_amount` (via keeper or sender cancel)
+
+### Test Coverage
+
+Adversarial test coverage is provided in:
+- `contracts/stream/tests/cliff_only_variant.rs` — comprehensive CliffOnly cancel tests
+- `contracts/stream/tests/keeper_cancel.rs` — deterministic CliffOnly keeper_cancel test
+  (`test_keeper_cancel_cliff_only_fully_accrued_zero_fee`) and property-based test
+  (`prop_keeper_cancel_cliff_only_conservation`)
+- `contracts/stream/tests/bulk_cancel.rs` — CliffOnly bulk_cancel tests
+  (`test_bulk_cancel_cliff_only_before_cliff_full_refund`,
+  `test_bulk_cancel_cliff_only_after_cliff_recipient_gets_all`,
+  `test_bulk_cancel_cliff_only_mixed_cliff`)
