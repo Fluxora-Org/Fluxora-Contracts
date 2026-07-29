@@ -518,6 +518,131 @@ fn test_keeper_cancel_event_reconciles_with_prior_withdrawal() {
 }
 
 // ===========================================================================
+// Deterministic CliffOnly tests
+// ===========================================================================
+
+/// CliffOnly stream past `end_time + GRACE` and past `cliff_time`:
+/// accrued == deposit_amount → keeper_fee == 0, sender_refund == 0.
+///
+/// This is the critical adversarial edge case: the binary nature of CliffOnly
+/// accrual (0 or full deposit) means `sender_refund_gross` collapses to 0 when
+/// the cliff is past, eliminating the keeper incentive entirely.
+#[test]
+fn test_keeper_cancel_cliff_only_fully_accrued_zero_fee() {
+    let ctx = Ctx::setup();
+    let deposit: i128 = 10_000;
+
+    let sid = ctx.client().create_stream(
+        &ctx.sender,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: deposit,
+            rate_per_second: 0, // CliffOnly requires rate=0
+            start_time: 0,
+            cliff_time: 500,
+            end_time: 1_000,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::CliffOnly,
+            irrevocable: None,
+            witness: None,
+        },
+    );
+
+    // Advance past end_time + grace period (well past cliff_time=500)
+    ctx.env.ledger().set_timestamp(1_000 + GRACE + 1);
+
+    let sender_before = ctx.balance(&ctx.sender);
+    let recipient_before = ctx.balance(&ctx.recipient);
+    let keeper_before = ctx.balance(&ctx.keeper);
+    let liabilities_before = ctx.client().get_total_liabilities();
+
+    ctx.client().keeper_cancel(&sid, &ctx.keeper);
+
+    // ── Balance assertions ────────────────────────────────────────────────
+    assert_eq!(ctx.balance(&ctx.recipient) - recipient_before, deposit);
+    assert_eq!(ctx.balance(&ctx.sender) - sender_before, 0);
+    assert_eq!(ctx.balance(&ctx.keeper) - keeper_before, 0);
+    assert_eq!(ctx.contract_balance(), 0);
+
+    // ── TotalLiabilities ──────────────────────────────────────────────────
+    assert_eq!(
+        ctx.client().get_total_liabilities(),
+        liabilities_before - deposit
+    );
+
+    // ── Stream state ──────────────────────────────────────────────────────
+    let stream = ctx.client().get_stream_state(&sid);
+    assert_eq!(stream.status, StreamStatus::Cancelled);
+
+    // ── Event payload ─────────────────────────────────────────────────────
+    let ev = find_keeper_cancelled(&ctx);
+    assert_eq!(ev.stream_id, sid);
+    assert_eq!(ev.keeper, ctx.keeper);
+    assert_eq!(ev.keeper_fee, 0, "keeper_fee must be 0 when refund_gross == 0");
+    assert_eq!(ev.recipient_amount, deposit);
+    assert_eq!(ev.sender_refund, 0);
+    assert_eq!(ev.keeper_fee + ev.recipient_amount + ev.sender_refund, deposit);
+}
+
+/// CliffOnly stream cancelled via `cancel_stream` before cliff_time:
+/// accrued == 0 → full deposit refunded to sender, recipient gets 0.
+///
+/// This exercises the other binary edge case: when the cliff hasn't been
+/// reached, the accrued amount is 0 and the entire deposit is refunded.
+///
+/// Note: `keeper_cancel` cannot fire before the cliff (it requires
+/// `now >= end_time + GRACE` and `cliff_time <= end_time` by validation),
+/// so the pre-cliff cancellation path is exercised via `cancel_stream`.
+#[test]
+fn test_cliff_only_cancel_stream_before_cliff_full_refund() {
+    let ctx = Ctx::setup();
+    let deposit: i128 = 10_000;
+
+    let sid = ctx.client().create_stream(
+        &ctx.sender,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: deposit,
+            rate_per_second: 0,
+            start_time: 0,
+            cliff_time: 500,
+            end_time: 1_000,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: StreamKind::CliffOnly,
+            irrevocable: None,
+            witness: None,
+        },
+    );
+
+    // t=300, before cliff=500
+    ctx.env.ledger().set_timestamp(300);
+
+    let sender_before = ctx.balance(&ctx.sender);
+    let recipient_before = ctx.balance(&ctx.recipient);
+    let liabilities_before = ctx.client().get_total_liabilities();
+
+    ctx.client().cancel_stream(&sid);
+
+    // ── Balance assertions ────────────────────────────────────────────────
+    assert_eq!(ctx.balance(&ctx.recipient) - recipient_before, 0);
+    assert_eq!(ctx.balance(&ctx.sender) - sender_before, deposit);
+    assert_eq!(ctx.contract_balance(), 0);
+    assert_eq!(
+        ctx.client().get_total_liabilities(),
+        liabilities_before - deposit
+    );
+
+    // ── Stream state ──────────────────────────────────────────────────────
+    let stream = ctx.client().get_stream_state(&sid);
+    assert_eq!(stream.status, StreamStatus::Cancelled);
+    assert_eq!(stream.withdrawn_amount, 0);
+}
+
+// ===========================================================================
 // Proptest strategies
 // ===========================================================================
 
