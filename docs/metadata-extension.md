@@ -176,6 +176,14 @@ Executable coverage lives in `contracts/stream/tests/metadata_extension.rs`:
 - Offer accept round-trip
 - Post-`shorten_stream_end_time` readability
 - `get_stream_metadata` on cancelled streams
+- **Fixture hardening** — `create_with_metadata_and_verify` helper asserts storage round-trip at creation time
+- **Storage consistency** — metadata reads are idempotent across 10 successive calls (both `get_stream_metadata` and `get_stream_state`)
+- **Binary safety** — all byte values (including `0x00`) round-trip through metadata keys/values
+- **Duplicate keys** — Soroban Map deduplication does not corrupt the stored map
+- **Partial batch mixed** — `create_streams_partial` correctly handles mixed valid/invalid metadata entries
+- **None metadata through offers and templates** — `create_stream_offer` / `create_stream_from_template` with `None` metadata
+- **Empty map through offers** — `Some(empty map)` retains its identity through offer→accept
+- **Post-completion readability** — metadata survives end_time elapse and full withdrawal
 
 Run:
 
