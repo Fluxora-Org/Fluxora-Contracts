@@ -68,6 +68,32 @@ check remains reproducible without the Stellar CLI installed.
 | `batch_withdraw` | 50 | 20M |
 | `batch_withdraw` | 100 | 35M |
 
+## Batch Benchmark Coverage
+
+The stream contract benchmark harness is implemented in `contracts/stream/tests/gas_regression.rs`.
+It captures hot-path CPU costs for both creation and withdrawal batch operations and documents the expected regression surface.
+
+Measured paths include:
+- `create_stream`: single-stream creation cost.
+- `create_streams`: batched creation for 1, 5, and 10 streams.
+- `withdraw`: single withdrawal cost.
+- `batch_withdraw`: batched withdrawal for 1, 10, 50, and 100 stream IDs.
+- `batch_withdraw` mixed-state coverage: active, cancelled, and completed streams together.
+
+This harness is intentionally narrow: it validates batch gas scaling and edge-case state handling, while functional correctness is covered by the broader stream contract test suite.
+
+## Regression Surface
+
+The current batch benchmark coverage explicitly locks down the following contract behavior:
+
+- `create_stream`: single-stream creation gas cost.
+- `create_streams`: batched creation for 1, 5, and 10 streams, ensuring batch-size scaling and total deposit handling.
+- `withdraw`: single-stream withdrawal cost.
+- `batch_withdraw`: batched withdrawal for 1, 10, 50, and 100 stream IDs, ensuring loop scaling and single-auth efficiency.
+- `batch_withdraw` mixed-state path: active, cancelled, and completed streams together, ensuring the batch loop exercises completion and cancellation handling.
+
+This coverage is intentionally regression-focused: it locks behavior around batch gas budgets, mixed stream state paths, and batch-create scaling without changing the public batch semantics.
+
 ## Hot Path Analysis
 
 ### `withdraw`
@@ -90,12 +116,18 @@ The following table provides the CPU instruction counts for core operations.
 <!-- GAS_BASELINE_START -->
 {
   "create_stream": 0,
+  "create_streams": {
+    "1": 0,
+    "5": 0,
+    "10": 0
+  },
   "withdraw": 0,
   "batch_withdraw": {
     "1": 0,
     "10": 0,
     "50": 0,
-    "100": 0
+    "100": 0,
+    "mixed-state": 0
   }
 }
 <!-- GAS_BASELINE_END -->

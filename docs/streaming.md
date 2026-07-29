@@ -851,9 +851,16 @@ Treasury key rotation: when a treasury wallet is being rotated, the operator cal
 
 ### batch_withdraw: completed stream behavior
 
-`batch_withdraw` processes each stream ID in order. A stream with status `Completed` **does not error** — it contributes a zero-amount result (`BatchWithdrawResult { stream_id, amount: 0 }`) and is skipped silently. No token transfer and no event are emitted for that entry. This allows callers to pass a mixed list of active and already-completed streams without pre-filtering.
+`batch_withdraw` processes each stream ID in order. The operation has the following explicit semantics:
 
-A `Paused` stream **does** return `ContractError::InvalidState` and reverts the entire batch.
+- A stream with status `Completed` **does not error** — it contributes a zero-amount result (`BatchWithdrawResult { stream_id, amount: 0 }`) and is skipped silently.
+- A stream with status `Cancelled` is processed normally: the transferred amount equals `accrued_at_cancel - withdrawn_amount`, and the stream remains `Cancelled` after the call.
+- A stream with status `Paused` causes the entire batch to abort with `ContractError::InvalidState`.
+- Duplicate stream IDs are rejected with `ContractError::DuplicateStreamId` and revert the whole batch.
+- An empty `stream_ids` vector returns `Ok(Vec::new())` with no transfers, no events, and no state change.
+- Mixed-state batches are supported for active, cancelled, and completed streams as long as no paused stream appears in the batch.
+
+This allows callers to submit mixed active/completed/cancelled batches safely while still preserving deterministic failure modes for invalid or duplicate inputs.
 
 ### One-Shot Init and Immutable Bootstrap
 
