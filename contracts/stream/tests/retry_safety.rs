@@ -161,7 +161,7 @@ fn retry_safety_withdraw_deterministic_timestamp() {
     assert_eq!(withdrawable_1, 5000);
 
     ctx.client
-        .withdraw(&stream_id)
+        .withdraw(&stream_id, &None)
         .expect("first withdraw should succeed");
     let withdrawn_after_1 = ctx
         .client
@@ -192,7 +192,7 @@ fn retry_safety_multiple_withdraws_monotonic() {
     for t in [100u64, 200, 300].iter() {
         ctx.env.ledger().set_timestamp(*t);
         ctx.client
-            .withdraw(&stream_id)
+            .withdraw(&stream_id, &None)
             .expect("withdraw should succeed");
 
         let stream = ctx
@@ -420,7 +420,7 @@ fn retry_safety_terminal_state_idempotent_rejection() {
     ctx.env.ledger().set_timestamp(1000); // Reach end_time
 
     // Withdraw full amount
-    ctx.client.withdraw(&stream_id).expect("should succeed");
+    ctx.client.withdraw(&stream_id, &None).expect("should succeed");
 
     // Stream is now Completed
     let stream = ctx
@@ -595,7 +595,7 @@ fn regression_monotonic_withdrawn() {
 
     for t in 0..=100 {
         ctx.env.ledger().set_timestamp(t);
-        ctx.client.withdraw(&stream_id).expect("should succeed");
+        ctx.client.withdraw(&stream_id, &None).expect("should succeed");
 
         let stream = ctx
             .client

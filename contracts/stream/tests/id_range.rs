@@ -126,7 +126,7 @@ fn test_get_streams_by_id_range_holey_ranges() {
     ctx.env.ledger().set_timestamp(now + 101);
 
     // Withdraw stream 2 fully to make it complete-able
-    ctx.client.withdraw(&id2);
+    ctx.client.withdraw(&id2, &None);
 
     // Close the completed stream (removes it from storage)
     ctx.client.close_completed_stream(&id2);

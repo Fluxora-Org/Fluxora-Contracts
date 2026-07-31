@@ -195,7 +195,7 @@ fn table_withdraw_dust_boundaries_threshold_minus_exact_plus() {
         let stream_id = ctx.create_linear_stream(deposit, case.threshold, end_time);
 
         ctx.env.ledger().set_timestamp(case.withdrawable as u64);
-        let withdrawn = ctx.client().withdraw(&stream_id);
+        let withdrawn = ctx.client().withdraw(&stream_id, &None);
         let want = expected_amount(case);
         assert_eq!(
             withdrawn, want,
@@ -335,12 +335,12 @@ fn withdraw_dust_threshold_bypassed_on_final_drain() {
     let stream_id = ctx.create_linear_stream(1000, 500, 1000);
 
     ctx.env.ledger().set_timestamp(950);
-    assert_eq!(ctx.client().withdraw(&stream_id), 950);
+    assert_eq!(ctx.client().withdraw(&stream_id, &None), 950);
 
     // Remaining 50 < threshold 500, but final drain (withdrawn + withdrawable == deposit).
     ctx.env.ledger().set_timestamp(1000);
     assert_eq!(
-        ctx.client().withdraw(&stream_id),
+        ctx.client().withdraw(&stream_id, &None),
         50,
         "final drain must bypass dust threshold per docs"
     );
@@ -356,7 +356,7 @@ fn withdraw_dust_threshold_bypassed_when_cancelled() {
     ctx.client().cancel_stream(&stream_id);
 
     assert_eq!(
-        ctx.client().withdraw(&stream_id),
+        ctx.client().withdraw(&stream_id, &None),
         100,
         "Cancelled terminal state must bypass dust threshold per docs"
     );
@@ -369,11 +369,11 @@ fn withdraw_dust_threshold_bypassed_past_end_time() {
 
     let stream_id = ctx.create_linear_stream(1000, 500, 1000);
     ctx.env.ledger().set_timestamp(900);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     ctx.env.ledger().set_timestamp(1100);
     assert_eq!(
-        ctx.client().withdraw(&stream_id),
+        ctx.client().withdraw(&stream_id, &None),
         100,
         "past end_time terminal bypass must allow remaining balance"
     );

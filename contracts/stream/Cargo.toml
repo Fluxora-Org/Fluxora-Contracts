@@ -84,6 +84,12 @@ path = "tests/factory_policy.rs"
 test = true
 
 [[test]]
+name = "factory_topup_lifecycle"
+path = "tests/factory_topup_lifecycle.rs"
+test = true
+
+
+[[test]]
 name = "formal_verification_smoke"
 path = "tests/formal_verification_smoke.rs"
 test = true
@@ -129,6 +135,11 @@ path = "tests/metadata_extension.rs"
 test = true
 
 [[test]]
+name = "metadata_extension_hardening"
+path = "tests/metadata_extension_hardening.rs"
+test = true
+
+[[test]]
 name = "stream_offer"
 path = "tests/stream_offer.rs"
 test = true
@@ -144,6 +155,11 @@ path = "tests/rate_decrease_after_withdraw.rs"
 test = true
 
 [[test]]
+name = "dynamic_pricing_edge_cases"
+path = "tests/dynamic_pricing_edge_cases.rs"
+test = true
+
+[[test]]
 name = "witnessed_cancel"
 path = "tests/witnessed_cancel.rs"
 test = true
@@ -151,7 +167,7 @@ test = true
 [[test]]
 name = "recipient_update_state_machine"
 path = "tests/recipient_update_state_machine.rs"
-test = false
+test = true
 
 [[test]]
 name = "id_reservation"
@@ -188,6 +204,11 @@ test = true
 name = "withdrawal_frequency"
 path = "tests/withdrawal_frequency.rs"
 test = false
+
+[[test]]
+name = "rate_schedule_bounds"
+path = "tests/rate_schedule_bounds.rs"
+test = true
 
 [[test]]
 name = "pause_semantics"
@@ -237,6 +258,11 @@ path = "tests/event_snapshots_suite.rs"
 test = true
 
 [[test]]
+name = "event_schema_consistency"
+path = "tests/event_schema_consistency.rs"
+test = true
+
+[[test]]
 name = "governance_integration"
 path = "tests/governance_integration.rs"
 test = false
@@ -249,5 +275,16 @@ test = false
 [[test]]
 name = "compile_warning_determinism"
 path = "tests/compile_warning_determinism.rs"
+test = true
+required-features = ["testutils"]
+
+[[test]]
+name = "delegated_flow_reentrancy"
+path = "tests/delegated_flow_reentrancy.rs"
+required-features = ["testutils"]
+
+[[test]]
+name = "storage_invariants_edge_cases"
+path = "tests/storage_invariants_edge_cases.rs"
 test = true
 required-features = ["testutils"]

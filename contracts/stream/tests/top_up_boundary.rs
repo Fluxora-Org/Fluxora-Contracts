@@ -135,7 +135,7 @@ fn test_top_up_completed_stream_rejected() {
     // Advance ledger sequence past withdrawal frequency check, then complete
     ctx.env.ledger().with_mut(|l| l.sequence_number += 32);
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client.withdraw(&stream_id);
+    ctx.client.withdraw(&stream_id, &None);
     let state = ctx.client.get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Completed);
 

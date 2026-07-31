@@ -1238,7 +1238,7 @@ fn test_policy_tightening_grandfathers_existing_streams() {
 
     // Advance time past the stream's end so the full deposit is withdrawable.
     ctx.env.ledger().set_timestamp(now + 2_000);
-    let withdrawn = ctx.stream.withdraw(&existing_id);
+    let withdrawn = ctx.stream.withdraw(&existing_id, &None);
     assert_eq!(withdrawn, 5_000);
 
     // ── 4. New stream creation respects tightened policy ──────────────────

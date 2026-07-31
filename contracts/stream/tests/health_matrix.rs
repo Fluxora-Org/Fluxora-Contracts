@@ -206,7 +206,7 @@ fn test_health_matrix_completed_after_end() {
     );
 
     ctx.env.ledger().set_timestamp(1200);
-    ctx.client.withdraw(&stream_id);
+    ctx.client.withdraw(&stream_id, &None);
 
     let health = ctx.client.get_stream_health(&stream_id);
 
@@ -415,7 +415,7 @@ fn test_portfolio_health_excludes_completed_and_cancelled() {
 
     // Withdraw fully from the first stream to complete it
     ctx.env.ledger().set_timestamp(10_000);
-    ctx.client.withdraw(&active);
+    ctx.client.withdraw(&active, &None);
 
     ctx.env.ledger().set_timestamp(10_100);
     let page = ctx

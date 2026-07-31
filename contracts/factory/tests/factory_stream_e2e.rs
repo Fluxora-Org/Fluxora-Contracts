@@ -173,6 +173,16 @@ impl<'a> FactoryClientWrapper<'a> {
     }
 }
 
+/// Forwards any `FluxoraFactoryClient` method not explicitly wrapped above
+/// (e.g. `get_factory_stream_count`, `get_factory_streams_paginated`)
+/// directly to the underlying client.
+impl<'a> std::ops::Deref for FactoryClientWrapper<'a> {
+    type Target = FluxoraFactoryClient<'a>;
+    fn deref(&self) -> &Self::Target {
+        &self.client
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Test context
 // ---------------------------------------------------------------------------
@@ -693,14 +703,6 @@ fn test_create_multiple_streams_same_recipient() {
         &cliff,
         &end,
         &dust,
-        &ctx.sender,
-        &ctx.recipient,
-        &dep,
-        &rate,
-        &start,
-        &cliff,
-        &end,
-        &dust,
         &fluxora_stream::StreamKind::Linear,
         &None,
     );
@@ -809,14 +811,6 @@ fn test_create_stream_factory_not_initialized_returns_not_initialized() {
         &now,
         &(now + STREAM_DURATION),
         &0,
-        &Address::generate(&env),
-        &Address::generate(&env),
-        &DEPOSIT_AMOUNT,
-        &RATE_PER_SECOND,
-        &now,
-        &now,
-        &(now + STREAM_DURATION),
-        &0,
         &fluxora_stream::StreamKind::Linear,
         &None,
     );
@@ -834,14 +828,6 @@ fn test_set_cap_enforced_end_to_end() {
 
     let (_, rate, start, cliff, end, dust) = ctx.default_params();
     let result = ctx.factory.try_create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &6_000,
-        &rate,
-        &start,
-        &cliff,
-        &end,
-        &dust,
         &ctx.sender,
         &ctx.recipient,
         &6_000,
@@ -871,14 +857,6 @@ fn test_set_min_duration_enforced_end_to_end() {
         &now,
         &(now + 200_000),
         &0,
-        &ctx.sender,
-        &ctx.recipient,
-        &DEPOSIT_AMOUNT,
-        &RATE_PER_SECOND,
-        &now,
-        &now,
-        &(now + 200_000),
-        &0,
         &fluxora_stream::StreamKind::Linear,
         &None,
     );
@@ -892,14 +870,6 @@ fn test_remove_allowlist_enforced_end_to_end() {
 
     let (dep, rate, start, cliff, end, dust) = ctx.default_params();
     let result = ctx.factory.try_create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &dep,
-        &rate,
-        &start,
-        &cliff,
-        &end,
-        &dust,
         &ctx.sender,
         &ctx.recipient,
         &dep,
@@ -1028,8 +998,8 @@ fn test_single_create_stream_still_registers_in_factory() {
         &ctx.now(),
         &(ctx.now() + STREAM_DURATION),
         &0,
-        &None,
         &StreamKind::Linear,
+        &None,
     );
 
     assert_eq!(ctx.factory.get_factory_stream_count(), 1);
@@ -1058,8 +1028,8 @@ fn test_single_then_batch_registry_accumulates_in_order() {
         &ctx.now(),
         &(ctx.now() + STREAM_DURATION),
         &0,
-        &None,
         &StreamKind::Linear,
+        &None,
     );
 
     // batch of two
@@ -1277,8 +1247,7 @@ fn test_direct_stream_call_bypasses_recipient_allowlist() {
                 irrevocable: None,
                 witness: None,
             },
-        )
-        .unwrap();
+        );
 
     // Stream exists in the stream contract.
     let state = ctx.stream.get_stream_state(&stream_id);
@@ -1338,8 +1307,7 @@ fn test_direct_stream_call_bypasses_deposit_cap() {
                 irrevocable: None,
                 witness: None,
             },
-        )
-        .unwrap();
+        );
 
     let state = ctx.stream.get_stream_state(&stream_id);
     assert_eq!(state.deposit_amount, over_cap_deposit);
@@ -1390,8 +1358,7 @@ fn test_direct_stream_call_bypasses_minimum_duration() {
                 irrevocable: None,
                 witness: None,
             },
-        )
-        .unwrap();
+        );
 
     let state = ctx.stream.get_stream_state(&stream_id);
     assert_eq!(state.end_time - state.start_time, short_duration);
@@ -1500,6 +1467,128 @@ fn test_create_streams_negative_deposit_rejected() {
     assert_eq!(res, Err(Ok(FactoryError::InvalidCap)));
 
     // Atomic rejection: no streams created, sender balance untouched
+    assert_eq!(ctx.factory.get_factory_stream_count(), factory_count_before);
+    assert_eq!(ctx.token.balance(&ctx.sender), sender_balance_before);
+}
+
+// ---------------------------------------------------------------------------
+// #1132: create_streams (batch) must use the fallible stream client call
+// ---------------------------------------------------------------------------
+
+/// Regression test for #1132: pausing the *stream* contract mid-batch must
+/// surface as a typed `FactoryError::StreamContractPaused`, not a host trap.
+///
+/// Before the fix, `create_streams` called the panicking
+/// `FluxoraStreamClient::create_streams` instead of `try_create_streams`, so
+/// this scenario would abort the whole host invocation instead of returning
+/// `Result::Err`.
+#[test]
+fn test_create_streams_paused_stream_contract_returns_typed_error() {
+    let ctx = Ctx::setup();
+    let now = ctx.now();
+
+    // Pause stream creation on the downstream stream contract (creation-pause,
+    // not the factory's own pause flag — this is the exact condition the
+    // single-stream path already handles via `StreamContractPaused`).
+    ctx.stream.set_contract_paused(&true);
+
+    let mut streams = Vec::new(&ctx.env);
+    streams.push_back(fluxora_stream::CreateStreamParams {
+        recipient: ctx.recipient.clone(),
+        deposit_amount: DEPOSIT_AMOUNT,
+        rate_per_second: RATE_PER_SECOND,
+        start_time: now,
+        cliff_time: now,
+        end_time: now + STREAM_DURATION,
+        withdraw_dust_threshold: Some(0),
+        memo: None,
+        metadata: None,
+        kind: fluxora_stream::StreamKind::Linear,
+        irrevocable: None,
+        witness: None,
+    });
+
+    let sender_balance_before = ctx.token.balance(&ctx.sender);
+    let factory_count_before = ctx.factory.get_factory_stream_count();
+
+    let res = ctx.factory.try_create_streams(&ctx.sender, &streams);
+
+    assert_eq!(
+        res,
+        Err(Ok(FactoryError::StreamContractPaused)),
+        "batch create against a paused stream contract must return a typed \
+         FactoryError::StreamContractPaused, not trap"
+    );
+
+    // No partial state changes: nothing registered, nothing debited.
+    assert_eq!(ctx.factory.get_factory_stream_count(), factory_count_before);
+    assert_eq!(ctx.token.balance(&ctx.sender), sender_balance_before);
+}
+
+/// Companion to the pause test: a downstream failure that is *not*
+/// `ContractPaused` must map to the generic `FactoryError::StreamContractError`,
+/// proving the batch path's error mapping is symmetric with the single-stream
+/// path across failure kinds, not just the paused case.
+///
+/// `InsufficientDeposit` is used here because it's a validation the stream
+/// contract performs (deposit must cover `rate_per_second * duration`) that
+/// the factory does not independently replicate, so it reaches the stream
+/// contract and fails there — unlike the cap/duration/allowlist checks the
+/// factory already rejects before ever calling downstream.
+#[test]
+fn test_create_streams_stream_contract_rejects_returns_generic_typed_error() {
+    let ctx = Ctx::setup();
+    let now = ctx.now();
+
+    let mut streams = Vec::new(&ctx.env);
+    // Valid first entry.
+    streams.push_back(fluxora_stream::CreateStreamParams {
+        recipient: ctx.recipient.clone(),
+        deposit_amount: DEPOSIT_AMOUNT,
+        rate_per_second: RATE_PER_SECOND,
+        start_time: now,
+        cliff_time: now,
+        end_time: now + STREAM_DURATION,
+        withdraw_dust_threshold: Some(0),
+        memo: None,
+        metadata: None,
+        kind: fluxora_stream::StreamKind::Linear,
+        irrevocable: None,
+        witness: None,
+    });
+    // Second entry: passes factory-level checks (positive, under cap, duration
+    // >= min) but deposit is deliberately half of what `rate_per_second *
+    // duration` requires, so the stream contract itself rejects it.
+    streams.push_back(fluxora_stream::CreateStreamParams {
+        recipient: ctx.recipient.clone(),
+        deposit_amount: DEPOSIT_AMOUNT / 2,
+        rate_per_second: RATE_PER_SECOND,
+        start_time: now,
+        cliff_time: now,
+        end_time: now + STREAM_DURATION,
+        withdraw_dust_threshold: Some(0),
+        memo: None,
+        metadata: None,
+        kind: fluxora_stream::StreamKind::Linear,
+        irrevocable: None,
+        witness: None,
+    });
+
+    let sender_balance_before = ctx.token.balance(&ctx.sender);
+    let factory_count_before = ctx.factory.get_factory_stream_count();
+
+    let res = ctx.factory.try_create_streams(&ctx.sender, &streams);
+
+    assert_eq!(
+        res,
+        Err(Ok(FactoryError::StreamContractError)),
+        "a non-paused downstream rejection must map to the generic \
+         FactoryError::StreamContractError, matching the single-stream path"
+    );
+
+    // Atomic rejection: the first (valid) entry must not have been created
+    // either — the stream contract validates the whole batch before any
+    // token transfer or persistence.
     assert_eq!(ctx.factory.get_factory_stream_count(), factory_count_before);
     assert_eq!(ctx.token.balance(&ctx.sender), sender_balance_before);
 }

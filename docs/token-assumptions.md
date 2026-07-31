@@ -53,6 +53,141 @@ The streaming contract's security model depends on these token behaviors:
 - **Atomic transactions**: The contract assumes that if a token transfer fails, the entire transaction reverts. Silent failures would break this invariant.
 - **Balance integrity**: The contract tracks `deposit_amount` and `withdrawn_amount` internally. If tokens are silently minted, burned, or transferred outside the contract's control, these internal accounting invariants diverge from actual token balances.
 
+## Token Transfer Architecture
+
+All token movements in the streaming contract are centralized through exactly **two** private helper functions. This centralization is a deliberate security property: it creates a single, auditable point of control for all inbound and outbound token flows.
+
+### Helper Functions
+
+#### `pull_token` — Inbound (External → Contract)
+
+```rust
+fn pull_token(env: &Env, from: &Address, amount: i128) -> Result<(), ContractError> {
+    let token_address = get_token(env)?;
+    let token_client = token::Client::new(env, &token_address);
+    token_client.transfer(from, &env.current_contract_address(), &amount);
+    Ok(())
+}
+```
+
+Used for: stream creation (single and batch) and top-ups.
+
+#### `push_token` — Outbound (Contract → External)
+
+```rust
+fn push_token(env: &Env, to: &Address, amount: i128) -> Result<(), ContractError> {
+    let token_address = get_token(env)?;
+    let token_client = token::Client::new(env, &to_address);
+    token_client.transfer(&env.current_contract_address(), to, &amount);
+    Ok(())
+}
+```
+
+Used for: withdrawals, refunds on cancellation, and partial refunds on stream shortening.
+
+### Complete Call-Site Inventory
+
+| Operation | Helper | Direction | Amount | Recipient |
+|---|---|---|---|---|
+| `create_stream` | `pull_token` | IN | `deposit_amount` | Contract |
+| `create_streams` (batch) | `pull_token` | IN | `total_deposit` | Contract |
+| `top_up_stream` | `pull_token` | IN | `amount` | Contract |
+| `withdraw` | `push_token` | OUT | `withdrawable` | `stream.recipient` |
+| `withdraw_to` | `push_token` | OUT | `withdrawable` | `destination` |
+| `batch_withdraw` | `push_token` | OUT | `withdrawable` | `stream.recipient` |
+| `shorten_stream_end_time` | `push_token` | OUT | `refund_amount` | `stream.sender` |
+| `cancel_stream_internal` | `push_token` | OUT | `refund_amount` | `stream.sender` |
+
+**Total: 3 inbound (`pull_token`), 5 outbound (`push_token`), 8 call sites.**
+
+### Zero-Bypass Guarantee
+
+No production code uses `token::Client` directly — every token movement routes through one of the two helpers. Verifiable with:
+
+```
+grep -n "token_client.transfer" contracts/stream/src/lib.rs
+```
+
+This should return **exactly two results**: one inside `pull_token` and one inside `push_token`. The only other occurrence in the codebase is in `integration_suite.rs` for balance-verification purposes only.
+
+### Zero-Amount Handling
+
+The helpers are never called with a zero amount unnecessarily:
+
+- **Withdrawals**: `withdrawable == 0` → returns `Ok(0)` immediately; no `push_token` call, no state change, no event.
+- **Refunds on cancel**: `refund_amount == 0` → skips `push_token`; stream status is still updated to `Cancelled` and the `StreamCancelled` event is still emitted.
+- **Batch deposits**: `total_deposit > 0` guard prevents `pull_token` from being called when a batch resolves to zero.
+
+### Admin Drain-Protection
+
+**Can a malicious actor drain contract funds?** No:
+- `pull_token` requires authorization from the funding address.
+- `push_token` only ever sends to the stream's pre-recorded recipient, sender (as a refund), or a recipient-authorized destination (`withdraw_to`).
+- No permissionless operation can trigger `push_token`.
+
+**Can the admin steal funds?** No:
+- Admin can cancel streams, but `cancel_stream_internal` always refunds the stream's original `sender`, never the admin's address.
+- Admin cannot withdraw on behalf of recipients.
+- Admin cannot redirect withdrawals to arbitrary addresses.
+
+### CEI Pattern: Canonical Examples
+
+All 8 call sites follow Checks-Effects-Interactions ordering — state is persisted **before** the external token call. Three representative examples:
+
+**`withdraw` (recipient pull)**
+```rust
+// CHECKS
+if stream.status == StreamStatus::Completed { return Err(...); }
+let withdrawable = accrued - stream.withdrawn_amount;
+if withdrawable == 0 { return Ok(0); }
+
+// EFFECTS — persisted before the external call
+stream.withdrawn_amount += withdrawable;
+if completed_now { stream.status = StreamStatus::Completed; }
+save_stream(&env, &stream);
+
+// INTERACTIONS
+push_token(&env, &stream.recipient, withdrawable)?;
+env.events().publish(...);
+```
+
+**`cancel_stream_internal` (sender refund)**
+```rust
+// CHECKS
+Self::require_cancellable_status(stream.status)?;
+let refund_amount = stream.deposit_amount.checked_sub(accrued_at_cancel)?;
+
+// EFFECTS
+stream.status = StreamStatus::Cancelled;
+stream.cancelled_at = Some(now);
+save_stream(env, stream);
+
+// INTERACTIONS
+if refund_amount > 0 {
+    push_token(env, &stream.sender, refund_amount)?;
+}
+env.events().publish(...);
+```
+
+**`top_up_stream` (funder deposit)**
+```rust
+// CHECKS
+funder.require_auth();
+if amount <= 0 { return Err(...); }
+
+// EFFECTS — state updated BEFORE the pull
+stream.deposit_amount = stream.deposit_amount.checked_add(amount)?;
+save_stream(&env, &stream);
+
+// INTERACTIONS
+pull_token(&env, &funder, amount)?;
+env.events().publish(...);
+```
+
+If a token transfer fails, the Soroban transaction reverts atomically — no partial state changes persist.
+
+---
+
 ## Explicit Non-Goals
 
 The following behaviors are **intentionally not mitigated** by the streaming contract. Operators, integrators, and auditors should be aware of these boundaries.
@@ -121,9 +256,9 @@ These mitigations conflict with the protocol's goals of gas efficiency, simplici
 
 **Specific risks**:
 
-- **Direct transfers to contract**: Tokens could be sent directly to the streaming contract address without going through `create_stream` or `top_up_stream`. These tokens would be locked permanently with no recovery path.
-- **Token recovery**: The contract has no mechanism to recover tokens sent directly to it outside of stream operations.
-- **Balance reconciliation**: The contract does not verify that `contract_balance >= sum(deposit_amount - withdrawn_amount)` across all streams.
+- **Direct transfers to contract**: Tokens sent directly to the streaming contract address without going through `create_stream` or `top_up_stream` increase the contract's token balance without increasing `TotalLiabilities`. These tokens become part of unallocated excess balance (`contract_balance - total_liabilities`) and are recoverable by the contract admin via `sweep_excess`.
+- **Token recovery**: Directly-transferred tokens are recoverable via `sweep_excess`, but recovery requires manual admin action (it is not automatic or permissionless). Recovered tokens are sent to an admin-specified recipient address rather than automatically returned to the original sender.
+- **Balance reconciliation**: The contract does not verify that `contract_balance >= sum(deposit_amount - withdrawn_amount)` across all streams on every operation; instead, it maintains `TotalLiabilities` and exposes `sweep_excess` for administrative balance management.
 
 **Rationale**: Balance verification would require:
 
@@ -137,7 +272,7 @@ The current design:
 - Assumes token transfers succeed or fail explicitly
 - Places responsibility on operators to avoid direct transfers
 
-**Residual risk**: Tokens sent directly to the contract address are permanently locked. Operators should never transfer tokens directly to the streaming contract address.
+**Residual risk**: Tokens sent directly to the contract address require manual admin intervention via `sweep_excess` for recovery. The original sender cannot reclaim directly-transferred tokens permissionlessly.
 
 ### 5. Token Allowance Management
 
@@ -246,7 +381,7 @@ Despite the non-goals above, the streaming contract provides the following obser
 1. **Sender operations**: Only the stream's `sender` can pause, resume, cancel, update rate, or modify end time.
 2. **Recipient operations**: Only the stream's `recipient` can withdraw tokens.
 3. **Admin operations**: Only the contract `admin` can pause, resume, or cancel streams as an administrative override.
-4. **Permissionless operations**: Anyone can call `close_completed_stream` to clean up completed streams.
+4. **Permissionless operations**: Anyone can call `close_completed_stream` to clean up completed streams. This operation is intentionally permissionless but **cannot move tokens** — `close_completed_stream` is only valid when the stream is already in `Completed` state, meaning all tokens have been fully withdrawn.
 
 ### Events
 
@@ -268,10 +403,23 @@ Despite the non-goals above, the streaming contract provides the following obser
 The following test scenarios verify token interaction behavior:
 
 1. **Successful transfers**: Tests verify that tokens are transferred correctly on stream creation, withdrawal, cancellation, and top-up.
-2. **Insufficient balance**: Tests verify that `create_stream` fails when the sender has insufficient token balance.
+2. **Insufficient balance**: Tests verify that `create_stream` fails when the sender has insufficient token balance (`test_create_stream_insufficient_balance_panics`).
 3. **Insufficient allowance**: Tests verify that `create_stream` fails when the sender has not approved the contract.
 4. **Zero withdrawable**: Tests verify that `withdraw` returns 0 without transferring tokens when nothing is withdrawable.
-5. **CEI ordering**: Tests verify that state is persisted before token transfers in all operations.
+5. **CEI ordering**: Tests verify that state is persisted before token transfers in all operations (`test_create_stream_transfer_failure_no_state_change`, `test_top_up_stream_insufficient_balance_reverts_cleanly`).
+6. **Balance conservation**: Tests verify that total tokens are conserved across cancel operations (`test_cancel_balance_consistency`).
+
+### On-Chain Audit Trail
+
+Third-party auditors can construct a complete, trustworthy audit trail using only on-chain data. These three sources are jointly sufficient:
+
+| Source | What It Proves |
+|---|---|
+| **Events** (`created`, `withdrew`, `cancelled`, `top_up`) | Every token movement has a corresponding on-chain event |
+| **State queries** (`get_stream_state`, `calculate_accrued`, `get_withdrawable`) | Internal accounting is always inspectable |
+| **Token contract balance** | Aggregate contract holdings are independently verifiable |
+
+Because Soroban transactions are atomic, a reverted transaction emits no events. Therefore: **if an event is observed on-chain, the corresponding token transfer succeeded.** Event logs are a reliable source of truth for token movements.
 
 ### Audit Notes
 
@@ -284,7 +432,7 @@ The following scenarios cannot be automatically tested and require manual audit:
 ### Residual Risks
 
 1. **Non-standard tokens**: If a token violates SEP-41 guarantees, the streaming contract's behavior may become unpredictable. Mitigation: Use only well-audited, standard SEP-41 tokens.
-2. **Direct transfers**: Tokens sent directly to the contract address are permanently locked. Mitigation: Operator education and wallet/tooling warnings.
+2. **Direct transfers**: Tokens sent directly to the contract address increase unallocated excess balance. They are recoverable by the contract admin via `sweep_excess`, but cannot be permissionlessly reclaimed by the original sender. Mitigation: Operator education, wallet/tooling warnings, and admin oversight.
 3. **Token upgrades**: If a token contract is upgraded to violate SEP-41 guarantees, the streaming contract's behavior may change. Mitigation: Use stable, non-upgradeable tokens or accept upgrade risk.
 
 ## Integration Guidelines
@@ -308,6 +456,36 @@ The following scenarios cannot be automatically tested and require manual audit:
 2. **Balance monitoring**: Monitor the contract's token balance and compare with internal accounting to detect anomalies.
 3. **Upgrade risk**: If using upgradeable tokens, monitor token contract upgrades and their potential impact on streaming behavior.
 4. **Direct transfer prevention**: Implement controls to prevent accidental direct transfers to the streaming contract address.
+
+## Open Work Items
+
+The following items were identified during the 2026-03-26 internal token-helpers audit as unresolved. They are preserved here to prevent them from being lost when the source audit files are removed.
+
+> [!IMPORTANT]
+> These items should be tracked as GitHub issues. They represent intentional future work, not defects.
+
+### High Priority (Before Mainnet)
+
+1. **Document token contract requirements in `docs/DEPLOYMENT.md`**  
+   The deployment guide should include a section explicitly stating SAC compliance requirements, the no-reentrancy assumption, and the no-hidden-fees assumption so operators can validate token contracts before initialization.
+
+2. **Add a reentrancy protection test**  
+   Add `test_token_reentrancy_protection` to the test suite: mock a malicious token contract that attempts to re-enter the streaming contract during `transfer`, and verify that the CEI pattern prevents state corruption. This is a defense-in-depth measure, as Soroban's execution model already limits reentrancy risk.
+
+### Medium Priority (Future Release)
+
+3. **Add a `should_transfer` zero-amount helper**  
+   Introduce `fn should_transfer(amount: i128) -> bool { amount > 0 }` and use it consistently before all `push_token` calls. This would make the zero-amount guarding pattern explicit and uniform across all outbound transfer sites.
+
+4. **Add lifetime metrics**  
+   Consider tracking cumulative totals for treasury dashboard purposes: total tokens deposited (all-time), total tokens withdrawn (all-time), total tokens refunded (all-time). These would be stored as contract-level counters, not per-stream.
+
+### Low Priority (Optional Enhancement)
+
+5. **Add batch admin refund operation**  
+   Allow the admin to cancel multiple streams in a single transaction for emergency scenarios. Currently streams must be cancelled one-by-one. This is not a security concern — it is a gas-efficiency and operational convenience improvement.
+
+---
 
 ## References
 

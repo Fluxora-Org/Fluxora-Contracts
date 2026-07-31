@@ -21,9 +21,11 @@ use soroban_sdk::{
 
 struct TestCtx<'a> {
     env: Env,
+    #[allow(dead_code)]
     contract_id: Address,
     client: FluxoraStreamClient<'a>,
     token_id: Address,
+    #[allow(dead_code)]
     sac: StellarAssetClient<'a>,
     admin: Address,
     sender: Address,
@@ -294,7 +296,7 @@ fn test_metadata_immutability_across_stream_operations() {
     assert_eq!(ctx.client.get_stream_metadata(&stream_id).unwrap(), meta);
 
     env.ledger().with_mut(|l| l.timestamp = 1_000_100);
-    ctx.client.withdraw(&stream_id);
+    ctx.client.withdraw(&stream_id, &None);
     assert_eq!(ctx.client.get_stream_metadata(&stream_id).unwrap(), meta);
 
     env.ledger().with_mut(|l| l.sequence_number += 100);

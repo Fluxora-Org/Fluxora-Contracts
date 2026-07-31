@@ -23,6 +23,30 @@
 //!    (the `testutils` feature is only for `#[cfg(test)]`).
 //! 5. **No environment-dependent code** is compiled into the WASM artifact.
 //!
+//! ## Current checksum computation and validation behavior
+//!
+//! The checksum flow is intentionally **off-chain only**:
+//!
+//! - `script/update-wasm-checksums.sh` rebuilds the release WASM artifacts and writes
+//!   SHA-256 digests into `wasm/checksums.sha256`.
+//! - `script/verify-wasm-checksum.sh` optionally rebuilds, then recomputes SHA-256
+//!   digests for the raw `target/wasm32-unknown-unknown/release/*.wasm` artifacts and
+//!   compares them against the committed file.
+//! - The contract itself does **not** compute or persist any checksum at runtime.
+//! - The `upgrade(env, new_wasm_hash)` entrypoint does **not** validate that the hash
+//!   matches `wasm/checksums.sha256`; it only enforces admin auth and then delegates
+//!   hash existence/validity checks to Soroban's
+//!   `env.deployer().update_current_contract_wasm(new_wasm_hash)` host function.
+//! - In the Soroban Rust test environment, arbitrary WASM blobs are not preloaded, so
+//!   an otherwise-authorized upgrade using `[0u8; 32]` reaches the host and traps with
+//!   `Error(Storage, MissingValue)` rather than returning a contract-defined error.
+//!
+//! This means the regression surface for checksum handling is:
+//! 1. The scripts must continue to hash the same release artifacts.
+//! 2. The reference file must continue to describe those exact artifacts.
+//! 3. The contract upgrade path must remain auth-gated while leaving artifact
+//!    authenticity to deployment-time/off-chain verification and Soroban host checks.
+//!
 //! If any of these invariants change, the reference checksum in
 //! `wasm/checksums.sha256` must be regenerated via
 //! `script/update-wasm-checksums.sh`.
@@ -256,13 +280,223 @@ fn encode_option_address_simple(buf: &mut Vec<u8>, opt: &Option<Address>) {
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
+//! # Storage key layout invariants (V5 → V6 → V7)
+//!
+//! `DataKey` is a `#[contracttype]` enum. Soroban serialises enum variants by
+//! their **0-based declaration-order discriminant**. Reordering, inserting, or
+//! removing variants silently corrupts every persistent storage entry on any
+//! live instance.
+//!
+//! ## V5 discriminant table (CONTRACT_VERSION = 5)
+//!
+//! | Discriminant | Variant                    | Storage   | Value type        |
+//! |:------------:|:---------------------------|:----------|:------------------|
+//! | 0            | `Config`                   | Instance  | `Config`          |
+//! | 1            | `NextStreamId`             | Instance  | `u64`             |
+//! | 2            | `Stream(u64)`              | Persistent| `Stream` (V5)     |
+//! | 3            | `RecipientStreams(Address)` | Persistent| `Vec<u64>`        |
+//! | 4            | `GlobalEmergencyPaused`    | Instance  | `bool`            |
+//! | 5            | `CreationPaused`           | Instance  | `bool`            |
+//! | 6            | `GlobalPauseReason`        | Instance  | `String`          |
+//! | 7            | `GlobalPauseTimestamp`     | Instance  | `u64`             |
+//! | 8            | `GlobalPauseAdmin`         | Instance  | `Address`         |
+//! | 9            | `AutoClaimDestination(u64)`| Persistent| `Address`         |
+//! | 10           | `NextTemplateId`           | Instance  | `u64`             |
+//! | 11           | `ActiveTemplateCount`      | Instance  | `u64`             |
+//! | 12           | `StreamTemplate(u64)`      | Persistent| `StreamScheduleTemplate` |
+//! | 13           | `OwnerTemplateIds(Address)`| Persistent| `Vec<u64>`        |
+//! | 14           | `TotalLiabilities`         | Instance  | `i128`            |
+//!
+//! V5 `Stream` struct fields (in declaration order, positional XDR encoding):
+//!
+//! | Position | Field                    | Type              |
+//! |:--------:|:-------------------------|:------------------|
+//! | 0        | `stream_id`              | `u64`             |
+//! | 1        | `sender`                 | `Address`         |
+//! | 2        | `recipient`              | `Address`         |
+//! | 3        | `deposit_amount`         | `i128`            |
+//! | 4        | `rate_per_second`        | `i128`            |
+//! | 5        | `start_time`             | `u64`             |
+//! | 6        | `cliff_time`             | `u64`             |
+//! | 7        | `end_time`               | `u64`             |
+//! | 8        | `withdrawn_amount`       | `i128`            |
+//! | 9        | `status`                 | `StreamStatus`    |
+//! | 10       | `cancelled_at`           | `Option<u64>`     |
+//! | 11       | `checkpointed_amount`    | `i128`            |
+//! | 12       | `checkpointed_at`        | `u64`             |
+//! | 13       | `withdraw_dust_threshold`| `i128`            |
+//!
+//! **No `memo` field in V5.** The V5 `Stream` struct has exactly 14 fields.
+//!
+//! ## V6 additions (appended — discriminants 0–14 preserved)
+//!
+//! | Discriminant | Variant                         | Storage   | Value type  |
+//! |:------------:|:--------------------------------|:----------|:------------|
+//! | 15           | `WithdrawNonce(Address)`        | Persistent| `u64`       |
+//! | 16           | `PauseState`                    | Instance  | `PauseState`|
+//! | 17           | `ReentrancyLock`                | Instance  | `bool`      |
+//! | 18           | `RecipientStreamPage(Address,u32)` | Persistent | `Vec<u64>` |
+//! | 19           | `RecipientStreamPageCount(Address)` | Persistent | `u32`    |
+//! | 20           | `PendingRecipientUpdate(u64)`   | Persistent| `Address`   |
+//!
+//! ## Post-V6 freeze additions (appended — discriminants 0–20 preserved)
+//!
+//! | Discriminant | Variant                         | Storage   | Value type   |
+//! |:------------:|:--------------------------------|:----------|:-------------|
+//! | 21           | `IdReservation(Address)`        | Instance  | `IdReservation` |
+//! | 22           | `MaxRatePerSecond`              | Instance  | `i128`       |
+//! | 23           | `DelegatedWithdrawNonce(Address)`| Persistent| `u64`       |
+//! | 24           | `LastPauseRecord(PauseKind)`    | Instance  | `PauseRecord`|
+//! | 25           | `RotationHistory(u64)`          | Persistent| `Vec<...>`   |
+//! | 26           | `LastAccrualLedgerTimestamp`    | Instance  | `u64`        |
+//! | 27           | `PausedStreamCount`             | Instance  | `u64`        |
+//! | 28           | `TotalKeeperFeesPaid`           | Instance  | `i128`       |
+//!
+//! Total live `DataKey` variant count in V7 (before post-V7 additions): **29** (discriminants 0–28).
+//! Current live `DataKey` variant count: **37** (discriminants 0–36) — see post-V7 additions below.
+//!
+//! V6 `Stream` struct adds one field at the end:
+//!
+//! | Position | Field  | Type              |
+//! |:--------:|:-------|:------------------|
+//! | 14       | `memo` | `Option<Bytes>`   |
+//!
+//! All V5 persistent `Stream` entries remain decodable on a V6 instance because
+//! Soroban XDR struct decoding is **positional and forward-compatible**: a V6
+//! decoder reading a V5-encoded struct will see `memo` as absent (`None`).
+//!
+//! ## V7 additions (discriminants 21–28)
+//!
+//! | Discriminant | Variant                         | Storage   | Value type            |
+//! |:------------:|:---------------------------------|:----------|:-----------------------|
+//! | 21           | `IdReservation(Address)`         | Persistent| `IdReservation`        |
+//! | 22           | `MaxRatePerSecond`               | Instance  | `i128`                 |
+//! | 23           | `DelegatedWithdrawNonce(Address)`| Persistent| `u64`                  |
+//! | 24           | `LastPauseRecord(PauseKind)`     | Instance  | `PauseRecord`          |
+//! | 25           | `RotationHistory(u64)`           | Persistent| `Vec<RotationEntry>`   |
+//! | 26           | `LastAccrualLedgerTimestamp`     | Instance  | `u64`                  |
+//! | 27           | `PausedStreamCount`              | Instance  | `u64`                  |
+//! | 28           | `TotalKeeperFeesPaid`            | Instance  | `i128`                 |
+//!
+//! These eight variants were appended incrementally across several prior changes
+//! (`IdReservation` in issue #584, `TotalKeeperFeesPaid` in issue #623, and others)
+//! without ever being consolidated into a single documented table or accompanying
+//! variant-count test — this section and the `v7_*` tests below close that gap
+//! retroactively. No `Stream` struct field changes accompanied these additions;
+//! the V6 `Stream` layout (15 fields, `memo` at position 14) is unchanged in V7.
+//!
+//! ### Why `CONTRACT_VERSION` was not bumped to 7
+//!
+//! Per `docs/upgrade.md`'s "When to increment" policy, a version bump is **required**
+//! only for changes that break a correctly-written existing client (removed/renamed
+//! entry-points, changed parameter types, changed error/event shapes, or storage
+//! layout changes that make *existing* entries unreadable). Purely additive
+//! `DataKey` variants satisfy none of those: per the append-only invariant below,
+//! they neither reorder nor remove any existing discriminant, so every V6-era
+//! persistent entry remains byte-identical and readable. This is a strictly
+//! narrower footprint than the policy's "Add a new entry-point (purely additive)"
+//! row — itself only *recommended*, not required, to bump conservatively (contrast
+//! the `transfer_sender` note in `docs/upgrade.md`, which chose to bump for a new
+//! *entry-point*). Of these eight variants, only `IdReservation` gained a
+//! corresponding read view (`get_id_reservation`); that entry-point addition was
+//! deliberately treated the same permissive way. `CONTRACT_VERSION` remains `6`;
+//! this decision may be revisited by maintainers if an integrator-visible reason
+//! to bump surfaces later.
+//!
+//! ## Invariant: discriminants 0–14 are frozen
+//!
+//! | Discriminant | Variant                            | Storage   | Value type           |
+//! |:------------:|:-----------------------------------|:----------|:---------------------|
+//! | 21           | `IdReservation(Address)`           | Persistent| `IdReservation`      |
+//! | 22           | `MaxRatePerSecond`                 | Instance  | `i128`               |
+//! | 23           | `DelegatedWithdrawNonce(Address)`  | Persistent| `u64`                |
+//! | 24           | `LastPauseRecord(PauseKind)`       | Instance  | `PauseRecord`        |
+//! | 25           | `RotationHistory(u64)`             | Persistent| `Vec<RotationEntry>` |
+//! | 26           | `LastAccrualLedgerTimestamp`       | Instance  | `u64`                |
+//! | 27           | `PausedStreamCount`                | Instance  | `u64`                |
+//! | 28           | `TotalKeeperFeesPaid`              | Instance  | `i128`               |
+//!
+//! Total `DataKey` variants in V7 (before post-V7 additions): **29** (discriminants 0 through 28).
+//!
+//! ## V8/V9 additions (discriminants 29–36)
+//!
+//! | Discriminant | Variant                              | Storage    | Value type           |
+//! |:------------:|:-------------------------------------|:-----------|:---------------------|
+//! | 29           | `AutoRenewEnabled(u64)`              | Persistent | `bool`               |
+//! | 30           | `MaxLookbackLedgers(u64)`            | Persistent | `u32`                |
+//! | 31           | `SenderStreams(Address)`             | Persistent | `Vec<u64>`           |
+//! | 32           | `PendingStreamOffer(u64)`            | Persistent | `StreamOffer`        |
+//! | 33           | `RecipientPendingOffers(Address)`    | Persistent | `Vec<u64>`           |
+//! | 34           | `PooledStreamShares(u64)`            | Persistent | `Vec<(Address,u32)>` |
+//! | 35           | `PooledStreamWithdrawn(u64,Address)` | Persistent | `i128`               |
+//! | 36           | `DelegatedCancelNonce(Address)`      | Persistent | `u64`                |
+//!
+//! These variants are strictly append-only: no existing discriminant 0–28 was
+//! changed. The live v9 total is **37** variants (0–36), and the next safe append
+//! position is 37. Additive keys may remain under the current contract version,
+//! but their absent-key behavior and the exhaustive compatibility map must be
+//! updated in the same change.
+//!
+//! See [`docs/storage.md`](../../../docs/storage.md) and
+//! [`docs/upgrade.md`](../../../docs/upgrade.md) for policy and runbooks.
+//!
+//! ## Invariant: discriminants 0–36 are frozen
+//!
+//! No variant at position 0–36 may ever be reordered, renamed, or removed on
+//! an instance that may contain that key. Violations cause storage corruption.
+//!
+//! ## Security assumptions
+//!
+//! - **Append-only extension**: New `DataKey` variants must always be appended.
+//!   Inserting at any position ≤ 36 shifts subsequent discriminants. The next
+//!   variant must receive discriminant 37.
+//! - **Struct field ordering**: `Stream` fields must never be reordered. Soroban
+//!   XDR encodes structs positionally; a field swap is a silent type mismatch.
+//! - **Option-tail compatibility**: The V5→V6 `memo: Option<Bytes>` addition is
+//!   safe only because it is appended as the last field and is `Option`-typed.
+//!   A non-`Option` field appended to a struct would break V5 decoders.
+//! - **No compile-time enforcement**: Discriminant stability and variant count
+//!   alignment are machine-checked by `contracts/stream/tests/storage_key_compat.rs`
+//!   and documented here.
+//!
+//! ## Residual risks
+//!
+//! - **Off-chain indexers.** Any tool reading Soroban storage via RPC must be
+//!   updated when new variants are appended (even append-only changes shift the
+//!   total variant count visible to generic XDR parsers).
+//! - **Optimised WASM.** The Stellar CLI `optimize` step may produce
+//!   non-deterministic output depending on the CLI version. The reference
+//!   checksum covers only the raw (unoptimised) WASM.
+//! - **Dependency resolution.** `Cargo.lock` must be committed and unchanged.
+//!   CI-enforced: the `build` job's "Verify Cargo.lock is committed and
+//!   unchanged" step runs `cargo update --locked --workspace` before any build
+//!   step and fails the build if resolution would modify `Cargo.lock` (e.g. an
+//!   unpinned `^` dependency resolving differently). See
+//!   `.github/workflows/ci.yml`.
+//!
+//! ## Upgrade determinism contract
+//!
+//! For checksum verification to remain deterministic across upgrades and retries:
+//!
+//! 1. **Frozen discriminants (0–14)** must never be reordered, renamed, or
+//!    removed. Any violation is a silent storage corruption bug.
+//! 2. **Append-only extension** ensures new `DataKey` variants start at
+//!    discriminant 29. Insertions before 29 shift all subsequent discriminants.
+//! 3. **Struct field ordering** is positional in Soroban XDR. Field swaps are
+//!    type mismatches; append-only additions must use `Option<T>` at the tail.
+//! 4. **Retry safety**: The checksum algorithm is deterministic given identical
+//!    input bytes. No runtime entropy (timestamps, thread IDs, etc.) may leak
+//!    into the verification path.
 
 #[cfg(test)]
 mod tests {
+    use crate::CONTRACT_VERSION;
     extern crate std;
     use soroban_sdk::{testutils::Address as _, Address, Bytes, Env, Map};
     use crate::{Stream, StreamKind, StreamStatus};
     use super::*;
+    use std::format;
+    use std::string::ToString;
 
     #[test]
     fn checksum_module_compiles() {}
@@ -279,18 +513,28 @@ mod tests {
         assert_eq!(V6_INITIAL_VARIANT_COUNT, 21);
     }
 
+    /// Live DataKey contains 37 variants (discriminants 0–36).
     #[test]
-    fn live_datakey_variant_count_is_36() {
-        const LIVE_VARIANT_COUNT: usize = 36;
-        assert_eq!(LIVE_VARIANT_COUNT, 36);
+    fn live_datakey_variant_count_is_37() {
+        const LIVE_VARIANT_COUNT: usize = 37;
+        assert_eq!(LIVE_VARIANT_COUNT, 37);
     }
 
     #[test]
     fn post_v7_new_variants_occupy_discriminants_29_to_35() {
         let post_v7_range = 29usize..=35;
         assert_eq!(post_v7_range.clone().count(), 7);
+    /// Eight post-V7 additive variants occupy discriminants 29–36.
+    #[test]
+    fn post_v7_new_variants_occupy_discriminants_29_to_36() {
+        // AutoRenewEnabled=29, MaxLookbackLedgers=30, SenderStreams=31,
+        // PendingStreamOffer=32, RecipientPendingOffers=33,
+        // PooledStreamShares=34, PooledStreamWithdrawn=35,
+        // DelegatedCancelNonce=36.
+        let post_v7_range = 29usize..=36;
+        assert_eq!(post_v7_range.clone().count(), 8);
         assert_eq!(*post_v7_range.start(), 29);
-        assert_eq!(*post_v7_range.end(), 35);
+        assert_eq!(*post_v7_range.end(), 36);
     }
 
     #[test]
@@ -308,24 +552,27 @@ mod tests {
         assert_eq!(*v6_only_range.end(), 20);
     }
 
+    /// At the V7 freeze point DataKey had 29 variants (0–28).
     #[test]
     fn v7_datakey_variant_count_at_freeze_was_29() {
         const V7_FREEZE_VARIANT_COUNT: usize = 29;
         assert_eq!(V7_FREEZE_VARIANT_COUNT, 29);
     }
 
+    /// V9 live DataKey has 37 variants (0–36); next append is 37.
     #[test]
-    fn v9_datakey_variant_count_is_36() {
-        const V9_VARIANT_COUNT: usize = 36;
-        assert_eq!(V9_VARIANT_COUNT, 36);
+    fn v9_datakey_variant_count_is_37() {
+        const V9_VARIANT_COUNT: usize = 37;
+        assert_eq!(V9_VARIANT_COUNT, 37);
     }
 
+    /// The eight V8/V9-only keys occupy discriminants 29–36.
     #[test]
-    fn v9_new_variants_occupy_discriminants_29_to_35() {
-        let v9_only_range = 29usize..=35;
-        assert_eq!(v9_only_range.clone().count(), 7);
+    fn v9_new_variants_occupy_discriminants_29_to_36() {
+        let v9_only_range = 29usize..=36;
+        assert_eq!(v9_only_range.clone().count(), 8);
         assert_eq!(*v9_only_range.start(), 29);
-        assert_eq!(*v9_only_range.end(), 35);
+        assert_eq!(*v9_only_range.end(), 36);
     }
 
     #[test]
@@ -379,6 +626,12 @@ mod tests {
 
     #[test]
     fn stream_struct_has_24_fields_with_all_appended() {
+    /// Stream struct field count with `paused_at_timestamp` and
+    /// `cumulative_paused_duration` appended.
+    /// Prior count (21) + decommissioned (1) + paused_at_timestamp (1)
+    /// + cumulative_paused_duration (1) = 24 fields.
+    #[test]
+    fn stream_struct_has_24_fields_with_paused_duration_tracking() {
         const TOTAL_STREAM_FIELDS: usize = 24;
         assert_eq!(TOTAL_STREAM_FIELDS, 24);
     }
@@ -981,5 +1234,71 @@ mod tests {
         };
         let hash = compute_stream_checksum_no_crypto(&stream);
         assert_eq!(hash.len(), CHECKSUM_LENGTH);
+    }
+
+    /// Verify `wasm/checksums.sha256` records the same pinned toolchain noted here.
+    #[test]
+    fn checksums_file_toolchain_matches_rust_toolchain_toml() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let repo_root = std::path::Path::new(manifest_dir).join("../..");
+        let toolchain_path = repo_root.join("rust-toolchain.toml");
+        let checksums_path = repo_root.join("wasm/checksums.sha256");
+
+        let toolchain = std::fs::read_to_string(&toolchain_path)
+            .expect("failed to read rust-toolchain.toml");
+        let expected_channel = toolchain
+            .lines()
+            .find_map(|line| {
+                let line = line.trim();
+                line.strip_prefix("channel")
+                    .map(|rest| rest.trim())
+                    .and_then(|rest| rest.strip_prefix('='))
+                    .map(|rest| rest.trim().trim_matches('"').to_string())
+            })
+            .expect("no channel found in rust-toolchain.toml");
+
+        let checksums = std::fs::read_to_string(&checksums_path)
+            .expect("failed to read wasm/checksums.sha256");
+        assert!(
+            checksums.contains(&format!("# Rust toolchain: {expected_channel}")),
+            "wasm/checksums.sha256 must record the pinned toolchain channel ({expected_channel})"
+        );
+    }
+
+    /// Verify the checksum scripts still target raw release WASM artifacts.
+    #[test]
+    fn checksum_scripts_target_raw_release_wasm() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let repo_root = std::path::Path::new(manifest_dir).join("../..");
+        let verify_script = std::fs::read_to_string(repo_root.join("script/verify-wasm-checksum.sh"))
+            .expect("failed to read script/verify-wasm-checksum.sh");
+        let update_script = std::fs::read_to_string(repo_root.join("script/update-wasm-checksums.sh"))
+            .expect("failed to read script/update-wasm-checksums.sh");
+
+        for script in [&verify_script, &update_script] {
+            assert!(
+                script.contains("target/wasm32-unknown-unknown/release"),
+                "checksum scripts must hash raw release WASM artifacts"
+            );
+            assert!(
+                !script.contains(".optimized.wasm"),
+                "checksum scripts must not silently switch to optimized artifacts"
+            );
+        }
+    }
+
+    /// Verify docs/upgrade.md advertises the live CONTRACT_VERSION.
+    #[test]
+    fn upgrade_doc_current_value_matches_contract_version() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let upgrade_doc = std::fs::read_to_string(
+            std::path::Path::new(manifest_dir).join("../../docs/upgrade.md"),
+        )
+        .expect("failed to read docs/upgrade.md");
+        let expected_block = format!("```\nCONTRACT_VERSION = {CONTRACT_VERSION}\n```");
+        assert!(
+            upgrade_doc.contains(&expected_block),
+            "docs/upgrade.md must advertise the live CONTRACT_VERSION ({CONTRACT_VERSION})"
+        );
     }
 }

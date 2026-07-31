@@ -162,6 +162,7 @@ fn test_create_stream_relative_irrevocable() {
             kind: StreamKind::Linear,
             metadata: None,
             irrevocable: Some(true),
+            witness: None,
         },
     );
 
@@ -223,7 +224,7 @@ fn test_renew_stream_inherits_irrevocable() {
 
     ctx.client.set_auto_renew(&stream_id, &ctx.sender, &true);
     ctx.env.ledger().set_timestamp(1100);
-    ctx.client.withdraw(&stream_id);
+    ctx.client.withdraw(&stream_id, &None);
 
     let new_stream_id = ctx.client.renew_stream(&stream_id);
     let renewed_stream = ctx.client.get_stream_state(&new_stream_id);

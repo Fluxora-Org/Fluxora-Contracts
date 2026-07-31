@@ -4,8 +4,83 @@
 //! the `symbol_short!` topic definitions co-located with the payload struct.
 //! This makes ABI review trivial: every event topic is in one file.
 //!
-//! Every helper in this module is wired up as the canonical call site for
-//! its corresponding event in `lib.rs` and `storage.rs`.
+//! Every helper in this module is the canonical call site for its
+//! corresponding event in `lib.rs` and `storage.rs`.
+//!
+//! # Schema evolution policy
+//!
+//! Event payloads in this module follow an **additive-only backward-compatibility**
+//! policy defined in [`docs/event-schema-evolution.md`](docs/event-schema-evolution.md).
+//!
+//! ## Core rules
+//!
+//! 1. **Topics are permanent** — Once a `symbol_short!` literal (e.g. `"created"`,
+//!    `"withdrew"`, `"rate_upd"`) is published to any non-local network, it must
+//!    never be renamed, reassigned, or removed.
+//! 2. **Fields are append-only** — New fields may only be added **at the end** of
+//!    an existing payload struct. Existing fields must never change type, name, or
+//!    position.
+//! 3. **New fields must have safe defaults** — Prefer `Option<T>` (which defaults
+//!    to `None`). Never add a required field that would break old deserialisers.
+//! 4. **One canonical emit helper per event** — Every event is emitted by exactly
+//!    one function in this file. No re-publishing inline elsewhere.
+//! 5. **Topic cardinality is fixed** — The number of topic elements for a given
+//!    symbol is part of the event identity and must not change.
+//!
+//! ## Deprecation lifecycle
+//!
+//! 1. **Announce** — Mark the field with `@deprecated` in the doc comment and
+//!    bump `CONTRACT_VERSION`. Minimum one version notice.
+//! 2. **Signal** — Emit the field as its sentinel value (e.g. `None` for
+//!    `Option<T>`, `0` for integers). Minimum two versions.
+//! 3. **Remove** — Delete the field from the struct. Only after market is
+//!    fully migrated.
+//!
+//! ## Topics in this module
+//!
+//! | Topic symbol | Cardinality | First emitted in |
+//! |-------------|-------------|-----------------|
+//! | `"created"`  | 2           | V1              |
+//! | `"withdrew"` | 2           | V1              |
+//! | `"wdraw_to"` | 2           | V1              |
+//! | `"cancelled"`| 2           | V1              |
+//! | `"completed"`| 2           | V1              |
+//! | `"closed"`   | 2           | V1              |
+//! | `"paused"`   | 2           | V1 (data changed in V3) |
+//! | `"resumed"`  | 2           | V1              |
+//! | `"rate_upd"` | 2           | V1              |
+//! | `"rate_dec"` | 2           | V8              |
+//! | `"rate_cap"` | 2           | V8              |
+//! | `"end_shrt"` | 2           | V1              |
+//! | `"end_ext"`  | 2           | V1              |
+//! | `"top_up"`   | 2           | V1              |
+//! | `"health"`   | 2           | V8              |
+//! | `"recp_upd"` | 2           | V1              |
+//! | `"gl_pause"` | 1           | V8              |
+//! | `"gl_resume"`| 1           | V8              |
+//! | `"ct_pause"` | 1           | V8              |
+//! | `"pr_pause"` | 2           | V8              |
+//! | `"pr_resume"`| 2           | V8              |
+//! | `"ac_set"`   | 2           | V8              |
+//! | `"ac_revoke"`| 2           | V8              |
+//! | `"ac_trig"`  | 2           | V8              |
+//! | `"ex_swept"` | 2           | V8              |
+//! | `"cloned"`   | 2           | V8              |
+//! | `"kp_cncl"`  | 2           | V8              |
+//! | `"decomm"`   | 2           | V8              |
+//! | `"sndr_xfr"` | 2           | V8              |
+//! | `"renewed"`  | 3           | V8              |
+//! | `"claim_own"`| 2           | V8              |
+//! | `"del_share"`| 2           | V8              |
+//! | `"offr_crt"` | 2           | V8              |
+//! | `"offr_acc"` | 2           | V8              |
+//! | `"offr_cxl"` | 2           | V8              |
+//! | `"upgraded"` | 1           | V8              |
+//! | `"AdminUpd"` | 1           | V1              |
+//! | `"migrated"` | 1           | Reserved        |
+//!
+//! See [`docs/event-schema-evolution.md`](docs/event-schema-evolution.md) for
+//! the full policy, deprecation process, and worked examples.
 
 use crate::*;
 use soroban_sdk::{symbol_short, Address, Env};

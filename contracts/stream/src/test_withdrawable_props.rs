@@ -285,7 +285,7 @@ proptest! {
     );
         for t in &times {
             ctx.env.ledger().set_timestamp(*t);
-            let _ = ctx.client().try_withdraw(&id);
+            let _ = ctx.client().try_withdraw(&id, &None);
             assert_invariants(&ctx, id, &std::format!("post-withdraw t={t}"));
         }
     }
@@ -360,7 +360,7 @@ proptest! {
         ctx.env.ledger().set_timestamp(cancel_at);
         ctx.client().cancel_stream(&id);
         assert_invariants(&ctx, id, "post-cancel");
-        let _ = ctx.client().withdraw(&id);
+        let _ = ctx.client().withdraw(&id, &None);
         assert_invariants(&ctx, id, "post-cancel-withdraw");
     }
 
@@ -392,7 +392,7 @@ proptest! {
         let mut prev = 0_i128;
         for t in &times {
             ctx.env.ledger().set_timestamp(*t);
-            let _ = ctx.client().try_withdraw(&id);
+            let _ = ctx.client().try_withdraw(&id, &None);
             let state = ctx.client().get_stream_state(&id);
             assert!(
                 state.withdrawn_amount >= prev,
@@ -523,7 +523,7 @@ fn invariants_active_at_end() {
 fn invariants_after_partial_withdrawal() {
     let (ctx, id) = setup_standard(1000);
     ctx.env.ledger().set_timestamp(300);
-    ctx.client().withdraw(&id);
+    ctx.client().withdraw(&id, &None);
     assert_invariants(&ctx, id, "after partial withdraw t=300");
 }
 
@@ -532,7 +532,7 @@ fn invariants_after_multiple_withdrawals() {
     let (ctx, id) = setup_standard(1000);
     for t in [100u64, 300, 600, 900, 1000] {
         ctx.env.ledger().set_timestamp(t);
-        ctx.client().withdraw(&id);
+        ctx.client().withdraw(&id, &None);
         assert_invariants(&ctx, id, &std::format!("multi-withdraw t={t}"));
     }
 }
@@ -541,7 +541,7 @@ fn invariants_after_multiple_withdrawals() {
 fn invariants_completed_stream() {
     let (ctx, id) = setup_standard(1000);
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&id);
+    ctx.client().withdraw(&id, &None);
     assert_eq!(
         ctx.client().get_stream_state(&id).status,
         StreamStatus::Completed
@@ -581,7 +581,7 @@ fn invariants_paused_withdraw_then_resume() {
     assert_invariants(&ctx, id, "paused before resume");
     ctx.env.ledger().set_timestamp(600);
     ctx.client().resume_stream(&id);
-    ctx.client().withdraw(&id);
+    ctx.client().withdraw(&id, &None);
     assert_invariants(&ctx, id, "post-resume withdraw");
 }
 
@@ -615,11 +615,11 @@ fn invariants_cancelled_before_cliff() {
 fn invariants_cancelled_after_partial_accrual() {
     let (ctx, id) = setup_standard(1000);
     ctx.env.ledger().set_timestamp(300);
-    ctx.client().withdraw(&id);
+    ctx.client().withdraw(&id, &None);
     ctx.env.ledger().set_timestamp(600);
     ctx.client().cancel_stream(&id);
     assert_invariants(&ctx, id, "cancelled after partial accrual");
-    ctx.client().withdraw(&id);
+    ctx.client().withdraw(&id, &None);
     assert_invariants(&ctx, id, "post-cancel final withdraw");
 }
 
@@ -687,7 +687,7 @@ fn invariants_excess_deposit_stream() {
         assert_invariants(&ctx, id, &std::format!("excess-deposit t={t}"));
     }
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&id);
+    ctx.client().withdraw(&id, &None);
     assert_invariants(&ctx, id, "excess-deposit post-withdraw");
 }
 
@@ -713,7 +713,7 @@ fn invariants_multiple_pause_resume_cycles() {
         assert_invariants(&ctx, id, &std::format!("cycle pause={pause} t={t}"));
     }
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&id);
+    ctx.client().withdraw(&id, &None);
     assert_invariants(&ctx, id, "post-cycles final withdraw");
 }
 
@@ -876,7 +876,7 @@ fn cliff_only_stream_lifecycle_and_unsupported_ops() {
     assert_eq!(ctx.client().calculate_accrued(&id), deposit);
     assert_eq!(ctx.client().get_withdrawable(&id), deposit);
 
-    let withdrawn = ctx.client().withdraw(&id);
+    let withdrawn = ctx.client().withdraw(&id, &None);
     assert_eq!(withdrawn, deposit);
     assert_eq!(
         ctx.client().get_stream_state(&id).status,

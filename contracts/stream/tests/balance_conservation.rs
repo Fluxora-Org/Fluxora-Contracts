@@ -373,7 +373,7 @@ proptest! {
 
             match op {
                 Op::Withdraw => {
-                    let result = ctx.client().try_withdraw(&stream_id);
+                    let result = ctx.client().try_withdraw(&stream_id, &None);
                     if let Ok(Ok(amount)) = result {
                         total_withdrawn = total_withdrawn.saturating_add(amount);
                     }
@@ -698,7 +698,7 @@ fn regression_cliff_only_unsupported_mutations() {
     ctx.env.ledger().set_sequence_number(100);
     assert_eq!(ctx.client().calculate_accrued(&id), 1000);
     assert_eq!(ctx.client().get_withdrawable(&id), 1000);
-    let withdrawn = ctx.client().withdraw(&id);
+    let withdrawn = ctx.client().withdraw(&id, &None);
     assert_eq!(withdrawn, 1000);
     assert_eq!(
         ctx.client().get_stream_state(&id).status,
@@ -715,7 +715,7 @@ fn regression_completed_stream_accrual_is_deterministic() {
 
     ctx.env.ledger().set_timestamp(1000);
     ctx.env.ledger().set_sequence_number(1000);
-    ctx.client().withdraw(&id);
+    ctx.client().withdraw(&id, &None);
     assert_eq!(
         ctx.client().get_stream_state(&id).status,
         StreamStatus::Completed

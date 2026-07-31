@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env bash 
 # =============================================================================
 # deploy-testnet.sh — Fluxora Contracts | Soroban CLI deploy script for testnet
 # =============================================================================
@@ -21,11 +21,11 @@
 # Usage:
 #   cp .env.example .env          # fill in your values
 #   source .env
-#   bash scripts/deploy-testnet.sh
+#   bash script/deploy-testnet.sh
 #
 # Or inline:
 #   STELLAR_SECRET_KEY=S... STELLAR_TOKEN_ADDRESS=C... STELLAR_ADMIN_ADDRESS=G... \
-#     bash scripts/deploy-testnet.sh
+#     bash script/deploy-testnet.sh
 # =============================================================================
 
 set -euo pipefail

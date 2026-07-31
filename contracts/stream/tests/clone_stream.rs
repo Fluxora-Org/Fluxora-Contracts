@@ -149,7 +149,7 @@ fn clone_from_completed_stream_fails_with_terminal_state() {
 
     // Complete the source stream.
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&source_id);
+    ctx.client().withdraw(&source_id, &None);
     assert_eq!(
         ctx.client().get_stream_state(&source_id).status,
         StreamStatus::Completed
@@ -1146,7 +1146,7 @@ fn clone_recipient_can_withdraw_from_new_stream() {
 
     // Advance to t=1500 (500s into new stream).
     ctx.env.ledger().set_timestamp(1500);
-    let withdrawn = ctx.client().withdraw(&new_id);
+    let withdrawn = ctx.client().withdraw(&new_id, &None);
     assert_eq!(withdrawn, 500);
     assert_eq!(ctx.token.balance(&ctx.recipient), 500);
 }
@@ -1207,7 +1207,7 @@ fn clone_recurring_payroll_three_months() {
         &false,
     );
 
-    ctx.client().withdraw(&m1_id);
+    ctx.client().withdraw(&m1_id, &None);
 
     // Month 3: clone from month 2 (while month 2 is still Active at t=2000).
     ctx.env.ledger().set_timestamp(2000);
@@ -1220,7 +1220,7 @@ fn clone_recurring_payroll_three_months() {
         &false,
     );
 
-    ctx.client().withdraw(&m2_id);
+    ctx.client().withdraw(&m2_id, &None);
 
     // All three IDs are distinct and sequential.
     assert_ne!(m1_id, m2_id);
@@ -1244,7 +1244,7 @@ fn clone_cliff_offset_preserved_across_generations() {
     let source_id = ctx.create_cliff_stream();
 
     ctx.env.ledger().set_timestamp(500);
-    ctx.client().withdraw(&source_id);
+    ctx.client().withdraw(&source_id, &None);
 
     // Gen 2: start=1000, expected cliff=1500.
     ctx.env.ledger().set_timestamp(1000);
@@ -1260,7 +1260,7 @@ fn clone_cliff_offset_preserved_across_generations() {
     assert_eq!(gen2.cliff_time, 1500);
 
     ctx.env.ledger().set_timestamp(1500);
-    ctx.client().withdraw(&gen2_id);
+    ctx.client().withdraw(&gen2_id, &None);
 
     // Gen 3: start=2000, expected cliff=2500.
     ctx.env.ledger().set_timestamp(2000);
@@ -1433,7 +1433,7 @@ fn clone_new_stream_has_zero_withdrawn_amount() {
 
     // Partially withdraw from source.
     ctx.env.ledger().set_timestamp(600);
-    ctx.client().withdraw(&source_id);
+    ctx.client().withdraw(&source_id, &None);
 
     ctx.env.ledger().set_timestamp(1000);
     let new_id = ctx.client().clone_stream(
@@ -2026,7 +2026,7 @@ fn clone_override_each_clone_gets_unique_stream_id() {
         &false,
     );
 
-    ctx.client().withdraw(&source_id);
+    ctx.client().withdraw(&source_id, &None);
 
     // Clone #2 (chained from clone #1, while clone1 is still Active at t=2000).
     ctx.env.ledger().set_timestamp(2000);
@@ -2039,7 +2039,7 @@ fn clone_override_each_clone_gets_unique_stream_id() {
         &false,
     );
 
-    ctx.client().withdraw(&clone1_id);
+    ctx.client().withdraw(&clone1_id, &None);
 
     // Clone #3 (chained from clone #2, while clone2 is still Active at t=3000).
     ctx.env.ledger().set_timestamp(3000);
@@ -2052,7 +2052,7 @@ fn clone_override_each_clone_gets_unique_stream_id() {
         &false,
     );
 
-    ctx.client().withdraw(&clone2_id);
+    ctx.client().withdraw(&clone2_id, &None);
 
     // All IDs are distinct.
     assert_ne!(source_id, clone1_id, "clone1 must differ from source");

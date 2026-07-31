@@ -236,37 +236,122 @@ fn new_reservation_fails_if_active() {
     assert_eq!(res.consumed, 0);
 }
 
+/// # Regression: `reserve_stream_ids` overwrite-leak (issue: id-reservation overwrite)
+///
+/// Pins the *guarded* behavior when the same caller invokes `reserve_stream_ids`
+/// twice without releasing in between.
+///
+/// ## Background — the leak this guard prevents
+/// `save_id_reservation` persists a caller's reservation under a single key,
+/// `DataKey::IdReservation(Address)`. Before the `ReservationAlreadyActive`
+/// guard landed, a second `reserve_stream_ids` call would **unconditionally
+/// overwrite** that one entry, dropping all references to the *first*
+/// reservation's `[start_id, start_id + count)` range. Those IDs had already
+/// advanced `NextStreamId`, yet no reservation — and no `create_stream` — could
+/// ever reach them again, so the range was permanently orphaned.
+///
+/// ## What this test pins (post-guard behavior)
+/// Because the guard now rejects the second reservation *before*
+/// `save_id_reservation` runs, the first reservation is preserved unchanged
+/// and **every one of its IDs remains reachable** through the only public
+/// consumption path (`create_stream`). There is no leak.
+///
+/// When the companion fix (the guard) is reverted, this test fails — making the
+/// regression visible rather than silently relied upon.
+///
+/// @security This is the central anti-leak invariant: a caller can never strand
+///           a reserved, counter-advanced ID range behind an overwritten record.
 #[test]
 fn reserve_stream_ids_overwrites_unreleased_reservation_leaking_ids_regression() {
     let ctx = Ctx::setup();
 
-    // Caller reserves 10 IDs (0..9)
-    ctx.client.reserve_stream_ids(&ctx.sender, &10u32, &None);
+    // 1) Caller reserves 10 IDs (0..9). NextStreamId advances 0 -> 10.
+    let first = ctx.client.reserve_stream_ids(&ctx.sender, &10u32, &None);
+    assert_eq!(first.len(), 10);
+    assert_eq!(first.get(0).unwrap(), 0u64);
+    assert_eq!(first.get(9).unwrap(), 9u64);
+    assert_eq!(ctx.client.get_stream_count(), 10);
 
-    // Caller reserves 5 more IDs without releasing the first -> returns ReservationAlreadyActive
+    // 2) Caller attempts to reserve 5 more IDs WITHOUT releasing the first.
+    //    Guard rejects it: the single IdReservation entry is NOT overwritten.
     let result = ctx.client.try_reserve_stream_ids(&ctx.sender, &5u32, &None);
     assert_eq!(result, Err(Ok(ContractError::ReservationAlreadyActive)));
 
+    // 3) The FIRST reservation is intact and unchanged (not overwritten by a
+    //    second reservation tracking a different range).
     let res = ctx.client.get_id_reservation(&ctx.sender).unwrap();
     assert_eq!(res.start_id, 0);
     assert_eq!(res.count, 10);
     assert_eq!(res.consumed, 0);
+
+    // 4) Recoverability proof: the first 10 IDs are NOT orphaned. Every one of
+    //    them is consumable, in order, via the only public entrypoint that
+    //    hands out stream IDs (`create_stream`). In the pre-guard leak this loop
+    //    would either return IDs outside 0..9 or strand 0..9 entirely.
+    for expected in 0..10u64 {
+        let id = ctx.create_stream(&ctx.sender);
+        assert_eq!(
+            id, expected,
+            "reserved ID {expected} must remain reachable through create_stream"
+        );
+    }
+    // Fully consumed -> reservation record removed.
+    assert!(ctx.client.get_id_reservation(&ctx.sender).is_none());
 }
 
+/// # Companion regression: `NextStreamId` is not double-billed on a rejected reservation
+///
+/// Proves the leak lives (lived) in **tracking**, not the counter — and that with
+/// the `ReservationAlreadyActive` guard in place neither the tracking nor the
+/// counter leaks.
+///
+/// ## Background — pre-guard behavior
+/// In the overwrite-leak, a second `reserve_stream_ids` would *both* advance
+/// `NextStreamId` by the second `count` *and* overwrite the tracked reservation,
+/// so `NextStreamId` reflected "both bumps" while only the second range was
+/// tracked. The first range was advanced-past yet unreachable: the counter had
+/// silently skipped it.
+///
+/// ## What this test pins (post-guard behavior)
+/// With the guard, the second call returns `ReservationAlreadyActive` *before*
+/// `set_stream_count` is reached, so `NextStreamId` advances exactly once
+/// (0 -> 10) and the first range stays tracked. The counter is correct and there
+/// is no phantom gap.
+///
+/// @security Guards against counter-inflation / ID-gap attacks where a caller
+///           repeatedly attempts reservations to push the global ID counter
+///           forward without consuming or releasing.
 #[test]
 fn next_stream_id_reflects_both_bumps_on_overwrite_regression() {
     let ctx = Ctx::setup();
 
-    // Counter initially 0
+    // Counter starts at 0.
     assert_eq!(ctx.client.get_stream_count(), 0);
 
-    // Reserve 10 IDs -> counter advances to 10
+    // First reservation of 10 IDs advances the counter 0 -> 10.
     ctx.client.reserve_stream_ids(&ctx.sender, &10u32, &None);
     assert_eq!(ctx.client.get_stream_count(), 10);
 
-    // Reserve 5 more IDs -> fails with ReservationAlreadyActive
+    // Second reservation is rejected; it must NOT advance the counter.
     let result = ctx.client.try_reserve_stream_ids(&ctx.sender, &5u32, &None);
     assert_eq!(result, Err(Ok(ContractError::ReservationAlreadyActive)));
+
+    // Counter reflects exactly ONE bump (10), not two (15): the rejected
+    // reservation never reached set_stream_count, so no gap is created.
+    assert_eq!(ctx.client.get_stream_count(), 10);
+
+    // The next consumed ID comes from the first (still-tracked) range, not from
+    // past the would-be gap. Consuming from a reservation does not move
+    // NextStreamId (it was already advanced at reserve time).
+    let id = ctx.create_stream(&ctx.sender);
+    assert_eq!(id, 0u64);
+    assert_eq!(ctx.client.get_stream_count(), 10);
+
+    // The first reservation is still tracked (one ID consumed of ten).
+    let res = ctx.client.get_id_reservation(&ctx.sender).unwrap();
+    assert_eq!(res.start_id, 0);
+    assert_eq!(res.count, 10);
+    assert_eq!(res.consumed, 1);
 }
 
 #[test]
@@ -689,8 +774,8 @@ fn count_definitions(source: &str, helper: &str) -> usize {
 #[test]
 fn id_reservation_helpers_defined_exactly_once() {
     let src = stream_src_dir();
-    let storage_rs =
-        std::fs::read_to_string(src.join("storage.rs")).expect("read contracts/stream/src/storage.rs");
+    let storage_rs = std::fs::read_to_string(src.join("storage.rs"))
+        .expect("read contracts/stream/src/storage.rs");
     let lib_rs =
         std::fs::read_to_string(src.join("lib.rs")).expect("read contracts/stream/src/lib.rs");
 

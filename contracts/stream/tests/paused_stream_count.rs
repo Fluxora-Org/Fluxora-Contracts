@@ -188,7 +188,7 @@ fn paused_stream_count_decrements_on_terminal_completion_from_paused() {
     assert_eq!(ctx.client.get_paused_stream_count(), 1);
 
     ctx.env.ledger().with_mut(|ledger| ledger.timestamp += 11);
-    let withdrawn = ctx.client.withdraw(&stream_id);
+    let withdrawn = ctx.client.withdraw(&stream_id, &None);
 
     assert_eq!(withdrawn, 10);
     assert_eq!(ctx.client.get_paused_stream_count(), 0);

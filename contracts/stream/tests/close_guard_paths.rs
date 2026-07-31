@@ -148,7 +148,7 @@ fn test_close_completed_stream_ok() {
         l.timestamp += 101;
         l.sequence_number += 2;
     });
-    ctx.client.withdraw(&stream_id);
+    ctx.client.withdraw(&stream_id, &None);
     assert_eq!(
         ctx.client.get_stream_state(&stream_id).status,
         StreamStatus::Completed
@@ -287,7 +287,7 @@ fn test_recipient_index_cleanup_graceful_on_missing_entry() {
         l.timestamp += 101;
         l.sequence_number += 2;
     });
-    ctx.client.withdraw(&stream_id);
+    ctx.client.withdraw(&stream_id, &None);
 
     let index_before = ctx.client.get_recipient_streams(&ctx.recipient);
     assert!(index_before.contains(stream_id));
@@ -312,7 +312,7 @@ fn test_close_removes_only_target_from_index() {
         l.timestamp += 101;
         l.sequence_number += 2;
     });
-    ctx.client.withdraw(&id_a);
+    ctx.client.withdraw(&id_a, &None);
     ctx.client.close_completed_stream(&id_a);
 
     let index = ctx.client.get_recipient_streams(&ctx.recipient);
@@ -407,7 +407,7 @@ fn test_close_removes_from_multi_page_index() {
         l.timestamp += 101;
         l.sequence_number += 2;
     });
-    ctx.client.withdraw(&close_id);
+    ctx.client.withdraw(&close_id, &None);
     ctx.client.close_completed_stream(&close_id);
 
     // Stream removed from storage.
@@ -471,7 +471,7 @@ fn test_close_last_stream_empty_index_graceful() {
         l.timestamp += 101;
         l.sequence_number += 2;
     });
-    ctx.client.withdraw(&stream_id);
+    ctx.client.withdraw(&stream_id, &None);
     ctx.client.close_completed_stream(&stream_id);
 
     // Non-paginated query returns empty.
@@ -551,7 +551,7 @@ fn test_set_stream_decommissioned_blocks_mutations_only() {
 
     // 2. withdraw works
     ctx.env.ledger().with_mut(|l| l.timestamp += 10);
-    let withdrawn = ctx.client.withdraw(&stream_id);
+    let withdrawn = ctx.client.withdraw(&stream_id, &None);
     assert!(withdrawn > 0);
 
     // 3. cancel_stream works

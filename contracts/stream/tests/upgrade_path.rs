@@ -26,9 +26,11 @@
 //! marked `#[ignore]` and are ready to be enabled when a test
 //! environment with deployable WASM artifacts is available.
 
-use fluxora_stream::{ContractError, FluxoraStream, FluxoraStreamClient};
+use fluxora_stream::{
+    ContractError, ContractUpgraded, DataKey, FluxoraStream, FluxoraStreamClient,
+};
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
+    testutils::{Address as _, Events, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
     Address, BytesN, Env, IntoVal,
 };
@@ -38,7 +40,7 @@ struct UpgradeTestCtx<'a> {
     env: Env,
     contract_id: Address,
     client: FluxoraStreamClient<'a>,
-    _admin: Address,
+    admin: Address,
     _token: Address,
     sender: Address,
     recipient: Address,
@@ -72,7 +74,7 @@ impl<'a> UpgradeTestCtx<'a> {
             env,
             contract_id,
             client,
-            _admin: admin,
+            admin,
             _token: token,
             sender,
             recipient,
@@ -120,24 +122,22 @@ fn test_upgrade_fails_if_not_initialized() {
     env.mock_all_auths();
 
     let contract_id = env.register_contract(None, FluxoraStream);
-    let _client = FluxoraStreamClient::new(&env, &contract_id);
+    let client = FluxoraStreamClient::new(&env, &contract_id);
 
     let new_hash = BytesN::from_array(&env, &[0u8; 32]);
 
-    // The `upgrade` entrypoint reads `DataKey::Config` to verify admin.
-    // If the contract has not been initialised, the read returns
-    // `ContractError::InvalidState` — the deployer is never called.
-    let result = env.as_contract(&contract_id, || {
-        fluxora_stream::upgrade(env.clone(), new_hash)
-    });
-    assert_eq!(result, Err(ContractError::InvalidState));
+    // Call through the generated client rather than the native helper. This is
+    // also a compile-time ABI guard: removing `upgrade` from #[contractimpl]
+    // removes `try_upgrade` and makes this test fail to compile.
+    let result = client.try_upgrade(&new_hash);
+    assert_eq!(result, Err(Ok(ContractError::InvalidState)));
 }
 
-/// Non-admin callers must be rejected with `ContractError::Unauthorized`
-/// before the deployer is ever invoked.
+/// A call without the configured admin's authorization must be rejected by
+/// the host before the deployer is invoked.
 ///
-/// `env.mock_all_auths()` is NOT called here so that the auth check can
-/// actually fail. We supply a fresh address that is not the admin.
+/// `env.mock_all_auths()` is deliberately not used. Soroban authorization is
+/// address-based; there is no separate caller argument to compare with admin.
 #[test]
 fn test_upgrade_rejected_for_non_admin() {
     let env = Env::default();
@@ -164,36 +164,16 @@ fn test_upgrade_rejected_for_non_admin() {
     }]);
     client.init(&token, &admin);
 
-    // Now attempt an upgrade as a *different* address — no auth mocked.
-    let non_admin = Address::generate(&env);
     let new_hash = BytesN::from_array(&env, &[0u8; 32]);
 
-    // `upgrade` reads Config to find admin, then calls `admin.require_auth()`.
-    // Without the admin's auth being satisfied the call must fail before the
-    // deployer is ever reached.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        env.as_contract(&contract_id, || {
-            // Override the "current" caller to the non-admin address
-            let _ = non_admin.clone();
-            fluxora_stream::upgrade(env.clone(), new_hash.clone())
-        })
-    }));
-    // The result must either be an Err(Unauthorized) OR a panic from the
-    // host's auth engine (both are acceptable — neither is a successful upgrade).
-    match result {
-        Ok(Ok(())) => panic!("upgrade must NOT succeed for a non-admin caller"),
-        Ok(Err(err)) => {
-            // The error must be Unauthorized, not some other contract error.
-            assert_eq!(
-                err,
-                ContractError::Unauthorized,
-                "non-admin upgrade must fail with Unauthorized"
-            );
-        }
-        Err(_) => {
-            // Host-level auth rejection (panic/trap) — also acceptable.
-        }
-    }
+    // Only init authorization was mocked. The generated-client call therefore
+    // reaches `admin.require_auth()` and is rejected before the invalid hash can
+    // be evaluated by `update_current_contract_wasm`.
+    let result = client.try_upgrade(&new_hash);
+    assert!(
+        result.is_err(),
+        "upgrade without the configured admin's authorization must fail"
+    );
 }
 
 /// `version()` returns the same compile-time constant regardless of how many
@@ -252,17 +232,68 @@ fn test_version_works_before_init() {
 #[test]
 fn test_version_has_no_storage_side_effects() {
     let ctx = UpgradeTestCtx::setup();
+    let contract_id = ctx.contract_id.clone();
 
-    // Record the stream count before calling version().
-    let count_before = ctx.client.get_stream_count();
+    // Seed both storage durabilities with canaries. Checking only stream count
+    // would miss accidental writes to unrelated keys.
+    ctx.env.as_contract(&contract_id, || {
+        ctx.env
+            .storage()
+            .instance()
+            .set(&DataKey::PausedStreamCount, &17u64);
+        ctx.env
+            .storage()
+            .persistent()
+            .set(&DataKey::AutoRenewEnabled(u64::MAX), &true);
+    });
 
     ctx.client.version();
     ctx.client.version();
 
-    let count_after = ctx.client.get_stream_count();
-    assert_eq!(
-        count_before, count_after,
-        "version() must not write to or mutate any storage"
+    ctx.env.as_contract(&contract_id, || {
+        assert_eq!(
+            ctx.env
+                .storage()
+                .instance()
+                .get::<_, u64>(&DataKey::PausedStreamCount),
+            Some(17),
+            "version() must not mutate instance storage"
+        );
+        assert_eq!(
+            ctx.env
+                .storage()
+                .persistent()
+                .get::<_, bool>(&DataKey::AutoRenewEnabled(u64::MAX)),
+            Some(true),
+            "version() must not mutate persistent storage"
+        );
+    });
+}
+
+/// The storage-free version view must remain cheaper than a view that loads
+/// Config and bumps instance TTL. This is a relative regression guard rather
+/// than a network-fee estimate: host cost models can change between releases.
+#[test]
+fn test_version_budget_is_lower_than_storage_backed_view() {
+    let ctx = UpgradeTestCtx::setup();
+
+    ctx.env.budget().reset_unlimited();
+    assert_eq!(ctx.client.version(), fluxora_stream::CONTRACT_VERSION);
+    let version_cpu = ctx.env.budget().cpu_instruction_cost();
+    let version_memory = ctx.env.budget().memory_bytes_cost();
+
+    ctx.env.budget().reset_unlimited();
+    let _ = ctx.client.get_config();
+    let config_cpu = ctx.env.budget().cpu_instruction_cost();
+    let config_memory = ctx.env.budget().memory_bytes_cost();
+
+    assert!(
+        version_cpu < config_cpu,
+        "version CPU cost ({version_cpu}) must remain below get_config ({config_cpu})"
+    );
+    assert!(
+        version_memory < config_memory,
+        "version memory cost ({version_memory}) must remain below get_config ({config_memory})"
     );
 }
 
@@ -352,4 +383,123 @@ fn test_upgrade_preserves_stream_state() {
     let stream_after = ctx.client.get_stream_state(&stream_id);
     assert_eq!(stream_after.sender, ctx.sender);
     assert_eq!(stream_after.recipient, ctx.recipient);
+}
+
+/// Test that the `ContractUpgraded` event struct has the expected field types.
+/// This is a compile-time safety net — if the struct definition changes, this
+/// test fails to compile, forcing an explicit review of the event schema.
+#[test]
+fn test_contract_upgraded_event_struct_layout() {
+    let env = Env::default();
+    let addr = Address::generate(&env);
+    let hash = BytesN::from_array(&env, &[1u8; 32]);
+
+    let event = ContractUpgraded {
+        new_wasm_hash: hash.clone(),
+        // Historical field name: the implementation records the version of
+        // the WASM executing the upgrade, then verifies the target separately.
+        new_version: fluxora_stream::CONTRACT_VERSION,
+        upgraded_at: 1_000_000,
+        upgraded_by: addr.clone(),
+    };
+
+    // Verify the backward-compatible field types and ordering.
+    assert_eq!(event.new_version, fluxora_stream::CONTRACT_VERSION);
+    assert_eq!(event.upgraded_at, 1_000_000);
+    assert_eq!(event.upgraded_by, addr);
+    assert_eq!(event.new_wasm_hash, hash);
+}
+
+// -----------------------------------------------------------------------
+// Edge case tests (do not call `update_current_contract_wasm`)
+// -----------------------------------------------------------------------
+
+/// Test that version() returns the same value before and after a failed
+/// upgrade attempt. This locks down the "no storage corruption" guarantee.
+#[test]
+fn test_version_stable_after_failed_upgrade() {
+    let ctx = UpgradeTestCtx::setup();
+
+    let v_before = ctx.client.version();
+
+    // The hash was not uploaded, so the host rejects the generated-client call.
+    let invalid_hash = BytesN::from_array(&ctx.env, &[0u8; 32]);
+    assert!(ctx.client.try_upgrade(&invalid_hash).is_err());
+
+    let v_after = ctx.client.version();
+    assert_eq!(
+        v_before, v_after,
+        "version() must be stable after a failed upgrade attempt"
+    );
+    assert_eq!(v_after, fluxora_stream::CONTRACT_VERSION);
+}
+
+/// A rejected host update is atomic: neither application upgrade events nor the
+/// host's executable update survive, and existing configuration is unchanged.
+#[test]
+fn test_failed_upgrade_rolls_back_events_and_config() {
+    let ctx = UpgradeTestCtx::setup();
+    let events_before = ctx.env.events().all();
+    let config_before = ctx.client.get_config();
+
+    let invalid_hash = BytesN::from_array(&ctx.env, &[0u8; 32]);
+    assert!(ctx.client.try_upgrade(&invalid_hash).is_err());
+
+    assert_eq!(
+        ctx.env.events().all(),
+        events_before,
+        "failed upgrade must not leave executable-update or application events"
+    );
+    assert_eq!(
+        ctx.client.get_config(),
+        config_before,
+        "failed upgrade must not mutate instance configuration"
+    );
+}
+
+/// Test that the contract remains fully operational after a failed upgrade
+/// attempt — creating a stream, reading config, and calling views all work.
+#[test]
+fn test_contract_usable_after_failed_upgrade() {
+    let ctx = UpgradeTestCtx::setup();
+
+    // Attempt upgrade with an uninstalled hash through the exported endpoint.
+    let invalid_hash = BytesN::from_array(&ctx.env, &[0u8; 32]);
+    assert!(ctx.client.try_upgrade(&invalid_hash).is_err());
+
+    // Post-upgrade-attempt operations must succeed
+    let stream_id = ctx.create_test_stream();
+    let stream = ctx.client.get_stream_state(&stream_id);
+    assert_eq!(stream.sender, ctx.sender);
+    assert_eq!(stream.recipient, ctx.recipient);
+
+    let count = ctx.client.get_stream_count();
+    assert_eq!(count, 1, "stream count must reflect newly created stream");
+
+    let config = ctx.client.get_config();
+    assert_eq!(
+        config.admin, ctx.admin,
+        "config and admin must remain readable after rollback"
+    );
+}
+
+/// Test that `set_admin` works after a failed upgrade attempt.
+/// Admin continuity is critical for scheduling a follow-up upgrade.
+#[test]
+fn test_admin_rotation_possible_after_failed_upgrade() {
+    let ctx = UpgradeTestCtx::setup();
+    let new_admin = Address::generate(&ctx.env);
+
+    // Attempt upgrade with an uninstalled hash through the exported endpoint.
+    let invalid_hash = BytesN::from_array(&ctx.env, &[0u8; 32]);
+    assert!(ctx.client.try_upgrade(&invalid_hash).is_err());
+
+    // Must be able to rotate admin after failed upgrade
+    ctx.client.set_admin(&new_admin);
+
+    let config_after = ctx.client.get_config();
+    assert_eq!(
+        config_after.admin, new_admin,
+        "admin rotation must succeed after failed upgrade"
+    );
 }

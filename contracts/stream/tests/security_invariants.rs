@@ -112,7 +112,7 @@ fn cei_withdraw_state_before_transfer() {
     let balance_before = ctx.token().balance(&ctx.recipient);
     let stream_before = ctx.client().get_stream_state(&stream_id);
 
-    let amount = ctx.client().withdraw(&stream_id);
+    let amount = ctx.client().withdraw(&stream_id, &None);
 
     let stream_after = ctx.client().get_stream_state(&stream_id);
     assert_eq!(
@@ -269,7 +269,7 @@ fn terminal_pause_completed_fails() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
     assert_eq!(
         ctx.client().get_stream_state(&stream_id).status,
         StreamStatus::Completed
@@ -288,7 +288,7 @@ fn terminal_cancel_completed_fails() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let result = ctx.client().try_cancel_stream(&stream_id);
     assert_eq!(result, Err(Ok(ContractError::InvalidState)));
@@ -307,7 +307,7 @@ fn terminal_withdraw_from_cancelled_succeeds() {
         StreamStatus::Cancelled
     );
 
-    let amount = ctx.client().withdraw(&stream_id);
+    let amount = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(amount, 300, "must withdraw accrued at cancellation time");
 }
 
@@ -331,7 +331,7 @@ fn terminal_top_up_completed_fails() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let result = ctx
         .client()
@@ -630,7 +630,7 @@ fn pause_global_blocks_withdraw() {
     ctx.client().set_global_emergency_paused(&true);
     ctx.env.ledger().set_timestamp(500);
 
-    let result = ctx.client().try_withdraw(&stream_id);
+    let result = ctx.client().try_withdraw(&stream_id, &None);
     assert_eq!(result, Err(Ok(ContractError::ContractPaused)));
 }
 
@@ -691,10 +691,10 @@ fn withdrawn_bounded_by_deposit() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(500);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let stream = ctx.client().get_stream_state(&stream_id);
     assert!(
@@ -765,7 +765,7 @@ fn event_withdraw_emits_withdrew() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(500);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let events = ctx.env.events().all();
     let event = events.last().unwrap();

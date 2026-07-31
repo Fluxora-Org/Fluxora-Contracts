@@ -131,7 +131,7 @@ enum Op {
 fn apply_op(ctx: &TestContext, stream_id: u64, op: Op) -> Result<(), ContractError> {
     match op {
         Op::Withdraw => {
-            ctx.client.withdraw(&stream_id);
+            ctx.client.withdraw(&stream_id, &None);
             Ok(())
         }
         Op::Cancel => {

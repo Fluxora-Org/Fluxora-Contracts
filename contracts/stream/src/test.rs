@@ -803,7 +803,7 @@ fn test_withdraw_emits_event() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(500);
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
 
     let events = ctx.env.events().all();
     let event = events.last().unwrap();
@@ -826,7 +826,7 @@ fn test_withdraw_partial_then_full_updates_state() {
 
     // Advance to t=300 and withdraw -> should get 300
     ctx.env.ledger().set_timestamp(300);
-    let amt1 = ctx.client().withdraw(&stream_id);
+    let amt1 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(amt1, 300, "first withdraw should return 300");
 
     let state1 = ctx.client().get_stream_state(&stream_id);
@@ -835,7 +835,7 @@ fn test_withdraw_partial_then_full_updates_state() {
 
     // Advance to t=800 and withdraw -> should get 500 (800 - 300)
     ctx.env.ledger().set_timestamp(800);
-    let amt2 = ctx.client().withdraw(&stream_id);
+    let amt2 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(amt2, 500, "second withdraw should return 500");
 
     let state2 = ctx.client().get_stream_state(&stream_id);
@@ -844,7 +844,7 @@ fn test_withdraw_partial_then_full_updates_state() {
 
     // Advance to t=1000 and withdraw -> should get final 200 and mark Completed
     ctx.env.ledger().set_timestamp(1000);
-    let amt3 = ctx.client().withdraw(&stream_id);
+    let amt3 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(amt3, 200, "final withdraw should return remaining 200");
 
     let state3 = ctx.client().get_stream_state(&stream_id);
@@ -2310,7 +2310,7 @@ fn test_create_stream_with_cliff_equals_start_accrues_immediately() {
     assert_eq!(state_before.withdrawn_amount, 0);
 
     // Withdraw accrued amount
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(
         withdrawn, 500,
         "should withdraw the full accrued amount (no cliff to block)"
@@ -2365,7 +2365,7 @@ fn test_calculate_accrued_completed_stream_returns_deposit() {
 
     // Fully withdraw to transition the stream to Completed
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Completed);
@@ -2692,7 +2692,7 @@ fn test_calculate_accrued_completed_deterministic() {
 
     // Complete the stream
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Completed);
@@ -3519,7 +3519,7 @@ fn test_resume_completed_stream_panics() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Completed);
     ctx.client().resume_stream(&stream_id);
@@ -3638,7 +3638,7 @@ fn test_cancel_completed_stream_panics() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
     ctx.client().cancel_stream(&stream_id);
 }
 
@@ -3725,15 +3725,15 @@ fn test_withdraw_completed_in_batch() {
 
     // Withdraw 200 at t=200
     ctx.env.ledger().set_timestamp(200);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     // Withdraw 300 at t=500
     ctx.env.ledger().set_timestamp(500);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     // Withdraw remaining 500 at t=1000
     ctx.env.ledger().set_timestamp(1000);
-    let amount = ctx.client().withdraw(&stream_id);
+    let amount = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(amount, 500);
 
     let state = ctx.client().get_stream_state(&stream_id);
@@ -3748,7 +3748,7 @@ fn test_withdraw_full_completes_stream() {
 
     ctx.env.ledger().set_timestamp(1000); // end of stream
 
-    let amount = ctx.client().withdraw(&stream_id);
+    let amount = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(amount, 1000);
 
     let state = ctx.client().get_stream_state(&stream_id);
@@ -3767,7 +3767,7 @@ fn test_withdraw_from_paused_stream_completes_if_full() {
         .pause_stream(&stream_id, &crate::PauseReason::Operational);
 
     // This should panic now because withdrawals are blocked while paused
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 }
 
 /// Test withdraw when withdrawable is zero (nothing to withdraw).
@@ -3778,7 +3778,7 @@ fn test_withdraw_nothing_panics() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(0);
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(withdrawn, 0, "should return 0 when nothing to withdraw");
 }
 
@@ -3789,10 +3789,10 @@ fn test_withdraw_already_completed_panics() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     // Try to withdraw again
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 }
 
 #[test]
@@ -3801,14 +3801,14 @@ fn test_withdraw_partial_stays_active() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(200);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Active);
     assert_eq!(state.withdrawn_amount, 200);
 
     ctx.env.ledger().set_timestamp(500); // 500 accrued, 500 unstreamed
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
 
     assert_eq!(
         withdrawn, 300,
@@ -3816,7 +3816,7 @@ fn test_withdraw_partial_stays_active() {
     );
 
     ctx.env.ledger().set_timestamp(800); // 800 accrued, 200 unstreamed
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
 
     assert_eq!(
         withdrawn, 300,
@@ -3824,7 +3824,7 @@ fn test_withdraw_partial_stays_active() {
     );
 
     ctx.env.ledger().set_timestamp(1000); // 1000 accrued, 0 unstreamed
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
 
     assert_eq!(
         withdrawn, 200,
@@ -3864,7 +3864,7 @@ fn test_withdraw_mid_stream() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
     ctx.env.ledger().set_timestamp(500);
-    let amount = ctx.client().withdraw(&stream_id);
+    let amount = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(amount, 500);
 }
 
@@ -3874,7 +3874,7 @@ fn test_withdraw_before_cliff_panics() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_cliff_stream();
     ctx.env.ledger().set_timestamp(100);
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(withdrawn, 0, "should return 0 before cliff");
 }
 
@@ -3894,7 +3894,7 @@ fn test_withdraw_requires_recipient_authorization() {
     // With mock_all_auths(), recipient's auth is mocked, so withdraw succeeds
     // This verifies that the authorization mechanism works correctly
     let recipient_before = ctx.token().balance(&ctx.recipient);
-    let amount = ctx.client().withdraw(&stream_id);
+    let amount = ctx.client().withdraw(&stream_id, &None);
 
     assert_eq!(amount, 500);
     assert_eq!(ctx.token().balance(&ctx.recipient) - recipient_before, 500);
@@ -4023,7 +4023,7 @@ fn test_batch_withdraw_completed_stream_yields_zero() {
 
     // Complete the stream
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
     assert_eq!(
         ctx.client().get_stream_state(&stream_id).status,
         StreamStatus::Completed
@@ -4096,7 +4096,7 @@ fn test_batch_withdraw_mixed_active_and_completed() {
 
     // Complete id1
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&id1);
+    ctx.client().withdraw(&id1, &None);
     assert_eq!(
         ctx.client().get_stream_state(&id1).status,
         StreamStatus::Completed
@@ -4145,8 +4145,8 @@ fn test_batch_withdraw_all_completed_all_zero() {
 
     // Complete both
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&id0);
-    ctx.client().withdraw(&id1);
+    ctx.client().withdraw(&id0, &None);
+    ctx.client().withdraw(&id1, &None);
 
     let recipient_before = ctx.token().balance(&ctx.recipient);
     let events_before = ctx.env.events().all().len();
@@ -4170,7 +4170,7 @@ fn test_batch_withdraw_completed_stream_does_not_panic() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     // Must not panic
     let result = ctx
@@ -4186,7 +4186,7 @@ fn test_batch_withdraw_completed_stream_state_unchanged() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let state_before = ctx.client().get_stream_state(&stream_id);
 
@@ -4363,7 +4363,7 @@ fn test_withdraw_to_after_partial_withdraw() {
     let destination = Address::generate(&ctx.env);
 
     ctx.env.ledger().set_timestamp(300);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     ctx.env.ledger().set_timestamp(700);
     let amount = ctx.client().withdraw_to(&stream_id, &destination);
@@ -4489,7 +4489,7 @@ fn test_withdraw_recipient_success() {
     }]);
 
     let recipient_before = ctx.token().balance(&ctx.recipient);
-    let amount = ctx.client().withdraw(&stream_id);
+    let amount = ctx.client().withdraw(&stream_id, &None);
 
     assert_eq!(amount, 500);
     assert_eq!(ctx.token().balance(&ctx.recipient) - recipient_before, 500);
@@ -4556,7 +4556,7 @@ fn test_withdraw_not_recipient_unauthorized() {
     }]);
 
     // This should panic with authorization failure because sender != recipient
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 }
 
 #[test]
@@ -4624,7 +4624,7 @@ fn test_withdraw_not_recipient_unauthorized_has_no_side_effects() {
     }]);
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.client().withdraw(&stream_id);
+        ctx.client().withdraw(&stream_id, &None);
     }));
     assert!(result.is_err(), "non-recipient signer must be rejected");
 
@@ -4653,7 +4653,7 @@ fn test_close_completed_stream_removes_storage() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Completed);
@@ -4680,7 +4680,7 @@ fn test_close_cancelled_stream_success() {
 
     ctx.env.ledger().set_timestamp(400);
     ctx.client().cancel_stream(&stream_id);
-    let _ = ctx.client().withdraw(&stream_id);
+    let _ = ctx.client().withdraw(&stream_id, &None);
 
     ctx.client().close_completed_stream(&stream_id);
 }
@@ -4691,7 +4691,7 @@ fn test_close_completed_stream_emits_event() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
     ctx.client().close_completed_stream(&stream_id);
 
     let events = ctx.env.events().all();
@@ -4704,7 +4704,7 @@ fn test_close_completed_stream_second_close_panics() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
     ctx.client().close_completed_stream(&stream_id);
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -4748,7 +4748,7 @@ fn test_close_completed_stream_emits_correct_event_topic() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     // Clear events before close
     let _ = ctx.env.events().all();
@@ -4836,9 +4836,9 @@ fn test_close_completed_stream_multiple_streams_closes_correct_one() {
 
     // Complete all three streams
     ctx.env.ledger().set_timestamp(2000);
-    ctx.client().withdraw(&id0);
-    ctx.client().withdraw(&id1);
-    ctx.client().withdraw(&id2);
+    ctx.client().withdraw(&id0, &None);
+    ctx.client().withdraw(&id1, &None);
+    ctx.client().withdraw(&id2, &None);
 
     // Verify all are in recipient's index
     let streams = ctx.client().get_recipient_streams(&ctx.recipient);
@@ -4871,7 +4871,7 @@ fn test_close_completed_stream_permissionless_access() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     // Any caller (including non-owner) should be able to close
     // This test demonstrates permissionless cleanup semantics
@@ -4912,7 +4912,7 @@ fn test_close_completed_stream_recipient_index_sorted_after_close() {
 
     // Complete and close stream 2 (middle)
     ctx.env.ledger().set_timestamp(100);
-    ctx.client().withdraw(&2u64);
+    ctx.client().withdraw(&2u64, &None);
     ctx.client().close_completed_stream(&2u64);
 
     // Verify remaining streams are still sorted
@@ -4925,7 +4925,7 @@ fn test_close_completed_stream_recipient_index_sorted_after_close() {
 
     // Close stream 0 (first)
     ctx.env.ledger().set_timestamp(100);
-    ctx.client().withdraw(&0u64);
+    ctx.client().withdraw(&0u64, &None);
     ctx.client().close_completed_stream(&0u64);
 
     let streams = ctx.client().get_recipient_streams(&ctx.recipient);
@@ -4936,7 +4936,7 @@ fn test_close_completed_stream_recipient_index_sorted_after_close() {
 
     // Close stream 4 (last)
     ctx.env.ledger().set_timestamp(100);
-    ctx.client().withdraw(&4u64);
+    ctx.client().withdraw(&4u64, &None);
     ctx.client().close_completed_stream(&4u64);
 
     let streams = ctx.client().get_recipient_streams(&ctx.recipient);
@@ -4971,7 +4971,7 @@ fn test_close_completed_stream_after_cliff_passed() {
 
     // Advance past cliff and end time
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     // Verify stream is completed
     let state = ctx.client().get_stream_state(&stream_id);
@@ -5014,13 +5014,13 @@ fn test_close_completed_stream_count_decreases() {
 
     // Complete and close one
     ctx.env.ledger().set_timestamp(100);
-    ctx.client().withdraw(&0u64);
+    ctx.client().withdraw(&0u64, &None);
     ctx.client().close_completed_stream(&0u64);
 
     assert_eq!(ctx.client().get_recipient_stream_count(&ctx.recipient), 2);
 
     // Complete and close another
-    ctx.client().withdraw(&1u64);
+    ctx.client().withdraw(&1u64, &None);
     ctx.client().close_completed_stream(&1u64);
 
     assert_eq!(ctx.client().get_recipient_stream_count(&ctx.recipient), 1);
@@ -5076,7 +5076,7 @@ fn test_close_completed_stream_different_recipients_independent() {
 
     // Complete and close stream for ctx.recipient
     ctx.env.ledger().set_timestamp(100);
-    ctx.client().withdraw(&id_r1);
+    ctx.client().withdraw(&id_r1, &None);
     ctx.client().close_completed_stream(&id_r1);
 
     // Verify ctx.recipient's index is updated
@@ -5255,7 +5255,7 @@ fn test_top_up_stream_fails_for_terminal_states() {
 
     // Complete the stream
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Completed);
 
@@ -5467,7 +5467,7 @@ fn test_withdraw_paused_stream_panics() {
     assert_eq!(state.status, StreamStatus::Paused);
 
     // Attempt to withdraw while paused should fail
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 }
 
 #[test]
@@ -5486,7 +5486,7 @@ fn test_withdraw_after_resume_succeeds() {
 
     // Withdraw should now succeed
     let recipient_before = ctx.token().balance(&ctx.recipient);
-    let amount = ctx.client().withdraw(&stream_id);
+    let amount = ctx.client().withdraw(&stream_id, &None);
 
     assert_eq!(amount, 500);
     assert_eq!(ctx.token().balance(&ctx.recipient) - recipient_before, 500);
@@ -5631,7 +5631,7 @@ fn test_completed_event() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let events = ctx.env.events().all();
     let last_event = events.last().unwrap();
@@ -5845,7 +5845,7 @@ fn test_admin_ops_emit_events_during_global_emergency_pause() {
     assert!(ctx.client().get_global_emergency_paused());
 
     // User withdraw is blocked
-    let result = ctx.client().try_withdraw(&stream_id);
+    let result = ctx.client().try_withdraw(&stream_id, &None);
     assert!(
         result.is_err(),
         "withdraw must be blocked during global emergency pause"
@@ -6984,7 +6984,7 @@ fn test_get_stream_state_all_statuses() {
     // 4. Check Completed
     let id_completed = ctx.create_default_stream();
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&id_completed);
+    ctx.client().withdraw(&id_completed, &None);
     let state_completed = ctx.client().get_stream_state(&id_completed);
     assert_eq!(state_completed.status, StreamStatus::Completed);
 }
@@ -7017,11 +7017,11 @@ fn test_withdraw_multiple_times() {
 
     // Withdraw 200 at t=200
     ctx.env.ledger().set_timestamp(200);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     // Withdraw another 300 at t=500
     ctx.env.ledger().set_timestamp(500);
-    let amount = ctx.client().withdraw(&stream_id);
+    let amount = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(amount, 300);
 
     let state = ctx.client().get_stream_state(&stream_id);
@@ -7258,7 +7258,7 @@ fn test_cancel_at_25_percent_partial_refund_recipient_withdraws() {
     assert_eq!(ctx.token().balance(&ctx.contract_id), 1000);
 
     // Verify recipient can withdraw accrued amount
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(withdrawn, 1000, "recipient should withdraw accrued amount");
 
     // Verify final balances
@@ -7370,7 +7370,7 @@ fn test_cancel_at_75_percent_recipient_can_withdraw_accrued() {
 
     // Verify recipient can withdraw full accrued amount
     let recipient_before = ctx.token().balance(&ctx.recipient);
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(withdrawn, 6000);
 
     let recipient_after = ctx.token().balance(&ctx.recipient);
@@ -7407,7 +7407,7 @@ fn test_cancel_after_partial_withdrawal_correct_refund() {
 
     // Advance to 40% and withdraw
     ctx.env.ledger().set_timestamp(2000);
-    let withdrawn_1 = ctx.client().withdraw(&stream_id);
+    let withdrawn_1 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(withdrawn_1, 2000);
 
     // Advance to 60% and cancel
@@ -7428,7 +7428,7 @@ fn test_cancel_after_partial_withdrawal_correct_refund() {
     assert_eq!(sender_after_cancel - sender_before_cancel, 2000);
 
     // Verify recipient can withdraw remaining accrued (3000 - 2000 = 1000)
-    let withdrawn_2 = ctx.client().withdraw(&stream_id);
+    let withdrawn_2 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(withdrawn_2, 1000);
 
     // Verify total withdrawn equals accrued
@@ -7533,7 +7533,7 @@ fn test_cancel_after_cliff_partial_refund() {
     assert_eq!(ctx.token().balance(&ctx.contract_id), 2500);
 
     // Verify recipient can withdraw accrued
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(withdrawn, 2500);
 }
 
@@ -7638,7 +7638,7 @@ fn test_cancel_balance_consistency() {
     assert_eq!(total_after_cancel, total_supply_initial);
 
     // Recipient withdraws accrued amount
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     // Verify total supply still unchanged after withdrawal
     let total_after_withdraw = ctx.token().balance(&ctx.sender)
@@ -7728,7 +7728,7 @@ fn test_get_stream_state_create_stream_withdraw_during_cliff() {
         },
     );
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.stream_id, 0);
@@ -7765,7 +7765,7 @@ fn test_get_stream_state_create_stream_withdraw() {
         },
     );
     ctx.env.ledger().set_timestamp(6000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.stream_id, 0);
@@ -7932,7 +7932,7 @@ fn test_cancel_stream_not_found() {
 #[test]
 fn test_withdraw_stream_not_found() {
     let ctx = TestContext::setup();
-    let result = ctx.client().try_withdraw(&999);
+    let result = ctx.client().try_withdraw(&999, &None);
     assert!(result.is_err());
 }
 
@@ -7979,7 +7979,7 @@ fn test_withdraw_zero_before_cliff() {
 
     // Before cliff, accrued = 0, withdrawn = 0, so withdrawable = 0
     ctx.env.ledger().set_timestamp(100);
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(withdrawn, 0, "should return 0 before cliff");
 
     // Verify no state change
@@ -7998,7 +7998,7 @@ fn test_withdraw_zero_after_full_withdrawal() {
 
     // Withdraw everything at t=1000
     ctx.env.ledger().set_timestamp(1000);
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(withdrawn, 1000);
 
     let state = ctx.client().get_stream_state(&stream_id);
@@ -8006,7 +8006,7 @@ fn test_withdraw_zero_after_full_withdrawal() {
     assert_eq!(state.withdrawn_amount, 1000);
 
     // Try to withdraw again - should panic with "stream already completed"
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 }
 
 /// Test withdraw when withdrawable is zero at start time (no cliff).
@@ -8018,7 +8018,7 @@ fn test_withdraw_zero_at_start_time() {
 
     // At start time, accrued = 0, withdrawn = 0, so withdrawable = 0
     ctx.env.ledger().set_timestamp(0);
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(withdrawn, 0, "should return 0 at start time");
 
     // Verify no state change
@@ -8036,11 +8036,11 @@ fn test_withdraw_zero_no_time_elapsed() {
 
     // Withdraw at t=500
     ctx.env.ledger().set_timestamp(500);
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(withdrawn, 500);
 
     // Try to withdraw again at same timestamp - should return 0
-    let withdrawn2 = ctx.client().withdraw(&stream_id);
+    let withdrawn2 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(withdrawn2, 0, "should return 0 when no time elapsed");
 
     // Verify no additional state change
@@ -8060,7 +8060,7 @@ fn test_withdraw_when_accrued_equals_withdrawn_zero_withdrawable() {
     ctx.env.ledger().set_timestamp(600);
 
     // First withdraw: drains the full accrued amount
-    let first_withdrawn = ctx.client().withdraw(&stream_id);
+    let first_withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(first_withdrawn, 600, "first withdraw should return 600");
 
     // Verify state: withdrawn_amount now equals accrued (both 600)
@@ -8074,7 +8074,7 @@ fn test_withdraw_when_accrued_equals_withdrawn_zero_withdrawable() {
 
     // Second withdraw at same timestamp: accrued (600) - withdrawn (600) = 0.
     // Must return 0 and must NOT transfer any additional tokens.
-    let second_withdrawn = ctx.client().withdraw(&stream_id);
+    let second_withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(second_withdrawn, 0, "zero withdrawable should return 0");
 
     // Verify no extra tokens moved.
@@ -8100,7 +8100,7 @@ fn test_withdraw_zero_after_immediate_cancel() {
     assert_eq!(state.status, StreamStatus::Cancelled);
 
     // Try to withdraw - should return 0 because accrued = 0
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(
         withdrawn, 0,
         "should return 0 when cancelled with no accrual"
@@ -8126,7 +8126,7 @@ fn test_withdraw_zero_idempotent_multiple_calls() {
 
     // Call withdraw multiple times
     for _ in 0..5 {
-        let withdrawn = ctx.client().withdraw(&stream_id);
+        let withdrawn = ctx.client().withdraw(&stream_id, &None);
         assert_eq!(withdrawn, 0, "should return 0 on every call");
     }
 
@@ -8157,7 +8157,7 @@ fn test_withdraw_capped_at_accrued_amount() {
 
     // At t=300, accrued = 300
     ctx.env.ledger().set_timestamp(300);
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
 
     // Should withdraw exactly 300, not more
     assert_eq!(withdrawn, 300);
@@ -8178,13 +8178,13 @@ fn test_withdraw_no_negative_withdrawable() {
 
     // Withdraw multiple times
     ctx.env.ledger().set_timestamp(200);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     ctx.env.ledger().set_timestamp(500);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let state = ctx.client().get_stream_state(&stream_id);
 
@@ -8204,7 +8204,7 @@ fn test_withdraw_no_overflow_max_values() {
     // Advance to end of stream
     ctx.env.ledger().set_timestamp(3);
 
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
 
     // Verify withdrawal is valid and non-negative
     assert!(withdrawn > 0);
@@ -8225,7 +8225,7 @@ fn test_withdraw_accrued_capped_at_deposit() {
     // Go way past end time
     ctx.env.ledger().set_timestamp(10_000);
 
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
 
     // Should withdraw exactly deposit_amount, not more
     assert_eq!(withdrawn, 1000);
@@ -8251,7 +8251,7 @@ fn test_withdraw_after_cancel_partial_accrual() {
     assert_eq!(state.status, StreamStatus::Cancelled);
 
     // Withdraw the accrued amount
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(withdrawn, 250);
 
     let state = ctx.client().get_stream_state(&stream_id);
@@ -8270,22 +8270,22 @@ fn test_withdraw_multiple_partial_no_excess() {
 
     // First withdrawal at t=100
     ctx.env.ledger().set_timestamp(100);
-    let w1 = ctx.client().withdraw(&stream_id);
+    let w1 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(w1, 100);
 
     // Second withdrawal at t=300
     ctx.env.ledger().set_timestamp(300);
-    let w2 = ctx.client().withdraw(&stream_id);
+    let w2 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(w2, 200);
 
     // Third withdrawal at t=700
     ctx.env.ledger().set_timestamp(700);
-    let w3 = ctx.client().withdraw(&stream_id);
+    let w3 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(w3, 400);
 
     // Final withdrawal at t=1000
     ctx.env.ledger().set_timestamp(1000);
-    let w4 = ctx.client().withdraw(&stream_id);
+    let w4 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(w4, 300);
 
     // Verify total withdrawn equals deposit
@@ -8304,7 +8304,7 @@ fn test_withdraw_zero_one_second_before_cliff() {
 
     // One second before cliff
     ctx.env.ledger().set_timestamp(499);
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(withdrawn, 0, "should return 0 before cliff");
 }
 
@@ -8316,7 +8316,7 @@ fn test_withdraw_exactly_at_cliff() {
 
     // Exactly at cliff, should be able to withdraw accrued amount
     ctx.env.ledger().set_timestamp(500);
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
 
     // At cliff (t=500), accrued from start (t=0) = 500 tokens
     assert_eq!(withdrawn, 500);
@@ -8336,14 +8336,14 @@ fn test_withdraw_contract_balance_tracking() {
 
     // Withdraw 400 at t=400
     ctx.env.ledger().set_timestamp(400);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let contract_balance_after_first = ctx.token().balance(&ctx.contract_id);
     assert_eq!(contract_balance_after_first, 600);
 
     // Withdraw remaining 600 at t=1000
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let final_contract_balance = ctx.token().balance(&ctx.contract_id);
     assert_eq!(final_contract_balance, 0);
@@ -8377,7 +8377,7 @@ fn test_withdraw_excess_deposit_only_streams_calculated_amount() {
 
     // At end, only 1000 should be withdrawable (rate * duration)
     ctx.env.ledger().set_timestamp(1000);
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
 
     // Should withdraw exactly 1000 (rate * duration), not 2000 (deposit)
     assert_eq!(withdrawn, 1000);
@@ -8397,7 +8397,7 @@ fn test_withdraw_monotonic_increase() {
 
     for t in [100, 200, 400, 700, 1000] {
         ctx.env.ledger().set_timestamp(t);
-        ctx.client().withdraw(&stream_id);
+        ctx.client().withdraw(&stream_id, &None);
 
         let state = ctx.client().get_stream_state(&stream_id);
 
@@ -8438,7 +8438,7 @@ fn test_withdraw_small_rate_no_underflow() {
     assert_eq!(accrued, 50);
 
     // Withdraw at t=50
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(withdrawn, 50);
 
     let state = ctx.client().get_stream_state(&stream_id);
@@ -8453,14 +8453,14 @@ fn test_withdraw_status_transition_to_completed() {
 
     // Partial withdrawal
     ctx.env.ledger().set_timestamp(500);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Active);
 
     // Final withdrawal
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Completed);
@@ -8473,11 +8473,11 @@ fn test_withdraw_active_final_drain_emits_withdrew_then_completed() {
 
     // Do a partial withdrawal first, then final-drain withdrawal.
     ctx.env.ledger().set_timestamp(400);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     ctx.env.ledger().set_timestamp(1000);
     let events_before = ctx.env.events().all().len();
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(withdrawn, 600);
 
     let state = ctx.client().get_stream_state(&stream_id);
@@ -8532,7 +8532,7 @@ fn test_withdraw_after_cancel_then_completed() {
     ctx.client().cancel_stream(&stream_id);
 
     // Withdraw accrued amount (600 tokens)
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(withdrawn, 600);
 
     let state = ctx.client().get_stream_state(&stream_id);
@@ -8546,7 +8546,7 @@ fn test_withdraw_after_cancel_then_completed() {
     ctx.env.ledger().set_timestamp(9_999);
 
     // Try to withdraw again - should return 0 because accrued (600) - withdrawn (600) = 0
-    let withdrawn2 = ctx.client().withdraw(&stream_id);
+    let withdrawn2 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(
         withdrawn2, 0,
         "should return 0 when nothing left to withdraw"
@@ -8753,7 +8753,7 @@ fn test_resume_enables_withdrawal() {
 
     // Verify can't withdraw while paused
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.client().withdraw(&stream_id);
+        ctx.client().withdraw(&stream_id, &None);
     }));
     assert!(result.is_err(), "should not allow withdrawal while paused");
 
@@ -8762,7 +8762,7 @@ fn test_resume_enables_withdrawal() {
 
     // Now withdrawal should succeed
     let recipient_before = ctx.token().balance(&ctx.recipient);
-    let amount = ctx.client().withdraw(&stream_id);
+    let amount = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(amount, 500);
 
     let recipient_after = ctx.token().balance(&ctx.recipient);
@@ -8957,7 +8957,7 @@ fn test_pause_resume_with_cliff_after_cliff() {
     ctx.client().resume_stream(&stream_id);
 
     let recipient_before = ctx.token().balance(&ctx.recipient);
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     let recipient_after = ctx.token().balance(&ctx.recipient);
 
     assert_eq!(withdrawn, 700);
@@ -8990,7 +8990,7 @@ fn test_pause_then_cancel() {
     assert_eq!(accrued, 300);
 
     // Verify recipient can withdraw accrued amount
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(withdrawn, 300);
 }
 
@@ -9003,7 +9003,7 @@ fn test_resume_completed_stream_fails() {
 
     // Withdraw everything to complete the stream
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Completed);
@@ -9038,7 +9038,7 @@ fn test_pause_resume_preserves_withdrawal_state() {
 
     // Withdraw 300 tokens
     ctx.env.ledger().set_timestamp(300);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.withdrawn_amount, 300);
@@ -9054,7 +9054,7 @@ fn test_pause_resume_preserves_withdrawal_state() {
 
     // Withdraw more at t=700
     ctx.env.ledger().set_timestamp(700);
-    let amount = ctx.client().withdraw(&stream_id);
+    let amount = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(amount, 400); // 700 - 300 already withdrawn
 
     let state = ctx.client().get_stream_state(&stream_id);
@@ -9235,7 +9235,7 @@ fn test_withdraw_updates_withdrawn_amount_and_status() {
     ctx.env.ledger().set_timestamp(300);
     let recipient_before_first = ctx.token().balance(&ctx.recipient);
 
-    let withdrawn_amount_1 = ctx.client().withdraw(&stream_id);
+    let withdrawn_amount_1 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(
         withdrawn_amount_1, 300,
         "first withdraw should return 300 tokens"
@@ -9265,7 +9265,7 @@ fn test_withdraw_updates_withdrawn_amount_and_status() {
     ctx.env.ledger().set_timestamp(700);
     let recipient_before_second = ctx.token().balance(&ctx.recipient);
 
-    let withdrawn_amount_2 = ctx.client().withdraw(&stream_id);
+    let withdrawn_amount_2 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(
         withdrawn_amount_2, 400,
         "second withdraw should return 400 additional tokens (700 - 300)"
@@ -9295,7 +9295,7 @@ fn test_withdraw_updates_withdrawn_amount_and_status() {
     ctx.env.ledger().set_timestamp(1000);
     let recipient_before_final = ctx.token().balance(&ctx.recipient);
 
-    let withdrawn_amount_3 = ctx.client().withdraw(&stream_id);
+    let withdrawn_amount_3 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(
         withdrawn_amount_3, 300,
         "final withdraw should return 300 remaining tokens (1000 - 700)"
@@ -9348,7 +9348,7 @@ fn test_withdraw_partial_then_full_with_intermediate_checks() {
 
     // First partial withdrawal: 250 tokens at t=250
     ctx.env.ledger().set_timestamp(250);
-    let w1 = ctx.client().withdraw(&stream_id);
+    let w1 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(w1, 250);
 
     let state1 = ctx.client().get_stream_state(&stream_id);
@@ -9365,7 +9365,7 @@ fn test_withdraw_partial_then_full_with_intermediate_checks() {
 
     // Second partial withdrawal: 250 more tokens at t=500
     ctx.env.ledger().set_timestamp(500);
-    let w2 = ctx.client().withdraw(&stream_id);
+    let w2 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(w2, 250, "second withdrawal adds 250 more");
 
     let state2 = ctx.client().get_stream_state(&stream_id);
@@ -9381,7 +9381,7 @@ fn test_withdraw_partial_then_full_with_intermediate_checks() {
 
     // Third partial withdrawal: 250 more tokens at t=750
     ctx.env.ledger().set_timestamp(750);
-    let w3 = ctx.client().withdraw(&stream_id);
+    let w3 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(w3, 250, "third withdrawal adds 250 more");
 
     let state3 = ctx.client().get_stream_state(&stream_id);
@@ -9397,7 +9397,7 @@ fn test_withdraw_partial_then_full_with_intermediate_checks() {
 
     // Final withdrawal: last 250 tokens at t=1000 -> COMPLETED
     ctx.env.ledger().set_timestamp(1000);
-    let w4 = ctx.client().withdraw(&stream_id);
+    let w4 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(w4, 250, "final withdrawal adds last 250");
 
     let state_final = ctx.client().get_stream_state(&stream_id);
@@ -9428,7 +9428,7 @@ fn test_withdraw_withdrawn_amount_monotonic_increase() {
 
     for &t in &timestamps {
         ctx.env.ledger().set_timestamp(t);
-        ctx.client().withdraw(&stream_id);
+        ctx.client().withdraw(&stream_id, &None);
 
         let state = ctx.client().get_stream_state(&stream_id);
 
@@ -9462,7 +9462,7 @@ fn test_withdraw_status_transitions_correctly() {
 
     for (timestamp, expected_status) in check_points {
         ctx.env.ledger().set_timestamp(timestamp);
-        ctx.client().withdraw(&stream_id);
+        ctx.client().withdraw(&stream_id, &None);
 
         let state = ctx.client().get_stream_state(&stream_id);
         assert_eq!(
@@ -9767,7 +9767,7 @@ fn test_withdraw_returned_amount_matches_increment() {
     // First withdrawal
     ctx.env.ledger().set_timestamp(300);
     let state_before_1 = ctx.client().get_stream_state(&stream_id);
-    let returned_1 = ctx.client().withdraw(&stream_id);
+    let returned_1 = ctx.client().withdraw(&stream_id, &None);
     let state_after_1 = ctx.client().get_stream_state(&stream_id);
 
     let increment_1 = state_after_1.withdrawn_amount - state_before_1.withdrawn_amount;
@@ -9779,7 +9779,7 @@ fn test_withdraw_returned_amount_matches_increment() {
     // Second withdrawal
     ctx.env.ledger().set_timestamp(700);
     let state_before_2 = ctx.client().get_stream_state(&stream_id);
-    let returned_2 = ctx.client().withdraw(&stream_id);
+    let returned_2 = ctx.client().withdraw(&stream_id, &None);
     let state_after_2 = ctx.client().get_stream_state(&stream_id);
 
     let increment_2 = state_after_2.withdrawn_amount - state_before_2.withdrawn_amount;
@@ -9791,7 +9791,7 @@ fn test_withdraw_returned_amount_matches_increment() {
     // Final withdrawal
     ctx.env.ledger().set_timestamp(1000);
     let state_before_3 = ctx.client().get_stream_state(&stream_id);
-    let returned_3 = ctx.client().withdraw(&stream_id);
+    let returned_3 = ctx.client().withdraw(&stream_id, &None);
     let state_after_3 = ctx.client().get_stream_state(&stream_id);
 
     let increment_3 = state_after_3.withdrawn_amount - state_before_3.withdrawn_amount;
@@ -9815,7 +9815,7 @@ fn test_withdraw_many_small_increments() {
         let timestamp = 100 * i as u64;
         ctx.env.ledger().set_timestamp(timestamp);
 
-        let amount = ctx.client().withdraw(&stream_id);
+        let amount = ctx.client().withdraw(&stream_id, &None);
         total_withdrawn += amount;
 
         let state = ctx.client().get_stream_state(&stream_id);
@@ -9859,7 +9859,7 @@ fn test_withdraw_contract_balance_decreases() {
 
     // First withdrawal: 300 tokens
     ctx.env.ledger().set_timestamp(300);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let balance_after_1 = ctx.token().balance(&ctx.contract_id);
     assert_eq!(
@@ -9869,7 +9869,7 @@ fn test_withdraw_contract_balance_decreases() {
 
     // Second withdrawal: 400 tokens
     ctx.env.ledger().set_timestamp(700);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let balance_after_2 = ctx.token().balance(&ctx.contract_id);
     assert_eq!(
@@ -9879,7 +9879,7 @@ fn test_withdraw_contract_balance_decreases() {
 
     // Final withdrawal: 300 tokens
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let final_contract_balance = ctx.token().balance(&ctx.contract_id);
     assert_eq!(
@@ -9903,7 +9903,7 @@ fn test_withdraw_recipient_balance_increases() {
 
     // First withdrawal: 300 tokens
     ctx.env.ledger().set_timestamp(300);
-    let amount_1 = ctx.client().withdraw(&stream_id);
+    let amount_1 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(amount_1, 300, "first withdrawal = 300");
 
     let balance_after_1 = ctx.token().balance(&ctx.recipient);
@@ -9911,7 +9911,7 @@ fn test_withdraw_recipient_balance_increases() {
 
     // Second withdrawal: 400 tokens
     ctx.env.ledger().set_timestamp(700);
-    let amount_2 = ctx.client().withdraw(&stream_id);
+    let amount_2 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(amount_2, 400, "second withdrawal = 400");
 
     let balance_after_2 = ctx.token().balance(&ctx.recipient);
@@ -9919,7 +9919,7 @@ fn test_withdraw_recipient_balance_increases() {
 
     // Final withdrawal: 300 tokens
     ctx.env.ledger().set_timestamp(1000);
-    let amount_3 = ctx.client().withdraw(&stream_id);
+    let amount_3 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(amount_3, 300, "final withdrawal = 300");
 
     let final_recipient_balance = ctx.token().balance(&ctx.recipient);
@@ -9938,7 +9938,7 @@ fn test_withdraw_state_persists_across_calls() {
 
     // Withdraw 500 tokens at t=500
     ctx.env.ledger().set_timestamp(500);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     // Check state immediately
     let state_1 = ctx.client().get_stream_state(&stream_id);
@@ -9953,7 +9953,7 @@ fn test_withdraw_state_persists_across_calls() {
 
     // Now withdraw again at t=800
     ctx.env.ledger().set_timestamp(800);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     // Check that previous withdraw didn't reset
     let state_3 = ctx.client().get_stream_state(&stream_id);
@@ -9975,7 +9975,7 @@ fn test_withdraw_cliff_updates_withdrawn_correctly() {
 
     // At cliff time (t=500), can withdraw accrued amount
     ctx.env.ledger().set_timestamp(500);
-    let w1 = ctx.client().withdraw(&stream_id);
+    let w1 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(w1, 500, "at cliff, withdraw 500 tokens accrued from start");
 
     let state1 = ctx.client().get_stream_state(&stream_id);
@@ -9983,7 +9983,7 @@ fn test_withdraw_cliff_updates_withdrawn_correctly() {
 
     // Withdraw remaining at t=1000
     ctx.env.ledger().set_timestamp(1000);
-    let w2 = ctx.client().withdraw(&stream_id);
+    let w2 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(w2, 500, "remaining 500 tokens");
 
     let state2 = ctx.client().get_stream_state(&stream_id);
@@ -10011,7 +10011,7 @@ fn test_withdraw_after_cancel_status_stays_cancelled() {
     assert_eq!(state_after_cancel.withdrawn_amount, 0, "no withdrawal yet");
 
     // Withdraw the accrued 600 tokens
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(withdrawn, 600, "can withdraw accrued 600 tokens");
 
     let state_after_withdraw = ctx.client().get_stream_state(&stream_id);
@@ -10036,7 +10036,7 @@ fn test_withdraw_after_cancel_at_full_accrual_stays_cancelled_no_completed_event
     ctx.client().cancel_stream(&stream_id);
     let events_before = ctx.env.events().all().len();
 
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(withdrawn, 1000);
 
     let state = ctx.client().get_stream_state(&stream_id);
@@ -10080,14 +10080,14 @@ fn test_withdraw_completed_stream_panics() {
 
     // Withdraw all tokens
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Completed);
     assert_eq!(state.withdrawn_amount, 1000);
 
     // Attempt another withdraw on completed stream - should panic
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 }
 
 // ---------------------------------------------------------------------------
@@ -10125,7 +10125,7 @@ fn test_cancel_stream_from_paused_state() {
     assert_eq!(sender_balance_after - sender_balance_before, 500);
 
     assert_eq!(ctx.token().balance(&ctx.recipient), 0);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
     assert_eq!(ctx.token().balance(&ctx.recipient), 500);
 }
 
@@ -11301,7 +11301,7 @@ fn test_get_withdrawable_after_partial_withdraw() {
 
     // Withdraw at t=300
     ctx.env.ledger().set_timestamp(300);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     // Advance time to t=800 and check withdrawable
     ctx.env.ledger().set_timestamp(800);
@@ -11341,7 +11341,7 @@ fn test_get_withdrawable_completed_stream_returns_zero() {
 
     // Fully withdraw to mark stream as Completed
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Completed);
@@ -11380,7 +11380,7 @@ fn test_get_withdrawable_matches_withdraw_active() {
 
     ctx.env.ledger().set_timestamp(600);
     let expected = ctx.client().get_withdrawable(&stream_id);
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
 
     assert_eq!(
         withdrawn, expected,
@@ -11406,7 +11406,7 @@ fn test_get_withdrawable_matches_withdraw_cancelled_freeze() {
     let expected = ctx.client().get_withdrawable(&stream_id);
     assert_eq!(expected, 400, "frozen accrual should remain at cancel time");
 
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(
         withdrawn, expected,
         "withdraw should transfer exactly frozen get_withdrawable amount"
@@ -11428,7 +11428,7 @@ fn test_withdraw_before_cliff_matches_get_withdrawable_no_event() {
     assert_eq!(expected, 0, "before cliff, get_withdrawable is 0");
 
     let events_before = ctx.env.events().all().len();
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     let events_after = ctx.env.events().all().len();
 
     assert_eq!(withdrawn, 0, "withdraw returns 0 before cliff");
@@ -11497,7 +11497,7 @@ fn test_get_claimable_at_after_partial_withdraw() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(300);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     // At t=800: accrued 800, withdrawn 300 -> claimable 500
     let claimable = ctx.client().get_claimable_at(&stream_id, &800);
@@ -11510,7 +11510,7 @@ fn test_get_claimable_at_completed_returns_zero() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let claimable = ctx.client().get_claimable_at(&stream_id, &1000);
     assert_eq!(claimable, 0, "completed stream has nothing left to claim");
@@ -11625,7 +11625,7 @@ fn test_update_rate_per_second_rejects_completed_stream() {
 
     // Complete the stream by withdrawing everything at end_time.
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Completed);
@@ -11942,7 +11942,7 @@ fn test_update_rate_per_second_with_partial_withdrawal() {
 
     // At t=300, withdraw partial amount.
     ctx.env.ledger().set_timestamp(300);
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(withdrawn, 300);
 
     // Update rate from 1 → 5.
@@ -11960,6 +11960,38 @@ fn test_update_rate_per_second_with_partial_withdrawal() {
 
     let withdrawable = accrued - state.withdrawn_amount;
     assert_eq!(withdrawable, 500);
+}
+
+#[test]
+fn test_decrease_rate_per_second_returns_arithmetic_overflow_when_new_deposit_exceeds_existing_deposit() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 1_000_i128,
+            rate_per_second: 10_i128,
+            start_time: 0u64,
+            cliff_time: 0u64,
+            end_time: 100u64,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: crate::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
+    );
+
+    ctx.env.ledger().set_timestamp(10);
+    let mut stream = crate::load_stream(&ctx.env, stream_id).unwrap();
+    stream.deposit_amount = 100;
+    stream.checkpointed_amount = 0;
+    stream.checkpointed_at = 0;
+    crate::save_stream(&ctx.env, &stream);
+
+    let result = ctx.client().try_decrease_rate_per_second(&stream_id, &5_i128);
+    assert_eq!(result, Err(Ok(ContractError::ArithmeticOverflow)));
 }
 
 #[test]
@@ -12040,7 +12072,7 @@ fn test_update_rate_per_second_on_paused_stream_after_partial_withdrawal() {
 
     // At t=300, withdraw partial amount.
     ctx.env.ledger().set_timestamp(300);
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(withdrawn, 300);
 
     // Pause the stream.
@@ -12093,7 +12125,7 @@ fn test_update_rate_per_second_after_partial_withdrawal_then_resume_and_withdraw
 
     // At t=200, withdraw partial amount.
     ctx.env.ledger().set_timestamp(200);
-    let withdrawn1 = ctx.client().withdraw(&stream_id);
+    let withdrawn1 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(withdrawn1, 200);
 
     // Pause the stream.
@@ -12108,7 +12140,7 @@ fn test_update_rate_per_second_after_partial_withdrawal_then_resume_and_withdraw
 
     // At t=400, withdraw again.
     ctx.env.ledger().set_timestamp(400);
-    let withdrawn2 = ctx.client().withdraw(&stream_id);
+    let withdrawn2 = ctx.client().withdraw(&stream_id, &None);
     // Checkpoint at t=200: amount=200; new epoch rate=3: 3*(400-200)=600; total=800
     // Withdrawn so far: 200; withdrawable: 800-200=600
     assert_eq!(withdrawn2, 600);
@@ -12584,7 +12616,7 @@ fn test_shorten_stream_end_time_rejects_completed_and_cancelled_states() {
 
     let completed_id = ctx.create_default_stream();
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&completed_id);
+    ctx.client().withdraw(&completed_id, &None);
     let completed_result = ctx
         .client()
         .try_shorten_stream_end_time(&completed_id, &900u64);
@@ -12923,7 +12955,7 @@ fn test_recipient_stream_index_removed_on_close() {
 
     // Withdraw all tokens to complete the stream
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Completed);
@@ -13006,7 +13038,7 @@ fn test_recipient_stream_index_sorted_after_operations() {
 
     // Complete and close stream 1
     ctx.env.ledger().set_timestamp(2000);
-    ctx.client().withdraw(&id1);
+    ctx.client().withdraw(&id1, &None);
     ctx.client().close_completed_stream(&id1);
 
     // Verify remaining streams are still sorted
@@ -13113,7 +13145,7 @@ fn test_recipient_stream_index_lifecycle_consistency() {
 
     // Withdraw some tokens
     ctx.env.ledger().set_timestamp(500);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
     let streams = ctx.client().get_recipient_streams(&ctx.recipient);
     assert_eq!(
         streams.len(),
@@ -13123,7 +13155,7 @@ fn test_recipient_stream_index_lifecycle_consistency() {
 
     // Complete the stream
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
     let streams = ctx.client().get_recipient_streams(&ctx.recipient);
     assert_eq!(
         streams.len(),
@@ -13562,7 +13594,7 @@ fn test_withdraw_to_panics_on_completed_stream() {
     let destination = Address::generate(&ctx.env);
 
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     ctx.client().withdraw_to(&stream_id, &destination);
 }
@@ -13592,7 +13624,7 @@ fn test_withdraw_and_withdraw_to_interleaved_no_double_pay() {
 
     // t=200: withdraw normally → recipient gets 200
     ctx.env.ledger().set_timestamp(200);
-    let a1 = ctx.client().withdraw(&stream_id);
+    let a1 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(a1, 200);
 
     // t=500: withdraw_to → destination gets 300 (500 - 200 already withdrawn)
@@ -13706,7 +13738,7 @@ fn test_global_pause_does_not_affect_existing_streams() {
 
     // 1. Withdraw should work
     ctx.env.ledger().set_timestamp(100);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.withdrawn_amount, 100);
 
@@ -14292,7 +14324,7 @@ fn test_extend_end_time_recipient_can_withdraw_extended_accrual() {
 
     // Withdraw up to old end_time
     ctx.env.ledger().set_timestamp(1000);
-    let w1 = ctx.client().withdraw(&stream_id);
+    let w1 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(w1, 1000);
 
     // Extend before stream completes (deposit still covers more)
@@ -14300,11 +14332,11 @@ fn test_extend_end_time_recipient_can_withdraw_extended_accrual() {
 
     // Withdraw in the extended window
     ctx.env.ledger().set_timestamp(1500);
-    let w2 = ctx.client().withdraw(&stream_id);
+    let w2 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(w2, 500, "should withdraw tokens accrued in extended window");
 
     ctx.env.ledger().set_timestamp(2000);
-    let w3 = ctx.client().withdraw(&stream_id);
+    let w3 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(w3, 500);
 
     let state = ctx.client().get_stream_state(&stream_id);
@@ -14519,7 +14551,7 @@ fn test_extend_end_time_completed_stream_rejected() {
     );
 
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Completed);
@@ -14828,11 +14860,11 @@ fn test_get_recipient_streams_sorted_after_interleaved_close() {
 
     // Complete and close stream 1 (middle).
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&1u64);
+    ctx.client().withdraw(&1u64, &None);
     ctx.client().close_completed_stream(&1u64);
 
     // Complete and close stream 3 (last).
-    ctx.client().withdraw(&3u64);
+    ctx.client().withdraw(&3u64, &None);
     ctx.client().close_completed_stream(&3u64);
 
     let streams = ctx.client().get_recipient_streams(&ctx.recipient);
@@ -14884,7 +14916,7 @@ fn test_get_recipient_stream_count_matches_list_len() {
 
     // After close
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&0u64);
+    ctx.client().withdraw(&0u64, &None);
     ctx.client().close_completed_stream(&0u64);
     assert_eq!(
         ctx.client().get_recipient_stream_count(&ctx.recipient),
@@ -14900,7 +14932,7 @@ fn test_get_recipient_stream_count_zero_after_only_stream_closed() {
     let id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&id);
+    ctx.client().withdraw(&id, &None);
     ctx.client().close_completed_stream(&id);
 
     assert_eq!(ctx.client().get_recipient_stream_count(&ctx.recipient), 0);
@@ -14980,7 +15012,7 @@ fn test_get_recipient_streams_single_second_stream() {
 
     // Complete and close.
     ctx.env.ledger().set_timestamp(1);
-    ctx.client().withdraw(&id);
+    ctx.client().withdraw(&id, &None);
     ctx.client().close_completed_stream(&id);
 
     assert_eq!(ctx.client().get_recipient_stream_count(&ctx.recipient), 0);
@@ -15510,7 +15542,7 @@ fn test_extend_end_time_integration_full_withdrawal() {
     ctx.client().extend_stream_end_time(&stream_id, &2000u64);
 
     ctx.env.ledger().set_timestamp(2000);
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(withdrawn, 2000);
 
     let state = ctx.client().get_stream_state(&stream_id);
@@ -15847,7 +15879,7 @@ fn test_pause_completed_stream_panics() {
 
     // Drive stream to Completed by withdrawing everything at end_time.
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Completed);
@@ -15886,7 +15918,7 @@ fn test_pause_stream_as_admin_completed_fails() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
     assert_eq!(
         ctx.client().get_stream_state(&stream_id).status,
         StreamStatus::Completed
@@ -15940,7 +15972,7 @@ fn test_resume_stream_as_admin_completed_fails() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(1_000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
     assert_eq!(
         ctx.client().get_stream_state(&stream_id).status,
         StreamStatus::Completed
@@ -16153,7 +16185,7 @@ fn test_withdraw_from_paused_at_end_time() {
     ctx.env.ledger().set_timestamp(1_000);
 
     // Withdraw should succeed even if Paused
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(withdrawn, 1000);
     assert_eq!(
         ctx.client().get_stream_state(&stream_id).status,
@@ -16719,7 +16751,7 @@ fn regression_double_init_repeated_attacks_do_not_degrade_contract() {
     assert_eq!(client.get_stream_count(), 1);
 
     env.ledger().set_timestamp(500);
-    let withdrawn = client.withdraw(&stream_id);
+    let withdrawn = client.withdraw(&stream_id, &None);
     assert_eq!(withdrawn, 500);
 
     let state = client.get_stream_state(&stream_id);
@@ -16793,7 +16825,7 @@ fn regression_double_init_existing_stream_survives() {
 
     // Full lifecycle still works
     env.ledger().set_timestamp(1000);
-    let withdrawn = client.withdraw(&stream_id);
+    let withdrawn = client.withdraw(&stream_id, &None);
     assert_eq!(withdrawn, 1000);
     let state = client.get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Completed);
@@ -17126,7 +17158,7 @@ fn regression_missing_config_withdraw_panics() {
     let contract_id = env.register_contract(None, FluxoraStream);
     let client = FluxoraStreamClient::new(&env, &contract_id);
 
-    let result = client.try_withdraw(&0);
+    let result = client.try_withdraw(&0, &None);
     assert!(
         result.is_err(),
         "withdraw on uninitialised contract must fail"
@@ -17409,7 +17441,7 @@ fn regression_double_init_interleaved_with_lifecycle() {
 
     // Phase 2: Partial withdraw, attempt re-init, verify balances
     env.ledger().set_timestamp(300);
-    let withdrawn = client.withdraw(&stream_id);
+    let withdrawn = client.withdraw(&stream_id, &None);
     assert_eq!(withdrawn, 300);
 
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -17430,7 +17462,7 @@ fn regression_double_init_interleaved_with_lifecycle() {
 
     client.resume_stream(&stream_id);
     env.ledger().set_timestamp(1000);
-    let final_withdrawn = client.withdraw(&stream_id);
+    let final_withdrawn = client.withdraw(&stream_id, &None);
     assert_eq!(final_withdrawn, 700);
 
     let state = client.get_stream_state(&stream_id);
@@ -17541,7 +17573,7 @@ fn claimable_at_deducts_withdrawn() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(300);
-    ctx.client().withdraw(&stream_id); // withdraws 300
+    ctx.client().withdraw(&stream_id, &None); // withdraws 300
 
     // Simulate at t=700: accrued=700, withdrawn=300 → claimable=400
     let claimable = ctx.client().get_claimable_at(&stream_id, &700);
@@ -17563,10 +17595,10 @@ fn claimable_at_after_multiple_withdrawals() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(200);
-    ctx.client().withdraw(&stream_id); // withdrawn=200
+    ctx.client().withdraw(&stream_id, &None); // withdrawn=200
 
     ctx.env.ledger().set_timestamp(500);
-    ctx.client().withdraw(&stream_id); // withdrawn=500
+    ctx.client().withdraw(&stream_id, &None); // withdrawn=500
 
     // At t=800: accrued=800, withdrawn=500 → claimable=300
     let claimable = ctx.client().get_claimable_at(&stream_id, &800);
@@ -17580,7 +17612,7 @@ fn claimable_at_exact_withdrawn_returns_zero() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(500);
-    ctx.client().withdraw(&stream_id); // withdrawn=500
+    ctx.client().withdraw(&stream_id, &None); // withdrawn=500
 
     let claimable = ctx.client().get_claimable_at(&stream_id, &500);
     assert_eq!(claimable, 0, "accrued == withdrawn → claimable must be 0");
@@ -17594,7 +17626,7 @@ fn claimable_at_before_withdrawn_returns_zero() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(500);
-    ctx.client().withdraw(&stream_id); // withdrawn=500
+    ctx.client().withdraw(&stream_id, &None); // withdrawn=500
 
     // At t=300: accrued=300, withdrawn=500 → claimable=max(0, -200)=0
     let claimable = ctx.client().get_claimable_at(&stream_id, &300);
@@ -17626,7 +17658,7 @@ fn claimable_at_cliff_after_withdraw() {
     let stream_id = ctx.create_cliff_stream();
 
     ctx.env.ledger().set_timestamp(500);
-    ctx.client().withdraw(&stream_id); // withdraws 500
+    ctx.client().withdraw(&stream_id, &None); // withdraws 500
 
     // At t=800: accrued=800, withdrawn=500 → claimable=300
     let claimable = ctx.client().get_claimable_at(&stream_id, &800);
@@ -17721,7 +17753,7 @@ fn claimable_at_cancel_after_partial_withdraw() {
 
     // Withdraw 200 at t=200
     ctx.env.ledger().set_timestamp(200);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     // Cancel at t=600: accrued=600, withdrawn=200
     ctx.env.ledger().set_timestamp(600);
@@ -17750,7 +17782,7 @@ fn claimable_at_cancel_after_full_accrual_withdraw() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(500);
-    ctx.client().withdraw(&stream_id); // withdrawn=500
+    ctx.client().withdraw(&stream_id, &None); // withdrawn=500
 
     ctx.client().cancel_stream(&stream_id); // cancelled_at=500
 
@@ -17867,7 +17899,7 @@ fn claimable_at_paused_after_withdraw() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(300);
-    ctx.client().withdraw(&stream_id); // withdrawn=300
+    ctx.client().withdraw(&stream_id, &None); // withdrawn=300
     ctx.client()
         .pause_stream(&stream_id, &crate::PauseReason::Operational);
 
@@ -17886,7 +17918,7 @@ fn claimable_at_completed_always_zero() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Completed);
@@ -17971,7 +18003,7 @@ fn claimable_at_equals_withdrawable_after_withdraw() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(300);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     ctx.env.ledger().set_timestamp(700);
     let withdrawable = ctx.client().get_withdrawable(&stream_id);
@@ -18049,7 +18081,7 @@ fn claimable_at_cancel_never_exceeds_frozen_accrual() {
 
     // Withdraw 150
     ctx.env.ledger().set_timestamp(150);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     // Cancel at t=600
     ctx.env.ledger().set_timestamp(600);
@@ -18076,7 +18108,7 @@ fn claimable_at_cancel_ceiling_parametric() {
 
         if withdraw_time > 0 {
             ctx.env.ledger().set_timestamp(withdraw_time);
-            ctx.client().withdraw(&stream_id);
+            ctx.client().withdraw(&stream_id, &None);
         }
 
         ctx.env.ledger().set_timestamp(cancel_time);
@@ -18210,7 +18242,7 @@ fn test_batch_withdraw_mixed_stream_states_comprehensive() {
 
     // Complete one stream
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&id_completed);
+    ctx.client().withdraw(&id_completed, &None);
 
     // Verify states
     assert_eq!(
@@ -18403,7 +18435,7 @@ fn test_create_streams_batch_recipient_index_consistency() {
 
     // Now complete and close one stream from recipient1
     ctx.env.ledger().set_timestamp(2000);
-    ctx.client().withdraw(&0);
+    ctx.client().withdraw(&0, &None);
     ctx.client().close_completed_stream(&0);
 
     // Verify recipient1 now only has stream 2
@@ -18602,7 +18634,7 @@ fn test_budget_single_withdraw_hot_path() {
     ctx.env.ledger().set_timestamp(500);
 
     ctx.env.budget().reset_unlimited();
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let cpu = ctx.env.budget().cpu_instruction_cost();
     let mem = ctx.env.budget().memory_bytes_cost();
@@ -18628,7 +18660,7 @@ fn test_budget_withdraw_zero_short_circuit() {
     ctx.env.ledger().set_timestamp(100); // before cliff → withdrawable = 0
 
     ctx.env.budget().reset_unlimited();
-    let amount = ctx.client().withdraw(&stream_id);
+    let amount = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(amount, 0);
 
     let cpu_zero = ctx.env.budget().cpu_instruction_cost();
@@ -18636,7 +18668,7 @@ fn test_budget_withdraw_zero_short_circuit() {
     // Now measure a full withdrawal for comparison
     ctx.env.ledger().set_timestamp(1000);
     ctx.env.budget().reset_unlimited();
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
     let cpu_full = ctx.env.budget().cpu_instruction_cost();
 
     // Zero-withdraw path must not be more expensive than a full withdrawal.
@@ -18735,7 +18767,7 @@ fn test_budget_batch_withdraw_cheaper_than_n_singles() {
     // Measure single withdraw cost
     ctx.env.ledger().set_timestamp(500);
     ctx.env.budget().reset_unlimited();
-    ctx.client().withdraw(&ids.get(0).unwrap());
+    ctx.client().withdraw(&ids.get(0).unwrap(), &None);
     let cpu_single = ctx.env.budget().cpu_instruction_cost();
 
     // Measure batch withdraw cost for remaining 9 streams
@@ -18768,7 +18800,7 @@ fn test_batch_withdraw_cancelled_stream_transfers_accrued_remainder() {
 
     // Withdraw 200 at t=200
     ctx.env.ledger().set_timestamp(200);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
     assert_eq!(ctx.token().balance(&ctx.recipient), 200);
 
     // Cancel at t=600 → accrued_at_cancel=600, refund=400 to sender, 400 left for recipient
@@ -18801,7 +18833,7 @@ fn test_batch_withdraw_cancelled_stream_fully_withdrawn_yields_zero() {
 
     // Withdraw 600 at t=600
     ctx.env.ledger().set_timestamp(600);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     // Cancel at t=600 (same timestamp) → accrued_at_cancel=600, already withdrawn=600
     ctx.client().cancel_stream(&stream_id);
@@ -19936,7 +19968,7 @@ mod i128_boundary_streams {
         );
 
         env.ledger().set_timestamp(1);
-        let withdrawn = client.withdraw(&stream_id);
+        let withdrawn = client.withdraw(&stream_id, &None);
 
         assert_eq!(withdrawn, NEAR_MAX_DEPOSIT);
         assert_eq!(token.balance(&recipient), NEAR_MAX_DEPOSIT);
@@ -19973,7 +20005,7 @@ mod i128_boundary_streams {
         );
 
         env.ledger().set_timestamp(1);
-        client.withdraw(&stream_id);
+        client.withdraw(&stream_id, &None);
 
         let events = env.events().all();
         // Find the withdrew event
@@ -20024,7 +20056,7 @@ mod i128_boundary_streams {
 
         // First withdrawal at t=400
         env.ledger().set_timestamp(400);
-        let first = client.withdraw(&stream_id);
+        let first = client.withdraw(&stream_id, &None);
         let expected_first = 400_i128 * rate;
         assert_eq!(first, expected_first);
         assert_eq!(
@@ -20034,7 +20066,7 @@ mod i128_boundary_streams {
 
         // Second withdrawal at t=1000 (end)
         env.ledger().set_timestamp(1_000);
-        let second = client.withdraw(&stream_id);
+        let second = client.withdraw(&stream_id, &None);
         let expected_second = large_deposit - expected_first;
         assert_eq!(second, expected_second);
 
@@ -20206,7 +20238,7 @@ mod i128_boundary_streams {
         client.cancel_stream(&stream_id);
         let frozen_accrued = 700_i128 * rate;
 
-        let withdrawn = client.withdraw(&stream_id);
+        let withdrawn = client.withdraw(&stream_id, &None);
         assert_eq!(withdrawn, frozen_accrued);
         assert_eq!(token.balance(&recipient), frozen_accrued);
 
@@ -20283,7 +20315,7 @@ mod i128_boundary_streams {
         );
 
         env.ledger().set_timestamp(500);
-        let withdrawn = client.withdraw(&stream_id);
+        let withdrawn = client.withdraw(&stream_id, &None);
         assert!(withdrawn > 0, "recipient can withdraw");
         assert_eq!(withdrawn, 500_i128 * rate);
     }
@@ -20365,7 +20397,7 @@ mod i128_boundary_streams {
         client.resume_stream(&stream_id);
 
         // Withdraw at t=700: should get 700 * rate
-        let withdrawn = client.withdraw(&stream_id);
+        let withdrawn = client.withdraw(&stream_id, &None);
         assert_eq!(withdrawn, 700_i128 * rate);
         assert_eq!(token.balance(&recipient), 700_i128 * rate);
     }
@@ -20503,7 +20535,7 @@ mod i128_boundary_streams {
 
         // Partial withdrawal at t=300
         env.ledger().set_timestamp(300);
-        client.withdraw(&stream_id);
+        client.withdraw(&stream_id, &None);
 
         // At t=700, withdrawable = accrued(700) - withdrawn(300*rate)
         env.ledger().set_timestamp(700);
@@ -20623,17 +20655,17 @@ mod recipient_index_stress {
         // 1. Close middle (ID at index 5)
         // Make it Completed first
         ctx.env.ledger().set_timestamp(1101);
-        ctx.client().withdraw(&stream_ids.get(5).unwrap());
+        ctx.client().withdraw(&stream_ids.get(5).unwrap(), &None);
         ctx.client()
             .close_completed_stream(&stream_ids.get(5).unwrap());
 
         // 2. Close start (ID at index 0)
-        ctx.client().withdraw(&stream_ids.get(0).unwrap());
+        ctx.client().withdraw(&stream_ids.get(0).unwrap(), &None);
         ctx.client()
             .close_completed_stream(&stream_ids.get(0).unwrap());
 
         // 3. Close end (ID at index 9)
-        ctx.client().withdraw(&stream_ids.get(9).unwrap());
+        ctx.client().withdraw(&stream_ids.get(9).unwrap(), &None);
         ctx.client()
             .close_completed_stream(&stream_ids.get(9).unwrap());
 
@@ -20793,7 +20825,7 @@ mod recipient_index_stress {
 
         // Close stream 2 (make it completed first)
         ctx.env.ledger().set_timestamp(1001);
-        ctx.client().withdraw(&2);
+        ctx.client().withdraw(&2, &None);
         ctx.client().close_completed_stream(&2);
 
         // Range should return streams 1, 3, 4 (skipping closed stream 2)
@@ -21131,7 +21163,7 @@ mod recipient_index_stress {
 
         // Close stream 2 (make completed first)
         ctx.env.ledger().set_timestamp(1001);
-        ctx.client().withdraw(&2);
+        ctx.client().withdraw(&2, &None);
         ctx.client().close_completed_stream(&2);
 
         // Full list should now have 4 items (0,1,3,4)
@@ -21422,7 +21454,7 @@ mod structured_error_tests {
         ctx.env.ledger().set_timestamp(500);
         client.set_global_emergency_paused(&true);
 
-        let result = client.try_withdraw(&stream_id);
+        let result = client.try_withdraw(&stream_id, &None);
         assert_eq!(
             result,
             Err(Ok(ContractError::ContractPaused)),
@@ -21629,7 +21661,7 @@ fn test_batch_withdraw_duplicate_with_completed_stream_rejected() {
     let id0 = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&id0);
+    ctx.client().withdraw(&id0, &None);
     assert_eq!(
         ctx.client().get_stream_state(&id0).status,
         StreamStatus::Completed
@@ -22155,7 +22187,7 @@ fn test_withdraw_active_at_end_time_succeeds() {
     let stream_id = make_stream_end_1000(&ctx);
 
     ctx.env.ledger().set_timestamp(1000); // end_time
-    let amount = ctx.client().withdraw(&stream_id);
+    let amount = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(
         amount, 1000,
         "full deposit must be withdrawable at end_time"
@@ -22178,7 +22210,7 @@ fn test_withdraw_paused_at_end_time_succeeds() {
         .pause_stream(&stream_id, &crate::PauseReason::Operational);
 
     ctx.env.ledger().set_timestamp(1000); // end_time
-    let amount = ctx.client().withdraw(&stream_id);
+    let amount = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(
         amount, 1000,
         "paused stream at end_time must allow full withdrawal"
@@ -22201,7 +22233,7 @@ fn test_withdraw_paused_past_end_time_succeeds() {
         .pause_stream(&stream_id, &crate::PauseReason::Operational);
 
     ctx.env.ledger().set_timestamp(1001); // end_time + 1
-    let amount = ctx.client().withdraw(&stream_id);
+    let amount = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(
         amount, 1000,
         "paused stream past end_time must allow full withdrawal"
@@ -22543,4 +22575,130 @@ fn xdr_pubkey_extraction_offset_is_correct() {
             "mismatch at helper output index {i}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Cross-entrypoint idempotency tests (issue #1310)
+// ---------------------------------------------------------------------------
+
+/// Verify that repeated `withdraw` calls on the same fully-depleted stream
+/// return 0 and do not change state — the cross-entrypoint idempotency
+/// contract guarantee.
+#[test]
+fn withdraw_is_idempotent_on_full_withdrawal() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+
+    // First withdrawal — full amount
+    let first = ctx.client().withdraw(&stream_id, &None);
+    assert_eq!(first, 1000);
+
+    let after_first = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(after_first.status, StreamStatus::Completed);
+    assert_eq!(after_first.withdrawn_amount, 1000);
+
+    // Second withdrawal — idempotent, returns 0
+    let second = ctx.client().withdraw(&stream_id, &None);
+    assert_eq!(second, 0);
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).withdrawn_amount,
+        1000
+    );
+}
+
+/// Verify that repeated `withdraw_to` calls on the same stream are idempotent
+/// after a full withdrawal.
+#[test]
+fn withdraw_to_is_idempotent_on_full_withdrawal() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let destination = Address::generate(&ctx.env);
+
+    ctx.env.ledger().set_timestamp(1000);
+
+    let first = ctx.client().withdraw_to(&stream_id, &destination);
+    assert_eq!(first, 1000);
+
+    let after_first = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(after_first.status, StreamStatus::Completed);
+
+    // Second call — idempotent
+    let second = ctx.client().withdraw_to(&stream_id, &destination);
+    assert_eq!(second, 0);
+}
+
+/// Verify that withdraw returns 0 after a partial withdrawal until more tokens accrue.
+#[test]
+fn withdraw_is_idempotent_after_partial_withdrawal() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(300);
+    let first = ctx.client().withdraw(&stream_id, &None);
+    assert_eq!(first, 300);
+
+    // Repeated call without time advancing — idempotent (returns 0)
+    let second = ctx.client().withdraw(&stream_id, &None);
+    assert_eq!(second, 0);
+
+    // After time advances, new accrual is available
+    ctx.env.ledger().set_timestamp(600);
+    let third = ctx.client().withdraw(&stream_id, &None);
+    assert_eq!(third, 300);
+}
+
+/// Verify that withdraw_to returns 0 after a partial withdrawal until more tokens accrue.
+#[test]
+fn withdraw_to_is_idempotent_after_partial_withdrawal() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let destination = Address::generate(&ctx.env);
+
+    ctx.env.ledger().set_timestamp(300);
+    let first = ctx.client().withdraw_to(&stream_id, &destination);
+    assert_eq!(first, 300);
+
+    // Repeated call — idempotent
+    let second = ctx.client().withdraw_to(&stream_id, &destination);
+    assert_eq!(second, 0);
+}
+
+/// Verify that the reentrancy lock is held during the cross-entrypoint token
+/// transfer in `withdraw` so a malicious token contract cannot corrupt state.
+#[test]
+fn withdraw_reentrancy_lock_prevents_state_corruption_during_push_token() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(1000);
+
+    // First withdrawal works normally
+    let first = ctx.client().withdraw(&stream_id, &None);
+    assert_eq!(first, 1000);
+
+    // Stream state should be Completed
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+    assert_eq!(state.withdrawn_amount, 1000);
+}
+
+/// Verify that the reentrancy lock is held during the cross-entrypoint token
+/// transfer in `withdraw_to` so a malicious token contract cannot corrupt state.
+#[test]
+fn withdraw_to_reentrancy_lock_prevents_state_corruption_during_push_token() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let destination = Address::generate(&ctx.env);
+
+    ctx.env.ledger().set_timestamp(1000);
+
+    // First withdraw_to works normally
+    let first = ctx.client().withdraw_to(&stream_id, &destination);
+    assert_eq!(first, 1000);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+    assert_eq!(state.withdrawn_amount, 1000);
 }

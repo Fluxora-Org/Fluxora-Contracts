@@ -358,7 +358,7 @@ fn sweep_excess_with_multiple_streams_complex_scenario() {
 
     // Withdraw from first stream at t=500 (500 tokens)
     ctx.env.ledger().set_timestamp(500);
-    ctx.client().withdraw(&stream_id_1);
+    ctx.client().withdraw(&stream_id_1, &None);
 
     // Contract has 2500 tokens, 2500 liabilities (500 withdrawn, 500 + 2000 remaining)
     assert_eq!(ctx.token.balance(&ctx.contract_id), 2_500);
@@ -425,7 +425,7 @@ fn sweep_excess_protects_recipient_funds() {
     assert_eq!(ctx.token.balance(&ctx.contract_id), 1_000);
 
     // Recipient can still withdraw their accrued amount
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(withdrawn, 500);
     assert_eq!(ctx.token.balance(&ctx.recipient), 500);
 }
@@ -440,7 +440,7 @@ fn sweep_excess_after_stream_completion() {
 
     // Complete stream and withdraw all
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     // Contract should have 0 tokens, 0 liabilities
     assert_eq!(ctx.token.balance(&ctx.contract_id), 0);
@@ -828,7 +828,7 @@ fn snapshot_no_withdraw_event_when_amount_zero() {
     let events_before = ctx.env.events().all().len();
 
     // Withdraw at t=0 (nothing accrued)
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
     assert_eq!(ctx.env.events().all().len(), events_before);
 }
 
@@ -1171,7 +1171,7 @@ fn sweep_excess_with_multiple_streams_complex_scenario() {
 
     // Withdraw from first stream at t=500 (500 tokens)
     ctx.env.ledger().set_timestamp(500);
-    ctx.client().withdraw(&stream_id_1);
+    ctx.client().withdraw(&stream_id_1, &None);
 
     // Contract has 2500 tokens, 2500 liabilities (500 withdrawn, 500 + 2000 remaining)
     assert_eq!(ctx.token.balance(&ctx.contract_id), 2_500);
@@ -1238,7 +1238,7 @@ fn sweep_excess_protects_recipient_funds() {
     assert_eq!(ctx.token.balance(&ctx.contract_id), 1_000);
 
     // Recipient can still withdraw their accrued amount
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(withdrawn, 500);
     assert_eq!(ctx.token.balance(&ctx.recipient), 500);
 }
@@ -1253,7 +1253,7 @@ fn sweep_excess_after_stream_completion() {
 
     // Complete stream and withdraw all
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     // Contract should have 0 tokens, 0 liabilities
     assert_eq!(ctx.token.balance(&ctx.contract_id), 0);
@@ -1449,7 +1449,7 @@ fn test_get_auto_claim_status_after_withdrawal() {
 
     // Advance time and withdraw
     ctx.env.ledger().set_timestamp(500);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     // Advance more time
     ctx.env.ledger().set_timestamp(800);
@@ -1549,7 +1549,7 @@ fn test_trigger_auto_claim_completed_stream() {
 
     // Complete the stream manually
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     // Try to trigger auto-claim on completed stream (should fail)
     ctx.client().trigger_auto_claim(&stream_id);
@@ -1587,7 +1587,7 @@ fn test_trigger_auto_claim_already_withdrawn() {
 
     // Withdraw everything first
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     // Try to trigger auto-claim (should return 0)
     let amount = ctx.client().trigger_auto_claim(&stream_id);
@@ -1624,7 +1624,7 @@ fn test_trigger_auto_claim_after_partial_withdrawal() {
 
     // Withdraw partially
     ctx.env.ledger().set_timestamp(500);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     // Advance to end_time and trigger auto-claim
     ctx.env.ledger().set_timestamp(1000);
@@ -1770,7 +1770,6 @@ fn test_contract_error_discriminants_unique() {
         ContractError::ArithmeticOverflow as u32,
         ContractError::Unauthorized as u32,
         ContractError::AlreadyInitialised as u32,
-        ContractError::TokenVerificationFailed as u32,
         ContractError::InsufficientBalance as u32,
         ContractError::InsufficientDeposit as u32,
         ContractError::StreamAlreadyPaused as u32,
@@ -1785,17 +1784,28 @@ fn test_contract_error_discriminants_unique() {
         ContractError::TemplateNotFound as u32,
         ContractError::TemplateLimitExceeded as u32,
         ContractError::TemplateUnauthorized as u32,
+        ContractError::PauseReasonTooLong as u32,
         ContractError::ReservationNotFound as u32,
         ContractError::ReservationNotExpirable as u32,
         ContractError::ReservationStillActive as u32,
-        ContractError::PauseReasonTooLong as u32,
         ContractError::ClockRegression as u32,
-        ContractError::WithdrawalTooFrequent as u32,
         ContractError::UnsupportedStreamKind as u32,
-        ContractError::KeeperGracePeriodNotElapsed as u32,
-        ContractError::MetadataTooLarge as u32,
-        ContractError::PauseCooldownActive as u32,
         ContractError::RateCapExceeded as u32,
+        ContractError::PauseCooldownActive as u32,
+        ContractError::WithdrawalTooFrequent as u32,
+        ContractError::MetadataTooLarge as u32,
+        ContractError::KeeperGracePeriodNotElapsed as u32,
+        ContractError::ReservationAlreadyActive as u32,
+        ContractError::InvalidDustThreshold as u32,
+        ContractError::RateCooldownActive as u32,
+        ContractError::AutoRenewFundingUnavailable as u32,
+        ContractError::OfferNotFound as u32,
+        ContractError::OfferExpired as u32,
+        ContractError::OfferWrongRecipient as u32,
+        ContractError::OfferWrongSender as u32,
+        ContractError::CyclicDelegation as u32,
+        ContractError::DelegationDepthExceeded as u32,
+        ContractError::TokenVerificationFailed as u32,
     ];
 
     let mut sorted_variants = variants.clone();
@@ -2078,7 +2088,7 @@ fn test_vault_sender_with_cliff() {
     assert_eq!(accrued_after_cliff, 4000);
 
     // Withdraw after cliff
-    let withdraw_amount = stream_client.withdraw(&stream_id);
+    let withdraw_amount = stream_client.withdraw(&stream_id, &None);
     assert_eq!(withdraw_amount, 4000);
 
     let state = stream_client.get_stream_state(&stream_id);
@@ -2274,7 +2284,7 @@ fn test_vault_sender_auto_renew() {
 
     // Complete the stream
     env.ledger().with_mut(|li| li.timestamp = 2000);
-    stream_client.withdraw(&stream_id);
+    stream_client.withdraw(&stream_id, &None);
 
     // Verify stream is completed
     let state = stream_client.get_stream_state(&stream_id);
@@ -2513,7 +2523,7 @@ fn test_vault_as_recipient() {
     env.ledger().with_mut(|li| li.timestamp = 1500);
 
     // Vault withdraws from stream (as recipient)
-    let amount = stream_client.withdraw(&stream_id);
+    let amount = stream_client.withdraw(&stream_id, &None);
 
     // Should have accrued (1500-1000) * 10 = 5000
     assert_eq!(amount, 5000);
@@ -2673,6 +2683,6 @@ impl MockVaultContract {
 
     pub fn vault_withdraw_from_stream(env: Env, stream_contract: Address, stream_id: u64) -> i128 {
         let client = fluxora_stream::FluxoraStreamClient::new(&env, &stream_contract);
-        client.withdraw(&stream_id)
+        client.withdraw(&stream_id, &None)
     }
 }

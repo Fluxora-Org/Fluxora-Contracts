@@ -179,11 +179,11 @@ fn same_ledger_withdrawal_is_rejected_and_exact_interval_succeeds() {
     ctx.advance_ledger(100);
 
     // First withdrawal succeeds
-    let result = ctx.client.withdraw(&stream_id);
+    let result = ctx.client.withdraw(&stream_id, &None);
     assert!(result.is_ok());
 
     // Second withdrawal at same ledger should fail
-    let result = ctx.client.try_withdraw(&stream_id);
+    let result = ctx.client.try_withdraw(&stream_id, &None);
     assert_eq!(result, Err(Ok(ContractError::WithdrawalTooFrequent)));
 }
 
@@ -196,13 +196,13 @@ fn test_withdrawal_before_interval_fails() {
     ctx.advance_ledger(100);
 
     // First withdrawal succeeds
-    ctx.client.withdraw(&stream_id).unwrap();
+    ctx.client.withdraw(&stream_id, &None).unwrap();
 
     // Advance by MIN_WITHDRAW_INTERVAL_LEDGERS - 1 (16 ledgers)
     ctx.advance_ledger(16);
 
     // Second withdrawal should fail (only 16 ledgers elapsed, need 17)
-    let result = ctx.client.try_withdraw(&stream_id);
+    let result = ctx.client.try_withdraw(&stream_id, &None);
     assert_eq!(result, Err(Ok(ContractError::WithdrawalTooFrequent)));
 }
 
@@ -215,14 +215,14 @@ fn test_withdrawal_at_exact_interval_succeeds() {
     ctx.advance_ledger(100);
 
     // First withdrawal succeeds
-    let first_amount = ctx.client.withdraw(&stream_id).unwrap();
+    let first_amount = ctx.client.withdraw(&stream_id, &None).unwrap();
     assert!(first_amount > 0);
 
     // Advance by exactly MIN_WITHDRAW_INTERVAL_LEDGERS (17 ledgers)
     ctx.advance_ledger(17);
 
     // Second withdrawal should succeed
-    let result = ctx.client.withdraw(&stream_id);
+    let result = ctx.client.withdraw(&stream_id, &None);
     assert!(result.is_ok());
     let second_amount = result.unwrap();
     assert!(second_amount > 0);
@@ -237,13 +237,13 @@ fn test_withdrawal_after_interval_succeeds() {
     ctx.advance_ledger(100);
 
     // First withdrawal succeeds
-    ctx.client.withdraw(&stream_id).unwrap();
+    ctx.client.withdraw(&stream_id, &None).unwrap();
 
     // Advance by more than MIN_WITHDRAW_INTERVAL_LEDGERS (20 ledgers)
     ctx.advance_ledger(20);
 
     // Second withdrawal should succeed
-    let result = ctx.client.withdraw(&stream_id);
+    let result = ctx.client.withdraw(&stream_id, &None);
     assert!(result.is_ok());
     assert!(result.unwrap() > 0);
 }
@@ -285,7 +285,7 @@ fn lookback_caps_each_claim_without_reducing_lifetime_accrual() {
             // lookback window is separated by the minimum interval.
             ctx.advance_ledger(17);
         }
-        total_withdrawn += ctx.client.withdraw(&stream_id).unwrap();
+        total_withdrawn += ctx.client.withdraw(&stream_id, &None).unwrap();
     }
 
     // The cap limits each call, but no accrued entitlement is permanently lost.
@@ -324,26 +324,26 @@ fn test_third_withdrawal_resets_window() {
     ctx.advance_ledger(100);
 
     // First withdrawal at ledger 100
-    ctx.client.withdraw(&stream_id).unwrap();
+    ctx.client.withdraw(&stream_id, &None).unwrap();
 
     // Advance by 17 ledgers to ledger 117
     ctx.advance_ledger(17);
 
     // Second withdrawal at ledger 117
-    ctx.client.withdraw(&stream_id).unwrap();
+    ctx.client.withdraw(&stream_id, &None).unwrap();
 
     // Advance by 16 ledgers to ledger 133 (only 16 from second withdrawal)
     ctx.advance_ledger(16);
 
     // Third withdrawal should fail (only 16 ledgers since second withdrawal)
-    let result = ctx.client.try_withdraw(&stream_id);
+    let result = ctx.client.try_withdraw(&stream_id, &None);
     assert_eq!(result, Err(Ok(ContractError::WithdrawalTooFrequent)));
 
     // Advance by 1 more ledger to ledger 134 (17 from second withdrawal)
     ctx.advance_ledger(1);
 
     // Third withdrawal should now succeed
-    let result = ctx.client.withdraw(&stream_id);
+    let result = ctx.client.withdraw(&stream_id, &None);
     assert!(result.is_ok());
 }
 
@@ -457,13 +457,13 @@ fn test_batch_withdraw_fails_if_any_stream_violates_rate_limit() {
     ctx.advance_ledger(100);
 
     // Withdraw from stream1 only
-    ctx.client.withdraw(&stream_id1).unwrap();
+    ctx.client.withdraw(&stream_id1, &None).unwrap();
 
     // Advance by 17 ledgers (stream1 can withdraw again, stream2 never withdrawn)
     ctx.advance_ledger(17);
 
     // Withdraw from stream1 again
-    ctx.client.withdraw(&stream_id1).unwrap();
+    ctx.client.withdraw(&stream_id1, &None).unwrap();
 
     // Now try batch withdraw with both streams
     // stream1 just withdrew (0 ledgers ago), stream2 never withdrew (should succeed)
@@ -484,7 +484,7 @@ fn test_initial_state_first_withdrawal_always_succeeds() {
 
     // First withdrawal should succeed regardless of current ledger sequence
     // because last_withdraw_ledger is initialized to 0
-    let result = ctx.client.withdraw(&stream_id);
+    let result = ctx.client.withdraw(&stream_id, &None);
     assert!(result.is_ok());
     assert!(result.unwrap() > 0);
 }
@@ -498,14 +498,14 @@ fn test_no_state_mutation_on_rate_limit_error() {
     ctx.advance_ledger(100);
 
     // First withdrawal succeeds
-    let _first_amount = ctx.client.withdraw(&stream_id).unwrap();
+    let _first_amount = ctx.client.withdraw(&stream_id, &None).unwrap();
 
     // Get stream state after first withdrawal
     let stream_after_first = ctx.client.get_stream_state(&stream_id);
     let withdrawn_after_first = stream_after_first.withdrawn_amount;
 
     // Attempt second withdrawal at same ledger (should fail)
-    let result = ctx.client.try_withdraw(&stream_id);
+    let result = ctx.client.try_withdraw(&stream_id, &None);
     assert_eq!(result, Err(Ok(ContractError::WithdrawalTooFrequent)));
 
     // Verify no state mutation occurred
@@ -521,7 +521,7 @@ fn test_underflow_safety_invariant() {
     // Advance time and perform multiple withdrawals
     for _ in 0..5 {
         ctx.advance_ledger(20);
-        ctx.client.withdraw(&stream_id).unwrap();
+        ctx.client.withdraw(&stream_id, &None).unwrap();
 
         // After each withdrawal, verify invariant: last_withdraw_ledger <= current_ledger
         let stream = ctx.client.get_stream_state(&stream_id);
@@ -557,7 +557,7 @@ fn test_zero_withdrawable_does_not_update_last_withdraw_ledger() {
     ctx.advance_ledger(50);
 
     // Attempt withdrawal before cliff (returns 0, no state change)
-    let result = ctx.client.withdraw(&stream_id).unwrap();
+    let result = ctx.client.withdraw(&stream_id, &None).unwrap();
     assert_eq!(result, 0);
 
     // Verify last_withdraw_ledger is still 0 (not updated)
@@ -568,7 +568,7 @@ fn test_zero_withdrawable_does_not_update_last_withdraw_ledger() {
     ctx.advance_ledger(100);
 
     // Now withdrawal should succeed and update last_withdraw_ledger
-    let result = ctx.client.withdraw(&stream_id).unwrap();
+    let result = ctx.client.withdraw(&stream_id, &None).unwrap();
     assert!(result > 0);
 
     let stream = ctx.client.get_stream_state(&stream_id);
@@ -584,7 +584,7 @@ fn test_rate_limit_applies_across_different_withdrawal_methods() {
     ctx.advance_ledger(100);
 
     // First withdrawal via regular withdraw
-    ctx.client.withdraw(&stream_id).unwrap();
+    ctx.client.withdraw(&stream_id, &None).unwrap();
 
     // Attempt batch_withdraw at same ledger (should fail)
     let stream_ids = soroban_sdk::vec![&ctx.env, stream_id];
@@ -611,19 +611,19 @@ fn test_multiple_streams_independent_rate_limits() {
     ctx.advance_ledger(100);
 
     // Withdraw from stream1
-    ctx.client.withdraw(&stream_id1).unwrap();
+    ctx.client.withdraw(&stream_id1, &None).unwrap();
 
     // Advance by 10 ledgers
     ctx.advance_ledger(10);
 
-    assert!(ctx.client.withdraw(&stream_id2).unwrap() > 0);
+    assert!(ctx.client.withdraw(&stream_id2, &None).unwrap() > 0);
     assert_eq!(
-        ctx.client.try_withdraw(&stream_id2),
+        ctx.client.try_withdraw(&stream_id2, &None),
         Err(Ok(ContractError::WithdrawalTooFrequent))
     );
 
     ctx.advance_ledger(MIN_WITHDRAW_INTERVAL_LEDGERS);
-    assert!(ctx.client.withdraw(&stream_id) > 0);
+    assert!(ctx.client.withdraw(&stream_id, &None) > 0);
 }
 
 #[test]
@@ -631,17 +631,17 @@ fn every_successful_withdrawal_resets_the_interval() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_stream_with_dust(0);
     ctx.advance_ledger(10);
-    ctx.client.withdraw(&stream_id);
+    ctx.client.withdraw(&stream_id, &None);
 
     ctx.advance_ledger(MIN_WITHDRAW_INTERVAL_LEDGERS);
-    ctx.client.withdraw(&stream_id);
+    ctx.client.withdraw(&stream_id, &None);
     assert_eq!(
-        ctx.client.try_withdraw(&stream_id),
+        ctx.client.try_withdraw(&stream_id, &None),
         Err(Ok(ContractError::WithdrawalTooFrequent))
     );
 
     ctx.advance_ledger(MIN_WITHDRAW_INTERVAL_LEDGERS);
-    assert!(ctx.client.withdraw(&stream_id) > 0);
+    assert!(ctx.client.withdraw(&stream_id, &None) > 0);
 }
 
 #[test]
@@ -650,14 +650,14 @@ fn zero_withdrawable_does_not_consume_the_interval() {
     let stream_id = ctx.create_stream_with_dust(100);
     ctx.advance_ledger(10); // 50 accrued, below the dust threshold.
 
-    assert_eq!(ctx.client.withdraw(&stream_id), 0);
+    assert_eq!(ctx.client.withdraw(&stream_id, &None), 0);
     assert_eq!(
         ctx.client.get_stream_state(&stream_id).last_withdraw_ledger,
         0
     );
 
     ctx.advance_ledger(10); // 100 accrued, exactly at the threshold.
-    assert_eq!(ctx.client.withdraw(&stream_id), 100);
+    assert_eq!(ctx.client.withdraw(&stream_id, &None), 100);
 }
 
 #[test]
@@ -700,18 +700,18 @@ fn rate_change_checkpoints_accrual_without_bypassing_the_interval() {
     let stream_id = ctx.create_stream_with_dust(0);
     ctx.advance_ledger(10);
 
-    assert_eq!(ctx.client.withdraw(&stream_id), 50);
+    assert_eq!(ctx.client.withdraw(&stream_id, &None), 50);
     ctx.client.update_rate_per_second(&stream_id, &2);
 
     // The checkpoint preserves the first 50 tokens, but a rate update must not
     // make a second withdrawal possible in the same ledger.
     assert_eq!(
-        ctx.client.try_withdraw(&stream_id),
+        ctx.client.try_withdraw(&stream_id, &None),
         Err(Ok(ContractError::WithdrawalTooFrequent))
     );
 
     ctx.advance_ledger(MIN_WITHDRAW_INTERVAL_LEDGERS);
-    assert_eq!(ctx.client.withdraw(&stream_id), 10);
+    assert_eq!(ctx.client.withdraw(&stream_id, &None), 10);
     let stream = ctx.client.get_stream_state(&stream_id);
     assert_eq!(stream.checkpointed_amount, 50);
     assert_eq!(stream.withdrawn_amount, 60);
@@ -762,7 +762,7 @@ fn backward_ledger_sequence_cannot_bypass_the_limit() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_stream_with_dust(0);
     ctx.advance_ledger(10);
-    ctx.client.withdraw(&stream_id);
+    ctx.client.withdraw(&stream_id, &None);
 
     ctx.env.ledger().set(LedgerInfo {
         timestamp: 25,
@@ -775,7 +775,7 @@ fn backward_ledger_sequence_cannot_bypass_the_limit() {
         max_entry_ttl: 6_312_000,
     });
     assert_eq!(
-        ctx.client.try_withdraw(&stream_id),
+        ctx.client.try_withdraw(&stream_id, &None),
         Err(Ok(ContractError::WithdrawalTooFrequent))
     );
 }
@@ -837,14 +837,14 @@ fn lookback_caps_each_claim_to_one_window() {
     ctx.advance_ledger(100); // t=500. Lifetime accrued = 500 tokens.
 
     // First claim: cap is one window worth (50 tokens).
-    let first = ctx.client.withdraw(&stream_id).unwrap();
+    let first = ctx.client.withdraw(&stream_id, &None).unwrap();
     assert_eq!(first, 50, "first claim must equal the window size");
 
     // The withdrawal-frequency guard guarantees at least 17 ledgers elapse
     // between calls. After that, time has advanced past one full window
     // and a fresh slice of accrual is reachable.
     ctx.advance_ledger(17); // t=585
-    let second = ctx.client.withdraw(&stream_id).unwrap();
+    let second = ctx.client.withdraw(&stream_id, &None).unwrap();
     assert!(second > 0);
     assert!(
         second <= 50,
@@ -869,7 +869,7 @@ fn lookback_repeated_claims_drain_full_entitlement() {
     // bringing fresh accrual into the claimed slice. After enough iterations
     // the recipient recovers every accrued token (capped by deposit).
     for _ in 0..30 {
-        let amount = ctx.client.withdraw(&stream_id).unwrap();
+        let amount = ctx.client.withdraw(&stream_id, &None).unwrap();
         withdrawn += amount;
         ctx.advance_ledger(17);
     }
@@ -1048,7 +1048,7 @@ fn lookback_set_mid_stream_preserves_old_accrual() {
         if available == 0 {
             break;
         }
-        let amount = ctx.client.withdraw(&stream_id).unwrap();
+        let amount = ctx.client.withdraw(&stream_id, &None).unwrap();
         withdrawn += amount;
         ctx.advance_ledger(17);
         cycles += 1;

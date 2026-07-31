@@ -16,12 +16,16 @@
 //! - All four `PauseReason` variants are accepted without error
 //! - Global emergency pause blocks `withdraw` but does not block `pause_stream`
 //! - Admin-pause writes a `LastPauseRecord` while sender-pause does not
+//! - `batch_withdraw_to` honors the same per-stream Paused gate as the other
+//!   withdrawal entrypoints (issue #1327)
+//! - `delegate_recipient_share` is unaffected by a per-stream Paused status,
+//!   consistent with other non-withdrawal mutations (issue #1327)
 
 #![cfg(test)]
 
 use fluxora_stream::{
     ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, PauseReason, StreamKind,
-    StreamStatus,
+    StreamStatus, WithdrawToParam,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -80,9 +84,7 @@ impl<'a> Ctx<'a> {
 
     /// Advance ledger sequence past the pause/resume cooldown window (17 ledgers).
     fn clear_pause_cooldown(&self) {
-        self.env
-            .ledger()
-            .with_mut(|l| l.sequence_number += 32);
+        self.env.ledger().with_mut(|l| l.sequence_number += 32);
     }
 
     /// Create a linear stream with `deposit_amount == duration` (1 token/sec).
@@ -94,6 +96,31 @@ impl<'a> Ctx<'a> {
                 recipient: self.recipient.clone(),
                 deposit_amount: duration as i128,
                 rate_per_second: 1,
+                start_time: now,
+                cliff_time: now,
+                end_time: now + duration,
+                withdraw_dust_threshold: Some(0),
+                memo: None,
+                metadata: None,
+                kind: StreamKind::Linear,
+                irrevocable: None,
+                witness: None,
+            },
+        )
+    }
+
+    /// Create a linear stream at a caller-chosen `rate_per_second`, sized so
+    /// `delegate_recipient_share`'s integer-division math (`rate * share_bps
+    /// / 10000`) stays non-zero for a 50% split. `create_stream` above fixes
+    /// `rate_per_second == 1`, which underflows to a zero child rate.
+    fn create_stream_with_rate(&self, rate_per_second: i128, duration: u64) -> u64 {
+        let now = self.env.ledger().timestamp();
+        self.client.create_stream(
+            &self.sender,
+            &CreateStreamParams {
+                recipient: self.recipient.clone(),
+                deposit_amount: rate_per_second * duration as i128,
+                rate_per_second,
                 start_time: now,
                 cliff_time: now,
                 end_time: now + duration,
@@ -136,19 +163,26 @@ fn pause_cooldown_blocks_rapid_retoggle() {
     // First pause — advance past cooldown.
     ctx.clear_pause_cooldown();
     ctx.client.pause_stream(&id, &PauseReason::Operational);
-    assert_eq!(ctx.client.get_stream_state(&id).status, StreamStatus::Paused);
+    assert_eq!(
+        ctx.client.get_stream_state(&id).status,
+        StreamStatus::Paused
+    );
 
     // Advance past cooldown again, resume.
     ctx.clear_pause_cooldown();
     ctx.client.resume_stream(&id);
-    assert_eq!(ctx.client.get_stream_state(&id).status, StreamStatus::Active);
+    assert_eq!(
+        ctx.client.get_stream_state(&id).status,
+        StreamStatus::Active
+    );
 
     // Attempt immediate re-pause (no cooldown advance) — must be rejected.
-    let err = ctx
-        .client
-        .try_pause_stream(&id, &PauseReason::Operational);
+    let err = ctx.client.try_pause_stream(&id, &PauseReason::Operational);
     assert_eq!(err, Err(Ok(ContractError::PauseCooldownActive)));
-    assert_eq!(ctx.client.get_stream_state(&id).status, StreamStatus::Active);
+    assert_eq!(
+        ctx.client.get_stream_state(&id).status,
+        StreamStatus::Active
+    );
 }
 
 /// The cooldown also applies to resume: immediately re-resuming after a
@@ -164,7 +198,10 @@ fn resume_cooldown_blocks_rapid_re_resume() {
 
     let err = ctx.client.try_resume_stream(&id);
     assert_eq!(err, Err(Ok(ContractError::PauseCooldownActive)));
-    assert_eq!(ctx.client.get_stream_state(&id).status, StreamStatus::Paused);
+    assert_eq!(
+        ctx.client.get_stream_state(&id).status,
+        StreamStatus::Paused
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -181,9 +218,37 @@ fn withdraw_blocked_while_paused() {
     ctx.env.ledger().with_mut(|l| l.timestamp += 100);
 
     ctx.sender_pause(id);
-    assert_eq!(ctx.client.get_stream_state(&id).status, StreamStatus::Paused);
+    assert_eq!(
+        ctx.client.get_stream_state(&id).status,
+        StreamStatus::Paused
+    );
 
-    let err = ctx.client.try_withdraw(&id);
+    let err = ctx.client.try_withdraw(&id, &None);
+    assert_eq!(err, Err(Ok(ContractError::InvalidState)));
+}
+
+/// `batch_withdraw_to` is blocked on a Paused, non-time-terminal stream —
+/// same gate as `withdraw`/`withdraw_to`/`batch_withdraw`/`withdraw_from_pool`,
+/// just exercised through the keeper/auto-claim batch path. Regression guard
+/// for the per-stream Paused check at the `batch_withdraw_to` call site,
+/// which previously had no dedicated test (only global-pause coverage
+/// existed in `src/test.rs`).
+#[test]
+fn batch_withdraw_to_blocked_while_paused() {
+    let ctx = Ctx::setup();
+    let id = ctx.create_stream(1_000);
+
+    ctx.env.ledger().with_mut(|l| l.timestamp += 100);
+    ctx.sender_pause(id);
+
+    let destination = Address::generate(&ctx.env);
+    let param = WithdrawToParam {
+        stream_id: id,
+        destination,
+    };
+    let err = ctx
+        .client
+        .try_batch_withdraw_to(&ctx.recipient, &soroban_sdk::vec![&ctx.env, param]);
     assert_eq!(err, Err(Ok(ContractError::InvalidState)));
 }
 
@@ -208,12 +273,15 @@ fn withdraw_allowed_on_paused_stream_past_end_time() {
     let id = ctx.create_stream(100);
 
     ctx.sender_pause(id);
-    assert_eq!(ctx.client.get_stream_state(&id).status, StreamStatus::Paused);
+    assert_eq!(
+        ctx.client.get_stream_state(&id).status,
+        StreamStatus::Paused
+    );
 
     // Advance past end_time — time-terminal override kicks in.
     ctx.env.ledger().with_mut(|l| l.timestamp += 101);
 
-    let withdrawn = ctx.client.withdraw(&id);
+    let withdrawn = ctx.client.withdraw(&id, &None);
     assert_eq!(withdrawn, 100); // full deposit
 }
 
@@ -230,7 +298,7 @@ fn time_terminal_withdraw_from_paused_completes_stream() {
     // Advance past end_time.
     ctx.env.ledger().with_mut(|l| l.timestamp += 51);
 
-    let withdrawn = ctx.client.withdraw(&id);
+    let withdrawn = ctx.client.withdraw(&id, &None);
     assert_eq!(withdrawn, 50);
     assert_eq!(
         ctx.client.get_stream_state(&id).status,
@@ -255,11 +323,12 @@ fn pause_rejected_on_time_terminal_stream() {
     ctx.env.ledger().with_mut(|l| l.timestamp += 11);
     ctx.clear_pause_cooldown();
 
-    let err = ctx
-        .client
-        .try_pause_stream(&id, &PauseReason::Operational);
+    let err = ctx.client.try_pause_stream(&id, &PauseReason::Operational);
     assert_eq!(err, Err(Ok(ContractError::StreamTerminalState)));
-    assert_eq!(ctx.client.get_stream_state(&id).status, StreamStatus::Active);
+    assert_eq!(
+        ctx.client.get_stream_state(&id).status,
+        StreamStatus::Active
+    );
 }
 
 /// `resume_stream` on a Paused stream that has since passed end_time must
@@ -270,7 +339,10 @@ fn resume_rejected_on_time_terminal_paused_stream() {
     let id = ctx.create_stream(100);
 
     ctx.sender_pause(id);
-    assert_eq!(ctx.client.get_stream_state(&id).status, StreamStatus::Paused);
+    assert_eq!(
+        ctx.client.get_stream_state(&id).status,
+        StreamStatus::Paused
+    );
 
     // Advance past end_time while stream is still Paused.
     ctx.env.ledger().with_mut(|l| l.timestamp += 101);
@@ -279,7 +351,10 @@ fn resume_rejected_on_time_terminal_paused_stream() {
     let err = ctx.client.try_resume_stream(&id);
     assert_eq!(err, Err(Ok(ContractError::StreamTerminalState)));
     // Status must remain Paused — no state change on error.
-    assert_eq!(ctx.client.get_stream_state(&id).status, StreamStatus::Paused);
+    assert_eq!(
+        ctx.client.get_stream_state(&id).status,
+        StreamStatus::Paused
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -299,9 +374,7 @@ fn pause_rejected_on_cancelled_stream() {
     );
 
     ctx.clear_pause_cooldown();
-    let err = ctx
-        .client
-        .try_pause_stream(&id, &PauseReason::Operational);
+    let err = ctx.client.try_pause_stream(&id, &PauseReason::Operational);
     assert_eq!(err, Err(Ok(ContractError::StreamTerminalState)));
 }
 
@@ -313,16 +386,14 @@ fn pause_rejected_on_completed_stream() {
 
     // Advance past end_time and withdraw everything to reach Completed.
     ctx.env.ledger().with_mut(|l| l.timestamp += 51);
-    ctx.client.withdraw(&id);
+    ctx.client.withdraw(&id, &None);
     assert_eq!(
         ctx.client.get_stream_state(&id).status,
         StreamStatus::Completed
     );
 
     ctx.clear_pause_cooldown();
-    let err = ctx
-        .client
-        .try_pause_stream(&id, &PauseReason::Operational);
+    let err = ctx.client.try_pause_stream(&id, &PauseReason::Operational);
     // Completed is caught by the terminal-state check (status == Completed).
     assert_eq!(err, Err(Ok(ContractError::StreamTerminalState)));
 }
@@ -359,7 +430,7 @@ fn accrual_continues_while_paused() {
         "accrual must have continued for the 300 seconds the stream was paused"
     );
 
-    let withdrawn = ctx.client.withdraw(&id);
+    let withdrawn = ctx.client.withdraw(&id, &None);
     assert_eq!(withdrawn, 500);
 }
 
@@ -390,7 +461,7 @@ fn cancel_from_paused_refunds_unstreamed() {
     assert_eq!(ctx.client.get_paused_stream_count(), 0);
 
     // Recipient should be able to withdraw the 400 accrued tokens.
-    let withdrawn = ctx.client.withdraw(&id);
+    let withdrawn = ctx.client.withdraw(&id, &None);
     assert_eq!(
         withdrawn, 400,
         "recipient must be able to claim accrued amount after cancel-from-paused"
@@ -438,7 +509,7 @@ fn global_pause_blocks_withdraw() {
     ctx.env.ledger().with_mut(|l| l.timestamp += 100);
     ctx.client.set_global_emergency_paused(&true);
 
-    let err = ctx.client.try_withdraw(&id);
+    let err = ctx.client.try_withdraw(&id, &None);
     assert_eq!(err, Err(Ok(ContractError::ContractPaused)));
 }
 
@@ -454,7 +525,10 @@ fn global_pause_does_not_block_sender_pause() {
 
     // Must succeed.
     ctx.client.pause_stream(&id, &PauseReason::Operational);
-    assert_eq!(ctx.client.get_stream_state(&id).status, StreamStatus::Paused);
+    assert_eq!(
+        ctx.client.get_stream_state(&id).status,
+        StreamStatus::Paused
+    );
 }
 
 /// `resume_stream` (sender path) is NOT blocked by the global emergency pause.
@@ -469,7 +543,10 @@ fn global_pause_does_not_block_sender_resume() {
 
     // Resume must succeed even while globally paused.
     ctx.client.resume_stream(&id);
-    assert_eq!(ctx.client.get_stream_state(&id).status, StreamStatus::Active);
+    assert_eq!(
+        ctx.client.get_stream_state(&id).status,
+        StreamStatus::Active
+    );
 }
 
 /// After `global_resume`, `withdraw` is unblocked again.
@@ -483,7 +560,7 @@ fn global_resume_unblocks_withdraw() {
 
     // Blocked while paused.
     assert_eq!(
-        ctx.client.try_withdraw(&id),
+        ctx.client.try_withdraw(&id, &None),
         Err(Ok(ContractError::ContractPaused))
     );
 
@@ -492,7 +569,7 @@ fn global_resume_unblocks_withdraw() {
     assert!(!ctx.client.get_global_emergency_paused());
 
     // Now withdraw should succeed.
-    let withdrawn = ctx.client.withdraw(&id);
+    let withdrawn = ctx.client.withdraw(&id, &None);
     assert_eq!(withdrawn, 100);
 }
 
@@ -500,12 +577,15 @@ fn global_resume_unblocks_withdraw() {
 // Admin-pause PauseRecord side-effect
 // ---------------------------------------------------------------------------
 
-/// `pause_stream` (sender path) does NOT store `DataKey::LastPauseRecord`.
-/// `pause_stream_as_admin` DOES store it, and the record can be retrieved via
-/// `get_pause_info` / the underlying storage.
+/// `pause_stream` (sender path) does NOT store `DataKey::LastPauseRecord(PauseKind::Stream)`.
+/// `pause_stream_as_admin` DOES store it.
 ///
-/// We verify the observable difference: after a sender pause there is no
-/// stored record; after an admin pause there is.
+/// `get_pause_info` is the **protocol-wide** (global) pause query — it is not
+/// the right accessor here, since `LastPauseRecord(PauseKind::Stream)` is a
+/// separate, per-mechanism instance-storage key with no public getter. We
+/// inspect it directly via `env.as_contract`, the same pattern already used
+/// by `paused_stream_count.rs` and `storage_key_compat.rs` for other
+/// storage-only keys.
 #[test]
 fn admin_pause_stores_pause_record_sender_pause_does_not() {
     let ctx = Ctx::setup();
@@ -513,11 +593,17 @@ fn admin_pause_stores_pause_record_sender_pause_does_not() {
 
     // Sender pause — no PauseRecord expected.
     ctx.sender_pause(id);
-    // `get_pause_info` returns None when no admin-pause record has been written.
-    let info = ctx.client.get_pause_info();
+    let has_record_after_sender_pause = ctx.env.as_contract(&ctx.contract_id, || {
+        ctx.env
+            .storage()
+            .instance()
+            .has(&fluxora_stream::DataKey::LastPauseRecord(
+                fluxora_stream::PauseKind::Stream,
+            ))
+    });
     assert!(
-        info.is_none(),
-        "sender pause must not write a PauseRecord; got: {info:?}"
+        !has_record_after_sender_pause,
+        "sender pause must not write a LastPauseRecord(Stream)"
     );
 
     // Resume, then admin-pause — PauseRecord expected.
@@ -525,11 +611,19 @@ fn admin_pause_stores_pause_record_sender_pause_does_not() {
     ctx.client.resume_stream(&id);
     ctx.admin_pause(id);
 
-    let info = ctx.client.get_pause_info();
+    let record_after_admin_pause = ctx.env.as_contract(&ctx.contract_id, || {
+        ctx.env
+            .storage()
+            .instance()
+            .get::<_, fluxora_stream::PauseRecord>(&fluxora_stream::DataKey::LastPauseRecord(
+                fluxora_stream::PauseKind::Stream,
+            ))
+    });
     assert!(
-        info.is_some(),
-        "admin pause must write a PauseRecord accessible via get_pause_info"
+        record_after_admin_pause.is_some(),
+        "admin pause must write a LastPauseRecord(Stream) accessible from instance storage"
     );
+    assert_eq!(record_after_admin_pause.unwrap().actor, ctx.admin);
 }
 
 // ---------------------------------------------------------------------------
@@ -547,9 +641,7 @@ fn double_pause_returns_stream_already_paused() {
     assert_eq!(ctx.client.get_paused_stream_count(), 1);
 
     ctx.clear_pause_cooldown();
-    let err = ctx
-        .client
-        .try_pause_stream(&id, &PauseReason::Operational);
+    let err = ctx.client.try_pause_stream(&id, &PauseReason::Operational);
     assert_eq!(err, Err(Ok(ContractError::StreamAlreadyPaused)));
     // Counter must be unchanged.
     assert_eq!(ctx.client.get_paused_stream_count(), 1);
@@ -562,10 +654,51 @@ fn resume_active_stream_returns_stream_not_paused() {
     let ctx = Ctx::setup();
     let id = ctx.create_stream(1_000);
     // Stream is Active — no pause has occurred.
-    assert_eq!(ctx.client.get_stream_state(&id).status, StreamStatus::Active);
+    assert_eq!(
+        ctx.client.get_stream_state(&id).status,
+        StreamStatus::Active
+    );
 
     ctx.clear_pause_cooldown();
     let err = ctx.client.try_resume_stream(&id);
     assert_eq!(err, Err(Ok(ContractError::StreamNotPaused)));
     assert_eq!(ctx.client.get_paused_stream_count(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Non-withdrawal operations on a Paused stream
+// ---------------------------------------------------------------------------
+
+/// `delegate_recipient_share` is NOT blocked by a per-stream Paused status
+/// (only by the terminal-state and end_time guards it already checks).
+/// This mirrors the existing "rate/schedule changes are allowed on Paused"
+/// behavior documented for `update_rate_per_second` / `top_up_stream` — pause
+/// only gates withdrawals, not configuration changes. Pinned here so a future
+/// refactor that adds a `status == Active` guard to this entrypoint is a
+/// deliberate, reviewed behavior change rather than an accidental regression.
+#[test]
+fn delegate_recipient_share_allowed_while_paused() {
+    let ctx = Ctx::setup();
+    let id = ctx.create_stream_with_rate(10_000, 1_000);
+
+    ctx.sender_pause(id);
+    assert_eq!(
+        ctx.client.get_stream_state(&id).status,
+        StreamStatus::Paused
+    );
+
+    let new_recipient = Address::generate(&ctx.env);
+    let child_id =
+        ctx.client
+            .delegate_recipient_share(&id, &ctx.recipient, &5_000u32, &new_recipient);
+
+    // Parent stream remains Paused; child is created Active.
+    assert_eq!(
+        ctx.client.get_stream_state(&id).status,
+        StreamStatus::Paused
+    );
+    assert_eq!(
+        ctx.client.get_stream_state(&child_id).status,
+        StreamStatus::Active
+    );
 }

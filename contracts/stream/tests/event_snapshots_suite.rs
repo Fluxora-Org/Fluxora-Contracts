@@ -318,7 +318,7 @@ fn event_snapshot_withdrawal_has_correct_topics_and_payload() {
     ctx.env.ledger().set_timestamp(500);
     let events_before = ctx.env.events().all().len();
 
-    let withdrawn_amount = ctx.client().withdraw(&stream_id);
+    let withdrawn_amount = ctx.client().withdraw(&stream_id, &None);
 
     let events = ctx.env.events().all();
     assert_eq!(withdrawn_amount, 500);
@@ -384,7 +384,7 @@ fn event_snapshot_no_withdrawal_event_when_amount_zero() {
     ctx.env.ledger().set_timestamp(100);
     let events_before = ctx.env.events().all().len();
 
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(withdrawn, 0, "Withdrawal before cliff must return 0");
 
     let events = ctx.env.events().all();
@@ -738,12 +738,12 @@ fn event_snapshot_stream_completed_emitted_after_withdrew() {
 
     // Partial withdrawal first
     ctx.env.ledger().set_timestamp(300);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     // Final withdrawal that completes the stream
     ctx.env.ledger().set_timestamp(1000);
     let events_before = ctx.env.events().all().len();
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let events = ctx.env.events().all();
     let mut withdrew_idx: Option<usize> = None;
@@ -797,7 +797,7 @@ fn event_snapshot_stream_closed_has_correct_topics() {
 
     // Complete the stream
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let events_before = ctx.env.events().all().len();
     ctx.client().close_completed_stream(&stream_id);
@@ -1350,7 +1350,7 @@ fn event_snapshot_no_events_on_failed_operations() {
 
     // Try to pause an already completed stream (should fail)
     ctx.env.ledger().set_timestamp(1000);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let events_before = ctx.env.events().all().len();
     let result = ctx

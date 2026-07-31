@@ -73,7 +73,7 @@ fn withdraw_emits_correct_event() {
     let stream_id = ctx.create_default_stream();
 
     ctx.env.ledger().set_timestamp(300);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     let events = ctx.env.events().all();
     assert!(!events.is_empty(), "must emit Withdrawal event");
@@ -222,7 +222,7 @@ fn non_recipient_cannot_withdraw_strict_auth() {
     let _non_recipient = Address::generate(&ctx.env);
 
     // Try to withdraw without proper auth
-    let result = ctx.client().try_withdraw(&stream_id);
+    let result = ctx.client().try_withdraw(&stream_id, &None);
     assert!(
         result.is_err(),
         "non-recipient must not be able to withdraw"
@@ -330,7 +330,7 @@ fn withdraw_at_exact_cliff_time_returns_zero() {
 
     // At exact cliff time, nothing is withdrawable yet
     ctx.env.ledger().set_timestamp(500);
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(withdrawn, 0, "withdraw at exact cliff time must return 0");
 }
 
@@ -359,7 +359,7 @@ fn withdraw_one_second_after_cliff_returns_accrued() {
 
     // One second after cliff, 1 token is accrued
     ctx.env.ledger().set_timestamp(501);
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(
         withdrawn, 1,
         "withdraw one second after cliff must return 1"
@@ -374,7 +374,7 @@ fn withdraw_at_exact_end_time_returns_full_deposit() {
 
     // At exact end time, full deposit is accrued
     ctx.env.ledger().set_timestamp(1000);
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(
         withdrawn, 1000,
         "withdraw at exact end time must return full deposit"
@@ -389,7 +389,7 @@ fn withdraw_after_end_time_returns_full_deposit() {
 
     // After end time, full deposit is accrued (no over-accrual)
     ctx.env.ledger().set_timestamp(2000);
-    let withdrawn = ctx.client().withdraw(&stream_id);
+    let withdrawn = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(
         withdrawn, 1000,
         "withdraw after end time must return full deposit"

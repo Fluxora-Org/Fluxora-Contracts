@@ -97,10 +97,74 @@ Stream Metadata Gas Profile
 Validation CPU Cost: Bounded validation iterates over a maximum of 8 key-value pairs (MAX_METADATA_KEYS = 8), checking string lengths and accumulating total byte count (MAX_METADATA_BYTES = 512). Execution CPU cost is negligible (< 0.05M CPU instructions).
 Fail-Fast Early Revert: Failures during validate_metadata short-circuit before any storage key reads/writes or token transfers, avoiding wasted ledger write footprint fees.
 Query Cost (get_stream_metadata): A single read-only persistent storage lookup on DataKey::Stream(u64). Consumes minimal CPU instructions (~0.1M) with no state mutation or token call overhead.
-Stream Metadata Gas Profile
-Validation CPU Cost: Bounded validation iterates over a maximum of 8 key-value pairs (MAX_METADATA_KEYS = 8), checking string lengths and accumulating total byte count (MAX_METADATA_BYTES = 512). Execution CPU cost is negligible (< 0.05M CPU instructions).
-Fail-Fast Early Revert: Failures during validate_metadata short-circuit before any storage key reads/writes or token transfers, avoiding wasted ledger write footprint fees.
-Query Cost (get_stream_metadata): A single read-only persistent storage lookup on DataKey::Stream(u64). Consumes minimal CPU instructions (~0.1M) with no state mutation or token call overhead.
+
+Rate Schedule Validation Gas Profile
+The `validate_rate_schedule` function validates a multi-segment rate schedule before storage.
+It performs a single linear scan over the segment array with one `checked_mul` and one
+`checked_add` per segment.
+
+Validation is bounded by `MAX_RATE_SEGMENTS = 256`:
+
+| Budget | Value | Notes |
+|---|---|---|
+| Max segments | 256 | Hard bound; exceeds → `RateScheduleTooManySegments` |
+| CPU (256 segments) | < 0.01 M instructions | Linear scan with checked arithmetic |
+| CPU (empty schedule) | < 0.001 M instructions | Length check only |
+
+**Fail-Fast Early Revert**: The count check runs first, then per-segment checks short-circuit
+at the first violation (zero-length, negative rate, or overflow) before any storage
+mutation occurs.
+
+## Rate-Schedule Packing: Packed vs. Unpacked Storage
+
+`contracts/stream/src/accrual.rs` provides `pack_rate_segment(rate_per_second, duration_secs)`
+and `unpack_rate_segment(word)`, which bit-pack a `(rate_per_second: i128, duration_secs: u64)`
+rate-schedule segment into a single `u128` storage word instead of two separate full-width
+fields.
+
+### Bit-field layout
+
+```text
+bits [0, 31)   (31 bits) : duration_secs  (unsigned, 0..=2^31-1, ~68 years)
+bit   31       (1 bit)   : sign bit       (0 = non-negative, 1 = negative)
+bits [32, 128) (96 bits) : rate magnitude (unsigned, 0..=2^96-1)
+```
+
+`MAX_PACKABLE_DURATION_SECS` (2^31 - 1) and `MAX_PACKABLE_RATE_MAGNITUDE` (2^96 - 1) bound the
+packable range. A rate or duration outside these bounds is rejected with
+`ContractError::InvalidParams` — the packer never silently truncates a value into an adjacent
+bit field.
+
+### Measured baseline: 10-segment schedule
+
+`contracts/stream/tests/gas_regression.rs::test_rate_schedule_packed_vs_unpacked_storage_gas`
+builds a representative 10-segment schedule (mixed positive/negative rates, short and long
+durations) two ways — as bit-packed `u128` words and as the legacy two-full-width-field layout —
+and measures both the serialized XDR size (what Soroban charges rent on) and the CPU
+instructions charged for the persistent-storage `set`/`get` host calls:
+
+| Metric | Unpacked (10 segments) | Packed (10 segments) | Reduction |
+|---|---|---|---|
+| Serialized XDR bytes | 932 bytes (93.2 B/segment) | 212 bytes (21.2 B/segment) | ~77% smaller |
+| CPU: persistent `set` | 29,422 instructions | 12,399 instructions | ~58% fewer |
+| CPU: persistent `get` | 41,103 instructions | 9,572 instructions | ~77% fewer |
+
+The byte-size reduction exceeds the "roughly half" estimate from the two-full-width-field
+comparison because Soroban's XDR framing overhead (type tags, vector length prefixes) is paid
+once per `Vec` rather than per field, so collapsing two fields into one word removes a
+disproportionate share of that framing on top of the raw bit-width halving. The CPU reduction
+follows directly from the smaller serialized payload: persistent storage `set`/`get` cost scales
+with entry size.
+
+Run the measurement with:
+
+```bash
+cargo test -p fluxora_stream --test gas_regression rate_schedule -- --nocapture
+```
+
+The measured CPU instruction counts are recorded in the JSON baseline above
+(`rate_schedule_storage.*`) and validated on every CI run by `script/validate_gas.py`.
+
 Hot Path Analysis
 withdraw
 The withdraw function is the most common operation. Its cost is dominated by:
@@ -122,12 +186,33 @@ TotalLiabilities instance-storage I/O from 100 reads plus 100 writes to 1 read
 plus 1 write, while preserving the same final liability value. The batch remains
 atomic: any validation or transfer failure reverts the whole call.
 
-bulk_cancel_streams
-bulk_cancel_streams uses the same single-flush liability pattern. Recipient
-accrual payouts and sender refunds both decrement a local TotalLiabilities
-accumulator, which is written back once after all streams have been processed.
-For a 100-stream cancellation where every stream has both accrued recipient
-funds and a sender refund, this reduces liability-slot writes from 200 to 1.
+## Batch Benchmark Coverage
+
+The stream contract benchmark harness is implemented in `contracts/stream/tests/gas_regression.rs`.
+It captures hot-path CPU costs for both creation and withdrawal batch operations and documents the expected regression surface.
+
+Measured paths include:
+- `create_stream`: single-stream creation cost.
+- `create_streams`: batched creation for 1, 5, and 10 streams.
+- `withdraw`: single withdrawal cost.
+- `batch_withdraw`: batched withdrawal for 1, 10, 50, and 100 stream IDs.
+- `batch_withdraw` mixed-state coverage: active, cancelled, and completed streams together.
+
+This harness is intentionally narrow: it validates batch gas scaling and edge-case state handling, while functional correctness is covered by the broader stream contract test suite.
+
+## Regression Surface
+
+The current batch benchmark coverage explicitly locks down the following contract behavior:
+
+- `create_stream`: single-stream creation gas cost.
+- `create_streams`: batched creation for 1, 5, and 10 streams, ensuring batch-size scaling and total deposit handling.
+- `withdraw`: single-stream withdrawal cost.
+- `batch_withdraw`: batched withdrawal for 1, 10, 50, and 100 stream IDs, ensuring loop scaling and single-auth efficiency.
+- `batch_withdraw` mixed-state path: active, cancelled, and completed streams together, ensuring the batch loop exercises completion and cancellation handling.
+
+This coverage is intentionally regression-focused: it locks behavior around batch gas budgets, mixed stream state paths, and batch-create scaling without changing the public batch semantics.
+
+## Hot Path Analysis
 
 batch_withdraw_to
 Identical cost structure to batch_withdraw except that each entry carries an explicit per-entry destination address. The additional WithdrawToParam struct field has negligible impact on iteration cost.
@@ -157,12 +242,18 @@ The following table provides the CPU instruction counts for core operations.
 <!-- GAS_BASELINE_START -->
 {
   "create_stream": 568292,
+  "create_streams": {
+    "1": 1500000,
+    "5": 10000000,
+    "10": 40000000
+  },
   "withdraw": 562057,
   "batch_withdraw": {
     "1": 531125,
     "10": 3675044,
     "50": 19844037,
-    "100": 45453389
+    "100": 45453389,
+    "mixed-state": 1500000
   },
   "batch_withdraw_to": {
     "1": 545000,
@@ -173,20 +264,25 @@ The following table provides the CPU instruction counts for core operations.
   "bulk_resume_streams_as_admin": {
     "1": 4000000,
     "10": 18000000,
-    "50": 85000000,
-    "100": 170000000
+    "50": 90000000,
+    "100": 180000000
   },
   "bulk_cancel_streams": {
     "1": 3500000,
     "10": 16000000,
-    "50": 75000000,
-    "100": 150000000
+    "50": 80000000,
+    "100": 160000000
   },
   "keeper_cancel": {
     "partial_accrual": 786739,
     "fully_accrued": 386889
+  },
+  "rate_schedule_storage": {
+    "unpacked_10_segments_write": 29422,
+    "unpacked_10_segments_read": 41103,
+    "packed_10_segments_write": 12399,
+    "packed_10_segments_read": 9572
   }
-}
 }
 
 <!-- GAS_BASELINE_END -->

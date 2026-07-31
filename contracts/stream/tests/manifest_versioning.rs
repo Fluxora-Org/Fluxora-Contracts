@@ -370,7 +370,7 @@ fn edge_case_completed_stream_terminal_state() {
     ctx.advance_time(1000); // Reach end_time
 
     // Withdraw full amount
-    ctx.client.withdraw(&stream_id).expect("should succeed");
+    ctx.client.withdraw(&stream_id, &None).expect("should succeed");
 
     // Stream should now be Completed
     let stream = ctx
@@ -454,7 +454,7 @@ fn edge_case_global_pause_instance_specific() {
     assert!(create_result.is_err());
 
     // Existing stream withdrawals should also fail
-    let withdraw_result = ctx.client.withdraw(&stream_id);
+    let withdraw_result = ctx.client.withdraw(&stream_id, &None);
     assert!(withdraw_result.is_err());
 
     // Resume pause
@@ -464,7 +464,7 @@ fn edge_case_global_pause_instance_specific() {
     // Operations should now succeed
     let withdraw_result2 = ctx
         .client
-        .withdraw(&stream_id)
+        .withdraw(&stream_id, &None)
         .expect("should succeed after unpause");
     assert_eq!(withdraw_result2, 100);
 }
@@ -520,7 +520,7 @@ fn edge_case_withdrawable_deterministic_with_checkpoint() {
 
     // Withdraw 3000
     ctx.client
-        .withdraw(&stream_id)
+        .withdraw(&stream_id, &None)
         .expect("withdraw should succeed");
 
     // Remaining should be 2000
@@ -730,7 +730,7 @@ fn regression_withdrawn_monotonic() {
 
     for t in [0, 100, 200, 500, 1000, 2000, 5000].iter() {
         ctx.advance_time(*t);
-        ctx.client.withdraw(&stream_id).expect("should succeed");
+        ctx.client.withdraw(&stream_id, &None).expect("should succeed");
 
         let stream = ctx
             .client
