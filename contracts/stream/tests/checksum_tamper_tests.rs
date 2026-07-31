@@ -22,9 +22,10 @@
 #![cfg(test)]
 
 use fluxora_stream::{
-    checksum, FluxoraStream, FluxoraStreamClient, StreamKind, StreamStatus,
+    FluxoraStream, FluxoraStreamClient, StreamKind, StreamStatus,
     CreateStreamParams,
 };
+use fluxora_stream::checksum::compute_stream_checksum;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
@@ -143,94 +144,7 @@ fn test_tamper_detection_stream_id() {
     // the checksum of a different stream
     let different_stream = ctx.client.get_stream_state(&tampered_stream_id);
 
-    // If the stream doesn't exist, we can't test directly, but this test
-    // demonstrates the concept. In a real implementation, you'd have
-    // direct access to the checksum function.
-    if let Ok(tampered_stream) = different_stream {
-        let tampered_checksum = compute_stream_checksum(&ctx.env, &tampered_stream);
-        assert_ne!(
-            original_checksum, tampered_checksum,
-            "Changing stream_id should change checksum"
-        );
-    }
-}
 
-/// Helper function to compute a stream's checksum.
-/// This should match the actual checksum implementation in checksum.rs.
-fn compute_stream_checksum(env: &Env, stream: &fluxora_stream::Stream) -> [u8; 32] {
-    // This is a placeholder that should be replaced with the actual
-    // checksum function from the checksum module.
-    // 
-    // For now, we hash all fields as a demonstration of what the
-    // tamper-detection tests expect.
-    use soroban_sdk::crypto::sha256;
-
-    let mut hash_input = Vec::new();
-
-    // Include all fields in the hash
-    hash_input.extend_from_slice(&stream.stream_id.to_le_bytes());
-    // Addresses need to be serialized
-    // For now, we just use the address string representation
-    // In a real implementation, use proper serialization
-    // hash_input.extend_from_slice(&stream.sender.to_bytes());
-    // hash_input.extend_from_slice(&stream.recipient.to_bytes());
-    hash_input.extend_from_slice(&stream.deposit_amount.to_le_bytes());
-    hash_input.extend_from_slice(&stream.rate_per_second.to_le_bytes());
-    hash_input.extend_from_slice(&stream.start_time.to_le_bytes());
-    hash_input.extend_from_slice(&stream.cliff_time.to_le_bytes());
-    hash_input.extend_from_slice(&stream.end_time.to_le_bytes());
-    hash_input.extend_from_slice(&stream.withdrawn_amount.to_le_bytes());
-    hash_input.extend_from_slice(&(stream.status as u32).to_le_bytes());
-
-    // Option fields: include a flag for Some/None
-    if let Some(cancelled_at) = stream.cancelled_at {
-        hash_input.push(1);
-        hash_input.extend_from_slice(&cancelled_at.to_le_bytes());
-    } else {
-        hash_input.push(0);
-    }
-
-    hash_input.extend_from_slice(&stream.checkpointed_amount.to_le_bytes());
-    hash_input.extend_from_slice(&stream.checkpointed_at.to_le_bytes());
-    hash_input.extend_from_slice(&stream.withdraw_dust_threshold.to_le_bytes());
-
-    // Bytes fields need proper handling
-    // In a real implementation, use the actual serialization
-    hash_input.extend_from_slice(&(stream.kind as u32).to_le_bytes());
-    hash_input.extend_from_slice(&stream.last_pause_toggle_ledger.to_le_bytes());
-    hash_input.extend_from_slice(&stream.last_withdraw_ledger.to_le_bytes());
-    hash_input.extend_from_slice(&stream.last_rate_change_ledger.to_le_bytes());
-
-    // Boolean options
-    if let Some(irrevocable) = stream.irrevocable {
-        hash_input.push(1);
-        hash_input.push(irrevocable as u8);
-    } else {
-        hash_input.push(0);
-    }
-
-    if let Some(is_pooled) = stream.is_pooled {
-        hash_input.push(1);
-        hash_input.push(is_pooled as u8);
-    } else {
-        hash_input.push(0);
-    }
-
-    hash_input.extend_from_slice(&stream.delegation_depth.to_le_bytes());
-
-    if let Some(decommissioned) = stream.decommissioned {
-        hash_input.push(1);
-        hash_input.push(decommissioned as u8);
-    } else {
-        hash_input.push(0);
-    }
-
-    // For Option<u64> parent_stream_id
-    if let Some(parent_id) = stream.parent_stream_id {
-        hash_input.push(1);
-        hash_input.extend_from_slice(&parent_id.to_le_bytes());
-    } else {
-        hash_input.push(0);
     }
 
     // The hash of all fields

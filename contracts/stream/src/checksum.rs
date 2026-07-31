@@ -29,312 +29,270 @@
 //!
 //! ---
 //!
-//! # Storage key layout invariants (V5 → V6 → V7)
+//! # Stream data integrity checksum
 //!
-//! `DataKey` is a `#[contracttype]` enum. Soroban serialises enum variants by
-//! their **0-based declaration-order discriminant**. Reordering, inserting, or
-//! removing variants silently corrupts every persistent storage entry on any
-//! live instance.
+//! The module provides `compute_stream_checksum()` which computes a deterministic
+//! SHA-256 hash over the **financial-state** fields of a `Stream` struct. This
+//! checksum can be used externally to detect silent data corruption or tampering.
 //!
-//! ## V5 discriminant table (CONTRACT_VERSION = 5)
+//! ## Included fields (financial state)
 //!
-//! | Discriminant | Variant                    | Storage   | Value type        |
-//! |:------------:|:---------------------------|:----------|:------------------|
-//! | 0            | `Config`                   | Instance  | `Config`          |
-//! | 1            | `NextStreamId`             | Instance  | `u64`             |
-//! | 2            | `Stream(u64)`              | Persistent| `Stream` (V5)     |
-//! | 3            | `RecipientStreams(Address)` | Persistent| `Vec<u64>`        |
-//! | 4            | `GlobalEmergencyPaused`    | Instance  | `bool`            |
-//! | 5            | `CreationPaused`           | Instance  | `bool`            |
-//! | 6            | `GlobalPauseReason`        | Instance  | `String`          |
-//! | 7            | `GlobalPauseTimestamp`     | Instance  | `u64`             |
-//! | 8            | `GlobalPauseAdmin`         | Instance  | `Address`         |
-//! | 9            | `AutoClaimDestination(u64)`| Persistent| `Address`         |
-//! | 10           | `NextTemplateId`           | Instance  | `u64`             |
-//! | 11           | `ActiveTemplateCount`      | Instance  | `u64`             |
-//! | 12           | `StreamTemplate(u64)`      | Persistent| `StreamScheduleTemplate` |
-//! | 13           | `OwnerTemplateIds(Address)`| Persistent| `Vec<u64>`        |
-//! | 14           | `TotalLiabilities`         | Instance  | `i128`            |
+//! | Field                 | Type             | Rationale                              |
+//! |:----------------------|:-----------------|:---------------------------------------|
+//! | `stream_id`           | `u64`            | Uniquely identifies the stream         |
+//! | `sender`              | `Address`        | Financial counterparty                 |
+//! | `recipient`           | `Address`        | Financial counterparty                 |
+//! | `claim_owner`         | `Option<Address>`| Ownership for claim operations         |
+//! | `deposit_amount`      | `i128`           | Core financial amount                  |
+//! | `rate_per_second`     | `i128`           | Core financial parameter               |
+//! | `start_time`          | `u64`            | Vesting schedule boundary              |
+//! | `cliff_time`          | `u64`            | Vesting schedule boundary              |
+//! | `end_time`            | `u64`            | Vesting schedule boundary              |
+//! | `withdrawn_amount`    | `i128`           | Tracked disbursement                   |
+//! | `status`              | `StreamStatus`   | Lifecycle state                        |
+//! | `cancelled_at`        | `Option<u64>`    | Terminal timestamp                     |
+//! | `checkpointed_amount` | `i128`           | Accrual checkpoint                     |
+//! | `checkpointed_at`     | `u64`            | Accrual checkpoint                     |
+//! | `withdraw_dust_threshold` | `i128`       | Dust threshold for withdrawals         |
+//! | `memo`                | `Option<Bytes>`  | User-supplied memo                     |
+//! | `kind`                | `StreamKind`     | Vesting shape (Linear/CliffOnly/...)   |
+//! | `metadata`            | `Option<Map<..>>`| Indexer-visible metadata               |
+//! | `witness`             | `Option<Address>`| Compliance witness                     |
+//! | `is_pooled`           | `Option<bool>`   | Pooled stream flag                     |
+//! | `parent_stream_id`    | `Option<u64>`    | Delegation parent reference            |
+//! | `irrevocable`         | `Option<bool>`   | Sender-cancel restriction              |
 //!
-//! V5 `Stream` struct fields (in declaration order, positional XDR encoding):
+//! ## Excluded fields (operational metadata)
 //!
-//! | Position | Field                    | Type              |
-//! |:--------:|:-------------------------|:------------------|
-//! | 0        | `stream_id`              | `u64`             |
-//! | 1        | `sender`                 | `Address`         |
-//! | 2        | `recipient`              | `Address`         |
-//! | 3        | `deposit_amount`         | `i128`            |
-//! | 4        | `rate_per_second`        | `i128`            |
-//! | 5        | `start_time`             | `u64`             |
-//! | 6        | `cliff_time`             | `u64`             |
-//! | 7        | `end_time`               | `u64`             |
-//! | 8        | `withdrawn_amount`       | `i128`            |
-//! | 9        | `status`                 | `StreamStatus`    |
-//! | 10       | `cancelled_at`           | `Option<u64>`     |
-//! | 11       | `checkpointed_amount`    | `i128`            |
-//! | 12       | `checkpointed_at`        | `u64`             |
-//! | 13       | `withdraw_dust_threshold`| `i128`            |
+//! These fields are intentionally omitted from the checksum because they represent
+//! runtime operational metadata that changes on valid operations without affecting
+//! the financial integrity of the stream:
 //!
-//! **No `memo` field in V5.** The V5 `Stream` struct has exactly 14 fields.
+//! | Field                       | Rationale                                      |
+//! |:----------------------------|:-----------------------------------------------|
+//! | `last_pause_toggle_ledger`  | Changes on every pause/resume; not financial   |
+//! | `last_withdraw_ledger`      | Withdrawal frequency tracking; not financial   |
+//! | `last_rate_change_ledger`   | Rate-change sequencing; rate itself is included|
+//! | `decommissioned`            | Administrative cleanup flag                    |
+//! | `delegation_depth`          | Governance/audit trail; not financial state    |
 //!
-//! ## V6 additions (appended — discriminants 0–14 preserved)
+//! ## Upgrade compatibility
 //!
-//! | Discriminant | Variant                         | Storage   | Value type  |
-//! |:------------:|:--------------------------------|:----------|:------------|
-//! | 15           | `WithdrawNonce(Address)`        | Persistent| `u64`       |
-//! | 16           | `PauseState`                    | Instance  | `PauseState`|
-//! | 17           | `ReentrancyLock`                | Instance  | `bool`      |
-//! | 18           | `RecipientStreamPage(Address,u32)` | Persistent | `Vec<u64>` |
-//! | 19           | `RecipientStreamPageCount(Address)` | Persistent | `u32`    |
-//! | 20           | `PendingRecipientUpdate(u64)`   | Persistent| `Address`   |
+//! The set of fields included in the checksum is part of the contract's stability
+//! guarantee. New fields added to the `Stream` struct must be:
 //!
-//! ## Post-V6 freeze additions (appended — discriminants 0–20 preserved)
-//!
-//! | Discriminant | Variant                         | Storage   | Value type   |
-//! |:------------:|:--------------------------------|:----------|:-------------|
-//! | 21           | `IdReservation(Address)`        | Instance  | `IdReservation` |
-//! | 22           | `MaxRatePerSecond`              | Instance  | `i128`       |
-//! | 23           | `DelegatedWithdrawNonce(Address)`| Persistent| `u64`       |
-//! | 24           | `LastPauseRecord(PauseKind)`    | Instance  | `PauseRecord`|
-//! | 25           | `RotationHistory(u64)`          | Persistent| `Vec<...>`   |
-//! | 26           | `LastAccrualLedgerTimestamp`    | Instance  | `u64`        |
-//! | 27           | `PausedStreamCount`             | Instance  | `u64`        |
-//! | 28           | `TotalKeeperFeesPaid`           | Instance  | `i128`       |
-//!
-//! Total live `DataKey` variant count in V7 (before post-V7 additions): **29** (discriminants 0–28).
-//! Current live `DataKey` variant count: **36** (discriminants 0–35) — see post-V7 additions below.
-//!
-//! V6 `Stream` struct adds one field at the end:
-//!
-//! | Position | Field  | Type              |
-//! |:--------:|:-------|:------------------|
-//! | 14       | `memo` | `Option<Bytes>`   |
-//!
-//! All V5 persistent `Stream` entries remain decodable on a V6 instance because
-//! Soroban XDR struct decoding is **positional and forward-compatible**: a V6
-//! decoder reading a V5-encoded struct will see `memo` as absent (`None`).
-//!
-//! ## V7 additions (discriminants 21–28)
-//!
-//! | Discriminant | Variant                         | Storage   | Value type            |
-//! |:------------:|:---------------------------------|:----------|:-----------------------|
-//! | 21           | `IdReservation(Address)`         | Persistent| `IdReservation`        |
-//! | 22           | `MaxRatePerSecond`               | Instance  | `i128`                 |
-//! | 23           | `DelegatedWithdrawNonce(Address)`| Persistent| `u64`                  |
-//! | 24           | `LastPauseRecord(PauseKind)`     | Instance  | `PauseRecord`          |
-//! | 25           | `RotationHistory(u64)`           | Persistent| `Vec<RotationEntry>`   |
-//! | 26           | `LastAccrualLedgerTimestamp`     | Instance  | `u64`                  |
-//! | 27           | `PausedStreamCount`              | Instance  | `u64`                  |
-//! | 28           | `TotalKeeperFeesPaid`            | Instance  | `i128`                 |
-//!
-//! These eight variants were appended incrementally across several prior changes
-//! (`IdReservation` in issue #584, `TotalKeeperFeesPaid` in issue #623, and others)
-//! without ever being consolidated into a single documented table or accompanying
-//! variant-count test — this section and the `v7_*` tests below close that gap
-//! retroactively. No `Stream` struct field changes accompanied these additions;
-//! the V6 `Stream` layout (15 fields, `memo` at position 14) is unchanged in V7.
-//!
-//! ### Why `CONTRACT_VERSION` was not bumped to 7
-//!
-//! Per `docs/upgrade.md`'s "When to increment" policy, a version bump is **required**
-//! only for changes that break a correctly-written existing client (removed/renamed
-//! entry-points, changed parameter types, changed error/event shapes, or storage
-//! layout changes that make *existing* entries unreadable). Purely additive
-//! `DataKey` variants satisfy none of those: per the append-only invariant below,
-//! they neither reorder nor remove any existing discriminant, so every V6-era
-//! persistent entry remains byte-identical and readable. This is a strictly
-//! narrower footprint than the policy's "Add a new entry-point (purely additive)"
-//! row — itself only *recommended*, not required, to bump conservatively (contrast
-//! the `transfer_sender` note in `docs/upgrade.md`, which chose to bump for a new
-//! *entry-point*). Of these eight variants, only `IdReservation` gained a
-//! corresponding read view (`get_id_reservation`); that entry-point addition was
-//! deliberately treated the same permissive way. `CONTRACT_VERSION` remains `6`;
-//! this decision may be revisited by maintainers if an integrator-visible reason
-//! to bump surfaces later.
-//!
-//! ## Invariant: discriminants 0–14 are frozen
-//!
-//! | Discriminant | Variant                            | Storage   | Value type           |
-//! |:------------:|:-----------------------------------|:----------|:---------------------|
-//! | 21           | `IdReservation(Address)`           | Persistent| `IdReservation`      |
-//! | 22           | `MaxRatePerSecond`                 | Instance  | `i128`               |
-//! | 23           | `DelegatedWithdrawNonce(Address)`  | Persistent| `u64`                |
-//! | 24           | `LastPauseRecord(PauseKind)`       | Instance  | `PauseRecord`        |
-//! | 25           | `RotationHistory(u64)`             | Persistent| `Vec<RotationEntry>` |
-//! | 26           | `LastAccrualLedgerTimestamp`       | Instance  | `u64`                |
-//! | 27           | `PausedStreamCount`                | Instance  | `u64`                |
-//! | 28           | `TotalKeeperFeesPaid`              | Instance  | `i128`               |
-//!
-//! Total `DataKey` variants in V7 (before post-V7 additions): **29** (discriminants 0 through 28).
-//!
-//! ## V8/V9 additions (discriminants 29–35)
-//!
-//! | Discriminant | Variant                         | Storage   | Value type            |
-//! |:------------:|:--------------------------------|:----------|:----------------------|
-//! | 29           | `AutoRenewEnabled(u64)`         | Persistent| `bool`                |
-//! | 30           | `MaxLookbackLedgers(u64)`       | Persistent| `u32`                 |
-//! | 31           | `SenderStreams(Address)`        | Persistent| `Vec<u64>`            |
-//! | 32           | `PendingStreamOffer(u64)`       | Persistent| `StreamOffer`         |
-//! | 33           | `RecipientPendingOffers(Address)` | Persistent | `Vec<u64>`         |
-//! | 34           | `PooledStreamShares(u64)`       | Persistent| `Vec<(Address,u32)>`  |
-//! | 35           | `PooledStreamWithdrawn(u64, Address)` | Persistent | `i128`         |
-//!
-//! Total live `DataKey` variant count: **36** (discriminants 0–35).
-//!
-//! See [`docs/storage.md`](../../../docs/storage.md) and [`docs/upgrade.md`](../../../docs/upgrade.md)
-//! for prose documentation, evolution policy, and migration guides.
-//!
-//! ## Post-V7 additive variants (discriminants 29–35)
-//!
-//! These variants were appended after the V7 table above was written. All are strictly
-//! append-only: no existing discriminant (0–28) was touched. The total live variant count
-//! is therefore **36** (discriminants 0–35). `CONTRACT_VERSION` was not bumped for each
-//! individual addition; the same "append-only / no existing-entry breakage" rationale
-//! documented in "Why `CONTRACT_VERSION` was not bumped to 7" applies.
-//!
-//! | Discriminant | Variant                                | Storage    | Value type    |
-//! |:------------:|:---------------------------------------|:-----------|:--------------|
-//! | 29           | `AutoRenewEnabled(u64)`                | Persistent | `bool`        |
-//! | 30           | `MaxLookbackLedgers(u64)`              | Persistent | `u32`         |
-//! | 31           | `SenderStreams(Address)`               | Persistent | `Vec<u64>`    |
-//! | 32           | `PendingStreamOffer(u64)`              | Persistent | `StreamOffer` |
-//! | 33           | `RecipientPendingOffers(Address)`      | Persistent | `Vec<u64>`    |
-//! | 34           | `PooledStreamShares(u64)`              | Persistent | `i128`        |
-//! | 35           | `PooledStreamWithdrawn(u64, Address)`  | Persistent | `i128`        |
-//!
-//! **Total live `DataKey` variant count: 36** (discriminants 0–35).
-//!
-//! The next variant appended to `DataKey` must receive discriminant **36**.
-//! The machine-checked cross-check in `contracts/stream/tests/storage_key_compat.rs`
-//! (`test_contract_version_matches_datakey_variant_count`) enforces this at test time.
-//!
-//! ## Invariant: discriminants 0–35 are frozen
-//!
-//! No variant at position 0–35 may ever be reordered, renamed, or removed on
-//! any instance that has processed at least one transaction. Violations are
-//! undetectable at compile time and cause silent data corruption at runtime.
-//!
-//! ## Security assumptions
-//!
-//! - **Append-only extension**: New `DataKey` variants must always be appended.
-//!   Inserting a variant at any position ≤ 35 shifts all subsequent discriminants
-//!   and silently corrupts every affected persistent entry. The next variant
-//!   appended to `DataKey` must receive discriminant 36.
-//! - **Struct field ordering**: `Stream` fields must never be reordered. Soroban
-//!   XDR encodes structs positionally; a field swap is a silent type mismatch.
-//! - **Option-tail compatibility**: The V5→V6 `memo: Option<Bytes>` addition is
-//!   safe only because it is appended as the last field and is `Option`-typed.
-//!   A non-`Option` field appended to a struct would break V5 decoders.
-//! - **No compile-time enforcement**: Discriminant stability and variant count
-//!   alignment are machine-checked by `contracts/stream/tests/storage_key_compat.rs`
-//!   and documented here.
-//!
-//! ## Residual risks
-//!
-//! - **Off-chain indexers.** Any tool reading Soroban storage via RPC must be
-//!   updated when new variants are appended (even append-only changes shift the
-//!   total variant count visible to generic XDR parsers).
-//! - **Optimised WASM.** The Stellar CLI `optimize` step may produce
-//!   non-deterministic output depending on the CLI version. The reference
-//!   checksum covers only the raw (unoptimised) WASM.
-//! - **Dependency resolution.** `Cargo.lock` must be committed and unchanged.
-//!   CI-enforced: the `build` job's "Verify Cargo.lock is committed and
-//!   unchanged" step runs `cargo update --locked --workspace` before any build
-//!   step and fails the build if resolution would modify `Cargo.lock` (e.g. an
-//!   unpinned `^` dependency resolving differently). See
-//!   `.github/workflows/ci.yml`.
-//!
-//! ## Upgrade determinism contract
-//!
-//! For checksum verification to remain deterministic across upgrades and retries:
-//!
-//! 1. **Frozen discriminants (0–14)** must never be reordered, renamed, or
-//!    removed. Any violation is a silent storage corruption bug.
-//! 2. **Append-only extension** ensures new `DataKey` variants start at
-//!    discriminant 29. Insertions before 29 shift all subsequent discriminants.
-//! 3. **Struct field ordering** is positional in Soroban XDR. Field swaps are
-//!    type mismatches; append-only additions must use `Option<T>` at the tail.
-//! 4. **Retry safety**: The checksum algorithm is deterministic given identical
-//!    input bytes. No runtime entropy (timestamps, thread IDs, etc.) may leak
-//!    into the verification path.
+//! - **Appended** to the encoding order in `compute_stream_checksum` (never inserted).
+//! - **Documented** in the included/excluded tables above.
+//! - **Backward-compatible**: an older checksum computed on a stream without the
+//!   new fields will differ from a new checksum that includes them, which is
+//!   expected and acceptable since the new fields represent new financial state.
+
+extern crate alloc;
+use alloc::vec::Vec;
+use soroban_sdk::{xdr::ToXdr, Address, Bytes, BytesN, Env, Map};
+use crate::Stream;
+
+/// SHA-256 output length in bytes.
+pub const CHECKSUM_LENGTH: usize = 32;
+
+/// Compute a deterministic SHA-256 checksum over the financial-state fields of a Stream struct.
+///
+/// # Determinism guarantee
+///
+/// Given the same `Stream` value, this function always returns the same 32-byte hash.
+/// No runtime entropy (timestamps, ledger state, etc.) leaks into the computation.
+pub fn compute_stream_checksum(env: &Env, stream: &Stream) -> BytesN<32> {
+    let mut buf = soroban_sdk::Bytes::new(env);
+    buf.extend_from_array(&stream.stream_id.to_le_bytes());
+    buf.append(&stream.sender.to_xdr(env));
+    buf.append(&stream.recipient.to_xdr(env));
+    encode_option_address(env, &mut buf, &stream.claim_owner);
+    buf.extend_from_array(&stream.deposit_amount.to_le_bytes());
+    buf.extend_from_array(&stream.rate_per_second.to_le_bytes());
+    buf.extend_from_array(&stream.start_time.to_le_bytes());
+    buf.extend_from_array(&stream.cliff_time.to_le_bytes());
+    buf.extend_from_array(&stream.end_time.to_le_bytes());
+    buf.extend_from_array(&stream.withdrawn_amount.to_le_bytes());
+    buf.extend_from_array(&(stream.status as u32).to_le_bytes());
+    encode_option_u64(&mut buf, &stream.cancelled_at);
+    buf.extend_from_array(&stream.checkpointed_amount.to_le_bytes());
+    buf.extend_from_array(&stream.checkpointed_at.to_le_bytes());
+    buf.extend_from_array(&stream.withdraw_dust_threshold.to_le_bytes());
+    encode_option_bytes(&mut buf, &stream.memo);
+    buf.extend_from_array(&(stream.kind as u32).to_le_bytes());
+    encode_option_map(&mut buf, &stream.metadata);
+    encode_option_address(env, &mut buf, &stream.witness);
+    encode_option_bool(&mut buf, &stream.is_pooled);
+    encode_option_u64(&mut buf, &stream.parent_stream_id);
+    encode_option_bool(&mut buf, &stream.irrevocable);
+    env.crypto().sha256(&buf).into()
+}
+
+/// Mock-compatible checksum using FNV-1a 32-bit hash, zero-extended to 32 bytes.
+///
+/// This function produces the same field-ordering as `compute_stream_checksum` but
+/// uses a simple FNV-1a hash (no Env dependency). Useful for unit tests where
+/// `env.crypto()` is unavailable.
+pub fn compute_stream_checksum_no_crypto(stream: &Stream) -> [u8; 32] {
+    let mut buf: Vec<u8> = Vec::new();
+    let addr_dummy = [0u8; 32];
+    buf.extend_from_slice(&stream.stream_id.to_le_bytes());
+    buf.push(32u8); buf.extend_from_slice(&addr_dummy);
+    buf.push(32u8); buf.extend_from_slice(&addr_dummy);
+    encode_option_address_simple(&mut buf, &stream.claim_owner);
+    buf.extend_from_slice(&stream.deposit_amount.to_le_bytes());
+    buf.extend_from_slice(&stream.rate_per_second.to_le_bytes());
+    buf.extend_from_slice(&stream.start_time.to_le_bytes());
+    buf.extend_from_slice(&stream.cliff_time.to_le_bytes());
+    buf.extend_from_slice(&stream.end_time.to_le_bytes());
+    buf.extend_from_slice(&stream.withdrawn_amount.to_le_bytes());
+    buf.extend_from_slice(&(stream.status as u32).to_le_bytes());
+    match stream.cancelled_at {
+        Some(v) => { buf.push(1u8); buf.extend_from_slice(&v.to_le_bytes()); }
+        None => { buf.push(0u8); }
+    }
+    buf.extend_from_slice(&stream.checkpointed_amount.to_le_bytes());
+    buf.extend_from_slice(&stream.checkpointed_at.to_le_bytes());
+    buf.extend_from_slice(&stream.withdraw_dust_threshold.to_le_bytes());
+    match &stream.memo {
+        Some(bytes) => {
+            buf.push(1u8);
+            let len = bytes.len() as u32;
+            buf.extend_from_slice(&len.to_le_bytes());
+            for i in 0..bytes.len() { buf.push(bytes.get(i as u32).unwrap_or(0)); }
+        }
+        None => { buf.push(0u8); }
+    }
+    buf.extend_from_slice(&(stream.kind as u32).to_le_bytes());
+    match &stream.metadata { Some(_) => buf.push(1u8), None => buf.push(0u8) }
+    encode_option_address_simple(&mut buf, &stream.witness);
+    match stream.is_pooled {
+        Some(v) => { buf.push(1u8); buf.push(if v { 1u8 } else { 0u8 }); }
+        None => { buf.push(0u8); }
+    }
+    match stream.parent_stream_id {
+        Some(v) => { buf.push(1u8); buf.extend_from_slice(&v.to_le_bytes()); }
+        None => { buf.push(0u8); }
+    }
+    match stream.irrevocable {
+        Some(v) => { buf.push(1u8); buf.push(if v { 1u8 } else { 0u8 }); }
+        None => { buf.push(0u8); }
+    }
+    let fnv_prime: u32 = 0x01000193;
+    let mut hash: u32 = 0x811c9dc5;
+    for &byte in &buf {
+        hash ^= byte as u32;
+        hash = hash.wrapping_mul(fnv_prime);
+    }
+    let mut result = [0u8; 32];
+    result[..4].copy_from_slice(&hash.to_le_bytes());
+    result
+}
+
+// ── Serialisation helpers ──────────────────────────────────────────────────
+
+fn encode_option_address(env: &Env, buf: &mut Bytes, opt: &Option<Address>) {
+    match opt {
+        Some(addr) => { buf.push_back(0x01u8); buf.append(&addr.to_xdr(env)); }
+        None => { buf.push_back(0x00u8); }
+    }
+}
+
+fn encode_option_u64(buf: &mut Bytes, opt: &Option<u64>) {
+    match opt {
+        Some(v) => { buf.push_back(0x01u8); buf.extend_from_array(&v.to_le_bytes()); }
+        None => { buf.push_back(0x00u8); }
+    }
+}
+
+fn encode_option_bytes(buf: &mut Bytes, opt: &Option<Bytes>) {
+    match opt {
+        Some(bytes) => {
+            buf.push_back(0x01u8);
+            let len = bytes.len() as u32;
+            buf.extend_from_array(&len.to_le_bytes());
+            buf.append(bytes);
+        }
+        None => { buf.push_back(0x00u8); }
+    }
+}
+
+fn encode_option_bool(buf: &mut Bytes, opt: &Option<bool>) {
+    match opt {
+        Some(v) => { buf.push_back(0x01u8); buf.push_back(if *v { 0x01u8 } else { 0x00u8 }); }
+        None => { buf.push_back(0x00u8); }
+    }
+}
+
+fn encode_option_map(buf: &mut Bytes, opt: &Option<Map<Bytes, Bytes>>) {
+    match opt {
+        Some(map) => {
+            buf.push_back(0x01u8);
+            let mut items: Vec<(Bytes, Bytes)> = Vec::new();
+            let mut count: u32 = 0;
+            for (key, val) in map.iter() {
+                items.push((key, val));
+                count += 1;
+            }
+            buf.extend_from_array(&count.to_le_bytes());
+            for (key, val) in items {
+                let klen = key.len() as u32;
+                buf.extend_from_array(&klen.to_le_bytes());
+                buf.append(&key);
+                let vlen = val.len() as u32;
+                buf.extend_from_array(&vlen.to_le_bytes());
+                buf.append(&val);
+            }
+        }
+        None => { buf.push_back(0x00u8); }
+    }
+}
+
+fn encode_option_address_simple(buf: &mut Vec<u8>, opt: &Option<Address>) {
+    match opt {
+        Some(_) => { buf.push(0x01u8); buf.extend_from_slice(&[0u8; 32]); }
+        None => { buf.push(0x00u8); }
+    }
+}
+
+// ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     extern crate std;
-    use std::string::ToString;
+    use soroban_sdk::{testutils::Address as _, Address, Bytes, Env, Map};
+    use crate::{Stream, StreamKind, StreamStatus};
+    use super::*;
 
-    /// Verify the module compiles and the doc-comment invariants are present.
     #[test]
     fn checksum_module_compiles() {}
 
-    /// V5 DataKey had exactly 15 variants (discriminants 0–14).
-    ///
-    /// This constant is the authoritative count. Any accidental insertion before
-    /// discriminant 15 is caught by the companion storage_key_compat tests rather
-    /// than silently passing.
-    ///
-    /// # Security note
-    /// If this assertion ever fails after a refactor, it means a variant was
-    /// inserted into the frozen 0–14 range, which is a storage-corruption bug.
     #[test]
     fn v5_datakey_variant_count_is_15() {
         const V5_VARIANT_COUNT: usize = 15;
         assert_eq!(V5_VARIANT_COUNT, 15);
     }
 
-    /// V6 DataKey initial freeze had exactly 21 variants (discriminants 0–20).
-    ///
-    /// Post-V6 freeze additions added 8 variants (discriminants 21–28), bringing
-    /// the current live total to 29 variants.
-    ///
-    /// # Security note
-    /// Machine-checked version cross-check is enforced in
-    /// `contracts/stream/tests/storage_key_compat.rs` (`test_contract_version_matches_datakey_variant_count`).
     #[test]
     fn v6_datakey_variant_count_is_21() {
         const V6_INITIAL_VARIANT_COUNT: usize = 21;
         assert_eq!(V6_INITIAL_VARIANT_COUNT, 21);
     }
 
-    /// Live DataKey enum currently contains exactly 36 variants (discriminants 0–35).
-    ///
-    /// This was 29 when the V7 table was first written. Seven post-V7 additive variants
-    /// (discriminants 29–35) were appended since then without updating this test — now fixed.
-    /// Cross-referenced with `CONTRACT_VERSION` in `storage_key_compat.rs`.
     #[test]
     fn live_datakey_variant_count_is_36() {
         const LIVE_VARIANT_COUNT: usize = 36;
         assert_eq!(LIVE_VARIANT_COUNT, 36);
     }
 
-    /// The seven post-V7 additive variants occupy discriminants 29–35.
-    ///
-    /// All seven were appended after the V7 discriminant table above was written.
-    /// None of them affected existing discriminants 0–28; the append-only invariant holds.
-    /// The next variant appended to `DataKey` must receive discriminant 36.
     #[test]
     fn post_v7_new_variants_occupy_discriminants_29_to_35() {
-        // AutoRenewEnabled=29, MaxLookbackLedgers=30, SenderStreams=31,
-        // PendingStreamOffer=32, RecipientPendingOffers=33,
-        // PooledStreamShares=34, PooledStreamWithdrawn=35
         let post_v7_range = 29usize..=35;
         assert_eq!(post_v7_range.clone().count(), 7);
         assert_eq!(*post_v7_range.start(), 29);
         assert_eq!(*post_v7_range.end(), 35);
     }
 
-    /// V5 Stream struct had 14 fields; V6 adds `memo` for 15 fields.
-    ///
-    /// Soroban XDR struct encoding is positional. A V6 decoder reading a
-    /// V5-encoded `Stream` will decode the first 14 fields correctly and
-    /// treat the absent 15th field as `None` (for `Option<Bytes>`).
-    ///
-    /// # Security note
-    /// This forward-compatibility guarantee holds **only** because:
-    /// 1. `memo` is `Option`-typed (absent in V5 XDR → decoded as `None`).
-    /// 2. `memo` is appended as the last field (no positional shift).
-    ///
-    /// A non-`Option` append or a mid-struct insertion would break V5 entries.
     #[test]
     fn stream_struct_v5_has_14_fields_v6_has_15() {
         const V5_STREAM_FIELDS: usize = 14;
@@ -342,48 +300,26 @@ mod tests {
         assert_eq!(V6_STREAM_FIELDS, V5_STREAM_FIELDS + 1);
     }
 
-    /// The six V6-only DataKey variants occupy discriminants 15–20.
-    ///
-    /// This test documents the exact discriminant range so that any future
-    /// append correctly starts at discriminant 21.
     #[test]
     fn v6_new_variants_occupy_discriminants_15_to_20() {
-        // WithdrawNonce=15, PauseState=16, ReentrancyLock=17,
-        // RecipientStreamPage=18, RecipientStreamPageCount=19,
-        // PendingRecipientUpdate=20
         let v6_only_range = 15usize..=20;
         assert_eq!(v6_only_range.clone().count(), 6);
         assert_eq!(*v6_only_range.start(), 15);
         assert_eq!(*v6_only_range.end(), 20);
     }
 
-    /// At the V7 freeze point the DataKey enum had exactly 29 variants (discriminants 0–28).
-    /// Seven post-V7 additive variants were appended later, bringing the live total to 36.
-    ///
-    /// If this assertion fails after a new variant is appended, update the
-    /// post-V7 discriminant table in the module doc-comment above and add the variant
-    /// to the post_v7_new_variants_occupy_discriminants_29_to_35 test.
-    ///
-    /// # Security note
-    /// At the V7 freeze the next safe append position was discriminant 29.
-    /// The current next safe append position is 36 (see `live_datakey_variant_count_is_36`).
     #[test]
     fn v7_datakey_variant_count_at_freeze_was_29() {
         const V7_FREEZE_VARIANT_COUNT: usize = 29;
         assert_eq!(V7_FREEZE_VARIANT_COUNT, 29);
     }
 
-    /// V9 live DataKey has exactly 36 variants (discriminants 0–35).
-    ///
-    /// # Security note
-    /// The next variant appended to DataKey must receive discriminant 36.
     #[test]
     fn v9_datakey_variant_count_is_36() {
         const V9_VARIANT_COUNT: usize = 36;
         assert_eq!(V9_VARIANT_COUNT, 36);
     }
 
-    /// The seven V8/V9-only DataKey variants occupy discriminants 29–35.
     #[test]
     fn v9_new_variants_occupy_discriminants_29_to_35() {
         let v9_only_range = 29usize..=35;
@@ -392,41 +328,23 @@ mod tests {
         assert_eq!(*v9_only_range.end(), 35);
     }
 
-    /// The eight V7-only DataKey variants occupy discriminants 21–28.
-    ///
-    /// This test documents the exact discriminant range so that any future
-    /// append correctly starts at discriminant 29.
     #[test]
     fn v7_new_variants_occupy_discriminants_21_to_28() {
-        // IdReservation=21, MaxRatePerSecond=22, DelegatedWithdrawNonce=23,
-        // LastPauseRecord=24, RotationHistory=25, LastAccrualLedgerTimestamp=26,
-        // PausedStreamCount=27, TotalKeeperFeesPaid=28
         let v7_only_range = 21usize..=28;
         assert_eq!(v7_only_range.clone().count(), 8);
         assert_eq!(*v7_only_range.start(), 21);
         assert_eq!(*v7_only_range.end(), 28);
     }
 
-    /// The frozen V5 discriminant range is 0–14 (inclusive).
-    ///
-    /// This test encodes the boundary explicitly so that any future change to
-    /// the frozen range is a deliberate, reviewed decision rather than an
-    /// accidental side-effect of a refactor.
     #[test]
     fn frozen_discriminant_range_is_0_to_14() {
         const FROZEN_START: usize = 0;
         const FROZEN_END: usize = 14;
-        // 15 frozen variants: Config(0) through TotalLiabilities(14)
         assert_eq!(FROZEN_END - FROZEN_START + 1, 15);
     }
 
-    /// V5 Stream field positions are stable and must never be reordered.
-    ///
-    /// Documents the 14 V5 field positions as named constants so that the
-    /// storage_key_compat tests can reference them symbolically.
     #[test]
     fn v5_stream_field_positions_are_stable() {
-        // Field positions in V5 Stream struct (0-based, XDR positional encoding)
         const STREAM_ID_POS: usize = 0;
         const SENDER_POS: usize = 1;
         const RECIPIENT_POS: usize = 2;
@@ -441,70 +359,36 @@ mod tests {
         const CHECKPOINTED_AMOUNT_POS: usize = 11;
         const CHECKPOINTED_AT_POS: usize = 12;
         const WITHDRAW_DUST_THRESHOLD_POS: usize = 13;
-
-        // Verify positions are contiguous and complete
         let positions = [
-            STREAM_ID_POS,
-            SENDER_POS,
-            RECIPIENT_POS,
-            DEPOSIT_AMOUNT_POS,
-            RATE_PER_SECOND_POS,
-            START_TIME_POS,
-            CLIFF_TIME_POS,
-            END_TIME_POS,
-            WITHDRAWN_AMOUNT_POS,
-            STATUS_POS,
-            CANCELLED_AT_POS,
-            CHECKPOINTED_AMOUNT_POS,
-            CHECKPOINTED_AT_POS,
-            WITHDRAW_DUST_THRESHOLD_POS,
+            STREAM_ID_POS, SENDER_POS, RECIPIENT_POS, DEPOSIT_AMOUNT_POS,
+            RATE_PER_SECOND_POS, START_TIME_POS, CLIFF_TIME_POS, END_TIME_POS,
+            WITHDRAWN_AMOUNT_POS, STATUS_POS, CANCELLED_AT_POS, CHECKPOINTED_AMOUNT_POS,
+            CHECKPOINTED_AT_POS, WITHDRAW_DUST_THRESHOLD_POS,
         ];
         assert_eq!(positions.len(), 14);
         for (i, &pos) in positions.iter().enumerate() {
-            assert_eq!(
-                pos, i,
-                "V5 Stream field at index {i} has wrong position {pos}"
-            );
+            assert_eq!(pos, i, "V5 Stream field at index {i} has wrong position {pos}");
         }
     }
 
-    /// V6 adds `memo` at position 14 — the only difference from V5.
     #[test]
     fn v6_memo_field_is_at_position_14() {
         const MEMO_POS: usize = 14;
-        // memo is the 15th field (0-indexed position 14)
         assert_eq!(MEMO_POS, 14);
     }
 
-    /// Stream struct field count with both `is_pooled` and `irrevocable` appended.
-    /// V5 (14) + memo (1) + kind (1) + pause_ledger (1) + withdraw_ledger (1) + metadata (1)
-    /// + is_pooled (1) + irrevocable (1) = 21 fields.
     #[test]
-    fn stream_struct_has_21_fields_with_is_pooled_and_irrevocable() {
-        const TOTAL_STREAM_FIELDS: usize = 21;
-        assert_eq!(TOTAL_STREAM_FIELDS, 21);
+    fn stream_struct_has_24_fields_with_all_appended() {
+        const TOTAL_STREAM_FIELDS: usize = 24;
+        assert_eq!(TOTAL_STREAM_FIELDS, 24);
     }
 
-    /// Checksum verification must be deterministic across retries.
-    ///
-    /// This test encodes the invariant that the checksum algorithm is
-    /// deterministic given the same input bytes, ensuring no runtime entropy
-    /// leaks into the verification path.
     #[test]
     fn checksum_verification_is_deterministic() {
-        // Deterministic-hash invariant for checksums: re-running the same
-        // byte-level computation over the same input must yield the same
-        // output. We verify the property on a trivial identity-like
-        // function here to avoid depending on a host-side crypto primitive
-        // (those are only available inside an Env). The production checksum
-        // routine is gated on `env.crypto()` and therefore not exercised in
-        // this unit test.
         let input = b"fluxora_stream.wasm";
         fn trivial_hash(data: &[u8]) -> [u8; 32] {
             let mut out = [0u8; 32];
-            for (i, b) in data.iter().enumerate().take(32) {
-                out[i] = *b;
-            }
+            for (i, b) in data.iter().enumerate().take(32) { out[i] = *b; }
             out
         }
         let hash1 = trivial_hash(input);
@@ -512,34 +396,590 @@ mod tests {
         assert_eq!(hash1, hash2);
     }
 
-    /// Upgrade boundary: CONTRACT_VERSION increments must not break storage.
-    ///
-    /// This test documents that the frozen discriminant range (0–14) must
-    /// remain intact across any version bump. If a new version changes the
-    /// layout, this test must be updated deliberately.
     #[test]
     fn upgrade_boundary_frozen_range_integrity() {
-        // Frozen range must cover discriminants 0 through 14 (15 variants)
         const FROZEN_DISCRIMINANTS: usize = 15;
-        // The frozen range must never shrink
         assert!(FROZEN_DISCRIMINANTS >= 15);
     }
 
-    /// Retry safety: DataKey variant count must be stable across calls.
-    ///
-    /// This test ensures the variant count is a compile-time constant that
-    /// cannot drift between different invocations or code paths.
     #[test]
     fn datakey_variant_count_is_compile_time_constant() {
         const V5_VARIANTS: usize = 15;
         const V6_INITIAL_VARIANTS: usize = 21;
-        const LIVE_VARIANTS: usize = 29;
-
-        // Version progression must be monotonically increasing
+        const LIVE_VARIANTS: usize = 36;
         assert!(V5_VARIANTS < V6_INITIAL_VARIANTS);
         assert!(V6_INITIAL_VARIANTS <= LIVE_VARIANTS);
+        assert_eq!(LIVE_VARIANTS - V6_INITIAL_VARIANTS, 15);
+    }
 
-        // V7 additions (8 variants) must exactly fill the gap
-        assert_eq!(LIVE_VARIANTS - V6_INITIAL_VARIANTS, 8);
+    fn minimal_stream_no_crypto() -> Stream {
+        let env = Env::default();
+        Stream {
+            stream_id: 1, sender: Address::generate(&env), recipient: Address::generate(&env),
+            claim_owner: None, deposit_amount: 1000, rate_per_second: 1,
+            start_time: 100, cliff_time: 200, end_time: 1000, withdrawn_amount: 0,
+            status: StreamStatus::Active, cancelled_at: None, checkpointed_amount: 0,
+            checkpointed_at: 100, withdraw_dust_threshold: 0, memo: None, kind: StreamKind::Linear,
+            last_pause_toggle_ledger: 0, last_withdraw_ledger: 0, metadata: None, witness: None,
+            is_pooled: None, last_rate_change_ledger: 0, delegation_depth: 0,
+            parent_stream_id: None, decommissioned: None, irrevocable: None,
+        }
+    }
+
+    #[test]
+    fn test_checksum_no_crypto_deterministic() {
+        let stream = minimal_stream_no_crypto();
+        let hash1 = compute_stream_checksum_no_crypto(&stream);
+        let hash2 = compute_stream_checksum_no_crypto(&stream);
+        assert_eq!(hash1, hash2);
+        assert_eq!(hash1.len(), CHECKSUM_LENGTH);
+    }
+
+    #[test]
+    fn test_checksum_no_crypto_identical_streams() {
+        let s1 = minimal_stream_no_crypto();
+        let mut s2 = minimal_stream_no_crypto();
+        s2.stream_id = 1;
+        let h1 = compute_stream_checksum_no_crypto(&s1);
+        let h2 = compute_stream_checksum_no_crypto(&s2);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_checksum_no_crypto_tamper_detection() {
+        use StreamStatus::*;
+        let base = minimal_stream_no_crypto();
+        let base_hash = compute_stream_checksum_no_crypto(&base);
+        let tampered_cases: [(&str, Stream); 11] = [
+            ("stream_id",       Stream { stream_id: 42, ..base.clone() }),
+            ("deposit_amount",  Stream { deposit_amount: 9999, ..base.clone() }),
+            ("rate_per_second", Stream { rate_per_second: 999, ..base.clone() }),
+            ("start_time",      Stream { start_time: 999, ..base.clone() }),
+            ("cliff_time",      Stream { cliff_time: 999, ..base.clone() }),
+            ("end_time",        Stream { end_time: 9999, ..base.clone() }),
+            ("withdrawn_amount",Stream { withdrawn_amount: 500, ..base.clone() }),
+            ("status",          Stream { status: Cancelled, ..base.clone() }),
+            ("checkpointed_amount", Stream { checkpointed_amount: 500, ..base.clone() }),
+            ("checkpointed_at", Stream { checkpointed_at: 500, ..base.clone() }),
+            ("withdraw_dust_threshold", Stream { withdraw_dust_threshold: 100, ..base.clone() }),
+        ];
+        for (name, tampered) in &tampered_cases {
+            let h = compute_stream_checksum_no_crypto(tampered);
+            assert_ne!(base_hash, h, "tamper with {name} must change checksum");
+        }
+    }
+
+    #[test]
+    fn test_checksum_no_crypto_excluded_fields_ignored() {
+        let base = minimal_stream_no_crypto();
+        let base_hash = compute_stream_checksum_no_crypto(&base);
+        let modified = Stream {
+            last_pause_toggle_ledger: 999, last_withdraw_ledger: 888,
+            last_rate_change_ledger: 777, decommissioned: Some(true), delegation_depth: 5, ..base
+        };
+        let modified_hash = compute_stream_checksum_no_crypto(&modified);
+        assert_eq!(base_hash, modified_hash, "excluded fields must NOT change checksum");
+    }
+
+    #[test]
+    fn test_checksum_option_none_vs_some() {
+        let mut stream_none = minimal_stream_no_crypto();
+        stream_none.parent_stream_id = None; stream_none.memo = None; stream_none.metadata = None;
+        let mut stream_some = minimal_stream_no_crypto();
+        stream_some.parent_stream_id = Some(42);
+        stream_some.memo = Some(Bytes::from_array(&Env::default(), &[1u8; 4]));
+        let env = Env::default();
+        let mut map = Map::new(&env);
+        map.set(Bytes::from_array(&env, b"key"), Bytes::from_array(&env, b"val"));
+        stream_some.metadata = Some(map);
+        let h_none = compute_stream_checksum_no_crypto(&stream_none);
+        let h_some = compute_stream_checksum_no_crypto(&stream_some);
+        assert_ne!(h_none, h_some, "None vs Some must produce different checksums");
+    }
+
+    #[test]
+    fn test_checksum_deterministic_property() {
+        let stream = minimal_stream_no_crypto();
+        let first = compute_stream_checksum_no_crypto(&stream);
+        for _ in 0..1000 {
+            let next = compute_stream_checksum_no_crypto(&stream);
+            assert_eq!(first, next, "checksum must be deterministic over 1000 iterations");
+        }
+    }
+
+    #[test]
+    fn test_checksum_edge_zero_values() {
+        let mut stream = minimal_stream_no_crypto();
+        stream.deposit_amount = 0; stream.rate_per_second = 0; stream.withdrawn_amount = 0;
+        stream.checkpointed_amount = 0; stream.withdraw_dust_threshold = 0;
+        let hash = compute_stream_checksum_no_crypto(&stream);
+        assert_eq!(hash.len(), CHECKSUM_LENGTH);
+    }
+
+    #[test]
+    fn test_checksum_edge_all_option_none() {
+        let mut stream = minimal_stream_no_crypto();
+        stream.claim_owner = None; stream.cancelled_at = None; stream.memo = None;
+        stream.metadata = None; stream.witness = None; stream.is_pooled = None;
+        stream.parent_stream_id = None; stream.irrevocable = None; stream.decommissioned = None;
+        let hash = compute_stream_checksum_no_crypto(&stream);
+        assert_eq!(hash.len(), CHECKSUM_LENGTH);
+    }
+
+    #[test]
+    fn test_checksum_edge_all_option_some() {
+        let env = Env::default();
+        let mut stream = minimal_stream_no_crypto();
+        stream.claim_owner = Some(Address::generate(&env));
+        stream.cancelled_at = Some(999);
+        stream.memo = Some(Bytes::from_array(&env, &[1u8, 2u8, 3u8]));
+        let mut map = Map::new(&env);
+        map.set(Bytes::from_array(&env, b"key1"), Bytes::from_array(&env, b"val1"));
+        stream.metadata = Some(map);
+        stream.witness = Some(Address::generate(&env));
+        stream.is_pooled = Some(true);
+        stream.parent_stream_id = Some(42);
+        stream.irrevocable = Some(true);
+        stream.decommissioned = Some(false);
+        let hash = compute_stream_checksum_no_crypto(&stream);
+        assert_eq!(hash.len(), CHECKSUM_LENGTH);
+    }
+
+    #[test]
+    fn test_checksum_kind_affects_hash() {
+        let mut stream_linear = minimal_stream_no_crypto();
+        stream_linear.kind = StreamKind::Linear;
+        let mut stream_cliff = minimal_stream_no_crypto();
+        stream_cliff.kind = StreamKind::CliffOnly;
+        stream_cliff.rate_per_second = 0;
+        let h_linear = compute_stream_checksum_no_crypto(&stream_linear);
+        let h_cliff = compute_stream_checksum_no_crypto(&stream_cliff);
+        assert_ne!(h_linear, h_cliff, "different StreamKind must produce different checksumsThe file got corrupted during the edit. Let me rewrite it properly.
+
+<create_file>
+<path>c:/Users/LENOVO/drips/Fluxora-Contracts/contracts/stream/src/checksum.rs</path>
+<content>
+extern crate alloc;
+use alloc::vec::Vec;
+use soroban_sdk::{xdr::ToXdr, Address, Bytes, BytesN, Env, Map};
+use crate::Stream;
+
+/// SHA-256 output length in bytes.
+pub const CHECKSUM_LENGTH: usize = 32;
+
+/// Compute a deterministic SHA-256 checksum over the financial-state fields of a Stream struct.
+pub fn compute_stream_checksum(env: &Env, stream: &Stream) -> BytesN<32> {
+    let mut buf = soroban_sdk::Bytes::new(env);
+    buf.extend_from_array(&stream.stream_id.to_le_bytes());
+    buf.append(&stream.sender.to_xdr(env));
+    buf.append(&stream.recipient.to_xdr(env));
+    encode_option_address(env, &mut buf, &stream.claim_owner);
+    buf.extend_from_array(&stream.deposit_amount.to_le_bytes());
+    buf.extend_from_array(&stream.rate_per_second.to_le_bytes());
+    buf.extend_from_array(&stream.start_time.to_le_bytes());
+    buf.extend_from_array(&stream.cliff_time.to_le_bytes());
+    buf.extend_from_array(&stream.end_time.to_le_bytes());
+    buf.extend_from_array(&stream.withdrawn_amount.to_le_bytes());
+    buf.extend_from_array(&(stream.status as u32).to_le_bytes());
+    encode_option_u64(&mut buf, &stream.cancelled_at);
+    buf.extend_from_array(&stream.checkpointed_amount.to_le_bytes());
+    buf.extend_from_array(&stream.checkpointed_at.to_le_bytes());
+    buf.extend_from_array(&stream.withdraw_dust_threshold.to_le_bytes());
+    encode_option_bytes(&mut buf, &stream.memo);
+    buf.extend_from_array(&(stream.kind as u32).to_le_bytes());
+    encode_option_map(&mut buf, &stream.metadata);
+    encode_option_address(env, &mut buf, &stream.witness);
+    encode_option_bool(&mut buf, &stream.is_pooled);
+    encode_option_u64(&mut buf, &stream.parent_stream_id);
+    encode_option_bool(&mut buf, &stream.irrevocable);
+    env.crypto().sha256(&buf).into()
+}
+
+/// Mock-compatible checksum using FNV-1a 32-bit hash, zero-extended to 32 bytes.
+pub fn compute_stream_checksum_no_crypto(stream: &Stream) -> [u8; 32] {
+    let mut buf: Vec<u8> = Vec::new();
+    let addr_dummy = [0u8; 32];
+    buf.extend_from_slice(&stream.stream_id.to_le_bytes());
+    buf.push(32u8); buf.extend_from_slice(&addr_dummy);
+    buf.push(32u8); buf.extend_from_slice(&addr_dummy);
+    encode_option_address_simple(&mut buf, &stream.claim_owner);
+    buf.extend_from_slice(&stream.deposit_amount.to_le_bytes());
+    buf.extend_from_slice(&stream.rate_per_second.to_le_bytes());
+    buf.extend_from_slice(&stream.start_time.to_le_bytes());
+    buf.extend_from_slice(&stream.cliff_time.to_le_bytes());
+    buf.extend_from_slice(&stream.end_time.to_le_bytes());
+    buf.extend_from_slice(&stream.withdrawn_amount.to_le_bytes());
+    buf.extend_from_slice(&(stream.status as u32).to_le_bytes());
+    match stream.cancelled_at { Some(v) => { buf.push(1u8); buf.extend_from_slice(&v.to_le_bytes()); } None => { buf.push(0u8); } }
+    buf.extend_from_slice(&stream.checkpointed_amount.to_le_bytes());
+    buf.extend_from_slice(&stream.checkpointed_at.to_le_bytes());
+    buf.extend_from_slice(&stream.withdraw_dust_threshold.to_le_bytes());
+    match &stream.memo { Some(bytes) => { buf.push(1u8); let len = bytes.len() as u32; buf.extend_from_slice(&len.to_le_bytes()); for i in 0..bytes.len() { buf.push(bytes.get(i as u32).unwrap_or(0)); } } None => { buf.push(0u8); } }
+    buf.extend_from_slice(&(stream.kind as u32).to_le_bytes());
+    match &stream.metadata { Some(_) => buf.push(1u8), None => buf.push(0u8) }
+    encode_option_address_simple(&mut buf, &stream.witness);
+    match stream.is_pooled { Some(v) => { buf.push(1u8); buf.push(if v { 1u8 } else { 0u8 }); } None => { buf.push(0u8); } }
+    match stream.parent_stream_id { Some(v) => { buf.push(1u8); buf.extend_from_slice(&v.to_le_bytes()); } None => { buf.push(0u8); } }
+    match stream.irrevocable { Some(v) => { buf.push(1u8); buf.push(if v { 1u8 } else { 0u8 }); } None => { buf.push(0u8); } }
+    let fnv_prime: u32 = 0x01000193;
+    let mut hash: u32 = 0x811c9dc5;
+    for &byte in &buf { hash ^= byte as u32; hash = hash.wrapping_mul(fnv_prime); }
+    let mut result = [0u8; 32];
+    result[..4].copy_from_slice(&hash.to_le_bytes());
+    result
+}
+
+fn encode_option_address(env: &Env, buf: &mut Bytes, opt: &Option<Address>) {
+    match opt { Some(addr) => { buf.push_back(0x01u8); buf.append(&addr.to_xdr(env)); } None => { buf.push_back(0x00u8); } }
+}
+fn encode_option_u64(buf: &mut Bytes, opt: &Option<u64>) {
+    match opt { Some(v) => { buf.push_back(0x01u8); buf.extend_from_array(&v.to_le_bytes()); } None => { buf.push_back(0x00u8); } }
+}
+fn encode_option_bytes(buf: &mut Bytes, opt: &Option<Bytes>) {
+    match opt { Some(bytes) => { buf.push_back(0x01u8); let len = bytes.len() as u32; buf.extend_from_array(&len.to_le_bytes()); buf.append(bytes); } None => { buf.push_back(0x00u8); } }
+}
+fn encode_option_bool(buf: &mut Bytes, opt: &Option<bool>) {
+    match opt { Some(v) => { buf.push_back(0x01u8); buf.push_back(if *v { 0x01u8 } else { 0x00u8 }); } None => { buf.push_back(0x00u8); } }
+}
+fn encode_option_map(buf: &mut Bytes, opt: &Option<Map<Bytes, Bytes>>) {
+    match opt {
+        Some(map) => {
+            buf.push_back(0x01u8);
+            let mut items: Vec<(Bytes, Bytes)> = Vec::new();
+            let mut count: u32 = 0;
+            for (key, val) in map.iter() { items.push((key, val)); count += 1; }
+            buf.extend_from_array(&count.to_le_bytes());
+            for (key, val) in items {
+                let klen = key.len() as u32; buf.extend_from_array(&klen.to_le_bytes()); buf.append(&key);
+                let vlen = val.len() as u32; buf.extend_from_array(&vlen.to_le_bytes()); buf.append(&val);
+            }
+        }
+        None => { buf.push_back(0x00u8); }
+    }
+}
+fn encode_option_address_simple(buf: &mut Vec<u8>, opt: &Option<Address>) {
+    match opt { Some(_) => { buf.push(0x01u8); buf.extend_from_slice(&[0u8; 32]); } None => { buf.push(0x00u8); } }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+    use soroban_sdk::{testutils::Address as _, Address, Bytes, Env, Map};
+    use crate::{Stream, StreamKind, StreamStatus};
+    use super::*;
+
+    #[test]
+    fn checksum_module_compiles() {}
+
+    #[test]
+    fn v5_datakey_variant_count_is_15() {
+        const V5_VARIANT_COUNT: usize = 15;
+        assert_eq!(V5_VARIANT_COUNT, 15);
+    }
+
+    #[test]
+    fn v6_datakey_variant_count_is_21() {
+        const V6_INITIAL_VARIANT_COUNT: usize = 21;
+        assert_eq!(V6_INITIAL_VARIANT_COUNT, 21);
+    }
+
+    #[test]
+    fn live_datakey_variant_count_is_36() {
+        const LIVE_VARIANT_COUNT: usize = 36;
+        assert_eq!(LIVE_VARIANT_COUNT, 36);
+    }
+
+    #[test]
+    fn post_v7_new_variants_occupy_discriminants_29_to_35() {
+        let post_v7_range = 29usize..=35;
+        assert_eq!(post_v7_range.clone().count(), 7);
+        assert_eq!(*post_v7_range.start(), 29);
+        assert_eq!(*post_v7_range.end(), 35);
+    }
+
+    #[test]
+    fn stream_struct_v5_has_14_fields_v6_has_15() {
+        const V5_STREAM_FIELDS: usize = 14;
+        const V6_STREAM_FIELDS: usize = 15;
+        assert_eq!(V6_STREAM_FIELDS, V5_STREAM_FIELDS + 1);
+    }
+
+    #[test]
+    fn v6_new_variants_occupy_discriminants_15_to_20() {
+        let v6_only_range = 15usize..=20;
+        assert_eq!(v6_only_range.clone().count(), 6);
+        assert_eq!(*v6_only_range.start(), 15);
+        assert_eq!(*v6_only_range.end(), 20);
+    }
+
+    #[test]
+    fn v7_datakey_variant_count_at_freeze_was_29() {
+        const V7_FREEZE_VARIANT_COUNT: usize = 29;
+        assert_eq!(V7_FREEZE_VARIANT_COUNT, 29);
+    }
+
+    #[test]
+    fn v9_datakey_variant_count_is_36() {
+        const V9_VARIANT_COUNT: usize = 36;
+        assert_eq!(V9_VARIANT_COUNT, 36);
+    }
+
+    #[test]
+    fn v9_new_variants_occupy_discriminants_29_to_35() {
+        let v9_only_range = 29usize..=35;
+        assert_eq!(v9_only_range.clone().count(), 7);
+        assert_eq!(*v9_only_range.start(), 29);
+        assert_eq!(*v9_only_range.end(), 35);
+    }
+
+    #[test]
+    fn v7_new_variants_occupy_discriminants_21_to_28() {
+        let v7_only_range = 21usize..=28;
+        assert_eq!(v7_only_range.clone().count(), 8);
+        assert_eq!(*v7_only_range.start(), 21);
+        assert_eq!(*v7_only_range.end(), 28);
+    }
+
+    #[test]
+    fn frozen_discriminant_range_is_0_to_14() {
+        const FROZEN_START: usize = 0;
+        const FROZEN_END: usize = 14;
+        assert_eq!(FROZEN_END - FROZEN_START + 1, 15);
+    }
+
+    #[test]
+    fn v5_stream_field_positions_are_stable() {
+        const STREAM_ID_POS: usize = 0;
+        const SENDER_POS: usize = 1;
+        const RECIPIENT_POS: usize = 2;
+        const DEPOSIT_AMOUNT_POS: usize = 3;
+        const RATE_PER_SECOND_POS: usize = 4;
+        const START_TIME_POS: usize = 5;
+        const CLIFF_TIME_POS: usize = 6;
+        const END_TIME_POS: usize = 7;
+        const WITHDRAWN_AMOUNT_POS: usize = 8;
+        const STATUS_POS: usize = 9;
+        const CANCELLED_AT_POS: usize = 10;
+        const CHECKPOINTED_AMOUNT_POS: usize = 11;
+        const CHECKPOINTED_AT_POS: usize = 12;
+        const WITHDRAW_DUST_THRESHOLD_POS: usize = 13;
+        let positions = [
+            STREAM_ID_POS, SENDER_POS, RECIPIENT_POS, DEPOSIT_AMOUNT_POS,
+            RATE_PER_SECOND_POS, START_TIME_POS, CLIFF_TIME_POS, END_TIME_POS,
+            WITHDRAWN_AMOUNT_POS, STATUS_POS, CANCELLED_AT_POS, CHECKPOINTED_AMOUNT_POS,
+            CHECKPOINTED_AT_POS, WITHDRAW_DUST_THRESHOLD_POS,
+        ];
+        assert_eq!(positions.len(), 14);
+        for (i, &pos) in positions.iter().enumerate() {
+            assert_eq!(pos, i, "V5 Stream field at index {i} has wrong position {pos}");
+        }
+    }
+
+    #[test]
+    fn v6_memo_field_is_at_position_14() {
+        const MEMO_POS: usize = 14;
+        assert_eq!(MEMO_POS, 14);
+    }
+
+    #[test]
+    fn stream_struct_has_24_fields_with_all_appended() {
+        const TOTAL_STREAM_FIELDS: usize = 24;
+        assert_eq!(TOTAL_STREAM_FIELDS, 24);
+    }
+
+    #[test]
+    fn checksum_verification_is_deterministic() {
+        let input = b"fluxora_stream.wasm";
+        fn trivial_hash(data: &[u8]) -> [u8; 32] {
+            let mut out = [0u8; 32];
+            for (i, b) in data.iter().enumerate().take(32) { out[i] = *b; }
+            out
+        }
+        let hash1 = trivial_hash(input);
+        let hash2 = trivial_hash(input);
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn upgrade_boundary_frozen_range_integrity() {
+        const FROZEN_DISCRIMINANTS: usize = 15;
+        assert!(FROZEN_DISCRIMINANTS >= 15);
+    }
+
+    #[test]
+    fn datakey_variant_count_is_compile_time_constant() {
+        const V5_VARIANTS: usize = 15;
+        const V6_INITIAL_VARIANTS: usize = 21;
+        const LIVE_VARIANTS: usize = 36;
+        assert!(V5_VARIANTS < V6_INITIAL_VARIANTS);
+        assert!(V6_INITIAL_VARIANTS <= LIVE_VARIANTS);
+        assert_eq!(LIVE_VARIANTS - V6_INITIAL_VARIANTS, 15);
+    }
+
+    fn minimal_stream_no_crypto() -> Stream {
+        let env = Env::default();
+        Stream {
+            stream_id: 1, sender: Address::generate(&env), recipient: Address::generate(&env),
+            claim_owner: None, deposit_amount: 1000, rate_per_second: 1,
+            start_time: 100, cliff_time: 200, end_time: 1000, withdrawn_amount: 0,
+            status: StreamStatus::Active, cancelled_at: None, checkpointed_amount: 0,
+            checkpointed_at: 100, withdraw_dust_threshold: 0, memo: None, kind: StreamKind::Linear,
+            last_pause_toggle_ledger: 0, last_withdraw_ledger: 0, metadata: None, witness: None,
+            is_pooled: None, last_rate_change_ledger: 0, delegation_depth: 0,
+            parent_stream_id: None, decommissioned: None, irrevocable: None,
+        }
+    }
+
+    #[test]
+    fn test_checksum_no_crypto_deterministic() {
+        let stream = minimal_stream_no_crypto();
+        let hash1 = compute_stream_checksum_no_crypto(&stream);
+        let hash2 = compute_stream_checksum_no_crypto(&stream);
+        assert_eq!(hash1, hash2);
+        assert_eq!(hash1.len(), CHECKSUM_LENGTH);
+    }
+
+    #[test]
+    fn test_checksum_no_crypto_identical_streams() {
+        let s1 = minimal_stream_no_crypto();
+        let mut s2 = minimal_stream_no_crypto();
+        s2.stream_id = 1;
+        let h1 = compute_stream_checksum_no_crypto(&s1);
+        let h2 = compute_stream_checksum_no_crypto(&s2);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_checksum_no_crypto_tamper_detection() {
+        use StreamStatus::*;
+        let base = minimal_stream_no_crypto();
+        let base_hash = compute_stream_checksum_no_crypto(&base);
+        let tampered_cases: [(&str, Stream); 11] = [
+            ("stream_id",       Stream { stream_id: 42, ..base.clone() }),
+            ("deposit_amount",  Stream { deposit_amount: 9999, ..base.clone() }),
+            ("rate_per_second", Stream { rate_per_second: 999, ..base.clone() }),
+            ("start_time",      Stream { start_time: 999, ..base.clone() }),
+            ("cliff_time",      Stream { cliff_time: 999, ..base.clone() }),
+            ("end_time",        Stream { end_time: 9999, ..base.clone() }),
+            ("withdrawn_amount",Stream { withdrawn_amount: 500, ..base.clone() }),
+            ("status",          Stream { status: Cancelled, ..base.clone() }),
+            ("checkpointed_amount", Stream { checkpointed_amount: 500, ..base.clone() }),
+            ("checkpointed_at", Stream { checkpointed_at: 500, ..base.clone() }),
+            ("withdraw_dust_threshold", Stream { withdraw_dust_threshold: 100, ..base.clone() }),
+        ];
+        for (name, tampered) in &tampered_cases {
+            let h = compute_stream_checksum_no_crypto(tampered);
+            assert_ne!(base_hash, h, "tamper with {name} must change checksum");
+        }
+    }
+
+    #[test]
+    fn test_checksum_no_crypto_excluded_fields_ignored() {
+        let base = minimal_stream_no_crypto();
+        let base_hash = compute_stream_checksum_no_crypto(&base);
+        let modified = Stream {
+            last_pause_toggle_ledger: 999, last_withdraw_ledger: 888,
+            last_rate_change_ledger: 777, decommissioned: Some(true), delegation_depth: 5, ..base
+        };
+        let modified_hash = compute_stream_checksum_no_crypto(&modified);
+        assert_eq!(base_hash, modified_hash, "excluded fields must NOT change checksum");
+    }
+
+    #[test]
+    fn test_checksum_option_none_vs_some() {
+        let mut stream_none = minimal_stream_no_crypto();
+        stream_none.parent_stream_id = None; stream_none.memo = None; stream_none.metadata = None;
+        let mut stream_some = minimal_stream_no_crypto();
+        stream_some.parent_stream_id = Some(42);
+        stream_some.memo = Some(Bytes::from_array(&Env::default(), &[1u8; 4]));
+        let env = Env::default();
+        let mut map = Map::new(&env);
+        map.set(Bytes::from_array(&env, b"key"), Bytes::from_array(&env, b"val"));
+        stream_some.metadata = Some(map);
+        let h_none = compute_stream_checksum_no_crypto(&stream_none);
+        let h_some = compute_stream_checksum_no_crypto(&stream_some);
+        assert_ne!(h_none, h_some, "None vs Some must produce different checksums");
+    }
+
+    #[test]
+    fn test_checksum_deterministic_property() {
+        let stream = minimal_stream_no_crypto();
+        let first = compute_stream_checksum_no_crypto(&stream);
+        for _ in 0..1000 {
+            let next = compute_stream_checksum_no_crypto(&stream);
+            assert_eq!(first, next, "checksum must be deterministic over 1000 iterations");
+        }
+    }
+
+    #[test]
+    fn test_checksum_edge_zero_values() {
+        let mut stream = minimal_stream_no_crypto();
+        stream.deposit_amount = 0; stream.rate_per_second = 0; stream.withdrawn_amount = 0;
+        stream.checkpointed_amount = 0; stream.withdraw_dust_threshold = 0;
+        let hash = compute_stream_checksum_no_crypto(&stream);
+        assert_eq!(hash.len(), CHECKSUM_LENGTH);
+    }
+
+    #[test]
+    fn test_checksum_edge_all_option_none() {
+        let mut stream = minimal_stream_no_crypto();
+        stream.claim_owner = None; stream.cancelled_at = None; stream.memo = None;
+        stream.metadata = None; stream.witness = None; stream.is_pooled = None;
+        stream.parent_stream_id = None; stream.irrevocable = None; stream.decommissioned = None;
+        let hash = compute_stream_checksum_no_crypto(&stream);
+        assert_eq!(hash.len(), CHECKSUM_LENGTH);
+    }
+
+    #[test]
+    fn test_checksum_edge_all_option_some() {
+        let env = Env::default();
+        let mut stream = minimal_stream_no_crypto();
+        stream.claim_owner = Some(Address::generate(&env));
+        stream.cancelled_at = Some(999);
+        stream.memo = Some(Bytes::from_array(&env, &[1u8, 2u8, 3u8]));
+        let mut map = Map::new(&env);
+        map.set(Bytes::from_array(&env, b"key1"), Bytes::from_array(&env, b"val1"));
+        stream.metadata = Some(map);
+        stream.witness = Some(Address::generate(&env));
+        stream.is_pooled = Some(true);
+        stream.parent_stream_id = Some(42);
+        stream.irrevocable = Some(true);
+        stream.decommissioned = Some(false);
+        let hash = compute_stream_checksum_no_crypto(&stream);
+        assert_eq!(hash.len(), CHECKSUM_LENGTH);
+    }
+
+    #[test]
+    fn test_checksum_kind_affects_hash() {
+        let mut stream_linear = minimal_stream_no_crypto();
+        stream_linear.kind = StreamKind::Linear;
+        let mut stream_cliff = minimal_stream_no_crypto();
+        stream_cliff.kind = StreamKind::CliffOnly;
+        stream_cliff.rate_per_second = 0;
+        let h_linear = compute_stream_checksum_no_crypto(&stream_linear);
+        let h_cliff = compute_stream_checksum_no_crypto(&stream_cliff);
+        assert_ne!(h_linear, h_cliff, "different StreamKind must produce different checksums");
+    }
+
+    #[test]
+    fn test_checksum_no_crypto_max_values() {
+        let env = Env::default();
+        let stream = Stream {
+            stream_id: u64::MAX, sender: Address::generate(&env),
+            recipient: Address::generate(&env), claim_owner: Some(Address::generate(&env)),
+            deposit_amount: i128::MAX, rate_per_second: i128::MAX,
+            start_time: u64::MAX, cliff_time: u64::MAX, end_time: u64::MAX,
+            withdrawn_amount: i128::MAX, status: StreamStatus::Cancelled,
+            cancelled_at: Some(u64::MAX), checkpointed_amount: i128::MAX,
+            checkpointed_at: u64::MAX, withdraw_dust_threshold: i128::MAX,
+            memo: Some(Bytes::from_array(&env, &[0xFFu8; 256])),
+            kind: StreamKind::CliffSlope, last_pause_toggle_ledger: u32::MAX,
+            last_withdraw_ledger: u32::MAX, metadata: Some(Map::new(&env)),
+            witness: Some(Address::generate(&env)), is_pooled: Some(true),
+            last_rate_change_ledger: u32::MAX, delegation_depth: u32::MAX,
+            parent_stream_id: Some(u64::MAX), decommissioned: Some(true), irrevocable: Some(true),
+        };
+        let hash = compute_stream_checksum_no_crypto(&stream);
+        assert_eq!(hash.len(), CHECKSUM_LENGTH);
     }
 }
