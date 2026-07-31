@@ -5,8 +5,7 @@
 )]
 
 pub mod accrual;
-#[cfg(test)]
-mod checksum;
+pub mod checksum;
 mod delegation;
 pub(crate) mod events;
 #[cfg(any(test, feature = "testutils"))]

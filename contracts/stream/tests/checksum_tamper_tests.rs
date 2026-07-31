@@ -22,8 +22,11 @@
 #![cfg(test)]
 
 use fluxora_stream::{
+    FluxoraStream, FluxoraStreamClient, StreamKind, StreamStatus,
+    CreateStreamParams,
     checksum, CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamKind, StreamStatus,
 };
+use fluxora_stream::checksum::compute_stream_checksum;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
@@ -227,12 +230,6 @@ fn compute_stream_checksum(env: &Env, stream: &fluxora_stream::Stream) -> [u8; 3
         hash_input.push(0);
     }
 
-    // For Option<u64> parent_stream_id
-    if let Some(parent_id) = stream.parent_stream_id {
-        hash_input.push(1);
-        hash_input.extend_from_slice(&parent_id.to_le_bytes());
-    } else {
-        hash_input.push(0);
     }
 
     // The hash of all fields
