@@ -16,6 +16,7 @@ When changing the contract:
 - Update snapshot tests if externally visible behavior changes
 - No behavior change required for doc-only updates
 
+**Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `cancel_recipient_update`, `delete_stream_template`, `get_global_emergency_paused`, `get_pending_recipient_update`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `global_resume`, `keeper_cancel`, `set_attester_allowlist`, `set_contract_paused`, `set_global_emergency_paused`, `version`, `migration_v5_to_v6`, `set_max_rate_per_second`, `verify_milestone_proof`.
 **Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `close_cancelled_stream`, `close_completed_stream`, `compute_keeper_fee_split`, `create_stream_with_lookback`, `delegated_cancel`, `delete_stream_template`, `get_auto_renew`, `get_delegated_cancel_nonce`, `get_global_emergency_paused`, `get_lookback_window`, `get_paused_stream_count`, `get_pending_recipient_update`, `get_protocol_fees_accrued`, `get_recipient_stream_count`, `get_sender_portfolio_health`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `get_total_liabilities`, `global_resume`, `keeper_cancel`, `renew_stream`, `set_auto_renew`, `set_contract_paused`, `set_global_emergency_paused`, `set_lookback_window`, `version`, `migration_v5_to_v6`, `set_max_rate_per_second`.
 **Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `delegated_cancel`, `delete_stream_template`, `get_auto_renew`, `get_delegated_cancel_nonce`, `get_global_emergency_paused`, `get_keeper_fee_split`, `get_pending_recipient_update`, `get_recipient_stream_count`, `get_sender_portfolio_health`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `get_total_liabilities`, `global_resume`, `keeper_cancel`, `renew_stream`, `set_auto_renew`, `set_contract_paused`, `set_global_emergency_paused`, `version`, `migration_v5_to_v6`, `set_max_rate_per_second`.
 **Entrypoint index (validator):** `accept_recipient_update`, `batch_withdraw_to`, `bulk_cancel_streams`, `bulk_resume_streams_as_admin`, `cancel_recipient_update`, `close_cancelled_stream`, `close_completed_stream`, `compute_keeper_fee_split`, `delegated_cancel`, `delete_stream_template`, `get_auto_renew`, `get_delegated_cancel_nonce`, `get_global_emergency_paused`, `get_keeper_fee_split`, `get_paused_stream_count`, `get_pending_recipient_update`, `get_protocol_fees_accrued`, `get_recipient_stream_count`, `get_sender_portfolio_health`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `get_total_liabilities`, `global_resume`, `keeper_cancel`, `migration_v5_to_v6`, `renew_stream`, `set_auto_renew`, `set_contract_paused`, `set_global_emergency_paused`, `set_max_rate_per_second`, `version`.
@@ -1143,6 +1144,70 @@ To preserve the absolute one-shot unlock nature of a `[CliffOnly](#cliff-only-st
 - `extend_stream_end_time`
 
 Any such attempt is atomic: no balances are transferred, no state is updated, and no events are emitted.
+
+### Milestone Proof Attestation (`verify_milestone_proof`)
+
+From **CONTRACT_VERSION 7**, `CliffOnly` streams support early cliff unlock via signed milestone attestations. An authorized attester can prove off-chain that a milestone has been reached, allowing the stream to unlock before the scheduled `cliff_time`.
+
+#### How it works
+
+1. The stream sender configures an attester allowlist via `set_attester_allowlist`.
+2. An attester on the allowlist signs a message containing `stream_id`, `milestone_id`, and `deadline` using their ed25519 private key.
+3. Anyone can call `verify_milestone_proof` with the attester's public key, the signature, and the milestone parameters.
+4. The contract verifies the deadline, checks for replay (monotonically increasing `milestone_id`), confirms the attester is on the allowlist, and validates the ed25519 signature.
+5. On success, the stream's `early_cliff_unlocked` flag is set to `true` and the milestone nonce is advanced.
+
+#### Domain separation
+
+The signed message is prefixed with `MILESTONE_PROOF_DOMAIN` (`b"FluxoraMilestoneProof"`) to prevent cross-protocol replay attacks.
+
+#### Message format
+
+```text
+message = MILESTONE_PROOF_DOMAIN (variable-length bytes)
+        | stream_id   (u64,  8 bytes, big-endian)
+        | milestone_id (u64, 8 bytes, big-endian)
+        | deadline     (u64,  8 bytes, big-endian)
+```
+
+Total: 24 bytes + domain tag length.
+
+#### Parameters
+
+| Parameter | Type | Description |
+|---|---|---|
+| `stream_id` | `u64` | Stream to unlock early |
+| `attester_pubkey` | `BytesN<32>` | Raw ed25519 public key of the attester |
+| `signature` | `BytesN<64>` | ed25519 signature over the message |
+| `milestone_id` | `u64` | Unique identifier for this attestation (per-stream nonce) |
+| `deadline` | `u64` | Ledger timestamp after which the signature is rejected |
+
+#### Errors
+
+| Error | Code | Condition |
+|---|---|---|
+| `StreamNotFound` | 1 | `stream_id` does not exist |
+| `StreamNotCliffOnly` | 39 | Stream is not a `CliffOnly` stream |
+| `InvalidState` | 2 | Stream is in a terminal state |
+| `AttestationExpired` | 36 | `deadline < current ledger timestamp` |
+| `AttestationReplayed` | 37 | `milestone_id` has already been used for this stream |
+| `UnauthorizedAttester` | 38 | `attester_pubkey` is not on the stream's allowlist |
+| `InvalidAttestation` | 35 | ed25519 signature verification failed |
+
+#### Authorization
+
+Anyone can call `verify_milestone_proof` — attester authorization is checked against the stream's allowlist, not the caller's Soroban auth.
+
+#### `set_attester_allowlist`
+
+Configures the attester allowlist for a `CliffOnly` stream. Replaces any existing allowlist. Only the stream sender (owner) may call this entrypoint.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `stream_id` | `u64` | Stream to configure |
+| `attesters` | `Vec<BytesN<32>>` | List of ed25519 public keys (raw 32-byte values) |
+
+**Errors**: `StreamNotFound`, `Unauthorized`, `StreamNotCliffOnly`, `InvalidState`.
 
 ### Shorten `end_time` Semantics
 

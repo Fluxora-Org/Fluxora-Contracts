@@ -339,6 +339,57 @@ const MIN_PAUSE_INTERVAL_LEDGERS: u32 = 17;
 /// Prevents rapid rate updates within the same ledger window.
 const MIN_RATE_INTERVAL_LEDGERS: u32 = 17;
 
+/// Domain separation tag for milestone proof attestations.
+///
+/// Prevents cross-protocol replay attacks by binding the signature
+/// to the Fluxora streaming protocol context.
+const MILESTONE_PROOF_DOMAIN: &[u8] = b"FluxoraMilestoneProof";
+
+// ---------------------------------------------------------------------------
+// Milestone proof helpers
+// ---------------------------------------------------------------------------
+
+/// Load the attester allowlist for a stream.
+///
+/// Returns an empty vector if no allowlist has been configured yet.
+fn load_attester_allowlist(env: &Env, stream_id: u64) -> soroban_sdk::Vec<Address> {
+    let key = DataKey::AttesterAllowlist(stream_id);
+    env.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| soroban_sdk::Vec::new(env))
+}
+
+/// Save the attester allowlist for a stream.
+fn save_attester_allowlist(env: &Env, stream_id: u64, allowlist: &soroban_sdk::Vec<Address>) {
+    let key = DataKey::AttesterAllowlist(stream_id);
+    env.storage().persistent().set(&key, allowlist);
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+}
+
+/// Load the milestone nonce for a stream.
+///
+/// Returns 0 if no milestone has been verified yet.
+fn load_milestone_nonce(env: &Env, stream_id: u64) -> u64 {
+    let key = DataKey::MilestoneNonce(stream_id);
+    env.storage().persistent().get(&key).unwrap_or(0u64)
+}
+
+/// Save the milestone nonce for a stream.
+fn save_milestone_nonce(env: &Env, stream_id: u64, nonce: u64) {
+    let key = DataKey::MilestoneNonce(stream_id);
+    env.storage().persistent().set(&key, &nonce);
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+}
+
 // Contract version
 // ---------------------------------------------------------------------------
 
@@ -414,6 +465,7 @@ const MIN_RATE_INTERVAL_LEDGERS: u32 = 17;
 /// resume/cancel/complete transitions; `get_paused_stream_count()` O(1) view added;
 /// duplicate `ContractError` discriminant 23 resolved and the previously-missing
 /// variants declared.
+pub const CONTRACT_VERSION: u32 = 7;
 ///
 /// Bumped to 7: permissionless auto-renewal entrypoints and the append-only
 /// `DataKey::AutoRenewEnabled` opt-in were added.
@@ -675,6 +727,17 @@ pub enum ContractError {
     /// Metadata payload exceeds the allowed size.
     MetadataTooLarge = 32,
     /// Keeper attempted to close a stream before the grace period elapsed.
+    KeeperGracePeriodNotElapsed = 34,
+    /// Attestation signature is invalid or malformed.
+    InvalidAttestation = 35,
+    /// Attestation deadline has expired.
+    AttestationExpired = 36,
+    /// Milestone ID has already been used for this stream (replay).
+    AttestationReplayed = 37,
+    /// Attester is not on the stream's configured allowlist.
+    UnauthorizedAttester = 38,
+    /// Operation only valid for CliffOnly streams.
+    StreamNotCliffOnly = 39,
     KeeperGracePeriodNotElapsed = 33,
     /// ID reservation is active; 34 is distinct from keeper grace errors.
     ReservationAlreadyActive = 34,
@@ -1160,6 +1223,48 @@ pub struct RotationEntry {
     pub authoriser: Address,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Stream {
+    pub stream_id: u64,
+    pub sender: Address,
+    pub recipient: Address,
+    pub deposit_amount: i128,
+    pub rate_per_second: i128,
+    pub start_time: u64,
+    pub cliff_time: u64,
+    pub end_time: u64,
+    pub withdrawn_amount: i128,
+    pub status: StreamStatus,
+    pub cancelled_at: Option<u64>,
+    /// Total tokens mathematically accrued up to `checkpointed_at` under all
+    /// previous rates. Updated by `decrease_rate_per_second` (and by
+    /// `update_rate_per_second` for symmetry) so that the new rate applies only
+    /// from `checkpointed_at` forward. Initialised to 0 at stream creation.
+    pub checkpointed_amount: i128,
+    /// Ledger timestamp of the last rate change (or `start_time` on creation).
+    /// `calculate_accrued` uses this as the start of the current rate epoch.
+    pub checkpointed_at: u64,
+    /// Optional withdrawal threshold (raw units). Withdrawals below this
+    /// amount are skipped unless they are the final drain or the stream is terminal.
+    pub withdraw_dust_threshold: i128,
+    pub last_pause_toggle_ledger: u32,
+    pub last_withdraw_ledger: u32,
+    /// Optional structured metadata stored alongside the stream.
+    pub metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
+    /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
+    /// Maximum `MAX_MEMO_BYTES` (64) bytes. Pass `None` to omit.
+    pub memo: Option<soroban_sdk::Bytes>,
+    /// The architectural style of the stream (Linear or CliffOnly).
+    pub kind: StreamKind,
+    /// Early cliff unlock flag set by `verify_milestone_proof`.
+    ///
+    /// When `true`, the stream's cliff is considered satisfied regardless of
+    /// the current ledger timestamp, allowing `CliffOnly` streams to unlock
+    /// ahead of schedule based on an authorized off-chain attestation.
+    /// The original `cliff_time` is preserved unchanged for audit purposes.
+    pub early_cliff_unlocked: bool,
+}
 // (Stream struct is defined in types.rs and re-exported above)
 
 // (Page struct is defined in types.rs and re-exported above)
@@ -1404,6 +1509,16 @@ pub enum DataKey {
     ///
     /// Added in issue #623. Appended at the end to preserve existing discriminants.
     TotalKeeperFeesPaid,
+    /// Per-stream attester allowlist (`Vec<Address>`).
+    ///
+    /// Addresses in this list are authorized to submit milestone attestations
+    /// for the stream via `verify_milestone_proof`.
+    AttesterAllowlist(u64),
+    /// Per-stream milestone nonce (`u64`).
+    ///
+    /// Tracks the next expected milestone ID to prevent replay attacks.
+    /// Incremented on each successful `verify_milestone_proof` call.
+    MilestoneNonce(u64),
     /// Per-stream auto-renew opt-in flag. Appended to preserve storage discriminants.
     AutoRenewEnabled(u64),
     /// Optional per-stream withdrawal lookback window in ledger count.
@@ -1770,6 +1885,8 @@ impl FluxoraStream {
             kind,
             last_pause_toggle_ledger: 0,
             last_withdraw_ledger: 0,
+            metadata: None,
+            early_cliff_unlocked: false,
             metadata: metadata.clone(),
             last_rate_change_ledger: 0,
             is_pooled: None,
@@ -1871,6 +1988,8 @@ impl FluxoraStream {
             kind,
             last_pause_toggle_ledger: 0,
             last_withdraw_ledger: 0,
+            metadata: None,
+            early_cliff_unlocked: false,
             metadata: metadata.clone(),
             last_rate_change_ledger: 0,
             is_pooled: None,
@@ -3992,6 +4111,7 @@ impl FluxoraStream {
                         end_time: stream.end_time,
                         deposit_amount: stream.deposit_amount,
                         kind: stream.kind,
+                        early_cliff_unlocked: stream.early_cliff_unlocked,
                     },
                     stream.rate_per_second,
                     effective_now,
@@ -4066,6 +4186,146 @@ impl FluxoraStream {
             });
         }
 
+        Ok(results)
+    }
+
+    /// Withdraw accrued tokens from multiple streams and route them to specified destinations.
+    ///
+    /// Similar to `batch_withdraw`, but allows the recipient to specify a distinct
+    /// `destination` address for each stream withdrawal in the batch.
+    ///
+    /// The caller must be the recipient of every stream in `withdrawals`. The operation
+    /// is atomic: if any stream fails (not found, unauthorized, paused, or invalid destination),
+    /// the entire batch reverts.
+    ///
+    /// # Parameters
+    /// - `recipient`: Address that must authorize and must be the recipient of all streams
+    /// - `withdrawals`: List of `WithdrawToParam` (stream_id, destination). Stream IDs must be unique.
+    ///
+    /// # Returns
+    /// - `Vec<BatchWithdrawResult>`: Per-stream `(stream_id, amount)` for each entry.
+    pub fn batch_withdraw_to(
+        env: Env,
+        recipient: Address,
+        withdrawals: soroban_sdk::Vec<WithdrawToParam>,
+    ) -> Result<soroban_sdk::Vec<BatchWithdrawResult>, ContractError> {
+        require_not_globally_paused(&env)?;
+        recipient.require_auth();
+
+        let n = withdrawals.len();
+        for i in 0..n {
+            let param_a = withdrawals.get(i).unwrap();
+
+            if param_a.destination == env.current_contract_address() {
+                return Err(ContractError::InvalidParams);
+            }
+
+            let mut j = i + 1;
+            while j < n {
+                let param_b = withdrawals.get(j).unwrap();
+                assert!(
+                    param_a.stream_id != param_b.stream_id,
+                    "batch_withdraw_to stream_ids must be unique"
+                );
+                j += 1;
+            }
+        }
+
+        // Fetch initial contract balance and track remaining safety buffer
+        let token_address = get_token(&env)?;
+        let mut contract_balance =
+            token::Client::new(&env, &token_address).balance(&env.current_contract_address());
+
+        let mut results = soroban_sdk::Vec::new(&env);
+
+        // Cache ledger timestamp once — constant within a single transaction (#515).
+        let now = current_accrual_timestamp(&env)?;
+
+        for param in withdrawals.iter() {
+            let mut stream = load_stream(&env, param.stream_id)?;
+
+            if stream.recipient != recipient {
+                return Err(ContractError::Unauthorized);
+            }
+
+            if stream.status == StreamStatus::Paused && !is_terminal_state(&env, &stream) {
+                return Err(ContractError::InvalidState);
+            }
+
+            let mut withdrawable = if stream.status == StreamStatus::Completed {
+                0
+            } else {
+                let effective_now = if stream.status == StreamStatus::Cancelled {
+                    stream.cancelled_at.ok_or(ContractError::InvalidState)?
+                } else {
+                    now
+                };
+                let accrued = accrual::calculate_accrued_amount_checkpointed(
+                    accrual::CheckpointState {
+                        checkpointed_amount: stream.checkpointed_amount,
+                        checkpointed_at: stream.checkpointed_at,
+                        cliff_time: stream.cliff_time,
+                        end_time: stream.end_time,
+                        deposit_amount: stream.deposit_amount,
+                        kind: stream.kind,
+                        early_cliff_unlocked: stream.early_cliff_unlocked,
+                    },
+                    stream.rate_per_second,
+                    effective_now,
+                );
+                (accrued - stream.withdrawn_amount).max(0)
+            };
+
+            // Cap by running contract balance for safety
+            withdrawable = withdrawable.min(contract_balance);
+
+            // Enforce dust threshold unless terminal state or final drain (#423)
+            if withdrawable > 0
+                && withdrawable < stream.withdraw_dust_threshold
+                && !is_terminal_state(&env, &stream)
+                && stream.withdrawn_amount + withdrawable < stream.deposit_amount
+            {
+                withdrawable = 0;
+            }
+
+            if withdrawable > 0 {
+                contract_balance -= withdrawable;
+                stream.withdrawn_amount += withdrawable;
+
+                let completed_now = (stream.status == StreamStatus::Active
+                    || stream.status == StreamStatus::Paused)
+                    && stream.withdrawn_amount == stream.deposit_amount;
+                let previous_status = stream.status;
+                if completed_now {
+                    stream.status = StreamStatus::Completed;
+                }
+                save_stream(&env, &stream);
+                reconcile_paused_stream_count(&env, previous_status, stream.status);
+
+                push_token(&env, &param.destination, withdrawable)?;
+
+                env.events().publish(
+                    (symbol_short!("wdraw_to"), param.stream_id),
+                    WithdrawalTo {
+                        stream_id: param.stream_id,
+                        recipient: stream.recipient.clone(),
+                        destination: param.destination.clone(),
+                        amount: withdrawable,
+                    },
+                );
+
+                if completed_now {
+                    env.events().publish(
+                        (symbol_short!("completed"), param.stream_id),
+                        StreamEvent::StreamCompleted(param.stream_id),
+                    );
+                }
+            }
+
+            results.push_back(BatchWithdrawResult {
+                stream_id: param.stream_id,
+                amount: withdrawable,
+            });
         if liabilities_changed {
             write_total_liabilities(&env, total_liabilities);
         }
@@ -4262,6 +4522,189 @@ impl FluxoraStream {
         load_delegated_nonce(&env, &recipient)
     }
 
+    /// Verify a milestone attestation and early-unlock a CliffOnly stream's cliff.
+    ///
+    /// Accepts an ed25519-signed attestation from an authorized attester.
+    /// If the attestation is valid, sets the `early_cliff_unlocked` flag on
+    /// the stream, allowing `CliffOnly` streams to unlock ahead of the
+    /// scheduled `cliff_time`.
+    ///
+    /// The original `cliff_time` is preserved unchanged for audit purposes.
+    /// The `early_cliff_unlocked` flag is consulted by `calculate_accrued`
+    /// and `get_withdrawable` instead of mutating `cliff_time` directly.
+    ///
+    /// # Domain separation
+    ///
+    /// The signed message is prefixed with `MILESTONE_PROOF_DOMAIN`
+    /// (`b"FluxoraMilestoneProof"`) to prevent cross-protocol replay attacks.
+    ///
+    /// # Message format
+    ///
+    /// ```text
+    /// message = MILESTONE_PROOF_DOMAIN (variable-length bytes)
+    ///         | stream_id       (u64,  8 bytes, big-endian)
+    ///         | milestone_id    (u64,  8 bytes, big-endian)
+    ///         | deadline        (u64,  8 bytes, big-endian)
+    /// ```
+    ///
+    /// Total: 24 bytes + domain tag length.
+    ///
+    /// # Parameters
+    /// - `env`: Contract environment
+    /// - `stream_id`: Stream to unlock early
+    /// - `attester_pubkey`: Raw 32-byte ed25519 public key of the attester
+    /// - `signature`: 64-byte ed25519 signature over the message above
+    /// - `milestone_id`: Unique identifier for this attestation (per-stream nonce)
+    /// - `deadline`: Ledger timestamp after which the signature is rejected
+    ///
+    /// # Returns
+    /// - `Ok(())` on success
+    ///
+    /// # Errors
+    /// - `StreamNotFound` (1): `stream_id` does not exist
+    /// - `StreamNotCliffOnly` (39): Stream is not a `CliffOnly` stream
+    /// - `InvalidState` (2): Stream is in a terminal state
+    /// - `AttestationExpired` (36): `deadline < current ledger timestamp`
+    /// - `AttestationReplayed` (37): `milestone_id` has already been used for this stream
+    /// - `UnauthorizedAttester` (38): `attester_pubkey` is not on the stream's allowlist
+    /// - `InvalidAttestation` (35): ed25519 signature verification failed
+    ///
+    /// # Authorization
+    /// - Anyone can call this entrypoint (attester authorization is checked
+    ///   against the stream's allowlist, not the caller's Soroban auth).
+    pub fn verify_milestone_proof(
+        env: Env,
+        stream_id: u64,
+        attester_pubkey: soroban_sdk::BytesN<32>,
+        signature: soroban_sdk::BytesN<64>,
+        milestone_id: u64,
+        deadline: u64,
+    ) -> Result<(), ContractError> {
+        // 1. Deadline check — reject stale signatures before any storage reads.
+        if env.ledger().timestamp() > deadline {
+            return Err(ContractError::AttestationExpired);
+        }
+
+        // 2. Load stream.
+        let mut stream = load_stream(&env, stream_id)?;
+
+        // 3. Only CliffOnly streams support early cliff unlock.
+        if stream.kind != StreamKind::CliffOnly {
+            return Err(ContractError::StreamNotCliffOnly);
+        }
+
+        // 4. Reject terminal states.
+        if stream.status == StreamStatus::Completed || stream.status == StreamStatus::Cancelled {
+            return Err(ContractError::InvalidState);
+        }
+
+        // 5. Replay check — milestone_id must be strictly greater than the stored nonce.
+        let stored_nonce = load_milestone_nonce(&env, stream_id);
+        if milestone_id <= stored_nonce {
+            return Err(ContractError::AttestationReplayed);
+        }
+
+        // 6. Attester allowlist check.
+        let allowlist = load_attester_allowlist(&env, stream_id);
+        let mut authorized = false;
+        // Check if the attester public key maps to an address on the allowlist.
+        {
+            use soroban_sdk::{
+                xdr::{AccountId, PublicKey, ScAddress, Uint256},
+                TryIntoVal,
+            };
+            let pk_arr = attester_pubkey.to_array();
+            let derived: Result<Address, _> =
+                ScAddress::Account(AccountId(PublicKey::PublicKeyTypeEd25519(Uint256(pk_arr))))
+                    .try_into_val(&env);
+            match derived {
+                Ok(addr) => {
+                    for i in 0..allowlist.len() {
+                        if allowlist.get(i).unwrap() == addr {
+                            authorized = true;
+                            break;
+                        }
+                    }
+                }
+                Err(_) => return Err(ContractError::InvalidAttestation),
+            }
+        }
+        if !authorized {
+            return Err(ContractError::UnauthorizedAttester);
+        }
+
+        // 7. Build the signed message.
+        let mut msg = soroban_sdk::Bytes::new(&env);
+        msg.extend_from_slice(MILESTONE_PROOF_DOMAIN);
+        msg.extend_from_array(&stream_id.to_be_bytes());
+        msg.extend_from_array(&milestone_id.to_be_bytes());
+        msg.extend_from_array(&deadline.to_be_bytes());
+
+        // 8. Verify signature.
+        env.crypto()
+            .ed25519_verify(&attester_pubkey, &msg, &signature);
+
+        // 9. Set the early cliff unlock flag and advance the nonce.
+        stream.early_cliff_unlocked = true;
+        save_stream(&env, &stream);
+        save_milestone_nonce(&env, stream_id, milestone_id);
+
+        Ok(())
+    }
+
+    /// Set the attester allowlist for a CliffOnly stream.
+    ///
+    /// Replaces any existing allowlist. Only the stream's sender (owner)
+    /// may call this entrypoint. The attester allowlist controls which
+    /// ed25519 public keys are authorized to submit milestone attestations
+    /// via `verify_milestone_proof`.
+    ///
+    /// # Parameters
+    /// - `env`: Contract environment
+    /// - `stream_id`: Stream to configure
+    /// - `attesters`: List of ed25519 public keys (raw 32-byte values)
+    ///
+    /// # Errors
+    /// - `StreamNotFound` (1): `stream_id` does not exist
+    /// - `Unauthorized` (7): Caller is not the stream's sender
+    /// - `StreamNotCliffOnly` (39): Stream is not a `CliffOnly` stream
+    /// - `InvalidState` (2): Stream is in a terminal state
+    pub fn set_attester_allowlist(
+        env: Env,
+        stream_id: u64,
+        attesters: soroban_sdk::Vec<soroban_sdk::BytesN<32>>,
+    ) -> Result<(), ContractError> {
+        let mut stream = load_stream(&env, stream_id)?;
+
+        Self::require_stream_sender(&stream.sender);
+
+        if stream.kind != StreamKind::CliffOnly {
+            return Err(ContractError::StreamNotCliffOnly);
+        }
+
+        if stream.status == StreamStatus::Completed || stream.status == StreamStatus::Cancelled {
+            return Err(ContractError::InvalidState);
+        }
+
+        let mut allowlist = soroban_sdk::Vec::new(&env);
+        for i in 0..attesters.len() {
+            let pk = attesters.get(i).unwrap();
+            let pk_arr = pk.to_array();
+            use soroban_sdk::{
+                xdr::{AccountId, PublicKey, ScAddress, Uint256},
+                TryIntoVal,
+            };
+            let addr: Address = ScAddress::Account(AccountId(PublicKey::PublicKeyTypeEd25519(
+                Uint256(pk_arr),
+            )))
+            .try_into_val(&env)
+            .map_err(|_| ContractError::InvalidAttestation)?;
+            allowlist.push_back(&addr);
+        }
+
+        save_attester_allowlist(&env, stream_id, &allowlist);
+
+        Ok(())
     /// Return the current delegated-cancel nonce for a sender.
     ///
     /// Relayers must include this value in the signed cancel-message to prevent
@@ -4342,6 +4785,7 @@ impl FluxoraStream {
                 end_time: stream.end_time,
                 deposit_amount: stream.deposit_amount,
                 kind: stream.kind,
+                early_cliff_unlocked: stream.early_cliff_unlocked,
             },
             stream.rate_per_second,
             now,
@@ -4477,6 +4921,7 @@ impl FluxoraStream {
                 end_time: stream.end_time,
                 deposit_amount: stream.deposit_amount,
                 kind: stream.kind,
+                early_cliff_unlocked: stream.early_cliff_unlocked,
             },
             stream.rate_per_second,
             effective_time,
@@ -4976,6 +5421,7 @@ impl FluxoraStream {
                 end_time: stream.end_time,
                 deposit_amount: stream.deposit_amount,
                 kind: stream.kind,
+                early_cliff_unlocked: stream.early_cliff_unlocked,
             },
             old_rate,
             now,
@@ -5100,6 +5546,7 @@ impl FluxoraStream {
                 end_time: stream.end_time,
                 deposit_amount: stream.deposit_amount,
                 kind: stream.kind,
+                early_cliff_unlocked: stream.early_cliff_unlocked,
             },
             old_rate,
             now,
@@ -5420,6 +5867,7 @@ impl FluxoraStream {
                 end_time: stream.end_time,
                 deposit_amount: stream.deposit_amount,
                 kind: stream.kind,
+                early_cliff_unlocked: stream.early_cliff_unlocked,
             },
             stream.rate_per_second,
             now,
@@ -5901,6 +6349,7 @@ impl FluxoraStream {
                     end_time: stream.end_time,
                     deposit_amount: stream.deposit_amount,
                     kind: stream.kind,
+                    early_cliff_unlocked: stream.early_cliff_unlocked,
                 },
                 stream.rate_per_second,
                 cancelled_at,
@@ -5967,6 +6416,7 @@ impl FluxoraStream {
                 end_time: stream.end_time,
                 deposit_amount: stream.deposit_amount,
                 kind: stream.kind,
+                early_cliff_unlocked: stream.early_cliff_unlocked,
             },
             stream.rate_per_second,
             cancelled_at,
@@ -6509,6 +6959,7 @@ impl FluxoraStream {
                 end_time: stream.end_time,
                 deposit_amount: stream.deposit_amount,
                 kind: stream.kind,
+                early_cliff_unlocked: stream.early_cliff_unlocked,
             },
             stream.rate_per_second,
             now,
@@ -6798,6 +7249,7 @@ impl FluxoraStream {
                 end_time: stream.end_time,
                 deposit_amount: stream.deposit_amount,
                 kind: stream.kind,
+                early_cliff_unlocked: stream.early_cliff_unlocked,
             },
             stream.rate_per_second,
             now,
@@ -7763,6 +8215,7 @@ impl FluxoraStream {
                 end_time: stream.end_time,
                 deposit_amount: stream.deposit_amount,
                 kind: stream.kind,
+                early_cliff_unlocked: stream.early_cliff_unlocked,
             },
             stream.rate_per_second,
             now,
@@ -7920,6 +8373,7 @@ impl FluxoraStream {
                         end_time: stream.end_time,
                         deposit_amount: stream.deposit_amount,
                         kind: stream.kind,
+                        early_cliff_unlocked: stream.early_cliff_unlocked,
                     },
                     stream.rate_per_second,
                     now,
@@ -8778,6 +9232,15 @@ impl FluxoraStream {
         // Add to RecipientStreams index (the offer was intentionally excluded from it).
         add_stream_to_recipient_index(&env, &offer.recipient, offer_id, Some(effective_end));
 
+        let accrued_at_cancel = accrual::calculate_accrued_amount_checkpointed(
+            accrual::CheckpointState {
+                checkpointed_amount: stream.checkpointed_amount,
+                checkpointed_at: stream.checkpointed_at,
+                cliff_time: stream.cliff_time,
+                end_time: stream.end_time,
+                deposit_amount: stream.deposit_amount,
+                kind: stream.kind,
+                early_cliff_unlocked: stream.early_cliff_unlocked,
         // Track liability: the full deposit is now owed to the recipient.
         let liabilities = read_total_liabilities(&env)
             .checked_add(offer.deposit_amount)
