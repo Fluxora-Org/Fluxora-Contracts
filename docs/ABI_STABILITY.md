@@ -3,7 +3,7 @@
 Canonical reference for what the Fluxora protocol guarantees to remain stable across deployments, and what constitutes a breaking change for indexers, wallets, and other integrators.
 
 **Source of truth:** `contracts/stream/src/lib.rs`
-**Current version:** `CONTRACT_VERSION = 3`
+**Current version:** `CONTRACT_VERSION = 9`
 **See also:** [`docs/upgrade.md`](./upgrade.md) for the migration runbook and version history.
 
 ---
@@ -44,55 +44,105 @@ A new contract deployment (new `CONTRACT_ID`) is required to change any of the a
 `ContractError` variants are identified by their `u32` discriminant value. The mapping between variant name and discriminant is **frozen** for any deployed instance:
 
 ```
-StreamNotFound      = 1
-InvalidState        = 2
-InvalidParams       = 3
-ContractPaused      = 4
-StartTimeInPast     = 5
-ArithmeticOverflow  = 6
-Unauthorized        = 7
-AlreadyInitialised  = 8
-InsufficientBalance = 9
-InsufficientDeposit = 10
-StreamAlreadyPaused = 11
-StreamNotPaused     = 12
-StreamTerminalState = 13
-DuplicateStreamId   = 14
-TemplateNotFound    = 15
-TemplateLimitExceeded = 16
-TemplateUnauthorized  = 17
+StreamNotFound              = 1
+InvalidState                = 2
+InvalidParams               = 3
+ContractPaused              = 4
+StartTimeInPast             = 5
+ArithmeticOverflow          = 6
+Unauthorized                = 7
+AlreadyInitialised          = 8
+InsufficientBalance         = 9
+InsufficientDeposit         = 10
+StreamAlreadyPaused         = 11
+StreamNotPaused             = 12
+StreamTerminalState         = 13
+DuplicateStreamId           = 14
+InvalidSignature            = 15
+BelowMinimumAmount          = 16
+ReservationCountZero        = 17
+ReservationLimitExceeded    = 18
+SignatureDeadlineExpired    = 19
+TemplateNotFound            = 20
+TemplateLimitExceeded       = 21
+TemplateUnauthorized        = 22
+PauseReasonTooLong          = 23
+ReservationNotFound         = 24
+ReservationNotExpirable     = 25
+ReservationStillActive      = 26
+ClockRegression             = 27
+UnsupportedStreamKind       = 28
+RateCapExceeded             = 29
+PauseCooldownActive         = 30
+WithdrawalTooFrequent       = 31
+MetadataTooLarge            = 32
+KeeperGracePeriodNotElapsed = 33
+ReservationAlreadyActive    = 34
+InvalidDustThreshold        = 35
+RateCooldownActive          = 36
+AutoRenewFundingUnavailable = 37
+OfferNotFound               = 38
+OfferExpired                = 39
+OfferWrongRecipient         = 40
+OfferWrongSender            = 41
+CyclicDelegation            = 43
+DelegationDepthExceeded     = 44
+TokenVerificationFailed     = 88
 ```
+
+`KeeperGracePeriodNotElapsed` and `ReservationAlreadyActive` are intentionally distinct (`33` and `34` respectively); CI checks now audit both docs and source for duplicate error codes.
 
 Clients MUST match on the numeric discriminant, not the variant name string, because Soroban encodes errors as `u32` values on the wire.
 
 ### 2.3 Event Topics and Payload Schemas
 
-Event topics are `symbol_short!` values (max 9 ASCII characters). The mapping between topic string and payload type is **frozen** for any deployed instance:
+Event topics are `symbol_short!` values (max 9 ASCII characters). The mapping between topic string and payload type is **frozen** for any deployed instance.
 
-| Topic | Payload type |
-|---|---|
-| `"created"` | `StreamCreated` struct |
-| `"withdrew"` | `Withdrawal` struct |
-| `"wdraw_to"` | `WithdrawalTo` struct |
-| `"paused"` | `StreamPaused` struct (v3+) |
-| `"resumed"` | `StreamEvent::Resumed(u64)` |
-| `"cancelled"` | `StreamEvent::StreamCancelled(u64)` |
-| `"completed"` | `StreamEvent::StreamCompleted(u64)` |
-| `"closed"` | `StreamEvent::StreamClosed(u64)` |
-| `"rate_upd"` | `RateUpdated` struct |
-| `"rate_dec"` | `RateDecreased` struct |
-| `"end_shrt"` | `StreamEndShortened` struct |
-| `"end_ext"` | `StreamEndExtended` struct |
-| `"top_up"` | `StreamToppedUp` struct |
-| `"recp_upd"` | `RecipientUpdated` struct |
-| `"sndr_xfr"` | `SenderTransferred` struct |
-| `"AdminUpdated"` | `(old_admin: Address, new_admin: Address)` tuple |
-| `"paused_ctl"` | `ContractPauseChanged { paused: bool }` |
-| `"gl_pause"` | `GlobalEmergencyPauseChanged { paused: bool }` |
-| `"gl_resume"` | `GlobalResumed { resumed_at: u64 }` |
-| `"pr_pause"` | `ProtocolPaused { reason: String, paused_at: u64 }` |
-| `"pr_resume"` | `ProtocolResumed { resumed_at: u64 }` |
-| `"tmpl_def"` | `StreamScheduleTemplate` struct |
+Events are canonically emitted from `contracts/stream/src/events.rs`. Several entrypoints in `lib.rs` still publish inline (pending a follow-up refactor); those inline topics are noted below. **All emitted topic/payload combinations are part of the ABI regardless of where they are published from.**
+
+| Topic | Payload type | Note |
+|---|---|---|
+| `"created"` | `StreamCreated` struct | |
+| `"withdrew"` | `Withdrawal` struct or `WithdrawalTo` struct | Same topic for both `withdraw` and `withdraw_to` |
+| `"wdraw_to"` | `WithdrawalTo` struct | Inline emit (lib.rs); distinct from `"withdrew"` |
+| `"paused"` | `StreamPaused` struct | |
+| `"resumed"` | `StreamEvent::Resumed(u64)` | |
+| `"cancelled"` | `StreamEvent::StreamCancelled(u64)` | |
+| `"complete"` | `StreamEvent::StreamCompleted(u64)` | Canonical topic from events.rs |
+| `"completed"` | `StreamEvent::StreamCompleted(u64)` | Inline emit (lib.rs); duplicate of `"complete"` — both exist in current ABI |
+| `"closed"` | `StreamEvent::StreamClosed(u64)` | |
+| `"rate_upd"` | `RateUpdated` struct | |
+| `"rate_dec"` | `RateDecreased` struct | |
+| `"rate_cap"` | `RateCapEnforced` struct | Emitted when rate update is rejected by governance cap |
+| `"end_shrt"` | `StreamEndShortened` struct | |
+| `"end_ext"` | `StreamEndExtended` struct | |
+| `"toppedup"` | `StreamToppedUp` struct | Canonical topic from events.rs |
+| `"top_up"` | `StreamToppedUp` struct | Inline emit (lib.rs); duplicate of `"toppedup"` — both exist in current ABI |
+| `"sndr_xfr"` | `SenderTransferred` struct | |
+| `"hlth_chg"` | `StreamHealthChanged` struct | Emitted when underfunded status transitions |
+| `"rcpt_upd"` | `RecipientUpdated` struct | Canonical topic from events.rs |
+| `"recp_upd"` | `RecipientUpdated` struct | Inline emit (lib.rs); duplicate of `"rcpt_upd"` |
+| `"g_paused"` | `GlobalEmergencyPauseChanged` struct | Canonical topic from events.rs |
+| `"gl_pause"` | `GlobalEmergencyPauseChanged` struct | Inline emit (lib.rs); duplicate of `"g_paused"` |
+| `"g_resume"` | `GlobalResumed` struct | Canonical topic from events.rs |
+| `"gl_resume"` | `GlobalResumed` struct | Inline emit (lib.rs); duplicate of `"g_resume"` |
+| `"ct_pause"` | `ContractPauseChanged` struct | |
+| `"pr_pause"` | `ProtocolPaused` struct | |
+| `"pr_rsm"` | `ProtocolResumed` struct | Canonical topic from events.rs |
+| `"pr_resume"` | `ProtocolResumed` struct | Inline emit (lib.rs); duplicate of `"pr_rsm"` |
+| `"ac_set"` | `AutoClaimSet` struct | |
+| `"ac_rev"` | `AutoClaimRevoked` struct | |
+| `"ac_trig"` | `AutoClaimTriggered` struct | |
+| `"excess_sw"` | `ExcessSwept` struct | Canonical topic from events.rs |
+| `"ex_swept"` | `ExcessSwept` struct | Inline emit (lib.rs); duplicate of `"excess_sw"` |
+| `"cloned"` | `StreamCloned` struct | |
+| `"kp_cncl"` | `KeeperCancelled` struct | |
+| `"tmpl_def"` | `StreamScheduleTemplate` struct | Template registration |
+| `"renewed"` | `StreamRenewed` struct | Stream auto-renewal |
+| `"offr_crt"` | `StreamOfferCreated` struct | Offer creation (v7+) |
+| `"offr_acc"` | `StreamOfferAccepted` struct | Offer acceptance (v7+) |
+| `"offr_cxl"` | `StreamOfferCancelled` struct | Offer cancellation/rejection (v7+) |
+| `"AdminUpd"` | `(old_admin: Address, new_admin: Address)` tuple | Admin rotation |
 
 Field names and types within each payload struct are also stable. Adding a new field to an existing struct is a breaking change (Soroban XDR encoding is positional).
 
@@ -117,10 +167,30 @@ Field names and types within each payload struct are also stable. Adding a new f
 | 12 | `StreamTemplate(u64)` | Persistent | `StreamScheduleTemplate` struct |
 | 13 | `OwnerTemplateIds(Address)` | Persistent | `Vec<u64>` |
 | 14 | `TotalLiabilities` | Instance | `i128` |
+| 15 | `WithdrawNonce(Address)` | Persistent | `u64` |
+| 16 | `PauseState` | Instance | `PauseState` enum |
+| 17 | `ReentrancyLock` | Instance | `bool` |
+| 18 | `RecipientStreamPage(Address, u32)` | Persistent | `Vec<u64>` |
+| 19 | `RecipientStreamPageCount(Address)` | Persistent | `u32` |
+| 20 | `PendingRecipientUpdate(u64)` | Persistent | `Address` |
+| 21 | `IdReservation(Address)` | Persistent | `IdReservation` struct |
+| 22 | `MaxRatePerSecond` | Instance | `i128` |
+| 23 | `DelegatedWithdrawNonce(Address)` | Persistent | `u64` |
+| 24 | `LastPauseRecord(PauseKind)` | Persistent | `PauseRecord` struct |
+| 25 | `RotationHistory(u64)` | Persistent | `Vec<RotationEntry>` |
+| 26 | `LastAccrualLedgerTimestamp` | Instance | `u64` |
+| 27 | `PausedStreamCount` | Instance | `u64` |
+| 28 | `TotalKeeperFeesPaid` | Instance | `i128` |
+| 29 | `SenderStreams(Address)` | Persistent | `Vec<u64>` (sorted) |
+| 30 | `AutoRenewEnabled(u64)` | Persistent | `bool` |
+| 31 | `PendingStreamOffer(u64)` | Persistent | `StreamOffer` struct |
+| 32 | `RecipientPendingOffers(Address)` | Persistent | `Vec<u64>` |
 
-> **Note on memo storage:** Stream memos are stored as the `memo: Option<Bytes>` field inside the `Stream` struct at `DataKey::Stream(stream_id)` (discriminant 2), not as a separate storage key. `docs/storage.md` references a `StreamMemo(u64)` key that does not exist in the current source; the `Stream` struct field is the canonical location.
+> **Note on memo storage:** Stream memos are stored as the `memo: Option<Bytes>` field inside the `Stream` struct at `DataKey::Stream(stream_id)` (discriminant 2), not as a separate storage key. The `Stream` struct field is the canonical location.
 
-Discriminants 0–14 are frozen. Any future variant must be appended at position 15 or higher.
+Discriminants 0–14 are permanently frozen. Discriminants 15–32 are append-only and must not be reordered. Any future variant must be appended at position 33 or higher.
+
+> **Cross-reference:** For the complete DataKey table with mutation tracking (which entrypoints set/modify each key), see [`docs/storage.md`](./storage.md#1-datakey-enum).
 
 ---
 
@@ -156,8 +226,8 @@ A change is **breaking** if a correctly-written client targeting the current `CO
 | Category | Example |
 |---|---|
 | Add a new entrypoint (purely additive) | Adding `get_stream_memo` |
-| Append a new `ContractError` variant at the end | Adding `TemplateUnauthorized = 17` |
-| Append a new `DataKey` variant at the end | Adding `TotalLiabilities` at discriminant 15 |
+| Append a new `ContractError` variant at the end | Adding `OfferWrongSender = 40` |
+| Append a new `DataKey` variant at the end | Adding `RecipientPendingOffers` at discriminant 32 |
 | Tighten validation that rejects a previously-accepted edge case | Rejecting `deposit_amount == 0` if it was previously a no-op |
 | Change TTL bump constants | Increasing `PERSISTENT_BUMP_AMOUNT` |
 | Internal refactor with identical external behaviour | Extracting a helper function |
@@ -236,6 +306,7 @@ A change is **breaking** if a correctly-written client targeting the current `CO
 | `set_admin` | `new_admin: Address` | `Result<(), ContractError>` | current `admin` |
 | `pause_stream_as_admin` | `stream_id: u64, reason: PauseReason` | `Result<(), ContractError>` | `admin` |
 | `resume_stream_as_admin` | `stream_id: u64` | `Result<(), ContractError>` | `admin` |
+| `bulk_resume_streams_as_admin` | `stream_ids: Vec<u64>` | `Result<(), ContractError>` | `admin` |
 | `cancel_stream_as_admin` | `stream_id: u64` | `Result<(), ContractError>` | `admin` |
 | `set_global_emergency_paused` | `paused: bool` | `()` | `admin` |
 | `set_contract_paused` | `paused: bool` | `Result<(), ContractError>` | `admin` |
@@ -291,9 +362,9 @@ Cancelled = 3
 
 ```
 Operational    = 0
-Emergency      = 1
-Compliance     = 2
-Administrative = 3
+Administrative = 1
+Emergency      = 2
+Compliance     = 3
 ```
 
 ### ContractError
@@ -333,6 +404,19 @@ Before connecting to any Fluxora contract instance:
 
 ---
 
+## 7a. Version-Bump Checklist (for contributors)
+
+When incrementing `CONTRACT_VERSION`, the following documents MUST be updated before the PR is merged:
+
+- [ ] `docs/ABI_STABILITY.md` — Update the "Current version" header, error code table (Section 2.2), event table (Section 2.3), DataKey discriminant table (Section 2.4), and frozen enum discriminants (Section 5) to reflect the new version's actual state.
+- [ ] `docs/upgrade.md` — Append a new row to the version history table and update the `CONTRACT_VERSION` heading.
+- [ ] `docs/storage.md` — Update the DataKey discriminant table (Section 1) and add any new variant documentation.
+- [ ] `contracts/stream/src/lib.rs` — Update the doc comment on `CONTRACT_VERSION` with a summary of what changed in this bump.
+
+> **CI safeguard idea:** Consider adding a CI check that compares the `CONTRACT_VERSION` constant against the version header in `docs/ABI_STABILITY.md` and fails if they diverge.
+
+---
+
 ## 8. Factory Contract ABI
 
 The `FluxoraFactory` contract is a thin policy wrapper around `FluxoraStream`. Its ABI is versioned independently.
@@ -340,16 +424,23 @@ The `FluxoraFactory` contract is a thin policy wrapper around `FluxoraStream`. I
 ### Factory Error Codes (`FactoryError`)
 
 ```
-AlreadyInitialized       = 1
-NotInitialized           = 2
-Unauthorized             = 3
-RecipientNotAllowlisted  = 4
-DepositExceedsCap        = 5
-DurationTooShort         = 6
-InvalidTimeRange         = 7
-InvalidCliff             = 8
-InvalidCap               = 9
-InvalidMinDuration       = 10
+AlreadyInitialized     = 1
+NotInitialized         = 2
+Unauthorized           = 3
+RecipientNotAllowlisted = 4
+DepositExceedsCap      = 5
+DurationTooShort       = 6
+InvalidTimeRange       = 7
+InvalidCliff           = 8
+CreationPaused         = 9
+StreamContractPaused   = 10
+StreamContractError    = 11
+RateBelowMin           = 12
+RateAboveMax           = 13
+InvalidCap             = 14
+InvalidMinDuration     = 15
+InvalidMemo            = 16
+InvalidStreamContract  = 17
 ```
 
 Factory error codes are append-only. New variants must use fresh discriminants
@@ -359,17 +450,26 @@ and must not renumber existing values.
 
 | Entrypoint | Parameters | Returns | Auth |
 |---|---|---|---|
-| `init` | `admin, stream_contract, max_deposit: i128, min_duration: u64` | `Result<(), FactoryError>` | None (first caller) |
+| `init` | `admin, stream_contract, max_deposit: i128, min_duration: u64` | `Result<(), FactoryError>` | `admin` |
 | `set_admin` | `new_admin: Address` | `Result<(), FactoryError>` | `admin` |
 | `set_stream_contract` | `new_stream_contract: Address` | `Result<(), FactoryError>` | `admin` |
 | `set_allowlist` | `recipient: Address, allowed: bool` | `Result<(), FactoryError>` | `admin` |
 | `set_cap` | `max_deposit: i128` | `Result<(), FactoryError>` | `admin` |
 | `set_min_duration` | `min_duration: u64` | `Result<(), FactoryError>` | `admin` |
-| `create_stream` | `sender, recipient, deposit_amount, rate_per_second, start_time, cliff_time, end_time` | `Result<u64, FactoryError>` | `sender` |
+| `set_batch_cap_enforcement` | `enabled: bool` | `Result<(), FactoryError>` | `admin` |
+| `set_rate_bounds` | `min_rate: Option<i128>, max_rate: Option<i128>` | `Result<(), FactoryError>` | `admin` |
+| `set_factory_paused` | `paused: bool` | `Result<(), FactoryError>` | `admin` |
+| `create_stream` | `sender, recipient, deposit_amount, rate_per_second, start_time, cliff_time, end_time, withdraw_dust_threshold, stream_kind, memo` | `Result<u64, FactoryError>` | `sender` |
+| `create_streams` | `sender, streams: Vec<CreateStreamParams>` | `Result<Vec<u64>, FactoryError>` | `sender` |
+| `is_factory_paused` | — | `bool` | None |
+| `get_factory_config` | — | `Result<FactoryConfig, FactoryError>` | None |
+| `is_allowlisted` | `recipient: Address` | `bool` | None |
+| `get_factory_stream_count` | — | `u32` | None |
+| `get_factory_streams_paginated` | `start_index: u32, limit: u32` | `Vec<u64>` | None |
 
 `init` and `set_cap` accept only `max_deposit` values in `1..=i128::MAX`.
 `init` and `set_min_duration` accept `min_duration` values in
-`0..=3_153_600_000` seconds (`MAX_MIN_DURATION_SECONDS`).
+`0..=MAX_MIN_DURATION_SECONDS` seconds.
 
 > **Important:** Factory policies (allowlist, deposit cap, minimum duration) are only enforced when streams are created through the factory. Direct calls to the `FluxoraStream` contract bypass all factory policies.
 
@@ -381,7 +481,12 @@ and must not renumber existing values.
 | 1 | `StreamContract` | Instance | `Address` |
 | 2 | `MaxDepositCap` | Instance | `i128` |
 | 3 | `MinDuration` | Instance | `u64` |
-| 4 | `Allowlist(Address)` | Persistent | `bool` |
+| 4 | `BatchCapEnforced` | Instance | `bool` |
+| 5 | `Allowlist(Address)` | Persistent | `bool` |
+| 6 | `FactoryStreamIds` | Persistent | `Vec<u64>` |
+| 7 | `CreationPaused` | Instance | `bool` |
+| 8 | `MinRatePerSecond` | Instance | `Option<i128>` |
+| 9 | `MaxRatePerSecond` | Instance | `Option<i128>` |
 
 ---
 

@@ -48,7 +48,10 @@ extern crate std;
 
 use fluxora_governance::{FluxoraGovernance, FluxoraGovernanceClient, GovernanceError};
 use proptest::prelude::*;
-use soroban_sdk::{testutils::{Address as _, Ledger}, vec, Address, Env};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger},
+    vec, Address, Env,
+};
 use std::collections::HashSet;
 use std::vec::Vec as StdVec;
 
@@ -85,7 +88,11 @@ enum Op {
 /// Strategy: one Op over the address pool.
 fn op_strategy() -> impl Strategy<Value = Op> {
     (any::<bool>(), 0usize..POOL_SIZE).prop_map(|(is_add, idx)| {
-        if is_add { Op::Add(idx) } else { Op::Remove(idx) }
+        if is_add {
+            Op::Add(idx)
+        } else {
+            Op::Remove(idx)
+        }
     })
 }
 
@@ -100,6 +107,7 @@ fn op_sequence_strategy() -> impl Strategy<Value = StdVec<Op>> {
 
 /// Self-contained governance environment for proptest cases.
 struct GovEnv {
+    #[allow(dead_code)]
     env: Env,
     /// All POOL_SIZE pre-generated addresses; ops reference these by index.
     pool: StdVec<Address>,
@@ -131,7 +139,12 @@ impl GovEnv {
         let client = FluxoraGovernanceClient::new(&env, &contract_id);
         client.init(&admin, &sdk_signers, &threshold);
 
-        GovEnv { env, pool, client, threshold }
+        GovEnv {
+            env,
+            pool,
+            client,
+            threshold,
+        }
     }
 }
 
@@ -145,6 +158,15 @@ impl GovEnv {
 /// Panics with a descriptive message on any invariant violation; proptest
 /// catches the panic and records it as a test-case failure with shrinking.
 fn check_invariants(gov: &GovEnv, expected: &HashSet<usize>) {
+    // Issue #1166: without resetting the harness budget here, the cumulative
+    // cost of O(expected) try_add_signer probes per check_invariants() call,
+    // invoked once initially and after every op in a 40-step sequence, exhausts
+    // the default test budget and trips HostError::Error(Budget, ExceededLimit)
+    // intermittently — see the committed signer_index_proptest.proptest-regressions
+    // corpus. Matches the pattern at
+    // contracts/stream/tests/bulk_cancel.rs::test_bulk_cancel_large_batch_up_to_max_page_size.
+    gov.env.budget().reset_unlimited();
+
     let on_chain = gov.client.get_signers();
     let on_chain_len = on_chain.len() as usize;
 
@@ -481,6 +503,7 @@ proptest! {
         client.init(&admin, &sdk_signers, &threshold);
 
         let n_removes = n_removes_raw.min(n);
+        #[allow(clippy::needless_range_loop)]
         for i in 0..n_removes {
             let result = client.try_remove_signer(&pool[i]);
             match result {
@@ -556,5 +579,162 @@ proptest! {
             }
             check_invariants(&gov, &expected);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Explicit unit tests for pinned regression cases
+// ---------------------------------------------------------------------------
+
+/// Regression for pinned proptest seed
+/// `5e6b3729f9cdc045263f5682a16e6c0227d5a15eeaaa816afa2c1f50996ff90a`.
+///
+/// Caught by `prop_add_remove_same_address_maintains_consistency`, shrunk to
+/// `n_signers=2, threshold_raw=1, rounds=15`.  Interleaved add/remove of a
+/// single address triggered a budget-related desync before the
+/// `budget.reset_unlimited()` fix in `check_invariants()`.
+#[test]
+fn regression_add_remove_same_address_rounds_15() {
+    let n = 2usize.min(POOL_SIZE - 1);
+    let threshold: u32 = 1;
+    let gov = GovEnv::new(n, threshold);
+    let toggle_idx = POOL_SIZE - 1;
+    let toggle_addr = &gov.pool[toggle_idx];
+
+    let mut expected: HashSet<usize> = (0..n).collect();
+    check_invariants(&gov, &expected);
+
+    for _ in 0..15 {
+        let add_result = gov.client.try_add_signer(toggle_addr);
+        match add_result {
+            Ok(Ok(())) => {
+                expected.insert(toggle_idx);
+            }
+            Err(Ok(GovernanceError::DuplicateSigner)) => {
+                assert!(expected.contains(&toggle_idx));
+            }
+            Err(Ok(GovernanceError::TooManySigners)) => {
+                assert_eq!(expected.len(), MAX_SIGNERS);
+            }
+            other => {
+                panic!("add_signer (toggle add) unexpected: {other:?}");
+            }
+        }
+        check_invariants(&gov, &expected);
+
+        let rm_result = gov.client.try_remove_signer(toggle_addr);
+        match rm_result {
+            Ok(Ok(())) => {
+                expected.remove(&toggle_idx);
+            }
+            Err(Ok(GovernanceError::QuorumWouldBreak)) => {
+                assert!(expected.contains(&toggle_idx));
+                assert!(expected.len() <= gov.threshold as usize);
+            }
+            other => {
+                panic!("remove_signer (toggle remove) unexpected: {other:?}");
+            }
+        }
+        check_invariants(&gov, &expected);
+    }
+}
+
+/// Regression for pinned proptest seed
+/// `f6b317e94ed7df5f1987c761d8f7fdf952e8fe1c834ea2309a841a9c196636de`.
+///
+/// Caught by `prop_signer_list_index_invariants`, shrunk to
+/// `init_count_raw=2, threshold_raw=1` with a specific 14-step op sequence.
+/// Interleaved adds and removes of overlapping pool indices exercised edge
+/// cases in `DuplicateSigner` vs. `TooManySigners` prioritisation and
+/// list/index agreement after duplicate-address operations.
+#[test]
+fn regression_signer_list_index_specific_ops() {
+    let init_count = 2usize.min(POOL_SIZE);
+    let threshold: u32 = 1;
+    let gov = GovEnv::new(init_count, threshold);
+
+    let ops: StdVec<Op> = vec![
+        Op::Add(9),
+        Op::Add(2),
+        Op::Remove(10),
+        Op::Remove(3),
+        Op::Add(3),
+        Op::Remove(10),
+        Op::Add(4),
+        Op::Remove(5),
+        Op::Add(5),
+        Op::Remove(6),
+        Op::Add(6),
+        Op::Add(0),
+        Op::Add(0),
+        Op::Remove(0),
+    ];
+
+    let mut expected: HashSet<usize> = (0..init_count).collect();
+    check_invariants(&gov, &expected);
+
+    for op in &ops {
+        match op {
+            Op::Add(pool_idx) => {
+                let addr = &gov.pool[*pool_idx];
+                let result = gov.client.try_add_signer(addr);
+                match result {
+                    Ok(Ok(())) => {
+                        assert!(
+                            !expected.contains(pool_idx),
+                            "add_signer succeeded but pool[{pool_idx}] was already in expected set"
+                        );
+                        expected.insert(*pool_idx);
+                    }
+                    Err(Ok(GovernanceError::DuplicateSigner)) => {
+                        assert!(
+                            expected.contains(pool_idx),
+                            "DuplicateSigner returned but pool[{pool_idx}] is not in expected set"
+                        );
+                    }
+                    Err(Ok(GovernanceError::TooManySigners)) => {
+                        assert_eq!(
+                            expected.len(),
+                            MAX_SIGNERS,
+                            "TooManySigners returned but expected set size is {} (not MAX_SIGNERS={})",
+                            expected.len(),
+                            MAX_SIGNERS
+                        );
+                        assert!(
+                            !expected.contains(pool_idx),
+                            "TooManySigners returned but pool[{pool_idx}] is already a signer"
+                        );
+                    }
+                    other => {
+                        panic!("add_signer returned unexpected result: {other:?}");
+                    }
+                }
+            }
+            Op::Remove(pool_idx) => {
+                let addr = &gov.pool[*pool_idx];
+                let result = gov.client.try_remove_signer(addr);
+                match result {
+                    Ok(Ok(())) => {
+                        expected.remove(pool_idx);
+                    }
+                    Err(Ok(GovernanceError::QuorumWouldBreak)) => {
+                        assert!(
+                            expected.contains(pool_idx),
+                            "QuorumWouldBreak returned but pool[{pool_idx}] is not a signer"
+                        );
+                        assert!(
+                            expected.len() <= gov.threshold as usize,
+                            "QuorumWouldBreak returned but expected.len()={} > threshold={}",
+                            expected.len(),
+                            gov.threshold
+                        );
+                    }
+                    other => {
+                        panic!("remove_signer returned unexpected result: {other:?}");
+                    }
+                }
+            }
+        }
+        check_invariants(&gov, &expected);
     }
 }

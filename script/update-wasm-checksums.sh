@@ -36,6 +36,13 @@ CONTRACTS["fluxora_stream"]="target/wasm32-unknown-unknown/release/fluxora_strea
 CONTRACTS["fluxora_factory"]="target/wasm32-unknown-unknown/release/fluxora_factory.wasm"
 CONTRACTS["fluxora_governance"]="target/wasm32-unknown-unknown/release/fluxora_governance.wasm"
 
+# Build and hash in a fixed order, with the stream contract last. The factory
+# depends on fluxora_stream with `import_only`; a single multi-package Cargo
+# invocation unifies that feature and can overwrite fluxora_stream.wasm with an
+# import-only artifact. Rebuilding stream last produces the deployable artifact
+# deterministically and makes this script agree with verify-wasm-checksum.sh.
+CONTRACT_ORDER=(fluxora_factory fluxora_governance fluxora_stream)
+
 # ---------------------------------------------------------------------------
 # Verify required tools
 # ---------------------------------------------------------------------------
@@ -61,15 +68,16 @@ echo "Rust toolchain: ${TOOLCHAIN_CHANNEL} (from rust-toolchain.toml)"
 # Build all contracts
 # ---------------------------------------------------------------------------
 echo "Building WASM artifacts (release, wasm32-unknown-unknown)..."
-cargo build --release --target wasm32-unknown-unknown \
-  --manifest-path "${REPO_ROOT}/Cargo.toml" \
-  $(for name in "${!CONTRACTS[@]}"; do echo "-p $name"; done)
+for name in "${CONTRACT_ORDER[@]}"; do
+  cargo build --release --target wasm32-unknown-unknown \
+    --manifest-path "${REPO_ROOT}/Cargo.toml" -p "$name"
+done
 
 # ---------------------------------------------------------------------------
 # Compute hashes
 # ---------------------------------------------------------------------------
 declare -A NEW_HASHES
-for name in "${!CONTRACTS[@]}"; do
+for name in "${CONTRACT_ORDER[@]}"; do
   wasm_path="${REPO_ROOT}/${CONTRACTS[$name]}"
   if [ ! -f "${wasm_path}" ]; then
     echo "ERROR: WASM artifact not found: ${wasm_path}" >&2
@@ -87,7 +95,7 @@ done
 if [ "$DRY_RUN" = true ]; then
   echo ""
   echo "--- DRY RUN: checksums.sha256 would be updated to ---"
-  for name in "${!NEW_HASHES[@]}"; do
+  for name in "${CONTRACT_ORDER[@]}"; do
     echo "${NEW_HASHES[$name]}  ${name}.wasm"
   done
   echo "--- No files were modified ---"
@@ -121,7 +129,7 @@ TODAY=$(date -u +%Y-%m-%d)
 #   - No environment-dependent flags beyond the pinned toolchain
 #
 EOF
-  for name in "${!NEW_HASHES[@]}"; do
+  for name in "${CONTRACT_ORDER[@]}"; do
     echo "${NEW_HASHES[$name]}  ${name}.wasm"
   done
 } > "${CHECKSUMS_FILE}"

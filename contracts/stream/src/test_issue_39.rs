@@ -1,6 +1,4 @@
-#[cfg(test)]
-use crate::test::TestContext;
-use crate::StreamStatus;
+use crate::{test::TestContext, CreateStreamParams, StreamStatus};
 use soroban_sdk::{testutils::Address as _, testutils::Ledger, Address};
 
 #[test]
@@ -10,7 +8,7 @@ fn test_withdraw_multiple_partial_withdrawals() {
 
     // t=200: withdraw 200
     ctx.env.ledger().set_timestamp(200);
-    let amt1 = ctx.client().withdraw(&stream_id);
+    let amt1 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(amt1, 200);
     assert_eq!(
         ctx.client().get_stream_state(&stream_id).withdrawn_amount,
@@ -19,7 +17,7 @@ fn test_withdraw_multiple_partial_withdrawals() {
 
     // t=500: withdraw 300 (500 - 200)
     ctx.env.ledger().set_timestamp(500);
-    let amt2 = ctx.client().withdraw(&stream_id);
+    let amt2 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(amt2, 300);
     assert_eq!(
         ctx.client().get_stream_state(&stream_id).withdrawn_amount,
@@ -28,7 +26,7 @@ fn test_withdraw_multiple_partial_withdrawals() {
 
     // t=900: withdraw 400 (900 - 500)
     ctx.env.ledger().set_timestamp(900);
-    let amt3 = ctx.client().withdraw(&stream_id);
+    let amt3 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(amt3, 400);
     assert_eq!(
         ctx.client().get_stream_state(&stream_id).withdrawn_amount,
@@ -37,7 +35,7 @@ fn test_withdraw_multiple_partial_withdrawals() {
 
     // t=1000: final withdraw 100
     ctx.env.ledger().set_timestamp(1000);
-    let amt4 = ctx.client().withdraw(&stream_id);
+    let amt4 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(amt4, 100);
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.withdrawn_amount, 1000);
@@ -51,14 +49,14 @@ fn test_withdraw_exact_remaining_accrued() {
 
     // t=750: withdraw 750
     ctx.env.ledger().set_timestamp(750);
-    ctx.client().withdraw(&stream_id);
+    ctx.client().withdraw(&stream_id, &None);
 
     // t=1000: remaining is 250
     ctx.env.ledger().set_timestamp(1000);
     let withdrawable = ctx.client().get_withdrawable(&stream_id);
     assert_eq!(withdrawable, 250);
 
-    let amt = ctx.client().withdraw(&stream_id);
+    let amt = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(amt, 250);
     assert_eq!(
         ctx.client().get_stream_state(&stream_id).status,
@@ -86,7 +84,7 @@ fn test_withdraw_cap_contract_balance_safety() {
                                                                    // The requirement said "In withdraw, compute withdrawable as min(...)".
                                                                    // I should also update get_withdrawable for consistency if possible.
 
-    let amt = ctx.client().withdraw(&stream_id);
+    let amt = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(
         amt, 600,
         "Withdrawn amount must be capped by contract balance"
@@ -102,7 +100,7 @@ fn test_withdraw_cap_contract_balance_safety() {
 
     // Replenish balance and withdraw remaining
     ctx.sac.mint(&ctx.contract_id, &400);
-    let amt2 = ctx.client().withdraw(&stream_id);
+    let amt2 = ctx.client().withdraw(&stream_id, &None);
     assert_eq!(amt2, 400);
     assert_eq!(
         ctx.client().get_stream_state(&stream_id).status,
@@ -117,27 +115,37 @@ fn test_batch_withdraw_running_balance_cap() {
     // Create two streams with 500 each
     let id1 = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &500,
-        &1,
-        &0,
-        &500,
-        &500,
-        &0,
-        &None,
-        &crate::StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 500,
+            rate_per_second: 1,
+            start_time: 0,
+            cliff_time: 500,
+            end_time: 500,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: crate::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
     let id2 = ctx.client().create_stream(
         &ctx.sender,
-        &ctx.recipient,
-        &500,
-        &1,
-        &0,
-        &500,
-        &500,
-        &0,
-        &None,
-        &crate::StreamKind::Linear,
+        &CreateStreamParams {
+            recipient: ctx.recipient.clone(),
+            deposit_amount: 500,
+            rate_per_second: 1,
+            start_time: 0,
+            cliff_time: 500,
+            end_time: 500,
+            withdraw_dust_threshold: Some(0),
+            memo: None,
+            metadata: None,
+            kind: crate::StreamKind::Linear,
+            irrevocable: None,
+            witness: None,
+        },
     );
 
     ctx.env.ledger().set_timestamp(500); // both fully accrued
