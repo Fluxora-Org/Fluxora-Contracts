@@ -178,6 +178,13 @@ pub struct CheckpointState {
     pub deposit_amount: i128,
     /// The kind of stream (Linear or CliffOnly).
     pub kind: StreamKind,
+    /// Early cliff unlock flag set by `verify_milestone_proof`.
+    ///
+    /// When `true`, the stream's cliff is considered satisfied regardless of
+    /// the current ledger timestamp, allowing `CliffOnly` streams to unlock
+    /// ahead of schedule based on an authorized off-chain attestation.
+    /// The original `cliff_time` is preserved unchanged for audit purposes.
+    pub early_cliff_unlocked: bool,
 }
 
 /// Checkpoint-aware accrual — the core pure function used by the contract for all
@@ -207,7 +214,7 @@ pub fn calculate_accrued_amount_checkpointed(
     rate_per_second: i128,
     now: u64,
 ) -> i128 {
-    if now < state.cliff_time {
+    if now < state.cliff_time && !state.early_cliff_unlocked {
         return 0;
     }
 
