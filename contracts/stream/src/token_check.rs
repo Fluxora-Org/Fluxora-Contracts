@@ -1,4 +1,4 @@
-use soroban_sdk::{token, Address, Env};
+use soroban_sdk::{token, vec, Address, Env, Error, IntoVal, Symbol, Val};
 
 use super::ContractError;
 
@@ -9,6 +9,12 @@ use super::ContractError;
 /// that must exist on a compliant token:
 /// - `balance(contract_address)`
 /// - `transfer(contract_address, contract_address, 0)`
+///
+/// ### Panic Handling
+/// Some tokens may panic or trap when a zero-value transfer is attempted (e.g., due to 
+/// custom validation logic or flawed implementation). `verify_token_behavior` 
+/// intercepts these panics and maps them to `ContractError::TokenRevertedOnZeroTransfer`
+/// to ensure initialization fails gracefully instead of propagating a host panic.
 ///
 /// ### Balance Invariants
 /// The token's balance at the contract address is queried before and after a zero-value
@@ -44,8 +50,22 @@ pub fn verify_token_behavior(env: &Env, token_address: &Address) -> Result<(), C
         return Err(ContractError::TokenVerificationFailed);
     }
 
-    // 2. Perform the existing zero-value self-transfer.
-    token_client.transfer(&contract_addr, &contract_addr, &0_i128);
+    // 2. Perform the zero-value self-transfer safely.
+    // Some tokens panic on zero-value transfers. We intercept this to avoid unhandled host panics.
+    let transfer_res = env.try_invoke_contract::<Val, Error>(
+        token_address,
+        &Symbol::new(env, "transfer"),
+        vec![
+            env,
+            contract_addr.into_val(env),
+            contract_addr.into_val(env),
+            0_i128.into_val(env),
+        ],
+    );
+
+    if transfer_res.is_err() {
+        return Err(ContractError::TokenRevertedOnZeroTransfer);
+    }
 
     // 3. Read the balance again afterward.
     let final_balance = token_client.balance(&contract_addr);

@@ -923,6 +923,35 @@ mod mock_zero_balance {
 }
 pub use mock_zero_balance::MockZeroBalanceToken;
 
+mod mock_reverting {
+    use soroban_sdk::{panic_with_error, Address, Env};
+
+    #[soroban_sdk::contracterror]
+    #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+    #[repr(u32)]
+    pub enum MockError {
+        ZeroTransferBlocked = 1,
+    }
+
+    /// Token that panics on zero-value transfers.
+    #[soroban_sdk::contract]
+    pub struct MockRevertingToken;
+
+    #[soroban_sdk::contractimpl]
+    impl MockRevertingToken {
+        pub fn balance(_env: Env, _id: Address) -> i128 {
+            100_i128
+        }
+
+        pub fn transfer(_env: Env, _from: Address, _to: Address, amount: i128) {
+            if amount == 0 {
+                panic_with_error!(&_env, MockError::ZeroTransferBlocked);
+            }
+        }
+    }
+}
+pub use mock_reverting::MockRevertingToken;
+
 /// verify_token_behavior succeeds when the contract token balance is zero.
 #[test]
 fn test_token_check_zero_balance_passes() {
@@ -983,4 +1012,35 @@ fn test_token_check_sac_zero_amount_transfer_is_noop() {
         0,
         "zero-amount self-transfer must leave balance unchanged"
     );
+}
+
+/// verify_token_behavior rejects tokens that panic on zero-value transfers.
+#[test]
+fn test_token_check_reverting_token_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let test_contract_id = env.register_contract(None, TestTokenCheckContract);
+    let test_client = TestTokenCheckContractClient::new(&env, &test_contract_id);
+
+    let token_id = env.register_contract(None, MockRevertingToken);
+
+    let result = test_client.try_run_verify(&token_id);
+    assert_eq!(result, Err(Ok(ContractError::TokenRevertedOnZeroTransfer)));
+}
+
+/// init fails for a reverting token.
+#[test]
+fn test_token_check_init_fails_for_reverting_token() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, FluxoraStream);
+    let client = FluxoraStreamClient::new(&env, &contract_id);
+
+    let token_id = env.register_contract(None, MockRevertingToken);
+    let admin = Address::generate(&env);
+
+    let result = client.try_init(&token_id, &admin);
+    assert_eq!(result, Err(Ok(ContractError::TokenRevertedOnZeroTransfer)));
 }

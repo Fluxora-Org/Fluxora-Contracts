@@ -703,6 +703,8 @@ pub enum ContractError {
     RateScheduleInvalid = 46,
     /// The token contract did not expose the expected SEP-41 interface during init.
     TokenVerificationFailed = 88,
+    /// The token contract panicked or trapped during a zero-value self-transfer.
+    TokenRevertedOnZeroTransfer = 89,
 }
 
 #[contracttype]
