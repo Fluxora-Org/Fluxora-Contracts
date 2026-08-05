@@ -2,6 +2,33 @@ use crate::ContractError;
 use crate::StreamKind;
 use soroban_sdk::contracttype;
 
+/// Maximum ledger close skew allowed for a cliff to be considered "imminent"
+/// rather than "pending" in the observability view.
+pub const MAX_LEDGER_CLOSE_SKEW_SECS: u64 = 60;
+
+/// Observability view for stream cliff status.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CliffStatus {
+    /// Cliff is more than `MAX_LEDGER_CLOSE_SKEW_SECS` in the future.
+    Pending = 0,
+    /// Cliff is within `MAX_LEDGER_CLOSE_SKEW_SECS` but not yet reached.
+    WithinSkewWindow = 1,
+    /// Cliff time has been reached or passed (`now >= cliff_time`).
+    Unlocked = 2,
+}
+
+/// Computes the cliff status relative to the provided evaluation timestamp.
+pub fn cliff_status(now: u64, cliff_time: u64) -> CliffStatus {
+    if now >= cliff_time {
+        CliffStatus::Unlocked
+    } else if cliff_time - now <= MAX_LEDGER_CLOSE_SKEW_SECS {
+        CliffStatus::WithinSkewWindow
+    } else {
+        CliffStatus::Pending
+    }
+}
+
 /// Maximum number of segments in a piecewise rate schedule.
 ///
 /// This bound prevents storage-bloat attacks where a caller submits an
