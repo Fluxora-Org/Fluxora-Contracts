@@ -24,3 +24,7 @@ target_local/debug/
 target_local/release/
 target_local/*.d
 test_snapshots/
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat
+.gitignore

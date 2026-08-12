@@ -249,6 +249,80 @@ encoding — which also removes the `u64`/`i128` class of bug permanently.
 | 2 | Widen or map `streams.status` for `Depleted`; make `rate_per_second` derived | 5 |
 | 3 | Build the indexer→`streams` projection against v1's event schemas (codegen from the deployed spec, do not hand-roll topic parsers) | 5 |
 | 4 | Replace `src/lib/stellar/tx.ts` with `fluxora-sdk` calls; rewrite `docs/soroban-contract-abi.md` | 6 |
-| 5 | Decide whether withdrawal rate limiting and claim caps are wanted back; if so, as a policy contract wrapping `withdraw`, not in the core | post-v1 |
+| 5 | Reinstate `delegated_withdraw` only — see the ruling below | v1.1, post-audit |
 
 Nothing here blocks stage 4.
+
+---
+
+## 7. Rulings on the three judgement calls
+
+Settled 2026-08-12. §3 lists these as defensible choices rather than obvious
+cleanups; this is the decision on each and the reasoning that produced it.
+
+### Delegated withdrawal — **reinstate, but as v1.1 after audit**
+
+Scope: `delegated_withdraw` only. `delegated_cancel`, `withdraw_to` and
+`batch_withdraw_to` stay out — routing a payout to an address that is not the
+recipient is a separate and larger risk than letting a relayer pay the gas.
+
+Reinstating it is justified: gasless recipient UX and keeper-driven withdrawal
+are real, and they are load-bearing for the smart-account composability story.
+But the cost is the largest of the three. It is a *second authorization system*
+living beside `require_auth` — bespoke nonce storage, deadline handling, message
+construction and ed25519 verification — and a replay window, a malleable-message
+bug or a nonce-reuse bug in that code is a direct fund-loss path. An auditor has
+to review it as a novel scheme rather than as standard Soroban auth.
+
+Note that smart accounts already cover much of the ground: a recipient whose
+address is a contract with `__check_auth` can accept a relayer-submitted signed
+intent without the core contract knowing anything about it, and that path is
+already tested. The genuine gap is gasless UX for a recipient who is a plain
+keypair.
+
+So it lands in v1.1 with its own threat model and its own audit pass, not folded
+into the frozen v1 ABI. See [docs/ABI.md](docs/ABI.md) — adding an entry point
+means a new deployment at a new address, so this is a deliberate v2 boundary
+rather than something to squeeze in.
+
+### Withdrawal rate limiting — **stays out**
+
+The old behaviour enforced a minimum one-ledger interval between withdrawals
+plus an optional lookback window capping each claim. Keeping it would cost a
+`last_withdraw_ledger` field on every stream, a per-stream lookback setting, and
+three more entry points — but the disqualifying cost is behavioural: it makes
+`withdraw` able to **fail for a recipient who is genuinely owed money**, which
+is a new denial vector in a primitive whose entire promise is that earned funds
+are always claimable.
+
+The stated rationale was preventing excessive ledger I/O, but the recipient pays
+their own transaction fees, so the protocol is not the party being harmed.
+Conservation holds exactly regardless of withdrawal frequency, and a single
+withdraw measures at 13/400 footprint entries. There is no protocol-level
+problem being solved. The one real use case — a sender capping how much can be
+claimed per period — is policy, and policy belongs in a contract wrapping
+`withdraw`.
+
+### Keeper cancellation — **stays out**
+
+What it actually did: `keeper_cancel(stream_id, keeper)` was permissionless once
+a stream was at least a 7-day grace period past its `end_time`. It force-settled
+an abandoned stream — pushed the recipient's accrued balance to them, computed
+the sender's refund of the unstreamed portion, took `KEEPER_FEE_BPS` of *that
+refund* as the keeper's fee, and sent the remainder to the sender. The purpose
+was stopping unclaimed deposits sitting in storage indefinitely.
+
+Two reasons it stays out. First, it is the only path in the contract where an
+unauthenticated third party moves other people's money and pays itself from the
+proceeds — a categorically different risk class from `extend_stream_ttl`, where
+the caller can only spend their *own* funds on rent.
+
+Second, and decisively, the economics are backwards. The fee is a cut of the
+sender's unstreamed remainder, and past `end_time` that remainder is zero by
+definition. So on a normally-completed stream the keeper fee is zero and nobody
+runs it; it only pays out on cancelled-early or dust-remainder streams. The
+incentive is both narrow and adversarially shaped.
+
+The problem it solves is also not real in v1: an unwithdrawn stream costs the
+contract nothing, TTL is handled by the permissionless rent path, and the
+recipient's claim never expires.

@@ -70,6 +70,33 @@
 //! Today that means `top_up` and `cancel` need the check and the rest do not,
 //! but the test suite verifies all of them so a future entry point cannot
 //! quietly join the first group.
+//!
+//! ## Why I3 requires freezing the clock, and why that is not a detail
+//!
+//! I3 can only be observed by reading `vested` at one timestamp, performing
+//! exactly one call, and reading `vested` again **at that same timestamp**.
+//!
+//! This is the reason the bug survived a suite that already had good coverage
+//! of `top_up`. Every hand-written test advanced time around the operations it
+//! exercised — deposit, wait, withdraw, wait, top up, wait, assert — because
+//! that is how you write a readable test for a contract whose whole subject is
+//! the passage of time. But `vested` is *supposed* to grow as the clock
+//! advances. So a 93-stroop backwards step vanished into the accrual that
+//! happened alongside it, and every assertion still passed. The regression was
+//! real, deterministic, and reachable from a two-line test — and invisible to
+//! roughly a hundred existing ones, because they all measured the wrong
+//! difference.
+//!
+//! So the test design follows from the invariant rather than from convenience:
+//! I2 (monotonic in time) is tested by holding *state* still and advancing the
+//! clock, and I3 (monotonic across calls) is tested by holding the *clock*
+//! still and advancing the state. Conflating the two hides exactly the class of
+//! defect that matters most, because a violation of I3 is a fund-safety bug
+//! while a violation of I2 is merely a wrong number.
+//!
+//! `test::monotonicity` implements the frozen-clock half across every entry
+//! point and every ordering of them; `test::props` implements the
+//! advancing-clock half over random schedules.
 
 use crate::error::Error;
 use crate::types::Stream;

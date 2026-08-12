@@ -245,8 +245,26 @@ meaningless, which is correct — a cancelled stream has no rate.
 computed value, not a stored one fed from an event.** No event carries a rate,
 and none will.
 
-The SDK must expose exactly one implementation of this formula so that clients
-do not each get the pause and cancel cases subtly different.
+**Requirement on `fluxora-sdk`, before stage 5.** The SDK must ship the
+canonical derivation as a single exported function, and integrators must be
+directed to it rather than to the formula. Declining to add an on-chain view
+only avoids the ambiguity if exactly one implementation exists downstream; if
+three integrators write three slightly different rate calculations — differing
+on the paused case, or on cancelled streams, or on truncation — then we have
+exported the ambiguity instead of resolving it, which is strictly worse than
+having added the view.
+
+The SDK's implementation is normative and must define, at minimum:
+
+| case | value |
+|---|---|
+| active | `deposited / (end_time - start_time)`, truncating |
+| paused | the schedule rate is unchanged; the *instantaneous* rate is zero. The SDK must expose these as two distinct, named quantities rather than one ambiguous `rate`. |
+| cancelled | undefined — return `None`, not zero. A cancelled stream has no rate, and zero would be indistinguishable from a paused stream to a caller that ignores status. |
+| after `top_up` | unchanged by construction; `top_up` extends `end_time` instead of raising the rate |
+
+Link back to this table from the SDK's own documentation so the two cannot
+drift.
 
 ---
 
