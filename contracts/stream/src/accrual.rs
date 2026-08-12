@@ -420,6 +420,193 @@ mod rate_segment_packing_tests {
     }
 }
 
+/// Maximum expected Stellar ledger close-time drift, in seconds.
+///
+/// Stellar ledger close times average 5-6 seconds but are not fixed to an
+/// exact cadence. A cliff timestamp that lands exactly on an expected ledger
+/// boundary can therefore unlock a few seconds later than an off-chain
+/// integrator's naive fixed-cadence expectation, even though the underlying
+/// `>= cliff_time` comparison is correct. This constant documents that
+/// worst-case drift so downstream integrators can reason about it explicitly
+/// (via [`get_cliff_status`]) instead of assuming exact-timestamp unlock.
+///
+/// # Security
+/// This constant is purely informational/observational. It does **not**
+/// alter the `>= cliff_time` unlock condition used by withdrawal or accrual
+/// math — see [`CliffStatus`] and `get_cliff_status` in `lib.rs`.
+pub const MAX_LEDGER_CLOSE_SKEW_SECS: u64 = 10;
+
+/// Observability status for a `CliffOnly` / `CliffSlope` stream's cliff unlock,
+/// distinguishing "not due yet" from "due imminently, within normal ledger
+/// close-time variance" from "unlocked".
+///
+/// See [`MAX_LEDGER_CLOSE_SKEW_SECS`] for the documented drift window.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CliffStatus {
+    /// `now < cliff_time - MAX_LEDGER_CLOSE_SKEW_SECS`: not due soon.
+    Pending,
+    /// `cliff_time - MAX_LEDGER_CLOSE_SKEW_SECS <= now < cliff_time`: due
+    /// imminently — within normal ledger close-time variance of unlocking.
+    WithinSkewWindow,
+    /// `now >= cliff_time`: unlocked (matches the actual `>= cliff_time`
+    /// withdrawal/accrual gate — see [`calculate_accrued_amount_checkpointed`]).
+    Unlocked,
+}
+
+/// Classifies the current ledger time against a stream's `cliff_time` for
+/// observability purposes.
+///
+/// This is a pure, read-only classification — it never changes withdrawal
+/// correctness. The actual unlock gate remains the strict
+/// `now >= cliff_time` comparison in [`calculate_accrued_amount_checkpointed`].
+///
+/// # Units
+/// `now` and `cliff_time` are ledger timestamps in seconds.
+pub fn cliff_status(now: u64, cliff_time: u64) -> CliffStatus {
+    if now >= cliff_time {
+        return CliffStatus::Unlocked;
+    }
+
+    if now >= cliff_time.saturating_sub(MAX_LEDGER_CLOSE_SKEW_SECS) {
+        return CliffStatus::WithinSkewWindow;
+    }
+
+    CliffStatus::Pending
+}
+
+#[cfg(test)]
+mod cliff_status_tests {
+    use super::{cliff_status, CliffStatus, MAX_LEDGER_CLOSE_SKEW_SECS};
+
+    #[test]
+    fn skew_constant_is_ten_seconds() {
+        assert_eq!(MAX_LEDGER_CLOSE_SKEW_SECS, 10);
+    }
+
+    // -----------------------------------------------------------------------
+    // Pending: strictly more than the skew window remains before cliff_time
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pending_well_before_cliff() {
+        assert_eq!(cliff_status(0, 1_000), CliffStatus::Pending);
+    }
+
+    #[test]
+    fn pending_one_second_outside_skew_window() {
+        // cliff_time - skew - 1 is still outside the window (one second short).
+        let cliff_time = 1_000u64;
+        let now = cliff_time - MAX_LEDGER_CLOSE_SKEW_SECS - 1;
+        assert_eq!(cliff_status(now, cliff_time), CliffStatus::Pending);
+    }
+
+    // -----------------------------------------------------------------------
+    // WithinSkewWindow: inside the tolerance window, not yet unlocked
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn within_skew_window_at_lower_boundary() {
+        // now == cliff_time - MAX_LEDGER_CLOSE_SKEW_SECS is the first in-window instant.
+        let cliff_time = 1_000u64;
+        let now = cliff_time - MAX_LEDGER_CLOSE_SKEW_SECS;
+        assert_eq!(cliff_status(now, cliff_time), CliffStatus::WithinSkewWindow);
+    }
+
+    #[test]
+    fn within_skew_window_one_second_before_cliff() {
+        let cliff_time = 1_000u64;
+        assert_eq!(
+            cliff_status(cliff_time - 1, cliff_time),
+            CliffStatus::WithinSkewWindow
+        );
+    }
+
+    #[test]
+    fn within_skew_window_midpoint() {
+        let cliff_time = 1_000u64;
+        let now = cliff_time - (MAX_LEDGER_CLOSE_SKEW_SECS / 2);
+        assert_eq!(cliff_status(now, cliff_time), CliffStatus::WithinSkewWindow);
+    }
+
+    // -----------------------------------------------------------------------
+    // Unlocked: now >= cliff_time, matches the real withdrawal gate
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn unlocked_exactly_at_cliff() {
+        assert_eq!(cliff_status(1_000, 1_000), CliffStatus::Unlocked);
+    }
+
+    #[test]
+    fn unlocked_after_cliff() {
+        assert_eq!(cliff_status(1_500, 1_000), CliffStatus::Unlocked);
+    }
+
+    #[test]
+    fn unlocked_far_after_cliff() {
+        assert_eq!(cliff_status(u64::MAX, 1_000), CliffStatus::Unlocked);
+    }
+
+    // -----------------------------------------------------------------------
+    // Edge cases: cliff_time == 0, and cliff_time < MAX_LEDGER_CLOSE_SKEW_SECS
+    // -----------------------------------------------------------------------
+
+    /// `cliff_time == 0`: any `now >= 0` is unlocked (there is no meaningful
+    /// pre-cliff window at all).
+    #[test]
+    fn cliff_time_zero_is_always_unlocked() {
+        assert_eq!(cliff_status(0, 0), CliffStatus::Unlocked);
+    }
+
+    /// `cliff_time` smaller than the skew window: `saturating_sub` prevents
+    /// underflow, so the window's lower boundary clamps to 0 instead of
+    /// wrapping. Every `now` in `[0, cliff_time)` must classify as
+    /// `WithinSkewWindow`, never panic and never `Pending`.
+    #[test]
+    fn cliff_time_smaller_than_skew_window_saturates_without_panicking() {
+        let cliff_time = 3u64; // < MAX_LEDGER_CLOSE_SKEW_SECS (10)
+        for now in 0..cliff_time {
+            assert_eq!(
+                cliff_status(now, cliff_time),
+                CliffStatus::WithinSkewWindow,
+                "now={now}, cliff_time={cliff_time}"
+            );
+        }
+        assert_eq!(cliff_status(cliff_time, cliff_time), CliffStatus::Unlocked);
+    }
+
+    // -----------------------------------------------------------------------
+    // Property-style: classification never panics and is total over u64
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn property_total_and_monotonic_by_severity() {
+        // As `now` increases toward and past `cliff_time`, status only ever
+        // moves Pending -> WithinSkewWindow -> Unlocked, never backwards.
+        fn severity(status: CliffStatus) -> u8 {
+            match status {
+                CliffStatus::Pending => 0,
+                CliffStatus::WithinSkewWindow => 1,
+                CliffStatus::Unlocked => 2,
+            }
+        }
+
+        let cliff_time = 10_000u64;
+        let mut prev = severity(cliff_status(0, cliff_time));
+        let mut now = 0u64;
+        while now < cliff_time + MAX_LEDGER_CLOSE_SKEW_SECS + 5 {
+            let current = severity(cliff_status(now, cliff_time));
+            assert!(
+                current >= prev,
+                "severity regressed at now={now}: {current} < {prev}"
+            );
+            prev = current;
+            now += 1;
+        }
+    }
+}
+
 /// Assert that ledger-backed accrual time has not moved backwards.
 ///
 /// # Security
