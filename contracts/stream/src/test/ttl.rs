@@ -371,6 +371,33 @@ fn the_instance_entry_is_kept_at_maximum_rent() {
     assert_eq!(instance_ttl, max);
 }
 
+/// Extending a persistent stream entry must extend the instance entry in the
+/// same transaction. Otherwise the id counter can archive while the stream
+/// itself remains readable, making the next create unsafe.
+#[test]
+fn keeper_extension_preserves_instance_before_persistent_state() {
+    use soroban_sdk::testutils::storage::Instance as _;
+
+    let h = Harness::new();
+    h.env.ledger().set_max_entry_ttl(50_000);
+    let id = h.create_simple(100 * ONE, YEAR);
+
+    age_ledgers(&h, 40_000);
+    let persistent_before = ttl_of(&h, id);
+    let instance_before = h
+        .env
+        .as_contract(&h.contract_id, || h.env.storage().instance().get_ttl());
+    assert!(persistent_before < instance_before);
+
+    h.client.extend_stream_ttl(&id);
+
+    let instance_after = h
+        .env
+        .as_contract(&h.contract_id, || h.env.storage().instance().get_ttl());
+    assert_eq!(ttl_of(&h, id), 50_000);
+    assert_eq!(instance_after, 50_000);
+}
+
 /// Ids stay unique across an archive/restore of the instance entry.
 #[test]
 fn stream_ids_never_collide_after_a_restore() {
