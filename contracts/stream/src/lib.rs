@@ -94,6 +94,18 @@ use soroban_sdk::{contract, contractimpl, token, Address, Env, MuxedAddress, Vec
 /// exact value is invisible to integrators.
 pub const MAX_BATCH_SIZE: u32 = 16;
 
+/// Version of the public stream ABI inventory.
+///
+/// Bump this when making a *breaking* change to a public method: removing,
+/// renaming, or changing a parameter/return type. Additive changes — a new
+/// method, a new error discriminant, a field appended to an event payload —
+/// do not require a bump; update `contracts/stream/abi/fluxora_stream.json`
+/// so the snapshot stays the generated source of truth.
+///
+/// The on-chain contract is immutable, so a bump is a *new deployment*, not an
+/// in-place upgrade. See `docs/ABI.md` and `test::abi`.
+pub const ABI_VERSION: u32 = 1;
+
 #[contract]
 pub struct FluxoraStream;
 

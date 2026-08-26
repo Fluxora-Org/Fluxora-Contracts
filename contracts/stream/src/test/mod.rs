@@ -9,6 +9,9 @@
 
 mod common;
 
+// ABI inventory — generated from the contract spec, independent of stage.
+mod abi;
+
 // Stage 1
 mod create;
 mod props;

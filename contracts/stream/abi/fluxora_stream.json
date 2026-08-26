@@ -1,0 +1,306 @@
+{
+  "abi_version": 1,
+  "functions": [
+    {
+      "name": "batch_extend_ttl",
+      "auth": "none",
+      "inputs": [
+        {"name": "stream_ids", "type": "Vec<u64>"}
+      ],
+      "outputs": "Result<u32, Error>"
+    },
+    {
+      "name": "batch_withdraw",
+      "auth": "recipient",
+      "inputs": [
+        {"name": "recipient", "type": "Address"},
+        {"name": "stream_ids", "type": "Vec<u64>"}
+      ],
+      "outputs": "Result<i128, Error>"
+    },
+    {
+      "name": "cancel",
+      "auth": "sender",
+      "inputs": [
+        {"name": "stream_id", "type": "u64"}
+      ],
+      "outputs": "Result<(), Error>"
+    },
+    {
+      "name": "create_stream",
+      "auth": "sender",
+      "inputs": [
+        {"name": "sender", "type": "Address"},
+        {"name": "recipient", "type": "Address"},
+        {"name": "token", "type": "Address"},
+        {"name": "deposit", "type": "i128"},
+        {"name": "start_time", "type": "u64"},
+        {"name": "end_time", "type": "u64"},
+        {"name": "cliff_time", "type": "u64"},
+        {"name": "cancellable", "type": "bool"},
+        {"name": "pausable", "type": "bool"},
+        {"name": "transferable", "type": "bool"}
+      ],
+      "outputs": "Result<u64, Error>"
+    },
+    {
+      "name": "extend_stream_ttl",
+      "auth": "none",
+      "inputs": [
+        {"name": "stream_id", "type": "u64"}
+      ],
+      "outputs": "Result<u32, Error>"
+    },
+    {
+      "name": "get_stream",
+      "auth": "none",
+      "inputs": [
+        {"name": "stream_id", "type": "u64"}
+      ],
+      "outputs": "Result<Stream, Error>"
+    },
+    {
+      "name": "pause",
+      "auth": "sender",
+      "inputs": [
+        {"name": "stream_id", "type": "u64"}
+      ],
+      "outputs": "Result<(), Error>"
+    },
+    {
+      "name": "refundable_of",
+      "auth": "none",
+      "inputs": [
+        {"name": "stream_id", "type": "u64"}
+      ],
+      "outputs": "Result<i128, Error>"
+    },
+    {
+      "name": "resume",
+      "auth": "sender",
+      "inputs": [
+        {"name": "stream_id", "type": "u64"}
+      ],
+      "outputs": "Result<(), Error>"
+    },
+    {
+      "name": "stream_count",
+      "auth": "none",
+      "inputs": [
+      ],
+      "outputs": "u64"
+    },
+    {
+      "name": "stream_exists",
+      "auth": "none",
+      "inputs": [
+        {"name": "stream_id", "type": "u64"}
+      ],
+      "outputs": "bool"
+    },
+    {
+      "name": "top_up",
+      "auth": "sender",
+      "inputs": [
+        {"name": "stream_id", "type": "u64"},
+        {"name": "amount", "type": "i128"}
+      ],
+      "outputs": "Result<(), Error>"
+    },
+    {
+      "name": "transfer_recipient",
+      "auth": "recipient",
+      "inputs": [
+        {"name": "stream_id", "type": "u64"},
+        {"name": "new_recipient", "type": "Address"}
+      ],
+      "outputs": "Result<(), Error>"
+    },
+    {
+      "name": "vested_of",
+      "auth": "none",
+      "inputs": [
+        {"name": "stream_id", "type": "u64"}
+      ],
+      "outputs": "Result<i128, Error>"
+    },
+    {
+      "name": "withdraw",
+      "auth": "recipient",
+      "inputs": [
+        {"name": "stream_id", "type": "u64"},
+        {"name": "amount", "type": "Option<i128>"}
+      ],
+      "outputs": "Result<i128, Error>"
+    },
+    {
+      "name": "withdrawable_of",
+      "auth": "none",
+      "inputs": [
+        {"name": "stream_id", "type": "u64"}
+      ],
+      "outputs": "Result<i128, Error>"
+    }
+  ],
+  "types": [
+    {
+      "name": "Stream",
+      "kind": "struct",
+      "fields": [
+        {"name": "cancellable", "type": "bool"},
+        {"name": "cliff_time", "type": "u64"},
+        {"name": "deposited", "type": "i128"},
+        {"name": "end_time", "type": "u64"},
+        {"name": "pausable", "type": "bool"},
+        {"name": "paused_at", "type": "Option<u64>"},
+        {"name": "paused_total", "type": "u64"},
+        {"name": "recipient", "type": "Address"},
+        {"name": "sender", "type": "Address"},
+        {"name": "start_time", "type": "u64"},
+        {"name": "status", "type": "StreamStatus"},
+        {"name": "token", "type": "Address"},
+        {"name": "transferable", "type": "bool"},
+        {"name": "withdrawn", "type": "i128"}
+      ],
+      "cases": [
+      ]
+    },
+    {
+      "name": "StreamStatus",
+      "kind": "enum",
+      "fields": [
+      ],
+      "cases": [
+        {"name": "Active", "discriminant": 0},
+        {"name": "Paused", "discriminant": 1},
+        {"name": "Cancelled", "discriminant": 2},
+        {"name": "Depleted", "discriminant": 3}
+      ]
+    }
+  ],
+  "errors": [
+    {"name": "StreamNotFound", "discriminant": 1},
+    {"name": "InvalidTimeRange", "discriminant": 2},
+    {"name": "InvalidCliff", "discriminant": 3},
+    {"name": "InvalidDeposit", "discriminant": 4},
+    {"name": "DepositRateTooLow", "discriminant": 5},
+    {"name": "SelfStream", "discriminant": 6},
+    {"name": "Unauthorized", "discriminant": 7},
+    {"name": "NotCancellable", "discriminant": 8},
+    {"name": "NotPausable", "discriminant": 9},
+    {"name": "NotTransferable", "discriminant": 10},
+    {"name": "StreamNotActive", "discriminant": 11},
+    {"name": "StreamNotPaused", "discriminant": 12},
+    {"name": "StreamAlreadyPaused", "discriminant": 13},
+    {"name": "StreamTerminated", "discriminant": 14},
+    {"name": "StreamMatured", "discriminant": 15},
+    {"name": "InsufficientWithdrawable", "discriminant": 16},
+    {"name": "NothingToWithdraw", "discriminant": 17},
+    {"name": "InvalidAmount", "discriminant": 18},
+    {"name": "BatchTooLarge", "discriminant": 19},
+    {"name": "EmptyBatch", "discriminant": 20},
+    {"name": "DuplicateStreamId", "discriminant": 21},
+    {"name": "Overflow", "discriminant": 22},
+    {"name": "TopUpTooSmall", "discriminant": 23}
+  ],
+  "events": [
+    {
+      "name": "Cancelled",
+      "topics": [
+        {"name": "stream_id", "type": "u64"},
+        {"name": "sender", "type": "Address"},
+        {"name": "recipient", "type": "Address"}
+      ],
+      "data": [
+        {"name": "refunded", "type": "i128"},
+        {"name": "vested", "type": "i128"},
+        {"name": "withdrawn", "type": "i128"},
+        {"name": "end_time", "type": "u64"}
+      ]
+    },
+    {
+      "name": "Paused",
+      "topics": [
+        {"name": "stream_id", "type": "u64"},
+        {"name": "sender", "type": "Address"}
+      ],
+      "data": [
+        {"name": "paused_at", "type": "u64"},
+        {"name": "paused_total", "type": "u64"}
+      ]
+    },
+    {
+      "name": "RecipientTransferred",
+      "topics": [
+        {"name": "stream_id", "type": "u64"},
+        {"name": "old_recipient", "type": "Address"},
+        {"name": "new_recipient", "type": "Address"}
+      ],
+      "data": [
+      ]
+    },
+    {
+      "name": "Resumed",
+      "topics": [
+        {"name": "stream_id", "type": "u64"},
+        {"name": "sender", "type": "Address"}
+      ],
+      "data": [
+        {"name": "paused_duration", "type": "u64"},
+        {"name": "paused_total", "type": "u64"}
+      ]
+    },
+    {
+      "name": "StreamCreated",
+      "topics": [
+        {"name": "stream_id", "type": "u64"},
+        {"name": "sender", "type": "Address"},
+        {"name": "recipient", "type": "Address"}
+      ],
+      "data": [
+        {"name": "token", "type": "Address"},
+        {"name": "deposited", "type": "i128"},
+        {"name": "start_time", "type": "u64"},
+        {"name": "end_time", "type": "u64"},
+        {"name": "cliff_time", "type": "u64"},
+        {"name": "cancellable", "type": "bool"},
+        {"name": "pausable", "type": "bool"},
+        {"name": "transferable", "type": "bool"}
+      ]
+    },
+    {
+      "name": "ToppedUp",
+      "topics": [
+        {"name": "stream_id", "type": "u64"},
+        {"name": "sender", "type": "Address"}
+      ],
+      "data": [
+        {"name": "amount", "type": "i128"},
+        {"name": "deposited", "type": "i128"},
+        {"name": "end_time", "type": "u64"}
+      ]
+    },
+    {
+      "name": "TtlExtended",
+      "topics": [
+        {"name": "stream_id", "type": "u64"}
+      ],
+      "data": [
+        {"name": "extended_to_ledgers", "type": "u32"}
+      ]
+    },
+    {
+      "name": "Withdrawn",
+      "topics": [
+        {"name": "stream_id", "type": "u64"},
+        {"name": "recipient", "type": "Address"}
+      ],
+      "data": [
+        {"name": "amount", "type": "i128"},
+        {"name": "withdrawn", "type": "i128"},
+        {"name": "deposited", "type": "i128"},
+        {"name": "status", "type": "StreamStatus"}
+      ]
+    }
+  ]
+}
