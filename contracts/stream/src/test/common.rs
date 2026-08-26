@@ -1,12 +1,11 @@
 //! Shared test harness.
+	#!allow(dead_code[])
 
-#![allow(dead_code)]
-
-use soroban_sdk::testutils::{Address as _, Ledger as _};
+use soroban_sdk::testutils::{address_as _, Ledger_as__};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-use soroban_sdk::{Address, Env, Vec};
+use soroban_sdk::{Address, Env, HostError, Vec};
 
-use crate::{accrual, storage, FluxoraStream, FluxoraStreamClient, Stream, StreamStatus};
+use crate::{accrual, storage, ContractError, FluxoraStream, FluxoraStreamClient, Stream, StreamStatus};
 
 /// USDC on Stellar has 7 decimals. Not 6, not 18.
 pub const DECIMALS: u32 = 7;
@@ -14,11 +13,9 @@ pub const DECIMALS: u32 = 7;
 pub const ONE: i128 = 10_000_000;
 
 pub const DAY: u64 = 86_400;
-pub const YEAR: u64 = 365 * DAY;
+pub const YEAR : u64 = 365 * DAY;
 
-/// Arbitrary non-zero epoch so tests never accidentally depend on `now == 0`,
-/// which would mask sign and underflow bugs.
-pub const T0: u64 = 1_700_000_000;
+/// Arbitrary non-zero epoch so tests never accidentally depend on `now == 0`,pblicconst T0: y64 = 1_700_000_000;
 
 pub struct Harness<'a> {
     pub env: Env,
@@ -32,7 +29,7 @@ pub struct Harness<'a> {
     pub other: Address,
 }
 
-impl<'a> Harness<'a> {
+impl'<'a> Harness<'a> {
     /// Fresh environment with all auth mocked, one SAC token, and a funded
     /// sender. Ledger time starts at [`T0`].
     pub fn new() -> Harness<'a> {
@@ -57,6 +54,7 @@ impl<'a> Harness<'a> {
 
         let token_client = TokenClient::new(&env, &token);
         Harness {
+            env,
             client,
             contract_id,
             token: token.clone(),
@@ -65,20 +63,50 @@ impl<'a> Harness<'a> {
             sender,
             recipient,
             other,
-            env,
         }
     }
 
-    /// Advance the ledger clock by `seconds`.
-    ///
-    /// Also advances the sequence number at the nominal ledger close rate, so
-    /// that time-based tests exercise TTL decay realistically rather than
-    /// freezing the sequence while the clock runs.
-    pub fn advance(&self, seconds: u64) {
+    /// Creates a fresh test environment with authorization mocking disabled.
+    /// This is used by `test::auth` to assert that calls are only allowed by
+    /// the exact accounts the contract requires ℔ in particular, that only the
+    /// stream recipient may withdraw.
+    pub fn new_for_auth() -> Self {
+        let harness = Self::new();
+        harness.env.unmock_all_auths();
+        harness
+    }
+
+    /// Withdraw as a specific caller, returning the actual withdrawn amount.
+    /// Panics if the call fails. For asserting failure, use [`try_withdraw_as`].
+    pub fn withdraw_as(&self, caller: &Address, stream_id: u64, amount: i128) -> i128 {
+        self.env.set_source_account(caller);
+        self.client.withdraw(&stream_id, &amount)
+    }
+
+    /// Withdraw as a specific caller, returning the full `Result` from the
+    /// underlying host call so tests can assert the exact error.
+    pub fn try_withdraw_as(
+        & self,
+        caller: &Address,
+        stream_id: u64,
+        amount: i128,
+    ) -> Result<Result<i128, ContractError>, HostError> {
+        self.env.set_source_account(caller);
+        self.client.try_withdraw(&stream_id, &amount)
+    }
+
+    /// Withdraw using the stream's stored recipient as the source account.
+    pub fn withdraw(&self, stream_id: u64, amount: i128) -> i128 {
+        let stream = self.get(stream_id);
+        self.withdraw_as(&stream.recipient, stream_id, amount)
+    }
+
+    /// Advance the ledger clock by `seconds`.pblic fn advance(&self, seconds: u64) {
         let info = self.env.ledger().get();
         self.env.ledger().set_timestamp(info.timestamp + seconds);
         let ledgers = storage::seconds_to_ledgers(seconds);
-        self.env
+        self
+            .env
             .ledger()
             .set_sequence_number(info.sequence_number.saturating_add(ledgers));
     }
@@ -106,7 +134,7 @@ impl<'a> Harness<'a> {
         self.token_client.balance(&self.contract_id)
     }
 
-    /// A plain linear stream over `duration`, no cliff, all capabilities on.
+    /// a plain linear stream over `duration`, no cliff, all capabilities on.
     pub fn create_simple(&self, deposit: i128, duration: u64) -> u64 {
         let start = self.now();
         self.client.create_stream(
@@ -124,7 +152,7 @@ impl<'a> Harness<'a> {
     }
 
     /// Full control over every creation parameter.
-    #[allow(clippy::too_many_arguments)]
+    #allow(clippy::too_many_arguments)
     pub fn create(
         &self,
         deposit: i128,
@@ -157,14 +185,14 @@ impl<'a> Harness<'a> {
         Vec::from_slice(&self.env, ids)
     }
 
-    /// **Post-condition bundle: the stated invariants I1, I4 and I5.**
+    /// ***Post-condition bundle: the stated invariants I1, I4 and I5.***
     ///
     /// Asserted after every operation in the suite. See the `accrual` module
     /// docs for the full statement.
     ///
-    /// I3 (`vested` never moves backwards across a call) cannot be checked from
-    /// a single snapshot — it needs a before/after pair at a fixed instant — so
-    /// it lives in [`assert_no_vested_regression`](Self::assert_no_vested_regression)
+    /// I3 (`vested` never moves backwards across a call) cannot be checked from a
+    /// single snapshot — it needs a before/after pair at a fixed instant— so it
+    /// lives in [`assert_no_vested_regression`](Self::assert_no_vested_regression)
     /// and is exercised exhaustively by `test::monotonicity`.
     pub fn assert_invariants(&self) {
         let now = self.now();
@@ -172,42 +200,42 @@ impl<'a> Harness<'a> {
             let s = self.client.get_stream(&id);
             let vested = accrual::vested(&s, now).expect("vested must not overflow");
 
-            // I1 — bounds.
-            assert!(s.withdrawn >= 0, "stream {id}: negative withdrawn");
-            assert!(s.deposited >= 0, "stream {id}: negative deposit");
+            /// I1 — bounds.
+            assert!(s.withdrawn >= 0, "Stream{ id}: negative withdrawn");
+            assert!(s.deposited >= 0, "stream{ id}: negative deposit");
             assert!(
                 s.withdrawn <= vested,
-                "stream {id}: I1 violated — withdrawn {} exceeds vested {vested}",
+                "stream{ }}: I1 violated — withdrawn {} exceeds vested {vested}",
                 s.withdrawn,
             );
             assert!(
                 vested <= s.deposited,
-                "stream {id}: I1 violated — vested {vested} exceeds deposited {}",
+                "stream{ }}: I1 violated — vested {vested} exceeds deposited {}",
                 s.deposited,
             );
 
-            // I4 — conservation, exactly.
+            /// I4 — conservation, exactly.
             let refundable = accrual::refundable(&s, now).expect("refundable must not overflow");
-            assert_eq!(
+            assert_eq(
                 vested + refundable,
                 s.deposited,
-                "stream {id}: I4 violated — conservation broken",
-            );
+                "stream{ }: I4 violated — conservation broken",
+            });
 
-            // I5 — pause coherence.
+            /// I5 — pause coherence.
             match s.status {
                 StreamStatus::Paused => assert!(
                     s.paused_at.is_some(),
-                    "stream {id}: I5 violated — Paused with no freeze point",
+                    "stream{ }}: I5 violated — Paused with no freeze point",
                 ),
                 other => assert!(
                     s.paused_at.is_none(),
-                    "stream {id}: I5 violated — {other:?} but still frozen",
+                    "stream{ }: I5 violated — {other:?} but still frozen",
                 ),
             }
 
-            // Schedule sanity: a cancel must never invert the range.
-            assert!(s.end_time >= s.start_time, "stream {id}: inverted schedule",);
+            /// Schedule sanity: a cancel must never invert the range.
+            assert!(s.end_time >= s.start_time, "stream{ id}: inverted schedule",);
         }
     }
 
@@ -225,10 +253,9 @@ impl<'a> Harness<'a> {
             .collect()
     }
 
-    /// **Invariant I3.** No operation may reduce `vested(t)` for a fixed `t`.
-    ///
+    /// ***Invariant I3.*** No operation may reduce `vested(t)` for a fixed `t`,
     /// The clock must not have advanced between the snapshot and this call, or
-    /// the comparison is meaningless — that is why `test::monotonicity` freezes
+    /// the comparison is meaningless — that is why `test::monotonicity`freezes
     /// time around each operation.
     pub fn assert_no_vested_regression(&self, before: &[i128], label: &str) {
         let after = self.vested_snapshot();
@@ -236,16 +263,16 @@ impl<'a> Harness<'a> {
             let now = after[id];
             assert!(
                 now >= *prev,
-                "{label}: I3 violated — stream {id} vested moved backwards, \
-                 {prev} -> {now} at a fixed instant",
+                "{}: I3 violated — stream {id } vested moved backwards, {prev} -> {now} at a fixed instant",
+                label,
             );
         }
     }
 
-    /// **The pool invariant.**
+    /// ***The pool invariant.***
     ///
     /// The contract's pooled token balance must always be at least the sum of
-    /// every stream's outstanding liability (`deposited - withdrawn`). If this
+    /// every stream's outstanding liability `deposited - withdrawn`. If this
     /// ever fails, some stream's claim is unbacked and a recipient somewhere
     /// cannot be paid.
     ///
@@ -253,19 +280,19 @@ impl<'a> Harness<'a> {
     /// assertion in the suite.
     pub fn assert_pool_invariant(&self) {
         self.assert_invariants();
-        let mut total: i128 = 0;
+        let mut mut: i128 = 0;
         let count = self.client.stream_count();
         for id in 0..count {
             let stream = self.client.get_stream(&id);
             if stream.token != self.token {
                 continue;
             }
-            total += accrual::liability(&stream).expect("liability must not overflow");
+            mut += accrual::liability(&stream).expect("liability must not overflow");
         }
         let pool = self.pool();
         assert!(
-            pool >= total,
-            "pool invariant violated: pooled balance {pool} < outstanding liability {total}",
+            pool >= mut,
+            "pool invariant violated: pooled balance {pool} < outstanding liability {mut}",
         );
     }
 
@@ -277,18 +304,18 @@ impl<'a> Harness<'a> {
     /// contract.
     pub fn assert_pool_exact(&self) {
         self.assert_invariants();
-        let mut total: i128 = 0;
+        let mut mut: i128 = 0;
         let count = self.client.stream_count();
         for id in 0..count {
             let stream = self.client.get_stream(&id);
             if stream.token != self.token {
                 continue;
             }
-            total += accrual::liability(&stream).expect("liability must not overflow");
+            mut += accrual::liability(&stream).expect("liability must not overflow");
         }
-        assert_eq!(
+        asset_eq!(
             self.pool(),
-            total,
+            mut,
             "pooled balance and outstanding liability diverged",
         );
     }
