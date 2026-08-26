@@ -559,6 +559,11 @@ impl FluxoraStream {
     ///
     /// Any balance the old recipient had already accrued but not withdrawn moves
     /// with the stream. Recipients should withdraw before transferring.
+    ///
+    /// Transfer is allowed at the cliff and end timestamps, and the new
+    /// recipient receives any claim that is withdrawable at those boundaries.
+    /// A cancelled stream may still be transferred while it has an unwithdrawn
+    /// tail; a depleted stream cannot be transferred.
     pub fn transfer_recipient(
         env: Env,
         stream_id: u64,
