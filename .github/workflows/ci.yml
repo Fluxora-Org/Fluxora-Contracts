@@ -34,8 +34,10 @@ jobs:
 
       # Lints are hard failures. A warning that CI tolerates is a warning
       # nobody ever fixes.
-      - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Clippy (entire workspace and test targets)
+        # Keep the scope explicit: every workspace member and test target is
+        # linted, so a new modular contract cannot bypass the quality gate.
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Tests
         run: cargo test --all-features
