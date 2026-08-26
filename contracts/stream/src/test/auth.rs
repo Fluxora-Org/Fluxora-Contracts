@@ -194,6 +194,13 @@ fn create_fails_without_authorization() {
 
 /// Verify that a rejected top_up (due to authorization failure) is completely
 /// side-effect free: tokens are not transferred and stream state is unchanged.
+///
+/// `require_auth` raises a host `Abort` trap in the test environment — it does
+/// not return a typed `Error` — so we cannot use `try_top_up` to catch the
+/// failure as a `Result`. Instead we use `catch_unwind` to absorb the panic,
+/// then assert that nothing changed. The host uses `RefCell` borrows that are
+/// fully released when the call stack unwinds, so the env remains usable for
+/// state-verification reads after the caught panic.
 #[test]
 fn rejected_top_up_is_side_effect_free() {
     let h = Harness::new();
@@ -202,12 +209,18 @@ fn rejected_top_up_is_side_effect_free() {
     let pool_before = h.pool();
     let sender_balance_before = h.balance(&h.sender);
 
-    // Attempt top_up without any authorization
+    // Attempt top_up without any authorization. The host aborts with
+    // "Unauthorized" — catch it so we can inspect state afterwards.
     revoke_all_auths(&h.env);
-    let err = h.client.try_top_up(&id, &(100 * ONE)).unwrap_err().unwrap();
-    assert_eq!(err, crate::Error::Unauthorized);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        h.client.top_up(&id, &(100 * ONE));
+    }));
+    assert!(result.is_err(), "expected top_up to be rejected");
 
-    // Verify no state changed after rejected top_up
+    // Restore mocked auth so state-reading calls below don't also abort.
+    h.env.mock_all_auths();
+
+    // Verify no state changed after rejected top_up.
     let stream_after = h.get(id);
     assert_eq!(
         stream_before.deposited, stream_after.deposited,
@@ -223,7 +236,7 @@ fn rejected_top_up_is_side_effect_free() {
     );
     assert_eq!(stream_before.status, stream_after.status, "status changed");
 
-    // Verify balances unchanged
+    // Verify balances unchanged.
     assert_eq!(h.pool(), pool_before, "pool balance changed");
     assert_eq!(
         h.balance(&h.sender),
