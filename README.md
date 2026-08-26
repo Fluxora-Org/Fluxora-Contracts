@@ -1,325 +1,366 @@
-# Fluxora Contracts
-
-Soroban smart contracts for the Fluxora treasury streaming protocol on Stellar. Stream USDC from a treasury to recipients over time with configurable rate, duration, and cliff.
-
-## Documentation
-
-
-
-- **[Stream contract](docs/streaming.md)** — Lifecycle, accrual formula, cliff/end_time, access control, events, and error codes.
-- **[Dust threshold](docs/dust-threshold.md)** — `withdraw_dust_threshold` formula, USDC examples, validation table, and template guidance.
-- **[Security](docs/security.md)** — CEI ordering, token trust model, authorization paths, overflow protection.
-- **[Upgrade strategy](docs/upgrade.md)** — CONTRACT_VERSION policy, breaking-change classification, migration runbook.
-- **[Deployment](docs/DEPLOYMENT.md)** — Step-by-step testnet deployment checklist.
-- **[Recipient stream index](docs/recipient-stream-index.md)** — `get_recipient_streams` page cap, full-enumeration pattern, and DoS-prevention rationale.
-- **[Storage layout](docs/storage.md)** — Contract storage architecture, key design, and TTL policies.
-- **[Audit preparation](docs/audit.md)** — Entry-points and invariants for auditors.
-- **[Error codes](docs/error.md)** — Full ContractError reference and the
-  [FactoryError discriminant table](docs/error.md#factoryerror-reference-factory-contract)
-  (factory decisions map to a stable `u32` per variant; the CI guard is
-  `contracts/factory/tests/factory_error_discriminants.rs`).
-- **[Events](docs/events.md)** — Emitted event shapes and topics.
-- **[Stream templates](docs/stream-templates.md)** — Template lifecycle, auth, field mapping, and calldata savings.
-
-## What's in this repo
-
-- **Stream contract** (`contracts/stream`) — Lock USDC, accrue per second, withdraw on demand.
-- **Data model** — `Stream` (sender, recipient, deposit_amount, rate_per_second, start/cliff/end time, withdrawn_amount, status, cancelled_at).
-- **Status** — `Active`, `Paused`, `Completed`, `Cancelled`.
-
-### Core Stream Entry Points
-
-The following table lists every public stream contract entry point implemented in `contracts/stream/src/lib.rs` inside the `FluxoraStream` `#[contractimpl]` block.
-
-| Entry Point | Caller / Auth Rules | Description |
-| :--- | :--- | :--- |
-| `init` | `admin.require_auth()` | Initialize contract config with token and admin |
-| `create_stream` | `sender.require_auth()` | Create one new stream with explicit absolute timing |
-| `create_stream_relative` | `sender.require_auth()` (via `create_stream`) | Create a stream with relative delays instead of absolute timestamps |
-| `create_streams` | `sender.require_auth()` | Create a batch of streams in one atomic call |
-| `create_streams_relative` | `sender.require_auth()` (via `create_streams`) | Create a batch of streams using relative timing |
-| `create_streams_partial` | `sender.require_auth()` | Create a batch of streams with per-entry failure isolation |
-| `pause_stream` | `stream.sender.require_auth()` | Pause a sender-owned stream |
-| `resume_stream` | `stream.sender.require_auth()` | Resume a sender-owned paused stream |
-| `cancel_stream` | `stream.sender.require_auth()` | Cancel a sender-owned stream and refund unstreamed deposit |
-| `withdraw` | `stream.recipient.require_auth()` | Withdraw accrued tokens as the stream recipient |
-| `withdraw_to` | `stream.recipient.require_auth()` | Withdraw accrued tokens to a specified destination as recipient |
-| `update_recipient` | `stream.recipient.require_auth()` | Rotate stream recipient to a new address |
-| `get_pending_recipient_update` | Public / None | Read the pending recipient update request |
-| `accept_recipient_update` | `stream.recipient.require_auth()` | Accept a pending recipient update as current recipient |
-| `cancel_recipient_update` | `stream.sender.require_auth()` | Cancel a pending recipient update as stream sender |
-| `batch_withdraw` | `recipient.require_auth()` | Withdraw accrued tokens from many streams as recipient |
-| `batch_withdraw_to` | `recipient.require_auth()` | Withdraw accrued tokens from many streams to destinations |
-| `delegated_withdraw` | `relayer.require_auth()` | Relayer-executed withdrawal using recipient signature |
-| `get_delegated_nonce` | Public / None | Read the delegated withdrawal nonce for a recipient |
-| `calculate_accrued` | Public / None | Compute accrued amount for a stream |
-| `get_withdrawable` | Public / None | Compute current withdrawable balance for a stream |
-| `get_claimable_at` | Public / None | Query claimable amount at a target timestamp |
-| `get_config` | Public / None | Read stored contract config |
-| `get_global_emergency_paused` | Public / None | Read emergency pause state |
-| `set_admin` | `old_admin.require_auth()` | Change contract admin (old admin auth required) |
-| `set_max_rate_per_second` | `admin.require_auth()` | Set the global max rate-per-second cap |
-| `get_stream_state` | Public / None | Read full stream details |
-| `get_stream_health` | Public / None | Read health metrics for a stream |
-| `get_stream_memo` | Public / None | Read the stream memo field |
-| `get_stream_metadata` | Public / None | Read stream metadata map |
-| `get_stream_count` | Public / None | Read total number of streams created |
-| `update_rate_per_second` | `stream.sender.require_auth()` | Increase a sender-owned stream rate |
-| `decrease_rate_per_second` | `stream.sender.require_auth()` | Decrease a sender-owned stream rate safely |
-| `shorten_stream_end_time` | `stream.sender.require_auth()` | Shorten stream duration and refund unstreamed deposit |
-| `extend_stream_end_time` | `stream.sender.require_auth()` | Extend stream duration without changing deposit |
-| `top_up_stream` | `funder.require_auth()` | Add deposit to a stream by an authorized funder |
-| `close_completed_stream` | Public / None | Permissionless cleanup of a completed or cancelled stream |
-| `register_stream_template` | `owner.require_auth()` | Create a reusable schedule template |
-| `delete_stream_template` | `owner.require_auth()` | Remove a schedule template owned by the caller |
-| `create_stream_from_template` | `sender.require_auth()` (via `create_stream_relative` / `create_stream`) | Create a stream from a registered template |
-| `get_stream_template` | Public / None | Read a saved schedule template |
-| `version` | Public / None | Read current contract version |
-| `get_recipient_streams` | Public / None | List stream IDs for a recipient (hard-capped at `RECIPIENT_STREAMS_PAGE_LIMIT`; use `get_recipient_streams_paginated` for full enumeration) |
-| `get_recipient_streams_paginated` | Public / None | Paginate recipient stream IDs |
-| `get_recipient_stream_count` | Public / None | Count streams for a recipient |
-| `get_streams_by_id_range` | Public / None | Read streams in an ID range for export |
-| `update_rate` | `caller.require_auth()` (sender or admin) | Update stream rate as sender or admin |
-| `cancel_stream_as_admin` | `admin.require_auth()` | Cancel any stream as contract admin |
-| `keeper_cancel` | `keeper.require_auth()` | Keeper-cancel an eligible stream after grace period |
-| `get_keeper_fee_split` | Public / None | Preview the `(keeper_fee, sender_refund)` split `keeper_cancel` would pay |
-| `pause_stream_as_admin` | `admin.require_auth()` | Pause any stream as contract admin |
-| `resume_stream_as_admin` | `admin.require_auth()` | Resume any paused stream as contract admin |
-| `set_global_emergency_paused` | `admin.require_auth()` | Admin toggle emergency pause |
-| `global_resume` | `admin.require_auth()` | Admin clear emergency pause |
-| `set_contract_paused` | `admin.require_auth()` | Admin pause or unpause stream creation |
-| `pause_protocol` | `admin.require_auth()` | Admin globally pause protocol creation |
-| `resume_protocol` | `admin.require_auth()` | Admin globally resume protocol creation |
-| `is_paused` | Public / None | Read protocol pause status |
-| `get_pause_info` | Public / None | Read current pause metadata |
-| `sweep_excess` | `admin.require_auth()` + `recipient.require_auth()` | Admin sweep excess tokens to a recipient |
-| `set_auto_claim` | `stream.recipient.require_auth()` | Recipient set auto-claim destination |
-| `revoke_auto_claim` | `stream.recipient.require_auth()` | Recipient revoke auto-claim destination |
-| `trigger_auto_claim` | Public / None | Permissionless execute auto-claim withdrawal |
-| `get_auto_claim_status` | Public / None | Read auto-claim status for a stream |
-| `get_auto_claim_destination` | Public / None | Read auto-claim destination if set |
-| `clone_stream` | `source.sender.require_auth()` | Clone a source stream into a new stream |
-| `reserve_stream_ids` | `caller.require_auth()` | Reserve contiguous stream IDs for later use |
-| `get_id_reservation` | Public / None | View active stream ID reservation for caller |
-
-> `cancel_stream` and `cancel_stream_as_admin` are valid only when status is `Active` or `Paused`. Streams in `Completed` or `Cancelled` state return `ContractError::InvalidState`. After cancellation, accrual is frozen at `cancelled_at`; the recipient may still withdraw the frozen accrued amount.
-
-## Tech stack
-
-- Rust (edition 2021)
-- [soroban-sdk](https://docs.rs/soroban-sdk) 21.7.7 (Stellar Soroban)
-- Build target: `wasm32-unknown-unknown` for deployment
-
-## Version pinning
-
-This project pins dependencies for **reproducible builds** and **auditor compatibility**:
-
-| Component       | Version | Location                      | Purpose                                          |
-| --------------- | ------- | ----------------------------- | ------------------------------------------------ |
-| **Rust**        | 1.94.1  | `rust-toolchain.toml`         | Ensures consistent WASM compilation              |
-| **soroban-sdk** | 21.7.7  | `contracts/stream/Cargo.toml` | Locked to tested Stellar Soroban network version |
-
-When upgrading versions:
-
-1. Update `rust-toolchain.toml` → run `rustup update` → rebuild and test
-2. Update `soroban-sdk` version in `Cargo.toml` → update lock file → run full test suite
-3. Verify compatibility with the target Stellar network (testnet, mainnet)
-4. Document the change in the PR or release notes
-
-## Local setup
-
-### Clone and prerequisites
-
-```bash
-git clone https://github.com/Fluxora-Org/Fluxora-Contracts.git
-cd Fluxora-Contracts
-```
-
-- **Rust 1.94.1** — Pinned in `rust-toolchain.toml` (auto-enforced via `rustup`)
-- **Soroban SDK 21.7.7** — Pinned in `contracts/stream/Cargo.toml` for reproducible builds
-- [Stellar CLI](https://developers.stellar.org/docs/tools/developer-tools) (optional, for deploy/test on network)
-
-Install dependencies:
-
-```bash
-rustup toolchain install
-rustup target add wasm32-unknown-unknown
-```
-
-Then verify:
-
-```bash
-rustc --version       # Should show 1.94.1
-cargo --version
-stellar --version     # Only if installing Stellar CLI
-```
-
-### Build
-
-From the repo root:
-
-```bash
-# Development build (faster compile, for local testing)
-cargo build -p fluxora_stream
-
-# Release build (optimized WASM for deployment)
-cargo build --release -p fluxora_stream --target wasm32-unknown-unknown
-```
-
-Release WASM output: `target/wasm32-unknown-unknown/release/fluxora_stream.wasm`.
-
-### Run tests
-
-```bash
-cargo test -p fluxora_stream
-```
-
-Runs all unit and integration tests. No environment variables or external services required — Soroban's in-process test environment (`soroban_sdk::testutils`) simulates the ledger and a mock Stellar asset in memory.
-
-Test files:
-
-- **Unit tests**: `contracts/stream/src/test.rs` — contract logic, accrual math, auth, edge cases, i128 boundary scenarios, version policy.
-- **Integration tests**: `contracts/stream/tests/integration_suite.rs` — full flows with `init`, `create_stream`, `withdraw`, `get_stream_state`, lifecycle transitions, and edge cases.
-- **Property-based balance-conservation harness**: `contracts/stream/tests/balance_conservation.rs` — randomized sequences of `top_up`, `decrease_rate`, `shorten`, `extend`, `pause/resume`, `cancel`, and `withdraw` on both `Linear` and `CliffOnly` streams. Asserts global token conservation, accrual monotonicity, the rate-decrease checkpoint invariant, and `CliffOnly` unsupported-operation guards. Regression seeds live in `contracts/stream/proptest-regressions/`.
-
-Run the new harness with a bounded case count for CI:
-
-```bash
-cargo test -p fluxora_stream --features testutils --test balance_conservation
-```
-
-For deeper local coverage before an audit or release:
-
-```bash
-PROPTEST_CASES=10000 cargo test -p fluxora_stream --features testutils --test balance_conservation
-```
-
-### Deploy to Stellar Testnet
-
-> **See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the complete step-by-step deployment checklist.**
-
-Quick start:
-
-```bash
-cp .env.example .env
-# Edit .env with your STELLAR_SECRET_KEY, STELLAR_TOKEN_ADDRESS, STELLAR_ADMIN_ADDRESS
-
-source .env
-bash script/deploy-testnet.sh
-```
-
-Contract ID is saved to `.contract_id`. Verify the deployment with:
-
-```bash
-stellar contract invoke --id $(cat .contract_id) -- version
-stellar contract invoke --id $(cat .contract_id) -- get_config
-```
-
-## Project structure
-
-```
-fluxora-contracts/
-  Cargo.toml                        # workspace
-  rust-toolchain.toml               # pinned Rust version
-  contracts/
-    stream/
-      Cargo.toml
-      src/
-        lib.rs                      # contract types, storage, and all entry-points
-        accrual.rs                  # pure accrual math (calculate_accrued_amount)
-        test.rs                     # unit tests
-      tests/
-        integration_suite.rs        # integration tests (Soroban testutils)
-  docs/
-    streaming.md                    # lifecycle, accrual, access control, events
-    security.md                     # CEI ordering, token trust model, auth paths
-    upgrade.md                      # CONTRACT_VERSION policy and migration runbook
-    storage.md                      # storage layout and TTL policies
-    audit.md                        # entry-points and invariants for auditors
-    error.md                        # ContractError reference
-    events.md                       # emitted event shapes
-    DEPLOYMENT.md                   # testnet deployment checklist
-    gas.md                          # gas and budget notes
-  script/
-    deploy-testnet.sh               # automated testnet deployment script
-```
-
-## Accrual formula (reference)
-
-```
-if current_time < cliff_time  →  0
-else  →  min((min(current_time, end_time) − start_time) × rate_per_second, deposit_amount)
-```
-
-- **Withdrawable** = `accrued − withdrawn_amount`
-- Accrual is capped at `end_time` — no extra accrual after the stream ends.
-- Multiplication overflow in accrual falls back to `deposit_amount` (safe upper bound).
-- Cancelled streams: accrual is frozen at `cancelled_at`.
-- Completed streams: `calculate_accrued` returns `deposit_amount` deterministically.
-
-## WASM build hash verification
-
-After each CI build, the pipeline computes a SHA256 hash of the contract WASM artifact and uploads it as a CI artifact. This allows deployers and auditors to verify that the deployed contract matches the tested build.
-
-To verify a deployment:
-
-1. Download the hash artifact from the CI run (GitHub Actions → Artifacts → `fluxora_stream-wasm-hash`).
-2. Rebuild locally and verify against the committed reference:
-   ```bash
-   bash script/verify-wasm-checksum.sh
-   ```
-3. Or verify existing artifacts without rebuilding:
-   ```bash
-   bash script/verify-wasm-checksum.sh --no-build
-   ```
-
-To update checksums after a source change:
-
-```bash
-bash script/update-wasm-checksums.sh
-git add wasm/checksums.sha256
-git commit -m "chore: update wasm checksums"
-```
-
-See [docs/security.md](docs/security.md#reproducible-wasm-builds) for the full reproducibility contract, auditor verification steps, and residual risks.
-
-## Related repos
-
-- **fluxora-backend** — API and Horizon sync
-- **fluxora-frontend** — Dashboard and recipient UI
-
-Each is a separate Git repository.
----
-
-## 🏭 Factory Contract
-The Factory contract anchors the workspace deployment ecosystem by supervising global templates, managing operational scopes, and generating token-bound stream addresses.
-
-* **Initialization (`init`):** Seals factory state parameters, configuring fundamental baseline settings and mapping the primary admin profile.
-* **Policy Setters:** Secure administration entry-points governing structural template overrides, fee parameters, and network ownership allocations.
-* **Stream Creation (`create_stream`):** Instantiates an isolated stream proxy sequence matched precisely against the active, verified template hash register.
-
-> For deployment parameter schemas, factory variables, and initialization matrices, see [docs/factory.md](docs/factory.md).
+# Fluxora
+
+**A continuous payment streaming primitive for Soroban.**
+
+Lock tokens once; have them accrue continuously to a recipient over time. The
+recipient pulls their accrued balance whenever they like.
+
+Fluxora is the layer other things build on — payroll tools, grant programs,
+subscription billing, vesting schedules. The contract is the product.
+
+| | |
+|---|---|
+| Protocol | 27 (live on testnet and mainnet) |
+| SDK | `soroban-sdk` 27.0.5 |
+| Rust | 1.97.1, target `wasm32v1-none` |
+| Token interface | SEP-41 (USDC on Stellar has **7 decimals**) |
+| Contract size | ~47 KB |
+| Tests | 146, including property tests and a pool invariant checked after every operation |
+
+> **Read [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) before relying on this.**
+> A green suite here does not mean TTL is solved — the archival *recovery* flow
+> is not yet proven against a live network. See §1 there, and the summary below.
 
 ---
 
-## ⚖️ Governance Contract
-The Governance module coordinates community actions, parameter threshold overrides, and critical upgrade vectors via verifiable checkpoint logic.
+## Quick start
 
-* **Proposal Lifecycles (`propose` / `approve` / `execute`):** Standard multi-signature/voting pipeline driving states from conception through validation rounds directly into on-chain enforcement.
-* **Signer Management:** Updates administrative sign-off lists, multisig weights, and required confirmation consensus thresholds.
+```bash
+cargo test                                    # full suite
+cargo test resource_limits -- --nocapture     # print measured resource costs
+cargo build --target wasm32v1-none --release  # build the contract
 
-> For technical consensus models, voter profiles, and cryptographic execution matrices, see [docs/governance.md](docs/governance.md).
+# Deeper randomized sweep. CI runs this nightly; worth running before a release
+# or after touching accrual.rs. Both suites have found real bugs.
+FLUXORA_FUZZ_SEEDS=200 FLUXORA_FUZZ_STEPS=300 PROPTEST_CASES=5000 cargo test --release
+```
 
 ---
 
-## 🛠️ Compilation and Local Development
+## Design
 
-All three workspace contract modules are structured to build simultaneously under standard WebAssembly environments. To compile `stream`, `factory`, and `governance` uniformly in a single action, run:
+### Pull-based, because Stellar has no scheduler
 
-```bash
-cargo build --target wasm32-unknown-unknown --workspace
-## Contributing
+There is no cron, no keeper network, no way for a contract to wake itself up.
+Every state change must be triggered by an external transaction. Nothing here
+runs in the background: the recipient calls `withdraw` and the contract computes
+what they have earned at that instant.
 
-Please read [CONTRIBUTING.md](CONTRIBUTING.md) for details on the development workflow, branch naming, and testing requirements (including the 95% test coverage standard).
+### No on-chain stream discovery
 
-See [CHANGELOG.md](./CHANGELOG.md) for a full history of changes between contract versions.
+There is deliberately **no per-user index** in storage. A `Vec<u64>` of a
+treasury's streams grows without bound, costs rent forever, and blows Soroban's
+transaction footprint limit once that treasury has a few hundred recipients. On
+chain, a stream is only ever addressed by its `u64` id.
+
+Discovery is an off-chain concern. `create_stream` returns the new id and emits
+an event carrying sender, recipient and every schedule field, so an indexer can
+answer "show me my streams" without the contract paying rent to remember.
+
+`test::resource_limits::cost_is_independent_of_how_many_streams_exist` states
+this as a test: the 153rd stream costs exactly what the 2nd did.
+
+### Immutable guarantees
+
+`cancellable`, `pausable` and `transferable` are fixed at creation and can never
+change. Before accepting a stream a recipient can verify that the sender cannot
+claw it back, freeze it, or reassign it. A stream that could *become* cancellable
+later would be worthless as a guarantee.
+
+For the same reason there is no admin key, no upgrade path, no fee switch and no
+global pause. Immutability is what lets another protocol depend on this one.
+
+---
+
+## The accrual model
+
+Everything is expressed against a **stream clock** that stops while the stream is
+paused:
+
+```
+stream_time(now) = paused_at.unwrap_or(now) - paused_total
+
+elapsed  = clamp(stream_time, start_time, end_time) - start_time
+vested   = 0                                    if stream_time < cliff_time
+         = deposited * elapsed / duration       otherwise   (rounds down)
+```
+
+All arithmetic is checked and every failure is a typed error. Nothing panics on
+a numeric edge case.
+
+**Rounding is always down.** Truncating in the recipient's disfavour is correct:
+the residue stays in the pool and returns to the sender at settlement, so the
+contract can never owe more than it holds.
+
+**The cliff gates, it does not delay.** At `cliff_time` the recipient becomes
+entitled to everything accrued *since `start_time`* — not merely what accrues
+after the cliff. This is standard vesting semantics and it surprises people.
+
+**Conservation is exact.** For all `t`:
+
+```
+vested(t) + refundable(t) == deposited
+```
+
+with no dust term. That falls out of computing `vested` from the cumulative
+formula rather than by summing per-interval deltas — truncation error is
+re-derived from scratch on every call instead of accumulating. The obvious
+per-interval implementation, which the existing MVPs use, loses a stroop per
+withdrawal and strands it in the pool forever. Verified by property test over
+random schedules and withdrawal patterns.
+
+### Pause
+
+Pausing freezes the clock and pushes the effective end forward by the paused
+duration. Total value delivered stays constant; the schedule stretches. The
+recipient can still withdraw while paused — pausing stops *accrual*, not access.
+Freezing earned funds would make pausable streams unacceptable to any serious
+recipient.
+
+A stream paused across its cliff does not silently pass the cliff while frozen.
+
+### Cancel
+
+Rather than a second state machine, cancellation rewrites the schedule so the
+stream looks like one that has fully matured: `deposited` drops to the amount
+vested right now, and `end_time` is pulled back to the current point on the
+stream clock. Every later `vested` call clamps to the reduced deposit, so
+`withdraw` needs no special-casing at all.
+
+Cancelling before the cliff refunds everything — pre-cliff the recipient's
+entitlement is zero by definition.
+
+---
+
+## Decisions
+
+The spec left four questions open. All four are settled, and the reasoning is in
+the code where the behaviour lives.
+
+### 1. `top_up` extends the duration; it never raises the rate
+
+```
+before:  10_000 over 100 days  ->  100/day, ends day 100
+top_up(1_000)
+after:   11_000 over 110 days  ->  100/day, ends day 110
+```
+
+The per-second rate the recipient agreed to never changes. The alternative —
+hold `end_time` and raise the rate — retroactively re-vests elapsed time: a
+top-up at the halfway point would instantly increase what is already
+withdrawable. Keeping the rate fixed means a top-up can never accelerate or
+dilute an existing schedule, which is what makes it safe to accept a stream from
+an untrusted sender.
+
+The extension rounds **down**, and that direction is load-bearing rather than
+cosmetic. Rounding *up* makes the new duration slightly longer than exact, which
+lowers the rate and therefore retroactively *reduces* the amount already vested —
+letting `withdrawn` exceed `vested`, and letting a subsequent `cancel` (which
+sets `deposited = vested`) drive liability negative and refund the sender money
+the recipient already holds. This was a real bug, caught by the randomized
+sequence suite; see [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) for the class of
+issue and `test::top_up::a_top_up_never_reduces_what_is_already_vested` for the
+regression. Rounding down guarantees `vested` never decreases; the residual is at
+most one second of schedule, in the recipient's favour.
+
+Topping up a *matured* stream is rejected (`StreamMatured`) rather than silently
+making the new funds instantly withdrawable. A top-up too small to buy one second
+of schedule is rejected (`TopUpTooSmall`), because absorbing it would mean raising
+the rate — exactly the retroactive re-vesting this design avoids.
+
+### 2. `MAX_BATCH_SIZE = 16`, derived from measurement
+
+The spec's "roughly 200 ledger entry reads" predates protocol 23. Since then
+live Soroban state is held in memory, and `disk_read_entries` is usually zero for
+a contract touching live state. Measured against protocol 27's real limits:
+
+| limit | 16-stream batch | ceiling |
+|---|---|---|
+| total footprint (entries) | 43 | 400 |
+| write entries | 20 | 200 |
+| instructions | ~4.6M | 400M |
+| **contract event bytes** | **8,192** | **16,384** |
+
+Entry counts would allow well over a hundred streams per call. The **event
+budget** is what binds: each stream emits a `withdrawn` event plus the token
+contract's own `transfer` event, roughly 512 bytes between them, so the hard
+ceiling is about 32.
+
+Sixteen is that ceiling with a 2x safety factor. The margin matters because the
+per-stream event cost depends on the *token's* event payload — a token heavier
+than the Stellar Asset Contract used in tests would inflate it, and a cap that
+merely fits today would fail on somebody else's token.
+
+Oversized batches are rejected with `BatchTooLarge` rather than failing opaquely
+at the network level. The SDK chunks client-side.
+
+### 3. Minimum deposit: `deposited >= duration`
+
+At least one stroop per second. Below that the rate truncates to zero and the
+recipient accrues nothing until very late — a real footgun for a treasury
+streaming a small grant over a year. The floor excludes nothing realistic: a
+year-long USDC stream needs only ~3.16 USDC to clear it.
+
+### 4. `transfer_recipient` is disableable at creation
+
+A `transferable: bool` flag alongside `cancellable` and `pausable`. A
+compliance-bound sender — payroll, a KYC'd grant program — can pin the payee at
+creation. Without it those senders simply could not use Fluxora.
+
+---
+
+## TTL, rent and archival
+
+The hardest problem in the project, and the one existing implementations skip.
+
+Persistent entries have a time-to-live in ledgers. When it runs out the entry is
+archived and becomes unreadable until restored. A stream running twelve months
+outlives its initial TTL. If a stream entry archives, the **tokens are not lost**
+— they sit in the contract's pooled balance — but the accounting entry saying who
+they belong to is inaccessible until someone pays to restore it.
+
+Three mechanisms:
+
+1. **Extend on every touch.** Every mutating call bumps that entry's TTL, so an
+   actively-used stream never expires.
+2. **Extend generously at creation**, targeting the stream's remaining lifetime
+   plus a 30-day buffer, clamped to the network's `max_entry_ttl`. The clamp is
+   not optional — a multi-year stream *will* need periodic extension regardless.
+3. **Permissionless `extend_stream_ttl` and `batch_extend_ttl`.** Anyone can pay
+   to keep any stream alive. Unauthenticated on purpose: a recipient's claim must
+   never depend on the sender's continued goodwill. There is nothing to grief —
+   the caller only ever *pays* rent, and TTL extension cannot move funds or
+   change stream state.
+
+Views deliberately do **not** extend TTL. They are called through simulation,
+where a footprint write is at best noise. Keeping a stream alive is the explicit
+job of `extend_stream_ttl`.
+
+### What the tests prove, and what they do not
+
+**This is the most important caveat in the project. Do not skip it.**
+
+The SDK's test host runs storage in recording mode, where reading an expired
+persistent entry is **silently auto-restored** rather than failing. So `test::ttl`
+proves the rent arithmetic, the extend-on-touch behaviour, that a year-long
+stream survives on keeper sweeps alone, and that crossing the archive/restore
+boundary preserves every field of the accounting with the pool still backing it.
+
+It does **not** prove the recovery flow. On a real network the transaction
+*fails first* and the caller must resubmit with a `RestoreFootprint` operation —
+a step the test host skips entirely. Nothing here establishes that the failure is
+diagnosable, that the footprint we would build is correct, or what a restore
+costs.
+
+**TTL is therefore half-proven.** Closing the other half against live testnet is
+the acceptance criterion for stage 4, not a nice-to-have. Full detail and
+integrator guidance in [KNOWN-LIMITATIONS.md §1](KNOWN-LIMITATIONS.md).
+
+---
+
+## Function surface
+
+```rust
+// Lifecycle
+create_stream(sender, recipient, token, deposit,
+              start, end, cliff,
+              cancellable, pausable, transferable) -> u64   // sender auth
+top_up(stream_id, amount)                                   // sender auth
+withdraw(stream_id, amount: Option<i128>) -> i128           // recipient auth; None = max
+batch_withdraw(recipient, stream_ids) -> i128               // recipient auth
+cancel(stream_id)                                           // sender auth
+pause(stream_id) / resume(stream_id)                        // sender auth
+transfer_recipient(stream_id, new_recipient)                // recipient auth
+
+// Views (read-only, no TTL side effects)
+get_stream(stream_id) -> Stream
+withdrawable_of(stream_id) -> i128
+vested_of(stream_id) -> i128
+refundable_of(stream_id) -> i128
+stream_count() -> u64
+stream_exists(stream_id) -> bool
+
+// Maintenance (permissionless)
+extend_stream_ttl(stream_id) -> u32
+batch_extend_ttl(stream_ids) -> u32
+```
+
+Both classic keypairs and custom `__check_auth` smart accounts work everywhere.
+
+### Events
+
+`stream_created`, `withdrawn`, `cancelled`, `paused`, `resumed`, `topped_up`,
+`recipient_transferred`, `ttl_extended`.
+
+Declared with `#[contractevent]`, so their schemas are embedded in the deployed
+contract's interface spec — the indexer and TypeScript SDK generate typed
+decoders from the contract itself rather than hand-rolling topic parsers.
+
+Every event carries `stream_id` as a topic, plus the addresses an indexer routes
+on, plus enough state to reconstruct the stream without replaying from genesis.
+Field order and topic placement are ABI: adding a field is compatible,
+reordering one is not.
+
+---
+
+## Repository layout
+
+```
+contracts/stream/
+  src/
+    lib.rs              contract entry points
+    accrual.rs          pure vesting math, no Env
+    storage.rs          storage access and TTL policy
+    events.rs           event definitions
+    types.rs            Stream, StreamStatus, DataKey
+    error.rs            typed errors (discriminants are ABI)
+    test/               140 tests, staged by build order
+```
+
+`accrual.rs` takes a `Stream` and a timestamp and returns a number — no `Env`, no
+storage, no host calls. That keeps the interesting arithmetic in one auditable
+place and makes the vesting model property-testable without a Soroban host, so a
+case costs microseconds instead of a host invocation.
+
+---
+
+## Non-goals for v1
+
+No admin key, no upgradeability, no global pause. No fee mechanism. No on-chain
+stream discovery. No multi-token streams. No unlock curves other than cliff plus
+linear. No cross-chain anything.
+
+---
+
+## Status
+
+Stages 1–3 complete: contract core, full lifecycle, TTL and resource limits.
+
+**Stage 4 (in progress).** Deployed to testnet as
+[`CBCGTSCJ…THXW`](https://stellar.expert/explorer/testnet/contract/CBCGTSCJXBMPPPE4BPDIPYZXPE2J5TQEKD2KCS7VQF533NKKEYGUTHXW);
+`script/testnet-exercise.sh` calls every entrypoint against the live deployment
+and passes 35/35 assertions.
+
+Its acceptance criterion — the live archival restore round trip — is **not yet
+met**. A canary entry was planted on 2026-08-12 and archives ~2026-08-19; see
+[KNOWN-LIMITATIONS.md §1](KNOWN-LIMITATIONS.md) and
+`script/archival-canary.sh`.
+
+Then the indexer, keeper and TypeScript SDK (stage 5), reference UI last (stage 6).
+
+Migrating from the pre-rewrite contract? See [MIGRATION.md](MIGRATION.md) — the
+frontend's four contract calls all break, the backend is unaffected.
+
+## Documents
+
+| | |
+|---|---|
+| [docs/ABI.md](docs/ABI.md) | **Interface of record.** Frozen 2026-08-12. Read this before integrating. |
+| [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) | What a green suite does not prove. |
+| [MIGRATION.md](MIGRATION.md) | Deletion audit vs the pre-rewrite contract, and downstream impact. |
+| [docs/soroban-rpc-read-skew.md](docs/soroban-rpc-read-skew.md) | Pin multi-call reads to one ledger, and the read-after-write barrier. |
+| [fluxora-build-spec.md](fluxora-build-spec.md) | The build spec, with amendments where measurement contradicted it. |
+
+> **Note for deployment:** the `stellar` CLI must be at least version 27 to match
+> the protocol. A protocol-23 CLI will scaffold and may misreport against a
+> protocol-27 network.
