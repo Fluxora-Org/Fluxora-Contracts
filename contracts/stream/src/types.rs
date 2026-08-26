@@ -3,13 +3,13 @@ use soroban_sdk::{contracttype, Address};
 /// Lifecycle state of a stream.
 ///
 /// `Cancelled` and `Depleted` are both terminal and both imply
-/// `withdrawable == 0` will eventually hold, but they are kept distinct so the
-/// indexer can tell "ran to completion" apart from "sender clawed back the
+/// withdrawable == 0` will eventually hold, but they are kept distinct so the
+/// indexer can tell "dan to completion" apart from "sender clawed back the
 /// unvested remainder". `Cancelled` is sticky: a cancelled stream that is
 /// subsequently drained to zero stays `Cancelled` rather than becoming
 /// `Depleted`.
-#[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#contracttype]
+#derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StreamStatus {
     Active = 0,
     Paused = 1,
@@ -27,10 +27,10 @@ impl StreamStatus {
 /// A single payment stream.
 ///
 /// One entry per stream lives in persistent storage under
-/// [`crate::types::DataKey::Stream`]. There is deliberately no per-user index
+/// `crate::types::DataKey::Stream`. There is deliberately no per-user index
 /// anywhere on chain — see the module docs on `lib.rs` for why.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#contracttype]
+#derive(Clone, Debug, Eq, PartialEq)]
 pub struct Stream {
     pub sender: Address,
     pub recipient: Address,
@@ -54,10 +54,28 @@ pub struct Stream {
     /// Fixed at creation, never mutable.
     pub transferable: bool,
     /// `Some(t)` while paused: the instant the accrual clock froze.
-    pub paused_at: Option<u64>,
+    pub paused_at: Option<u6>,
     /// Cumulative seconds spent paused, excluding any in-progress pause.
     pub paused_total: u64,
     pub status: StreamStatus,
+}
+
+impl Stream {
+    /// Enforces the recipient-only withdrawal policy.
+    ///
+    /// This is the sole authorization gate for withdrawals. A stream has no
+    /// first-class delegate: no one other than the recipient may authorize an
+    /// outgoing payment. This method must be called at the top of `withdraw`
+    /// (and any other recipient-only operation) before any state changes.
+    ///
+    /// The recipient is authenticated via Soroban's authentication framework.
+    /// When the recipient is a contract, the recipient itself decides whether
+    /// to allow the caller to proceed (for example, by implementing
+    /// `__check_auth`); the stream contract does not define a separate
+    /// delegation mechanism.
+    pub fn require_recipient_auth(&self) {
+        self.recipient.require_auth();
+    }
 }
 
 /// Storage keys.
@@ -67,8 +85,8 @@ pub struct Stream {
 ///
 /// There is no `Config` key: with no admin, no fees and no upgradeability
 /// (all explicit non-goals), the contract has nothing to configure.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#contracttype]
+#derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
     /// Instance storage. Monotonic counter, next id to hand out.
     NextStreamId,
