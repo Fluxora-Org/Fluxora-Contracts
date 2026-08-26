@@ -6,6 +6,9 @@
 //!   every adversarial boundary case.
 //! * **Stage 3** — TTL survival and archival recovery, resource consumption at
 //!   the batch cap.
+//! * **Stage 4** — the stream id invariant: unique, strictly monotonic, and
+//!   never consumed or reused by a failed create, independent of fixture
+//!   order.
 
 mod common;
 
@@ -28,3 +31,6 @@ mod invariants;
 mod monotonicity;
 mod resource_limits;
 mod ttl;
+
+// Stage 4
+mod stream_ids;
