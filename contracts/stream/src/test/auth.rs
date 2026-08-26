@@ -204,23 +204,32 @@ fn rejected_top_up_is_side_effect_free() {
 
     // Attempt top_up without any authorization
     revoke_all_auths(&h.env);
-    let err = h
-        .client
-        .try_top_up(&id, &(100 * ONE))
-        .unwrap_err()
-        .unwrap();
+    let err = h.client.try_top_up(&id, &(100 * ONE)).unwrap_err().unwrap();
     assert_eq!(err, crate::Error::Unauthorized);
 
     // Verify no state changed after rejected top_up
     let stream_after = h.get(id);
-    assert_eq!(stream_before.deposited, stream_after.deposited, "deposited changed");
-    assert_eq!(stream_before.end_time, stream_after.end_time, "end_time changed");
-    assert_eq!(stream_before.withdrawn, stream_after.withdrawn, "withdrawn changed");
+    assert_eq!(
+        stream_before.deposited, stream_after.deposited,
+        "deposited changed"
+    );
+    assert_eq!(
+        stream_before.end_time, stream_after.end_time,
+        "end_time changed"
+    );
+    assert_eq!(
+        stream_before.withdrawn, stream_after.withdrawn,
+        "withdrawn changed"
+    );
     assert_eq!(stream_before.status, stream_after.status, "status changed");
 
     // Verify balances unchanged
     assert_eq!(h.pool(), pool_before, "pool balance changed");
-    assert_eq!(h.balance(&h.sender), sender_balance_before, "sender balance changed");
+    assert_eq!(
+        h.balance(&h.sender),
+        sender_balance_before,
+        "sender balance changed"
+    );
     h.assert_pool_exact();
 }
 
