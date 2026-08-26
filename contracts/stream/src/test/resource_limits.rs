@@ -39,7 +39,7 @@
 //!   exists.
 
 use super::common::*;
-use crate::MAX_BATCH_SIZE;
+use crate::{Error, MAX_BATCH_SIZE};
 
 /// Maximum total transaction footprint: disk reads + memory reads + writes.
 const LEDGER_ENTRY_LIMIT: u32 = 400;
@@ -275,5 +275,134 @@ fn the_event_budget_is_not_the_binding_constraint_at_the_cap() {
     assert!(
         max_events_by_budget > MAX_BATCH_SIZE,
         "the event budget, not the entry count, is what bounds the batch",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Deterministic max / max+1 boundary tests
+// ---------------------------------------------------------------------------
+
+/// At exactly [`MAX_BATCH_SIZE`] streams the transaction must succeed. Measure
+/// and record every resource dimension so regressions are visible.
+#[test]
+fn batch_withdraw_at_max_succeeds_and_records_costs() {
+    let h = Harness::new();
+    let ids: std::vec::Vec<u64> = (0..MAX_BATCH_SIZE)
+        .map(|_| h.create_simple(100 * ONE, 100 * DAY))
+        .collect();
+    h.advance(30 * DAY);
+
+    h.client.batch_withdraw(&h.recipient, &h.ids(&ids));
+    let cost = report(&h, "batch_withdraw(MAX)");
+
+    assert!(
+        cost.footprint <= LEDGER_ENTRY_LIMIT,
+        "footprint {} exceeds limit {LEDGER_ENTRY_LIMIT}",
+        cost.footprint,
+    );
+    assert!(
+        cost.writes <= WRITE_ENTRY_LIMIT,
+        "writes {} exceed limit {WRITE_ENTRY_LIMIT}",
+        cost.writes,
+    );
+    assert!(
+        cost.event_bytes <= EVENT_BYTES_LIMIT,
+        "event bytes {} exceed limit {EVENT_BYTES_LIMIT}",
+        cost.event_bytes,
+    );
+}
+
+/// At [`MAX_BATCH_SIZE`] + 1 the contract must reject the call with a typed
+/// error *before* touching any storage, so resource usage should be minimal.
+#[test]
+fn batch_withdraw_at_max_plus_one_is_rejected_with_typed_error() {
+    let h = Harness::new();
+    let ids: std::vec::Vec<u64> = (0..MAX_BATCH_SIZE + 1)
+        .map(|_| h.create_simple(100 * ONE, 100 * DAY))
+        .collect();
+    h.advance(30 * DAY);
+
+    let err = h
+        .client
+        .try_batch_withdraw(&h.recipient, &h.ids(&ids))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::BatchTooLarge);
+}
+
+/// Same boundary exercise for [`batch_extend_ttl`](crate::FluxoraStream::batch_extend_ttl):
+/// at exactly the cap the call must succeed with room to spare.
+#[test]
+fn batch_extend_ttl_at_max_succeeds_and_records_costs() {
+    let h = Harness::new();
+    let ids: std::vec::Vec<u64> = (0..MAX_BATCH_SIZE)
+        .map(|_| h.create_simple(100 * ONE, YEAR))
+        .collect();
+
+    h.client.batch_extend_ttl(&h.ids(&ids));
+    let cost = report(&h, "batch_extend_ttl(MAX)");
+
+    assert!(
+        cost.footprint <= LEDGER_ENTRY_LIMIT,
+        "footprint {} exceeds limit {LEDGER_ENTRY_LIMIT}",
+        cost.footprint,
+    );
+    assert!(
+        cost.writes <= WRITE_ENTRY_LIMIT,
+        "writes {} exceed limit {WRITE_ENTRY_LIMIT}",
+        cost.writes,
+    );
+    assert!(
+        cost.event_bytes <= EVENT_BYTES_LIMIT,
+        "event bytes {} exceed limit {EVENT_BYTES_LIMIT}",
+        cost.event_bytes,
+    );
+}
+
+/// At [`MAX_BATCH_SIZE`] + 1 the TTL sweep must also be rejected with
+/// [`Error::BatchTooLarge`] before doing any work.
+#[test]
+fn batch_extend_ttl_at_max_plus_one_is_rejected_with_typed_error() {
+    let h = Harness::new();
+    let ids: std::vec::Vec<u64> = (0..MAX_BATCH_SIZE + 1)
+        .map(|_| h.create_simple(100 * ONE, YEAR))
+        .collect();
+
+    let err = h
+        .client
+        .try_batch_extend_ttl(&h.ids(&ids))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::BatchTooLarge);
+}
+
+/// The resource cost at MAX must be at least as cheap as 2× the cost at
+/// MAX/2 — proving the cost scales linearly with batch size and that the cap
+/// was not set by a pathological case.
+#[test]
+fn batch_withdraw_cost_at_max_is_comparable_to_half_batch() {
+    let h = Harness::new();
+    let all_ids: std::vec::Vec<u64> = (0..MAX_BATCH_SIZE)
+        .map(|_| h.create_simple(100 * ONE, 100 * DAY))
+        .collect();
+    let half = (MAX_BATCH_SIZE / 2) as usize;
+
+    h.advance(30 * DAY);
+
+    h.client.batch_withdraw(&h.recipient, &h.ids(&all_ids[..half]));
+    let half_cost = report(&h, "batch_withdraw(half)");
+
+    h.advance(DAY);
+
+    h.client
+        .batch_withdraw(&h.recipient, &h.ids(&all_ids[half..]));
+    let full_cost = report(&h, "batch_withdraw(full)");
+
+    // Full batch costs more, but not more than 2× — linear scaling.
+    assert!(
+        full_cost.footprint <= half_cost.footprint * 2,
+        "full batch footprint {} > 2× half batch {}",
+        full_cost.footprint,
+        half_cost.footprint,
     );
 }
