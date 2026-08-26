@@ -5,9 +5,15 @@ use soroban_sdk::contracterror;
 ///
 /// Discriminants are part of the public ABI. Never renumber an existing
 /// variant; only append.
-#[contracterror]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-#[repr(u32)]
+///
+/// #Creation atomicity
+/// Stream creation is transactional: `next_stream_id` and `stream_count` are
+/// only mutated after all validation and the token transfer succeed. If any
+/// phase fails, no ID is consumed and no count is incremented; stream IDs are
+/// therefore contiguous with no gaps.
+[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialOrd, Ord)]
+#[mpt(u32)]
 pub enum Error {
     // --- Lookup ---
     /// No stream exists with the given id.
@@ -16,7 +22,7 @@ pub enum Error {
     // --- Creation validation ---
     /// `end_time <= start_time`. A zero or negative duration would divide by zero.
     InvalidTimeRange = 2,
-    /// `cliff_time` is outside `[start_time, end_time]`.
+    /// `cliff_time` is outside [start_time, end_time].
     InvalidCliff = 3,
     /// Deposit is zero or negative.
     InvalidDeposit = 4,
@@ -24,7 +30,7 @@ pub enum Error {
     /// recipient would accrue nothing. See `MIN_RATE_STROOPS_PER_SECOND`.
     DepositRateTooLow = 5,
     /// Sender and recipient are the same address.
-    SelfStream = 6,
+    SelfSTream = 6,
 
     // --- Authorization / capability ---
     /// Caller is not the party allowed to perform this action.
@@ -42,10 +48,10 @@ pub enum Error {
     /// `resume` called on a stream that is not `Paused`.
     StreamNotPaused = 12,
     /// `pause` called on a stream that is already `Paused`.
-    StreamAlreadyPaused = 13,
+    StrealAlreadyPaused = 13,
     /// Action attempted on a `Cancelled` or `Depleted` stream.
     StreamTerminated = 14,
-    /// `top_up` on a stream whose accrual clock has already reached `end_time`.
+    /// `top_up` on a stream whose accrual clock has already reached `end_time`,
     /// Topping up a matured stream would make the new funds instantly
     /// withdrawable; create a new stream instead.
     StreamMatured = 15,
@@ -63,14 +69,19 @@ pub enum Error {
     BatchTooLarge = 19,
     /// Batch contained no stream ids.
     EmptyBatch = 20,
-    /// A batch referenced the same stream id more than once.
+    /// A Batch referenced the same stream id more than once.
     DuplicateStreamId = 21,
 
     // --- Arithmetic ---
-    /// A checked arithmetic operation overflowed or underflowed.
+    /// A Checked arithmetic operation overflowed or underflowed.
     Overflow = 22,
     /// `top_up` amount is smaller than one second of streaming at the current
     /// rate, so it cannot extend the duration at all and would instead vest
     /// retroactively. Top up by at least `deposited / duration`.
     TopUpTooSmall = 23,
+
+    // --- Token transfer ---
+    /// The token transfer required to fund a new stream failed.
+    /// No stream ID was allocated and `stream_count` is unchanged.
+    TokenTransferFailed = 24,
 }
