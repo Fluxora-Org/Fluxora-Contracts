@@ -14,7 +14,7 @@ subscription billing, vesting schedules. The contract is the product.
 | SDK | `soroban-sdk` 27.0.5 |
 | Rust | 1.97.1, target `wasm32v1-none` |
 | Token interface | SEP-41 (USDC on Stellar has **7 decimals**) |
-| Contract size | ~47 KB |
+| Contract size | ~47 KiB baseline; enforced by `contracts/stream/wasm-size-budget.env` |
 | Tests | 146, including property tests and a pool invariant checked after every operation |
 
 > **Read [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) before relying on this.**
@@ -29,11 +29,18 @@ subscription billing, vesting schedules. The contract is the product.
 cargo test                                    # full suite
 cargo test resource_limits -- --nocapture     # print measured resource costs
 cargo build --target wasm32v1-none --release  # build the contract
+script/check-stream-wasm-size.sh              # clean build and wasm size budget check
 
 # Deeper randomized sweep. CI runs this nightly; worth running before a release
 # or after touching accrual.rs. Both suites have found real bugs.
 FLUXORA_FUZZ_SEEDS=200 FLUXORA_FUZZ_STEPS=300 PROPTEST_CASES=5000 cargo test --release
 ```
+
+`script/check-stream-wasm-size.sh` is the review gate for deployable artifact
+growth. It sources `contracts/stream/wasm-size-budget.env`, runs the recorded
+clean pinned build command, prints the exact `fluxora_stream.wasm` byte count,
+and fails if the artifact exceeds the checked-in budget. Intentional growth
+should update the budget file in the same PR and explain the size delta.
 
 ---
 
