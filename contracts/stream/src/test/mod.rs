@@ -28,3 +28,6 @@ mod invariants;
 mod monotonicity;
 mod resource_limits;
 mod ttl;
+
+// Issue #1571 — withdrawal bookkeeping atomicity / rollback on token failure
+mod withdrawal_atomicity;
