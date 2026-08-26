@@ -19,6 +19,40 @@
 //!
 //! Field order and topic placement are ABI. Adding a field is a compatible
 //! change; reordering or re-topicking one is not.
+//!
+//! Note that item-level doc comments on a `#[contractevent]` struct are copied
+//! into the contract spec and therefore into the deployed wasm. Statements of
+//! the ABI belong there; the reasoning behind them belongs here, where it costs
+//! the contract nothing.
+//!
+//! # `Cancelled.vested`: total vested, not the withdrawable remainder
+//!
+//! Issue #1584. `cancelled` publishes `refunded`, `vested` and `withdrawn`,
+//! which makes it a public accounting statement, and `vested` had two defensible
+//! readings: everything the recipient has earned over the life of the stream, or
+//! only the part of it they can still pull. The two differ exactly when the
+//! recipient withdrew before the cancel.
+//!
+//! The ruling is **total vested**, cumulative and inclusive of `withdrawn`,
+//! because that is the reading that keeps the event self-checking:
+//!
+//! * Conservation holds unconditionally: `refunded + vested` equals the
+//!   pre-cancel `deposited` for every stream. Under the withdrawable reading
+//!   that identity fails for any partially withdrawn stream, and a reconciler
+//!   could no longer tell a broken contract from an ordinary one.
+//! * No information is lost. The event carries `withdrawn`, so the remainder is
+//!   `vested - withdrawn`. The reverse does not hold — from the remainder
+//!   alone, total vested is unrecoverable.
+//! * It matches storage one-for-one: cancellation rewrites `deposited` to the
+//!   vested amount, so an indexer mirroring `deposited` assigns the field
+//!   directly. [`cancelled`] reads it straight off the settled stream for that
+//!   reason, which is what makes divergence between event and storage
+//!   unrepresentable rather than merely untested.
+//!
+//! The cancel itself moves nothing to the recipient: they still pull
+//! `vested - withdrawn` through the normal withdraw path, which is why that
+//! amount stays pooled in the contract. Every cancellation state is asserted
+//! against storage and token balances in `test::cancel_events`.
 
 use soroban_sdk::{contractevent, Address, Env};
 
@@ -60,8 +94,18 @@ pub struct Withdrawn {
     pub status: StreamStatus,
 }
 
-/// The sender cancelled. `refunded` went back to the sender; `vested` is what
-/// the recipient keeps and may still withdraw.
+/// The sender cancelled, collapsing the schedule onto the cancellation instant.
+///
+/// Amounts are readings at that instant and reconcile with storage and the
+/// token ledger exactly:
+///
+/// ```text
+/// refunded + vested == deposited before the cancel   (conservation)
+/// vested - withdrawn == still claimable == tokens left pooled for this stream
+/// ```
+///
+/// `vested` is the cumulative total, not the withdrawable remainder — see the
+/// module docs for why.
 #[contractevent]
 pub struct Cancelled {
     #[topic]
@@ -70,8 +114,13 @@ pub struct Cancelled {
     pub sender: Address,
     #[topic]
     pub recipient: Address,
+    /// Returned to the sender by this call: pre-cancel `deposited` minus
+    /// `vested`. Zero when the stream had already fully vested.
     pub refunded: i128,
+    /// Total vested at cancellation, including what was already withdrawn.
+    /// Equal to the post-cancel `deposited`.
     pub vested: i128,
+    /// Cumulative withdrawn before the cancel. Never moved by the cancel.
     pub withdrawn: i128,
     /// Rewritten end of the collapsed schedule.
     pub end_time: u64,
@@ -165,13 +214,28 @@ pub fn withdrawn(env: &Env, stream_id: u64, stream: &Stream, amount: i128) {
     .publish(env);
 }
 
-pub fn cancelled(env: &Env, stream_id: u64, stream: &Stream, refunded: i128, vested: i128) {
+/// Emit [`Cancelled`] for a stream that has already been collapsed and saved.
+///
+/// Issue #1584: `vested` is deliberately *not* a parameter. Cancellation
+/// rewrites `deposited` to the amount vested at that instant, so reading the
+/// figure back off the settled stream is what guarantees the event and storage
+/// can never disagree - the two cannot be wired up out of order or drift apart
+/// in a later edit. `refunded` is still passed in because it is a token
+/// movement, not stream state; `cancel` debug-asserts the conservation identity
+/// that ties the two together.
+///
+/// # Preconditions
+///
+/// `stream` must be the post-cancel state: `status == Cancelled`, `deposited`
+/// already reduced to the vested amount, and `end_time` already collapsed.
+pub fn cancelled(env: &Env, stream_id: u64, stream: &Stream, refunded: i128) {
     Cancelled {
         stream_id,
         sender: stream.sender.clone(),
         recipient: stream.recipient.clone(),
         refunded,
-        vested,
+        // Total vested at the cancellation instant == post-cancel `deposited`.
+        vested: stream.deposited,
         withdrawn: stream.withdrawn,
         end_time: stream.end_time,
     }

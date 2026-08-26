@@ -17,6 +17,8 @@ mod withdraw;
 // Stage 2
 mod auth;
 mod cancel;
+// Issue #1584: the cancellation event's accounting contract.
+mod cancel_events;
 mod cliff;
 mod pause;
 mod top_up;

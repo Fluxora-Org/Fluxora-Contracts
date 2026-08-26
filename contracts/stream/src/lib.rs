@@ -465,6 +465,28 @@ impl FluxoraStream {
         let vested_now = accrual::vested(&stream, now)?;
         let refund = accrual::refundable(&stream, now)?;
 
+        // Issue #1584 — the accounting the `Cancelled` event publishes.
+        //
+        // `vested_now` is the *total* vested at this instant, cumulative and
+        // inclusive of `withdrawn`; `refund` is the unvested remainder handed
+        // back to the sender. Conservation (invariant I4) says the two must
+        // partition the pre-cancel deposit exactly, with nothing created or
+        // destroyed in between. Checked here rather than trusted, because this
+        // is the identity every downstream ledger reconciles against.
+        //
+        // `debug_assert` compiles out of the release profile
+        // (`debug-assertions = false`), so this costs the deployed contract
+        // nothing while the test suite runs it on every cancellation.
+        debug_assert_eq!(
+            refund + vested_now,
+            stream.deposited,
+            "cancel: conservation broken — refund + vested != deposited",
+        );
+        debug_assert!(
+            vested_now >= stream.withdrawn,
+            "cancel: vested below what was already withdrawn",
+        );
+
         // Collapse the schedule onto the current point of the stream clock.
         // Clamped at `start_time` so a cancel before the stream opens leaves a
         // zero-length (not negative-length) schedule.
@@ -487,7 +509,11 @@ impl FluxoraStream {
             );
         }
 
-        events::cancelled(&env, stream_id, &stream, refund, vested_now);
+        // Issue #1584: the event's `vested` is read off the settled stream by
+        // the helper (`stream.deposited`, set above), so it cannot disagree with
+        // storage. Asserted here so the intent survives a future edit.
+        debug_assert_eq!(stream.deposited, vested_now);
+        events::cancelled(&env, stream_id, &stream, refund);
         Ok(())
     }
 
