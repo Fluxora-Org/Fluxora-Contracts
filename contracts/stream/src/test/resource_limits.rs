@@ -389,7 +389,8 @@ fn batch_withdraw_cost_at_max_is_comparable_to_half_batch() {
 
     h.advance(30 * DAY);
 
-    h.client.batch_withdraw(&h.recipient, &h.ids(&all_ids[..half]));
+    h.client
+        .batch_withdraw(&h.recipient, &h.ids(&all_ids[..half]));
     let half_cost = report(&h, "batch_withdraw(half)");
 
     h.advance(DAY);
