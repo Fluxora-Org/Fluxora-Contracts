@@ -104,4 +104,8 @@ pub enum Error {
     /// handed out. Ids are monotonic and never reused, so the counter never
     /// wraps — this error is terminal for new-stream creation.
     StreamIdExhausted = 24,
+
+    // --- Batch decoding ---
+    /// A batch vector contained a value that was not a serialized `u64`.
+    MalformedStreamId = 27,
 }

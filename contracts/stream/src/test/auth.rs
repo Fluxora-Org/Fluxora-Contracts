@@ -143,6 +143,17 @@ fn withdraw_fails_without_authorization() {
 
 #[test]
 #[should_panic(expected = "Unauthorized")]
+fn batch_withdraw_fails_without_authorization() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    h.advance(10 * DAY);
+
+    revoke_all_auths(&h.env);
+    h.client.batch_withdraw(&h.recipient, &h.ids(&[id]));
+}
+
+#[test]
+#[should_panic(expected = "Unauthorized")]
 fn cancel_fails_without_authorization() {
     let h = Harness::new();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);

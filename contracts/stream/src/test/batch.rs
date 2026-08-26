@@ -14,7 +14,7 @@
 use soroban_sdk::testutils::storage::Persistent as _;
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
 use soroban_sdk::xdr::{ContractEventBody, ScVal};
-use soroban_sdk::{Address, Vec};
+use soroban_sdk::{Address, IntoVal, TryFromVal, Val, Vec};
 
 use super::common::*;
 use crate::{DataKey, Error, MAX_BATCH_SIZE};
@@ -59,6 +59,13 @@ fn ttl_of(h: &Harness, stream_id: u64) -> u32 {
 fn age_ledgers(h: &Harness, ledgers: u32) {
     let seq = h.env.ledger().sequence();
     h.env.ledger().set_sequence_number(seq + ledgers);
+}
+
+fn malformed_ids(h: &Harness, valid_id: u64) -> Vec<u64> {
+    let mut raw: Vec<Val> = Vec::new(&h.env);
+    raw.push_back(valid_id.into_val(&h.env));
+    raw.push_back(true.into_val(&h.env));
+    Vec::<u64>::try_from_val(&h.env, &&raw).unwrap()
 }
 
 #[test]
@@ -289,6 +296,8 @@ fn an_oversized_ttl_batch_is_rejected() {
     let ids: std::vec::Vec<u64> = (0..MAX_BATCH_SIZE + 1)
         .map(|_| h.create_simple(10 * ONE, 100 * DAY))
         .collect();
+    h.advance(10 * DAY);
+    let before = ttl_of(&h, ids[0]);
 
     let err = h
         .client
@@ -296,6 +305,58 @@ fn an_oversized_ttl_batch_is_rejected() {
         .unwrap_err()
         .unwrap();
     assert_eq!(err, Error::BatchTooLarge);
+    assert_eq!(ttl_of(&h, ids[0]), before);
+}
+
+#[test]
+fn malformed_serialized_ids_are_typed_errors_without_partial_mutation() {
+    let h = Harness::new();
+    let id = h.create_simple(100 * ONE, 100 * DAY);
+    h.advance(30 * DAY);
+    let before_ttl = ttl_of(&h, id);
+    let malformed = malformed_ids(&h, id);
+    h.env.mock_auths(&[]);
+
+    let withdraw_err = h
+        .client
+        .try_batch_withdraw(&h.recipient, &malformed)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(withdraw_err, Error::MalformedStreamId);
+    assert!(h.env.auths().is_empty());
+    assert_eq!(h.get(id).withdrawn, 0);
+    assert_eq!(h.balance(&h.recipient), 0);
+
+    let ttl_err = h
+        .client
+        .try_batch_extend_ttl(&malformed)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(ttl_err, Error::MalformedStreamId);
+    assert_eq!(ttl_of(&h, id), before_ttl);
+
+    h.env.mock_all_auths();
+    assert_eq!(
+        h.client.batch_withdraw(&h.recipient, &h.ids(&[id])),
+        30 * ONE,
+        "a corrected retry must succeed"
+    );
+}
+
+#[test]
+fn structural_rejection_precedes_withdraw_authorization() {
+    let h = Harness::new();
+    let oversized = h.ids(&std::vec![0; MAX_BATCH_SIZE as usize + 1]);
+    h.env.mock_auths(&[]);
+
+    let err = h
+        .client
+        .try_batch_withdraw(&h.recipient, &oversized)
+        .unwrap_err()
+        .unwrap();
+
+    assert_eq!(err, Error::BatchTooLarge);
+    assert!(h.env.auths().is_empty());
 }
 
 // ---------------------------------------------------------------------------

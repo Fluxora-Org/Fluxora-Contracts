@@ -109,9 +109,10 @@ Discriminants are ABI and are never renumbered; new variants are appended.
 | 8 | `NotCancellable` | | 21 | `DuplicateStreamId` |
 | 9 | `NotPausable` | | 22 | `Overflow` |
 | 10 | `NotTransferable` | | 23 | `TopUpTooSmall` |
-| 11 | `StreamNotActive` | | 25 | `TokenTransferFailed` |
-| 12 | `StreamNotPaused` | | 26 | `TokenMissing` |
-| 13 | `StreamAlreadyPaused` | | | |
+| 11 | `StreamNotActive` | | 24 | `StreamIdExhausted` |
+| 12 | `StreamNotPaused` | | 25 | `TokenTransferFailed` |
+| 13 | `StreamAlreadyPaused` | | 26 | `TokenMissing` |
+| | | | 27 | `MalformedStreamId` |
 
 `TokenTransferFailed` (25) and `TokenMissing` (26) are **stable stream-level categories** for token sub-invocation failures. The token contract's internal error discriminant is intentionally discarded — forwarding it would produce a value clients decode against Fluxora's error table, yielding a silent misinterpretation. The raw diagnostic is visible in the failed transaction's `diagnosticEvents`.
 
