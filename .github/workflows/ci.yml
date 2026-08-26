@@ -29,13 +29,19 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # The provenance tool lives outside the workspace (it targets the host,
+      # not wasm32v1-none), so it is linted and formatted explicitly.
       - name: Formatting
-        run: cargo fmt --all -- --check
+        run: |
+          cargo fmt --all -- --check
+          cargo fmt --manifest-path tools/provenance/Cargo.toml -- --check
 
       # Lints are hard failures. A warning that CI tolerates is a warning
       # nobody ever fixes.
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: |
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo clippy --manifest-path tools/provenance/Cargo.toml --all-targets -- -D warnings
 
       - name: Tests
         run: cargo test --all-features
@@ -49,7 +55,22 @@ jobs:
       - name: Build contract WASM
         run: cargo build --target wasm32v1-none --release
 
-      - name: Report WASM size
+      # Regression suite for the provenance tool itself (issue #1546):
+      # round-trip, tamper/missing/unlisted detection, empty-dir boundary,
+      # and metadata drift.
+      - name: Provenance tool tests
+        run: cargo test --manifest-path tools/provenance/Cargo.toml
+
+      # Provenance ties the built bytes to git revision, toolchain, SDK,
+      # target and release flags. Generate then verify so a mismatch between
+      # the two fails the job — this is the mandatory pre-release gate.
+      - name: Generate wasm provenance
+        run: script/provenance.sh generate
+
+      - name: Verify wasm provenance
+        run: script/provenance.sh verify
+
+      - name: Report WASM size and provenance
         run: |
           size=$(stat -c%s target/wasm32v1-none/release/fluxora_stream.wasm)
           echo "fluxora_stream.wasm: ${size} bytes"
@@ -58,11 +79,16 @@ jobs:
             echo "::error::WASM exceeds the 128 KiB contract code entry limit"
             exit 1
           fi
+          echo "provenance:"
+          cat target/wasm32v1-none/release/provenance.json
 
       - uses: actions/upload-artifact@v4
         with:
           name: fluxora-stream-wasm
-          path: target/wasm32v1-none/release/fluxora_stream.wasm
+          path: |
+            target/wasm32v1-none/release/fluxora_stream.wasm
+            target/wasm32v1-none/release/provenance.json
+            target/wasm32v1-none/release/SHASUMS
 
   fuzz:
     name: randomized and property suites
