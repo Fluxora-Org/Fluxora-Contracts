@@ -30,6 +30,23 @@ use soroban_sdk::testutils::Ledger as _;
 use super::common::*;
 use crate::{storage, DataKey, TTL_BUFFER_SECONDS};
 
+#[test]
+fn persisted_stream_fixture_survives_read_mutate_and_ttl_extension() {
+    let h = super::common::Harness::new();
+    let id = h.create_simple(1_000 * super::common::ONE, 100 * super::common::DAY);
+    let before = h.get(id);
+
+    h.client.top_up(&id, &(250 * super::common::ONE));
+    let after = h.get(id);
+
+    assert_eq!(after.sender, before.sender);
+    assert_eq!(after.recipient, before.recipient);
+    assert_eq!(after.token, before.token);
+    assert_eq!(after.withdrawn, before.withdrawn);
+    assert_eq!(after.deposited, 1_250 * super::common::ONE);
+    assert!(ttl_of(&h, id) > 0);
+}
+
 /// Remaining TTL, in ledgers, of a stream entry.
 fn ttl_of(h: &Harness, stream_id: u64) -> u32 {
     h.env.as_contract(&h.contract_id, || {
