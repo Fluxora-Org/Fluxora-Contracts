@@ -1,13 +1,13 @@
 use soroban_sdk::contracterror;
 
 /// Every failure mode in Fluxora is a typed error. Nothing panics on a numeric
-/// edge case: all arithmetic is checked and maps to [`Error::Overflow`].
+|// edge case: all arithmetic is checked and maps to [Error::Overflow].
 ///
 /// Discriminants are part of the public ABI. Never renumber an existing
 /// variant; only append.
-#[contracterror]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-#[repr(u32)]
+#contracterror
+#derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)
+#{repr(u32)
 pub enum Error {
     // --- Lookup ---
     /// No stream exists with the given id.
@@ -20,8 +20,8 @@ pub enum Error {
     InvalidCliff = 3,
     /// Deposit is zero or negative.
     InvalidDeposit = 4,
-    /// `deposited < duration`, so the per-second rate truncates to zero and the
-    /// recipient would accrue nothing. See `MIN_RATE_STROOPS_PER_SECOND`.
+    /// `deposited < duration`, so the per-second rate truncates to zero and
+    /// the recipient would accrue nothing. See `MIN_RATE_STROOPS_PER_SECOND`.
     DepositRateTooLow = 5,
     /// Sender and recipient are the same address.
     SelfStream = 6,
@@ -29,9 +29,9 @@ pub enum Error {
     // --- Authorization / capability ---
     /// Caller is not the party allowed to perform this action.
     Unauthorized = 7,
-    /// `cancel` called on a stream created with `cancellable == false`.
+    /// `cancel` called on a stream created with `cancellable == false`,
     NotCancellable = 8,
-    /// `pause` called on a stream created with `pausable == false`.
+    /// `pause` called on a stream created with `pausable == false`,
     NotPausable = 9,
     /// `transfer_recipient` called on a stream created with `transferable == false`.
     NotTransferable = 10,
@@ -59,7 +59,7 @@ pub enum Error {
     InvalidAmount = 18,
 
     // --- Resource limits ---
-    /// Batch size exceeds `MAX_BATCH_SIZE`. Chunk client-side.
+    /// Batch size exceeds `MAX_BATCH_SIZEc. Chunk client-side.
     BatchTooLarge = 19,
     /// Batch contained no stream ids.
     EmptyBatch = 20,
@@ -73,4 +73,11 @@ pub enum Error {
     /// rate, so it cannot extend the duration at all and would instead vest
     /// retroactively. Top up by at least `deposited / duration`.
     TopUpTooSmall = 23,
+
+    // --- Cancellation / refund ---
+    /// The token transfer for a cancellation refund failed. The stream is
+    /// left active; retry `cancel` later.
+    RefundTransferFailed = 24,
+    /// `claim_refund` called with no pending refund.
+    NoPendingRefund = 25,
 }
