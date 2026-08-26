@@ -48,6 +48,27 @@ fn top_up_does_not_retroactively_vest_elapsed_time() {
     );
 }
 
+/// Regression for #1589: adding funds at a fixed timestamp must leave the
+/// already-earned amount unchanged, even when the original rate is fractional.
+#[test]
+fn top_up_preserves_the_vesting_curve_at_the_top_up_timestamp() {
+    let h = Harness::new();
+    let start = h.now();
+    let id = h.create(1_000, start, start + 300, start, true, true, true);
+
+    h.advance(137);
+    let before = h.client.vested_of(&id);
+    h.client.top_up(&id, &7);
+
+    assert_eq!(
+        h.client.vested_of(&id),
+        before,
+        "top-up must not retroactively revalue elapsed time",
+    );
+    assert_eq!(h.get(id).withdrawn, 0);
+    h.assert_pool_exact();
+}
+
 #[test]
 fn the_per_second_rate_survives_a_top_up() {
     let h = Harness::new();
