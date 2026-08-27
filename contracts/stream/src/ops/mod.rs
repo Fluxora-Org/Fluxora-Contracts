@@ -8,3 +8,21 @@
 //! offers, admin, views) following the same pattern.
 
 pub(crate) mod validation;
+
+// Slice 2+ modules — same pattern as slice 1 (issue #1520).
+pub(crate) mod admin;
+pub(crate) mod auto_claim;
+pub(crate) mod auto_renew;
+pub(crate) mod cancel;
+pub(crate) mod clone;
+pub(crate) mod create;
+pub(crate) mod id_reservation;
+pub(crate) mod offers;
+pub(crate) mod pause_resume;
+pub(crate) mod rate;
+pub(crate) mod recipient;
+pub(crate) mod schedule;
+pub(crate) mod templates;
+pub(crate) mod version;
+pub(crate) mod views;
+pub(crate) mod withdraw;

@@ -347,3 +347,9 @@ pub(crate) fn ed25519_pubkey_from_address(env: &Env, addr: &Address) -> [u8; 32]
     pk_bytes.copy_into_slice(&mut pk);
     pk
 }
+
+/// Authorization guard: only the sender may perform this operation.
+/// Move-only extraction from `lib.rs` (issue #1520).
+pub(crate) fn require_stream_sender(sender: &Address) {
+    sender.require_auth();
+}
