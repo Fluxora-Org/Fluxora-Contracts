@@ -280,6 +280,7 @@ fn the_event_budget_is_not_the_binding_constraint_at_the_cap() {
 
 /// Enforce a hard ceiling on `batch_withdraw` budget usage. This is the reviewed
 /// threshold: any optimization that breaks these numbers is a regression.
+#[rustfmt::skip]
 #[test]
 fn batch_withdraw_budget_regression() {
     let h = Harness::new();
