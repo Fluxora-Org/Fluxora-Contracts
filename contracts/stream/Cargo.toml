@@ -1,38 +1,24 @@
 [package]
-name = "fluxora_stream"
-version = "0.1.0"
-edition = "2021"
-rust-version = "1.94.1"
-description = "Fluxora USDC streaming contract for Stellar Soroban"
-# Issue #206 — global emergency pause: scaffold branch. Instance pause flag + admin setter to follow.
-
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+name = "fluxora-stream"
+description = "Continuous payment streaming primitive for Soroban"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+publish = false
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["lib", "cdylib"]
 doctest = false
 
 [features]
-import_only = []
 testutils = ["soroban-sdk/testutils"]
 
-# Soroban SDK version pinned for reproducible builds.
-# soroban-sdk 21.7.7 is compatible with Stellar Soroban networks as of Feb 2026.
-# See rust-toolchain.toml for Rust version pin.
-# To upgrade, verify compatibility with latest Stellar/Soroban network and run full test suite.
-
 [dependencies]
-soroban-sdk = "21.7.7"
+soroban-sdk = { workspace = true }
 
 [dev-dependencies]
-# Required for simulating ledger environment and testing time dependencies
-soroban-sdk = { version = "21.7.7", features = ["testutils"] }
-# Factory policy enforcement tests (#525)
-fluxora_factory = { path = "../factory", features = ["testutils"] }
-# Governance integration tests (#585)
-fluxora_governance = { path = "../governance", features = ["testutils"] }
-# Property-based testing for accrual math fuzz harness (#292)
+soroban-sdk = { workspace = true, features = ["testutils"] }
 proptest = "1"
 # Required for constructing Ed25519 keypairs in delegated-withdraw tests
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
