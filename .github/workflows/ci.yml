@@ -32,11 +32,13 @@ jobs:
       - name: Formatting
         run: cargo fmt --all
         
-      - name: Auto-commit formatting
+      - name: Auto-commit formatting and clippy log
         run: |
           git config --global user.name 'github-actions'
           git config --global user.email 'github-actions@github.com'
-          git commit -am "style: auto format from CI" || echo "No changes to commit"
+          cargo clippy --all-targets --all-features -- -D warnings > clippy_output.txt 2>&1 || true
+          git add clippy_output.txt
+          git commit -am "chore: save clippy log for debugging" || echo "No changes to commit"
           git push || echo "No changes to push"
 
       # Lints are hard failures. A warning that CI tolerates is a warning
