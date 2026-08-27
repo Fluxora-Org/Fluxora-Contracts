@@ -357,6 +357,22 @@ fn an_empty_batch_is_rejected() {
     );
 }
 
+#[test]
+fn a_duplicated_id_in_ttl_batch_is_rejected() {
+    let h = Harness::new();
+    let id = h.create_simple(100 * ONE, 100 * DAY);
+    let before_ttl = ttl_of(&h, id);
+
+    let err = h
+        .client
+        .try_batch_extend_ttl(&h.ids(&[id, id]))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::DuplicateStreamId);
+
+    assert_eq!(ttl_of(&h, id), before_ttl);
+}
+
 /// A duplicated id would load the stream twice and apply the second withdrawal
 /// to a stale copy — silently paying out more than the recipient earned.
 #[test]

@@ -1150,14 +1150,14 @@ impl FluxoraStream {
     ///
     /// **The sweep is per-item, not atomic.** Unknown ids are skipped rather
     /// than failing the batch, so a keeper working from a slightly stale index
-    /// does not lose the whole sweep to one bad id. A duplicate id is simply
-    /// extended again — the operation is idempotent and harmless — and each
-    /// occurrence counts toward the return value, so the outcome for a given
-    /// input is deterministic. Empty, oversized, and malformed vectors are
-    /// rejected before the sweep starts. Returns how many entries were actually
-    /// extended.
+    /// does not lose the whole sweep to one bad id. Unlike `batch_withdraw`,
+    /// duplicate ids are rejected up-front: passing the same id twice returns
+    /// [`Error::DuplicateStreamId`] rather than attempting to extend it twice.
+    /// Empty, oversized, and malformed vectors are rejected before the sweep
+    /// starts. Returns how many entries were actually extended.
     pub fn batch_extend_ttl(env: Env, stream_ids: Vec<u64>) -> Result<u32, Error> {
         let stream_ids = Self::validate_batch_ids(&env, &stream_ids)?;
+        Self::reject_duplicate_ids(&stream_ids)?;
 
         let mut extended = 0u32;
         for stream_id in stream_ids.iter() {
