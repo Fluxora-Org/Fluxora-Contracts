@@ -39,7 +39,7 @@
 //!   exists.
 
 use super::common::*;
-use crate::MAX_BATCH_SIZE;
+use crate::{Error, MAX_BATCH_SIZE};
 
 /// Maximum total transaction footprint: disk reads + memory reads + writes.
 const LEDGER_ENTRY_LIMIT: u32 = 400;
@@ -289,25 +289,26 @@ fn batch_withdraw_budget_regression() {
     let max_size = MAX_BATCH_SIZE as usize;
     let total_streams = typical_size + max_size;
 
-    let ids: std::vec::Vec<u64> = (0..total_streams)
+    let ids: Vec<u64> = (0..total_streams)
         .map(|_| h.create_simple(100 * ONE, 100 * DAY))
         .collect();
 
     h.advance(30 * DAY);
 
     // Empty batch
-    let _ = h.client.try_batch_withdraw(&h.recipient, &h.ids(&[]));
+    assert_eq!(
+        h.client.try_batch_withdraw(&h.recipient, &h.ids(&[])),
+        Err(Ok(Error::EmptyBatch))
+    );
     let empty = report(&h, "batch_withdraw(0)");
 
     // Typical batch
-    h.client
-        .batch_withdraw(&h.recipient, &h.ids(&ids[..typical_size]));
-    let typical = report(&h, &std::format!("batch_withdraw({typical_size})"));
+    h.client.batch_withdraw(&h.recipient, &h.ids(&ids[..typical_size]));
+    let typical = report(&h, "batch_withdraw(4)");
 
     // Max batch
-    h.client
-        .batch_withdraw(&h.recipient, &h.ids(&ids[typical_size..]));
-    let max = report(&h, &std::format!("batch_withdraw({max_size})"));
+    h.client.batch_withdraw(&h.recipient, &h.ids(&ids[typical_size..]));
+    let max = report(&h, "batch_withdraw(16)");
 
     // Thresholds established by measurement.
     // They must never increase significantly without a design review.
