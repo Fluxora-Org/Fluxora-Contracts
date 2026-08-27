@@ -149,12 +149,27 @@ pub fn save_stream(env: &Env, stream_id: u64, stream: &Stream) {
 ///
 /// Ids are monotonic and never reused, so an id is a stable handle an indexer
 /// can key on forever.
+///
+/// # Exhaustion
+///
+/// The counter is never allowed to wrap: at `u64::MAX` there is no next
+/// representable id, and handing one out would either duplicate an id or wrap
+/// the counter and corrupt the monotonicity guarantee. The counter is checked
+/// *before* any state is written, so an exhausted call leaves the counter, the
+/// pool and the stream set untouched — no duplicate id and no partial stream.
 pub fn next_stream_id(env: &Env) -> Result<u64, Error> {
     let current: u64 = env
         .storage()
         .instance()
         .get(&DataKey::NextStreamId)
         .unwrap_or(0);
+
+    // Checked *before* the counter is advanced: if we are at the boundary, fail
+    // with the typed exhaustion error and write nothing.
+    if current == u64::MAX {
+        return Err(Error::StreamIdExhausted);
+    }
+
     let next = current.checked_add(1).ok_or(Error::Overflow)?;
     env.storage().instance().set(&DataKey::NextStreamId, &next);
     extend_instance(env);

@@ -73,4 +73,10 @@ pub enum Error {
     /// rate, so it cannot extend the duration at all and would instead vest
     /// retroactively. Top up by at least `deposited / duration`.
     TopUpTooSmall = 23,
+
+    // --- Identifier exhaustion ---
+    /// The stream-id counter has reached `u64::MAX`; no further ids can be
+    /// handed out. Ids are monotonic and never reused, so the counter never
+    /// wraps — this error is terminal for new-stream creation.
+    StreamIdExhausted = 24,
 }

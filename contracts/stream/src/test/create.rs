@@ -4,7 +4,98 @@ use soroban_sdk::testutils::Address as _;
 use soroban_sdk::Address;
 
 use super::common::*;
-use crate::{Error, StreamStatus};
+use crate::{DataKey, Error, StreamStatus};
+
+/// Seed the stream-id counter directly, as if `u64::MAX - 1` ids had already
+/// been handed out. Tests use this to exercise the exhaustion boundary without
+/// creating billions of streams.
+fn seed_counter(h: &Harness, value: u64) {
+    h.env.as_contract(&h.contract_id, || {
+        h.env
+            .storage()
+            .instance()
+            .set(&DataKey::NextStreamId, &value);
+    });
+}
+
+/// The id counter hands out the last representable id, then the *next* create
+/// fails with a typed exhaustion error and leaves no partial state behind.
+#[test]
+fn stream_ids_exhaust_with_a_typed_error_at_the_u64_boundary() {
+    let h = Harness::new();
+    let before = h.balance(&h.sender);
+
+    // One id left in the space.
+    seed_counter(&h, u64::MAX - 1);
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    assert_eq!(id, u64::MAX - 1, "last representable id must be handed out");
+
+    // The counter is now at u64::MAX; the next create must fail with the typed
+    // exhaustion error — not wrap, not panic, and not hand out a duplicate.
+    let start = h.now();
+    let err = h
+        .client
+        .try_create_stream(
+            &h.sender,
+            &h.recipient,
+            &h.token,
+            &(1_000 * ONE),
+            &start,
+            &(start + 100 * DAY),
+            &start,
+            &true,
+            &true,
+            &true,
+        )
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::StreamIdExhausted);
+
+    // No partial stream state: no deposit moved, no duplicate entry, and the
+    // counter was not advanced past the boundary.
+    assert_eq!(h.balance(&h.sender), before - 1_000 * ONE);
+    assert_eq!(h.pool(), 1_000 * ONE);
+    assert_eq!(h.client.stream_count(), u64::MAX);
+    // NOTE: cannot use `assert_pool_exact` here — it iterates `0..stream_count`
+    // and the counter is at u64::MAX.
+    let s = h.get(id);
+    assert_eq!(s.deposited, 1_000 * ONE);
+    assert_eq!(s.withdrawn, 0);
+}
+
+/// Seeding the counter directly at `u64::MAX` means the very first create is
+/// already exhausted — nothing is written and nothing moves.
+#[test]
+fn create_is_rejected_when_the_counter_is_already_exhausted() {
+    let h = Harness::new();
+    let before = h.balance(&h.sender);
+
+    seed_counter(&h, u64::MAX);
+    let start = h.now();
+    let err = h
+        .client
+        .try_create_stream(
+            &h.sender,
+            &h.recipient,
+            &h.token,
+            &(1_000 * ONE),
+            &start,
+            &(start + 100 * DAY),
+            &start,
+            &true,
+            &true,
+            &true,
+        )
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::StreamIdExhausted);
+
+    // Nothing was written and no funds moved.
+    assert_eq!(h.balance(&h.sender), before);
+    assert_eq!(h.pool(), 0);
+    assert_eq!(h.client.stream_count(), u64::MAX);
+    assert!(!h.client.stream_exists(&u64::MAX));
+}
 
 #[test]
 fn create_moves_deposit_into_the_pool() {
