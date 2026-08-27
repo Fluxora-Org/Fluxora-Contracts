@@ -20,9 +20,9 @@ fn zero_duration_collapsed_stream_is_safe_to_read_and_withdraw() {
     assert_eq!(h.client.withdrawable_of(&id), 0);
     assert_eq!(h.client.refundable_of(&id), 0);
 
-    // Write path is a typed error, not a panic.
+    // Write path is a typed error, not a panic. Cancelled status returns StreamTerminated.
     let err = h.client.try_withdraw(&id, &None).unwrap_err().unwrap();
-    assert_eq!(err, Error::NothingToWithdraw);
+    assert_eq!(err, Error::StreamTerminated);
     h.assert_pool_exact();
 }
 

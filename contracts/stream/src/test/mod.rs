@@ -35,3 +35,6 @@ mod ttl;
 
 // Issue #1593 — reproducible ledger and token state on failure
 mod snapshot_tests;
+
+// Issue #1595 — release dry-run pre-flight validation
+mod release_dry_run;
