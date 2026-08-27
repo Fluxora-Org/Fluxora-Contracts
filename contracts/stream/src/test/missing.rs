@@ -3,7 +3,7 @@
 //! predicate returns `false`. A live stream with no accrued value is distinct
 //! from a missing stream and returns a valid zero from its accrual views.
 
-use soroban_sdk::testutils::storage::Persistent as _;
+use soroban_sdk::testutils::Ledger as _;
 
 use super::common::*;
 use crate::{DataKey, Error};
@@ -26,7 +26,10 @@ fn missing_id_is_false_only_for_the_existence_query() {
     assert!(!h.client.stream_exists(&MISSING_ID));
     assert_eq!(h.client.stream_count(), 0);
 
-    assert_eq!(h.client.try_get_stream(&MISSING_ID).unwrap_err().unwrap(), Error::StreamNotFound);
+    assert_eq!(
+        h.client.try_get_stream(&MISSING_ID).unwrap_err().unwrap(),
+        Error::StreamNotFound
+    );
     assert_eq!(
         h.client
             .try_withdrawable_of(&MISSING_ID)
@@ -66,22 +69,43 @@ fn deleted_id_returns_stream_not_found_across_reads_and_mutations() {
     delete_stream(&h, id);
 
     assert!(!h.client.stream_exists(&id));
-    assert_eq!(h.client.try_get_stream(&id).unwrap_err().unwrap(), Error::StreamNotFound);
+    assert_eq!(
+        h.client.try_get_stream(&id).unwrap_err().unwrap(),
+        Error::StreamNotFound
+    );
     assert_eq!(
         h.client.try_withdrawable_of(&id).unwrap_err().unwrap(),
         Error::StreamNotFound
     );
-    assert_eq!(h.client.try_vested_of(&id).unwrap_err().unwrap(), Error::StreamNotFound);
+    assert_eq!(
+        h.client.try_vested_of(&id).unwrap_err().unwrap(),
+        Error::StreamNotFound
+    );
     assert_eq!(
         h.client.try_refundable_of(&id).unwrap_err().unwrap(),
         Error::StreamNotFound
     );
 
-    assert_eq!(h.client.try_top_up(&id, &(ONE)).unwrap_err().unwrap(), Error::StreamNotFound);
-    assert_eq!(h.client.try_withdraw(&id, &None).unwrap_err().unwrap(), Error::StreamNotFound);
-    assert_eq!(h.client.try_cancel(&id).unwrap_err().unwrap(), Error::StreamNotFound);
-    assert_eq!(h.client.try_pause(&id).unwrap_err().unwrap(), Error::StreamNotFound);
-    assert_eq!(h.client.try_resume(&id).unwrap_err().unwrap(), Error::StreamNotFound);
+    assert_eq!(
+        h.client.try_top_up(&id, &(ONE)).unwrap_err().unwrap(),
+        Error::StreamNotFound
+    );
+    assert_eq!(
+        h.client.try_withdraw(&id, &None).unwrap_err().unwrap(),
+        Error::StreamNotFound
+    );
+    assert_eq!(
+        h.client.try_cancel(&id).unwrap_err().unwrap(),
+        Error::StreamNotFound
+    );
+    assert_eq!(
+        h.client.try_pause(&id).unwrap_err().unwrap(),
+        Error::StreamNotFound
+    );
+    assert_eq!(
+        h.client.try_resume(&id).unwrap_err().unwrap(),
+        Error::StreamNotFound
+    );
     assert_eq!(
         h.client
             .try_transfer_recipient(&id, &h.other)

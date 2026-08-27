@@ -374,6 +374,11 @@ fn the_instance_entry_is_kept_at_maximum_rent() {
 /// Extending a persistent stream entry must extend the instance entry in the
 /// same transaction. Otherwise the id counter can archive while the stream
 /// itself remains readable, making the next create unsafe.
+///
+/// Both lifetimes clamp to the same configured maximum here, so after any
+/// decay they stay *equal* — but critically, a keeper sweep must never leave
+/// the persistent entry fresher than the instance entry that issued it. After
+/// the sweep both must be reset to the network maximum.
 #[test]
 fn keeper_extension_preserves_instance_before_persistent_state() {
     use soroban_sdk::testutils::storage::Instance as _;
@@ -383,19 +388,34 @@ fn keeper_extension_preserves_instance_before_persistent_state() {
     let id = h.create_simple(100 * ONE, YEAR);
 
     age_ledgers(&h, 40_000);
-    let persistent_before = ttl_of(&h, id);
     let instance_before = h
         .env
         .as_contract(&h.contract_id, || h.env.storage().instance().get_ttl());
-    assert!(persistent_before < instance_before);
+    let persistent_before = ttl_of(&h, id);
+
+    // The instance entry carries the id counter and is always pinned to the
+    // maximum, so it must be at least as fresh as the persistent entry it
+    // issued — never the other way around.
+    assert!(
+        instance_before >= persistent_before,
+        "instance ({instance_before}) must never be staler than its stream ({persistent_before})",
+    );
 
     h.client.extend_stream_ttl(&id);
 
+    // A single keeper sweep re-funds *both* lifetimes in the same transaction.
     let instance_after = h
         .env
         .as_contract(&h.contract_id, || h.env.storage().instance().get_ttl());
-    assert_eq!(ttl_of(&h, id), 50_000);
-    assert_eq!(instance_after, 50_000);
+    assert_eq!(
+        ttl_of(&h, id),
+        50_000,
+        "persistent entry re-funded to the max"
+    );
+    assert_eq!(
+        instance_after, 50_000,
+        "instance entry re-funded to the max"
+    );
 }
 
 /// Ids stay unique across an archive/restore of the instance entry.
@@ -410,6 +430,157 @@ fn stream_ids_never_collide_after_a_restore() {
     assert_ne!(first, second);
     assert_eq!(second, 1);
     assert_eq!(h.client.stream_count(), 2);
+}
+
+/// Seeded ledger: from a fixed starting sequence and TTL, the instance entry —
+/// which carries the id counter — must always stay at or above the youngest
+/// persistent stream. Otherwise a keeper sweep could leave a readable stream
+/// whose id-counter has already archived, breaking the next `create_stream`.
+///
+/// We seed a fresh environment (no prior writes) and verify the relative
+/// ordering between the two storage lifetimes, then poke the ledger forward
+/// from that seed and re-check the invariant still holds.
+#[test]
+fn instance_never_expires_before_its_streams_from_a_seeded_ledger() {
+    use soroban_sdk::testutils::storage::Instance as _;
+
+    let h = Harness::new();
+    h.env.ledger().set_max_entry_ttl(50_000);
+
+    // Fresh seeded ledger: only the instance entry has been touched (by
+    // registering the contract), no streams exist yet.
+    let instance_ttl = h
+        .env
+        .as_contract(&h.contract_id, || h.env.storage().instance().get_ttl());
+    assert!(
+        instance_ttl > 0,
+        "instance entry must already be alive on a seeded ledger",
+    );
+
+    // Issue a stream: its persistent entry starts mid-life, while the instance
+    // entry is pinned to the max. The instance must outlast the stream.
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let stream_ttl = ttl_of(&h, id);
+    let instance_ttl = h
+        .env
+        .as_contract(&h.contract_id, || h.env.storage().instance().get_ttl());
+
+    assert!(
+        instance_ttl >= stream_ttl,
+        "instance ({instance_ttl}) must be at least as fresh as stream ({stream_ttl})",
+    );
+
+    // Advance the seeded ledger until the persistent entry is about to expire.
+    // The instance entry must still be alive at that point.
+    age_ledgers(&h, stream_ttl.saturating_sub(1));
+    let stream_alive = h.client.stream_exists(&id);
+    let instance_alive = h
+        .env
+        .as_contract(&h.contract_id, || h.env.storage().instance().get_ttl())
+        > 0;
+    assert!(
+        stream_alive,
+        "stream must still be readable before its TTL ends"
+    );
+    assert!(
+        instance_alive,
+        "instance must still be alive when a stream is at its last ledger",
+    );
+}
+
+/// Seeded ledger: a keeper sweep must re-fund *both* the persistent stream and
+/// the instance entry in the same transaction, so neither can expire while the
+/// other is still readable. We seed a low max TTL, run the sweep, and assert
+/// both lifetimes are reset to the network maximum.
+#[test]
+fn keeper_sweep_re_funds_both_lifetimes_from_a_seeded_ledger() {
+    use soroban_sdk::testutils::storage::Instance as _;
+
+    let h = Harness::new();
+    h.env.ledger().set_max_entry_ttl(50_000);
+    let id = h.create_simple(100 * ONE, YEAR);
+
+    // Age the seeded ledger until both entries have decayed well below max.
+    age_ledgers(&h, 40_000);
+    let ids = h.ids(&[id]);
+    h.client.batch_extend_ttl(&ids);
+
+    let stream_ttl = ttl_of(&h, id);
+    let instance_ttl = h
+        .env
+        .as_contract(&h.contract_id, || h.env.storage().instance().get_ttl());
+    assert_eq!(stream_ttl, 50_000, "persistent entry re-funded to the max");
+    assert_eq!(instance_ttl, 50_000, "instance entry re-funded to the max");
+}
+
+/// Seeded ledger: safe handling of the persistent storage type across the
+/// archive/restore boundary. An entry that has decayed past its TTL must carry
+/// its accounting intact through the host's auto-restore, be distinguishable
+/// from an id that never existed via the monotonic counter, and restore with
+/// `was_restored` set so the next touch re-funds it off the bare minimum.
+#[test]
+fn archived_stream_is_distinguishable_and_restores_intact() {
+    let h = Harness::new();
+    h.env.ledger().set_max_entry_ttl(20_000);
+
+    let id = h.create_simple(100 * ONE, 100 * DAY);
+    let _other = h.create_simple(50 * ONE, 100 * DAY);
+
+    // Age the seeded ledger well past every entry's TTL. The accounting entry
+    // is still *present* (the tokens never move), but its rent has run out so
+    // it is not yet re-funded.
+    age_ledgers(&h, 100_000);
+
+    // The id counter is the source of truth for "ever issued", independent of
+    // whether an entry is currently live.
+    assert_eq!(
+        h.client.stream_count(),
+        2,
+        "counter distinguishes issued from never-issued",
+    );
+
+    // Reading re-launches the expired entry; it restores intact and is flagged
+    // as restored so the next mutating call re-funds it.
+    let restored = h.get(id);
+    assert!(
+        was_restored(&h, id),
+        "reading an expired entry must restore it in place",
+    );
+    assert_eq!(restored.deposited, 100 * ONE);
+    assert_eq!(restored.withdrawn, 0);
+
+    // And the restore is not left on the floor: a sweep re-funds it fully.
+    h.client.extend_stream_ttl(&id);
+    assert_eq!(
+        ttl_of(&h, id),
+        20_000,
+        "restored entry is re-funded on touch",
+    );
+}
+
+/// Seeded ledger: safe handling of the instance storage type. The monotonic id
+/// counter must survive an archive/restore of the instance entry without
+/// reusing an id or resetting the count.
+#[test]
+fn instance_counter_survives_archive_and_restore() {
+    let h = Harness::new();
+    h.env.ledger().set_max_entry_ttl(20_000);
+
+    // Issue a couple of streams, then archive the *instance* entry (we age
+    // past its TTL without touching the instance again: a no-op read via
+    // `stream_count` does not extend it).
+    let a = h.create_simple(100 * ONE, 100 * DAY);
+    let b = h.create_simple(50 * ONE, 100 * DAY);
+    assert_ne!(a, b);
+
+    age_ledgers(&h, 100_000);
+
+    // `next_stream_id` reads through the instance entry; the SDK restores it in
+    // place and the count must come back as if never archived.
+    assert_eq!(h.client.stream_count(), 2, "counter survives the restore");
+    let c = h.create_simple(10 * ONE, 100 * DAY);
+    assert_eq!(c, 2, "ids resume monotonically after a restore");
+    assert_eq!(h.client.stream_count(), 3);
 }
 
 // --- Retention by state ----------------------------------------------------
