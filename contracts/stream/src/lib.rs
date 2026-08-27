@@ -59,7 +59,8 @@ pub use accrual::{
 };
 pub use error::Error;
 pub use storage::{MIN_STREAM_TTL_LEDGERS, SECONDS_PER_LEDGER, TTL_BUFFER_SECONDS};
-pub use types::{DataKey, DelegateGrant, Op, Stream, StreamStatus};
+pub use types::{DataKey, DelegateGrant, Stream, StreamStatus};
+pub use types::op;
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env, InvokeError, MuxedAddress, Vec};
 
@@ -737,8 +738,8 @@ impl FluxoraStream {
             return Err(Error::StreamTerminated);
         }
 
-        let sender_ops = Op::CANCEL | Op::PAUSE | Op::RESUME | Op::TOP_UP;
-        let recipient_ops = Op::WITHDRAW | Op::TRANSFER_RECIPIENT;
+        let sender_ops = op::CANCEL | op::PAUSE | op::RESUME | op::TOP_UP;
+        let recipient_ops = op::WITHDRAW | op::TRANSFER_RECIPIENT;
 
         // The grantor must be the party that owns the ops being delegated.
         // Mixed calls are rejected; split into two grants instead.
@@ -803,14 +804,14 @@ impl FluxoraStream {
     }
 
     /// Withdraw as a delegate. The `delegate` address must hold a valid
-    /// grant with [`Op::WITHDRAW`] for this stream.
+    /// grant with [`op::WITHDRAW`] for this stream.
     pub fn delegate_withdraw(
         env: Env,
         stream_id: u64,
         delegate: Address,
         amount: Option<i128>,
     ) -> Result<i128, Error> {
-        Self::check_delegate(&env, stream_id, &delegate, Op::WITHDRAW)?;
+        Self::check_delegate(&env, stream_id, &delegate, op::WITHDRAW)?;
         let mut stream = storage::load_stream(&env, stream_id)?;
 
         let now = env.ledger().timestamp();
@@ -839,9 +840,9 @@ impl FluxoraStream {
         Ok(payout)
     }
 
-    /// Cancel as a delegate. Requires [`Op::CANCEL`] grant.
+    /// Cancel as a delegate. Requires [`op::CANCEL`] grant.
     pub fn delegate_cancel(env: Env, stream_id: u64, delegate: Address) -> Result<(), Error> {
-        Self::check_delegate(&env, stream_id, &delegate, Op::CANCEL)?;
+        Self::check_delegate(&env, stream_id, &delegate, op::CANCEL)?;
         let mut stream = storage::load_stream(&env, stream_id)?;
 
         if !stream.cancellable {
@@ -879,9 +880,9 @@ impl FluxoraStream {
         Ok(())
     }
 
-    /// Pause as a delegate. Requires [`Op::PAUSE`] grant.
+    /// Pause as a delegate. Requires [`op::PAUSE`] grant.
     pub fn delegate_pause(env: Env, stream_id: u64, delegate: Address) -> Result<(), Error> {
-        Self::check_delegate(&env, stream_id, &delegate, Op::PAUSE)?;
+        Self::check_delegate(&env, stream_id, &delegate, op::PAUSE)?;
         let mut stream = storage::load_stream(&env, stream_id)?;
 
         if !stream.pausable {
@@ -903,9 +904,9 @@ impl FluxoraStream {
         Ok(())
     }
 
-    /// Resume as a delegate. Requires [`Op::RESUME`] grant.
+    /// Resume as a delegate. Requires [`op::RESUME`] grant.
     pub fn delegate_resume(env: Env, stream_id: u64, delegate: Address) -> Result<(), Error> {
-        Self::check_delegate(&env, stream_id, &delegate, Op::RESUME)?;
+        Self::check_delegate(&env, stream_id, &delegate, op::RESUME)?;
         let mut stream = storage::load_stream(&env, stream_id)?;
 
         if stream.status.is_terminal() {
@@ -933,14 +934,14 @@ impl FluxoraStream {
         Ok(())
     }
 
-    /// Top up as a delegate. Requires [`Op::TOP_UP`] grant.
+    /// Top up as a delegate. Requires [`op::TOP_UP`] grant.
     pub fn delegate_top_up(
         env: Env,
         stream_id: u64,
         delegate: Address,
         amount: i128,
     ) -> Result<(), Error> {
-        Self::check_delegate(&env, stream_id, &delegate, Op::TOP_UP)?;
+        Self::check_delegate(&env, stream_id, &delegate, op::TOP_UP)?;
         let mut stream = storage::load_stream(&env, stream_id)?;
 
         if stream.status.is_terminal() {
@@ -994,6 +995,9 @@ impl FluxoraStream {
         stream.end_time = new_end;
         storage::save_stream(&env, stream_id, &stream);
 
+        // Tokens come from the sender — require their auth even though a
+        // delegate triggered this call.
+        sender.require_auth();
         token_transfer(
             &env,
             &token,
@@ -1006,14 +1010,14 @@ impl FluxoraStream {
         Ok(())
     }
 
-    /// Transfer recipient as a delegate. Requires [`Op::TRANSFER_RECIPIENT`] grant.
+    /// Transfer recipient as a delegate. Requires [`op::TRANSFER_RECIPIENT`] grant.
     pub fn delegate_transfer_recipient(
         env: Env,
         stream_id: u64,
         delegate: Address,
         new_recipient: Address,
     ) -> Result<(), Error> {
-        Self::check_delegate(&env, stream_id, &delegate, Op::TRANSFER_RECIPIENT)?;
+        Self::check_delegate(&env, stream_id, &delegate, op::TRANSFER_RECIPIENT)?;
         let mut stream = storage::load_stream(&env, stream_id)?;
 
         if !stream.transferable {

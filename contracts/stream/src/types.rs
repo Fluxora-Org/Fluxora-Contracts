@@ -1,12 +1,10 @@
 use soroban_sdk::{contracttype, Address};
 
-/// Which operations a delegate is permitted to perform on a stream.
+/// Bitmask constants for which operations a delegate is permitted to perform.
 ///
-/// Stored as a `u32` bitmask so multiple permissions can be granted in one
-/// call without a growing enum. New bits may be added; existing bits are
-/// stable ABI.
-#[allow(non_snake_case)]
-pub mod Op {
+/// Pass one constant or OR several together when calling [`crate::FluxoraStream::grant_delegate`].
+/// New bits may be added; existing values are stable ABI.
+pub mod op {
     pub const WITHDRAW: u32 = 1 << 0;
     pub const CANCEL: u32 = 1 << 1;
     pub const PAUSE: u32 = 1 << 2;
