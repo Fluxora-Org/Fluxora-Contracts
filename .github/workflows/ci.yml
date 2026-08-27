@@ -44,7 +44,7 @@ jobs:
       # protocol-version change that moves costs is visible in the CI log
       # before it becomes a production surprise.
       - name: Resource report
-        run: cargo test resource_limits -- --nocapture --test-threads=1
+        run: cargo test --release resource_limits -- --nocapture --test-threads=1
 
       - name: Build contract WASM
         run: cargo build --target wasm32v1-none --release
