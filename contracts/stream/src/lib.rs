@@ -7897,11 +7897,7 @@ impl FluxoraStream {
         env.storage().persistent().remove(&key);
 
         // Emit event
-        events::emit_auto_claim_revoked(
-            &env,
-            stream_id,
-            AutoClaimRevoked { stream_id },
-        );
+        events::emit_auto_claim_revoked(&env, stream_id, AutoClaimRevoked { stream_id });
 
         Ok(())
     }
