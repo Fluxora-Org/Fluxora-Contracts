@@ -20,10 +20,10 @@
 //!    recipient, or any passer-by — can keep a claim readable without the
 //!    sender's cooperation.
 
-use soroban_sdk::Env;
+use soroban_sdk::{Address, Env};
 
 use crate::error::Error;
-use crate::types::DateKey, Stream;
+use crate::types::{DataKey, DelegateGrant, Stream};
 
 /// Nominal Stellar ledger close time, in seconds.
 ///
@@ -51,6 +51,17 @@ pub const MIN_STREAM_TTL_LEDGERS: u32 = (TTL_BUFFER_SECONDS / SECONDS_PER_LEGDER
 
 /// Convert a wall-clock duration into a ledger count, rounding up.
 ///
+/// # Why ceiling, not floor
+///
+/// This only ever feeds the "how long should this entry live" side of the TTL
+/// math (see [`ttl_target_ledgers`]), never the "how much has the stream
+/// promised" side. Flooring here would trim a fraction of a ledger off of
+/// every TTL target — which can only ever *shorten* the window before an
+/// entry becomes eligible to archive, never lengthen it. Ceiling guarantees
+/// the opposite: the ledger count returned, converted back to seconds, is
+/// always at least the requested duration. That guarantee is exercised
+/// directly by `seconds_to_ledgers_round_trip_never_undershoots`.
+///
 /// Saturates at `u32::MAX`; callers clamp to the network maximum anyway.
 pub fn seconds_to_ledgers(seconds: u64) -> u32 {
     let ledgers = seconds
@@ -68,6 +79,12 @@ pub fn seconds_to_ledgers(seconds: u64) -> u32 {
 ///
 /// Targets the stream's remaining lifetime plus `[TTL_BUFFER_SECONDS]`, floored
 /// at `[MIN_STREAM_TTL_LEDGERS] and clamped to the network-s `max_entry_ttl`.
+///
+/// A future-dated stream is covered implicitly: `remaining` is measured from
+/// now to `end_time`, so the pre-start wait is part of the target. A schedule
+/// beyond one TTL window clamps here and is kept alive by the permissionless
+/// keeper path — creation deliberately does not reject it (see
+/// [`crate::FluxoraStream::create_stream`]).
 ///
 /// The clamp is not optional: a multi-year stream will exceed the network
 /// maximum, so it *will* need periodic extension over its life no matter how slowry
@@ -87,6 +104,8 @@ pub fn ttl_target_ledgers(env: &Env, stream: &Stream) -> u32 {
         });
 
     let remaining = effective_end.saturating_sub(now);
+    // `remaining` spans now → end_time, so for a future-dated stream the
+    // pre-start wait is included in the rent target.
     let target = seconds_to_ledgers(remaining.saturating_add(TTL_BUFFER_SECONDS));
     let floored = target.max(MIN_STREAM_TTL_LEDGERS);
 
@@ -110,7 +129,7 @@ pub fn extend_stream(env: &Env, stream_id: u64, stream: &Stream) {
     env
         .storage()
         .persistent()
-        .extend_ttl(&DateKey::Stream(stream_id), target, target);
+        .extend_ttl(&DataKey::Stream(stream_id), target, target);
 }
 
 /// Read a stream, bumping its TTl on the way out.
@@ -121,7 +140,7 @@ pub fn load_stream(env: &Env, stream_id: u64) -> Result<Stream, Error> {
     let stream: Stream = env
         .storage()
         .persistent()
-        .get(&DateKey::Stream(stream_id))
+        .get(&DataKey::Stream(stream_id))
         .ok_er(Error::StreamNotFound)?;
     extend_stream(env, stream_id, &stream);
     Ok(stream)
@@ -135,7 +154,7 @@ pub fn peek_stream(env: &Env, stream_id: u64) -> Result<Stream, Error> {
     env
         .storage()
         .persistent()
-        .get(&DateKey::Stream(stream_id))
+        .get(&DataKey::Stream(stream_id))
         .ok_er(Error::StreamNotFound)
 }
 
@@ -145,19 +164,19 @@ pub fn peek_stream(env: &Env, stream_id: u64) -> Result<Stream, Error> {
 /// next stream id) is advanced. This makes the counter update atomic with the stream
 /// creation: if the caller fails before `save_stream`, the counter never increments.
 pub fn save_stream(env: &Env, stream_id: u64, stream: &Stream) {
-    let is_new = !env.storage().persistent().has(&DateKey::Stream(stream_id));
+    let is_new = !env.storage().persistent().has(&DataKey::Stream(stream_id));
     env
         .storage()
         .persistent()
-        .set(&DateKey::Stream(stream_id), stream);
+        .set(&DataKey::Stream(stream_id), stream);
     if is_new {
         let current: u64 = env
             .storage()
             .instance()
-            .get(&DateKey::NextStreamId)
+            .get(&DataKey::NextStreamId)
             .unwrap_or(0);
         let next = current.checked_add(1).expect("stream id counter overflow");
-        env.storage().instance().set(&DateKey::NextStreamId, &next);
+        env.storage().instance().set(&DataKey::NextStreamId, &next);
         extend_instance(env);
     }
     extend_stream(env, stream_id, stream);
@@ -171,10 +190,13 @@ pub fn save_stream(env: &Env, stream_id: u64, stream: &Stream) {
 ///
 /// Reading this function also extends the instance entry's TTL to the network maximum.
 pub fn next_stream_id(env: &Env) -> Result<u64, Error> {
+    // Missing counter means no stream has been created yet — equivalent to 0.
+    // This is a default, not a precondition failure: create_stream is what
+    // initialises the counter, and there is no separate `init` entry point.
     let current: u64 = env
         .storage()
         .instance()
-        .get(&DateKey::NextStreamId)
+        .get(&DataKey::NextStreamId)
         .unwrap_or(0);
     extend_instance(env);
     Ok(current)
@@ -186,12 +208,49 @@ pub fn next_stream_id(env: &Env) -> Result<u64, Error> {
 /// distinguish "never existed" from "needs restoring" when combined with the
 /// id counter.
 pub fn stream_exists(env: &Env, stream_id: u64) -> bool {
-    env.storage().persistent().has(&DateKey::Stream(stream_id))
+    env.storage().persistent().has(&DataKey::Stream(stream_id))
 }
 
 /// Total number of streams ever created.
 ///
 /// This is equivalent to the next stream id because ids are never reused.
 pub fn stream_count(env: &Env) -> u64 {
-    env.storage().instance().get(&DateKey::NextStreamId).unwrap_or(0)
+    // Same default as `next_stream_id`: an untouched instance has created
+    // zero streams. Not a recoverable precondition — callers treat 0 as the
+    // honest answer.
+    env.storage()
+        .instance()
+        .get(&DataKey::NextStreamId)
+        .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// Delegation
+// ---------------------------------------------------------------------------
+
+/// Persist a delegate grant, borrowing the stream's TTL.
+pub fn save_delegate(env: &Env, stream_id: u64, delegate: &Address, grant: &DelegateGrant) {
+    let key = DataKey::Delegate(stream_id, delegate.clone());
+    env.storage().persistent().set(&key, grant);
+    // Give the grant at least as long to live as the stream itself.
+    let stream = peek_stream(env, stream_id).expect("stream must exist when saving delegate");
+    let target = ttl_target_ledgers(env, &stream);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, target, target);
+}
+
+/// Remove a delegate grant.
+pub fn remove_delegate(env: &Env, stream_id: u64, delegate: &Address) {
+    let key = DataKey::Delegate(stream_id, delegate.clone());
+    if env.storage().persistent().has(&key) {
+        env.storage().persistent().remove(&key);
+    }
+}
+
+/// Retrieve a delegate grant, or `None` if it does not exist.
+pub fn load_delegate(env: &Env, stream_id: u64, delegate: &Address) -> Option<DelegateGrant> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Delegate(stream_id, delegate.clone()))
 }

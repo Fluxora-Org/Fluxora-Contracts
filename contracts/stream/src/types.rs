@@ -1,5 +1,36 @@
 use soroban_sdk::{contracttype, Address};
 
+/// Which operations a delegate is permitted to perform on a stream.
+///
+/// Stored as a `u32` bitmask so multiple permissions can be granted in one
+/// call without a growing enum. New bits may be added; existing bits are
+/// stable ABI.
+#[allow(non_snake_case)]
+pub mod Op {
+    pub const WITHDRAW: u32 = 1 << 0;
+    pub const CANCEL: u32 = 1 << 1;
+    pub const PAUSE: u32 = 1 << 2;
+    pub const RESUME: u32 = 1 << 3;
+    pub const TOP_UP: u32 = 1 << 4;
+    pub const TRANSFER_RECIPIENT: u32 = 1 << 5;
+}
+
+/// A delegation grant stored in persistent storage.
+///
+/// Scoped to one `(stream_id, delegate)` pair. The grantor is implied by which
+/// bits are set: sender-side ops (`CANCEL`, `PAUSE`, `RESUME`, `TOP_UP`) can
+/// only be granted by the sender; recipient-side ops (`WITHDRAW`,
+/// `TRANSFER_RECIPIENT`) can only be granted by the recipient.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DelegateGrant {
+    /// Bitmask of [`Op`] constants the delegate may invoke.
+    pub ops: u32,
+    /// Unix seconds after which this grant is no longer valid.
+    /// `None` means the grant never expires on its own.
+    pub expires_at: Option<u64>,
+}
+
 /// Lifecycle state of a stream.
 ///
 /// `Cancelled` and `Depleted` are both terminal and both imply
@@ -40,7 +71,11 @@ pub struct Stream {
     pub deposited: i128,
     /// Total ever withdrawn by the recipient.
     pub withdrawn: i128,
-    /// Unix seconds. May be in the past (backdated vesting is legitimate).
+    /// Unix seconds. May be in the past (backdated vesting is legitimate) or
+    /// in the future (a scheduled stream). No bound on skew: the ledger
+    /// timestamp is the only clock on chain, and well-formedness (`end > start`,
+    /// `cliff` within `[start, end]`) is the whole validation. See
+    /// [`crate::FluxoraStream::create_stream`].
     pub start_time: u64,
     /// Unix seconds. Strictly greater than `start_time` at creation.
     pub end_time: u64,
@@ -65,6 +100,8 @@ pub struct Stream {
 /// `NextStreamId` and `StreamCount` live in instance storage (tiny, share the
 /// contract's TTL). `Stream(id)` entries live in persistent storage with
 /// independent TTLs.
+/// `Delegate(stream_id, delegate)` entries live in persistent storage, scoped
+/// to the stream they were issued for.
 ///
 /// Both counters are updated **only** after all validation and token transfers
 /// have succeeded. Any failure in `create_stream` MUST panic so that all
@@ -86,4 +123,6 @@ pub enum DataKey {
     StreamCount,
     /// Persistent storage. One entry per stream.
     Stream(u64),
+    /// Persistent storage. One entry per (stream_id, delegate) pair.
+    Delegate(u64, Address),
 }

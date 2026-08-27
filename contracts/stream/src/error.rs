@@ -44,6 +44,10 @@ pub enum Error {
 
     // --- State machine ---
     /// Action requires an `Active` stream.
+    ///
+    /// Reserved in the frozen ABI; current entry points use the more specific
+    /// [`Self::StreamNotPaused`] / [`Self::StreamAlreadyPaused`] /
+    /// [`Self::StreamTerminated`] variants instead. Do not renumber.
     StreamNotActive = 11,
     /// `resume` called on a stream that is not `Paused`.
     StreamNotPaused = 12,
@@ -80,8 +84,43 @@ pub enum Error {
     /// retroactively. Top up by at least `deposited / duration`.
     TopUpTooSmall = 23,
 
-    // --- Token transfer ---
-    /// The token transfer required to fund a new stream failed.
-    /// No stream ID was allocated and `stream_count` is unchanged.
-    TokenTransferFailed = 24,
+    // --- Token sub-invocation ---
+    /// The token contract rejected the transfer (e.g. insufficient balance in
+    /// the pool on a payout, insufficient sender balance on a deposit, or the
+    /// token contract's own authorization rules refused the call).
+    ///
+    /// When this occurs while creating a stream, no stream ID was allocated
+    /// and `stream_count` is unchanged.
+    ///
+    /// The token contract's internal error discriminant is **intentionally
+    /// discarded** here. Forwarding it would produce a value that clients
+    /// decode against Fluxora's own error table, yielding a silent
+    /// misinterpretation. The raw diagnostic is visible on chain in the failed
+    /// transaction's `diagnosticEvents`; this variant is what a stream client
+    /// should match on.
+    TokenTransferFailed = 25,
+
+    /// The address stored as the stream's token does not resolve to a deployed
+    /// contract. This indicates a misconfigured stream; no funds have moved.
+    ///
+    /// Surfaces when the token sub-invocation fails with an `Abort` (host
+    /// trap) rather than a typed contract error, which is what the host
+    /// produces when the callee contract does not exist.
+    TokenMissing = 26,
+
+    // --- Identifier exhaustion ---
+    /// The stream-id counter has reached `u64::MAX`; no further ids can be
+    /// handed out. Ids are monotonic and never reused, so the counter never
+    /// wraps — this error is terminal for new-stream creation.
+    StreamIdExhausted = 24,
+
+    // --- Delegation ---
+    /// The delegate grant does not permit this operation on this stream.
+    DelegateNotPermitted = 27,
+    /// The delegate grant has passed its `expires_at` timestamp.
+    DelegateExpired = 28,
+
+    // --- Batch decoding ---
+    /// A batch vector contained a value that was not a serialized `u64`.
+    MalformedStreamId = 29,
 }
