@@ -226,6 +226,11 @@ path = "tests/liability_invariant.rs"
 required-features = ["testutils"]
 
 [[test]]
+name = "event_ordering_failed_transfer"
+path = "tests/event_ordering_failed_transfer.rs"
+test = true
+
+[[test]]
 name = "event_snapshots_suite"
 path = "tests/event_snapshots_suite.rs"
 test = true
