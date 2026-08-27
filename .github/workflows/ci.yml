@@ -59,6 +59,19 @@ jobs:
             exit 1
           fi
 
+      # Release-safety guard: deployment tooling fetches the contract by the
+      # exact package name (fluxora-stream) and artifact name
+      # (fluxora_stream.wasm). An accidental rename would break deploys
+      # silently, so we fail the build when either drifts from
+      # packaging.json. The self-test covers the guard's own logic; the
+      # second invocation checks the real workspace and the freshly built
+      # artifact (--require-artifact).
+      - name: Self-test the deployable-name guard
+        run: python3 script/check-deployable-names.py --selftest
+
+      - name: Assert deployable package & artifact names
+        run: python3 script/check-deployable-names.py --require-artifact
+
       - uses: actions/upload-artifact@v4
         with:
           name: fluxora-stream-wasm
