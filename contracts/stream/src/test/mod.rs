@@ -21,6 +21,7 @@ mod cancel;
 mod cliff;
 mod pause;
 mod storage_keys;
+mod terminal_operations;
 mod token_errors;
 mod top_up;
 mod transfer;
