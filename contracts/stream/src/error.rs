@@ -73,4 +73,8 @@ pub enum Error {
     /// rate, so it cannot extend the duration at all and would instead vest
     /// retroactively. Top up by at least `deposited / duration`.
     TopUpTooSmall = 23,
+
+    // --- Transfer ---
+    /// `transfer_recipient` to the current recipient.
+    RepeatedTransfer = 24,
 }
