@@ -1,0 +1,6 @@
+{
+  "_comment": "Canonical deployable package and artifact identifiers. Deployment tooling (backend/frontend artifact fetch, the CI wasm-upload step) depends on these exact names. They are guarded by script/check-deployable-names.py, which fails CI on any drift. The ONLY sanctioned way to change a name is the rename procedure in MIGRATION.md ('Renaming a deployable package'): edit this file and the matching Cargo.toml + deployment references in one reviewed PR.",
+  "deployables": [
+    { "package": "fluxora-stream", "wasm": "fluxora_stream.wasm" }
+  ]
+}

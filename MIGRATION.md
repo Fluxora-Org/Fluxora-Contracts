@@ -1,5 +1,30 @@
 # Migration: `main` → `v1-rewrite`
 
+## Renaming a deployable package (release safety)
+
+The shipping contract has two identifiers that deployment tooling depends on by
+exact name:
+
+* the Cargo **package** name `fluxora-stream`, and
+* the compiled **artifact** `fluxora_stream.wasm` (cargo emits the package name
+  with dashes→underscores plus `.wasm` for a `cdylib` built for a wasm target).
+
+These are guarded by `script/check-deployable-names.py`, which fails CI if
+either drifts from `packaging.json`. The guard exists to make *accidental*
+renames fail loudly, not to block deliberate, reviewed ones. To rename on
+purpose, do all of the following in a **single** PR:
+
+1. State the new name and the reason in the PR.
+2. Change `name = "fluxora-stream"` in `contracts/stream/Cargo.toml` **and** the
+   matching `package`/`wasm` entry in `packaging.json` together.
+3. Update every downstream reference in the same PR: the backend/frontend
+   artifact fetch, the `path:` in the CI wasm-upload step, and any docs.
+4. Land it as one reviewed change.
+
+Do **not** circumvent the guard — deleting the CI step or editing
+`packaging.json` without the matching `Cargo.toml` change — because that silently
+breaks deploys.
+
 Deletion audit for the v1 rewrite. Two questions, answered in order:
 
 1. What did the disabled tests cover, and is any of it now *silently* missing
