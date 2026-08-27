@@ -19,6 +19,7 @@ mod withdraw;
 mod auth;
 mod cancel;
 mod cliff;
+mod delegation;
 mod pause;
 mod storage_keys;
 mod token_errors;

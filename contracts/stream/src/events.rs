@@ -124,6 +124,30 @@ pub struct RecipientTransferred {
     pub new_recipient: Address,
 }
 
+/// A delegate grant was issued.
+#[contractevent]
+pub struct DelegateGranted {
+    #[topic]
+    pub stream_id: u64,
+    #[topic]
+    pub grantor: Address,
+    #[topic]
+    pub delegate: Address,
+    pub ops: u32,
+    pub expires_at: Option<u64>,
+}
+
+/// A delegate grant was revoked.
+#[contractevent]
+pub struct DelegateRevoked {
+    #[topic]
+    pub stream_id: u64,
+    #[topic]
+    pub grantor: Address,
+    #[topic]
+    pub delegate: Address,
+}
+
 /// A stream entry's TTL was topped up. Lets a keeper confirm its sweep landed.
 #[contractevent]
 pub struct TtlExtended {
@@ -227,6 +251,33 @@ pub fn ttl_extended(env: &Env, stream_id: u64, extended_to_ledgers: u32) {
     TtlExtended {
         stream_id,
         extended_to_ledgers,
+    }
+    .publish(env);
+}
+
+pub fn delegate_granted(
+    env: &Env,
+    stream_id: u64,
+    grantor: &Address,
+    delegate: &Address,
+    ops: u32,
+    expires_at: Option<u64>,
+) {
+    DelegateGranted {
+        stream_id,
+        grantor: grantor.clone(),
+        delegate: delegate.clone(),
+        ops,
+        expires_at,
+    }
+    .publish(env);
+}
+
+pub fn delegate_revoked(env: &Env, stream_id: u64, grantor: &Address, delegate: &Address) {
+    DelegateRevoked {
+        stream_id,
+        grantor: grantor.clone(),
+        delegate: delegate.clone(),
     }
     .publish(env);
 }

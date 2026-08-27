@@ -104,4 +104,10 @@ pub enum Error {
     /// handed out. Ids are monotonic and never reused, so the counter never
     /// wraps — this error is terminal for new-stream creation.
     StreamIdExhausted = 24,
+
+    // --- Delegation ---
+    /// The delegate grant does not permit this operation on this stream.
+    DelegateNotPermitted = 27,
+    /// The delegate grant has passed its `expires_at` timestamp.
+    DelegateExpired = 28,
 }
