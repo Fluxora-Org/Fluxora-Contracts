@@ -77,12 +77,20 @@ fn key_hex(env: &Env, key: DataKey) -> std::string::String {
 ///
 /// This is the canonical encoding the host uses to persist stream data.
 fn stream_value_hex(env: &Env, stream: &Stream) -> std::string::String {
-    stream.to_xdr(env).iter().map(|b| format!("{b:02x}")).collect()
+    stream
+        .to_xdr(env)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Encode a [`StreamStatus`] to its on-chain XDR representation.
 fn status_xdr_hex(env: &Env, status: StreamStatus) -> std::string::String {
-    status.to_xdr(env).iter().map(|b| format!("{b:02x}")).collect()
+    status
+        .to_xdr(env)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 // ─── snapshot assertions ─────────────────────────────────────────────────────
@@ -279,7 +287,8 @@ fn every_data_key_variant_has_a_known_encoding() {
         key_hex(&env, DataKey::Stream(0)),
         key_hex(&env, DataKey::Stream(1)),
         key_hex(&env, DataKey::Stream(u64::MAX)),
-    ];        for enc in all_variants_encoded {
+    ];
+    for enc in all_variants_encoded {
         assert!(
             known_encodings.contains(&enc.as_str()),
             "DataKey variant produced an unrecognised encoding: {enc}\n\
@@ -307,7 +316,7 @@ fn deterministic_stream(env: &Env) -> Stream {
         recipient: soroban_sdk::Address::generate(env),
         token: soroban_sdk::Address::generate(env),
         deposited: 1_000_000_000_000, // 1M ONE
-        withdrawn: 250_000_000_000,     // 250k ONE
+        withdrawn: 250_000_000_000,   // 250k ONE
         start_time: 1_700_000_000,
         end_time: 1_700_000_000 + 86_400 * 365,
         cliff_time: 1_700_000_000 + 86_400 * 30,
@@ -393,7 +402,10 @@ fn stream_status_encoding_is_stable() {
     assert_ne!(active, depleted, "Active and Depleted encodings match");
     assert_ne!(paused, cancelled, "Paused and Cancelled encodings match");
     assert_ne!(paused, depleted, "Paused and Depleted encodings match");
-    assert_ne!(cancelled, depleted, "Cancelled and Depleted encodings match");
+    assert_ne!(
+        cancelled, depleted,
+        "Cancelled and Depleted encodings match"
+    );
 
     // Each encoding is deterministic.
     assert_eq!(active, status_xdr_hex(&env, StreamStatus::Active));
@@ -436,8 +448,8 @@ fn stream_value_round_trips_all_fields() {
     let original = deterministic_stream(&env);
 
     let xdr_bytes = original.clone().to_xdr(&env);
-    let decoded = Stream::from_xdr(&env, &xdr_bytes)
-        .expect("Stream::from_xdr must decode a valid encoding");
+    let decoded =
+        Stream::from_xdr(&env, &xdr_bytes).expect("Stream::from_xdr must decode a valid encoding");
 
     assert_eq!(original.sender, decoded.sender);
     assert_eq!(original.recipient, decoded.recipient);
@@ -469,8 +481,7 @@ fn stream_with_paused_at_round_trips() {
     stream.paused_total = 3_600;
 
     let xdr_bytes = stream.clone().to_xdr(&env);
-    let decoded = Stream::from_xdr(&env, &xdr_bytes)
-        .expect("paused Stream must decode");
+    let decoded = Stream::from_xdr(&env, &xdr_bytes).expect("paused Stream must decode");
 
     assert_eq!(decoded.paused_at, Some(1_700_000_000));
     assert_eq!(decoded.status, StreamStatus::Paused);
@@ -490,9 +501,11 @@ fn stream_status_round_trips() {
         StreamStatus::Depleted,
     ] {
         let xdr = status.to_xdr(&env);
-        let decoded = StreamStatus::from_xdr(&env, &xdr)
-            .expect("StreamStatus must decode");
-        assert_eq!(status, decoded, "StreamStatus::{status:?} round-trip failed");
+        let decoded = StreamStatus::from_xdr(&env, &xdr).expect("StreamStatus must decode");
+        assert_eq!(
+            status, decoded,
+            "StreamStatus::{status:?} round-trip failed"
+        );
     }
 }
 
@@ -511,8 +524,7 @@ fn stream_minimal_values_round_trip() {
     stream.status = StreamStatus::Active;
 
     let xdr_bytes = stream.clone().to_xdr(&env);
-    let decoded = Stream::from_xdr(&env, &xdr_bytes)
-        .expect("minimal Stream must decode");
+    let decoded = Stream::from_xdr(&env, &xdr_bytes).expect("minimal Stream must decode");
 
     assert_eq!(decoded.deposited, 0);
     assert_eq!(decoded.withdrawn, 0);
@@ -539,8 +551,7 @@ fn stream_maximal_values_round_trip() {
     stream.status = StreamStatus::Depleted;
 
     let xdr_bytes = stream.clone().to_xdr(&env);
-    let decoded = Stream::from_xdr(&env, &xdr_bytes)
-        .expect("maximal Stream must decode");
+    let decoded = Stream::from_xdr(&env, &xdr_bytes).expect("maximal Stream must decode");
 
     assert_eq!(decoded.deposited, i128::MAX);
     assert_eq!(decoded.withdrawn, i128::MAX);
@@ -569,8 +580,7 @@ fn stream_cancelled_with_paused_total_round_trips() {
     stream.withdrawn = 250_000;
 
     let xdr_bytes = stream.clone().to_xdr(&env);
-    let decoded = Stream::from_xdr(&env, &xdr_bytes)
-        .expect("cancelled+paused stream must decode");
+    let decoded = Stream::from_xdr(&env, &xdr_bytes).expect("cancelled+paused stream must decode");
 
     assert_eq!(decoded.status, StreamStatus::Cancelled);
     assert_eq!(decoded.paused_at, None);
@@ -628,8 +638,8 @@ fn current_reader_decodes_old_v1_fixture() {
         .collect();
     let bytes = soroban_sdk::Bytes::from_slice(&env, &raw_bytes);
 
-    let decoded = Stream::from_xdr(&env, &bytes)
-        .expect("current reader must decode the old fixture");
+    let decoded =
+        Stream::from_xdr(&env, &bytes).expect("current reader must decode the old fixture");
 
     assert_eq!(decoded.deposited, 1_000_000_000_000);
     assert_eq!(decoded.withdrawn, 0);
@@ -643,4 +653,3 @@ fn current_reader_decodes_old_v1_fixture() {
     assert_eq!(decoded.paused_total, 0);
     assert_eq!(decoded.status, StreamStatus::Active);
 }
-
