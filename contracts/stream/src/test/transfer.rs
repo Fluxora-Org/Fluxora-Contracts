@@ -81,7 +81,7 @@ fn transfer_chains() {
 fn transferring_to_the_current_recipient_is_an_error() {
     let h = Harness::new();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
-    
+
     let err = h
         .client
         .try_transfer_recipient(&id, &h.recipient)
@@ -94,7 +94,7 @@ fn transferring_to_the_current_recipient_is_an_error() {
 fn new_recipient_replay_fails_due_to_repeated_transfer() {
     let h = Harness::new();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
-    
+
     h.client.transfer_recipient(&id, &h.other);
 
     // If the transaction is replayed, the current recipient is now h.other.
