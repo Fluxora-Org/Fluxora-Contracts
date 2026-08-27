@@ -372,10 +372,12 @@ impl FluxoraStream {
     /// Withdraw the full available balance from several streams at once.
     ///
     /// All streams must share the same `recipient`, who authorizes once for the
-    /// whole batch. Streams with nothing currently withdrawable are skipped
-    /// rather than failing the batch. Returns the total transferred across all
-    /// streams; per-stream amounts are available from the individual `withdrawn`
-    /// events.
+    /// whole batch. A batch is atomic with respect to hard failures: if any item
+    /// is missing, unauthorized, or otherwise rejects as an invalid batch entry,
+    /// the entire transaction rolls back and no earlier withdrawals remain in
+    /// state. Streams with nothing currently withdrawable are skipped rather
+    /// than failing the batch. Returns the total transferred across all streams;
+    /// per-stream amounts are available from the individual `withdrawn` events.
     ///
     /// Streams need not share a token — each payout uses its own stream's token.
     ///

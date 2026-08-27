@@ -82,6 +82,54 @@ fn streams_with_nothing_available_are_skipped() {
 }
 
 #[test]
+fn a_mixed_batch_with_an_unauthorized_item_rolls_back_everything() {
+    let h = Harness::new();
+    let valid = h.create_simple(100 * ONE, 100 * DAY);
+    let theirs = h.client.create_stream(
+        &h.sender,
+        &h.other,
+        &h.token,
+        &(100 * ONE),
+        &h.now(),
+        &(h.now() + 100 * DAY),
+        &h.now(),
+        &true,
+        &true,
+        &true,
+    );
+    let second_valid = h.create_simple(100 * ONE, 100 * DAY);
+    h.advance(10 * DAY);
+
+    let err = h
+        .client
+        .try_batch_withdraw(&h.recipient, &h.ids(&[valid, theirs, second_valid]))
+        .unwrap_err()
+        .unwrap();
+
+    assert_eq!(err, Error::Unauthorized);
+    assert_eq!(h.balance(&h.recipient), 0, "whole batch rolled back");
+    assert_eq!(h.get(valid).withdrawn, 0);
+    assert_eq!(h.get(second_valid).withdrawn, 0);
+    h.assert_pool_exact();
+}
+
+#[test]
+fn an_already_withdrawn_stream_is_skipped_without_failing_the_batch() {
+    let h = Harness::new();
+    let drained = h.create_simple(100 * ONE, 10 * DAY);
+    let pending = h.create_simple(100 * ONE, 100 * DAY);
+    h.advance(10 * DAY);
+    h.client.withdraw(&drained, &None);
+
+    let total = h.client.batch_withdraw(&h.recipient, &h.ids(&[drained, pending]));
+
+    assert_eq!(total, 10 * ONE, "only the still-withdrawable stream pays");
+    assert_eq!(h.get(drained).withdrawn, 100 * ONE, "already fully withdrawn");
+    assert_eq!(h.get(pending).withdrawn, 10 * ONE);
+    h.assert_pool_exact();
+}
+
+#[test]
 fn a_batch_of_entirely_empty_streams_returns_zero() {
     let h = Harness::new();
     let a = h.create_simple(100 * ONE, 100 * DAY);
