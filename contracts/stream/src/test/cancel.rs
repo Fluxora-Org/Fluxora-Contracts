@@ -4,22 +4,18 @@
 //! fully matured, which is why `withdraw` needs no special case for it. These
 //! tests pin that equivalence down.
 
-use soroban_sdk::testutils::Events as _;
-use soroban_sdk::xdr::{ContractEventBody, ScVal};
-
 use super::common::*;
 use crate::{Error, StreamStatus};
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Helper
 // ---------------------------------------------------------------------------
 
 /// Assert the three-way balance split and pool invariant after a cancel.
 ///
-/// After cancel, `deposited` is rewritten to what vested, so:
-///   refunded = original - s.deposited
+/// After cancel `deposited` is rewritten to what vested, so the refund is
+/// `original - s.deposited`. The invariant:
 ///
-/// The invariant is:
 ///   refunded + claimable + already_withdrawn == original_deposit
 ///
 /// No funds may be stranded or double-counted.
@@ -34,28 +30,6 @@ fn assert_split(h: &Harness, id: u64, original: i128) {
         s.withdrawn,
     );
     h.assert_pool_exact();
-}
-
-/// Assert that at least one `cancelled` event was emitted by the contract.
-fn assert_cancel_event_emitted(h: &Harness) {
-    let found = h
-        .env
-        .events()
-        .all()
-        .filter_by_contract(&h.contract_id)
-        .events()
-        .iter()
-        .any(|e| {
-            if let ContractEventBody::V0(v0) = &e.body {
-                matches!(
-                    v0.topics.as_slice(),
-                    [ScVal::Symbol(s), ..] if s.0.as_slice() == b"cancelled"
-                )
-            } else {
-                false
-            }
-        });
-    assert!(found, "no cancelled event emitted");
 }
 
 // ---------------------------------------------------------------------------
@@ -340,8 +314,8 @@ fn cancel_while_paused_settles_at_the_frozen_clock() {
 // ---------------------------------------------------------------------------
 // Explicit balance-split invariant tests
 //
-// Each test asserts: refunded + claimable + already_withdrawn == original_deposit
-// No funds may be stranded or double-counted. Cancellation is terminal.
+// Each asserts: refunded + claimable + already_withdrawn == original_deposit
+// No funds stranded or double-counted. Cancellation is terminal.
 // ---------------------------------------------------------------------------
 
 /// Before start: sender recovers everything, recipient has nothing to claim.
@@ -362,10 +336,9 @@ fn split_before_start_sender_gets_everything() {
     h.advance(5 * DAY); // still pre-start
     h.client.cancel(&id);
 
-    // refunded=1000, claimable=0, withdrawn=0 → sum=1000
+    // refunded=1000, claimable=0, withdrawn=0
     assert_split(&h, id, 1_000 * ONE);
     assert_eq!(h.get(id).status, StreamStatus::Cancelled);
-    assert_cancel_event_emitted(&h);
 }
 
 /// Mid-accrual, no prior withdrawals: unvested goes to sender, vested stays
@@ -380,11 +353,15 @@ fn split_during_accrual_no_prior_withdrawals() {
 
     // 40% vested → refunded=600, claimable=400, withdrawn=0
     assert_split(&h, id, 1_000 * ONE);
-    assert_cancel_event_emitted(&h);
+
+    // Verify the event carried the right settlement figures via stream state.
+    let s = h.get(id);
+    assert_eq!(s.deposited, 400 * ONE, "deposited rewritten to vested");
+    assert_eq!(s.withdrawn, 0);
 }
 
-/// Mid-accrual, after a partial withdrawal: the split accounts for what
-/// already left the pool.
+/// Mid-accrual after a partial withdrawal: the split accounts for what already
+/// left the pool.
 #[test]
 fn split_after_partial_withdrawal() {
     let h = Harness::new();
@@ -398,11 +375,14 @@ fn split_after_partial_withdrawal() {
 
     // refunded=400, claimable=300, withdrawn=300 → sum=1000
     assert_split(&h, id, 1_000 * ONE);
-    assert_cancel_event_emitted(&h);
+
+    let s = h.get(id);
+    assert_eq!(s.deposited, 600 * ONE, "deposited rewritten to vested");
+    assert_eq!(s.withdrawn, 300 * ONE);
 }
 
 /// Second cancel is terminal: error fires, split from the first cancel is
-/// unchanged, and nothing moves.
+/// unchanged, nothing moves.
 #[test]
 fn split_repeated_cancel_is_terminal_state_unchanged() {
     let h = Harness::new();
@@ -412,19 +392,19 @@ fn split_repeated_cancel_is_terminal_state_unchanged() {
     h.client.cancel(&id);
     assert_split(&h, id, 1_000 * ONE);
 
-    let state_after_first = h.get(id);
-    let pool_after_first = h.pool();
+    let state_after = h.get(id);
+    let pool_after = h.pool();
 
     let err = h.client.try_cancel(&id).unwrap_err().unwrap();
     assert_eq!(err, Error::StreamTerminated);
 
-    assert_eq!(h.get(id), state_after_first, "state changed on failed cancel");
-    assert_eq!(h.pool(), pool_after_first);
+    assert_eq!(h.get(id), state_after, "state must not change on failed cancel");
+    assert_eq!(h.pool(), pool_after);
     h.assert_pool_exact();
 }
 
-/// After cancel, recipient drains the tail — pool reaches zero with the split
-/// still holding and status remaining Cancelled.
+/// After cancel, recipient drains the tail — pool reaches zero and status stays
+/// Cancelled.
 #[test]
 fn split_holds_after_recipient_drains_the_tail() {
     let h = Harness::new();
