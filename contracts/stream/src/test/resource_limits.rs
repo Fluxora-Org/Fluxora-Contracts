@@ -26,6 +26,19 @@
 //! is the one people forget — a batch emitting one event per stream can run out
 //! of event bytes before it runs out of entries.
 //!
+//! # What each measurement covers
+//!
+//! Every invocation here reports and then bounds three resource dimensions:
+//!
+//! * **CPU** — `instructions`, the modelled CPU instruction count.
+//! * **Memory** — `memory_read_entries`, the in-memory ledger entries accessed
+//!   (live Soroban state is held in memory, not re-read from disk).
+//! * **Storage writes** — `write_entries`, the entries written to the ledger.
+//!
+//! The deterministic max/max+1 boundary tests below assert *all three* at the
+//! cap, and that one past the cap is rejected with [`Error::BatchTooLarge`]
+//! before any partial mutation.
+//!
 //! # Caveats on the numbers
 //!
 //! * These contracts are registered natively, so Wasm instantiation and
@@ -47,29 +60,37 @@ const LEDGER_ENTRY_LIMIT: u32 = 400;
 const WRITE_ENTRY_LIMIT: u32 = 200;
 /// Maximum total size of emitted contract events, in bytes.
 const EVENT_BYTES_LIMIT: u32 = 16_384;
+/// Maximum modelled CPU instructions per invocation.
+const INSTRUCTION_LIMIT: i64 = 400_000_000;
 
 #[derive(Debug, Clone, Copy)]
 struct Cost {
     footprint: u32,
     writes: u32,
+    memory: u32,
     instructions: i64,
     event_bytes: u32,
 }
 
-/// Report and return the last invocation's cost.
+/// Report and return the last invocation's cost. Every resource dimension the
+/// issue asks about — CPU ([`Cost::instructions`]), memory
+/// ([`Cost::memory`], the in-memory ledger entries accessed), and storage
+/// writes ([`Cost::writes`]) — is surfaced so regressions are visible.
 fn report(h: &Harness, label: &str) -> Cost {
     let r = h.env.cost_estimate().resources();
     let cost = Cost {
         footprint: r.disk_read_entries + r.memory_read_entries + r.write_entries,
         writes: r.write_entries,
+        memory: r.memory_read_entries,
         instructions: r.instructions,
         event_bytes: r.contract_events_size_bytes,
     };
     std::println!(
         "{label:<26} footprint={:<4}/{LEDGER_ENTRY_LIMIT}  writes={:<4}/{WRITE_ENTRY_LIMIT}  \
-         events={:<6}/{EVENT_BYTES_LIMIT}  instructions={}",
+         mem={:<4}  events={:<6}/{EVENT_BYTES_LIMIT}  instructions={}",
         cost.footprint,
         cost.writes,
+        cost.memory,
         cost.event_bytes,
         cost.instructions,
     );
@@ -86,6 +107,16 @@ fn assert_has_headroom(label: &str, cost: Cost, factor: u32) {
         cost.writes * factor <= WRITE_ENTRY_LIMIT,
         "{label}: {} writes lack {factor}x headroom under {WRITE_ENTRY_LIMIT}",
         cost.writes,
+    );
+    assert!(
+        cost.memory * factor <= LEDGER_ENTRY_LIMIT,
+        "{label}: {} in-memory reads lack {factor}x headroom under {LEDGER_ENTRY_LIMIT}",
+        cost.memory,
+    );
+    assert!(
+        cost.instructions <= INSTRUCTION_LIMIT,
+        "{label}: {} instructions exceed {INSTRUCTION_LIMIT}",
+        cost.instructions,
     );
     assert!(
         cost.event_bytes * factor <= EVENT_BYTES_LIMIT,
@@ -295,21 +326,11 @@ fn batch_withdraw_at_max_succeeds_and_records_costs() {
     h.client.batch_withdraw(&h.recipient, &h.ids(&ids));
     let cost = report(&h, "batch_withdraw(MAX)");
 
-    assert!(
-        cost.footprint <= LEDGER_ENTRY_LIMIT,
-        "footprint {} exceeds limit {LEDGER_ENTRY_LIMIT}",
-        cost.footprint,
-    );
-    assert!(
-        cost.writes <= WRITE_ENTRY_LIMIT,
-        "writes {} exceed limit {WRITE_ENTRY_LIMIT}",
-        cost.writes,
-    );
-    assert!(
-        cost.event_bytes <= EVENT_BYTES_LIMIT,
-        "event bytes {} exceed limit {EVENT_BYTES_LIMIT}",
-        cost.event_bytes,
-    );
+    // The batch must succeed *within* every documented protocol limit, with
+    // the 2x margin that protects against a heavier token contract. This
+    // asserts CPU (instructions), memory (in-memory reads), storage writes,
+    // footprint, and event bytes together.
+    assert_has_headroom("batch_withdraw(MAX)", cost, 2);
 }
 
 /// At [`MAX_BATCH_SIZE`] + 1 the contract must reject the call with a typed
@@ -342,21 +363,7 @@ fn batch_extend_ttl_at_max_succeeds_and_records_costs() {
     h.client.batch_extend_ttl(&h.ids(&ids));
     let cost = report(&h, "batch_extend_ttl(MAX)");
 
-    assert!(
-        cost.footprint <= LEDGER_ENTRY_LIMIT,
-        "footprint {} exceeds limit {LEDGER_ENTRY_LIMIT}",
-        cost.footprint,
-    );
-    assert!(
-        cost.writes <= WRITE_ENTRY_LIMIT,
-        "writes {} exceed limit {WRITE_ENTRY_LIMIT}",
-        cost.writes,
-    );
-    assert!(
-        cost.event_bytes <= EVENT_BYTES_LIMIT,
-        "event bytes {} exceed limit {EVENT_BYTES_LIMIT}",
-        cost.event_bytes,
-    );
+    assert_has_headroom("batch_extend_ttl(MAX)", cost, 2);
 }
 
 /// At [`MAX_BATCH_SIZE`] + 1 the TTL sweep must also be rejected with
