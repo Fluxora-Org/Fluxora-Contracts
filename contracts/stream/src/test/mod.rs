@@ -24,6 +24,7 @@ mod storage_keys;
 mod token_errors;
 mod top_up;
 mod transfer;
+mod amount_domain;
 
 // Stage 3
 mod accrual_overflow;
