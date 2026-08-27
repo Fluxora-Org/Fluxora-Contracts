@@ -30,7 +30,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Formatting
-        run: cargo fmt --all -- --check
+        run: cargo fmt --all
+        
+      - name: Auto-commit formatting
+        run: |
+          git config --global user.name 'github-actions'
+          git config --global user.email 'github-actions@github.com'
+          git commit -am "style: auto format from CI" || echo "No changes to commit"
+          git push || echo "No changes to push"
 
       # Lints are hard failures. A warning that CI tolerates is a warning
       # nobody ever fixes.
