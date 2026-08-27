@@ -46,8 +46,15 @@ jobs:
       - name: Resource report
         run: cargo test resource_limits -- --nocapture --test-threads=1
 
-      - name: Build contract WASM
-        run: cargo build --target wasm32v1-none --release
+      # Build release artifacts via the release command, not a bare workspace
+      # build. This is deliberate isolation (issue #1543): the archival probe
+      # shares the workspace but must never ship. `script/release.sh` builds only
+      # the `fluxora-stream` product package and fails if a probe wasm would be
+      # produced, so this step is also the regression test for "a release produces
+      # only product artifacts". The probe's smoke test still runs above via
+      # `cargo test --all-features`.
+      - name: Build release artifacts (product only)
+        run: script/release.sh
 
       - name: Report WASM size
         run: |
