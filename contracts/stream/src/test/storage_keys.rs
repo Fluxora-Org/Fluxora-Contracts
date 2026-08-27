@@ -438,7 +438,6 @@ fn stream_status_encoding_is_stable() {
 /// struct has not been migrated yet.  The tests below verify that the
 /// *current* round-trip is sound, which is the baseline a future migration
 /// test builds on.
-
 /// A [`Stream`] with every field set to a well-known, non-default value must
 /// survive encode → decode with all fields preserved.
 #[test]
@@ -646,9 +645,9 @@ fn current_reader_decodes_old_v1_fixture() {
     assert_eq!(decoded.start_time, 1_700_000_000);
     assert_eq!(decoded.end_time, 1_731_536_000);
     assert_eq!(decoded.cliff_time, 1_702_592_000);
-    assert_eq!(decoded.cancellable, true);
-    assert_eq!(decoded.pausable, false);
-    assert_eq!(decoded.transferable, true);
+    assert!(decoded.cancellable);
+    assert!(!decoded.pausable);
+    assert!(decoded.transferable);
     assert_eq!(decoded.paused_at, None);
     assert_eq!(decoded.paused_total, 0);
     assert_eq!(decoded.status, StreamStatus::Active);
