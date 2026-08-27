@@ -4,6 +4,7 @@
 //! from a missing stream and returns a valid zero from its accrual views.
 
 use soroban_sdk::testutils::storage::Persistent as _;
+use soroban_sdk::testutils::Ledger as _;
 
 use super::common::*;
 use crate::{DataKey, Error};
