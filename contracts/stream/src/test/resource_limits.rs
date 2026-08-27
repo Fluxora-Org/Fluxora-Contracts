@@ -280,7 +280,6 @@ fn the_event_budget_is_not_the_binding_constraint_at_the_cap() {
 
 /// Enforce a hard ceiling on `batch_withdraw` budget usage. This is the reviewed
 /// threshold: any optimization that breaks these numbers is a regression.
-#[rustfmt::skip]
 #[test]
 fn batch_withdraw_budget_regression() {
     let h = Harness::new();
@@ -300,21 +299,47 @@ fn batch_withdraw_budget_regression() {
     let empty = report(&h, "batch_withdraw(0)");
 
     // Typical batch
-    h.client.batch_withdraw(&h.recipient, &h.ids(&ids[..typical_size]));
+    h.client
+        .batch_withdraw(&h.recipient, &h.ids(&ids[..typical_size]));
     let typical = report(&h, &std::format!("batch_withdraw({typical_size})"));
 
     // Max batch
-    h.client.batch_withdraw(&h.recipient, &h.ids(&ids[typical_size..]));
+    h.client
+        .batch_withdraw(&h.recipient, &h.ids(&ids[typical_size..]));
     let max = report(&h, &std::format!("batch_withdraw({max_size})"));
 
     // Thresholds established by measurement.
     // They must never increase significantly without a design review.
-    assert!(empty.footprint <= 30, "empty batch footprint regression: {}", empty.footprint);
-    assert!(empty.instructions <= 15_000_000, "empty batch CPU regression: {}", empty.instructions);
+    assert!(
+        empty.footprint <= 30,
+        "empty batch footprint regression: {}",
+        empty.footprint
+    );
+    assert!(
+        empty.instructions <= 15_000_000,
+        "empty batch CPU regression: {}",
+        empty.instructions
+    );
 
-    assert!(typical.footprint <= 100, "typical batch footprint regression: {}", typical.footprint);
-    assert!(typical.instructions <= 80_000_000, "typical batch CPU regression: {}", typical.instructions);
+    assert!(
+        typical.footprint <= 100,
+        "typical batch footprint regression: {}",
+        typical.footprint
+    );
+    assert!(
+        typical.instructions <= 80_000_000,
+        "typical batch CPU regression: {}",
+        typical.instructions
+    );
 
-    assert!(max.footprint <= 350, "max batch footprint regression: {}", max.footprint);
-    assert!(max.instructions <= 350_000_000, "max batch CPU regression: {}", max.instructions);
+    assert!(
+        max.footprint <= 350,
+        "max batch footprint regression: {}",
+        max.footprint
+    );
+    assert!(
+        max.instructions <= 350_000_000,
+        "max batch CPU regression: {}",
+        max.instructions
+    );
 }
