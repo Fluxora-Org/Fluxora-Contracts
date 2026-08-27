@@ -14,6 +14,8 @@ mod missing;
 mod create;
 mod props;
 mod withdraw;
+// Issue #1583: withdrawal return value matches emitted amounts.
+mod withdraw_events;
 
 // Stage 2
 mod auth;
