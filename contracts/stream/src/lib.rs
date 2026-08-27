@@ -1010,6 +1010,11 @@ impl FluxoraStream {
             return Err(Error::DepositRateTooLow);
         }
 
+        // The delegate is authorized by `check_delegate`, but the tokens come
+        // out of the stream sender's wallet. Authorize the sender here so the
+        // nested token transfer can consume the same root-invocation auth that
+        // `create_stream` and `top_up` rely on.
+        stream.sender.require_auth();
         let token = stream.token.clone();
         let sender = stream.sender.clone();
         stream.deposited = new_deposited;

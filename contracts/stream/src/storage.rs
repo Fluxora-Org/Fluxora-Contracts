@@ -1,10 +1,10 @@
-//! Storage access and TTl management.
+//! Storage access and TTL management.
 //!
-//! # Why TTl is the hard part
+//! # Why TTL is the hard part
 //!
 //! Soroban persistent entries have a time-to-live measured in ledgers. When it
 //! runs out the entry is archived and becomes unreadable until explicitly
-//! restored. A stream running twelve months will outlive its default TTl.
+//! restored. A stream running twelve months will outlive its default TTL.
 //!
 //! If a stream entry archives the tokens are *not* lost — they sit in the
 //! contract's pooled balance — but the accounting entry saying who they belong to
@@ -35,10 +35,10 @@ use crate::types::{DataKey, DelegateGrant, Stream};
 pub const SECONDS_PER_LEDGER: u64 = 5;
 
 /// Extra headroom, in seconds, added on top of a stream's remaining lifetime
-/// when computing its TTl target. 30 days.
+/// when computing its TTL target. 30 days.
 ///
 /// This is what gives the keeper a wide window to act in: a stream only needs
-/// sweeping once its TTl falls inside this buffer, not on the day it would
+/// sweeping once its TTL falls inside this buffer, not on the day it would
 /// otherwise archive.
 pub const TTL_BUFFER_SECONDS: u64 = 30 * 24 * 60 * 60;
 
@@ -47,7 +47,7 @@ pub const TTL_BUFFER_SECONDS: u64 = 30 * 24 * 60 * 60;
 ///
 /// A settled stream still has to stay readable: the recipient may not have
 /// withdrawn their tail yet, and the indexer needs to see the final state.
-pub const MIN_STREAM_TTL_LEDGERS: u32 = (TTL_BUFFER_SECONDS / SECONDS_PER_LEGDER) as u32;
+pub const MIN_STREAM_TTL_LEDGERS: u32 = (TTL_BUFFER_SECONDS / SECONDS_PER_LEDGER) as u32;
 
 /// Convert a wall-clock duration into a ledger count, rounding up.
 ///
@@ -78,7 +78,7 @@ pub fn seconds_to_ledgers(seconds: u64) -> u32 {
 /// current time.
 ///
 /// Targets the stream's remaining lifetime plus `[TTL_BUFFER_SECONDS]`, floored
-/// at `[MIN_STREAM_TTL_LEDGERS] and clamped to the network-s `max_entry_ttl`.
+/// at `[MIN_STREAM_TTL_LEDGERS] and clamped to the network's `max_entry_ttl`.
 ///
 /// A future-dated stream is covered implicitly: `remaining` is measured from
 /// now to `end_time`, so the pre-start wait is part of the target. A schedule
@@ -126,13 +126,12 @@ pub fn extend_instance(env: &Env) {
 /// cheap relative to a stream archiving under a recipient.
 pub fn extend_stream(env: &Env, stream_id: u64, stream: &Stream) {
     let target = ttl_target_ledgers(env, stream);
-    env
-        .storage()
+    env.storage()
         .persistent()
         .extend_ttl(&DataKey::Stream(stream_id), target, target);
 }
 
-/// Read a stream, bumping its TTl on the way out.
+/// Read a stream, bumping its TTL on the way out.
 ///
 /// Every read path in the contract goes through here, which is what implements
 /// "extend on every touch".
@@ -141,32 +140,30 @@ pub fn load_stream(env: &Env, stream_id: u64) -> Result<Stream, Error> {
         .storage()
         .persistent()
         .get(&DataKey::Stream(stream_id))
-        .ok_er(Error::StreamNotFound)?;
+        .ok_or(Error::StreamNotFound)?;
     extend_stream(env, stream_id, &stream);
     Ok(stream)
 }
 
-/// Read a stream without touching its TTl.
+/// Read a stream without touching its TTL.
 ///
 /// Used by the read-only view functions, which run in simulation and should not
 /// pretend to write. Also used by `extend_stream_ttl`, which does its own bump.
 pub fn peek_stream(env: &Env, stream_id: u64) -> Result<Stream, Error> {
-    env
-        .storage()
+    env.storage()
         .persistent()
         .get(&DataKey::Stream(stream_id))
-        .ok_er(Error::StreamNotFound)
+        .ok_or(Error::StreamNotFound)
 }
 
-/// Write a stream back and bump its TTl.
+/// Write a stream back and bump its TTL.
 ///
 /// If the stream did not exist before this call, the global stream counter (and the
 /// next stream id) is advanced. This makes the counter update atomic with the stream
 /// creation: if the caller fails before `save_stream`, the counter never increments.
 pub fn save_stream(env: &Env, stream_id: u64, stream: &Stream) {
     let is_new = !env.storage().persistent().has(&DataKey::Stream(stream_id));
-    env
-        .storage()
+    env.storage()
         .persistent()
         .set(&DataKey::Stream(stream_id), stream);
     if is_new {
@@ -198,6 +195,13 @@ pub fn next_stream_id(env: &Env) -> Result<u64, Error> {
         .instance()
         .get(&DataKey::NextStreamId)
         .unwrap_or(0);
+    // The counter is advanced by `save_stream` only after a new stream is
+    // persisted, but the exhaustion boundary is checked here so that a create
+    // at `u64::MAX` fails with the typed error instead of a panic in the
+    // counter increment. Ids are never reused and never wrap.
+    if current == u64::MAX {
+        return Err(Error::StreamIdExhausted);
+    }
     extend_instance(env);
     Ok(current)
 }
@@ -235,9 +239,7 @@ pub fn save_delegate(env: &Env, stream_id: u64, delegate: &Address, grant: &Dele
     // Give the grant at least as long to live as the stream itself.
     let stream = peek_stream(env, stream_id).expect("stream must exist when saving delegate");
     let target = ttl_target_ledgers(env, &stream);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, target, target);
+    env.storage().persistent().extend_ttl(&key, target, target);
 }
 
 /// Remove a delegate grant.

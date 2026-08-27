@@ -6,14 +6,14 @@ use soroban_sdk::contracterror;
 /// Discriminants are part of the public ABI. Never renumber an existing
 /// variant; only append.
 ///
-/// #Creation atomicity
+/// ## Creation atomicity
 /// Stream creation is transactional: `next_stream_id` and `stream_count` are
 /// only mutated after all validation and the token transfer succeed. If any
 /// phase fails, no ID is consumed and no count is incremented; stream IDs are
 /// therefore contiguous with no gaps.
-[contracterror]
-#[derive(Copy, Clone, Debug, Eq, PartialOrd, Ord)]
-#[mpt(u32)]
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
 pub enum Error {
     // --- Lookup ---
     /// No stream exists with the given id.
@@ -30,7 +30,7 @@ pub enum Error {
     /// recipient would accrue nothing. See `MIN_RATE_STROOPS_PER_SECOND`.
     DepositRateTooLow = 5,
     /// Sender and recipient are the same address.
-    SelfSTream = 6,
+    SelfStream = 6,
 
     // --- Authorization / capability ---
     /// Caller is not the party allowed to perform this action.
@@ -52,7 +52,7 @@ pub enum Error {
     /// `resume` called on a stream that is not `Paused`.
     StreamNotPaused = 12,
     /// `pause` called on a stream that is already `Paused`.
-    StrealAlreadyPaused = 13,
+    StreamAlreadyPaused = 13,
     /// Action attempted on a `Cancelled` or `Depleted` stream.
     StreamTerminated = 14,
     /// `top_up` on a stream whose accrual clock has already reached `end_time`,
