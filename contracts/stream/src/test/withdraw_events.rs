@@ -108,9 +108,18 @@ fn partial_withdraw_return_matches_event_amount() {
     let returned = h.client.withdraw(&id, &Some(requested));
     let expected = assert_withdrawn_event(&h, id, requested, recipient_before);
 
-    assert_eq!(returned, requested, "return value must equal requested amount");
-    assert_eq!(expected.amount, requested, "event amount must equal requested");
-    assert_eq!(expected.amount, returned, "event amount must equal return value");
+    assert_eq!(
+        returned, requested,
+        "return value must equal requested amount"
+    );
+    assert_eq!(
+        expected.amount, requested,
+        "event amount must equal requested"
+    );
+    assert_eq!(
+        expected.amount, returned,
+        "event amount must equal return value"
+    );
     h.assert_pool_exact();
 }
 
@@ -127,9 +136,18 @@ fn full_withdraw_return_matches_event_amount() {
     let returned = h.client.withdraw(&id, &None);
     let expected = assert_withdrawn_event(&h, id, available, recipient_before);
 
-    assert_eq!(returned, available, "return value must equal available balance");
-    assert_eq!(expected.amount, available, "event amount must equal available");
-    assert_eq!(expected.amount, returned, "event amount must equal return value");
+    assert_eq!(
+        returned, available,
+        "return value must equal available balance"
+    );
+    assert_eq!(
+        expected.amount, available,
+        "event amount must equal available"
+    );
+    assert_eq!(
+        expected.amount, returned,
+        "event amount must equal return value"
+    );
     h.assert_pool_exact();
 }
 
@@ -148,7 +166,11 @@ fn exact_boundary_withdraw_at_end_time() {
     assert_eq!(returned, 1_000 * ONE, "full deposit at end_time");
     assert_eq!(expected.amount, 1_000 * ONE);
     assert_eq!(expected.amount, returned);
-    assert_eq!(expected.status, StreamStatus::Depleted, "stream is depleted");
+    assert_eq!(
+        expected.status,
+        StreamStatus::Depleted,
+        "stream is depleted"
+    );
     h.assert_pool_exact();
 }
 
@@ -173,7 +195,15 @@ fn pre_cliff_withdraw_returns_error_no_event() {
     let h = Harness::new();
     let start = h.now();
     let cliff = start + 30 * DAY;
-    let id = h.create(1_000 * ONE, start, start + 100 * DAY, cliff, true, true, true);
+    let id = h.create(
+        1_000 * ONE,
+        start,
+        start + 100 * DAY,
+        cliff,
+        true,
+        true,
+        true,
+    );
     h.advance(15 * DAY); // before cliff
 
     let err = h.client.try_withdraw(&id, &None).unwrap_err().unwrap();
@@ -247,7 +277,8 @@ fn multiple_withdrawals_event_consistency() {
         "event withdrawn must equal sum of all payouts"
     );
     assert_eq!(
-        e3.withdrawn, h.get(id).withdrawn,
+        e3.withdrawn,
+        h.get(id).withdrawn,
         "event withdrawn must match storage"
     );
     assert_eq!(cumulative_payout, 500 * ONE);
@@ -296,7 +327,10 @@ fn batch_withdraw_per_stream_event_amounts() {
     let total = h.client.batch_withdraw(&h.recipient, &h.ids(&[a, b, c]));
     let published = published_by_stream(&h);
 
-    assert_eq!(total, expected_total, "batch return must equal sum of payouts");
+    assert_eq!(
+        total, expected_total,
+        "batch return must equal sum of payouts"
+    );
     assert_eq!(published.len(), 3, "one event per stream");
 
     // Build expected events from ground truth.
@@ -357,7 +391,9 @@ fn batch_withdraw_zero_stream_skipped_no_event() {
 
     let recipient_before = h.balance(&h.recipient);
 
-    let total = h.client.batch_withdraw(&h.recipient, &h.ids(&[drained, live]));
+    let total = h
+        .client
+        .batch_withdraw(&h.recipient, &h.ids(&[drained, live]));
     let published = published_by_stream(&h);
 
     assert_eq!(total, 10 * ONE, "only the live stream pays");
@@ -499,7 +535,15 @@ fn cliff_withdraw_event_matches_return() {
     let h = Harness::new();
     let start = h.now();
     let cliff = start + 30 * DAY;
-    let id = h.create(1_000 * ONE, start, start + 100 * DAY, cliff, true, true, true);
+    let id = h.create(
+        1_000 * ONE,
+        start,
+        start + 100 * DAY,
+        cliff,
+        true,
+        true,
+        true,
+    );
 
     // Before cliff: error, no event.
     h.advance(15 * DAY);
