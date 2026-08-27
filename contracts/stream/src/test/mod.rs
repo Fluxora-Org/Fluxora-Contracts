@@ -8,6 +8,7 @@
 //!   the batch cap.
 
 mod common;
+mod missing;
 
 // Stage 1
 mod create;
@@ -19,12 +20,18 @@ mod auth;
 mod cancel;
 mod cliff;
 mod pause;
+mod storage_keys;
+mod token_errors;
 mod top_up;
 mod transfer;
 
 // Stage 3
+mod accrual_overflow;
 mod batch;
 mod invariants;
 mod monotonicity;
 mod resource_limits;
 mod ttl;
+
+// Issue #1593 — reproducible ledger and token state on failure
+mod snapshot_tests;

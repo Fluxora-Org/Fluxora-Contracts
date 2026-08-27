@@ -40,7 +40,11 @@ pub struct Stream {
     pub deposited: i128,
     /// Total ever withdrawn by the recipient.
     pub withdrawn: i128,
-    /// Unix seconds. May be in the past (backdated vesting is legitimate).
+    /// Unix seconds. May be in the past (backdated vesting is legitimate) or
+    /// in the future (a scheduled stream). No bound on skew: the ledger
+    /// timestamp is the only clock on chain, and well-formedness (`end > start`,
+    /// `cliff` within `[start, end]`) is the whole validation. See
+    /// [`crate::FluxoraStream::create_stream`].
     pub start_time: u64,
     /// Unix seconds. Strictly greater than `start_time` at creation.
     pub end_time: u64,

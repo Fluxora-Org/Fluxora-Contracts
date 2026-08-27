@@ -138,10 +138,12 @@ fn cancel_at_the_instant_of_creation_refunds_everything() {
     h.assert_pool_exact();
 
     // The collapsed zero-length schedule must stay readable, not panic.
+    // Status is Cancelled with nothing left → StreamTerminated, not the
+    // live-stream NothingToWithdraw path.
     h.advance(200 * DAY);
     assert_eq!(h.client.vested_of(&id), 0);
     let err = h.client.try_withdraw(&id, &None).unwrap_err().unwrap();
-    assert_eq!(err, Error::NothingToWithdraw);
+    assert_eq!(err, Error::StreamTerminated);
 }
 
 /// Cancelling before the stream even opens must not produce a negative-length
@@ -245,6 +247,14 @@ fn a_depleted_stream_cannot_be_cancelled() {
 
     let err = h.client.try_cancel(&id).unwrap_err().unwrap();
     assert_eq!(err, Error::StreamTerminated);
+}
+
+/// Missing stream on cancel must be a decodable contract error, not a trap.
+#[test]
+fn cancelling_unknown_stream_is_stream_not_found() {
+    let h = Harness::new();
+    let err = h.client.try_cancel(&999).unwrap_err().unwrap();
+    assert_eq!(err, Error::StreamNotFound);
 }
 
 /// Cancelling a paused stream must settle against the frozen clock, not the

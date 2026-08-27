@@ -51,6 +51,17 @@ pub const MIN_STREAM_TTL_LEDGERS: u32 = (TTL_BUFFER_SECONDS / SECONDS_PER_LEDGER
 
 /// Convert a wall-clock duration into a ledger count, rounding up.
 ///
+/// # Why ceiling, not floor
+///
+/// This only ever feeds the "how long should this entry live" side of the TTL
+/// math (see [`ttl_target_ledgers`]), never the "how much has the stream
+/// promised" side. Flooring here would trim a fraction of a ledger off of
+/// every TTL target — which can only ever *shorten* the window before an
+/// entry becomes eligible to archive, never lengthen it. Ceiling guarantees
+/// the opposite: the ledger count returned, converted back to seconds, is
+/// always at least the requested duration. That guarantee is exercised
+/// directly by `seconds_to_ledgers_round_trip_never_undershoots`.
+///
 /// Saturates at `u32::MAX`; callers clamp to the network maximum anyway.
 pub fn seconds_to_ledgers(seconds: u64) -> u32 {
     let ledgers = seconds
@@ -68,6 +79,12 @@ pub fn seconds_to_ledgers(seconds: u64) -> u32 {
 ///
 /// Targets the stream's remaining lifetime plus [`TTL_BUFFER_SECONDS`], floored
 /// at [`MIN_STREAM_TTL_LEDGERS`] and clamped to the network's `max_entry_ttl`.
+///
+/// A future-dated stream is covered implicitly: `remaining` is measured from
+/// now to `end_time`, so the pre-start wait is part of the target. A schedule
+/// beyond one TTL window clamps here and is kept alive by the permissionless
+/// keeper path — creation deliberately does not reject it (see
+/// [`crate::FluxoraStream::create_stream`]).
 ///
 /// The clamp is not optional: a multi-year stream will exceed the network
 /// maximum, so it *will* need periodic extension over its life no matter how
@@ -87,6 +104,8 @@ pub fn ttl_target_ledgers(env: &Env, stream: &Stream) -> u32 {
         });
 
     let remaining = effective_end.saturating_sub(now);
+    // `remaining` spans now → end_time, so for a future-dated stream the
+    // pre-start wait is included in the rent target.
     let target = seconds_to_ledgers(remaining.saturating_add(TTL_BUFFER_SECONDS));
     let floored = target.max(MIN_STREAM_TTL_LEDGERS);
 
@@ -149,12 +168,30 @@ pub fn save_stream(env: &Env, stream_id: u64, stream: &Stream) {
 ///
 /// Ids are monotonic and never reused, so an id is a stable handle an indexer
 /// can key on forever.
+///
+/// # Exhaustion
+///
+/// The counter is never allowed to wrap: at `u64::MAX` there is no next
+/// representable id, and handing one out would either duplicate an id or wrap
+/// the counter and corrupt the monotonicity guarantee. The counter is checked
+/// *before* any state is written, so an exhausted call leaves the counter, the
+/// pool and the stream set untouched — no duplicate id and no partial stream.
 pub fn next_stream_id(env: &Env) -> Result<u64, Error> {
+    // Missing counter means no stream has been created yet — equivalent to 0.
+    // This is a default, not a precondition failure: create_stream is what
+    // initialises the counter, and there is no separate `init` entry point.
     let current: u64 = env
         .storage()
         .instance()
         .get(&DataKey::NextStreamId)
         .unwrap_or(0);
+
+    // Checked *before* the counter is advanced: if we are at the boundary, fail
+    // with the typed exhaustion error and write nothing.
+    if current == u64::MAX {
+        return Err(Error::StreamIdExhausted);
+    }
+
     let next = current.checked_add(1).ok_or(Error::Overflow)?;
     env.storage().instance().set(&DataKey::NextStreamId, &next);
     extend_instance(env);
@@ -172,6 +209,9 @@ pub fn stream_exists(env: &Env, stream_id: u64) -> bool {
 
 /// Total number of streams ever created.
 pub fn stream_count(env: &Env) -> u64 {
+    // Same default as `next_stream_id`: an untouched instance has created
+    // zero streams. Not a recoverable precondition — callers treat 0 as the
+    // honest answer.
     env.storage()
         .instance()
         .get(&DataKey::NextStreamId)
