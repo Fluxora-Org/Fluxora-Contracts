@@ -124,8 +124,16 @@ fn create_debits_the_stated_sender_not_a_third_party() {
     );
 
     // The sender argument, not h.sender, was debited.
-    assert_eq!(h.balance(&h.other), other_balance_before - 100 * ONE, "h.other paid");
-    assert_eq!(h.balance(&h.sender), sender_balance_before, "h.sender untouched");
+    assert_eq!(
+        h.balance(&h.other),
+        other_balance_before - 100 * ONE,
+        "h.other paid"
+    );
+    assert_eq!(
+        h.balance(&h.sender),
+        sender_balance_before,
+        "h.sender untouched"
+    );
     h.assert_pool_exact();
 }
 
@@ -313,8 +321,15 @@ fn rejected_cancel_leaves_stream_byte_identical_and_issues_no_refund() {
     assert_eq!(after.end_time, before.end_time, "end_time unchanged");
     assert_eq!(after.status, before.status, "status unchanged");
     assert_eq!(after.paused_at, before.paused_at, "paused_at unchanged");
-    assert_eq!(after.paused_total, before.paused_total, "paused_total unchanged");
-    assert_eq!(h.balance(&h.sender), sender_balance_before, "no refund issued");
+    assert_eq!(
+        after.paused_total, before.paused_total,
+        "paused_total unchanged"
+    );
+    assert_eq!(
+        h.balance(&h.sender),
+        sender_balance_before,
+        "no refund issued"
+    );
     assert_eq!(h.pool(), pool_before, "pool unchanged");
     h.assert_pool_exact();
 }
@@ -362,7 +377,11 @@ fn rejected_withdraw_leaves_accounting_and_pool_unchanged() {
     h.env.mock_all_auths();
 
     assert_eq!(h.get(id).withdrawn, withdrawn_before, "withdrawn unchanged");
-    assert_eq!(h.balance(&h.recipient), balance_before, "recipient balance unchanged");
+    assert_eq!(
+        h.balance(&h.recipient),
+        balance_before,
+        "recipient balance unchanged"
+    );
     assert_eq!(h.pool(), pool_before, "pool unchanged");
     h.assert_pool_exact();
 }
@@ -431,7 +450,11 @@ fn batch_withdraw_rejects_streams_belonging_to_someone_else() {
     assert_eq!(err, Error::Unauthorized, "runtime field check fires");
 
     // The batch rolled back atomically — no partial drain.
-    assert_eq!(h.balance(&h.recipient), recipient_balance_before, "no tokens moved");
+    assert_eq!(
+        h.balance(&h.recipient),
+        recipient_balance_before,
+        "no tokens moved"
+    );
     assert_eq!(h.pool(), pool_before, "pool unchanged");
     h.assert_pool_exact();
 }
@@ -470,8 +493,16 @@ fn batch_withdraw_rolls_back_entirely_on_unauthorized_stream() {
     assert_eq!(err, Error::Unauthorized);
 
     // own_a and own_b were untouched — the whole transaction rolled back.
-    assert_eq!(h.get(own_a).withdrawn, withdrawn_a_before, "own_a unchanged");
-    assert_eq!(h.get(own_b).withdrawn, withdrawn_b_before, "own_b unchanged");
+    assert_eq!(
+        h.get(own_a).withdrawn,
+        withdrawn_a_before,
+        "own_a unchanged"
+    );
+    assert_eq!(
+        h.get(own_b).withdrawn,
+        withdrawn_b_before,
+        "own_b unchanged"
+    );
     assert_eq!(h.pool(), pool_before, "pool unchanged");
     h.assert_pool_exact();
 }
@@ -532,7 +563,11 @@ fn authority_follows_the_recipient_after_a_transfer() {
 
     // New recipient's auth is demanded.
     h.client.withdraw(&id, &None);
-    assert_eq!(required_auth(&h.env), h.other, "new recipient's auth demanded");
+    assert_eq!(
+        required_auth(&h.env),
+        h.other,
+        "new recipient's auth demanded"
+    );
 
     // Old recipient has no further authority — revoking all auth and calling
     // under the old env confirms the call was actually locked to the new party.
@@ -628,7 +663,10 @@ fn operations_on_nonexistent_stream_return_stream_not_found() {
     let bad_id: u64 = 9999;
 
     assert_eq!(
-        h.client.try_top_up(&bad_id, &(100 * ONE)).unwrap_err().unwrap(),
+        h.client
+            .try_top_up(&bad_id, &(100 * ONE))
+            .unwrap_err()
+            .unwrap(),
         Error::StreamNotFound,
         "top_up",
     );
@@ -735,7 +773,11 @@ fn smart_account_addresses_work_as_sender_and_recipient() {
     h.advance(100 * DAY);
     h.client.withdraw(&id, &None);
     assert_eq!(required_auth(&h.env), smart_recipient, "withdraw auth");
-    assert_eq!(h.balance(&smart_recipient), 500 * ONE, "50% of 1000 at 100/200 days");
+    assert_eq!(
+        h.balance(&smart_recipient),
+        500 * ONE,
+        "50% of 1000 at 100/200 days"
+    );
 
     // Cancel (sender) after partial withdrawal.
     h.client.cancel(&id);
@@ -808,7 +850,11 @@ fn cancel_on_non_cancellable_stream_returns_not_cancellable_not_unauthorized() {
     h.advance(30 * DAY);
 
     let err = h.client.try_cancel(&id).unwrap_err().unwrap();
-    assert_eq!(err, Error::NotCancellable, "capability flag, not auth error");
+    assert_eq!(
+        err,
+        Error::NotCancellable,
+        "capability flag, not auth error"
+    );
 
     assert_eq!(h.pool(), 1_000 * ONE);
     h.assert_pool_exact();
@@ -859,7 +905,11 @@ fn transfer_on_non_transferable_stream_returns_not_transferable_not_unauthorized
         .try_transfer_recipient(&id, &h.other)
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, Error::NotTransferable, "capability flag, not auth error");
+    assert_eq!(
+        err,
+        Error::NotTransferable,
+        "capability flag, not auth error"
+    );
 
     assert_eq!(h.get(id).recipient, h.recipient, "recipient unchanged");
     h.assert_pool_exact();
@@ -939,8 +989,14 @@ fn no_auth_for_withdraw_also_blocks_top_up_and_cancel() {
 
     revoke_all_auths(&h.env);
 
-    assert!(h.client.try_withdraw(&id, &None).is_err(), "withdraw blocked");
-    assert!(h.client.try_top_up(&id, &(50 * ONE)).is_err(), "top_up blocked");
+    assert!(
+        h.client.try_withdraw(&id, &None).is_err(),
+        "withdraw blocked"
+    );
+    assert!(
+        h.client.try_top_up(&id, &(50 * ONE)).is_err(),
+        "top_up blocked"
+    );
     assert!(h.client.try_cancel(&id).is_err(), "cancel blocked");
     assert!(h.client.try_pause(&id).is_err(), "pause blocked");
 
