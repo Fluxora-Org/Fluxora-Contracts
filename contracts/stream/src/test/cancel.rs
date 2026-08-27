@@ -38,10 +38,23 @@ fn assert_split(h: &Harness, id: u64, original: i128) {
 
 /// Assert that at least one `cancelled` event was emitted by the contract.
 fn assert_cancel_event_emitted(h: &Harness) {
-    let found = h.env.events().all().iter().any(|e| {
-        let ContractEventBody::V0(v0) = &e.body;
-        matches!(v0.topics.first(), Some(ScVal::Symbol(s)) if s.0.as_slice() == b"cancelled")
-    });
+    let found = h
+        .env
+        .events()
+        .all()
+        .filter_by_contract(&h.contract_id)
+        .events()
+        .iter()
+        .any(|e| {
+            if let ContractEventBody::V0(v0) = &e.body {
+                matches!(
+                    v0.topics.as_slice(),
+                    [ScVal::Symbol(s), ..] if s.0.as_slice() == b"cancelled"
+                )
+            } else {
+                false
+            }
+        });
     assert!(found, "no cancelled event emitted");
 }
 
