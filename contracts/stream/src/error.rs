@@ -110,4 +110,8 @@ pub enum Error {
     DelegateNotPermitted = 27,
     /// The delegate grant has passed its `expires_at` timestamp.
     DelegateExpired = 28,
+
+    // --- Batch decoding ---
+    /// A batch vector contained a value that was not a serialized `u64`.
+    MalformedStreamId = 29,
 }

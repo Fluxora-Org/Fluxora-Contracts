@@ -129,11 +129,19 @@ fn withdraw_validates_amount_bounds_and_limits() {
     assert!(available > 0, "sanity: expected some withdrawable balance");
 
     // Zero -> InvalidAmount
-    let err = h.client.try_withdraw(&id, &Some(0i128)).unwrap_err().unwrap();
+    let err = h
+        .client
+        .try_withdraw(&id, &Some(0i128))
+        .unwrap_err()
+        .unwrap();
     assert_eq!(err, Error::InvalidAmount);
 
     // Negative -> InvalidAmount
-    let err = h.client.try_withdraw(&id, &Some(-1i128)).unwrap_err().unwrap();
+    let err = h
+        .client
+        .try_withdraw(&id, &Some(-1i128))
+        .unwrap_err()
+        .unwrap();
     assert_eq!(err, Error::InvalidAmount);
 
     // Too large -> InsufficientWithdrawable

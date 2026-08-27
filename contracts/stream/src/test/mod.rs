@@ -19,6 +19,7 @@ mod withdraw;
 mod auth;
 mod cancel;
 // Issue #1584: the cancellation event's accounting contract.
+mod amount_domain;
 mod cancel_events;
 mod cliff;
 mod delegation;
@@ -27,7 +28,6 @@ mod storage_keys;
 mod token_errors;
 mod top_up;
 mod transfer;
-mod amount_domain;
 
 // Stage 3
 mod accrual_overflow;

@@ -61,7 +61,9 @@ pub use error::Error;
 pub use storage::{MIN_STREAM_TTL_LEDGERS, SECONDS_PER_LEDGER, TTL_BUFFER_SECONDS};
 pub use types::{DataKey, DelegateGrant, Op, Stream, StreamStatus};
 
-use soroban_sdk::{contract, contractimpl, token, Address, Env, InvokeError, MuxedAddress, Vec};
+use soroban_sdk::{
+    contract, contractimpl, token, Address, Env, InvokeError, MuxedAddress, TryFromVal, Vec,
+};
 
 /// Maximum number of streams one batch call may touch.
 ///
@@ -476,58 +478,52 @@ impl FluxoraStream {
     ///
     /// # Errors
     ///
+    /// * [`Error::EmptyBatch`] — no ids were supplied.
     /// * [`Error::BatchTooLarge`] — more than [`MAX_BATCH_SIZE`] ids. Chunk
     ///   client-side; the SDK does this automatically.
+    /// * [`Error::MalformedStreamId`] — a serialized vector element is not a
+    ///   `u64`.
     /// * [`Error::DuplicateStreamId`] — the same id appears twice, which would
     ///   otherwise operate on a stale copy of the stream the second time.
+    /// * [`Error::StreamNotFound`] — one of the ids does not exist.
     /// * [`Error::Unauthorized`] — one of the streams has a different recipient.
     pub fn batch_withdraw(
         env: Env,
         recipient: Address,
         stream_ids: Vec<u64>,
     ) -> Result<i128, Error> {
+        let stream_ids = Self::validate_batch_ids(&env, &stream_ids)?;
+        Self::reject_duplicate_ids(&stream_ids)?;
         recipient.require_auth();
 
-        let count = stream_ids.len();
-        if count == 0 {
-            return Err(Error::EmptyBatch);
-        }
-        if count > MAX_BATCH_SIZE {
-            return Err(Error::BatchTooLarge);
-        }
-
-        // Quadratic, but bounded by MAX_BATCH_SIZE and it avoids allocating a
-        // set. A duplicate id would load the stream twice and apply the second
-        // withdrawal to a stale copy, silently over-paying.
-        //
-        // Invariant: `i` and `j` are always in `0..count`, and `count` is
-        // `stream_ids.len()`, so `get_unchecked` cannot be out of range. A
-        // bounds-checked `get` would only ever return `None` if the Vec were
-        // mutated mid-loop, which it is not.
-        for i in 0..count {
-            for j in (i + 1)..count {
-                if stream_ids.get_unchecked(i) == stream_ids.get_unchecked(j) {
-                    return Err(Error::DuplicateStreamId);
-                }
-            }
-        }
-
         let now = env.ledger().timestamp();
+        let mut streams = Vec::new(&env);
+        let mut payouts = Vec::new(&env);
         let mut total: i128 = 0;
 
+        // Resolve and validate the entire batch before changing storage or
+        // calling any token contract.
         for stream_id in stream_ids.iter() {
-            let mut stream = storage::load_stream(&env, stream_id)?;
+            let stream = storage::peek_stream(&env, stream_id)?;
             if stream.recipient != recipient {
                 return Err(Error::Unauthorized);
             }
 
             let available = accrual::withdrawable(&stream, now)?;
-            if available == 0 {
-                continue;
-            }
-
-            Self::apply_withdrawal(&env, stream_id, &mut stream, available)?;
             total = total.checked_add(available).ok_or(Error::Overflow)?;
+            streams.push_back(stream);
+            payouts.push_back(available);
+        }
+
+        for i in 0..stream_ids.len() {
+            let stream_id = stream_ids.get_unchecked(i);
+            let mut stream = streams.get_unchecked(i);
+            let payout = payouts.get_unchecked(i);
+            if payout == 0 {
+                storage::extend_stream(&env, stream_id, &stream);
+            } else {
+                Self::apply_withdrawal(&env, stream_id, &mut stream, payout)?;
+            }
         }
 
         Ok(total)
@@ -901,7 +897,7 @@ impl FluxoraStream {
             )?;
         }
 
-        events::cancelled(&env, stream_id, &stream, refund, vested_now);
+        events::cancelled(&env, stream_id, &stream, refund);
         Ok(())
     }
 
@@ -1157,15 +1153,11 @@ impl FluxoraStream {
     /// does not lose the whole sweep to one bad id. A duplicate id is simply
     /// extended again — the operation is idempotent and harmless — and each
     /// occurrence counts toward the return value, so the outcome for a given
-    /// input is deterministic. Returns how many entries were actually extended.
+    /// input is deterministic. Empty, oversized, and malformed vectors are
+    /// rejected before the sweep starts. Returns how many entries were actually
+    /// extended.
     pub fn batch_extend_ttl(env: Env, stream_ids: Vec<u64>) -> Result<u32, Error> {
-        let count = stream_ids.len();
-        if count == 0 {
-            return Err(Error::EmptyBatch);
-        }
-        if count > MAX_BATCH_SIZE {
-            return Err(Error::BatchTooLarge);
-        }
+        let stream_ids = Self::validate_batch_ids(&env, &stream_ids)?;
 
         let mut extended = 0u32;
         for stream_id in stream_ids.iter() {
@@ -1206,6 +1198,42 @@ impl FluxoraStream {
                 Ok(())
             }
         }
+    }
+
+    /// Validate raw vector contents before authorization, storage, or tokens.
+    ///
+    /// Soroban's typed `Vec<T>` conversion is lazy: converting a host vector to
+    /// `Vec<u64>` verifies the container but not each element.
+    fn validate_batch_ids(env: &Env, stream_ids: &Vec<u64>) -> Result<Vec<u64>, Error> {
+        let count = stream_ids.len();
+        if count == 0 {
+            return Err(Error::EmptyBatch);
+        }
+        if count > MAX_BATCH_SIZE {
+            return Err(Error::BatchTooLarge);
+        }
+
+        let mut validated = Vec::new(env);
+        for raw_id in stream_ids.to_vals().iter() {
+            let stream_id =
+                u64::try_from_val(env, &raw_id).map_err(|_| Error::MalformedStreamId)?;
+            validated.push_back(stream_id);
+        }
+        Ok(validated)
+    }
+
+    /// Withdrawal batches reject duplicates because processing the same stream
+    /// twice would operate on stale copies. TTL batches deliberately do not.
+    fn reject_duplicate_ids(stream_ids: &Vec<u64>) -> Result<(), Error> {
+        let count = stream_ids.len();
+        for i in 0..count {
+            for j in (i + 1)..count {
+                if stream_ids.get_unchecked(i) == stream_ids.get_unchecked(j) {
+                    return Err(Error::DuplicateStreamId);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Shared tail of [`withdraw`](Self::withdraw) and
