@@ -8,6 +8,7 @@
 
 use super::common::*;
 use crate::{Error, StreamStatus};
+use soroban_sdk::testutils::Events;
 
 #[test]
 fn top_up_extends_the_end_date_at_the_same_rate() {
