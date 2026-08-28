@@ -3,7 +3,7 @@
 //! predicate returns `false`. A live stream with no accrued value is distinct
 //! from a missing stream and returns a valid zero from its accrual views.
 
-use soroban_sdk::testutils::Ledger as _;
+use soroban_sdk::testutils::Ledger;
 
 use super::common::*;
 use crate::{DataKey, Error};

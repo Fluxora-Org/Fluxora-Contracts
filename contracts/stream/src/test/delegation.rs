@@ -13,7 +13,7 @@ use soroban_sdk::testutils::Address as _;
 use soroban_sdk::Address;
 
 use super::common::*;
-use crate::{Error, Op};
+use crate::{op, Error};
 
 // ---------------------------------------------------------------------------
 // Grant and basic use
@@ -27,7 +27,7 @@ fn delegate_can_withdraw() {
     h.advance(10 * DAY);
 
     h.client
-        .grant_delegate(&id, &h.recipient, &agent, &Op::WITHDRAW, &None);
+        .grant_delegate(&id, &h.recipient, &agent, &op::WITHDRAW, &None);
 
     let paid = h.client.delegate_withdraw(&id, &agent, &None);
     assert_eq!(paid, 100 * ONE);
@@ -42,13 +42,10 @@ fn delegate_can_cancel() {
     h.advance(10 * DAY);
 
     h.client
-        .grant_delegate(&id, &h.sender, &agent, &Op::CANCEL, &None);
+        .grant_delegate(&id, &h.sender, &agent, &op::CANCEL, &None);
 
     h.client.delegate_cancel(&id, &agent);
-    assert_eq!(
-        h.client.get_stream(&id).status,
-        crate::StreamStatus::Cancelled
-    );
+    assert_eq!(h.client.get_stream(&id).status, crate::StreamStatus::Cancelled);
     h.assert_pool_exact();
 }
 
@@ -58,8 +55,13 @@ fn delegate_can_pause_and_resume() {
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     let agent = Address::generate(&h.env);
 
-    h.client
-        .grant_delegate(&id, &h.sender, &agent, &(Op::PAUSE | Op::RESUME), &None);
+    h.client.grant_delegate(
+        &id,
+        &h.sender,
+        &agent,
+        &(op::PAUSE | op::RESUME),
+        &None,
+    );
 
     h.client.delegate_pause(&id, &agent);
     assert_eq!(h.client.get_stream(&id).status, crate::StreamStatus::Paused);
@@ -75,7 +77,7 @@ fn delegate_can_top_up() {
     let agent = Address::generate(&h.env);
 
     h.client
-        .grant_delegate(&id, &h.sender, &agent, &Op::TOP_UP, &None);
+        .grant_delegate(&id, &h.sender, &agent, &op::TOP_UP, &None);
 
     h.client.delegate_top_up(&id, &agent, &(100 * ONE));
     assert_eq!(h.client.get_stream(&id).deposited, 1_100 * ONE);
@@ -88,11 +90,15 @@ fn delegate_can_transfer_recipient() {
     let agent = Address::generate(&h.env);
     let new_recip = Address::generate(&h.env);
 
-    h.client
-        .grant_delegate(&id, &h.recipient, &agent, &Op::TRANSFER_RECIPIENT, &None);
+    h.client.grant_delegate(
+        &id,
+        &h.recipient,
+        &agent,
+        &op::TRANSFER_RECIPIENT,
+        &None,
+    );
 
-    h.client
-        .delegate_transfer_recipient(&id, &agent, &new_recip);
+    h.client.delegate_transfer_recipient(&id, &agent, &new_recip);
     assert_eq!(h.client.get_stream(&id).recipient, new_recip);
 }
 
@@ -108,7 +114,7 @@ fn revoke_takes_effect_immediately() {
     h.advance(10 * DAY);
 
     h.client
-        .grant_delegate(&id, &h.recipient, &agent, &Op::WITHDRAW, &None);
+        .grant_delegate(&id, &h.recipient, &agent, &op::WITHDRAW, &None);
     h.client.revoke_delegate(&id, &h.recipient, &agent);
 
     // Grant is gone — delegate_withdraw must fail.
@@ -130,7 +136,7 @@ fn revoke_is_idempotent() {
     let agent = Address::generate(&h.env);
 
     h.client
-        .grant_delegate(&id, &h.recipient, &agent, &Op::WITHDRAW, &None);
+        .grant_delegate(&id, &h.recipient, &agent, &op::WITHDRAW, &None);
     h.client.revoke_delegate(&id, &h.recipient, &agent);
     // Second revoke should not panic or error.
     h.client.revoke_delegate(&id, &h.recipient, &agent);
@@ -144,7 +150,7 @@ fn revoke_does_not_affect_already_moved_funds() {
     h.advance(20 * DAY);
 
     h.client
-        .grant_delegate(&id, &h.recipient, &agent, &Op::WITHDRAW, &None);
+        .grant_delegate(&id, &h.recipient, &agent, &op::WITHDRAW, &None);
 
     // Delegate withdraws while the grant is live.
     let paid = h.client.delegate_withdraw(&id, &agent, &None);
@@ -167,7 +173,7 @@ fn sender_can_revoke_recipient_issued_grant() {
 
     // Recipient issued the grant.
     h.client
-        .grant_delegate(&id, &h.recipient, &agent, &Op::WITHDRAW, &None);
+        .grant_delegate(&id, &h.recipient, &agent, &op::WITHDRAW, &None);
 
     // Sender revokes it — allowed because the sender is a party to the stream.
     h.client.revoke_delegate(&id, &h.sender, &agent);
@@ -192,7 +198,7 @@ fn expired_grant_is_rejected() {
 
     let expires = h.now() + 5 * DAY;
     h.client
-        .grant_delegate(&id, &h.recipient, &agent, &Op::WITHDRAW, &Some(expires));
+        .grant_delegate(&id, &h.recipient, &agent, &op::WITHDRAW, &Some(expires));
 
     // Valid just before expiry.
     h.advance(4 * DAY);
@@ -216,7 +222,7 @@ fn grant_with_no_expiry_does_not_expire() {
     let agent = Address::generate(&h.env);
 
     h.client
-        .grant_delegate(&id, &h.recipient, &agent, &Op::WITHDRAW, &None);
+        .grant_delegate(&id, &h.recipient, &agent, &op::WITHDRAW, &None);
 
     // Jump well past the stream's end — grant is still valid.
     h.advance(200 * DAY);
@@ -236,7 +242,7 @@ fn delegate_cannot_call_an_op_not_in_their_grant() {
 
     // Grant only WITHDRAW.
     h.client
-        .grant_delegate(&id, &h.recipient, &agent, &Op::WITHDRAW, &None);
+        .grant_delegate(&id, &h.recipient, &agent, &op::WITHDRAW, &None);
 
     // Agent tries TRANSFER_RECIPIENT — not in the grant.
     let new_recip = Address::generate(&h.env);
@@ -260,9 +266,9 @@ fn sender_delegate_cannot_call_recipient_ops() {
 
     // Sender grants CANCEL to the agent.
     h.client
-        .grant_delegate(&id, &h.sender, &agent, &Op::CANCEL, &None);
+        .grant_delegate(&id, &h.sender, &agent, &op::CANCEL, &None);
 
-    // Agent tries delegate_withdraw — Op::WITHDRAW not in their grant.
+    // Agent tries delegate_withdraw — op::WITHDRAW not in their grant.
     let err = h
         .client
         .try_delegate_withdraw(&id, &agent, &None)
@@ -287,7 +293,7 @@ fn grant_on_stream_a_does_not_work_on_stream_b() {
 
     // Grant WITHDRAW on stream A only.
     h.client
-        .grant_delegate(&id_a, &h.recipient, &agent, &Op::WITHDRAW, &None);
+        .grant_delegate(&id_a, &h.recipient, &agent, &op::WITHDRAW, &None);
 
     // No grant on stream B — must be rejected.
     let err = h
@@ -313,7 +319,7 @@ fn failed_delegate_call_leaves_stream_unchanged() {
 
     let expires = h.now() + DAY;
     h.client
-        .grant_delegate(&id, &h.sender, &agent, &Op::CANCEL, &Some(expires));
+        .grant_delegate(&id, &h.sender, &agent, &op::CANCEL, &Some(expires));
 
     // Let the grant expire.
     h.advance(2 * DAY);
@@ -325,11 +331,7 @@ fn failed_delegate_call_leaves_stream_unchanged() {
         .unwrap_err()
         .unwrap();
     assert_eq!(err, Error::DelegateExpired);
-    assert_eq!(
-        h.client.get_stream(&id),
-        before,
-        "stream must not have changed"
-    );
+    assert_eq!(h.client.get_stream(&id), before, "stream must not have changed");
     h.assert_pool_exact();
 }
 
@@ -345,7 +347,13 @@ fn granting_mixed_sender_and_recipient_ops_is_rejected() {
 
     let err = h
         .client
-        .try_grant_delegate(&id, &h.sender, &agent, &(Op::CANCEL | Op::WITHDRAW), &None)
+        .try_grant_delegate(
+            &id,
+            &h.sender,
+            &agent,
+            &(op::CANCEL | op::WITHDRAW),
+            &None,
+        )
         .unwrap_err()
         .unwrap();
     assert_eq!(err, Error::Unauthorized);
@@ -363,7 +371,7 @@ fn regranting_after_revocation_restores_access() {
     h.advance(10 * DAY);
 
     h.client
-        .grant_delegate(&id, &h.recipient, &agent, &Op::WITHDRAW, &None);
+        .grant_delegate(&id, &h.recipient, &agent, &op::WITHDRAW, &None);
     h.client.revoke_delegate(&id, &h.recipient, &agent);
 
     // Attempt after revocation fails.
@@ -376,7 +384,7 @@ fn regranting_after_revocation_restores_access() {
 
     // Re-grant restores access.
     h.client
-        .grant_delegate(&id, &h.recipient, &agent, &Op::WITHDRAW, &None);
+        .grant_delegate(&id, &h.recipient, &agent, &op::WITHDRAW, &None);
 
     let paid = h.client.delegate_withdraw(&id, &agent, &None);
     assert_eq!(paid, 100 * ONE);

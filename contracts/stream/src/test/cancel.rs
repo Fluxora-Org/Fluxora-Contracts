@@ -7,6 +7,35 @@
 use super::common::*;
 use crate::{Error, StreamStatus};
 
+// ---------------------------------------------------------------------------
+// Helper
+// ---------------------------------------------------------------------------
+
+/// Assert the three-way balance split and pool invariant after a cancel.
+///
+/// After cancel `deposited` is rewritten to what vested, so the refund is
+/// `original - s.deposited`. The invariant:
+///
+///   refunded + claimable + already_withdrawn == original_deposit
+///
+/// No funds may be stranded or double-counted.
+fn assert_split(h: &Harness, id: u64, original: i128) {
+    let s = h.get(id);
+    let refunded = original - s.deposited;
+    let claimable = h.client.withdrawable_of(&id);
+    assert_eq!(
+        refunded + claimable + s.withdrawn,
+        original,
+        "split: refunded={refunded} + claimable={claimable} + withdrawn={} != original={original}",
+        s.withdrawn,
+    );
+    h.assert_pool_exact();
+}
+
+// ---------------------------------------------------------------------------
+// Existing tests (unchanged)
+// ---------------------------------------------------------------------------
+
 #[test]
 fn cancel_refunds_the_unvested_remainder_and_leaves_the_rest_claimable() {
     let h = Harness::new();
@@ -279,5 +308,115 @@ fn cancel_while_paused_settles_at_the_frozen_clock() {
     // And it stays frozen afterwards.
     h.advance(YEAR);
     assert_eq!(h.client.withdrawable_of(&id), 300 * ONE);
+    h.assert_pool_exact();
+}
+
+// ---------------------------------------------------------------------------
+// Explicit balance-split invariant tests
+//
+// Each asserts: refunded + claimable + already_withdrawn == original_deposit
+// No funds stranded or double-counted. Cancellation is terminal.
+// ---------------------------------------------------------------------------
+
+/// Before start: sender recovers everything, recipient has nothing to claim.
+#[test]
+fn split_before_start_sender_gets_everything() {
+    let h = Harness::new();
+    let start = h.now() + 10 * DAY;
+    let id = h.create(
+        1_000 * ONE,
+        start,
+        start + 100 * DAY,
+        start,
+        true,
+        true,
+        true,
+    );
+
+    h.advance(5 * DAY); // still pre-start
+    h.client.cancel(&id);
+
+    // refunded=1000, claimable=0, withdrawn=0
+    assert_split(&h, id, 1_000 * ONE);
+    assert_eq!(h.get(id).status, StreamStatus::Cancelled);
+}
+
+/// Mid-accrual, no prior withdrawals: unvested goes to sender, vested stays
+/// claimable.
+#[test]
+fn split_during_accrual_no_prior_withdrawals() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+
+    h.advance(40 * DAY);
+    h.client.cancel(&id);
+
+    // 40% vested → refunded=600, claimable=400, withdrawn=0
+    assert_split(&h, id, 1_000 * ONE);
+
+    // Verify the event carried the right settlement figures via stream state.
+    let s = h.get(id);
+    assert_eq!(s.deposited, 400 * ONE, "deposited rewritten to vested");
+    assert_eq!(s.withdrawn, 0);
+}
+
+/// Mid-accrual after a partial withdrawal: the split accounts for what already
+/// left the pool.
+#[test]
+fn split_after_partial_withdrawal() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+
+    h.advance(50 * DAY);
+    h.client.withdraw(&id, &Some(300 * ONE)); // 300 of 500 vested pulled
+
+    h.advance(10 * DAY); // now 60% vested
+    h.client.cancel(&id);
+
+    // refunded=400, claimable=300, withdrawn=300 → sum=1000
+    assert_split(&h, id, 1_000 * ONE);
+
+    let s = h.get(id);
+    assert_eq!(s.deposited, 600 * ONE, "deposited rewritten to vested");
+    assert_eq!(s.withdrawn, 300 * ONE);
+}
+
+/// Second cancel is terminal: error fires, split from the first cancel is
+/// unchanged, nothing moves.
+#[test]
+fn split_repeated_cancel_is_terminal_state_unchanged() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+
+    h.advance(30 * DAY);
+    h.client.cancel(&id);
+    assert_split(&h, id, 1_000 * ONE);
+
+    let state_after = h.get(id);
+    let pool_after = h.pool();
+
+    let err = h.client.try_cancel(&id).unwrap_err().unwrap();
+    assert_eq!(err, Error::StreamTerminated);
+
+    assert_eq!(h.get(id), state_after, "state must not change on failed cancel");
+    assert_eq!(h.pool(), pool_after);
+    h.assert_pool_exact();
+}
+
+/// After cancel, recipient drains the tail — pool reaches zero and status stays
+/// Cancelled.
+#[test]
+fn split_holds_after_recipient_drains_the_tail() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+
+    h.advance(25 * DAY);
+    h.client.cancel(&id);
+    assert_split(&h, id, 1_000 * ONE);
+
+    h.client.withdraw(&id, &None);
+
+    assert_eq!(h.pool(), 0);
+    assert_eq!(h.get(id).status, StreamStatus::Cancelled);
     h.assert_pool_exact();
 }

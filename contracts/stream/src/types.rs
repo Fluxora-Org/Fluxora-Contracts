@@ -1,12 +1,10 @@
 use soroban_sdk::{contracttype, Address};
 
-/// Which operations a delegate is permitted to perform on a stream.
+/// Bitmask constants for which operations a delegate is permitted to perform.
 ///
-/// Stored as a `u32` bitmask so multiple permissions can be granted in one
-/// call without a growing enum. New bits may be added; existing bits are
-/// stable ABI.
-#[allow(non_snake_case)]
-pub mod Op {
+/// Pass one constant or OR several together when calling [`crate::FluxoraStream::grant_delegate`].
+/// New bits may be added; existing values are stable ABI.
+pub mod op {
     pub const WITHDRAW: u32 = 1 << 0;
     pub const CANCEL: u32 = 1 << 1;
     pub const PAUSE: u32 = 1 << 2;
@@ -34,7 +32,7 @@ pub struct DelegateGrant {
 /// Lifecycle state of a stream.
 ///
 /// `Cancelled` and `Depleted` are both terminal and both imply
-/// `withdrawable == 0` will eventually hold, but they are kept distinct so the
+/// `withdrawable == ` will eventually hold, but they are kept distinct so the
 /// indexer can tell "ran to completion" apart from "sender clawed back the
 /// unvested remainder". `Cancelled` is sticky: a cancelled stream that is
 /// subsequently drained to zero stays `Cancelled` rather than becoming
@@ -108,7 +106,12 @@ pub struct Stream {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
     /// Instance storage. Monotonic counter, next id to hand out.
+    /// Incremented only on successful stream creation.
     NextStreamId,
+    /// Instance storage. Number of streams successfully created.
+    /// Incremented only in the same transaction as `NextStreamId` and the
+    /// corresponding `Stream(id)` entry.
+    StreamCount,
     /// Persistent storage. One entry per stream.
     Stream(u64),
     /// Persistent storage. One entry per (stream_id, delegate) pair.

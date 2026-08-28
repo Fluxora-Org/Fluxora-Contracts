@@ -11,10 +11,12 @@
 //!   sub-invocation trees, which drift with every signature change and turn
 //!   into false failures rather than real coverage.
 
-use soroban_sdk::testutils::Address as _;
-use soroban_sdk::{Address, Env};
+use proptest::prelude::*;
+use soroban_sdk::testutils::{Address as _, Events as _, MockAuth, MockAuthInvoke};
+use soroban_sdk::{Address, Env, IntoVal, Val, Vec};
 
 use super::common::*;
+use crate::Stream;
 
 /// The address whose `require_auth` the last invocation actually demanded.
 fn required_auth(env: &Env) -> Address {
@@ -27,6 +29,142 @@ fn required_auth(env: &Env) -> Address {
 /// genuinely permissionless.
 fn revoke_all_auths(env: &Env) {
     env.mock_auths(&[]);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CallerRole {
+    Sender,
+    InitialRecipient,
+    AlternateRecipient,
+    Unrelated,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AuthAction {
+    Withdraw,
+    BatchWithdraw,
+    TransferRecipient,
+    Pause,
+    Resume,
+    Cancel,
+    TopUp,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AuthSnapshot {
+    stream: Stream,
+    sender_balance: i128,
+    initial_recipient_balance: i128,
+    alternate_recipient_balance: i128,
+    unrelated_balance: i128,
+    pool: i128,
+    stream_count: u64,
+}
+
+impl CallerRole {
+    fn address(self, h: &Harness, unrelated: &Address) -> Address {
+        match self {
+            CallerRole::Sender => h.sender.clone(),
+            CallerRole::InitialRecipient => h.recipient.clone(),
+            CallerRole::AlternateRecipient => h.other.clone(),
+            CallerRole::Unrelated => unrelated.clone(),
+        }
+    }
+}
+
+impl AuthAction {
+    fn expected_authorizer(self, stream: &Stream) -> Address {
+        match self {
+            AuthAction::Withdraw | AuthAction::BatchWithdraw | AuthAction::TransferRecipient => {
+                stream.recipient.clone()
+            }
+            AuthAction::Pause | AuthAction::Resume | AuthAction::Cancel | AuthAction::TopUp => {
+                stream.sender.clone()
+            }
+        }
+    }
+
+    fn transfer_target(self, h: &Harness, stream: &Stream) -> Address {
+        if self != AuthAction::TransferRecipient {
+            return h.other.clone();
+        }
+        if stream.recipient == h.other {
+            h.recipient.clone()
+        } else {
+            h.other.clone()
+        }
+    }
+
+    fn fn_name(self) -> &'static str {
+        match self {
+            AuthAction::Withdraw => "withdraw",
+            AuthAction::BatchWithdraw => "batch_withdraw",
+            AuthAction::TransferRecipient => "transfer_recipient",
+            AuthAction::Pause => "pause",
+            AuthAction::Resume => "resume",
+            AuthAction::Cancel => "cancel",
+            AuthAction::TopUp => "top_up",
+        }
+    }
+
+    fn args(self, h: &Harness, stream_id: u64, stream: &Stream, caller: &Address) -> Vec<Val> {
+        match self {
+            AuthAction::Withdraw => (stream_id, None::<i128>).into_val(&h.env),
+            AuthAction::BatchWithdraw => (caller, h.ids(&[stream_id])).into_val(&h.env),
+            AuthAction::TransferRecipient => {
+                (stream_id, self.transfer_target(h, stream)).into_val(&h.env)
+            }
+            AuthAction::Pause => (stream_id,).into_val(&h.env),
+            AuthAction::Resume => (stream_id,).into_val(&h.env),
+            AuthAction::Cancel => (stream_id,).into_val(&h.env),
+            AuthAction::TopUp => (stream_id, 10 * ONE).into_val(&h.env),
+        }
+    }
+
+    fn apply(self, h: &Harness, stream_id: u64, stream: &Stream, caller: &Address) -> bool {
+        let invoke = MockAuthInvoke {
+            contract: &h.contract_id,
+            fn_name: self.fn_name(),
+            args: self.args(h, stream_id, stream, caller),
+            sub_invokes: &[],
+        };
+        let auth = MockAuth {
+            address: caller,
+            invoke: &invoke,
+        };
+        let auths = [auth];
+        let client = h.client.mock_auths(&auths);
+
+        match self {
+            AuthAction::Withdraw => matches!(client.try_withdraw(&stream_id, &None), Ok(Ok(_))),
+            AuthAction::BatchWithdraw => {
+                matches!(
+                    client.try_batch_withdraw(caller, &h.ids(&[stream_id])),
+                    Ok(Ok(_))
+                )
+            }
+            AuthAction::TransferRecipient => matches!(
+                client.try_transfer_recipient(&stream_id, &self.transfer_target(h, stream)),
+                Ok(Ok(_))
+            ),
+            AuthAction::Pause => matches!(client.try_pause(&stream_id), Ok(Ok(_))),
+            AuthAction::Resume => matches!(client.try_resume(&stream_id), Ok(Ok(_))),
+            AuthAction::Cancel => matches!(client.try_cancel(&stream_id), Ok(Ok(_))),
+            AuthAction::TopUp => matches!(client.try_top_up(&stream_id, &(10 * ONE)), Ok(Ok(_))),
+        }
+    }
+}
+
+fn snapshot(h: &Harness, stream_id: u64, unrelated: &Address) -> AuthSnapshot {
+    AuthSnapshot {
+        stream: h.get(stream_id),
+        sender_balance: h.balance(&h.sender),
+        initial_recipient_balance: h.balance(&h.recipient),
+        alternate_recipient_balance: h.balance(&h.other),
+        unrelated_balance: h.balance(unrelated),
+        pool: h.pool(),
+        stream_count: h.client.stream_count(),
+    }
 }
 
 // --- Sender-authorized operations -----------------------------------------
@@ -201,6 +339,62 @@ fn create_fails_without_authorization() {
     h.create_simple(1_000 * ONE, 100 * DAY);
 }
 
+// --- Sender-only: top_up cannot be called by recipient or others ---------
+
+/// Verify that a rejected top_up (due to authorization failure) is completely
+/// side-effect free: tokens are not transferred and stream state is unchanged.
+///
+/// `require_auth` raises a host `Abort` trap in the test environment — it does
+/// not return a typed `Error` — so we cannot use `try_top_up` to catch the
+/// failure as a `Result`. Instead we use `catch_unwind` to absorb the panic,
+/// then assert that nothing changed. The host uses `RefCell` borrows that are
+/// fully released when the call stack unwinds, so the env remains usable for
+/// state-verification reads after the caught panic.
+#[test]
+fn rejected_top_up_is_side_effect_free() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let stream_before = h.get(id);
+    let pool_before = h.pool();
+    let sender_balance_before = h.balance(&h.sender);
+
+    // Attempt top_up without any authorization. The host aborts with
+    // "Unauthorized" — catch it so we can inspect state afterwards.
+    revoke_all_auths(&h.env);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        h.client.top_up(&id, &(100 * ONE));
+    }));
+    assert!(result.is_err(), "expected top_up to be rejected");
+
+    // Restore mocked auth so state-reading calls below don't also abort.
+    h.env.mock_all_auths();
+
+    // Verify no state changed after rejected top_up.
+    let stream_after = h.get(id);
+    assert_eq!(
+        stream_before.deposited, stream_after.deposited,
+        "deposited changed"
+    );
+    assert_eq!(
+        stream_before.end_time, stream_after.end_time,
+        "end_time changed"
+    );
+    assert_eq!(
+        stream_before.withdrawn, stream_after.withdrawn,
+        "withdrawn changed"
+    );
+    assert_eq!(stream_before.status, stream_after.status, "status changed");
+
+    // Verify balances unchanged.
+    assert_eq!(h.pool(), pool_before, "pool balance changed");
+    assert_eq!(
+        h.balance(&h.sender),
+        sender_balance_before,
+        "sender balance changed"
+    );
+    h.assert_pool_exact();
+}
+
 // --- Permissionless by design ---------------------------------------------
 
 /// TTL extension is deliberately unauthenticated: a recipient's claim must
@@ -317,4 +511,113 @@ fn smart_account_addresses_work_as_sender_and_recipient() {
     assert_eq!(required_auth(&h.env), smart_recipient);
     assert_eq!(h.balance(&smart_recipient), 250 * ONE);
     h.assert_pool_exact();
+}
+
+prop_compose! {
+    fn caller_role_strategy()(n in 0u8..4) -> CallerRole {
+        match n {
+            0 => CallerRole::Sender,
+            1 => CallerRole::InitialRecipient,
+            2 => CallerRole::AlternateRecipient,
+            _ => CallerRole::Unrelated,
+        }
+    }
+}
+
+prop_compose! {
+    fn auth_action_strategy()(n in 0u8..7) -> AuthAction {
+        match n {
+            0 => AuthAction::Withdraw,
+            1 => AuthAction::BatchWithdraw,
+            2 => AuthAction::TransferRecipient,
+            3 => AuthAction::Pause,
+            4 => AuthAction::Resume,
+            5 => AuthAction::Cancel,
+            _ => AuthAction::TopUp,
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::default())]
+
+    /// Stateful authorization model:
+    ///
+    /// * sender-authorized actions: `pause`, `resume`, `cancel`, `top_up`
+    /// * recipient-authorized actions: `withdraw`, `batch_withdraw`,
+    ///   `transfer_recipient`
+    /// * after a transfer, "recipient" means the current recipient stored on
+    ///   the stream, not the original recipient
+    ///
+    /// Any rejected call — whether rejected by host auth, by the batch
+    /// recipient ownership check, or by a state boundary such as retrying
+    /// `pause` — must leave stream state, token balances, stream count, and
+    /// emitted contract events untouched.
+    #[test]
+    fn generated_caller_sequences_enforce_the_state_authorization_predicate(
+        steps in prop::collection::vec(
+            (
+                caller_role_strategy(),
+                auth_action_strategy(),
+                0u64..20,
+            ),
+            1..32,
+        )
+    ) {
+        let h = Harness::new();
+        let unrelated = Address::generate(&h.env);
+        let id = h.create_simple(1_000 * ONE, 100 * DAY);
+
+        for (step, (role, action, days)) in steps.into_iter().enumerate() {
+            h.advance(days * DAY);
+
+            let before = snapshot(&h, id, &unrelated);
+            let caller = role.address(&h, &unrelated);
+            let expected = action.expected_authorizer(&before.stream);
+            let caller_is_authorized = caller == expected;
+
+            let accepted = action.apply(&h, id, &before.stream, &caller);
+
+            if accepted {
+                prop_assert!(
+                    caller_is_authorized,
+                    "step {}: {:?} accepted {:?}; expected authorizer was {:?}",
+                    step,
+                    action,
+                    role,
+                    expected,
+                );
+                let required = required_auth(&h.env);
+                prop_assert_eq!(
+                    required,
+                    expected,
+                    "step {}: {:?} accepted {:?} but required the wrong address",
+                    step,
+                    action,
+                    role,
+                );
+            }
+
+            if !accepted {
+                let after = snapshot(&h, id, &unrelated);
+                prop_assert_eq!(
+                    after,
+                    before,
+                    "step {}: rejected {:?} by {:?} changed state or balances",
+                    step,
+                    action,
+                    role,
+                );
+                prop_assert!(
+                    h.env.events().all().events().is_empty(),
+                    "step {}: rejected {:?} by {:?} emitted events",
+                    step,
+                    action,
+                    role,
+                );
+            }
+
+            h.assert_pool_exact();
+        }
+    }
 }

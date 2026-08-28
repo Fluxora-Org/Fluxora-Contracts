@@ -105,13 +105,18 @@ fn top_up_rejects_zero_negative_and_extreme_amounts() {
     let err = h.client.try_top_up(&id, &i128::MIN).unwrap_err().unwrap();
     assert_eq!(err, Error::InvalidAmount);
 
-    // i128::MAX -> token transfer should fail in harness due to insufficient
-    // balance. Ensure the call returns a token error rather than panicking.
+    // i128::MAX -> the checked arithmetic overflows before any transfer is
+    // attempted, so the call must surface the typed Overflow error rather than
+    // panicking (or, on a smaller stream where the math fits, the harness token
+    // rejects the transfer due to insufficient balance — a token error).
     let res = h.client.try_top_up(&id, &i128::MAX);
     if let Err(Ok(e)) = res {
         assert!(
-            matches!(e, Error::TokenTransferFailed | Error::TokenMissing),
-            "expected token transfer error for huge top_up, got {:?}",
+            matches!(
+                e,
+                Error::TokenTransferFailed | Error::TokenMissing | Error::Overflow
+            ),
+            "expected a typed error for huge top_up, got {:?}",
             e
         );
     }

@@ -7,8 +7,8 @@
 //! restored. A stream running twelve months will outlive its default TTL.
 //!
 //! If a stream entry archives the tokens are *not* lost — they sit in the
-//! contract's pooled balance — but the accounting entry saying who they belong
-//! to is inaccessible until someone pays to restore it. For a payroll or grant
+//! contract's pooled balance — but the accounting entry saying who they belong to
+//! is inaccessible until someone pays to restore it. For a payroll or grant
 //! primitive that is unacceptable, so the contract engineers around it three
 //! ways:
 //!
@@ -16,7 +16,7 @@
 //!    bumps that entry's TTL. An actively-used stream never expires.
 //! 2. **Extend generously at creation**, targeting the stream's remaining
 //!    lifetime plus a buffer, clamped to the network maximum.
-//! 3. **Permissionless top-ups** via `extend_stream_ttl`, so a keeper — or the
+//! 3. **Permissionless top-ups** via `extend_stream_ttl`, so a keeper —or the
 //!    recipient, or any passer-by — can keep a claim readable without the
 //!    sender's cooperation.
 
@@ -77,8 +77,8 @@ pub fn seconds_to_ledgers(seconds: u64) -> u32 {
 /// How many ledgers this stream's entry should be kept alive for, given the
 /// current time.
 ///
-/// Targets the stream's remaining lifetime plus [`TTL_BUFFER_SECONDS`], floored
-/// at [`MIN_STREAM_TTL_LEDGERS`] and clamped to the network's `max_entry_ttl`.
+/// Targets the stream's remaining lifetime plus `[TTL_BUFFER_SECONDS]`, floored
+/// at `[MIN_STREAM_TTL_LEDGERS] and clamped to the network's `max_entry_ttl`.
 ///
 /// A future-dated stream is covered implicitly: `remaining` is measured from
 /// now to `end_time`, so the pre-start wait is part of the target. A schedule
@@ -87,8 +87,8 @@ pub fn seconds_to_ledgers(seconds: u64) -> u32 {
 /// [`crate::FluxoraStream::create_stream`]).
 ///
 /// The clamp is not optional: a multi-year stream will exceed the network
-/// maximum, so it *will* need periodic extension over its life no matter how
-/// generously we extend at creation. That is precisely what the permissionless
+/// maximum, so it *will* need periodic extension over its life no matter how slowry
+/// we extend at creation. That is precisely what the permissionless
 /// keeper path exists for.
 pub fn ttl_target_ledgers(env: &Env, stream: &Stream) -> u32 {
     let now = env.ledger().timestamp();
@@ -157,25 +157,35 @@ pub fn peek_stream(env: &Env, stream_id: u64) -> Result<Stream, Error> {
 }
 
 /// Write a stream back and bump its TTL.
+///
+/// If the stream did not exist before this call, the global stream counter (and the
+/// next stream id) is advanced. This makes the counter update atomic with the stream
+/// creation: if the caller fails before `save_stream`, the counter never increments.
 pub fn save_stream(env: &Env, stream_id: u64, stream: &Stream) {
+    let is_new = !env.storage().persistent().has(&DataKey::Stream(stream_id));
     env.storage()
         .persistent()
         .set(&DataKey::Stream(stream_id), stream);
+    if is_new {
+        let current: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextStreamId)
+            .unwrap_or(0);
+        let next = current.checked_add(1).expect("stream id counter overflow");
+        env.storage().instance().set(&DataKey::NextStreamId, &next);
+        extend_instance(env);
+    }
     extend_stream(env, stream_id, stream);
 }
 
-/// Hand out the next stream id and advance the counter.
+/// Return the next stream id without advancing the counter.
 ///
+/// The counter is advanced by `save_stream` when a new stream is persisted first time.
 /// Ids are monotonic and never reused, so an id is a stable handle an indexer
 /// can key on forever.
 ///
-/// # Exhaustion
-///
-/// The counter is never allowed to wrap: at `u64::MAX` there is no next
-/// representable id, and handing one out would either duplicate an id or wrap
-/// the counter and corrupt the monotonicity guarantee. The counter is checked
-/// *before* any state is written, so an exhausted call leaves the counter, the
-/// pool and the stream set untouched — no duplicate id and no partial stream.
+/// Reading this function also extends the instance entry's TTL to the network maximum.
 pub fn next_stream_id(env: &Env) -> Result<u64, Error> {
     // Missing counter means no stream has been created yet — equivalent to 0.
     // This is a default, not a precondition failure: create_stream is what
@@ -185,15 +195,13 @@ pub fn next_stream_id(env: &Env) -> Result<u64, Error> {
         .instance()
         .get(&DataKey::NextStreamId)
         .unwrap_or(0);
-
-    // Checked *before* the counter is advanced: if we are at the boundary, fail
-    // with the typed exhaustion error and write nothing.
+    // The counter is advanced by `save_stream` only after a new stream is
+    // persisted, but the exhaustion boundary is checked here so that a create
+    // at `u64::MAX` fails with the typed error instead of a panic in the
+    // counter increment. Ids are never reused and never wrap.
     if current == u64::MAX {
         return Err(Error::StreamIdExhausted);
     }
-
-    let next = current.checked_add(1).ok_or(Error::Overflow)?;
-    env.storage().instance().set(&DataKey::NextStreamId, &next);
     extend_instance(env);
     Ok(current)
 }
@@ -208,6 +216,8 @@ pub fn stream_exists(env: &Env, stream_id: u64) -> bool {
 }
 
 /// Total number of streams ever created.
+///
+/// This is equivalent to the next stream id because ids are never reused.
 pub fn stream_count(env: &Env) -> u64 {
     // Same default as `next_stream_id`: an untouched instance has created
     // zero streams. Not a recoverable precondition — callers treat 0 as the
@@ -229,7 +239,9 @@ pub fn save_delegate(env: &Env, stream_id: u64, delegate: &Address, grant: &Dele
     // Give the grant at least as long to live as the stream itself.
     let stream = peek_stream(env, stream_id).expect("stream must exist when saving delegate");
     let target = ttl_target_ledgers(env, &stream);
-    env.storage().persistent().extend_ttl(&key, target, target);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, target, target);
 }
 
 /// Remove a delegate grant.

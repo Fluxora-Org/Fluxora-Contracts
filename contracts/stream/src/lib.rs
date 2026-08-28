@@ -59,7 +59,8 @@ pub use accrual::{
 };
 pub use error::Error;
 pub use storage::{MIN_STREAM_TTL_LEDGERS, SECONDS_PER_LEDGER, TTL_BUFFER_SECONDS};
-pub use types::{DataKey, DelegateGrant, Op, Stream, StreamStatus};
+pub use types::{DataKey, DelegateGrant, Stream, StreamStatus};
+pub use types::op;
 
 use soroban_sdk::{
     contract, contractimpl, token, Address, Env, InvokeError, MuxedAddress, TryFromVal, Vec,
@@ -388,9 +389,6 @@ impl FluxoraStream {
 
         let token = stream.token.clone();
         let sender = stream.sender.clone();
-        stream.deposited = new_deposited;
-        stream.end_time = new_end;
-        storage::save_stream(&env, stream_id, &stream);
 
         token_transfer(
             &env,
@@ -399,6 +397,10 @@ impl FluxoraStream {
             MuxedAddress::from(env.current_contract_address()),
             &amount,
         )?;
+
+        stream.deposited = new_deposited;
+        stream.end_time = new_end;
+        storage::save_stream(&env, stream_id, &stream);
 
         events::topped_up(&env, stream_id, &stream, amount);
         Ok(())
@@ -759,8 +761,8 @@ impl FluxoraStream {
             return Err(Error::StreamTerminated);
         }
 
-        let sender_ops = Op::CANCEL | Op::PAUSE | Op::RESUME | Op::TOP_UP;
-        let recipient_ops = Op::WITHDRAW | Op::TRANSFER_RECIPIENT;
+        let sender_ops = op::CANCEL | op::PAUSE | op::RESUME | op::TOP_UP;
+        let recipient_ops = op::WITHDRAW | op::TRANSFER_RECIPIENT;
 
         // The grantor must be the party that owns the ops being delegated.
         // Mixed calls are rejected; split into two grants instead.
@@ -825,14 +827,14 @@ impl FluxoraStream {
     }
 
     /// Withdraw as a delegate. The `delegate` address must hold a valid
-    /// grant with [`Op::WITHDRAW`] for this stream.
+    /// grant with [`op::WITHDRAW`] for this stream.
     pub fn delegate_withdraw(
         env: Env,
         stream_id: u64,
         delegate: Address,
         amount: Option<i128>,
     ) -> Result<i128, Error> {
-        Self::check_delegate(&env, stream_id, &delegate, Op::WITHDRAW)?;
+        Self::check_delegate(&env, stream_id, &delegate, op::WITHDRAW)?;
         let mut stream = storage::load_stream(&env, stream_id)?;
 
         let now = env.ledger().timestamp();
@@ -861,9 +863,9 @@ impl FluxoraStream {
         Ok(payout)
     }
 
-    /// Cancel as a delegate. Requires [`Op::CANCEL`] grant.
+    /// Cancel as a delegate. Requires [`op::CANCEL`] grant.
     pub fn delegate_cancel(env: Env, stream_id: u64, delegate: Address) -> Result<(), Error> {
-        Self::check_delegate(&env, stream_id, &delegate, Op::CANCEL)?;
+        Self::check_delegate(&env, stream_id, &delegate, op::CANCEL)?;
         let mut stream = storage::load_stream(&env, stream_id)?;
 
         if !stream.cancellable {
@@ -897,13 +899,13 @@ impl FluxoraStream {
             )?;
         }
 
-        events::cancelled(&env, stream_id, &stream, refund);
+        events::cancelled(&env, stream_id, &stream, refund, vested_now);
         Ok(())
     }
 
-    /// Pause as a delegate. Requires [`Op::PAUSE`] grant.
+    /// Pause as a delegate. Requires [`op::PAUSE`] grant.
     pub fn delegate_pause(env: Env, stream_id: u64, delegate: Address) -> Result<(), Error> {
-        Self::check_delegate(&env, stream_id, &delegate, Op::PAUSE)?;
+        Self::check_delegate(&env, stream_id, &delegate, op::PAUSE)?;
         let mut stream = storage::load_stream(&env, stream_id)?;
 
         if !stream.pausable {
@@ -925,9 +927,9 @@ impl FluxoraStream {
         Ok(())
     }
 
-    /// Resume as a delegate. Requires [`Op::RESUME`] grant.
+    /// Resume as a delegate. Requires [`op::RESUME`] grant.
     pub fn delegate_resume(env: Env, stream_id: u64, delegate: Address) -> Result<(), Error> {
-        Self::check_delegate(&env, stream_id, &delegate, Op::RESUME)?;
+        Self::check_delegate(&env, stream_id, &delegate, op::RESUME)?;
         let mut stream = storage::load_stream(&env, stream_id)?;
 
         if stream.status.is_terminal() {
@@ -955,14 +957,14 @@ impl FluxoraStream {
         Ok(())
     }
 
-    /// Top up as a delegate. Requires [`Op::TOP_UP`] grant.
+    /// Top up as a delegate. Requires [`op::TOP_UP`] grant.
     pub fn delegate_top_up(
         env: Env,
         stream_id: u64,
         delegate: Address,
         amount: i128,
     ) -> Result<(), Error> {
-        Self::check_delegate(&env, stream_id, &delegate, Op::TOP_UP)?;
+        Self::check_delegate(&env, stream_id, &delegate, op::TOP_UP)?;
         let mut stream = storage::load_stream(&env, stream_id)?;
 
         if stream.status.is_terminal() {
@@ -1016,6 +1018,9 @@ impl FluxoraStream {
         stream.end_time = new_end;
         storage::save_stream(&env, stream_id, &stream);
 
+        // Tokens come from the sender — require their auth even though a
+        // delegate triggered this call.
+        sender.require_auth();
         token_transfer(
             &env,
             &token,
@@ -1028,14 +1033,14 @@ impl FluxoraStream {
         Ok(())
     }
 
-    /// Transfer recipient as a delegate. Requires [`Op::TRANSFER_RECIPIENT`] grant.
+    /// Transfer recipient as a delegate. Requires [`op::TRANSFER_RECIPIENT`] grant.
     pub fn delegate_transfer_recipient(
         env: Env,
         stream_id: u64,
         delegate: Address,
         new_recipient: Address,
     ) -> Result<(), Error> {
-        Self::check_delegate(&env, stream_id, &delegate, Op::TRANSFER_RECIPIENT)?;
+        Self::check_delegate(&env, stream_id, &delegate, op::TRANSFER_RECIPIENT)?;
         let mut stream = storage::load_stream(&env, stream_id)?;
 
         if !stream.transferable {
@@ -1153,15 +1158,15 @@ impl FluxoraStream {
     ///
     /// **The sweep is per-item, not atomic.** Unknown ids are skipped rather
     /// than failing the batch, so a keeper working from a slightly stale index
-    /// does not lose the whole sweep to one bad id. A duplicate id is simply
-    /// extended again — the operation is idempotent and harmless — and each
-    /// occurrence counts toward the return value, so the outcome for a given
-    /// input is deterministic. Empty, oversized, and malformed vectors are
-    /// rejected before the sweep starts. Returns how many entries were actually
-    /// extended.
+    /// does not lose the whole sweep to one bad id. Unlike `batch_withdraw`,
+    /// duplicate ids are rejected up-front: passing the same id twice returns
+    /// [`Error::DuplicateStreamId`] rather than attempting to extend it twice.
+    /// Empty, oversized, and malformed vectors are rejected before the sweep
+    /// starts. Returns how many entries were actually extended.
     pub fn batch_extend_ttl(env: Env, stream_ids: Vec<u64>) -> Result<u32, Error> {
         // Authorization: permissionless — same policy as `extend_stream_ttl`.
         let stream_ids = Self::validate_batch_ids(&env, &stream_ids)?;
+        Self::reject_duplicate_ids(&stream_ids)?;
 
         let mut extended = 0u32;
         for stream_id in stream_ids.iter() {
@@ -1202,42 +1207,6 @@ impl FluxoraStream {
                 Ok(())
             }
         }
-    }
-
-    /// Validate raw vector contents before authorization, storage, or tokens.
-    ///
-    /// Soroban's typed `Vec<T>` conversion is lazy: converting a host vector to
-    /// `Vec<u64>` verifies the container but not each element.
-    fn validate_batch_ids(env: &Env, stream_ids: &Vec<u64>) -> Result<Vec<u64>, Error> {
-        let count = stream_ids.len();
-        if count == 0 {
-            return Err(Error::EmptyBatch);
-        }
-        if count > MAX_BATCH_SIZE {
-            return Err(Error::BatchTooLarge);
-        }
-
-        let mut validated = Vec::new(env);
-        for raw_id in stream_ids.to_vals().iter() {
-            let stream_id =
-                u64::try_from_val(env, &raw_id).map_err(|_| Error::MalformedStreamId)?;
-            validated.push_back(stream_id);
-        }
-        Ok(validated)
-    }
-
-    /// Withdrawal batches reject duplicates because processing the same stream
-    /// twice would operate on stale copies. TTL batches deliberately do not.
-    fn reject_duplicate_ids(stream_ids: &Vec<u64>) -> Result<(), Error> {
-        let count = stream_ids.len();
-        for i in 0..count {
-            for j in (i + 1)..count {
-                if stream_ids.get_unchecked(i) == stream_ids.get_unchecked(j) {
-                    return Err(Error::DuplicateStreamId);
-                }
-            }
-        }
-        Ok(())
     }
 
     /// Shared tail of [`withdraw`](Self::withdraw) and

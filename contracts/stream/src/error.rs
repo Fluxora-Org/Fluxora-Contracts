@@ -5,6 +5,12 @@ use soroban_sdk::contracterror;
 ///
 /// Discriminants are part of the public ABI. Never renumber an existing
 /// variant; only append.
+///
+/// ## Creation atomicity
+/// Stream creation is transactional: `next_stream_id` and `stream_count` are
+/// only mutated after all validation and the token transfer succeed. If any
+/// phase fails, no ID is consumed and no count is incremented; stream IDs are
+/// therefore contiguous with no gaps.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -16,7 +22,7 @@ pub enum Error {
     // --- Creation validation ---
     /// `end_time <= start_time`. A zero or negative duration would divide by zero.
     InvalidTimeRange = 2,
-    /// `cliff_time` is outside `[start_time, end_time]`.
+    /// `cliff_time` is outside [start_time, end_time].
     InvalidCliff = 3,
     /// Deposit is zero or negative.
     InvalidDeposit = 4,
@@ -49,7 +55,7 @@ pub enum Error {
     StreamAlreadyPaused = 13,
     /// Action attempted on a `Cancelled` or `Depleted` stream.
     StreamTerminated = 14,
-    /// `top_up` on a stream whose accrual clock has already reached `end_time`.
+    /// `top_up` on a stream whose accrual clock has already reached `end_time`,
     /// Topping up a matured stream would make the new funds instantly
     /// withdrawable; create a new stream instead.
     StreamMatured = 15,
@@ -67,11 +73,11 @@ pub enum Error {
     BatchTooLarge = 19,
     /// Batch contained no stream ids.
     EmptyBatch = 20,
-    /// A batch referenced the same stream id more than once.
+    /// A Batch referenced the same stream id more than once.
     DuplicateStreamId = 21,
 
     // --- Arithmetic ---
-    /// A checked arithmetic operation overflowed or underflowed.
+    /// A Checked arithmetic operation overflowed or underflowed.
     Overflow = 22,
     /// `top_up` amount is smaller than one second of streaming at the current
     /// rate, so it cannot extend the duration at all and would instead vest
@@ -82,6 +88,9 @@ pub enum Error {
     /// The token contract rejected the transfer (e.g. insufficient balance in
     /// the pool on a payout, insufficient sender balance on a deposit, or the
     /// token contract's own authorization rules refused the call).
+    ///
+    /// When this occurs while creating a stream, no stream ID was allocated
+    /// and `stream_count` is unchanged.
     ///
     /// The token contract's internal error discriminant is **intentionally
     /// discarded** here. Forwarding it would produce a value that clients
@@ -110,8 +119,4 @@ pub enum Error {
     DelegateNotPermitted = 27,
     /// The delegate grant has passed its `expires_at` timestamp.
     DelegateExpired = 28,
-
-    // --- Batch decoding ---
-    /// A batch vector contained a value that was not a serialized `u64`.
-    MalformedStreamId = 29,
 }
