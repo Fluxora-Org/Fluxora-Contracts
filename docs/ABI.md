@@ -48,6 +48,13 @@ hand-rolled topic parsers. The previous frontend's hand-written
 `nativeToScVal` encoding is exactly the thing that broke; see
 [MIGRATION.md](../MIGRATION.md).
 
+The reviewable inventory of every public method, return type, error
+discriminant and event is generated from that same spec XDR and committed at
+[`contracts/stream/abi/fluxora_stream.json`](../contracts/stream/abi/fluxora_stream.json).
+`test::abi` fails the suite if a method is removed, renamed, or type-changed
+without bumping [`ABI_VERSION`](../contracts/stream/src/lib.rs). Additive
+changes update the snapshot only.
+
 ---
 
 ## Types

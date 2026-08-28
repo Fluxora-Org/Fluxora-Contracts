@@ -96,47 +96,17 @@ use soroban_sdk::{
 /// exact value is invisible to integrators.
 pub const MAX_BATCH_SIZE: u32 = 16;
 
-/// Call `token.transfer(from, to, amount)` and map any failure to a stable
-/// stream-level error.
+/// Version of the public stream ABI inventory.
 ///
-/// # Why not forward the token's error discriminant?
+/// Bump this when making a *breaking* change to a public method: removing,
+/// renaming, or changing a parameter/return type. Additive changes — a new
+/// method, a new error discriminant, a field appended to an event payload —
+/// do not require a bump; update `contracts/stream/abi/fluxora_stream.json`
+/// so the snapshot stays the generated source of truth.
 ///
-/// A client receiving `Error(Contract, #N)` has no way to know whether `N`
-/// comes from the stream contract or from the token contract without out-of-band
-/// knowledge of which contract threw. Forwarding the raw token discriminant
-/// would cause silent misinterpretation — e.g. token error #7 would decode as
-/// `Unauthorized` against Fluxora's table, which is wrong and unsettling.
-///
-/// Instead, failures are bucketed into two stream-level categories that are
-/// stable, unambiguous, and actionable:
-///
-/// * [`Error::TokenTransferFailed`] — the token returned a typed contract
-///   error. The root cause (insufficient balance, authorization refused by the
-///   token contract, etc.) is visible in the transaction's `diagnosticEvents`
-///   and is therefore preserved for off-chain tooling without polluting the
-///   stream ABI.
-/// * [`Error::TokenMissing`] — the host raised an `Abort` (non-contract trap).
-///   This most commonly means the `token` address has no deployed code. No
-///   funds moved, so the stream is in a clean pre-transfer state.
-fn token_transfer(
-    env: &Env,
-    token: &Address,
-    from: &Address,
-    to: MuxedAddress,
-    amount: &i128,
-) -> Result<(), Error> {
-    match token::TokenClient::new(env, token).try_transfer(from, &to, amount) {
-        Ok(Ok(())) => Ok(()),
-        // The token contract returned a typed contract error (e.g. insufficient
-        // balance, deauthorized trustline, custom token logic). The raw
-        // discriminant is intentionally discarded — see the function doc.
-        Err(Err(InvokeError::Contract(_))) | Ok(Err(_)) | Err(Ok(_)) => {
-            Err(Error::TokenTransferFailed)
-        }
-        // Host trap: most commonly the token address has no deployed code.
-        Err(Err(InvokeError::Abort)) => Err(Error::TokenMissing),
-    }
-}
+/// The on-chain contract is immutable, so a bump is a *new deployment*, not an
+/// in-place upgrade. See `docs/ABI.md` and `test::abi`.
+pub const ABI_VERSION: u32 = 1;
 
 #[contract]
 pub struct FluxoraStream;
