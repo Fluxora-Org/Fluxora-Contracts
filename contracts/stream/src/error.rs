@@ -3,6 +3,10 @@ use soroban_sdk::contracterror;
 /// Every failure mode in Fluxora is a typed error. Nothing panics on a numeric
 /// edge case: all arithmetic is checked and maps to [`Error::Overflow`].
 ///
+/// Zero-amount policy: zero or negative deposit, top-up, and explicit
+/// withdrawal amounts are errors, not no-ops. No zero-value event is emitted
+/// for a rejected operation, and balances are conserved.
+///
 /// Discriminants are part of the public ABI. Never renumber an existing
 /// variant; only append.
 ///
@@ -54,6 +58,9 @@ pub enum Error {
     /// `pause` called on a stream that is already `Paused`.
     StreamAlreadyPaused = 13,
     /// Action attempted on a `Cancelled` or `Depleted` stream.
+    ///
+    /// A stream is `Depleted` when the recipient withdraws the exact
+    /// withdrawable balance; subsequent withdrawals return this error.
     StreamTerminated = 14,
     /// `top_up` on a stream whose accrual clock has already reached `end_time`,
     /// Topping up a matured stream would make the new funds instantly
@@ -79,9 +86,10 @@ pub enum Error {
     // --- Arithmetic ---
     /// A Checked arithmetic operation overflowed or underflowed.
     Overflow = 22,
-    /// `top_up` amount is smaller than one second of streaming at the current
-    /// rate, so it cannot extend the duration at all and would instead vest
-    /// retroactively. Top up by at least `deposited / duration`.
+    /// A positive `top_up` amount is smaller than one second of streaming at
+    /// the current rate, so it cannot extend the duration at all and would
+    /// instead vest retroactively. Top up by at least `deposited / duration`.
+    /// Zero or negative amounts return [`Self::InvalidTopUp`].
     TopUpTooSmall = 23,
 
     // --- Token sub-invocation ---
@@ -119,4 +127,7 @@ pub enum Error {
     DelegateNotPermitted = 27,
     /// The delegate grant has passed its `expires_at` timestamp.
     DelegateExpired = 28,
+
+    /// `top_up` amount was zero or negative.
+    InvalidTopUp = 29,
 }
