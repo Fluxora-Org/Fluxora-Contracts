@@ -177,7 +177,7 @@ fn create_requires_the_senders_authorization() {
 }
 
 #[test]
-fn cancel_pause_resume_and_top_up_require_the_sender() {
+fn cancel_pause_resume_top_up_and_transfer_require_the_sender() {
     let h = Harness::new();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     h.advance(10 * DAY);
@@ -191,6 +191,9 @@ fn cancel_pause_resume_and_top_up_require_the_sender() {
     h.client.resume(&id);
     assert_eq!(required_auth(&h.env), h.sender, "resume");
 
+    h.client.transfer_recipient(&id, &h.other);
+    assert_eq!(required_auth(&h.env), h.sender, "transfer_recipient");
+
     h.client.cancel(&id);
     assert_eq!(required_auth(&h.env), h.sender, "cancel");
 }
@@ -198,16 +201,13 @@ fn cancel_pause_resume_and_top_up_require_the_sender() {
 // --- Recipient-authorized operations --------------------------------------
 
 #[test]
-fn withdraw_and_transfer_require_the_recipient() {
+fn withdraw_requires_the_recipient() {
     let h = Harness::new();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     h.advance(10 * DAY);
 
     h.client.withdraw(&id, &None);
     assert_eq!(required_auth(&h.env), h.recipient, "withdraw");
-
-    h.client.transfer_recipient(&id, &h.other);
-    assert_eq!(required_auth(&h.env), h.recipient, "transfer_recipient");
 }
 
 /// After a transfer, authority follows the stream: the new recipient can
