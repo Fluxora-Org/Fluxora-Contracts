@@ -185,6 +185,14 @@ Rules that must hold:
   stream's liability negative and refund the sender funds the recipient already holds. This is
   not hypothetical — see §0.4 and §2.7.
 - **Reject `end_time <= start_time` at creation** — division by zero.
+- **No bound on clock skew.** `start_time` may be any distance in the past
+  (backdated vesting; the elapsed portion vests immediately) or in the future
+  (scheduled streams). The ledger timestamp is the only clock on chain, and a
+  skew limit would be business policy, not a protocol requirement. A future
+  stream may extend beyond the `max_entry_ttl` horizon: creation funds the
+  entry for as long as the network allows and the permissionless keeper path
+  covers the rest, exactly as for multi-year streams. Only well-formedness is
+  validated: `end > start`, and `cliff ∈ [start, end]`.
 - **Handle `duration == 0` after a cancel.** Cancelling at the instant of creation collapses
   the schedule to a point. Return `deposited` (which the cancel has already reduced to the
   vested amount) rather than dividing by zero.

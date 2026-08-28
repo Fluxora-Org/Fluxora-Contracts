@@ -222,6 +222,11 @@ A `transferable: bool` flag alongside `cancellable` and `pausable`. A
 compliance-bound sender — payroll, a KYC'd grant program — can pin the payee at
 creation. Without it those senders simply could not use Fluxora.
 
+Transfer moves the stream's entire remaining claim. Funds already withdrawn
+stay with the old recipient; accrued but unwithdrawn funds and all future
+accrual belong to the new recipient. The transfer itself changes no schedule or
+accounting value, and only the new recipient may withdraw afterward.
+
 ---
 
 ## TTL, rent and archival
@@ -250,6 +255,39 @@ Three mechanisms:
 Views deliberately do **not** extend TTL. They are called through simulation,
 where a footprint write is at best noise. Keeping a stream alive is the explicit
 job of `extend_stream_ttl`.
+
+### Retention policy by state
+
+Every touch tops the entry back up to one target — the stream's remaining
+effective life plus the 30-day buffer, floored at `MIN_STREAM_TTL_LEDGERS`
+(~30 days) and clamped to the network's `max_entry_ttl`. The threshold equals
+the extend-to, so an entry below its target is topped back up to it in full —
+and one already funded past the target keeps its higher balance: rent is never
+clawed back, so a stream entering a terminal state decays toward its floor
+rather than dropping to it. State only changes what "remaining life" means:
+
+| State | Rent target on any touch | Why |
+|---|---|---|
+| `Active` | remaining effective life (schedule plus any accumulated pauses) + buffer | funded to its end plus the keeper's working window |
+| `Paused` | stretched end (schedule + accumulated and in-progress pauses) + buffer | a paused stream is not settled; its end slides forward in wall-clock terms |
+| `Cancelled` | the floor | cancel collapses the schedule onto "now", so remaining life is zero (a cancel before `start_time` still funds up to the unopened start); the floor keeps the vested tail withdrawable and the final state indexable |
+| `Depleted` | the floor | fully paid out is not the same as forgotten; the terminal record stays readable |
+
+The instance entry (the id counter) is always extended to the network maximum,
+whatever the streams are doing.
+
+Expired and missing records: on a live network a transaction touching an
+archived entry fails **before** the contract executes and must be resubmitted
+with a `RestoreFootprint` (see the caveat below). The contract itself answers
+an id it cannot see with `Error::StreamNotFound` (#1), and a call that fails
+this way mutates nothing — both halves of that contract-side story are pinned
+by deterministic assertions in `test::ttl`. Batch calls differ by design:
+`batch_withdraw` fails the whole batch with `StreamNotFound`, while
+`batch_extend_ttl` skips unknown ids so a keeper's sweep survives a stale
+index. `stream_exists(id) == false` while `id < stream_count()` is the
+integrator's signal for "archived, not nonexistent"; whether that signal holds
+against a real RPC is exactly the stage-4 territory
+[KNOWN-LIMITATIONS.md §1](KNOWN-LIMITATIONS.md) tracks.
 
 ### What the tests prove, and what they do not
 

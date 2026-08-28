@@ -3,6 +3,29 @@
 use super::common::*;
 use crate::{Error, StreamStatus};
 
+/// A schedule that collapses to zero duration after an at-start cancel must
+/// stay readable and writable: reads return the settled (zero) amounts without
+/// dividing by zero, and withdraw reports `StreamTerminated` — the stream is
+/// Cancelled, not merely unaccrued — rather than trapping.
+#[test]
+fn zero_duration_collapsed_stream_is_safe_to_read_and_withdraw() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+
+    // Cancel at the instant of creation collapses the schedule to zero length.
+    h.client.cancel(&id);
+
+    // Reads must not divide by zero.
+    assert_eq!(h.client.vested_of(&id), 0);
+    assert_eq!(h.client.withdrawable_of(&id), 0);
+    assert_eq!(h.client.refundable_of(&id), 0);
+
+    // Write path is a typed error, not a panic. Cancelled status returns StreamTerminated.
+    let err = h.client.try_withdraw(&id, &None).unwrap_err().unwrap();
+    assert_eq!(err, Error::StreamTerminated);
+    h.assert_pool_exact();
+}
+
 #[test]
 fn nothing_is_withdrawable_before_the_stream_starts() {
     let h = Harness::new();
@@ -164,8 +187,9 @@ fn draining_a_stream_marks_it_depleted() {
     assert_eq!(h.get(id).withdrawn, 1_000 * ONE);
 }
 
-/// A depleted stream must return a typed error, never panic and never pay
-/// twice.
+/// A depleted stream must return `StreamTerminated`, never panic and never
+/// pay twice. Distinct from `NothingToWithdraw` so a client does not confuse
+/// "not accrued yet" with "this stream is over".
 #[test]
 fn withdrawing_from_a_depleted_stream_is_a_typed_error() {
     let h = Harness::new();
@@ -174,13 +198,22 @@ fn withdrawing_from_a_depleted_stream_is_a_typed_error() {
     h.client.withdraw(&id, &None);
 
     let err = h.client.try_withdraw(&id, &None).unwrap_err().unwrap();
-    assert_eq!(err, Error::NothingToWithdraw);
+    assert_eq!(err, Error::StreamTerminated);
     assert_eq!(h.balance(&h.recipient), 1_000 * ONE);
 
     h.advance(10 * YEAR);
     let err = h.client.try_withdraw(&id, &None).unwrap_err().unwrap();
-    assert_eq!(err, Error::NothingToWithdraw);
+    assert_eq!(err, Error::StreamTerminated);
     h.assert_pool_exact();
+}
+
+/// Missing stream on a fund-moving path must be a decodable contract error,
+/// not a host trap from an unwrap on storage.
+#[test]
+fn withdrawing_unknown_stream_is_stream_not_found() {
+    let h = Harness::new();
+    let err = h.client.try_withdraw(&999, &None).unwrap_err().unwrap();
+    assert_eq!(err, Error::StreamNotFound);
 }
 
 /// A one-second stream is the tightest possible schedule and must still behave.
