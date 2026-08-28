@@ -89,6 +89,7 @@ jobs:
             target/wasm32v1-none/release/fluxora_stream.wasm
             target/wasm32v1-none/release/provenance.json
             target/wasm32v1-none/release/SHASUMS
+          if-no-files-found: error
 
   fuzz:
     name: randomized and property suites
