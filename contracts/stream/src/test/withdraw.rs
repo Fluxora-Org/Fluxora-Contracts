@@ -141,6 +141,77 @@ fn explicit_zero_or_negative_amount_is_rejected() {
     }
 }
 
+#[test]
+fn withdrawal_amount_boundaries_have_typed_results_and_preserve_balance() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    h.advance(30 * DAY);
+
+    for (amount, expected) in [
+        (0i128, Error::InvalidAmount),
+        (i128::MIN, Error::InvalidAmount),
+        (300 * ONE + 1, Error::InsufficientWithdrawable),
+        (i128::MAX, Error::InsufficientWithdrawable),
+    ] {
+        let err = h
+            .client
+            .try_withdraw(&id, &Some(amount))
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, expected, "amount {amount}");
+        assert_eq!(h.get(id).withdrawn, 0);
+        assert_eq!(h.balance(&h.recipient), 0);
+        h.assert_pool_exact();
+    }
+}
+
+#[test]
+fn explicit_one_unit_withdraw_is_honored() {
+    let h = Harness::new();
+    let start = h.now();
+    let id = h.create(1, start, start + 1, start, true, true, true);
+    h.advance(1);
+
+    assert_eq!(h.client.withdraw(&id, &Some(1)), 1);
+    assert_eq!(h.get(id).withdrawn, 1);
+    assert_eq!(h.balance(&h.recipient), 1);
+    assert_eq!(h.get(id).status, StreamStatus::Depleted);
+    h.assert_pool_exact();
+}
+
+#[test]
+fn withdrawing_the_exact_available_amount_clears_withdrawable() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    h.advance(30 * DAY);
+
+    let available = h.client.withdrawable_of(&id);
+    assert!(available > 0);
+    assert_eq!(h.client.withdraw(&id, &Some(available)), available);
+    assert_eq!(h.client.withdrawable_of(&id), 0);
+    assert_eq!(h.balance(&h.recipient), available);
+    h.assert_pool_exact();
+}
+
+#[test]
+fn repeated_zero_withdraw_calls_are_rejected_and_preserve_state() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    h.advance(30 * DAY);
+
+    for _ in 0..3 {
+        let err = h
+            .client
+            .try_withdraw(&id, &Some(0))
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, Error::InvalidAmount);
+    }
+    assert_eq!(h.get(id).withdrawn, 0);
+    assert_eq!(h.balance(&h.recipient), 0);
+    h.assert_pool_exact();
+}
+
 // --- Boundaries -----------------------------------------------------------
 
 /// Exactly at `end_time` the whole deposit must be vested — not one stroop
