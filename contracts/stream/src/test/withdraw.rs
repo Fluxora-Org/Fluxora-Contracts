@@ -5,10 +5,8 @@ use crate::{Error, StreamStatus};
 
 /// A schedule that collapses to zero duration after an at-start cancel must
 /// stay readable and writable: reads return the settled (zero) amounts without
-/// dividing by zero, and withdraw reports `StreamTerminated` rather than
-/// trapping — the contract distinguishes "terminal with nothing left" from
-/// "live stream with nothing accrued yet" so integrators can branch without
-/// guessing.
+/// dividing by zero, and withdraw reports `StreamTerminated` — the stream is
+/// Cancelled, not merely unaccrued — rather than trapping.
 #[test]
 fn zero_duration_collapsed_stream_is_safe_to_read_and_withdraw() {
     let h = Harness::new();
@@ -22,10 +20,7 @@ fn zero_duration_collapsed_stream_is_safe_to_read_and_withdraw() {
     assert_eq!(h.client.withdrawable_of(&id), 0);
     assert_eq!(h.client.refundable_of(&id), 0);
 
-    // Write path is a typed error, not a panic.
-    // The stream is Cancelled (terminal) with nothing withdrawable, so the
-    // contract returns StreamTerminated rather than NothingToWithdraw —
-    // terminal + empty is a different precondition from live + not-yet-accrued.
+    // Write path is a typed error, not a panic. Cancelled status returns StreamTerminated.
     let err = h.client.try_withdraw(&id, &None).unwrap_err().unwrap();
     assert_eq!(err, Error::StreamTerminated);
     h.assert_pool_exact();

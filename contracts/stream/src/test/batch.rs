@@ -14,7 +14,7 @@
 use soroban_sdk::testutils::storage::Persistent as _;
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
 use soroban_sdk::xdr::{ContractEventBody, ScVal};
-use soroban_sdk::{Address, Vec};
+use soroban_sdk::{Address, IntoVal, TryFromVal, Val, Vec};
 
 use super::common::*;
 use crate::{DataKey, Error, MAX_BATCH_SIZE};
@@ -59,6 +59,13 @@ fn ttl_of(h: &Harness, stream_id: u64) -> u32 {
 fn age_ledgers(h: &Harness, ledgers: u32) {
     let seq = h.env.ledger().sequence();
     h.env.ledger().set_sequence_number(seq + ledgers);
+}
+
+fn malformed_ids(h: &Harness, valid_id: u64) -> Vec<u64> {
+    let mut raw: Vec<Val> = Vec::new(&h.env);
+    raw.push_back(valid_id.into_val(&h.env));
+    raw.push_back(true.into_val(&h.env));
+    Vec::<u64>::try_from_val(&h.env, &&raw).unwrap()
 }
 
 #[test]
@@ -134,6 +141,123 @@ fn streams_with_nothing_available_are_skipped() {
     assert_eq!(total, 10 * ONE);
     assert_eq!(h.get(not_ready).withdrawn, 0);
     h.assert_pool_exact();
+}
+
+#[test]
+fn a_mixed_batch_with_an_unauthorized_item_rolls_back_everything() {
+    let h = Harness::new();
+    let valid = h.create_simple(100 * ONE, 100 * DAY);
+    let theirs = h.client.create_stream(
+        &h.sender,
+        &h.other,
+        &h.token,
+        &(100 * ONE),
+        &h.now(),
+        &(h.now() + 100 * DAY),
+        &h.now(),
+        &true,
+        &true,
+        &true,
+    );
+    let second_valid = h.create_simple(100 * ONE, 100 * DAY);
+    h.advance(10 * DAY);
+
+    let err = h
+        .client
+        .try_batch_withdraw(&h.recipient, &h.ids(&[valid, theirs, second_valid]))
+        .unwrap_err()
+        .unwrap();
+
+    assert_eq!(err, Error::Unauthorized);
+    assert_eq!(h.balance(&h.recipient), 0, "whole batch rolled back");
+    assert_eq!(h.get(valid).withdrawn, 0);
+    assert_eq!(h.get(second_valid).withdrawn, 0);
+    h.assert_pool_exact();
+}
+
+/// Covers the "already fully withdrawn" case of the missing/unauthorized/
+/// over-withdrawn triad: a stream with nothing left to claim sitting in a
+/// batch alongside a healthy one. Proves both the amount and the event log —
+/// the drained stream contributes no new event from this call, so there is
+/// no hidden partial state for it.
+#[test]
+fn an_already_withdrawn_stream_is_skipped_without_failing_the_batch() {
+    let h = Harness::new();
+    let drained = h.create_simple(100 * ONE, 10 * DAY);
+    let pending = h.create_simple(100 * ONE, 100 * DAY);
+    h.advance(10 * DAY);
+    h.client.withdraw(&drained, &None);
+
+    let total = h
+        .client
+        .batch_withdraw(&h.recipient, &h.ids(&[drained, pending]));
+    let events = withdrawn_event_ids(&h); // ← capture right away, before any h.get() calls
+
+    assert_eq!(total, 10 * ONE, "only the still-withdrawable stream pays");
+    assert_eq!(
+        events,
+        std::vec![pending],
+        "the batch call emits exactly one new event, for the stream that \
+         actually paid — nothing for the already-drained one"
+    );
+    assert_eq!(
+        h.get(drained).withdrawn,
+        100 * ONE,
+        "already fully withdrawn"
+    );
+    assert_eq!(h.get(pending).withdrawn, 10 * ONE);
+    h.assert_pool_exact();
+}
+
+/// Covers the "over-withdrawn" case of the missing/unauthorized/over-withdrawn
+/// triad the reviewer asked for: a stream whose `withdrawn` has somehow moved
+/// past `deposited` (the only way this can arise is direct storage
+/// manipulation — see `accrual::withdrawable`'s doc comment) sitting in a
+/// batch alongside a healthy stream. Proves the corrupted stream is left
+/// completely untouched — no further payout, no event — while the healthy
+/// stream still pays in full, so there's no hidden partial state.
+///
+/// Note: this deliberately puts one stream into a state that violates I1
+/// (`withdrawn <= vested`), so `h.assert_pool_exact()` — which asserts I1
+/// across every stream — cannot be used here. The pool balance is checked
+/// directly instead, and the pool's liability accounting for the healthy
+/// stream is what actually matters for this regression.
+#[test]
+fn an_over_withdrawn_stream_is_skipped_without_hidden_partial_state() {
+    let h = Harness::new();
+    let over_withdrawn = h.create_simple(100 * ONE, 100 * DAY);
+    let valid = h.create_simple(100 * ONE, 100 * DAY);
+    h.advance(10 * DAY);
+
+    let pool_before = h.pool();
+
+    let mut corrupted = h.get(over_withdrawn);
+    corrupted.withdrawn = corrupted.deposited + ONE;
+    h.env.as_contract(&h.contract_id, || {
+        crate::storage::save_stream(&h.env, over_withdrawn, &corrupted);
+    });
+
+    let total = h
+        .client
+        .batch_withdraw(&h.recipient, &h.ids(&[over_withdrawn, valid]));
+    let events = withdrawn_event_ids(&h);
+
+    assert_eq!(total, 10 * ONE, "only the healthy stream pays");
+    assert_eq!(
+        events,
+        std::vec![valid],
+        "no withdrawn event for the over-withdrawn stream"
+    );
+    assert_eq!(
+        h.get(over_withdrawn).withdrawn,
+        corrupted.withdrawn,
+        "over-withdrawn stream is untouched, not paid again"
+    );
+    assert_eq!(h.get(valid).withdrawn, 10 * ONE);
+
+    // Pool moved by exactly what the healthy stream paid out — the
+    // corrupted stream's presence caused no extra token movement.
+    assert_eq!(h.pool(), pool_before - 10 * ONE);
 }
 
 #[test]
@@ -289,6 +413,8 @@ fn an_oversized_ttl_batch_is_rejected() {
     let ids: std::vec::Vec<u64> = (0..MAX_BATCH_SIZE + 1)
         .map(|_| h.create_simple(10 * ONE, 100 * DAY))
         .collect();
+    h.advance(10 * DAY);
+    let before = ttl_of(&h, ids[0]);
 
     let err = h
         .client
@@ -296,6 +422,58 @@ fn an_oversized_ttl_batch_is_rejected() {
         .unwrap_err()
         .unwrap();
     assert_eq!(err, Error::BatchTooLarge);
+    assert_eq!(ttl_of(&h, ids[0]), before);
+}
+
+#[test]
+fn malformed_serialized_ids_are_typed_errors_without_partial_mutation() {
+    let h = Harness::new();
+    let id = h.create_simple(100 * ONE, 100 * DAY);
+    h.advance(30 * DAY);
+    let before_ttl = ttl_of(&h, id);
+    let malformed = malformed_ids(&h, id);
+    h.env.mock_auths(&[]);
+
+    let withdraw_err = h
+        .client
+        .try_batch_withdraw(&h.recipient, &malformed)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(withdraw_err, Error::MalformedStreamId);
+    assert!(h.env.auths().is_empty());
+    assert_eq!(h.get(id).withdrawn, 0);
+    assert_eq!(h.balance(&h.recipient), 0);
+
+    let ttl_err = h
+        .client
+        .try_batch_extend_ttl(&malformed)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(ttl_err, Error::MalformedStreamId);
+    assert_eq!(ttl_of(&h, id), before_ttl);
+
+    h.env.mock_all_auths();
+    assert_eq!(
+        h.client.batch_withdraw(&h.recipient, &h.ids(&[id])),
+        30 * ONE,
+        "a corrected retry must succeed"
+    );
+}
+
+#[test]
+fn structural_rejection_precedes_withdraw_authorization() {
+    let h = Harness::new();
+    let oversized = h.ids(&std::vec![0; MAX_BATCH_SIZE as usize + 1]);
+    h.env.mock_auths(&[]);
+
+    let err = h
+        .client
+        .try_batch_withdraw(&h.recipient, &oversized)
+        .unwrap_err()
+        .unwrap();
+
+    assert_eq!(err, Error::BatchTooLarge);
+    assert!(h.env.auths().is_empty());
 }
 
 // ---------------------------------------------------------------------------

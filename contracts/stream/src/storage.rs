@@ -20,10 +20,10 @@
 //!    recipient, or any passer-by — can keep a claim readable without the
 //!    sender's cooperation.
 
-use soroban_sdk::Env;
+use soroban_sdk::{Address, Env};
 
 use crate::error::Error;
-use crate::types::{DataKey, Stream};
+use crate::types::{DataKey, DelegateGrant, Stream};
 
 /// Nominal Stellar ledger close time, in seconds.
 ///
@@ -216,4 +216,35 @@ pub fn stream_count(env: &Env) -> u64 {
         .instance()
         .get(&DataKey::NextStreamId)
         .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// Delegation
+// ---------------------------------------------------------------------------
+
+/// Persist a delegate grant, borrowing the stream's TTL.
+pub fn save_delegate(env: &Env, stream_id: u64, delegate: &Address, grant: &DelegateGrant) {
+    let key = DataKey::Delegate(stream_id, delegate.clone());
+    env.storage().persistent().set(&key, grant);
+    // Give the grant at least as long to live as the stream itself.
+    let stream = peek_stream(env, stream_id).expect("stream must exist when saving delegate");
+    let target = ttl_target_ledgers(env, &stream);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, target, target);
+}
+
+/// Remove a delegate grant.
+pub fn remove_delegate(env: &Env, stream_id: u64, delegate: &Address) {
+    let key = DataKey::Delegate(stream_id, delegate.clone());
+    if env.storage().persistent().has(&key) {
+        env.storage().persistent().remove(&key);
+    }
+}
+
+/// Retrieve a delegate grant, or `None` if it does not exist.
+pub fn load_delegate(env: &Env, stream_id: u64, delegate: &Address) -> Option<DelegateGrant> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Delegate(stream_id, delegate.clone()))
 }
