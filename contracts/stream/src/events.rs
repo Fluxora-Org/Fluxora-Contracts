@@ -80,6 +80,8 @@ pub struct StreamCreated {
 
 /// The recipient drew down accrued funds. Emitted once per stream, including
 /// once per drawn-from stream inside a `batch_withdraw`.
+///
+/// Zero-amount withdrawals are no-ops and do not emit this event.
 #[contractevent]
 pub struct Withdrawn {
     #[topic]
@@ -151,6 +153,8 @@ pub struct Resumed {
 
 /// Funds added. Carries the new `end_time` because a top-up extends the
 /// duration rather than raising the rate.
+///
+/// Zero-amount top-ups are no-ops and do not emit this event.
 #[contractevent]
 pub struct ToppedUp {
     #[topic]
@@ -227,6 +231,10 @@ pub fn stream_created(env: &Env, stream_id: u64, stream: &Stream) {
 }
 
 pub fn withdrawn(env: &Env, stream_id: u64, stream: &Stream, amount: i128) {
+    if amount == 0 {
+        return;
+    }
+    assert!(amount > 0, "withdraw amount must be positive");
     Withdrawn {
         stream_id,
         recipient: stream.recipient.clone(),
@@ -287,6 +295,10 @@ pub fn resumed(env: &Env, stream_id: u64, stream: &Stream, paused_duration: u64)
 }
 
 pub fn topped_up(env: &Env, stream_id: u64, stream: &Stream, amount: i128) {
+    if amount == 0 {
+        return;
+    }
+    assert!(amount > 0, "top-up amount must be positive");
     ToppedUp {
         stream_id,
         sender: stream.sender.clone(),
