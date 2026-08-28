@@ -16,7 +16,7 @@
 # What it deliberately does NOT cover: the archival restore round trip. Testnet's
 # min_persistent_ttl is 120,960 ledgers (~7 days), a network floor no contract
 # can undercut, so a genuine archival cannot be observed in a single run. See
-# script/local-archival-proof.sh and KNOWN-LIMITATIONS.md §1.
+# script/local-archival-proof.sh and docs/KNOWN-LIMITATIONS.md §1.
 
 set -euo pipefail
 
@@ -54,7 +54,7 @@ info() { printf '   %s\n' "$*"; }
 #
 # So after every state change, block until every backend we can see has caught
 # up. Any client combining multiple views into one derived number needs the
-# same discipline; see KNOWN-LIMITATIONS.md §6.
+# same discipline; see docs/KNOWN-LIMITATIONS.md §6.
 # ---------------------------------------------------------------------------
 RPC_URL="${RPC_URL:-https://soroban-testnet.stellar.org}"
 
@@ -349,3 +349,4 @@ printf '│ %-2d passed   %-2d failed                                           
 printf '╰──────────────────────────────────────────────────────────────────────╯\n'
 printf '\nContract: https://stellar.expert/explorer/testnet/contract/%s\n' "$CONTRACT"
 [[ $fail -eq 0 ]]
+

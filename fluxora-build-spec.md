@@ -382,7 +382,7 @@ with balances intact.
 >
 > Closing that gap on live testnet — let an entry genuinely archive, observe the real failure,
 > restore it, prove the stream still pays out — is the **acceptance criterion for stage 4**, not
-> a nice-to-have. See `KNOWN-LIMITATIONS.md`.
+> a nice-to-have. See `docs/KNOWN-LIMITATIONS.md`.
 
 ### 3.2 Resource limits
 
@@ -475,7 +475,7 @@ and the `wasm32v1-none` target. Check before starting; do not trust a version nu
 training data or from an older tutorial. Note the `stellar` CLI is versioned the same way and
 must match.
 
-See `MIGRATION.md` for the audit of what the pre-v1 contract set exposed and what downstream
+See `docs/MIGRATION.md` for the audit of what the pre-v1 contract set exposed and what downstream
 repos still call into it.
 
 ---
@@ -513,7 +513,7 @@ weaken the audit story.
 - No unlock curves other than linear. Cliff plus linear covers the real use cases.
 - No cross-chain anything.
 - No withdrawal rate limiting or claim caps in the core. If wanted, they belong in a policy
-  contract wrapping `withdraw` — see `MIGRATION.md` §3.
+  contract wrapping `withdraw` — see `docs/MIGRATION.md` §3.
 - No delegated withdrawal with bespoke nonce-and-signature schemes. Smart accounts
   (`__check_auth`) cover the legitimate cases.
 
@@ -551,3 +551,4 @@ weaken the audit story.
   returns a typed error.
 - When a measurement contradicts a number in this spec, trust the measurement, fix the spec, and
   record the date and protocol version next to the new number.
+

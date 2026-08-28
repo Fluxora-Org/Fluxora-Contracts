@@ -17,7 +17,7 @@
 //!   read again           ->  succeeds, data intact
 //! ```
 //!
-//! See `KNOWN-LIMITATIONS.md` §1.
+//! See `docs/KNOWN-LIMITATIONS.md` §1.
 //!
 //! ## Why a separate contract
 //!

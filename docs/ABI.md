@@ -46,7 +46,7 @@ deployed contract via `#[contractevent]` and `#[contractimpl]`. The SDK and
 indexer must codegen from `stellar contract info interface`, not from
 hand-rolled topic parsers. The previous frontend's hand-written
 `nativeToScVal` encoding is exactly the thing that broke; see
-[MIGRATION.md](../MIGRATION.md).
+[MIGRATION.md](MIGRATION.md).
 
 ---
 
@@ -183,7 +183,7 @@ may emit fewer than 16 events.
 
 ## Resolved schema questions
 
-Both were open against `Fluxora-Backend` in [MIGRATION.md](../MIGRATION.md) §5
+Both were open against `Fluxora-Backend` in [MIGRATION.md](MIGRATION.md) §5
 and are settled here as part of the freeze.
 
 ### 1. `streams.status` — mirror the contract's four values verbatim
@@ -283,4 +283,5 @@ view calls combined into one derived figure (for example checking
 **2. Handle archived streams.** `stream_exists(id) == false` while
 `id < stream_count()` means the entry has been archived, not that it never
 existed. Surface a restore action rather than an error. See
-[KNOWN-LIMITATIONS.md](../KNOWN-LIMITATIONS.md) §1.
+[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) §1.
+

@@ -17,7 +17,7 @@ subscription billing, vesting schedules. The contract is the product.
 | Contract size | ~47 KB |
 | Tests | 146, including property tests and a pool invariant checked after every operation |
 
-> **Read [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) before relying on this.**
+> **Read [docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md) before relying on this.**
 > A green suite here does not mean TTL is solved — the archival *recovery* flow
 > is not yet proven against a live network. See §1 there, and the summary below.
 
@@ -158,7 +158,7 @@ lowers the rate and therefore retroactively *reduces* the amount already vested 
 letting `withdrawn` exceed `vested`, and letting a subsequent `cancel` (which
 sets `deposited = vested`) drive liability negative and refund the sender money
 the recipient already holds. This was a real bug, caught by the randomized
-sequence suite; see [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) for the class of
+sequence suite; see [docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md) for the class of
 issue and `test::top_up::a_top_up_never_reduces_what_is_already_vested` for the
 regression. Rounding down guarantees `vested` never decreases; the residual is at
 most one second of schedule, in the recipient's favour.
@@ -254,7 +254,7 @@ costs.
 
 **TTL is therefore half-proven.** Closing the other half against live testnet is
 the acceptance criterion for stage 4, not a nice-to-have. Full detail and
-integrator guidance in [KNOWN-LIMITATIONS.md §1](KNOWN-LIMITATIONS.md).
+integrator guidance in [docs/KNOWN-LIMITATIONS.md §1](docs/KNOWN-LIMITATIONS.md).
 
 ---
 
@@ -343,12 +343,12 @@ and passes 35/35 assertions.
 
 Its acceptance criterion — the live archival restore round trip — is **not yet
 met**. A canary entry was planted on 2026-08-12 and archives ~2026-08-19; see
-[KNOWN-LIMITATIONS.md §1](KNOWN-LIMITATIONS.md) and
+[docs/KNOWN-LIMITATIONS.md §1](docs/KNOWN-LIMITATIONS.md) and
 `script/archival-canary.sh`.
 
 Then the indexer, keeper and TypeScript SDK (stage 5), reference UI last (stage 6).
 
-Migrating from the pre-rewrite contract? See [MIGRATION.md](MIGRATION.md) — the
+Migrating from the pre-rewrite contract? See [docs/MIGRATION.md](docs/MIGRATION.md) — the
 frontend's four contract calls all break, the backend is unaffected.
 
 ## Documents
@@ -356,11 +356,12 @@ frontend's four contract calls all break, the backend is unaffected.
 | | |
 |---|---|
 | [docs/ABI.md](docs/ABI.md) | **Interface of record.** Frozen 2026-08-12. Read this before integrating. |
-| [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) | What a green suite does not prove. |
-| [MIGRATION.md](MIGRATION.md) | Deletion audit vs the pre-rewrite contract, and downstream impact. |
+| [docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md) | What a green suite does not prove. |
+| [docs/MIGRATION.md](docs/MIGRATION.md) | Deletion audit vs the pre-rewrite contract, and downstream impact. |
 | [docs/soroban-rpc-read-skew.md](docs/soroban-rpc-read-skew.md) | Pin multi-call reads to one ledger, and the read-after-write barrier. |
 | [fluxora-build-spec.md](fluxora-build-spec.md) | The build spec, with amendments where measurement contradicted it. |
 
 > **Note for deployment:** the `stellar` CLI must be at least version 27 to match
 > the protocol. A protocol-23 CLI will scaffold and may misreport against a
 > protocol-27 network.
+
