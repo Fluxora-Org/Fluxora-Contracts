@@ -78,14 +78,12 @@ fn create_stream_rejects_zero_negative_and_handles_extremes() {
         &true,
         &true,
     );
-    if let Err(inner) = res {
-        if let Ok(e) = inner {
-            assert!(
-                matches!(e, Error::TokenTransferFailed | Error::TokenMissing),
-                "expected token transfer error for huge deposit, got {:?}",
-                e
-            );
-        }
+    if let Err(Ok(e)) = res {
+        assert!(
+            matches!(e, Error::TokenTransferFailed | Error::TokenMissing),
+            "expected token transfer error for huge deposit, got {:?}",
+            e
+        );
     }
 }
 
@@ -112,17 +110,15 @@ fn top_up_rejects_zero_negative_and_extreme_amounts() {
     // a token transfer error would also be acceptable. Either is a clean
     // rejection of an extreme amount.
     let res = h.client.try_top_up(&id, &i128::MAX);
-    if let Err(inner) = res {
-        if let Ok(e) = inner {
-            assert!(
-                matches!(
-                    e,
-                    Error::Overflow | Error::TokenTransferFailed | Error::TokenMissing
-                ),
-                "expected a typed error for huge top_up, got {:?}",
-                e
-            );
-        }
+    if let Err(Ok(e)) = res {
+        assert!(
+            matches!(
+                e,
+                Error::Overflow | Error::TokenTransferFailed | Error::TokenMissing
+            ),
+            "expected a typed error for huge top_up, got {:?}",
+            e
+        );
     }
 }
 
