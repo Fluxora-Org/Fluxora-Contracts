@@ -646,11 +646,7 @@ fn duplicate_at_first_position_preserves_all_balances_and_events() {
         recipient_before,
         "recipient balance changed"
     );
-    assert_eq!(
-        h.pool(),
-        pool_before,
-        "pool balance changed"
-    );
+    assert_eq!(h.pool(), pool_before, "pool balance changed");
     // Per-stream accounting untouched.
     assert_eq!(h.get(a).withdrawn, 0, "stream a was drawn on");
     assert_eq!(h.get(b).withdrawn, 0, "stream b was drawn on");
@@ -690,11 +686,7 @@ fn duplicate_at_middle_position_preserves_all_balances_and_events() {
         recipient_before,
         "recipient balance changed"
     );
-    assert_eq!(
-        h.pool(),
-        pool_before,
-        "pool balance changed"
-    );
+    assert_eq!(h.pool(), pool_before, "pool balance changed");
     assert_eq!(h.get(a).withdrawn, 0, "stream a was drawn on");
     assert_eq!(h.get(b).withdrawn, 0, "stream b was drawn on");
     h.assert_pool_exact();
@@ -733,11 +725,7 @@ fn duplicate_at_last_position_preserves_all_balances_and_events() {
         recipient_before,
         "recipient balance changed"
     );
-    assert_eq!(
-        h.pool(),
-        pool_before,
-        "pool balance changed"
-    );
+    assert_eq!(h.pool(), pool_before, "pool balance changed");
     assert_eq!(h.get(a).withdrawn, 0, "stream a was drawn on");
     assert_eq!(h.get(b).withdrawn, 0, "stream b was drawn on");
     h.assert_pool_exact();
