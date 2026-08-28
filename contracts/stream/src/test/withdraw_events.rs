@@ -123,6 +123,24 @@ fn partial_withdraw_return_matches_event_amount() {
     h.assert_pool_exact();
 }
 
+/// Minimal positive requested amount: one stroop. Return, event, and token delta
+/// must all agree.
+#[test]
+fn one_stroop_withdraw_return_matches_event_amount() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    h.advance(30 * DAY);
+
+    let recipient_before = h.balance(&h.recipient);
+    let returned = h.client.withdraw(&id, &Some(1));
+    let expected = assert_withdrawn_event(&h, id, 1, recipient_before);
+
+    assert_eq!(returned, 1);
+    assert_eq!(expected.amount, 1);
+    assert_eq!(expected.amount, returned);
+    h.assert_pool_exact();
+}
+
 /// Full withdrawal (`None`): the recipient drains the entire available balance.
 #[test]
 fn full_withdraw_return_matches_event_amount() {
@@ -448,6 +466,25 @@ fn negative_amount_rejected_no_event() {
     h.assert_pool_exact();
 }
 
+/// Most negative representable amount is rejected: returns `InvalidAmount`, no event.
+#[test]
+fn min_int_amount_rejected_no_event() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    h.advance(30 * DAY);
+
+    let err = h
+        .client
+        .try_withdraw(&id, &Some(i128::MIN))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::InvalidAmount);
+
+    let events = published_by_stream(&h);
+    assert!(events.is_empty(), "no event on i128::MIN amount");
+    h.assert_pool_exact();
+}
+
 /// Over-request is rejected: returns `InsufficientWithdrawable`, no event.
 #[test]
 fn over_request_rejected_no_event() {
@@ -466,6 +503,23 @@ fn over_request_rejected_no_event() {
     assert!(events.is_empty(), "no event on over-request");
     h.assert_pool_exact();
 }
+
+/// Maximum signed integer over-request is rejected: returns
+/// `InsufficientWithdrawable`, no event.
+#[test]
+fn max_int_over_request_rejected_no_event() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    h.advance(30 * DAY);
+
+    let err = h
+        .client
+        .try_withdraw(&id, &Some(i128::MAX))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::InsufficientWithdrawable);
+
+    let events = published_by_stream(&h);
 
 /// Unknown stream: returns `StreamNotFound`, no event.
 #[test]
