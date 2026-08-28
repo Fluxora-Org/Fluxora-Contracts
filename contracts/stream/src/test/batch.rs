@@ -609,6 +609,201 @@ fn a_duplicate_is_rejected_at_any_position() {
 }
 
 // ---------------------------------------------------------------------------
+// Focused regression (#1560): duplicate at each position, full assertions
+// ---------------------------------------------------------------------------
+
+/// Regression for #1560. A duplicate id at the *first* position rejects the
+/// whole batch: balances (sender, recipient, pool) are unchanged, no events
+/// leak, and the returned error is `DuplicateStreamId`.
+#[test]
+fn duplicate_at_first_position_preserves_all_balances_and_events() {
+    let h = Harness::new();
+    let a = h.create_simple(100 * ONE, 100 * DAY);
+    let b = h.create_simple(100 * ONE, 100 * DAY);
+    h.advance(30 * DAY);
+
+    let sender_before = h.balance(&h.sender);
+    let recipient_before = h.balance(&h.recipient);
+    let pool_before = h.pool();
+
+    let err = h
+        .client
+        .try_batch_withdraw(&h.recipient, &h.ids(&[a, a, b]))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::DuplicateStreamId);
+
+    // No withdrawn events should have been emitted.
+    assert!(withdrawn_event_ids(&h).is_empty());
+    // All three balances must be unchanged.
+    assert_eq!(h.balance(&h.sender), sender_before, "sender balance changed");
+    assert_eq!(
+        h.balance(&h.recipient),
+        recipient_before,
+        "recipient balance changed"
+    );
+    assert_eq!(h.pool(), pool_before, "pool balance changed");
+    // Per-stream accounting untouched.
+    assert_eq!(h.get(a).withdrawn, 0, "stream a was drawn on");
+    assert_eq!(h.get(b).withdrawn, 0, "stream b was drawn on");
+    h.assert_pool_exact();
+}
+
+/// Regression for #1560. A duplicate id at the *middle* position (first and
+/// last are the same id, middle is distinct) rejects the whole batch with
+/// full balance and event preservation.
+#[test]
+fn duplicate_at_middle_position_preserves_all_balances_and_events() {
+    let h = Harness::new();
+    let a = h.create_simple(100 * ONE, 100 * DAY);
+    let b = h.create_simple(100 * ONE, 100 * DAY);
+    h.advance(30 * DAY);
+
+    let sender_before = h.balance(&h.sender);
+    let recipient_before = h.balance(&h.recipient);
+    let pool_before = h.pool();
+
+    // ids = [a, b, a] — duplicate wraps around first and last.
+    let err = h
+        .client
+        .try_batch_withdraw(&h.recipient, &h.ids(&[a, b, a]))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::DuplicateStreamId);
+
+    assert!(withdrawn_event_ids(&h).is_empty());
+    assert_eq!(h.balance(&h.sender), sender_before, "sender balance changed");
+    assert_eq!(
+        h.balance(&h.recipient),
+        recipient_before,
+        "recipient balance changed"
+    );
+    assert_eq!(h.pool(), pool_before, "pool balance changed");
+    assert_eq!(h.get(a).withdrawn, 0, "stream a was drawn on");
+    assert_eq!(h.get(b).withdrawn, 0, "stream b was drawn on");
+    h.assert_pool_exact();
+}
+
+/// Regression for #1560. A duplicate id at the *last* position rejects the
+/// whole batch, even though the first two streams are valid and would have
+/// paid out if the batch were not atomic.
+#[test]
+fn duplicate_at_last_position_preserves_all_balances_and_events() {
+    let h = Harness::new();
+    let a = h.create_simple(100 * ONE, 100 * DAY);
+    let b = h.create_simple(100 * ONE, 100 * DAY);
+    h.advance(30 * DAY);
+
+    let sender_before = h.balance(&h.sender);
+    let recipient_before = h.balance(&h.recipient);
+    let pool_before = h.pool();
+
+    // ids = [a, b, b] — duplicate at the end.
+    let err = h
+        .client
+        .try_batch_withdraw(&h.recipient, &h.ids(&[a, b, b]))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::DuplicateStreamId);
+
+    assert!(withdrawn_event_ids(&h).is_empty());
+    assert_eq!(h.balance(&h.sender), sender_before, "sender balance changed");
+    assert_eq!(
+        h.balance(&h.recipient),
+        recipient_before,
+        "recipient balance changed"
+    );
+    assert_eq!(h.pool(), pool_before, "pool balance changed");
+    assert_eq!(h.get(a).withdrawn, 0, "stream a was drawn on");
+    assert_eq!(h.get(b).withdrawn, 0, "stream b was drawn on");
+    h.assert_pool_exact();
+}
+
+/// Regression for #1560. A triple-duplicated id (three occurrences of the
+/// same stream) is still a single `DuplicateStreamId` rejection, not a
+/// different error path.
+#[test]
+fn triple_duplicate_is_rejected_with_same_error() {
+    let h = Harness::new();
+    let a = h.create_simple(100 * ONE, 100 * DAY);
+    h.advance(30 * DAY);
+
+    let sender_before = h.balance(&h.sender);
+    let recipient_before = h.balance(&h.recipient);
+    let pool_before = h.pool();
+
+    let err = h
+        .client
+        .try_batch_withdraw(&h.recipient, &h.ids(&[a, a, a]))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::DuplicateStreamId);
+
+    assert!(withdrawn_event_ids(&h).is_empty());
+    assert_eq!(h.balance(&h.sender), sender_before);
+    assert_eq!(h.balance(&h.recipient), recipient_before);
+    assert_eq!(h.pool(), pool_before);
+    assert_eq!(h.get(a).withdrawn, 0);
+    h.assert_pool_exact();
+}
+
+/// Regression for #1560. Duplicate rejection is order-independent: all six
+/// orderings of one duplicate among two unique ids produce identical
+/// balances, events, and error code.
+#[test]
+fn duplicate_rejection_is_order_independent_for_balances_and_events() {
+    let patterns: [[u64; 3]; 6] = [
+        [0, 0, 1],
+        [0, 1, 0],
+        [1, 0, 0],
+        [1, 1, 0],
+        [1, 0, 1],
+        [0, 1, 1],
+    ];
+
+    for ids in patterns {
+        let h = Harness::new();
+        let a = h.create_simple(100 * ONE, 100 * DAY);
+        let b = h.create_simple(100 * ONE, 100 * DAY);
+        h.advance(30 * DAY);
+
+        let sender_before = h.balance(&h.sender);
+        let recipient_before = h.balance(&h.recipient);
+        let pool_before = h.pool();
+
+        let err = h
+            .client
+            .try_batch_withdraw(&h.recipient, &h.ids(&ids))
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, Error::DuplicateStreamId, "ids {ids:?}");
+
+        assert!(
+            withdrawn_event_ids(&h).is_empty(),
+            "leaked events for ids {ids:?}"
+        );
+        assert_eq!(
+            h.balance(&h.sender),
+            sender_before,
+            "sender balance changed for ids {ids:?}"
+        );
+        assert_eq!(
+            h.balance(&h.recipient),
+            recipient_before,
+            "recipient balance changed for ids {ids:?}"
+        );
+        assert_eq!(
+            h.pool(),
+            pool_before,
+            "pool balance changed for ids {ids:?}"
+        );
+        assert_eq!(h.get(a).withdrawn, 0, "stream a drawn for ids {ids:?}");
+        assert_eq!(h.get(b).withdrawn, 0, "stream b drawn for ids {ids:?}");
+        h.assert_pool_exact();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Retry behaviour
 // ---------------------------------------------------------------------------
 
