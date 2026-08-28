@@ -689,11 +689,13 @@ impl FluxoraStream {
     /// A compliance-bound sender — payroll, a KYC'd grant program — can pin the
     /// payee at creation by passing `false`.
     ///
-    /// Transfer changes only `recipient`: the schedule, vested amount, amount
-    /// already withdrawn and outstanding liability are unchanged. Funds already
-    /// withdrawn stay with the old recipient; every accrued but unwithdrawn
-    /// stroop and all future accrual move with the stream. After transfer only
-    /// the new recipient may withdraw the remaining claim.
+    /// Any balance the old recipient had already accrued but not withdrawn moves
+    /// with the stream. Recipients should withdraw before transferring.
+    ///
+    /// Transfer is allowed at the cliff and end timestamps, and the new
+    /// recipient receives any claim that is withdrawable at those boundaries.
+    /// A cancelled stream may still be transferred while it has an unwithdrawn
+    /// tail; a depleted stream cannot be transferred.
     pub fn transfer_recipient(
         env: Env,
         stream_id: u64,

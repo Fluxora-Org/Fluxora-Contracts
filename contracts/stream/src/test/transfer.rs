@@ -188,6 +188,109 @@ fn transferring_to_the_current_recipient_is_a_no_op() {
     assert_eq!(h.get(id).recipient, h.other, "a later retry still succeeds");
 }
 
+// --- Cliff and terminal boundaries ----------------------------------------
+
+/// Transfer immediately before the cliff moves the still-locked claim. The
+/// new recipient cannot withdraw before the cliff, but can claim the accrued
+/// amount as soon as the cliff opens.
+#[test]
+fn transfer_one_second_before_cliff_moves_claim_to_new_recipient() {
+    let h = Harness::new();
+    let start = h.now();
+    let cliff = start + 50 * DAY;
+    let end = start + 100 * DAY;
+    let id = h.create(1_000 * ONE, start, end, cliff, true, true, true);
+
+    h.warp_to(cliff - 1);
+    h.client.transfer_recipient(&id, &h.other);
+
+    let err = h.client.try_withdraw(&id, &None).unwrap_err().unwrap();
+    assert_eq!(err, Error::NothingToWithdraw);
+    assert_eq!(h.balance(&h.other), 1_000_000 * ONE);
+
+    h.warp_to(cliff);
+    assert_eq!(h.client.withdraw(&id, &None), 500 * ONE);
+    assert_eq!(h.balance(&h.recipient), 0);
+    assert_eq!(h.balance(&h.other), 1_000_000 * ONE + 500 * ONE);
+}
+
+/// The cliff ledger is inclusive: transferring at the exact cliff preserves
+/// the newly opened claim for the recipient who receives the stream.
+#[test]
+fn transfer_at_cliff_preserves_the_open_claim() {
+    let h = Harness::new();
+    let start = h.now();
+    let cliff = start + 50 * DAY;
+    let id = h.create(1_000 * ONE, start, start + 100 * DAY, cliff, true, true, true);
+
+    h.warp_to(cliff);
+    h.client.transfer_recipient(&id, &h.other);
+
+    assert_eq!(h.client.withdrawable_of(&id), 500 * ONE);
+    assert_eq!(h.client.withdraw(&id, &None), 500 * ONE);
+    assert_eq!(h.balance(&h.recipient), 0);
+    assert_eq!(h.balance(&h.other), 1_000_000 * ONE + 500 * ONE);
+}
+
+/// Transfer after the cliff moves both the already-open claim and all future
+/// accrual; the old recipient receives no payout.
+#[test]
+fn transfer_after_cliff_moves_accrued_and_future_claims() {
+    let h = Harness::new();
+    let start = h.now();
+    let cliff = start + 50 * DAY;
+    let end = start + 100 * DAY;
+    let id = h.create(1_000 * ONE, start, end, cliff, true, true, true);
+
+    h.warp_to(cliff + 1);
+    let accrued = 1_000 * ONE * (50 * DAY + 1) as i128 / (100 * DAY) as i128;
+    h.client.transfer_recipient(&id, &h.other);
+    assert_eq!(h.client.withdraw(&id, &None), accrued);
+
+    h.warp_to(end);
+    assert_eq!(h.client.withdraw(&id, &None), 1_000 * ONE - accrued);
+    assert_eq!(h.balance(&h.recipient), 0);
+    assert_eq!(h.balance(&h.other), 1_000_000 * ONE + 1_000 * ONE);
+}
+
+/// End is inclusive: the recipient transferred to on the end ledger receives
+/// the complete vested claim.
+#[test]
+fn transfer_at_end_moves_the_complete_claim() {
+    let h = Harness::new();
+    let start = h.now();
+    let end = start + 100 * DAY;
+    let id = h.create(1_000 * ONE, start, end, end, true, true, true);
+
+    h.warp_to(end);
+    h.client.transfer_recipient(&id, &h.other);
+
+    assert_eq!(h.client.withdraw(&id, &None), 1_000 * ONE);
+    assert_eq!(h.balance(&h.recipient), 0);
+    assert_eq!(h.balance(&h.other), 1_000_000 * ONE + 1_000 * ONE);
+}
+
+/// Once the end claim has been withdrawn, the stream is depleted. Transfer
+/// retries remain rejected and cannot redirect a second withdrawal.
+#[test]
+fn transfer_after_depletion_is_rejected_and_retry_is_stable() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    h.warp_to(T0 + 100 * DAY);
+    h.client.withdraw(&id, &None);
+
+    for _ in 0..2 {
+        let err = h
+            .client
+            .try_transfer_recipient(&id, &h.other)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, Error::StreamTerminated);
+    }
+    assert_eq!(h.get(id).recipient, h.recipient);
+    assert_eq!(h.balance(&h.other), 1_000_000 * ONE);
+}
+
 // --- Guards ---------------------------------------------------------------
 
 /// A compliance-bound sender can pin the payee at creation. This is the whole
