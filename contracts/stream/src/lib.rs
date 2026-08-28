@@ -1135,6 +1135,9 @@ impl FluxoraStream {
     /// contract extends at creation, because no entry may exceed the network's
     /// `max_entry_ttl`.
     pub fn extend_stream_ttl(env: Env, stream_id: u64) -> Result<u32, Error> {
+        // Authorization: permissionless by design — see doc comment. Any caller
+        // may pay rent for any stream. The caller has no address parameter and
+        // no `require_auth` is invoked.
         let stream = storage::peek_stream(&env, stream_id)?;
         let target = storage::ttl_target_ledgers(&env, &stream);
         storage::extend_stream(&env, stream_id, &stream);
@@ -1157,6 +1160,7 @@ impl FluxoraStream {
     /// rejected before the sweep starts. Returns how many entries were actually
     /// extended.
     pub fn batch_extend_ttl(env: Env, stream_ids: Vec<u64>) -> Result<u32, Error> {
+        // Authorization: permissionless — same policy as `extend_stream_ttl`.
         let stream_ids = Self::validate_batch_ids(&env, &stream_ids)?;
 
         let mut extended = 0u32;

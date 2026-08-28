@@ -445,6 +445,69 @@ fn a_depleted_stream_settles_to_the_floor() {
     );
 }
 
+// --- Permissionless policy regression (issue #1563) ------------------------
+
+/// `extend_stream_ttl` must only touch the entry's TTL. The stream record
+/// — deposit, withdrawn, schedule, status — must be byte-identical before
+/// and after.
+#[test]
+fn extend_stream_ttl_does_not_mutate_stream_state() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    h.advance(30 * DAY);
+    h.client.withdraw(&id, &Some(100 * ONE));
+
+    let before = h.get(id);
+    let pool_before = h.pool();
+    let snap = h.snapshot();
+
+    age_ledgers(&h, ttl_of(&h, id) - 1_000);
+    h.client.extend_stream_ttl(&id);
+
+    let after = h.get(id);
+    assert_eq!(after, before, "stream state must not change\n{snap}");
+    assert_eq!(h.pool(), pool_before, "pool must not change");
+    h.assert_pool_exact();
+}
+
+/// A failed `extend_stream_ttl` (non-existent id) must not mutate the
+/// counter, any live stream, any live TTL, or the pool.
+#[test]
+fn extend_stream_ttl_failure_does_not_mutate_storage() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let before = h.get(id);
+    let rent = ttl_of(&h, id);
+    let pool = h.pool();
+
+    let err = h
+        .client
+        .try_extend_stream_ttl(&999_u64)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::StreamNotFound);
+
+    assert_eq!(h.client.stream_count(), 1, "counter must not move");
+    assert_eq!(h.get(id), before, "live stream must not change");
+    assert_eq!(ttl_of(&h, id), rent, "live TTL must not change");
+    assert_eq!(h.pool(), pool, "pool must not change");
+}
+
+/// An entry one ledger from archival recovers its full rent window on extension.
+#[test]
+fn extend_stream_ttl_near_expiry_recovers_full_window() {
+    let h = Harness::new();
+    h.env.ledger().set_max_entry_ttl(50_000);
+    let id = h.create_simple(1_000 * ONE, YEAR);
+
+    // Decay to the edge.
+    age_ledgers(&h, 49_999);
+    assert_eq!(ttl_of(&h, id), 1, "must be at the archival boundary");
+
+    h.client.extend_stream_ttl(&id);
+    assert_eq!(ttl_of(&h, id), 50_000, "must recover the full window");
+}
+
 // --- Missing entries -------------------------------------------------------
 
 /// Every single-stream entry point answers a never-issued id with

@@ -225,6 +225,46 @@ fn batch_extend_ttl_needs_no_authorization() {
 
     revoke_all_auths(&h.env);
     assert_eq!(h.client.batch_extend_ttl(&h.ids(&[a, b])), 2);
+    assert!(h.env.auths().is_empty(), "should have required no auth");
+}
+
+/// The three natural caller classes — sender, recipient, unrelated third
+/// party — all succeed, and none of them triggers a `require_auth`.
+///
+/// Because `extend_stream_ttl` has no caller address parameter, all three
+/// calls are mechanically identical — the function cannot distinguish who
+/// submitted the transaction. The test's value is as a policy specification:
+/// its name and structure document that every caller class is permitted.
+#[test]
+fn extend_stream_ttl_is_callable_by_every_caller_class() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+
+    // Sender context.
+    revoke_all_auths(&h.env);
+    h.client.extend_stream_ttl(&id);
+    assert!(h.env.auths().is_empty(), "sender: no auth required");
+
+    // Recipient context.
+    revoke_all_auths(&h.env);
+    h.client.extend_stream_ttl(&id);
+    assert!(h.env.auths().is_empty(), "recipient: no auth required");
+
+    // Unrelated third party.
+    revoke_all_auths(&h.env);
+    h.client.extend_stream_ttl(&id);
+    assert!(h.env.auths().is_empty(), "third party: no auth required");
+}
+
+#[test]
+fn batch_extend_ttl_is_callable_by_every_caller_class() {
+    let h = Harness::new();
+    let a = h.create_simple(100 * ONE, 100 * DAY);
+    let b = h.create_simple(100 * ONE, 100 * DAY);
+
+    revoke_all_auths(&h.env);
+    assert_eq!(h.client.batch_extend_ttl(&h.ids(&[a, b])), 2);
+    assert!(h.env.auths().is_empty(), "batch: no auth required");
 }
 
 /// Views must be readable by anyone, including with no auth context at all.
