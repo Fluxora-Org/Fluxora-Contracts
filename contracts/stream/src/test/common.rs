@@ -2,11 +2,141 @@
 
 #![allow(dead_code)]
 
+use soroban_sdk::testutils::storage::Persistent as _;
 use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
 use soroban_sdk::{Address, Env, Vec};
 
-use crate::{accrual, storage, FluxoraStream, FluxoraStreamClient, Stream, StreamStatus};
+use crate::{accrual, storage, DataKey, FluxoraStream, FluxoraStreamClient, Stream, StreamStatus};
+
+// ---------------------------------------------------------------------------
+// TestSnapshot — deterministic, credential-free state capture
+// ---------------------------------------------------------------------------
+
+/// A point-in-time snapshot of ledger, stream, and token state.
+///
+/// Captured by [`Harness::snapshot`] and printed automatically on assertion
+/// failure via `eprintln!`. Every value is a plain integer or enum — no
+/// addresses, no secrets. The output is deterministic and replayable: given the
+/// same seed inputs, the same snapshot is reproduced every time.
+///
+/// # CI safety
+///
+/// Soroban test environments use randomly-generated, ephemeral addresses that
+/// exist only in the in-memory test host. There are no private keys, RPC
+/// endpoints, or credentials of any kind. Printing a snapshot in CI output is
+/// therefore safe and produces no information useful to an attacker.
+///
+/// # What it captures
+///
+/// | Field | Source |
+/// |---|---|
+/// | `ledger_timestamp` | `env.ledger().timestamp()` |
+/// | `ledger_sequence` | `env.ledger().sequence()` |
+/// | `stream_count` | `client.stream_count()` |
+/// | `streams` | one [`StreamSnapshot`] per stream id |
+/// | `balance_sender` | `token_client.balance(sender)` |
+/// | `balance_recipient` | `token_client.balance(recipient)` |
+/// | `balance_other` | `token_client.balance(other)` |
+/// | `balance_pool` | `token_client.balance(contract_id)` |
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestSnapshot {
+    /// Unix seconds at the moment the snapshot was taken.
+    pub ledger_timestamp: u64,
+    /// Ledger sequence number at the moment the snapshot was taken.
+    pub ledger_sequence: u32,
+    /// Total number of streams in the contract.
+    pub stream_count: u64,
+    /// Per-stream accounting state, indexed by stream id.
+    pub streams: std::vec::Vec<StreamSnapshot>,
+    /// Token balance of the sender address, in stroops.
+    pub balance_sender: i128,
+    /// Token balance of the recipient address, in stroops.
+    pub balance_recipient: i128,
+    /// Token balance of the `other` address, in stroops.
+    pub balance_other: i128,
+    /// Token balance pooled inside the contract, in stroops.
+    pub balance_pool: i128,
+}
+
+/// Accounting snapshot for a single stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamSnapshot {
+    /// Stream identifier (monotonic, starts at 0).
+    pub id: u64,
+    /// Total ever deposited (reduced on cancel).
+    pub deposited: i128,
+    /// Total ever withdrawn by the recipient.
+    pub withdrawn: i128,
+    /// Computed vested amount at the snapshot instant.
+    pub vested: i128,
+    /// Computed withdrawable amount at the snapshot instant.
+    pub withdrawable: i128,
+    /// Current lifecycle status.
+    pub status: StreamStatus,
+    /// Schedule start (unix seconds).
+    pub start_time: u64,
+    /// Schedule end (unix seconds).
+    pub end_time: u64,
+    /// Cliff gate (unix seconds).
+    pub cliff_time: u64,
+    /// Cumulative seconds spent paused (excluding any in-progress pause).
+    pub paused_total: u64,
+    /// Freeze point if the stream is currently paused.
+    pub paused_at: Option<u64>,
+}
+
+impl std::fmt::Display for StreamSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "stream[{id}]: status={status:?} \
+             deposited={dep} withdrawn={wth} vested={vest} withdrawable={draw} \
+             start={start} end={end} cliff={cliff} \
+             paused_total={ptot}{paused_at}",
+            id = self.id,
+            status = self.status,
+            dep = self.deposited,
+            wth = self.withdrawn,
+            vest = self.vested,
+            draw = self.withdrawable,
+            start = self.start_time,
+            end = self.end_time,
+            cliff = self.cliff_time,
+            ptot = self.paused_total,
+            paused_at = match self.paused_at {
+                Some(t) => std::format!(" paused_at={t}"),
+                None => std::string::String::new(),
+            },
+        )
+    }
+}
+
+impl std::fmt::Display for TestSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::writeln!(f, "=== TestSnapshot ===")?;
+        std::writeln!(
+            f,
+            "ledger: timestamp={ts} sequence={seq}",
+            ts = self.ledger_timestamp,
+            seq = self.ledger_sequence,
+        )?;
+        std::writeln!(
+            f,
+            "balances: sender={s} recipient={r} other={o} pool={p}",
+            s = self.balance_sender,
+            r = self.balance_recipient,
+            o = self.balance_other,
+            p = self.balance_pool,
+        )?;
+        std::writeln!(f, "streams ({}):", self.stream_count)?;
+        for ss in &self.streams {
+            std::writeln!(f, "  {ss}")?;
+        }
+        write!(f, "===================")?;
+        Ok(())
+    }
+}
 
 /// USDC on Stellar has 7 decimals. Not 6, not 18.
 pub const DECIMALS: u32 = 7;
@@ -95,6 +225,28 @@ impl<'a> Harness<'a> {
 
     pub fn now(&self) -> u64 {
         self.env.ledger().timestamp()
+    }
+
+    /// Remaining TTL, in ledgers, of a stream entry.
+    pub fn ttl_of(&self, stream_id: u64) -> u32 {
+        self.env.as_contract(&self.contract_id, || {
+            self.env
+                .storage()
+                .persistent()
+                .get_ttl(&DataKey::Stream(stream_id))
+        })
+    }
+
+    /// The largest TTL any entry can actually hold right now.
+    ///
+    /// This is deliberately read from the SDK rather than from
+    /// `LedgerInfo::max_entry_ttl`: the achievable maximum is
+    /// `max_live_until_ledger - sequence`, which is not always the raw
+    /// configured value. Asserting against the config number bakes in an
+    /// off-by-one.
+    pub fn max_achievable_ttl(&self) -> u32 {
+        self.env
+            .as_contract(&self.contract_id, || self.env.storage().max_ttl())
     }
 
     pub fn balance(&self, who: &Address) -> i128 {
@@ -291,5 +443,86 @@ impl<'a> Harness<'a> {
             total,
             "pooled balance and outstanding liability diverged",
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Snapshot helpers
+    // -----------------------------------------------------------------------
+
+    /// Capture a deterministic, credential-free snapshot of the current ledger
+    /// and token state.
+    ///
+    /// The snapshot encodes everything needed to reproduce and diagnose a test
+    /// failure:
+    ///
+    /// * **Ledger state** — timestamp and sequence number are the two inputs
+    ///   that govern all accrual calculations; given these a developer can
+    ///   reconstruct every vested/withdrawable value by hand.
+    /// * **Stream accounting** — `deposited`, `withdrawn`, `vested`,
+    ///   `withdrawable`, status, and the full schedule for every stream.
+    /// * **Token balances** — sender, recipient, other, and the contract pool.
+    ///   Together with the stream accounting these let you verify the pool
+    ///   invariant without re-running the suite.
+    ///
+    /// # Usage in tests
+    ///
+    /// Take a snapshot before the operation under test; if the assertion fails,
+    /// print it so CI output contains the full pre-condition state:
+    ///
+    /// ```rust,ignore
+    /// let snap = h.snapshot();
+    /// let result = h.client.try_withdraw(&id, &None);
+    /// assert!(result.is_ok(), "withdraw failed\n{snap}");
+    /// ```
+    ///
+    /// For `should_panic` tests or multi-step sequences, calling
+    /// [`Harness::dump_snapshot`] inside the test body lets you print without
+    /// storing the value.
+    pub fn snapshot(&self) -> TestSnapshot {
+        let info = self.env.ledger().get();
+        let now = info.timestamp;
+        let count = self.client.stream_count();
+
+        let streams = (0..count)
+            .map(|id| {
+                let s: Stream = self.client.get_stream(&id);
+                let vest = accrual::vested(&s, now).expect("vested must not overflow in snapshot");
+                let draw = accrual::withdrawable(&s, now).expect("withdrawable must not overflow");
+                StreamSnapshot {
+                    id,
+                    deposited: s.deposited,
+                    withdrawn: s.withdrawn,
+                    vested: vest,
+                    withdrawable: draw,
+                    status: s.status,
+                    start_time: s.start_time,
+                    end_time: s.end_time,
+                    cliff_time: s.cliff_time,
+                    paused_total: s.paused_total,
+                    paused_at: s.paused_at,
+                }
+            })
+            .collect();
+
+        TestSnapshot {
+            ledger_timestamp: now,
+            ledger_sequence: info.sequence_number,
+            stream_count: count,
+            streams,
+            balance_sender: self.balance(&self.sender),
+            balance_recipient: self.balance(&self.recipient),
+            balance_other: self.balance(&self.other),
+            balance_pool: self.pool(),
+        }
+    }
+
+    /// Print the current snapshot to stderr.
+    ///
+    /// Useful inside test bodies where you want the state visible in
+    /// `--nocapture` output without having to store the snapshot in a variable.
+    /// Nothing is written when the test passes; you only see it when you run
+    /// with `-- --nocapture` or when the binary dumps stderr on a panic.
+    pub fn dump_snapshot(&self) {
+        std::eprintln!("{}", self.snapshot());
     }
 }

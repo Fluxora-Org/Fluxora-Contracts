@@ -281,3 +281,25 @@ fn the_pool_invariant_holds_across_long_sequences() {
         run_sequence(0xDEAD_BEEF ^ i.wrapping_mul(0xA24B_AED4_963E_E407), steps);
     }
 }
+
+#[test]
+fn lifecycle_operations_conserve_liability_exactly() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    h.assert_invariants();
+
+    h.advance(20 * DAY);
+    h.client.withdraw(&id, &None);
+    h.assert_invariants();
+
+    h.client.top_up(&id, &(300 * ONE));
+    h.assert_invariants();
+
+    h.client.pause(&id);
+    h.client.top_up(&id, &(100 * ONE));
+    h.assert_invariants();
+
+    h.client.cancel(&id);
+    h.assert_invariants();
+    assert_eq!(h.pool(), accrual::liability(&h.get(id)).unwrap());
+}
