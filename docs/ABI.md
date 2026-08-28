@@ -99,20 +99,35 @@ Discriminants are ABI and are never renumbered; new variants are appended.
 
 | # | name | | # | name |
 |---|---|---|---|---|
-| 1 | `StreamNotFound` | | 13 | `StreamAlreadyPaused` |
-| 2 | `InvalidTimeRange` | | 14 | `StreamTerminated` |
-| 3 | `InvalidCliff` | | 15 | `StreamMatured` |
-| 4 | `InvalidDeposit` | | 16 | `InsufficientWithdrawable` |
-| 5 | `DepositRateTooLow` | | 17 | `NothingToWithdraw` |
-| 6 | `SelfStream` | | 18 | `InvalidAmount` |
-| 7 | `Unauthorized` | | 19 | `BatchTooLarge` |
-| 8 | `NotCancellable` | | 20 | `EmptyBatch` |
-| 9 | `NotPausable` | | 21 | `DuplicateStreamId` |
-| 10 | `NotTransferable` | | 22 | `Overflow` |
-| 11 | `StreamNotActive` | | 23 | `TopUpTooSmall` |
-| 12 | `StreamNotPaused` | | | |
+| 1 | `StreamNotFound` | | 14 | `StreamTerminated` |
+| 2 | `InvalidTimeRange` | | 15 | `StreamMatured` |
+| 3 | `InvalidCliff` | | 16 | `InsufficientWithdrawable` |
+| 4 | `InvalidDeposit` | | 17 | `NothingToWithdraw` |
+| 5 | `DepositRateTooLow` | | 18 | `InvalidAmount` |
+| 6 | `SelfStream` | | 19 | `BatchTooLarge` |
+| 7 | `Unauthorized` | | 20 | `EmptyBatch` |
+| 8 | `NotCancellable` | | 21 | `DuplicateStreamId` |
+| 9 | `NotPausable` | | 22 | `Overflow` |
+| 10 | `NotTransferable` | | 23 | `TopUpTooSmall` |
+| 11 | `StreamNotActive` | | 24 | `StreamIdExhausted` |
+| 12 | `StreamNotPaused` | | 25 | `TokenTransferFailed` |
+| 13 | `StreamAlreadyPaused` | | 26 | `TokenMissing` |
+| | | | 29 | `MalformedStreamId` |
+
+`TokenTransferFailed` (25) and `TokenMissing` (26) are **stable stream-level categories** for token sub-invocation failures. The token contract's internal error discriminant is intentionally discarded — forwarding it would produce a value clients decode against Fluxora's error table, yielding a silent misinterpretation. The raw diagnostic is visible in the failed transaction's `diagnosticEvents`.
+
+* `TokenTransferFailed` — the token contract returned a typed contract error: insufficient sender balance, pool underfunded on a payout, or the token's own authorization rules refused the call.
+* `TokenMissing` — the token address resolves to nothing (Abort / host trap); the stream references a non-deployed contract.
 
 The CLI and RPC render these as `Error(Contract, #N)`.
+
+`StreamNotActive` (11) is reserved in the frozen ABI; current entry points
+return the more specific pause/terminated variants instead.
+
+`withdraw` distinguishes empty balances: a live stream with nothing accrued
+yet returns `NothingToWithdraw` (17); a `Cancelled` or `Depleted` stream with
+nothing left returns `StreamTerminated` (14). Clients must not treat those as
+equivalent.
 
 ---
 
