@@ -1,12 +1,10 @@
 use soroban_sdk::{contracttype, Address};
 
-/// Which operations a delegate is permitted to perform on a stream.
+/// Bitmask constants for which operations a delegate is permitted to perform.
 ///
-/// Stored as a `u32` bitmask so multiple permissions can be granted in one
-/// call without a growing enum. New bits may be added; existing bits are
-/// stable ABI.
-#[allow(non_snake_case)]
-pub mod Op {
+/// Pass one constant or OR several together when calling [`crate::FluxoraStream::grant_delegate`].
+/// New bits may be added; existing values are stable ABI.
+pub mod op {
     pub const WITHDRAW: u32 = 1 << 0;
     pub const CANCEL: u32 = 1 << 1;
     pub const PAUSE: u32 = 1 << 2;
@@ -97,17 +95,10 @@ pub struct Stream {
 
 /// Storage keys.
 ///
-/// `NextStreamId` and `StreamCount` live in instance storage (tiny, share the
-/// contract's TTL). `Stream(id)` entries live in persistent storage with
-/// independent TTLs.
+/// `NextStreamId` lives in instance storage (tiny, shares the contract's TTL).
+/// `Stream(id)` entries live in persistent storage with independent TTLs.
 /// `Delegate(stream_id, delegate)` entries live in persistent storage, scoped
 /// to the stream they were issued for.
-///
-/// Both counters are updated **only** after all validation and token transfers
-/// have succeeded. Any failure in `create_stream` MUST panic so that all
-/// storage changes are rolled back atomically. This guarantees that a failed
-/// creation does not consume an ID, increment the stream count, or leave a
-/// partial record.
 ///
 /// There is no `Config` key: with no admin, no fees and no upgradeability
 /// (all explicit non-goals), the contract has nothing to configure.
