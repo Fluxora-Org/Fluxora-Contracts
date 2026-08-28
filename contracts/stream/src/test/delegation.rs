@@ -24,6 +24,7 @@ fn delegate_can_withdraw() {
     let h = Harness::new();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     let agent = Address::generate(&h.env);
+    h.token_admin.mint(&agent, &(1_000 * ONE));
     h.advance(10 * DAY);
 
     h.client
@@ -39,6 +40,7 @@ fn delegate_can_cancel() {
     let h = Harness::new();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     let agent = Address::generate(&h.env);
+    h.token_admin.mint(&agent, &(1_000 * ONE));
     h.advance(10 * DAY);
 
     h.client
@@ -54,6 +56,7 @@ fn delegate_can_pause_and_resume() {
     let h = Harness::new();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     let agent = Address::generate(&h.env);
+    h.token_admin.mint(&agent, &(1_000 * ONE));
 
     h.client.grant_delegate(
         &id,
@@ -75,6 +78,7 @@ fn delegate_can_top_up() {
     let h = Harness::new();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     let agent = Address::generate(&h.env);
+    h.token_admin.mint(&agent, &(1_000 * ONE));
 
     h.client
         .grant_delegate(&id, &h.sender, &agent, &op::TOP_UP, &None);
@@ -88,6 +92,7 @@ fn delegate_can_transfer_recipient() {
     let h = Harness::new();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     let agent = Address::generate(&h.env);
+    h.token_admin.mint(&agent, &(1_000 * ONE));
     let new_recip = Address::generate(&h.env);
 
     h.client.grant_delegate(
@@ -111,6 +116,7 @@ fn revoke_takes_effect_immediately() {
     let h = Harness::new();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     let agent = Address::generate(&h.env);
+    h.token_admin.mint(&agent, &(1_000 * ONE));
     h.advance(10 * DAY);
 
     h.client
@@ -134,6 +140,7 @@ fn revoke_is_idempotent() {
     let h = Harness::new();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     let agent = Address::generate(&h.env);
+    h.token_admin.mint(&agent, &(1_000 * ONE));
 
     h.client
         .grant_delegate(&id, &h.recipient, &agent, &op::WITHDRAW, &None);
@@ -147,6 +154,7 @@ fn revoke_does_not_affect_already_moved_funds() {
     let h = Harness::new();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     let agent = Address::generate(&h.env);
+    h.token_admin.mint(&agent, &(1_000 * ONE));
     h.advance(20 * DAY);
 
     h.client
@@ -169,6 +177,7 @@ fn sender_can_revoke_recipient_issued_grant() {
     let h = Harness::new();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     let agent = Address::generate(&h.env);
+    h.token_admin.mint(&agent, &(1_000 * ONE));
     h.advance(10 * DAY);
 
     // Recipient issued the grant.
@@ -195,6 +204,7 @@ fn expired_grant_is_rejected() {
     let h = Harness::new();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     let agent = Address::generate(&h.env);
+    h.token_admin.mint(&agent, &(1_000 * ONE));
 
     let expires = h.now() + 5 * DAY;
     h.client
@@ -220,6 +230,7 @@ fn grant_with_no_expiry_does_not_expire() {
     let h = Harness::new();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     let agent = Address::generate(&h.env);
+    h.token_admin.mint(&agent, &(1_000 * ONE));
 
     h.client
         .grant_delegate(&id, &h.recipient, &agent, &op::WITHDRAW, &None);
@@ -239,6 +250,7 @@ fn delegate_cannot_call_an_op_not_in_their_grant() {
     let h = Harness::new();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     let agent = Address::generate(&h.env);
+    h.token_admin.mint(&agent, &(1_000 * ONE));
 
     // Grant only WITHDRAW.
     h.client
@@ -262,6 +274,7 @@ fn sender_delegate_cannot_call_recipient_ops() {
     let h = Harness::new();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     let agent = Address::generate(&h.env);
+    h.token_admin.mint(&agent, &(1_000 * ONE));
     h.advance(10 * DAY);
 
     // Sender grants CANCEL to the agent.
@@ -289,6 +302,7 @@ fn grant_on_stream_a_does_not_work_on_stream_b() {
     let id_a = h.create_simple(1_000 * ONE, 100 * DAY);
     let id_b = h.create_simple(1_000 * ONE, 100 * DAY);
     let agent = Address::generate(&h.env);
+    h.token_admin.mint(&agent, &(1_000 * ONE));
     h.advance(10 * DAY);
 
     // Grant WITHDRAW on stream A only.
@@ -316,6 +330,7 @@ fn failed_delegate_call_leaves_stream_unchanged() {
     let h = Harness::new();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     let agent = Address::generate(&h.env);
+    h.token_admin.mint(&agent, &(1_000 * ONE));
 
     let expires = h.now() + DAY;
     h.client
@@ -344,6 +359,7 @@ fn granting_mixed_sender_and_recipient_ops_is_rejected() {
     let h = Harness::new();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     let agent = Address::generate(&h.env);
+    h.token_admin.mint(&agent, &(1_000 * ONE));
 
     let err = h
         .client
@@ -368,6 +384,7 @@ fn regranting_after_revocation_restores_access() {
     let h = Harness::new();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     let agent = Address::generate(&h.env);
+    h.token_admin.mint(&agent, &(1_000 * ONE));
     h.advance(10 * DAY);
 
     h.client

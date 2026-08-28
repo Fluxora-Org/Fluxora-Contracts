@@ -239,9 +239,7 @@ pub fn save_delegate(env: &Env, stream_id: u64, delegate: &Address, grant: &Dele
     // Give the grant at least as long to live as the stream itself.
     let stream = peek_stream(env, stream_id).expect("stream must exist when saving delegate");
     let target = ttl_target_ledgers(env, &stream);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, target, target);
+    env.storage().persistent().extend_ttl(&key, target, target);
 }
 
 /// Remove a delegate grant.

@@ -17,8 +17,11 @@
 //! * Each payload carries enough state to reconstruct the stream without
 //!   replaying from genesis.
 //!
-//! Field order and topic placement are ABI. Adding a field is a compatible
-//! change; reordering or re-topicking one is not.
+//! Field order and topic placement are ABI. Adding a field at the end of a struct is a compatible
+//! change (additive versioning); reordering, removing, or re-topicking an existing field is an
+//! incompatible breaking change. Indexers should tolerate unknown trailing fields.
+//! Event ordering within a single operation is deterministic. Currently, a single state change
+//! emits exactly one event, guaranteeing the event order aligns with the operation order.
 //!
 //! Note that item-level doc comments on a `#[contractevent]` struct are copied
 //! into the contract spec and therefore into the deployed wasm. Statements of
@@ -53,7 +56,6 @@
 //! `vested - withdrawn` through the normal withdraw path, which is why that
 //! amount stays pooled in the contract. Every cancellation state is asserted
 //! against storage and token balances in `test::cancel_events`.
-
 use soroban_sdk::{contractevent, Address, Env};
 
 use crate::types::{Stream, StreamStatus};
