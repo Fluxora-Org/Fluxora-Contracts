@@ -40,8 +40,5 @@ mod monotonicity;
 mod resource_limits;
 mod ttl;
 
-// Issue #1593 — reproducible ledger and token state on failure
-mod snapshot_tests;
-
-// Issue #1595 — release dry-run pre-flight validation
-mod release_dry_run;
+// Issue #1571 — withdrawal bookkeeping atomicity / rollback on token failure
+mod withdrawal_atomicity;

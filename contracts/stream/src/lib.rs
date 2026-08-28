@@ -1246,9 +1246,26 @@ impl FluxoraStream {
     /// [`batch_withdraw`](Self::batch_withdraw): update accounting, persist,
     /// pay out, emit.
     ///
-    /// State is written before the token call (checks-effects-interactions).
-    /// Soroban forbids reentrancy outright, so this is belt-and-braces rather
-    /// than load-bearing, but it keeps the ordering obvious to a reader.
+    /// # Atomicity of bookkeeping vs. token transfer
+    ///
+    /// State (`stream.withdrawn`, `stream.status`) is written to storage before
+    /// the token `transfer` call.  This is the standard
+    /// checks-effects-interactions ordering.  Soroban forbids reentrancy
+    /// outright, so there is no classical reentrancy risk here.
+    ///
+    /// The correctness argument for atomicity in the failure case is that
+    /// **every host trap propagates as a Rust panic that unwinds the entire
+    /// transaction**.  If `token::Client::transfer` panics (e.g. because the
+    /// recipient is deauthorized on a Stellar Asset Contract, or because the
+    /// token contract itself traps for any reason), the Soroban host discards
+    /// every storage write made in this invocation — including the
+    /// `save_stream` call — before returning the error to the caller.  No
+    /// partial state leaks: `stream.withdrawn` is never permanently incremented
+    /// unless the matching tokens actually leave the contract's pool.
+    ///
+    /// `test::withdrawal_atomicity` proves this with two failure injection
+    /// mechanisms: (1) SAC `set_authorized(recipient, false)` and (2) a
+    /// custom contract that always panics registered at the token address.
     fn apply_withdrawal(
         env: &Env,
         stream_id: u64,
