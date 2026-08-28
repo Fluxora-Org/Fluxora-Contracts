@@ -64,6 +64,25 @@ jobs:
           name: fluxora-stream-wasm
           path: target/wasm32v1-none/release/fluxora_stream.wasm
 
+  feature-matrix:
+    name: feature-matrix
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Test all supported feature combinations to prevent feature drift
+        # and ensure production builds don't accidentally depend on test-only features.
+        features:
+          - ""                    # Production defaults (no features)
+          - "testutils"           # Test utilities feature
+          - "--no-default-features" # Explicit no features
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Check fluxora-stream with ${{ matrix.features }}
+        run: cargo check -p fluxora-stream ${{ matrix.features }}
+
   fuzz:
     name: randomized and property suites
     runs-on: ubuntu-latest
