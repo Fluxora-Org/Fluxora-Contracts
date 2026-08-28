@@ -78,19 +78,21 @@ fn create_stream_rejects_zero_negative_and_handles_extremes() {
         &true,
         &true,
     );
-    if let Err(Some(e)) = res {
-        assert!(
-            matches!(e, Error::TokenTransferFailed | Error::TokenMissing),
-            "expected token transfer error for huge deposit, got {:?}",
-            e
-        );
+    if let Err(inner) = res {
+        if let Ok(e) = inner {
+            assert!(
+                matches!(e, Error::TokenTransferFailed | Error::TokenMissing),
+                "expected token transfer error for huge deposit, got {:?}",
+                e
+            );
+        }
     }
 }
 
 #[test]
 fn top_up_rejects_zero_negative_and_extreme_amounts() {
     let h = Harness::new();
-    let start = h.now();
+    let _start = h.now();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
 
     // Zero amount -> InvalidAmount
@@ -105,22 +107,29 @@ fn top_up_rejects_zero_negative_and_extreme_amounts() {
     let err = h.client.try_top_up(&id, &i128::MIN).unwrap_err().unwrap();
     assert_eq!(err, Error::InvalidAmount);
 
-    // i128::MAX -> token transfer should fail in harness due to insufficient
-    // balance. Ensure the call returns a token error rather than panicking.
+    // i128::MAX -> rejected with a typed error rather than panicking. The rate
+    // scaling (`amount * duration`) overflows first, surfacing as `Overflow`;
+    // a token transfer error would also be acceptable. Either is a clean
+    // rejection of an extreme amount.
     let res = h.client.try_top_up(&id, &i128::MAX);
-    if let Err(Some(e)) = res {
-        assert!(
-            matches!(e, Error::TokenTransferFailed | Error::TokenMissing),
-            "expected token transfer error for huge top_up, got {:?}",
-            e
-        );
+    if let Err(inner) = res {
+        if let Ok(e) = inner {
+            assert!(
+                matches!(
+                    e,
+                    Error::Overflow | Error::TokenTransferFailed | Error::TokenMissing
+                ),
+                "expected a typed error for huge top_up, got {:?}",
+                e
+            );
+        }
     }
 }
 
 #[test]
 fn withdraw_validates_amount_bounds_and_limits() {
     let h = Harness::new();
-    let start = h.now();
+    let _start = h.now();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
 
     // advance to accrue some vested amount
