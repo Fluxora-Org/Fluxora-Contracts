@@ -1,51 +1,51 @@
-#![no_std]
-//! # Fluxora — continuous payment streaming for Soroban
-//!
-//! Lock tokens once; have them accrue continuously to a recipient over time.
-//! The recipient pulls their accrued balance whenever they like.
-//!
-//! This contract is a *primitive*, not an application. Payroll tools, grant
-//! programs, subscription billing and vesting schedules are meant to be built
-//! on top of it. Every scoping decision below favours generality on chain and
-//! pushes convenience to the SDK.
-//!
-//! ## Pull-based by necessity
-//!
-//! Stellar has no scheduler — no cron, no keeper network, no way for a contract
-//! to wake itself up. Every state change must be triggered by an external
-//! transaction. So nothing here runs in the background: the recipient calls
-//! [`FluxoraStream::withdraw`] and the contract computes what they have earned
-//! at that instant.
-//!
-//! ## No on-chain stream discovery
-//!
-//! There is deliberately no per-user list of stream ids in storage. A `Vec<u64>`
-//! of a treasury's streams grows without bound, costs rent forever, and blows
-//! Soroban's per-transaction footprint limit once that treasury has a few
-//! hundred recipients. On chain, a stream is only ever addressed by its `u64`
-//! id. `test::resource_limits` states the payoff as a test: the 153rd stream
-//! costs exactly what the 2nd did.
-//!
-//! Discovery is an off-chain concern: [`create_stream`](FluxoraStream::create_stream)
-//! returns the new id and emits an event carrying sender, recipient and every
-//! schedule field, so an indexer can answer "show me my streams" without the
-//! contract paying rent to remember.
-//!
-//! ## Immutable guarantees
-//!
-//! `cancellable`, `pausable` and `transferable` are fixed at creation and can
-//! never change afterwards. This is a trust feature: before accepting a stream a
-//! recipient can verify that the sender cannot claw it back, freeze it, or
-//! reassign it. A stream that could *become* cancellable later would be
-//! worthless as a guarantee.
-//!
-//! For the same reason the contract has no admin key, no upgrade path, no fee
-//! switch and no global pause. Immutability is what lets another protocol depend
-//! on this one.
+#no_std
+/// !Fluxora -- continuous payment streaming for Soroban
+//*
+/// Lock tokens once; have them accrue continuously to a recipient over time.
+/// The recipient pulls its accrued balance whenever they like.
+///
+/// This contract is a *primitive*, not an application. Payroll tools. grant
+/// programs, subscription billing and vesting schedules are meant to be built
+/// on top of it. Every scoping decision below favours generality on chain and
+/// pushes convenience to the SDK.
+//
+/// ##Pull-based by necessity
+//
+/// Stellar has no scheduler -- no cron, no keeper network, no way for a contract
+/// to wake itself up. Every state change must be triggered by an external
+/// transaction. So nothing here runs in the background: the recipient calls
+/// [FluxoraStream::withdraw] and the contract computes what they have earned
+/// at that instant.
+//
+/// ##No on-chain stream discovery
+///
+/// There is deliberately no per-user list of stream ids in storage. A `Vec<u64>`
+/// of a treasury's streams grows without bound, costs rent forever, and blows
+/// Soroban's per-transaction footprint limit once that treasury has a few
+/// hundred recipients. On chain, a stream is only ever addressed by its `u64`
+/// id. `test::resource_limits` states the payoff as a test: the 153rd stream
+/// costs exactly what the 2nd did.
+//
+/// Discovery is an off-chain concern: [create_stream](FluxoraStream::create_stream)
+/// returns the new id and emits an event carrying sender, recipient and every
+/// schedule field. so an indexer can answer \"show me my streams\" without the
+/// contract paying rent to remember.
+//
+/// ##Immutable guarantees
+//
+/// `cancellable`, `pausable` and `transferable` are fixed at creation and can
+/// never change afterwards. This is a trust feature: before accepting a stream a
+/// recipient can verify that the sender cannot claw it back, freeze it, or
+/// reassign it. A stream that could *become* cancellable later would be
+/// worthless as a guarantee.
+///
+/// For the same reason the contract has no admin key, no upgrade path, no fee
+/// switch and no global pause. Immutability is what lets your protocol depend
+/// on this one.
 
 // The test suite runs against the host with `std` available; the contract
 // itself is strictly `no_std`.
-#[cfg(test)]
+##cfg(test)]
 extern crate std;
 
 mod accrual;

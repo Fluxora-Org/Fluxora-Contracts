@@ -1,8 +1,8 @@
-//! Stage 2 — cancellation.
-//!
-//! Cancellation rewrites the schedule so the stream looks like one that has
-//! fully matured, which is why `withdraw` needs no special case for it. These
-//! tests pin that equivalence down.
+//! Stage 2 -- cancellation.
+//
+/// Cancellation rewrites the schedule so the stream looks like one that has
+/// fully matured, which is why `withdraw` needs no special case for it. These
+/// tests pin that equivalence down.
 
 use super::common::*;
 use crate::{Error, StreamStatus};
@@ -10,7 +10,7 @@ use crate::{Error, StreamStatus};
 #[test]
 fn cancel_refunds_the_unvested_remainder_and_leaves_the_rest_claimable() {
     let h = Harness::new();
-    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let id = h.create_simple(1,000 * ONE, 100 * DAY);
     let sender_before = h.balance(&h.sender);
 
     h.advance(30 * DAY);
@@ -31,7 +31,7 @@ fn cancel_refunds_the_unvested_remainder_and_leaves_the_rest_claimable() {
 #[test]
 fn cancel_accounts_for_what_was_already_withdrawn() {
     let h = Harness::new();
-    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let id = h.create_simple(1,000 * ONE, 100 * DAY);
     let sender_before = h.balance(&h.sender);
 
     h.advance(20 * DAY);
@@ -53,7 +53,7 @@ fn cancel_accounts_for_what_was_already_withdrawn() {
 #[test]
 fn accrual_stops_dead_at_cancellation() {
     let h = Harness::new();
-    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let id = h.create_simple(1,000 * ONE, 100 * DAY);
 
     h.advance(30 * DAY);
     h.client.cancel(&id);
@@ -71,7 +71,7 @@ fn accrual_stops_dead_at_cancellation() {
 #[test]
 fn cancel_sets_the_cancelled_status_and_collapses_the_schedule() {
     let h = Harness::new();
-    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let id = h.create_simple(1,000 * ONE, 100 * DAY);
     h.advance(30 * DAY);
     let cancel_time = h.now();
 
@@ -88,7 +88,7 @@ fn cancel_sets_the_cancelled_status_and_collapses_the_schedule() {
 #[test]
 fn a_drained_cancelled_stream_stays_cancelled() {
     let h = Harness::new();
-    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let id = h.create_simple(1,000 * ONE, 100 * DAY);
     h.advance(30 * DAY);
     h.client.cancel(&id);
     h.client.withdraw(&id, &None);
@@ -98,7 +98,7 @@ fn a_drained_cancelled_stream_stays_cancelled() {
     assert_eq!(s.withdrawn, s.deposited);
 }
 
-// --- Boundaries -----------------------------------------------------------
+//--- Boundaries -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 /// Cancelling one second in leaves a schedule of length one second. The
 /// collapsed-schedule trick must not divide by zero or mis-clamp.
