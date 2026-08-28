@@ -636,13 +636,21 @@ fn duplicate_at_first_position_preserves_all_balances_and_events() {
     // No withdrawn events should have been emitted.
     assert!(withdrawn_event_ids(&h).is_empty());
     // All three balances must be unchanged.
-    assert_eq!(h.balance(&h.sender), sender_before, "sender balance changed");
+    assert_eq!(
+        h.balance(&h.sender),
+        sender_before,
+        "sender balance changed"
+    );
     assert_eq!(
         h.balance(&h.recipient),
         recipient_before,
         "recipient balance changed"
     );
-    assert_eq!(h.pool(), pool_before, "pool balance changed");
+    assert_eq!(
+        h.pool(),
+        pool_before,
+        "pool balance changed"
+    );
     // Per-stream accounting untouched.
     assert_eq!(h.get(a).withdrawn, 0, "stream a was drawn on");
     assert_eq!(h.get(b).withdrawn, 0, "stream b was drawn on");
@@ -672,13 +680,21 @@ fn duplicate_at_middle_position_preserves_all_balances_and_events() {
     assert_eq!(err, Error::DuplicateStreamId);
 
     assert!(withdrawn_event_ids(&h).is_empty());
-    assert_eq!(h.balance(&h.sender), sender_before, "sender balance changed");
+    assert_eq!(
+        h.balance(&h.sender),
+        sender_before,
+        "sender balance changed"
+    );
     assert_eq!(
         h.balance(&h.recipient),
         recipient_before,
         "recipient balance changed"
     );
-    assert_eq!(h.pool(), pool_before, "pool balance changed");
+    assert_eq!(
+        h.pool(),
+        pool_before,
+        "pool balance changed"
+    );
     assert_eq!(h.get(a).withdrawn, 0, "stream a was drawn on");
     assert_eq!(h.get(b).withdrawn, 0, "stream b was drawn on");
     h.assert_pool_exact();
@@ -707,13 +723,21 @@ fn duplicate_at_last_position_preserves_all_balances_and_events() {
     assert_eq!(err, Error::DuplicateStreamId);
 
     assert!(withdrawn_event_ids(&h).is_empty());
-    assert_eq!(h.balance(&h.sender), sender_before, "sender balance changed");
+    assert_eq!(
+        h.balance(&h.sender),
+        sender_before,
+        "sender balance changed"
+    );
     assert_eq!(
         h.balance(&h.recipient),
         recipient_before,
         "recipient balance changed"
     );
-    assert_eq!(h.pool(), pool_before, "pool balance changed");
+    assert_eq!(
+        h.pool(),
+        pool_before,
+        "pool balance changed"
+    );
     assert_eq!(h.get(a).withdrawn, 0, "stream a was drawn on");
     assert_eq!(h.get(b).withdrawn, 0, "stream b was drawn on");
     h.assert_pool_exact();
