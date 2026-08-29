@@ -53,6 +53,21 @@ script/release.sh      # -> target/wasm32v1-none/release/fluxora_stream.wasm (on
 
 ---
 
+## Release integrity
+
+Every contract wasm is released with a provenance manifest tying its bytes to
+the git revision, Rust toolchain, soroban-sdk version, target triple and
+release profile, plus a SHA-256 digest per artifact (see
+[docs/provenance.md](docs/provenance.md)). Verification is mandatory — a
+mismatch fails the release:
+
+```bash
+script/provenance.sh build   # wasm build + generate + verify (the release gate)
+script/provenance.sh verify  # re-check the current build
+```
+
+---
+
 ## Design
 
 ### Pull-based, because Stellar has no scheduler
@@ -434,6 +449,7 @@ frontend's four contract calls all break, the backend is unaffected.
 | [docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md) | What a green suite does not prove. |
 | [docs/MIGRATION.md](docs/MIGRATION.md) | Deletion audit vs the pre-rewrite contract, and downstream impact. |
 | [docs/soroban-rpc-read-skew.md](docs/soroban-rpc-read-skew.md) | Pin multi-call reads to one ledger, and the read-after-write barrier. |
+| [docs/provenance.md](docs/provenance.md) | Wasm provenance schema, design decisions, and the release gate. |
 | [fluxora-build-spec.md](fluxora-build-spec.md) | The build spec, with amendments where measurement contradicted it. |
 
 > **Note for deployment:** the `stellar` CLI must be at least version 27 to match
