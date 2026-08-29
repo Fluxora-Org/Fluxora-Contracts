@@ -317,14 +317,15 @@ jobs:
       # continue-on-error: --features testutils hits the same rand_core
       # version-skew as the other exceptions above (confirmed same root
       # cause: ChaCha20Rng vs ed25519_dalek::rand_core::CryptoRng).
-      - name: Run tests (archival-probe)
-        run: cargo test -p fluxora-archival-probe
+      - name: Run tests (all packages)
+        run: cargo test --all --features testutils
         continue-on-error: true
 
-      # NOTE: factory crate is incomplete (no Cargo.toml or src/lib.rs yet).
-      # Re-enable this step once contracts/factory/ is a valid workspace member.
-      # - name: Factory discriminant-stability tests
-      #   run: cargo test -p fluxora_factory
+      # Hard gate: factory discriminant-stability test is testutils-free and
+      # must always pass. Guards docs/error.md FactoryError table against
+      # silent discriminant drift. See contracts/factory/tests/factory_error_discriminants.rs.
+      - name: Factory discriminant-stability tests
+        run: cargo test -p fluxora_factory
 
       # Hard gate: cross-file collision audit. Parses all three discriminant
       # tables in docs/error.md and fails (exit 1) on any intra-section
