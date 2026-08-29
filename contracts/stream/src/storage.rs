@@ -185,7 +185,39 @@ pub fn save_stream(env: &Env, stream_id: u64, stream: &Stream) {
 /// Ids are monotonic and never reused, so an id is a stable handle an indexer
 /// can key on forever.
 ///
-/// Reading this function also extends the instance entry's TTL to the network maximum.
+/// # Design: global, not per-sender, not derived from storage
+///
+/// One counter (`DataKey::NextStreamId`) is shared by every caller. Ids are
+/// **not** namespaced per sender and **not** derived from any property of the
+/// stream itself (e.g. a hash of its fields) — a global sequence is the only
+/// scheme that gives every id, across every sender, a fixed total order with
+/// no coordination needed between callers.
+///
+/// # Why a rejected `create_stream` can never consume or reuse an id
+///
+/// `create_stream` calls this function only after every validation gate has
+/// passed, so a call rejected on validation (bad schedule, self-stream, dust
+/// rate, ...) never reaches here and the counter never moves.
+///
+/// The remaining case is the deposit transfer at the very end of
+/// `create_stream`, which can still fail (insufficient balance or allowance)
+/// *after* this function has already bumped the counter and after the new
+/// `Stream` entry has already been written. That is safe because a Soroban
+/// contract invocation is atomic end to end: if `create_stream` does not
+/// return `Ok`, every storage write it made — the counter bump and the
+/// `Stream` entry alike — is rolled back along with the failed token
+/// transfer, not just the transfer itself. So no id is ever left half
+/// allocated, and a retried call after a failure gets the exact id the
+/// failed attempt would have received, not the next one. `test::stream_ids`
+/// exercises this directly by forcing a deposit transfer to fail and
+/// asserting the next successful create reuses that id.
+///
+/// # Gaps
+///
+/// There are none. Every id in `0..stream_count()` was assigned to exactly
+/// one successful create and, once assigned, is never reassigned — even a
+/// stream whose entry later archives under [`stream_exists`] keeps its id
+/// permanently retired rather than freeing it for reuse.
 pub fn next_stream_id(env: &Env) -> Result<u64, Error> {
     // Missing counter means no stream has been created yet — equivalent to 0.
     // This is a default, not a precondition failure: create_stream is what
