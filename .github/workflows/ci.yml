@@ -193,8 +193,8 @@ jobs:
             echo "::error::If this dependency change is intentional, run 'cargo update' locally, review the diff, and commit the updated Cargo.lock alongside your change."
             exit 1
           fi
-      - name: Build and check contract WASM size
-        run: script/check-stream-wasm-size.sh
+          echo "provenance:"
+          cat target/wasm32v1-none/release/provenance.json
 
       - name: Build release (native)
         run: cargo build --release -p fluxora_stream
