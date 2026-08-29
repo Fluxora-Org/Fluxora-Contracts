@@ -81,6 +81,8 @@ fn delegate_can_top_up() {
     h.client
         .grant_delegate(&id, &h.sender, &agent, &op::TOP_UP, &None);
 
+    // The delegate is permitted to initiate this operation; the harness's
+    // mocked sender authorization covers the token spend required by top-up.
     h.client.delegate_top_up(&id, &agent, &(100 * ONE));
     assert_eq!(h.client.get_stream(&id).deposited, 1_100 * ONE);
 }

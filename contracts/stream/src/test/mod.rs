@@ -42,6 +42,7 @@ mod batch;
 mod invariants;
 mod lifecycle_proptest;
 mod monotonicity;
+mod release_profile;
 mod resource_limits;
 mod ttl;
 

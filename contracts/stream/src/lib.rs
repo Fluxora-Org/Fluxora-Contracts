@@ -43,6 +43,15 @@
 //! switch and no global pause. Immutability is what lets another protocol depend
 //! on this one.
 
+#[cfg(all(target_family = "wasm", not(target_os = "none")))]
+compile_error!(
+    "Fluxora production WASM must be built for wasm32v1-none; wasm32-unknown-unknown can emit unsupported features."
+);
+#[cfg(all(target_family = "wasm", debug_assertions))]
+compile_error!("Fluxora production WASM must be built without debug assertions; use --release.");
+#[cfg(all(target_family = "wasm", feature = "testutils"))]
+compile_error!("Fluxora production WASM must not enable the testutils feature.");
+
 // The test suite runs against the host with `std` available; the contract
 // itself is strictly `no_std`.
 #[cfg(test)]
@@ -940,6 +949,9 @@ impl FluxoraStream {
     ) -> Result<(), Error> {
         Self::check_delegate(&env, stream_id, &delegate, op::TOP_UP)?;
         let mut stream = storage::load_stream(&env, stream_id)?;
+        // A delegate may request a top-up, but only the sender may authorize
+        // spending the sender's tokens.
+        stream.sender.require_auth();
 
         if stream.status.is_terminal() {
             return Err(Error::StreamTerminated);
