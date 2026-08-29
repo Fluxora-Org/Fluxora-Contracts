@@ -188,7 +188,11 @@ fn cliff_boundary_reads_are_exact() {
     // Before cliff: nothing vested, everything refundable
     h.warp_to(cliff - 1);
     assert_eq!(h.client.vested_of(&id), 0, "vested before cliff");
-    assert_eq!(h.client.withdrawable_of(&id), 0, "withdrawable before cliff");
+    assert_eq!(
+        h.client.withdrawable_of(&id),
+        0,
+        "withdrawable before cliff"
+    );
     assert_eq!(
         h.client.refundable_of(&id),
         deposit,
@@ -336,7 +340,10 @@ fn cancellation_exactly_at_cliff_vests_cliff_amount() {
     );
 
     let stream = h.get(id);
-    assert_eq!(stream.deposited, expected_at_cliff, "deposited after cancel");
+    assert_eq!(
+        stream.deposited, expected_at_cliff,
+        "deposited after cancel"
+    );
     assert_eq!(stream.status, crate::StreamStatus::Cancelled);
 
     h.assert_pool_exact();
@@ -483,7 +490,11 @@ fn withdrawal_before_cliff_fails_with_correct_error() {
 
     // Try with None (full withdrawal)
     let err = h.client.try_withdraw(&id, &None).unwrap_err().unwrap();
-    assert_eq!(err, Error::NothingToWithdraw, "full withdrawal before cliff");
+    assert_eq!(
+        err,
+        Error::NothingToWithdraw,
+        "full withdrawal before cliff"
+    );
 
     // Try with explicit amount
     let err = h

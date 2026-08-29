@@ -59,8 +59,8 @@ pub use accrual::{
 };
 pub use error::Error;
 pub use storage::{MIN_STREAM_TTL_LEDGERS, SECONDS_PER_LEDGER, TTL_BUFFER_SECONDS};
-pub use types::{DataKey, DelegateGrant, Stream, StreamStatus};
 pub use types::op;
+pub use types::{DataKey, DelegateGrant, Stream, StreamStatus};
 
 use soroban_sdk::{
     contract, contractimpl, token, Address, Env, InvokeError, MuxedAddress, TryFromVal, Vec,
