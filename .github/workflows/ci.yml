@@ -245,16 +245,22 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-build-
 
-      # Hard gate: the workspace must resolve and type-check. The strict
-      # `cargo update --locked` check is relaxed here because the Cargo.lock
-      # was committed against soroban-sdk 21.x and the workspace was upgraded
-      # to 27.x without a local `cargo update`. TODO: run `cargo update` and
-      # re-enable the locked check once the lock file is regenerated.
-      - name: Sync Cargo.lock
-        run: cargo update --workspace
-
-      - name: Verify workspace resolves
-        run: cargo check --workspace
+      # Hard gate: Cargo.lock must be committed and unchanged (the "Dependency
+      # resolution" residual risk documented in contracts/stream/src/checksum.rs's
+      # build-reproducibility contract). `cargo update --locked` fails immediately
+      # if resolving the current Cargo.toml manifests would produce a different
+      # Cargo.lock, catching an unpinned `^` dependency silently drifting.
+      - name: Verify Cargo.lock is committed and unchanged
+        run: |
+          set -euo pipefail
+          if ! cargo update --locked --workspace; then
+            echo "::error::Cargo.lock would change on dependency resolution — it is out of sync with the committed Cargo.toml manifests."
+            echo "::error::This breaks the WASM build-reproducibility contract documented in contracts/stream/src/checksum.rs ('Dependency resolution: Cargo.lock must be committed and unchanged')."
+            echo "::error::If this dependency change is intentional, run 'cargo update' locally, review the diff, and commit the updated Cargo.lock alongside your change."
+            exit 1
+          fi
+          echo "provenance:"
+          cat target/wasm32v1-none/release/provenance.json
 
       - name: Build release (native)
         run: cargo build --release -p fluxora_stream
