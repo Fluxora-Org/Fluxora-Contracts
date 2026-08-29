@@ -398,7 +398,11 @@ fn split_repeated_cancel_is_terminal_state_unchanged() {
     let err = h.client.try_cancel(&id).unwrap_err().unwrap();
     assert_eq!(err, Error::StreamTerminated);
 
-    assert_eq!(h.get(id), state_after, "state must not change on failed cancel");
+    assert_eq!(
+        h.get(id),
+        state_after,
+        "state must not change on failed cancel"
+    );
     assert_eq!(h.pool(), pool_after);
     h.assert_pool_exact();
 }
