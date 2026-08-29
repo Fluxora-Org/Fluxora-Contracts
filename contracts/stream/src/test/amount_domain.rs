@@ -84,7 +84,7 @@ fn create_stream_rejects_zero_negative_and_handles_extremes() {
         &true,
         &true,
     );
-    if let Err(Ok(e) = res {
+    if let Err(Ok(e)) = res {
         assert!(
             matches!(e, Error::TokenTransferFailed | Error::TokenMissing),
             "expected token transfer error for huge deposit, got {?:}",
@@ -111,18 +111,18 @@ fn top_up_rejects_zero_negative_and_extreme_amounts() {
     let err = h.client.try_top_up(&id, &i128::MIN).unwrap_err().unwrap();
     assert_eq!(err, Error::InvalidAmount);
 
-    // i128::MAX -> the checked arithmetic overflows before any transfer is
-    // attempted, so the call must surface the typed Overflow error rather than
-    // panicking (or, on a smaller stream where the math fits, the harness token
-    // rejects the transfer due to insufficient balance — a token error).
+    // i128::MAX -> rejected with a typed error rather than panicking. The rate
+    // scaling (`amount * duration`) overflows first, surfacing as `Overflow`;
+    // a token transfer error would also be acceptable. Either is a clean
+    // rejection of an extreme amount.
     let res = h.client.try_top_up(&id, &i128::MAX);
     if let Err(Ok(e)) = res {
         assert!(
             matches!(
                 e,
-                Error::TokenTransferFailed | Error::TokenMissing | Error::Overflow
+                Error::Overflow | Error::TokenTransferFailed | Error::TokenMissing
             ),
-            "expected a typed error for huge top_up, got {?:}",
+            "expected a typed error for huge top_up, got {:?}",
             e
         );
     }

@@ -146,13 +146,68 @@ jobs:
         # linted, so a new modular contract cannot bypass the quality gate.
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-  build:
-    name: Build
-    runs-on: ubuntu-latest
-    needs: lint
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      # Issue #1594 — reject accidental renames of the deployable package and
+      # WASM artifact before any build work happens.  This is an independent
+      # shell-level check; the same invariants are also enforced by the
+      # `packaging::` test module so there are two independent gates.
+      #
+      # Canonical values (update both here and in
+      # contracts/stream/src/test/packaging.rs for an intentional rename):
+      #   package name  : fluxora-stream
+      #   target name   : fluxora_stream
+      #   WASM basename : fluxora_stream.wasm
+      - name: Check package and artifact names
+        run: |
+          echo "=== cargo metadata package/target check ==="
+          meta=$(cargo metadata --format-version 1 --no-deps)
+
+          # ---- package name ----
+          pkg_name=$(echo "$meta" | python3 -c "
+          import json,sys
+          pkgs = json.load(sys.stdin)['packages']
+          names = [p['name'] for p in pkgs]
+          print(' '.join(names))
+          ")
+          echo "Packages found: $pkg_name"
+          if echo "$pkg_name" | grep -qw "fluxora-stream"; then
+            echo "  package name 'fluxora-stream' ✓"
+          else
+            echo "::error::Package 'fluxora-stream' not found in workspace. Found: $pkg_name"
+            echo "::error::If this rename is intentional, update the canonical values in"
+            echo "::error::  .github/workflows/ci.yml (this step)"
+            echo "::error::  contracts/stream/src/test/packaging.rs (EXPECTED_PACKAGE_NAME)"
+            echo "::error::and follow the migration checklist in that file's module doc."
+            exit 1
+          fi
+
+          # ---- cdylib target / WASM basename ----
+          target_name=$(echo "$meta" | python3 -c "
+          import json,sys
+          pkgs = json.load(sys.stdin)['packages']
+          pkg = next((p for p in pkgs if p['name'] == 'fluxora-stream'), None)
+          if pkg is None:
+            sys.exit(1)
+          cdylib = next((t for t in pkg['targets'] if 'cdylib' in t['kind']), None)
+          if cdylib is None:
+            sys.exit(2)
+          print(cdylib['name'])
+          ")
+          echo "cdylib target name: $target_name"
+          if [ "$target_name" = "fluxora_stream" ]; then
+            echo "  target name 'fluxora_stream' ✓"
+            echo "  WASM basename 'fluxora_stream.wasm' ✓"
+          else
+            echo "::error::cdylib target name changed: expected 'fluxora_stream', got '$target_name'"
+            echo "::error::This renames the WASM artifact to '${target_name}.wasm' and breaks"
+            echo "::error::  stellar contract deploy, script/testnet-exercise.sh, and stage-5 tooling."
+            echo "::error::If intentional, update the canonical values in"
+            echo "::error::  .github/workflows/ci.yml (this step)"
+            echo "::error::  contracts/stream/src/test/packaging.rs (EXPECTED_TARGET_NAME)"
+            exit 1
+          fi
+
+      - name: Tests
+        run: cargo test --all-features
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.94.1
@@ -239,8 +294,69 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
 
-  feature-matrix:
-    name: feature-matrix
+  # Issue #1594 — standalone packaging guard, runs in parallel with `check`.
+  # A rename should fail fast here with a targeted error, not be buried in
+  # a full-suite test run.  The `packaging::` test module in the Rust suite
+  # provides the second independent gate.
+  packaging:
+    name: package and artifact names
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+
+      # Shell-level gate (fast, no build required).
+      - name: Check package and artifact names (metadata)
+        run: |
+          echo "=== cargo metadata package/target check ==="
+          meta=$(cargo metadata --format-version 1 --no-deps)
+
+          pkg_name=$(echo "$meta" | python3 -c "
+          import json,sys
+          pkgs = json.load(sys.stdin)['packages']
+          names = [p['name'] for p in pkgs]
+          print(' '.join(names))
+          ")
+          echo "Packages found: $pkg_name"
+          if echo "$pkg_name" | grep -qw "fluxora-stream"; then
+            echo "  package name 'fluxora-stream' ✓"
+          else
+            echo "::error::Package 'fluxora-stream' not found. Found: $pkg_name"
+            echo "::error::Update EXPECTED_PACKAGE_NAME in contracts/stream/src/test/packaging.rs"
+            echo "::error::and the canonical values in .github/workflows/ci.yml for an intentional rename."
+            exit 1
+          fi
+
+          target_name=$(echo "$meta" | python3 -c "
+          import json,sys
+          pkgs = json.load(sys.stdin)['packages']
+          pkg = next((p for p in pkgs if p['name'] == 'fluxora-stream'), None)
+          if pkg is None: sys.exit(1)
+          cdylib = next((t for t in pkg['targets'] if 'cdylib' in t['kind']), None)
+          if cdylib is None: sys.exit(2)
+          print(cdylib['name'])
+          ")
+          echo "cdylib target name: $target_name"
+          if [ "$target_name" = "fluxora_stream" ]; then
+            echo "  target name 'fluxora_stream' ✓"
+            echo "  WASM basename 'fluxora_stream.wasm' ✓"
+          else
+            echo "::error::Target name changed: expected 'fluxora_stream', got '$target_name'"
+            echo "::error::This renames the artifact to '${target_name}.wasm'."
+            echo "::error::Update EXPECTED_TARGET_NAME in contracts/stream/src/test/packaging.rs"
+            echo "::error::and the canonical values in .github/workflows/ci.yml for an intentional rename."
+            exit 1
+          fi
+
+      # Rust-level gate: runs the focused packaging:: test module.
+      # --nocapture surfaces the confirmation lines for each invariant.
+      - name: Check package and artifact names (test suite)
+        run: "cargo test --all-features packaging:: -- --nocapture --test-threads=1"
+
+  fuzz:
+    name: randomized and property suites
     runs-on: ubuntu-latest
     strategy:
       matrix:
