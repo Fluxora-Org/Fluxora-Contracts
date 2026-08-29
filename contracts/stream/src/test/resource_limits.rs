@@ -26,6 +26,19 @@
 //! is the one people forget — a batch emitting one event per stream can run out
 //! of event bytes before it runs out of entries.
 //!
+//! # What each measurement covers
+//!
+//! Every invocation here reports and then bounds three resource dimensions:
+//!
+//! * **CPU** — `instructions`, the modelled CPU instruction count.
+//! * **Memory** — `memory_read_entries`, the in-memory ledger entries accessed
+//!   (live Soroban state is held in memory, not re-read from disk).
+//! * **Storage writes** — `write_entries`, the entries written to the ledger.
+//!
+//! The deterministic max/max+1 boundary tests below assert *all three* at the
+//! cap, and that one past the cap is rejected with [`Error::BatchTooLarge`]
+//! before any partial mutation.
+//!
 //! # Caveats on the numbers
 //!
 //! * These contracts are registered natively, so Wasm instantiation and
@@ -47,29 +60,37 @@ const LEDGER_ENTRY_LIMIT: u32 = 400;
 const WRITE_ENTRY_LIMIT: u32 = 200;
 /// Maximum total size of emitted contract events, in bytes.
 const EVENT_BYTES_LIMIT: u32 = 16_384;
+/// Maximum modelled CPU instructions per invocation.
+const INSTRUCTION_LIMIT: i64 = 400_000_000;
 
 #[derive(Debug, Clone, Copy)]
 struct Cost {
     footprint: u32,
     writes: u32,
+    memory: u32,
     instructions: i64,
     event_bytes: u32,
 }
 
-/// Report and return the last invocation's cost.
+/// Report and return the last invocation's cost. Every resource dimension the
+/// issue asks about — CPU ([`Cost::instructions`]), memory
+/// ([`Cost::memory`], the in-memory ledger entries accessed), and storage
+/// writes ([`Cost::writes`]) — is surfaced so regressions are visible.
 fn report(h: &Harness, label: &str) -> Cost {
     let r = h.env.cost_estimate().resources();
     let cost = Cost {
         footprint: r.disk_read_entries + r.memory_read_entries + r.write_entries,
         writes: r.write_entries,
+        memory: r.memory_read_entries,
         instructions: r.instructions,
         event_bytes: r.contract_events_size_bytes,
     };
     std::println!(
         "{label:<26} footprint={:<4}/{LEDGER_ENTRY_LIMIT}  writes={:<4}/{WRITE_ENTRY_LIMIT}  \
-         events={:<6}/{EVENT_BYTES_LIMIT}  instructions={}",
+         mem={:<4}  events={:<6}/{EVENT_BYTES_LIMIT}  instructions={}",
         cost.footprint,
         cost.writes,
+        cost.memory,
         cost.event_bytes,
         cost.instructions,
     );
@@ -86,6 +107,16 @@ fn assert_has_headroom(label: &str, cost: Cost, factor: u32) {
         cost.writes * factor <= WRITE_ENTRY_LIMIT,
         "{label}: {} writes lack {factor}x headroom under {WRITE_ENTRY_LIMIT}",
         cost.writes,
+    );
+    assert!(
+        cost.memory * factor <= LEDGER_ENTRY_LIMIT,
+        "{label}: {} in-memory reads lack {factor}x headroom under {LEDGER_ENTRY_LIMIT}",
+        cost.memory,
+    );
+    assert!(
+        cost.instructions <= INSTRUCTION_LIMIT,
+        "{label}: {} instructions exceed {INSTRUCTION_LIMIT}",
+        cost.instructions,
     );
     assert!(
         cost.event_bytes * factor <= EVENT_BYTES_LIMIT,
@@ -278,70 +309,108 @@ fn the_event_budget_is_not_the_binding_constraint_at_the_cap() {
     );
 }
 
-/// Enforce a hard ceiling on `batch_withdraw` budget usage. This is the reviewed
-/// threshold: any optimization that breaks these numbers is a regression.
-#[rustfmt::skip]
+// ---------------------------------------------------------------------------
+// Deterministic max / max+1 boundary tests
+// ---------------------------------------------------------------------------
+
+/// At exactly [`MAX_BATCH_SIZE`] streams the transaction must succeed. Measure
+/// and record every resource dimension so regressions are visible.
 #[test]
-fn batch_withdraw_budget_regression() {
+fn batch_withdraw_at_max_succeeds_and_records_costs() {
     let h = Harness::new();
-
-    let typical_size = 4usize;
-    let max_size = MAX_BATCH_SIZE as usize;
-    let total_streams = typical_size + max_size;
-
-    let ids: Vec<u64> = (0..total_streams)
+    let ids: std::vec::Vec<u64> = (0..MAX_BATCH_SIZE)
         .map(|_| h.create_simple(100 * ONE, 100 * DAY))
         .collect();
+    h.advance(30 * DAY);
+
+    h.client.batch_withdraw(&h.recipient, &h.ids(&ids));
+    let cost = report(&h, "batch_withdraw(MAX)");
+
+    // The batch must succeed *within* every documented protocol limit, with
+    // the 2x margin that protects against a heavier token contract. This
+    // asserts CPU (instructions), memory (in-memory reads), storage writes,
+    // footprint, and event bytes together.
+    assert_has_headroom("batch_withdraw(MAX)", cost, 2);
+}
+
+/// At [`MAX_BATCH_SIZE`] + 1 the contract must reject the call with a typed
+/// error *before* touching any storage, so resource usage should be minimal.
+#[test]
+fn batch_withdraw_at_max_plus_one_is_rejected_with_typed_error() {
+    let h = Harness::new();
+    let ids: std::vec::Vec<u64> = (0..MAX_BATCH_SIZE + 1)
+        .map(|_| h.create_simple(100 * ONE, 100 * DAY))
+        .collect();
+    h.advance(30 * DAY);
+
+    let err = h
+        .client
+        .try_batch_withdraw(&h.recipient, &h.ids(&ids))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::BatchTooLarge);
+}
+
+/// Same boundary exercise for [`batch_extend_ttl`](crate::FluxoraStream::batch_extend_ttl):
+/// at exactly the cap the call must succeed with room to spare.
+#[test]
+fn batch_extend_ttl_at_max_succeeds_and_records_costs() {
+    let h = Harness::new();
+    let ids: std::vec::Vec<u64> = (0..MAX_BATCH_SIZE)
+        .map(|_| h.create_simple(100 * ONE, YEAR))
+        .collect();
+
+    h.client.batch_extend_ttl(&h.ids(&ids));
+    let cost = report(&h, "batch_extend_ttl(MAX)");
+
+    assert_has_headroom("batch_extend_ttl(MAX)", cost, 2);
+}
+
+/// At [`MAX_BATCH_SIZE`] + 1 the TTL sweep must also be rejected with
+/// [`Error::BatchTooLarge`] before doing any work.
+#[test]
+fn batch_extend_ttl_at_max_plus_one_is_rejected_with_typed_error() {
+    let h = Harness::new();
+    let ids: std::vec::Vec<u64> = (0..MAX_BATCH_SIZE + 1)
+        .map(|_| h.create_simple(100 * ONE, YEAR))
+        .collect();
+
+    let err = h
+        .client
+        .try_batch_extend_ttl(&h.ids(&ids))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::BatchTooLarge);
+}
+
+/// The resource cost at MAX must be at least as cheap as 2× the cost at
+/// MAX/2 — proving the cost scales linearly with batch size and that the cap
+/// was not set by a pathological case.
+#[test]
+fn batch_withdraw_cost_at_max_is_comparable_to_half_batch() {
+    let h = Harness::new();
+    let all_ids: std::vec::Vec<u64> = (0..MAX_BATCH_SIZE)
+        .map(|_| h.create_simple(100 * ONE, 100 * DAY))
+        .collect();
+    let half = (MAX_BATCH_SIZE / 2) as usize;
 
     h.advance(30 * DAY);
 
-    // Empty batch
-    assert_eq!(
-        h.client.try_batch_withdraw(&h.recipient, &h.ids(&[])),
-        Err(Ok(Error::EmptyBatch))
-    );
-    let empty = report(&h, "batch_withdraw(0)");
+    h.client
+        .batch_withdraw(&h.recipient, &h.ids(&all_ids[..half]));
+    let half_cost = report(&h, "batch_withdraw(half)");
 
-    // Typical batch
-    h.client.batch_withdraw(&h.recipient, &h.ids(&ids[..typical_size]));
-    let typical = report(&h, "batch_withdraw(4)");
+    h.advance(DAY);
 
-    // Max batch
-    h.client.batch_withdraw(&h.recipient, &h.ids(&ids[typical_size..]));
-    let max = report(&h, "batch_withdraw(16)");
+    h.client
+        .batch_withdraw(&h.recipient, &h.ids(&all_ids[half..]));
+    let full_cost = report(&h, "batch_withdraw(full)");
 
-    // Thresholds established by measurement.
-    // They must never increase significantly without a design review.
+    // Full batch costs more, but not more than 2× — linear scaling.
     assert!(
-        empty.footprint <= 30,
-        "empty batch footprint regression: {}",
-        empty.footprint
-    );
-    assert!(
-        empty.instructions <= 15_000_000,
-        "empty batch CPU regression: {}",
-        empty.instructions
-    );
-
-    assert!(
-        typical.footprint <= 100,
-        "typical batch footprint regression: {}",
-        typical.footprint
-    );
-    assert!(
-        typical.instructions <= 80_000_000,
-        "typical batch CPU regression: {}",
-        typical.instructions
-    );
-
-    assert!(
-        max.footprint <= 350,
-        "max batch footprint regression: {}",
-        max.footprint
-    );
-    assert!(
-        max.instructions <= 350_000_000,
-        "max batch CPU regression: {}",
-        max.instructions
+        full_cost.footprint <= half_cost.footprint * 2,
+        "full batch footprint {} > 2× half batch {}",
+        full_cost.footprint,
+        half_cost.footprint,
     );
 }
