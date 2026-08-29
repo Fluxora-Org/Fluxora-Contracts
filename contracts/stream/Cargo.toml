@@ -20,32 +20,4 @@ soroban-sdk = { workspace = true }
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 proptest = "1"
-# Required for constructing Ed25519 keypairs in delegated-withdraw tests
-ed25519-dalek = { version = "2.1", features = ["rand_core"] }
-rand = "0.8"
-# Required for injecting Classic Stellar AccountEntry + TrustLineEntry into the
-# host ledger storage in adversarial_auth tests (ed25519 recipient trustline setup).
-soroban-env-host = { version = "=21.2.1", features = ["testutils"] }
-
-# ---------------------------------------------------------------------------
-# Known-broken integration tests (pre-existing, unrelated to CI restoration)
-# ---------------------------------------------------------------------------
-# These files predate this commit and fail to compile against the current
-# soroban-sdk 21.7.7 API / current contract signatures (e.g. removed
-# `Ledger::set_sequence_number`/`set_timestamp`, removed `Events::all`,
-# stale `create_stream` call sites missing the `memo`/`kind` parameters).
-# They were never actually exercised by CI: the old workflow's Test/Build
-# jobs `needs: lint`, and Lint was already failing on `cargo fmt`, so these
-# files' breakage went undetected. Disabled here (rather than deleted) so
-# `cargo test --workspace` and `cargo fmt --all` succeed; each should be
-# repaired or removed in a dedicated follow-up.
-[[test]]
-name = "rate_change_semantics_boundary"
-path = "tests/rate_change_semantics_boundary.rs"
-test = true
-
-[[test]]
-name = "event_ordering_failed_transfer"
-path = "tests/event_ordering_failed_transfer.rs"
-test = true
-
+serde_json = { workspace = true }
