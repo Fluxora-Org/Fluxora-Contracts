@@ -19,6 +19,49 @@
 //! 3. **Permissionless top-ups** via `extend_stream_ttl`, so a keeper —or the
 //!    recipient, or any passer-by — can keep a claim readable without the
 //!    sender's cooperation.
+//!
+//! # Instance vs persistent TTL policy
+//!
+//! The contract uses two Soroban storage lifetimes, and they are *not* managed
+//! the same way:
+//!
+//! | Entry | Lifetime | TTL target | Who bumps it |
+//! |-------|----------|-----------|--------------|
+//! | [`DataKey::NextStreamId`] (id counter) | **instance** | always the network `max_ttl()` | every mutating call |
+//! | [`DataKey::Stream(id)`] (a stream) | **persistent** | remaining life + [`TTL_BUFFER_SECONDS`], floored at [`MIN_STREAM_TTL_LEDGERS`] | every touch + keeper |
+//!
+//! **Instance entries are always kept at maximum rent.** They are tiny, and the
+//! id counter carries the contract's monotonicity invariant: if `NextStreamId`
+//! archived, the next `create_stream` would restart ids from zero and collide
+//! with live streams. So [`extend_instance`] pins it to `max_ttl()` on *every*
+//! mutating call — creation, every withdrawal, every pause, every keeper sweep.
+//!
+//! **Persistent entries target the stream's remaining lifetime.** They hold the
+//! full accounting record, so they are extended to a window that covers the
+//! stream's scheduled end plus a keeper buffer. A stream that is still settling
+//! keeps a floor of [`MIN_STREAM_TTL_LEDGERS`] so final state stays readable.
+//!
+//! **Ordering guarantee.** [`DataKey::NextStreamId`] must *never* expire before
+//! the streams it issued. Because the instance entry is always pinned to the
+//! maximum while a persistent entry is only ever as long-lived as its target,
+//! the instance entry is always at least as fresh as any stream — so a live
+//! stream can never outlive its own id-counter, and a keeper sweep always
+//! bumps both in the same transaction ([`extend_stream_ttl`] calls
+//! [`extend_stream`] *and* [`extend_instance`] together).
+//!
+//! # Safe handling of each storage type
+//!
+//! - **Instance `NextStreamId`** is read with a fallback of `0` (a fresh
+//!   contract), written monotonically, and always re-extended. A restored
+//!   instance correctly resumes from the last persisted id, never reusing one.
+//! - **Persistent `Stream(id)`** is read through [`load_stream`] (which bumps
+//!   TTL) or [`peek_stream`] (view-only, no write). [`stream_exists`] reports
+//!   `false` for an archived entry, which combined with the id counter lets the
+//!   contract tell "never existed" apart from "needs restoring".
+//!
+//! The regression tests in `test/ttl.rs` exercise both lifetimes from seeded
+//! ledger states and assert that the instance entry cannot expire before the
+//! persistent entries it issued.
 
 use soroban_sdk::{Address, Env};
 
