@@ -1,0 +1,84 @@
+╭──────────────────────────────────────────────────────────────────────╮
+│ Fluxora — testnet exercise                                           │
+╰──────────────────────────────────────────────────────────────────────╯
+ network   testnet
+ contract  CBCGTSCJXBMPPPE4BPDIPYZXPE2J5TQEKD2KCS7VQF533NKKEYGUTHXW
+ token     CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC  (native XLM SAC, 7 decimals)
+ sender    GCMCJCWMJOAW7ARHGZJ3JGKICI7VGNSRZAIIUJAH63AJ7DVCX3JUP6KP
+ recipient GCHCF4NQME775XAFB7P2NCV3F54GDWNSGGPTJ3COEVMWTM2STYHRTSVX
+ third     GCKTQDWOY7BHIDSKRPTDAU23BBNM2VZTGQO7H226TV2F2LZCFU3ATYJJ
+ cli       stellar 27.1.0 (8e402ea28202950b272fbabc34caad4d2f64fe87)
+
+[1m── create_stream — 60 XLM over 600s, no cliff, all capabilities[0m
+   stream_id = 3
+   [32m✓[0m create_stream returned an id
+   [32m✓[0m stream_exists                                        true
+   [32m✓[0m stream_count > 3
+
+[1m── views — get_stream / vested_of / withdrawable_of / refundable_of[0m
+   {'deposited': '600000000', 'withdrawn': '0', 'start_time': 1786506624, 'end_time': 1786507224, 'status': 0, 'cancellable': True, 'pausable': True, 'transferable': True}
+   [32m✓[0m deposited                                            600000000
+   [32m✓[0m withdrawn                                            0
+   vested=46000000 refundable=554000000  drift=0 stroops (~0s of RPC skew)
+   [32m✓[0m conservation holds within the RPC skew window
+
+[1m── withdraw — partial, then max[0m
+   waiting 30s for accrual…
+   withdrawable = 76000000 stroops
+   [32m✓[0m accrual is positive after 30s
+   [32m✓[0m partial withdraw paid exactly 1 XLM                  10000000
+   withdraw(None) paid 91000000 stroops
+   [32m✓[0m withdraw with no amount drains the accrued balance
+   [32m✓[0m withdrawable dropped after the max withdraw (5000000 << 76000000)
+
+[1m── top_up — extends the duration, holds the rate[0m
+   end_time 1786507224 -> 1786507524   deposited -> 900000000
+   [32m✓[0m deposited grew by the top-up                         900000000
+   extension = 300s
+   [32m✓[0m end_time extended, rate held
+   [32m✓[0m sub-second top_up is rejected (TopUpTooSmall = #23)  #23
+
+[1m── pause / resume — accrual freezes, withdrawal still works[0m
+   [32m✓[0m status is Paused                                     Paused
+   [32m✓[0m vested frozen across 12s of wall clock               136000000
+   [32m✓[0m double pause is rejected (StreamAlreadyPaused = #13) #13
+   [32m✓[0m status is Active                                     Active
+   [32m✓[0m resume when not paused is rejected (StreamNotPaused = #12) #12
+   [32m✓[0m accrual resumed
+
+[1m── transfer_recipient — authority follows the stream[0m
+   [32m✓[0m recipient updated                                    GCKTQDWOY7BHIDSKRPTDAU23BBNM2VZTGQO7H226TV2F2LZCFU3ATYJJ
+   [32m✓[0m old recipient can no longer withdraw (Unauthorized)  blocked
+   new recipient withdrew successfully
+   [32m✓[0m new recipient can withdraw
+
+[1m── TTL maintenance — permissionless[0m
+   extend_stream_ttl -> 518536 ledgers (~30 days)
+   [32m✓[0m a third party with no relationship to the stream can pay its rent
+
+[1m── batch operations[0m
+   second stream id = 4
+   [32m✓[0m batch_extend_ttl skips unknown ids                   2
+   batch_withdraw total = 113000000 stroops
+   [32m✓[0m batch_withdraw paid out
+   [32m✓[0m duplicate id in a batch is rejected (DuplicateStreamId = #21) #21
+   [32m✓[0m oversized batch is rejected (BatchTooLarge = #19)    #19
+
+[1m── cancel — refund the unvested remainder, recipient keeps what vested[0m
+   refundable before cancel = 178666667
+   [32m✓[0m status is Cancelled                                  Cancelled
+   [32m✓[0m sender's balance increased by roughly the refund
+   [32m✓[0m cancelling twice is rejected (StreamTerminated = #14) #14
+   [32m✓[0m cancel left deposited >= withdrawn (liability non-negative)
+
+[1m── validation gates[0m
+   [32m✓[0m end <= start rejected (InvalidTimeRange = #2)        #2
+   [32m✓[0m stream to self rejected (SelfStream = #6)            #6
+   [32m✓[0m dust-rate deposit rejected (DepositRateTooLow = #5)  #5
+   [32m✓[0m unknown stream id (StreamNotFound = #1)              #1
+
+╭──────────────────────────────────────────────────────────────────────╮
+│ 35 passed   0  failed                                              │
+╰──────────────────────────────────────────────────────────────────────╯
+
+Contract: https://stellar.expert/explorer/testnet/contract/CBCGTSCJXBMPPPE4BPDIPYZXPE2J5TQEKD2KCS7VQF533NKKEYGUTHXW

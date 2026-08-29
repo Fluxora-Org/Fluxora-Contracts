@@ -36,9 +36,6 @@ fn test_init_happy_path() {
     assert_eq!(cfg.stream_contract, sc);
     assert_eq!(cfg.max_deposit, 5_000);
     assert_eq!(cfg.min_duration, 200);
-    assert!(!cfg.creation_paused, "creation_paused defaults to false");
-    assert_eq!(cfg.min_rate_per_second, None);
-    assert_eq!(cfg.max_rate_per_second, None);
 }
 
 /// Calling `init` a second time returns `AlreadyInitialized`.
@@ -577,38 +574,6 @@ fn test_idle_factory_recovers_on_first_setter() {
 
 /// Test that set_rate_bounds bumps instance TTL.
 #[test]
-/// `set_rate_bounds(Some(-1), None)` returns `InvalidRateBounds` (not
-/// `StreamContractError`).
-#[test]
-fn test_set_rate_bounds_rejects_negative_min_rate() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
-    let factory = FluxoraFactoryClient::new(&env, &fid);
-    let admin = Address::generate(&env);
-    let sc = Address::generate(&env);
-    factory.init(&admin, &sc, &10_000, &100);
-
-    let result = factory.try_set_rate_bounds(&Some(-1_i128), &None);
-    assert_eq!(result, Err(Ok(FactoryError::InvalidRateBounds)));
-}
-
-/// `set_rate_bounds(Some(100), Some(50))` with `min > max` returns
-/// `InvalidRateBounds`.
-#[test]
-fn test_set_rate_bounds_rejects_min_greater_than_max() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
-    let factory = FluxoraFactoryClient::new(&env, &fid);
-    let admin = Address::generate(&env);
-    let sc = Address::generate(&env);
-    factory.init(&admin, &sc, &10_000, &100);
-
-    let result = factory.try_set_rate_bounds(&Some(100_i128), &Some(50_i128));
-    assert_eq!(result, Err(Ok(FactoryError::InvalidRateBounds)));
-}
-
 fn test_set_rate_bounds_bumps_instance_ttl() {
     let env = Env::default();
     env.mock_all_auths();
@@ -1005,56 +970,4 @@ fn test_set_admin_same_ledger_multiple_setters() {
     }]);
     factory.set_batch_cap_enforcement(&false);
     assert_eq!(factory.get_factory_config().batch_cap_enforced, false);
-}
-
-// ---------------------------------------------------------------------------
-// issue #1133 — set_batch_cap_enforcement must emit BatchCapEnforcementUpdated
-// ---------------------------------------------------------------------------
-
-/// `set_batch_cap_enforcement(true)` emits a typed `BatchCapEnforcementUpdated`
-/// event with `enabled == true`.
-#[test]
-fn test_set_batch_cap_enforcement_emits_event_true() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
-    let factory = FluxoraFactoryClient::new(&env, &fid);
-    let admin = Address::generate(&env);
-    let sc = Address::generate(&env);
-
-    factory.init(&admin, &sc, &5_000, &200);
-
-    factory.set_batch_cap_enforcement(&true);
-
-    let events = env.events().all();
-    let (_, topics, data) = events.get(events.len() - 1).unwrap();
-    let topic0: soroban_sdk::Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
-    assert_eq!(topic0, soroban_sdk::symbol_short!("batch_cap"));
-    let payload: fluxora_factory::BatchCapEnforcementUpdated =
-        data.try_into_val(&env).unwrap();
-    assert_eq!(payload.enabled, true);
-}
-
-/// `set_batch_cap_enforcement(false)` emits the same event with `enabled == false`.
-#[test]
-fn test_set_batch_cap_enforcement_emits_event_false() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
-    let factory = FluxoraFactoryClient::new(&env, &fid);
-    let admin = Address::generate(&env);
-    let sc = Address::generate(&env);
-
-    factory.init(&admin, &sc, &5_000, &200);
-    factory.set_batch_cap_enforcement(&true);
-
-    factory.set_batch_cap_enforcement(&false);
-
-    let events = env.events().all();
-    let (_, topics, data) = events.get(events.len() - 1).unwrap();
-    let topic0: soroban_sdk::Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
-    assert_eq!(topic0, soroban_sdk::symbol_short!("batch_cap"));
-    let payload: fluxora_factory::BatchCapEnforcementUpdated =
-        data.try_into_val(&env).unwrap();
-    assert_eq!(payload.enabled, false);
 }

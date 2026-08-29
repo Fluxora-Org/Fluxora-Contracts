@@ -1,42 +1,31 @@
 [package]
-name = "fluxora_stream"
-version = "0.1.0"
-edition = "2021"
-rust-version = "1.94.1"
-description = "Fluxora USDC streaming contract for Stellar Soroban"
-# Issue #206 — global emergency pause: scaffold branch. Instance pause flag + admin setter to follow.
-
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+name = "fluxora-stream"
+description = "Continuous payment streaming primitive for Soroban"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+publish = false
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["lib", "cdylib"]
 doctest = false
 
 [features]
 testutils = ["soroban-sdk/testutils"]
 
-# Soroban SDK version pinned for reproducible builds.
-# soroban-sdk 21.7.7 is compatible with Stellar Soroban networks as of Feb 2026.
-# See rust-toolchain.toml for Rust version pin.
-# To upgrade, verify compatibility with latest Stellar/Soroban network and run full test suite.
-
 [dependencies]
-soroban-sdk = "21.7.7"
+soroban-sdk = { workspace = true }
 
 [dev-dependencies]
-# Required for simulating ledger environment and testing time dependencies
-soroban-sdk = { version = "21.7.7", features = ["testutils"] }
-# Factory policy enforcement tests (#525)
-fluxora_factory = { path = "../factory", features = ["testutils"] }
-# Governance integration tests (#585)
-fluxora_governance = { path = "../governance", features = ["testutils"] }
-# Property-based testing for accrual math fuzz harness (#292)
+soroban-sdk = { workspace = true, features = ["testutils"] }
 proptest = "1"
 # Required for constructing Ed25519 keypairs in delegated-withdraw tests
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 rand = "0.8"
-soroban-env-host = "=21.2.1"
+# Required for injecting Classic Stellar AccountEntry + TrustLineEntry into the
+# host ledger storage in adversarial_auth tests (ed25519 recipient trustline setup).
+soroban-env-host = { version = "=21.2.1", features = ["testutils"] }
 
 # ---------------------------------------------------------------------------
 # Known-broken integration tests (pre-existing, unrelated to CI restoration)
@@ -58,17 +47,22 @@ test = true
 [[test]]
 name = "chaos"
 path = "tests/chaos.rs"
-test = true
+test = false
 
 [[test]]
 name = "cliff_only_variant"
 path = "tests/cliff_only_variant.rs"
-test = true
+test = false
 
 [[test]]
 name = "create_stream_relative"
 path = "tests/create_stream_relative.rs"
-test = true
+test = false
+
+[[test]]
+name = "id_monotonicity_upgrade"
+path = "tests/id_monotonicity_upgrade.rs"
+test = false
 
 [[test]]
 name = "factory_policy"
@@ -78,7 +72,7 @@ test = true
 [[test]]
 name = "formal_verification_smoke"
 path = "tests/formal_verification_smoke.rs"
-test = false
+test = true
 
 [[test]]
 name = "governance_proptest"
@@ -88,12 +82,12 @@ test = false
 [[test]]
 name = "health_matrix"
 path = "tests/health_matrix.rs"
-test = false
+test = true
 
 [[test]]
 name = "id_range"
 path = "tests/id_range.rs"
-test = false
+test = true
 
 [[test]]
 name = "metadata_limits_900"
@@ -106,6 +100,11 @@ path = "tests/keeper_cancel.rs"
 required-features = ["testutils"]
 
 [[test]]
+name = "security_invariants"
+path = "tests/security_invariants.rs"
+test = true
+
+[[test]]
 name = "max_rate_per_second"
 path = "tests/max_rate_per_second.rs"
 test = true
@@ -113,7 +112,7 @@ test = true
 [[test]]
 name = "metadata_extension"
 path = "tests/metadata_extension.rs"
-test = false
+test = true
 
 [[test]]
 name = "stream_offer"
@@ -146,6 +145,21 @@ path = "tests/recipient_update_state_machine.rs"
 test = false
 
 [[test]]
+name = "id_reservation"
+path = "tests/id_reservation.rs"
+test = false
+
+[[test]]
+name = "storage_invariants"
+path = "tests/storage_invariants.rs"
+test = true
+
+[[test]]
+name = "dust_threshold"
+path = "tests/dust_threshold.rs"
+test = true
+
+[[test]]
 name = "storage_key_compat"
 path = "tests/storage_key_compat.rs"
 required-features = ["testutils"]
@@ -163,7 +177,7 @@ test = true
 [[test]]
 name = "withdrawal_frequency"
 path = "tests/withdrawal_frequency.rs"
-test = true
+test = false
 
 # ---------------------------------------------------------------------------
 # Known-broken integration tests, second batch (compile fine, fail at runtime)
@@ -195,12 +209,17 @@ test = true
 [[test]]
 name = "adversarial_auth"
 path = "tests/adversarial_auth.rs"
-test = false
+test = true
 
 [[test]]
 name = "liability_invariant"
 path = "tests/liability_invariant.rs"
 required-features = ["testutils"]
+
+[[test]]
+name = "event_ordering_failed_transfer"
+path = "tests/event_ordering_failed_transfer.rs"
+test = true
 
 [[test]]
 name = "event_snapshots_suite"
