@@ -178,11 +178,7 @@ impl FluxoraFactory {
         Ok(())
     }
 
-    pub fn set_allowlist(
-        env: Env,
-        recipient: Address,
-        allowed: bool,
-    ) -> Result<(), FactoryError> {
+    pub fn set_allowlist(env: Env, recipient: Address, allowed: bool) -> Result<(), FactoryError> {
         require_admin(&env)?;
         env.storage()
             .instance()
@@ -190,10 +186,7 @@ impl FluxoraFactory {
         Ok(())
     }
 
-    pub fn set_batch_cap_enforcement(
-        env: Env,
-        enforced: bool,
-    ) -> Result<(), FactoryError> {
+    pub fn set_batch_cap_enforcement(env: Env, enforced: bool) -> Result<(), FactoryError> {
         require_admin(&env)?;
         let mut policy = get_policy(&env)?;
         policy.batch_cap_enforced = enforced;
