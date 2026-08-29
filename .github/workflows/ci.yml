@@ -160,10 +160,15 @@ jobs:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
+      # Build release artifacts via the release command, not a bare workspace
+      # build. This is deliberate isolation (issue #1543): the archival probe
+      # shares the workspace but must never ship. `script/release.sh` builds only
+      # the `fluxora-stream` product package and fails if a probe wasm would be
+      # produced, so this step is also the regression test for "a release produces
+      # only product artifacts". The probe's smoke test still runs above via
+      # `cargo test --all-features`.
+      - name: Build release artifacts (product only)
+        run: script/release.sh
 
       - name: Verify Rust toolchain version
         run: echo "Skip verify_rust_version"
