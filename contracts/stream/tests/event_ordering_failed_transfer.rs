@@ -190,7 +190,9 @@ fn failed_create_emits_no_created_event() {
         "event log must not grow on reverted create"
     );
     assert_eq!(
-        count_topic(&env, &contract_id, "created"), 0, "no 'created' topic on revert"
+        count_topic(&env, &contract_id, "created"),
+        0,
+        "no 'created' topic on revert"
     );
     assert_eq!(
         client.get_stream_count(),
@@ -236,7 +238,9 @@ fn failed_withdraw_emits_no_withdrew_event() {
         "event log must not grow on reverted withdraw"
     );
     assert_eq!(
-        count_topic(&env, &contract_id, "withdrew"), 0, "no 'withdrew' topic on revert"
+        count_topic(&env, &contract_id, "withdrew"),
+        0,
+        "no 'withdrew' topic on revert"
     );
 }
 
@@ -278,7 +282,9 @@ fn failed_cancel_emits_no_cancelled_event() {
         "event log must not grow on reverted cancel"
     );
     assert_eq!(
-        count_topic(&env, &contract_id, "cancelled"), 0, "no 'cancelled' topic on revert"
+        count_topic(&env, &contract_id, "cancelled"),
+        0,
+        "no 'cancelled' topic on revert"
     );
 }
 
@@ -322,6 +328,8 @@ fn failed_top_up_emits_no_top_up_event() {
         "event log must not grow on reverted top-up"
     );
     assert_eq!(
-        count_topic(&env, &contract_id, "top_up"), 0, "no 'top_up' topic on revert"
+        count_topic(&env, &contract_id, "top_up"),
+        0,
+        "no 'top_up' topic on revert"
     );
 }
