@@ -664,8 +664,7 @@ impl FluxoraStream {
         Ok(())
     }
 
-    /// Reassign a stream's entire remaining claim to a new recipient.
-    /// Recipient auth.
+    /// Reassign a stream's future payouts to a new recipient. Sender auth.
     ///
     /// Available only if the stream was created with `transferable == true`.
     /// A compliance-bound sender — payroll, a KYC'd grant program — can pin the
@@ -684,7 +683,7 @@ impl FluxoraStream {
         new_recipient: Address,
     ) -> Result<(), Error> {
         let mut stream = storage::load_stream(&env, stream_id)?;
-        stream.recipient.require_auth();
+        stream.sender.require_auth();
 
         if !stream.transferable {
             return Err(Error::NotTransferable);
@@ -698,7 +697,7 @@ impl FluxoraStream {
 
         let old_recipient = stream.recipient.clone();
         if old_recipient == new_recipient {
-            return Ok(());
+            return Err(Error::RepeatedTransfer);
         }
 
         stream.recipient = new_recipient.clone();
