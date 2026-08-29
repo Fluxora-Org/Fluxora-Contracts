@@ -238,7 +238,15 @@ fn transfer_at_cliff_preserves_the_open_claim() {
     let h = Harness::new();
     let start = h.now();
     let cliff = start + 50 * DAY;
-    let id = h.create(1_000 * ONE, start, start + 100 * DAY, cliff, true, true, true);
+    let id = h.create(
+        1_000 * ONE,
+        start,
+        start + 100 * DAY,
+        cliff,
+        true,
+        true,
+        true,
+    );
 
     h.warp_to(cliff);
     h.client.transfer_recipient(&id, &h.other);

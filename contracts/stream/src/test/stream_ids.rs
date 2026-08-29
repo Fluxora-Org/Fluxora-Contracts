@@ -366,7 +366,15 @@ fn transfers_and_top_ups_do_not_perturb_id_allocation() {
     h.client.top_up(&1, &(50 * ONE));
     let _ = h.client.try_top_up(&2, &0); // rejected: InvalidAmount
     h.client.cancel(&3);
-    h.client.transfer_recipient(&3, &h.other); // a cancelled stream's tail stays transferable
+    // A cancelled stream with nothing vested (cancelled before any time passed)
+    // holds no claim, so it is not reassignable. (A cancelled stream *with* an
+    // unwithdrawn tail remains transferable — see transfer.rs.)
+    let err = h
+        .client
+        .try_transfer_recipient(&3, &h.other)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::StreamTerminated);
     h.advance(10 * DAY);
 
     ledger.record(h.create_simple(10 * ONE, DAY));

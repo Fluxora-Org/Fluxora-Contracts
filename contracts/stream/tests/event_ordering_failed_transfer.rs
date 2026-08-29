@@ -1,420 +1,340 @@
-//! Regression tests: event ordering around failed cross-contract token calls.
+//! Regression tests: no success event is emitted when a cross-contract
+//! token transfer is reverted.
 //!
-//! # Policy
+//! ## Policy (decided here)
 //!
-//! Soroban transactions are atomic. If the token transfer panics (insufficient
-//! balance, allowance revoked, or a malicious token that always reverts), the
-//! entire transaction is rolled back — including any storage mutations AND any
-//! events that were published during that invocation.
+//! Soroban transactions are **atomic**. When the token transfer inside
+//! `create_stream`, `withdraw`, `cancel` or `top_up` fails, the host rolls
+//! back the entire invocation frame — storage writes AND published events are
+//! discarded together. There is therefore no such thing as a "failure event"
+//! for these operations: the absence of the success event (`stream_created`,
+//! `withdrawn`, `cancelled`, `topped_up`) is itself the signal that the
+//! operation did not complete.
 //!
-//! Therefore: **a consumer can never observe a success event (`withdrew`,
-//! `cancelled`, `top_up`) for a transaction that was ultimately reverted.**
-//! No explicit "failure event" is needed; the absence of the success event IS
-//! the signal.
+//! The test host enforces this: `Events::all()` reports only the most recent
+//! invocation and filters out events recorded on a `failed_call` frame, so a
+//! reverted operation leaves an **empty** observable event log. These tests
+//! pin that guarantee down so a future edit cannot quietly move an emission
+//! before the token call.
 //!
-//! # What these tests verify
+//! ## What is tested
 //!
-//! For each of the three lifecycle operations that cross-call the token contract:
-//!
-//! | Operation        | Token call   | Success event |
-//! |-----------------|--------------|---------------|
-//! | `withdraw`       | `push_token` | `"withdrew"`  |
-//! | `cancel_stream`  | `push_token` | `"cancelled"` |
-//! | `top_up_stream`  | `pull_token` | `"top_up"`    |
+//! | Entry-point      | Token call | Success topic  |
+//! |-----------------|------------|----------------|
+//! | `withdraw`       | `transfer` | `"withdrawn"`  |
+//! | `cancel`         | `transfer` | `"cancelled"`  |
+//! | `top_up`         | `transfer` | `"topped_up"`  |
+//! | `create_stream`  | `transfer` | `"stream_created"` |
 //!
 //! Each test:
-//! 1. Registers a `PanicToken` — a contract whose `transfer` /
-//!    `transfer_from` always panics.
-//! 2. Initialises a streaming contract backed by that token (bypassing the
-//!    normal `verify_token_behavior` guard via a compliant `balance` impl).
-//! 3. Records the event-log length before the failing call.
-//! 4. Confirms the call panics (via `try_*` returning `Err`).
-//! 5. Asserts the event-log length is **unchanged** — no partial event was
-//!    left behind.
+//! 1. Boots a streaming contract whose token mock **panics on every real
+//!    transfer** (non-zero amount).
+//! 2. Calls `try_*` and asserts it returns `Err`.
+//! 3. Asserts the observable event log is **empty** — no topic leaked — and
+//!    that storage is unchanged too.
 //!
-//! Run with:
-//! ```bash
-//! cargo test -p fluxora-stream events -- --nocapture
+//! For withdraw / cancel / top-up the stream must already exist before the
+//! failing call. `OnceToken` allows exactly **one** `transfer` (consumed by
+//! `create_stream`), then panics on every subsequent call, giving us a live
+//! stream backed by an otherwise-broken token.
+//!
+//! ## Running
+//! ```
+//! cargo test -p fluxora-stream --test event_ordering_failed_transfer -- --nocapture
 //! ```
 
 extern crate std;
 
-use fluxora_stream::{CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamKind};
+use fluxora_stream::{Error, FluxoraStream, FluxoraStreamClient, Stream, StreamStatus};
 use soroban_sdk::{
-    contract, contractimpl,
+    contract, contractimpl, symbol_short,
     testutils::{Address as _, Events, Ledger},
-    Address, Env,
+    xdr::ContractEventBody,
+    Address, Env, Symbol, TryFromVal,
 };
 
 // ---------------------------------------------------------------------------
-// Failing token mock
+// Mock 1 — PanicToken
+// Panics on every real transfer (non-zero amount). Used for the
+// `create_stream` failure test, where the very first token call must fail.
 // ---------------------------------------------------------------------------
 
-/// A minimal SEP-41 lookalike whose `transfer` and `transfer_from` always panic.
-///
-/// `balance` returns 0 normally so that `verify_token_behavior` (which only
-/// calls `transfer(self, self, 0)` as a smoke test) passes during `init`.
-/// The zero-amount self-transfer path in `transfer` succeeds; any non-zero
-/// amount panics, simulating an always-reverting token.
 #[contract]
 pub struct PanicToken;
 
 #[contractimpl]
 impl PanicToken {
-    /// Always returns 0 — satisfies `verify_token_behavior`.
-    pub fn balance(_env: Env, _id: Address) -> i128 {
-        0
-    }
-
-    /// Zero-amount self-transfer succeeds (SEP-41 smoke test in `init`).
-    /// Any real transfer panics.
+    /// Zero-amount transfers succeed; any other amount panics.
     pub fn transfer(_env: Env, _from: Address, _to: Address, amount: i128) {
         assert_eq!(
             amount, 0,
             "PanicToken: transfer always fails for amount > 0"
         );
     }
-
-    /// Always panics — used by `pull_token` / `push_token` paths that call
-    /// `transfer_from`.
-    pub fn transfer_from(
-        _env: Env,
-        _spender: Address,
-        _from: Address,
-        _to: Address,
-        _amount: i128,
-    ) {
-        panic!("PanicToken: transfer_from always fails");
-    }
-    pub fn decimals(_env: Env) -> u32 {
-        7
-    }
 }
 
 // ---------------------------------------------------------------------------
-// Test context (PanicToken — used for failed create test only)
+// Mock 2 — OnceToken
+// Allows exactly ONE transfer (the deposit pull in create_stream), then
+// panics on every subsequent call. Used for withdraw / cancel / top-up tests.
 // ---------------------------------------------------------------------------
 
-struct Ctx<'a> {
-    env: Env,
-    client: FluxoraStreamClient<'a>,
-    sender: Address,
-    recipient: Address,
-    #[allow(dead_code)]
-    contract_id: Address,
-}
+#[contract]
+pub struct OnceToken;
 
 #[contractimpl]
 impl OnceToken {
-    pub fn balance(_env: Env, _id: Address) -> i128 {
-        // Return a balance large enough for the contract balance-cap check.
-        1_000_000
-    }
     pub fn transfer(env: Env, _from: Address, _to: Address, amount: i128) {
         if amount == 0 {
             return;
-        } // init smoke test
+        }
         let k = symbol_short!("used");
         if env.storage().instance().get::<_, bool>(&k).unwrap_or(false) {
             panic!("OnceToken: transfer already used");
         }
-    }
-    pub fn transfer_from(env: Env, _sp: Address, _from: Address, _to: Address, amount: i128) {
-        if amount == 0 {
-            return;
-        }
-        let k = symbol_short!("used");
-        if env.storage().instance().get::<_, bool>(&k).unwrap_or(false) {
-            panic!("OnceToken: transfer_from already used");
-        }
-    }
-    pub fn decimals(_env: Env) -> u32 {
-        7
-    }
-}
-
-impl<'a> OnceCtx<'a> {
-    fn setup() -> Self {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let token_id = env.register_contract(None, OnceToken);
-        let contract_id = env.register_contract(None, FluxoraStream);
-        let client = FluxoraStreamClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        client.init(&token_id, &admin);
-
-        let sender = Address::generate(&env);
-        let recipient = Address::generate(&env);
-
-        env.ledger().set_timestamp(0);
-
-        OnceCtx {
-            env,
-            client,
-            sender,
-            recipient,
-        }
-    }
-
-    /// Create a stream — consumes the one allowed token transfer.
-    fn create_stream(&self) -> u64 {
-        self.client.create_stream(
-            &self.sender,
-            &CreateStreamParams {
-                recipient: self.recipient.clone(),
-                deposit_amount: 1000,
-                rate_per_second: 1,
-                start_time: 0,
-                cliff_time: 0,
-                end_time: 1000,
-                withdraw_dust_threshold: Some(0),
-                memo: None,
-                metadata: None,
-                kind: StreamKind::Linear,
-                irrevocable: None,
-                witness: None,
-            },
-        )
+        env.storage().instance().set(&k, &true);
     }
 }
 
 // ---------------------------------------------------------------------------
-// Regression 1: failed withdrawal emits no "withdrew" event
+// Helpers
 // ---------------------------------------------------------------------------
 
-/// Policy: when `push_token` panics during `withdraw`, the transaction is
-/// rolled back atomically. No `"withdrew"` event must appear in the log.
-#[test]
-fn failed_withdraw_emits_no_withdrew_event() {
-    let ctx = OnceCtx::setup();
-    // Consume the one allowed transfer on stream creation.
-    let stream_id = ctx.create_stream();
+/// The events the *stream* contract published during the most recent call.
+///
+/// `Events::all()` only reports the most recent invocation, so this must be
+/// the first thing read after the failing call — any further contract call
+/// (even a read-only view) replaces the snapshot.
+fn stream_events(
+    env: &Env,
+    contract_id: &Address,
+) -> std::vec::Vec<soroban_sdk::xdr::ContractEvent> {
+    env.events()
+        .all()
+        .filter_by_contract(contract_id)
+        .events()
+        .to_vec()
+}
 
-    // Advance time so there is something to withdraw.
-    ctx.env.ledger().set_timestamp(500);
-
-    let events_before = ctx.env.events().all().len();
-
-    // withdraw calls push_token which panics on the second transfer.
-    let result = ctx.client.try_withdraw(&stream_id);
-    assert!(
-        result.is_err(),
-        "withdraw must fail when push_token panics"
-    );
-
-    // Event log must be unchanged — no partial "withdrew" event.
-    let events_after = ctx.env.events().all().len();
-    assert_eq!(
-        events_after, events_before,
-        "no events must be emitted for a reverted withdrawal"
-    );
-
-    // Double-check no "withdrew" topic is present at all since creation.
-    let all_events = ctx.env.events().all();
-    let withdrew_count = all_events
+/// Count the events whose first topic is the given symbol string.
+fn count_topic(env: &Env, contract_id: &Address, topic: &str) -> usize {
+    stream_events(env, contract_id)
         .iter()
         .filter(|e| {
-            if &e.0 != contract_id {
+            // `ContractEventBody` has a single `V0` variant, so this cannot
+            // fail; the destructure is irrefutable.
+            let ContractEventBody::V0(v0) = &e.body;
+            let Some(first) = v0.topics.first() else {
                 return false;
-            }
-            if let Some(v) = e.1.iter().next() {
-                if let Ok(s) = soroban_sdk::Symbol::try_from_val(env, &v) {
-                    return s.to_string() == topic;
-                }
-            }
-            false
+            };
+            Symbol::try_from_val(env, first)
+                .map(|s| s.to_string() == topic)
+                .unwrap_or(false)
         })
-        .count();
-    assert_eq!(
-        withdrew_count, 0,
-        "\"withdrew\" topic must never appear when withdrawal is reverted"
+        .count()
+}
+
+/// Boot a stream contract whose deposit pull succeeds exactly once, then
+/// panics on every subsequent transfer. Returns the client, the stream
+/// contract id, the token id and the created stream id.
+fn live_stream_with_once_token(
+    env: &Env,
+) -> (
+    FluxoraStreamClient<'_>,
+    soroban_sdk::Address,
+    soroban_sdk::Address,
+    u64,
+) {
+    let token_id = env.register(OnceToken, ());
+    let contract_id = env.register(FluxoraStream, ());
+    let client = FluxoraStreamClient::new(env, &contract_id);
+
+    let sender = Address::generate(env);
+    let recipient = Address::generate(env);
+    env.ledger().set_timestamp(0);
+
+    // create_stream consumes the one allowed transfer.
+    let stream_id = client.create_stream(
+        &sender, &recipient, &token_id, &1_000, &0, &1_000, &0, &true, &true, &true,
     );
+    (client, contract_id, token_id, stream_id)
 }
 
 // ---------------------------------------------------------------------------
-// Regression 2: failed cancellation emits no "cancelled" event
+// Test 1 — failed create_stream emits no "stream_created" event
 // ---------------------------------------------------------------------------
 
-/// When `pull_token` panics during `create_stream` the entire frame rolls
-/// back.  The `"created"` event must not appear and the stream counter must
-/// be unchanged.
+/// When the deposit pull panics during `create_stream` the entire frame rolls
+/// back. The `"stream_created"` event must not appear, no stream id may be
+/// consumed, and no funds may move.
 #[test]
 fn failed_create_emits_no_created_event() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let token_id = env.register_contract(None, PanicToken);
-    let contract_id = env.register_contract(None, FluxoraStream);
+    let token_id = env.register(PanicToken, ());
+    let contract_id = env.register(FluxoraStream, ());
     let client = FluxoraStreamClient::new(&env, &contract_id);
-    client.init(&token_id, &Address::generate(&env));
 
     let sender = Address::generate(&env);
     let recipient = Address::generate(&env);
     env.ledger().set_timestamp(0);
 
-    let count_before = client.get_stream_count();
-    let events_before = env.events().all().len();
+    let count_before = client.stream_count();
 
-    let result = client.try_create_stream(&sender, &default_params(&env, recipient));
+    let result = client.try_create_stream(
+        &sender, &recipient, &token_id, &1_000, &0, &1_000, &0, &true, &true, &true,
+    );
 
+    assert!(result.is_err(), "create_stream must fail when pull panics");
     assert!(
-        result.is_err(),
-        "create_stream must fail when pull_token panics"
+        env.events().all().events().is_empty(),
+        "a reverted create publishes no events",
     );
     assert_eq!(
-        env.events().all().len(),
-        events_before,
-        "event log must not grow on reverted create"
-    );
-    assert_eq!(
-        count_topic(&env, &contract_id, "created"),
+        count_topic(&env, &contract_id, "stream_created"),
         0,
-        "no 'created' topic on revert"
+        "no 'stream_created' topic on revert",
     );
     assert_eq!(
-        client.get_stream_count(),
+        client.stream_count(),
         count_before,
-        "stream counter must not increment on revert"
+        "stream counter must not increment on revert",
     );
 }
 
 // ---------------------------------------------------------------------------
-// Test 2 — failed withdraw emits no "withdrew" event
+// Test 2 — failed withdraw emits no "withdrawn" event
 // ---------------------------------------------------------------------------
 
-/// When `push_token` panics during `withdraw` the `"withdrew"` event must
-/// not appear in the log.
+/// When the payout transfer panics during `withdraw` the `"withdrawn"` event
+/// must not appear and the stream's accounting must be untouched.
 #[test]
 fn failed_withdraw_emits_no_withdrew_event() {
     let env = Env::default();
     env.mock_all_auths();
-
-    let token_id = env.register_contract(None, OnceToken);
-    let contract_id = env.register_contract(None, FluxoraStream);
-    let client = FluxoraStreamClient::new(&env, &contract_id);
-    client.init(&token_id, &Address::generate(&env));
-
-    let sender = Address::generate(&env);
-    let recipient = Address::generate(&env);
     env.ledger().set_timestamp(0);
 
-    // create_stream consumes the one allowed transfer_from.
-    let stream_id = client.create_stream(&sender, &default_params(&env, recipient));
+    let (client, contract_id, _token_id, stream_id) = live_stream_with_once_token(&env);
 
-    // Advance time so there is something withdrawable.
+    // Advance so there is something withdrawable; the payout now panics.
     env.ledger().set_timestamp(500);
-    let events_before = env.events().all().len();
 
-    // push_token now panics → withdrawal reverts.
-    let result = client.try_withdraw(&stream_id);
+    let result = client.try_withdraw(&stream_id, &None);
 
-    assert!(result.is_err(), "withdraw must fail when push_token panics");
-    assert_eq!(
-        env.events().all().len(),
-        events_before,
-        "event log must not grow on reverted withdraw"
+    assert!(result.is_err(), "withdraw must fail when the payout panics");
+    assert!(
+        env.events().all().events().is_empty(),
+        "a reverted withdraw publishes no events",
     );
     assert_eq!(
-        count_topic(&env, &contract_id, "withdrew"),
+        count_topic(&env, &contract_id, "withdrawn"),
         0,
-        "no 'withdrew' topic on revert"
+        "no 'withdrawn' topic on revert",
     );
+
+    // Accounting untouched: nothing withdrawn, still active.
+    let s: Stream = client.get_stream(&stream_id);
+    assert_eq!(s.withdrawn, 0, "reverted withdraw must not move accounting");
+    assert_eq!(s.status, StreamStatus::Active);
 }
 
 // ---------------------------------------------------------------------------
-// Test 3 — failed cancel_stream emits no "cancelled" event
+// Test 3 — failed cancel emits no "cancelled" event
 // ---------------------------------------------------------------------------
 
-/// When `push_token` panics during `cancel_stream` (refund path) the
-/// `"cancelled"` event must not appear.
+/// When the refund transfer panics during `cancel` the `"cancelled"` event
+/// must not appear and the stream must still be live and whole.
 #[test]
 fn failed_cancel_emits_no_cancelled_event() {
-    let ctx = OnceCtx::setup();
-    // Consume the one allowed transfer.
-    let stream_id = ctx.create_stream();
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(0);
 
-    // Cancel at t=0: full refund path — push_token fires immediately.
-    ctx.env.ledger().set_timestamp(0);
+    let (client, contract_id, _token_id, stream_id) = live_stream_with_once_token(&env);
 
-    let events_before = ctx.env.events().all().len();
+    // Cancel at t=0 triggers a full refund → transfer → panic.
+    let result = client.try_cancel(&stream_id);
 
-    let result = ctx.client.try_cancel_stream(&stream_id);
+    assert!(result.is_err(), "cancel must fail when the refund panics");
     assert!(
-        result.is_err(),
-        "cancel_stream must fail when push_token panics"
-    );
-
-    let events_after = ctx.env.events().all().len();
-    assert_eq!(
-        events_after, events_before,
-        "no events must be emitted for a reverted cancellation"
-    );
-
-    let result = client.try_cancel_stream(&stream_id);
-
-    assert!(
-        result.is_err(),
-        "cancel_stream must fail when push_token panics"
-    );
-    assert_eq!(
-        env.events().all().len(),
-        events_before,
-        "event log must not grow on reverted cancel"
+        env.events().all().events().is_empty(),
+        "a reverted cancel publishes no events",
     );
     assert_eq!(
         count_topic(&env, &contract_id, "cancelled"),
         0,
-        "no 'cancelled' topic on revert"
+        "no 'cancelled' topic on revert",
+    );
+
+    // The stream is still live with its full deposit.
+    let s: Stream = client.get_stream(&stream_id);
+    assert_eq!(s.status, StreamStatus::Active, "cancel must not stick");
+    assert_eq!(
+        s.deposited, 1_000,
+        "reverted cancel must not shrink the deposit"
     );
 }
 
 // ---------------------------------------------------------------------------
-// Regression 3: failed top-up emits no "top_up" event
+// Test 4 — failed top_up emits no "topped_up" event
 // ---------------------------------------------------------------------------
 
-/// Policy: when `pull_token` panics during `top_up_stream`, the transaction
-/// rolls back. No `"top_up"` event must appear.
-///
-/// For this test we need the CREATE to succeed (so stream exists) but the
-/// TOP-UP transfer to fail.  We use a fresh `OnceCtx` — create consumes the
-/// one allowed transfer, leaving top_up unable to pull tokens.
+/// When the pull transfer panics during `top_up` the `"topped_up"` event must
+/// not appear and the schedule must be unchanged.
 #[test]
 fn failed_top_up_emits_no_top_up_event() {
-    let ctx = OnceCtx::setup();
-    let stream_id = ctx.create_stream(); // consumes the one token transfer
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(0);
 
-    ctx.env.ledger().set_timestamp(100); // still before end_time=1000
+    let (client, contract_id, _token_id, stream_id) = live_stream_with_once_token(&env);
 
-    let events_before = ctx.env.events().all().len();
+    // Advance inside the stream window so top_up is allowed.
+    env.ledger().set_timestamp(100);
 
-    let result = ctx.client.try_top_up_stream(&stream_id, &ctx.sender, &500);
+    let result = client.try_top_up(&stream_id, &500);
+
+    assert!(result.is_err(), "top_up must fail when the pull panics");
     assert!(
-        result.is_err(),
-        "top_up_stream must fail when pull_token panics"
-    );
-
-    let events_after = ctx.env.events().all().len();
-    assert_eq!(
-        events_after, events_before,
-        "no events must be emitted for a reverted top-up"
-    );
-
-    // pull_token now panics → top-up reverts.
-    let result = client.try_top_up_stream(&stream_id, &sender, &500);
-
-    assert!(
-        result.is_err(),
-        "top_up_stream must fail when pull_token panics"
+        env.events().all().events().is_empty(),
+        "a reverted top-up publishes no events",
     );
     assert_eq!(
-        env.events().all().len(),
-        events_before,
-        "event log must not grow on reverted top-up"
-    );
-    assert_eq!(
-        count_topic(&env, &contract_id, "top_up"),
+        count_topic(&env, &contract_id, "topped_up"),
         0,
-        "no 'top_up' topic on revert"
+        "no 'topped_up' topic on revert",
     );
+
+    // Schedule and deposit unchanged.
+    let s: Stream = client.get_stream(&stream_id);
+    assert_eq!(s.deposited, 1_000, "reverted top-up must not add funds");
+    assert_eq!(
+        s.end_time, 1_000,
+        "reverted top-up must not extend the schedule"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Sanity: the mocks actually fail the way the tests assume
+// ---------------------------------------------------------------------------
+
+/// The failing-call paths above all expect a typed stream error — the token
+/// failure is bucketed, never leaked as a raw host abort. This pins the
+/// mapping so a future change to `token_transfer` cannot silently turn these
+/// into panics that pass for the wrong reason.
+#[test]
+fn reverted_token_calls_surface_typed_errors() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(0);
+
+    let (client, _contract_id, _token_id, stream_id) = live_stream_with_once_token(&env);
+
+    env.ledger().set_timestamp(500);
+    let err = client.try_withdraw(&stream_id, &None).unwrap_err().unwrap();
+    assert_eq!(err, Error::TokenTransferFailed);
+
+    let err = client.try_top_up(&stream_id, &500).unwrap_err().unwrap();
+    assert_eq!(err, Error::TokenTransferFailed);
 }

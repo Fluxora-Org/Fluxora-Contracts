@@ -15,7 +15,11 @@ const CI_WORKFLOW: &str = concat!(
 );
 const STREAM_SRC: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
 
-const RELEASE_COMMAND: &str = "cargo build --target wasm32v1-none --release";
+// CI builds the production artifact through `script/release.sh`, which wraps
+// `cargo build --target wasm32v1-none --profile <production>`. The script's
+// header documents that exact command.
+const RELEASE_COMMAND: &str = "script/release.sh";
+const RELEASE_SCRIPT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../script/release.sh");
 
 fn read(path: &str) -> String {
     fs::read_to_string(path).unwrap_or_else(|err| panic!("failed to read {path}: {err}"))
@@ -73,7 +77,14 @@ fn production_wasm_target_is_wasm32v1_none() {
     let ci = read(CI_WORKFLOW);
     assert!(
         ci.contains(RELEASE_COMMAND),
-        "CI must build the authoritative release artifact with `{RELEASE_COMMAND}`",
+        "CI must build the authoritative release artifact via `{RELEASE_COMMAND}`",
+    );
+
+    // The script itself must target `wasm32v1-none`.
+    let release = read(RELEASE_SCRIPT);
+    assert!(
+        release.contains("wasm32v1-none"),
+        "script/release.sh must build the wasm32v1-none production target",
     );
 }
 

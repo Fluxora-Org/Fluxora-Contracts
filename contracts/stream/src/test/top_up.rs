@@ -8,6 +8,7 @@
 
 use super::common::*;
 use crate::{Error, StreamStatus};
+use soroban_sdk::testutils::storage::Persistent as _;
 use soroban_sdk::testutils::Events;
 
 #[test]
@@ -327,8 +328,8 @@ fn a_top_up_that_would_overflow_accrual_is_rejected() {
     h.assert_pool_exact();
 }
 
-use crate::storage::DataKey;
-use soroban_sdk::{contract, contractimpl};
+use crate::DataKey;
+use soroban_sdk::{contract, contractimpl, Address, Env};
 
 #[contract]
 struct FaultyToken;
@@ -363,30 +364,24 @@ fn failed_transfer_reverts_state_and_ttl_changes() {
 
     let before = h.get(id);
     let ttl_before = h.env.as_contract(&h.contract_id, || {
-        h.env
-            .storage()
-            .persistent()
-            .get_ttl(&DataKey::Stream(id))
-            .unwrap()
+        h.env.storage().persistent().get_ttl(&DataKey::Stream(id))
     });
-
-    let events_before = h.env.events().all().len();
 
     let res = h.client.try_top_up(&id, &999);
     assert!(res.is_err());
 
     let after = h.get(id);
     let ttl_after = h.env.as_contract(&h.contract_id, || {
-        h.env
-            .storage()
-            .persistent()
-            .get_ttl(&DataKey::Stream(id))
-            .unwrap()
+        h.env.storage().persistent().get_ttl(&DataKey::Stream(id))
     });
-    let events_after = h.env.events().all().len();
 
     assert_eq!(before.deposited, after.deposited);
     assert_eq!(before.end_time, after.end_time);
     assert_eq!(ttl_before, ttl_after);
-    assert_eq!(events_before, events_after);
+    // `Events::all()` reports only the most recent invocation; a reverted
+    // frame publishes nothing, so the observable log must be empty.
+    assert!(
+        h.env.events().all().events().is_empty(),
+        "a reverted top-up publishes no events",
+    );
 }

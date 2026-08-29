@@ -120,6 +120,48 @@ pub const MAX_BATCH_SIZE: u32 = 16;
 /// in-place upgrade. See `docs/ABI.md` and `test::abi`.
 pub const ABI_VERSION: u32 = 1;
 
+/// Call `token.transfer(from, to, amount)` and map any failure to a stable
+/// stream-level error.
+///
+/// # Why not forward the token's error discriminant?
+///
+/// A client receiving `Error(Contract, #N)` has no way to know whether `N`
+/// comes from the stream contract or from the token contract without out-of-band
+/// knowledge of which contract threw. Forwarding the raw token discriminant
+/// would cause silent misinterpretation — e.g. token error #7 would decode as
+/// `Unauthorized` against Fluxora's table, which is wrong and unsettling.
+///
+/// Instead, failures are bucketed into two stream-level categories that are
+/// stable, unambiguous, and actionable:
+///
+/// * [`Error::TokenTransferFailed`] — the token returned a typed contract
+///   error. The root cause (insufficient balance, authorization refused by the
+///   token contract, etc.) is visible in the transaction's `diagnosticEvents`
+///   and is therefore preserved for off-chain tooling without polluting the
+///   stream ABI.
+/// * [`Error::TokenMissing`] — the host raised an `Abort` (non-contract trap).
+///   This most commonly means the `token` address has no deployed code. No
+///   funds moved, so the stream is in a clean pre-transfer state.
+fn token_transfer(
+    env: &Env,
+    token: &Address,
+    from: &Address,
+    to: MuxedAddress,
+    amount: &i128,
+) -> Result<(), Error> {
+    match token::TokenClient::new(env, token).try_transfer(from, &to, amount) {
+        Ok(Ok(())) => Ok(()),
+        // The token contract returned a typed contract error (e.g. insufficient
+        // balance, deauthorized trustline, custom token logic). The raw
+        // discriminant is intentionally discarded — see the function doc.
+        Err(Err(InvokeError::Contract(_))) | Ok(Err(_)) | Err(Ok(_)) => {
+            Err(Error::TokenTransferFailed)
+        }
+        // Host trap: most commonly the token address has no deployed code.
+        Err(Err(InvokeError::Abort)) => Err(Error::TokenMissing),
+    }
+}
+
 #[contract]
 pub struct FluxoraStream;
 
@@ -683,12 +725,20 @@ impl FluxoraStream {
         new_recipient: Address,
     ) -> Result<(), Error> {
         let mut stream = storage::load_stream(&env, stream_id)?;
+        // #1637 hardens recipient-transfer authorization to the sender: the
+        // party who funded the stream keeps control over who is paid out.
+        // Granting this to the current recipient is the *delegate* path
+        // (`delegate_transfer_recipient`), gated on a recipient-issued grant.
         stream.sender.require_auth();
 
         if !stream.transferable {
             return Err(Error::NotTransferable);
         }
-        if stream.status == StreamStatus::Depleted {
+        // A stream with no claim left is not reassignable. This covers both
+        // `Depleted` streams and cancelled streams whose tail has been fully
+        // drawn (where `Cancelled` is intentionally sticky, so checking only
+        // the status would miss it).
+        if stream.status == StreamStatus::Depleted || stream.withdrawn >= stream.deposited {
             return Err(Error::StreamTerminated);
         }
         if new_recipient == stream.sender {
@@ -881,7 +931,9 @@ impl FluxoraStream {
             )?;
         }
 
-        events::cancelled(&env, stream_id, &stream, refund, vested_now);
+        // `vested` is derived from the post-cancel `stream.deposited` inside
+        // the event, so it is not passed separately.
+        events::cancelled(&env, stream_id, &stream, refund);
         Ok(())
     }
 
@@ -948,9 +1000,6 @@ impl FluxoraStream {
     ) -> Result<(), Error> {
         Self::check_delegate(&env, stream_id, &delegate, op::TOP_UP)?;
         let mut stream = storage::load_stream(&env, stream_id)?;
-        // A delegate may request a top-up, but only the sender may authorize
-        // spending the sender's tokens.
-        stream.sender.require_auth();
 
         if stream.status.is_terminal() {
             return Err(Error::StreamTerminated);
@@ -998,6 +1047,7 @@ impl FluxoraStream {
         }
 
         let token = stream.token.clone();
+        let sender = stream.sender.clone();
         stream.deposited = new_deposited;
         stream.end_time = new_end;
         storage::save_stream(&env, stream_id, &stream);
@@ -1008,7 +1058,7 @@ impl FluxoraStream {
         token_transfer(
             &env,
             &token,
-            &delegate,
+            &sender,
             MuxedAddress::from(env.current_contract_address()),
             &amount,
         )?;
@@ -1030,7 +1080,9 @@ impl FluxoraStream {
         if !stream.transferable {
             return Err(Error::NotTransferable);
         }
-        if stream.status == StreamStatus::Depleted {
+        // Same settled-claim rule as `transfer_recipient`: a stream with no
+        // unwithdrawn claim is not reassignable.
+        if stream.status == StreamStatus::Depleted || stream.withdrawn >= stream.deposited {
             return Err(Error::StreamTerminated);
         }
         if new_recipient == stream.sender {
@@ -1191,6 +1243,46 @@ impl FluxoraStream {
                 Ok(())
             }
         }
+    }
+
+    /// Pre-flight shared by the batch entry points: reject empty, oversized,
+    /// and malformed vectors, and return a validated copy.
+    ///
+    /// `MalformedStreamId` covers a serialized element that does not decode as
+    /// a `u64`; the batch entry points take `Vec<u64>` straight from the ABI,
+    /// and element-level conversion errors would otherwise surface as opaque
+    /// host errors instead of typed ones.
+    fn validate_batch_ids(env: &Env, stream_ids: &Vec<u64>) -> Result<Vec<u64>, Error> {
+        let count = stream_ids.len();
+        if count == 0 {
+            return Err(Error::EmptyBatch);
+        }
+        if count > MAX_BATCH_SIZE {
+            return Err(Error::BatchTooLarge);
+        }
+
+        let mut validated = Vec::new(env);
+        for raw_id in stream_ids.to_vals().iter() {
+            let stream_id =
+                u64::try_from_val(env, &raw_id).map_err(|_| Error::MalformedStreamId)?;
+            validated.push_back(stream_id);
+        }
+        Ok(validated)
+    }
+
+    /// Reject a batch that names the same stream twice. Processing the same
+    /// stream twice would otherwise operate on a stale copy the second time.
+    /// Both `batch_withdraw` and `batch_extend_ttl` reject duplicates.
+    fn reject_duplicate_ids(stream_ids: &Vec<u64>) -> Result<(), Error> {
+        let count = stream_ids.len();
+        for i in 0..count {
+            for j in (i + 1)..count {
+                if stream_ids.get_unchecked(i) == stream_ids.get_unchecked(j) {
+                    return Err(Error::DuplicateStreamId);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Shared tail of [`withdraw`](Self::withdraw) and

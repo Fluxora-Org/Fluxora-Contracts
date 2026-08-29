@@ -54,7 +54,7 @@ use soroban_sdk::testutils::{Address as _, Events as _, MockAuth, MockAuthInvoke
 use soroban_sdk::{Address, Env, IntoVal, Val, Vec};
 
 use super::common::*;
-use crate::Error;
+use crate::{Error, Stream};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -512,14 +512,15 @@ fn batch_withdraw_rolls_back_entirely_on_unauthorized_stream() {
 // 8. transfer_recipient — current recipient's authority
 // ---------------------------------------------------------------------------
 
-/// Positive: `transfer_recipient` demands the current recipient's auth.
+/// Positive: `transfer_recipient` demands the **sender's** auth (#1637 hardened
+/// recipient-transfer authorization to the party who funded the stream).
 #[test]
-fn transfer_recipient_requires_the_current_recipient() {
+fn transfer_recipient_requires_the_senders_authorization() {
     let h = Harness::new();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     h.advance(10 * DAY);
     h.client.transfer_recipient(&id, &h.other);
-    assert_eq!(required_auth(&h.env), h.recipient, "transfer_recipient");
+    assert_eq!(required_auth(&h.env), h.sender, "transfer_recipient");
 }
 
 /// Negative: no authorization → rejected.
@@ -960,11 +961,6 @@ fn all_recipient_operations_demand_the_recipient_in_lifecycle_order() {
     h.client.withdraw(&id, &None);
     assert_eq!(required_auth(&h.env), h.recipient, "withdraw");
 
-    // Create a fresh stream for transfer_recipient.
-    let id2 = h.create_simple(1_000 * ONE, 100 * DAY);
-    h.client.transfer_recipient(&id2, &h.other);
-    assert_eq!(required_auth(&h.env), h.recipient, "transfer_recipient");
-
     // Batch withdraw: multiple streams, one auth check.
     let id3 = h.create_simple(200 * ONE, 50 * DAY);
     let id4 = h.create_simple(200 * ONE, 50 * DAY);
@@ -1008,6 +1004,147 @@ fn no_auth_for_withdraw_also_blocks_top_up_and_cancel() {
     assert_eq!(h.get(id).deposited, 1_000 * ONE);
     assert_eq!(h.get(id).status, crate::StreamStatus::Active);
     h.assert_pool_exact();
+}
+
+// ---------------------------------------------------------------------------
+// Stateful model: caller roles, actions, and the state snapshot the property
+// below compares rejected calls against.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CallerRole {
+    Sender,
+    InitialRecipient,
+    AlternateRecipient,
+    Unrelated,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AuthAction {
+    Withdraw,
+    BatchWithdraw,
+    TransferRecipient,
+    Pause,
+    Resume,
+    Cancel,
+    TopUp,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AuthSnapshot {
+    stream: Stream,
+    sender_balance: i128,
+    initial_recipient_balance: i128,
+    alternate_recipient_balance: i128,
+    unrelated_balance: i128,
+    pool: i128,
+    stream_count: u64,
+}
+
+impl CallerRole {
+    fn address(self, h: &Harness, unrelated: &Address) -> Address {
+        match self {
+            CallerRole::Sender => h.sender.clone(),
+            CallerRole::InitialRecipient => h.recipient.clone(),
+            CallerRole::AlternateRecipient => h.other.clone(),
+            CallerRole::Unrelated => unrelated.clone(),
+        }
+    }
+}
+
+impl AuthAction {
+    fn expected_authorizer(self, stream: &Stream) -> Address {
+        match self {
+            AuthAction::Withdraw | AuthAction::BatchWithdraw => stream.recipient.clone(),
+            // #1637 hardens recipient-transfer authorization to the sender.
+            AuthAction::TransferRecipient => stream.sender.clone(),
+            AuthAction::Pause | AuthAction::Resume | AuthAction::Cancel | AuthAction::TopUp => {
+                stream.sender.clone()
+            }
+        }
+    }
+
+    fn transfer_target(self, h: &Harness, stream: &Stream) -> Address {
+        if self != AuthAction::TransferRecipient {
+            return h.other.clone();
+        }
+        if stream.recipient == h.other {
+            h.recipient.clone()
+        } else {
+            h.other.clone()
+        }
+    }
+
+    fn fn_name(self) -> &'static str {
+        match self {
+            AuthAction::Withdraw => "withdraw",
+            AuthAction::BatchWithdraw => "batch_withdraw",
+            AuthAction::TransferRecipient => "transfer_recipient",
+            AuthAction::Pause => "pause",
+            AuthAction::Resume => "resume",
+            AuthAction::Cancel => "cancel",
+            AuthAction::TopUp => "top_up",
+        }
+    }
+
+    fn args(self, h: &Harness, stream_id: u64, stream: &Stream, caller: &Address) -> Vec<Val> {
+        match self {
+            AuthAction::Withdraw => (stream_id, None::<i128>).into_val(&h.env),
+            AuthAction::BatchWithdraw => (caller, h.ids(&[stream_id])).into_val(&h.env),
+            AuthAction::TransferRecipient => {
+                (stream_id, self.transfer_target(h, stream)).into_val(&h.env)
+            }
+            AuthAction::Pause => (stream_id,).into_val(&h.env),
+            AuthAction::Resume => (stream_id,).into_val(&h.env),
+            AuthAction::Cancel => (stream_id,).into_val(&h.env),
+            AuthAction::TopUp => (stream_id, 10 * ONE).into_val(&h.env),
+        }
+    }
+
+    fn apply(self, h: &Harness, stream_id: u64, stream: &Stream, caller: &Address) -> bool {
+        let invoke = MockAuthInvoke {
+            contract: &h.contract_id,
+            fn_name: self.fn_name(),
+            args: self.args(h, stream_id, stream, caller),
+            sub_invokes: &[],
+        };
+        let auth = MockAuth {
+            address: caller,
+            invoke: &invoke,
+        };
+        let auths = [auth];
+        let client = h.client.mock_auths(&auths);
+
+        match self {
+            AuthAction::Withdraw => matches!(client.try_withdraw(&stream_id, &None), Ok(Ok(_))),
+            AuthAction::BatchWithdraw => {
+                matches!(
+                    client.try_batch_withdraw(caller, &h.ids(&[stream_id])),
+                    Ok(Ok(_))
+                )
+            }
+            AuthAction::TransferRecipient => matches!(
+                client.try_transfer_recipient(&stream_id, &self.transfer_target(h, stream)),
+                Ok(Ok(_))
+            ),
+            AuthAction::Pause => matches!(client.try_pause(&stream_id), Ok(Ok(_))),
+            AuthAction::Resume => matches!(client.try_resume(&stream_id), Ok(Ok(_))),
+            AuthAction::Cancel => matches!(client.try_cancel(&stream_id), Ok(Ok(_))),
+            AuthAction::TopUp => matches!(client.try_top_up(&stream_id, &(10 * ONE)), Ok(Ok(_))),
+        }
+    }
+}
+
+fn snapshot(h: &Harness, stream_id: u64, unrelated: &Address) -> AuthSnapshot {
+    AuthSnapshot {
+        stream: h.get(stream_id),
+        sender_balance: h.balance(&h.sender),
+        initial_recipient_balance: h.balance(&h.recipient),
+        alternate_recipient_balance: h.balance(&h.other),
+        unrelated_balance: h.balance(unrelated),
+        pool: h.pool(),
+        stream_count: h.client.stream_count(),
+    }
 }
 
 prop_compose! {
