@@ -655,4 +655,3 @@ fn ttl_target_ledgers_already_expired() {
     let target = storage::ttl_target_ledgers(&h.env, &h.get(id));
     assert_eq!(target, storage::MIN_STREAM_TTL_LEDGERS);
 }
-

@@ -363,7 +363,11 @@ fn failed_transfer_reverts_state_and_ttl_changes() {
 
     let before = h.get(id);
     let ttl_before = h.env.as_contract(&h.contract_id, || {
-        h.env.storage().persistent().get_ttl(&DataKey::Stream(id)).unwrap()
+        h.env
+            .storage()
+            .persistent()
+            .get_ttl(&DataKey::Stream(id))
+            .unwrap()
     });
     
     let events_before = h.env.events().all().len();
@@ -373,7 +377,11 @@ fn failed_transfer_reverts_state_and_ttl_changes() {
 
     let after = h.get(id);
     let ttl_after = h.env.as_contract(&h.contract_id, || {
-        h.env.storage().persistent().get_ttl(&DataKey::Stream(id)).unwrap()
+        h.env
+            .storage()
+            .persistent()
+            .get_ttl(&DataKey::Stream(id))
+            .unwrap()
     });
     let events_after = h.env.events().all().len();
 

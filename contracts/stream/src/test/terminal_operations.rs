@@ -322,11 +322,7 @@ fn depleted_stream_rejects_transfer_recipient_when_fully_drained() {
     h.warp_to(T0 + 100 * DAY);
     h.client.withdraw(&id, &None);
     assert_eq!(h.get(id).status, StreamStatus::Depleted);
-    assert_eq!(
-        h.get(id).withdrawn,
-        h.get(id).deposited,
-        "fully drained"
-    );
+    assert_eq!(h.get(id).withdrawn, h.get(id).deposited, "fully drained");
 
     let before = h.get(id);
     let ttl_before = h.ttl_of(id);

@@ -45,7 +45,10 @@ fn delegate_can_cancel() {
         .grant_delegate(&id, &h.sender, &agent, &op::CANCEL, &None);
 
     h.client.delegate_cancel(&id, &agent);
-    assert_eq!(h.client.get_stream(&id).status, crate::StreamStatus::Cancelled);
+    assert_eq!(
+        h.client.get_stream(&id).status,
+        crate::StreamStatus::Cancelled
+    );
     h.assert_pool_exact();
 }
 
@@ -55,13 +58,8 @@ fn delegate_can_pause_and_resume() {
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     let agent = Address::generate(&h.env);
 
-    h.client.grant_delegate(
-        &id,
-        &h.sender,
-        &agent,
-        &(op::PAUSE | op::RESUME),
-        &None,
-    );
+    h.client
+        .grant_delegate(&id, &h.sender, &agent, &(op::PAUSE | op::RESUME), &None);
 
     h.client.delegate_pause(&id, &agent);
     assert_eq!(h.client.get_stream(&id).status, crate::StreamStatus::Paused);
@@ -331,7 +329,11 @@ fn failed_delegate_call_leaves_stream_unchanged() {
         .unwrap_err()
         .unwrap();
     assert_eq!(err, Error::DelegateExpired);
-    assert_eq!(h.client.get_stream(&id), before, "stream must not have changed");
+    assert_eq!(
+        h.client.get_stream(&id),
+        before,
+        "stream must not have changed"
+    );
     h.assert_pool_exact();
 }
 
@@ -347,13 +349,7 @@ fn granting_mixed_sender_and_recipient_ops_is_rejected() {
 
     let err = h
         .client
-        .try_grant_delegate(
-            &id,
-            &h.sender,
-            &agent,
-            &(op::CANCEL | op::WITHDRAW),
-            &None,
-        )
+        .try_grant_delegate(&id, &h.sender, &agent, &(op::CANCEL | op::WITHDRAW), &None)
         .unwrap_err()
         .unwrap();
     assert_eq!(err, Error::Unauthorized);

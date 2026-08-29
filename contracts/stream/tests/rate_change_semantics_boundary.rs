@@ -111,9 +111,7 @@ impl Ctx {
 
     fn advance(&self, ts: u64) {
         self.env.ledger().set_timestamp(ts);
-        self.env
-            .ledger()
-            .set_sequence_number(ts as u32 + 1);
+        self.env.ledger().set_sequence_number(ts as u32 + 1);
     }
 
     fn contract_balance(&self) -> i128 {
@@ -466,8 +464,8 @@ fn rate_change_rejected_for_non_sender() {
     // This test confirms the stream state is unchanged after rejection.
     let state_before = ctx.client.get_stream_state(&id);
     let _ = attacker; // unused — auth is mocked, but the sender check is the guard.
-    // The try_ variant returns the contract error when the sender check fails
-    // under mock_all_auths.
+                      // The try_ variant returns the contract error when the sender check fails
+                      // under mock_all_auths.
     let _result = ctx
         .client
         .try_update_rate_per_second(&id, &(state_before.rate_per_second + 5));
@@ -496,7 +494,10 @@ fn rate_change_rejected_on_completed_stream() {
 
     ctx.advance(10);
     assert_eq!(ctx.client.withdraw(&id), 100);
-    assert_eq!(ctx.client.get_stream_state(&id).status, StreamStatus::Completed);
+    assert_eq!(
+        ctx.client.get_stream_state(&id).status,
+        StreamStatus::Completed
+    );
 
     let result = ctx.client.try_update_rate_per_second(&id, &20);
     assert!(result.is_err(), "update rate on Completed stream must fail");
@@ -509,10 +510,16 @@ fn rate_decrease_rejected_on_completed_stream() {
 
     ctx.advance(10);
     assert_eq!(ctx.client.withdraw(&id), 100);
-    assert_eq!(ctx.client.get_stream_state(&id).status, StreamStatus::Completed);
+    assert_eq!(
+        ctx.client.get_stream_state(&id).status,
+        StreamStatus::Completed
+    );
 
     let result = ctx.client.try_decrease_rate_per_second(&id, &5);
-    assert!(result.is_err(), "decrease rate on Completed stream must fail");
+    assert!(
+        result.is_err(),
+        "decrease rate on Completed stream must fail"
+    );
 }
 
 // ===========================================================================
@@ -577,7 +584,11 @@ fn rate_change_at_last_second_before_end_applies_one_second() {
     assert_eq!(s.checkpointed_amount, 990);
     assert_eq!(s.deposit_amount, 991);
     assert_eq!(s.rate_per_second, 1);
-    assert_eq!(ctx.token.balance(&ctx.sender) - sb, 9, "refund = 1000 − 991");
+    assert_eq!(
+        ctx.token.balance(&ctx.sender) - sb,
+        9,
+        "refund = 1000 − 991"
+    );
 
     ctx.advance(100);
     assert_eq!(ctx.client.calculate_accrued(&id), 991);
@@ -613,7 +624,10 @@ fn rate_decrease_to_minimum_rate_correctly_computes_remaining() {
     // accrued = 500 + 1*50 = 550
     assert_eq!(ctx.client.calculate_accrued(&id), 550);
     assert_eq!(ctx.client.withdraw(&id), 550);
-    assert_eq!(ctx.client.get_stream_state(&id).status, StreamStatus::Completed);
+    assert_eq!(
+        ctx.client.get_stream_state(&id).status,
+        StreamStatus::Completed
+    );
 }
 
 // ===========================================================================

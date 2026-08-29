@@ -61,12 +61,17 @@ impl PanicToken {
     }
     /// Zero-amount self-transfer succeeds (init smoke test). Any other amount panics.
     pub fn transfer(_env: Env, _from: Address, _to: Address, amount: i128) {
-        assert_eq!(amount, 0, "PanicToken: transfer always fails for amount > 0");
+        assert_eq!(
+            amount, 0,
+            "PanicToken: transfer always fails for amount > 0"
+        );
     }
     pub fn transfer_from(_env: Env, _sp: Address, _from: Address, _to: Address, _amt: i128) {
         panic!("PanicToken: transfer_from always fails");
     }
-    pub fn decimals(_env: Env) -> u32 { 7 }
+    pub fn decimals(_env: Env) -> u32 {
+        7
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -85,7 +90,9 @@ impl OnceToken {
         1_000_000
     }
     pub fn transfer(env: Env, _from: Address, _to: Address, amount: i128) {
-        if amount == 0 { return; } // init smoke test
+        if amount == 0 {
+            return;
+        } // init smoke test
         let k = symbol_short!("used");
         if env.storage().instance().get::<_, bool>(&k).unwrap_or(false) {
             panic!("OnceToken: transfer already used");
@@ -93,14 +100,18 @@ impl OnceToken {
         env.storage().instance().set(&k, &true);
     }
     pub fn transfer_from(env: Env, _sp: Address, _from: Address, _to: Address, amount: i128) {
-        if amount == 0 { return; }
+        if amount == 0 {
+            return;
+        }
         let k = symbol_short!("used");
         if env.storage().instance().get::<_, bool>(&k).unwrap_or(false) {
             panic!("OnceToken: transfer_from already used");
         }
         env.storage().instance().set(&k, &true);
     }
-    pub fn decimals(_env: Env) -> u32 { 7 }
+    pub fn decimals(_env: Env) -> u32 {
+        7
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -130,7 +141,9 @@ fn count_topic(env: &Env, contract_id: &Address, topic: &str) -> usize {
         .all()
         .iter()
         .filter(|e| {
-            if &e.0 != contract_id { return false; }
+            if &e.0 != contract_id {
+                return false;
+            }
             if let Some(v) = e.1.iter().next() {
                 if let Ok(s) = soroban_sdk::Symbol::try_from_val(env, &v) {
                     return s.to_string() == topic;
@@ -167,10 +180,25 @@ fn failed_create_emits_no_created_event() {
 
     let result = client.try_create_stream(&sender, &default_params(&env, recipient));
 
-    assert!(result.is_err(), "create_stream must fail when pull_token panics");
-    assert_eq!(env.events().all().len(), events_before, "event log must not grow on reverted create");
-    assert_eq!(count_topic(&env, &contract_id, "created"), 0, "no 'created' topic on revert");
-    assert_eq!(client.get_stream_count(), count_before, "stream counter must not increment on revert");
+    assert!(
+        result.is_err(),
+        "create_stream must fail when pull_token panics"
+    );
+    assert_eq!(
+        env.events().all().len(),
+        events_before,
+        "event log must not grow on reverted create"
+    );
+    assert_eq!(
+        count_topic(&env,
+        &contract_id,
+        "created"), 0, "no 'created' topic on revert"
+    );
+    assert_eq!(
+        client.get_stream_count(),
+        count_before,
+        "stream counter must not increment on revert"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -203,9 +231,20 @@ fn failed_withdraw_emits_no_withdrew_event() {
     // push_token now panics → withdrawal reverts.
     let result = client.try_withdraw(&stream_id);
 
-    assert!(result.is_err(), "withdraw must fail when push_token panics");
-    assert_eq!(env.events().all().len(), events_before, "event log must not grow on reverted withdraw");
-    assert_eq!(count_topic(&env, &contract_id, "withdrew"), 0, "no 'withdrew' topic on revert");
+    assert!(
+        result.is_err(),
+        "withdraw must fail when push_token panics"
+    );
+    assert_eq!(
+        env.events().all().len(),
+        events_before,
+        "event log must not grow on reverted withdraw"
+    );
+    assert_eq!(
+        count_topic(&env,
+        &contract_id,
+        "withdrew"), 0, "no 'withdrew' topic on revert"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -236,9 +275,20 @@ fn failed_cancel_emits_no_cancelled_event() {
 
     let result = client.try_cancel_stream(&stream_id);
 
-    assert!(result.is_err(), "cancel_stream must fail when push_token panics");
-    assert_eq!(env.events().all().len(), events_before, "event log must not grow on reverted cancel");
-    assert_eq!(count_topic(&env, &contract_id, "cancelled"), 0, "no 'cancelled' topic on revert");
+    assert!(
+        result.is_err(),
+        "cancel_stream must fail when push_token panics"
+    );
+    assert_eq!(
+        env.events().all().len(),
+        events_before,
+        "event log must not grow on reverted cancel"
+    );
+    assert_eq!(
+        count_topic(&env,
+        &contract_id,
+        "cancelled"), 0, "no 'cancelled' topic on revert"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -271,7 +321,18 @@ fn failed_top_up_emits_no_top_up_event() {
     // pull_token now panics → top-up reverts.
     let result = client.try_top_up_stream(&stream_id, &sender, &500);
 
-    assert!(result.is_err(), "top_up_stream must fail when pull_token panics");
-    assert_eq!(env.events().all().len(), events_before, "event log must not grow on reverted top-up");
-    assert_eq!(count_topic(&env, &contract_id, "top_up"), 0, "no 'top_up' topic on revert");
+    assert!(
+        result.is_err(),
+        "top_up_stream must fail when pull_token panics"
+    );
+    assert_eq!(
+        env.events().all().len(),
+        events_before,
+        "event log must not grow on reverted top-up"
+    );
+    assert_eq!(
+        count_topic(&env,
+        &contract_id,
+        "top_up"), 0, "no 'top_up' topic on revert"
+    );
 }
