@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["contracts/*"]
+members = ["contracts/archival-probe", "contracts/stream"]
 
 [workspace.package]
 version = "1.0.0"
