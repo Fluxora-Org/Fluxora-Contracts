@@ -5,6 +5,8 @@ on:
     branches: [main, v1-rewrite]
   pull_request:
   schedule:
+    # Workflow edits are review-gated by the maintainer owner in
+    # .github/CODEOWNERS before merge.
     # Nightly deep fuzz. The randomized suites have found two real bugs
     # (depleted-while-paused, and top_up rounding driving vested backwards),
     # so they get a budget that a per-PR run cannot afford.
