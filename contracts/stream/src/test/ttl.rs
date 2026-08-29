@@ -636,24 +636,23 @@ proptest! {
     }
 }
 
- # [ t e s t ] 
- f n   s e c o n d s _ t o _ l e d g e r s _ e d g e _ c a s e s ( )   { 
-         a s s e r t _ e q ! ( s t o r a g e : : s e c o n d s _ t o _ l e d g e r s ( 0 ) ,   0 ) ; 
-         a s s e r t _ e q ! ( s t o r a g e : : s e c o n d s _ t o _ l e d g e r s ( 1 ) ,   1 ) ; 
-         a s s e r t _ e q ! ( s t o r a g e : : s e c o n d s _ t o _ l e d g e r s ( u 6 4 : : M A X ) ,   u 3 2 : : M A X ) ; 
- } 
- 
- # [ t e s t ] 
- f n   t t l _ t a r g e t _ l e d g e r s _ a l r e a d y _ e x p i r e d ( )   { 
-         l e t   h   =   H a r n e s s : : n e w ( ) ; 
-         l e t   i d   =   h . c r e a t e _ s i m p l e ( 1 _ 0 0 0   *   O N E ,   1 0   *   D A Y ) ; 
- 
-         / /   f a s t   f o r w a r d   w a y   p a s t   t h e   e n d   d a t e 
-         h . w a r p _ t o ( T 0   +   1 0 0   *   D A Y ) ; 
- 
-         / /   T a r g e t   s h o u l d   b e   f l o o r e d   a t   t h e   m i n i m u m 
-         l e t   t a r g e t   =   s t o r a g e : : t t l _ t a r g e t _ l e d g e r s ( & h . e n v ,   & h . g e t ( i d ) ) ; 
-         a s s e r t _ e q ! ( t a r g e t ,   s t o r a g e : : M I N _ S T R E A M _ T T L _ L E D G E R S ) ; 
- } 
-  
- 
+#[test]
+fn seconds_to_ledgers_edge_cases() {
+    assert_eq!(storage::seconds_to_ledgers(0), 0);
+    assert_eq!(storage::seconds_to_ledgers(1), 1);
+    assert_eq!(storage::seconds_to_ledgers(u64::MAX), u32::MAX);
+}
+
+#[test]
+fn ttl_target_ledgers_already_expired() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 10 * DAY);
+
+    // fast forward way past the end date
+    h.warp_to(T0 + 100 * DAY);
+
+    // Target should be floored at the minimum
+    let target = storage::ttl_target_ledgers(&h.env, &h.get(id));
+    assert_eq!(target, storage::MIN_STREAM_TTL_LEDGERS);
+}
+
