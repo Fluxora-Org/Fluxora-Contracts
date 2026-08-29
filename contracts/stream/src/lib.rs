@@ -128,6 +128,9 @@ const MIN_PAUSE_INTERVAL_LEDGERS: u32 = 17;
 /// Prevents rapid rate updates within the same ledger window.
 const MIN_RATE_INTERVAL_LEDGERS: u32 = 17;
 
+/// Maximum number of recipients allowed in a single pooled stream.
+pub const MAX_POOL_RECIPIENTS: u32 = 100;
+
 // Contract version
 // ---------------------------------------------------------------------------
 
@@ -750,6 +753,15 @@ pub struct KeeperCancelled {
     pub sender_refund: i128,
 }
 
+/// Emitted when claim ownership is transferred on a stream.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ClaimOwnershipTransferred {
+    pub stream_id: u64,
+    pub old_owner: Address,
+    pub new_owner: Address,
+}
+
 // ---------------------------------------------------------------------------
 // Offer-then-accept types (two-phase stream creation)
 // ---------------------------------------------------------------------------
@@ -1113,6 +1125,34 @@ pub struct CreateStreamParams {
     pub witness: Option<Address>,
 }
 
+/// Parameters for `create_stream_relative` — offsets instead of absolute timestamps.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreateStreamRelativeParams {
+    /// Address that will receive streamed tokens.
+    pub recipient: Address,
+    /// Total amount escrowed for this stream.
+    pub deposit_amount: i128,
+    /// Streaming speed in tokens per second.
+    pub rate_per_second: i128,
+    /// Delay (in seconds) before stream accrual starts, relative to current timestamp.
+    pub start_delay: u64,
+    /// Delay (in seconds) before withdrawals are allowed, relative to current timestamp.
+    pub cliff_delay: u64,
+    /// Total duration the stream runs (in seconds) from start_time to end_time.
+    pub duration: u64,
+    /// Optional withdrawal threshold (raw units) to reduce fee spam.
+    pub withdraw_dust_threshold: Option<i128>,
+    /// Optional bounded memo for indexer correlation.
+    pub memo: Option<soroban_sdk::Bytes>,
+    /// Optional structured metadata for indexer consumption.
+    pub metadata: Option<soroban_sdk::Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
+    /// The architectural style of the stream.
+    pub kind: StreamKind,
+    /// If true, the stream cannot be cancelled or shortened.
+    pub irrevocable: Option<bool>,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreateStreamOptions {
@@ -1136,11 +1176,6 @@ pub struct CreateStreamOptions {
     pub duration: u64,
     /// Optional withdrawal threshold (raw units) to reduce fee spam.
     pub withdraw_dust_threshold: Option<i128>,
-    /// Optional bounded memo for indexer correlation (e.g. payroll batch ID).
-    /// Maximum `MAX_MEMO_BYTES` (64) bytes. Pass `None` to omit.
-    pub memo: Option<soroban_sdk::Bytes>,
-    /// Optional structured metadata for indexer consumption.
-    pub metadata: Option<Map<soroban_sdk::Bytes, soroban_sdk::Bytes>>,
     /// The architectural style of the stream (Linear or CliffOnly).
     pub kind: StreamKind,
     /// If true, the stream cannot be cancelled or shortened. Defaults to false (None).
@@ -2257,7 +2292,15 @@ impl FluxoraStream {
             withdraw_dust_threshold,
             last_pause_toggle_ledger: 0,
             last_withdraw_ledger: 0,
+            last_rate_change_ledger: 0,
             metadata: metadata.clone(),
+            memo: memo.clone(),
+            kind,
+            irrevocable: None,
+            witness: None,
+            is_pooled: None,
+            parent_stream_id: None,
+            delegation_depth: 0,
         };
 
         save_stream(env, &stream);
@@ -2343,7 +2386,16 @@ impl FluxoraStream {
             withdraw_dust_threshold,
             last_pause_toggle_ledger: 0,
             last_withdraw_ledger: 0,
+            last_rate_change_ledger: 0,
             metadata: metadata.clone(),
+            memo: memo.clone(),
+            kind,
+            irrevocable: None,
+            witness: None,
+            is_pooled: None,
+            parent_stream_id: None,
+            delegation_depth: 0,
+            claim_owner: None,
         };
 
         save_stream(env, &stream);
@@ -2568,7 +2620,7 @@ impl FluxoraStream {
             params.irrevocable,
             params.witness,
             None,
-        );
+        )
     }
 
     /// Internal helper for stream creation with full parameter set.
@@ -2627,7 +2679,8 @@ impl FluxoraStream {
             memo,
             kind,
             None,
-        );
+        )?;
+        Ok(stream_id)
     }
 
     /// Create a new payment stream with relative (offset-based) timing.
@@ -2722,24 +2775,21 @@ impl FluxoraStream {
             .ok_or(ContractError::InvalidParams)?;
 
         // Delegate to standard create_stream with computed absolute times
-        Self::persist_new_stream(
+        let stream_id = Self::persist_new_stream(
             &env,
             sender,
-            CreateStreamParams {
-                recipient: params.recipient,
-                deposit_amount: params.deposit_amount,
-                rate_per_second: params.rate_per_second,
-                start_time,
-                cliff_time,
-                end_time,
-                withdraw_dust_threshold: params.withdraw_dust_threshold,
-                memo: params.memo,
-                metadata: params.metadata,
-                kind: params.kind,
-                irrevocable: params.irrevocable,
-                witness: None,
-            },
-        );
+            params.recipient,
+            params.deposit_amount,
+            params.rate_per_second,
+            start_time,
+            cliff_time,
+            end_time,
+            params.withdraw_dust_threshold.unwrap_or(0),
+            params.memo,
+            params.kind,
+            params.metadata,
+        )?;
+        Ok(stream_id)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4071,7 +4121,7 @@ impl FluxoraStream {
             (symbol_short!("claim_own"), stream_id),
             ClaimOwnershipTransferred {
                 stream_id,
-                old_owner,
+                old_owner: old_owner.unwrap_or_else(|| env.current_contract_address()),
                 new_owner,
             },
         );
@@ -5445,9 +5495,6 @@ impl FluxoraStream {
             is_pooled: None,
             parent_stream_id: Some(stream_id),
             delegation_depth: stream.delegation_depth + 1,
-            claim_owner: None,
-            witness: None,
-            last_rate_change_ledger: 0,
         };
 
         save_stream(&env, &child_stream);
@@ -5899,8 +5946,7 @@ impl FluxoraStream {
             stream.withdraw_dust_threshold,
             stream.memo.clone(),
             stream.kind,
-            stream.irrevocable,
-            stream.witness.clone(),
+            stream.metadata.clone(),
         )?;
         set_auto_renew_enabled(&env, new_stream_id, true);
 
@@ -6151,7 +6197,7 @@ impl FluxoraStream {
                 kind,
                 irrevocable,
             },
-        );
+        )
     }
 
     /// Read a schedule template by id (permissionless view).

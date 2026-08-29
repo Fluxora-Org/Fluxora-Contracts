@@ -826,12 +826,12 @@ pub(crate) fn read_pooled_stream_withdrawn(env: &Env, stream_id: u64, recipient:
 pub fn reject_duplicate_ids(
     env: &Env,
     stream_ids: &soroban_sdk::Vec<u64>,
-) -> Result<(), crate::types::ContractError> {
+) -> Result<(), crate::ContractError> {
     let mut seen = soroban_sdk::Vec::<u64>::new(env);
     for id in stream_ids.iter() {
         for s in seen.iter() {
             if s == id {
-                return Err(crate::types::ContractError::DuplicateStreamId);
+                return Err(crate::ContractError::DuplicateStreamId);
             }
         }
         seen.push_back(id);

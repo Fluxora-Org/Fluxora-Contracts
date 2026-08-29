@@ -131,6 +131,11 @@ path = "tests/rate_decrease_after_withdraw.rs"
 test = true
 
 [[test]]
+name = "rate_change_semantics_boundary"
+path = "tests/rate_change_semantics_boundary.rs"
+test = true
+
+[[test]]
 name = "witnessed_cancel"
 path = "tests/witnessed_cancel.rs"
 test = true

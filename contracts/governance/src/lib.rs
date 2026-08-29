@@ -384,10 +384,10 @@ fn dispatch_call(env: &Env, target: &Address, calldata: &Bytes) -> Result<(), Go
             set_threshold_internal(env, new_threshold)?;
         }
         CallData::GovAddSigner(signer) => {
-            FluxoraGovernance::add_signer_internal(env, signer)?;
+            add_signer_internal(&env, signer)?;
         }
         CallData::GovRemoveSigner(signer) => {
-            FluxoraGovernance::remove_signer_internal(env, signer)?;
+            remove_signer_internal(&env, signer)?;
         }
     }
     Ok(())
