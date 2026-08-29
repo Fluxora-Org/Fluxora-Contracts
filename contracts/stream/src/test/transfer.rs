@@ -176,16 +176,33 @@ fn transfer_chains() {
 }
 
 #[test]
-fn transferring_to_the_current_recipient_is_a_no_op() {
+fn transferring_to_the_current_recipient_is_an_error() {
     let h = Harness::new();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
-    let before = h.get(id);
 
-    h.client.transfer_recipient(&id, &h.recipient);
-    assert_eq!(h.get(id), before);
+    let err = h
+        .client
+        .try_transfer_recipient(&id, &h.recipient)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::RepeatedTransfer);
+}
+
+#[test]
+fn new_recipient_replay_fails_due_to_repeated_transfer() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
 
     h.client.transfer_recipient(&id, &h.other);
-    assert_eq!(h.get(id).recipient, h.other, "a later retry still succeeds");
+
+    // If the transaction is replayed, the current recipient is now h.other.
+    // A replay tries to transfer to h.other again.
+    let err = h
+        .client
+        .try_transfer_recipient(&id, &h.other)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::RepeatedTransfer);
 }
 
 // --- Cliff and terminal boundaries ----------------------------------------
