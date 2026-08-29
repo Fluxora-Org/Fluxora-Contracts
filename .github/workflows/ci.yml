@@ -244,8 +244,21 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
 
-  feature-matrix:
-    name: feature-matrix
+  local-sandbox:
+    name: isolated Soroban deployment proof
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Stellar CLI
+        run: cargo install stellar-cli --locked
+      - name: Deploy, initialize, query, checksum, and tear down
+        run: script/local-sandbox-proof.sh
+
+  fuzz:
+    name: randomized and property suites
     runs-on: ubuntu-latest
     strategy:
       matrix:
