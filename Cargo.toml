@@ -14,6 +14,9 @@ repository = "https://github.com/Fluxora-Org/Fluxora-Contracts"
 # soroban-sdk's major version tracks the Stellar protocol version; do not
 # upgrade past the protocol the target network actually runs.
 soroban-sdk = "27.0.5"
+# Used by the packaging tests to parse `cargo metadata` JSON output.
+# Only a dev-dependency; never compiled into the contract WASM.
+serde_json = { version = "1.0.140", default-features = false, features = ["std"] }
 
 [profile.release]
 opt-level = "z"
