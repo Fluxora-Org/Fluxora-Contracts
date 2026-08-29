@@ -38,6 +38,21 @@
 //! No auth, no tokens, no value of any kind. It holds a single symbol. If it
 //! archives and is never restored, nothing is lost. Do not build on it, and do
 //! not deploy it to mainnet.
+//!
+//! ## Release isolation (issue #1543)
+//!
+//! This probe is a workspace member but is **not** part of the deployable product
+//! contract list. It stays a member so its smoke test remains wired into the
+//! standard workspace checks (`cargo test --workspace`, `cargo fmt --all`,
+//! `cargo clippy --all-targets`), but `script/release.sh` — the only command that
+//! produces release artifacts — builds **only** the `fluxora-stream` package and
+//! rejects any probe wasm among its outputs. To build this probe explicitly, use:
+//!
+//! ```text
+//! cargo build -p fluxora-archival-probe --target wasm32v1-none --release
+//! ```
+//!
+//! and for the live-network round trip, `script/archival-canary.sh`.
 
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Env, Symbol};
 

@@ -28,19 +28,28 @@ subscription billing, vesting schedules. The contract is the product.
 ```bash
 cargo test                                    # full suite
 cargo test resource_limits -- --nocapture     # print measured resource costs
-cargo build --target wasm32v1-none --release  # build the contract
-script/check-stream-wasm-size.sh              # clean build and wasm size budget check
 
 # Deeper randomized sweep. CI runs this nightly; worth running before a release
 # or after touching accrual.rs. Both suites have found real bugs.
 FLUXORA_FUZZ_SEEDS=200 FLUXORA_FUZZ_STEPS=300 PROPTEST_CASES=5000 cargo test --release
 ```
 
-`script/check-stream-wasm-size.sh` is the review gate for deployable artifact
-growth. It sources `contracts/stream/wasm-size-budget.env`, runs the recorded
-clean pinned build command, prints the exact `fluxora_stream.wasm` byte count,
-and fails if the artifact exceeds the checked-in budget. Intentional growth
-should update the budget file in the same PR and explain the size delta.
+## Building and releasing
+
+The **product** contract (`contracts/stream`) builds to `fluxora_stream.wasm`.
+
+**Release artifacts come from `script/release.sh` only.** It builds exactly the
+product package, downloads nothing else, and refuses to produce an artifact if the
+archival probe's wasm would be swept in:
+
+```bash
+script/release.sh      # -> target/wasm32v1-none/release/fluxora_stream.wasm (only)
+```
+
+> The archival probe (see below) is a workspace member so its smoke test stays
+> wired into `cargo test`, but it is deliberately excluded from release artifacts.
+> Never deploy it to mainnet. See
+> [`contracts/archival-probe/src/lib.rs`](contracts/archival-probe/src/lib.rs).
 
 ---
 
@@ -366,6 +375,27 @@ contracts/stream/
 storage, no host calls. That keeps the interesting arithmetic in one auditable
 place and makes the vesting model property-testable without a Soroban host, so a
 case costs microseconds instead of a host invocation.
+
+### The archival probe: a deliberate exception
+
+`contracts/archival-probe/` is a **throwaway** contract, not part of the product.
+Its entire purpose is to prove the live-network archival/restore round trip that
+the unit suite structurally cannot (see [KNOWN-LIMITATIONS.md §1](KNOWN-LIMITATIONS.md)
+and [`script/archival-canary.sh`](script/archival-canary.sh)). It writes a
+persistent entry and deliberately never extends its TTL, so it archives on the
+network's minimum schedule.
+
+It remains a **workspace member** — so `cargo test --workspace`, `cargo fmt --all`
+and `cargo clippy --all-targets` keep covering its smoke test — but it is
+**explicitly excluded from release artifacts**: `script/release.sh` builds only the
+`fluxora-stream` package and rejects a probe wasm among its outputs. To build the
+probe on its own, use the explicit command:
+
+```bash
+cargo build -p fluxora-archival-probe --target wasm32v1-none --release
+```
+
+This is the documented design decision for issue #1543.
 
 ---
 
