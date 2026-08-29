@@ -88,15 +88,11 @@ fn delegate_can_transfer_recipient() {
     let agent = Address::generate(&h.env);
     let new_recip = Address::generate(&h.env);
 
-    h.client.grant_delegate(
-        &id,
-        &h.recipient,
-        &agent,
-        &op::TRANSFER_RECIPIENT,
-        &None,
-    );
+    h.client
+        .grant_delegate(&id, &h.recipient, &agent, &op::TRANSFER_RECIPIENT, &None);
 
-    h.client.delegate_transfer_recipient(&id, &agent, &new_recip);
+    h.client
+        .delegate_transfer_recipient(&id, &agent, &new_recip);
     assert_eq!(h.client.get_stream(&id).recipient, new_recip);
 }
 

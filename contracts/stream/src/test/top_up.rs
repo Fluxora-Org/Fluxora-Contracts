@@ -369,7 +369,7 @@ fn failed_transfer_reverts_state_and_ttl_changes() {
             .get_ttl(&DataKey::Stream(id))
             .unwrap()
     });
-    
+
     let events_before = h.env.events().all().len();
 
     let res = h.client.try_top_up(&id, &999);
