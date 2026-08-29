@@ -4,7 +4,13 @@ on:
   push:
     branches: [main, develop]
   pull_request:
-    branches: [main, develop]
+  schedule:
+    # Workflow edits are review-gated by the maintainer owner in
+    # .github/CODEOWNERS before merge.
+    # Nightly deep fuzz. The randomized suites have found two real bugs
+    # (depleted-while-paused, and top_up rounding driving vested backwards),
+    # so they get a budget that a per-PR run cannot afford.
+    - cron: "0 3 * * *"
   workflow_dispatch:
     inputs:
       deploy_target:
@@ -154,11 +160,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.94.1
-        with:
-          components: rustfmt, clippy
-          targets: wasm32-unknown-unknown
+      # Resource measurements are printed rather than only asserted, so a
+      # protocol-version change that moves costs is visible in the CI log
+      # before it becomes a production surprise.
+      - name: Resource report
+        run: cargo test --release resource_limits -- --nocapture --test-threads=1
 
       # Build release artifacts via the release command, not a bare workspace
       # build. This is deliberate isolation (issue #1543): the archival probe

@@ -234,6 +234,31 @@ fn batch_cost_grows_linearly_and_not_faster() {
     }
 }
 
+#[test]
+fn batch_ttl_cost_grows_linearly_and_not_faster() {
+    let h = Harness::new();
+    let ids: std::vec::Vec<u64> = (0..MAX_BATCH_SIZE)
+        .map(|_| h.create_simple(100 * ONE, YEAR))
+        .collect();
+
+    let mut measurements = std::vec::Vec::new();
+    for size in [1usize, 4, 8, MAX_BATCH_SIZE as usize] {
+        h.client.batch_extend_ttl(&h.ids(&ids[..size]));
+        let cost = report(&h, &std::format!("batch_extend_ttl({size})"));
+        measurements.push((size as u32, cost));
+    }
+
+    let (_, base) = measurements[0];
+    for &(size, cost) in &measurements[1..] {
+        assert!(
+            cost.footprint <= base.footprint * size,
+            "footprint grew faster than linearly: {size} items took {} vs {} for one",
+            cost.footprint,
+            base.footprint,
+        );
+    }
+}
+
 /// The contract holds no per-user index, so a treasury's hundredth stream costs
 /// exactly what its first did. This is the property the "no on-chain discovery"
 /// decision buys, stated as a test — and it is precisely what the existing

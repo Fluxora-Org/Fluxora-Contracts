@@ -74,6 +74,8 @@ use soroban_sdk::{
 /// full batch against protocol 27's mainnet limits, and the constraint that
 /// binds is not the one you would expect:
 ///
+/// Measured evidence from the release resource suite (20-stream batch):
+///
 /// | limit | used by a 20-stream batch | ceiling |
 /// |---|---|---|
 /// | total footprint (entries) | 51 | 400 |
