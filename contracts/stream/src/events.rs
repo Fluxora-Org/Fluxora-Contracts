@@ -23,6 +23,24 @@
 //! Event ordering within a single operation is deterministic. Currently, a single state change
 //! emits exactly one event, guaranteeing the event order aligns with the operation order.
 //!
+//! # Topic namespace and collision prevention (issue #1585)
+//!
+//! `topic[0]` is a `Symbol` derived from the event struct's name in `snake_case`
+//! by the soroban SDK macro. It serves as the **namespace** that uniquely
+//! identifies each event type. No two structs in this module may produce the
+//! same `topic[0]` symbol — a collision would make two distinct event kinds
+//! indistinguishable to an indexer filtering by topic.
+//!
+//! **This invariant is enforced by `test::events::test_all_event_topic_names_are_unique`.**
+//! That test emits every event type, collects the observed `topic[0]` symbols,
+//! and asserts they match the exact known inventory with no duplicates.
+//!
+//! Versioning rule:
+//! * **Additive (compatible):** append a new field at the end of the struct.
+//! * **Breaking change:** rename, remove, reorder, or re-topic an existing field,
+//!   or rename the struct. For a breaking change, introduce a new struct with a
+//!   `V2` suffix and keep the old one for the migration window.
+//!
 //! Note that item-level doc comments on a `#[contractevent]` struct are copied
 //! into the contract spec and therefore into the deployed wasm. Statements of
 //! the ABI belong there; the reasoning behind them belongs here, where it costs
