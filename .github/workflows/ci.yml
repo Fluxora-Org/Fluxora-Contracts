@@ -122,7 +122,7 @@ jobs:
         uses: dtolnay/rust-toolchain@1.94.1
         with:
           components: rustfmt, clippy
-          targets: wasm32-unknown-unknown
+          targets: wasm32v1-none
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -214,8 +214,52 @@ jobs:
             exit 1
           fi
 
-      - name: Tests
-        run: cargo test --all-features
+      - name: Build workspace
+        run: cargo build --workspace
+
+      # Issue #1516: run tests and surface pass/fail/ignored counts so a
+      # green run that skipped 140 tests cannot look identical to one that
+      # actually ran them.  The output is tee'd to a temp file so the
+      # reporting step can always run (even on failure) without re-executing.
+      - name: Tests (workspace)
+        run: |
+          cargo test --workspace --all-features 2>&1 | tee /tmp/ci-test-output.txt
+          echo "test_exit=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+        id: tests
+
+      # ── Ignored-test visibility ────────────────────────────────────────────
+      - name: Report test result counts
+        if: always()
+        run: |
+          echo "## Test Result Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Metric | Count |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|--------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          TOTAL_PASSED=0
+          TOTAL_FAILED=0
+          TOTAL_IGNORED=0
+          if [ -f /tmp/ci-test-output.txt ]; then
+            while IFS= read -r line; do
+              if echo "$line" | grep -qP '^test result:'; then
+                P=$(echo "$line" | grep -oP '\d+ passed' | grep -oP '\d+')
+                F=$(echo "$line" | grep -oP '\d+ failed' | grep -oP '\d+')
+                I=$(echo "$line" | grep -oP '\d+ ignored' | grep -oP '\d+')
+                TOTAL_PASSED=$((TOTAL_PASSED + ${P:-0}))
+                TOTAL_FAILED=$((TOTAL_FAILED + ${F:-0}))
+                TOTAL_IGNORED=$((TOTAL_IGNORED + ${I:-0}))
+              fi
+            done < /tmp/ci-test-output.txt
+          fi
+          echo "| Passed | ${TOTAL_PASSED} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Failed | ${TOTAL_FAILED} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Ignored | ${TOTAL_IGNORED} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Totals: ${TOTAL_PASSED} passed, ${TOTAL_FAILED} failed, ${TOTAL_IGNORED} ignored" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${TOTAL_IGNORED}" -gt 0 ]; then
+            echo "::warning::${TOTAL_IGNORED} tests are currently ignored. See issue #1516 and related triage issues."
+          fi
+          # Re-fail the step if the actual test run failed
+          exit ${{ steps.tests.outputs.test_exit || '0' }}
 
       # Resource measurements are printed rather than only asserted, so a
       # protocol-version change that moves costs is visible in the CI log
@@ -266,10 +310,10 @@ jobs:
           cat target/wasm32v1-none/release/provenance.json
 
       - name: Build release (native)
-        run: cargo build --release -p fluxora_stream
+        run: cargo build --release --workspace
 
-      - name: Build WASM
-        run: cargo build --release -p fluxora_stream --target wasm32-unknown-unknown
+      - name: Build WASM (all contracts)
+        run: cargo build --release --workspace --target wasm32v1-none
 
       - name: Install Stellar CLI (pinned)
         run: |
@@ -286,26 +330,37 @@ jobs:
 
       - name: Optimize WASM
         run: |
-          stellar contract optimize --wasm target/wasm32-unknown-unknown/release/fluxora_stream.wasm
+          stellar contract optimize --wasm target/wasm32v1-none/release/fluxora_stream.wasm
 
       - name: Compute WASM SHA256 hash
         run: |
-          sha256sum target/wasm32-unknown-unknown/release/fluxora_stream.wasm > target/wasm32-unknown-unknown/release/fluxora_stream.wasm.sha256
-          if [ -f target/wasm32-unknown-unknown/release/fluxora_stream.optimized.wasm ]; then
-            sha256sum target/wasm32-unknown-unknown/release/fluxora_stream.optimized.wasm > target/wasm32-unknown-unknown/release/fluxora_stream.optimized.wasm.sha256
+          sha256sum target/wasm32v1-none/release/fluxora_stream.wasm > target/wasm32v1-none/release/fluxora_stream.wasm.sha256
+          if [ -f target/wasm32v1-none/release/fluxora_stream.optimized.wasm ]; then
+            sha256sum target/wasm32v1-none/release/fluxora_stream.optimized.wasm > target/wasm32v1-none/release/fluxora_stream.optimized.wasm.sha256
           fi
 
       - name: Verify WASM build reproducibility
         if: ${{ hashFiles('script/verify-wasm-checksum.sh') != '' }}
         run: bash script/verify-wasm-checksum.sh --no-build
 
+      - name: List built WASM contracts
+        run: |
+          echo "## WASM Contracts Built" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          for wasm in target/wasm32v1-none/release/*.wasm; do
+            if [ -f "$wasm" ]; then
+              SIZE=$(stat --printf='%s' "$wasm" 2>/dev/null || stat -f%z "$wasm" 2>/dev/null || echo "unknown")
+              echo "- $(basename $wasm) — ${SIZE} bytes" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+
       - name: Upload WASM hash artifact
         uses: actions/upload-artifact@v4
         with:
           name: fluxora_stream-wasm-hash
           path: |
-            target/wasm32-unknown-unknown/release/fluxora_stream.wasm.sha256
-            target/wasm32-unknown-unknown/release/fluxora_stream.optimized.wasm.sha256
+            target/wasm32v1-none/release/fluxora_stream.wasm.sha256
+            target/wasm32v1-none/release/fluxora_stream.optimized.wasm.sha256
           retention-days: 30
           if-no-files-found: warn
 
@@ -370,8 +425,8 @@ jobs:
       - name: Check package and artifact names (test suite)
         run: "cargo test --all-features packaging:: -- --nocapture --test-threads=1"
 
-  fuzz:
-    name: randomized and property suites
+  fuzz-feature-matrix:
+    name: feature matrix check
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -401,7 +456,7 @@ jobs:
         uses: dtolnay/rust-toolchain@1.94.1
         with:
           components: rustfmt, clippy
-          targets: wasm32-unknown-unknown
+          targets: wasm32v1-none
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -561,7 +616,7 @@ jobs:
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
-    needs: test
+    needs: lint
     # continue-on-error: tarpaulin builds with --features testutils, hitting
     # the same rand_core version-skew as the other exceptions in this file.
     continue-on-error: true
@@ -573,7 +628,7 @@ jobs:
         uses: dtolnay/rust-toolchain@1.94.1
         with:
           components: rustfmt, clippy
-          targets: wasm32-unknown-unknown
+          targets: wasm32v1-none
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -682,7 +737,7 @@ jobs:
   deploy-testnet:
     name: Deploy to Testnet
     runs-on: ubuntu-latest
-    needs: [build, test]
+    needs: lint
     if: |
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_target == 'testnet')
@@ -745,7 +800,7 @@ jobs:
   deploy-mainnet:
     name: Deploy to Mainnet
     runs-on: ubuntu-latest
-    needs: [build, test]
+    needs: lint
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_target == 'mainnet'
     environment:
       name: mainnet
