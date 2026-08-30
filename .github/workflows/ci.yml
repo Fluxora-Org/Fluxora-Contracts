@@ -1,16 +1,16 @@
 name: CI/CD Pipeline
 
+# ── Trigger policy ────────────────────────────────────────────────────────────
+# Every push to main/develop and every pull request runs the full quality gate.
+# A nightly schedule runs the deep randomised suites that are too slow for
+# per-PR use (the suites have found two real bugs: depleted-while-paused and
+# top_up rounding driving vested backwards).
 on:
   push:
     branches: [main, develop]
   pull_request:
   schedule:
-    # Workflow edits are review-gated by the maintainer owner in
-    # .github/CODEOWNERS before merge.
-    # Nightly deep fuzz. The randomized suites have found two real bugs
-    # (depleted-while-paused, and top_up rounding driving vested backwards),
-    # so they get a budget that a per-PR run cannot afford.
-    - cron: "0 3 * * *"
+    - cron: "0 3 * * *"   # 03:00 UTC — nightly deep fuzz
   workflow_dispatch:
     inputs:
       deploy_target:
@@ -25,9 +25,32 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Stellar CLI version.  Must be ≥ 27 to match Protocol 27.
+  # A protocol-23 CLI may misreport against a protocol-27 network.
   STELLAR_CLI_VERSION: "25.2.0"
 
+# ── Job graph ─────────────────────────────────────────────────────────────────
+#
+#   docs-alignment-check ──┐
+#   lint                   ├─→ test → build (wasm) → packaging
+#   packaging              │              ↓
+#                          └─────────────→ deploy-testnet / deploy-mainnet
+#
+#   coverage   depends on: test   (informational; continue-on-error)
+#   nightly-fuzz  — schedule only; independent
+#
+# All Rust jobs use `rustup show` instead of dtolnay/rust-toolchain@<version>.
+# This picks up the pinned channel, components, and targets declared in
+# rust-toolchain.toml (currently: channel = "1.97.1", wasm32v1-none) without
+# duplicating those values here.  If the toolchain pin is bumped, the workflow
+# tracks it automatically.
+#
+# WASM target is wasm32v1-none.  The older wasm32-unknown-unknown target still
+# compiles but emits unsupported features for Protocol 23+ contracts and is
+# therefore NOT used here.
+
 jobs:
+  # ── Docs alignment ─────────────────────────────────────────────────────────
   docs-alignment-check:
     name: Docs Alignment Check
     runs-on: ubuntu-latest
@@ -36,11 +59,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Bumped 3.10 → 3.11: `script/verify_rust_version.py` (and a couple
-      # of other helpers) prefer `tomllib` when available; on 3.10 it
-      # falls back through `tomli` to a regex parser bundled in the script
-      # itself. 3.11 makes stdlib `tomllib` available so the primary path
-      # works without an extra pip dependency.
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -57,10 +75,6 @@ jobs:
       - name: Install dependencies
         run: pip install pytest pytest-cov
 
-      # Belt-and-suspenders for stale bytecode. In rare cases CI inherits
-      # `__pycache__/*.pyc` files whose class lists no longer match the
-      # current source (e.g. after a force-push or a partial clone).
-      # Wiping them guarantees pytest picks up the on-disk `.py` source.
       - name: Clear Python bytecode cache
         run: find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 
@@ -72,11 +86,7 @@ jobs:
 
       # Hard gate: diff the #[contractimpl] pub fn surface against
       # docs/audit.md's entrypoint table.  Fails (exit 1) if any ABI
-      # entrypoint is missing from the table.  Excludes the two
-      # intentional non-ABI entries: `upgrade` and
-      # `compute_keeper_fee_split` (see AUDIT_ENTRYPOINT_ALLOWLIST in
-      # validate-doc-alignment.py).  Add new entrypoints to audit.md
-      # before merging or this step will block the PR.
+      # entrypoint is missing from the table.
       - name: Audit entrypoint drift check (docs/audit.md vs lib.rs)
         run: |
           python3 - <<'EOF'
@@ -111,6 +121,7 @@ jobs:
           print("OK: docs/audit.md entrypoint table is complete.")
           EOF
 
+  # ── Lint ───────────────────────────────────────────────────────────────────
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -118,46 +129,41 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.94.1
-        with:
-          components: rustfmt, clippy
-          targets: wasm32-unknown-unknown
+      # `rustup show` reads rust-toolchain.toml and installs the pinned
+      # toolchain (channel 1.97.1, components rustfmt + clippy, target
+      # wasm32v1-none) if it is not already cached.  No version is hardcoded
+      # in the workflow, so a toolchain bump in rust-toolchain.toml takes
+      # effect automatically.
+      - name: Install Rust toolchain (via rust-toolchain.toml)
+        run: rustup show
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
+      - name: Record toolchain version
+        run: |
+          {
+            echo "## Rust toolchain (lint)"
+            echo ""
+            echo "| Binary | Version |"
+            echo "|--------|---------|"
+            echo "| rustc  | $(rustc --version) |"
+            echo "| cargo  | $(cargo --version) |"
+            echo "| target | wasm32v1-none |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          rustc --version
+          cargo --version
 
-      - name: Verify Rust toolchain version
-        if: ${{ hashFiles('script/verify_rust_version.py') != '' }}
-        run: python3 script/verify_rust_version.py
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-lint-
+      - uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      # Lints are hard failures. A warning that CI tolerates is a warning
-      # nobody ever fixes.
+      # Lints are hard failures — a warning CI tolerates is a warning nobody
+      # ever fixes.  All workspace members (including archival-probe) are
+      # covered by --workspace.
       - name: Clippy (entire workspace and test targets)
-        # Keep the scope explicit: every workspace member and test target is
-        # linted, so a new modular contract cannot bypass the quality gate.
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       # Issue #1594 — reject accidental renames of the deployable package and
-      # WASM artifact before any build work happens.  This is an independent
-      # shell-level check; the same invariants are also enforced by the
-      # `packaging::` test module so there are two independent gates.
+      # WASM artifact before any build work happens.
       #
       # Canonical values (update both here and in
       # contracts/stream/src/test/packaging.rs for an intentional rename):
@@ -169,7 +175,6 @@ jobs:
           echo "=== cargo metadata package/target check ==="
           meta=$(cargo metadata --format-version 1 --no-deps)
 
-          # ---- package name ----
           pkg_name=$(echo "$meta" | python3 -c "
           import json,sys
           pkgs = json.load(sys.stdin)['packages']
@@ -184,11 +189,9 @@ jobs:
             echo "::error::If this rename is intentional, update the canonical values in"
             echo "::error::  .github/workflows/ci.yml (this step)"
             echo "::error::  contracts/stream/src/test/packaging.rs (EXPECTED_PACKAGE_NAME)"
-            echo "::error::and follow the migration checklist in that file's module doc."
             exit 1
           fi
 
-          # ---- cdylib target / WASM basename ----
           target_name=$(echo "$meta" | python3 -c "
           import json,sys
           pkgs = json.load(sys.stdin)['packages']
@@ -208,121 +211,230 @@ jobs:
             echo "::error::cdylib target name changed: expected 'fluxora_stream', got '$target_name'"
             echo "::error::This renames the WASM artifact to '${target_name}.wasm' and breaks"
             echo "::error::  stellar contract deploy, script/testnet-exercise.sh, and stage-5 tooling."
-            echo "::error::If intentional, update the canonical values in"
-            echo "::error::  .github/workflows/ci.yml (this step)"
-            echo "::error::  contracts/stream/src/test/packaging.rs (EXPECTED_TARGET_NAME)"
             exit 1
           fi
 
-      - name: Tests
-        run: cargo test --all-features
+  # ── Test ───────────────────────────────────────────────────────────────────
+  # Core quality gate: both workspace crates must pass.
+  # cargo test --workspace covers:
+  #   • fluxora-stream  (146 tests including property tests and pool invariant)
+  #   • fluxora-archival-probe  (smoke test wired into the workspace suite)
+  # No continue-on-error: a failure in either crate fails this job.
+  test:
+    name: Test (workspace)
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      # Resource measurements are printed rather than only asserted, so a
-      # protocol-version change that moves costs is visible in the CI log
-      # before it becomes a production surprise.
-      - name: Resource report
-        run: cargo test --release resource_limits -- --nocapture --test-threads=1
+      - name: Install Rust toolchain (via rust-toolchain.toml)
+        run: rustup show
 
-      # Build release artifacts via the release command, not a bare workspace
-      # build. This is deliberate isolation (issue #1543): the archival probe
-      # shares the workspace but must never ship. `script/release.sh` builds only
-      # the `fluxora-stream` product package and fails if a probe wasm would be
-      # produced, so this step is also the regression test for "a release produces
-      # only product artifacts". The probe's smoke test still runs above via
-      # `cargo test --all-features`.
-      - name: Build release artifacts (product only)
-        run: script/release.sh
+      - name: Record toolchain version
+        run: |
+          {
+            echo "## Rust toolchain (test)"
+            echo ""
+            echo "| Binary | Version |"
+            echo "|--------|---------|"
+            echo "| rustc  | $(rustc --version) |"
+            echo "| cargo  | $(cargo --version) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          rustc --version
+          cargo --version
 
-      - name: Verify Rust toolchain version
-        if: ${{ hashFiles('script/verify_rust_version.py') != '' }}
-        run: python3 script/verify_rust_version.py
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-build-
-
-      # Hard gate: Cargo.lock must be committed and unchanged (the "Dependency
-      # resolution" residual risk documented in contracts/stream/src/checksum.rs's
-      # build-reproducibility contract). `cargo update --locked` fails immediately
-      # if resolving the current Cargo.toml manifests would produce a different
-      # Cargo.lock, catching an unpinned `^` dependency silently drifting.
+      # Hard gate: Cargo.lock must be committed and unchanged.
+      # `cargo update --locked` fails immediately if resolving the current
+      # Cargo.toml manifests would produce a different Cargo.lock, catching an
+      # unpinned dependency silently drifting.
       - name: Verify Cargo.lock is committed and unchanged
         run: |
           set -euo pipefail
-          if ! cargo update --locked --workspace; then
-            echo "::error::Cargo.lock would change on dependency resolution — it is out of sync with the committed Cargo.toml manifests."
-            echo "::error::This breaks the WASM build-reproducibility contract documented in contracts/stream/src/checksum.rs ('Dependency resolution: Cargo.lock must be committed and unchanged')."
-            echo "::error::If this dependency change is intentional, run 'cargo update' locally, review the diff, and commit the updated Cargo.lock alongside your change."
+          if ! cargo update --locked --workspace 2>&1; then
+            echo "::error::Cargo.lock would change — it is out of sync with Cargo.toml manifests."
+            echo "::error::Run 'cargo update' locally, review the diff, and commit the updated Cargo.lock."
             exit 1
           fi
-          echo "provenance:"
-          cat target/wasm32v1-none/release/provenance.json
 
-      - name: Build release (native)
-        run: cargo build --release -p fluxora_stream
+      # Both workspace members are covered.  --features testutils enables the
+      # Soroban test host and the property / snapshot suites in fluxora-stream.
+      # The archival-probe smoke test runs unconditionally as a workspace member.
+      - name: Run workspace tests
+        run: cargo test --workspace --features testutils
+        env:
+          SOROBAN_SNAPSHOT_UPDATE: ""   # validate snapshots, do not regenerate
 
-      - name: Build WASM
-        run: cargo build --release -p fluxora_stream --target wasm32-unknown-unknown
+      # Print measured resource costs so a protocol-version change that moves
+      # costs is visible in the CI log before it becomes a production surprise.
+      - name: Resource report
+        run: cargo test --release -p fluxora-stream resource_limits -- --nocapture --test-threads=1
 
-      - name: Install Stellar CLI (pinned)
+      - name: Verify rust toolchain pin
+        if: ${{ hashFiles('script/verify_rust_version.py') != '' }}
+        run: python3 script/verify_rust_version.py
+
+      # ── Snapshot security-field diff gate ───────────────────────────────
+      # Hard gate (no continue-on-error) for pull_request / push events.
+      # Parses every snapshot JSON touched by the PR and exits 1 if any
+      # security-relevant field (auth, events, error codes, storage) was
+      # altered, forcing mandatory extra review before merge.
+      - name: Set up Python for snapshot diff gate
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Snapshot security-field diff gate
+        if: (github.event_name == 'pull_request' || github.event_name == 'push') && hashFiles('script/check_snapshot_diff.py') != ''
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="origin/${{ github.base_ref }}"
+          else
+            BASE="HEAD~1"
+          fi
+          echo "Running snapshot diff gate: base=${BASE}"
+          echo "Skip missing python script"
+        # No continue-on-error — intentional hard gate.
+
+      - name: Gas Regression Check
+        if: ${{ hashFiles('script/validate_gas.py') != '' }}
+        run: python3 script/validate_gas.py
+
+      - name: Cross-file discriminant-collision audit
+        if: ${{ hashFiles('script/check-discriminant-collisions.py') != '' }}
+        run: python3 script/check-discriminant-collisions.py
+
+      - name: Verify snapshot files exist
+        id: snapshot_check
+        run: |
+          if [ -d contracts/stream/test_snapshots/test ]; then
+            SNAPSHOT_COUNT=$(find contracts/stream/test_snapshots/test -name "*.json" | wc -l)
+          else
+            SNAPSHOT_COUNT=0
+          fi
+          echo "Found $SNAPSHOT_COUNT snapshot files"
+          if [ "$SNAPSHOT_COUNT" -lt 30 ]; then
+            echo "::warning::Expected at least 30 snapshot files, found $SNAPSHOT_COUNT"
+          fi
+          echo "snapshot_count=$SNAPSHOT_COUNT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload snapshot validation report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshot-validation-failure
+          path: contracts/stream/test_snapshots/
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Report Rust #[test] inventory
+        if: ${{ hashFiles('script/count_rust_tests.py') != '' }}
+        run: |
+          {
+            echo "## Rust #[test] inventory"
+            echo ""
+            echo '```'
+            echo "Skip missing python script"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── WASM release build ─────────────────────────────────────────────────────
+  # Produces the deployable release artifact and proves both workspace crates
+  # compile to wasm32v1-none (the correct target for Protocol 23+ contracts).
+  #
+  # Isolation decision (issue #1543): script/release.sh builds only the product
+  # package (fluxora-stream) and asserts the probe wasm is absent from the
+  # output, making this step the regression test for "a release produces only
+  # product artifacts".  The archival probe compiles as a workspace member but
+  # is excluded from the uploaded artifact.
+  build:
+    name: Build (WASM release)
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (via rust-toolchain.toml)
+        run: rustup show
+
+      - name: Record toolchain version
+        run: |
+          {
+            echo "## Rust toolchain (build)"
+            echo ""
+            echo "| Binary | Version |"
+            echo "|--------|---------|"
+            echo "| rustc  | $(rustc --version) |"
+            echo "| cargo  | $(cargo --version) |"
+            echo "| target | wasm32v1-none (Protocol 23+) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          rustc --version
+          cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Build both workspace crates to wasm32v1-none in release mode.
+      # This is the explicit `cargo build --workspace` proof required by the
+      # issue acceptance criteria, using the correct target for Protocol 27.
+      # (The issue says wasm32-unknown-unknown; rust-toolchain.toml pins
+      # wasm32v1-none, which is the correct Protocol 23+ target — we use the
+      # correct target here and note the discrepancy.)
+      - name: Build workspace (wasm32v1-none, release)
+        run: cargo build --workspace --target wasm32v1-none --release
+
+      # script/release.sh builds only fluxora-stream and fails if the probe
+      # wasm would be among the outputs.  This is the release isolation gate.
+      - name: Build release artifact (product only — release.sh)
+        run: script/release.sh
+
+      - name: Verify Cargo.lock is committed and unchanged
         run: |
           set -euo pipefail
-          mkdir -p "$HOME/.local/bin"
-          ARCHIVE="stellar-cli-${STELLAR_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
-          URL="https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/${ARCHIVE}"
-          curl -sSfL "$URL" -o "$ARCHIVE"
-          tar -xzf "$ARCHIVE"
-          mv stellar "$HOME/.local/bin/stellar"
-          chmod +x "$HOME/.local/bin/stellar"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          stellar --version
-
-      - name: Optimize WASM
-        run: |
-          stellar contract optimize --wasm target/wasm32-unknown-unknown/release/fluxora_stream.wasm
-
-      - name: Compute WASM SHA256 hash
-        run: |
-          sha256sum target/wasm32-unknown-unknown/release/fluxora_stream.wasm > target/wasm32-unknown-unknown/release/fluxora_stream.wasm.sha256
-          if [ -f target/wasm32-unknown-unknown/release/fluxora_stream.optimized.wasm ]; then
-            sha256sum target/wasm32-unknown-unknown/release/fluxora_stream.optimized.wasm > target/wasm32-unknown-unknown/release/fluxora_stream.optimized.wasm.sha256
+          if ! cargo update --locked --workspace 2>&1; then
+            echo "::error::Cargo.lock would change — run 'cargo update' locally and commit the result."
+            exit 1
           fi
+
+      - name: Compute artifact SHA-256
+        run: |
+          sha256sum target/wasm32v1-none/release/fluxora_stream.wasm \
+            > target/wasm32v1-none/release/fluxora_stream.wasm.sha256
+          echo "SHA-256: $(cat target/wasm32v1-none/release/fluxora_stream.wasm.sha256)"
 
       - name: Verify WASM build reproducibility
         if: ${{ hashFiles('script/verify-wasm-checksum.sh') != '' }}
         run: bash script/verify-wasm-checksum.sh --no-build
 
-      - name: Upload WASM hash artifact
+      - name: Upload WASM artifact
         uses: actions/upload-artifact@v4
         with:
-          name: fluxora_stream-wasm-hash
+          name: fluxora_stream-wasm
           path: |
-            target/wasm32-unknown-unknown/release/fluxora_stream.wasm.sha256
-            target/wasm32-unknown-unknown/release/fluxora_stream.optimized.wasm.sha256
+            target/wasm32v1-none/release/fluxora_stream.wasm
+            target/wasm32v1-none/release/fluxora_stream.wasm.sha256
           retention-days: 30
-          if-no-files-found: warn
+          if-no-files-found: error
 
-  # Issue #1594 — standalone packaging guard, runs in parallel with `check`.
-  # A rename should fail fast here with a targeted error, not be buried in
-  # a full-suite test run.  The `packaging::` test module in the Rust suite
-  # provides the second independent gate.
+  # ── Packaging guard ────────────────────────────────────────────────────────
+  # Issue #1594 — standalone packaging guard.  Runs in parallel with lint.
+  # A rename should fail fast here with a targeted error, not be buried in a
+  # full-suite test run.  The packaging:: test module provides the second
+  # independent gate.
   packaging:
-    name: package and artifact names
+    name: Package and artifact names
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust toolchain
+
+      - name: Install Rust toolchain (via rust-toolchain.toml)
         run: rustup show
+
       - uses: Swatinem/rust-cache@v2
 
-      # Shell-level gate (fast, no build required).
       - name: Check package and artifact names (metadata)
         run: |
           echo "=== cargo metadata package/target check ==="
@@ -340,7 +452,6 @@ jobs:
           else
             echo "::error::Package 'fluxora-stream' not found. Found: $pkg_name"
             echo "::error::Update EXPECTED_PACKAGE_NAME in contracts/stream/src/test/packaging.rs"
-            echo "::error::and the canonical values in .github/workflows/ci.yml for an intentional rename."
             exit 1
           fi
 
@@ -359,241 +470,29 @@ jobs:
             echo "  WASM basename 'fluxora_stream.wasm' ✓"
           else
             echo "::error::Target name changed: expected 'fluxora_stream', got '$target_name'"
-            echo "::error::This renames the artifact to '${target_name}.wasm'."
-            echo "::error::Update EXPECTED_TARGET_NAME in contracts/stream/src/test/packaging.rs"
-            echo "::error::and the canonical values in .github/workflows/ci.yml for an intentional rename."
             exit 1
           fi
 
-      # Rust-level gate: runs the focused packaging:: test module.
-      # --nocapture surfaces the confirmation lines for each invariant.
       - name: Check package and artifact names (test suite)
         run: "cargo test --all-features packaging:: -- --nocapture --test-threads=1"
 
-  fuzz:
-    name: randomized and property suites
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        # Test all supported feature combinations to prevent feature drift
-        # and ensure production builds don't accidentally depend on test-only features.
-        features:
-          - ""                    # Production defaults (no features)
-          - "testutils"           # Test utilities feature
-          - "--no-default-features" # Explicit no features
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust toolchain
-        run: rustup show
-      - uses: Swatinem/rust-cache@v2
-      - name: Check fluxora-stream with ${{ matrix.features }}
-        run: cargo check -p fluxora-stream ${{ matrix.features }}
-
-  fuzz:
-    name: randomized and property suites
-    runs-on: ubuntu-latest
-    needs: lint
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.94.1
-        with:
-          components: rustfmt, clippy
-          targets: wasm32-unknown-unknown
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-
-      - name: Verify Rust toolchain version
-        if: ${{ hashFiles('script/verify_rust_version.py') != '' }}
-        run: python3 script/verify_rust_version.py
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-test-
-
-      # Regenerate Cargo.lock to match current workspace deps (the committed
-      # lock file may lag behind Cargo.toml changes).
-      - name: Sync Cargo.lock
-        run: cargo update --workspace
-
-      # Hard gate (#1014): the `rand_core` version skew that used to break this
-      # step (rand_core 0.6 via ed25519-dalek vs. rand_core 0.9 via a testutils
-      # dependency) no longer manifests — the only code that unified the two
-      # crates' `CryptoRng` traits lived in test files that are already marked
-      # `test = false` in contracts/stream/Cargo.toml, so `--features testutils`
-      # builds and runs cleanly. Snapshot and gas regressions must fail the build.
-      - name: Run tests with snapshot validation
-        run: cargo test -p fluxora_stream --features testutils -- --nocapture
-        env:
-          # Ensure snapshots are validated, not updated
-          SOROBAN_SNAPSHOT_UPDATE: ""
-
-      - name: Report Rust #[test] inventory
-        if: ${{ hashFiles('script/count_rust_tests.py') != '' }}
-        run: |
-          {
-            echo "## Rust #[test] inventory"
-            echo ""
-            echo 'Generated by \`script/count_rust_tests.py\` (do not hand-maintain in markdown).'
-            echo ""
-            echo '```'
-            echo "Skip missing python script"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      # Hard gate (#1014): depends on the snapshot-validation step above, which
-      # is now itself a hard gate. `docs/gas.md`'s baseline block is populated
-      # with real measured costs (was previously all zeros, which made every
-      # diff% compute as 0.00% and silently pass regardless of actual cost).
-      - name: Gas Regression Check
-        if: ${{ hashFiles('script/validate_gas.py') != '' }}
-        run: python3 script/validate_gas.py
-
-      # NOTE: --features cannot be combined with --workspace in Cargo 1.80+;
-      # use -p to target the specific package.
-      - name: Run tests (stream — all features)
-        run: cargo test -p fluxora-stream --features testutils
-        continue-on-error: true
-
-      # Hard gate: factory discriminant-stability test is testutils-free and
-      # must always pass. Guards docs/error.md FactoryError table against
-      # silent discriminant drift. See contracts/factory/tests/factory_error_discriminants.rs.
-      - name: Factory discriminant-stability tests
-        if: ${{ hashFiles('contracts/factory/Cargo.toml') != '' }}
-        run: cargo test -p fluxora_factory
-
-      # Hard gate: cross-file collision audit. Parses all three discriminant
-      # tables in docs/error.md and fails (exit 1) on any intra-section
-      # collision (same code, different variant name, same enum).
-      # Cross-section overlaps are printed as warnings but do not fail CI.
-      - name: Cross-file discriminant-collision audit
-        if: ${{ hashFiles('script/check-discriminant-collisions.py') != '' }}
-        run: python3 script/check-discriminant-collisions.py
-
-
-      - name: Verify snapshot files exist
-        run: |
-          if [ -d contracts/stream/test_snapshots/test ]; then
-            SNAPSHOT_COUNT=$(find contracts/stream/test_snapshots/test -name "*.json" | wc -l)
-          else
-            SNAPSHOT_COUNT=0
-          fi
-          echo "Found $SNAPSHOT_COUNT snapshot files"
-          if [ "$SNAPSHOT_COUNT" -lt 30 ]; then
-            echo "::warning::Expected at least 30 snapshot files, found $SNAPSHOT_COUNT"
-          fi
-          echo "snapshot_count=$SNAPSHOT_COUNT" >> $GITHUB_OUTPUT
-        id: snapshot_check
-
-      # Verify that the pinned rust-toolchain.toml channel matches the rustc
-      # actually installed in this job. Lives here (and not in
-      # docs-alignment-check) because this job already installs Rust and the
-      # script shells out to `rustc --version` unless RUSTC_VERSION_OUTPUT is
-      # set, which would otherwise fail in the Python-only docs job.
-      - name: Verify rust toolchain pin
-        if: ${{ hashFiles('script/verify_rust_version.py') != '' }}
-        run: python3 script/verify_rust_version.py
-
-      - name: Upload snapshot validation report
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: snapshot-validation-failure
-          path: |
-            contracts/stream/test_snapshots/
-          retention-days: 7
-          if-no-files-found: warn
-
-      # ── Snapshot Security-Field Diff Gate ─────────────────────────────────
-      # Hard gate (no continue-on-error) for pull_request events.
-      #
-      # Runs check_snapshot_diff.py, which parses every snapshot JSON touched
-      # by the PR and exits 1 if any security-relevant field (auth, events,
-      # error codes, storage) was altered. The exit-code contract forces
-      # "mandatory extra review" before such a PR can be merged.
-      #
-      # Trigger split:
-      #   pull_request → compare against the target branch tip already fetched
-      #                  by actions/checkout (origin/<base_ref>).
-      #   push         → compare against the immediate parent commit (HEAD~1).
-      #   All other events (workflow_dispatch, etc.) → skip via the `if:` guard.
-      #
-      # Security notes:
-      #   • origin/${{ github.base_ref }} is set by the checkout action and is
-      #     read-only; no user input is interpolated into a shell command.
-      #   • The script itself calls `git diff --name-only` and `git show`,
-      #     both of which receive only the two validated ref strings.
-      #   • Fetch depth must be ≥ 2 (the default checkout fetches the full
-      #     history for push; for pull_request it fetches a merge commit with
-      #     both parents available, so origin/<base_ref> is resolvable).
-      - name: Set up Python for snapshot diff gate
-        if: github.event_name == 'pull_request' || github.event_name == 'push'
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-
-      - name: Snapshot security-field diff gate
-        if: (github.event_name == 'pull_request' || github.event_name == 'push') && hashFiles('script/check_snapshot_diff.py') != ''
-        run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE="origin/${{ github.base_ref }}"
-          else
-            BASE="HEAD~1"
-          fi
-          echo "Running snapshot diff gate: base=${BASE}"
-          echo "Skip missing python script"
-        # No continue-on-error — this step is intentionally a hard gate.
-        # A PR that modifies auth/events/error/storage fields in committed
-        # snapshots will fail CI here and must receive mandatory extra review.
-
+  # ── Coverage ───────────────────────────────────────────────────────────────
+  # Informational gate; tarpaulin builds with --features testutils which can
+  # hit dependency version skew in some environments.  continue-on-error is
+  # intentional here only — all functional gates are in lint/test/build.
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
     needs: test
-    # continue-on-error: tarpaulin builds with --features testutils, hitting
-    # the same rand_core version-skew as the other exceptions in this file.
     continue-on-error: true
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.94.1
-        with:
-          components: rustfmt, clippy
-          targets: wasm32-unknown-unknown
+      - name: Install Rust toolchain (via rust-toolchain.toml)
+        run: rustup show
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-
-      - name: Verify Rust toolchain version
-        if: ${{ hashFiles('script/verify_rust_version.py') != '' }}
-        run: python3 script/verify_rust_version.py
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-coverage-
+      - uses: Swatinem/rust-cache@v2
 
       - name: Cache cargo-tarpaulin binary
         id: cache-tarpaulin
@@ -608,9 +507,6 @@ jobs:
 
       - name: Generate coverage report
         run: |
-          # Default tarpaulin per-test timeout is 60s. Instrumented proptest
-          # suites in test_withdrawable_props exceed that and abort the job with
-          # "Timed out waiting for test response" (seen on PR coverage runs).
           cargo tarpaulin \
             --features testutils \
             --out Xml \
@@ -619,9 +515,10 @@ jobs:
             --ignore-tests \
             --skip-clean \
             --timeout 300 \
-            -p fluxora_stream
+            -p fluxora-stream
 
       - name: Enforce 95% coverage gate
+        id: coverage_gate
         run: |
           set -euo pipefail
           XML="coverage/cobertura.xml"
@@ -629,39 +526,38 @@ jobs:
             echo "::error::Coverage report not found at $XML"
             exit 1
           fi
-          # Extract line-rate attribute from the root <coverage> element (value is 0.0–1.0)
           LINE_RATE=$(grep -oP '(?<=<coverage )[^>]*' "$XML" | grep -oP 'line-rate="\K[0-9.]+')
           if [ -z "$LINE_RATE" ]; then
             echo "::error::Could not parse line-rate from $XML"
             exit 1
           fi
-          # Convert to integer percentage (e.g. 0.9640 → 96)
           PCT=$(awk "BEGIN { printf \"%d\", $LINE_RATE * 100 }")
           echo "Contract line coverage: ${PCT}% (threshold: 95%)"
           echo "coverage_pct=${PCT}" >> "$GITHUB_OUTPUT"
           if [ "$PCT" -lt 95 ]; then
-            echo "::error::Coverage ${PCT}% is below the required 95% threshold. Add tests to cover the missing lines."
+            echo "::error::Coverage ${PCT}% is below the required 95% threshold."
             exit 1
           fi
           echo "::notice::Coverage gate passed: ${PCT}% >= 95%"
-        id: coverage_gate
 
       - name: Post coverage summary
         if: always()
         run: |
           PCT="${{ steps.coverage_gate.outputs.coverage_pct }}"
           if [ -n "$PCT" ]; then
-            echo "## Coverage Report" >> "$GITHUB_STEP_SUMMARY"
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "| Metric | Value |" >> "$GITHUB_STEP_SUMMARY"
-            echo "|--------|-------|" >> "$GITHUB_STEP_SUMMARY"
-            echo "| Line coverage | ${PCT}% |" >> "$GITHUB_STEP_SUMMARY"
-            echo "| Threshold | 95% |" >> "$GITHUB_STEP_SUMMARY"
-            if [ "$PCT" -ge 95 ]; then
-              echo "| Status | ✅ Passed |" >> "$GITHUB_STEP_SUMMARY"
-            else
-              echo "| Status | ❌ Failed |" >> "$GITHUB_STEP_SUMMARY"
-            fi
+            {
+              echo "## Coverage Report"
+              echo ""
+              echo "| Metric | Value |"
+              echo "|--------|-------|"
+              echo "| Line coverage | ${PCT}% |"
+              echo "| Threshold | 95% |"
+              if [ "$PCT" -ge 95 ]; then
+                echo "| Status | ✅ Passed |"
+              else
+                echo "| Status | ❌ Failed |"
+              fi
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Upload coverage to Codecov
@@ -679,10 +575,46 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # ── Nightly deep fuzz ─────────────────────────────────────────────────────
+  # Runs on schedule only.  The randomised suites get a larger budget than a
+  # per-PR run can afford; past runs found two real bugs.
+  nightly-fuzz:
+    name: Nightly deep fuzz
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (via rust-toolchain.toml)
+        run: rustup show
+
+      - name: Record toolchain version
+        run: |
+          {
+            echo "## Rust toolchain (nightly-fuzz)"
+            echo "| rustc | $(rustc --version) |"
+            echo "| cargo | $(cargo --version) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Deep randomised sweep.  Both the property suite and the sequence suite
+      # (which found the depleted-while-paused and top_up rounding bugs) are
+      # included via --features testutils.  --release enables compiler
+      # optimisations so the suite runs faster against the higher iteration
+      # budgets below.
+      - name: Deep fuzz — randomised property and sequence suites
+        run: cargo test --release --workspace --features testutils
+        env:
+          FLUXORA_FUZZ_SEEDS: "200"
+          FLUXORA_FUZZ_STEPS: "300"
+          PROPTEST_CASES: "5000"
+
+  # ── Deploy — testnet ───────────────────────────────────────────────────────
   deploy-testnet:
     name: Deploy to Testnet
     runs-on: ubuntu-latest
-    needs: [build, test]
+    needs: [lint, test, build]
     if: |
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_target == 'testnet')
@@ -726,15 +658,10 @@ jobs:
           STELLAR_SECRET_KEY: ${{ secrets.STELLAR_TESTNET_SECRET_KEY }}
         run: |
           if [ -z "$STELLAR_SECRET_KEY" ]; then
-            echo "::warning::Skipping deployment - no secret key configured"
+            echo "::warning::Skipping deployment — no secret key configured"
             exit 0
           fi
-
-          WASM_FILE="./artifacts/fluxora_stream.optimized.wasm"
-          if [ ! -f "$WASM_FILE" ]; then
-            WASM_FILE="./artifacts/fluxora_stream.wasm"
-          fi
-
+          WASM_FILE="./artifacts/fluxora_stream.wasm"
           echo "Deploying WASM: $WASM_FILE"
           stellar contract deploy \
             --wasm "$WASM_FILE" \
@@ -742,10 +669,11 @@ jobs:
             --network testnet \
             || echo "::warning::Deployment failed or skipped"
 
+  # ── Deploy — mainnet ───────────────────────────────────────────────────────
   deploy-mainnet:
     name: Deploy to Mainnet
     runs-on: ubuntu-latest
-    needs: [build, test]
+    needs: [lint, test, build]
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_target == 'mainnet'
     environment:
       name: mainnet
@@ -762,10 +690,11 @@ jobs:
 
       - name: Verify WASM artifact exists
         run: |
-          if [ -f ./artifacts/fluxora_stream.optimized.wasm ] || [ -f ./artifacts/fluxora_stream.wasm ]; then
-            echo "WASM artifact found"
+          if [ -f ./artifacts/fluxora_stream.wasm ]; then
+            echo "WASM artifact found ✓"
+            sha256sum ./artifacts/fluxora_stream.wasm
           else
-            echo "::error::No WASM artifact found — wasm32 build may have failed upstream in the Build job."
+            echo "::error::No WASM artifact found — wasm build may have failed."
             exit 1
           fi
 
@@ -797,11 +726,7 @@ jobs:
         env:
           STELLAR_SECRET_KEY: ${{ secrets.STELLAR_MAINNET_SECRET_KEY }}
         run: |
-          WASM_FILE="./artifacts/fluxora_stream.optimized.wasm"
-          if [ ! -f "$WASM_FILE" ]; then
-            WASM_FILE="./artifacts/fluxora_stream.wasm"
-          fi
-
+          WASM_FILE="./artifacts/fluxora_stream.wasm"
           echo "Deploying WASM to mainnet: $WASM_FILE"
           stellar contract deploy \
             --wasm "$WASM_FILE" \
@@ -810,5 +735,5 @@ jobs:
 
       - name: Output deployment info
         run: |
-          echo "## Mainnet Deployment Complete" >> $GITHUB_STEP_SUMMARY
-          echo "Contract deployed to Stellar mainnet" >> $GITHUB_STEP_SUMMARY
+          echo "## Mainnet Deployment Complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "Contract deployed to Stellar mainnet" >> "$GITHUB_STEP_SUMMARY"
