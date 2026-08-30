@@ -31,6 +31,7 @@ jobs:
   docs-alignment-check:
     name: Docs Alignment Check
     runs-on: ubuntu-latest
+    if: ${{ hashFiles('tests/**', 'script/validate-doc-alignment.py') != '' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -129,7 +130,8 @@ jobs:
           python-version: "3.10"
 
       - name: Verify Rust toolchain version
-        run: echo "Skip verify_rust_version"
+        if: ${{ hashFiles('script/verify_rust_version.py') != '' }}
+        run: python3 script/verify_rust_version.py
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -232,7 +234,8 @@ jobs:
         run: script/release.sh
 
       - name: Verify Rust toolchain version
-        run: echo "Skip verify_rust_version"
+        if: ${{ hashFiles('script/verify_rust_version.py') != '' }}
+        run: python3 script/verify_rust_version.py
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -293,6 +296,7 @@ jobs:
           fi
 
       - name: Verify WASM build reproducibility
+        if: ${{ hashFiles('script/verify-wasm-checksum.sh') != '' }}
         run: bash script/verify-wasm-checksum.sh --no-build
 
       - name: Upload WASM hash artifact
@@ -405,7 +409,8 @@ jobs:
           python-version: "3.10"
 
       - name: Verify Rust toolchain version
-        run: echo "Skip verify_rust_version"
+        if: ${{ hashFiles('script/verify_rust_version.py') != '' }}
+        run: python3 script/verify_rust_version.py
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -436,6 +441,7 @@ jobs:
           SOROBAN_SNAPSHOT_UPDATE: ""
 
       - name: Report Rust #[test] inventory
+        if: ${{ hashFiles('script/count_rust_tests.py') != '' }}
         run: |
           {
             echo "## Rust #[test] inventory"
@@ -452,7 +458,8 @@ jobs:
       # with real measured costs (was previously all zeros, which made every
       # diff% compute as 0.00% and silently pass regardless of actual cost).
       - name: Gas Regression Check
-        run: echo "Skip missing python script"
+        if: ${{ hashFiles('script/validate_gas.py') != '' }}
+        run: python3 script/validate_gas.py
 
       # NOTE: --features cannot be combined with --workspace in Cargo 1.80+;
       # use -p to target the specific package.
@@ -460,22 +467,29 @@ jobs:
         run: cargo test -p fluxora-stream --features testutils
         continue-on-error: true
 
-      # NOTE: factory crate is incomplete (no Cargo.toml or src/lib.rs).
-      # Re-enable once contracts/factory/ is a valid workspace member.
-      # - name: Factory discriminant-stability tests
-      #   run: cargo test -p fluxora_factory
+      # Hard gate: factory discriminant-stability test is testutils-free and
+      # must always pass. Guards docs/error.md FactoryError table against
+      # silent discriminant drift. See contracts/factory/tests/factory_error_discriminants.rs.
+      - name: Factory discriminant-stability tests
+        if: ${{ hashFiles('contracts/factory/Cargo.toml') != '' }}
+        run: cargo test -p fluxora_factory
 
       # Hard gate: cross-file collision audit. Parses all three discriminant
       # tables in docs/error.md and fails (exit 1) on any intra-section
       # collision (same code, different variant name, same enum).
       # Cross-section overlaps are printed as warnings but do not fail CI.
       - name: Cross-file discriminant-collision audit
-        run: echo "Skip missing python script"
+        if: ${{ hashFiles('script/check-discriminant-collisions.py') != '' }}
+        run: python3 script/check-discriminant-collisions.py
 
 
       - name: Verify snapshot files exist
         run: |
-          SNAPSHOT_COUNT=$(find contracts/stream/test_snapshots/test -name "*.json" | wc -l)
+          if [ -d contracts/stream/test_snapshots/test ]; then
+            SNAPSHOT_COUNT=$(find contracts/stream/test_snapshots/test -name "*.json" | wc -l)
+          else
+            SNAPSHOT_COUNT=0
+          fi
           echo "Found $SNAPSHOT_COUNT snapshot files"
           if [ "$SNAPSHOT_COUNT" -lt 30 ]; then
             echo "::warning::Expected at least 30 snapshot files, found $SNAPSHOT_COUNT"
@@ -489,7 +503,8 @@ jobs:
       # script shells out to `rustc --version` unless RUSTC_VERSION_OUTPUT is
       # set, which would otherwise fail in the Python-only docs job.
       - name: Verify rust toolchain pin
-        run: echo "Skip verify_rust_version"
+        if: ${{ hashFiles('script/verify_rust_version.py') != '' }}
+        run: python3 script/verify_rust_version.py
 
       - name: Upload snapshot validation report
         if: failure()
@@ -530,7 +545,7 @@ jobs:
           python-version: "3.10"
 
       - name: Snapshot security-field diff gate
-        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        if: (github.event_name == 'pull_request' || github.event_name == 'push') && hashFiles('script/check_snapshot_diff.py') != ''
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             BASE="origin/${{ github.base_ref }}"
@@ -566,7 +581,8 @@ jobs:
           python-version: "3.10"
 
       - name: Verify Rust toolchain version
-        run: echo "Skip verify_rust_version"
+        if: ${{ hashFiles('script/verify_rust_version.py') != '' }}
+        run: python3 script/verify_rust_version.py
 
       - name: Cache cargo registry
         uses: actions/cache@v4
