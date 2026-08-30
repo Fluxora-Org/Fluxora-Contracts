@@ -100,6 +100,14 @@ const AUTH: &[(&str, &str)] = &[
     ("withdraw", "recipient"),
     ("batch_withdraw", "recipient"),
     ("transfer_recipient", "recipient"),
+    ("grant_delegate", "grantor"),
+    ("revoke_delegate", "grantor"),
+    ("delegate_withdraw", "delegate"),
+    ("delegate_cancel", "delegate"),
+    ("delegate_pause", "delegate"),
+    ("delegate_resume", "delegate"),
+    ("delegate_top_up", "delegate"),
+    ("delegate_transfer_recipient", "delegate"),
     ("get_stream", "none"),
     ("withdrawable_of", "none"),
     ("vested_of", "none"),
@@ -282,6 +290,16 @@ fn current_inventory() -> Inventory {
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_stream_exists())),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_extend_stream_ttl())),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_batch_extend_ttl())),
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_grant_delegate())),
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_revoke_delegate())),
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_delegate_withdraw())),
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_delegate_cancel())),
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_delegate_pause())),
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_delegate_resume())),
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_delegate_top_up())),
+        function_from_spec(parse_spec(
+            &FluxoraStream::spec_xdr_delegate_transfer_recipient(),
+        )),
     ];
     functions.sort_by(|a, b| a.name.cmp(&b.name));
 
@@ -1085,7 +1103,10 @@ fn auth_table_covers_every_public_method() {
     assert_eq!(table, names);
     for f in &inv.functions {
         assert!(
-            matches!(f.auth, "sender" | "recipient" | "none"),
+            matches!(
+                f.auth,
+                "sender" | "recipient" | "grantor" | "delegate" | "none"
+            ),
             "method {} has unknown auth {}",
             f.name,
             f.auth
@@ -1094,8 +1115,14 @@ fn auth_table_covers_every_public_method() {
 }
 
 #[test]
-fn error_discriminants_are_the_frozen_v1_set() {
-    assert_eq!(current_inventory().errors, frozen_v1().errors);
+fn frozen_v1_error_discriminants_are_an_unchanged_prefix() {
+    let current = current_inventory();
+    let frozen = frozen_v1();
+    // The frozen v1 set is the interface of record: existing discriminants
+    // must be byte-for-byte identical, in order. New discriminants may only be
+    // appended after it (additive per docs/ABI.md).
+    assert!(current.errors.len() >= frozen.errors.len());
+    assert_eq!(current.errors[..frozen.errors.len()], frozen.errors[..]);
 }
 
 #[test]

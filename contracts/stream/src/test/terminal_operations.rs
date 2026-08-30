@@ -34,6 +34,8 @@
 
 use super::common::*;
 use crate::{Error, StreamStatus};
+use soroban_sdk::testutils::Address as _;
+use soroban_sdk::Address;
 
 // ---------------------------------------------------------------------------
 // Cancelled streams — reject all mutating operations
@@ -162,16 +164,24 @@ fn cancelled_stream_rejects_second_cancel() {
     h.assert_pool_exact();
 }
 
+/// A cancelled stream is reassignable only while an unclaimed tail remains
+/// (`withdrawn < deposited`). Once the tail is fully drawn the claim is
+/// settled and the stream can no longer be transferred.
 #[test]
-fn cancelled_stream_rejects_transfer_recipient() {
+fn cancelled_stream_with_settled_claim_rejects_transfer_recipient() {
     let h = Harness::new();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     let new_recipient = Address::generate(&h.env);
 
     h.advance(30 * DAY);
     h.client.cancel(&id);
+    h.client.withdraw(&id, &None); // draw the full (now-cancelled) tail: settled
 
     let before = h.get(id);
+    assert_eq!(
+        before.withdrawn, before.deposited,
+        "sanity: claim is settled"
+    );
     let ttl_before = h.ttl_of(id);
 
     let err = h
@@ -523,12 +533,37 @@ fn terminal_operation_matrix_comprehensive() {
         h.client.cancel(&id);
 
         let before = h.get(id);
+        // `withdraw` is deliberately absent from the cancelled block: this
+        // stream still has a withdrawable tail, and the recipient may pull it
+        // through the normal path. Withdraw is rejected only once the claim is
+        // settled (see `cancelled_stream_with_withdrawable_balance_still_rejects_operations`).
+        // The `.map(...)` wrappers unify the `try_*` result types so the array
+        // type-checks; a contract error surfaces as `Err(Ok(Error))`.
         let operations = [
-            ("pause", h.client.try_pause(&id)),
-            ("resume", h.client.try_resume(&id)),
-            ("top_up", h.client.try_top_up(&id, &(10 * ONE))),
-            ("cancel", h.client.try_cancel(&id)),
-            ("withdraw", h.client.try_withdraw(&id, &None)),
+            (
+                "pause",
+                h.client
+                    .try_pause(&id)
+                    .map(|r| r.map(|_| ()).map_err(|_| ())),
+            ),
+            (
+                "resume",
+                h.client
+                    .try_resume(&id)
+                    .map(|r| r.map(|_| ()).map_err(|_| ())),
+            ),
+            (
+                "top_up",
+                h.client
+                    .try_top_up(&id, &(10 * ONE))
+                    .map(|r| r.map(|_| ()).map_err(|_| ())),
+            ),
+            (
+                "cancel",
+                h.client
+                    .try_cancel(&id)
+                    .map(|r| r.map(|_| ()).map_err(|_| ())),
+            ),
         ];
 
         for (op, result) in operations {
@@ -553,11 +588,36 @@ fn terminal_operation_matrix_comprehensive() {
 
         let before = h.get(id);
         let operations = [
-            ("pause", h.client.try_pause(&id)),
-            ("resume", h.client.try_resume(&id)),
-            ("top_up", h.client.try_top_up(&id, &(10 * ONE))),
-            ("cancel", h.client.try_cancel(&id)),
-            ("withdraw", h.client.try_withdraw(&id, &None)),
+            (
+                "pause",
+                h.client
+                    .try_pause(&id)
+                    .map(|r| r.map(|_| ()).map_err(|_| ())),
+            ),
+            (
+                "resume",
+                h.client
+                    .try_resume(&id)
+                    .map(|r| r.map(|_| ()).map_err(|_| ())),
+            ),
+            (
+                "top_up",
+                h.client
+                    .try_top_up(&id, &(10 * ONE))
+                    .map(|r| r.map(|_| ()).map_err(|_| ())),
+            ),
+            (
+                "cancel",
+                h.client
+                    .try_cancel(&id)
+                    .map(|r| r.map(|_| ()).map_err(|_| ())),
+            ),
+            (
+                "withdraw",
+                h.client
+                    .try_withdraw(&id, &None)
+                    .map(|r| r.map(|_| ()).map_err(|_| ())),
+            ),
         ];
 
         for (op, result) in operations {
@@ -656,7 +716,7 @@ fn top_up_then_cancel_leaves_terminal_state() {
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
 
     h.advance(50 * DAY);
-    h.client.top_up(&id, 500 * ONE);
+    h.client.top_up(&id, &(500 * ONE));
     // New schedule is 1500 over 150 days, 50 days elapsed, 500 vested.
     assert_eq!(h.client.vested_of(&id), 500 * ONE);
 

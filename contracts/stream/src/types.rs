@@ -37,8 +37,8 @@ pub struct DelegateGrant {
 /// unvested remainder". `Cancelled` is sticky: a cancelled stream that is
 /// subsequently drained to zero stays `Cancelled` rather than becoming
 /// `Depleted`.
-#contracttype]
-#derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StreamStatus {
     Active = 0,
     Paused = 1,
@@ -58,8 +58,8 @@ impl StreamStatus {
 /// One entry per stream lives in persistent storage under
 /// `crate::types::DataKey::Stream`. There is deliberately no per-user index
 /// anywhere on chain — see the module docs on `lib.rs` for why.
-#contracttype]
-#derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Stream {
     pub sender: Address,
     pub recipient: Address,
@@ -87,7 +87,7 @@ pub struct Stream {
     /// Fixed at creation, never mutable.
     pub transferable: bool,
     /// `Some(t)` while paused: the instant the accrual clock froze.
-    pub paused_at: Option<u6>,
+    pub paused_at: Option<u64>,
     /// Cumulative seconds spent paused, excluding any in-progress pause.
     pub paused_total: u64,
     pub status: StreamStatus,
@@ -120,8 +120,8 @@ impl Stream {
 ///
 /// There is no `Config` key: with no admin, no fees and no upgradeability
 /// (all explicit non-goals), the contract has nothing to configure.
-#contracttype]
-#derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
     /// Instance storage. Monotonic counter, next id to hand out.
     /// Incremented only on successful stream creation.

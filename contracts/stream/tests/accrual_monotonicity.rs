@@ -382,7 +382,7 @@ fn regression_overflow_no_panic() {
     let env = Env::default();
     let s = dummy_stream(&env, 1_000_000, 0, 100, 0);
     let v = vested(&s, 2).unwrap();
-    assert!(v >= 0 && v <= 1_000_000);
+    assert!((0..=1_000_000).contains(&v));
 }
 
 #[test]

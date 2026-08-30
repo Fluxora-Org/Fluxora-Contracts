@@ -509,10 +509,11 @@ fn withdrawal_before_cliff_fails_with_correct_error() {
     );
 }
 
-/// **Boundary: batch operations at cliff boundary**
+/// **Boundary: cliff boundaries across multiple streams**
 ///
-/// Batch reads (`vested_of_batch`, `withdrawable_of_batch`) must handle cliff
-/// boundaries correctly across multiple streams at different stages.
+/// The cliff gate is evaluated per stream: at the same instant, a stream
+/// whose cliff is still ahead, one exactly at the cliff, and one already past
+/// it must report distinct vested/withdrawable amounts.
 #[test]
 fn batch_reads_handle_cliff_boundaries_correctly() {
     let h = Harness::new();
@@ -528,38 +529,30 @@ fn batch_reads_handle_cliff_boundaries_correctly() {
 
     h.warp_to(cliff);
 
-    let ids = h.ids(&[id1, id2, id3]);
-    let vested_batch = h.client.vested_of_batch(&ids);
-    let withdrawable_batch = h.client.withdrawable_of_batch(&ids);
-
     // id1: cliff not reached (cliff+10)
-    assert_eq!(vested_batch.get(0).unwrap(), 0, "id1 vested before cliff");
+    assert_eq!(h.client.vested_of(&id1), 0, "id1 vested before cliff");
     assert_eq!(
-        withdrawable_batch.get(0).unwrap(),
+        h.client.withdrawable_of(&id1),
         0,
         "id1 withdrawable before cliff"
     );
 
     // id2: exactly at cliff
+    assert_eq!(h.client.vested_of(&id2), 1000 * ONE, "id2 vested at cliff");
     assert_eq!(
-        vested_batch.get(1).unwrap(),
-        1000 * ONE,
-        "id2 vested at cliff"
-    );
-    assert_eq!(
-        withdrawable_batch.get(1).unwrap(),
+        h.client.withdrawable_of(&id2),
         1000 * ONE,
         "id2 withdrawable at cliff"
     );
 
     // id3: past cliff (cliff-10)
     assert_eq!(
-        vested_batch.get(2).unwrap(),
+        h.client.vested_of(&id3),
         1000 * ONE,
         "id3 vested after cliff"
     );
     assert_eq!(
-        withdrawable_batch.get(2).unwrap(),
+        h.client.withdrawable_of(&id3),
         1000 * ONE,
         "id3 withdrawable after cliff"
     );

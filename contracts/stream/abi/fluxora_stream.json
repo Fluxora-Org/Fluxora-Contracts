@@ -44,6 +44,63 @@
       "outputs": "Result<u64, Error>"
     },
     {
+      "name": "delegate_cancel",
+      "auth": "delegate",
+      "inputs": [
+        {"name": "stream_id", "type": "u64"},
+        {"name": "delegate", "type": "Address"}
+      ],
+      "outputs": "Result<(), Error>"
+    },
+    {
+      "name": "delegate_pause",
+      "auth": "delegate",
+      "inputs": [
+        {"name": "stream_id", "type": "u64"},
+        {"name": "delegate", "type": "Address"}
+      ],
+      "outputs": "Result<(), Error>"
+    },
+    {
+      "name": "delegate_resume",
+      "auth": "delegate",
+      "inputs": [
+        {"name": "stream_id", "type": "u64"},
+        {"name": "delegate", "type": "Address"}
+      ],
+      "outputs": "Result<(), Error>"
+    },
+    {
+      "name": "delegate_top_up",
+      "auth": "delegate",
+      "inputs": [
+        {"name": "stream_id", "type": "u64"},
+        {"name": "delegate", "type": "Address"},
+        {"name": "amount", "type": "i128"}
+      ],
+      "outputs": "Result<(), Error>"
+    },
+    {
+      "name": "delegate_transfer_recipient",
+      "auth": "delegate",
+      "inputs": [
+        {"name": "stream_id", "type": "u64"},
+        {"name": "delegate", "type": "Address"},
+        {"name": "new_recipient", "type": "Address"}
+      ],
+      "outputs": "Result<(), Error>"
+    },
+    {
+      "name": "delegate_withdraw",
+      "auth": "delegate",
+      "inputs": [
+        {"name": "stream_id", "type": "u64"},
+        {"name": "delegate", "type": "Address"},
+        {"name": "amount", "type": "Option<i128>"}
+      ],
+      "outputs": "Result<i128, Error>"
+    },
+    {
       "name": "extend_stream_ttl",
       "auth": "none",
       "inputs": [
@@ -58,6 +115,18 @@
         {"name": "stream_id", "type": "u64"}
       ],
       "outputs": "Result<Stream, Error>"
+    },
+    {
+      "name": "grant_delegate",
+      "auth": "grantor",
+      "inputs": [
+        {"name": "stream_id", "type": "u64"},
+        {"name": "grantor", "type": "Address"},
+        {"name": "delegate", "type": "Address"},
+        {"name": "ops", "type": "u32"},
+        {"name": "expires_at", "type": "Option<u64>"}
+      ],
+      "outputs": "Result<(), Error>"
     },
     {
       "name": "pause",
@@ -80,6 +149,16 @@
       "auth": "sender",
       "inputs": [
         {"name": "stream_id", "type": "u64"}
+      ],
+      "outputs": "Result<(), Error>"
+    },
+    {
+      "name": "revoke_delegate",
+      "auth": "grantor",
+      "inputs": [
+        {"name": "stream_id", "type": "u64"},
+        {"name": "grantor", "type": "Address"},
+        {"name": "delegate", "type": "Address"}
       ],
       "outputs": "Result<(), Error>"
     },
@@ -201,7 +280,15 @@
     {"name": "EmptyBatch", "discriminant": 20},
     {"name": "DuplicateStreamId", "discriminant": 21},
     {"name": "Overflow", "discriminant": 22},
-    {"name": "TopUpTooSmall", "discriminant": 23}
+    {"name": "TopUpTooSmall", "discriminant": 23},
+    {"name": "StreamIdExhausted", "discriminant": 24},
+    {"name": "TokenTransferFailed", "discriminant": 25},
+    {"name": "TokenMissing", "discriminant": 26},
+    {"name": "DelegateNotPermitted", "discriminant": 27},
+    {"name": "DelegateExpired", "discriminant": 28},
+    {"name": "MalformedStreamId", "discriminant": 29},
+    {"name": "RepeatedTransfer", "discriminant": 30},
+    {"name": "InvalidTopUp", "discriminant": 31}
   ],
   "events": [
     {

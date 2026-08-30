@@ -520,6 +520,8 @@ fn max_int_over_request_rejected_no_event() {
     assert_eq!(err, Error::InsufficientWithdrawable);
 
     let events = published_by_stream(&h);
+    assert!(events.is_empty(), "no event on over-request");
+}
 
 /// Unknown stream: returns `StreamNotFound`, no event.
 #[test]

@@ -9,25 +9,16 @@
 //!
 //! Failing seeds are preserved as regression fixtures for reproducible debugging.
 
-use soroban_sdk::testutils::Address as _;
-
 use super::common::*;
 use crate::accrual;
 
 /// Maximum number of operations in a generated sequence.
 const MAX_STEPS: u32 = 50;
 
-/// Maximum number of streams to create in a test.
-const MAX_STREAMS: usize = 8;
-
 /// xorshift64* deterministic PRNG for reproducible sequences.
 struct Rng(u64);
 
 impl Rng {
-    fn new(seed: u64) -> Self {
-        Rng(seed)
-    }
-
     fn next(&mut self) -> u64 {
         let mut x = self.0;
         x ^= x >> 12;
@@ -57,11 +48,9 @@ fn check_liability_conservation(h: &Harness, seed: u64, step: u32) {
 
     let pool = h.pool();
     assert_eq!(
-        pool,
-        liability_total,
+        pool, liability_total,
         "seed {seed}, step {step}: liability conservation violated: pool {} != total liability {}",
-        pool,
-        liability_total
+        pool, liability_total
     );
 }
 
@@ -70,25 +59,17 @@ fn run_lifecycle_sequence(seed: u64, steps: u32) {
     let h = Harness::new();
     let mut rng = Rng(seed);
 
-    // Seed the world with initial streams
-    for i in 0..1u64 {
+    // Seed the world with one initial stream
+    {
         let start = h.now() + rng.below(10 * DAY);
-        let duration = 1 * DAY + rng.below(5 * DAY);
+        let duration = DAY + rng.below(5 * DAY);
         let end = start + duration;
         // Use start as cliff for simplicity (always valid)
         let cliff = start;
         // Deposit must be >= duration to satisfy rate floor (1 stroop/second)
         // Use minimal deposit to conserve balance
         let deposit = duration as i128 * ONE;
-        h.create(
-            deposit,
-            start,
-            end,
-            cliff,
-            true,
-            true,
-            true,
-        );
+        h.create(deposit, start, end, cliff, true, true, true);
     }
 
     check_liability_conservation(&h, seed, 0);
@@ -187,7 +168,9 @@ fn liability_conservation_holds_across_long_lifecycle_sequences() {
     let steps = 150;
 
     for i in 0..cases {
-        let seed = 0xDEAD_BEEF_u64.wrapping_mul(i).wrapping_add(0xA24B_AED4_963E_E407);
+        let seed = 0xDEAD_BEEF_u64
+            .wrapping_mul(i)
+            .wrapping_add(0xA24B_AED4_963E_E407);
         run_lifecycle_sequence(seed, steps);
     }
 }

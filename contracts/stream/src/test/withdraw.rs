@@ -200,11 +200,7 @@ fn repeated_zero_withdraw_calls_are_rejected_and_preserve_state() {
     h.advance(30 * DAY);
 
     for _ in 0..3 {
-        let err = h
-            .client
-            .try_withdraw(&id, &Some(0))
-            .unwrap_err()
-            .unwrap();
+        let err = h.client.try_withdraw(&id, &Some(0)).unwrap_err().unwrap();
         assert_eq!(err, Error::InvalidAmount);
     }
     assert_eq!(h.get(id).withdrawn, 0);

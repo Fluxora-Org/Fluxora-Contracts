@@ -5,9 +5,13 @@ use crate::Error;
 // - Zero amounts are rejected with `Error::InvalidAmount` for top-up and withdraw,
 //   and `Error::InvalidDeposit` for create (they are errors, not no-ops).
 // - Withdrawing exactly the available balance succeeds and leaves the stream
-//   with zero withdrawable balance; further withdrawals are `InsufficientWithdrawable`.
+//   with zero withdrawable balance. A further withdrawal from a stream that is
+//   still live returns `NothingToWithdraw` ("wait for more accrual"); an amount
+//   exceeding a *positive* available balance returns `InsufficientWithdrawable`.
+// - A top-up smaller than one second of streaming (rate-preserving floor hits
+//   zero) is rejected with `TopUpTooSmall` rather than silently ignored.
 
-[#test]
+#[test]
 fn create_stream_rejects_zero_negative_and_handles_extremes() {
     let h = Harness::new();
     let start = h.now();
@@ -37,7 +41,7 @@ fn create_stream_rejects_zero_negative_and_handles_extremes() {
         .try_create_stream(
             &h.sender,
             &h.recipient,
-            & h.token,
+            &h.token,
             &-1i128,
             &start,
             &(start + 10 * DAY),
@@ -55,8 +59,8 @@ fn create_stream_rejects_zero_negative_and_handles_extremes() {
         .client
         .try_create_stream(
             &h.sender,
-            & h.recipient,
-            & h.token,
+            &h.recipient,
+            &h.token,
             &i128::MIN,
             &start,
             &(start + 10 * DAY),
@@ -87,13 +91,13 @@ fn create_stream_rejects_zero_negative_and_handles_extremes() {
     if let Err(Ok(e)) = res {
         assert!(
             matches!(e, Error::TokenTransferFailed | Error::TokenMissing),
-            "expected token transfer error for huge deposit, got {?:}",
+            "expected token transfer error for huge deposit, got {:?}",
             e
         );
     }
 }
 
-[#test]
+#[test]
 fn top_up_rejects_zero_negative_and_extreme_amounts() {
     let h = Harness::new();
     let _start = h.now();
@@ -128,7 +132,7 @@ fn top_up_rejects_zero_negative_and_extreme_amounts() {
     }
 }
 
-[#test]
+#[test]
 fn withdraw_validates_amount_bounds_and_limits() {
     let h = Harness::new();
     let _start = h.now();
@@ -159,7 +163,7 @@ fn withdraw_validates_amount_bounds_and_limits() {
     let err = h
         .client
         .try_withdraw(&id, &Some(i128::MAX))
-        .unwrap_error()
+        .unwrap_err()
         .unwrap();
     assert_eq!(err, Error::InsufficientWithdrawable);
 }
@@ -170,12 +174,14 @@ fn minimal_positive_amounts_are_accepted() {
     let _start = h.now();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
 
-    // Top up with 1 token (the smallest positive representable amount)
-    let result = h.client.try_top_up(&id, &1i128);
-    assert!(result.is_ok(), "top_up of 1 should succeed");
+    // A top-up smaller than one second of streaming cannot extend the schedule
+    // (rate-preserving floor lands on zero); the only way to absorb it would be
+    // to raise the rate and re-vest elapsed time retroactively. Rejected.
+    let err = h.client.try_top_up(&id, &1i128).unwrap_err().unwrap();
+    assert_eq!(err, Error::TopUpTooSmall);
 
     // Advance a little to make some withdrawable balance.
-    h.advance(1 * DAY);
+    h.advance(DAY);
     let available = h.client.withdrawable_of(&id);
     assert!(available > 0, "expected positive withdrawable");
 
@@ -203,13 +209,14 @@ fn withdraw_exact_balance_updates_stream_state() {
     let remaining = h.client.withdrawable_of(&id);
     assert_eq!(remaining, 0, "exact withdrawal should deplete the stream");
 
-    // Any subsequent withdrawal attempt is over-balance.
+    // The stream is still live (mid-schedule), just with nothing currently
+    // withdrawable, so an over-balance request reads as `NothingToWithdraw`.
     let err = h
         .client
         .try_withdraw(&id, &Some(1i128))
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, Error::InsufficientWithdrawable);
+    assert_eq!(err, Error::NothingToWithdraw);
 }
 
 #[test]

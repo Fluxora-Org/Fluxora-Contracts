@@ -8,8 +8,8 @@
 //!   including payouts already applied to earlier streams. No accounting is
 //!   written, no tokens move, and no event is observable.
 //! * [`batch_extend_ttl`](crate::FluxoraStream::batch_extend_ttl) is **per-item**:
-//!   unknown ids are skipped, duplicates are idempotent, and the outcome for a
-//!   given input is deterministic.
+//!   unknown ids are skipped and the outcome for a given input is deterministic,
+//!   but duplicate and malformed ids are rejected up-front with a typed error.
 
 use soroban_sdk::testutils::storage::Persistent as _;
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
@@ -951,16 +951,16 @@ fn a_ttl_batch_is_per_item_and_deterministic() {
     age_ledgers(&h, 40_000);
     assert!(ttl_of(&h, a) < 15_000, "TTL should have decayed");
 
-    // One sweep with an unknown id and a duplicate: nothing fails, and the two
-    // real streams are restored to the max. The duplicate counts once per
-    // occurrence, so the return value is 3, deterministically.
-    let extended = h.client.batch_extend_ttl(&h.ids(&[a, a, 999, b]));
-    assert_eq!(extended, 3, "duplicate counts per occurrence");
+    // One sweep with an unknown id: nothing fails, the unknown id is skipped,
+    // and the two real streams are restored to the max. The unknown id does
+    // not count toward the return value, so it is 2, deterministically.
+    let extended = h.client.batch_extend_ttl(&h.ids(&[a, 999, b]));
+    assert_eq!(extended, 2, "unknown id is skipped and not counted");
     assert_eq!(ttl_of(&h, a), 50_000);
     assert_eq!(ttl_of(&h, b), 50_000);
 
     // Rerunning the identical sweep is a no-op with the identical result.
-    let again = h.client.batch_extend_ttl(&h.ids(&[a, a, 999, b]));
+    let again = h.client.batch_extend_ttl(&h.ids(&[a, 999, b]));
     assert_eq!(again, extended, "sweep must be deterministic");
     assert_eq!(ttl_of(&h, a), 50_000);
     assert_eq!(ttl_of(&h, b), 50_000);
