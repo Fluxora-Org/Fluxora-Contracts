@@ -17,6 +17,9 @@ mod missing;
 // ABI inventory — generated from the contract spec, independent of stage.
 mod abi;
 
+// Issue #1535 — discriminant fixture and public error-path regression tests.
+mod error_discriminants;
+
 // Stage 1
 mod create;
 mod props;
