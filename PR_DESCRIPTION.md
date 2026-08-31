@@ -1,164 +1,89 @@
-# Terminal Operation Rejection - Comprehensive Test Coverage
+# Fix cancellation after a pause so every balance component settles correctly
+
+Closes #1554
 
 ## Summary
 
-Adds comprehensive regression test coverage for terminal operation rejection behavior. Terminal states (`Cancelled` and `Depleted`) must reject all mutating lifecycle operations with stable errors and guaranteed state preservation.
+This change hardens the paused-then-cancel settlement path so cancellation freezes at the paused stream clock, clears the pause metadata, and preserves the exact sender/recipient balance split across the full lifecycle.
 
-## Design Decision
+The root issue was that a cancel performed while a stream was paused could settle against wall-clock time instead of the stream clock, while also leaving the paused state inconsistent with a terminal cancelled stream. That meant the `refund + vested` conservation identity and the pool invariant could drift away from the actual available balance components.
 
-Every terminal entrypoint rejects with `Error::StreamTerminated` and guarantees:
-- Storage remains unchanged after rejection
-- No success events are emitted
-- TTL is not extended by failed calls
-- Rejection precedes authorization checks (fail fast)
+## What changed
 
-## Changes
+- Cancellation now settles against the frozen stream time while paused, exactly as the accrued value says it should.
+- The cancel path clears `paused_at` and leaves the stream in a terminal `Cancelled` state without allowing an accidental paused state to linger.
+- The refund/vested split is enforced against the pre-cancel deposit so the contract cannot over-refund or under-settle the sender/recipient balance.
+- The pause/cancel sequence is covered with focused regression tests from before-pause, during-pause, after-resume, and repeated-cancel scenarios.
 
-### New Files
-- `contracts/stream/src/test/terminal_operations.rs` - 23 focused regression tests (~850 LOC)
-- `TERMINAL_OPERATIONS_TEST_SUMMARY.md` - Comprehensive documentation
-- `TERMINAL_OPERATIONS_VERIFICATION.md` - Pre-merge verification checklist
+## Design decision
 
-### Modified Files
-- `contracts/stream/src/test/mod.rs` - Added `terminal_operations` module declaration
+The selected behavior is:
 
-## Test Coverage Matrix
+- Cancel while paused settles at the frozen stream clock, not real elapsed wall time.
+- The stream is cancelled atomically and the pause state is cleared before the transfer is finalized.
+- `refunded + vested == deposited_before_cancel` remains exact, and the recipient keeps only the vested-but-unwithdrawn remainder.
+- Repeated cancellation remains rejected with `Error::StreamTerminated` and leaves state unchanged.
 
-| Operation | Cancelled | Depleted | Tests |
-|-----------|-----------|----------|-------|
-| resume | ✓ | ✓ | 2 |
-| pause | ✓ | ✓ | 2 |
-| top_up | ✓ | ✓ | 2 |
-| withdraw | ✓ | ✓ | 2 |
-| cancel | ✓ | ✓ | 2 |
-| transfer_recipient | ✓ | ✓ | 2 |
+This keeps the change narrowly scoped to the accounting semantics without altering unrelated lifecycle behavior.
 
-**Total: 23 tests** covering all operation × terminal state combinations plus boundary cases, retry behavior, and authorization precedence.
+## Regression coverage
 
-## Test Categories
+Focused tests cover:
 
-1. **Basic Terminal Rejection** (12 tests)
-   - Each operation rejected on both terminal states
-   - Verifies error code, unchanged storage, unchanged balances, TTL not extended
+- Cancel before pause
+- Cancel while paused
+- Cancel after resume
+- Cancel after partial withdrawal
+- Repeated cancel rejection
+- Exact sender and recipient balance reconciliation
+- Event payload verification for the settlement figures
+- Pause metadata clearing on terminal cancellation
 
-2. **Boundary Conditions** (6 tests)
-   - Terminal with withdrawable balance
-   - Pause state cleared on termination
-   - Zero-balance terminal states
-   - Extended schedules cancelled
-   - Pre-cliff termination
+Key checks include:
 
-3. **Retry/Idempotency** (2 tests)
-   - Repeated rejections don't mutate state
-   - Verified for both terminal states
+- `cancel_while_paused_settles_at_the_frozen_clock`
+- `state_machine_cancel_after_pause_clears_pause_state`
+- `cancel_while_paused_publishes_the_frozen_figures`
+- `split_*` balance invariant tests in `contracts/stream/src/test/cancel.rs`
 
-4. **Authorization Precedence** (1 test)
-   - Terminal check before auth validation
+## Why this is the correct fix
 
-5. **Comprehensive Matrix** (1 test)
-   - All operations × both states in single test
+Cancellation is terminal and rewrites the schedule so the stream behaves like a fully matured stream from that instant onward. The implementation enforces the invariant:
 
-6. **Edge Cases** (1 test)
-   - Cancel at creation (zero-duration schedule)
+- `refund + vested == deposited_before_cancel`
+- `vested >= withdrawn`
+- `withdrawable == vested - withdrawn`
+- contract pool balance matches the unclaimed remainder exactly
+
+That ensures the sender receives exactly the unvested remainder, the recipient holds exactly the vested amount still claimable, and no funds remain stranded or double-counted.
 
 ## Verification
 
-Run the test suite:
+I verified this with the required focused suite:
+
 ```bash
-cargo test -p fluxora-stream terminal_operations -- --nocapture
+source $HOME/.cargo/env && cd /workspaces/Fluxora-Contracts && cargo test -p fluxora-stream cancel -- --nocapture
 ```
 
-All tests include standard harness invariant checks:
-- I1 (Bounds): `0 ≤ withdrawn ≤ vested ≤ deposited`
-- I4 (Conservation): `vested + refundable == deposited`
-- I5 (Pause coherence): `paused_at` ⟺ status is `Paused`
-- Pool invariant: `pool ≥ Σ(deposited - withdrawn)`
+Evidence from the fresh run:
 
-## Related Tests
+- `running 69 tests`
+- `test result: ok. 69 passed; 0 failed`
+- additional event-ordering regression check also passed: `1 passed; 0 failed`
 
-Complements existing terminal rejection tests:
-- `test/cancel.rs::cancelling_twice_is_rejected`
-- `test/cancel.rs::a_depleted_stream_cannot_be_cancelled`
-- `test/pause.rs::terminated_streams_cannot_be_paused_or_resumed`
-- `test/withdraw.rs::withdrawing_from_a_depleted_stream_is_a_typed_error`
+## CI / performance impact
 
-This PR consolidates and extends coverage into a comprehensive matrix test suite.
+- Runtime impact: none beyond the normal atomic cancel settlement logic already in the stream contract.
+- Resource impact: no contract binary or storage schema changes beyond the existing tested accounting semantics.
+- CI evidence: the focused cancellation and related regression tests completed successfully in the current environment.
 
-## Acceptance Criteria
+## Out of scope
 
-✅ Stable error selected (`Error::StreamTerminated`)  
-✅ Focused regression tests covering all combinations  
-✅ Storage immutability verified for all rejections  
-✅ Boundary cases tested (zero-balance, pause, extended)  
-✅ Retry behavior tested (idempotency)  
-✅ Authorization precedence tested  
-✅ Existing behavior unchanged (test-only PR)  
-✅ CI integration ready (standard `cargo test`)  
-✅ Performance impact: none (test-only)  
+- unrelated refactors
+- dependency churn
+- documentation-only cleanup outside this fix
+- weakening or skipping regression coverage
 
-## Performance Impact
+## Notes
 
-**Zero runtime impact** - This is a test-only PR with no changes to production code. Test suite executes in < 1 second.
-
-## Documentation
-
-- Module header explains design decisions and coverage
-- Each test has descriptive name and/or doc comments
-- `TERMINAL_OPERATIONS_TEST_SUMMARY.md` provides comprehensive documentation
-- `TERMINAL_OPERATIONS_VERIFICATION.md` provides verification checklist
-
-## CI Output
-
-Expected after merge:
-```
-running 23 tests
-test terminal_operations::cancelled_stream_rejects_cancel ... ok
-test terminal_operations::cancelled_stream_rejects_pause ... ok
-test terminal_operations::cancelled_stream_rejects_resume ... ok
-test terminal_operations::cancelled_stream_rejects_top_up ... ok
-test terminal_operations::cancelled_stream_rejects_transfer_recipient ... ok
-test terminal_operations::cancelled_stream_rejects_withdraw ... ok
-test terminal_operations::cancelled_stream_with_withdrawable_balance_still_rejects_operations ... ok
-test terminal_operations::cancelled_stream_after_pause_clears_pause_state_and_rejects_resume ... ok
-test terminal_operations::depleted_stream_rejects_cancel ... ok
-test terminal_operations::depleted_stream_rejects_pause ... ok
-test terminal_operations::depleted_stream_rejects_resume ... ok
-test terminal_operations::depleted_stream_rejects_top_up ... ok
-test terminal_operations::depleted_stream_rejects_transfer_recipient_when_fully_drained ... ok
-test terminal_operations::depleted_stream_rejects_withdraw ... ok
-test terminal_operations::depleted_stream_after_pause_clears_pause_state_and_rejects_resume ... ok
-test terminal_operations::repeated_rejection_on_cancelled_stream_does_not_mutate_state ... ok
-test terminal_operations::repeated_rejection_on_depleted_stream_does_not_mutate_state ... ok
-test terminal_operations::cancelled_stream_returns_terminal_error_before_auth_check ... ok
-test terminal_operations::terminal_operation_matrix_comprehensive ... ok
-test terminal_operations::cancel_at_creation_produces_terminal_state_with_zero_balance ... ok
-test terminal_operations::depleted_before_cliff_is_still_terminal ... ok
-test terminal_operations::top_up_then_cancel_leaves_terminal_state ... ok
-
-test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 123 filtered out
-```
-
-## Out of Scope
-
-- Production code changes
-- Documentation-only changes to other files
-- Dependency updates
-- Unrelated refactors
-- Weakening existing tests
-
-## Review Focus
-
-1. Test coverage completeness (6 operations × 2 states)
-2. State verification in each test (before/after comparison)
-3. Boundary condition coverage
-4. Clear test naming and documentation
-5. Module integration in `mod.rs`
-
-## Merge Checklist
-
-Before merge:
-- [ ] Full test suite passes (`cargo test -p fluxora-stream`)
-- [ ] No compilation warnings (`cargo build --release`)
-- [ ] No clippy warnings (`cargo clippy --all-targets`)
-- [ ] Documentation reviewed
-- [ ] Module properly declared in `mod.rs`
+This patch is intentionally narrow: it preserves the existing stream model outside this pause/cancel settlement path while fixing the bug in the exact transition that was inconsistent. The balance split is now explicit, stable, and regression-tested across the relevant lifecycle states.
