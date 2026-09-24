@@ -136,6 +136,13 @@ yet returns `NothingToWithdraw` (17); a `Cancelled` or `Depleted` stream with
 nothing left returns `StreamTerminated` (14). Clients must not treat those as
 equivalent.
 
+`NothingToWithdraw` (17) and `InsufficientWithdrawable` (16) are also not
+interchangeable: on a live stream with zero withdrawable, `withdraw` returns
+`NothingToWithdraw` regardless of whether `amount` is `None` or an explicit
+value (the zero check runs first). `InsufficientWithdrawable` is returned only
+when the withdrawable balance is positive and an explicit `amount` exceeds it;
+requesting exactly the available balance succeeds.
+
 ---
 
 ## Entry points

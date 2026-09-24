@@ -68,9 +68,14 @@ pub enum Error {
     StreamMatured = 15,
 
     // --- Withdrawal ---
-    /// Requested amount exceeds the currently withdrawable balance.
+    /// Explicit amount exceeds a positive withdrawable balance. Returned only
+    /// when the available balance is non-zero; a zero balance returns
+    /// [`Self::NothingToWithdraw`] instead, regardless of the requested amount.
     InsufficientWithdrawable = 16,
-    /// Withdrawable balance is zero.
+    /// Withdrawable balance is zero on a live stream. Returned for both
+    /// `None` and explicit amounts; the zero check runs before amount
+    /// comparison, so it takes precedence over
+    /// [`Self::InsufficientWithdrawable`].
     NothingToWithdraw = 17,
     /// Explicit withdraw amount was zero or negative.
     InvalidAmount = 18,
