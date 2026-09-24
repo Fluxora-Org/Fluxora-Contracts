@@ -325,29 +325,41 @@ fn rejects_cliff_outside_the_schedule() {
 fn rejects_deposit_below_one_stroop_per_second() {
     let h = Harness::new();
     let start = h.now();
-    let end = start + YEAR;
-    let duration = YEAR as i128;
+    
+    // Test for several durations: 1 second, 1 hour, 1 year, 4 years
+    let durations = [1, 3600, YEAR, 4 * YEAR];
+    
+    for duration_u64 in durations {
+        let end = start + duration_u64;
+        let duration = duration_u64 as i128;
 
-    let err = h
-        .client
-        .try_create_stream(
-            &h.sender,
-            &h.recipient,
-            &h.token,
-            &(duration - 1),
-            &start,
-            &end,
-            &start,
-            &true,
-            &true,
-            &true,
-        )
-        .unwrap_err()
-        .unwrap();
-    assert_eq!(err, Error::DepositRateTooLow);
+        // Just below the threshold
+        if duration > 1 {
+            let err = h
+                .client
+                .try_create_stream(
+                    &h.sender,
+                    &h.recipient,
+                    &h.token,
+                    &(duration - 1),
+                    &start,
+                    &end,
+                    &start,
+                    &true,
+                    &true,
+                    &true,
+                )
+                .unwrap_err()
+                .unwrap();
+            assert_eq!(err, Error::DepositRateTooLow);
+        }
 
-    // Exactly one stroop per second is the boundary, and it is allowed.
-    h.create(duration, start, end, start, true, true, true);
+        // Exactly at the threshold (1 unit per second)
+        h.create(duration, start, end, start, true, true, true);
+
+        // Just above the threshold
+        h.create(duration + 1, start, end, start, true, true, true);
+    }
 }
 
 /// A year-long USDC stream needs only ~3.16 USDC to clear the rate floor, so
