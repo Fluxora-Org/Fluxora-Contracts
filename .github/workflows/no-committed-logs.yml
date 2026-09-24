@@ -1,0 +1,36 @@
+name: No committed run logs
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+jobs:
+  no-committed-logs:
+    name: Forbid committed run logs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fail if captured run/build output is tracked
+        run: |
+          set -euo pipefail
+          mapfile -t tracked < <(git ls-files -- \
+            'batch_test_output.txt' \
+            'script/testnet-exercise.log' \
+            '*.log' \
+            || true)
+          if [ "${#tracked[@]}" -eq 0 ] || [ -z "${tracked[0]:-}" ]; then
+            echo "OK: no captured run/build logs are tracked."
+            exit 0
+          fi
+          for f in "${tracked[@]}"; do
+            [ -z "$f" ] && continue
+            echo "::error file=$f::Captured run/build output must not be committed. Keep it gitignored and publish as a CI artifact instead."
+          done
+          exit 1
+
+      # Future transcripts (testnet exercise, batch cargo runs) should be uploaded
+      # with actions/upload-artifact — not committed. Nothing from the removed
+      # stale root/script logs was worth republishing.
