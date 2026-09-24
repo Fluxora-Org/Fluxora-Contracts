@@ -29,9 +29,8 @@ env:
 
 jobs:
   docs-alignment-check:
-    name: Docs Alignment Check
+    name: Python Tooling Tests and Docs Alignment
     runs-on: ubuntu-latest
-    if: ${{ hashFiles('tests/**', 'script/validate-doc-alignment.py') != '' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -65,7 +64,19 @@ jobs:
         run: find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 
       - name: Run test suite with coverage
-        run: pytest tests/ --cov=script/ --cov-fail-under=50 -v --tb=short
+        run: >-
+          pytest tests/ --cov=script/ --cov-fail-under=50
+          --cov-report=term-missing
+          --cov-report=xml:coverage/python-tooling.xml
+          -v --tb=short
+
+      - name: Upload Python tooling coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-tooling-coverage
+          path: coverage/python-tooling.xml
+          if-no-files-found: warn
 
       - name: Validate doc alignment (streaming / events / errors)
         run: echo "Skip missing python script"
