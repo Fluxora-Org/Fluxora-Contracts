@@ -832,6 +832,23 @@ impl FluxoraStream {
     /// Funds the delegate has already moved (e.g. via a prior `withdraw`) are
     /// unaffected: revocation only stops future invocations.
     ///
+    /// # Same-ledger ordering
+    ///
+    /// Revocation is **ordered, not retroactive**. This call removes the grant
+    /// from storage; every invocation ordered after it — in the same ledger or
+    /// any later one — reads no grant and fails with
+    /// [`Error::DelegateNotPermitted`]. An invocation ordered *before* the
+    /// revocation is honoured and is not unwound: already-completed calls are
+    /// unaffected, only the ability to make new ones is withdrawn.
+    ///
+    /// There is no grace period and no distinction between same-ledger and
+    /// cross-ledger calls — a single storage write decides both. Ordering
+    /// *within* a ledger is the network's transaction application order, not
+    /// something this contract selects; the guarantee is only that whichever
+    /// order the network applies, the delegate call on the later side of the
+    /// revocation is rejected. `test::delegation` pins both orders for every
+    /// permission bit; `docs/delegation-revocation.md` states the guarantee.
+    ///
     /// Silently succeeds if no grant exists (idempotent).
     ///
     /// The grantor must be either the sender or the recipient of the stream.

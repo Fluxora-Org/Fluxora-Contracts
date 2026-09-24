@@ -8,6 +8,10 @@
 //!   • Revocation takes effect immediately and does not touch already-moved funds.
 //!   • Delegate entry points (`delegate_withdraw`, `delegate_cancel`, …) take the
 //!     delegate address explicitly; existing entry points are unchanged.
+//!   • Revocation is **ordered, not retroactive**: within a single ledger a
+//!     delegate call ordered before the revocation is honoured and one ordered
+//!     after it is rejected. See the “Same-ledger revocation ordering” section
+//!     below and `docs/delegation-revocation.md`.
 
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::Address;
@@ -400,4 +404,174 @@ fn regranting_after_revocation_restores_access() {
     let paid = h.client.delegate_withdraw(&id, &agent, &None);
     assert_eq!(paid, 100 * ONE);
     h.assert_pool_exact();
+}
+
+// ---------------------------------------------------------------------------
+// Same-ledger revocation ordering (Issue #1730)
+// ---------------------------------------------------------------------------
+//
+// `revoke_delegate` removes the grant from storage. Within a single ledger the
+// host applies writes in call order, so a delegate call that runs *after* the
+// revocation observes no grant and is rejected, while one that runs *before* it
+// is honoured. The guarantee is **ordered, not retroactive**: revocation stops
+// future calls, it does not unwind a call that already ran.
+//
+// The tests below pin both directions for every permission bit. No ledger
+// advance happens between the calls, so grant, call and revoke all share one
+// ledger — matching the issue's acceptance criteria exactly.
+
+/// Every permission bit a [`crate::DelegateGrant`] can carry.
+///
+/// Kept exhaustive so a new op added to `types::op` must be threaded through
+/// the same-ledger tests below, not silently skipped.
+const ALL_OPS: [u32; 6] = [
+    op::WITHDRAW,
+    op::CANCEL,
+    op::PAUSE,
+    op::RESUME,
+    op::TOP_UP,
+    op::TRANSFER_RECIPIENT,
+];
+
+/// The party that owns `op` and may therefore grant (and revoke) it.
+fn grantor_for(h: &Harness, op: u32) -> &Address {
+    match op {
+        op::WITHDRAW | op::TRANSFER_RECIPIENT => &h.recipient,
+        _ => &h.sender,
+    }
+}
+
+/// Create a stream and give `agent` a grant covering exactly `op`.
+///
+/// The stream and the agent are left in a state where the op would succeed if
+/// the grant were still live, so a later rejection can only be the revocation.
+fn stream_with_grant(h: &Harness, agent: &Address, op_bit: u32) -> u64 {
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    h.token_admin.mint(agent, &(1_000 * ONE));
+    h.advance(10 * DAY);
+
+    // `resume` only makes sense on a paused stream; pause it first.
+    if op_bit == op::RESUME {
+        h.client.pause(&id);
+    }
+
+    h.client
+        .grant_delegate(&id, grantor_for(h, op_bit), agent, &op_bit, &None);
+    id
+}
+
+/// Invoke the delegate entry point gated on `op`, discarding its result.
+///
+/// Panics if the call errors, so callers must have arranged a state where the
+/// op would succeed with a live grant.
+fn delegate_call(h: &Harness, id: u64, agent: &Address, op_bit: u32) {
+    delegate_call_result(h, id, agent, op_bit).expect("delegate call should succeed");
+}
+
+/// Invoke the delegate entry point gated on `op` and return its contract error.
+fn delegate_call_error(h: &Harness, id: u64, agent: &Address, op_bit: u32) -> Error {
+    delegate_call_result(h, id, agent, op_bit).expect_err("delegate call should be rejected")
+}
+
+/// Dispatch to the `delegate_*` entry point gated on `op_bit`, normalising the
+/// heterogeneous success types to `()`.
+///
+/// `try_delegate_*` wraps the contract's own `Result` inside the host's result;
+/// the outer `unwrap` peels off the host layer (a failure there is a genuine
+/// trap, not the typed error this suite asserts on).
+fn delegate_call_result(
+    h: &Harness,
+    id: u64,
+    agent: &Address,
+    op_bit: u32,
+) -> Result<(), Error> {
+    let new_recip = Address::generate(&h.env);
+    let outcome = match op_bit {
+        op::WITHDRAW => h
+            .client
+            .try_delegate_withdraw(&id, agent, &None)
+            .map(|inner| inner.map(|_| ())),
+        op::CANCEL => h.client.try_delegate_cancel(&id, agent),
+        op::PAUSE => h.client.try_delegate_pause(&id, agent),
+        op::RESUME => h.client.try_delegate_resume(&id, agent),
+        op::TOP_UP => h
+            .client
+            .try_delegate_top_up(&id, agent, &(100 * ONE))
+            .map(|inner| inner.map(|_| ())),
+        op::TRANSFER_RECIPIENT => h
+            .client
+            .try_delegate_transfer_recipient(&id, agent, &new_recip),
+        other => panic!("unhandled op bit {other}"),
+    };
+    outcome.unwrap()
+}
+
+/// A delegate revoked earlier in the same ledger cannot act afterwards.
+///
+/// The delegate call is ordered **after** the revocation, with no ledger
+/// advance between them, and must be rejected for every permission bit.
+#[test]
+fn revoked_delegate_cannot_act_later_in_the_same_ledger() {
+    for op_bit in ALL_OPS {
+        let h = Harness::new();
+        let agent = Address::generate(&h.env);
+        let id = stream_with_grant(&h, &agent, op_bit);
+
+        // Revoke, then invoke — both in the same ledger, revocation first.
+        h.client.revoke_delegate(&id, grantor_for(&h, op_bit), &agent);
+        let before = h.client.get_stream(&id);
+
+        assert_eq!(
+            delegate_call_error(&h, id, &agent, op_bit),
+            Error::DelegateNotPermitted,
+            "op bit {op_bit}: revoked delegate must be rejected",
+        );
+
+        // The rejection is a pure authorization failure: nothing mutated.
+        assert_eq!(
+            h.client.get_stream(&id),
+            before,
+            "op bit {op_bit}: rejected delegate call must not touch the stream",
+        );
+    }
+}
+
+/// A delegate call ordered **before** a same-ledger revocation is honoured.
+///
+/// Revocation is not retroactive: it removes the grant for subsequent calls but
+/// does not unwind one that already ran. After the honored call, the next call
+/// in the same ledger is rejected.
+#[test]
+fn delegate_call_ordered_before_revocation_in_the_same_ledger_is_honoured() {
+    for op_bit in ALL_OPS {
+        let h = Harness::new();
+        let agent = Address::generate(&h.env);
+        let id = stream_with_grant(&h, &agent, op_bit);
+
+        // Grant, call and revoke all share one ledger — no `advance` here.
+        delegate_call(&h, id, &agent, op_bit);
+        h.client.revoke_delegate(&id, grantor_for(&h, op_bit), &agent);
+
+        assert_eq!(
+            delegate_call_error(&h, id, &agent, op_bit),
+            Error::DelegateNotPermitted,
+            "op bit {op_bit}: call after revocation must be rejected",
+        );
+    }
+}
+
+/// The fixture is exhaustive: every permission bit is exercised by the
+/// same-ledger tests above, so a newly added op cannot slip through untested.
+#[test]
+fn all_ops_fixture_covers_every_permission_bit() {
+    let mut covered: u32 = 0;
+    for op_bit in ALL_OPS {
+        assert_eq!(op_bit.count_ones(), 1, "ALL_OPS entries must be single bits");
+        assert_eq!(covered & op_bit, 0, "duplicate op bit {op_bit} in ALL_OPS");
+        covered |= op_bit;
+    }
+
+    // The six bits used by `types::op` (1 << 0 .. 1 << 5). If a new bit is
+    // added, extend ALL_OPS and this mask together.
+    assert_eq!(covered, 0b11_1111, "ALL_OPS does not cover every permission bit");
 }
