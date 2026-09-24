@@ -146,13 +146,82 @@ equivalent.
 |---|---|---|
 | `create_stream(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable)` | sender | `u64` stream id |
 | `top_up(stream_id, amount)` | sender | — |
-| `withdraw(stream_id, amount: Option<i128>)` | recipient | `i128` paid |
+| `withdraw(stream_id, amount: Option<i128>)` | recipient | `i128` paid — [details](#withdraw) |
 | `batch_withdraw(recipient, stream_ids: Vec<u64>)` | recipient | `i128` total |
 | `cancel(stream_id)` | sender | — |
 | `pause(stream_id)` / `resume(stream_id)` | sender | — |
 | `transfer_recipient(stream_id, new_recipient)` | recipient | — |
 
 `withdraw` with `amount = None` draws the full available balance.
+
+### `withdraw`
+
+```rust
+fn withdraw(env: Env, stream_id: u64, amount: Option<i128>) -> Result<i128, Error>
+```
+
+Pays the stream's current recipient the tokens they have already earned and
+returns the `i128` amount transferred (token smallest units). The available
+balance is `vested(now) - withdrawn`, where `vested` is zero until
+`cliff_time` is reached and then rises linearly (rounding down) to `deposited`
+by `end_time`.
+
+Pausing freezes *accrual* only: funds already earned remain withdrawable while
+`status == Paused`. A `Cancelled` stream that still holds an unwithdrawn
+residual (`withdrawn < deposited`) can also be drained; a `Depleted` stream, or
+any terminal stream with nothing left, cannot.
+
+`amount == None` draws the full available balance. An explicit `Some(n)` pays
+exactly `n` when `0 < n <= available`. On success the contract transfers tokens
+from its pool to the recipient via a SEP-41 `transfer`, increments
+`Stream.withdrawn`, and — when `withdrawn` reaches `deposited` on a
+non-`Cancelled` stream — flips `status` to `Depleted` (and clears any open
+pause). `Cancelled` is sticky: draining a cancelled stream to zero leaves it
+`Cancelled`, never `Depleted`.
+
+#### Parameters
+
+| parameter | type | valid range / constraints |
+|---|---|---|
+| `stream_id` | `u64` | Id of an existing stream. Ids are monotonic in `0..stream_count()`; an id that was never issued, or whose entry has been archived, fails with `StreamNotFound`. |
+| `amount` | `Option<i128>` | `None` — pay the entire currently-withdrawable balance. `Some(n)` — `n` must be strictly positive (`> 0`) and at most the currently-withdrawable balance (`<= available`). Values are in the stream token's smallest unit. |
+
+#### Authorisation
+
+`recipient.require_auth()` — only the stream's current recipient may call this
+entry point. The sender cannot withdraw, and there is no admin key. A missing
+or wrong signature surfaces as a host authentication failure, not a typed
+`Error`.
+
+#### Errors
+
+| variant | # | condition |
+|---|---|---|
+| `StreamNotFound` | 1 | No readable entry for `stream_id`: the id was never issued, or its entry has been archived. Raised by `load_stream` before any other check. |
+| `InsufficientWithdrawable` | 16 | An explicit `Some(n)` was supplied, `available > 0`, and `n > available`. Never returned when `available == 0` — that path uses the empty-balance variants below instead. |
+| `NothingToWithdraw` | 17 | The stream is still live (`Active` or `Paused`) but the withdrawable balance is zero: pre-start, pre-cliff, fully drawn for the moment, or otherwise accrued-nothing-left-to-pay. |
+| `InvalidAmount` | 18 | An explicit `Some(n)` was supplied with `n <= 0`. |
+| `StreamTerminated` | 14 | The stream is `Cancelled` or `Depleted` and has nothing left to pay (`available == 0`). Distinct from `NothingToWithdraw` so a client can tell "wait for accrual" apart from "this stream is over" without a second round-trip. |
+| `Overflow` | 22 | Checked arithmetic overflow while computing vested/withdrawable amounts, or while updating `withdrawn` / `paused_total` in the shared withdrawal tail. Unreachable for any stream created through the contract under normal schedules. |
+| `TokenTransferFailed` | 25 | The token contract returned a typed error on the payout transfer (insufficient pooled balance, deauthorized recipient trustline, or token auth rules). |
+| `TokenMissing` | 26 | The stream's token address has no deployed code (host Abort / trap). |
+
+This list was cross-checked against `FluxoraStream::withdraw` and
+`FluxoraStream::apply_withdrawal` in
+[`contracts/stream/src/lib.rs`](../contracts/stream/src/lib.rs), plus
+`accrual::withdrawable` / `accrual::vested` and the shared `token_transfer`
+helper; the eight variants above are the complete set the entry point can
+return. `Unauthorized` (7) is **not** reachable here — auth failures abort in
+the host before a typed error is produced.
+
+#### Events
+
+Exactly one `withdrawn` event on success: topics `stream_id` and `recipient`;
+payload `amount` (this payout), `withdrawn` (cumulative after the call),
+`deposited`, and `status` (may already be `Depleted` when the payout exhausted
+the deposit on a non-cancelled stream). The token contract also emits its own
+`transfer` event for the payout. No event is emitted on failure.
+
 
 ### Views — read-only, no TTL side effects
 
