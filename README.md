@@ -450,7 +450,10 @@ frontend's four contract calls all break, the backend is unaffected.
 | [docs/MIGRATION.md](docs/MIGRATION.md) | Deletion audit vs the pre-rewrite contract, and downstream impact. |
 | [docs/soroban-rpc-read-skew.md](docs/soroban-rpc-read-skew.md) | Pin multi-call reads to one ledger, and the read-after-write barrier. |
 | [docs/provenance.md](docs/provenance.md) | Wasm provenance schema, design decisions, and the release gate. |
-| [fluxora-build-spec.md](fluxora-build-spec.md) | The build spec, with amendments where measurement contradicted it. |
+| [docs/terminal-operations.md](docs/terminal-operations.md) | Terminal (`Cancelled`/`Depleted`) behaviour and the rejection matrix. |
+| [docs/cliff-test-scenarios.md](docs/cliff-test-scenarios.md) | Cliff boundary test scenarios and expected values. |
+| [docs/factory-admin-rotation-tests.md](docs/factory-admin-rotation-tests.md) | Same-ledger admin rotation coverage for the factory. |
+| [docs/archive/](docs/archive/README.md) | Point-in-time reports and the original build spec, kept for provenance. |
 
 > **Note for deployment:** the `stellar` CLI must be at least version 27 to match
 > the protocol. A protocol-23 CLI will scaffold and may misreport against a

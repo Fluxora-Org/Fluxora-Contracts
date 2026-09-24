@@ -1,5 +1,9 @@
 # Terminal Operations - Quick Reference Guide
 
+> **Provenance:** moved from the repository root into `docs/` in the point-in-time
+> documentation cleanup for [#1681](https://github.com/Fluxora-Org/Fluxora-Contracts/issues/1681). Update this document alongside the
+> tests it covers.
+
 ## What Are Terminal Operations?
 
 Terminal states (`Cancelled` and `Depleted`) represent streams that have reached their end state. Once terminal, a stream rejects all mutating lifecycle operations.
@@ -344,7 +348,7 @@ When testing terminal operations:
 ## Related Documentation
 
 - `test/terminal_operations.rs` - Full test suite
-- `TERMINAL_OPERATIONS_TEST_SUMMARY.md` - Detailed documentation
+- `docs/archive/terminal-operations-test-summary.md` - Detailed documentation
 - `test/cancel.rs` - Cancellation behavior
 - `test/pause.rs` - Pause state management
 - `test/withdraw.rs` - Withdrawal and depletion

@@ -1,5 +1,10 @@
 # Fluxora — Build Spec (v1.1)
 
+> **Historical (point in time).** Moved from the repository root into `docs/archive/`
+> in the point-in-time documentation cleanup for [#1681](https://github.com/Fluxora-Org/Fluxora-Contracts/issues/1681). This record is
+> kept for provenance and is not maintained; see `docs/` and the test suites for current
+> behaviour.
+
 **A continuous payment streaming primitive for Soroban.**
 
 This document is written to be handed to a coding agent. It contains the context needed to

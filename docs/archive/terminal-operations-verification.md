@@ -1,5 +1,10 @@
 # Terminal Operations - Verification Checklist
 
+> **Historical (point in time).** Moved from the repository root into `docs/archive/`
+> in the point-in-time documentation cleanup for [#1681](https://github.com/Fluxora-Org/Fluxora-Contracts/issues/1681). This record is
+> kept for provenance and is not maintained; see `docs/` and the test suites for current
+> behaviour.
+
 ## Pre-Merge Verification
 
 ### 1. Build Verification
@@ -200,8 +205,8 @@ head -40 contracts/stream/src/test/terminal_operations.rs
 
 ```bash
 # Check summary exists and is complete
-ls -lh TERMINAL_OPERATIONS_TEST_SUMMARY.md
-wc -l TERMINAL_OPERATIONS_TEST_SUMMARY.md
+ls -lh docs/archive/terminal-operations-test-summary.md
+wc -l docs/archive/terminal-operations-test-summary.md
 ```
 
 **Expected**: Comprehensive summary document present
@@ -328,7 +333,7 @@ Monitor CI output for:
 
 For questions about this test suite:
 - Review design decisions in module header
-- Check `TERMINAL_OPERATIONS_TEST_SUMMARY.md`
+- Check `docs/archive/terminal-operations-test-summary.md`
 - Reference existing tests in `test/cancel.rs` and `test/pause.rs`
 
 ## Version
