@@ -45,6 +45,7 @@ mod transfer;
 // Stage 3
 mod accrual_overflow;
 mod batch;
+mod entrypoint_costs;
 mod invariants;
 mod lifecycle_proptest;
 mod monotonicity;
