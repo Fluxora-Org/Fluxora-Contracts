@@ -165,6 +165,66 @@ equivalent.
 | `stream_count()` | `u64` — ids run `0..stream_count()` |
 | `stream_exists(stream_id)` | `bool` |
 
+#### `vested_of(stream_id)` — total earned by the recipient, withdrawn or not
+
+`vested_of` is the **cumulative** amount the recipient has accrued since
+`start_time`, whether or not it has been withdrawn. It is **monotonic
+non-decreasing** in the stream clock: paused streams freeze the clock, so a
+pause pauses vesting too, and it never moves backwards. The three view
+quantities `vested_of`, `withdrawable_of` and `refundable_of` are related by
+
+```
+vested_of + refundable_of == deposited          // conservation, at any instant
+withdrawable_of == max(0, vested_of - withdrawn) // what the recipient may claim now
+```
+
+Two behavioural facts are the point of this entry point and must not be
+assumed:
+
+* **Rounding is down.** Vested is computed as
+
+  ```
+  vested = floor(deposited * elapsed / duration)     // integer division
+  ```
+
+  truncating in the recipient's disfavour. The residue stays in the contract
+  and returns to the sender when the stream settles, so the pool can never be
+  short. A client must not round up, and must not assume `deposited /
+  duration` times `elapsed` is exact.
+
+* **Pre-cliff it is zero.** The cliff *gates* the payout, it does not delay
+  accrual: before `cliff_time` the result is exactly `0`, and at the cliff
+  instant the recipient becomes entitled to everything accrued since
+  `start_time` — not merely what accrues after the cliff. There is no partial
+  vesting beforehand.
+
+The cliff gate is evaluated **first**: while the stream clock is below
+`cliff_time` the result is `0`, even for a schedule that has collapsed. Only
+once the cliff has opened is the formula applied, and then the result is
+`deposited` in full when either the schedule has fully elapsed
+(`elapsed >= duration`) or its duration is zero (a `cancel` that collapsed the
+schedule onto its start instant). A cancelled stream reads the same way:
+`vested_of` returns its settled, rewritten `deposited`.
+
+**Parameters.**
+
+| parameter | type | valid range |
+|---|---|---|
+| `stream_id` | `u64` | any id ever issued, i.e. `id < stream_count()`. Ids are monotonic and never reused. Any `u64` is accepted syntactically; an id that was never issued, or whose entry has been archived, fails with `StreamNotFound` — it does not signal "no such id" vs "archived" (see Client requirements). |
+
+**Authorization.** None — `vested_of` is a permissionless, read-only view. It
+runs in simulation and, like every view, does **not** extend the entry's TTL;
+keeping a stream alive is `extend_stream_ttl`'s job.
+
+**Errors.**
+
+| variant | # | condition |
+|---|---|---|
+| `StreamNotFound` | 1 | No readable entry for `stream_id`: the id was never issued or the entry has been archived. |
+| `Overflow` | 22 | Defensive only: the checked `deposited * elapsed` product does not fit in `i128`. It is unreachable for any stream created through the contract — `create_stream` and `top_up` both guard `deposited * duration` fits in `i128`, and `elapsed <= duration` always holds. Listed only so an integrator is never surprised by it. |
+
+**Events.** None. Views emit no events; `vested_of` only reads.
+
 ### Maintenance — permissionless
 
 | function | returns |
