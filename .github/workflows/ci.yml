@@ -444,10 +444,103 @@ jobs:
       - name: Check fluxora-stream with ${{ matrix.features }}
         run: cargo check -p fluxora-stream ${{ matrix.features }}
 
+  # ── Per-PR bounded fuzz pass ──────────────────────────────────────────────
+  # Runs on every pull_request with a time-bounded budget so a regression
+  # reintroducing a known bug class (depleted-while-paused, top_up rounding)
+  # is caught before merge rather than the following night.
+  #
+  # Budget: 8 seeds × 40 steps for the sequence fuzz, 64 proptest cases.
+  # On a standard GitHub-hosted runner this completes in roughly 2–3 minutes.
+  # Tune FLUXORA_FUZZ_SEEDS / FLUXORA_FUZZ_STEPS / PROPTEST_CASES here if the
+  # job consistently exceeds 5 minutes; document the new target duration in the
+  # comment above.
+  #
+  # Reproducibility: a failing seed is printed by the test harness itself
+  # ("seed <N>, step <M>") so it can be replayed locally with:
+  #   FLUXORA_FUZZ_SEEDS=1 FLUXORA_FUZZ_STEPS=<M> cargo test \
+  #     the_pool_invariant_holds_across_random_operation_sequences -- --nocapture
+  # (set the seed constant in invariants.rs or add a targeted fixture test).
+  fuzz-pr:
+    name: randomized fuzz pass (PR)
+    runs-on: ubuntu-latest
+    needs: lint
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.94.1
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-fuzz-pr-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-fuzz-pr-
+
+      # Run the randomized invariant suite and the proptest accrual suite with
+      # a budget sized to keep the job under ~5 minutes on a standard runner.
+      # --nocapture ensures the failing seed appears in the job log immediately.
+      - name: Bounded randomized fuzz pass
+        run: |
+          cargo test -p fluxora_stream --features testutils \
+            the_pool_invariant_holds_across_random_operation_sequences \
+            the_pool_invariant_holds_across_long_sequences \
+            -- --nocapture --test-threads=1
+        env:
+          # PR budget: light enough to keep the job under 5 minutes.
+          # Nightly deep run uses higher values set in the `fuzz` job below.
+          FLUXORA_FUZZ_SEEDS: "8"
+          FLUXORA_FUZZ_STEPS: "40"
+
+      - name: Bounded proptest accrual pass
+        run: |
+          cargo test -p fluxora_stream --features testutils \
+            props:: \
+            -- --nocapture
+        env:
+          PROPTEST_CASES: "64"
+
+      # Regression guard: explicitly run the depleted-while-paused fixture so
+      # a code change that reintroduces the defect fails this job, not just the
+      # nightly run.
+      - name: Regression guard — depleted-while-paused
+        run: |
+          cargo test -p fluxora_stream --features testutils \
+            depleting_a_paused_stream_closes_out_the_pause \
+            -- --nocapture
+
+      - name: Report fuzz budget used
+        if: always()
+        run: |
+          echo "## PR Fuzz Pass Budget" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Parameter | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-----------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| FLUXORA_FUZZ_SEEDS | 8 |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| FLUXORA_FUZZ_STEPS | 40 |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| PROPTEST_CASES | 64 |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "To reproduce a failing seed locally:" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "FLUXORA_FUZZ_SEEDS=1 FLUXORA_FUZZ_STEPS=40 cargo test \\" >> "$GITHUB_STEP_SUMMARY"
+          echo "  the_pool_invariant_holds_across_random_operation_sequences \\" >> "$GITHUB_STEP_SUMMARY"
+          echo "  -- --nocapture" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
   fuzz:
     name: randomized and property suites
     runs-on: ubuntu-latest
     needs: lint
+    # Deep nightly run: skip on pull_request (fuzz-pr handles that).
+    if: github.event_name != 'pull_request'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -494,6 +587,12 @@ jobs:
         env:
           # Ensure snapshots are validated, not updated
           SOROBAN_SNAPSHOT_UPDATE: ""
+          # Nightly deep fuzz budget. The randomized suites cap their defaults
+          # to values a local `cargo test` can afford; the nightly schedule
+          # raises them here so the deep sweep costs only CI time.
+          FLUXORA_FUZZ_SEEDS: "64"
+          FLUXORA_FUZZ_STEPS: "150"
+          PROPTEST_CASES: "512"
 
       - name: Report Rust #[test] inventory
         if: ${{ hashFiles('script/count_rust_tests.py') != '' }}
