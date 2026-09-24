@@ -306,14 +306,28 @@ jobs:
             echo "::error::If this dependency change is intentional, run 'cargo update' locally, review the diff, and commit the updated Cargo.lock alongside your change."
             exit 1
           fi
-          echo "provenance:"
-          cat target/wasm32v1-none/release/provenance.json
 
       - name: Build release (native)
         run: cargo build --release --workspace
 
+      # `fluxora-provenance` is a workspace member but targets the host (it
+      # needs std), so it must be excluded from every wasm-target workspace
+      # build — otherwise cargo would try to compile it for the no_std
+      # `wasm32v1-none` target. It is still built and tested on the host by
+      # `cargo build --workspace` / `cargo test --workspace` above.
       - name: Build WASM (all contracts)
-        run: cargo build --release --workspace --target wasm32v1-none
+        run: cargo build --release --workspace --exclude fluxora-provenance --target wasm32v1-none
+
+      # Issue #1677: run the provenance gate against the workspace-built wasm
+      # artifacts. `generate`/`verify` both build the tool package from the
+      # workspace root, then hash/validate the release dir; verify is a hard
+      # gate that exits non-zero on any drift.
+      - name: Provenance (generate + verify)
+        run: |
+          script/provenance.sh generate
+          script/provenance.sh verify
+          echo "provenance:"
+          cat target/wasm32v1-none/release/provenance.json
 
       - name: Install Stellar CLI (pinned)
         run: |

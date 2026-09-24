@@ -166,9 +166,18 @@ script/provenance.sh verify   [release-dir]     # re-check; exit non-zero on any
 script/provenance.sh test                       # regression suite for the tool itself
 ```
 
-The tool is a standalone Rust crate at `tools/provenance` — deliberately not a
-workspace member, because it targets the host while the workspace's product
-crates target `wasm32v1-none`. Invoke it directly as
+The tool is a Rust crate at `tools/provenance`, built as a workspace member so
+it resolves through the root `Cargo.lock` and is covered by the standard
+`cargo build --workspace` / `cargo test --workspace` checks. It targets the
+host (it needs std) while the workspace's product crates target
+`wasm32v1-none`, so wasm-target workspace builds exclude it:
+
+```bash
+cargo build --workspace --exclude fluxora-provenance --target wasm32v1-none --release
+```
+
+The workspace build puts the binary at `target/release/fluxora-provenance`.
+Invoke it directly as
 `fluxora-provenance generate|verify <release-dir> [--target <triple>]`
 if needed; see `fluxora-provenance help` for the full CLI.
 
