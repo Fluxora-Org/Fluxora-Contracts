@@ -139,4 +139,17 @@ pub enum Error {
     // --- Arithmetic (top-up) ---
     /// Zero or negative `top_up` amount.
     InvalidTopUp = 31,
+
+    // --- Token assumptions ---
+    /// A deposit-side pull (`create_stream`, `top_up`, `delegate_top_up`)
+    /// delivered a different amount than requested.
+    ///
+    /// The contract measures its own token balance before and after the pull
+    /// and requires the delta to equal the requested amount exactly. This is
+    /// how a fee-on-transfer or balance-adjusting token is detected and
+    /// rejected on the deposit leg — see `docs/ABI.md` "Token assumptions"
+    /// for the full statement of what a stream's token is assumed to do, and
+    /// what happens when an assumption cannot be checked at call time (a
+    /// rebasing token).
+    TokenAmountMismatch = 32,
 }

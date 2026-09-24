@@ -95,13 +95,15 @@ const DISCRIMINANT_FIXTURE: &[(&str, u32)] = &[
     ("RepeatedTransfer", 30),
     // --- Arithmetic (top-up) ---
     ("InvalidTopUp", 31),
+    // --- Token assumptions ---
+    ("TokenAmountMismatch", 32),
 ];
 
 /// The highest discriminant value in the fixture above.
 ///
 /// New variants must use `LAST_DISCRIMINANT + 1`. This constant is checked
 /// against the fixture length so a gap is caught immediately.
-const LAST_DISCRIMINANT: u32 = 31;
+const LAST_DISCRIMINANT: u32 = 32;
 
 /// Assert that the fixture has no gaps and ends at `LAST_DISCRIMINANT`.
 ///
@@ -171,6 +173,7 @@ fn discriminant_fixture_matches_source() {
         ("MalformedStreamId", Error::MalformedStreamId as u32),
         ("RepeatedTransfer", Error::RepeatedTransfer as u32),
         ("InvalidTopUp", Error::InvalidTopUp as u32),
+        ("TokenAmountMismatch", Error::TokenAmountMismatch as u32),
     ];
 
     assert_eq!(
@@ -902,5 +905,19 @@ fn invalid_top_up_discriminant_value() {
         Error::InvalidTopUp as u32,
         31,
         "InvalidTopUp discriminant must be 31",
+    );
+}
+
+// #32 — TokenAmountMismatch --------------------------------------------------
+//
+// Driven end-to-end (a fee-on-transfer token rejected on `create_stream` and
+// `top_up`) in `test::token_errors`. Discriminant confirmed here.
+
+#[test]
+fn token_amount_mismatch_discriminant_value() {
+    assert_eq!(
+        Error::TokenAmountMismatch as u32,
+        32,
+        "TokenAmountMismatch discriminant must be 32",
     );
 }

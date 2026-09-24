@@ -208,3 +208,18 @@ The constant is deliberately conservative — it over-estimates ledgers per unit
 time, so entries are funded for longer than strictly needed — but a sustained
 slowdown well beyond 5s/ledger would erode the margin. The 30-day buffer and the
 keeper path both exist to absorb that.
+
+---
+
+## 6. Rebasing tokens can desynchronize the pool, undetected
+
+See [ABI.md "Token assumptions"](ABI.md#token-assumptions) for the full
+statement. Fee-on-transfer tokens are detected and rejected on the deposit
+leg (`Error::TokenAmountMismatch`); a token whose balances change outside of a
+transfer Fluxora itself initiated — an elastic-supply rebase — cannot be
+detected at call time, because there is no transfer to instrument. Should one
+be used anyway, the pool invariant (`Harness::assert_pool_invariant`) can be
+violated on-chain, and the only symptom is a later `withdraw` or `cancel`
+failing closed with `Error::TokenTransferFailed` once the shortfall is
+reached. Integrators choosing a token for a stream are responsible for
+confirming it does not rebase.

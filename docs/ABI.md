@@ -106,25 +106,28 @@ Discriminants are ABI and are never renumbered; new variants are appended.
 
 | # | name | | # | name |
 |---|---|---|---|---|
-| 1 | `StreamNotFound` | | 14 | `StreamTerminated` |
-| 2 | `InvalidTimeRange` | | 15 | `StreamMatured` |
-| 3 | `InvalidCliff` | | 16 | `InsufficientWithdrawable` |
-| 4 | `InvalidDeposit` | | 17 | `NothingToWithdraw` |
-| 5 | `DepositRateTooLow` | | 18 | `InvalidAmount` |
-| 6 | `SelfStream` | | 19 | `BatchTooLarge` |
-| 7 | `Unauthorized` | | 20 | `EmptyBatch` |
-| 8 | `NotCancellable` | | 21 | `DuplicateStreamId` |
-| 9 | `NotPausable` | | 22 | `Overflow` |
-| 10 | `NotTransferable` | | 23 | `TopUpTooSmall` |
-| 11 | `StreamNotActive` | | 24 | `StreamIdExhausted` |
-| 12 | `StreamNotPaused` | | 25 | `TokenTransferFailed` |
-| 13 | `StreamAlreadyPaused` | | 26 | `TokenMissing` |
-| | | | 29 | `MalformedStreamId` |
+| 1 | `StreamNotFound` | | 17 | `NothingToWithdraw` |
+| 2 | `InvalidTimeRange` | | 18 | `InvalidAmount` |
+| 3 | `InvalidCliff` | | 19 | `BatchTooLarge` |
+| 4 | `InvalidDeposit` | | 20 | `EmptyBatch` |
+| 5 | `DepositRateTooLow` | | 21 | `DuplicateStreamId` |
+| 6 | `SelfStream` | | 22 | `Overflow` |
+| 7 | `Unauthorized` | | 23 | `TopUpTooSmall` |
+| 8 | `NotCancellable` | | 24 | `StreamIdExhausted` |
+| 9 | `NotPausable` | | 25 | `TokenTransferFailed` |
+| 10 | `NotTransferable` | | 26 | `TokenMissing` |
+| 11 | `StreamNotActive` | | 27 | `DelegateNotPermitted` |
+| 12 | `StreamNotPaused` | | 28 | `DelegateExpired` |
+| 13 | `StreamAlreadyPaused` | | 29 | `MalformedStreamId` |
+| 14 | `StreamTerminated` | | 30 | `RepeatedTransfer` |
+| 15 | `StreamMatured` | | 31 | `InvalidTopUp` |
+| 16 | `InsufficientWithdrawable` | | 32 | `TokenAmountMismatch` |
 
 `TokenTransferFailed` (25) and `TokenMissing` (26) are **stable stream-level categories** for token sub-invocation failures. The token contract's internal error discriminant is intentionally discarded — forwarding it would produce a value clients decode against Fluxora's error table, yielding a silent misinterpretation. The raw diagnostic is visible in the failed transaction's `diagnosticEvents`.
 
 * `TokenTransferFailed` — the token contract returned a typed contract error: insufficient sender balance, pool underfunded on a payout, or the token's own authorization rules refused the call.
 * `TokenMissing` — the token address resolves to nothing (Abort / host trap); the stream references a non-deployed contract.
+* `TokenAmountMismatch` (32) — a deposit pull (`create_stream`, `top_up`, `delegate_top_up`) changed the pool's balance by something other than the requested amount. See "Token assumptions" below.
 
 The CLI and RPC render these as `Error(Contract, #N)`.
 
@@ -135,6 +138,73 @@ return the more specific pause/terminated variants instead.
 yet returns `NothingToWithdraw` (17); a `Cancelled` or `Depleted` stream with
 nothing left returns `StreamTerminated` (14). Clients must not treat those as
 equivalent.
+
+---
+
+## Token assumptions
+
+`Stream.token` must be a [SEP-41](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0041.md)-conforming
+contract. Fluxora is a primitive that trusts its token the way it trusts
+nothing else on chain — `Stream.deposited`, and every rate, liability and
+refund figure derived from it, is arithmetic over numbers the contract itself
+chose, not numbers it re-derives from the token's ledger on every call. That
+is fast and simple, and it is only correct if the token behaves as follows.
+
+**1. A transfer moves exactly the amount requested. No fee-on-transfer, no
+reflection.** The pool's real token balance is what actually backs every
+recipient's claim; `deposited` assumes a `create_stream` or `top_up` pull
+grows that balance by precisely the amount passed in.
+
+> **Enforced.** `create_stream`, `top_up` and `delegate_top_up` read the
+> contract's own balance immediately before and after the pull and require
+> the delta to equal the requested amount exactly ([`pull_deposit`](../contracts/stream/src/lib.rs)).
+> A mismatch — a fee-on-transfer token delivering less, or a
+> positive-rebasing token delivering more — is rejected with
+> [`Error::TokenAmountMismatch`](#error) (32), and the whole invocation,
+> including the transfer that already happened, is rolled back by the host.
+> No funds move and no phantom entry is written.
+>
+> This guards the *deposit* leg only. A fee taken on the *outbound* leg
+> (`withdraw`'s payout, `cancel`'s refund) is not detected, and does not need
+> to be: it is the recipient's or sender's own balance that comes up short,
+> not the pool's — the pool still drops by exactly the amount the contract
+> sent, so Fluxora's internal accounting stays in sync either way.
+
+**2. The token does not rebase.** Fluxora never re-reads the pool's balance
+except immediately around a transfer it initiated itself. An elastic-supply
+token that changes the pool's balance out from under the contract — up or
+down, on some schedule the contract is not party to — desynchronizes the real
+balance from the sum of every stream's `deposited - withdrawn`.
+
+> **Not detectable, not enforced.** There is no transfer to instrument; a
+> rebase does not happen inside a Fluxora invocation. If the pool balance
+> ever falls short of outstanding liabilities, the failure mode is a
+> legitimate `withdraw` or `cancel` refund returning
+> [`Error::TokenTransferFailed`](#error) once the shortfall is reached —
+> Fluxora fails closed rather than overpaying one recipient at another's
+> expense, but it does not compensate for the missing balance. Only fund a
+> stream with a token whose balance changes exclusively through transfers
+> Fluxora itself is a party to.
+
+**3. Zero-value transfers are never issued — so whether the token treats one
+as a no-op or a revert is immaterial.** Every entry point that could reach the
+token with a non-positive amount is rejected first, before any token call:
+
+| path | guard |
+|---|---|
+| `create_stream` | `deposit > 0`, else `InvalidDeposit` (4) |
+| `top_up` / `delegate_top_up` | `amount > 0`, else `InvalidAmount` (18); schedule delta must be nonzero, else `TopUpTooSmall` (23) |
+| `withdraw` / `delegate_withdraw` | `NothingToWithdraw` (17) short-circuits before any payout of zero |
+| `batch_withdraw` | a stream with nothing currently available is skipped, not paid a zero |
+| `cancel` / `delegate_cancel` | the refund transfer is only called when `refund > 0` |
+
+`test::token_errors` pins all three assumptions down: a fee-on-transfer
+mock is rejected on both `create_stream` and `top_up`; a token that panics on
+any zero-value `transfer` call is proven never to be invoked with one, across
+`cancel`, `withdraw` and `batch_withdraw`; and an out-of-band balance loss on
+the pool (standing in for a negative rebase) is shown to fail closed with
+`Error::TokenTransferFailed` rather than corrupting an unrelated stream's
+accounting.
 
 ---
 

@@ -13,7 +13,7 @@ subscription billing, vesting schedules. The contract is the product.
 | Protocol | 27 (live on testnet and mainnet) |
 | SDK | `soroban-sdk` 27.0.5 |
 | Rust | 1.97.1, target `wasm32v1-none` |
-| Token interface | SEP-41 (USDC on Stellar has **7 decimals**) |
+| Token interface | SEP-41 (USDC on Stellar has **7 decimals**); see [token assumptions](docs/ABI.md#token-assumptions) — no fee-on-transfer, no rebasing |
 | Contract size | ~47 KiB baseline; enforced by `contracts/stream/wasm-size-budget.env` |
 | Tests | 146, including property tests and a pool invariant checked after every operation |
 
