@@ -176,6 +176,41 @@ equivalent.
 this automatically. See [README](../README.md) for why the cap is 16 and why it
 is derived from the *event* budget rather than the entry count.
 
+#### `extend_stream_ttl(stream_id) -> u32`
+
+**Authorisation: none - permissionless.**
+There is no caller parameter and no `require_auth`: anyone may pay rent for any
+stream, and the caller bears the rent cost.
+This is deliberate - a recipient's claim must never depend on the sender's
+continued goodwill, and a third-party keeper sweeping streams that approach
+expiry needs nobody's permission.
+The call cannot move funds or change stream state; the caller only ever *pays*.
+
+| parameter | type | valid range |
+|---|---|---|
+| `stream_id` | `u64` | an issued id whose entry still exists. Ids run `0..stream_count()`. Streams in **any** status are eligible, including terminal `Cancelled` and `Depleted` ones |
+
+**Returns** the `u32` number of ledgers the entry is now funded for.
+The target is the stream's remaining effective lifetime (now to `end_time`,
+plus accumulated and in-progress pause time) plus a 30-day buffer, converted at
+5 seconds per ledger rounding up, floored at `MIN_STREAM_TTL_LEDGERS` (518,400
+ledgers, ~30 days) and clamped to the network's `max_entry_ttl`.
+Multi-year streams therefore need periodic re-extension no matter how
+generously creation funds them.
+The contract instance entry is extended to the network maximum in the same
+transaction.
+
+**Errors**
+
+| error | condition |
+|---|---|
+| `StreamNotFound` (1) | `stream_id` was never issued, or its entry has been archived and needs restoring |
+
+`StreamNotFound` is the only typed error this entry point returns.
+
+**Events** - on success emits `ttl_extended`: topics are the event name and
+`stream_id`; the payload is `extended_to_ledgers`, equal to the returned value.
+
 ---
 
 ## Events
