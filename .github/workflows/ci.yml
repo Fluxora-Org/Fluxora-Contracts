@@ -267,17 +267,6 @@ jobs:
       - name: Resource report
         run: cargo test --release resource_limits -- --nocapture --test-threads=1
 
-      - name: Gate entry point CPU costs
-        run: python3 script/validate_gas.py
-
-      - name: Upload entry point cost report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: stream-entrypoint-costs
-          path: target/entrypoint-cost-report.md
-          if-no-files-found: warn
-
       # Build release artifacts via the release command, not a bare workspace
       # build. This is deliberate isolation (issue #1543): the archival probe
       # shares the workspace but must never ship. `script/release.sh` builds only
@@ -373,6 +362,27 @@ jobs:
             target/wasm32v1-none/release/fluxora_stream.wasm.sha256
             target/wasm32v1-none/release/fluxora_stream.optimized.wasm.sha256
           retention-days: 30
+          if-no-files-found: warn
+
+  entrypoint-costs:
+    name: Stream entry point CPU costs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Measure and gate entry point costs
+        run: python3 script/validate_gas.py
+      - name: Upload entry point cost report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stream-entrypoint-costs
+          path: target/entrypoint-cost-report.md
           if-no-files-found: warn
 
   # Issue #1594 — standalone packaging guard, runs in parallel with `check`.
