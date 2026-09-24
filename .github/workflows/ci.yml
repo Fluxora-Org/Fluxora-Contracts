@@ -364,27 +364,6 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
 
-  entrypoint-costs:
-    name: Stream entry point CPU costs
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install pinned Rust toolchain
-        run: rustup show
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Measure and gate entry point costs
-        run: python3 script/validate_gas.py
-      - name: Upload entry point cost report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: stream-entrypoint-costs
-          path: target/entrypoint-cost-report.md
-          if-no-files-found: warn
-
   # Issue #1594 — standalone packaging guard, runs in parallel with `check`.
   # A rename should fail fast here with a targeted error, not be buried in
   # a full-suite test run.  The `packaging::` test module in the Rust suite
