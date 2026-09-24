@@ -100,6 +100,44 @@ Crosses the ABI as its **discriminant**, not its name.
 `Cancelled`. It never becomes `Depleted`. This distinction is deliberate and
 load-bearing for reporting — see the resolved schema question below.
 
+### Capability flags
+
+Three `bool` fields on `Stream` describe operations that are **not available**
+for a given stream. They are supplied by the sender to `create_stream` and are
+**fixed for the lifetime of the stream** — no entry point can change them after
+creation. `get_stream` returns the live `Stream` struct, which includes all
+three fields.
+
+| field | error when `false` | discriminant |
+|---|---|---|
+| `cancellable` | `NotCancellable` | 8 |
+| `pausable` | `NotPausable` | 9 |
+| `transferable` | `NotTransferable` | 10 |
+
+**Creation-time semantics.** Flags are part of the initial `Stream` value
+written to persistent storage inside `create_stream`. They are never touched
+by any subsequent entry point.
+
+**Immutability is structural.** The `Stream` struct exposes no setter for these
+fields, and no entry point in the contract's public API assigns to them after
+creation. Every mutating operation (`top_up`, `withdraw`, `pause`, `resume`,
+`cancel`, `transfer_recipient`, `extend_stream_ttl`, and their delegate
+variants) leaves all three flags unchanged.
+
+**Operation enforcement.** When a flag is `false`, the corresponding operation
+is rejected before any state change occurs:
+
+* `cancel` and `delegate_cancel` return `NotCancellable` (8).
+* `pause` and `delegate_pause` return `NotPausable` (9).
+* `transfer_recipient` and `delegate_transfer_recipient` return
+  `NotTransferable` (10).
+
+**Trust model.** A recipient can call `get_stream` before accepting a stream
+and verify that `cancellable == false`, `pausable == false`, and
+`transferable == false`. Because those values cannot change after creation, the
+verification is permanent: the sender cannot later claw back, freeze, or
+reassign the stream.
+
 ### `Error`
 
 Discriminants are ABI and are never renumbered; new variants are appended.

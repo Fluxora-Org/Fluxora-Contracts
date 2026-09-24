@@ -41,12 +41,12 @@
 
 use soroban_sdk::{testutils::Events, vec, Symbol, TryFromVal, TryIntoVal, Val};
 
-use crate::test::common::{Harness, DAY, ONE, T0};
 use crate::op;
+use crate::test::common::{Harness, DAY, ONE, T0};
 
 extern crate std;
-use std::string::{String, ToString};
 use std::println;
+use std::string::{String, ToString};
 
 // ---------------------------------------------------------------------------
 // Helper
@@ -156,7 +156,8 @@ fn test_all_event_topic_names_are_unique() {
     let delegate = &h.other;
 
     // 9. delegate_granted
-    h.client.grant_delegate(&id2, &h.sender, delegate, &op::CANCEL, &None);
+    h.client
+        .grant_delegate(&id2, &h.sender, delegate, &op::CANCEL, &None);
     capture();
 
     // 10. delegate_revoked
@@ -212,8 +213,7 @@ fn test_all_event_topic_names_are_unique() {
     // If there is a collision the deduped set will be smaller than `expected`;
     // if an event type is missing it will differ in content.
     assert_eq!(
-        unique_names,
-        expected,
+        unique_names, expected,
         "Event inventory mismatch or TOPIC COLLISION DETECTED.\n\
          A collision means two event structs generated the same snake_case name.\n\
          A mismatch means a new event was added without registering it here,\n\
@@ -501,11 +501,7 @@ fn test_delegate_events() {
     let (granted_topics, granted_data) = &granted_events[0];
 
     // Topic[0] name
-    let granted_name: Symbol = granted_topics
-        .get(0)
-        .unwrap()
-        .try_into_val(env)
-        .unwrap();
+    let granted_name: Symbol = granted_topics.get(0).unwrap().try_into_val(env).unwrap();
     assert_eq!(
         granted_name,
         Symbol::new(env, "delegate_granted"),
@@ -520,8 +516,7 @@ fn test_delegate_events() {
     );
 
     // Payload field schema
-    let granted_payload: soroban_sdk::Map<Symbol, Val> =
-        granted_data.try_into_val(env).unwrap();
+    let granted_payload: soroban_sdk::Map<Symbol, Val> = granted_data.try_into_val(env).unwrap();
     assert!(
         granted_payload.contains_key(Symbol::new(env, "ops")),
         "DelegateGranted payload must contain 'ops'"
@@ -532,7 +527,9 @@ fn test_delegate_events() {
     );
 
     // --- DelegateRevoked ---
-    harness.client.revoke_delegate(&stream_id, &harness.sender, delegate);
+    harness
+        .client
+        .revoke_delegate(&stream_id, &harness.sender, delegate);
 
     let revoked_events: std::vec::Vec<_> = env
         .events()
@@ -566,11 +563,7 @@ fn test_delegate_events() {
     let (revoked_topics, revoked_data) = &revoked_events[0];
 
     // Topic[0] name
-    let revoked_name: Symbol = revoked_topics
-        .get(0)
-        .unwrap()
-        .try_into_val(env)
-        .unwrap();
+    let revoked_name: Symbol = revoked_topics.get(0).unwrap().try_into_val(env).unwrap();
     assert_eq!(
         revoked_name,
         Symbol::new(env, "delegate_revoked"),
@@ -586,14 +579,12 @@ fn test_delegate_events() {
 
     // Payload: DelegateRevoked has no data fields (all information is in topics).
     // Verify it deserializes cleanly.
-    let _revoked_payload: soroban_sdk::Map<Symbol, Val> =
-        revoked_data.try_into_val(env).unwrap();
+    let _revoked_payload: soroban_sdk::Map<Symbol, Val> = revoked_data.try_into_val(env).unwrap();
 
     // Critically: the two delegate events must have DIFFERENT topic[0] values.
     // This is the direct collision check for the most structurally-similar pair.
     assert_ne!(
-        granted_name,
-        revoked_name,
+        granted_name, revoked_name,
         "COLLISION: delegate_granted and delegate_revoked must have different topic[0] symbols"
     );
 

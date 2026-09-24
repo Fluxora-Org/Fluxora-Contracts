@@ -30,6 +30,8 @@ mod withdraw_events;
 // Stage 2
 mod auth;
 mod cancel;
+// Issue #1726: capability flags are set at creation and immutable.
+mod capabilities;
 // Issue #1584: the cancellation event's accounting contract.
 mod amount_domain;
 mod cancel_events;

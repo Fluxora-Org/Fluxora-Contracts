@@ -155,7 +155,10 @@ fn discriminant_fixture_matches_source() {
         ("StreamAlreadyPaused", Error::StreamAlreadyPaused as u32),
         ("StreamTerminated", Error::StreamTerminated as u32),
         ("StreamMatured", Error::StreamMatured as u32),
-        ("InsufficientWithdrawable", Error::InsufficientWithdrawable as u32),
+        (
+            "InsufficientWithdrawable",
+            Error::InsufficientWithdrawable as u32,
+        ),
         ("NothingToWithdraw", Error::NothingToWithdraw as u32),
         ("InvalidAmount", Error::InvalidAmount as u32),
         ("BatchTooLarge", Error::BatchTooLarge as u32),
@@ -199,7 +202,10 @@ fn discriminant_fixture_matches_source() {
 
     // Print all discriminants when run with --nocapture, as required by the
     // issue verification command.
-    std::println!("=== error discriminant fixture ({} variants) ===", runtime.len());
+    std::println!(
+        "=== error discriminant fixture ({} variants) ===",
+        runtime.len()
+    );
     for (name, disc) in runtime.iter() {
         std::println!("  {disc:>3}  {name}");
     }
@@ -222,49 +228,84 @@ fn discriminant_fixture_matches_source() {
 fn stream_not_found_get_stream() {
     let h = Harness::new();
     let err = h.client.try_get_stream(&999).unwrap_err().unwrap();
-    assert_eq!(err, Error::StreamNotFound, "discriminant {}", Error::StreamNotFound as u32);
+    assert_eq!(
+        err,
+        Error::StreamNotFound,
+        "discriminant {}",
+        Error::StreamNotFound as u32
+    );
 }
 
 #[test]
 fn stream_not_found_withdraw() {
     let h = Harness::new();
     let err = h.client.try_withdraw(&999, &None).unwrap_err().unwrap();
-    assert_eq!(err, Error::StreamNotFound, "discriminant {}", Error::StreamNotFound as u32);
+    assert_eq!(
+        err,
+        Error::StreamNotFound,
+        "discriminant {}",
+        Error::StreamNotFound as u32
+    );
 }
 
 #[test]
 fn stream_not_found_cancel() {
     let h = Harness::new();
     let err = h.client.try_cancel(&999).unwrap_err().unwrap();
-    assert_eq!(err, Error::StreamNotFound, "discriminant {}", Error::StreamNotFound as u32);
+    assert_eq!(
+        err,
+        Error::StreamNotFound,
+        "discriminant {}",
+        Error::StreamNotFound as u32
+    );
 }
 
 #[test]
 fn stream_not_found_top_up() {
     let h = Harness::new();
     let err = h.client.try_top_up(&999, &ONE).unwrap_err().unwrap();
-    assert_eq!(err, Error::StreamNotFound, "discriminant {}", Error::StreamNotFound as u32);
+    assert_eq!(
+        err,
+        Error::StreamNotFound,
+        "discriminant {}",
+        Error::StreamNotFound as u32
+    );
 }
 
 #[test]
 fn stream_not_found_pause() {
     let h = Harness::new();
     let err = h.client.try_pause(&999).unwrap_err().unwrap();
-    assert_eq!(err, Error::StreamNotFound, "discriminant {}", Error::StreamNotFound as u32);
+    assert_eq!(
+        err,
+        Error::StreamNotFound,
+        "discriminant {}",
+        Error::StreamNotFound as u32
+    );
 }
 
 #[test]
 fn stream_not_found_resume() {
     let h = Harness::new();
     let err = h.client.try_resume(&999).unwrap_err().unwrap();
-    assert_eq!(err, Error::StreamNotFound, "discriminant {}", Error::StreamNotFound as u32);
+    assert_eq!(
+        err,
+        Error::StreamNotFound,
+        "discriminant {}",
+        Error::StreamNotFound as u32
+    );
 }
 
 #[test]
 fn stream_not_found_extend_stream_ttl() {
     let h = Harness::new();
     let err = h.client.try_extend_stream_ttl(&999).unwrap_err().unwrap();
-    assert_eq!(err, Error::StreamNotFound, "discriminant {}", Error::StreamNotFound as u32);
+    assert_eq!(
+        err,
+        Error::StreamNotFound,
+        "discriminant {}",
+        Error::StreamNotFound as u32
+    );
 }
 
 #[test]
@@ -276,7 +317,12 @@ fn stream_not_found_transfer_recipient() {
         .try_transfer_recipient(&999, &other)
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, Error::StreamNotFound, "discriminant {}", Error::StreamNotFound as u32);
+    assert_eq!(
+        err,
+        Error::StreamNotFound,
+        "discriminant {}",
+        Error::StreamNotFound as u32
+    );
 }
 
 #[test]
@@ -287,28 +333,48 @@ fn stream_not_found_batch_withdraw() {
         .try_batch_withdraw(&h.recipient, &h.ids(&[999]))
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, Error::StreamNotFound, "discriminant {}", Error::StreamNotFound as u32);
+    assert_eq!(
+        err,
+        Error::StreamNotFound,
+        "discriminant {}",
+        Error::StreamNotFound as u32
+    );
 }
 
 #[test]
 fn stream_not_found_vested_of() {
     let h = Harness::new();
     let err = h.client.try_vested_of(&999).unwrap_err().unwrap();
-    assert_eq!(err, Error::StreamNotFound, "discriminant {}", Error::StreamNotFound as u32);
+    assert_eq!(
+        err,
+        Error::StreamNotFound,
+        "discriminant {}",
+        Error::StreamNotFound as u32
+    );
 }
 
 #[test]
 fn stream_not_found_withdrawable_of() {
     let h = Harness::new();
     let err = h.client.try_withdrawable_of(&999).unwrap_err().unwrap();
-    assert_eq!(err, Error::StreamNotFound, "discriminant {}", Error::StreamNotFound as u32);
+    assert_eq!(
+        err,
+        Error::StreamNotFound,
+        "discriminant {}",
+        Error::StreamNotFound as u32
+    );
 }
 
 #[test]
 fn stream_not_found_refundable_of() {
     let h = Harness::new();
     let err = h.client.try_refundable_of(&999).unwrap_err().unwrap();
-    assert_eq!(err, Error::StreamNotFound, "discriminant {}", Error::StreamNotFound as u32);
+    assert_eq!(
+        err,
+        Error::StreamNotFound,
+        "discriminant {}",
+        Error::StreamNotFound as u32
+    );
 }
 
 // #2 — InvalidTimeRange -----------------------------------------------------
@@ -333,7 +399,12 @@ fn invalid_time_range_end_equals_start() {
         )
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, Error::InvalidTimeRange, "discriminant {}", Error::InvalidTimeRange as u32);
+    assert_eq!(
+        err,
+        Error::InvalidTimeRange,
+        "discriminant {}",
+        Error::InvalidTimeRange as u32
+    );
 }
 
 // #3 — InvalidCliff ---------------------------------------------------------
@@ -358,7 +429,12 @@ fn invalid_cliff_before_start() {
         )
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, Error::InvalidCliff, "discriminant {}", Error::InvalidCliff as u32);
+    assert_eq!(
+        err,
+        Error::InvalidCliff,
+        "discriminant {}",
+        Error::InvalidCliff as u32
+    );
 }
 
 // #4 — InvalidDeposit -------------------------------------------------------
@@ -383,7 +459,12 @@ fn invalid_deposit_zero() {
         )
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, Error::InvalidDeposit, "discriminant {}", Error::InvalidDeposit as u32);
+    assert_eq!(
+        err,
+        Error::InvalidDeposit,
+        "discriminant {}",
+        Error::InvalidDeposit as u32
+    );
 }
 
 // #5 — DepositRateTooLow ----------------------------------------------------
@@ -399,7 +480,7 @@ fn deposit_rate_too_low_below_floor() {
             &h.sender,
             &h.recipient,
             &h.token,
-            &1,       // deposit < duration (86_400)
+            &1, // deposit < duration (86_400)
             &now,
             &(now + DAY),
             &now,
@@ -409,7 +490,12 @@ fn deposit_rate_too_low_below_floor() {
         )
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, Error::DepositRateTooLow, "discriminant {}", Error::DepositRateTooLow as u32);
+    assert_eq!(
+        err,
+        Error::DepositRateTooLow,
+        "discriminant {}",
+        Error::DepositRateTooLow as u32
+    );
 }
 
 // #6 — SelfStream -----------------------------------------------------------
@@ -434,7 +520,12 @@ fn self_stream_same_sender_and_recipient() {
         )
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, Error::SelfStream, "discriminant {}", Error::SelfStream as u32);
+    assert_eq!(
+        err,
+        Error::SelfStream,
+        "discriminant {}",
+        Error::SelfStream as u32
+    );
 }
 
 // #7 — Unauthorized ---------------------------------------------------------
@@ -450,7 +541,12 @@ fn unauthorized_batch_withdraw_wrong_recipient() {
         .try_batch_withdraw(&h.other, &h.ids(&[id]))
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, Error::Unauthorized, "discriminant {}", Error::Unauthorized as u32);
+    assert_eq!(
+        err,
+        Error::Unauthorized,
+        "discriminant {}",
+        Error::Unauthorized as u32
+    );
 }
 
 // #8 — NotCancellable -------------------------------------------------------
@@ -461,7 +557,12 @@ fn not_cancellable_when_flag_false() {
     let now = h.now();
     let id = h.create(1_000 * ONE, now, now + DAY, now, false, true, true);
     let err = h.client.try_cancel(&id).unwrap_err().unwrap();
-    assert_eq!(err, Error::NotCancellable, "discriminant {}", Error::NotCancellable as u32);
+    assert_eq!(
+        err,
+        Error::NotCancellable,
+        "discriminant {}",
+        Error::NotCancellable as u32
+    );
 }
 
 // #9 — NotPausable ----------------------------------------------------------
@@ -472,7 +573,12 @@ fn not_pausable_when_flag_false() {
     let now = h.now();
     let id = h.create(1_000 * ONE, now, now + DAY, now, true, false, true);
     let err = h.client.try_pause(&id).unwrap_err().unwrap();
-    assert_eq!(err, Error::NotPausable, "discriminant {}", Error::NotPausable as u32);
+    assert_eq!(
+        err,
+        Error::NotPausable,
+        "discriminant {}",
+        Error::NotPausable as u32
+    );
 }
 
 // #10 — NotTransferable -----------------------------------------------------
@@ -488,7 +594,12 @@ fn not_transferable_when_flag_false() {
         .try_transfer_recipient(&id, &other)
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, Error::NotTransferable, "discriminant {}", Error::NotTransferable as u32);
+    assert_eq!(
+        err,
+        Error::NotTransferable,
+        "discriminant {}",
+        Error::NotTransferable as u32
+    );
 }
 
 // #11 — StreamNotActive -----------------------------------------------------
@@ -506,7 +617,12 @@ fn stream_not_paused_resume_active_stream() {
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     // The stream is active (not paused), so resume must fail.
     let err = h.client.try_resume(&id).unwrap_err().unwrap();
-    assert_eq!(err, Error::StreamNotPaused, "discriminant {}", Error::StreamNotPaused as u32);
+    assert_eq!(
+        err,
+        Error::StreamNotPaused,
+        "discriminant {}",
+        Error::StreamNotPaused as u32
+    );
 }
 
 // #13 — StreamAlreadyPaused -------------------------------------------------
@@ -517,7 +633,12 @@ fn stream_already_paused_double_pause() {
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     h.client.pause(&id);
     let err = h.client.try_pause(&id).unwrap_err().unwrap();
-    assert_eq!(err, Error::StreamAlreadyPaused, "discriminant {}", Error::StreamAlreadyPaused as u32);
+    assert_eq!(
+        err,
+        Error::StreamAlreadyPaused,
+        "discriminant {}",
+        Error::StreamAlreadyPaused as u32
+    );
 }
 
 // #14 — StreamTerminated ----------------------------------------------------
@@ -528,7 +649,12 @@ fn stream_terminated_cancel_after_cancel() {
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     h.client.cancel(&id);
     let err = h.client.try_cancel(&id).unwrap_err().unwrap();
-    assert_eq!(err, Error::StreamTerminated, "discriminant {}", Error::StreamTerminated as u32);
+    assert_eq!(
+        err,
+        Error::StreamTerminated,
+        "discriminant {}",
+        Error::StreamTerminated as u32
+    );
 }
 
 #[test]
@@ -540,7 +666,12 @@ fn stream_terminated_withdraw_depleted_stream() {
     h.client.withdraw(&id, &None);
     // Second withdraw on a depleted stream with nothing remaining.
     let err = h.client.try_withdraw(&id, &None).unwrap_err().unwrap();
-    assert_eq!(err, Error::StreamTerminated, "discriminant {}", Error::StreamTerminated as u32);
+    assert_eq!(
+        err,
+        Error::StreamTerminated,
+        "discriminant {}",
+        Error::StreamTerminated as u32
+    );
 }
 
 #[test]
@@ -549,7 +680,12 @@ fn stream_terminated_top_up_cancelled_stream() {
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     h.client.cancel(&id);
     let err = h.client.try_top_up(&id, &ONE).unwrap_err().unwrap();
-    assert_eq!(err, Error::StreamTerminated, "discriminant {}", Error::StreamTerminated as u32);
+    assert_eq!(
+        err,
+        Error::StreamTerminated,
+        "discriminant {}",
+        Error::StreamTerminated as u32
+    );
 }
 
 // #15 — StreamMatured -------------------------------------------------------
@@ -561,7 +697,12 @@ fn stream_matured_top_up_after_end_time() {
     // Advance past end_time so the stream clock has reached end_time.
     h.advance(DAY + 1);
     let err = h.client.try_top_up(&id, &(100 * ONE)).unwrap_err().unwrap();
-    assert_eq!(err, Error::StreamMatured, "discriminant {}", Error::StreamMatured as u32);
+    assert_eq!(
+        err,
+        Error::StreamMatured,
+        "discriminant {}",
+        Error::StreamMatured as u32
+    );
 }
 
 // #16 — InsufficientWithdrawable --------------------------------------------
@@ -576,7 +717,12 @@ fn insufficient_withdrawable_explicit_amount_too_large() {
         .try_withdraw(&id, &Some(200 * ONE)) // ask for more than available
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, Error::InsufficientWithdrawable, "discriminant {}", Error::InsufficientWithdrawable as u32);
+    assert_eq!(
+        err,
+        Error::InsufficientWithdrawable,
+        "discriminant {}",
+        Error::InsufficientWithdrawable as u32
+    );
 }
 
 // #17 — NothingToWithdraw ---------------------------------------------------
@@ -596,7 +742,12 @@ fn nothing_to_withdraw_before_start_time() {
         true,
     );
     let err = h.client.try_withdraw(&id, &None).unwrap_err().unwrap();
-    assert_eq!(err, Error::NothingToWithdraw, "discriminant {}", Error::NothingToWithdraw as u32);
+    assert_eq!(
+        err,
+        Error::NothingToWithdraw,
+        "discriminant {}",
+        Error::NothingToWithdraw as u32
+    );
 }
 
 #[test]
@@ -614,7 +765,12 @@ fn nothing_to_withdraw_before_cliff() {
         true,
     );
     let err = h.client.try_withdraw(&id, &Some(1)).unwrap_err().unwrap();
-    assert_eq!(err, Error::NothingToWithdraw, "discriminant {}", Error::NothingToWithdraw as u32);
+    assert_eq!(
+        err,
+        Error::NothingToWithdraw,
+        "discriminant {}",
+        Error::NothingToWithdraw as u32
+    );
 }
 
 // #18 — InvalidAmount -------------------------------------------------------
@@ -625,7 +781,12 @@ fn invalid_amount_withdraw_zero() {
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     h.advance(10 * DAY);
     let err = h.client.try_withdraw(&id, &Some(0)).unwrap_err().unwrap();
-    assert_eq!(err, Error::InvalidAmount, "discriminant {}", Error::InvalidAmount as u32);
+    assert_eq!(
+        err,
+        Error::InvalidAmount,
+        "discriminant {}",
+        Error::InvalidAmount as u32
+    );
 }
 
 #[test]
@@ -634,7 +795,12 @@ fn invalid_amount_withdraw_negative() {
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     h.advance(10 * DAY);
     let err = h.client.try_withdraw(&id, &Some(-1)).unwrap_err().unwrap();
-    assert_eq!(err, Error::InvalidAmount, "discriminant {}", Error::InvalidAmount as u32);
+    assert_eq!(
+        err,
+        Error::InvalidAmount,
+        "discriminant {}",
+        Error::InvalidAmount as u32
+    );
 }
 
 // #19 — BatchTooLarge -------------------------------------------------------
@@ -650,7 +816,12 @@ fn batch_too_large_exceeds_max_batch_size() {
         .try_batch_withdraw(&h.recipient, &id_vec)
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, Error::BatchTooLarge, "discriminant {}", Error::BatchTooLarge as u32);
+    assert_eq!(
+        err,
+        Error::BatchTooLarge,
+        "discriminant {}",
+        Error::BatchTooLarge as u32
+    );
 }
 
 #[test]
@@ -659,7 +830,12 @@ fn batch_too_large_batch_extend_ttl() {
     let ids: std::vec::Vec<u64> = (0..17).collect();
     let id_vec = soroban_sdk::Vec::from_slice(&h.env, &ids);
     let err = h.client.try_batch_extend_ttl(&id_vec).unwrap_err().unwrap();
-    assert_eq!(err, Error::BatchTooLarge, "discriminant {}", Error::BatchTooLarge as u32);
+    assert_eq!(
+        err,
+        Error::BatchTooLarge,
+        "discriminant {}",
+        Error::BatchTooLarge as u32
+    );
 }
 
 // #20 — EmptyBatch ----------------------------------------------------------
@@ -672,7 +848,12 @@ fn empty_batch_withdraw_empty_vec() {
         .try_batch_withdraw(&h.recipient, &h.ids(&[]))
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, Error::EmptyBatch, "discriminant {}", Error::EmptyBatch as u32);
+    assert_eq!(
+        err,
+        Error::EmptyBatch,
+        "discriminant {}",
+        Error::EmptyBatch as u32
+    );
 }
 
 #[test]
@@ -683,7 +864,12 @@ fn empty_batch_extend_ttl_empty_vec() {
         .try_batch_extend_ttl(&h.ids(&[]))
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, Error::EmptyBatch, "discriminant {}", Error::EmptyBatch as u32);
+    assert_eq!(
+        err,
+        Error::EmptyBatch,
+        "discriminant {}",
+        Error::EmptyBatch as u32
+    );
 }
 
 // #21 — DuplicateStreamId ---------------------------------------------------
@@ -697,7 +883,12 @@ fn duplicate_stream_id_batch_withdraw() {
         .try_batch_withdraw(&h.recipient, &h.ids(&[id, id]))
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, Error::DuplicateStreamId, "discriminant {}", Error::DuplicateStreamId as u32);
+    assert_eq!(
+        err,
+        Error::DuplicateStreamId,
+        "discriminant {}",
+        Error::DuplicateStreamId as u32
+    );
 }
 
 #[test]
@@ -709,7 +900,12 @@ fn duplicate_stream_id_batch_extend_ttl() {
         .try_batch_extend_ttl(&h.ids(&[id, id]))
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, Error::DuplicateStreamId, "discriminant {}", Error::DuplicateStreamId as u32);
+    assert_eq!(
+        err,
+        Error::DuplicateStreamId,
+        "discriminant {}",
+        Error::DuplicateStreamId as u32
+    );
 }
 
 // #22 — Overflow ------------------------------------------------------------
@@ -742,7 +938,12 @@ fn overflow_deposit_times_duration_overflows_i128() {
         )
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, Error::Overflow, "discriminant {}", Error::Overflow as u32);
+    assert_eq!(
+        err,
+        Error::Overflow,
+        "discriminant {}",
+        Error::Overflow as u32
+    );
 }
 
 // #23 — TopUpTooSmall -------------------------------------------------------
@@ -754,7 +955,12 @@ fn top_up_too_small_amount_buys_zero_seconds() {
     // A 1-stroop top-up: delta = floor(1 * 86_400 / 1_000_ONE) = 0.
     let id = h.create_simple(1_000 * ONE, DAY);
     let err = h.client.try_top_up(&id, &1).unwrap_err().unwrap();
-    assert_eq!(err, Error::TopUpTooSmall, "discriminant {}", Error::TopUpTooSmall as u32);
+    assert_eq!(
+        err,
+        Error::TopUpTooSmall,
+        "discriminant {}",
+        Error::TopUpTooSmall as u32
+    );
 }
 
 // #24 — StreamIdExhausted ---------------------------------------------------
@@ -813,7 +1019,12 @@ fn delegate_not_permitted_no_grant_exists() {
         .try_delegate_withdraw(&id, &agent, &None)
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, Error::DelegateNotPermitted, "discriminant {}", Error::DelegateNotPermitted as u32);
+    assert_eq!(
+        err,
+        Error::DelegateNotPermitted,
+        "discriminant {}",
+        Error::DelegateNotPermitted as u32
+    );
 }
 
 #[test]
@@ -830,7 +1041,12 @@ fn delegate_not_permitted_wrong_op_in_grant() {
         .try_delegate_withdraw(&id, &agent, &None)
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, Error::DelegateNotPermitted, "discriminant {}", Error::DelegateNotPermitted as u32);
+    assert_eq!(
+        err,
+        Error::DelegateNotPermitted,
+        "discriminant {}",
+        Error::DelegateNotPermitted as u32
+    );
 }
 
 // #28 — DelegateExpired -----------------------------------------------------
@@ -851,7 +1067,12 @@ fn delegate_expired_past_expiry_timestamp() {
         .try_delegate_withdraw(&id, &agent, &None)
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, Error::DelegateExpired, "discriminant {}", Error::DelegateExpired as u32);
+    assert_eq!(
+        err,
+        Error::DelegateExpired,
+        "discriminant {}",
+        Error::DelegateExpired as u32
+    );
 }
 
 // #29 — MalformedStreamId ---------------------------------------------------
@@ -884,7 +1105,12 @@ fn repeated_transfer_same_recipient() {
         .try_transfer_recipient(&id, &h.recipient)
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, Error::RepeatedTransfer, "discriminant {}", Error::RepeatedTransfer as u32);
+    assert_eq!(
+        err,
+        Error::RepeatedTransfer,
+        "discriminant {}",
+        Error::RepeatedTransfer as u32
+    );
 }
 
 // #31 — InvalidTopUp --------------------------------------------------------
