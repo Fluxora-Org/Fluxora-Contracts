@@ -54,3 +54,14 @@ mod ttl;
 
 // Stage 4
 mod stream_ids;
+
+// Issue #1686: every read entry point's storage/TTL behaviour, pinned to
+// docs/ABI.md. `read_methods_no_side_effects` (#1566) existed but was never
+// registered here, so it did not compile or run until now.
+mod read_methods_no_side_effects;
+mod read_ttl_matrix;
+
+// Package / artifact naming gates, run by CI's `packaging::` step. Also
+// guards #1675 (no inert governance crate). Previously unregistered, so
+// that CI step matched zero tests.
+mod packaging;

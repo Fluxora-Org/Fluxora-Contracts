@@ -27,11 +27,10 @@
 //! 5. **No auth required.** Read methods must not require any authorization — they
 //!    are callable by anyone.
 
-use soroban_sdk::testutils::storage::Persistent as _;
-use soroban_sdk::testutils::{Address as _, Ledger as _};
+use soroban_sdk::testutils::Ledger as _;
 
 use super::common::*;
-use crate::{accrual, storage, DataKey, Error, StreamStatus};
+use crate::{accrual, Error, StreamStatus};
 
 // --- Read methods do not extend TTL on active streams -----------------------
 
@@ -61,7 +60,11 @@ fn withdrawable_of_does_not_extend_ttl_on_active_stream() {
 
     for _ in 0..5 {
         let _withdrawable = h.client.withdrawable_of(&id);
-        assert_eq!(h.ttl_of(id), ttl_before, "withdrawable_of must not extend TTL");
+        assert_eq!(
+            h.ttl_of(id),
+            ttl_before,
+            "withdrawable_of must not extend TTL"
+        );
     }
 }
 
@@ -91,7 +94,11 @@ fn refundable_of_does_not_extend_ttl_on_active_stream() {
 
     for _ in 0..5 {
         let _refundable = h.client.refundable_of(&id);
-        assert_eq!(h.ttl_of(id), ttl_before, "refundable_of must not extend TTL");
+        assert_eq!(
+            h.ttl_of(id),
+            ttl_before,
+            "refundable_of must not extend TTL"
+        );
     }
 }
 
@@ -301,10 +308,7 @@ fn withdrawable_of_fails_on_never_issued_id() {
     let missing = 999_u64;
 
     assert_eq!(
-        h.client
-            .try_withdrawable_of(&missing)
-            .unwrap_err()
-            .unwrap(),
+        h.client.try_withdrawable_of(&missing).unwrap_err().unwrap(),
         Error::StreamNotFound
     );
 }
@@ -350,7 +354,10 @@ fn missing_id_errors_do_not_mutate_state() {
     let snap_after = h.snapshot();
     let ttl_after = h.ttl_of(id);
 
-    assert_eq!(snap_before, snap_after, "snapshot changed after missing id reads");
+    assert_eq!(
+        snap_before, snap_after,
+        "snapshot changed after missing id reads"
+    );
     assert_eq!(ttl_before, ttl_after, "TTL changed after missing id reads");
 }
 

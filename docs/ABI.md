@@ -156,21 +156,31 @@ equivalent.
 
 ### Views — read-only, no TTL side effects
 
-| function | returns |
-|---|---|
-| `get_stream(stream_id)` | `Stream` |
-| `withdrawable_of(stream_id)` | `i128` |
-| `vested_of(stream_id)` | `i128` |
-| `refundable_of(stream_id)` | `i128` |
-| `stream_count()` | `u64` — ids run `0..stream_count()` |
-| `stream_exists(stream_id)` | `bool` |
+| function | returns | extends TTL | writes storage |
+|---|---|---|---|
+| `get_stream(stream_id)` | `Stream` | no | no |
+| `withdrawable_of(stream_id)` | `i128` | no | no |
+| `vested_of(stream_id)` | `i128` | no | no |
+| `refundable_of(stream_id)` | `i128` | no | no |
+| `stream_count()` | `u64` — ids run `0..stream_count()` | no | no |
+| `stream_exists(stream_id)` | `bool` | no | no |
 
 ### Maintenance — permissionless
 
-| function | returns |
-|---|---|
-| `extend_stream_ttl(stream_id)` | `u32` ledgers now funded |
-| `batch_extend_ttl(stream_ids: Vec<u64>)` | `u32` entries extended |
+| function | returns | extends TTL | writes storage |
+|---|---|---|---|
+| `extend_stream_ttl(stream_id)` | `u32` ledgers now funded | **yes** — the stream entry and the contract instance | TTL only; no entry data changes |
+| `batch_extend_ttl(stream_ids: Vec<u64>)` | `u32` entries extended | **yes** — each existing listed stream and the contract instance; unknown ids are skipped | TTL only; no entry data changes |
+
+**Read-path TTL rule (#1686).** Every view reads through `storage::peek_stream`
+or a plain `has`/`get`, so a view never extends TTL and never writes: calling
+one — including in simulation — leaves every ledger entry, and its
+`live_until`, exactly as it was. Keeping a stream alive is only ever done by
+the two maintenance calls above, or as a side effect of a state-changing
+lifecycle call (those go through `storage::load_stream`, which bumps TTL).
+`contracts/stream/src/test/read_ttl_matrix.rs` snapshots all ledger entries
+around every entry point in these two tables and fails if behaviour and this
+table disagree — including if a view is switched to a TTL-bumping read.
 
 `MAX_BATCH_SIZE = 16` for both batch functions. Chunk client-side; the SDK does
 this automatically. See [README](../README.md) for why the cap is 16 and why it

@@ -176,8 +176,11 @@ pub fn extend_stream(env: &Env, stream_id: u64, stream: &Stream) {
 
 /// Read a stream, bumping its TTL on the way out.
 ///
-/// Every read path in the contract goes through here, which is what implements
-/// "extend on every touch".
+/// Used by the state-changing entry points, which is what implements
+/// "extend on every touch". The public views do **not** come through here —
+/// they use [`peek_stream`] and never extend TTL (#1686, `docs/ABI.md`,
+/// `test::read_ttl_matrix`). Switching a view to this function is a
+/// behaviour change callers can observe, and that test fails on it.
 pub fn load_stream(env: &Env, stream_id: u64) -> Result<Stream, Error> {
     let stream: Stream = env
         .storage()
