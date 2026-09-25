@@ -51,6 +51,11 @@ script/release.sh      # -> target/wasm32v1-none/release/fluxora_stream.wasm (on
 > Never deploy it to mainnet. See
 > [`contracts/archival-probe/src/lib.rs`](contracts/archival-probe/src/lib.rs).
 
+**The full sequence — every script, the `deploy_target` input, who may trigger a
+mainnet deploy, and rollback — is in
+[docs/RELEASE.md](docs/RELEASE.md).** Follow that document end to end; the
+sections above are only the short version.
+
 ---
 
 ## Release integrity
@@ -450,6 +455,7 @@ frontend's four contract calls all break, the backend is unaffected.
 | [docs/MIGRATION.md](docs/MIGRATION.md) | Deletion audit vs the pre-rewrite contract, and downstream impact. |
 | [docs/soroban-rpc-read-skew.md](docs/soroban-rpc-read-skew.md) | Pin multi-call reads to one ledger, and the read-after-write barrier. |
 | [docs/provenance.md](docs/provenance.md) | Wasm provenance schema, design decisions, and the release gate. |
+| [docs/RELEASE.md](docs/RELEASE.md) | **Release runbook.** Script roles, workflow inputs, deploy authorisation, rollback. |
 | [docs/terminal-operations.md](docs/terminal-operations.md) | Terminal (`Cancelled`/`Depleted`) behaviour and the rejection matrix. |
 | [docs/cliff-test-scenarios.md](docs/cliff-test-scenarios.md) | Cliff boundary test scenarios and expected values. |
 | [docs/factory-admin-rotation-tests.md](docs/factory-admin-rotation-tests.md) | Same-ledger admin rotation coverage for the factory. |
