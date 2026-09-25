@@ -1,0 +1,9 @@
+{
+  "updated_at": "2026-09-25T00:00:00.000Z",
+  "mode": "initial-commit",
+  "note": "Baseline for lint backlog. Empty because the workspace already passes `cargo clippy --workspace --all-targets --all-features -- -D warnings` and `cargo fmt --all -- --check`. Any NEW violation added after this commit will fail CI lint (see scripts/lint-full-with-baseline.mjs). Shrink this file by running `pnpm lint:baseline:update` after fixing a previously-allowlisted error.",
+  "fmt_count": 0,
+  "clippy_count": 0,
+  "fingerprint_count": 0,
+  "fingerprints": []
+}

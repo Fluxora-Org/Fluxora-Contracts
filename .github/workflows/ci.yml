@@ -111,6 +111,53 @@ jobs:
           print("OK: docs/audit.md entrypoint table is complete.")
           EOF
 
+  # ---------------------------------------------------------------------------
+  # Fast changed-files lint (PRs only).  Mirrors what developers run locally
+  # via `pnpm lint:ci`.  This is the "cheap" gate; the full workspace lint
+  # with baseline regression protection runs below.
+  # ---------------------------------------------------------------------------
+  lint-changed:
+    name: Lint (changed files)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.94.1
+        with:
+          components: rustfmt, clippy
+          targets: wasm32v1-none
+
+      - name: Set up Node.js (for lint runner)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Enable corepack (pnpm)
+        run: corepack enable && corepack prepare pnpm@9 --activate
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-lint-changed-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-lint-changed-
+
+      # Fast local-equivalent path.  $LINT_BASE_REF is the merge-base computed
+      # by actions/checkout for the PR target branch (origin/<base_ref>).
+      - name: Run lint:ci (changed-files fast path)
+        env:
+          LINT_BASE_REF: origin/${{ github.base_ref }}
+        run: pnpm lint:ci
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -128,6 +175,17 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
+
+      # Baseline & baseline-comparison runner.  Node 20 + pnpm mirror the local
+      # developer workflow.  No npm dependencies are installed; the scripts use
+      # only builtins + cargo invocations.
+      - name: Set up Node.js (for full-lint baseline layer)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Enable corepack (pnpm)
+        run: corepack enable && corepack prepare pnpm@9 --activate
 
       - name: Verify Rust toolchain version
         if: ${{ hashFiles('script/verify_rust_version.py') != '' }}
@@ -153,6 +211,26 @@ jobs:
         # Keep the scope explicit: every workspace member and test target is
         # linted, so a new modular contract cannot bypass the quality gate.
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      # ---- Baseline-checked full-lint gate ---------------------------------
+      #
+      # Wraps the same `cargo fmt` + `cargo clippy` calls above into a
+      # fingerprinted comparison against scripts/lint-baseline.json.
+      #
+      # Why two gates?
+      #   1. The raw cargo steps above fail FAST on any violation — this is
+      #      the primary hard gate and always has been.
+      #   2. `pnpm lint:full` provides the *backlog stop-growing* guarantee:
+      #      if a maintainer ever relaxes the `-D warnings` flag temporarily
+      #      (or allows a specific lint via `--allow`) the baseline file
+      #      captures the exact fingerprint set.  Any NEW violation that the
+      #      raw gate misses is still caught by the set-diff check here.
+      #
+      # Exit contract of lint-full-with-baseline.mjs:
+      #   • current_violations ⊆ baseline  →  exit 0  (no new violations)
+      #   • any NEW fingerprint            →  exit 1  (prints exact diff)
+      - name: Full lint with baseline regression check (pnpm lint:full)
+        run: pnpm lint:full
 
       # Issue #1594 — reject accidental renames of the deployable package and
       # WASM artifact before any build work happens.  This is an independent
