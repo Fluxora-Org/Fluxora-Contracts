@@ -435,6 +435,51 @@ fn test_golden_events() {
     assert!(ttl_extended_payload.contains_key(Symbol::new(env, "extended_to_ledgers")));
 }
 
+/// **Issue #1688: `resumed` publishes the data needed to recompute the cliff.**
+///
+/// The cliff gate is evaluated on the stream clock, so a paused stream's cliff
+/// moves forward in wall-clock terms by the accumulated `paused_total`. An
+/// indexer that saw only `stream_created` and `resumed` must be able to derive
+/// the new instant; this test reads `paused_total` straight out of the
+/// `resumed` payload and checks it against the moved instant the contract uses.
+#[test]
+fn resumed_event_paused_total_recomputes_the_moved_cliff() {
+    let h = Harness::new();
+    let start = T0;
+    let cliff = start + 1000;
+    let end = start + 10_000;
+    let id = h.create(10_000 * ONE, start, end, cliff, true, true, true);
+
+    // Pause 100s before the cliff, resume 500s after it: 600s absorbed.
+    h.warp_to(cliff - 100);
+    h.client.pause(&id);
+    h.warp_to(cliff + 500);
+    h.client.resume(&id);
+
+    let events = drain_events(&h);
+    let resumed = events
+        .iter()
+        .find(|event| topic_name(&h, event) == Symbol::new(&h.env, "resumed"))
+        .expect("resume must emit a resumed event");
+    let payload: soroban_sdk::Map<Symbol, Val> = resumed.1.try_into_val(&h.env).unwrap();
+    let paused_total: u64 = payload
+        .get(Symbol::new(&h.env, "paused_total"))
+        .expect("resumed must publish paused_total")
+        .try_into_val(&h.env)
+        .unwrap();
+
+    // Enough information: cliff_time (stream_created / get_stream) + paused_total.
+    assert_eq!(
+        paused_total, 600,
+        "resumed must publish the post-resume cumulative paused total"
+    );
+    assert_eq!(
+        h.get(id).cliff_time + paused_total,
+        cliff + 600,
+        "cliff_time + paused_total is the moved wall-clock cliff"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Invariant 2b — Delegate events schema snapshot (previously uncovered)
 //

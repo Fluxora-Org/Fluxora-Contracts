@@ -602,6 +602,65 @@ fn pause_across_cliff_preserves_cliff_gate() {
     h.assert_pool_exact();
 }
 
+/// **Issue #1688: the cliff moves in wall-clock terms when a stream is paused.**
+///
+/// `cliff_reached` is evaluated against the stream clock, and `stream_time`
+/// subtracts the cumulative `paused_total`. Pausing therefore freezes the cliff
+/// gate as well as accrual, and a resume pushes the *wall-clock* instant at
+/// which the gate opens forward by the whole paused interval:
+/// `effective_cliff = cliff_time + paused_total`.
+///
+/// `docs/ABI.md` states this rule at the integration boundary; this test pins
+/// it down at the exact second on either side of the moved instant.
+#[test]
+fn pause_across_cliff_delays_the_wall_clock_cliff() {
+    let h = Harness::new();
+    let start = h.now();
+    let cliff = start + 1000;
+    let end = start + 10000;
+    let deposit = 10000 * ONE;
+    let id = h.create(deposit, start, end, cliff, true, true, true);
+
+    // Pause 100s before the cliff, then let the wall clock run 500s past it.
+    h.warp_to(cliff - 100);
+    h.client.pause(&id);
+    h.warp_to(cliff + 500);
+
+    // The gate is frozen: wall-clock time alone does not open it.
+    assert_eq!(
+        h.client.vested_of(&id),
+        0,
+        "cliff must not open while the stream is paused"
+    );
+
+    h.client.resume(&id);
+    let paused_total = h.get(id).paused_total;
+    assert_eq!(paused_total, 600, "resume must absorb the whole interval");
+
+    // The moved instant is cliff_time + paused_total, one full pause later.
+    let effective_cliff = cliff + paused_total;
+    assert_eq!(effective_cliff, cliff + 600);
+
+    // One second before it the gate is still shut...
+    h.warp_to(effective_cliff - 1);
+    assert_eq!(
+        h.client.vested_of(&id),
+        0,
+        "cliff gate must still be shut one second before the moved instant"
+    );
+
+    // ...and at the moved instant the gate opens with everything accrued since
+    // start_time, exactly as it would have at the un-paused cliff.
+    h.warp_to(effective_cliff);
+    assert_eq!(
+        h.client.vested_of(&id),
+        1000 * ONE,
+        "vested at the moved cliff instant"
+    );
+
+    h.assert_pool_exact();
+}
+
 /// **Boundary: multiple withdrawals at cliff instant**
 ///
 /// Making multiple partial withdrawals at the exact cliff instant must

@@ -220,6 +220,35 @@ Result: vested = 1000 * ONE
 
 ---
 
+### 11b. Pause Moves the Wall-Clock Cliff
+
+**Test:** `pause_across_cliff_delays_the_wall_clock_cliff`
+
+```
+Time: cliff - 100
+Action: pause()
+
+Time: cliff + 500 (wall-clock, while paused)
+Result: vested = 0  // gate frozen; wall clock alone does not open it
+
+Action: resume()   // paused_total = 600
+effective_cliff = cliff_time + paused_total = cliff + 600
+
+Time: effective_cliff - 1
+Result: vested = 0  // still gated
+
+Time: effective_cliff
+Result: vested = 1000 * ONE
+```
+
+**Verifies:**
+- Pausing delays the cliff in wall-clock terms by exactly `paused_total`
+- The stored `cliff_time` is never rewritten; only the effective instant moves
+- `resumed` carries `paused_total`, enough to recompute the moved instant
+  (asserted by `events::resumed_event_paused_total_recomputes_the_moved_cliff`)
+
+---
+
 ### 12. Multiple Partial Withdrawals at Cliff
 
 **Test:** `multiple_partial_withdrawals_at_cliff_are_exact`
@@ -290,7 +319,7 @@ cargo test -p fluxora-stream test::cliff:: -- --nocapture
 ## Expected Output
 
 ```
-running 19 tests
+running 20 tests
 test cliff::nothing_is_withdrawable_one_second_before_the_cliff ... ok
 test cliff::cliff_releases_all_accrual_since_start_not_since_the_cliff ... ok
 test cliff::the_cliff_step_lands_on_the_exact_second ... ok
@@ -309,15 +338,16 @@ test cliff::cliff_equals_end_is_lump_sum_at_final_instant ... ok
 test cliff::withdrawal_before_cliff_fails_with_correct_error ... ok
 test cliff::batch_reads_handle_cliff_boundaries_correctly ... ok
 test cliff::pause_across_cliff_preserves_cliff_gate ... ok
+test cliff::pause_across_cliff_delays_the_wall_clock_cliff ... ok
 test cliff::multiple_partial_withdrawals_at_cliff_are_exact ... ok
 
-test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 127 filtered out
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 127 filtered out
 ```
 
 ---
 
 **Quick verification checklist:**
-- [ ] 19 tests pass (7 existing + 12 new)
+- [ ] 20 tests pass (7 existing + 13 new)
 - [ ] No panics or overflows
 - [ ] Pool invariant holds after every operation
 - [ ] Conservation law exact (no dust)

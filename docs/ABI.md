@@ -284,6 +284,24 @@ shifts the effective end of the stream forward by exactly the time it spent
 paused, so the clock picks up where it stopped and the total value delivered
 over the stream's life is unchanged.
 
+**Pausing also moves the cliff, in wall-clock terms.** `cliff_reached` is
+evaluated against the same stream clock,
+`stream_time(now) = (paused_at ?? now) - paused_total`, so a pause freezes the
+cliff gate along with accrual: while the clock is frozen below `cliff_time` the
+gate stays shut no matter how far the wall clock advances. After a resume,
+`paused_total` has absorbed the whole paused interval, so the gate opens at
+wall-clock `cliff_time + paused_total`, not at the stored `cliff_time`. A stream
+paused for `P` seconds in total therefore has its cliff — and with it the
+instant its recipient can first withdraw — pushed `P` seconds later, exactly as
+its `end_time` is. The stored `cliff_time` field is never rewritten; only the
+mapping from wall clock to stream clock changes.
+
+The `resumed` event publishes the post-resume `paused_total`, which is enough for
+an integrator to recompute the moved instant as `cliff_time + paused_total` from
+the `stream_created` schedule (or `get_stream`) alone, without replaying
+individual pause intervals. `test::cliff::pause_across_cliff_delays_the_wall_clock_cliff`
+and `test::pause::pausing_across_the_cliff_defers_the_cliff_too` assert this.
+
 No value moves: `resume` performs no token sub-invocation and does not change
 `deposited`, `withdrawn`, or any balance. It is a pure clock operation.
 
@@ -640,7 +658,7 @@ fn create_stream(
 | `deposit` | `i128` | Initial amount to lock, in the token's smallest unit. Must be positive and satisfy rate constraints. |
 | `start_time` | `u64` | Accrual begins (unix seconds). May be past (backdated vesting), present, or future (scheduled stream). |
 | `end_time` | `u64` | Accrual ends (unix seconds). Must be strictly greater than `start_time`. |
-| `cliff_time` | `u64` | Payout gate (unix seconds). Must be in `[start_time, end_time]`. Set equal to `start_time` for no cliff. **Gates payout, does not delay accrual** — at the cliff instant the recipient becomes entitled to everything accrued since `start_time`. |
+| `cliff_time` | `u64` | Payout gate (unix seconds). Must be in `[start_time, end_time]`. Set equal to `start_time` for no cliff. **Gates payout, does not delay accrual** — at the cliff instant the recipient becomes entitled to everything accrued since `start_time`. On a `pausable` stream this stored instant is a lower bound, not the wall-clock instant the gate opens: pausing pushes the opening instant forward by the accumulated `paused_total`. See the `resume` entry point. |
 | `cancellable` | `bool` | Whether sender may cancel. Immutable after creation. |
 | `pausable` | `bool` | Whether sender may pause accrual. Immutable after creation. |
 | `transferable` | `bool` | Whether recipient may reassign the stream. Immutable after creation. |
@@ -686,6 +704,7 @@ Creation is transactional. The stream-id counter and count are advanced only aft
 * **Fully Elapsed Schedule** (`end_time ≤ now`): Accepted. Reads as fully vested immediately. The entry receives the minimum retention TTL floor.
 * **No Cliff** (`cliff_time == start_time`): Standard continuous vesting with no payout gate.
 * **Cliff at Maturity** (`cliff_time == end_time`): Single lump-sum payout when the stream completes.
+* **Pause Moves the Cliff** (`pausable == true`): the stored `cliff_time` is never rewritten, but pausing shifts the wall-clock instant at which the gate opens by the accumulated paused time. A recipient's first withdrawal becomes available at `cliff_time + paused_total`, not at `cliff_time` — see the `resume` entry point. An integrator rendering "funds unlock at &lt;time&gt;" must add the stream's current `paused_total` rather than displaying `cliff_time` directly.
 
 **Example:** A 100-day stream of 1,000 USDC (7 decimals = 10,000,000 stroops per USDC) created with a 10-day cliff:
 
@@ -758,7 +777,11 @@ assumed:
   accrual: before `cliff_time` the result is exactly `0`, and at the cliff
   instant the recipient becomes entitled to everything accrued since
   `start_time` — not merely what accrues after the cliff. There is no partial
-  vesting beforehand.
+  vesting beforehand. "Before `cliff_time`" is measured **on the stream clock**,
+  so on a stream that has been paused the wall-clock instant the gate opens is
+  `cliff_time + paused_total`: a recipient whose stream was paused across its
+  cliff waits the total paused duration longer before anything is vestable. See
+  the `resume` entry point.
 
 The cliff gate is evaluated **first**: while the stream clock is below
 `cliff_time` the result is `0`, even for a schedule that has collapsed. Only
@@ -938,6 +961,12 @@ is the snake_case event name, second is always `stream_id`.
 
 Every payload carries enough state to reconstruct the stream without replaying
 from genesis. Field order and topic placement are ABI.
+
+`resumed` deserves one note: its `paused_total` is the post-resume cumulative
+figure, and it is enough to recompute the stream's moved cliff instant,
+`cliff_time + paused_total`, given the `cliff_time` carried by `stream_created`
+(or read back from `get_stream`). The event deliberately does not republish
+`cliff_time`, which never changes; see the `resume` entry point.
 
 Note that `batch_withdraw` emits one `withdrawn` event **per stream drawn from**,
 not one per call, and skips streams with nothing available — so a batch of 16

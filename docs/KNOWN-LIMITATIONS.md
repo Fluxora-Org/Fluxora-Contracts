@@ -223,3 +223,42 @@ violated on-chain, and the only symptom is a later `withdraw` or `cancel`
 failing closed with `Error::TokenTransferFailed` once the shortfall is
 reached. Integrators choosing a token for a stream are responsible for
 confirming it does not rebase.
+
+---
+
+## 7. Pausing moves the cliff in wall-clock terms
+
+**Status: by design — documented, not fixed.**
+
+`cliff_reached` is evaluated against the stream clock, and `stream_time`
+subtracts the cumulative `paused_total`. Pausing a stream therefore freezes the
+cliff gate along with accrual, and resuming pushes the wall-clock instant the
+gate opens forward by the total time spent paused: the gate opens at
+`cliff_time + paused_total`, not at the stored `cliff_time`.
+
+The stored `cliff_time` is never rewritten — `get_stream().cliff_time` still
+reports the original instant — so the two values an integrator might read (the
+schedule field and the effective instant) disagree by exactly `paused_total`. A
+recipient who computes an unlock date from `cliff_time` alone will expect funds
+to unlock earlier than they do.
+
+This is a limitation because `pause` is **sender-only** and unbounded. A sender
+who wants to defer the recipient's first withdrawal can pause a pausable stream
+before its cliff and hold it paused, moving the unlock instant arbitrarily far
+into the future. The recipient can still withdraw anything already vested, but
+before the cliff nothing has vested, so there is nothing to withdraw. The
+`pausable` capability is fixed at creation, so this exposure exists exactly when
+the stream was created with `pausable == true`.
+
+**What is documented instead of fixed.** `docs/ABI.md` states the rule and gives
+the recomputation (`cliff_time + paused_total`); the `resumed` event publishes
+the post-resume `paused_total` so an indexer can derive the new instant without
+replaying individual intervals; and
+`test::cliff::pause_across_cliff_delays_the_wall_clock_cliff` together with
+`test::pause::pausing_across_the_cliff_defers_the_cliff_too` assert it.
+
+**If you are integrating a pausable stream:** treat `cliff_time` as a lower
+bound, not the unlock date. Read the stream's current `paused_total` — from
+`get_stream`, or from the latest `resumed` event — and display
+`cliff_time + paused_total`. Do not cache the unlock instant while a stream is
+pausable.
