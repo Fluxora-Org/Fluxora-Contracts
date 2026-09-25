@@ -99,6 +99,16 @@ class TestSourceConsistency:
         assert "withdraw" in content, "lib.rs missing withdraw entrypoint"
 
 
+class TestKnownLimitations:
+    """Keep documented limitations tied to an executable repository guard."""
+
+    def test_no_third_party_audit_is_claimed(self):
+        limitations = REPO_ROOT / "docs" / "KNOWN-LIMITATIONS.md"
+        content = limitations.read_text(encoding="utf-8")
+        assert "## 4. Not audited" in content
+        assert "No third-party security audit has been performed." in content
+
+
 class TestScriptFunctions:
     """Exercise actual script functions for coverage."""
 
