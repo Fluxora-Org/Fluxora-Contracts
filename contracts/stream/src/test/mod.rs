@@ -20,6 +20,10 @@ mod abi;
 // Issue #1535 — discriminant fixture and public error-path regression tests.
 mod error_discriminants;
 
+// Issue #1689 — every discriminant is produced by a public entry point or
+// listed in the frozen reserved allowlist.
+mod error_reachability;
+
 // Stage 1
 mod create;
 mod props;

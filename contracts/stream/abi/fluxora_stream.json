@@ -289,7 +289,8 @@
     {"name": "MalformedStreamId", "discriminant": 29},
     {"name": "RepeatedTransfer", "discriminant": 30},
     {"name": "InvalidTopUp", "discriminant": 31},
-    {"name": "TokenAmountMismatch", "discriminant": 32}
+    {"name": "TokenAmountMismatch", "discriminant": 32},
+    {"name": "VestedDecreased", "discriminant": 33}
   ],
   "events": [
     {

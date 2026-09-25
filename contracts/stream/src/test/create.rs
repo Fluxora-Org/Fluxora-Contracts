@@ -9,7 +9,7 @@ use crate::{storage, DataKey, Error, StreamStatus};
 /// Seed the stream-id counter directly, as if `u64::MAX - 1` ids had already
 /// been handed out. Tests use this to exercise the exhaustion boundary without
 /// creating billions of streams.
-fn seed_counter(h: &Harness, value: u64) {
+pub(super) fn seed_counter(h: &Harness, value: u64) {
     h.env.as_contract(&h.contract_id, || {
         h.env
             .storage()

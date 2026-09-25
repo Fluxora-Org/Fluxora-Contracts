@@ -50,7 +50,7 @@ use crate::{op, Error};
 /// This is the canonical record. Any change to the numbers in `error.rs`
 /// must be rejected — only *appending* new entries (with the next free slot)
 /// is permitted.
-const DISCRIMINANT_FIXTURE: &[(&str, u32)] = &[
+pub(super) const DISCRIMINANT_FIXTURE: &[(&str, u32)] = &[
     // --- Lookup ---
     ("StreamNotFound", 1),
     // --- Creation validation ---
@@ -97,13 +97,15 @@ const DISCRIMINANT_FIXTURE: &[(&str, u32)] = &[
     ("InvalidTopUp", 31),
     // --- Token assumptions ---
     ("TokenAmountMismatch", 32),
+    // --- Vesting monotonicity ---
+    ("VestedDecreased", 33),
 ];
 
 /// The highest discriminant value in the fixture above.
 ///
 /// New variants must use `LAST_DISCRIMINANT + 1`. This constant is checked
 /// against the fixture length so a gap is caught immediately.
-const LAST_DISCRIMINANT: u32 = 32;
+const LAST_DISCRIMINANT: u32 = 33;
 
 /// Assert that the fixture has no gaps and ends at `LAST_DISCRIMINANT`.
 ///
@@ -177,6 +179,7 @@ fn discriminant_fixture_matches_source() {
         ("RepeatedTransfer", Error::RepeatedTransfer as u32),
         ("InvalidTopUp", Error::InvalidTopUp as u32),
         ("TokenAmountMismatch", Error::TokenAmountMismatch as u32),
+        ("VestedDecreased", Error::VestedDecreased as u32),
     ];
 
     assert_eq!(
@@ -1145,5 +1148,21 @@ fn token_amount_mismatch_discriminant_value() {
         Error::TokenAmountMismatch as u32,
         32,
         "TokenAmountMismatch discriminant must be 32",
+    );
+}
+
+// #33 — VestedDecreased -----------------------------------------------------
+//
+// Added without a reaching test (the gap issue #1689 exists to close). It is
+// classified as reserved — a defensive monotonicity guard — in
+// test::error_reachability, which also pins its name, discriminant and
+// account against this fixture.
+
+#[test]
+fn vested_decreased_discriminant_value() {
+    assert_eq!(
+        Error::VestedDecreased as u32,
+        33,
+        "VestedDecreased discriminant must be 33",
     );
 }

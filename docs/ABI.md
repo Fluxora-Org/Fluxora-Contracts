@@ -142,24 +142,48 @@ reassign the stream.
 
 Discriminants are ABI and are never renumbered; new variants are appended.
 
-| # | name | | # | name |
-|---|---|---|---|---|
-| 1 | `StreamNotFound` | | 17 | `NothingToWithdraw` |
-| 2 | `InvalidTimeRange` | | 18 | `InvalidAmount` |
-| 3 | `InvalidCliff` | | 19 | `BatchTooLarge` |
-| 4 | `InvalidDeposit` | | 20 | `EmptyBatch` |
-| 5 | `DepositRateTooLow` | | 21 | `DuplicateStreamId` |
-| 6 | `SelfStream` | | 22 | `Overflow` |
-| 7 | `Unauthorized` | | 23 | `TopUpTooSmall` |
-| 8 | `NotCancellable` | | 24 | `StreamIdExhausted` |
-| 9 | `NotPausable` | | 25 | `TokenTransferFailed` |
-| 10 | `NotTransferable` | | 26 | `TokenMissing` |
-| 11 | `StreamNotActive` | | 27 | `DelegateNotPermitted` |
-| 12 | `StreamNotPaused` | | 28 | `DelegateExpired` |
-| 13 | `StreamAlreadyPaused` | | 29 | `MalformedStreamId` |
-| 14 | `StreamTerminated` | | 30 | `RepeatedTransfer` |
-| 15 | `StreamMatured` | | 31 | `InvalidTopUp` |
-| 16 | `InsufficientWithdrawable` | | 32 | `TokenAmountMismatch` |
+Every row states the condition that produces the variant and whether the test
+suite can drive a public entry point to it. `reachable` rows are produced by
+`test::error_reachability`, which fails to compile if a variant is added to
+`error.rs` without being classified here. `reserved` rows have no reachable
+path — each is frozen ABI kept so an existing client keeps decoding the same
+number — and are listed in that test's frozen allowlist.
+
+| # | name | condition | status |
+|---|---|---|---|
+| 1 | `StreamNotFound` | no stream is stored under that id | reachable |
+| 2 | `InvalidTimeRange` | `create_stream` called with `end_time <= start_time` | reachable |
+| 3 | `InvalidCliff` | `cliff_time` outside `[start_time, end_time]` | reachable |
+| 4 | `InvalidDeposit` | `create_stream` called with a non-positive deposit | reachable |
+| 5 | `DepositRateTooLow` | `deposit < end_time - start_time`, so the per-second rate truncates to zero | reachable |
+| 6 | `SelfStream` | sender and recipient are the same address | reachable |
+| 7 | `Unauthorized` | caller is not the party that owns the operation (grantor or grantee rule failed) | reachable |
+| 8 | `NotCancellable` | stream created with `cancellable == false` | reachable |
+| 9 | `NotPausable` | stream created with `pausable == false` | reachable |
+| 10 | `NotTransferable` | stream created with `transferable == false` | reachable |
+| 11 | `StreamNotActive` | superseded: entry points name their own condition (12, 13, 14) | reserved |
+| 12 | `StreamNotPaused` | `resume` on a stream that is not `Paused` | reachable |
+| 13 | `StreamAlreadyPaused` | `pause` on a stream that is already `Paused` | reachable |
+| 14 | `StreamTerminated` | operation on a `Cancelled` or `Depleted` stream | reachable |
+| 15 | `StreamMatured` | `top_up` after the accrual clock has reached `end_time` | reachable |
+| 16 | `InsufficientWithdrawable` | explicit `withdraw` amount exceeds a positive withdrawable balance | reachable |
+| 17 | `NothingToWithdraw` | `withdraw` on a live stream with nothing accrued yet | reachable |
+| 18 | `InvalidAmount` | `withdraw` or `top_up` amount is zero or negative | reachable |
+| 19 | `BatchTooLarge` | batch larger than `MAX_BATCH_SIZE` (16) | reachable |
+| 20 | `EmptyBatch` | batch vector is empty | reachable |
+| 21 | `DuplicateStreamId` | the same id appears twice in one batch | reachable |
+| 22 | `Overflow` | checked arithmetic in the deposit/duration product or the accrual math would exceed `i128` | reachable |
+| 23 | `TopUpTooSmall` | top-up buys fewer than one second of schedule | reachable |
+| 24 | `StreamIdExhausted` | the stream-id counter is already at `u64::MAX` | reachable |
+| 25 | `TokenTransferFailed` | the token sub-invocation returned a typed contract error | reachable |
+| 26 | `TokenMissing` | the token sub-invocation aborted at the host (token address not deployed); the native test host types every such failure as a contract error, so this cannot be reproduced in tests | reserved |
+| 27 | `DelegateNotPermitted` | no live grant covers that op on that stream, or the grant was revoked | reachable |
+| 28 | `DelegateExpired` | the grant's `expires_at` is in the past | reachable |
+| 29 | `MalformedStreamId` | a batch vector element is not a `u64`; only a raw XDR caller can send one, the typed ABI rejects it first | reserved |
+| 30 | `RepeatedTransfer` | `transfer_recipient` target equals the current recipient | reachable |
+| 31 | `InvalidTopUp` | superseded by `InvalidAmount` (18); no entry point emits 31 | reserved |
+| 32 | `TokenAmountMismatch` | a deposit pull changed the pool's balance by something other than the requested amount | reachable |
+| 33 | `VestedDecreased` | defensive guard: the operation would move `vested` backwards; pause, resume, top-up and recipient transfer all leave `vested` non-decreasing | reserved |
 
 `TokenTransferFailed` (25) and `TokenMissing` (26) are **stable stream-level categories** for token sub-invocation failures. The token contract's internal error discriminant is intentionally discarded — forwarding it would produce a value clients decode against Fluxora's error table, yielding a silent misinterpretation. The raw diagnostic is visible in the failed transaction's `diagnosticEvents`.
 
@@ -171,8 +195,11 @@ The CLI and RPC render these as `Error(Contract, #N)`.
 
 `DepositRateTooLow` (5) enforces a minimum rate of 1 token unit per second (`deposit >= end_time - start_time`). Below one unit per second, the per-second rate truncates to zero and the recipient accrues literally nothing until very late in the schedule. This is rejected to prevent a footgun where a treasury streams a small grant over a long duration and the recipient cannot withdraw anything.
 
-`StreamNotActive` (11) is reserved in the frozen ABI; current entry points
-return the more specific pause/terminated variants instead.
+`StreamNotActive` (11), `TokenMissing` (26), `MalformedStreamId` (29),
+`InvalidTopUp` (31) and `VestedDecreased` (33) are reserved in the frozen ABI:
+each is documented in the table above and in `test::error_reachability`, and
+none of them has a reachable path through a public entry point. Do not
+renumber or remove them.
 
 `withdraw` distinguishes empty balances: a live stream with nothing accrued
 yet returns `NothingToWithdraw` (17); a `Cancelled` or `Depleted` stream with
