@@ -107,6 +107,43 @@ fn delegate_can_transfer_recipient() {
     assert_eq!(h.client.get_stream(&id).recipient, new_recip);
 }
 
+/// #1725 — the delegate-mediated transfer path enforces the self-stream rule.
+///
+/// `transfer_recipient` rejects a `new_recipient` equal to the sender, so a
+/// `TRANSFER_RECIPIENT` grant must not become a way around that check: the
+/// grant is authority to reassign the stream, not authority to collapse its
+/// sender and recipient into the same address.
+#[test]
+fn delegate_cannot_transfer_recipient_to_the_sender() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let agent = Address::generate(&h.env);
+    h.token_admin.mint(&agent, &(1_000 * ONE));
+
+    h.client
+        .grant_delegate(&id, &h.recipient, &agent, &op::TRANSFER_RECIPIENT, &None);
+
+    let before = h.client.get_stream(&id);
+    let err = h
+        .client
+        .try_delegate_transfer_recipient(&id, &agent, &h.sender)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::SelfStream);
+    assert_eq!(
+        h.client.get_stream(&id),
+        before,
+        "rejected self-stream transfer must not change the stream"
+    );
+
+    // The rejection is specific to `new_recipient == sender`: the grant is
+    // still usable, so transferring to any other address succeeds.
+    let new_recip = Address::generate(&h.env);
+    h.client
+        .delegate_transfer_recipient(&id, &agent, &new_recip);
+    assert_eq!(h.client.get_stream(&id).recipient, new_recip);
+}
+
 // ---------------------------------------------------------------------------
 // Revocation
 // ---------------------------------------------------------------------------
