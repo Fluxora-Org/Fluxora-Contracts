@@ -778,6 +778,22 @@ impl FluxoraStream {
     /// recipient receives any claim that is withdrawable at those boundaries.
     /// A cancelled stream may still be transferred while it has an unwithdrawn
     /// tail; a depleted stream cannot be transferred.
+    ///
+    /// # Delegate grants
+    ///
+    /// A transfer changes only the `recipient` field; it does **not** touch
+    /// delegate grants. Grants are scoped to the stream, not to the recipient
+    /// who issued them, so every grant live before the transfer is still live
+    /// after it — including recipient-issued `WITHDRAW` and
+    /// `TRANSFER_RECIPIENT` grants, which now belong to whoever holds the
+    /// recipient slot. That makes revocation follow the slot rather than the
+    /// person: the new recipient can revoke a surviving grant immediately, the
+    /// old recipient can neither grant nor revoke anything further, and
+    /// sender-issued grants (`CANCEL`, `PAUSE`, `RESUME`, `TOP_UP`) are
+    /// untouched because the sender did not change.
+    ///
+    /// The rule is stated in `docs/delegation-revocation.md` and asserted for
+    /// every permission bit by `test::delegation`.
     pub fn transfer_recipient(
         env: Env,
         stream_id: u64,
@@ -894,6 +910,15 @@ impl FluxoraStream {
     }
 
     /// Revoke a previously-issued delegate grant.
+    ///
+    /// # Authority follows the party, not the person
+    ///
+    /// The sender / recipient test below reads the stream's *current* parties,
+    /// so after a [`transfer_recipient`](Self::transfer_recipient) the new
+    /// recipient holds the recipient half of the check: they can revoke a grant
+    /// the old recipient issued, and the old recipient — no longer a party to
+    /// the stream — is rejected with [`Error::Unauthorized`]. Grants themselves
+    /// survive the transfer; see `docs/delegation-revocation.md`.
     ///
     /// Takes effect immediately — the delegate's next call will be rejected.
     /// Funds the delegate has already moved (e.g. via a prior `withdraw`) are
@@ -1146,6 +1171,12 @@ impl FluxoraStream {
     }
 
     /// Transfer recipient as a delegate. Requires [`op::TRANSFER_RECIPIENT`] grant.
+    ///
+    /// Follows the same semantics as [`transfer_recipient`](Self::transfer_recipient),
+    /// including its stance on delegate grants: nothing is cleared by the
+    /// transfer, so the grant that authorised this call — and every other grant
+    /// on the stream — survives it. A delegate acting for the old recipient
+    /// therefore keeps its rights until the new recipient revokes them.
     pub fn delegate_transfer_recipient(
         env: Env,
         stream_id: u64,
