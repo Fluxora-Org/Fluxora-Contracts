@@ -105,6 +105,27 @@ governance). v1 exposes **16**. Grouped by why:
 `get_keeper_fee_split`, `set_max_rate_per_second`, plus the entire `factory`
 (16) and `governance` (29) contracts.
 
+> **Decision record — governance source removed (#1675).** The governance
+> contract was dropped here, but its source, `contracts/governance/src/lib.rs`
+> (2,910 lines), stayed in the tree with no `Cargo.toml` and no workspace
+> entry, so nothing compiled or tested it. It was **deleted rather than
+> revived**:
+>
+> * v1 has no admin key, no upgrade path and no settable parameters (§6), so
+>   a multisig/timelock contract has nothing to govern.
+> * Giving it a crate showed it no longer builds against soroban-sdk 27: its
+>   test module fails to compile (duplicate test names, a removed events
+>   API) and the library uses deprecated `events().publish`, which CI's
+>   `clippy -D warnings` rejects. Reviving it would mean re-auditing ~3k lines
+>   of unaudited admin code for a feature v1 deliberately does not have.
+> * Git history keeps the file (last present at `57b2937`) if governance is
+>   ever re-scoped; that would come back as a proper workspace member with
+>   tests, release and size-budget entries.
+>
+> `packaging::governance_crate_is_absent` (in `contracts/stream`) runs
+> `cargo metadata` and fails if a governance package or the
+> `contracts/governance` directory reappears.
+
 **Contradicts §2.3 (no on-chain stream discovery)**
 `get_recipient_streams`, `get_recipient_streams_paginated`,
 `get_recipient_stream_count`, `get_streams_by_id_range`, `get_sender_portfolio_health`,

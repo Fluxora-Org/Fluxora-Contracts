@@ -49,10 +49,24 @@
 //!  contract-error sub-contract — both surface as `TokenTransferFailed`.
 //!  `TokenMissing` is only reachable via WASM execution on a real network.
 //!  The variant's discriminant (26) is verified by `token_error_discriminants_match_the_abi_table`.
+//!
+//! ## Token assumptions — see `docs/ABI.md` "Token assumptions"
+//!
+//! The rest of this module covers the three assumptions Fluxora states about
+//! its token: no fee-on-transfer, no rebasing, and no zero-value transfers.
+//!
+//! | assumption | site | scenario | expected outcome |
+//! |---|---|---|---|
+//! | no fee-on-transfer | `create_stream` | deposit pull delivers 90% of `deposit` | `TokenAmountMismatch`, no entry |
+//! | no fee-on-transfer | `top_up` | pull delivers 90% of `amount` | `TokenAmountMismatch`, stream unchanged |
+//! | no rebasing | `withdraw` | pool balance reduced out-of-band (clawback, standing in for a negative rebase) | `TokenTransferFailed` — fails closed, other streams' accounting untouched |
+//! | zero transfers never issued | `cancel` | refund is exactly zero at maturity | succeeds; a token that panics on a zero-value transfer proves none was called |
+//! | zero transfers never issued | `withdraw` | nothing vested yet | `NothingToWithdraw`, no token call |
+//! | zero transfers never issued | `batch_withdraw` | one stream in the batch has nothing available | batch succeeds; skipped stream's `withdrawn` stays 0 |
 
 use soroban_sdk::testutils::{Address as _, IssuerFlags};
 use soroban_sdk::token::{StellarAssetClient, TokenClient};
-use soroban_sdk::{contract, contractimpl, Address, Env, MuxedAddress, String};
+use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, MuxedAddress, String};
 
 use super::common::*;
 use crate::{Error, StreamStatus};
@@ -474,6 +488,442 @@ fn withdraw_is_retryable_once_pool_is_replenished() {
     assert_eq!(tc.balance(&h.recipient), available);
 }
 
+// ─── fee-on-transfer token ───────────────────────────────────────────────────
+
+/// A token whose `transfer` debits `from` in full but credits `to` only
+/// `amount` minus a configurable fee — the fee simply vanishes, the same
+/// observable effect as a burn-on-transfer or reflective token.
+///
+/// The fee is off (0 bps) by default, so a stream can be created normally;
+/// [`FeeOnTransferTokenClient::set_fee_bps`] turns it on so a test can isolate
+/// exactly which call (`create_stream` vs. `top_up`) is expected to detect
+/// and reject the shortfall.
+///
+/// Balances are tracked in this contract's own instance storage — a
+/// test-only stand-in for a real SEP-41 ledger, not a SAC wrapper, so the fee
+/// can be applied deterministically on every `transfer`.
+#[contract]
+pub struct FeeOnTransferToken;
+
+#[contractimpl]
+impl FeeOnTransferToken {
+    /// Test-only mint, bypassing transfer/fee semantics entirely.
+    pub fn mint(env: Env, to: Address, amount: i128) {
+        let bal = Self::balance_of(&env, &to);
+        env.storage().instance().set(&to, &(bal + amount));
+    }
+
+    /// Test-only: set the fee, in basis points of the transferred amount.
+    pub fn set_fee_bps(env: Env, bps: u32) {
+        env.storage().instance().set(&symbol_short!("fee_bps"), &bps);
+    }
+
+    fn fee_bps(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("fee_bps"))
+            .unwrap_or(0)
+    }
+
+    fn balance_of(env: &Env, id: &Address) -> i128 {
+        env.storage().instance().get(id).unwrap_or(0)
+    }
+
+    pub fn transfer(env: Env, from: Address, to: MuxedAddress, amount: i128) {
+        let to = to.address();
+        let from_bal = Self::balance_of(&env, &from);
+        assert!(
+            from_bal >= amount,
+            "FeeOnTransferToken: insufficient balance"
+        );
+        env.storage().instance().set(&from, &(from_bal - amount));
+
+        let bps = Self::fee_bps(&env) as i128;
+        let fee = amount * bps / 10_000;
+        let credited = amount - fee;
+        let to_bal = Self::balance_of(&env, &to);
+        env.storage().instance().set(&to, &(to_bal + credited));
+    }
+
+    pub fn balance(env: Env, id: Address) -> i128 {
+        Self::balance_of(&env, &id)
+    }
+
+    pub fn allowance(_env: Env, _from: Address, _spender: Address) -> i128 {
+        0
+    }
+    pub fn approve(
+        _env: Env,
+        _from: Address,
+        _spender: Address,
+        _amount: i128,
+        _live_until_ledger: u32,
+    ) {
+    }
+    pub fn transfer_from(
+        _env: Env,
+        _spender: Address,
+        _from: Address,
+        _to: Address,
+        _amount: i128,
+    ) {
+    }
+    pub fn burn(_env: Env, _from: Address, _amount: i128) {}
+    pub fn burn_from(_env: Env, _spender: Address, _from: Address, _amount: i128) {}
+    pub fn decimals(_env: Env) -> u32 {
+        7
+    }
+    pub fn name(env: Env) -> String {
+        String::from_str(&env, "FeeOnTransferToken")
+    }
+    pub fn symbol(env: Env) -> String {
+        String::from_str(&env, "FEE")
+    }
+}
+
+/// Register a fee-on-transfer token with the fee off, fund `sender`, and
+/// return `(token, client)`.
+fn register_fee_on_transfer_token<'a>(
+    h: &'a Harness<'a>,
+) -> (Address, FeeOnTransferTokenClient<'a>) {
+    let token = h.env.register(FeeOnTransferToken, ());
+    let client = FeeOnTransferTokenClient::new(&h.env, &token);
+    client.mint(&h.sender, &(10_000 * ONE));
+    (token, client)
+}
+
+/// `create_stream`'s deposit pull must deliver exactly `deposit`. A
+/// fee-on-transfer token delivers less, so the pull is detected and rejected
+/// with [`Error::TokenAmountMismatch`] rather than silently under-collateralizing
+/// the stream. See `docs/ABI.md` "Token assumptions" #1.
+#[test]
+fn create_stream_with_fee_on_transfer_token_is_rejected() {
+    let h = Harness::new();
+    let (token, fee_token) = register_fee_on_transfer_token(&h);
+    fee_token.set_fee_bps(&1_000); // 10%
+
+    let start = h.now();
+    let err = h
+        .client
+        .try_create_stream(
+            &h.sender,
+            &h.recipient,
+            &token,
+            &(1_000 * ONE),
+            &start,
+            &(start + 100 * DAY),
+            &start,
+            &true,
+            &true,
+            &true,
+        )
+        .unwrap_err()
+        .unwrap();
+
+    assert_eq!(err, Error::TokenAmountMismatch);
+
+    // Rollback is total: no phantom entry, id counter untouched, and the
+    // already-executed (fee-taking) transfer is undone along with it — the
+    // sender is made whole, fee included.
+    assert_eq!(h.client.stream_count(), 0, "id counter must not advance");
+    assert!(!h.client.stream_exists(&0));
+    assert_eq!(
+        fee_token.balance(&h.sender),
+        10_000 * ONE,
+        "reverted pull must not cost the sender the fee"
+    );
+}
+
+/// Same detection on `top_up`: the fee is turned on only *after* the stream
+/// is created with the fee off, isolating the `top_up` pull as the call under
+/// test. The schedule and deposit must be exactly as they were before the
+/// rejected call.
+#[test]
+fn top_up_with_fee_on_transfer_token_is_rejected() {
+    let h = Harness::new();
+    let (token, fee_token) = register_fee_on_transfer_token(&h);
+
+    let start = h.now();
+    let id = h.client.create_stream(
+        &h.sender,
+        &h.recipient,
+        &token,
+        &(1_000 * ONE),
+        &start,
+        &(start + 100 * DAY),
+        &start,
+        &true,
+        &true,
+        &true,
+    );
+    h.advance(10 * DAY);
+    let before = h.client.get_stream(&id);
+
+    fee_token.set_fee_bps(&1_000); // 10%, turned on after creation
+    let err = h
+        .client
+        .try_top_up(&id, &(200 * ONE))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::TokenAmountMismatch);
+
+    let after = h.client.get_stream(&id);
+    assert_eq!(after.deposited, before.deposited, "rejected top-up must not add funds");
+    assert_eq!(after.end_time, before.end_time, "rejected top-up must not extend the schedule");
+}
+
+// ─── rebasing / out-of-band balance loss ────────────────────────────────────
+
+/// A rebase is not a `transfer` Fluxora is party to, so it cannot be detected
+/// at call time — there is nothing to instrument. `admin.clawback` on the
+/// pool directly (bypassing every Fluxora entry point) stands in for the
+/// out-of-band balance loss a negative rebase would cause. The documented
+/// contract is that this fails *closed*: the underfunded stream's `withdraw`
+/// returns [`Error::TokenTransferFailed`] rather than paying a wrong amount,
+/// and an unrelated stream sharing the same token is untouched. See
+/// `docs/ABI.md` "Token assumptions" #2.
+#[test]
+fn rebase_style_balance_loss_fails_closed_and_does_not_corrupt_other_streams() {
+    let h = Harness::new();
+    let (token, tc, admin) = make_clawback_token(&h);
+    let contract_id = h.contract_id.clone();
+
+    admin.mint(&h.sender, &(2_000 * ONE));
+    let start = h.now();
+    let a = h.client.create_stream(
+        &h.sender,
+        &h.recipient,
+        &token,
+        &(1_000 * ONE),
+        &start,
+        &(start + 100 * DAY),
+        &start,
+        &true,
+        &true,
+        &true,
+    );
+    let b = h.client.create_stream(
+        &h.sender,
+        &h.recipient,
+        &token,
+        &(1_000 * ONE),
+        &start,
+        &(start + 100 * DAY),
+        &start,
+        &true,
+        &true,
+        &true,
+    );
+    h.advance(50 * DAY);
+
+    let before_b = h.client.get_stream(&b);
+
+    // Out-of-band balance loss on the pool — stands in for a negative
+    // rebase. Leaves just enough to cover stream A alone, well short of both
+    // streams' combined outstanding liability.
+    let a_liability = h.client.withdrawable_of(&a);
+    admin.clawback(&contract_id, &(tc.balance(&contract_id) - a_liability));
+
+    // A drains what is left; B — untouched by any Fluxora call — must find
+    // the pool empty and fail closed rather than paying a partial or wrong
+    // amount.
+    h.client.withdraw(&a, &None);
+    let err = h.client.try_withdraw(&b, &None).unwrap_err().unwrap();
+    assert_eq!(err, Error::TokenTransferFailed);
+
+    // B's own accounting is untouched by A's withdrawal or by the
+    // out-of-band loss: the rebase corrupted the pool's real balance, not
+    // Fluxora's bookkeeping.
+    let after_b = h.client.get_stream(&b);
+    assert_eq!(after_b.withdrawn, before_b.withdrawn);
+    assert_eq!(after_b.deposited, before_b.deposited);
+    assert_eq!(after_b.status, StreamStatus::Active);
+}
+
+// ─── zero-value transfers are never issued ──────────────────────────────────
+
+/// A token that behaves normally for any nonzero `transfer` but panics on a
+/// zero-value one. Used to prove Fluxora never issues a zero-value transfer:
+/// if it did, this token would panic and the call would fail loudly instead
+/// of returning the typed error (or succeeding) the test expects.
+#[contract]
+pub struct ZeroGuardToken;
+
+#[contractimpl]
+impl ZeroGuardToken {
+    pub fn mint(env: Env, to: Address, amount: i128) {
+        let bal = Self::balance_of(&env, &to);
+        env.storage().instance().set(&to, &(bal + amount));
+    }
+
+    fn balance_of(env: &Env, id: &Address) -> i128 {
+        env.storage().instance().get(id).unwrap_or(0)
+    }
+
+    pub fn transfer(env: Env, from: Address, to: MuxedAddress, amount: i128) {
+        assert_ne!(
+            amount, 0,
+            "ZeroGuardToken: unexpected zero-value transfer"
+        );
+        let to = to.address();
+        let from_bal = Self::balance_of(&env, &from);
+        assert!(from_bal >= amount, "ZeroGuardToken: insufficient balance");
+        env.storage().instance().set(&from, &(from_bal - amount));
+        let to_bal = Self::balance_of(&env, &to);
+        env.storage().instance().set(&to, &(to_bal + amount));
+    }
+
+    pub fn balance(env: Env, id: Address) -> i128 {
+        Self::balance_of(&env, &id)
+    }
+
+    pub fn allowance(_env: Env, _from: Address, _spender: Address) -> i128 {
+        0
+    }
+    pub fn approve(
+        _env: Env,
+        _from: Address,
+        _spender: Address,
+        _amount: i128,
+        _live_until_ledger: u32,
+    ) {
+    }
+    pub fn transfer_from(
+        _env: Env,
+        _spender: Address,
+        _from: Address,
+        _to: Address,
+        _amount: i128,
+    ) {
+    }
+    pub fn burn(_env: Env, _from: Address, _amount: i128) {}
+    pub fn burn_from(_env: Env, _spender: Address, _from: Address, _amount: i128) {}
+    pub fn decimals(_env: Env) -> u32 {
+        7
+    }
+    pub fn name(env: Env) -> String {
+        String::from_str(&env, "ZeroGuardToken")
+    }
+    pub fn symbol(env: Env) -> String {
+        String::from_str(&env, "ZG")
+    }
+}
+
+fn register_zero_guard_token<'a>(h: &'a Harness<'a>) -> (Address, ZeroGuardTokenClient<'a>) {
+    let token = h.env.register(ZeroGuardToken, ());
+    let client = ZeroGuardTokenClient::new(&h.env, &token);
+    client.mint(&h.sender, &(10_000 * ONE));
+    (token, client)
+}
+
+/// `cancel` skips the refund transfer entirely when `refund == 0` (e.g.
+/// cancelling an already fully-vested stream). Proven here with a token that
+/// panics on any zero-value transfer: if `cancel` ever called it with zero,
+/// this test would fail with a panic instead of a clean `Cancelled` status.
+#[test]
+fn cancel_with_zero_refund_never_calls_transfer() {
+    let h = Harness::new();
+    let (token, _zg) = register_zero_guard_token(&h);
+
+    let start = h.now();
+    let id = h.client.create_stream(
+        &h.sender,
+        &h.recipient,
+        &token,
+        &(1_000 * ONE),
+        &start,
+        &(start + 100 * DAY),
+        &start,
+        &true,
+        &true,
+        &true,
+    );
+    // Fully matured: everything is vested, nothing is left to refund.
+    h.advance(100 * DAY);
+    assert_eq!(h.client.refundable_of(&id), 0);
+
+    h.client.cancel(&id);
+
+    assert_eq!(h.client.get_stream(&id).status, StreamStatus::Cancelled);
+    assert_eq!(h.client.get_stream(&id).deposited, 1_000 * ONE);
+}
+
+/// `withdraw` on a stream with nothing vested yet returns
+/// [`Error::NothingToWithdraw`] before ever touching the token. Proven with a
+/// token that panics on a zero-value transfer.
+#[test]
+fn withdraw_with_nothing_vested_never_calls_transfer() {
+    let h = Harness::new();
+    let (token, _zg) = register_zero_guard_token(&h);
+
+    let start = h.now();
+    let id = h.client.create_stream(
+        &h.sender,
+        &h.recipient,
+        &token,
+        &(1_000 * ONE),
+        &start,
+        &(start + 100 * DAY),
+        &start,
+        &true,
+        &true,
+        &true,
+    );
+    // No time has passed: nothing is vested yet.
+    let err = h.client.try_withdraw(&id, &None).unwrap_err().unwrap();
+    assert_eq!(err, Error::NothingToWithdraw);
+}
+
+/// `batch_withdraw` skips a stream with nothing currently available rather
+/// than paying it a zero. Proven with a token that panics on a zero-value
+/// transfer: a mixed batch (one stream with nothing available, one with a
+/// real payout) must succeed without the skipped stream ever reaching the
+/// token.
+#[test]
+fn batch_withdraw_skips_zero_available_stream_without_calling_transfer() {
+    let h = Harness::new();
+    let (token, _zg) = register_zero_guard_token(&h);
+
+    let start = h.now();
+    // `behind` has a cliff well past the batch's advance point, so it has
+    // nothing withdrawable yet.
+    let behind = h.client.create_stream(
+        &h.sender,
+        &h.recipient,
+        &token,
+        &(1_000 * ONE),
+        &start,
+        &(start + 100 * DAY),
+        &(start + 50 * DAY),
+        &true,
+        &true,
+        &true,
+    );
+    let ready = h.client.create_stream(
+        &h.sender,
+        &h.recipient,
+        &token,
+        &(1_000 * ONE),
+        &start,
+        &(start + 100 * DAY),
+        &start,
+        &true,
+        &true,
+        &true,
+    );
+    h.advance(10 * DAY);
+    assert_eq!(h.client.withdrawable_of(&behind), 0);
+    assert!(h.client.withdrawable_of(&ready) > 0);
+
+    let total = h
+        .client
+        .batch_withdraw(&h.recipient, &h.ids(&[behind, ready]));
+
+    assert!(total > 0);
+    assert_eq!(h.client.get_stream(&behind).withdrawn, 0);
+    assert!(h.client.get_stream(&ready).withdrawn > 0);
+}
+
 // ─── discriminants ───────────────────────────────────────────────────────────
 
 /// Confirm the frozen ABI discriminants for both token error variants.
@@ -481,4 +931,11 @@ fn withdraw_is_retryable_once_pool_is_replenished() {
 fn token_error_discriminants_match_the_abi_table() {
     assert_eq!(Error::TokenTransferFailed as u32, 25);
     assert_eq!(Error::TokenMissing as u32, 26);
+}
+
+/// Confirm the frozen ABI discriminant for the fee-on-transfer / rebase
+/// detection error.
+#[test]
+fn token_amount_mismatch_discriminant_matches_the_abi_table() {
+    assert_eq!(Error::TokenAmountMismatch as u32, 32);
 }

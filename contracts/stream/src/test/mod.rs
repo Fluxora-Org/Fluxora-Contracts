@@ -30,6 +30,8 @@ mod withdraw_events;
 // Stage 2
 mod auth;
 mod cancel;
+// Issue #1726: capability flags are set at creation and immutable.
+mod capabilities;
 // Issue #1584: the cancellation event's accounting contract.
 mod amount_domain;
 mod cancel_events;
@@ -43,6 +45,7 @@ mod top_up;
 mod transfer;
 
 // Stage 3
+mod accounting_identity;
 mod accrual_overflow;
 mod batch;
 mod entrypoint_costs;
@@ -55,3 +58,14 @@ mod ttl;
 
 // Stage 4
 mod stream_ids;
+
+// Issue #1686: every read entry point's storage/TTL behaviour, pinned to
+// docs/ABI.md. `read_methods_no_side_effects` (#1566) existed but was never
+// registered here, so it did not compile or run until now.
+mod read_methods_no_side_effects;
+mod read_ttl_matrix;
+
+// Package / artifact naming gates, run by CI's `packaging::` step. Also
+// guards #1675 (no inert governance crate). Previously unregistered, so
+// that CI step matched zero tests.
+mod packaging;

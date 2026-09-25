@@ -296,3 +296,36 @@ fn comparison_is_exact_not_prefix_match() {
 
     std::println!("packaging::comparison_is_exact_not_prefix_match  exact-match-logic=verified  ✓");
 }
+
+/// Issue #1675: `contracts/governance/src/lib.rs` (2,910 lines, no
+/// `Cargo.toml`, never compiled) was removed rather than revived — v1 has no
+/// admin key or upgrade path, so there is nothing for it to govern (see
+/// docs/MIGRATION.md §3). This keeps it from silently coming back as inert
+/// source: no governance package may be in the workspace, and the directory
+/// must not exist. Reviving governance means deleting this test in the same
+/// PR that adds the crate, its CI coverage and its release/size-budget
+/// entries.
+#[test]
+fn governance_crate_is_absent() {
+    let meta = cargo_metadata();
+    let pkgs = packages(&meta);
+    let names: std::vec::Vec<&str> = pkgs.iter().filter_map(|p| p["name"].as_str()).collect();
+    assert!(
+        !names.iter().any(|n| n.contains("governance")),
+        "a governance package is back in the workspace: {names:?}",
+    );
+
+    let workspace_root = meta["workspace_root"]
+        .as_str()
+        .expect("`workspace_root` missing from `cargo metadata` output");
+    let dir = std::path::Path::new(workspace_root)
+        .join("contracts")
+        .join("governance");
+    assert!(
+        !dir.exists(),
+        "{} exists again; add it as a real workspace member or keep it deleted (#1675)",
+        dir.display(),
+    );
+
+    std::println!("packaging::governance_crate_is_absent  packages={names:?}  ✓");
+}

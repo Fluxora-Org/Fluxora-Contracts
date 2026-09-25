@@ -1,5 +1,9 @@
 # Cliff Boundary Test Scenarios - Quick Reference
 
+> **Provenance:** moved from the repository root into `docs/` in the point-in-time
+> documentation cleanup for [#1681](https://github.com/Fluxora-Org/Fluxora-Contracts/issues/1681). Update this document alongside the
+> tests it covers.
+
 ## Test Configuration Pattern
 
 All boundary tests use this setup:

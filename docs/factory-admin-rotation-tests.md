@@ -1,5 +1,9 @@
 # Same-Ledger Admin Rotation Tests
 
+> **Provenance:** moved from the repository root into `docs/` in the point-in-time
+> documentation cleanup for [#1681](https://github.com/Fluxora-Org/Fluxora-Contracts/issues/1681). Update this document alongside the
+> tests it covers.
+
 ## Summary
 
 Added three comprehensive tests to `contracts/factory/tests/factory_setters.rs` to verify that admin rotation properly invalidates authorization within the same simulated ledger/transaction.

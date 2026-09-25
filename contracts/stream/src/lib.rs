@@ -162,6 +162,52 @@ fn token_transfer(
     }
 }
 
+/// Pull `amount` of `token` from `from` into the contract's own balance and
+/// verify the pool grew by exactly `amount`.
+///
+/// # Why measure rather than trust the requested amount
+///
+/// Fluxora's accounting — [`Stream::deposited`], and every rate, liability and
+/// refund figure derived from it — assumes a deposit pull moves exactly the
+/// amount requested into the pool. A **fee-on-transfer** token (a cut taken
+/// out of every transfer) silently breaks that assumption: the sender's
+/// balance drops by `amount`, but the pool only grows by `amount` minus the
+/// fee. Nothing about that failure is loud — the deposit "succeeds" and the
+/// shortfall says nothing until, much later, an unrelated stream's `withdraw`
+/// or `cancel` fails with [`Error::TokenTransferFailed`] because the pool
+/// cannot cover every stream's claim. See `docs/ABI.md` "Token assumptions".
+///
+/// The fix is to check, not assume: read the contract's own balance before
+/// and after the pull and require the delta to equal `amount` exactly. Any
+/// deviation — a shortfall from a fee, or an overage from a positive-rebasing
+/// token — is rejected with [`Error::TokenAmountMismatch`]. Soroban rolls back
+/// the entire invocation on error, so the transfer that already happened
+/// (and any fee it took) is undone along with everything else; nothing is
+/// stranded.
+///
+/// # Why this guards deposits only
+///
+/// The outbound legs — [`FluxoraStream::withdraw`]'s payout and
+/// [`FluxoraStream::cancel`]'s refund — call [`token_transfer`] directly, with
+/// no balance check. If the token takes a further cut on receipt there, that
+/// is between the recipient (or sender) and their own balance: the *pool's*
+/// balance still drops by exactly the amount the contract sent, so Fluxora's
+/// internal accounting stays in sync either way.
+fn pull_deposit(env: &Env, token: &Address, from: &Address, amount: &i128) -> Result<(), Error> {
+    let contract = env.current_contract_address();
+    let token_client = token::TokenClient::new(env, token);
+    let before = token_client.balance(&contract);
+
+    token_transfer(env, token, from, MuxedAddress::from(contract.clone()), amount)?;
+
+    let after = token_client.balance(&contract);
+    let received = after.checked_sub(before).ok_or(Error::Overflow)?;
+    if received != *amount {
+        return Err(Error::TokenAmountMismatch);
+    }
+    Ok(())
+}
+
 #[contract]
 pub struct FluxoraStream;
 
@@ -223,6 +269,9 @@ impl FluxoraStream {
     /// * [`Error::DepositRateTooLow`] — `deposit < duration`, so the per-second
     ///   rate would truncate to zero and the recipient would accrue nothing.
     /// * [`Error::Overflow`] — `deposit * duration` does not fit in `i128`.
+    /// * [`Error::TokenAmountMismatch`] — the deposit pull delivered a
+    ///   different amount than `deposit` (a fee-on-transfer or rebasing
+    ///   token). See `docs/ABI.md` "Token assumptions".
     #[allow(clippy::too_many_arguments)]
     pub fn create_stream(
         env: Env,
@@ -296,13 +345,7 @@ impl FluxoraStream {
         //
         // The sender's auth on this invocation covers the nested token
         // transfer; no prior approval is needed.
-        token_transfer(
-            &env,
-            &token,
-            &sender,
-            MuxedAddress::from(env.current_contract_address()),
-            &deposit,
-        )?;
+        pull_deposit(&env, &token, &sender, &deposit)?;
 
         storage::save_stream(&env, stream_id, &stream);
         storage::extend_instance(&env);
@@ -352,6 +395,9 @@ impl FluxoraStream {
     ///   instantly (or near-instantly) withdrawable, which is never what the
     ///   sender means. Create a new stream instead.
     /// * [`Error::StreamTerminated`] — stream is cancelled or depleted.
+    /// * [`Error::TokenAmountMismatch`] — the pull delivered a different
+    ///   amount than `amount` (a fee-on-transfer or rebasing token). See
+    ///   `docs/ABI.md` "Token assumptions".
     pub fn top_up(env: Env, stream_id: u64, amount: i128) -> Result<(), Error> {
         let mut stream = storage::load_stream(&env, stream_id)?;
         stream.sender.require_auth();
@@ -410,19 +456,18 @@ impl FluxoraStream {
             return Err(Error::DepositRateTooLow);
         }
 
+        let old_vested = accrual::vested(&stream, now)?;
+        stream.deposited = new_deposited;
+        stream.end_time = new_end;
+        if accrual::vested(&stream, now)? < old_vested {
+            return Err(Error::VestedDecreased);
+        }
+
         let token = stream.token.clone();
         let sender = stream.sender.clone();
 
-        token_transfer(
-            &env,
-            &token,
-            &sender,
-            MuxedAddress::from(env.current_contract_address()),
-            &amount,
-        )?;
+        pull_deposit(&env, &token, &sender, &amount)?;
 
-        stream.deposited = new_deposited;
-        stream.end_time = new_end;
         storage::save_stream(&env, stream_id, &stream);
 
         events::topped_up(&env, stream_id, &stream, amount);
@@ -667,8 +712,15 @@ impl FluxoraStream {
         }
 
         let now = env.ledger().timestamp();
+        let old_vested = accrual::vested(&stream, now)?;
+
         stream.paused_at = Some(now);
         stream.status = StreamStatus::Paused;
+
+        if accrual::vested(&stream, now)? < old_vested {
+            return Err(Error::VestedDecreased);
+        }
+
         storage::save_stream(&env, stream_id, &stream);
 
         events::paused(&env, stream_id, &stream, now);
@@ -693,6 +745,8 @@ impl FluxoraStream {
         }
 
         let now = env.ledger().timestamp();
+        let old_vested = accrual::vested(&stream, now)?;
+
         let paused_duration = now.saturating_sub(paused_at);
         stream.paused_total = stream
             .paused_total
@@ -700,6 +754,11 @@ impl FluxoraStream {
             .ok_or(Error::Overflow)?;
         stream.paused_at = None;
         stream.status = StreamStatus::Active;
+
+        if accrual::vested(&stream, now)? < old_vested {
+            return Err(Error::VestedDecreased);
+        }
+
         storage::save_stream(&env, stream_id, &stream);
 
         events::resumed(&env, stream_id, &stream, paused_duration);
@@ -750,7 +809,15 @@ impl FluxoraStream {
             return Err(Error::RepeatedTransfer);
         }
 
+        let now = env.ledger().timestamp();
+        let old_vested = accrual::vested(&stream, now)?;
+
         stream.recipient = new_recipient.clone();
+
+        if accrual::vested(&stream, now)? < old_vested {
+            return Err(Error::VestedDecreased);
+        }
+
         storage::save_stream(&env, stream_id, &stream);
 
         events::recipient_transferred(&env, stream_id, &old_recipient, &new_recipient);
@@ -831,6 +898,23 @@ impl FluxoraStream {
     /// Takes effect immediately — the delegate's next call will be rejected.
     /// Funds the delegate has already moved (e.g. via a prior `withdraw`) are
     /// unaffected: revocation only stops future invocations.
+    ///
+    /// # Same-ledger ordering
+    ///
+    /// Revocation is **ordered, not retroactive**. This call removes the grant
+    /// from storage; every invocation ordered after it — in the same ledger or
+    /// any later one — reads no grant and fails with
+    /// [`Error::DelegateNotPermitted`]. An invocation ordered *before* the
+    /// revocation is honoured and is not unwound: already-completed calls are
+    /// unaffected, only the ability to make new ones is withdrawn.
+    ///
+    /// There is no grace period and no distinction between same-ledger and
+    /// cross-ledger calls — a single storage write decides both. Ordering
+    /// *within* a ledger is the network's transaction application order, not
+    /// something this contract selects; the guarantee is only that whichever
+    /// order the network applies, the delegate call on the later side of the
+    /// revocation is rejected. `test::delegation` pins both orders for every
+    /// permission bit; `docs/delegation-revocation.md` states the guarantee.
     ///
     /// Silently succeeds if no grant exists (idempotent).
     ///
@@ -1055,13 +1139,7 @@ impl FluxoraStream {
         // Tokens come from the sender — require their auth even though a
         // delegate triggered this call.
         sender.require_auth();
-        token_transfer(
-            &env,
-            &token,
-            &sender,
-            MuxedAddress::from(env.current_contract_address()),
-            &amount,
-        )?;
+        pull_deposit(&env, &token, &sender, &amount)?;
 
         events::topped_up(&env, stream_id, &stream, amount);
         Ok(())

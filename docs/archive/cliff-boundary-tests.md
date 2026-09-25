@@ -1,5 +1,10 @@
 # Cliff Boundary Testing - Implementation Report
 
+> **Historical (point in time).** Moved from the repository root into `docs/archive/`
+> in the point-in-time documentation cleanup for [#1681](https://github.com/Fluxora-Org/Fluxora-Contracts/issues/1681). This record is
+> kept for provenance and is not maintained; see `docs/` and the test suites for current
+> behaviour.
+
 ## Problem Statement
 The `accrual.rs` module contains `cliff_reached` logic and `test/cliff.rs` has existing tests, but callers needed a fixed contract for exact boundary behavior at just-before, exactly-at, and just-after cliff ledgers.
 

@@ -68,9 +68,14 @@ pub enum Error {
     StreamMatured = 15,
 
     // --- Withdrawal ---
-    /// Requested amount exceeds the currently withdrawable balance.
+    /// Explicit amount exceeds a positive withdrawable balance. Returned only
+    /// when the available balance is non-zero; a zero balance returns
+    /// [`Self::NothingToWithdraw`] instead, regardless of the requested amount.
     InsufficientWithdrawable = 16,
-    /// Withdrawable balance is zero.
+    /// Withdrawable balance is zero on a live stream. Returned for both
+    /// `None` and explicit amounts; the zero check runs before amount
+    /// comparison, so it takes precedence over
+    /// [`Self::InsufficientWithdrawable`].
     NothingToWithdraw = 17,
     /// Explicit withdraw amount was zero or negative.
     InvalidAmount = 18,
@@ -139,4 +144,20 @@ pub enum Error {
     // --- Arithmetic (top-up) ---
     /// Zero or negative `top_up` amount.
     InvalidTopUp = 31,
+
+    // --- Token assumptions ---
+    /// A deposit-side pull (`create_stream`, `top_up`, `delegate_top_up`)
+    /// delivered a different amount than requested.
+    ///
+    /// The contract measures its own token balance before and after the pull
+    /// and requires the delta to equal the requested amount exactly. This is
+    /// how a fee-on-transfer or balance-adjusting token is detected and
+    /// rejected on the deposit leg — see `docs/ABI.md` "Token assumptions"
+    /// for the full statement of what a stream's token is assumed to do, and
+    /// what happens when an assumption cannot be checked at call time (a
+    /// rebasing token).
+    TokenAmountMismatch = 32,
+    // --- Monotonicity ---
+    /// An operation would cause the vested amount to decrease.
+    VestedDecreased = 33,
 }

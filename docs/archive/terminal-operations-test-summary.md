@@ -1,5 +1,10 @@
 # Terminal Operations Test Matrix - Implementation Summary
 
+> **Historical (point in time).** Moved from the repository root into `docs/archive/`
+> in the point-in-time documentation cleanup for [#1681](https://github.com/Fluxora-Org/Fluxora-Contracts/issues/1681). This record is
+> kept for provenance and is not maintained; see `docs/` and the test suites for current
+> behaviour.
+
 ## Overview
 
 This PR implements comprehensive regression tests for terminal operation rejection behavior in the Fluxora stream contract. Terminal states (`Cancelled` and `Depleted`) must reject all mutating lifecycle operations with stable errors and guaranteed unchanged state.

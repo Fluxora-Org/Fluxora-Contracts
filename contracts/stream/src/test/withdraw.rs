@@ -365,3 +365,41 @@ fn views_are_side_effect_free() {
     assert_eq!(a, b);
     assert_eq!(before, after);
 }
+
+/// Discriminants 16 and 17 are not interchangeable: zero available always
+/// yields `NothingToWithdraw`, while an over-request on a positive available
+/// balance yields `InsufficientWithdrawable`.
+#[test]
+fn nothing_vs_insufficient_withdrawable_boundary_is_explicit() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+
+    // Zero available: both `None` and an explicit over-request report
+    // `NothingToWithdraw`, never `InsufficientWithdrawable`.
+    assert_eq!(h.client.withdrawable_of(&id), 0);
+    let err = h.client.try_withdraw(&id, &None).unwrap_err().unwrap();
+    assert_eq!(err, Error::NothingToWithdraw);
+    let err = h
+        .client
+        .try_withdraw(&id, &Some(1_000 * ONE))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::NothingToWithdraw);
+
+    // Positive available: requesting more than available reports
+    // `InsufficientWithdrawable`.
+    h.advance(10 * DAY);
+    let available = h.client.withdrawable_of(&id);
+    assert!(available > 0);
+    let err = h
+        .client
+        .try_withdraw(&id, &Some(available + 1))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::InsufficientWithdrawable);
+
+    // The failed attempts changed nothing.
+    assert_eq!(h.get(id).withdrawn, 0);
+    assert_eq!(h.balance(&h.recipient), 0);
+    h.assert_pool_exact();
+}
