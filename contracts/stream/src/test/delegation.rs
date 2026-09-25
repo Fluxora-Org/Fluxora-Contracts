@@ -270,6 +270,85 @@ fn delegate_cannot_call_an_op_not_in_their_grant() {
 }
 
 #[test]
+fn each_permission_bit_is_independent_and_requires_its_grantor() {
+    for op_bit in ALL_OPS {
+        let h = Harness::new();
+        let agent = Address::generate(&h.env);
+        let id = match op_bit {
+            op::WITHDRAW => {
+                let id = h.create_simple(1_000 * ONE, 100 * DAY);
+                h.advance(10 * DAY);
+                h.client
+                    .grant_delegate(&id, &h.recipient, &agent, &op_bit, &None);
+                id
+            }
+            op::CANCEL => {
+                let id = h.create_simple(1_000 * ONE, 100 * DAY);
+                h.client
+                    .grant_delegate(&id, &h.sender, &agent, &op_bit, &None);
+                id
+            }
+            op::PAUSE => {
+                let id = h.create_simple(1_000 * ONE, 100 * DAY);
+                h.client
+                    .grant_delegate(&id, &h.sender, &agent, &op_bit, &None);
+                id
+            }
+            op::RESUME => {
+                let id = h.create_simple(1_000 * ONE, 100 * DAY);
+                h.client.pause(&id);
+                h.client
+                    .grant_delegate(&id, &h.sender, &agent, &op_bit, &None);
+                id
+            }
+            op::TOP_UP => {
+                let id = h.create_simple(1_000 * ONE, 100 * DAY);
+                h.client
+                    .grant_delegate(&id, &h.sender, &agent, &op_bit, &None);
+                id
+            }
+            op::TRANSFER_RECIPIENT => {
+                let id = h.create_simple(1_000 * ONE, 100 * DAY);
+                h.client
+                    .grant_delegate(&id, &h.recipient, &agent, &op_bit, &None);
+                id
+            }
+            other => panic!("unhandled op bit {other}"),
+        };
+
+        assert!(
+            delegate_call_result(&h, id, &agent, op_bit).is_ok(),
+            "op bit {op_bit}: the sole granted permission must succeed",
+        );
+
+        let wrong_grantor = match op_bit {
+            op::WITHDRAW | op::TRANSFER_RECIPIENT => &h.sender,
+            _ => &h.recipient,
+        };
+        let err = h
+            .client
+            .try_grant_delegate(&id, wrong_grantor, &agent, &op_bit, &None)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(
+            err,
+            Error::Unauthorized,
+            "op bit {op_bit}: the grantor must own the delegated permission",
+        );
+
+        for other_bit in ALL_OPS {
+            if other_bit == op_bit {
+                continue;
+            }
+            assert!(
+                delegate_call_result(&h, id, &agent, other_bit).is_err(),
+                "op bit {op_bit}: unrelated permission {other_bit} must be rejected",
+            );
+        }
+    }
+}
+
+#[test]
 fn sender_delegate_cannot_call_recipient_ops() {
     let h = Harness::new();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);

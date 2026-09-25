@@ -4,6 +4,25 @@
 states exactly when that removal takes effect, so integrators can rely on it
 without reading the implementation.
 
+## Permission model
+
+Each delegation bit is an independent authorization. No bit implies another:
+
+| Bit | Grantor | Permits | Implies another bit? |
+|---|---|---|---|
+| `WITHDRAW` | recipient | `delegate_withdraw` | No |
+| `CANCEL` | sender | `delegate_cancel` | No |
+| `PAUSE` | sender | `delegate_pause` | No |
+| `RESUME` | sender | `delegate_resume` | No |
+| `TOP_UP` | sender | `delegate_top_up` | No |
+| `TRANSFER_RECIPIENT` | recipient | `delegate_transfer_recipient` | No |
+
+The model is intentionally orthogonal: a grant for `PAUSE` does not authorize
+`RESUME`, a grant for `WITHDRAW` does not authorize `TRANSFER_RECIPIENT`, and a
+sender cannot delegate a recipient-owned permission or vice versa. A grant can
+only be issued by the party that owns that operation domain, and the same
+`grant_delegate` call must not mix sender-side and recipient-side permissions.
+
 ## The guarantee
 
 **Revocation is ordered, not retroactive.**
