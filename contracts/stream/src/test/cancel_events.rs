@@ -511,3 +511,55 @@ fn the_published_settlement_required_the_senders_authorization() {
 
     assert_cancel_settlement(&h, id, sender_before, 1_000 * ONE);
 }
+
+// --- Cancel at exactly `start_time` (issue #1694) --------------------------
+//
+// The `Cancelled` event is the public accounting statement for this path too.
+// These tests rebuild it from storage and the token ledger and require the
+// published `refunded` to be the entire deposit, byte for byte, for deposits
+// that divide the schedule evenly and ones that do not.
+
+/// See `test::cancel` for why these particular deposits are chosen.
+const START_TIME_DEPOSITS: [i128; 4] = [
+    8_640_000,
+    8_640_001,
+    1_000 * ONE,
+    123_456_789_013,
+];
+
+#[test]
+fn cancel_at_start_time_publishes_the_exact_refunded_amount() {
+    for deposit in START_TIME_DEPOSITS {
+        let h = Harness::new();
+        let id = h.create_simple(deposit, 100 * DAY);
+        let start = h.now();
+        let sender_before = h.balance(&h.sender);
+
+        h.client.cancel(&id);
+        let s = assert_cancel_settlement(&h, id, sender_before, deposit);
+
+        assert_eq!(
+            s.refunded, deposit,
+            "deposit {deposit}: the event must report the full refund",
+        );
+        assert_eq!(
+            s.vested, 0,
+            "deposit {deposit}: nothing had vested at start_time",
+        );
+        assert_eq!(s.withdrawn, 0, "deposit {deposit}");
+        assert_eq!(
+            s.end_time, start,
+            "deposit {deposit}: zero-length schedule, not a negative one",
+        );
+
+        // Balances agree with what was published: sender whole, recipient with
+        // nothing, pool empty.
+        assert_eq!(
+            h.balance(&h.sender),
+            sender_before + deposit,
+            "deposit {deposit}",
+        );
+        assert_eq!(h.balance(&h.recipient), 0, "deposit {deposit}");
+        assert_eq!(h.pool(), 0, "deposit {deposit}");
+    }
+}
