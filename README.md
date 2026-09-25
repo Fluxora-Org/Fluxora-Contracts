@@ -91,15 +91,21 @@ answer "show me my streams" without the contract paying rent to remember.
 `test::resource_limits::cost_is_independent_of_how_many_streams_exist` states
 this as a test: the 153rd stream costs exactly what the 2nd did.
 
-### Immutable guarantees
+### Deliberately immutable
+
+The deployed stream contract is **not upgradeable in place**. It has no admin
+key and exposes no upgrade entry point; changing the implementation requires a
+new deployment at a new address. This is a deliberate trust property, not a
+missing operational procedure: a recipient's stream guarantees cannot later be
+changed by an administrator. See the [ABI reference](docs/ABI.md#upgrade-posture).
 
 `cancellable`, `pausable` and `transferable` are fixed at creation and can never
 change. Before accepting a stream a recipient can verify that the sender cannot
 claw it back, freeze it, or reassign it. A stream that could *become* cancellable
 later would be worthless as a guarantee.
 
-For the same reason there is no admin key, no upgrade path, no fee switch and no
-global pause. Immutability is what lets another protocol depend on this one.
+For the same reason there is no fee switch and no global pause. Immutability is
+what lets another protocol depend on this one.
 
 ---
 
