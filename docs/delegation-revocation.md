@@ -1,7 +1,8 @@
 # Delegate revocation: same-ledger ordering guarantee
 
 `revoke_delegate` removes a delegate grant from persistent storage. This note
-states exactly when that removal takes effect, so integrators can rely on it
+states exactly when that removal takes effect, and what a recipient transfer
+does to grants that have not been revoked, so integrators can rely on both
 without reading the implementation.
 
 ## The guarantee
@@ -50,6 +51,43 @@ succeeds without error. `grant_delegate` on a `(stream, delegate)` pair replaces
 any existing grant for that pair, so a re-grant after a revocation restores
 access from that point forward.
 
+## Recipient transfer: grants survive
+
+`transfer_recipient` and `delegate_transfer_recipient` reassign who is paid.
+They do **not** touch `Delegate(stream_id, delegate)` entries: **a delegate
+grant survives a recipient transfer unchanged.**
+
+| Grant | Who issued it | After a recipient transfer |
+|---|---|---|
+| `CANCEL`, `PAUSE`, `RESUME`, `TOP_UP` | Sender | Unchanged — the sender is still the sender. |
+| `WITHDRAW`, `TRANSFER_RECIPIENT` | Recipient | Still live, and now controlled by the **new** recipient. |
+
+The rule follows from where authority already lives. `grant_delegate` and
+`revoke_delegate` resolve their recipient half against the stream's *current*
+`recipient`, so authority over recipient-issued grants moves with the slot:
+
+- The **new recipient** can revoke a surviving grant immediately:
+  `revoke_delegate(stream_id, new_recipient, delegate)` succeeds, and the next
+  delegate call is rejected with `Error::DelegateNotPermitted`.
+- The **old recipient** is no longer a party to the stream, so
+  `grant_delegate` and `revoke_delegate` both reject them with
+  `Error::Unauthorized`. They cannot mint new grants for their delegate either.
+- The **sender** is unaffected: it can still grant and revoke every sender-side
+  op, before or after the transfer.
+
+Because revocation is ordered rather than retroactive (the guarantee above), a
+recipient who inherits somebody else's delegate should revoke it before that
+delegate acts. Anything the delegate did before the revocation stands, exactly
+as for any other revocation.
+
+Clearing grants on transfer was the alternative rule. It was rejected on two
+counts: a grant is not exclusively the recipient's instrument — the sender's
+`CANCEL` / `PAUSE` / `RESUME` / `TOP_UP` grants have nothing to do with who is
+paid — and grants are stored per `(stream, delegate)` with no index a transfer
+could sweep, so selective clearing would need a schema change and a migration.
+The stated rule needs neither, and it is the behaviour the contract already
+exhibits.
+
 ## Verification
 
 `contracts/stream/src/test/delegation.rs`, section *Same-ledger revocation
@@ -68,3 +106,17 @@ ordering*, asserts both directions for **every permission bit**
 
 No test advances the ledger clock between the calls, which is what pins the
 "same ledger" case rather than merely the cross-ledger one.
+
+The same module's section *Recipient transfer* pins the transfer rule above,
+again by looping over `ALL_OPS`:
+
+- `delegate_grants_survive_a_recipient_transfer_for_every_permission_bit` —
+  grant, transfer the recipient, then invoke the delegate entry point for the
+  bit. The call is authorised for all six bits, which can only happen if the
+  grant survived.
+- `the_new_recipient_can_revoke_a_grant_that_survived_the_transfer` — the new
+  recipient revokes a recipient-issued grant; the next delegate call is
+  rejected with `DelegateNotPermitted` and the stream is unchanged.
+- `the_old_recipient_cannot_revoke_after_a_transfer` — the previous recipient
+  is rejected with `Error::Unauthorized`, and the delegate remains authorised,
+  so the rejection did not silently clear anything.
