@@ -617,6 +617,11 @@ impl FluxoraStream {
     /// Cancelling before the cliff refunds everything: pre-cliff the recipient's
     /// entitlement is zero by definition.
     ///
+    /// Cancelling at exactly `start_time` is that case one instant later:
+    /// nothing has vested, so the entire deposit is returned, the recipient
+    /// receives nothing, and the collapsed schedule has zero length rather than
+    /// a negative one.
+    ///
     /// # Errors
     ///
     /// * [`Error::StreamNotFound`] — no stream with this id.
