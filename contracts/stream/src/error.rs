@@ -125,6 +125,11 @@ pub enum Error {
     /// Surfaces when the token sub-invocation fails with an `Abort` (host
     /// trap) rather than a typed contract error, which is what the host
     /// produces when the callee contract does not exist.
+    ///
+    /// Reserved for real WASM execution: the native test host types every
+    /// sub-invocation failure as a contract error, so this collapses into
+    /// [`Self::TokenTransferFailed`] there and cannot be produced by a test.
+    /// Classified as reserved in `test::error_reachability`.
     TokenMissing = 26,
 
     // --- Delegation ---
@@ -135,6 +140,11 @@ pub enum Error {
 
     // --- Batch validation ---
     /// A serialized vector element of a batch is not a `u64`.
+    ///
+    /// Defence in depth against a raw XDR caller. The typed client argument
+    /// is `Vec<u64>`, so the host rejects a non-`u64` element before this body
+    /// runs; no well-typed public call can reach it. Classified as reserved in
+    /// `test::error_reachability`.
     MalformedStreamId = 29,
 
     // --- Transfer ---
@@ -143,6 +153,11 @@ pub enum Error {
 
     // --- Arithmetic (top-up) ---
     /// Zero or negative `top_up` amount.
+    ///
+    /// Superseded by [`Self::InvalidAmount`]: `top_up` rejects
+    /// `amount <= 0` as `InvalidAmount` before any schedule arithmetic runs,
+    /// so no entry point emits 31. Frozen ABI — do not renumber. Classified as
+    /// reserved in `test::error_reachability`.
     InvalidTopUp = 31,
 
     // --- Token assumptions ---
@@ -159,5 +174,13 @@ pub enum Error {
     TokenAmountMismatch = 32,
     // --- Monotonicity ---
     /// An operation would cause the vested amount to decrease.
+    ///
+    /// A defensive guard on `pause`, `resume`, `top_up` and
+    /// `transfer_recipient`. `vested` is non-decreasing under every mutation
+    /// those four paths can make — pause/resume leave elapsed time unchanged,
+    /// `top_up` scales numerator and denominator together, and the recipient
+    /// is not an input to the formula — so no reachable call produces it.
+    /// The guard stays because the invariant it protects is load-bearing.
+    /// Classified as reserved in `test::error_reachability`.
     VestedDecreased = 33,
 }

@@ -585,8 +585,8 @@ impl FeeOnTransferToken {
 
 /// Register a fee-on-transfer token with the fee off, fund `sender`, and
 /// return `(token, client)`.
-fn register_fee_on_transfer_token<'a>(
-    h: &'a Harness<'a>,
+pub(super) fn register_fee_on_transfer_token<'a, 'b>(
+    h: &'a Harness<'b>,
 ) -> (Address, FeeOnTransferTokenClient<'a>) {
     let token = h.env.register(FeeOnTransferToken, ());
     let client = FeeOnTransferTokenClient::new(&h.env, &token);

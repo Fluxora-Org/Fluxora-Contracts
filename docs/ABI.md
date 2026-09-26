@@ -210,8 +210,11 @@ The CLI and RPC render these as `Error(Contract, #N)`.
 
 `DepositRateTooLow` (5) enforces a minimum rate of 1 token unit per second (`deposit >= end_time - start_time`). Below one unit per second, the per-second rate truncates to zero and the recipient accrues literally nothing until very late in the schedule. This is rejected to prevent a footgun where a treasury streams a small grant over a long duration and the recipient cannot withdraw anything.
 
-`StreamNotActive` (11) is reserved in the frozen ABI; current entry points
-return the more specific pause/terminated variants instead.
+`StreamNotActive` (11), `TokenMissing` (26), `MalformedStreamId` (29),
+`InvalidTopUp` (31) and `VestedDecreased` (33) are reserved in the frozen ABI:
+each is documented in the table above and in `test::error_reachability`, and
+none of them has a reachable path through a public entry point. Do not
+renumber or remove them.
 
 `withdraw` distinguishes empty balances: a live stream with nothing accrued
 yet returns `NothingToWithdraw` (17); a `Cancelled` or `Depleted` stream with

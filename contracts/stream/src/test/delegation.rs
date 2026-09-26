@@ -589,6 +589,24 @@ fn delegate_call_error(h: &Harness, id: u64, agent: &Address, op_bit: u32) -> Er
     delegate_call_result(h, id, agent, op_bit).expect_err("delegate call should be rejected")
 }
 
+/// Peel the host layer off a `try_delegate_*` result and normalise it to
+/// `Result<(), Error>`.
+///
+/// The four delegate entry points do not share one generated client type
+/// (`delegate_withdraw` returns `i128`, the others `()`, and the SDK's
+/// return-value conversion error differs between them), so each arm is
+/// normalised here instead of in the `match` above.
+fn peel<T, X: std::fmt::Debug>(
+    outcome: Result<Result<T, X>, Result<Error, soroban_sdk::InvokeError>>,
+) -> Result<(), Error> {
+    match outcome {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(x)) => panic!("delegate return value failed to convert: {x:?}"),
+        Err(Ok(e)) => Err(e),
+        Err(Err(e)) => panic!("delegate call trapped in the host: {e:?}"),
+    }
+}
+
 /// Dispatch to the `delegate_*` entry point gated on `op_bit`, normalising the
 /// heterogeneous success types to `()`.
 ///
