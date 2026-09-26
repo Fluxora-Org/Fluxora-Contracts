@@ -354,6 +354,9 @@ jobs:
             fi
           done
 
+      - name: Check WASM size budget
+        run: bash script/check-stream-wasm-size.sh
+
       - name: Upload WASM hash artifact
         uses: actions/upload-artifact@v4
         with:
