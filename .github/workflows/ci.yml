@@ -716,9 +716,6 @@ jobs:
     name: Code Coverage
     runs-on: ubuntu-latest
     needs: lint
-    # continue-on-error: tarpaulin builds with --features testutils, hitting
-    # the same rand_core version-skew as the other exceptions in this file.
-    continue-on-error: true
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -775,50 +772,17 @@ jobs:
             --timeout 300 \
             -p fluxora_stream
 
-      - name: Enforce 95% coverage gate
+      - name: Enforce committed coverage floor
         run: |
-          set -euo pipefail
-          XML="coverage/cobertura.xml"
-          if [ ! -f "$XML" ]; then
-            echo "::error::Coverage report not found at $XML"
-            exit 1
-          fi
-          # Extract line-rate attribute from the root <coverage> element (value is 0.0–1.0)
-          LINE_RATE=$(grep -oP '(?<=<coverage )[^>]*' "$XML" | grep -oP 'line-rate="\K[0-9.]+')
-          if [ -z "$LINE_RATE" ]; then
-            echo "::error::Could not parse line-rate from $XML"
-            exit 1
-          fi
-          # Convert to integer percentage (e.g. 0.9640 → 96)
-          PCT=$(awk "BEGIN { printf \"%d\", $LINE_RATE * 100 }")
-          echo "Contract line coverage: ${PCT}% (threshold: 95%)"
-          echo "coverage_pct=${PCT}" >> "$GITHUB_OUTPUT"
-          if [ "$PCT" -lt 95 ]; then
-            echo "::error::Coverage ${PCT}% is below the required 95% threshold. Add tests to cover the missing lines."
-            exit 1
-          fi
-          echo "::notice::Coverage gate passed: ${PCT}% >= 95%"
+          python3 script/check_stream_coverage.py \
+            --xml coverage/cobertura.xml \
+            --floor contracts/stream/coverage-floor.txt \
+            --summary "$GITHUB_STEP_SUMMARY" \
+            --github-output "$GITHUB_OUTPUT"
         id: coverage_gate
 
-      - name: Post coverage summary
-        if: always()
-        run: |
-          PCT="${{ steps.coverage_gate.outputs.coverage_pct }}"
-          if [ -n "$PCT" ]; then
-            echo "## Coverage Report" >> "$GITHUB_STEP_SUMMARY"
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "| Metric | Value |" >> "$GITHUB_STEP_SUMMARY"
-            echo "|--------|-------|" >> "$GITHUB_STEP_SUMMARY"
-            echo "| Line coverage | ${PCT}% |" >> "$GITHUB_STEP_SUMMARY"
-            echo "| Threshold | 95% |" >> "$GITHUB_STEP_SUMMARY"
-            if [ "$PCT" -ge 95 ]; then
-              echo "| Status | ✅ Passed |" >> "$GITHUB_STEP_SUMMARY"
-            else
-              echo "| Status | ❌ Failed |" >> "$GITHUB_STEP_SUMMARY"
-            fi
-          fi
-
       - name: Upload coverage to Codecov
+        if: always()
         uses: codecov/codecov-action@v4
         with:
           files: coverage/cobertura.xml
@@ -826,6 +790,7 @@ jobs:
           verbose: true
 
       - name: Upload coverage artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
