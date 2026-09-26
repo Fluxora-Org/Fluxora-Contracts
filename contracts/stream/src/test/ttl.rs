@@ -381,3 +381,8 @@ fn seconds_to_ledgers_rounds_up() {
     assert_eq!(storage::seconds_to_ledgers(1), 1);
     assert_eq!(storage::seconds_to_ledgers(u64::MAX), u32::MAX);
 }
+
+#[test]
+fn nominal_ledger_close_time_is_five_seconds() {
+    assert_eq!(storage::SECONDS_PER_LEDGER, 5);
+}
