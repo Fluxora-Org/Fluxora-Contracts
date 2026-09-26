@@ -236,7 +236,7 @@ fn identity_holds_across_randomized_operation_sequences() {
         let start = h.now();
         let duration = 80 * DAY + rng.below(40 * DAY);
         let cliff = start + rng.below(duration / 2 + 1);
-        let deposit = (duration as i128) * ONE;
+        let deposit = 1_000 * ONE;
         let id = h.create(deposit, start, start + duration, cliff, true, true, true);
         assert_contract_identity(&h, id, &std::format!("seed {seed} init"));
 

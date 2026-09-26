@@ -353,11 +353,6 @@ fn each_permission_bit_is_independent_and_requires_its_grantor() {
             other => panic!("unhandled op bit {other}"),
         };
 
-        assert!(
-            delegate_call_result(&h, id, &agent, op_bit).is_ok(),
-            "op bit {op_bit}: the sole granted permission must succeed",
-        );
-
         let wrong_grantor = match op_bit {
             op::WITHDRAW | op::TRANSFER_RECIPIENT => &h.sender,
             _ => &h.recipient,
@@ -371,6 +366,11 @@ fn each_permission_bit_is_independent_and_requires_its_grantor() {
             err,
             Error::Unauthorized,
             "op bit {op_bit}: the grantor must own the delegated permission",
+        );
+
+        assert!(
+            delegate_call_result(&h, id, &agent, op_bit).is_ok(),
+            "op bit {op_bit}: the sole granted permission must succeed",
         );
 
         for other_bit in ALL_OPS {
@@ -550,7 +550,7 @@ const ALL_OPS: [u32; 6] = [
 ];
 
 /// The party that owns `op` and may therefore grant (and revoke) it.
-fn grantor_for(h: &Harness, op: u32) -> &Address {
+fn grantor_for<'a>(h: &'a Harness<'_>, op: u32) -> &'a Address {
     match op {
         op::WITHDRAW | op::TRANSFER_RECIPIENT => &h.recipient,
         _ => &h.sender,
@@ -592,9 +592,8 @@ fn delegate_call_error(h: &Harness, id: u64, agent: &Address, op_bit: u32) -> Er
 /// Dispatch to the `delegate_*` entry point gated on `op_bit`, normalising the
 /// heterogeneous success types to `()`.
 ///
-/// `try_delegate_*` wraps the contract's own `Result` inside the host's result;
-/// the outer `unwrap` peels off the host layer (a failure there is a genuine
-/// trap, not the typed error this suite asserts on).
+/// `try_delegate_*` returns a contract error in the outer `Err(Ok(error))`.
+/// Discard each successful return value and unwrap only the host error layer.
 fn delegate_call_result(
     h: &Harness,
     id: u64,
@@ -603,23 +602,21 @@ fn delegate_call_result(
 ) -> Result<(), Error> {
     let new_recip = Address::generate(&h.env);
     let outcome = match op_bit {
-        op::WITHDRAW => h
-            .client
-            .try_delegate_withdraw(&id, agent, &None)
-            .map(|inner| inner.map(|_| ())),
-        op::CANCEL => h.client.try_delegate_cancel(&id, agent),
-        op::PAUSE => h.client.try_delegate_pause(&id, agent),
-        op::RESUME => h.client.try_delegate_resume(&id, agent),
+        op::WITHDRAW => h.client.try_delegate_withdraw(&id, agent, &None).map(|_| ()),
+        op::CANCEL => h.client.try_delegate_cancel(&id, agent).map(|_| ()),
+        op::PAUSE => h.client.try_delegate_pause(&id, agent).map(|_| ()),
+        op::RESUME => h.client.try_delegate_resume(&id, agent).map(|_| ()),
         op::TOP_UP => h
             .client
             .try_delegate_top_up(&id, agent, &(100 * ONE))
-            .map(|inner| inner.map(|_| ())),
+            .map(|_| ()),
         op::TRANSFER_RECIPIENT => h
             .client
-            .try_delegate_transfer_recipient(&id, agent, &new_recip),
+            .try_delegate_transfer_recipient(&id, agent, &new_recip)
+            .map(|_| ()),
         other => panic!("unhandled op bit {other}"),
     };
-    outcome.unwrap()
+    outcome.map_err(|error| error.expect("host invocation trapped"))
 }
 
 /// A delegate revoked earlier in the same ledger cannot act afterwards.
@@ -666,7 +663,19 @@ fn delegate_call_ordered_before_revocation_in_the_same_ledger_is_honoured() {
 
         // Grant, call and revoke all share one ledger — no `advance` here.
         delegate_call(&h, id, &agent, op_bit);
-        h.client.revoke_delegate(&id, grantor_for(&h, op_bit), &agent);
+        // Cancellation terminates the stream, so there is no live grant left
+        // to revoke. The revoke-before-cancel order is covered above.
+        if op_bit == op::CANCEL {
+            continue;
+        }
+        // A recipient transfer changes who can revoke the old recipient's
+        // grant; the sender remains authorized after that transfer.
+        let revoker = if op_bit == op::TRANSFER_RECIPIENT {
+            &h.sender
+        } else {
+            grantor_for(&h, op_bit)
+        };
+        h.client.revoke_delegate(&id, revoker, &agent);
 
         assert_eq!(
             delegate_call_error(&h, id, &agent, op_bit),

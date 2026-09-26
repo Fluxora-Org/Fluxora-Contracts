@@ -331,18 +331,19 @@ fn abi_row<'d>(doc: &'d str, name: &str) -> &'d str {
         .unwrap_or_else(|| panic!("docs/ABI.md has no table row for `{name}`"))
 }
 
-/// Function names listed in the ABI tables between `start` and the next
-/// top-level `---` rule.
+/// Function names listed in the ABI table under `start`.
 fn abi_section_functions(doc: &str, start: &str) -> std::vec::Vec<std::string::String> {
     let from = doc
         .find(start)
         .unwrap_or_else(|| panic!("docs/ABI.md: no section {start}"));
     let section = &doc[from..];
-    let section = &section[..section.find("\n---").unwrap_or(section.len())];
+    let section = &section[..section.find("\n### ").unwrap_or(section.len())];
     section
         .lines()
         .filter_map(|l| l.strip_prefix("| `"))
-        .filter_map(|l| l.split('(').next())
+        .filter_map(|l| l.split('`').next())
+        .filter(|name| name.contains('('))
+        .filter_map(|name| name.split('(').next())
         .map(std::string::String::from)
         .collect()
 }
@@ -370,6 +371,7 @@ fn abi_doc_states_ttl_behaviour_per_read_method() {
 fn abi_doc_classifies_every_read_entry_point() {
     let doc = abi_doc();
     let mut documented = abi_section_functions(&doc, "### Views");
+    documented.extend(abi_section_functions(&doc, "### Maintenance"));
     documented.sort();
     let mut classified: std::vec::Vec<std::string::String> = PURE_READS
         .iter()
