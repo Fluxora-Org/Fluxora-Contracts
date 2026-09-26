@@ -809,6 +809,15 @@ jobs:
       name: mainnet
       url: https://stellar.expert
     steps:
+      - name: Await manual approval
+        uses: trstringer/manual-approval@v1
+        with:
+          secret: ${{ github.TOKEN }}
+          approvers: Fluxora-Org/maintainers
+          minimum-approvals: 1
+          issue-title: "Mainnet deploy approval required"
+          issue-body: "Please approve or deny the deployment to mainnet."
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
