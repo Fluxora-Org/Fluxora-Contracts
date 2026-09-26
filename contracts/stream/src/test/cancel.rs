@@ -424,3 +424,105 @@ fn split_holds_after_recipient_drains_the_tail() {
     assert_eq!(h.get(id).status, StreamStatus::Cancelled);
     h.assert_pool_exact();
 }
+
+// ---------------------------------------------------------------------------
+// Cancel at exactly `start_time` (Issue #1694)
+//
+// `accrual::vested` documents that a cancel landing on the schedule's first
+// instant collapses the duration to zero and rewrites `deposited` to the
+// vested amount, returning it in full rather than dividing by zero. This is
+// the path where rounding and the rewrite interact, so exact conservation is
+// pinned here across deposits that divide the schedule evenly and ones that
+// leave a remainder.
+// ---------------------------------------------------------------------------
+
+/// Deposits against a 100-day schedule (8_640_000 seconds).
+///
+/// `8_640_000` is exactly one stroop per second; `8_640_001` leaves a
+/// remainder of one stroop; the rest are deliberately uneven so no test can
+/// pass by way of an exact division. All are >= the schedule length, which is
+/// the creation-time dust-rate floor.
+const START_TIME_DEPOSITS: [i128; 5] = [
+    8_640_000,
+    8_640_001,
+    9_999_999_999,
+    1_000 * ONE,
+    123_456_789_013,
+];
+
+/// Cancelling on the schedule's first instant returns every deposit exactly:
+/// the sender is made whole, the recipient receives nothing, and no residue
+/// stays attributable to the stream.
+#[test]
+fn cancel_at_start_time_returns_every_deposit_and_leaves_no_residue() {
+    for deposit in START_TIME_DEPOSITS {
+        let h = Harness::new();
+        let id = h.create_simple(deposit, 100 * DAY);
+        let sender_before = h.balance(&h.sender);
+        let recipient_before = h.balance(&h.recipient);
+
+        // Nothing has vested on the first instant, so the whole deposit is the
+        // refundable amount — the precondition the cancel path relies on.
+        assert_eq!(h.client.vested_of(&id), 0, "deposit {deposit}");
+        assert_eq!(
+            h.client.refundable_of(&id),
+            deposit,
+            "deposit {deposit}: the entire deposit must be refundable",
+        );
+
+        h.client.cancel(&id);
+
+        // The sender receives the entire deposit back, exactly.
+        assert_eq!(
+            h.balance(&h.sender),
+            sender_before + deposit,
+            "deposit {deposit}: full refund",
+        );
+        // The recipient receives nothing.
+        assert_eq!(
+            h.balance(&h.recipient),
+            recipient_before,
+            "deposit {deposit}: the recipient must receive nothing",
+        );
+        assert_eq!(h.client.withdrawable_of(&id), 0, "deposit {deposit}");
+
+        // No residue remains attributable to the stream: the rewritten deposit
+        // is zero, the schedule collapsed onto start_time, and the pool is empty.
+        let s = h.get(id);
+        assert_eq!(s.deposited, 0, "deposit {deposit}: no residue in storage");
+        assert_eq!(s.withdrawn, 0, "deposit {deposit}");
+        assert_eq!(
+            s.end_time, s.start_time,
+            "deposit {deposit}: zero-length schedule, not a negative one",
+        );
+        assert_eq!(h.pool(), 0, "deposit {deposit}: pool must be empty");
+        assert_split(&h, id, deposit);
+
+        // And there is nothing left for the recipient to claim afterwards.
+        let err = h.client.try_withdraw(&id, &None).unwrap_err().unwrap();
+        assert_eq!(err, Error::StreamTerminated, "deposit {deposit}");
+    }
+}
+
+/// The same instant for a stream whose `start_time` is not the creation time:
+/// warping to the first instant and cancelling must refund in full, with no
+/// partial accrual creeping in from the wait.
+#[test]
+fn cancel_exactly_when_a_delayed_stream_opens_refunds_in_full() {
+    let h = Harness::new();
+    let start = h.now() + 10 * DAY;
+    let id = h.create(1_000 * ONE, start, start + 7 * DAY, start, true, true, true);
+    let sender_before = h.balance(&h.sender);
+    let recipient_before = h.balance(&h.recipient);
+
+    h.warp_to(start);
+    assert_eq!(h.now(), start, "the cancel must land exactly on start_time");
+
+    h.client.cancel(&id);
+
+    assert_eq!(h.balance(&h.sender), sender_before + 1_000 * ONE);
+    assert_eq!(h.balance(&h.recipient), recipient_before);
+    assert_eq!(h.get(id).deposited, 0, "no residue");
+    assert_eq!(h.pool(), 0);
+    assert_split(&h, id, 1_000 * ONE);
+}
