@@ -14,6 +14,16 @@ integrators. Anything not described here is not part of the interface.
 | Wasm hash | `d47c96a344a79c614ab0dcf0eac62cc9384f6dc7f1d45c3f5109fb09658b035e` |
 | Interface spec sha256 | `acdfd259c7f9a854d42c5da4cda43138fb71b757b604a21c6dac8a8a5a3a86d1` |
 
+## Upgrade posture
+
+The deployed stream contract is **not upgradeable in place**. This is a
+deliberate property: the contract has no admin key and exposes no upgrade entry
+point. A changed implementation must be deployed at a new address; existing
+streams remain on the original deployment and are not migrated automatically.
+There is therefore no upgrade authorization or in-place migration process.
+The ABI inventory below is the deployed surface and contains no upgrade or
+admin-rotation method.
+
 The deployed contract's interface has been verified byte-identical to the local
 build:
 
