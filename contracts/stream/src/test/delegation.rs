@@ -700,3 +700,101 @@ fn all_ops_fixture_covers_every_permission_bit() {
     // added, extend ALL_OPS and this mask together.
     assert_eq!(covered, 0b11_1111, "ALL_OPS does not cover every permission bit");
 }
+
+// ---------------------------------------------------------------------------
+// Recipient transfer (Issue #1696)
+// ---------------------------------------------------------------------------
+//
+// Documented rule — `docs/delegation-revocation.md`, section “Recipient
+// transfer: grants survive”. A transfer reassigns who is paid; it does not
+// touch `Delegate(stream_id, delegate)` entries. Recipient-issued grants
+// therefore pass to the new holder of the recipient slot, who can revoke them,
+// while the old recipient — no longer a party to the stream — can revoke
+// nothing. Sender-issued grants are unaffected because the sender does not
+// change with the transfer.
+//
+// Each test below loops over `ALL_OPS`, so the rule is asserted for every
+// permission bit rather than for a representative sample.
+
+/// The documented rule: a grant that was live before the transfer is still
+/// live after it, for every permission bit.
+#[test]
+fn delegate_grants_survive_a_recipient_transfer_for_every_permission_bit() {
+    for op_bit in ALL_OPS {
+        let h = Harness::new();
+        let agent = Address::generate(&h.env);
+        let id = stream_with_grant(&h, &agent, op_bit);
+
+        h.client.transfer_recipient(&id, &h.other);
+        assert_eq!(
+            h.client.get_stream(&id).recipient,
+            h.other,
+            "op bit {op_bit}: the transfer must have taken effect",
+        );
+
+        // Authorised only if `check_delegate` still found the grant — a
+        // cleared grant would fail with `DelegateNotPermitted` instead.
+        delegate_call(&h, id, &agent, op_bit);
+    }
+}
+
+/// Grants survive, so authority over the recipient-issued ones follows the
+/// recipient slot: the new recipient can revoke them the moment they take over.
+#[test]
+fn the_new_recipient_can_revoke_a_grant_that_survived_the_transfer() {
+    for op_bit in ALL_OPS {
+        let h = Harness::new();
+        // Recipient-issued bits only — the sender's grants are the sender's
+        // to revoke and are covered by `sender_can_revoke_recipient_issued_grant`.
+        if *grantor_for(&h, op_bit) != h.recipient {
+            continue;
+        }
+        let agent = Address::generate(&h.env);
+        let id = stream_with_grant(&h, &agent, op_bit);
+
+        h.client.transfer_recipient(&id, &h.other);
+        h.client.revoke_delegate(&id, &h.other, &agent);
+
+        let before = h.client.get_stream(&id);
+        assert_eq!(
+            delegate_call_error(&h, id, &agent, op_bit),
+            Error::DelegateNotPermitted,
+            "op bit {op_bit}: the new recipient's revocation must be effective",
+        );
+        assert_eq!(
+            h.client.get_stream(&id),
+            before,
+            "op bit {op_bit}: a rejected delegate call must not touch the stream",
+        );
+    }
+}
+
+/// The previous recipient is no longer a party to the stream, so revocation is
+/// theirs no longer — and the rejection must not have cleared the grant either.
+#[test]
+fn the_old_recipient_cannot_revoke_after_a_transfer() {
+    for op_bit in ALL_OPS {
+        let h = Harness::new();
+        if *grantor_for(&h, op_bit) != h.recipient {
+            continue;
+        }
+        let agent = Address::generate(&h.env);
+        let id = stream_with_grant(&h, &agent, op_bit);
+
+        h.client.transfer_recipient(&id, &h.other);
+
+        let err = h
+            .client
+            .try_revoke_delegate(&id, &h.recipient, &agent)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(
+            err,
+            Error::Unauthorized,
+            "op bit {op_bit}: the old recipient is no longer a party",
+        );
+
+        // The grant is untouched by the rejected call: the delegate still acts.
+        delegate_call(&h, id, &agent, op_bit);
+    }
+}
