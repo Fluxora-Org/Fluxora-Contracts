@@ -409,7 +409,9 @@ Its entire purpose is to prove the live-network archival/restore round trip that
 the unit suite structurally cannot (see [KNOWN-LIMITATIONS.md §1](KNOWN-LIMITATIONS.md)
 and [`script/archival-canary.sh`](script/archival-canary.sh)). It writes a
 persistent entry and deliberately never extends its TTL, so it archives on the
-network's minimum schedule.
+network's minimum schedule. For the expected cadence, command prerequisites,
+signal interpretation, and operator response, see the
+[archival canary runbook](docs/archival-canary.md).
 
 It remains a **workspace member** — so `cargo test --workspace`, `cargo fmt --all`
 and `cargo clippy --all-targets` keep covering its smoke test — but it is
@@ -457,6 +459,7 @@ frontend's four contract calls all break, the backend is unaffected.
 | | |
 |---|---|
 | [docs/ABI.md](docs/ABI.md) | **Interface of record.** Frozen 2026-08-12. Read this before integrating. |
+| [docs/archival-canary.md](docs/archival-canary.md) | Archival canary cadence, signal interpretation, and operator response. |
 | [docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md) | What a green suite does not prove. |
 | [docs/MIGRATION.md](docs/MIGRATION.md) | Deletion audit vs the pre-rewrite contract, and downstream impact. |
 | [docs/soroban-rpc-read-skew.md](docs/soroban-rpc-read-skew.md) | Pin multi-call reads to one ledger, and the read-after-write barrier. |
