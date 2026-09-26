@@ -153,8 +153,10 @@ fn run_sequence(seed: u64, steps: u32) {
     let h = Harness::new();
     let mut rng = Rng(seed);
 
-    // Seed the world with a handful of streams with varied shapes.
-    for i in 0..4u64 {
+    // Seed the world with a population of streams with varied shapes. Keeping
+    // several streams live at once is important: a one-unit accounting bug in
+    // one stream must be detected against the aggregate pool liability.
+    for i in 0..8u64 {
         let start = h.now() + rng.below(10 * DAY);
         let duration = 10 * DAY + rng.below(200 * DAY);
         let cliff = start + rng.below(duration);
@@ -280,6 +282,28 @@ fn the_pool_invariant_holds_across_long_sequences() {
         // Distinct from the seeds used above, and stable across runs.
         run_sequence(0xDEAD_BEEF ^ i.wrapping_mul(0xA24B_AED4_963E_E407), steps);
     }
+}
+
+#[test]
+fn the_pool_invariant_covers_paused_cancelled_and_matured_streams() {
+    let h = Harness::new();
+    let paused = h.create(1_000 * ONE, T0, T0 + 100 * DAY, T0, true, true, true);
+    let cancelled = h.create(1_000 * ONE, T0, T0 + 100 * DAY, T0, true, false, true);
+    let matured = h.create_simple(1_000 * ONE, 10 * DAY);
+
+    h.advance(20 * DAY);
+    h.client.pause(&paused);
+    h.client.cancel(&cancelled);
+    h.warp_to(T0 + 200 * DAY);
+
+    assert_eq!(h.get(paused).status, StreamStatus::Paused);
+    assert_eq!(h.get(cancelled).status, StreamStatus::Cancelled);
+    assert_eq!(h.client.vested_of(&matured), 1_000 * ONE);
+
+    // The exact equality is a mutation sentinel: a one-unit withdrawal or
+    // refund accounting error must fail this assertion immediately.
+    check_all_invariants(&h, 0x1683, 0);
+    h.assert_pool_exact();
 }
 
 #[test]

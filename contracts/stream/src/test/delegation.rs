@@ -631,7 +631,8 @@ fn revoked_delegate_cannot_act_later_in_the_same_ledger() {
         let id = stream_with_grant(&h, &agent, op_bit);
 
         // Revoke, then invoke — both in the same ledger, revocation first.
-        h.client.revoke_delegate(&id, grantor_for(&h, op_bit), &agent);
+        h.client
+            .revoke_delegate(&id, grantor_for(&h, op_bit), &agent);
         let before = h.client.get_stream(&id);
 
         assert_eq!(
@@ -691,14 +692,21 @@ fn delegate_call_ordered_before_revocation_in_the_same_ledger_is_honoured() {
 fn all_ops_fixture_covers_every_permission_bit() {
     let mut covered: u32 = 0;
     for op_bit in ALL_OPS {
-        assert_eq!(op_bit.count_ones(), 1, "ALL_OPS entries must be single bits");
+        assert_eq!(
+            op_bit.count_ones(),
+            1,
+            "ALL_OPS entries must be single bits"
+        );
         assert_eq!(covered & op_bit, 0, "duplicate op bit {op_bit} in ALL_OPS");
         covered |= op_bit;
     }
 
     // The six bits used by `types::op` (1 << 0 .. 1 << 5). If a new bit is
     // added, extend ALL_OPS and this mask together.
-    assert_eq!(covered, 0b11_1111, "ALL_OPS does not cover every permission bit");
+    assert_eq!(
+        covered, 0b11_1111,
+        "ALL_OPS does not cover every permission bit"
+    );
 }
 
 // ---------------------------------------------------------------------------

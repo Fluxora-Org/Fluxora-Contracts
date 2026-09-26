@@ -515,7 +515,9 @@ impl FeeOnTransferToken {
 
     /// Test-only: set the fee, in basis points of the transferred amount.
     pub fn set_fee_bps(env: Env, bps: u32) {
-        env.storage().instance().set(&symbol_short!("fee_bps"), &bps);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("fee_bps"), &bps);
     }
 
     fn fee_bps(env: &Env) -> u32 {
@@ -660,16 +662,18 @@ fn top_up_with_fee_on_transfer_token_is_rejected() {
     let before = h.client.get_stream(&id);
 
     fee_token.set_fee_bps(&1_000); // 10%, turned on after creation
-    let err = h
-        .client
-        .try_top_up(&id, &(200 * ONE))
-        .unwrap_err()
-        .unwrap();
+    let err = h.client.try_top_up(&id, &(200 * ONE)).unwrap_err().unwrap();
     assert_eq!(err, Error::TokenAmountMismatch);
 
     let after = h.client.get_stream(&id);
-    assert_eq!(after.deposited, before.deposited, "rejected top-up must not add funds");
-    assert_eq!(after.end_time, before.end_time, "rejected top-up must not extend the schedule");
+    assert_eq!(
+        after.deposited, before.deposited,
+        "rejected top-up must not add funds"
+    );
+    assert_eq!(
+        after.end_time, before.end_time,
+        "rejected top-up must not extend the schedule"
+    );
 }
 
 // ─── rebasing / out-of-band balance loss ────────────────────────────────────
@@ -761,10 +765,7 @@ impl ZeroGuardToken {
     }
 
     pub fn transfer(env: Env, from: Address, to: MuxedAddress, amount: i128) {
-        assert_ne!(
-            amount, 0,
-            "ZeroGuardToken: unexpected zero-value transfer"
-        );
+        assert_ne!(amount, 0, "ZeroGuardToken: unexpected zero-value transfer");
         let to = to.address();
         let from_bal = Self::balance_of(&env, &from);
         assert!(from_bal >= amount, "ZeroGuardToken: insufficient balance");

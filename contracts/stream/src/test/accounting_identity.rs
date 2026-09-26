@@ -146,7 +146,15 @@ fn identity_holds_before_cliff_mid_schedule_and_after_maturity() {
     let start = h.now();
     let duration = 100 * DAY;
     let cliff = start + 20 * DAY;
-    let id = h.create(1_000 * ONE, start, start + duration, cliff, true, true, true);
+    let id = h.create(
+        1_000 * ONE,
+        start,
+        start + duration,
+        cliff,
+        true,
+        true,
+        true,
+    );
 
     // Before the cliff: vested = 0 ⇒ refundable = deposit, withdrawable = 0.
     h.advance(10 * DAY);
@@ -181,7 +189,11 @@ fn identity_holds_while_paused() {
     assert_contract_identity(&h, id, "just after pause");
 
     h.advance(40 * DAY);
-    assert_eq!(h.client.vested_of(&id), frozen_vested, "accrual continued while paused");
+    assert_eq!(
+        h.client.vested_of(&id),
+        frozen_vested,
+        "accrual continued while paused"
+    );
     assert_contract_identity(&h, id, "deep into pause");
 
     h.client.resume(&id);
@@ -243,10 +255,9 @@ fn identity_holds_across_randomized_operation_sequences() {
         for step in 1..=40u32 {
             match rng.below(8) {
                 0..=2 => {
-                    let _ = h.client.try_withdraw(
-                        &id,
-                        &Some((1 + rng.below(50)) as i128 * ONE),
-                    );
+                    let _ = h
+                        .client
+                        .try_withdraw(&id, &Some((1 + rng.below(50)) as i128 * ONE));
                 }
                 3 => {
                     let _ = h.client.try_pause(&id);
@@ -255,7 +266,9 @@ fn identity_holds_across_randomized_operation_sequences() {
                     let _ = h.client.try_resume(&id);
                 }
                 5 => {
-                    let _ = h.client.try_top_up(&id, &((1 + rng.below(20)) as i128 * ONE));
+                    let _ = h
+                        .client
+                        .try_top_up(&id, &((1 + rng.below(20)) as i128 * ONE));
                 }
                 _ => {}
             }
@@ -305,7 +318,11 @@ fn deliberate_change_to_any_term_breaks_the_identity() {
     let forged = honest + 1;
     let r = accrual::refundable(&s, now).unwrap();
     let w = accrual::withdrawable(&s, now).unwrap();
-    assert_ne!(r + w, forged, "forged liability must not satisfy the identity");
+    assert_ne!(
+        r + w,
+        forged,
+        "forged liability must not satisfy the identity"
+    );
 
     // Silence unused helper warnings when only the contract path is exercised
     // elsewhere — keep a pure-path call in this sensitivity test.

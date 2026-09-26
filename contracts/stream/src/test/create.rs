@@ -325,10 +325,10 @@ fn rejects_cliff_outside_the_schedule() {
 fn rejects_deposit_below_one_stroop_per_second() {
     let h = Harness::new();
     let start = h.now();
-    
+
     // Test for several durations: 1 second, 1 hour, 1 year, 4 years
     let durations = [1, 3600, YEAR, 4 * YEAR];
-    
+
     for duration_u64 in durations {
         let end = start + duration_u64;
         let duration = duration_u64 as i128;

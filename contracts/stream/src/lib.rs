@@ -198,7 +198,13 @@ fn pull_deposit(env: &Env, token: &Address, from: &Address, amount: &i128) -> Re
     let token_client = token::TokenClient::new(env, token);
     let before = token_client.balance(&contract);
 
-    token_transfer(env, token, from, MuxedAddress::from(contract.clone()), amount)?;
+    token_transfer(
+        env,
+        token,
+        from,
+        MuxedAddress::from(contract.clone()),
+        amount,
+    )?;
 
     let after = token_client.balance(&contract);
     let received = after.checked_sub(before).ok_or(Error::Overflow)?;
