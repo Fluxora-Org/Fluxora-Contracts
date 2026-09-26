@@ -965,3 +965,154 @@ fn a_ttl_batch_is_per_item_and_deterministic() {
     assert_eq!(ttl_of(&h, a), 50_000);
     assert_eq!(ttl_of(&h, b), 50_000);
 }
+
+// ---------------------------------------------------------------------------
+// Explicit batch-size boundary tests (0 / 1 / MAX / MAX+1) for both entry
+// points.  The table below enumerates every combination; each test asserts the
+// exact typed error (or success) and the absence of side effects.
+//
+// Covers the MAX_BATCH_SIZE contract advertised in docs/ABI.md: integrators
+// should be able to rely on the exact boundary, not merely "small works /
+// large fails".
+// ---------------------------------------------------------------------------
+
+// -- batch_withdraw: 0 elements ------------------------------------------------
+#[test]
+fn batch_withdraw_size_zero_is_empty_batch() {
+    let h = Harness::new();
+    let empty: Vec<u64> = Vec::new(&h.env);
+
+    let err = h
+        .client
+        .try_batch_withdraw(&h.recipient, &empty)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::EmptyBatch);
+    assert_eq!(h.balance(&h.recipient), 0);
+}
+
+// -- batch_withdraw: 1 element -------------------------------------------------
+#[test]
+fn batch_withdraw_size_one_succeeds() {
+    let h = Harness::new();
+    let id = h.create_simple(100 * ONE, 100 * DAY);
+    h.advance(10 * DAY);
+
+    let total = h.client.batch_withdraw(&h.recipient, &h.ids(&[id]));
+    assert_eq!(total, 10 * ONE);
+    assert_eq!(h.get(id).withdrawn, 10 * ONE);
+    h.assert_pool_exact();
+}
+
+// -- batch_withdraw: exactly MAX_BATCH_SIZE -----------------------------------
+#[test]
+fn batch_withdraw_size_exactly_max_succeeds() {
+    let h = Harness::new();
+    let ids: std::vec::Vec<u64> = (0..MAX_BATCH_SIZE)
+        .map(|_| h.create_simple(100 * ONE, 100 * DAY))
+        .collect();
+    h.advance(5 * DAY);
+
+    let total = h.client.batch_withdraw(&h.recipient, &h.ids(&ids));
+    assert_eq!(total, MAX_BATCH_SIZE as i128 * 5 * ONE);
+    for id in &ids {
+        assert_eq!(h.get(*id).withdrawn, 5 * ONE);
+    }
+    h.assert_pool_exact();
+}
+
+// -- batch_withdraw: MAX_BATCH_SIZE + 1 ---------------------------------------
+#[test]
+fn batch_withdraw_size_max_plus_one_is_batch_too_large() {
+    let h = Harness::new();
+    let ids: std::vec::Vec<u64> = (0..MAX_BATCH_SIZE + 1)
+        .map(|_| h.create_simple(10 * ONE, 100 * DAY))
+        .collect();
+    h.advance(10 * DAY);
+
+    let err = h
+        .client
+        .try_batch_withdraw(&h.recipient, &h.ids(&ids))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::BatchTooLarge);
+    assert_eq!(h.balance(&h.recipient), 0, "nothing drawn");
+    for id in &ids {
+        assert_eq!(h.get(*id).withdrawn, 0, "stream {id} was drawn on");
+    }
+    h.assert_pool_exact();
+}
+
+// -- batch_extend_ttl: 0 elements ---------------------------------------------
+#[test]
+fn batch_extend_ttl_size_zero_is_empty_batch() {
+    let h = Harness::new();
+    let empty: Vec<u64> = Vec::new(&h.env);
+
+    let err = h
+        .client
+        .try_batch_extend_ttl(&empty)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::EmptyBatch);
+}
+
+// -- batch_extend_ttl: 1 element ----------------------------------------------
+#[test]
+fn batch_extend_ttl_size_one_succeeds() {
+    let h = Harness::new();
+    h.env.ledger().set_max_entry_ttl(50_000);
+    let id = h.create_simple(100 * ONE, YEAR);
+    age_ledgers(&h, 40_000);
+    let before = ttl_of(&h, id);
+    assert!(before < 15_000, "TTL should have decayed before extension");
+
+    let extended = h.client.batch_extend_ttl(&h.ids(&[id]));
+    assert_eq!(extended, 1);
+    assert_eq!(ttl_of(&h, id), 50_000);
+}
+
+// -- batch_extend_ttl: exactly MAX_BATCH_SIZE ---------------------------------
+#[test]
+fn batch_extend_ttl_size_exactly_max_succeeds() {
+    let h = Harness::new();
+    h.env.ledger().set_max_entry_ttl(50_000);
+    let ids: std::vec::Vec<u64> = (0..MAX_BATCH_SIZE)
+        .map(|_| h.create_simple(100 * ONE, YEAR))
+        .collect();
+    age_ledgers(&h, 40_000);
+    for id in &ids {
+        assert!(ttl_of(&h, *id) < 15_000, "TTL should have decayed");
+    }
+
+    let extended = h.client.batch_extend_ttl(&h.ids(&ids));
+    assert_eq!(extended, MAX_BATCH_SIZE);
+    for id in &ids {
+        assert_eq!(ttl_of(&h, *id), 50_000);
+    }
+}
+
+// -- batch_extend_ttl: MAX_BATCH_SIZE + 1 -------------------------------------
+#[test]
+fn batch_extend_ttl_size_max_plus_one_is_batch_too_large() {
+    let h = Harness::new();
+    let ids: std::vec::Vec<u64> = (0..MAX_BATCH_SIZE + 1)
+        .map(|_| h.create_simple(10 * ONE, YEAR))
+        .collect();
+    let before: std::vec::Vec<u32> = ids.iter().map(|id| ttl_of(&h, *id)).collect();
+
+    let err = h
+        .client
+        .try_batch_extend_ttl(&h.ids(&ids))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::BatchTooLarge);
+
+    for (i, id) in ids.iter().enumerate() {
+        assert_eq!(
+            ttl_of(&h, *id),
+            before[i],
+            "no TTL change for stream {id} on oversized batch"
+        );
+    }
+}

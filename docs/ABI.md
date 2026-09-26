@@ -57,6 +57,34 @@ changes update the snapshot only.
 
 ---
 
+## Constants
+
+These numeric limits are part of the frozen ABI. They are guaranteed not to
+change in a same-address deployment; any increase requires a new contract at a
+new address. Integrators should hard-code these values rather than probing with
+trial calls.
+
+| constant | value | applies to | notes |
+|---|---|---|---|
+| **`MAX_BATCH_SIZE`** | **16** | `batch_withdraw`, `batch_extend_ttl` | Maximum number of stream ids accepted in a single batch call. Requests with **more than 16 ids** return [`BatchTooLarge` (19)](#error). Chunk larger lists client-side; the SDK does this automatically. |
+| `MIN_RATE_STROOPS_PER_SECOND` | 1 | `create_stream`, `top_up` | Enforced via `DepositRateTooLow` (5). Below 1 token unit per second the per-second rate truncates to zero and the recipient accrues nothing until the last instant. |
+
+### Derivation of `MAX_BATCH_SIZE = 16`
+
+The binding mainnet constraint is the **contract event budget** (16,384 bytes per
+transaction), not entry or instruction counts. Each stream in a batch emits a
+`withdrawn` event plus the token's `transfer` event — roughly 512 bytes per
+stream between them. With a heavier token event payload, 32 streams would risk
+exhausting the budget. **Sixteen is the measured ceiling with a 2x safety
+factor.** The measurement suite lives in `test::resource_limits` and runs in
+every CI build under the `Resource report` step.
+
+Client-side chunking is transparent to integrators: each chunk is a separate,
+atomic `batch_withdraw` or `batch_extend_ttl` call, and the SDK retries on
+transient network errors per chunk.
+
+---
+
 ## Types
 
 ### `Stream`
@@ -146,7 +174,7 @@ Discriminants are ABI and are never renumbered; new variants are appended.
 |---|---|---|---|---|
 | 1 | `StreamNotFound` | | 17 | `NothingToWithdraw` |
 | 2 | `InvalidTimeRange` | | 18 | `InvalidAmount` |
-| 3 | `InvalidCliff` | | 19 | `BatchTooLarge` |
+| 3 | `InvalidCliff` | | 19 | `BatchTooLarge` — exceeds `MAX_BATCH_SIZE = 16` ([details](#constants)) |
 | 4 | `InvalidDeposit` | | 20 | `EmptyBatch` |
 | 5 | `DepositRateTooLow` | | 21 | `DuplicateStreamId` |
 | 6 | `SelfStream` | | 22 | `Overflow` |
@@ -160,6 +188,7 @@ Discriminants are ABI and are never renumbered; new variants are appended.
 | 14 | `StreamTerminated` | | 30 | `RepeatedTransfer` |
 | 15 | `StreamMatured` | | 31 | `InvalidTopUp` |
 | 16 | `InsufficientWithdrawable` | | 32 | `TokenAmountMismatch` |
+| — | — | | 33 | `VestedDecreased` |
 
 `TokenTransferFailed` (25) and `TokenMissing` (26) are **stable stream-level categories** for token sub-invocation failures. The token contract's internal error discriminant is intentionally discarded — forwarding it would produce a value clients decode against Fluxora's error table, yielding a silent misinterpretation. The raw diagnostic is visible in the failed transaction's `diagnosticEvents`.
 
