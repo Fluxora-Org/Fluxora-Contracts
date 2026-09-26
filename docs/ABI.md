@@ -303,6 +303,42 @@ accounting.
 
 `withdraw` with `amount = None` draws the full available balance.
 
+#### `pause(stream_id)` — freeze accrual and the cliff gate
+
+`pause(stream_id)` requires authorization from the stream's `sender`. The
+`stream_id` parameter is an unsigned 64-bit integer in `[0, u64::MAX]`; it must
+identify an existing stream. Stream ids are assigned monotonically starting at
+`0` and are never reused, so in normal operation the valid ids are
+`0..stream_count()`.
+
+The stream must have been created with `pausable = true`, must not be
+`Cancelled` or `Depleted`, and must currently be `Active`. On success, the
+stream becomes `Paused` and its accrual clock freezes at the ledger timestamp
+of the call. Wall-clock time that passes while paused does not increase
+`vested_of` or the withdrawable balance, and does not allow a cliff to pass.
+The recipient can still withdraw value accrued before the pause. When
+`resume` is later called, the paused interval is added to `paused_total` and
+the schedule continues from the same stream time, stretching the effective end
+date by the paused duration.
+
+**Errors.**
+
+| variant | # | condition |
+|---|---|---|
+| `StreamNotFound` | 1 | No readable entry for `stream_id`: the id was never issued, or its entry has been archived. |
+| `NotPausable` | 9 | The stream was created with `pausable = false`. |
+| `StreamAlreadyPaused` | 13 | The stream is already `Paused`. |
+| `StreamTerminated` | 14 | The stream is `Cancelled` or `Depleted`. Checked before the paused-state test, so a terminal stream that still carries a `paused_at` reports `StreamTerminated`, not `StreamAlreadyPaused`. |
+| `VestedDecreased` | 33 | Defensive only: the post-pause accrual-sanity check observed a lower vested amount. Unreachable for any stream created through the contract. |
+
+This list was cross-checked against `FluxoraStream::pause` in
+[`contracts/stream/src/lib.rs`](../contracts/stream/src/lib.rs); the five
+variants above are the complete set it can return.
+
+**Events.** Exactly one `paused` event on success: topics `stream_id` and
+`sender`; payload `paused_at` (the pause-call ledger timestamp) and
+`paused_total` (the cumulative paused seconds before this in-progress pause).
+
 #### `resume(stream_id)` — un-pause and fold the paused interval into `paused_total`
 
 `resume` reverses `pause`: it clears `paused_at`, moves the stream back to
