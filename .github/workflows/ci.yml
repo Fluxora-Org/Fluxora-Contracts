@@ -122,6 +122,9 @@ jobs:
           print("OK: docs/audit.md entrypoint table is complete.")
           EOF
 
+      - name: Migration path validation (docs/MIGRATION.md vs ABI)
+        run: python3 script/validate_migration.py
+
   # ---------------------------------------------------------------------------
   # Fast changed-files lint (PRs only).  Mirrors what developers run locally
   # via `pnpm lint:ci`.  This is the "cheap" gate; the full workspace lint
