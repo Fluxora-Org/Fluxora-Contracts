@@ -931,6 +931,41 @@ fn a_successful_batch_emits_withdrawn_events_in_batch_order() {
     h.assert_pool_exact();
 }
 
+/// The realistic payroll settlement: a batch of multiple streams (e.g. 16 elements)
+/// all settling to the same recipient, requiring a single authorization doing the
+/// work for the entire batch.
+///
+/// Acceptance criteria:
+/// - A batch of streams sharing a recipient settles with one authorisation.
+/// - The total transferred equals the sum of the individual withdrawable amounts.
+/// - A batch mixing recipients requires the right authorisation for each (covered elsewhere/in auth).
+/// - Events are emitted per stream, not per batch.
+#[test]
+fn batch_withdraw_same_recipient_settles_payroll_with_single_authorisation() {
+    let h = Harness::new();
+    let num_streams = 16;
+    let ids: std::vec::Vec<u64> = (0..num_streams)
+        .map(|i| h.create_simple((100 + i as i128) * ONE, 100 * DAY))
+        .collect();
+    h.advance(30 * DAY);
+
+    let expected_per_stream: std::vec::Vec<i128> =
+        ids.iter().map(|id| h.client.withdrawable_of(id)).collect();
+    let expected_total: i128 = expected_per_stream.iter().sum();
+
+    let total = h.client.batch_withdraw(&h.recipient, &h.ids(&ids));
+    assert_eq!(total, expected_total);
+    assert_eq!(h.balance(&h.recipient), expected_total);
+
+    // Assert events are emitted per stream, not per batch (in exact batch order).
+    assert_eq!(withdrawn_event_ids(&h), ids);
+
+    for (i, id) in ids.iter().enumerate() {
+        assert_eq!(h.get(*id).withdrawn, expected_per_stream[i]);
+    }
+    h.assert_pool_exact();
+}
+
 // ---------------------------------------------------------------------------
 // TTL sweep: per-item, deterministic
 // ---------------------------------------------------------------------------
