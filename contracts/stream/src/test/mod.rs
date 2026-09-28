@@ -82,3 +82,6 @@ mod read_ttl_matrix;
 // guards #1675 (no inert governance crate). Previously unregistered, so
 // that CI step matched zero tests.
 mod packaging;
+
+// Issue #1860 — the id allocator must be a function of the counter alone, never of which records happen to be present
+mod id_reuse_proptest;
