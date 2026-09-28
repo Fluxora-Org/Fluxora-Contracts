@@ -601,6 +601,7 @@ fn cancel_collapse_settles_schedule_at_cancel_instant_and_conserves() {
 
     for case in case_defs {
         let h = Harness::new();
+        let label = case.label;
         let start = T0 + case.start_offset;
         let end = start + DURATION;
         let id = h.create(DEPOSIT, start, end, start, true, true, true);
@@ -618,20 +619,18 @@ fn cancel_collapse_settles_schedule_at_cancel_instant_and_conserves() {
         let refundable_before = h.client.refundable_of(&id);
         assert_eq!(
             vested_before, case.expected_vested,
-            "{}: vested_before",
-            case.label
+            "{label}: vested_before"
         );
         assert_eq!(
             refundable_before,
             DEPOSIT - case.expected_vested,
-            "{}: entire unvested remainder must be refundable",
-            case.label
+            "{label}: entire unvested remainder must be refundable"
         );
 
         h.client.cancel(&id);
 
         // The clock must not have moved under the cancel itself.
-        assert_eq!(h.now(), cancel_time, "{}: cancel moved the clock", case.label);
+        assert_eq!(h.now(), cancel_time, "{label}: cancel moved the clock");
 
         let s = h.get(id);
         // settle_at = max(stream_time, start_time); unpaused, so stream_time
@@ -639,28 +638,24 @@ fn cancel_collapse_settles_schedule_at_cancel_instant_and_conserves() {
         let settle_at = cancel_time.max(start);
         assert_eq!(
             s.end_time, settle_at,
-            "{}: end_time must collapse onto the cancel instant",
-            case.label
+            "{label}: end_time must collapse onto the cancel instant"
         );
         assert!(
             s.end_time >= s.start_time,
-            "{}: schedule must not invert",
-            case.label
+            "{label}: schedule must not invert"
         );
         if case.expect_clamped_to_start {
             assert_eq!(
                 s.end_time, s.start_time,
-                "{}: pre/at-start cancel clamps to a zero-length schedule",
-                case.label
+                "{label}: pre/at-start cancel clamps to a zero-length schedule"
             );
         }
-        assert_eq!(s.status, StreamStatus::Cancelled, "{}: status", case.label);
+        assert_eq!(s.status, StreamStatus::Cancelled, "{label}: status");
 
         // The rewrite drops `deposited` to what vested and nothing else.
         assert_eq!(
             s.deposited, vested_before,
-            "{}: deposited must be rewritten to vested_before",
-            case.label
+            "{label}: deposited must be rewritten to vested_before"
         );
 
         // The collapse itself leaves `vested` unchanged at the same instant.
@@ -670,14 +665,12 @@ fn cancel_collapse_settles_schedule_at_cancel_instant_and_conserves() {
         let vested_after = h.client.vested_of(&id);
         assert_eq!(
             vested_after, vested_before,
-            "{}: collapse must not change vested at the cancel instant",
-            case.label
+            "{label}: collapse must not change vested at the cancel instant"
         );
         if s.end_time == s.start_time {
             assert_eq!(
                 vested_after, s.deposited,
-                "{}: zero-duration schedule must vest the settled deposit in full",
-                case.label
+                "{label}: zero-duration schedule must vest the settled deposit in full"
             );
         }
 
@@ -687,32 +680,27 @@ fn cancel_collapse_settles_schedule_at_cancel_instant_and_conserves() {
         assert_eq!(
             refund + vested_before,
             DEPOSIT,
-            "{}: conservation broken — refund + vested != deposited",
-            case.label
+            "{label}: conservation broken — refund + vested != deposited"
         );
         assert_eq!(
             h.balance(&h.sender),
             sender_before + refund,
-            "{}: sender refund",
-            case.label
+            "{label}: sender refund"
         );
         assert_eq!(
             h.balance(&h.recipient),
             recipient_before,
-            "{}: recipient must receive nothing at cancel",
-            case.label
+            "{label}: recipient must receive nothing at cancel"
         );
         assert_eq!(
             h.client.refundable_of(&id),
             0,
-            "{}: nothing refundable remains after settlement",
-            case.label
+            "{label}: nothing refundable remains after settlement"
         );
         assert_eq!(
             h.client.withdrawable_of(&id),
             vested_after,
-            "{}: whole settled deposit stays claimable",
-            case.label
+            "{label}: whole settled deposit stays claimable"
         );
         assert_split(&h, id, DEPOSIT);
     }
