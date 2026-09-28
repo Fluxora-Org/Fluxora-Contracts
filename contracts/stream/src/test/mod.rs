@@ -53,6 +53,8 @@ mod withdraw_cancel_same_ledger;
 mod accounting_identity;
 mod accrual_overflow;
 mod batch;
+// Issue #1810 — atomic, bounded payroll-style stream creation.
+mod batch_create;
 mod entrypoint_costs;
 mod invariants;
 mod lifecycle_proptest;

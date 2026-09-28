@@ -93,6 +93,21 @@ pub struct Stream {
     pub status: StreamStatus,
 }
 
+/// One element in an atomic payroll-style stream creation batch.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchCreateRequest {
+    pub recipient: Address,
+    pub token: Address,
+    pub deposit: i128,
+    pub start_time: u64,
+    pub end_time: u64,
+    pub cliff_time: u64,
+    pub cancellable: bool,
+    pub pausable: bool,
+    pub transferable: bool,
+}
+
 impl Stream {
     /// Enforces the recipient-only withdrawal policy.
     ///
