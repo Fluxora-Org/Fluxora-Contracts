@@ -17097,14 +17097,17 @@ fn test_budget_single_withdraw_hot_path() {
     let cpu = ctx.env.budget().cpu_instruction_cost();
     let mem = ctx.env.budget().memory_bytes_cost();
 
-    // Guardrail: single withdraw must stay well under 1 M CPU instructions and 500 KB.
+    use crate::protocol_limits::{LIMITS, SOROBAN_PROTOCOL_VERSION};
+    // Guardrail: single withdraw must stay well under the protocol-derived CPU and memory ceilings.
     assert!(
-        cpu <= 1_000_000,
-        "single withdraw cpu={cpu} exceeds guardrail 1_000_000"
+        cpu <= LIMITS.single_withdraw_cpu_max,
+        "single withdraw cpu={cpu} exceeds protocol-{SOROBAN_PROTOCOL_VERSION} guardrail {}",
+        LIMITS.single_withdraw_cpu_max
     );
     assert!(
-        mem <= 500_000,
-        "single withdraw mem={mem} exceeds guardrail 500_000"
+        mem <= LIMITS.single_withdraw_mem_max,
+        "single withdraw mem={mem} exceeds protocol-{SOROBAN_PROTOCOL_VERSION} guardrail {}",
+        LIMITS.single_withdraw_mem_max
     );
 }
 
@@ -17176,14 +17179,17 @@ fn test_budget_batch_withdraw_10_streams() {
     let cpu = ctx.env.budget().cpu_instruction_cost();
     let mem = ctx.env.budget().memory_bytes_cost();
 
-    // Guardrail: 10-stream batch must stay under 5 M CPU and 2 MB.
+    use crate::protocol_limits::{LIMITS, SOROBAN_PROTOCOL_VERSION};
+    // Guardrail: 10-stream batch must stay under protocol-derived CPU and memory ceilings.
     assert!(
-        cpu <= 5_000_000,
-        "batch_withdraw(10) cpu={cpu} exceeds guardrail 5_000_000"
+        cpu <= LIMITS.batch_withdraw_10_cpu_max,
+        "batch_withdraw(10) cpu={cpu} exceeds protocol-{SOROBAN_PROTOCOL_VERSION} guardrail {}",
+        LIMITS.batch_withdraw_10_cpu_max
     );
     assert!(
-        mem <= 2_000_000,
-        "batch_withdraw(10) mem={mem} exceeds guardrail 2_000_000"
+        mem <= LIMITS.batch_withdraw_10_mem_max,
+        "batch_withdraw(10) mem={mem} exceeds protocol-{SOROBAN_PROTOCOL_VERSION} guardrail {}",
+        LIMITS.batch_withdraw_10_mem_max
     );
 }
 
@@ -17349,14 +17355,17 @@ fn test_budget_create_streams_batch_5() {
     let cpu = ctx.env.budget().cpu_instruction_cost();
     let mem = ctx.env.budget().memory_bytes_cost();
 
-    // Guardrail: 5-stream batch create must stay under 3 M CPU and 1.5 MB.
+    use crate::protocol_limits::{LIMITS, SOROBAN_PROTOCOL_VERSION};
+    // Guardrail: 5-stream batch create must stay under protocol-derived CPU and memory ceilings.
     assert!(
-        cpu <= 3_000_000,
-        "create_streams(5) cpu={cpu} exceeds guardrail 3_000_000"
+        cpu <= LIMITS.create_streams_5_cpu_max,
+        "create_streams(5) cpu={cpu} exceeds protocol-{SOROBAN_PROTOCOL_VERSION} guardrail {}",
+        LIMITS.create_streams_5_cpu_max
     );
     assert!(
-        mem <= 1_500_000,
-        "create_streams(5) mem={mem} exceeds guardrail 1_500_000"
+        mem <= LIMITS.create_streams_5_mem_max,
+        "create_streams(5) mem={mem} exceeds protocol-{SOROBAN_PROTOCOL_VERSION} guardrail {}",
+        LIMITS.create_streams_5_mem_max
     );
 }
 

@@ -4,6 +4,8 @@
 mod accrual;
 #[cfg(test)]
 mod checksum;
+#[cfg(test)]
+mod protocol_limits;
 mod token_check;
 
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env};
