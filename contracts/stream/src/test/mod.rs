@@ -63,6 +63,9 @@ mod ttl;
 // Stage 4
 mod stream_ids;
 
+// Invariant: no success event emitted on a reverting token transfer (#1728).
+mod event_ordering_failed_transfer;
+
 // Issue #1686: every read entry point's storage/TTL behaviour, pinned to
 // docs/ABI.md. `read_methods_no_side_effects` (#1566) existed but was never
 // registered here, so it did not compile or run until now.

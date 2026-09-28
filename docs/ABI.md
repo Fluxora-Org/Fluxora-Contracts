@@ -824,7 +824,43 @@ produced.
 | `stream_count()` | `u64` — ids run `0..stream_count()` | no | no |
 | `stream_exists(stream_id)` | `bool` | no | no |
 
+> **⚠ RPC read-skew caveat — all view functions**
+>
+> Public Soroban RPC endpoints are load-balanced across nodes that may be at
+> different ledger heights at the same instant. Two consecutive view calls can
+> therefore observe different ledgers, and a derived figure that *combines* two
+> calls (e.g. `vested_of + refundable_of`) may be arithmetically impossible
+> even when the on-chain contract is perfectly correct.
+>
+> **This is not a contract bug.** Each node returns a valid, internally consistent
+> view of a real ledger — it is just a different ledger from the one the previous
+> call observed.
+>
+> **Recommended mitigation for integrators:**
+> 1. **Prefer `get_stream`** (single call) over calling `withdrawable_of`,
+>    `vested_of`, and `refundable_of` separately. One call is one ledger by
+>    construction — there is nothing to pin.
+> 2. **When you must combine multiple view calls**, read `latestLedger` from
+>    each response and discard the set if any two responses disagree.
+> 3. **After a write**, do not read immediately. Sample `getLatestLedger` until
+>    several consecutive responses all report a ledger at or beyond your
+>    transaction's ledger; only then issue the view call.
+> 4. **In tests against a public endpoint**, assert within a justified tolerance
+>    rather than demanding exact equality across separate simulation calls.
+> 5. **Run your own RPC node** if you need strict read-after-write consistency.
+>
+> See [`docs/soroban-rpc-read-skew.md`](soroban-rpc-read-skew.md) for a full
+> write-up including the original incident, measurement data, and code examples
+> for all five mitigations.
+
 #### `vested_of(stream_id)` — total earned by the recipient, withdrawn or not
+
+> **⚠ RPC read-skew:** calling `vested_of` and `refundable_of` (or
+> `withdrawable_of`) in separate simulation calls against a public RPC endpoint
+> can observe different ledger heights, producing a conservation sum that does
+> not equal `deposited`. Use `get_stream` to obtain all three figures from a
+> single ledger. See [`docs/soroban-rpc-read-skew.md`](soroban-rpc-read-skew.md)
+> and the [Views caveat](#views--read-only-no-ttl-side-effects) above.
 
 `vested_of` is the **cumulative** amount the recipient has accrued since
 `start_time`, whether or not it has been withdrawn. It is **monotonic
@@ -1148,8 +1184,22 @@ testnet.
 load-balanced across nodes at different heights, and consecutive calls can
 observe different ledgers — including apparently going backwards in time. Two
 view calls combined into one derived figure (for example checking
-`vested_of + refundable_of == deposited`) will intermittently disagree. See
-[soroban-rpc-read-skew.md](soroban-rpc-read-skew.md).
+`vested_of + refundable_of == deposited`) will intermittently disagree.
+
+The primary affected method is `withdrawable_of` — because its return value is
+derived from `vested - withdrawn` evaluated at a ledger the caller cannot pin
+without reading the full `Stream` struct, any off-chain calculation that calls
+`withdrawable_of` and `vested_of` (or `refundable_of`) separately against a
+load-balanced endpoint can observe a stale ledger on one of the two calls and
+produce an arithmetically impossible result. The same hazard affects
+`vested_of` and `refundable_of` when called separately.
+
+**Recommended approach:** use `get_stream` to read the full `Stream` struct in
+one call and derive `withdrawable`, `vested`, and `refundable` locally from
+`deposited`, `withdrawn`, `start_time`, `end_time`, and `paused_total`. This
+is how the Fluxora SDK is written, and it is the canonical mitigation. See
+[`docs/soroban-rpc-read-skew.md`](soroban-rpc-read-skew.md) for the full
+technical write-up, including measurement data and code examples.
 
 **2. Handle archived streams.** `stream_exists(id) == false` while
 `id < stream_count()` means the entry has been archived, not that it never

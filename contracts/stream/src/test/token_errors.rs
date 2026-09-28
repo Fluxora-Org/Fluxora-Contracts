@@ -64,7 +64,7 @@
 //! | zero transfers never issued | `withdraw` | nothing vested yet | `NothingToWithdraw`, no token call |
 //! | zero transfers never issued | `batch_withdraw` | one stream in the batch has nothing available | batch succeeds; skipped stream's `withdrawn` stays 0 |
 
-use soroban_sdk::testutils::{Address as _, IssuerFlags};
+use soroban_sdk::testutils::{Address as _, Events as _, IssuerFlags};
 use soroban_sdk::token::{StellarAssetClient, TokenClient};
 use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, MuxedAddress, String};
 
@@ -265,6 +265,10 @@ fn create_stream_with_sender_insufficient_balance_returns_token_transfer_failed(
 /// `top_up` must return [`Error::TokenTransferFailed`] when the sender has no
 /// balance.  Because the whole invocation rolls back, the stream's `deposited`
 /// and `end_time` must be exactly as they were before the call.
+///
+/// **Event invariant:** a reverted top_up must emit zero stream-contract
+/// events. A spurious `ToppedUp` event would cause an indexer to believe the
+/// stream was extended when it was not.
 #[test]
 fn top_up_returns_token_transfer_failed_when_sender_has_no_balance() {
     let h = Harness::new();
@@ -299,6 +303,20 @@ fn top_up_returns_token_transfer_failed_when_sender_has_no_balance() {
 
     assert_eq!(err, Error::TokenTransferFailed);
 
+    // Event invariant: zero stream-contract events must survive a revert.
+    let stream_events = h
+        .env
+        .events()
+        .all()
+        .filter_by_contract(&h.contract_id)
+        .events()
+        .to_vec();
+    assert!(
+        stream_events.is_empty(),
+        "top_up rolled back: zero stream events must be emitted, found {}",
+        stream_events.len()
+    );
+
     // Rollback: stream must be exactly as before.
     let after = h.client.get_stream(&id);
     assert_eq!(after.deposited, before.deposited);
@@ -315,6 +333,10 @@ fn top_up_returns_token_transfer_failed_when_sender_has_no_balance() {
 /// `cancel` must return [`Error::TokenTransferFailed`] when the pool is empty.
 /// Because Soroban rolls back all writes on error, the stream status stays
 /// `Active` — the cancel did not take effect.
+///
+/// **Event invariant:** a reverted cancel must emit zero stream-contract
+/// events. A spurious `Cancelled` event would mislead indexers into marking
+/// the stream settled when it is still active.
 #[test]
 fn cancel_returns_token_transfer_failed_when_pool_is_underfunded() {
     let h = Harness::new();
@@ -346,6 +368,22 @@ fn cancel_returns_token_transfer_failed_when_pool_is_underfunded() {
     let err = h.client.try_cancel(&id).unwrap_err().unwrap();
     assert_eq!(err, Error::TokenTransferFailed);
 
+    // Event invariant: zero stream-contract events must survive a revert.
+    // `Events::all()` captures only the most recent invocation; filtering by
+    // `contract_id` drops any token-contract events.
+    let stream_events = h
+        .env
+        .events()
+        .all()
+        .filter_by_contract(&h.contract_id)
+        .events()
+        .to_vec();
+    assert!(
+        stream_events.is_empty(),
+        "cancel rolled back: zero stream events must be emitted, found {}",
+        stream_events.len()
+    );
+
     // Rollback: stream status must still be Active, nothing moved.
     assert_eq!(
         h.client.get_stream(&id).status,
@@ -359,6 +397,10 @@ fn cancel_returns_token_transfer_failed_when_pool_is_underfunded() {
 
 /// `withdraw` must return [`Error::TokenTransferFailed`] when the pool is
 /// empty.  Rollback means `withdrawn` is unchanged and the recipient has zero.
+///
+/// **Event invariant:** a reverted withdraw must emit zero stream-contract
+/// events. A spurious `Withdrawn` event would over-credit the recipient in an
+/// indexer's ledger.
 #[test]
 fn withdraw_returns_token_transfer_failed_when_pool_is_underfunded() {
     let h = Harness::new();
@@ -388,6 +430,20 @@ fn withdraw_returns_token_transfer_failed_when_pool_is_underfunded() {
 
     let err = h.client.try_withdraw(&id, &None).unwrap_err().unwrap();
     assert_eq!(err, Error::TokenTransferFailed);
+
+    // Event invariant: zero stream-contract events must survive a revert.
+    let stream_events = h
+        .env
+        .events()
+        .all()
+        .filter_by_contract(&h.contract_id)
+        .events()
+        .to_vec();
+    assert!(
+        stream_events.is_empty(),
+        "withdraw rolled back: zero stream events must be emitted, found {}",
+        stream_events.len()
+    );
 
     // Rollback: nothing changed.
     assert_eq!(tc.balance(&h.recipient), 0);
