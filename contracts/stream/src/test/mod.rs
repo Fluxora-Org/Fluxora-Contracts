@@ -41,6 +41,9 @@ mod amount_domain;
 mod cancel_events;
 mod cliff;
 mod delegation;
+// Issue #1734: comprehensive revoke_delegate coverage — per-bit, no-op on
+// never-issued grants, same-ledger effect, and multi-delegate isolation.
+mod revoke_delegate;
 mod pause;
 mod storage_keys;
 mod terminal_operations;
