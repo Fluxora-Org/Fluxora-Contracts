@@ -274,6 +274,13 @@ reflection.** The pool's real token balance is what actually backs every
 recipient's claim; `deposited` assumes a `create_stream` or `top_up` pull
 grows that balance by precisely the amount passed in.
 
+Fluxora treats amounts as raw integer token units and does not call the token's
+`decimals()` method or rescale amounts. The caller must scale each amount using
+the token's actual precision. For example, passing `1_000 * 10^7` to a
+two-decimal token transfers and records that many smallest units (100,000,000
+whole tokens), not 1,000 tokens. Because the requested transfer and received
+balance delta still match, a decimal-assumption mismatch is not rejected.
+
 > **Enforced.** `create_stream`, `top_up` and `delegate_top_up` read the
 > contract's own balance immediately before and after the pull and require
 > the delta to equal the requested amount exactly ([`pull_deposit`](../contracts/stream/src/lib.rs)).
@@ -763,7 +770,7 @@ fn create_stream(
 | `sender` | `Address` | Funding party. Must authorize the call. |
 | `recipient` | `Address` | Receiving party. Must differ from `sender`. |
 | `token` | `Address` | Token contract address (SEP-41). Per-stream, not contract-wide. |
-| `deposit` | `i128` | Initial amount to lock, in the token's smallest unit. Must be positive and satisfy rate constraints. |
+| `deposit` | `i128` | Initial amount to lock, in the token's smallest unit. The caller must scale for the token's actual `decimals()`; Fluxora does not query or normalize precision. Must be positive and satisfy rate constraints. |
 | `start_time` | `u64` | Accrual begins (unix seconds). May be past (backdated vesting), present, or future (scheduled stream). |
 | `end_time` | `u64` | Accrual ends (unix seconds). Must be strictly greater than `start_time`. |
 | `cliff_time` | `u64` | Payout gate (unix seconds). Must be in `[start_time, end_time]`. Set equal to `start_time` for no cliff. **Gates payout, does not delay accrual** — at the cliff instant the recipient becomes entitled to everything accrued since `start_time`. On a `pausable` stream this stored instant is a lower bound, not the wall-clock instant the gate opens: pausing pushes the opening instant forward by the accumulated `paused_total`. See the `resume` entry point. |
