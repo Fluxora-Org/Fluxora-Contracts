@@ -971,3 +971,72 @@ fn test_set_admin_same_ledger_multiple_setters() {
     factory.set_batch_cap_enforcement(&false);
     assert_eq!(factory.get_factory_config().batch_cap_enforced, false);
 }
+
+/// A setter call ordered **before** `set_admin` is honoured, and the rotation
+/// that follows does not unwind it. This is the reverse of
+/// `test_set_admin_same_ledger_old_admin_fails` / `_new_admin_succeeds`: both
+/// calls share one ledger, only the order differs. Documented in
+/// `docs/same-ledger-ordering.md`, section “set_admin and any admin-gated
+/// setter”.
+#[test]
+fn test_set_admin_same_ledger_setter_before_rotation_is_honoured() {
+    let env = Env::default();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let old_admin = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    let sc = Address::generate(&env);
+
+    env.mock_auths(&[MockAuth {
+        address: &old_admin,
+        invoke: &MockAuthInvoke {
+            contract: &fid,
+            fn_name: "init",
+            args: (&old_admin, &sc, 10_000i128, 100u64).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    factory.init(&old_admin, &sc, &10_000, &100);
+
+    // Ordering 1: setter (old admin) then set_admin, same ledger.
+    env.mock_auths(&[MockAuth {
+        address: &old_admin,
+        invoke: &MockAuthInvoke {
+            contract: &fid,
+            fn_name: "set_cap",
+            args: (5_000i128,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    factory.set_cap(&5_000);
+    assert_eq!(factory.get_factory_config().max_deposit, 5_000);
+
+    env.mock_auths(&[MockAuth {
+        address: &old_admin,
+        invoke: &MockAuthInvoke {
+            contract: &fid,
+            fn_name: "set_admin",
+            args: (&new_admin,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    factory.set_admin(&new_admin);
+    assert_eq!(factory.get_factory_config().admin, new_admin);
+
+    // The earlier setter call is not unwound by the later rotation.
+    assert_eq!(factory.get_factory_config().max_deposit, 5_000);
+
+    // Ordering 2: rotation first — the old admin can no longer set the cap,
+    // and the rejected call leaves the cap untouched.
+    env.mock_auths(&[MockAuth {
+        address: &old_admin,
+        invoke: &MockAuthInvoke {
+            contract: &fid,
+            fn_name: "set_cap",
+            args: (1_000i128,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert_auth_fails(|| factory.set_cap(&1_000));
+    assert_eq!(factory.get_factory_config().max_deposit, 5_000);
+}

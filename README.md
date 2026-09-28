@@ -468,6 +468,8 @@ frontend's four contract calls all break, the backend is unaffected.
 | [docs/terminal-operations.md](docs/terminal-operations.md) | Terminal (`Cancelled`/`Depleted`) behaviour and the rejection matrix. |
 | [docs/cliff-test-scenarios.md](docs/cliff-test-scenarios.md) | Cliff boundary test scenarios and expected values. |
 | [docs/factory-admin-rotation-tests.md](docs/factory-admin-rotation-tests.md) | Same-ledger admin rotation coverage for the factory. |
+| [docs/same-ledger-ordering.md](docs/same-ledger-ordering.md) | **Ordering model.** What is guaranteed when two calls share a ledger, and the pairs it affects. |
+| [docs/delegation-revocation.md](docs/delegation-revocation.md) | Delegate revocation takes effect immediately; grant/revoke ordering and recipient-transfer behaviour. |
 | [docs/archive/](docs/archive/README.md) | Point-in-time reports and the original build spec, kept for provenance. |
 
 > **Note for deployment:** the `stellar` CLI must be at least version 27 to match
