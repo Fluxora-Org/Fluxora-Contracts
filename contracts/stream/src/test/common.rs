@@ -446,6 +446,16 @@ impl<'a> Harness<'a> {
     }
 
     // -----------------------------------------------------------------------
+    // Counter / population consistency (#1699)
+    // -----------------------------------------------------------------------
+
+    /// See [`assert_stream_count_consistent`]. The harness-shaped wrapper, so
+    /// the check reads like its siblings (`assert_pool_exact`, …).
+    pub fn assert_stream_count_consistent(&self) {
+        assert_stream_count_consistent(&self.env, &self.contract_id);
+    }
+
+    // -----------------------------------------------------------------------
     // Snapshot helpers
     // -----------------------------------------------------------------------
 
@@ -525,4 +535,61 @@ impl<'a> Harness<'a> {
     pub fn dump_snapshot(&self) {
         std::eprintln!("{}", self.snapshot());
     }
+}
+
+// ---------------------------------------------------------------------------
+// Issue #1699 — counter / population consistency
+// ---------------------------------------------------------------------------
+
+/// **`stream_count()` must equal the number of streams that actually exist.**
+///
+/// The contract keeps two representations of the same fact: the instance-level
+/// id counter behind [`crate::FluxoraStream::stream_count`] and the population
+/// of `DataKey::Stream(id)` records in persistent storage. This asserts they
+/// still agree, which is what the following invariants jointly guarantee:
+///
+/// * ids are handed out from the counter, contiguously, and never reused, so a
+///   successful create adds exactly one record at exactly the next id;
+/// * no entry point ever *removes* a stream record — a terminal operation
+///   rewrites it in place — so the population only grows;
+/// * a failing invocation rolls back **every** write it made, counter bumps
+///   included, so a create (or a terminal operation) that fails partway
+///   cannot leave the two halves of a write behind.
+///
+/// # How the probe works
+///
+/// Ids are contiguous, so the population is exactly `0..stream_count()`. The
+/// check counts the records that exist over the **inclusive** range
+/// `0..=stream_count()` — inclusive so that the *next* id out of the counter is
+/// probed too — and requires that count to come back as `stream_count()`:
+///
+/// * counter **too high**: some id below the counter has no record, so the
+///   population counts short and the assertion fails;
+/// * counter **too low**: the record sitting at (and above) the counter still
+///   exists, so the population counts long and the assertion fails.
+///
+/// One count therefore detects a wrong counter in either direction, and a
+/// deleted record (a hole) as well.
+///
+/// # When the two legitimately disagree — do not call it here
+///
+/// On a real network an entry whose TTL has run out archives and reports
+/// `stream_exists() == false` while its id is still below the counter: that is
+/// the documented "needs restoring" state, not a divergence
+/// (`docs/KNOWN-LIMITATIONS.md`). The SDK test host auto-restores on read, so
+/// time alone cannot produce this state in tests — only an explicit
+/// `persistent().remove(...)` can. Likewise, the `test::create` exhaustion
+/// fixtures seed the counter at `u64::MAX`, which would make the probe below
+/// iterate for ~2^64 ids; do not call this while the counter is seeded high.
+pub fn assert_stream_count_consistent(env: &Env, contract_id: &Address) {
+    let client = FluxoraStreamClient::new(env, contract_id);
+    let count = client.stream_count();
+
+    let existing = (0..=count).filter(|&id| client.stream_exists(&id)).count() as u64;
+
+    assert_eq!(
+        existing, count,
+        "stream_count() reports {count} streams but only {existing} stream \
+         records exist (ids 0..={count} probed) — counter and population diverged",
+    );
 }
