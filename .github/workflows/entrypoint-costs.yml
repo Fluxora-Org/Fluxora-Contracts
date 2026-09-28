@@ -1,0 +1,30 @@
+name: Stream entry point CPU costs
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  entrypoint-costs:
+    name: Measure and gate stream entry point costs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Measure and gate entry point costs
+        run: python3 script/validate_gas.py
+      - name: Upload entry point cost report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stream-entrypoint-costs
+          path: target/entrypoint-cost-report.md
+          retention-days: 30
+          if-no-files-found: warn

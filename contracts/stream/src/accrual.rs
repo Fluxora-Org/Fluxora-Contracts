@@ -1,292 +1,225 @@
-/// Computes accrued stream amount without relying on Soroban environment state.
+//! Accrual math.
+//!
+//! Every function here is pure: it takes a [`Stream`] and a wall-clock
+//! timestamp and returns a number. No `Env`, no storage, no host calls. That
+//! makes the whole vesting model property-testable without a Soroban host, and
+//! it keeps the interesting arithmetic in one auditable place.
+//!
+//! # The stream clock
+//!
+//! The central idea is that a stream has its own clock which stops while the
+//! stream is paused. [`stream_time`] maps wall-clock time onto that clock:
+//!
+//! ```text
+//! stream_time(now) = (paused_at.unwrap_or(now)) - paused_total
+//! ```
+//!
+//! While paused, the numerator is frozen at the instant of the pause, so the
+//! clock does not advance. After a resume, `paused_total` has absorbed the
+//! paused interval, so the clock resumes exactly where it stopped. Every other
+//! quantity — elapsed time, the cliff gate, vesting — is expressed against this
+//! clock, which is why pausing stretches the schedule without ever changing the
+//! total value delivered.
+//!
+//! Note that this differs from the naive formulation
+//! `effective_now = min(now, end_time + paused_total)`, which is correct only
+//! *after* a resume. During an in-progress pause that formula keeps accruing,
+//! because the current pause has not yet been added to `paused_total`. Reading
+//! `paused_at` is what makes the freeze actually freeze.
+//!
+//! # Stated invariants
+//!
+//! These hold for every stream at every instant, and every entry point is
+//! responsible for preserving them. They are asserted after *every* operation
+//! by the test suite (`Harness::assert_invariants`), exhaustively across
+//! operation orderings by `test::monotonicity`, and over random schedules by
+//! `test::props`.
+//!
+//! **I1 — Bounds.** `0 <= withdrawn <= vested(t) <= deposited`.
+//!
+//! **I2 — Monotonic in time.** For a fixed stream state and `t1 <= t2`,
+//! `vested(t1) <= vested(t2)`.
+//!
+//! **I3 — Monotonic across calls.** For a *fixed* `t`, no entry point may
+//! reduce `vested(t)`. Formally, if a call transforms stream state `S -> S'`,
+//! then `vested(S', t) >= vested(S, t)`.
+//!
+//! **I4 — Conservation.** `vested(t) + refundable(t) == deposited`, exactly.
+//!
+//! **I5 — Pause coherence.** `paused_at.is_some()` if and only if
+//! `status == Paused`, and while paused the clock does not advance.
+//!
+//! ## Why I3 is the dangerous one
+//!
+//! I2 is the obvious property and is easy to get right. **I3 is the one that
+//! actually broke.** It is easy to violate by accident because it is a property
+//! of *state transitions*, not of the accrual formula, so reading `vested` in
+//! isolation never reveals it.
+//!
+//! `top_up` originally rounded its duration extension up, so the new duration
+//! slightly overshot, the rate fell slightly, and `vested(t)` for the *same* `t`
+//! came out lower after the call than before. That breaks I1 — a recipient who
+//! had already withdrawn at the old rate now holds more than `vested` — and
+//! from there `cancel`, which sets `deposited = vested`, drives the stream's
+//! liability negative and refunds the sender tokens the recipient already has.
+//!
+//! The general rule this yields: **any operation that changes `deposited`,
+//! `start_time`, `end_time`, `cliff_time` or `paused_total` must be checked
+//! against I3**, because those are exactly the inputs to `vested`. Operations
+//! that touch only `withdrawn`, `recipient` or `status` cannot violate it.
+//! Today that means `top_up` and `cancel` need the check and the rest do not,
+//! but the test suite verifies all of them so a future entry point cannot
+//! quietly join the first group.
+//!
+//! ## Why I3 requires freezing the clock, and why that is not a detail
+//!
+//! I3 can only be observed by reading `vested` at one timestamp, performing
+//! exactly one call, and reading `vested` again **at that same timestamp**.
+//!
+//! This is the reason the bug survived a suite that already had good coverage
+//! of `top_up`. Every hand-written test advanced time around the operations it
+//! exercised — deposit, wait, withdraw, wait, top up, wait, assert — because
+//! that is how you write a readable test for a contract whose whole subject is
+//! the passage of time. But `vested` is *supposed* to grow as the clock
+//! advances. So a 93-stroop backwards step vanished into the accrual that
+//! happened alongside it, and every assertion still passed. The regression was
+//! real, deterministic, and reachable from a two-line test — and invisible to
+//! roughly a hundred existing ones, because they all measured the wrong
+//! difference.
+//!
+//! So the test design follows from the invariant rather than from convenience:
+//! I2 (monotonic in time) is tested by holding *state* still and advancing the
+//! clock, and I3 (monotonic across calls) is tested by holding the *clock*
+//! still and advancing the state. Conflating the two hides exactly the class of
+//! defect that matters most, because a violation of I3 is a fund-safety bug
+//! while a violation of I2 is merely a wrong number.
+//!
+//! `test::monotonicity` implements the frozen-clock half across every entry
+//! point and every ordering of them; `test::props` implements the
+//! advancing-clock half over random schedules.
+
+use crate::error::Error;
+use crate::types::Stream;
+
+/// The stream's own clock, in the same units and origin as `start_time` and
+/// `end_time`. Stops while the stream is paused.
 ///
-/// This helper is intentionally pure to make the core vesting math easy to unit test.
-///
-/// Rules:
-/// - Returns `0` before `cliff_time`.
-/// - Returns `0` for invalid schedules (`start_time >= end_time`) or negative rates.
-/// - Uses `min(current_time, end_time)` so accrual is capped at stream end.
-/// - Multiplies elapsed seconds by `rate_per_second`, and on multiplication overflow
-///   returns `deposit_amount` (safe upper bound before final clamping).
-/// - Final result is clamped to `[0, deposit_amount]`.
-pub fn calculate_accrued_amount(
-    start_time: u64,
-    cliff_time: u64,
-    end_time: u64,
-    rate_per_second: i128,
-    deposit_amount: i128,
-    current_time: u64,
-) -> i128 {
-    if current_time < cliff_time {
-        return 0;
-    }
-
-    if start_time >= end_time || rate_per_second < 0 {
-        return 0;
-    }
-
-    let elapsed_now = current_time.min(end_time);
-    let elapsed_seconds = match elapsed_now.checked_sub(start_time) {
-        Some(elapsed) => elapsed as i128,
-        None => return 0,
+/// Saturates at zero rather than underflowing; a stream whose `paused_total`
+/// exceeds the current instant simply reads as time zero, which clamps to "no
+/// elapsed time" downstream.
+pub fn stream_time(stream: &Stream, now: u64) -> u64 {
+    let frozen_at = match stream.paused_at {
+        Some(paused_at) => paused_at,
+        None => now,
     };
-
-    let accrued = match elapsed_seconds.checked_mul(rate_per_second) {
-        Some(amount) => amount,
-        None => deposit_amount,
-    };
-
-    accrued.min(deposit_amount).max(0)
+    frozen_at.saturating_sub(stream.paused_total)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::calculate_accrued_amount;
-
-    #[test]
-    fn returns_zero_before_cliff() {
-        let accrued = calculate_accrued_amount(0, 500, 1000, 1, 1000, 499);
-        assert_eq!(accrued, 0);
-    }
-
-    #[test]
-    fn accrues_from_start_at_cliff() {
-        let accrued = calculate_accrued_amount(0, 500, 1000, 1, 1000, 500);
-        assert_eq!(accrued, 500);
-    }
-
-    #[test]
-    fn caps_at_end_time_and_deposit() {
-        let accrued = calculate_accrued_amount(0, 0, 1000, 2, 1000, 9_999);
-        assert_eq!(accrued, 1000);
-    }
-
-    #[test]
-    fn returns_zero_for_invalid_schedule() {
-        let accrued = calculate_accrued_amount(10, 10, 10, 1, 1000, 10);
-        assert_eq!(accrued, 0);
-    }
-
-    #[test]
-    fn returns_zero_for_negative_rate() {
-        let accrued = calculate_accrued_amount(0, 0, 1000, -1, 1000, 100);
-        assert_eq!(accrued, 0);
-    }
-
-    #[test]
-    fn multiplication_overflow_returns_capped_deposit() {
-        let accrued = calculate_accrued_amount(0, 0, u64::MAX, i128::MAX, 10_000, u64::MAX);
-        assert_eq!(accrued, 10_000);
-    }
+/// Total scheduled duration, in seconds.
+///
+/// Guaranteed non-zero at creation ([`Error::InvalidTimeRange`]), but it can
+/// legitimately become zero after a cancel that lands at `start_time` — see
+/// [`vested`] for how that case is handled.
+pub fn duration(stream: &Stream) -> u64 {
+    stream.end_time.saturating_sub(stream.start_time)
 }
 
-/// Tests for Issue #47: calculate_accrued is capped after end_time
+/// Seconds of the schedule actually consumed, clamped to `[0, duration]`.
+pub fn elapsed(stream: &Stream, now: u64) -> u64 {
+    let clock = stream_time(stream, now);
+    let capped = if clock > stream.end_time {
+        stream.end_time
+    } else {
+        clock
+    };
+    capped.saturating_sub(stream.start_time)
+}
+
+/// Whether the cliff gate has opened.
 ///
-/// These tests verify that accrual stops at end_time regardless of how much
-/// time has passed. The result must always equal min(rate * duration, deposit_amount).
-#[cfg(test)]
-mod accrued_after_end_time {
-    use crate::accrual::calculate_accrued_amount;
+/// The gate is evaluated against the stream clock, so a stream paused across
+/// its cliff does not silently pass the cliff while frozen.
+pub fn cliff_reached(stream: &Stream, now: u64) -> bool {
+    stream_time(stream, now) >= stream.cliff_time
+}
 
-    // -----------------------------------------------------------------------
-    // Helpers
-    // -----------------------------------------------------------------------
-
-    /// A standard stream used across tests:
-    ///   start=1000, cliff=1000, end=2000, rate=1/s, deposit=1000
-    ///   => total streamable = 1 * (2000-1000) = 1000 == deposit
-    fn standard_stream() -> (u64, u64, u64, i128, i128) {
-        let start_time: u64 = 1_000;
-        let cliff_time: u64 = 1_000;
-        let end_time: u64 = 2_000;
-        let rate_per_second: i128 = 1;
-        let deposit_amount: i128 = 1_000;
-        (
-            start_time,
-            cliff_time,
-            end_time,
-            rate_per_second,
-            deposit_amount,
-        )
+/// Amount vested at `now`: what the recipient has earned in total, ever.
+///
+/// Rounds **down**. Integer division truncating in the recipient's disfavour is
+/// the correct direction: the residue stays in the contract and is returned to
+/// the sender when the stream settles, so the pool can never be short.
+///
+/// Before the cliff this is zero — the cliff *gates* the payout, it does not
+/// delay accrual, so at the cliff instant the recipient becomes entitled to
+/// everything accrued since `start_time`, not since `cliff_time`.
+pub fn vested(stream: &Stream, now: u64) -> Result<i128, Error> {
+    if !cliff_reached(stream, now) {
+        return Ok(0);
     }
 
-    // -----------------------------------------------------------------------
-    // Core Issue #47 tests: accrual capped at end_time
-    // -----------------------------------------------------------------------
+    let total_duration = duration(stream);
 
-    /// Exactly at end_time: result must equal full deposit amount.
-    #[test]
-    fn exactly_at_end_time_equals_deposit() {
-        let (start, cliff, end, rate, deposit) = standard_stream();
-        let accrued = calculate_accrued_amount(start, cliff, end, rate, deposit, end);
-        assert_eq!(
-            accrued, deposit,
-            "at end_time, accrued should equal deposit_amount"
-        );
+    // A zero duration means the schedule has collapsed onto a single instant,
+    // which only happens after `cancel` lands at `start_time`. In that case
+    // `deposited` has already been rewritten to the amount vested at the
+    // cancel, so returning it in full is exactly right — and it avoids a
+    // division by zero.
+    if total_duration == 0 {
+        return Ok(stream.deposited);
     }
 
-    /// One second past end_time: result must still equal deposit (no extra accrual).
-    #[test]
-    fn one_second_after_end_time_still_capped() {
-        let (start, cliff, end, rate, deposit) = standard_stream();
-        let accrued = calculate_accrued_amount(start, cliff, end, rate, deposit, end + 1);
-        assert_eq!(
-            accrued, deposit,
-            "one second past end_time should not accrue more than deposit_amount"
-        );
+    let consumed = elapsed(stream, now);
+    if consumed >= total_duration {
+        return Ok(stream.deposited);
     }
 
-    /// Long after end_time (10x the stream duration): result still capped at deposit.
-    #[test]
-    fn long_after_end_time_still_capped() {
-        let (start, cliff, end, rate, deposit) = standard_stream();
-        let far_future = end + 10_000;
-        let accrued = calculate_accrued_amount(start, cliff, end, rate, deposit, far_future);
-        assert_eq!(
-            accrued, deposit,
-            "long after end_time, accrued must be capped at deposit_amount"
-        );
-    }
+    let numerator = stream
+        .deposited
+        .checked_mul(consumed as i128)
+        .ok_or(Error::Overflow)?;
+    let raw = numerator
+        .checked_div(total_duration as i128)
+        .ok_or(Error::Overflow)?;
 
-    /// u64::MAX as current_time: must not overflow and must cap at deposit.
-    #[test]
-    fn max_time_does_not_overflow() {
-        let (start, cliff, end, rate, deposit) = standard_stream();
-        let accrued = calculate_accrued_amount(start, cliff, end, rate, deposit, u64::MAX);
-        assert_eq!(
-            accrued, deposit,
-            "u64::MAX current_time should cap safely at deposit_amount"
-        );
-    }
+    // Clamp explicitly rather than trusting the arithmetic. `consumed` is
+    // already capped at `total_duration`, so this should be unreachable, but
+    // the invariant is load-bearing enough to assert rather than assume.
+    Ok(if raw > stream.deposited {
+        stream.deposited
+    } else {
+        raw
+    })
+}
 
-    // -----------------------------------------------------------------------
-    // Edge cases: boundary conditions around end_time
-    // -----------------------------------------------------------------------
+/// Amount the recipient can withdraw right now: vested minus already withdrawn.
+///
+/// Saturates at zero. `withdrawn` can momentarily exceed `vested` only if a
+/// cancel rewrote the schedule, and even then the cancel path guarantees
+/// `deposited >= withdrawn`, so this is defence in depth.
+pub fn withdrawable(stream: &Stream, now: u64) -> Result<i128, Error> {
+    let earned = vested(stream, now)?;
+    let available = earned
+        .checked_sub(stream.withdrawn)
+        .ok_or(Error::Overflow)?;
+    Ok(if available < 0 { 0 } else { available })
+}
 
-    /// One second BEFORE end_time: accrued must be less than deposit.
-    #[test]
-    fn one_second_before_end_time_less_than_deposit() {
-        let (start, cliff, end, rate, deposit) = standard_stream();
-        let accrued = calculate_accrued_amount(start, cliff, end, rate, deposit, end - 1);
-        assert!(
-            accrued < deposit,
-            "one second before end_time, accrued ({accrued}) should be less than deposit ({deposit})"
-        );
-        assert_eq!(accrued, 999, "should have accrued 999 out of 1000");
-    }
+/// Amount still locked for the recipient's future: deposited minus vested.
+///
+/// This is what the sender gets back if they cancel at `now`.
+pub fn refundable(stream: &Stream, now: u64) -> Result<i128, Error> {
+    let earned = vested(stream, now)?;
+    stream.deposited.checked_sub(earned).ok_or(Error::Overflow)
+}
 
-    /// Exactly at start_time (== cliff_time): should accrue 0.
-    #[test]
-    fn at_start_time_accrues_zero() {
-        let (start, cliff, end, rate, deposit) = standard_stream();
-        let accrued = calculate_accrued_amount(start, cliff, end, rate, deposit, start);
-        assert_eq!(accrued, 0, "at start_time, nothing should have accrued yet");
-    }
-
-    /// Midway through stream: should accrue exactly half the deposit.
-    #[test]
-    fn midway_accrues_half_deposit() {
-        let (start, cliff, end, rate, deposit) = standard_stream();
-        let midpoint = (start + end) / 2; // 1500
-        let accrued = calculate_accrued_amount(start, cliff, end, rate, deposit, midpoint);
-        assert_eq!(
-            accrued, 500,
-            "halfway through, should accrue half the deposit"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // High rate streams: deposit is the binding cap
-    // -----------------------------------------------------------------------
-
-    /// Rate so high that rate * duration >> deposit: cap must be deposit, not rate * time.
-    #[test]
-    fn high_rate_caps_at_deposit_at_end_time() {
-        // rate=10/s, duration=1000s => total streamable=10_000 but deposit=5_000
-        let accrued = calculate_accrued_amount(
-            0,     // start
-            0,     // cliff
-            1_000, // end
-            10,    // rate_per_second
-            5_000, // deposit (lower than rate * duration)
-            1_000, // current_time == end_time
-        );
-        assert_eq!(
-            accrued, 5_000,
-            "when rate*duration > deposit, result must cap at deposit_amount"
-        );
-    }
-
-    /// High rate, long after end: still capped at deposit.
-    #[test]
-    fn high_rate_long_after_end_still_caps_at_deposit() {
-        let accrued = calculate_accrued_amount(
-            0, 0, 1_000, 10, 5_000, 999_999, // far future
-        );
-        assert_eq!(accrued, 5_000);
-    }
-
-    // -----------------------------------------------------------------------
-    // Cliff after end_time edge: before cliff, always zero
-    // -----------------------------------------------------------------------
-
-    /// current_time is past end_time but before cliff_time: must return 0.
-    #[test]
-    fn past_end_but_before_cliff_returns_zero() {
-        // Unusual but valid schedule: cliff > end (degenerate)
-        // start=0, cliff=5000, end=1000 => start < end but cliff > end
-        // The function should return 0 because current_time < cliff_time
-        let accrued = calculate_accrued_amount(
-            0,     // start
-            5_000, // cliff (way after end)
-            1_000, // end
-            1,     // rate
-            1_000, // deposit
-            2_000, // current_time > end but < cliff
-        );
-        assert_eq!(
-            accrued, 0,
-            "before cliff, accrual must be zero even if past end_time"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // Result consistency: calling twice returns same value
-    // -----------------------------------------------------------------------
-
-    /// Calling calculate_accrued_amount is pure/deterministic: same args → same result.
-    #[test]
-    fn pure_function_same_result_on_repeat_calls() {
-        let (start, cliff, end, rate, deposit) = standard_stream();
-        let t = end + 500;
-        let first = calculate_accrued_amount(start, cliff, end, rate, deposit, t);
-        let second = calculate_accrued_amount(start, cliff, end, rate, deposit, t);
-        assert_eq!(first, second, "pure function must be deterministic");
-        assert_eq!(first, deposit);
-    }
-
-    // -----------------------------------------------------------------------
-    // Documented cap formula: result == min(rate * (end - start), deposit)
-    // -----------------------------------------------------------------------
-
-    /// Verifies the documented cap formula from the issue:
-    /// result == min(rate_per_second * (end_time - start_time), deposit_amount)
-    #[test]
-    fn cap_matches_issue_formula() {
-        let start: u64 = 500;
-        let cliff: u64 = 500;
-        let end: u64 = 1_500;
-        let rate: i128 = 3;
-        let deposit: i128 = 2_000;
-
-        // rate * duration = 3 * 1000 = 3000, but deposit = 2000
-        // so expected = min(3000, 2000) = 2000
-        let expected = (rate * (end - start) as i128).min(deposit);
-
-        let accrued = calculate_accrued_amount(start, cliff, end, rate, deposit, end + 9_999);
-        assert_eq!(
-            accrued, expected,
-            "result must match the documented cap formula: min(rate*(end-start), deposit)"
-        );
-    }
+/// Outstanding liability of this stream against the pooled contract balance:
+/// everything deposited that has not yet left the contract.
+///
+/// The pool invariant is that the contract's token balance is always at least
+/// the sum of this quantity across all live streams.
+pub fn liability(stream: &Stream) -> Result<i128, Error> {
+    stream
+        .deposited
+        .checked_sub(stream.withdrawn)
+        .ok_or(Error::Overflow)
 }

@@ -1,787 +1,1484 @@
 #![no_std]
+//! # Fluxora — continuous payment streaming for Soroban
+//!
+//! Lock tokens once; have them accrue continuously to a recipient over time.
+//! The recipient pulls their accrued balance whenever they like.
+//!
+//! This contract is a *primitive*, not an application. Payroll tools, grant
+//! programs, subscription billing and vesting schedules are meant to be built
+//! on top of it. Every scoping decision below favours generality on chain and
+//! pushes convenience to the SDK.
+//!
+//! ## Pull-based by necessity
+//!
+//! Stellar has no scheduler — no cron, no keeper network, no way for a contract
+//! to wake itself up. Every state change must be triggered by an external
+//! transaction. So nothing here runs in the background: the recipient calls
+//! [`FluxoraStream::withdraw`] and the contract computes what they have earned
+//! at that instant.
+//!
+//! ## No on-chain stream discovery
+//!
+//! There is deliberately no per-user list of stream ids in storage. A `Vec<u64>`
+//! of a treasury's streams grows without bound, costs rent forever, and blows
+//! Soroban's per-transaction footprint limit once that treasury has a few
+//! hundred recipients. On chain, a stream is only ever addressed by its `u64`
+//! id. `test::resource_limits` states the payoff as a test: the 153rd stream
+//! costs exactly what the 2nd did.
+//!
+//! Discovery is an off-chain concern: [`create_stream`](FluxoraStream::create_stream)
+//! returns the new id and emits an event carrying sender, recipient and every
+//! schedule field, so an indexer can answer "show me my streams" without the
+//! contract paying rent to remember.
+//!
+//! ## Immutable guarantees
+//!
+//! `cancellable`, `pausable` and `transferable` are fixed at creation and can
+//! never change afterwards. This is a trust feature: before accepting a stream a
+//! recipient can verify that the sender cannot claw it back, freeze it, or
+//! reassign it. A stream that could *become* cancellable later would be
+//! worthless as a guarantee.
+//!
+//! For the same reason the contract has no admin key, no upgrade path, no fee
+//! switch and no global pause. Immutability is what lets another protocol depend
+//! on this one.
+
+#[cfg(all(target_family = "wasm", not(target_os = "none")))]
+compile_error!(
+    "Fluxora production WASM must be built for wasm32v1-none; wasm32-unknown-unknown can emit unsupported features."
+);
+#[cfg(all(target_family = "wasm", debug_assertions))]
+compile_error!("Fluxora production WASM must be built without debug assertions; use --release.");
+#[cfg(all(target_family = "wasm", feature = "testutils"))]
+compile_error!("Fluxora production WASM must not enable the testutils feature.");
+
+// The test suite runs against the host with `std` available; the contract
+// itself is strictly `no_std`.
+#[cfg(test)]
+extern crate std;
 
 mod accrual;
+mod error;
+mod events;
+mod storage;
+mod types;
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env};
+pub use accrual::{
+    cliff_reached, duration, elapsed, liability, refundable, stream_time, vested, withdrawable,
+};
+pub use error::Error;
+pub use storage::{MIN_STREAM_TTL_LEDGERS, SECONDS_PER_LEDGER, TTL_BUFFER_SECONDS};
+pub use types::op;
+pub use types::{DataKey, DelegateGrant, Stream, StreamStatus};
 
-// ---------------------------------------------------------------------------
-// Data types
-// ---------------------------------------------------------------------------
+use soroban_sdk::{
+    contract, contractimpl, token, Address, Env, InvokeError, MuxedAddress, TryFromVal, Vec,
+};
 
-/// Global configuration for the Fluxora protocol.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct Config {
-    pub token: Address,
-    pub admin: Address,
+/// Maximum number of streams one batch call may touch.
+///
+/// # Where this number comes from
+///
+/// Measured, not guessed. `test::resource_limits` reports the real cost of a
+/// full batch against protocol 27's mainnet limits, and the constraint that
+/// binds is not the one you would expect:
+///
+/// Measured evidence from the release resource suite (20-stream batch):
+///
+/// | limit | used by a 20-stream batch | ceiling |
+/// |---|---|---|
+/// | total footprint (entries) | 51 | 400 |
+/// | write entries | 24 | 200 |
+/// | instructions | ~5.8M | 400M |
+/// | **contract event bytes** | **10,240** | **16,384** |
+///
+/// Entry counts would allow well over a hundred streams per call. The *event
+/// budget* allows about 32, because each stream emits a `withdrawn` event plus
+/// the token contract's own `transfer` event — roughly 512 bytes per stream
+/// between them.
+///
+/// Sixteen is that measured ceiling with a 2x safety factor. The margin is not
+/// decoration: the per-stream event cost depends on the *token's* event
+/// payload, and a token heavier than the Stellar Asset Contract used in the
+/// tests would inflate it. A cap that merely fits today would fail on somebody
+/// else's token.
+///
+/// Larger requests are rejected with [`Error::BatchTooLarge`] rather than
+/// failing opaquely at the network level. The SDK chunks client-side, so the
+/// exact value is invisible to integrators.
+pub const MAX_BATCH_SIZE: u32 = 16;
+
+/// Version of the public stream ABI inventory.
+///
+/// Bump this when making a *breaking* change to a public method: removing,
+/// renaming, or changing a parameter/return type. Additive changes — a new
+/// method, a new error discriminant, a field appended to an event payload —
+/// do not require a bump; update `contracts/stream/abi/fluxora_stream.json`
+/// so the snapshot stays the generated source of truth.
+///
+/// The on-chain contract is immutable, so a bump is a *new deployment*, not an
+/// in-place upgrade. See `docs/ABI.md` and `test::abi`.
+pub const ABI_VERSION: u32 = 1;
+
+/// Call `token.transfer(from, to, amount)` and map any failure to a stable
+/// stream-level error.
+///
+/// # Why not forward the token's error discriminant?
+///
+/// A client receiving `Error(Contract, #N)` has no way to know whether `N`
+/// comes from the stream contract or from the token contract without out-of-band
+/// knowledge of which contract threw. Forwarding the raw token discriminant
+/// would cause silent misinterpretation — e.g. token error #7 would decode as
+/// `Unauthorized` against Fluxora's table, which is wrong and unsettling.
+///
+/// Instead, failures are bucketed into two stream-level categories that are
+/// stable, unambiguous, and actionable:
+///
+/// * [`Error::TokenTransferFailed`] — the token returned a typed contract
+///   error. The root cause (insufficient balance, authorization refused by the
+///   token contract, etc.) is visible in the transaction's `diagnosticEvents`
+///   and is therefore preserved for off-chain tooling without polluting the
+///   stream ABI.
+/// * [`Error::TokenMissing`] — the host raised an `Abort` (non-contract trap).
+///   This most commonly means the `token` address has no deployed code. No
+///   funds moved, so the stream is in a clean pre-transfer state.
+fn token_transfer(
+    env: &Env,
+    token: &Address,
+    from: &Address,
+    to: MuxedAddress,
+    amount: &i128,
+) -> Result<(), Error> {
+    match token::TokenClient::new(env, token).try_transfer(from, &to, amount) {
+        Ok(Ok(())) => Ok(()),
+        // The token contract returned a typed contract error (e.g. insufficient
+        // balance, deauthorized trustline, custom token logic). The raw
+        // discriminant is intentionally discarded — see the function doc.
+        Err(Err(InvokeError::Contract(_))) | Ok(Err(_)) | Err(Ok(_)) => {
+            Err(Error::TokenTransferFailed)
+        }
+        // Host trap: most commonly the token address has no deployed code.
+        Err(Err(InvokeError::Abort)) => Err(Error::TokenMissing),
+    }
 }
 
-#[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum StreamStatus {
-    Active = 0,
-    Paused = 1,
-    Completed = 2,
-    Cancelled = 3,
+/// Pull `amount` of `token` from `from` into the contract's own balance and
+/// verify the pool grew by exactly `amount`.
+///
+/// # Why measure rather than trust the requested amount
+///
+/// Fluxora's accounting — [`Stream::deposited`], and every rate, liability and
+/// refund figure derived from it — assumes a deposit pull moves exactly the
+/// amount requested into the pool. A **fee-on-transfer** token (a cut taken
+/// out of every transfer) silently breaks that assumption: the sender's
+/// balance drops by `amount`, but the pool only grows by `amount` minus the
+/// fee. Nothing about that failure is loud — the deposit "succeeds" and the
+/// shortfall says nothing until, much later, an unrelated stream's `withdraw`
+/// or `cancel` fails with [`Error::TokenTransferFailed`] because the pool
+/// cannot cover every stream's claim. See `docs/ABI.md` "Token assumptions".
+///
+/// The fix is to check, not assume: read the contract's own balance before
+/// and after the pull and require the delta to equal `amount` exactly. Any
+/// deviation — a shortfall from a fee, or an overage from a positive-rebasing
+/// token — is rejected with [`Error::TokenAmountMismatch`]. Soroban rolls back
+/// the entire invocation on error, so the transfer that already happened
+/// (and any fee it took) is undone along with everything else; nothing is
+/// stranded.
+///
+/// # Why this guards deposits only
+///
+/// The outbound legs — [`FluxoraStream::withdraw`]'s payout and
+/// [`FluxoraStream::cancel`]'s refund — call [`token_transfer`] directly, with
+/// no balance check. If the token takes a further cut on receipt there, that
+/// is between the recipient (or sender) and their own balance: the *pool's*
+/// balance still drops by exactly the amount the contract sent, so Fluxora's
+/// internal accounting stays in sync either way.
+fn pull_deposit(env: &Env, token: &Address, from: &Address, amount: &i128) -> Result<(), Error> {
+    let contract = env.current_contract_address();
+    let token_client = token::TokenClient::new(env, token);
+    let before = token_client.balance(&contract);
+
+    token_transfer(
+        env,
+        token,
+        from,
+        MuxedAddress::from(contract.clone()),
+        amount,
+    )?;
+
+    let after = token_client.balance(&contract);
+    let received = after.checked_sub(before).ok_or(Error::Overflow)?;
+    if received != *amount {
+        return Err(Error::TokenAmountMismatch);
+    }
+    Ok(())
 }
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum StreamEvent {
-    Paused(u64),
-    Resumed(u64),
-    Cancelled(u64),
-}
-
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct Stream {
-    pub stream_id: u64,
-    pub sender: Address,
-    pub recipient: Address,
-    pub deposit_amount: i128,
-    pub rate_per_second: i128,
-    pub start_time: u64,
-    pub cliff_time: u64,
-    pub end_time: u64,
-    pub withdrawn_amount: i128,
-    pub status: StreamStatus,
-}
-
-/// Namespace for all contract storage keys.
-#[contracttype]
-pub enum DataKey {
-    Config,       // Instance storage for global settings (admin/token).
-    NextStreamId, // Instance storage for the auto-incrementing ID counter.
-    Stream(u64),  // Persistent storage for individual stream data (O(1) lookup).
-}
-
-// ---------------------------------------------------------------------------
-// Storage helpers
-// ---------------------------------------------------------------------------
-
-fn get_config(env: &Env) -> Config {
-    env.storage()
-        .instance()
-        .get(&DataKey::Config)
-        .expect("contract not initialised: missing config")
-}
-
-fn get_token(env: &Env) -> Address {
-    get_config(env).token
-}
-
-fn get_admin(env: &Env) -> Address {
-    get_config(env).admin
-}
-
-fn get_stream_count(env: &Env) -> u64 {
-    env.storage()
-        .instance()
-        .get(&DataKey::NextStreamId)
-        .unwrap_or(0u64)
-}
-
-fn set_stream_count(env: &Env, count: u64) {
-    env.storage().instance().set(&DataKey::NextStreamId, &count);
-}
-
-fn load_stream(env: &Env, stream_id: u64) -> Stream {
-    env.storage()
-        .persistent()
-        .get(&DataKey::Stream(stream_id))
-        .expect("stream not found")
-}
-
-fn save_stream(env: &Env, stream: &Stream) {
-    let key = DataKey::Stream(stream.stream_id);
-    env.storage().persistent().set(&key, stream);
-
-    // Requirement from Issue #1: extend TTL on stream save to ensure persistence
-    env.storage().persistent().extend_ttl(&key, 17280, 120960);
-}
-
-// ---------------------------------------------------------------------------
-// Contract Implementation
-// ---------------------------------------------------------------------------
 
 #[contract]
 pub struct FluxoraStream;
 
 #[contractimpl]
 impl FluxoraStream {
-    /// Initialise the contract with the streaming token and admin address.
-    ///
-    /// This function must be called exactly once before any other contract operations.
-    /// It persists the token address (used for all stream transfers) and admin address
-    /// (authorized for administrative operations) in instance storage.
-    ///
-    /// # Parameters
-    /// - `token`: Address of the token contract used for all payment streams
-    /// - `admin`: Address authorized to perform administrative operations (pause, cancel, etc.)
-    ///
-    /// # Storage
-    /// - Stores `Config { token, admin }` in instance storage under `DataKey::Config`
-    /// - Initializes `NextStreamId` counter to 0 for stream ID generation
-    /// - Extends TTL to prevent premature expiration (17280 ledgers threshold, 120960 max)
-    ///
-    /// # Panics
-    /// - If called more than once (contract already initialized)
-    ///
-    /// # Security
-    /// - Re-initialization is prevented to ensure immutable token and admin configuration
-    /// - No authorization required for initial setup (deployer calls this once)
-    pub fn init(env: Env, token: Address, admin: Address) {
-        if env.storage().instance().has(&DataKey::Config) {
-            panic!("already initialised");
-        }
-        let config = Config { token, admin };
-        env.storage().instance().set(&DataKey::Config, &config);
-        env.storage().instance().set(&DataKey::NextStreamId, &0u64);
+    // ---------------------------------------------------------------------
+    // Lifecycle
+    // ---------------------------------------------------------------------
 
-        // Ensure instance storage (Config/ID) doesn't expire quickly
-        env.storage().instance().extend_ttl(17280, 120960);
-    }
-
-    /// Create a new payment stream with specified parameters.
+    /// Create a stream and move `deposit` from `sender` into the contract's
+    /// pooled balance.
     ///
-    /// Establishes a new token stream from sender to recipient with defined rate and duration.
-    /// Transfers the deposit amount from sender to the contract immediately. Returns a unique
-    /// stream ID that can be used to interact with the stream.
+    /// Returns the new stream id. The id is monotonic and never reused, so it is
+    /// a stable handle for an indexer.
     ///
-    /// # Parameters
-    /// - `sender`: Address funding the stream (must authorize the transaction)
-    /// - `recipient`: Address receiving the streamed tokens
-    /// - `deposit_amount`: Total tokens to deposit (must be > 0)
-    /// - `rate_per_second`: Streaming rate in tokens per second (must be > 0)
-    /// - `start_time`: When streaming begins (ledger timestamp)
-    /// - `cliff_time`: When tokens first become available (vesting cliff, must be in [start_time, end_time])
-    /// - `end_time`: When streaming completes (must be > start_time)
+    /// # Schedule
     ///
-    /// # Returns
-    /// - `u64`: Unique stream identifier for the newly created stream
+    /// Tokens accrue linearly from `start_time` to `end_time`. `start_time` may
+    /// be in the past — backdated vesting from a hire date or grant award date
+    /// is a legitimate use — in which case the backdated portion is immediately
+    /// withdrawable. It may equally be in the future — a scheduled stream — in
+    /// which case nothing vests until the start instant.
     ///
-    /// # Authorization
-    /// - Requires authorization from the sender address
+    /// There is deliberately **no bound on clock skew** in either direction.
+    /// The ledger timestamp is the only clock the contract can see, so a skew
+    /// limit would be an arbitrary business-policy number rather than a
+    /// protocol requirement; policy belongs in the SDK or a wrapping contract.
+    /// A past start vests immediately by the sender's own authorization, and a
+    /// schedule that has already fully elapsed simply reads as fully vested.
+    /// The accrual math is safe at any skew — every quantity clamps or is
+    /// checked — and TTL is where the real risk is bounded: a stream whose
+    /// schedule extends beyond the network's `max_entry_ttl` horizon is funded
+    /// for as long as the network allows at creation, and the permissionless
+    /// `extend_stream_ttl` keeper path covers the remainder, exactly as it
+    /// does for any multi-year stream. The regression tests in `test/create.rs`
+    /// pin these semantics.
     ///
-    /// # Validation
-    /// The function validates all parameters before creating the stream:
-    /// - `deposit_amount > 0` and `rate_per_second > 0`
-    /// - `sender != recipient` (cannot stream to yourself)
-    /// - `start_time < end_time` (valid time range)
-    /// - `cliff_time` in `[start_time, end_time]` (cliff within stream duration)
-    /// - `deposit_amount >= rate_per_second × (end_time - start_time)` (sufficient deposit)
+    /// `cliff_time` **gates** the payout, it does not delay accrual. Pass
+    /// `cliff_time == start_time` for no cliff. At the cliff instant the
+    /// recipient becomes entitled to everything accrued since `start_time`, not
+    /// merely what accrues after the cliff. This is standard vesting semantics
+    /// and it surprises people, so it is worth restating in any UI.
     ///
-    /// # Panics
-    /// - If `deposit_amount` or `rate_per_second` is not positive
-    /// - If `sender` and `recipient` are the same address
-    /// - If `start_time >= end_time` (invalid time range)
-    /// - If `cliff_time` is not in `[start_time, end_time]`
-    /// - If `deposit_amount < rate_per_second × (end_time - start_time)` (insufficient deposit)
-    /// - If token transfer fails (insufficient balance or allowance)
-    /// - If overflow occurs calculating total streamable amount
+    /// # Errors
     ///
-    /// # State Changes
-    /// - Transfers `deposit_amount` tokens from sender to contract
-    /// - Creates new stream with status `Active`
-    /// - Increments global stream counter
-    /// - Stores stream data in persistent storage with extended TTL
+    /// * [`Error::SelfStream`] — sender and recipient are the same address.
+    /// * [`Error::InvalidDeposit`] — deposit is not positive.
+    /// * [`Error::InvalidTimeRange`] — `end_time <= start_time`.
     ///
-    /// # Events
-    /// - Publishes `created(stream_id, deposit_amount)` event on success
-    ///
-    /// # Usage Notes
-    /// - Transaction is atomic: if token transfer fails, no stream is created
-    /// - Stream IDs are sequential starting from 0
-    /// - Cliff time enables vesting schedules (no withdrawals before cliff)
-    /// - Setting `cliff_time = start_time` means no cliff (immediate vesting)
-    /// - Deposit can exceed minimum required (excess remains in contract)
-    /// - Sender must have sufficient token balance and approve contract
-    ///
-    /// # Examples
-    /// - Linear stream: 1000 tokens over 1000 seconds, no cliff
-    ///   - `deposit_amount = 1000`, `rate = 1`, `start = 0`, `cliff = 0`, `end = 1000`
-    /// - Vesting stream: 12000 tokens over 12 months, 6-month cliff
-    ///   - `deposit_amount = 12000`, `rate = 1`, `start = 0`, `cliff = 15552000`, `end = 31104000`
+    ///   **Zero-duration design decision:** a stream with `end_time == start_time`
+    ///   (or earlier) is **rejected**, never treated as "already vested". A zero
+    ///   length would make every accrual formula divide by zero, and there is no
+    ///   meaningful schedule for a single-instant stream to vest against. The
+    ///   one legitimate zero-length state — a *cancel* that collapses a live
+    ///   schedule onto its start instant — is produced by [`FluxoraStream::cancel`]
+    ///   and handled specially in [`vested`], which returns the settled deposit
+    ///   in full rather than dividing.
+    /// * [`Error::InvalidCliff`] — cliff outside `[start_time, end_time]`.
+    /// * [`Error::DepositRateTooLow`] — `deposit < duration`, so the per-second
+    ///   rate would truncate to zero and the recipient would accrue nothing.
+    /// * [`Error::Overflow`] — `deposit * duration` does not fit in `i128`.
+    /// * [`Error::TokenAmountMismatch`] — the deposit pull delivered a
+    ///   different amount than `deposit` (a fee-on-transfer or rebasing
+    ///   token). See `docs/ABI.md` "Token assumptions".
     #[allow(clippy::too_many_arguments)]
     pub fn create_stream(
         env: Env,
         sender: Address,
         recipient: Address,
-        deposit_amount: i128,
-        rate_per_second: i128,
+        token: Address,
+        deposit: i128,
         start_time: u64,
-        cliff_time: u64,
         end_time: u64,
-    ) -> u64 {
+        cliff_time: u64,
+        cancellable: bool,
+        pausable: bool,
+        transferable: bool,
+    ) -> Result<u64, Error> {
         sender.require_auth();
 
-        // Validate positive amounts (#35)
-        assert!(deposit_amount > 0, "deposit_amount must be positive");
-        assert!(rate_per_second > 0, "rate_per_second must be positive");
+        if sender == recipient {
+            return Err(Error::SelfStream);
+        }
+        if deposit <= 0 {
+            return Err(Error::InvalidDeposit);
+        }
+        if end_time <= start_time {
+            return Err(Error::InvalidTimeRange);
+        }
+        if cliff_time < start_time || cliff_time > end_time {
+            return Err(Error::InvalidCliff);
+        }
 
-        // Validate sender != recipient (#35)
-        assert!(
-            sender != recipient,
-            "sender and recipient must be different"
-        );
+        let total_duration = end_time - start_time;
 
-        // Validate time constraints
-        assert!(start_time < end_time, "start_time must be before end_time");
-        assert!(
-            cliff_time >= start_time && cliff_time <= end_time,
-            "cliff_time must be within [start_time, end_time]"
-        );
+        // Reject dust-rate streams. Below one stroop per second the recipient
+        // accrues literally nothing until very late in the schedule, which is a
+        // real footgun for a treasury streaming a small grant over a year.
+        if deposit < total_duration as i128 {
+            return Err(Error::DepositRateTooLow);
+        }
 
-        // Validate deposit covers total streamable amount (#34)
-        let duration = (end_time - start_time) as i128;
-        let total_streamable = rate_per_second
-            .checked_mul(duration)
-            .expect("overflow calculating total streamable amount");
-        assert!(
-            deposit_amount >= total_streamable,
-            "deposit_amount must cover total streamable amount (rate * duration)"
-        );
+        // Front-load the overflow guard for all future accrual. Because
+        // `elapsed <= duration` always holds, proving `deposit * duration` fits
+        // in an i128 here means the `deposited * elapsed` multiplication inside
+        // `vested` can never overflow for the life of the stream. `top_up`
+        // re-establishes the same guard against its new figures.
+        deposit
+            .checked_mul(total_duration as i128)
+            .ok_or(Error::Overflow)?;
 
-        // Transfer tokens from sender to this contract (#36)
-        // If transfer fails (insufficient balance/allowance), this will panic
-        // and no state will be persisted (atomic transaction)
-        let token_client = token::Client::new(&env, &get_token(&env));
-        token_client.transfer(&sender, &env.current_contract_address(), &deposit_amount);
-
-        // Only allocate stream id and persist state AFTER successful transfer
-        let stream_id = get_stream_count(&env);
-        set_stream_count(&env, stream_id + 1);
-
+        let stream_id = storage::next_stream_id(&env)?;
         let stream = Stream {
-            stream_id,
-            sender,
+            sender: sender.clone(),
             recipient,
-            deposit_amount,
-            rate_per_second,
+            token: token.clone(),
+            deposited: deposit,
+            withdrawn: 0,
             start_time,
-            cliff_time,
             end_time,
-            withdrawn_amount: 0,
+            cliff_time,
+            cancellable,
+            pausable,
+            transferable,
+            paused_at: None,
+            paused_total: 0,
             status: StreamStatus::Active,
         };
 
-        save_stream(&env, &stream);
+        // Pull the deposit before writing the stream entry. If the token
+        // transfer fails (missing contract, authorization refused, insufficient
+        // balance) we return a typed error and leave no phantom entry in
+        // storage — the id counter has already advanced, so the id is
+        // consumed, but no stream with that id is observable to any caller.
+        //
+        // The sender's auth on this invocation covers the nested token
+        // transfer; no prior approval is needed.
+        pull_deposit(&env, &token, &sender, &deposit)?;
 
-        env.events()
-            .publish((symbol_short!("created"), stream_id), deposit_amount);
+        storage::save_stream(&env, stream_id, &stream);
+        storage::extend_instance(&env);
 
-        stream_id
+        events::stream_created(&env, stream_id, &stream);
+        Ok(stream_id)
     }
 
-    /// Pause an active stream. Only the sender or admin may call this.
+    /// Add funds to a live stream.
     ///
-    /// ## Errors / Panics
-    /// - Panics with `"stream is already paused"` if the stream is already in
-    ///   `Paused` state. This is a clear, distinct error to aid frontend/backend
-    ///   consumers in diagnosing double-pause scenarios.
-    /// - Panics with `"stream must be active to pause"` if the stream is in any
-    ///   other non-`Active` state (`Completed` or `Cancelled`).
+    /// # Semantics: extend the duration, keep the rate
     ///
-    /// ## Consistency with `resume_stream`
-    /// `resume_stream` mirrors this behaviour: it panics with
-    /// `"stream is not paused"` when called on a non-`Paused` stream.
-    pub fn pause_stream(env: Env, stream_id: u64) {
-        let mut stream = load_stream(&env, stream_id);
+    /// The per-second rate the recipient agreed to at creation **never
+    /// changes**. `end_time` moves forward by `amount / rate` so the added
+    /// tokens stream out at the original pace:
+    ///
+    /// ```text
+    /// before:  10_000 over 100 days  ->  100/day, ends day 100
+    /// top_up(1_000)
+    /// after:   11_000 over 110 days  ->  100/day, ends day 110
+    /// ```
+    ///
+    /// The alternative — hold `end_time` and raise the rate — was rejected
+    /// because it retroactively re-vests elapsed time: a top-up at the halfway
+    /// point would instantly increase the amount already withdrawable. Keeping
+    /// the rate fixed means a top-up can never accelerate or dilute an existing
+    /// schedule, which is the property that makes it safe to accept a stream
+    /// from an untrusted sender.
+    ///
+    /// # Rounding
+    ///
+    /// The duration extension rounds **down**. That direction is load-bearing,
+    /// not cosmetic: rounding up would make the new duration slightly longer
+    /// than exact, which lowers the rate and therefore *retroactively reduces*
+    /// the amount already vested. A recipient who had withdrawn at the old rate
+    /// would then hold more than `vested`, and a subsequent `cancel` — which
+    /// sets `deposited = vested` — would drive the stream's liability negative
+    /// and refund the sender money the recipient already has.
+    ///
+    /// Rounding down guarantees `vested` never decreases across a top-up. The
+    /// residual is at most one second of schedule, in the recipient's favour.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::StreamMatured`] — the accrual clock has already reached
+    ///   `end_time`. Extending a matured stream would make the new funds
+    ///   instantly (or near-instantly) withdrawable, which is never what the
+    ///   sender means. Create a new stream instead.
+    /// * [`Error::StreamTerminated`] — stream is cancelled or depleted.
+    /// * [`Error::TokenAmountMismatch`] — the pull delivered a different
+    ///   amount than `amount` (a fee-on-transfer or rebasing token). See
+    ///   `docs/ABI.md` "Token assumptions".
+    pub fn top_up(env: Env, stream_id: u64, amount: i128) -> Result<(), Error> {
+        let mut stream = storage::load_stream(&env, stream_id)?;
+        stream.sender.require_auth();
 
-        Self::require_sender_or_admin(&env, &stream.sender);
-
-        if stream.status == StreamStatus::Paused {
-            panic!("stream is already paused");
+        if stream.status.is_terminal() {
+            return Err(Error::StreamTerminated);
+        }
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
         }
 
-        assert!(
-            stream.status == StreamStatus::Active,
-            "stream must be active to pause"
-        );
-
-        stream.status = StreamStatus::Paused;
-        save_stream(&env, &stream);
-
-        env.events().publish(
-            (symbol_short!("paused"), stream_id),
-            StreamEvent::Paused(stream_id),
-        );
-    }
-
-    /// Resume a paused payment stream.
-    ///
-    /// Reactivates a paused stream, allowing the recipient to withdraw accrued funds again.
-    /// Only streams in `Paused` state can be resumed. Terminal states (Completed, Cancelled)
-    /// cannot be resumed.
-    ///
-    /// # Parameters
-    /// - `stream_id`: Unique identifier of the stream to resume
-    ///
-    /// # Authorization
-    /// - Requires authorization from the stream's sender (original creator)
-    /// - Admin can use `resume_stream_as_admin` for administrative override
-    ///
-    /// # Panics
-    /// - If the stream is `Active` (not paused, already running)
-    /// - If the stream is `Completed` (terminal state, cannot be resumed)
-    /// - If the stream is `Cancelled` (terminal state, cannot be resumed)
-    /// - If the stream does not exist (`stream_id` is invalid)
-    /// - If caller is not authorized (not the sender)
-    ///
-    /// # Events
-    /// - Publishes `Resumed(stream_id)` event on success
-    ///
-    /// # Usage Notes
-    /// - Only paused streams can be resumed
-    /// - Accrual calculations are time-based and unaffected by pause/resume
-    /// - After resume, recipient can immediately withdraw accrued funds
-    pub fn resume_stream(env: Env, stream_id: u64) {
-        let mut stream = load_stream(&env, stream_id);
-        Self::require_sender_or_admin(&env, &stream.sender);
-
-        match stream.status {
-            StreamStatus::Active => panic!("stream is active, not paused"),
-            StreamStatus::Completed => panic!("stream is completed"),
-            StreamStatus::Cancelled => panic!("stream is cancelled"),
-            StreamStatus::Paused => {}
+        let now = env.ledger().timestamp();
+        if accrual::stream_time(&stream, now) >= stream.end_time {
+            return Err(Error::StreamMatured);
         }
 
-        stream.status = StreamStatus::Active;
-        save_stream(&env, &stream);
+        let current_duration = accrual::duration(&stream) as i128;
 
-        env.events().publish(
-            (symbol_short!("resumed"), stream_id),
-            StreamEvent::Resumed(stream_id),
-        );
-    }
-
-    /// Cancel a payment stream and refund unstreamed funds to the sender.
-    ///
-    /// Terminates an active or paused stream, immediately refunding any unstreamed tokens
-    /// to the sender. The accrued amount (based on time elapsed) remains in the contract
-    /// for the recipient to withdraw. This is a terminal operation - cancelled streams
-    /// cannot be resumed.
-    ///
-    /// # Parameters
-    /// - `stream_id`: Unique identifier of the stream to cancel
-    ///
-    /// # Authorization
-    /// - Requires authorization from the stream's sender (original creator)
-    /// - Admin can use `cancel_stream_as_admin` for administrative override
-    ///
-    /// # Behavior
-    /// 1. Validates stream is in `Active` or `Paused` state
-    /// 2. Calculates accrued amount: `min((now - start_time) × rate, deposit_amount)`
-    /// 3. Calculates refund: `deposit_amount - accrued`
-    /// 4. Transfers refund to sender (if > 0)
-    /// 5. Sets stream status to `Cancelled`
-    /// 6. Accrued but not withdrawn amount remains for recipient
-    ///
-    /// # Returns
-    /// - Implicitly returns via state change and token transfer
-    ///
-    /// # Panics
-    /// - If stream is not `Active` or `Paused` (already completed or cancelled)
-    /// - If the stream does not exist (`stream_id` is invalid)
-    /// - If caller is not authorized (not the sender)
-    /// - If token transfer fails (should not happen with valid contract state)
-    ///
-    /// # Events
-    /// - Publishes `Cancelled(stream_id)` event on success
-    ///
-    /// # Usage Notes
-    /// - Cancellation is irreversible (terminal state)
-    /// - Recipient can still withdraw accrued amount after cancellation
-    /// - If fully accrued (time >= end_time), sender receives no refund
-    /// - Accrual is time-based, not affected by pause state
-    /// - Can be called on paused streams
-    ///
-    /// # Examples
-    /// - Cancel at 30% completion → sender gets 70% refund, recipient can withdraw 30%
-    /// - Cancel at 100% completion → sender gets 0% refund, recipient can withdraw 100%
-    /// - Cancel before cliff → sender gets 100% refund (no accrual before cliff)
-    pub fn cancel_stream(env: Env, stream_id: u64) {
-        let mut stream = load_stream(&env, stream_id);
-        Self::require_sender_or_admin(&env, &stream.sender);
-
-        assert!(
-            stream.status == StreamStatus::Active || stream.status == StreamStatus::Paused,
-            "stream must be active or paused to cancel"
-        );
-
-        let accrued = Self::calculate_accrued(env.clone(), stream_id);
-        let unstreamed = stream.deposit_amount - accrued;
-
-        if unstreamed > 0 {
-            let token_client = token::Client::new(&env, &get_token(&env));
-            token_client.transfer(&env.current_contract_address(), &stream.sender, &unstreamed);
+        // delta = floor(amount * duration / deposited), preserving the rate.
+        // Floor, never ceiling — see the rounding note above.
+        let scaled = amount
+            .checked_mul(current_duration)
+            .ok_or(Error::Overflow)?;
+        let delta = scaled
+            .checked_div(stream.deposited)
+            .ok_or(Error::Overflow)?;
+        if delta < 0 || delta > u64::MAX as i128 {
+            return Err(Error::Overflow);
         }
 
-        stream.status = StreamStatus::Cancelled;
-        save_stream(&env, &stream);
+        // A top-up too small to buy even one second cannot extend the schedule,
+        // so the only way to absorb it would be to raise the rate — which
+        // re-vests elapsed time retroactively, the exact thing this function
+        // exists to avoid. Reject instead.
+        if delta == 0 {
+            return Err(Error::TopUpTooSmall);
+        }
 
-        env.events().publish(
-            (symbol_short!("cancelled"), stream_id),
-            StreamEvent::Cancelled(stream_id),
-        );
+        let new_deposited = stream
+            .deposited
+            .checked_add(amount)
+            .ok_or(Error::Overflow)?;
+        let new_end = stream
+            .end_time
+            .checked_add(delta as u64)
+            .ok_or(Error::Overflow)?;
+        let new_duration = new_end
+            .checked_sub(stream.start_time)
+            .ok_or(Error::Overflow)?;
+
+        // Re-establish the creation-time guards against the new figures.
+        new_deposited
+            .checked_mul(new_duration as i128)
+            .ok_or(Error::Overflow)?;
+        if new_deposited < new_duration as i128 {
+            return Err(Error::DepositRateTooLow);
+        }
+
+        let old_vested = accrual::vested(&stream, now)?;
+        stream.deposited = new_deposited;
+        stream.end_time = new_end;
+        if accrual::vested(&stream, now)? < old_vested {
+            return Err(Error::VestedDecreased);
+        }
+
+        let token = stream.token.clone();
+        let sender = stream.sender.clone();
+
+        pull_deposit(&env, &token, &sender, &amount)?;
+
+        storage::save_stream(&env, stream_id, &stream);
+
+        events::topped_up(&env, stream_id, &stream, amount);
+        Ok(())
     }
 
-    /// Withdraw accrued tokens from a payment stream to the recipient.
+    /// Withdraw accrued tokens to the recipient.
     ///
-    /// Transfers all accrued-but-not-yet-withdrawn tokens to the stream's recipient.
-    /// The amount withdrawn is calculated as `accrued - withdrawn_amount`, where accrued
-    /// is based on time elapsed since stream start. If this withdrawal completes the
-    /// stream (all deposited tokens withdrawn), the stream status transitions to `Completed`.
+    /// `amount == None` withdraws the full withdrawable balance. Returns the
+    /// amount actually transferred.
     ///
-    /// # Parameters
-    /// - `stream_id`: Unique identifier of the stream to withdraw from
+    /// Withdrawal works while the stream is paused: pausing stops *accrual*, it
+    /// does not freeze funds the recipient has already earned. Freezing earned
+    /// funds would make pausable streams unacceptable to any serious recipient.
     ///
-    /// # Returns
-    /// - `i128`: The amount of tokens transferred to the recipient
+    /// # Errors
     ///
-    /// # Authorization
-    /// - Requires authorization from the stream's recipient (only recipient can withdraw)
-    /// - This prevents anyone from withdrawing on behalf of the recipient
-    ///
-    /// # Panics
-    /// - If the stream is `Completed` (all tokens already withdrawn)
-    /// - If the stream is `Paused` (withdrawals not allowed while paused)
-    /// - If there is nothing to withdraw (`accrued == withdrawn_amount`)
-    /// - If the stream does not exist (`stream_id` is invalid)
-    /// - If caller is not authorized (not the recipient)
-    /// - If token transfer fails (insufficient contract balance, should not happen)
-    ///
-    /// # State Changes
-    /// - Updates `withdrawn_amount` by the amount transferred
-    /// - Sets status to `Completed` if all deposited tokens are withdrawn
-    /// - Extends stream storage TTL to prevent expiration
-    ///
-    /// # Events
-    /// - Publishes `withdrew(stream_id, amount)` event on success
-    ///
-    /// # Usage Notes
-    /// - Can be called multiple times to withdraw incrementally
-    /// - Accrual is time-based: `min((now - start_time) × rate, deposit_amount)`
-    /// - Before cliff time, accrued amount is 0 (nothing to withdraw)
-    /// - After end_time, accrued amount is capped at deposit_amount
-    /// - Works on `Active` and `Cancelled` streams, not on `Paused` or `Completed`
-    /// - For cancelled streams, only the accrued amount (not refunded) can be withdrawn
-    ///
-    /// # Examples
-    /// - Stream: 1000 tokens over 1000 seconds (1 token/sec)
-    /// - At t=300: withdraw() returns 300 tokens
-    /// - At t=800: withdraw() returns 500 tokens (800 - 300 already withdrawn)
-    /// - At t=1000: withdraw() returns 200 tokens, status → Completed
-    pub fn withdraw(env: Env, stream_id: u64) -> i128 {
-        let mut stream = load_stream(&env, stream_id);
-
-        // Enforce recipient-only authorization: only the stream's recipient can withdraw
-        // This is equivalent to checking env.invoker() == stream.recipient
-        // require_auth() ensures only the recipient can authorize this call,
-        // preventing anyone from withdrawing on behalf of the recipient
+    /// * [`Error::StreamNotFound`] — no stream with this id.
+    /// * [`Error::StreamTerminated`] — stream is `Cancelled` or `Depleted` and
+    ///   has nothing left to pay. Distinct from [`Error::NothingToWithdraw`] so
+    ///   a client can tell "wait for accrual" apart from "this stream is over"
+    ///   without a second round-trip.
+    /// * [`Error::NothingToWithdraw`] — stream is still live but the
+    ///   withdrawable balance is zero (pre-start, pre-cliff, or fully drawn
+    ///   for now). A typed error rather than a silent no-op.
+    /// * [`Error::InsufficientWithdrawable`] — explicit amount exceeds the
+    ///   withdrawable balance.
+    pub fn withdraw(env: Env, stream_id: u64, amount: Option<i128>) -> Result<i128, Error> {
+        let mut stream = storage::load_stream(&env, stream_id)?;
         stream.recipient.require_auth();
 
-        assert!(
-            stream.status != StreamStatus::Completed,
-            "stream already completed"
-        );
-
-        assert!(
-            stream.status != StreamStatus::Paused,
-            "cannot withdraw from paused stream"
-        );
-
-        let accrued = Self::calculate_accrued(env.clone(), stream_id);
-        let withdrawable = accrued - stream.withdrawn_amount;
-        assert!(withdrawable > 0, "nothing to withdraw");
-
-        let token_client = token::Client::new(&env, &get_token(&env));
-        token_client.transfer(
-            &env.current_contract_address(),
-            &stream.recipient,
-            &withdrawable,
-        );
-
-        stream.withdrawn_amount += withdrawable;
-
-        // If the full deposit has been streamed and withdrawn, mark completed.
-        if stream.withdrawn_amount == stream.deposit_amount {
-            stream.status = StreamStatus::Completed;
-        }
-
-        save_stream(&env, &stream);
-        env.events()
-            .publish((symbol_short!("withdrew"), stream_id), withdrawable);
-        withdrawable
-    }
-
-    /// Calculate the total amount accrued to the recipient at the current time.
-    ///
-    /// Computes how many tokens have been earned by the recipient based on time elapsed
-    /// since the stream started. This is a read-only view function that does not modify
-    /// state or require authorization.
-    ///
-    /// # Parameters
-    /// - `stream_id`: Unique identifier of the stream to query
-    ///
-    /// # Returns
-    /// - `i128`: Total accrued amount in tokens (not the withdrawable amount)
-    ///
-    /// # Calculation
-    /// - Before `cliff_time`: returns 0 (no accrual before cliff)
-    /// - After `cliff_time`: `min((now - start_time) × rate_per_second, deposit_amount)`
-    /// - After `end_time`: capped at `deposit_amount` (no accrual beyond end)
-    ///
-    /// # Panics
-    /// - If the stream does not exist (`stream_id` is invalid)
-    ///
-    /// # Usage Notes
-    /// - This is a view function (read-only, no state changes)
-    /// - No authorization required (public information)
-    /// - Returns total accrued, not withdrawable amount
-    /// - To get withdrawable amount: `calculate_accrued() - stream.withdrawn_amount`
-    /// - Accrual is time-based and unaffected by stream status (Active, Paused, etc.)
-    /// - Useful for UIs to show real-time accrual without transactions
-    ///
-    /// # Examples
-    /// - Stream: 1000 tokens, 0-1000s, rate 1 token/sec, cliff at 500s
-    /// - At t=300: returns 0 (before cliff)
-    /// - At t=500: returns 500 (at cliff, accrual from start_time)
-    /// - At t=800: returns 800
-    /// - At t=1500: returns 1000 (capped at deposit_amount)
-    pub fn calculate_accrued(env: Env, stream_id: u64) -> i128 {
-        let stream = load_stream(&env, stream_id);
         let now = env.ledger().timestamp();
-
-        accrual::calculate_accrued_amount(
-            stream.start_time,
-            stream.cliff_time,
-            stream.end_time,
-            stream.rate_per_second,
-            stream.deposit_amount,
-            now,
-        )
-    }
-
-    /// Retrieve the global contract configuration.
-    ///
-    /// Returns the contract's configuration containing the token address used for all
-    /// streams and the admin address authorized for administrative operations.
-    ///
-    /// # Returns
-    /// - `Config`: Structure containing:
-    ///   - `token`: Address of the token contract used for all payment streams
-    ///   - `admin`: Address authorized to perform admin operations (pause, cancel, resume)
-    ///
-    /// # Panics
-    /// - If the contract has not been initialized (missing config)
-    ///
-    /// # Usage Notes
-    /// - This is a view function (read-only, no state changes)
-    /// - No authorization required (public information)
-    /// - Config is set once during `init()` and cannot be changed
-    /// - Useful for integrators to verify token and admin addresses
-    pub fn get_config(env: Env) -> Config {
-        get_config(&env)
-    }
-
-    /// Retrieve the complete state of a payment stream.
-    ///
-    /// Returns all stored information about a stream including participants, amounts,
-    /// timing parameters, and current status. This is a read-only view function.
-    ///
-    /// # Parameters
-    /// - `stream_id`: Unique identifier of the stream to query
-    ///
-    /// # Returns
-    /// - `Stream`: Complete stream state containing:
-    ///   - `stream_id`: Unique identifier
-    ///   - `sender`: Address that created and funded the stream
-    ///   - `recipient`: Address that receives the streamed tokens
-    ///   - `deposit_amount`: Total tokens deposited (initial funding)
-    ///   - `rate_per_second`: Streaming rate (tokens per second)
-    ///   - `start_time`: When streaming begins (ledger timestamp)
-    ///   - `cliff_time`: When tokens first become available (vesting cliff)
-    ///   - `end_time`: When streaming completes (ledger timestamp)
-    ///   - `withdrawn_amount`: Total tokens already withdrawn by recipient
-    ///   - `status`: Current stream status (Active, Paused, Completed, Cancelled)
-    ///
-    /// # Panics
-    /// - If the stream does not exist (`stream_id` is invalid)
-    ///
-    /// # Usage Notes
-    /// - This is a view function (read-only, no state changes)
-    /// - No authorization required (public information)
-    /// - Useful for UIs to display stream details
-    /// - Combine with `calculate_accrued()` to show real-time withdrawable amount
-    /// - Status indicates current operational state:
-    ///   - `Active`: Normal operation, recipient can withdraw
-    ///   - `Paused`: Temporarily halted, no withdrawals allowed
-    ///   - `Completed`: All tokens withdrawn, terminal state
-    ///   - `Cancelled`: Terminated early, unstreamed tokens refunded, terminal state
-    pub fn get_stream_state(env: Env, stream_id: u64) -> Stream {
-        load_stream(&env, stream_id)
-    }
-
-    /// Internal helper to check authorization for sender or admin.
-    fn require_sender_or_admin(_env: &Env, sender: &Address) {
-        // Only the sender can manage their own stream via these paths.
-        // Admin overrides are handled by the 'as_admin' specific functions.
-        sender.require_auth();
-    }
-}
-
-#[contractimpl]
-impl FluxoraStream {
-    /// Cancel a payment stream as the contract admin.
-    ///
-    /// Administrative override to cancel any stream, bypassing sender authorization.
-    /// Identical behavior to `cancel_stream` but requires admin authorization instead
-    /// of sender authorization. Useful for emergency interventions or dispute resolution.
-    ///
-    /// # Parameters
-    /// - `stream_id`: Unique identifier of the stream to cancel
-    ///
-    /// # Authorization
-    /// - Requires authorization from the contract admin (set during `init`)
-    ///
-    /// # Behavior
-    /// Same as `cancel_stream`:
-    /// 1. Validates stream is in `Active` or `Paused` state
-    /// 2. Calculates accrued amount based on time elapsed
-    /// 3. Refunds unstreamed tokens to sender
-    /// 4. Sets stream status to `Cancelled`
-    /// 5. Accrued amount remains for recipient to withdraw
-    ///
-    /// # Panics
-    /// - If stream is not `Active` or `Paused`
-    /// - If the stream does not exist
-    /// - If caller is not the admin
-    /// - If token transfer fails
-    ///
-    /// # Events
-    /// - Publishes `Cancelled(stream_id)` event on success
-    ///
-    /// # Usage Notes
-    /// - Admin can cancel any stream regardless of sender
-    /// - Use for emergency situations or dispute resolution
-    /// - Sender still receives refund of unstreamed tokens
-    /// - Recipient can still withdraw accrued amount
-    pub fn cancel_stream_as_admin(env: Env, stream_id: u64) {
-        let admin = get_admin(&env);
-        admin.require_auth();
-
-        let mut stream = load_stream(&env, stream_id);
-
-        assert!(
-            stream.status == StreamStatus::Active || stream.status == StreamStatus::Paused,
-            "stream must be active or paused to cancel"
-        );
-
-        let accrued = Self::calculate_accrued(env.clone(), stream_id);
-        let unstreamed = stream.deposit_amount - accrued;
-
-        if unstreamed > 0 {
-            let token_client = token::Client::new(&env, &get_token(&env));
-            token_client.transfer(&env.current_contract_address(), &stream.sender, &unstreamed);
+        let available = accrual::withdrawable(&stream, now)?;
+        if available == 0 {
+            // Terminal with nothing left is a different precondition from a
+            // live stream that simply has not accrued (or is fully drawn for
+            // now). Integrators must be able to branch without guessing.
+            if stream.status.is_terminal() {
+                return Err(Error::StreamTerminated);
+            }
+            return Err(Error::NothingToWithdraw);
         }
 
+        let payout = match amount {
+            None => available,
+            Some(requested) => {
+                if requested <= 0 {
+                    return Err(Error::InvalidAmount);
+                }
+                if requested > available {
+                    return Err(Error::InsufficientWithdrawable);
+                }
+                requested
+            }
+        };
+
+        Self::apply_withdrawal(&env, stream_id, &mut stream, payout)?;
+        Ok(payout)
+    }
+
+    /// Withdraw the full available balance from several streams at once.
+    ///
+    /// All streams must share the same `recipient`, who authorizes once for the
+    /// whole batch. Streams with nothing currently withdrawable are skipped
+    /// rather than failing the batch. Returns the total transferred across all
+    /// streams; per-stream amounts are available from the individual `withdrawn`
+    /// events, which are emitted in batch order.
+    ///
+    /// Streams need not share a token — each payout uses its own stream's token.
+    ///
+    /// **Atomicity: the batch is all-or-nothing.** Any error — an unknown id, a
+    /// stream belonging to a different recipient, or a duplicate id — reverts
+    /// the *entire* call, including payouts already applied to earlier streams
+    /// in the batch. No accounting is written, no tokens move, and no event is
+    /// observable. A failed batch leaves the caller free to retry with a
+    /// corrected id list; the duplicates are rejected deterministically
+    /// ([`Error::DuplicateStreamId`]) no matter where in the batch they sit.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::EmptyBatch`] — no ids were supplied.
+    /// * [`Error::BatchTooLarge`] — more than [`MAX_BATCH_SIZE`] ids. Chunk
+    ///   client-side; the SDK does this automatically.
+    /// * [`Error::MalformedStreamId`] — a serialized vector element is not a
+    ///   `u64`.
+    /// * [`Error::DuplicateStreamId`] — the same id appears twice, which would
+    ///   otherwise operate on a stale copy of the stream the second time.
+    /// * [`Error::StreamNotFound`] — one of the ids does not exist.
+    /// * [`Error::Unauthorized`] — one of the streams has a different recipient.
+    pub fn batch_withdraw(
+        env: Env,
+        recipient: Address,
+        stream_ids: Vec<u64>,
+    ) -> Result<i128, Error> {
+        let stream_ids = Self::validate_batch_ids(&env, &stream_ids)?;
+        Self::reject_duplicate_ids(&stream_ids)?;
+        recipient.require_auth();
+
+        let now = env.ledger().timestamp();
+        let mut streams = Vec::new(&env);
+        let mut payouts = Vec::new(&env);
+        let mut total: i128 = 0;
+
+        // Resolve and validate the entire batch before changing storage or
+        // calling any token contract.
+        for stream_id in stream_ids.iter() {
+            let stream = storage::peek_stream(&env, stream_id)?;
+            if stream.recipient != recipient {
+                return Err(Error::Unauthorized);
+            }
+
+            let available = accrual::withdrawable(&stream, now)?;
+            total = total.checked_add(available).ok_or(Error::Overflow)?;
+            streams.push_back(stream);
+            payouts.push_back(available);
+        }
+
+        for i in 0..stream_ids.len() {
+            let stream_id = stream_ids.get_unchecked(i);
+            let mut stream = streams.get_unchecked(i);
+            let payout = payouts.get_unchecked(i);
+            if payout == 0 {
+                storage::extend_stream(&env, stream_id, &stream);
+            } else {
+                Self::apply_withdrawal(&env, stream_id, &mut stream, payout)?;
+            }
+        }
+
+        Ok(total)
+    }
+
+    /// Cancel a stream: stop accrual and refund the unvested remainder to the
+    /// sender.
+    ///
+    /// The recipient keeps everything vested up to this instant and withdraws it
+    /// through the normal path — cancellation does not seize earned funds.
+    ///
+    /// # Implementation
+    ///
+    /// Rather than introduce a second state machine, cancellation rewrites the
+    /// schedule so the stream *looks* like one that has fully matured:
+    /// `deposited` is reduced to the amount vested right now and `end_time` is
+    /// pulled back to the current point on the stream clock. Every subsequent
+    /// `vested` call then clamps to the full (reduced) deposit, so
+    /// [`withdraw`](Self::withdraw) needs no special-casing at all.
+    ///
+    /// Cancelling before the cliff refunds everything: pre-cliff the recipient's
+    /// entitlement is zero by definition.
+    ///
+    /// Cancelling at exactly `start_time` is that case one instant later:
+    /// nothing has vested, so the entire deposit is returned, the recipient
+    /// receives nothing, and the collapsed schedule has zero length rather than
+    /// a negative one.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::StreamNotFound`] — no stream with this id.
+    /// * [`Error::NotCancellable`] — created with `cancellable == false`.
+    /// * [`Error::StreamTerminated`] — already cancelled or depleted.
+    pub fn cancel(env: Env, stream_id: u64) -> Result<(), Error> {
+        let mut stream = storage::load_stream(&env, stream_id)?;
+        stream.sender.require_auth();
+
+        if !stream.cancellable {
+            return Err(Error::NotCancellable);
+        }
+        if stream.status.is_terminal() {
+            return Err(Error::StreamTerminated);
+        }
+
+        let now = env.ledger().timestamp();
+        let vested_now = accrual::vested(&stream, now)?;
+        let refund = accrual::refundable(&stream, now)?;
+
+        // Issue #1584 — the accounting the `Cancelled` event publishes.
+        //
+        // `vested_now` is the *total* vested at this instant, cumulative and
+        // inclusive of `withdrawn`; `refund` is the unvested remainder handed
+        // back to the sender. Conservation (invariant I4) says the two must
+        // partition the pre-cancel deposit exactly, with nothing created or
+        // destroyed in between. Checked here rather than trusted, because this
+        // is the identity every downstream ledger reconciles against.
+        //
+        // `debug_assert` compiles out of the release profile
+        // (`debug-assertions = false`), so this costs the deployed contract
+        // nothing while the test suite runs it on every cancellation.
+        debug_assert_eq!(
+            refund + vested_now,
+            stream.deposited,
+            "cancel: conservation broken — refund + vested != deposited",
+        );
+        debug_assert!(
+            vested_now >= stream.withdrawn,
+            "cancel: vested below what was already withdrawn",
+        );
+
+        // Collapse the schedule onto the current point of the stream clock.
+        // Clamped at `start_time` so a cancel before the stream opens leaves a
+        // zero-length (not negative-length) schedule.
+        let settle_at = accrual::stream_time(&stream, now).max(stream.start_time);
+
+        stream.deposited = vested_now;
+        stream.end_time = settle_at;
+        stream.paused_at = None;
         stream.status = StreamStatus::Cancelled;
-        save_stream(&env, &stream);
 
-        env.events().publish(
-            (symbol_short!("cancelled"), stream_id),
-            StreamEvent::Cancelled(stream_id),
-        );
+        let token = stream.token.clone();
+        let sender = stream.sender.clone();
+        storage::save_stream(&env, stream_id, &stream);
+
+        if refund > 0 {
+            token_transfer(
+                &env,
+                &token,
+                &env.current_contract_address(),
+                MuxedAddress::from(sender),
+                &refund,
+            )?;
+        }
+
+        // Issue #1584: the event's `vested` is read off the settled stream by
+        // the helper (`stream.deposited`, set above), so it cannot disagree with
+        // storage. Asserted here so the intent survives a future edit.
+        debug_assert_eq!(stream.deposited, vested_now);
+        events::cancelled(&env, stream_id, &stream, refund);
+        Ok(())
     }
 
-    /// Pause a payment stream as the contract admin.
+    /// Pause accrual. Only the sender, and only if `pausable`.
     ///
-    /// Administrative override to pause any stream, bypassing sender authorization.
-    /// Identical behavior to `pause_stream` but requires admin authorization instead
-    /// of sender authorization.
-    ///
-    /// # Parameters
-    /// - `stream_id`: Unique identifier of the stream to pause
-    ///
-    /// # Authorization
-    /// - Requires authorization from the contract admin (set during `init`)
-    ///
-    /// # Panics
-    /// - If the stream is not in `Active` state
-    /// - If the stream does not exist
-    /// - If caller is not the admin
-    ///
-    /// # Events
-    /// - Publishes `Paused(stream_id)` event on success
-    ///
-    /// # Usage Notes
-    /// - Admin can pause any stream regardless of sender
-    /// - Accrual continues based on time (pause doesn't stop time)
-    /// - Recipient cannot withdraw while paused
-    pub fn pause_stream_as_admin(env: Env, stream_id: u64) {
-        let admin = get_admin(&env);
-        admin.require_auth();
+    /// Pausing freezes the stream's clock and pushes the effective end date
+    /// forward by the paused duration. Total value delivered stays constant; the
+    /// schedule simply stretches. The recipient can still withdraw what they
+    /// already earned.
+    pub fn pause(env: Env, stream_id: u64) -> Result<(), Error> {
+        let mut stream = storage::load_stream(&env, stream_id)?;
+        stream.sender.require_auth();
 
-        let mut stream = load_stream(&env, stream_id);
+        if !stream.pausable {
+            return Err(Error::NotPausable);
+        }
+        if stream.status.is_terminal() {
+            return Err(Error::StreamTerminated);
+        }
+        if stream.status == StreamStatus::Paused {
+            return Err(Error::StreamAlreadyPaused);
+        }
 
-        assert!(
-            stream.status == StreamStatus::Active,
-            "stream is not active"
-        );
+        let now = env.ledger().timestamp();
+        let old_vested = accrual::vested(&stream, now)?;
 
+        stream.paused_at = Some(now);
         stream.status = StreamStatus::Paused;
-        save_stream(&env, &stream);
 
-        env.events().publish(
-            (symbol_short!("paused"), stream_id),
-            StreamEvent::Paused(stream_id),
-        );
+        if accrual::vested(&stream, now)? < old_vested {
+            return Err(Error::VestedDecreased);
+        }
+
+        storage::save_stream(&env, stream_id, &stream);
+
+        events::paused(&env, stream_id, &stream, now);
+        Ok(())
     }
 
-    /// Resume a paused payment stream as the contract admin.
-    ///
-    /// Administrative override to resume any paused stream, bypassing sender authorization.
-    /// Identical behavior to `resume_stream` but requires admin authorization instead
-    /// of sender authorization.
-    ///
-    /// # Parameters
-    /// - `stream_id`: Unique identifier of the stream to resume
-    ///
-    /// # Authorization
-    /// - Requires authorization from the contract admin (set during `init`)
-    ///
-    /// # Panics
-    /// - If the stream is not in `Paused` state
-    /// - If the stream does not exist
-    /// - If caller is not the admin
-    ///
-    /// # Events
-    /// - Publishes `Resumed(stream_id)` event on success
-    ///
-    /// # Usage Notes
-    /// - Admin can resume any paused stream regardless of sender
-    /// - After resume, recipient can immediately withdraw accrued funds
-    /// - Cannot resume completed or cancelled streams (terminal states)
-    pub fn resume_stream_as_admin(env: Env, stream_id: u64) {
-        get_admin(&env).require_auth();
-        let mut stream = load_stream(&env, stream_id);
+    /// Resume a paused stream, absorbing the paused interval into
+    /// `paused_total` so the clock picks up exactly where it stopped.
+    pub fn resume(env: Env, stream_id: u64) -> Result<(), Error> {
+        let mut stream = storage::load_stream(&env, stream_id)?;
+        stream.sender.require_auth();
 
-        assert!(
-            stream.status == StreamStatus::Paused,
-            "stream is not paused"
-        );
+        if stream.status.is_terminal() {
+            return Err(Error::StreamTerminated);
+        }
+        let paused_at = match stream.paused_at {
+            Some(t) => t,
+            None => return Err(Error::StreamNotPaused),
+        };
+        if stream.status != StreamStatus::Paused {
+            return Err(Error::StreamNotPaused);
+        }
 
+        let now = env.ledger().timestamp();
+        let old_vested = accrual::vested(&stream, now)?;
+
+        let paused_duration = now.saturating_sub(paused_at);
+        stream.paused_total = stream
+            .paused_total
+            .checked_add(paused_duration)
+            .ok_or(Error::Overflow)?;
+        stream.paused_at = None;
         stream.status = StreamStatus::Active;
-        save_stream(&env, &stream);
 
-        env.events().publish(
-            (symbol_short!("resumed"), stream_id),
-            StreamEvent::Resumed(stream_id),
-        );
+        if accrual::vested(&stream, now)? < old_vested {
+            return Err(Error::VestedDecreased);
+        }
+
+        storage::save_stream(&env, stream_id, &stream);
+
+        events::resumed(&env, stream_id, &stream, paused_duration);
+        Ok(())
+    }
+
+    /// Reassign a stream's future payouts to a new recipient. Sender auth.
+    ///
+    /// Available only if the stream was created with `transferable == true`.
+    /// A compliance-bound sender — payroll, a KYC'd grant program — can pin the
+    /// payee at creation by passing `false`.
+    ///
+    /// Any balance the old recipient had already accrued but not withdrawn moves
+    /// with the stream. Recipients should withdraw before transferring.
+    ///
+    /// Transfer is allowed at the cliff and end timestamps, and the new
+    /// recipient receives any claim that is withdrawable at those boundaries.
+    /// A cancelled stream may still be transferred while it has an unwithdrawn
+    /// tail; a depleted stream cannot be transferred.
+    ///
+    /// # Delegate grants
+    ///
+    /// A transfer changes only the `recipient` field; it does **not** touch
+    /// delegate grants. Grants are scoped to the stream, not to the recipient
+    /// who issued them, so every grant live before the transfer is still live
+    /// after it — including recipient-issued `WITHDRAW` and
+    /// `TRANSFER_RECIPIENT` grants, which now belong to whoever holds the
+    /// recipient slot. That makes revocation follow the slot rather than the
+    /// person: the new recipient can revoke a surviving grant immediately, the
+    /// old recipient can neither grant nor revoke anything further, and
+    /// sender-issued grants (`CANCEL`, `PAUSE`, `RESUME`, `TOP_UP`) are
+    /// untouched because the sender did not change.
+    ///
+    /// The rule is stated in `docs/delegation-revocation.md` and asserted for
+    /// every permission bit by `test::delegation`.
+    pub fn transfer_recipient(
+        env: Env,
+        stream_id: u64,
+        new_recipient: Address,
+    ) -> Result<(), Error> {
+        let mut stream = storage::load_stream(&env, stream_id)?;
+        // #1637 hardens recipient-transfer authorization to the sender: the
+        // party who funded the stream keeps control over who is paid out.
+        // Granting this to the current recipient is the *delegate* path
+        // (`delegate_transfer_recipient`), gated on a recipient-issued grant.
+        stream.sender.require_auth();
+
+        if !stream.transferable {
+            return Err(Error::NotTransferable);
+        }
+        // A stream with no claim left is not reassignable. This covers both
+        // `Depleted` streams and cancelled streams whose tail has been fully
+        // drawn (where `Cancelled` is intentionally sticky, so checking only
+        // the status would miss it).
+        if stream.status == StreamStatus::Depleted || stream.withdrawn >= stream.deposited {
+            return Err(Error::StreamTerminated);
+        }
+        if new_recipient == stream.sender {
+            return Err(Error::SelfStream);
+        }
+
+        let old_recipient = stream.recipient.clone();
+        if old_recipient == new_recipient {
+            return Err(Error::RepeatedTransfer);
+        }
+
+        let now = env.ledger().timestamp();
+        let old_vested = accrual::vested(&stream, now)?;
+
+        stream.recipient = new_recipient.clone();
+
+        if accrual::vested(&stream, now)? < old_vested {
+            return Err(Error::VestedDecreased);
+        }
+
+        storage::save_stream(&env, stream_id, &stream);
+
+        events::recipient_transferred(&env, stream_id, &old_recipient, &new_recipient);
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------------
+    // Delegation
+    // ---------------------------------------------------------------------
+
+    /// Grant a delegate permission to call specific operations on a stream.
+    ///
+    /// `ops` is a bitmask of [`Op`] constants. `expires_at` is an optional
+    /// Unix timestamp after which the grant is no longer valid; pass `None`
+    /// for a grant that does not expire on its own. Only the authoritative
+    /// party for the requested ops may call this:
+    ///
+    /// * Sender-side ops (`CANCEL`, `PAUSE`, `RESUME`, `TOP_UP`): sender auth.
+    /// * Recipient-side ops (`WITHDRAW`, `TRANSFER_RECIPIENT`): recipient auth.
+    /// * Mixed grants must come from both parties; callers should split them.
+    ///
+    /// Granting over an existing grant replaces it entirely.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::StreamNotFound`] — no stream with this id.
+    /// * [`Error::StreamTerminated`] — stream is cancelled or depleted.
+    /// * [`Error::Unauthorized`] — caller is not the required party for any of
+    ///   the requested ops.
+    pub fn grant_delegate(
+        env: Env,
+        stream_id: u64,
+        grantor: Address,
+        delegate: Address,
+        ops: u32,
+        expires_at: Option<u64>,
+    ) -> Result<(), Error> {
+        let stream = storage::load_stream(&env, stream_id)?;
+        if stream.status.is_terminal() {
+            return Err(Error::StreamTerminated);
+        }
+
+        let sender_ops = op::CANCEL | op::PAUSE | op::RESUME | op::TOP_UP;
+        let recipient_ops = op::WITHDRAW | op::TRANSFER_RECIPIENT;
+
+        // The grantor must be the party that owns the ops being delegated.
+        // Mixed calls are rejected; split into two grants instead.
+        let needs_sender = ops & sender_ops != 0;
+        let needs_recipient = ops & recipient_ops != 0;
+
+        if needs_sender && needs_recipient {
+            return Err(Error::Unauthorized);
+        }
+        if needs_sender {
+            if grantor != stream.sender {
+                return Err(Error::Unauthorized);
+            }
+            grantor.require_auth();
+        } else if needs_recipient {
+            if grantor != stream.recipient {
+                return Err(Error::Unauthorized);
+            }
+            grantor.require_auth();
+        } else {
+            // ops == 0 is a no-op; treat it as success.
+            return Ok(());
+        }
+
+        let grant = DelegateGrant { ops, expires_at };
+        storage::save_delegate(&env, stream_id, &delegate, &grant);
+
+        events::delegate_granted(&env, stream_id, &grantor, &delegate, ops, expires_at);
+        Ok(())
+    }
+
+    /// Revoke a previously-issued delegate grant.
+    ///
+    /// # Authority follows the party, not the person
+    ///
+    /// The sender / recipient test below reads the stream's *current* parties,
+    /// so after a [`transfer_recipient`](Self::transfer_recipient) the new
+    /// recipient holds the recipient half of the check: they can revoke a grant
+    /// the old recipient issued, and the old recipient — no longer a party to
+    /// the stream — is rejected with [`Error::Unauthorized`]. Grants themselves
+    /// survive the transfer; see `docs/delegation-revocation.md`.
+    ///
+    /// Takes effect immediately — the delegate's next call will be rejected.
+    /// Funds the delegate has already moved (e.g. via a prior `withdraw`) are
+    /// unaffected: revocation only stops future invocations.
+    ///
+    /// # Same-ledger ordering
+    ///
+    /// Revocation is **ordered, not retroactive**. This call removes the grant
+    /// from storage; every invocation ordered after it — in the same ledger or
+    /// any later one — reads no grant and fails with
+    /// [`Error::DelegateNotPermitted`]. An invocation ordered *before* the
+    /// revocation is honoured and is not unwound: already-completed calls are
+    /// unaffected, only the ability to make new ones is withdrawn.
+    ///
+    /// There is no grace period and no distinction between same-ledger and
+    /// cross-ledger calls — a single storage write decides both. Ordering
+    /// *within* a ledger is the network's transaction application order, not
+    /// something this contract selects; the guarantee is only that whichever
+    /// order the network applies, the delegate call on the later side of the
+    /// revocation is rejected. `test::delegation` pins both orders for every
+    /// permission bit; `docs/delegation-revocation.md` states the guarantee.
+    ///
+    /// Silently succeeds if no grant exists (idempotent).
+    ///
+    /// The grantor must be either the sender or the recipient of the stream.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::StreamNotFound`] — no stream with this id.
+    /// * [`Error::Unauthorized`] — caller is neither sender nor recipient.
+    pub fn revoke_delegate(
+        env: Env,
+        stream_id: u64,
+        grantor: Address,
+        delegate: Address,
+    ) -> Result<(), Error> {
+        let stream = storage::load_stream(&env, stream_id)?;
+
+        if grantor != stream.sender && grantor != stream.recipient {
+            return Err(Error::Unauthorized);
+        }
+        grantor.require_auth();
+
+        storage::remove_delegate(&env, stream_id, &delegate);
+        events::delegate_revoked(&env, stream_id, &grantor, &delegate);
+        Ok(())
+    }
+
+    /// Withdraw as a delegate. The `delegate` address must hold a valid
+    /// grant with [`op::WITHDRAW`] for this stream.
+    pub fn delegate_withdraw(
+        env: Env,
+        stream_id: u64,
+        delegate: Address,
+        amount: Option<i128>,
+    ) -> Result<i128, Error> {
+        Self::check_delegate(&env, stream_id, &delegate, op::WITHDRAW)?;
+        let mut stream = storage::load_stream(&env, stream_id)?;
+
+        let now = env.ledger().timestamp();
+        let available = accrual::withdrawable(&stream, now)?;
+        if available == 0 {
+            if stream.status.is_terminal() {
+                return Err(Error::StreamTerminated);
+            }
+            return Err(Error::NothingToWithdraw);
+        }
+
+        let payout = match amount {
+            None => available,
+            Some(requested) => {
+                if requested <= 0 {
+                    return Err(Error::InvalidAmount);
+                }
+                if requested > available {
+                    return Err(Error::InsufficientWithdrawable);
+                }
+                requested
+            }
+        };
+
+        Self::apply_withdrawal(&env, stream_id, &mut stream, payout)?;
+        Ok(payout)
+    }
+
+    /// Cancel as a delegate. Requires [`op::CANCEL`] grant.
+    pub fn delegate_cancel(env: Env, stream_id: u64, delegate: Address) -> Result<(), Error> {
+        Self::check_delegate(&env, stream_id, &delegate, op::CANCEL)?;
+        let mut stream = storage::load_stream(&env, stream_id)?;
+
+        if !stream.cancellable {
+            return Err(Error::NotCancellable);
+        }
+        if stream.status.is_terminal() {
+            return Err(Error::StreamTerminated);
+        }
+
+        let now = env.ledger().timestamp();
+        let vested_now = accrual::vested(&stream, now)?;
+        let refund = accrual::refundable(&stream, now)?;
+        let settle_at = accrual::stream_time(&stream, now).max(stream.start_time);
+
+        stream.deposited = vested_now;
+        stream.end_time = settle_at;
+        stream.paused_at = None;
+        stream.status = StreamStatus::Cancelled;
+
+        let token = stream.token.clone();
+        let sender = stream.sender.clone();
+        storage::save_stream(&env, stream_id, &stream);
+
+        if refund > 0 {
+            token_transfer(
+                &env,
+                &token,
+                &env.current_contract_address(),
+                MuxedAddress::from(sender),
+                &refund,
+            )?;
+        }
+
+        // `vested` is derived from the post-cancel `stream.deposited` inside
+        // the event, so it is not passed separately.
+        events::cancelled(&env, stream_id, &stream, refund);
+        Ok(())
+    }
+
+    /// Pause as a delegate. Requires [`op::PAUSE`] grant.
+    pub fn delegate_pause(env: Env, stream_id: u64, delegate: Address) -> Result<(), Error> {
+        Self::check_delegate(&env, stream_id, &delegate, op::PAUSE)?;
+        let mut stream = storage::load_stream(&env, stream_id)?;
+
+        if !stream.pausable {
+            return Err(Error::NotPausable);
+        }
+        if stream.status.is_terminal() {
+            return Err(Error::StreamTerminated);
+        }
+        if stream.status == StreamStatus::Paused {
+            return Err(Error::StreamAlreadyPaused);
+        }
+
+        let now = env.ledger().timestamp();
+        stream.paused_at = Some(now);
+        stream.status = StreamStatus::Paused;
+        storage::save_stream(&env, stream_id, &stream);
+
+        events::paused(&env, stream_id, &stream, now);
+        Ok(())
+    }
+
+    /// Resume as a delegate. Requires [`op::RESUME`] grant.
+    pub fn delegate_resume(env: Env, stream_id: u64, delegate: Address) -> Result<(), Error> {
+        Self::check_delegate(&env, stream_id, &delegate, op::RESUME)?;
+        let mut stream = storage::load_stream(&env, stream_id)?;
+
+        if stream.status.is_terminal() {
+            return Err(Error::StreamTerminated);
+        }
+        let paused_at = match stream.paused_at {
+            Some(t) => t,
+            None => return Err(Error::StreamNotPaused),
+        };
+        if stream.status != StreamStatus::Paused {
+            return Err(Error::StreamNotPaused);
+        }
+
+        let now = env.ledger().timestamp();
+        let paused_duration = now.saturating_sub(paused_at);
+        stream.paused_total = stream
+            .paused_total
+            .checked_add(paused_duration)
+            .ok_or(Error::Overflow)?;
+        stream.paused_at = None;
+        stream.status = StreamStatus::Active;
+        storage::save_stream(&env, stream_id, &stream);
+
+        events::resumed(&env, stream_id, &stream, paused_duration);
+        Ok(())
+    }
+
+    /// Top up as a delegate. Requires [`op::TOP_UP`] grant.
+    pub fn delegate_top_up(
+        env: Env,
+        stream_id: u64,
+        delegate: Address,
+        amount: i128,
+    ) -> Result<(), Error> {
+        Self::check_delegate(&env, stream_id, &delegate, op::TOP_UP)?;
+        let mut stream = storage::load_stream(&env, stream_id)?;
+
+        if stream.status.is_terminal() {
+            return Err(Error::StreamTerminated);
+        }
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let now = env.ledger().timestamp();
+        if accrual::stream_time(&stream, now) >= stream.end_time {
+            return Err(Error::StreamMatured);
+        }
+
+        let current_duration = accrual::duration(&stream) as i128;
+        let scaled = amount
+            .checked_mul(current_duration)
+            .ok_or(Error::Overflow)?;
+        let delta = scaled
+            .checked_div(stream.deposited)
+            .ok_or(Error::Overflow)?;
+        if delta < 0 || delta > u64::MAX as i128 {
+            return Err(Error::Overflow);
+        }
+        if delta == 0 {
+            return Err(Error::TopUpTooSmall);
+        }
+
+        let new_deposited = stream
+            .deposited
+            .checked_add(amount)
+            .ok_or(Error::Overflow)?;
+        let new_end = stream
+            .end_time
+            .checked_add(delta as u64)
+            .ok_or(Error::Overflow)?;
+        let new_duration = new_end
+            .checked_sub(stream.start_time)
+            .ok_or(Error::Overflow)?;
+
+        new_deposited
+            .checked_mul(new_duration as i128)
+            .ok_or(Error::Overflow)?;
+        if new_deposited < new_duration as i128 {
+            return Err(Error::DepositRateTooLow);
+        }
+
+        let token = stream.token.clone();
+        let sender = stream.sender.clone();
+        stream.deposited = new_deposited;
+        stream.end_time = new_end;
+        storage::save_stream(&env, stream_id, &stream);
+
+        // Tokens come from the sender — require their auth even though a
+        // delegate triggered this call.
+        sender.require_auth();
+        pull_deposit(&env, &token, &sender, &amount)?;
+
+        events::topped_up(&env, stream_id, &stream, amount);
+        Ok(())
+    }
+
+    /// Transfer recipient as a delegate. Requires [`op::TRANSFER_RECIPIENT`] grant.
+    ///
+    /// Follows the same semantics as [`transfer_recipient`](Self::transfer_recipient),
+    /// including its stance on delegate grants: nothing is cleared by the
+    /// transfer, so the grant that authorised this call — and every other grant
+    /// on the stream — survives it. A delegate acting for the old recipient
+    /// therefore keeps its rights until the new recipient revokes them.
+    pub fn delegate_transfer_recipient(
+        env: Env,
+        stream_id: u64,
+        delegate: Address,
+        new_recipient: Address,
+    ) -> Result<(), Error> {
+        Self::check_delegate(&env, stream_id, &delegate, op::TRANSFER_RECIPIENT)?;
+        let mut stream = storage::load_stream(&env, stream_id)?;
+
+        if !stream.transferable {
+            return Err(Error::NotTransferable);
+        }
+        // Same settled-claim rule as `transfer_recipient`: a stream with no
+        // unwithdrawn claim is not reassignable.
+        if stream.status == StreamStatus::Depleted || stream.withdrawn >= stream.deposited {
+            return Err(Error::StreamTerminated);
+        }
+        if new_recipient == stream.sender {
+            return Err(Error::SelfStream);
+        }
+
+        let old_recipient = stream.recipient.clone();
+        if old_recipient == new_recipient {
+            return Ok(());
+        }
+
+        stream.recipient = new_recipient.clone();
+        storage::save_stream(&env, stream_id, &stream);
+
+        events::recipient_transferred(&env, stream_id, &old_recipient, &new_recipient);
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------------
+    // Views
+    // ---------------------------------------------------------------------
+
+    /// Full stream state.
+    ///
+    /// Views deliberately do **not** extend the entry's TTL. They are called
+    /// through simulation by the SDK and UI, where a write to the footprint is
+    /// at best noise and at worst confusing. Keeping a stream alive is the
+    /// explicit job of [`extend_stream_ttl`](Self::extend_stream_ttl).
+    ///
+    /// Returns [`Error::StreamNotFound`] when the id is missing or deleted.
+    pub fn get_stream(env: Env, stream_id: u64) -> Result<Stream, Error> {
+        storage::peek_stream(&env, stream_id)
+    }
+
+    /// Amount the recipient could withdraw right now.
+    ///
+    /// Returns [`Error::StreamNotFound`] when the id is missing or deleted;
+    /// zero means the stream exists but has no currently withdrawable funds.
+    pub fn withdrawable_of(env: Env, stream_id: u64) -> Result<i128, Error> {
+        let stream = storage::peek_stream(&env, stream_id)?;
+        accrual::withdrawable(&stream, env.ledger().timestamp())
+    }
+
+    /// Total earned by the recipient since `start_time`, withdrawn or not.
+    ///
+    /// Returns [`Error::StreamNotFound`] when the id is missing or deleted.
+    pub fn vested_of(env: Env, stream_id: u64) -> Result<i128, Error> {
+        let stream = storage::peek_stream(&env, stream_id)?;
+        accrual::vested(&stream, env.ledger().timestamp())
+    }
+
+    /// Amount that would be refunded to the sender if they cancelled right now.
+    ///
+    /// Returns [`Error::StreamNotFound`] when the id is missing or deleted.
+    pub fn refundable_of(env: Env, stream_id: u64) -> Result<i128, Error> {
+        let stream = storage::peek_stream(&env, stream_id)?;
+        accrual::refundable(&stream, env.ledger().timestamp())
+    }
+
+    /// Number of streams ever created. Ids run `0..stream_count()`.
+    pub fn stream_count(env: Env) -> u64 {
+        storage::stream_count(&env)
+    }
+
+    /// Whether a stream entry is currently readable.
+    ///
+    /// Returns `false` both for ids that were never issued and for entries that
+    /// have been archived. Compare against [`stream_count`](Self::stream_count)
+    /// to tell those apart: an id below the count that does not exist has been
+    /// archived and needs restoring.
+    pub fn stream_exists(env: Env, stream_id: u64) -> bool {
+        storage::stream_exists(&env, stream_id)
+    }
+
+    // ---------------------------------------------------------------------
+    // Maintenance
+    // ---------------------------------------------------------------------
+
+    /// Extend a stream entry's TTL. **Permissionless** — anyone may pay.
+    ///
+    /// Returns the number of ledgers the entry is now good for.
+    ///
+    /// This is the keeper hook. It is unauthenticated on purpose: a recipient's
+    /// claim must never depend on the sender's continued goodwill, and a
+    /// third-party keeper sweeping streams that approach expiry should not need
+    /// anyone's permission to do so. There is nothing to grief here — the caller
+    /// only ever *pays* rent, and TTL extension cannot move funds or change
+    /// stream state.
+    ///
+    /// Multi-year streams need this periodically no matter how generously the
+    /// contract extends at creation, because no entry may exceed the network's
+    /// `max_entry_ttl`.
+    pub fn extend_stream_ttl(env: Env, stream_id: u64) -> Result<u32, Error> {
+        // Authorization: permissionless by design — see doc comment. Any caller
+        // may pay rent for any stream. The caller has no address parameter and
+        // no `require_auth` is invoked.
+        let stream = storage::peek_stream(&env, stream_id)?;
+        let target = storage::ttl_target_ledgers(&env, &stream);
+        storage::extend_stream(&env, stream_id, &stream);
+        storage::extend_instance(&env);
+
+        events::ttl_extended(&env, stream_id, target);
+        Ok(target)
+    }
+
+    /// Extend several streams' TTLs in one transaction. Permissionless.
+    ///
+    /// Same [`MAX_BATCH_SIZE`] cap as [`batch_withdraw`](Self::batch_withdraw).
+    ///
+    /// **The sweep is per-item, not atomic.** Unknown ids are skipped rather
+    /// than failing the batch, so a keeper working from a slightly stale index
+    /// does not lose the whole sweep to one bad id. Unlike `batch_withdraw`,
+    /// duplicate ids are rejected up-front: passing the same id twice returns
+    /// [`Error::DuplicateStreamId`] rather than attempting to extend it twice.
+    /// Empty, oversized, and malformed vectors are rejected before the sweep
+    /// starts. Returns how many entries were actually extended.
+    pub fn batch_extend_ttl(env: Env, stream_ids: Vec<u64>) -> Result<u32, Error> {
+        // Authorization: permissionless — same policy as `extend_stream_ttl`.
+        let stream_ids = Self::validate_batch_ids(&env, &stream_ids)?;
+        Self::reject_duplicate_ids(&stream_ids)?;
+
+        let mut extended = 0u32;
+        for stream_id in stream_ids.iter() {
+            if let Ok(stream) = storage::peek_stream(&env, stream_id) {
+                let target = storage::ttl_target_ledgers(&env, &stream);
+                storage::extend_stream(&env, stream_id, &stream);
+                events::ttl_extended(&env, stream_id, target);
+                extended += 1;
+            }
+        }
+        storage::extend_instance(&env);
+        Ok(extended)
+    }
+
+    // ---------------------------------------------------------------------
+    // Internal
+    // ---------------------------------------------------------------------
+
+    /// Verify that `caller` holds a valid, unexpired delegate grant for `op`
+    /// on `stream_id`, then call `caller.require_auth()`.
+    ///
+    /// Returns `DelegateNotPermitted` if no grant exists or the grant does not
+    /// cover `op`. Returns `DelegateExpired` if the grant exists but has passed
+    /// its expiry. On success the host will validate the caller's auth.
+    fn check_delegate(env: &Env, stream_id: u64, caller: &Address, op: u32) -> Result<(), Error> {
+        match storage::load_delegate(env, stream_id, caller) {
+            None => Err(Error::DelegateNotPermitted),
+            Some(grant) => {
+                if let Some(expires) = grant.expires_at {
+                    if env.ledger().timestamp() > expires {
+                        return Err(Error::DelegateExpired);
+                    }
+                }
+                if grant.ops & op == 0 {
+                    return Err(Error::DelegateNotPermitted);
+                }
+                caller.require_auth();
+                Ok(())
+            }
+        }
+    }
+
+    /// Pre-flight shared by the batch entry points: reject empty, oversized,
+    /// and malformed vectors, and return a validated copy.
+    ///
+    /// `MalformedStreamId` covers a serialized element that does not decode as
+    /// a `u64`; the batch entry points take `Vec<u64>` straight from the ABI,
+    /// and element-level conversion errors would otherwise surface as opaque
+    /// host errors instead of typed ones.
+    fn validate_batch_ids(env: &Env, stream_ids: &Vec<u64>) -> Result<Vec<u64>, Error> {
+        let count = stream_ids.len();
+        if count == 0 {
+            return Err(Error::EmptyBatch);
+        }
+        if count > MAX_BATCH_SIZE {
+            return Err(Error::BatchTooLarge);
+        }
+
+        let mut validated = Vec::new(env);
+        for raw_id in stream_ids.to_vals().iter() {
+            let stream_id =
+                u64::try_from_val(env, &raw_id).map_err(|_| Error::MalformedStreamId)?;
+            validated.push_back(stream_id);
+        }
+        Ok(validated)
+    }
+
+    /// Reject a batch that names the same stream twice. Processing the same
+    /// stream twice would otherwise operate on a stale copy the second time.
+    /// Both `batch_withdraw` and `batch_extend_ttl` reject duplicates.
+    fn reject_duplicate_ids(stream_ids: &Vec<u64>) -> Result<(), Error> {
+        let count = stream_ids.len();
+        for i in 0..count {
+            for j in (i + 1)..count {
+                if stream_ids.get_unchecked(i) == stream_ids.get_unchecked(j) {
+                    return Err(Error::DuplicateStreamId);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Shared tail of [`withdraw`](Self::withdraw) and
+    /// [`batch_withdraw`](Self::batch_withdraw): update accounting, persist,
+    /// pay out, emit.
+    ///
+    /// # Atomicity of bookkeeping vs. token transfer
+    ///
+    /// State (`stream.withdrawn`, `stream.status`) is written to storage before
+    /// the token `transfer` call.  This is the standard
+    /// checks-effects-interactions ordering.  Soroban forbids reentrancy
+    /// outright, so there is no classical reentrancy risk here.
+    ///
+    /// The correctness argument for atomicity in the failure case is that
+    /// **every host trap propagates as a Rust panic that unwinds the entire
+    /// transaction**.  If `token::Client::transfer` panics (e.g. because the
+    /// recipient is deauthorized on a Stellar Asset Contract, or because the
+    /// token contract itself traps for any reason), the Soroban host discards
+    /// every storage write made in this invocation — including the
+    /// `save_stream` call — before returning the error to the caller.  No
+    /// partial state leaks: `stream.withdrawn` is never permanently incremented
+    /// unless the matching tokens actually leave the contract's pool.
+    ///
+    /// `test::withdrawal_atomicity` proves this with two failure injection
+    /// mechanisms: (1) SAC `set_authorized(recipient, false)` and (2) a
+    /// custom contract that always panics registered at the token address.
+    fn apply_withdrawal(
+        env: &Env,
+        stream_id: u64,
+        stream: &mut Stream,
+        payout: i128,
+    ) -> Result<(), Error> {
+        stream.withdrawn = stream
+            .withdrawn
+            .checked_add(payout)
+            .ok_or(Error::Overflow)?;
+
+        // `Cancelled` is sticky: draining a cancelled stream to zero leaves it
+        // visibly cancelled rather than relabelling it as a clean completion.
+        if stream.withdrawn >= stream.deposited && stream.status != StreamStatus::Cancelled {
+            stream.status = StreamStatus::Depleted;
+
+            // A stream can be paused *after* maturity and then drained, and
+            // depletion is terminal — `resume` would be rejected — so leaving
+            // `paused_at` set would strand the stream in a state that says
+            // "Depleted" and "frozen" at once, with nothing able to clear it.
+            // Close the pause out here, exactly as `cancel` does. Accrual is
+            // unaffected: reaching `withdrawn == deposited` means the stream
+            // had already fully vested.
+            if let Some(paused_at) = stream.paused_at {
+                let now = env.ledger().timestamp();
+                stream.paused_total = stream
+                    .paused_total
+                    .checked_add(now.saturating_sub(paused_at))
+                    .ok_or(Error::Overflow)?;
+                stream.paused_at = None;
+            }
+        }
+
+        let token = stream.token.clone();
+        let recipient = stream.recipient.clone();
+        storage::save_stream(env, stream_id, stream);
+
+        token_transfer(
+            env,
+            &token,
+            &env.current_contract_address(),
+            MuxedAddress::from(recipient),
+            &payout,
+        )?;
+
+        events::withdrawn(env, stream_id, stream, payout);
+        Ok(())
     }
 }
 
 #[cfg(test)]
+#[path = "test/mod.rs"]
 mod test;
