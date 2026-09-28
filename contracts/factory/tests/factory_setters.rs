@@ -10,7 +10,7 @@ use fluxora_factory::{
     load_policy, FactoryError, FactoryPolicy, FluxoraFactory, FluxoraFactoryClient,
 };
 use soroban_sdk::{
-    testutils::{Address as _, MockAuth, MockAuthInvoke},
+    testutils::{Address as _, Ledger as _, MockAuth, MockAuthInvoke},
     Address, Env, IntoVal,
 };
 use std::panic::AssertUnwindSafe;
