@@ -53,6 +53,9 @@ mod withdraw_cancel_same_ledger;
 mod accounting_identity;
 mod accrual_overflow;
 mod batch;
+
+// Issue #1866 — the MAX_BATCH_SIZE ceiling across every batch entry point.
+mod batch_ceiling;
 mod entrypoint_costs;
 mod invariants;
 mod lifecycle_proptest;
