@@ -41,6 +41,9 @@ mod amount_domain;
 mod cancel_events;
 mod cliff;
 mod delegation;
+// Issue #1854: two delegates holding WITHDRAW on one stream settle in the
+// same ledger serialised by storage — no double settlement, funds conserved.
+mod delegate_concurrent_withdraw;
 mod pause;
 mod storage_keys;
 mod terminal_operations;
