@@ -962,7 +962,10 @@ fn batch_withdraw_same_recipient_settles_payroll_with_single_authorisation() {
     let events = withdrawn_event_ids(&h);
 
     assert_eq!(total, expected_total);
-    assert_eq!(events, ids, "events emitted per stream, in exact batch order");
+    assert_eq!(
+        events, ids,
+        "events emitted per stream, in exact batch order"
+    );
     assert_eq!(h.balance(&h.recipient), expected_total);
 
     for (i, id) in ids.iter().enumerate() {
