@@ -20,6 +20,29 @@
 //!    recipient, or any passer-by — can keep a claim readable without the
 //!    sender's cooperation.
 //!
+//! # Terminal streams and the TTL extension rule
+//!
+//! **Extending the TTL of a `Cancelled` or `Depleted` stream is rejected with
+//! `Error::StreamTerminated` from both `extend_stream_ttl` and
+//! `batch_extend_ttl`.** The reasons are:
+//!
+//! * **No future state change is possible.** Terminal streams have settled all
+//!   accounting. Allowing indefinite TTL extensions would charge callers rent
+//!   for a record they cannot modify or interact with in any meaningful way.
+//! * **The floor TTL covers the withdrawal tail.** At the instant a stream
+//!   enters a terminal state, the contract applies the floor TTL
+//!   (`MIN_STREAM_TTL_LEDGERS` ≈ 30 days). A `Cancelled` stream that still
+//!   has an unwithdrawn vested tail remains readable for that window, giving
+//!   the recipient ample time to withdraw.
+//! * **Restoration is the right answer after archival.** If a terminal entry
+//!   does archive (e.g. because no one withdrew the tail before the floor
+//!   expired), the caller must submit a `RestoreFootprint` operation rather
+//!   than extending an already-live entry. Locking callers out of `extend`
+//!   makes this distinction explicit.
+//!
+//! A keeper sweeping streams should filter terminal ids out of its batch before
+//! calling `batch_extend_ttl`. The indexer's `status` field is the signal.
+//!
 //! # Instance vs persistent TTL policy
 //!
 //! The contract uses two Soroban storage lifetimes, and they are *not* managed

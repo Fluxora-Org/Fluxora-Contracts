@@ -268,6 +268,13 @@ Three mechanisms:
    the caller only ever *pays* rent, and TTL extension cannot move funds or
    change stream state.
 
+   **Exception: terminal streams (`Cancelled` and `Depleted`) are rejected.**
+   Both entry points return `Error::StreamTerminated` when called against a
+   settled stream. The floor TTL applied at the time of cancellation/depletion
+   covers any remaining withdrawal tail; after that, callers should use
+   `RestoreFootprint` rather than extending. Keepers should filter terminal ids
+   out of their sweep batches.
+
 Views deliberately do **not** extend TTL. They are called through simulation,
 where a footprint write is at best noise. Keeping a stream alive is the explicit
 job of `extend_stream_ttl`.
@@ -300,7 +307,9 @@ this way mutates nothing — both halves of that contract-side story are pinned
 by deterministic assertions in `test::ttl`. Batch calls differ by design:
 `batch_withdraw` fails the whole batch with `StreamNotFound`, while
 `batch_extend_ttl` skips unknown ids so a keeper's sweep survives a stale
-index. `stream_exists(id) == false` while `id < stream_count()` is the
+index, but fails the whole batch with `StreamTerminated` if any id belongs to
+a terminal (`Cancelled` or `Depleted`) stream. `stream_exists(id) == false`
+while `id < stream_count()` is the
 integrator's signal for "archived, not nonexistent"; whether that signal holds
 against a real RPC is exactly the stage-4 territory
 [KNOWN-LIMITATIONS.md §1](KNOWN-LIMITATIONS.md) tracks.
