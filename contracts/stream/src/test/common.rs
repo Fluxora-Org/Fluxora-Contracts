@@ -201,13 +201,19 @@ impl<'a> Harness<'a> {
 
     /// Advance the ledger clock by `seconds`.
     ///
-    /// Also advances the sequence number at the nominal ledger close rate, so
-    /// that time-based tests exercise TTL decay realistically rather than
-    /// freezing the sequence while the clock runs.
+    /// Also advances the sequence number at the network's *nominal* close
+    /// cadence, so that time-based tests exercise TTL decay realistically
+    /// rather than freezing the sequence while the clock runs. The nominal
+    /// rate is deliberate: this simulates the network the contract runs on,
+    /// while [`storage::seconds_to_ledgers`] carries the funding margin on
+    /// the contract side. Deriving cadence from the margined conversion would
+    /// hide the very gap the margin exists to cover.
     pub fn advance(&self, seconds: u64) {
         let info = self.env.ledger().get();
         self.env.ledger().set_timestamp(info.timestamp + seconds);
-        let ledgers = storage::seconds_to_ledgers(seconds);
+        let ledgers = seconds
+            .saturating_add(storage::SECONDS_PER_LEDGER - 1)
+            .saturating_div(storage::SECONDS_PER_LEDGER);
         self.env
             .ledger()
             .set_sequence_number(info.sequence_number.saturating_add(ledgers));

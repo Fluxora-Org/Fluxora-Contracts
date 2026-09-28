@@ -67,7 +67,9 @@ pub use accrual::{
     cliff_reached, duration, elapsed, liability, refundable, stream_time, vested, withdrawable,
 };
 pub use error::Error;
-pub use storage::{MIN_STREAM_TTL_LEDGERS, SECONDS_PER_LEDGER, TTL_BUFFER_SECONDS};
+pub use storage::{
+    MIN_STREAM_TTL_LEDGERS, SECONDS_PER_LEDGER, TTL_BUFFER_SECONDS, TTL_SAFETY_MARGIN_PERCENT,
+};
 pub use types::op;
 pub use types::{DataKey, DelegateGrant, Stream, StreamStatus};
 

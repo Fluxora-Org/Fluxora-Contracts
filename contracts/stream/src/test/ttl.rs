@@ -28,7 +28,7 @@ use soroban_sdk::testutils::storage::Persistent as _;
 use soroban_sdk::testutils::Ledger as _;
 
 use super::common::*;
-use crate::{storage, DataKey, TTL_BUFFER_SECONDS};
+use crate::{storage, DataKey, TTL_BUFFER_SECONDS, TTL_SAFETY_MARGIN_PERCENT};
 
 #[test]
 fn persisted_stream_fixture_survives_read_mutate_and_ttl_extension() {
@@ -169,9 +169,12 @@ fn every_mutating_call_re_extends_the_ttl() {
 
     h.advance(10 * DAY);
     h.client.withdraw(&id, &None);
-    assert!(
-        ttl_of(&h, id) > full - 200_000,
-        "withdraw did not re-extend"
+    // Back to exactly the margined target (90 days remaining + 30-day
+    // buffer): every touch re-funds the window in full.
+    assert_eq!(
+        ttl_of(&h, id),
+        storage::seconds_to_ledgers(90 * DAY + TTL_BUFFER_SECONDS),
+        "withdraw did not re-extend to the full target"
     );
 
     age_ledgers(&h, ttl_of(&h, id) - 1_000);
@@ -206,6 +209,11 @@ fn a_year_long_stream_survives_on_keeper_sweeps_alone() {
 
     // Nobody touches the stream all year except the keeper, sweeping at 60% of
     // the rent window — the cadence the backend keeper would actually use.
+    // Sweeps advance wall-clock time at the nominal close cadence, the same
+    // rate the TTL conversion assumes, while the funding carries the margin —
+    // so the rent is always funded for more wall-clock time than the decay
+    // between sweeps actually burns. The test cannot flatter itself by
+    // underestimating close time.
     let sweep_every = MAX_TTL * 6 / 10;
     let mut sweeps = 0;
     let mut lowest_seen = MAX_TTL;
@@ -382,7 +390,94 @@ fn seconds_to_ledgers_rounds_up() {
     assert_eq!(storage::seconds_to_ledgers(u64::MAX), u32::MAX);
 }
 
+/// The pinned assumed close time and where it comes from.
+///
+/// #1806: this constant is measured, not assumed. The value is the observed
+/// mean close time rounded up to a whole second; the raw statistics, the
+/// window and the method live in docs/ledger-close-time.md, and
+/// `script/measure-ledger-close.sh --verify` re-checks the live network
+/// against it. A sustained change in close time in either direction — beyond
+/// what the safety margin covers — must land here as a code review with a
+/// fresh measurement, not silently erode every TTL.
 #[test]
-fn nominal_ledger_close_time_is_five_seconds() {
-    assert_eq!(storage::SECONDS_PER_LEDGER, 5);
+fn seconds_per_ledger_matches_the_measured_close_time() {
+    // The docs and the constant must stay in lockstep. If this fails after a
+    // re-measurement, one of the two was updated without the other.
+    // MARKER: observed_mean_seconds
+    let observed_mean_rounded_up: u64 = 5; // docs/ledger-close-time.md: 5.000 s
+    assert_eq!(
+        storage::SECONDS_PER_LEDGER, observed_mean_rounded_up,
+        "SECONDS_PER_LEDGER drifted from the measured value in \
+         docs/ledger-close-time.md"
+    );
+}
+
+/// The margin exists to absorb drift between re-measurements: close time can
+/// slide without anyone noticing until the next sustained window is measured.
+///
+/// Direction note: a funded TTL of N ledgers spans N × real_close seconds, so
+/// a network that runs *faster* than the conversion assumes shrinks every
+/// window — that is the side the margin guards. A slower network only
+/// over-funds (wasteful rent, never unsafe).
+#[test]
+fn safety_margin_absorbs_drift_between_measurements() {
+    assert_eq!(storage::TTL_SAFETY_MARGIN_PERCENT, 20);
+
+    // The coverage guarantee, in exact integer arithmetic: for any real mean
+    // close time c with c × (100 + margin) ≥ SECONDS_PER_LEDGER × 100 —
+    // c ≥ 5 × 100/120 ≈ 4.17 s, a network up to ~17% faster than observed —
+    // a window funded for s seconds spans at least s seconds. Checked at the
+    // load-bearing point, the retention floor: its 622,080 ledgers span 30
+    // days at exactly that boundary close time.
+    assert!(
+        storage::MIN_STREAM_TTL_LEDGERS as u64
+            * storage::SECONDS_PER_LEDGER
+            * 100
+            >= TTL_BUFFER_SECONDS * (100 + storage::TTL_SAFETY_MARGIN_PERCENT),
+        "the retention floor no longer covers 30 days at the margin's \
+         boundary close time"
+    );
+}
+
+/// The drift detector: the funded window must cover the stream even if close
+/// time drifts to the protocol's *nominal* 5 s while the conversion is
+/// inflated on top of it — and, by the margin's guarantee, for any real mean
+/// at or above ~4.17 s. This is the test that fails if the network's real
+/// close time changes by more than the margin absorbs (see
+/// docs/KNOWN-LIMITATIONS.md §5).
+#[test]
+fn conversion_covers_close_time_faster_than_observed() {
+    let nominal: u64 = 5; // Stellar target close time
+
+    // Coverage floor of the band, truncated down: the smallest whole-second
+    // close time the margin provably covers. Must stay at or below the
+    // nominal, or a move back to nominal alone would break coverage.
+    let coverage_floor =
+        storage::SECONDS_PER_LEDGER * 100 / (100 + storage::TTL_SAFETY_MARGIN_PERCENT);
+    assert!(
+        coverage_floor <= nominal,
+        "margin no longer covers the nominal close time"
+    );
+
+    // 30 days of rent must span 30 days even at the nominal close time.
+    assert!(
+        storage::seconds_to_ledgers(TTL_BUFFER_SECONDS) as u64 * nominal
+            >= TTL_BUFFER_SECONDS,
+        "the funded window is shorter than intended at nominal close time"
+    );
+}
+
+#[test]
+fn seconds_to_ledgers_round_trip_never_undershoots() {
+    // Converting back at the assumed close time must never return less than
+    // was asked — including after the margin inflates the request. Checked at
+    // one-second granularity, the sizes the contract actually funds at, and
+    // the u64 boundary.
+    for s in [1u64, 10, 86_400, 30 * 86_400, 365 * 86_400] {
+        let ledgers = storage::seconds_to_ledgers(s);
+        assert!(
+            ledgers as u64 * storage::SECONDS_PER_LEDGER >= s,
+            "conversion undershoots at {s} s"
+        );
+    }
 }

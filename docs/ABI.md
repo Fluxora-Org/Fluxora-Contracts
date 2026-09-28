@@ -991,9 +991,10 @@ The call cannot move funds or change stream state; the caller only ever *pays*.
 
 **Returns** the `u32` number of ledgers the entry is now funded for.
 The target is the stream's remaining effective lifetime (now to `end_time`,
-plus accumulated and in-progress pause time) plus a 30-day buffer, converted at
-5 seconds per ledger rounding up, floored at `MIN_STREAM_TTL_LEDGERS` (518,400
-ledgers, ~30 days) and clamped to the network's `max_entry_ttl`.
+plus accumulated and in-progress pause time) plus a 30-day buffer, inflated by a 20% close-time safety margin, converted
+at 5 seconds per ledger (the measured mean — §5 of KNOWN-LIMITATIONS.md)
+rounding up, floored at `MIN_STREAM_TTL_LEDGERS` (622,080 ledgers, a 30-day
+floor plus the margin) and clamped to the network's `max_entry_ttl`.
 Multi-year streams therefore need periodic re-extension no matter how
 generously creation funds them.
 The contract instance entry is extended to the network maximum in the same

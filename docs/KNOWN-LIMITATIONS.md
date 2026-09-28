@@ -98,7 +98,10 @@ state.
 
 Two things are therefore running in parallel.
 
-**1. Testnet canary — clock started 2026-08-12.** `contracts/archival-probe` is a
+**1. Testnet canary — clock started 2026-08-12.** The ledger-count-to-date
+estimates below are quoted at the nominal 5 s/ledger; §5's measurement
+(2026-09-28) confirmed the real close time over a sustained window sits exactly
+at 5.000 s, so the dates were not skewed. `contracts/archival-probe` is a
 throwaway contract that writes one persistent entry and *deliberately never
 extends its TTL*, so it receives exactly `min_persistent_ttl` and archives as
 early as the network allows. The restore mechanism is a property of the ledger,
@@ -225,20 +228,57 @@ substitute for review.
 
 ---
 
-## 5. Ledger close time is assumed, not measured
+## 5. Ledger close time is measured, not assumed — but only on one network
+
+**Status: narrowed by #1806. The conversion is now measured and margined;
+what remains open is single-network coverage.**
 
 **Pinned by:**
-`contracts/stream/src/test/ttl.rs::nominal_ledger_close_time_is_five_seconds`
-and `contracts/stream/src/test/ttl.rs::seconds_to_ledgers_rounds_up`.
-Together they pin both the nominal five-second assumption and the conservative
-round-up conversion used by TTL targets.
+`contracts/stream/src/test/ttl.rs::seconds_per_ledger_matches_the_measured_close_time`
+(pins the constant to the recorded measurement),
+`contracts/stream/src/test/ttl.rs::safety_margin_absorbs_drift_between_measurements`,
+`contracts/stream/src/test/ttl.rs::conversion_covers_close_time_faster_than_observed`,
+and `contracts/stream/src/test/ttl.rs::seconds_to_ledgers_round_trip_never_undershoots`.
+`script/measure-ledger-close.sh --verify` re-checks the live network against
+the pinned values on demand.
 
-TTL targets convert seconds to ledgers at a nominal 5s close time
-(`storage::SECONDS_PER_LEDGER`). Close time is a network property that drifts.
-The constant is deliberately conservative — it over-estimates ledgers per unit
-time, so entries are funded for longer than strictly needed — but a sustained
-slowdown well beyond 5s/ledger would erode the margin. The 30-day buffer and the
-keeper path both exist to absorb that.
+TTL targets convert seconds to ledgers at
+`storage::SECONDS_PER_LEDGER`, inflated by
+`storage::TTL_SAFETY_MARGIN_PERCENT` before conversion. Both are no longer
+assumptions:
+
+- `SECONDS_PER_LEDGER = 5` is the **observed mean** over the RPC node's full
+  retention window — 120,960 consecutive ledgers (≈ 6.9 days) on Stellar
+  testnet, re-checked 2026-09-28: 5.000 s/ledger exactly, with every one of
+  1,176 sampled per-ledger gaps closing in exactly 5 s. Method, raw
+  statistics and re-measurement procedure:
+  [`docs/ledger-close-time.md`](ledger-close-time.md).
+- `TTL_SAFETY_MARGIN_PERCENT = 20` exists because the flat measurement
+  exposed **zero headroom** in the previous constant: any change in close
+  time would have flowed straight into every funded window. A funded TTL of
+  N ledgers spans N × real_close seconds, so the dangerous direction is a
+  network that runs *faster* than the conversion assumes; the margin keeps
+  the conversion fully covering down to ≈ 4.17 s/ledger real mean (a
+  network up to ~17% faster than observed), and it does not cover a
+  sustained mean below that.
+
+What is still true — the reason this section stays open:
+
+- **One network, one week.** The measurement covers Stellar testnet over a
+  6.9-day window. It does not cover mainnet, and it cannot rule out a
+  protocol upgrade or a sustained performance shift *after* the window.
+  Before a mainnet deployment, re-run
+  `script/measure-ledger-close.sh --verify` against the target network and
+  move the pinned constants only from a fresh, widest-available-window
+  measurement recorded in `docs/ledger-close-time.md`.
+- **Drift between measurements is silent to CI.** The unit suite cannot see
+  the live network; the `--verify` re-check is on-demand, not continuous.
+  The 30-day buffer and the permissionless keeper path remain the backstop
+  that makes an unanticipated drift a rent inefficiency rather than an
+  availability failure.
+
+A sustained change in either direction is a signal to re-measure and re-pin —
+not to silently rebalance the margin.
 
 ---
 

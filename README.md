@@ -286,8 +286,11 @@ job of `extend_stream_ttl`.
 ### Retention policy by state
 
 Every touch tops the entry back up to one target — the stream's remaining
-effective life plus the 30-day buffer, floored at `MIN_STREAM_TTL_LEDGERS`
-(~30 days) and clamped to the network's `max_entry_ttl`. The threshold equals
+effective life plus the 30-day buffer, inflated by a 20% close-time safety
+margin, floored at `MIN_STREAM_TTL_LEDGERS` (~30 days plus the margin) and
+clamped to the network's `max_entry_ttl`. The close time the conversion
+assumes is measured, not assumed, with the margin covering drift
+([`KNOWN-LIMITATIONS.md` §5](docs/KNOWN-LIMITATIONS.md)). The threshold equals
 the extend-to, so an entry below its target is topped back up to it in full —
 and one already funded past the target keeps its higher balance: rent is never
 clawed back, so a stream entering a terminal state decays toward its floor

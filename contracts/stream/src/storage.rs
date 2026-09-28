@@ -71,11 +71,56 @@ use crate::types::{DataKey, DelegateGrant, Stream};
 /// Nominal Stellar ledger close time, in seconds.
 ///
 /// Ledger close time is a network property, not a protocol constant, and it
-/// drifts. Using a deliberately conservative value means the ledger count we
-/// derive from a wall-clock duration *over*-estimates how many ledgers that
-/// duration spans, which errs toward keeping entries alive longer than needed.
-/// That is the safe direction to be wrong in.
+/// drifts. The safe direction to be wrong in is **up**: an assumed close time
+/// at or above the real mean funds at least as many ledgers as the duration
+/// needs, while an assumed value below the real mean silently under-funds
+/// every entry. Rounding the measured mean up to a whole second buys that
+/// direction for free; [`TTL_SAFETY_MARGIN_PERCENT`] covers the other side.
+///
+/// # Where 5 comes from
+///
+/// Not assumed any more — **measured**. The mean close time over the RPC
+/// node's full retention window (120,960 ledgers ≈ 6.9 days) on Stellar
+/// testnet was exactly 5.000 s/ledger when re-checked on 2026-09-28: every
+/// one of 1,176 sampled per-ledger gaps closed in exactly 5 s, with no gap
+/// above the nominal. See `script/measure-ledger-close.sh` and
+/// docs/ledger-close-time.md for the method, the raw statistics and the
+/// re-measurement procedure.
+///
+/// The measurement's headline finding was **not** the value but the margin:
+/// the previous version of this constant carried *zero* headroom against
+/// drift, so any change in close time landed directly on every TTL — a
+/// network that closed even slightly faster would have shortened every
+/// funded window in wall-clock terms with nothing in the way. That is what
+/// [`TTL_SAFETY_MARGIN_PERCENT`] now adds. This constant stays at the
+/// measured mean (5 s, which happens to equal the protocol's target close
+/// time); the conversion absorbs variance on top of it.
 pub const SECONDS_PER_LEDGER: u64 = 5;
+
+/// Drift margin applied by [`seconds_to_ledgers`] on top of the assumed close
+/// time, as a percentage, before converting to ledgers.
+///
+/// The 2026-09-28 testnet measurement (docs/ledger-close-time.md) observed a
+/// dead-flat 5.000 s mean over a 6.9-day window — which means the TTL
+/// conversion previously had **zero** headroom: any change in close time
+/// would have flowed straight into every funded window.
+///
+/// # Which direction is dangerous
+///
+/// A funded TTL of N ledgers spans N × real_close seconds of wall clock. If
+/// the network runs *faster* than this conversion assumes, every window
+/// shrinks and an entry can archive before its schedule ends — that is the
+/// direction to margin. A *slower* network only over-funds: wasteful in
+/// rent, never unsafe.
+///
+/// 20% keeps the conversion fully covering for any sustained real mean close
+/// time at or above `5 × 100 / 120 ≈ 4.17 s` — i.e. a network up to ~17%
+/// faster than observed. It does not cover a sustained mean below that;
+/// that is what [`measure-ledger-close.sh`] re-checks before releases, and
+/// a sustained change in either direction is a signal to re-measure.
+///
+/// [`measure-ledger-close.sh`]: https://github.com/Fluxora-Org/Fluxora-Contracts/blob/main/script/measure-ledger-close.sh
+pub const TTL_SAFETY_MARGIN_PERCENT: u64 = 20;
 
 /// Extra headroom, in seconds, added on top of a stream's remaining lifetime
 /// when computing its TTL target. 30 days.
@@ -86,11 +131,21 @@ pub const SECONDS_PER_LEDGER: u64 = 5;
 pub const TTL_BUFFER_SECONDS: u64 = 30 * 24 * 60 * 60;
 
 /// Floor for any stream entry's TTL, in ledgers, regardless of how little
-/// lifetime the stream has left. Roughly 30 days at the nominal close time.
+/// lifetime the stream has left. 622,080 ledgers at the pinned close time:
+/// 30 days inflated by [`TTL_SAFETY_MARGIN_PERCENT`] and converted. At the
+/// observed 5.000 s mean that window spans 36 days; the margin guarantees at
+/// least 30 days even if the network ran ~17% faster than observed.
+///
+/// Coincidence worth knowing: this equals the network's `max_entry_ttl`
+/// (30 days at the nominal 5 s close), so the floor is exactly one
+/// max-TTL window on the 2026-09-28 settings. They are still independent
+/// quantities — the floor is ours, the max is the network's.
 ///
 /// A settled stream still has to stay readable: the recipient may not have
 /// withdrawn their tail yet, and the indexer needs to see the final state.
-pub const MIN_STREAM_TTL_LEDGERS: u32 = (TTL_BUFFER_SECONDS / SECONDS_PER_LEDGER) as u32;
+pub const MIN_STREAM_TTL_LEDGERS: u32 =
+    (TTL_BUFFER_SECONDS * (100 + TTL_SAFETY_MARGIN_PERCENT)
+        / (SECONDS_PER_LEDGER * 100)) as u32;
 
 /// Convert a wall-clock duration into a ledger count, rounding up.
 ///
@@ -105,9 +160,23 @@ pub const MIN_STREAM_TTL_LEDGERS: u32 = (TTL_BUFFER_SECONDS / SECONDS_PER_LEDGER
 /// always at least the requested duration. That guarantee is exercised
 /// directly by `seconds_to_ledgers_round_trip_never_undershoots`.
 ///
+/// # Why the margin is applied here, not by callers
+///
+/// Margining at the conversion layer means no call site can forget it, and it
+/// is exercised by the same round-trip test that pins the ceiling direction.
+/// [`ttl_target_ledgers`] is the only production caller.
+///
 /// Saturates at `u32::MAX`; callers clamp to the network maximum anyway.
 pub fn seconds_to_ledgers(seconds: u64) -> u32 {
-    let ledgers = seconds
+    // Inflate the requested duration by the drift margin, then convert at the
+    // assumed close time. The margin guarantees full coverage for any real
+    // close time at or above assumed × 100 / (100 + margin); see
+    // [`TTL_SAFETY_MARGIN_PERCENT`] for why faster, not slower, is the
+    // dangerous direction.
+    let inflated = seconds
+        .saturating_mul(100 + TTL_SAFETY_MARGIN_PERCENT)
+        .saturating_div(100);
+    let ledgers = inflated
         .saturating_add(SECONDS_PER_LEDGER - 1)
         .saturating_div(SECONDS_PER_LEDGER);
     if ledgers > u32::MAX as u64 {
@@ -130,8 +199,8 @@ pub fn seconds_to_ledgers(seconds: u64) -> u32 {
 /// [`crate::FluxoraStream::create_stream`]).
 ///
 /// The clamp is not optional: a multi-year stream will exceed the network
-/// maximum, so it *will* need periodic extension over its life no matter how slowry
-/// we extend at creation. That is precisely what the permissionless
+/// maximum, so it *will* need periodic extension over its life no matter how
+/// slowly we extend at creation. That is precisely what the permissionless
 /// keeper path exists for.
 pub fn ttl_target_ledgers(env: &Env, stream: &Stream) -> u32 {
     let now = env.ledger().timestamp();
@@ -148,7 +217,9 @@ pub fn ttl_target_ledgers(env: &Env, stream: &Stream) -> u32 {
 
     let remaining = effective_end.saturating_sub(now);
     // `remaining` spans now → end_time, so for a future-dated stream the
-    // pre-start wait is included in the rent target.
+    // pre-start wait is included in the rent target. The drift margin is
+    // applied inside `seconds_to_ledgers`, so the rent target — not just the
+    // close-time conversion — carries it.
     let target = seconds_to_ledgers(remaining.saturating_add(TTL_BUFFER_SECONDS));
     let floored = target.max(MIN_STREAM_TTL_LEDGERS);
 
