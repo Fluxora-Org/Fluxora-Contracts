@@ -899,8 +899,9 @@ fn state_machine_paused_for_full_lifetime_resumes_normally() {
 /// * The test fails if the behaviour it pins is changed.
 #[test]
 fn resume_exactly_at_end_time_conservation_and_final_state() {
-    use soroban_sdk::testutils::Events as _;
     use crate::events::Resumed;
+    use soroban_sdk::testutils::Events as _;
+    use soroban_sdk::Event as _;
 
     let h = Harness::new();
     let duration = 100 * DAY;
@@ -924,11 +925,7 @@ fn resume_exactly_at_end_time_conservation_and_final_state() {
     // Advance the wall clock to exactly the original end_time while paused.
     // Accrual must not move — stream clock is frozen.
     h.warp_to(end);
-    assert_eq!(
-        h.now(),
-        end,
-        "wall clock must be exactly at end_time"
-    );
+    assert_eq!(h.now(), end, "wall clock must be exactly at end_time");
     assert_eq!(
         h.client.vested_of(&id),
         300 * ONE,
@@ -971,29 +968,40 @@ fn resume_exactly_at_end_time_conservation_and_final_state() {
             "resume must emit exactly one Resumed event with the correct payload"
         );
 
-        // Also verify the individual fields against the expected values.
+        // Also verify the individual field against the expected value.
         assert_eq!(
-            s_after.paused_total, 70 * DAY,
+            s_after.paused_total,
+            70 * DAY,
             "paused_total must equal the 70-day pause duration"
         );
     }
 
     // --- Post-resume stream state ------------------------------------------
     let s = h.get(id);
-    assert_eq!(s.status, StreamStatus::Active, "stream must be Active after resume");
+    assert_eq!(
+        s.status,
+        StreamStatus::Active,
+        "stream must be Active after resume"
+    );
     assert_eq!(s.paused_at, None, "paused_at must be cleared");
-    assert_eq!(s.paused_total, 70 * DAY, "paused_total must absorb the 70-day pause");
+    assert_eq!(
+        s.paused_total,
+        70 * DAY,
+        "paused_total must absorb the 70-day pause"
+    );
 
     // --- Conservation at the resume instant --------------------------------
     // Invariant I4: vested + refundable == deposited, exactly.
-    let vested_now     = h.client.vested_of(&id);
+    let vested_now = h.client.vested_of(&id);
     let refundable_now = h.client.refundable_of(&id);
     assert_eq!(
-        vested_now, 300 * ONE,
+        vested_now,
+        300 * ONE,
         "vested must equal the amount accrued before the pause"
     );
     assert_eq!(
-        refundable_now, 700 * ONE,
+        refundable_now,
+        700 * ONE,
         "refundable must be the remainder"
     );
     assert_eq!(
@@ -1013,7 +1021,11 @@ fn resume_exactly_at_end_time_conservation_and_final_state() {
     // The stream is Active but the clock is at stream-day 30. Withdraw what
     // is available now to prove the stream is not stuck in a terminal state.
     let paid = h.client.withdraw(&id, &None);
-    assert_eq!(paid, 300 * ONE, "first withdrawal must be the pre-pause accrual");
+    assert_eq!(
+        paid,
+        300 * ONE,
+        "first withdrawal must be the pre-pause accrual"
+    );
     assert_eq!(h.balance(&h.recipient), 300 * ONE);
     assert_eq!(
         h.get(id).status,
@@ -1049,10 +1061,18 @@ fn resume_exactly_at_end_time_conservation_and_final_state() {
     );
     h.assert_pool_exact();
 
-    // --- Final withdrawal drains the stream to Depleted -------------------
+    // --- Final withdrawal drains the stream to Depleted --------------------
     let final_paid = h.client.withdraw(&id, &None);
-    assert_eq!(final_paid, 700 * ONE, "final withdrawal must collect the remaining deposit");
-    assert_eq!(h.balance(&h.recipient), 1_000 * ONE, "recipient must hold the full deposit");
+    assert_eq!(
+        final_paid,
+        700 * ONE,
+        "final withdrawal must collect the remaining deposit"
+    );
+    assert_eq!(
+        h.balance(&h.recipient),
+        1_000 * ONE,
+        "recipient must hold the full deposit"
+    );
 
     let s_final = h.get(id);
     assert_eq!(
@@ -1061,7 +1081,11 @@ fn resume_exactly_at_end_time_conservation_and_final_state() {
         "stream must become Depleted after the last withdrawal"
     );
     assert_eq!(s_final.withdrawn, deposit, "withdrawn must equal deposited");
-    assert_eq!(s_final.paused_at, None, "no open pause on a terminal stream");
+    assert_eq!(
+        s_final.paused_at,
+        None,
+        "no open pause on a terminal stream"
+    );
 
     // Pool must be empty — every token has been paid to the recipient.
     h.assert_pool_exact();
