@@ -421,6 +421,9 @@ jobs:
           echo "provenance:"
           cat target/wasm32v1-none/release/provenance.json
 
+      # The release inventory contains only fluxora_stream.wasm. Build that
+      # deployable artifact twice into isolated target directories and compare
+      # both the raw and optimizer-produced bytes before deployment packaging.
       - name: Install Stellar CLI (pinned)
         run: |
           set -euo pipefail
@@ -433,6 +436,11 @@ jobs:
           chmod +x "$HOME/.local/bin/stellar"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           stellar --version
+
+      - name: Verify deployable WASM reproducibility
+        env:
+          FLUXORA_REQUIRE_OPTIMIZED: "true"
+        run: bash script/verify-wasm-checksum.sh --reproducible
 
       - name: Optimize WASM
         run: |
