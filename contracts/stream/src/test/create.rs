@@ -15,6 +15,10 @@ pub(super) fn seed_counter(h: &Harness, value: u64) {
             .storage()
             .instance()
             .set(&DataKey::NextStreamId, &value);
+        h.env
+            .storage()
+            .instance()
+            .set(&DataKey::StreamCount, &value);
     });
 }
 

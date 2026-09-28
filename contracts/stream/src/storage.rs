@@ -218,8 +218,18 @@ pub fn save_stream(env: &Env, stream_id: u64, stream: &Stream) {
             .instance()
             .get(&DataKey::NextStreamId)
             .unwrap_or(0);
+        let recorded_count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::StreamCount)
+            .unwrap_or(current);
+        debug_assert_eq!(
+            recorded_count, current,
+            "NextStreamId and StreamCount must advance together",
+        );
         let next = current.checked_add(1).expect("stream id counter overflow");
         env.storage().instance().set(&DataKey::NextStreamId, &next);
+        env.storage().instance().set(&DataKey::StreamCount, &next);
         extend_instance(env);
     }
     extend_stream(env, stream_id, stream);
@@ -297,12 +307,13 @@ pub fn stream_exists(env: &Env, stream_id: u64) -> bool {
 ///
 /// This is equivalent to the next stream id because ids are never reused.
 pub fn stream_count(env: &Env) -> u64 {
-    // Same default as `next_stream_id`: an untouched instance has created
-    // zero streams. Not a recoverable precondition — callers treat 0 as the
-    // honest answer.
+    // Keep the population counter as an independent entry. Falling back to
+    // NextStreamId preserves the read view for instances created before this
+    // key was introduced; every new write maintains both entries atomically.
     env.storage()
         .instance()
-        .get(&DataKey::NextStreamId)
+        .get(&DataKey::StreamCount)
+        .or_else(|| env.storage().instance().get(&DataKey::NextStreamId))
         .unwrap_or(0)
 }
 
