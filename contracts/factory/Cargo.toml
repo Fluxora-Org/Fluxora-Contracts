@@ -5,7 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["lib", "cdylib"]
+doctest = false
 
 [features]
 testutils = ["soroban-sdk/testutils"]
