@@ -9,6 +9,14 @@ part of Fluxora as production-ready.
 
 **Status: open. Closing it is the acceptance criterion for stage 4.**
 
+**Pinned by:**
+`contracts/stream/src/test/read_methods_no_side_effects.rs::get_stream_does_not_extend_ttl_on_archived_stream`
+and `contracts/stream/src/test/ttl.rs::an_archived_stream_restores_with_its_accounting_intact`.
+The first pins the test host's automatic restore behavior; the second pins the
+accounting-preservation endpoint. Neither can pass if the host stops restoring
+expired persistent entries with intact data, while neither claims to cover the
+real-network failed-transaction and `RestoreFootprint` resubmission step.
+
 ### The claim you might read off a green suite
 
 `test::ttl` passes. It contains
@@ -167,6 +175,13 @@ and surface a restore action rather than an error toast. Run a keeper against
 
 ## 2. Resource measurements understate a real deployment
 
+**Pinned by:**
+`contracts/stream/src/test/resource_limits.rs::a_full_batch_withdraw_keeps_headroom_on_every_limit`
+and `contracts/stream/src/test/resource_limits.rs::batch_withdraw_at_max_succeeds_and_records_costs`.
+These tests pin the native-host measurement and the protocol-27 resource
+snapshot used by the suite; they intentionally do not claim to measure Wasm
+instantiation or live-network limits.
+
 `test::resource_limits` registers contracts **natively**, not as WASM. Wasm
 instantiation and execution costs are therefore skipped, so reported
 `instructions` are lower than production. Ledger entry counts and event bytes —
@@ -181,6 +196,12 @@ testnet simulation and reconcile.
 
 ## 3. `MAX_BATCH_SIZE` is calibrated against one token
 
+**Pinned by:**
+`contracts/stream/src/test/resource_limits.rs::the_event_budget_is_not_the_binding_constraint_at_the_cap`.
+It measures the event cost at `MAX_BATCH_SIZE` using the Stellar Asset
+Contract, so a change to the event payload or SAC cost that makes the event
+budget binding fails the test and requires this limitation to be revisited.
+
 The cap is bounded by the **contract event budget**, and roughly half of the
 per-stream event cost is the *token's* `transfer` event, not Fluxora's
 `withdrawn` event. Measured against the Stellar Asset Contract. A SEP-41 token
@@ -194,6 +215,10 @@ integrator standardising on an unusual token should re-run
 
 ## 4. Not audited
 
+**Pinned by:** `tests/test_validator.py::TestKnownLimitations::test_no_third_party_audit_is_claimed`.
+The guard requires this limitation to remain explicitly stated until an audit
+is performed and the limitation is deliberately removed or rewritten.
+
 No third-party security audit has been performed. The property tests, the pool
 invariant and the randomized sequence suite are evidence of care, not a
 substitute for review.
@@ -202,9 +227,69 @@ substitute for review.
 
 ## 5. Ledger close time is assumed, not measured
 
+**Pinned by:**
+`contracts/stream/src/test/ttl.rs::nominal_ledger_close_time_is_five_seconds`
+and `contracts/stream/src/test/ttl.rs::seconds_to_ledgers_rounds_up`.
+Together they pin both the nominal five-second assumption and the conservative
+round-up conversion used by TTL targets.
+
 TTL targets convert seconds to ledgers at a nominal 5s close time
 (`storage::SECONDS_PER_LEDGER`). Close time is a network property that drifts.
 The constant is deliberately conservative — it over-estimates ledgers per unit
 time, so entries are funded for longer than strictly needed — but a sustained
 slowdown well beyond 5s/ledger would erode the margin. The 30-day buffer and the
 keeper path both exist to absorb that.
+
+---
+
+## 6. Rebasing tokens can desynchronize the pool, undetected
+
+See [ABI.md "Token assumptions"](ABI.md#token-assumptions) for the full
+statement. Fee-on-transfer tokens are detected and rejected on the deposit
+leg (`Error::TokenAmountMismatch`); a token whose balances change outside of a
+transfer Fluxora itself initiated — an elastic-supply rebase — cannot be
+detected at call time, because there is no transfer to instrument. Should one
+be used anyway, the pool invariant (`Harness::assert_pool_invariant`) can be
+violated on-chain, and the only symptom is a later `withdraw` or `cancel`
+failing closed with `Error::TokenTransferFailed` once the shortfall is
+reached. Integrators choosing a token for a stream are responsible for
+confirming it does not rebase.
+
+---
+
+## 7. Pausing moves the cliff in wall-clock terms
+
+**Status: by design — documented, not fixed.**
+
+`cliff_reached` is evaluated against the stream clock, and `stream_time`
+subtracts the cumulative `paused_total`. Pausing a stream therefore freezes the
+cliff gate along with accrual, and resuming pushes the wall-clock instant the
+gate opens forward by the total time spent paused: the gate opens at
+`cliff_time + paused_total`, not at the stored `cliff_time`.
+
+The stored `cliff_time` is never rewritten — `get_stream().cliff_time` still
+reports the original instant — so the two values an integrator might read (the
+schedule field and the effective instant) disagree by exactly `paused_total`. A
+recipient who computes an unlock date from `cliff_time` alone will expect funds
+to unlock earlier than they do.
+
+This is a limitation because `pause` is **sender-only** and unbounded. A sender
+who wants to defer the recipient's first withdrawal can pause a pausable stream
+before its cliff and hold it paused, moving the unlock instant arbitrarily far
+into the future. The recipient can still withdraw anything already vested, but
+before the cliff nothing has vested, so there is nothing to withdraw. The
+`pausable` capability is fixed at creation, so this exposure exists exactly when
+the stream was created with `pausable == true`.
+
+**What is documented instead of fixed.** `docs/ABI.md` states the rule and gives
+the recomputation (`cliff_time + paused_total`); the `resumed` event publishes
+the post-resume `paused_total` so an indexer can derive the new instant without
+replaying individual intervals; and
+`test::cliff::pause_across_cliff_delays_the_wall_clock_cliff` together with
+`test::pause::pausing_across_the_cliff_defers_the_cliff_too` assert it.
+
+**If you are integrating a pausable stream:** treat `cliff_time` as a lower
+bound, not the unlock date. Read the stream's current `paused_total` — from
+`get_stream`, or from the latest `resumed` event — and display
+`cliff_time + paused_total`. Do not cache the unlock instant while a stream is
+pausable.

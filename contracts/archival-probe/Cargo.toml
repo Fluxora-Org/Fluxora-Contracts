@@ -1,6 +1,17 @@
 [package]
 name = "fluxora-archival-probe"
-description = "Throwaway probe that proves the Soroban archival/restore flow. NOT part of the product."
+# Isolation decision (issue #1543): this is a deliberate EXCEPTION to the
+# "contracts/* are the deployable product" rule. It is a throwaway probe that
+# proves the Soroban archival/restore flow. It is intentionally NOT part of the
+# product and MUST never be released or deployed to mainnet.
+#
+# Remains a workspace member so `cargo test --workspace` / `cargo fmt --all` /
+# `cargo clippy --all-targets` keep covering its smoke test (see ci.yml), but it
+# is excluded from every release-artifact path: script/release.sh builds only the
+# `fluxora-stream` package and rejects a probe wasm among release outputs. Build
+# it explicitly, when needed, with:
+#   cargo build -p fluxora-archival-probe --target wasm32v1-none --release
+description = "Throwaway probe that proves the Soroban archival/restore flow. NOT part of the product; excluded from release artifacts."
 version = { workspace = true }
 edition = { workspace = true }
 license = { workspace = true }

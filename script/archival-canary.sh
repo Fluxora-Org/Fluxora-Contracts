@@ -2,7 +2,7 @@
 #
 # Stage 4 acceptance criterion — the live archival/restore round trip.
 #
-# Closes KNOWN-LIMITATIONS.md §1, the one thing the unit suite structurally
+# Closes docs/KNOWN-LIMITATIONS.md §1, the one thing the unit suite structurally
 # cannot prove: that reading an archived persistent entry *fails* on a real
 # network, that `RestoreFootprint` recovers it, and that the data survives.
 #
@@ -62,7 +62,7 @@ if (( REMAINING > 0 )); then
   echo "Not archived yet. The entry received exactly min_persistent_ttl (120,960"
   echo "ledgers, ~7 days) because the probe deliberately never extends it."
   echo "Re-run after ledger $LIVE_UNTIL_LEDGER, with --restore, to close"
-  echo "KNOWN-LIMITATIONS.md §1."
+  echo "docs/KNOWN-LIMITATIONS.md §1."
   exit 0
 fi
 
@@ -86,7 +86,7 @@ if OUT=$(stellar contract invoke --id "$PROBE" --source "$SOURCE" \
            --network "$NETWORK" --send=yes -- read 2>&1); then
   echo "   ✗ invocation SUCCEEDED against an archived entry: $OUT"
   echo "     If this happens, the network auto-restored — which would mean the"
-  echo "     unit-test caveat in KNOWN-LIMITATIONS.md §1 does not apply on-network."
+  echo "     unit-test caveat in docs/KNOWN-LIMITATIONS.md §1 does not apply on-network."
   exit 1
 fi
 echo "   ✓ invocation failed as expected"
@@ -126,9 +126,10 @@ echo "   ✓ entry live again until ledger $NEW_TTL"
 cat <<'DONE'
 
 ╭──────────────────────────────────────────────────────────────────────╮
-│ Round trip complete — KNOWN-LIMITATIONS.md §1 can be closed.          │
+│ Round trip complete — docs/KNOWN-LIMITATIONS.md §1 can be closed.          │
 ╰──────────────────────────────────────────────────────────────────────╯
-Update KNOWN-LIMITATIONS.md §1 with the transaction hashes above, and note
+Update docs/KNOWN-LIMITATIONS.md §1 with the transaction hashes above, and note
 in the SDK requirements that a client must detect this failure and offer
 restore rather than surfacing the raw error.
 DONE
+

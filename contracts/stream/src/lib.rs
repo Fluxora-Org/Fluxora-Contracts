@@ -43,6 +43,15 @@
 //! switch and no global pause. Immutability is what lets another protocol depend
 //! on this one.
 
+#[cfg(all(target_family = "wasm", not(target_os = "none")))]
+compile_error!(
+    "Fluxora production WASM must be built for wasm32v1-none; wasm32-unknown-unknown can emit unsupported features."
+);
+#[cfg(all(target_family = "wasm", debug_assertions))]
+compile_error!("Fluxora production WASM must be built without debug assertions; use --release.");
+#[cfg(all(target_family = "wasm", feature = "testutils"))]
+compile_error!("Fluxora production WASM must not enable the testutils feature.");
+
 // The test suite runs against the host with `std` available; the contract
 // itself is strictly `no_std`.
 #[cfg(test)]
@@ -59,9 +68,12 @@ pub use accrual::{
 };
 pub use error::Error;
 pub use storage::{MIN_STREAM_TTL_LEDGERS, SECONDS_PER_LEDGER, TTL_BUFFER_SECONDS};
-pub use types::{DataKey, Stream, StreamStatus};
+pub use types::op;
+pub use types::{DataKey, DelegateGrant, Stream, StreamStatus};
 
-use soroban_sdk::{contract, contractimpl, token, Address, Env, InvokeError, MuxedAddress, Vec};
+use soroban_sdk::{
+    contract, contractimpl, token, Address, Env, InvokeError, MuxedAddress, TryFromVal, Vec,
+};
 
 /// Maximum number of streams one batch call may touch.
 ///
@@ -70,6 +82,8 @@ use soroban_sdk::{contract, contractimpl, token, Address, Env, InvokeError, Muxe
 /// Measured, not guessed. `test::resource_limits` reports the real cost of a
 /// full batch against protocol 27's mainnet limits, and the constraint that
 /// binds is not the one you would expect:
+///
+/// Measured evidence from the release resource suite (20-stream batch):
 ///
 /// | limit | used by a 20-stream batch | ceiling |
 /// |---|---|---|
@@ -93,6 +107,18 @@ use soroban_sdk::{contract, contractimpl, token, Address, Env, InvokeError, Muxe
 /// failing opaquely at the network level. The SDK chunks client-side, so the
 /// exact value is invisible to integrators.
 pub const MAX_BATCH_SIZE: u32 = 16;
+
+/// Version of the public stream ABI inventory.
+///
+/// Bump this when making a *breaking* change to a public method: removing,
+/// renaming, or changing a parameter/return type. Additive changes — a new
+/// method, a new error discriminant, a field appended to an event payload —
+/// do not require a bump; update `contracts/stream/abi/fluxora_stream.json`
+/// so the snapshot stays the generated source of truth.
+///
+/// The on-chain contract is immutable, so a bump is a *new deployment*, not an
+/// in-place upgrade. See `docs/ABI.md` and `test::abi`.
+pub const ABI_VERSION: u32 = 1;
 
 /// Call `token.transfer(from, to, amount)` and map any failure to a stable
 /// stream-level error.
@@ -134,6 +160,58 @@ fn token_transfer(
         // Host trap: most commonly the token address has no deployed code.
         Err(Err(InvokeError::Abort)) => Err(Error::TokenMissing),
     }
+}
+
+/// Pull `amount` of `token` from `from` into the contract's own balance and
+/// verify the pool grew by exactly `amount`.
+///
+/// # Why measure rather than trust the requested amount
+///
+/// Fluxora's accounting — [`Stream::deposited`], and every rate, liability and
+/// refund figure derived from it — assumes a deposit pull moves exactly the
+/// amount requested into the pool. A **fee-on-transfer** token (a cut taken
+/// out of every transfer) silently breaks that assumption: the sender's
+/// balance drops by `amount`, but the pool only grows by `amount` minus the
+/// fee. Nothing about that failure is loud — the deposit "succeeds" and the
+/// shortfall says nothing until, much later, an unrelated stream's `withdraw`
+/// or `cancel` fails with [`Error::TokenTransferFailed`] because the pool
+/// cannot cover every stream's claim. See `docs/ABI.md` "Token assumptions".
+///
+/// The fix is to check, not assume: read the contract's own balance before
+/// and after the pull and require the delta to equal `amount` exactly. Any
+/// deviation — a shortfall from a fee, or an overage from a positive-rebasing
+/// token — is rejected with [`Error::TokenAmountMismatch`]. Soroban rolls back
+/// the entire invocation on error, so the transfer that already happened
+/// (and any fee it took) is undone along with everything else; nothing is
+/// stranded.
+///
+/// # Why this guards deposits only
+///
+/// The outbound legs — [`FluxoraStream::withdraw`]'s payout and
+/// [`FluxoraStream::cancel`]'s refund — call [`token_transfer`] directly, with
+/// no balance check. If the token takes a further cut on receipt there, that
+/// is between the recipient (or sender) and their own balance: the *pool's*
+/// balance still drops by exactly the amount the contract sent, so Fluxora's
+/// internal accounting stays in sync either way.
+fn pull_deposit(env: &Env, token: &Address, from: &Address, amount: &i128) -> Result<(), Error> {
+    let contract = env.current_contract_address();
+    let token_client = token::TokenClient::new(env, token);
+    let before = token_client.balance(&contract);
+
+    token_transfer(
+        env,
+        token,
+        from,
+        MuxedAddress::from(contract.clone()),
+        amount,
+    )?;
+
+    let after = token_client.balance(&contract);
+    let received = after.checked_sub(before).ok_or(Error::Overflow)?;
+    if received != *amount {
+        return Err(Error::TokenAmountMismatch);
+    }
+    Ok(())
 }
 
 #[contract]
@@ -197,6 +275,9 @@ impl FluxoraStream {
     /// * [`Error::DepositRateTooLow`] — `deposit < duration`, so the per-second
     ///   rate would truncate to zero and the recipient would accrue nothing.
     /// * [`Error::Overflow`] — `deposit * duration` does not fit in `i128`.
+    /// * [`Error::TokenAmountMismatch`] — the deposit pull delivered a
+    ///   different amount than `deposit` (a fee-on-transfer or rebasing
+    ///   token). See `docs/ABI.md` "Token assumptions".
     #[allow(clippy::too_many_arguments)]
     pub fn create_stream(
         env: Env,
@@ -270,13 +351,7 @@ impl FluxoraStream {
         //
         // The sender's auth on this invocation covers the nested token
         // transfer; no prior approval is needed.
-        token_transfer(
-            &env,
-            &token,
-            &sender,
-            MuxedAddress::from(env.current_contract_address()),
-            &deposit,
-        )?;
+        pull_deposit(&env, &token, &sender, &deposit)?;
 
         storage::save_stream(&env, stream_id, &stream);
         storage::extend_instance(&env);
@@ -326,6 +401,9 @@ impl FluxoraStream {
     ///   instantly (or near-instantly) withdrawable, which is never what the
     ///   sender means. Create a new stream instead.
     /// * [`Error::StreamTerminated`] — stream is cancelled or depleted.
+    /// * [`Error::TokenAmountMismatch`] — the pull delivered a different
+    ///   amount than `amount` (a fee-on-transfer or rebasing token). See
+    ///   `docs/ABI.md` "Token assumptions".
     pub fn top_up(env: Env, stream_id: u64, amount: i128) -> Result<(), Error> {
         let mut stream = storage::load_stream(&env, stream_id)?;
         stream.sender.require_auth();
@@ -384,19 +462,19 @@ impl FluxoraStream {
             return Err(Error::DepositRateTooLow);
         }
 
-        let token = stream.token.clone();
-        let sender = stream.sender.clone();
+        let old_vested = accrual::vested(&stream, now)?;
         stream.deposited = new_deposited;
         stream.end_time = new_end;
-        storage::save_stream(&env, stream_id, &stream);
+        if accrual::vested(&stream, now)? < old_vested {
+            return Err(Error::VestedDecreased);
+        }
 
-        token_transfer(
-            &env,
-            &token,
-            &sender,
-            MuxedAddress::from(env.current_contract_address()),
-            &amount,
-        )?;
+        let token = stream.token.clone();
+        let sender = stream.sender.clone();
+
+        pull_deposit(&env, &token, &sender, &amount)?;
+
+        storage::save_stream(&env, stream_id, &stream);
 
         events::topped_up(&env, stream_id, &stream, amount);
         Ok(())
@@ -476,58 +554,52 @@ impl FluxoraStream {
     ///
     /// # Errors
     ///
+    /// * [`Error::EmptyBatch`] — no ids were supplied.
     /// * [`Error::BatchTooLarge`] — more than [`MAX_BATCH_SIZE`] ids. Chunk
     ///   client-side; the SDK does this automatically.
+    /// * [`Error::MalformedStreamId`] — a serialized vector element is not a
+    ///   `u64`.
     /// * [`Error::DuplicateStreamId`] — the same id appears twice, which would
     ///   otherwise operate on a stale copy of the stream the second time.
+    /// * [`Error::StreamNotFound`] — one of the ids does not exist.
     /// * [`Error::Unauthorized`] — one of the streams has a different recipient.
     pub fn batch_withdraw(
         env: Env,
         recipient: Address,
         stream_ids: Vec<u64>,
     ) -> Result<i128, Error> {
+        let stream_ids = Self::validate_batch_ids(&env, &stream_ids)?;
+        Self::reject_duplicate_ids(&stream_ids)?;
         recipient.require_auth();
 
-        let count = stream_ids.len();
-        if count == 0 {
-            return Err(Error::EmptyBatch);
-        }
-        if count > MAX_BATCH_SIZE {
-            return Err(Error::BatchTooLarge);
-        }
-
-        // Quadratic, but bounded by MAX_BATCH_SIZE and it avoids allocating a
-        // set. A duplicate id would load the stream twice and apply the second
-        // withdrawal to a stale copy, silently over-paying.
-        //
-        // Invariant: `i` and `j` are always in `0..count`, and `count` is
-        // `stream_ids.len()`, so `get_unchecked` cannot be out of range. A
-        // bounds-checked `get` would only ever return `None` if the Vec were
-        // mutated mid-loop, which it is not.
-        for i in 0..count {
-            for j in (i + 1)..count {
-                if stream_ids.get_unchecked(i) == stream_ids.get_unchecked(j) {
-                    return Err(Error::DuplicateStreamId);
-                }
-            }
-        }
-
         let now = env.ledger().timestamp();
+        let mut streams = Vec::new(&env);
+        let mut payouts = Vec::new(&env);
         let mut total: i128 = 0;
 
+        // Resolve and validate the entire batch before changing storage or
+        // calling any token contract.
         for stream_id in stream_ids.iter() {
-            let mut stream = storage::load_stream(&env, stream_id)?;
+            let stream = storage::peek_stream(&env, stream_id)?;
             if stream.recipient != recipient {
                 return Err(Error::Unauthorized);
             }
 
             let available = accrual::withdrawable(&stream, now)?;
-            if available == 0 {
-                continue;
-            }
-
-            Self::apply_withdrawal(&env, stream_id, &mut stream, available)?;
             total = total.checked_add(available).ok_or(Error::Overflow)?;
+            streams.push_back(stream);
+            payouts.push_back(available);
+        }
+
+        for i in 0..stream_ids.len() {
+            let stream_id = stream_ids.get_unchecked(i);
+            let mut stream = streams.get_unchecked(i);
+            let payout = payouts.get_unchecked(i);
+            if payout == 0 {
+                storage::extend_stream(&env, stream_id, &stream);
+            } else {
+                Self::apply_withdrawal(&env, stream_id, &mut stream, payout)?;
+            }
         }
 
         Ok(total)
@@ -551,6 +623,11 @@ impl FluxoraStream {
     /// Cancelling before the cliff refunds everything: pre-cliff the recipient's
     /// entitlement is zero by definition.
     ///
+    /// Cancelling at exactly `start_time` is that case one instant later:
+    /// nothing has vested, so the entire deposit is returned, the recipient
+    /// receives nothing, and the collapsed schedule has zero length rather than
+    /// a negative one.
+    ///
     /// # Errors
     ///
     /// * [`Error::StreamNotFound`] — no stream with this id.
@@ -570,6 +647,28 @@ impl FluxoraStream {
         let now = env.ledger().timestamp();
         let vested_now = accrual::vested(&stream, now)?;
         let refund = accrual::refundable(&stream, now)?;
+
+        // Issue #1584 — the accounting the `Cancelled` event publishes.
+        //
+        // `vested_now` is the *total* vested at this instant, cumulative and
+        // inclusive of `withdrawn`; `refund` is the unvested remainder handed
+        // back to the sender. Conservation (invariant I4) says the two must
+        // partition the pre-cancel deposit exactly, with nothing created or
+        // destroyed in between. Checked here rather than trusted, because this
+        // is the identity every downstream ledger reconciles against.
+        //
+        // `debug_assert` compiles out of the release profile
+        // (`debug-assertions = false`), so this costs the deployed contract
+        // nothing while the test suite runs it on every cancellation.
+        debug_assert_eq!(
+            refund + vested_now,
+            stream.deposited,
+            "cancel: conservation broken — refund + vested != deposited",
+        );
+        debug_assert!(
+            vested_now >= stream.withdrawn,
+            "cancel: vested below what was already withdrawn",
+        );
 
         // Collapse the schedule onto the current point of the stream clock.
         // Clamped at `start_time` so a cancel before the stream opens leaves a
@@ -595,7 +694,11 @@ impl FluxoraStream {
             )?;
         }
 
-        events::cancelled(&env, stream_id, &stream, refund, vested_now);
+        // Issue #1584: the event's `vested` is read off the settled stream by
+        // the helper (`stream.deposited`, set above), so it cannot disagree with
+        // storage. Asserted here so the intent survives a future edit.
+        debug_assert_eq!(stream.deposited, vested_now);
+        events::cancelled(&env, stream_id, &stream, refund);
         Ok(())
     }
 
@@ -620,8 +723,15 @@ impl FluxoraStream {
         }
 
         let now = env.ledger().timestamp();
+        let old_vested = accrual::vested(&stream, now)?;
+
         stream.paused_at = Some(now);
         stream.status = StreamStatus::Paused;
+
+        if accrual::vested(&stream, now)? < old_vested {
+            return Err(Error::VestedDecreased);
+        }
+
         storage::save_stream(&env, stream_id, &stream);
 
         events::paused(&env, stream_id, &stream, now);
@@ -633,6 +743,348 @@ impl FluxoraStream {
     pub fn resume(env: Env, stream_id: u64) -> Result<(), Error> {
         let mut stream = storage::load_stream(&env, stream_id)?;
         stream.sender.require_auth();
+
+        if stream.status.is_terminal() {
+            return Err(Error::StreamTerminated);
+        }
+        let paused_at = match stream.paused_at {
+            Some(t) => t,
+            None => return Err(Error::StreamNotPaused),
+        };
+        if stream.status != StreamStatus::Paused {
+            return Err(Error::StreamNotPaused);
+        }
+
+        let now = env.ledger().timestamp();
+        let old_vested = accrual::vested(&stream, now)?;
+
+        let paused_duration = now.saturating_sub(paused_at);
+        stream.paused_total = stream
+            .paused_total
+            .checked_add(paused_duration)
+            .ok_or(Error::Overflow)?;
+        stream.paused_at = None;
+        stream.status = StreamStatus::Active;
+
+        if accrual::vested(&stream, now)? < old_vested {
+            return Err(Error::VestedDecreased);
+        }
+
+        storage::save_stream(&env, stream_id, &stream);
+
+        events::resumed(&env, stream_id, &stream, paused_duration);
+        Ok(())
+    }
+
+    /// Reassign a stream's future payouts to a new recipient. Sender auth.
+    ///
+    /// Available only if the stream was created with `transferable == true`.
+    /// A compliance-bound sender — payroll, a KYC'd grant program — can pin the
+    /// payee at creation by passing `false`.
+    ///
+    /// Any balance the old recipient had already accrued but not withdrawn moves
+    /// with the stream. Recipients should withdraw before transferring.
+    ///
+    /// Transfer is allowed at the cliff and end timestamps, and the new
+    /// recipient receives any claim that is withdrawable at those boundaries.
+    /// A cancelled stream may still be transferred while it has an unwithdrawn
+    /// tail; a depleted stream cannot be transferred.
+    ///
+    /// # Delegate grants
+    ///
+    /// A transfer changes only the `recipient` field; it does **not** touch
+    /// delegate grants. Grants are scoped to the stream, not to the recipient
+    /// who issued them, so every grant live before the transfer is still live
+    /// after it — including recipient-issued `WITHDRAW` and
+    /// `TRANSFER_RECIPIENT` grants, which now belong to whoever holds the
+    /// recipient slot. That makes revocation follow the slot rather than the
+    /// person: the new recipient can revoke a surviving grant immediately, the
+    /// old recipient can neither grant nor revoke anything further, and
+    /// sender-issued grants (`CANCEL`, `PAUSE`, `RESUME`, `TOP_UP`) are
+    /// untouched because the sender did not change.
+    ///
+    /// The rule is stated in `docs/delegation-revocation.md` and asserted for
+    /// every permission bit by `test::delegation`.
+    pub fn transfer_recipient(
+        env: Env,
+        stream_id: u64,
+        new_recipient: Address,
+    ) -> Result<(), Error> {
+        let mut stream = storage::load_stream(&env, stream_id)?;
+        // #1637 hardens recipient-transfer authorization to the sender: the
+        // party who funded the stream keeps control over who is paid out.
+        // Granting this to the current recipient is the *delegate* path
+        // (`delegate_transfer_recipient`), gated on a recipient-issued grant.
+        stream.sender.require_auth();
+
+        if !stream.transferable {
+            return Err(Error::NotTransferable);
+        }
+        // A stream with no claim left is not reassignable. This covers both
+        // `Depleted` streams and cancelled streams whose tail has been fully
+        // drawn (where `Cancelled` is intentionally sticky, so checking only
+        // the status would miss it).
+        if stream.status == StreamStatus::Depleted || stream.withdrawn >= stream.deposited {
+            return Err(Error::StreamTerminated);
+        }
+        if new_recipient == stream.sender {
+            return Err(Error::SelfStream);
+        }
+
+        let old_recipient = stream.recipient.clone();
+        if old_recipient == new_recipient {
+            return Err(Error::RepeatedTransfer);
+        }
+
+        let now = env.ledger().timestamp();
+        let old_vested = accrual::vested(&stream, now)?;
+
+        stream.recipient = new_recipient.clone();
+
+        if accrual::vested(&stream, now)? < old_vested {
+            return Err(Error::VestedDecreased);
+        }
+
+        storage::save_stream(&env, stream_id, &stream);
+
+        events::recipient_transferred(&env, stream_id, &old_recipient, &new_recipient);
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------------
+    // Delegation
+    // ---------------------------------------------------------------------
+
+    /// Grant a delegate permission to call specific operations on a stream.
+    ///
+    /// `ops` is a bitmask of [`Op`] constants. `expires_at` is an optional
+    /// Unix timestamp after which the grant is no longer valid; pass `None`
+    /// for a grant that does not expire on its own. Only the authoritative
+    /// party for the requested ops may call this:
+    ///
+    /// * Sender-side ops (`CANCEL`, `PAUSE`, `RESUME`, `TOP_UP`): sender auth.
+    /// * Recipient-side ops (`WITHDRAW`, `TRANSFER_RECIPIENT`): recipient auth.
+    /// * Mixed grants must come from both parties; callers should split them.
+    ///
+    /// Granting over an existing grant replaces it entirely.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::StreamNotFound`] — no stream with this id.
+    /// * [`Error::StreamTerminated`] — stream is cancelled or depleted.
+    /// * [`Error::Unauthorized`] — caller is not the required party for any of
+    ///   the requested ops.
+    pub fn grant_delegate(
+        env: Env,
+        stream_id: u64,
+        grantor: Address,
+        delegate: Address,
+        ops: u32,
+        expires_at: Option<u64>,
+    ) -> Result<(), Error> {
+        let stream = storage::load_stream(&env, stream_id)?;
+        if stream.status.is_terminal() {
+            return Err(Error::StreamTerminated);
+        }
+
+        let sender_ops = op::CANCEL | op::PAUSE | op::RESUME | op::TOP_UP;
+        let recipient_ops = op::WITHDRAW | op::TRANSFER_RECIPIENT;
+
+        // The grantor must be the party that owns the ops being delegated.
+        // Mixed calls are rejected; split into two grants instead.
+        let needs_sender = ops & sender_ops != 0;
+        let needs_recipient = ops & recipient_ops != 0;
+
+        if needs_sender && needs_recipient {
+            return Err(Error::Unauthorized);
+        }
+        if needs_sender {
+            if grantor != stream.sender {
+                return Err(Error::Unauthorized);
+            }
+            grantor.require_auth();
+        } else if needs_recipient {
+            if grantor != stream.recipient {
+                return Err(Error::Unauthorized);
+            }
+            grantor.require_auth();
+        } else {
+            // ops == 0 is a no-op; treat it as success.
+            return Ok(());
+        }
+
+        let grant = DelegateGrant { ops, expires_at };
+        storage::save_delegate(&env, stream_id, &delegate, &grant);
+
+        events::delegate_granted(&env, stream_id, &grantor, &delegate, ops, expires_at);
+        Ok(())
+    }
+
+    /// Revoke a previously-issued delegate grant.
+    ///
+    /// # Authority follows the party, not the person
+    ///
+    /// The sender / recipient test below reads the stream's *current* parties,
+    /// so after a [`transfer_recipient`](Self::transfer_recipient) the new
+    /// recipient holds the recipient half of the check: they can revoke a grant
+    /// the old recipient issued, and the old recipient — no longer a party to
+    /// the stream — is rejected with [`Error::Unauthorized`]. Grants themselves
+    /// survive the transfer; see `docs/delegation-revocation.md`.
+    ///
+    /// Takes effect immediately — the delegate's next call will be rejected.
+    /// Funds the delegate has already moved (e.g. via a prior `withdraw`) are
+    /// unaffected: revocation only stops future invocations.
+    ///
+    /// # Same-ledger ordering
+    ///
+    /// Revocation is **ordered, not retroactive**. This call removes the grant
+    /// from storage; every invocation ordered after it — in the same ledger or
+    /// any later one — reads no grant and fails with
+    /// [`Error::DelegateNotPermitted`]. An invocation ordered *before* the
+    /// revocation is honoured and is not unwound: already-completed calls are
+    /// unaffected, only the ability to make new ones is withdrawn.
+    ///
+    /// There is no grace period and no distinction between same-ledger and
+    /// cross-ledger calls — a single storage write decides both. Ordering
+    /// *within* a ledger is the network's transaction application order, not
+    /// something this contract selects; the guarantee is only that whichever
+    /// order the network applies, the delegate call on the later side of the
+    /// revocation is rejected. `test::delegation` pins both orders for every
+    /// permission bit; `docs/delegation-revocation.md` states the guarantee.
+    ///
+    /// Silently succeeds if no grant exists (idempotent).
+    ///
+    /// The grantor must be either the sender or the recipient of the stream.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::StreamNotFound`] — no stream with this id.
+    /// * [`Error::Unauthorized`] — caller is neither sender nor recipient.
+    pub fn revoke_delegate(
+        env: Env,
+        stream_id: u64,
+        grantor: Address,
+        delegate: Address,
+    ) -> Result<(), Error> {
+        let stream = storage::load_stream(&env, stream_id)?;
+
+        if grantor != stream.sender && grantor != stream.recipient {
+            return Err(Error::Unauthorized);
+        }
+        grantor.require_auth();
+
+        storage::remove_delegate(&env, stream_id, &delegate);
+        events::delegate_revoked(&env, stream_id, &grantor, &delegate);
+        Ok(())
+    }
+
+    /// Withdraw as a delegate. The `delegate` address must hold a valid
+    /// grant with [`op::WITHDRAW`] for this stream.
+    pub fn delegate_withdraw(
+        env: Env,
+        stream_id: u64,
+        delegate: Address,
+        amount: Option<i128>,
+    ) -> Result<i128, Error> {
+        Self::check_delegate(&env, stream_id, &delegate, op::WITHDRAW)?;
+        let mut stream = storage::load_stream(&env, stream_id)?;
+
+        let now = env.ledger().timestamp();
+        let available = accrual::withdrawable(&stream, now)?;
+        if available == 0 {
+            if stream.status.is_terminal() {
+                return Err(Error::StreamTerminated);
+            }
+            return Err(Error::NothingToWithdraw);
+        }
+
+        let payout = match amount {
+            None => available,
+            Some(requested) => {
+                if requested <= 0 {
+                    return Err(Error::InvalidAmount);
+                }
+                if requested > available {
+                    return Err(Error::InsufficientWithdrawable);
+                }
+                requested
+            }
+        };
+
+        Self::apply_withdrawal(&env, stream_id, &mut stream, payout)?;
+        Ok(payout)
+    }
+
+    /// Cancel as a delegate. Requires [`op::CANCEL`] grant.
+    pub fn delegate_cancel(env: Env, stream_id: u64, delegate: Address) -> Result<(), Error> {
+        Self::check_delegate(&env, stream_id, &delegate, op::CANCEL)?;
+        let mut stream = storage::load_stream(&env, stream_id)?;
+
+        if !stream.cancellable {
+            return Err(Error::NotCancellable);
+        }
+        if stream.status.is_terminal() {
+            return Err(Error::StreamTerminated);
+        }
+
+        let now = env.ledger().timestamp();
+        let vested_now = accrual::vested(&stream, now)?;
+        let refund = accrual::refundable(&stream, now)?;
+        let settle_at = accrual::stream_time(&stream, now).max(stream.start_time);
+
+        stream.deposited = vested_now;
+        stream.end_time = settle_at;
+        stream.paused_at = None;
+        stream.status = StreamStatus::Cancelled;
+
+        let token = stream.token.clone();
+        let sender = stream.sender.clone();
+        storage::save_stream(&env, stream_id, &stream);
+
+        if refund > 0 {
+            token_transfer(
+                &env,
+                &token,
+                &env.current_contract_address(),
+                MuxedAddress::from(sender),
+                &refund,
+            )?;
+        }
+
+        // `vested` is derived from the post-cancel `stream.deposited` inside
+        // the event, so it is not passed separately.
+        events::cancelled(&env, stream_id, &stream, refund);
+        Ok(())
+    }
+
+    /// Pause as a delegate. Requires [`op::PAUSE`] grant.
+    pub fn delegate_pause(env: Env, stream_id: u64, delegate: Address) -> Result<(), Error> {
+        Self::check_delegate(&env, stream_id, &delegate, op::PAUSE)?;
+        let mut stream = storage::load_stream(&env, stream_id)?;
+
+        if !stream.pausable {
+            return Err(Error::NotPausable);
+        }
+        if stream.status.is_terminal() {
+            return Err(Error::StreamTerminated);
+        }
+        if stream.status == StreamStatus::Paused {
+            return Err(Error::StreamAlreadyPaused);
+        }
+
+        let now = env.ledger().timestamp();
+        stream.paused_at = Some(now);
+        stream.status = StreamStatus::Paused;
+        storage::save_stream(&env, stream_id, &stream);
+
+        events::paused(&env, stream_id, &stream, now);
+        Ok(())
+    }
+
+    /// Resume as a delegate. Requires [`op::RESUME`] grant.
+    pub fn delegate_resume(env: Env, stream_id: u64, delegate: Address) -> Result<(), Error> {
+        Self::check_delegate(&env, stream_id, &delegate, op::RESUME)?;
+        let mut stream = storage::load_stream(&env, stream_id)?;
 
         if stream.status.is_terminal() {
             return Err(Error::StreamTerminated);
@@ -659,30 +1111,98 @@ impl FluxoraStream {
         Ok(())
     }
 
-    /// Reassign a stream's entire remaining claim to a new recipient.
-    /// Recipient auth.
-    ///
-    /// Available only if the stream was created with `transferable == true`.
-    /// A compliance-bound sender — payroll, a KYC'd grant program — can pin the
-    /// payee at creation by passing `false`.
-    ///
-    /// Transfer changes only `recipient`: the schedule, vested amount, amount
-    /// already withdrawn and outstanding liability are unchanged. Funds already
-    /// withdrawn stay with the old recipient; every accrued but unwithdrawn
-    /// stroop and all future accrual move with the stream. After transfer only
-    /// the new recipient may withdraw the remaining claim.
-    pub fn transfer_recipient(
+    /// Top up as a delegate. Requires [`op::TOP_UP`] grant.
+    pub fn delegate_top_up(
         env: Env,
         stream_id: u64,
+        delegate: Address,
+        amount: i128,
+    ) -> Result<(), Error> {
+        Self::check_delegate(&env, stream_id, &delegate, op::TOP_UP)?;
+        let mut stream = storage::load_stream(&env, stream_id)?;
+
+        if stream.status.is_terminal() {
+            return Err(Error::StreamTerminated);
+        }
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let now = env.ledger().timestamp();
+        if accrual::stream_time(&stream, now) >= stream.end_time {
+            return Err(Error::StreamMatured);
+        }
+
+        let current_duration = accrual::duration(&stream) as i128;
+        let scaled = amount
+            .checked_mul(current_duration)
+            .ok_or(Error::Overflow)?;
+        let delta = scaled
+            .checked_div(stream.deposited)
+            .ok_or(Error::Overflow)?;
+        if delta < 0 || delta > u64::MAX as i128 {
+            return Err(Error::Overflow);
+        }
+        if delta == 0 {
+            return Err(Error::TopUpTooSmall);
+        }
+
+        let new_deposited = stream
+            .deposited
+            .checked_add(amount)
+            .ok_or(Error::Overflow)?;
+        let new_end = stream
+            .end_time
+            .checked_add(delta as u64)
+            .ok_or(Error::Overflow)?;
+        let new_duration = new_end
+            .checked_sub(stream.start_time)
+            .ok_or(Error::Overflow)?;
+
+        new_deposited
+            .checked_mul(new_duration as i128)
+            .ok_or(Error::Overflow)?;
+        if new_deposited < new_duration as i128 {
+            return Err(Error::DepositRateTooLow);
+        }
+
+        let token = stream.token.clone();
+        let sender = stream.sender.clone();
+        stream.deposited = new_deposited;
+        stream.end_time = new_end;
+        storage::save_stream(&env, stream_id, &stream);
+
+        // Tokens come from the sender — require their auth even though a
+        // delegate triggered this call.
+        sender.require_auth();
+        pull_deposit(&env, &token, &sender, &amount)?;
+
+        events::topped_up(&env, stream_id, &stream, amount);
+        Ok(())
+    }
+
+    /// Transfer recipient as a delegate. Requires [`op::TRANSFER_RECIPIENT`] grant.
+    ///
+    /// Follows the same semantics as [`transfer_recipient`](Self::transfer_recipient),
+    /// including its stance on delegate grants: nothing is cleared by the
+    /// transfer, so the grant that authorised this call — and every other grant
+    /// on the stream — survives it. A delegate acting for the old recipient
+    /// therefore keeps its rights until the new recipient revokes them.
+    pub fn delegate_transfer_recipient(
+        env: Env,
+        stream_id: u64,
+        delegate: Address,
         new_recipient: Address,
     ) -> Result<(), Error> {
+        Self::check_delegate(&env, stream_id, &delegate, op::TRANSFER_RECIPIENT)?;
         let mut stream = storage::load_stream(&env, stream_id)?;
-        stream.recipient.require_auth();
 
         if !stream.transferable {
             return Err(Error::NotTransferable);
         }
-        if stream.status == StreamStatus::Depleted {
+        // Same settled-claim rule as `transfer_recipient`: a stream with no
+        // unwithdrawn claim is not reassignable.
+        if stream.status == StreamStatus::Depleted || stream.withdrawn >= stream.deposited {
             return Err(Error::StreamTerminated);
         }
         if new_recipient == stream.sender {
@@ -776,6 +1296,9 @@ impl FluxoraStream {
     /// contract extends at creation, because no entry may exceed the network's
     /// `max_entry_ttl`.
     pub fn extend_stream_ttl(env: Env, stream_id: u64) -> Result<u32, Error> {
+        // Authorization: permissionless by design — see doc comment. Any caller
+        // may pay rent for any stream. The caller has no address parameter and
+        // no `require_auth` is invoked.
         let stream = storage::peek_stream(&env, stream_id)?;
         let target = storage::ttl_target_ledgers(&env, &stream);
         storage::extend_stream(&env, stream_id, &stream);
@@ -791,18 +1314,15 @@ impl FluxoraStream {
     ///
     /// **The sweep is per-item, not atomic.** Unknown ids are skipped rather
     /// than failing the batch, so a keeper working from a slightly stale index
-    /// does not lose the whole sweep to one bad id. A duplicate id is simply
-    /// extended again — the operation is idempotent and harmless — and each
-    /// occurrence counts toward the return value, so the outcome for a given
-    /// input is deterministic. Returns how many entries were actually extended.
+    /// does not lose the whole sweep to one bad id. Unlike `batch_withdraw`,
+    /// duplicate ids are rejected up-front: passing the same id twice returns
+    /// [`Error::DuplicateStreamId`] rather than attempting to extend it twice.
+    /// Empty, oversized, and malformed vectors are rejected before the sweep
+    /// starts. Returns how many entries were actually extended.
     pub fn batch_extend_ttl(env: Env, stream_ids: Vec<u64>) -> Result<u32, Error> {
-        let count = stream_ids.len();
-        if count == 0 {
-            return Err(Error::EmptyBatch);
-        }
-        if count > MAX_BATCH_SIZE {
-            return Err(Error::BatchTooLarge);
-        }
+        // Authorization: permissionless — same policy as `extend_stream_ttl`.
+        let stream_ids = Self::validate_batch_ids(&env, &stream_ids)?;
+        Self::reject_duplicate_ids(&stream_ids)?;
 
         let mut extended = 0u32;
         for stream_id in stream_ids.iter() {
@@ -821,13 +1341,94 @@ impl FluxoraStream {
     // Internal
     // ---------------------------------------------------------------------
 
+    /// Verify that `caller` holds a valid, unexpired delegate grant for `op`
+    /// on `stream_id`, then call `caller.require_auth()`.
+    ///
+    /// Returns `DelegateNotPermitted` if no grant exists or the grant does not
+    /// cover `op`. Returns `DelegateExpired` if the grant exists but has passed
+    /// its expiry. On success the host will validate the caller's auth.
+    fn check_delegate(env: &Env, stream_id: u64, caller: &Address, op: u32) -> Result<(), Error> {
+        match storage::load_delegate(env, stream_id, caller) {
+            None => Err(Error::DelegateNotPermitted),
+            Some(grant) => {
+                if let Some(expires) = grant.expires_at {
+                    if env.ledger().timestamp() > expires {
+                        return Err(Error::DelegateExpired);
+                    }
+                }
+                if grant.ops & op == 0 {
+                    return Err(Error::DelegateNotPermitted);
+                }
+                caller.require_auth();
+                Ok(())
+            }
+        }
+    }
+
+    /// Pre-flight shared by the batch entry points: reject empty, oversized,
+    /// and malformed vectors, and return a validated copy.
+    ///
+    /// `MalformedStreamId` covers a serialized element that does not decode as
+    /// a `u64`; the batch entry points take `Vec<u64>` straight from the ABI,
+    /// and element-level conversion errors would otherwise surface as opaque
+    /// host errors instead of typed ones.
+    fn validate_batch_ids(env: &Env, stream_ids: &Vec<u64>) -> Result<Vec<u64>, Error> {
+        let count = stream_ids.len();
+        if count == 0 {
+            return Err(Error::EmptyBatch);
+        }
+        if count > MAX_BATCH_SIZE {
+            return Err(Error::BatchTooLarge);
+        }
+
+        let mut validated = Vec::new(env);
+        for raw_id in stream_ids.to_vals().iter() {
+            let stream_id =
+                u64::try_from_val(env, &raw_id).map_err(|_| Error::MalformedStreamId)?;
+            validated.push_back(stream_id);
+        }
+        Ok(validated)
+    }
+
+    /// Reject a batch that names the same stream twice. Processing the same
+    /// stream twice would otherwise operate on a stale copy the second time.
+    /// Both `batch_withdraw` and `batch_extend_ttl` reject duplicates.
+    fn reject_duplicate_ids(stream_ids: &Vec<u64>) -> Result<(), Error> {
+        let count = stream_ids.len();
+        for i in 0..count {
+            for j in (i + 1)..count {
+                if stream_ids.get_unchecked(i) == stream_ids.get_unchecked(j) {
+                    return Err(Error::DuplicateStreamId);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Shared tail of [`withdraw`](Self::withdraw) and
     /// [`batch_withdraw`](Self::batch_withdraw): update accounting, persist,
     /// pay out, emit.
     ///
-    /// State is written before the token call (checks-effects-interactions).
-    /// Soroban forbids reentrancy outright, so this is belt-and-braces rather
-    /// than load-bearing, but it keeps the ordering obvious to a reader.
+    /// # Atomicity of bookkeeping vs. token transfer
+    ///
+    /// State (`stream.withdrawn`, `stream.status`) is written to storage before
+    /// the token `transfer` call.  This is the standard
+    /// checks-effects-interactions ordering.  Soroban forbids reentrancy
+    /// outright, so there is no classical reentrancy risk here.
+    ///
+    /// The correctness argument for atomicity in the failure case is that
+    /// **every host trap propagates as a Rust panic that unwinds the entire
+    /// transaction**.  If `token::Client::transfer` panics (e.g. because the
+    /// recipient is deauthorized on a Stellar Asset Contract, or because the
+    /// token contract itself traps for any reason), the Soroban host discards
+    /// every storage write made in this invocation — including the
+    /// `save_stream` call — before returning the error to the caller.  No
+    /// partial state leaks: `stream.withdrawn` is never permanently incremented
+    /// unless the matching tokens actually leave the contract's pool.
+    ///
+    /// `test::withdrawal_atomicity` proves this with two failure injection
+    /// mechanisms: (1) SAC `set_authorized(recipient, false)` and (2) a
+    /// custom contract that always panics registered at the token address.
     fn apply_withdrawal(
         env: &Env,
         stream_id: u64,

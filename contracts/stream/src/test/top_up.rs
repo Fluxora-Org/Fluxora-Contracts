@@ -8,6 +8,8 @@
 
 use super::common::*;
 use crate::{Error, StreamStatus};
+use soroban_sdk::testutils::storage::Persistent as _;
+use soroban_sdk::testutils::Events;
 
 #[test]
 fn top_up_extends_the_end_date_at_the_same_rate() {
@@ -46,6 +48,27 @@ fn top_up_does_not_retroactively_vest_elapsed_time() {
         before,
         "topping up must not move already-vested funds",
     );
+}
+
+/// Regression for #1589: adding funds at a fixed timestamp must leave the
+/// already-earned amount unchanged, even when the original rate is fractional.
+#[test]
+fn top_up_preserves_the_vesting_curve_at_the_top_up_timestamp() {
+    let h = Harness::new();
+    let start = h.now();
+    let id = h.create(1_000, start, start + 300, start, true, true, true);
+
+    h.advance(137);
+    let before = h.client.vested_of(&id);
+    h.client.top_up(&id, &7);
+
+    assert_eq!(
+        h.client.vested_of(&id),
+        before,
+        "top-up must not retroactively revalue elapsed time",
+    );
+    assert_eq!(h.get(id).withdrawn, 0);
+    h.assert_pool_exact();
 }
 
 #[test]
@@ -303,4 +326,68 @@ fn a_top_up_that_would_overflow_accrual_is_rejected() {
         .unwrap();
     assert_eq!(err, Error::Overflow);
     h.assert_pool_exact();
+}
+
+use crate::DataKey;
+use soroban_sdk::{contract, contractimpl, Address, Env};
+
+#[contract]
+struct FaultyToken;
+
+#[contractimpl]
+impl FaultyToken {
+    pub fn balance(env: Env, id: Address) -> i128 {
+        env.storage().instance().get(&id).unwrap_or(0)
+    }
+
+    pub fn transfer(env: Env, _from: Address, to: Address, amount: i128) {
+        if amount == 999 {
+            panic!("Mock token transfer failed");
+        }
+        let balance = Self::balance(env.clone(), to.clone());
+        env.storage().instance().set(&to, &(balance + amount));
+    }
+}
+
+#[test]
+fn failed_transfer_reverts_state_and_ttl_changes() {
+    let h = Harness::new();
+    let mock_token = h.env.register(FaultyToken, ());
+
+    let start = h.now();
+    let id = h.client.create_stream(
+        &h.sender,
+        &h.recipient,
+        &mock_token,
+        &(1_000 * ONE),
+        &start,
+        &(start + 100 * DAY),
+        &start,
+        &true,
+        &true,
+        &true,
+    );
+
+    let before = h.get(id);
+    let ttl_before = h.env.as_contract(&h.contract_id, || {
+        h.env.storage().persistent().get_ttl(&DataKey::Stream(id))
+    });
+
+    let res = h.client.try_top_up(&id, &999);
+    assert!(res.is_err());
+
+    let after = h.get(id);
+    let ttl_after = h.env.as_contract(&h.contract_id, || {
+        h.env.storage().persistent().get_ttl(&DataKey::Stream(id))
+    });
+
+    assert_eq!(before.deposited, after.deposited);
+    assert_eq!(before.end_time, after.end_time);
+    assert_eq!(ttl_before, ttl_after);
+    // `Events::all()` reports only the most recent invocation; a reverted
+    // frame publishes nothing, so the observable log must be empty.
+    assert!(
+        h.env.events().all().events().is_empty(),
+        "a reverted top-up publishes no events",
+    );
 }

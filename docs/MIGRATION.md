@@ -94,7 +94,11 @@ least as well in v1, or dropped for a reason traceable to a v1 non-goal.
 ## 3. Behaviour deliberately removed
 
 The old contract set exposed **145 entrypoints** (100 stream, 16 factory, 29
-governance). v1 exposes **16**. Grouped by why:
+governance). v1 exposes **16** core entrypoints plus **8 delegation entrypoints**
+(`grant_delegate`, `revoke_delegate`, and the six `delegate_*` variants) for a
+total of **24**. The delegates are gated on per-operation grants
+(`docs/delegation-revocation.md`) and do not change the core surface the
+renames table below maps. Grouped by why:
 
 **Contradicts §6 (no admin, no upgradeability, no fees, no global pause)**
 `init`, `set_admin`, `upgrade`, `version`, `pause_protocol`, `resume_protocol`,
@@ -104,6 +108,27 @@ governance). v1 exposes **16**. Grouped by why:
 `set_stream_decommissioned`, `sweep_excess`, `get_protocol_fees_accrued`,
 `get_keeper_fee_split`, `set_max_rate_per_second`, plus the entire `factory`
 (16) and `governance` (29) contracts.
+
+> **Decision record — governance source removed (#1675).** The governance
+> contract was dropped here, but its source, `contracts/governance/src/lib.rs`
+> (2,910 lines), stayed in the tree with no `Cargo.toml` and no workspace
+> entry, so nothing compiled or tested it. It was **deleted rather than
+> revived**:
+>
+> * v1 has no admin key, no upgrade path and no settable parameters (§6), so
+>   a multisig/timelock contract has nothing to govern.
+> * Giving it a crate showed it no longer builds against soroban-sdk 27: its
+>   test module fails to compile (duplicate test names, a removed events
+>   API) and the library uses deprecated `events().publish`, which CI's
+>   `clippy -D warnings` rejects. Reviving it would mean re-auditing ~3k lines
+>   of unaudited admin code for a feature v1 deliberately does not have.
+> * Git history keeps the file (last present at `57b2937`) if governance is
+>   ever re-scoped; that would come back as a proper workspace member with
+>   tests, release and size-budget entries.
+>
+> `packaging::governance_crate_is_absent` (in `contracts/stream`) runs
+> `cargo metadata` and fails if a governance package or the
+> `contracts/governance` directory reappears.
 
 **Contradicts §2.3 (no on-chain stream discovery)**
 `get_recipient_streams`, `get_recipient_streams_paginated`,
