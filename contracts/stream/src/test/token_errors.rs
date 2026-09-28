@@ -50,9 +50,10 @@
 //!  `TokenMissing` is only reachable via WASM execution on a real network.
 //!  The variant's discriminant (26) is verified by `token_error_discriminants_match_the_abi_table`.
 
-use soroban_sdk::testutils::{Address as _, IssuerFlags};
+use soroban_sdk::testutils::{Address as _, Events as _, IssuerFlags};
 use soroban_sdk::token::{StellarAssetClient, TokenClient};
-use soroban_sdk::{contract, contractimpl, Address, Env, MuxedAddress, String};
+use soroban_sdk::xdr::ContractEventBody;
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, MuxedAddress, String};
 
 use super::common::*;
 use crate::{Error, StreamStatus};
@@ -117,6 +118,100 @@ impl PanicToken {
 
 fn register_panic_token(h: &Harness) -> Address {
     h.env.register(PanicToken, ())
+}
+
+#[contract]
+pub struct RejectZeroToken;
+
+#[contracttype]
+enum RejectZeroDataKey {
+    Underlying,
+}
+
+#[contractimpl]
+impl RejectZeroToken {
+    pub fn init(env: Env, underlying: Address) {
+        env.storage()
+            .instance()
+            .set(&RejectZeroDataKey::Underlying, &underlying);
+    }
+
+    pub fn transfer(env: Env, from: Address, to: MuxedAddress, amount: i128) {
+        if amount == 0 {
+            panic!("RejectZeroToken: zero transfer");
+        }
+        TokenClient::new(&env, &Self::underlying(&env)).transfer(&from, &to, &amount);
+    }
+
+    pub fn balance(env: Env, id: Address) -> i128 {
+        TokenClient::new(&env, &Self::underlying(&env)).balance(&id)
+    }
+
+    fn underlying(env: &Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&RejectZeroDataKey::Underlying)
+            .unwrap()
+    }
+}
+
+fn register_reject_zero_token<'a>(h: &'a Harness<'a>) -> (Address, Address) {
+    let admin = Address::generate(&h.env);
+    let asset = h.env.register_stellar_asset_contract_v2(admin);
+    let underlying = asset.address();
+    let token = h.env.register(RejectZeroToken, ());
+    RejectZeroTokenClient::new(&h.env, &token).init(&underlying);
+    (token, underlying)
+}
+
+#[test]
+fn cancellation_with_zero_refund_skips_a_rejecting_token_transfer() {
+    let h = Harness::new();
+    let (token, underlying) = register_reject_zero_token(&h);
+    let admin = StellarAssetClient::new(&h.env, &underlying);
+    let token_client = RejectZeroTokenClient::new(&h.env, &token);
+    let deposit = 1_000 * ONE;
+    admin.mint(&h.sender, &deposit);
+    let start = h.now();
+    let id = h.client.create_stream(
+        &h.sender,
+        &h.recipient,
+        &token,
+        &deposit,
+        &start,
+        &(start + 100 * DAY),
+        &start,
+        &true,
+        &true,
+        &true,
+    );
+
+    h.warp_to(start + 100 * DAY);
+    h.client.cancel(&id);
+
+    let filtered_events = h.env.events().all().filter_by_contract(&h.contract_id);
+    let events = filtered_events.events();
+    let event = events.iter().last().expect("cancelled event");
+    let ContractEventBody::V0(v0) = &event.body;
+    let [soroban_sdk::xdr::ScVal::Symbol(name), soroban_sdk::xdr::ScVal::U64(event_id), ..] =
+        v0.topics.as_slice()
+    else {
+        panic!("unexpected cancelled event topics");
+    };
+    assert_eq!(name.0.as_slice(), b"cancelled");
+    assert_eq!(*event_id, id);
+
+    let stream = h.client.get_stream(&id);
+    assert_eq!(stream.status, StreamStatus::Cancelled);
+    assert_eq!(stream.deposited, deposit);
+    assert_eq!(stream.withdrawn, 0);
+    assert_eq!(h.client.refundable_of(&id), 0);
+    assert_eq!(token_client.balance(&h.contract_id), deposit);
+    assert_eq!(
+        token_client.balance(&h.contract_id),
+        stream.deposited - stream.withdrawn,
+        "pool must equal the stream liability"
+    );
 }
 
 // ─── clawback-enabled SAC ────────────────────────────────────────────────────
