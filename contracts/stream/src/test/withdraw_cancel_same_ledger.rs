@@ -73,9 +73,12 @@ fn test_cancel_then_withdraw_at(offset: u64) {
     h.client.cancel(&id);
 
     if expected_vested == 0 {
+        // Cancelled is terminal, so draining an empty tail is
+        // StreamTerminated — not the live-stream NothingToWithdraw path.
+        // Pinned by `cancel::cancel_at_the_instant_of_creation_refunds_everything`.
         assert_eq!(
             h.client.try_withdraw(&id, &None).unwrap_err().unwrap(),
-            Error::NothingToWithdraw
+            Error::StreamTerminated
         );
     } else {
         h.client.withdraw(&id, &None);
