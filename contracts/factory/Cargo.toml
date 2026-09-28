@@ -7,6 +7,9 @@ license.workspace = true
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+testutils = ["soroban-sdk/testutils"]
+
 [dependencies]
 soroban-sdk = { workspace = true }
 
