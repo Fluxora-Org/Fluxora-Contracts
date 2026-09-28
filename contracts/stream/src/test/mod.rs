@@ -64,6 +64,10 @@ mod ttl;
 // Stage 4
 mod stream_ids;
 
+// Issue #1870 — the documented migration path, walked and cross-checked
+// against the committed ABI inventory.
+mod migration;
+
 // Invariant: no success event emitted on a reverting token transfer (#1728).
 mod event_ordering_failed_transfer;
 
