@@ -64,6 +64,9 @@ mod ttl;
 // Stage 4
 mod stream_ids;
 
+// Issue #1875 — docs/ARCHITECTURE.md, checked against the code it describes.
+mod architecture;
+
 // Invariant: no success event emitted on a reverting token transfer (#1728).
 mod event_ordering_failed_transfer;
 
