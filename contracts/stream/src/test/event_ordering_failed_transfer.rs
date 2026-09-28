@@ -93,9 +93,7 @@ use crate::{Error, StreamStatus};
 
 /// Create a fresh clawback-enabled SAC so tests can drain either the pool or
 /// a specific address out-of-band.
-fn make_clawback_token<'a>(
-    env: &'a Env,
-) -> (Address, TokenClient<'a>, StellarAssetClient<'a>) {
+fn make_clawback_token<'a>(env: &'a Env) -> (Address, TokenClient<'a>, StellarAssetClient<'a>) {
     let admin = Address::generate(env);
     let asset = env.register_stellar_asset_contract_v2(admin);
     asset.issuer().set_flag(IssuerFlags::ClawbackEnabledFlag);
@@ -166,7 +164,10 @@ fn withdraw_token_failure_emits_no_withdrawn_event() {
     );
     h.advance(30 * DAY);
 
-    assert!(h.client.withdrawable_of(&id) > 0, "pre-condition: something to withdraw");
+    assert!(
+        h.client.withdrawable_of(&id) > 0,
+        "pre-condition: something to withdraw"
+    );
 
     // Drain the pool so the outbound transfer will fail.
     let pool = tc.balance(&contract_id);
@@ -178,11 +179,7 @@ fn withdraw_token_failure_emits_no_withdrawn_event() {
     let recipient_balance_before = tc.balance(&h.recipient);
 
     // The call must fail with TokenTransferFailed.
-    let err = h
-        .client
-        .try_withdraw(&id, &None)
-        .unwrap_err()
-        .unwrap();
+    let err = h.client.try_withdraw(&id, &None).unwrap_err().unwrap();
     assert_eq!(
         err,
         Error::TokenTransferFailed,
@@ -190,10 +187,7 @@ fn withdraw_token_failure_emits_no_withdrawn_event() {
     );
 
     // ── Invariant: zero stream events ──────────────────────────────────────
-    assert_no_stream_events(
-        &h,
-        "withdraw_token_failure_emits_no_withdrawn_event",
-    );
+    assert_no_stream_events(&h, "withdraw_token_failure_emits_no_withdrawn_event");
 
     // ── State is unchanged ─────────────────────────────────────────────────
     let stream_after = h.client.get_stream(&id);
@@ -250,8 +244,14 @@ fn batch_withdraw_token_failure_emits_no_withdrawn_event() {
     );
     h.advance(50 * DAY);
 
-    assert!(h.client.withdrawable_of(&a) > 0, "pre-condition: stream A has balance");
-    assert!(h.client.withdrawable_of(&b) > 0, "pre-condition: stream B has balance");
+    assert!(
+        h.client.withdrawable_of(&a) > 0,
+        "pre-condition: stream A has balance"
+    );
+    assert!(
+        h.client.withdrawable_of(&b) > 0,
+        "pre-condition: stream B has balance"
+    );
 
     // Drain the pool entirely.
     let pool = tc.balance(&contract_id);
@@ -269,18 +269,27 @@ fn batch_withdraw_token_failure_emits_no_withdrawn_event() {
     assert_eq!(err, Error::TokenTransferFailed);
 
     // ── Invariant: zero stream events ──────────────────────────────────────
-    assert_no_stream_events(
-        &h,
-        "batch_withdraw_token_failure_emits_no_withdrawn_event",
-    );
+    assert_no_stream_events(&h, "batch_withdraw_token_failure_emits_no_withdrawn_event");
 
     // ── State for both streams unchanged ───────────────────────────────────
     let stream_a_after = h.client.get_stream(&a);
     let stream_b_after = h.client.get_stream(&b);
-    assert_eq!(stream_a_after.withdrawn, stream_a_before.withdrawn, "stream A withdrawn unchanged");
-    assert_eq!(stream_a_after.status, stream_a_before.status, "stream A status unchanged");
-    assert_eq!(stream_b_after.withdrawn, stream_b_before.withdrawn, "stream B withdrawn unchanged");
-    assert_eq!(stream_b_after.status, stream_b_before.status, "stream B status unchanged");
+    assert_eq!(
+        stream_a_after.withdrawn, stream_a_before.withdrawn,
+        "stream A withdrawn unchanged"
+    );
+    assert_eq!(
+        stream_a_after.status, stream_a_before.status,
+        "stream A status unchanged"
+    );
+    assert_eq!(
+        stream_b_after.withdrawn, stream_b_before.withdrawn,
+        "stream B withdrawn unchanged"
+    );
+    assert_eq!(
+        stream_b_after.status, stream_b_before.status,
+        "stream B status unchanged"
+    );
     assert_eq!(
         tc.balance(&h.recipient),
         recipient_balance_before,
@@ -325,7 +334,10 @@ fn cancel_token_failure_emits_no_cancelled_event() {
     // Confirm there is a non-zero refund outstanding so the token transfer
     // code path is actually reached.
     let refundable = h.client.refundable_of(&id);
-    assert!(refundable > 0, "pre-condition: non-zero refund to trigger transfer");
+    assert!(
+        refundable > 0,
+        "pre-condition: non-zero refund to trigger transfer"
+    );
 
     // Drain the pool so the refund transfer will fail.
     let pool = tc.balance(&contract_id);
@@ -342,10 +354,7 @@ fn cancel_token_failure_emits_no_cancelled_event() {
     );
 
     // ── Invariant: zero stream events ──────────────────────────────────────
-    assert_no_stream_events(
-        &h,
-        "cancel_token_failure_emits_no_cancelled_event",
-    );
+    assert_no_stream_events(&h, "cancel_token_failure_emits_no_cancelled_event");
 
     // ── State unchanged: still Active, not Cancelled ───────────────────────
     let stream_after = h.client.get_stream(&id);
@@ -385,7 +394,11 @@ fn cancel_with_zero_refund_emits_exactly_one_cancelled_event() {
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     h.advance(100 * DAY); // fully vested; refundable == 0
 
-    assert_eq!(h.client.refundable_of(&id), 0, "pre-condition: nothing to refund");
+    assert_eq!(
+        h.client.refundable_of(&id),
+        0,
+        "pre-condition: nothing to refund"
+    );
 
     h.client.cancel(&id);
 
@@ -464,16 +477,23 @@ fn cancel_while_paused_token_failure_emits_no_event() {
     assert_eq!(err, Error::TokenTransferFailed);
 
     // ── Invariant: zero stream events ──────────────────────────────────────
-    assert_no_stream_events(
-        &h,
-        "cancel_while_paused_token_failure_emits_no_event",
-    );
+    assert_no_stream_events(&h, "cancel_while_paused_token_failure_emits_no_event");
 
     // ── Stream unchanged: still Paused, not Cancelled ──────────────────────
     let stream_after = h.client.get_stream(&id);
-    assert_eq!(stream_after.status, StreamStatus::Paused, "must remain Paused");
-    assert_eq!(stream_after.deposited, stream_before.deposited, "deposited unchanged");
-    assert_eq!(stream_after.end_time, stream_before.end_time, "end_time unchanged");
+    assert_eq!(
+        stream_after.status,
+        StreamStatus::Paused,
+        "must remain Paused"
+    );
+    assert_eq!(
+        stream_after.deposited, stream_before.deposited,
+        "deposited unchanged"
+    );
+    assert_eq!(
+        stream_after.end_time, stream_before.end_time,
+        "end_time unchanged"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -519,11 +539,7 @@ fn top_up_token_failure_emits_no_topped_up_event() {
     }
     assert_eq!(tc.balance(&h.sender), 0, "sender has no balance");
 
-    let err = h
-        .client
-        .try_top_up(&id, &(200 * ONE))
-        .unwrap_err()
-        .unwrap();
+    let err = h.client.try_top_up(&id, &(200 * ONE)).unwrap_err().unwrap();
     assert_eq!(
         err,
         Error::TokenTransferFailed,
@@ -531,10 +547,7 @@ fn top_up_token_failure_emits_no_topped_up_event() {
     );
 
     // ── Invariant: zero stream events ──────────────────────────────────────
-    assert_no_stream_events(
-        &h,
-        "top_up_token_failure_emits_no_topped_up_event",
-    );
+    assert_no_stream_events(&h, "top_up_token_failure_emits_no_topped_up_event");
 
     // ── Stream state unchanged ─────────────────────────────────────────────
     let stream_after = h.client.get_stream(&id);
@@ -581,24 +594,23 @@ fn top_up_while_paused_token_failure_emits_no_event() {
         admin.clawback(&h.sender, &remaining);
     }
 
-    let err = h
-        .client
-        .try_top_up(&id, &(100 * ONE))
-        .unwrap_err()
-        .unwrap();
+    let err = h.client.try_top_up(&id, &(100 * ONE)).unwrap_err().unwrap();
     assert_eq!(err, Error::TokenTransferFailed);
 
     // ── Invariant: zero stream events ──────────────────────────────────────
-    assert_no_stream_events(
-        &h,
-        "top_up_while_paused_token_failure_emits_no_event",
-    );
+    assert_no_stream_events(&h, "top_up_while_paused_token_failure_emits_no_event");
 
     // ── State: still Paused, deposited and end_time unchanged ──────────────
     let stream_after = h.client.get_stream(&id);
     assert_eq!(stream_after.status, StreamStatus::Paused, "still Paused");
-    assert_eq!(stream_after.deposited, stream_before.deposited, "deposited unchanged");
-    assert_eq!(stream_after.end_time, stream_before.end_time, "end_time unchanged");
+    assert_eq!(
+        stream_after.deposited, stream_before.deposited,
+        "deposited unchanged"
+    );
+    assert_eq!(
+        stream_after.end_time, stream_before.end_time,
+        "end_time unchanged"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -633,7 +645,8 @@ fn delegate_withdraw_token_failure_emits_no_withdrawn_event() {
     );
 
     // Grant WITHDRAW permission to `other`.
-    h.client.grant_delegate(&id, &h.recipient, &h.other, &op::WITHDRAW, &None);
+    h.client
+        .grant_delegate(&id, &h.recipient, &h.other, &op::WITHDRAW, &None);
 
     h.advance(40 * DAY);
     assert!(h.client.withdrawable_of(&id) > 0, "pre-condition");
@@ -658,8 +671,14 @@ fn delegate_withdraw_token_failure_emits_no_withdrawn_event() {
     );
 
     let stream_after = h.client.get_stream(&id);
-    assert_eq!(stream_after.withdrawn, stream_before.withdrawn, "withdrawn unchanged");
-    assert_eq!(stream_after.status, stream_before.status, "status unchanged");
+    assert_eq!(
+        stream_after.withdrawn, stream_before.withdrawn,
+        "withdrawn unchanged"
+    );
+    assert_eq!(
+        stream_after.status, stream_before.status,
+        "status unchanged"
+    );
     assert_eq!(tc.balance(&h.recipient), 0, "recipient balance unchanged");
 }
 
@@ -690,7 +709,8 @@ fn delegate_cancel_token_failure_emits_no_cancelled_event() {
     );
 
     // Grant CANCEL to `other`.
-    h.client.grant_delegate(&id, &h.sender, &h.other, &op::CANCEL, &None);
+    h.client
+        .grant_delegate(&id, &h.sender, &h.other, &op::CANCEL, &None);
 
     h.advance(25 * DAY);
     assert!(h.client.refundable_of(&id) > 0, "pre-condition");
@@ -709,15 +729,18 @@ fn delegate_cancel_token_failure_emits_no_cancelled_event() {
     assert_eq!(err, Error::TokenTransferFailed);
 
     // ── Invariant: zero stream events ──────────────────────────────────────
-    assert_no_stream_events(
-        &h,
-        "delegate_cancel_token_failure_emits_no_cancelled_event",
-    );
+    assert_no_stream_events(&h, "delegate_cancel_token_failure_emits_no_cancelled_event");
 
     let stream_after = h.client.get_stream(&id);
     assert_eq!(stream_after.status, StreamStatus::Active, "still Active");
-    assert_eq!(stream_after.deposited, stream_before.deposited, "deposited unchanged");
-    assert_eq!(stream_after.end_time, stream_before.end_time, "end_time unchanged");
+    assert_eq!(
+        stream_after.deposited, stream_before.deposited,
+        "deposited unchanged"
+    );
+    assert_eq!(
+        stream_after.end_time, stream_before.end_time,
+        "end_time unchanged"
+    );
 }
 
 /// `delegate_top_up` pulls from the sender's balance. A failed pull must emit
@@ -746,7 +769,8 @@ fn delegate_top_up_token_failure_emits_no_topped_up_event() {
     );
 
     // Grant TOP_UP to `other`.
-    h.client.grant_delegate(&id, &h.sender, &h.other, &op::TOP_UP, &None);
+    h.client
+        .grant_delegate(&id, &h.sender, &h.other, &op::TOP_UP, &None);
 
     h.advance(10 * DAY);
     let stream_before = h.client.get_stream(&id);
@@ -765,14 +789,17 @@ fn delegate_top_up_token_failure_emits_no_topped_up_event() {
     assert_eq!(err, Error::TokenTransferFailed);
 
     // ── Invariant: zero stream events ──────────────────────────────────────
-    assert_no_stream_events(
-        &h,
-        "delegate_top_up_token_failure_emits_no_topped_up_event",
-    );
+    assert_no_stream_events(&h, "delegate_top_up_token_failure_emits_no_topped_up_event");
 
     let stream_after = h.client.get_stream(&id);
-    assert_eq!(stream_after.deposited, stream_before.deposited, "deposited unchanged");
-    assert_eq!(stream_after.end_time, stream_before.end_time, "end_time unchanged");
+    assert_eq!(
+        stream_after.deposited, stream_before.deposited,
+        "deposited unchanged"
+    );
+    assert_eq!(
+        stream_after.end_time, stream_before.end_time,
+        "end_time unchanged"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -801,14 +828,22 @@ fn successful_withdraw_emits_exactly_one_withdrawn_event() {
         .events()
         .to_vec();
 
-    assert_eq!(stream_events.len(), 1, "exactly one stream event on success");
+    assert_eq!(
+        stream_events.len(),
+        1,
+        "exactly one stream event on success"
+    );
     let soroban_sdk::xdr::ContractEventBody::V0(ref body) = stream_events[0].body;
     let mut topics = soroban_sdk::vec![&h.env];
     for t in body.topics.iter() {
         topics.push_back(soroban_sdk::Val::try_from_val(&h.env, t).unwrap());
     }
     let name: Symbol = topics.get(0).unwrap().try_into_val(&h.env).unwrap();
-    assert_eq!(name, Symbol::new(&h.env, "withdrawn"), "event must be `withdrawn`");
+    assert_eq!(
+        name,
+        Symbol::new(&h.env, "withdrawn"),
+        "event must be `withdrawn`"
+    );
 }
 
 /// A successful `cancel` emits exactly one `Cancelled` event.
@@ -828,14 +863,22 @@ fn successful_cancel_emits_exactly_one_cancelled_event() {
         .events()
         .to_vec();
 
-    assert_eq!(stream_events.len(), 1, "exactly one stream event on success");
+    assert_eq!(
+        stream_events.len(),
+        1,
+        "exactly one stream event on success"
+    );
     let soroban_sdk::xdr::ContractEventBody::V0(ref body) = stream_events[0].body;
     let mut topics = soroban_sdk::vec![&h.env];
     for t in body.topics.iter() {
         topics.push_back(soroban_sdk::Val::try_from_val(&h.env, t).unwrap());
     }
     let name: Symbol = topics.get(0).unwrap().try_into_val(&h.env).unwrap();
-    assert_eq!(name, Symbol::new(&h.env, "cancelled"), "event must be `cancelled`");
+    assert_eq!(
+        name,
+        Symbol::new(&h.env, "cancelled"),
+        "event must be `cancelled`"
+    );
 }
 
 /// A successful `top_up` emits exactly one `ToppedUp` event.
@@ -855,12 +898,20 @@ fn successful_top_up_emits_exactly_one_topped_up_event() {
         .events()
         .to_vec();
 
-    assert_eq!(stream_events.len(), 1, "exactly one stream event on success");
+    assert_eq!(
+        stream_events.len(),
+        1,
+        "exactly one stream event on success"
+    );
     let soroban_sdk::xdr::ContractEventBody::V0(ref body) = stream_events[0].body;
     let mut topics = soroban_sdk::vec![&h.env];
     for t in body.topics.iter() {
         topics.push_back(soroban_sdk::Val::try_from_val(&h.env, t).unwrap());
     }
     let name: Symbol = topics.get(0).unwrap().try_into_val(&h.env).unwrap();
-    assert_eq!(name, Symbol::new(&h.env, "topped_up"), "event must be `topped_up`");
+    assert_eq!(
+        name,
+        Symbol::new(&h.env, "topped_up"),
+        "event must be `topped_up`"
+    );
 }
