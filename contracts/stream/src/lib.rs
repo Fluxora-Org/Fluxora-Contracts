@@ -294,6 +294,35 @@ impl FluxoraStream {
     ) -> Result<u64, Error> {
         sender.require_auth();
 
+        Self::create_stream_unchecked(
+            env,
+            sender,
+            recipient,
+            token,
+            deposit,
+            start_time,
+            end_time,
+            cliff_time,
+            cancellable,
+            pausable,
+            transferable,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_stream_unchecked(
+        env: Env,
+        sender: Address,
+        recipient: Address,
+        token: Address,
+        deposit: i128,
+        start_time: u64,
+        end_time: u64,
+        cliff_time: u64,
+        cancellable: bool,
+        pausable: bool,
+        transferable: bool,
+    ) -> Result<u64, Error> {
         if sender == recipient {
             return Err(Error::SelfStream);
         }
@@ -403,7 +432,7 @@ impl FluxoraStream {
 
         let mut ids = Vec::new(&env);
         for request in requests.iter() {
-            ids.push_back(Self::create_stream(
+            ids.push_back(Self::create_stream_unchecked(
                 env.clone(),
                 sender.clone(),
                 request.recipient.clone(),
