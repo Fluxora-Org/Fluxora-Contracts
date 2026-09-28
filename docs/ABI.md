@@ -228,7 +228,7 @@ Discriminants are ABI and are never renumbered; new variants are appended.
 | 30 | `RepeatedTransfer` | Recipient transfer targets the current recipient. | reachable |
 | 31 | `InvalidTopUp` | Reserved; non-positive top-ups are rejected as `InvalidAmount` first. | reserved |
 | 32 | `TokenAmountMismatch` | Deposit pull changes pool balance by an unexpected amount. | reachable |
-| 33 | `VestedDecreased` | Reserved; current mutation paths preserve non-decreasing vested value. | reserved |
+| 33 | `VestedDecreased` | Reserved; defensive invariant — the randomized operation-sequence search in `test::vested_decreased` finds no path that lowers vested. | reserved |
 
 `TokenTransferFailed` (25) and `TokenMissing` (26) are **stable stream-level categories** for token sub-invocation failures. The token contract's internal error discriminant is intentionally discarded — forwarding it would produce a value clients decode against Fluxora's error table, yielding a silent misinterpretation. The raw diagnostic is visible in the failed transaction's `diagnosticEvents`.
 
@@ -245,6 +245,13 @@ The CLI and RPC render these as `Error(Contract, #N)`.
 each is documented in the table above and in `test::error_reachability`, and
 none of them has a reachable path through a public entry point. Do not
 renumber or remove them.
+
+`VestedDecreased` (33) is the one *defensive invariant* in that list rather than
+a superseded error: `test::vested_decreased` searches randomized operation
+sequences against paused, cliffed and near-maximum streams, observes the
+contract error each call returns, and confirms the guard never fires. It is kept
+because the invariant it protects is load-bearing, not because an integrator is
+expected to handle it.
 
 `withdraw` distinguishes empty balances: a live stream with nothing accrued
 yet returns `NothingToWithdraw` (17); a `Cancelled` or `Depleted` stream with
@@ -527,10 +534,11 @@ from this function).
 | `StreamNotPaused` | 12 | The stream is not currently paused — `paused_at` is `None`, or `status` is `Active` (never paused, or already resumed). |
 | `StreamTerminated` | 14 | The stream is `Cancelled` or `Depleted`. Checked before the paused-state test, so a terminal stream that still carries a `paused_at` reports `StreamTerminated`, not `StreamNotPaused`. |
 | `Overflow` | 22 | Defensive only: `paused_total + paused_duration` does not fit in `u64`. Unreachable for any stream created through the contract. Listed only so an integrator is never surprised by it. |
+| `VestedDecreased` | 33 | Defensive only: the post-resume accrual-sanity check observed a lower vested amount. Unreachable for any stream created through the contract; `test::vested_decreased` searches for a trigger and finds none. |
 
 `NotPausable` (9) is a `pause`-only failure and is never returned by `resume`.
 This list was cross-checked against `FluxoraStream::resume` in
-[`contracts/stream/src/lib.rs`](../contracts/stream/src/lib.rs); the four
+[`contracts/stream/src/lib.rs`](../contracts/stream/src/lib.rs); the five
 variants above are the complete set it can return.
 
 **Events.** Exactly one `resumed` event on success: topics `stream_id` and

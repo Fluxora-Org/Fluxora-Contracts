@@ -24,6 +24,10 @@ mod error_discriminants;
 // listed in the frozen reserved allowlist.
 mod error_reachability;
 
+// Issue #1879 — randomized operation-sequence search proving `VestedDecreased`
+// (33) is unreachable, and documenting it as a defensive invariant.
+mod vested_decreased;
+
 // Stage 1
 mod create;
 mod props;
