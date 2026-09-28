@@ -36,7 +36,7 @@ use crate::events::{
     Cancelled, Paused, RecipientTransferred, Resumed, StreamCreated, ToppedUp, TtlExtended,
     Withdrawn,
 };
-use crate::{Error, FluxoraStream, Stream, StreamStatus, ABI_VERSION};
+use crate::{CliffMode, Error, FluxoraStream, Stream, StreamStatus, ABI_VERSION};
 
 // ---------------------------------------------------------------------------
 // Inventory
@@ -93,6 +93,7 @@ struct EventAbi {
 /// fails the suite.
 const AUTH: &[(&str, &str)] = &[
     ("create_stream", "sender"),
+    ("create_stream_with_cliff_mode", "sender"),
     ("top_up", "sender"),
     ("cancel", "sender"),
     ("pause", "sender"),
@@ -275,6 +276,9 @@ fn event_from_spec(entry: ScSpecEntry) -> EventAbi {
 fn current_inventory() -> Inventory {
     let mut functions = vec![
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_create_stream())),
+        function_from_spec(parse_spec(
+            &FluxoraStream::spec_xdr_create_stream_with_cliff_mode(),
+        )),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_top_up())),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_withdraw())),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_batch_withdraw())),
@@ -306,6 +310,7 @@ fn current_inventory() -> Inventory {
     let mut types = vec![
         type_from_spec(parse_spec(&Stream::spec_xdr())),
         type_from_spec(parse_spec(&StreamStatus::spec_xdr())),
+        type_from_spec(parse_spec(&CliffMode::spec_xdr())),
     ];
     types.sort_by(|a, b| a.name.cmp(&b.name));
 
@@ -1199,6 +1204,101 @@ fn adding_a_method_is_additive_and_needs_no_version_bump() {
     ));
     new.functions.sort_by(|a, b| a.name.cmp(&b.name));
     check_compatibility(&old, &new).unwrap();
+}
+
+#[test]
+fn adding_a_struct_field_to_a_udt_is_breaking_and_needs_the_bump_we_took() {
+    // `Stream` gained `cliff_mode`, and `diff_types` classifies that as
+    // `type-changed UDT` — breaking. It is the one breaking change in ABI v2,
+    // and it is why `ABI_VERSION` is 2 rather than 1. This test states the rule
+    // explicitly so the bump cannot be reverted as "gratuitous" by someone
+    // folding the field into `create_stream` instead.
+    let old = frozen_v1();
+    let mut new = old.clone();
+    new.types
+        .iter_mut()
+        .find(|t| t.name == "Stream")
+        .unwrap()
+        .fields
+        .push(param("cliff_mode", "CliffMode"));
+
+    let err = check_compatibility(&old, &new).unwrap_err();
+    assert!(err.contains("type-changed UDT `Stream`"), "{err}");
+    assert!(err.contains("ABI_VERSION"), "{err}");
+
+    // ...and is accepted once the version moves.
+    new.abi_version = old.abi_version + 1;
+    check_compatibility(&old, &new).unwrap();
+}
+
+/// `create_stream` is the v1 entry point and must keep its exact frozen
+/// signature, delegating to the mode-taking form with the default.
+///
+/// This is the whole reason the new capability is a *new method* rather than a
+/// new parameter on the old one: every deployed v1 caller — the TypeScript SDK,
+/// the frontend, `script/testnet-exercise.sh` — keeps compiling and keeps
+/// getting the behaviour it was written against. If someone ever collapses
+/// `cliff_mode` into `create_stream`, this fails.
+#[test]
+fn create_stream_keeps_its_frozen_v1_signature() {
+    let frozen = frozen_v1();
+    let current = current_inventory();
+    let want = frozen
+        .functions
+        .iter()
+        .find(|f| f.name == "create_stream")
+        .expect("frozen v1 records create_stream");
+    let have = current
+        .functions
+        .iter()
+        .find(|f| f.name == "create_stream")
+        .expect("current spec has create_stream");
+    assert_eq!(
+        want, have,
+        "create_stream drifted from the frozen v1 signature"
+    );
+}
+
+/// The new entry point differs from `create_stream` by exactly one parameter,
+/// and that parameter is the cliff mode in the cliff position.
+#[test]
+fn create_stream_with_cliff_mode_is_create_stream_plus_one_parameter() {
+    let current = current_inventory();
+    let base = current
+        .functions
+        .iter()
+        .find(|f| f.name == "create_stream")
+        .unwrap();
+    let extended = current
+        .functions
+        .iter()
+        .find(|f| f.name == "create_stream_with_cliff_mode")
+        .unwrap();
+
+    assert_eq!(base.outputs, extended.outputs);
+    assert_eq!(
+        extended.inputs.len(),
+        base.inputs.len() + 1,
+        "exactly one parameter was added"
+    );
+
+    // Inserted after `cliff_time`, next to the field it qualifies.
+    let at = extended
+        .inputs
+        .iter()
+        .position(|p| p.name == "cliff_mode")
+        .expect("the extended entry point takes a cliff_mode");
+    assert_eq!(
+        extended.inputs[at].type_name, "CliffMode",
+        "the inserted parameter is the mode, not some other type"
+    );
+    assert_eq!(at, 7, "the mode is inserted, not appended");
+    assert_eq!(base.inputs[at - 1].name, "cliff_time");
+
+    // Everything before the insertion is byte-for-byte the same parameter, and
+    // everything after it still lines up with the tail of the original list.
+    assert_eq!(&extended.inputs[..at], &base.inputs[..at]);
+    assert_eq!(&extended.inputs[at + 1..], &base.inputs[at..]);
 }
 
 #[test]

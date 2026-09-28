@@ -7,7 +7,9 @@ use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
 use soroban_sdk::{Address, Env, Vec};
 
-use crate::{accrual, storage, DataKey, FluxoraStream, FluxoraStreamClient, Stream, StreamStatus};
+use crate::{
+    accrual, storage, CliffMode, DataKey, FluxoraStream, FluxoraStreamClient, Stream, StreamStatus,
+};
 
 // ---------------------------------------------------------------------------
 // TestSnapshot — deterministic, credential-free state capture
@@ -80,6 +82,8 @@ pub struct StreamSnapshot {
     pub end_time: u64,
     /// Cliff gate (unix seconds).
     pub cliff_time: u64,
+    /// Which clock the cliff gate is read against.
+    pub cliff_mode: CliffMode,
     /// Cumulative seconds spent paused (excluding any in-progress pause).
     pub paused_total: u64,
     /// Freeze point if the stream is currently paused.
@@ -92,7 +96,7 @@ impl std::fmt::Display for StreamSnapshot {
             f,
             "stream[{id}]: status={status:?} \
              deposited={dep} withdrawn={wth} vested={vest} withdrawable={draw} \
-             start={start} end={end} cliff={cliff} \
+             start={start} end={end} cliff={cliff} cliff_mode={cmode:?} \
              paused_total={ptot}{paused_at}",
             id = self.id,
             status = self.status,
@@ -103,6 +107,7 @@ impl std::fmt::Display for StreamSnapshot {
             start = self.start_time,
             end = self.end_time,
             cliff = self.cliff_time,
+            cmode = self.cliff_mode,
             ptot = self.paused_total,
             paused_at = match self.paused_at {
                 Some(t) => std::format!(" paused_at={t}"),
@@ -295,6 +300,35 @@ impl<'a> Harness<'a> {
             &start,
             &end,
             &cliff,
+            &cancellable,
+            &pausable,
+            &transferable,
+        )
+    }
+
+    /// Full control over every creation parameter, including which clock the
+    /// cliff gate is read against.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_with_cliff_mode(
+        &self,
+        deposit: i128,
+        start: u64,
+        end: u64,
+        cliff: u64,
+        cliff_mode: CliffMode,
+        cancellable: bool,
+        pausable: bool,
+        transferable: bool,
+    ) -> u64 {
+        self.client.create_stream_with_cliff_mode(
+            &self.sender,
+            &self.recipient,
+            &self.token,
+            &deposit,
+            &start,
+            &end,
+            &cliff,
+            &cliff_mode,
             &cancellable,
             &pausable,
             &transferable,
@@ -508,6 +542,7 @@ impl<'a> Harness<'a> {
                     start_time: s.start_time,
                     end_time: s.end_time,
                     cliff_time: s.cliff_time,
+                    cliff_mode: s.cliff_mode,
                     paused_total: s.paused_total,
                     paused_at: s.paused_at,
                 }

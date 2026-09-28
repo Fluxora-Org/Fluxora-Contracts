@@ -65,6 +65,36 @@ discriminant and event is generated from that same spec XDR and committed at
 without bumping [`ABI_VERSION`](../contracts/stream/src/lib.rs). Additive
 changes update the snapshot only.
 
+`ABI_VERSION` is currently **2**. Version 1 is the interface this repository
+froze; version 2 adds `create_stream_with_cliff_mode` and the `CliffMode` type,
+and adds one field to the `Stream` UDT and one to the `stream_created` payload.
+Every version-1 method keeps its version-1 signature and meaning — `create_stream`
+in particular still creates `CliffMode::Schedule` streams — so version 1 is a
+prefix of version 2 apart from those two additions. The version-1 record is
+preserved as the `frozen_v1()` inventory in
+`contracts/stream/src/test/abi.rs` and asserted against by
+`test::abi::current_spec_is_compatible_with_frozen_v1`.
+
+**What adding a `Stream` field does to stored data.** `cliff_mode` changes the
+`Stream` struct's XDR layout, so a v2 reader cannot decode a v1 entry — the field
+count no longer matches and the host rejects the unpack. This is safe for the
+same reason every other breaking change here is safe: the contract is not
+upgradeable in place, so a v2 build is deployed at a **new address** and v1
+entries stay under the v1 contract id, never opened by v2 code. There is no
+in-place migration to write, and none is provided — one would be unreachable
+code that grows the deployable WASM. Both halves are asserted in
+`contracts/stream/src/test/storage_keys.rs`:
+`v1_layout_is_no_longer_decodable_and_that_is_deliberate` (the refusal, with the
+upgrade-posture argument) and `v2_layout_round_trips` (that the new layout still
+reads its own entries).
+
+A consequence worth stating plainly: the mode is a **creation-time** choice that
+cannot be changed later, and there is no way to move an existing deployment's
+streams onto the new mode other than creating new streams under the new
+contract. That is the same trade-off the capability flags already carry, and it
+is deliberate — an immutable choice is what makes `cliff_mode` trustworthy to a
+recipient reading `get_stream`.
+
 ---
 
 ## Constants
@@ -109,6 +139,7 @@ struct Stream {
     start_time: u64,       // unix seconds
     end_time: u64,         // unix seconds
     cliff_time: u64,       // in [start_time, end_time]; == start_time for none
+    cliff_mode: CliffMode, // immutable after creation. How cliff_time is compared.
     cancellable: bool,     // immutable after creation
     pausable: bool,        // immutable after creation
     transferable: bool,    // immutable after creation
@@ -117,6 +148,20 @@ struct Stream {
     status: StreamStatus,
 }
 ```
+
+### `CliffMode`
+
+```rust
+enum CliffMode {
+    Schedule,   // 0, default. Gate opens when the stream clock reaches cliff_time.
+    WallClock,  // 1.         Gate opens when ledger time reaches cliff_time.
+}
+```
+
+A `u32`-backed enum, carried on the wire as a bare `u32`. Any other value is
+refused by the host while arguments are decoded, as a conversion error, so no
+`Error` discriminant is needed for it. The two discriminants are part of the ABI
+and will only ever be appended, matching the rule for error codes.
 
 All amounts are `i128` in the token's smallest unit. **USDC on Stellar has 7
 decimals** — not 6, not 18. Amounts cross the JSON-RPC boundary as *strings*
@@ -158,7 +203,8 @@ Three `bool` fields on `Stream` describe operations that are **not available**
 for a given stream. They are supplied by the sender to `create_stream` and are
 **fixed for the lifetime of the stream** — no entry point can change them after
 creation. `get_stream` returns the live `Stream` struct, which includes all
-three fields.
+three fields. `cliff_mode` is fixed the same way, but is not a capability: it
+selects a rule rather than denying an operation.
 
 | field | error when `false` | discriminant |
 |---|---|---|
@@ -333,7 +379,8 @@ accounting.
 
 | function | auth | returns |
 |---|---|---|
-| `create_stream(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable)` | sender | `u64` stream id |
+| `create_stream(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable)` | sender | `u64` stream id — [details](#create_stream) |
+| `create_stream_with_cliff_mode(sender, recipient, token, deposit, start_time, end_time, cliff_time, cliff_mode, cancellable, pausable, transferable)` | sender | `u64` stream id — [details](#create_stream_with_cliff_mode) |
 | `top_up(stream_id, amount)` | sender | — |
 | `withdraw(stream_id, amount: Option<i128>)` | recipient | `i128` paid |
 | `batch_withdraw(recipient, stream_ids: Vec<u64>)` | recipient | `i128` total — [details](#batch_withdraw) |
@@ -392,8 +439,8 @@ shifts the effective end of the stream forward by exactly the time it spent
 paused, so the clock picks up where it stopped and the total value delivered
 over the stream's life is unchanged.
 
-**Pausing also moves the cliff, in wall-clock terms.** `cliff_reached` is
-evaluated against the same stream clock,
+**On a `Schedule` stream, pausing also moves the cliff, in wall-clock terms.**
+`cliff_reached` is evaluated against the same stream clock,
 `stream_time(now) = (paused_at ?? now) - paused_total`, so a pause freezes the
 cliff gate along with accrual: while the clock is frozen below `cliff_time` the
 gate stays shut no matter how far the wall clock advances. After a resume,
@@ -404,11 +451,21 @@ instant its recipient can first withdraw — pushed `P` seconds later, exactly a
 its `end_time` is. The stored `cliff_time` field is never rewritten; only the
 mapping from wall clock to stream clock changes.
 
+**On a `WallClock` stream, none of that applies.** `cliff_reached` compares
+`now` against `cliff_time` directly, so `paused_total` is not consulted and no
+pause can move the gate. Accrual is still frozen while paused, so such a stream
+that is paused across its cliff opens the gate on schedule and pays out its whole
+pre-pause backlog at once when it resumes.
+`test::cliff_mode::pausing_across_the_cliff_moves_a_schedule_cliff_but_not_a_wall_clock_one`
+asserts both rules on the same timeline.
+
 The `resumed` event publishes the post-resume `paused_total`, which is enough for
 an integrator to recompute the moved instant as `cliff_time + paused_total` from
 the `stream_created` schedule (or `get_stream`) alone, without replaying
-individual pause intervals. `test::cliff::pause_across_cliff_delays_the_wall_clock_cliff`
-and `test::pause::pausing_across_the_cliff_defers_the_cliff_too` assert this.
+individual pause intervals. That recomputation is only needed on a `Schedule`
+stream. `test::cliff::pause_across_cliff_delays_the_wall_clock_cliff` and
+`test::pause::pausing_across_the_cliff_defers_the_cliff_too` assert the
+`Schedule` rule.
 
 No value moves: `resume` performs no token sub-invocation and does not change
 `deposited`, `withdrawn`, or any balance. It is a pure clock operation.
@@ -766,7 +823,7 @@ fn create_stream(
 | `deposit` | `i128` | Initial amount to lock, in the token's smallest unit. Must be positive and satisfy rate constraints. |
 | `start_time` | `u64` | Accrual begins (unix seconds). May be past (backdated vesting), present, or future (scheduled stream). |
 | `end_time` | `u64` | Accrual ends (unix seconds). Must be strictly greater than `start_time`. |
-| `cliff_time` | `u64` | Payout gate (unix seconds). Must be in `[start_time, end_time]`. Set equal to `start_time` for no cliff. **Gates payout, does not delay accrual** — at the cliff instant the recipient becomes entitled to everything accrued since `start_time`. On a `pausable` stream this stored instant is a lower bound, not the wall-clock instant the gate opens: pausing pushes the opening instant forward by the accumulated `paused_total`. See the `resume` entry point. |
+| `cliff_time` | `u64` | Payout gate (unix seconds). Must be in `[start_time, end_time]`. Set equal to `start_time` for no cliff. **Gates payout, does not delay accrual** — at the cliff instant the recipient becomes entitled to everything accrued since `start_time`. How it is compared to the current time depends on `cliff_mode`, which `create_stream` fixes to `CliffMode::Schedule`: on a `pausable` stream this stored instant is then a lower bound, not the wall-clock instant the gate opens, because pausing pushes the opening instant forward by the accumulated `paused_total`. See the `resume` entry point and [`create_stream_with_cliff_mode`](#create_stream_with_cliff_mode). |
 | `cancellable` | `bool` | Whether sender may cancel. Immutable after creation. |
 | `pausable` | `bool` | Whether sender may pause accrual. Immutable after creation. |
 | `transferable` | `bool` | Whether recipient may reassign the stream. Immutable after creation. |
@@ -799,7 +856,7 @@ All validation errors are checked **before** the token transfer. A rejected crea
 
 **Events:**
 
-On success, emits `stream_created` with topics `[stream_id, sender, recipient]` and payload carrying the complete initial state: `token`, `deposited`, `start_time`, `end_time`, `cliff_time`, `cancellable`, `pausable`, `transferable`. This is the canonical event for indexer discovery.
+On success, emits `stream_created` with topics `[stream_id, sender, recipient]` and payload carrying the complete initial state: `token`, `deposited`, `start_time`, `end_time`, `cliff_time`, `cliff_mode`, `cancellable`, `pausable`, `transferable`. This is the canonical event for indexer discovery. `cliff_mode` was appended last, so a decoder that stops after `transferable` still works against a v1 payload.
 
 **Atomicity:**
 
@@ -812,7 +869,7 @@ Creation is transactional. The stream-id counter and count are advanced only aft
 * **Fully Elapsed Schedule** (`end_time ≤ now`): Accepted. Reads as fully vested immediately. The entry receives the minimum retention TTL floor.
 * **No Cliff** (`cliff_time == start_time`): Standard continuous vesting with no payout gate.
 * **Cliff at Maturity** (`cliff_time == end_time`): Single lump-sum payout when the stream completes.
-* **Pause Moves the Cliff** (`pausable == true`): the stored `cliff_time` is never rewritten, but pausing shifts the wall-clock instant at which the gate opens by the accumulated paused time. A recipient's first withdrawal becomes available at `cliff_time + paused_total`, not at `cliff_time` — see the `resume` entry point. An integrator rendering "funds unlock at &lt;time&gt;" must add the stream's current `paused_total` rather than displaying `cliff_time` directly.
+* **Pause Moves the Cliff** (`pausable == true`): the stored `cliff_time` is never rewritten, but pausing shifts the wall-clock instant at which the gate opens by the accumulated paused time. A recipient's first withdrawal becomes available at `cliff_time + paused_total`, not at `cliff_time` — see the `resume` entry point. An integrator rendering "funds unlock at &lt;time&gt;" must add the stream's current `paused_total` rather than displaying `cliff_time` directly. Call `create_stream_with_cliff_mode` with `CliffMode::WallClock` to get a cliff that pausing cannot move.
 
 **Example:** A 100-day stream of 1,000 USDC (7 decimals = 10,000,000 stroops per USDC) created with a 10-day cliff:
 
@@ -828,6 +885,66 @@ cliff_time:  1610323200 (2021-01-11 00:00:00 UTC)
 At day 9: vested = 900 USDC, but withdrawable = 0 (pre-cliff).  
 At day 11: vested = 1,100 USDC, withdrawable = 1,100 USDC (cliff passed, all accrued funds unlocked).  
 At day 100: vested = 10,000 USDC, withdrawable = 10,000 USDC (fully matured).
+
+With `cliff_mode = WallClock` the day-11 unlock instant above is exact even if the stream was paused; with the default `Schedule` mode and 3 days of accumulated pause, the first withdrawal lands on day 14 instead.
+
+#### `create_stream_with_cliff_mode` — detailed reference
+
+Identical to [`create_stream`](#create_stream) except that it takes one extra
+parameter, `cliff_mode`, inserted directly after `cliff_time`. It is the only way
+to create a stream whose cliff a `pause` cannot move.
+
+**Signature:**
+```rust
+fn create_stream_with_cliff_mode(
+    env: Env,
+    sender: Address,
+    recipient: Address,
+    token: Address,
+    deposit: i128,
+    start_time: u64,
+    end_time: u64,
+    cliff_time: u64,
+    cliff_mode: CliffMode,
+    cancellable: bool,
+    pausable: bool,
+    transferable: bool,
+) -> Result<u64, Error>
+```
+
+**Authorization:** Requires `sender.require_auth()`, exactly as `create_stream`.
+
+**Parameters:** All of `create_stream`'s, with the same meanings, constraints and
+errors, plus:
+
+| parameter | type | description |
+|---|---|---|
+| `cliff_mode` | `CliffMode` | How `cliff_time` is compared to the current time. Immutable after creation. `Schedule` (0) gates on the stream clock, so `paused_total` pushes the opening instant forward by exactly the accumulated paused time. `WallClock` (1) gates on the ledger timestamp, so the opening instant is `cliff_time` no matter how much the stream is paused. |
+
+**Errors:** Exactly `create_stream`'s — the mode is not a source of new
+outcomes, so there is deliberately no `InvalidCliffMode` discriminant. A value
+that is neither 0 nor 1 fails while the host is still decoding the arguments, as
+a conversion error that aborts the invocation; it is never a contract-level
+`Error`, and because the decode precedes all contract code it consumes no id,
+transfers nothing, and leaves no state. `cliff_time` range validation is
+unchanged and still applies in both modes: a mode changes *when* the gate is
+judged, not *which* `cliff_time` values are legal.
+
+**Relationship to `create_stream`:** `create_stream` is a thin wrapper that
+passes `CliffMode::Schedule`. It is not deprecated, and the two are byte-for-byte
+equivalent for `Schedule`; `create_stream` exists so a v1 caller and a v2 caller
+can create the same stream.
+
+**What the mode does not change.** The cliff remains a gate on *payout*, never on
+*accrual*, in both modes: before the gate opens, `withdrawable_of` is `0` even
+though `vested_of` has been rising since `start_time`. And a `pause` still stops
+accrual in both modes. Choosing `WallClock` therefore removes the sender's
+ability to move the unlock instant; it does not let funds accrue while paused, so
+a wall-clock stream paused across its cliff releases its whole pre-pause backlog
+in one withdrawal on resume.
+
+**Events:** identical to `create_stream`, including `stream_created` carrying the
+`cliff_mode` that was actually used.
 | `StreamNotFound` | 1 | No readable entry for `stream_id`: the id was never issued, or its entry has been archived. Raised by `load_stream` before any other check. |
 | `NotTransferable` | 10 | The stream was created with `transferable == false`. |
 | `StreamTerminated` | 14 | The stream is `Depleted`, or `withdrawn >= deposited` (covers a sticky `Cancelled` stream whose residual has already been fully drawn). |
@@ -921,11 +1038,13 @@ assumed:
   accrual: before `cliff_time` the result is exactly `0`, and at the cliff
   instant the recipient becomes entitled to everything accrued since
   `start_time` — not merely what accrues after the cliff. There is no partial
-  vesting beforehand. "Before `cliff_time`" is measured **on the stream clock**,
-  so on a stream that has been paused the wall-clock instant the gate opens is
-  `cliff_time + paused_total`: a recipient whose stream was paused across its
-  cliff waits the total paused duration longer before anything is vestable. See
-  the `resume` entry point.
+  vesting beforehand. On a `Schedule` stream (the default) "before `cliff_time`"
+  is measured **on the stream clock**, so on a stream that has been paused the
+  wall-clock instant the gate opens is `cliff_time + paused_total`: a recipient
+  whose stream was paused across its cliff waits the total paused duration
+  longer before anything is vestable. On a `WallClock` stream the comparison is
+  against the ledger timestamp and `paused_total` is not consulted, so no pause
+  can delay the gate. See the `resume` entry point.
 
 The cliff gate is evaluated **first**: while the stream clock is below
 `cliff_time` the result is `0`, even for a schedule that has collapsed. Only
@@ -1091,7 +1210,7 @@ is the snake_case event name, second is always `stream_id`.
 
 | event | topics after the name | payload |
 |---|---|---|
-| `stream_created` | `stream_id`, `sender`, `recipient` | `token`, `deposited`, `start_time`, `end_time`, `cliff_time`, `cancellable`, `pausable`, `transferable` |
+| `stream_created` | `stream_id`, `sender`, `recipient` | `token`, `deposited`, `start_time`, `end_time`, `cliff_time`, `cliff_mode`, `cancellable`, `pausable`, `transferable` |
 | `withdrawn` | `stream_id`, `recipient` | `amount`, `withdrawn`, `deposited`, `status` |
 | `cancelled` | `stream_id`, `sender`, `recipient` | `refunded`, `vested`, `withdrawn`, `end_time` |
 | `paused` | `stream_id`, `sender` | `paused_at`, `paused_total` |
@@ -1107,10 +1226,12 @@ Every payload carries enough state to reconstruct the stream without replaying
 from genesis. Field order and topic placement are ABI.
 
 `resumed` deserves one note: its `paused_total` is the post-resume cumulative
-figure, and it is enough to recompute the stream's moved cliff instant,
-`cliff_time + paused_total`, given the `cliff_time` carried by `stream_created`
-(or read back from `get_stream`). The event deliberately does not republish
-`cliff_time`, which never changes; see the `resume` entry point.
+figure, and on a `Schedule` stream it is enough to recompute the moved cliff
+instant, `cliff_time + paused_total`, given the `cliff_time` carried by
+`stream_created` (or read back from `get_stream`). The event deliberately does
+not republish `cliff_time`, which never changes; see the `resume` entry point. A
+`WallClock` stream needs no such recomputation — `stream_created` already
+carries both the `cliff_time` and the `cliff_mode` that say which rule applies.
 
 Note that `batch_withdraw` emits one `withdrawn` event **per stream drawn from**,
 not one per call, and skips streams with nothing available — so a batch of 16

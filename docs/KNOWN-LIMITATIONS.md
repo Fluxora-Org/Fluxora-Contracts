@@ -257,39 +257,62 @@ confirming it does not rebase.
 
 ---
 
-## 7. Pausing moves the cliff in wall-clock terms
+## 7. Pausing moves the cliff in wall-clock terms — on `Schedule` streams
 
-**Status: by design — documented, not fixed.**
+**Status: fixed by an opt-in, not by a change of default.**
 
-`cliff_reached` is evaluated against the stream clock, and `stream_time`
-subtracts the cumulative `paused_total`. Pausing a stream therefore freezes the
-cliff gate along with accrual, and resuming pushes the wall-clock instant the
-gate opens forward by the total time spent paused: the gate opens at
+Every stream carries a `cliff_mode`, set at creation and immutable thereafter.
+It selects how `cliff_reached` is evaluated:
+
+| `cliff_mode` | Gate opens when | Affected by `pause`? |
+| --- | --- | --- |
+| `CliffMode::Schedule` (0, **default**) | `stream_time(now) >= cliff_time` | Yes |
+| `CliffMode::WallClock` (1) | `now >= cliff_time` | No |
+
+On a `Schedule` stream, `cliff_reached` is evaluated against the stream clock,
+and `stream_time` subtracts the cumulative `paused_total`. Pausing therefore
+freezes the cliff gate along with accrual, and resuming pushes the wall-clock
+instant the gate opens forward by the total time spent paused: the gate opens at
 `cliff_time + paused_total`, not at the stored `cliff_time`.
 
 The stored `cliff_time` is never rewritten — `get_stream().cliff_time` still
-reports the original instant — so the two values an integrator might read (the
-schedule field and the effective instant) disagree by exactly `paused_total`. A
-recipient who computes an unlock date from `cliff_time` alone will expect funds
-to unlock earlier than they do.
+reports the original instant — so on a `Schedule` stream the two values an
+integrator might read (the schedule field and the effective instant) disagree by
+exactly `paused_total`. A recipient who computes an unlock date from
+`cliff_time` alone will expect funds to unlock earlier than they do.
 
-This is a limitation because `pause` is **sender-only** and unbounded. A sender
-who wants to defer the recipient's first withdrawal can pause a pausable stream
+This matters because `pause` is **sender-only** and unbounded. A sender who
+wants to defer the recipient's first withdrawal can pause a pausable stream
 before its cliff and hold it paused, moving the unlock instant arbitrarily far
 into the future. The recipient can still withdraw anything already vested, but
 before the cliff nothing has vested, so there is nothing to withdraw. The
 `pausable` capability is fixed at creation, so this exposure exists exactly when
 the stream was created with `pausable == true`.
 
-**What is documented instead of fixed.** `docs/ABI.md` states the rule and gives
-the recomputation (`cliff_time + paused_total`); the `resumed` event publishes
-the post-resume `paused_total` so an indexer can derive the new instant without
-replaying individual intervals; and
-`test::cliff::pause_across_cliff_delays_the_wall_clock_cliff` together with
-`test::pause::pausing_across_the_cliff_defers_the_cliff_too` assert it.
+`CliffMode::WallClock` removes that exposure. The gate is compared against the
+ledger timestamp, so a `pause` can no longer move it, however long the stream
+stays paused. Accrual still stops while paused, so a wall-clock stream paused
+across its cliff releases the whole pre-pause backlog at once on resume — the
+cliff stops being a lever, and it is still a gate rather than a
+payout-per-interval switch.
 
-**If you are integrating a pausable stream:** treat `cliff_time` as a lower
-bound, not the unlock date. Read the stream's current `paused_total` — from
-`get_stream`, or from the latest `resumed` event — and display
-`cliff_time + paused_total`. Do not cache the unlock instant while a stream is
-pausable.
+`create_stream` keeps its signature and creates `CliffMode::Schedule` streams, so
+no existing stream, call, or stored value changes meaning; only the ABI
+version moved, to 2. Opt in by calling
+`create_stream_with_cliff_mode(..., cliff_mode: CliffMode::WallClock, ...)`.
+
+**What is documented.** `docs/ABI.md` states both rules, gives the `Schedule`
+recomputation (`cliff_time + paused_total`), and the `resumed` event publishes
+the post-resume `paused_total` so an indexer can derive the new instant without
+replaying individual intervals. `test::cliff::pause_across_cliff_delays_the_wall_clock_cliff`
+with `test::pause::pausing_across_the_cliff_defers_the_cliff_too` assert the
+`Schedule` rule, and `test::cliff_mode::pausing_across_the_cliff_moves_a_schedule_cliff_but_not_a_wall_clock_one`
+asserts both rules on the same timeline.
+
+**If you are integrating a pausable stream:** read `cliff_mode` first. On
+`Schedule`, treat `cliff_time` as a lower bound rather than the unlock date —
+read the stream's current `paused_total` from `get_stream`, or the latest
+`resumed` event, and display `cliff_time + paused_total`, without caching the
+instant while the stream is pausable. On `WallClock`, display `cliff_time`
+directly; it is the actual instant, and `paused_total` is irrelevant to the
+gate.

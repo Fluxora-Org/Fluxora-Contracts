@@ -14,7 +14,7 @@ subscription billing, vesting schedules. The contract is the product.
 | SDK | `soroban-sdk` 27.0.5 |
 | Rust | 1.97.1, target `wasm32v1-none` |
 | Token interface | SEP-41 (USDC on Stellar has **7 decimals**); see [token assumptions](docs/ABI.md#token-assumptions) — no fee-on-transfer, no rebasing |
-| Contract size | ~47 KiB baseline; enforced by `contracts/stream/wasm-size-budget.env` |
+| Contract size | 75,159 bytes; enforced by `contracts/stream/wasm-size-budget.env` (42.7% under the 128 KiB Soroban cap) |
 | Tests | 146, including property tests and a pool invariant checked after every operation |
 
 > **Read [docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md) before relying on this.**
@@ -138,6 +138,23 @@ contract can never owe more than it holds.
 entitled to everything accrued *since `start_time`* — not merely what accrues
 after the cliff. This is standard vesting semantics and it surprises people.
 
+**Which clock the cliff is judged on is a per-stream choice.** A stream carries
+a `cliff_mode`, fixed at creation:
+
+```
+cliff_mode = Schedule  (default)   gate opens when stream_time >= cliff_time
+cliff_mode = WallClock             gate opens when now        >= cliff_time
+```
+
+On the default `Schedule` mode a pause slides the cliff along with the schedule,
+so the gate opens at `cliff_time + paused_total`. That is the historical
+behaviour and it is what `create_stream` produces. `WallClock` judges the gate
+against the ledger timestamp instead, so a sender pausing the stream can no
+longer move the recipient's unlock instant — while accrual still stops while
+paused, so the pre-cliff backlog is released in one go on resume. Create one
+with `create_stream_with_cliff_mode(..., CliffMode::WallClock, ...)`; the mode is
+returned by `get_stream` and published in the `stream_created` event.
+
 **Conservation is exact.** For all `t`:
 
 ```
@@ -159,7 +176,7 @@ recipient can still withdraw while paused — pausing stops *accrual*, not acces
 Freezing earned funds would make pausable streams unacceptable to any serious
 recipient.
 
-A stream paused across its cliff does not silently pass the cliff while frozen.
+A stream paused across its cliff does not silently pass the cliff while frozen — on a `Schedule` stream the gate is pushed back by the paused time, and on a `WallClock` stream it is not, which is the whole point of the mode.
 
 ### Cancel
 
@@ -344,6 +361,9 @@ integrator guidance in [docs/KNOWN-LIMITATIONS.md §1](docs/KNOWN-LIMITATIONS.md
 // Lifecycle
 create_stream(sender, recipient, token, deposit,
               start, end, cliff,
+              cancellable, pausable, transferable) -> u64   // sender auth; cliff_mode = Schedule
+create_stream_with_cliff_mode(sender, recipient, token, deposit,
+              start, end, cliff, cliff_mode,
               cancellable, pausable, transferable) -> u64   // sender auth
 top_up(stream_id, amount)                                   // sender auth
 withdraw(stream_id, amount: Option<i128>) -> i128           // recipient auth; None = max

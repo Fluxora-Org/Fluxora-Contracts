@@ -69,7 +69,7 @@ pub use accrual::{
 pub use error::Error;
 pub use storage::{MIN_STREAM_TTL_LEDGERS, SECONDS_PER_LEDGER, TTL_BUFFER_SECONDS};
 pub use types::op;
-pub use types::{DataKey, DelegateGrant, Stream, StreamStatus};
+pub use types::{CliffMode, DataKey, DelegateGrant, Stream, StreamStatus};
 
 use soroban_sdk::{
     contract, contractimpl, token, Address, Env, InvokeError, MuxedAddress, TryFromVal, Vec,
@@ -118,7 +118,21 @@ pub const MAX_BATCH_SIZE: u32 = 16;
 ///
 /// The on-chain contract is immutable, so a bump is a *new deployment*, not an
 /// in-place upgrade. See `docs/ABI.md` and `test::abi`.
-pub const ABI_VERSION: u32 = 1;
+///
+/// # v2 — wall-clock cliff
+///
+/// Bumped for the one breaking change in this release: the `Stream` UDT gained
+/// a `cliff_mode` field, which `test::abi` classifies as `type-changed UDT` and
+/// therefore refuses without a version bump. `StreamCreated` also gained a
+/// trailing `cliff_mode` payload field, and `create_stream_with_cliff_mode` a
+/// new method — both additive on their own.
+///
+/// `create_stream`'s signature is deliberately **unchanged**, so v1 callers need
+/// no migration: it now delegates with [`CliffMode::DEFAULT`]. `Stream` gaining
+/// a field is only a break for a caller that *constructs* a `Stream` locally;
+/// readers and indexers decode it from storage or an event, both of which carry
+/// the new field explicitly.
+pub const ABI_VERSION: u32 = 2;
 
 /// Call `token.transfer(from, to, amount)` and map any failure to a stable
 /// stream-level error.
@@ -229,6 +243,53 @@ impl FluxoraStream {
     /// Returns the new stream id. The id is monotonic and never reused, so it is
     /// a stable handle for an indexer.
     ///
+    /// This is [`CliffMode::Schedule`]: the cliff is a point on the stream
+    /// clock, so pausing a `pausable` stream before its cliff defers the gate.
+    /// Callers who need a cliff that pausing cannot move — a contractual date —
+    /// want [`create_stream_with_cliff_mode`](Self::create_stream_with_cliff_mode).
+    ///
+    /// Every parameter, the accrual semantics, and the error set are otherwise
+    /// identical between the two entry points; this one delegates.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_stream(
+        env: Env,
+        sender: Address,
+        recipient: Address,
+        token: Address,
+        deposit: i128,
+        start_time: u64,
+        end_time: u64,
+        cliff_time: u64,
+        cancellable: bool,
+        pausable: bool,
+        transferable: bool,
+    ) -> Result<u64, Error> {
+        Self::create_stream_with_cliff_mode(
+            env,
+            sender,
+            recipient,
+            token,
+            deposit,
+            start_time,
+            end_time,
+            cliff_time,
+            CliffMode::DEFAULT,
+            cancellable,
+            pausable,
+            transferable,
+        )
+    }
+
+    /// Create a stream, choosing which clock the cliff gate is read against.
+    ///
+    /// Returns the new stream id. The id is monotonic and never reused, so it is
+    /// a stable handle for an indexer.
+    ///
+    /// Identical to [`create_stream`](Self::create_stream) except for the
+    /// `cliff_mode` parameter. Prefer this one when the caller has an opinion
+    /// about pausing; prefer `create_stream` when it does not, since
+    /// [`CliffMode::Schedule`] is the default and the long-standing behaviour.
+    ///
     /// # Schedule
     ///
     /// Tokens accrue linearly from `start_time` to `end_time`. `start_time` may
@@ -251,11 +312,37 @@ impl FluxoraStream {
     /// does for any multi-year stream. The regression tests in `test/create.rs`
     /// pin these semantics.
     ///
+    /// # The cliff gate
+    ///
     /// `cliff_time` **gates** the payout, it does not delay accrual. Pass
     /// `cliff_time == start_time` for no cliff. At the cliff instant the
     /// recipient becomes entitled to everything accrued since `start_time`, not
     /// merely what accrues after the cliff. This is standard vesting semantics
     /// and it surprises people, so it is worth restating in any UI.
+    ///
+    /// `cliff_mode` decides which clock that instant is read against, and so
+    /// whether pausing can move it. `cliff_time` is validated against
+    /// `[start_time, end_time]` in both modes, and is fixed at creation either
+    /// way.
+    ///
+    /// * [`CliffMode::Schedule`] (the default) — gate at `cliff_time` on the
+    ///   stream clock, so pausing freezes it and resuming pushes the wall-clock
+    ///   opening instant forward by the total paused duration.
+    /// * [`CliffMode::WallClock`] — gate at `cliff_time` on the ledger clock.
+    ///   Pausing never moves it. Pausing still stops *accrual*, so a stream
+    ///   paused before its cliff opens the gate on schedule and pays out only
+    ///   what had accrued when it was paused.
+    ///
+    /// The mode is a term of the stream, fixed at creation and never mutable —
+    /// the same trust property as `cancellable` / `pausable` / `transferable`.
+    /// A recipient can therefore read `cliff_mode` and know exactly which
+    /// reading of `cliff_time` applies. It is published by
+    /// `stream_created` and readable from `get_stream`.
+    ///
+    /// Choose `WallClock` when `cliff_time` is a contractual date the recipient
+    /// is entitled to hold you to; choose `Schedule` when the cliff is a
+    /// milestone in your own schedule and stretching it alongside the schedule
+    /// is the intent. Neither mode changes the total value delivered.
     ///
     /// # Errors
     ///
@@ -279,7 +366,7 @@ impl FluxoraStream {
     ///   different amount than `deposit` (a fee-on-transfer or rebasing
     ///   token). See `docs/ABI.md` "Token assumptions".
     #[allow(clippy::too_many_arguments)]
-    pub fn create_stream(
+    pub fn create_stream_with_cliff_mode(
         env: Env,
         sender: Address,
         recipient: Address,
@@ -288,6 +375,7 @@ impl FluxoraStream {
         start_time: u64,
         end_time: u64,
         cliff_time: u64,
+        cliff_mode: CliffMode,
         cancellable: bool,
         pausable: bool,
         transferable: bool,
@@ -335,6 +423,7 @@ impl FluxoraStream {
             start_time,
             end_time,
             cliff_time,
+            cliff_mode,
             cancellable,
             pausable,
             transferable,

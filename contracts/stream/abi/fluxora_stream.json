@@ -1,5 +1,5 @@
 {
-  "abi_version": 1,
+  "abi_version": 2,
   "functions": [
     {
       "name": "batch_extend_ttl",
@@ -37,6 +37,24 @@
         {"name": "start_time", "type": "u64"},
         {"name": "end_time", "type": "u64"},
         {"name": "cliff_time", "type": "u64"},
+        {"name": "cancellable", "type": "bool"},
+        {"name": "pausable", "type": "bool"},
+        {"name": "transferable", "type": "bool"}
+      ],
+      "outputs": "Result<u64, Error>"
+    },
+    {
+      "name": "create_stream_with_cliff_mode",
+      "auth": "sender",
+      "inputs": [
+        {"name": "sender", "type": "Address"},
+        {"name": "recipient", "type": "Address"},
+        {"name": "token", "type": "Address"},
+        {"name": "deposit", "type": "i128"},
+        {"name": "start_time", "type": "u64"},
+        {"name": "end_time", "type": "u64"},
+        {"name": "cliff_time", "type": "u64"},
+        {"name": "cliff_mode", "type": "CliffMode"},
         {"name": "cancellable", "type": "bool"},
         {"name": "pausable", "type": "bool"},
         {"name": "transferable", "type": "bool"}
@@ -223,10 +241,21 @@
   ],
   "types": [
     {
+      "name": "CliffMode",
+      "kind": "enum",
+      "fields": [
+      ],
+      "cases": [
+        {"name": "Schedule", "discriminant": 0},
+        {"name": "WallClock", "discriminant": 1}
+      ]
+    },
+    {
       "name": "Stream",
       "kind": "struct",
       "fields": [
         {"name": "cancellable", "type": "bool"},
+        {"name": "cliff_mode", "type": "CliffMode"},
         {"name": "cliff_time", "type": "u64"},
         {"name": "deposited", "type": "i128"},
         {"name": "end_time", "type": "u64"},
@@ -354,7 +383,8 @@
         {"name": "cliff_time", "type": "u64"},
         {"name": "cancellable", "type": "bool"},
         {"name": "pausable", "type": "bool"},
-        {"name": "transferable", "type": "bool"}
+        {"name": "transferable", "type": "bool"},
+        {"name": "cliff_mode", "type": "CliffMode"}
       ]
     },
     {

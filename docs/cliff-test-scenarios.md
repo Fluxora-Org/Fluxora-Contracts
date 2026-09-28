@@ -3,6 +3,13 @@
 > **Provenance:** moved from the repository root into `docs/` in the point-in-time
 > documentation cleanup for [#1681](https://github.com/Fluxora-Org/Fluxora-Contracts/issues/1681). Update this document alongside the
 > tests it covers.
+>
+> **Scope:** every scenario below assumes the default `cliff_mode =
+> CliffMode::Schedule`, i.e. a cliff judged on the stream clock, so a pause
+> shifts the gate by the accumulated `paused_total`. The same scenarios for the
+> `CliffMode::WallClock` half — where no pause can move the gate — are in
+> `test::cliff_mode`; see `docs/ABI.md` §`CliffMode` and
+> `docs/KNOWN-LIMITATIONS.md` §7.
 
 ## Test Configuration Pattern
 

@@ -34,6 +34,21 @@ fn entrypoint_cost_snapshot() {
     h.create_simple(1_000 * ONE, 100 * DAY);
     record(&h, "create_stream");
 
+    // Same call through the mode-taking entry point, so the baseline records the
+    // extra argument decode and the stored enum rather than assuming it is free.
+    let h = wasm_harness();
+    h.create_with_cliff_mode(
+        1_000 * ONE,
+        h.env.ledger().timestamp(),
+        h.env.ledger().timestamp() + 100 * DAY,
+        h.env.ledger().timestamp() + 10 * DAY,
+        crate::CliffMode::WallClock,
+        true,
+        true,
+        true,
+    );
+    record(&h, "create_stream_with_cliff_mode");
+
     let (h, id) = fresh();
     h.client.top_up(&id, &(100 * ONE));
     record(&h, "top_up");
