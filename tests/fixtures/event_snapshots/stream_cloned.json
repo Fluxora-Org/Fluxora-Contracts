@@ -1,0 +1,15 @@
+{
+  "ledger_sequence": 2400,
+  "stream_id": 12,
+  "events": [
+    {
+      "type": "StreamCloned",
+      "data": {
+        "destination": "CCONTRACTAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "deposit_amount": 20000000,
+        "recipient": "GRECIPIENTAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "sender": "GSENDERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      }
+    }
+  ]
+}

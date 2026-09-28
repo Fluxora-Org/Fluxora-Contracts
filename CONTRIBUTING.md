@@ -1,112 +1,244 @@
-# Contributing to Fluxora Contracts
+# Contributing to Fluxora-Contracts
 
-First off, thank you for considering contributing to Fluxora! It's people like you that make open-source software such a great community.
+This repo holds `Fluxora-Contracts` — the Rust / Soroban smart contracts. If
+you're new here, read this before writing any code.
 
-## How to Contribute
+## 1. Layout: what's live, what isn't
 
-### 1. Fork & Clone
+```
+contracts/
+  stream/            the product. Deployed to testnet, ABI frozen.
+  archival-probe/    a throwaway probe, kept as a workspace member so its
+                      smoke test runs in CI, but never released or deployed.
+  factory/           NOT a workspace member. Has only a tests/ directory,
+                      no Cargo.toml, no src/. Does not build.
+  governance/         NOT a workspace member. Has src/lib.rs but no
+                      Cargo.toml. Does not build.
+```
 
-1. Fork the repository to your own GitHub account.
-2. Clone the project to your local machine.
-3. Add the original repository as a remote ("upstream").
+Only two crates are in the workspace (`Cargo.toml` at the repo root):
 
-### 2. Branch Naming Conventions
+```toml
+[workspace]
+members = ["contracts/archival-probe", "contracts/stream"]
+```
 
-Always create a new branch for your work. Do not commit directly to the `main` branch. Please use the following prefixes for your branch names:
+`factory` and `governance` are **not** buildable or testable as-is — there is
+no `Cargo.toml` for either, so `cargo build`, `cargo test`, and `cargo clippy`
+never touch them, workspace-wide flags included. Don't assume a red build
+there means you broke something; it means the crate was never wired in. If
+your issue is about one of those two directories, say so in your PR and don't
+expect `cargo test --workspace` to cover it — see `docs/MIGRATION.md` for why
+governance was dropped from the product (§6: no admin key, no upgradeability)
+and check the issue tracker for whether factory is meant to be restored.
 
-- `feature/` - for new features (e.g., `feature/multi-period-attestations`)
-- `fix/` - for bug fixes (e.g., `fix/stream-overflow`)
-- `docs/` - for documentation updates (e.g., `docs/contributing`)
-- `test/` - for adding or updating tests (e.g., `test/cancel-from-paused`)
+`contracts/stream` is the interface of record: its ABI is **frozen** as of
+2026-08-12 (`docs/ABI.md`). Anything not documented there isn't part of the
+interface, and a breaking change means a new contract address, not an edit to
+the deployed one.
 
-### 3. Development Guidelines
+`contracts/archival-probe` exists only to prove the live-network
+archival/restore round trip that the unit suite can't (see
+`docs/KNOWN-LIMITATIONS.md` §1). It stays in the workspace so its smoke test
+runs, but `script/release.sh` builds *only* `fluxora-stream` and fails if a
+probe wasm shows up in the output. Never deploy it to mainnet.
 
-- **Write Tests:** All new code must include comprehensive unit tests.
-- **Maintain Coverage:** We enforce a strict **minimum of 95% test coverage**. PRs that drop coverage below this threshold will not be merged.
-- **Snapshot Tests:** All behavior changes must update snapshot tests. See [Snapshot Test Workflow](docs/snapshot-tests.md).
-- **Run Linters:** Ensure your code is properly formatted and passes all linting checks before opening a PR.
-- **Update Documentation:** If you are adding a new feature or changing an API, please update the relevant documentation (and NatSpec comments) alongside your code.
+## 2. Commands CI runs — reproduce them locally
 
-### 4. Snapshot Test Workflow
+Four jobs in `.github/workflows/ci.yml` gate every PR: `docs-alignment-check`,
+`lint`, `fuzz`, `packaging`, and `fuzz-feature-matrix` (plus `coverage`, which
+runs but is allowed to fail — see §5). Run the same commands locally before
+pushing:
 
-When your changes affect contract behavior:
+```bash
+# Formatting and lints — hard gate, warnings fail the build
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-1. **Run tests locally:**
+# Build and test the whole workspace
+cargo build --workspace
+cargo test --workspace --all-features
 
-   ```bash
-   cargo test -p fluxora_stream
-   ```
+# Resource-cost regression report (prints, doesn't just assert)
+cargo test --release resource_limits -- --nocapture --test-threads=1
 
-2. **If snapshot tests fail and changes are intentional:**
+# Release artifact — builds only fluxora-stream, never the probe
+script/release.sh
 
-   ```bash
-   SOROBAN_SNAPSHOT_UPDATE=1 cargo test -p fluxora_stream
-   ```
+# Cargo.lock must not drift from Cargo.toml
+cargo update --locked --workspace
 
-3. **Review snapshot changes:**
+# WASM build + provenance
+cargo build --release --workspace --target wasm32v1-none
+script/provenance.sh build
 
-   ```bash
-   git diff contracts/stream/test_snapshots/
-   ```
+# Package/artifact name guard (issue #1594) — catches an accidental rename
+# of the deployable package or WASM file
+cargo test --all-features packaging:: -- --nocapture --test-threads=1
 
-4. **Commit with clear message:**
+# Feature-matrix check — every supported feature combination must compile
+cargo check -p fluxora-stream
+cargo check -p fluxora-stream --features testutils
+cargo check -p fluxora-stream --no-default-features
 
-   ```bash
-   git add contracts/stream/test_snapshots/
-   git commit -m "test: update snapshots for [specific change]"
-   ```
+# Doc-alignment / entrypoint-drift check (Python)
+pip install pytest pytest-cov
+pytest tests/ --cov=script/ --cov-fail-under=50 -v --tb=short
+python3 script/validate-doc-alignment.py
+```
 
-5. **Document in PR:** Explain why snapshots changed and what behavior changed.
+`script/verify_rust_version.py` checks your installed `rustc` against the pin
+in `rust-toolchain.toml` (currently `1.97.1` per that file; CI's `lint` job
+separately pins `1.94.1` via `dtolnay/rust-toolchain` — match whichever job
+you're trying to reproduce). Install the toolchain and target with:
 
-See [Snapshot Test Documentation](docs/snapshot-tests.md) for complete guidance.
+```bash
+rustup toolchain install 1.97.1
+rustup target add wasm32v1-none --toolchain 1.97.1
+rustup component add rustfmt clippy --toolchain 1.97.1
+```
 
-### 5. Opening a Pull Request
+**Windows note:** several `cargo test` runs in this workspace create
+temporary files under a fixed name and then try to rename or delete them
+(model-registry-style GC tests are the classic case, but the stream contract
+has its own tempfile-based tests too). If you see `OSError: [WinError 1314]
+A required privilege is not held by the client` on Windows, it's usually
+because Developer Mode (or "Create symbolic links") isn't enabled for your
+account, or antivirus is holding a lock on the temp file mid-test. Run tests
+from WSL2 if you hit this repeatedly — it avoids the whole class of failure.
 
-1. Push your changes to your fork.
-2. Open a Pull Request against the `main` branch of the upstream repository.
-3. Ensure your PR title is descriptive and follows conventional commit formatting.
-4. Link the PR to the relevant issue(s) it resolves.
-5. **If snapshots changed:** Use the PR template to document what changed and why.
-6. Wait for a maintainer to review your code.
+## 3. Test expectations for a change to the stream contract
 
-## Testing Requirements
+`contracts/stream/src/test/` is staged to match the build order (see the
+module doc at the top of `test/mod.rs`):
 
-### Unit Tests
+- **Stage 1** — data model, create, withdraw, views, plus the property suite
+  and the pool invariant.
+- **Stage 2** — cliff, cancel, pause/resume, top-up, recipient transfer, and
+  every adversarial boundary case.
+- **Stage 3** — TTL survival, archival recovery within the test host, resource
+  consumption at the batch cap.
+- **Stage 4** — the stream-id invariant (unique, monotonic, never reused).
 
-- All new functions must have unit tests
-- Edge cases must be covered
-- Error conditions must be tested
+Any new test file must be added to `mod.rs` — `cargo test` only picks up a
+module that's declared there. Check first: several files on disk
+(`packaging.rs`, `snapshot_tests.rs`, `release_dry_run.rs`,
+`read_methods_no_side_effects.rs`, `withdrawal_atomicity.rs`) are **not**
+currently declared in `mod.rs`. If you're adding a file, don't assume an
+existing undeclared file is a template to copy from without checking whether
+it's supposed to run.
 
-### Snapshot Tests
+What a change to `contracts/stream` is expected to satisfy before review:
 
-- All state transitions must have snapshot coverage
-- Authorization boundaries must be explicit
-- Event emissions must be verified
-- See [Snapshot Test Authoring Guide](docs/snapshot-test-authoring-guide.md)
+1. **The pool invariant holds after every operation you touch.** If your
+   change affects accrual, withdraw, cancel, pause, or top-up, run
+   `assert_invariants()` (from `test::common::Harness`) after the operation in
+   any new test you write — this is the pattern every existing lifecycle test
+   follows.
+2. **Exact accounting, not "under a documented bound".** What the recipient
+   withdraws plus what's refunded to the sender must equal `deposited`
+   exactly. `vested` must be monotonic; rounding is always down and tight to
+   one stroop; `top_up` must never reduce `vested`.
+3. **Adversarial boundaries are covered explicitly**, not just the happy
+   path: withdraw at exactly `cliff_time`, withdraw at exactly `end_time`,
+   cancel one second after creation, cancel at the instant of creation, cancel
+   after full vesting, pause/resume across the cliff, top-up on a cancelled
+   stream (must reject), withdraw from a depleted stream (no-op or typed
+   error, never a panic).
+4. **If you touch the ABI** (any `#[contractimpl] pub fn`, an event's field
+   order, an error discriminant, a struct field), update `docs/audit.md` in
+   the same PR. CI's `docs-alignment-check` job diffs the entrypoint surface
+   in `lib.rs` against that table and fails the build if they've drifted.
+   Read `docs/ABI.md` first — it defines what counts as a compatible change
+   (a new field at the end of an event, a new error discriminant, a new entry
+   point) versus a breaking one (renamed/removed entry point, reordered
+   parameters or event topics, renumbered error discriminant).
+5. **If you touch `MAX_BATCH_SIZE`, the wasm size, or anything resource
+   related**, re-measure — don't adjust the number by feel. See §3.2 of
+   `fluxora-build-spec.md` for how the batch cap was derived, and
+   `contracts/stream/wasm-size-budget.env` for the size gate (currently
+   48,128 bytes baseline, 131,072 max).
+6. **If you rename the package or the cdylib target**, update the canonical
+   values in *both* `.github/workflows/ci.yml` (the `lint` and `packaging`
+   jobs) and `contracts/stream/src/test/packaging.rs`
+   (`EXPECTED_PACKAGE_NAME`/`EXPECTED_TARGET_NAME`) in the same PR. There are
+   two independent gates for this (issue #1594); missing either one fails CI.
 
-### Coverage
+## 4. The nightly fuzz suite, and reproducing a failing seed
 
-- Minimum 95% code coverage required
-- Run coverage report: `cargo tarpaulin --features testutils -p fluxora_stream`
+Two files drive long randomized operation sequences against the real
+contract, re-checking every invariant after **every single operation**:
+`contracts/stream/src/test/invariants.rs` and `.../lifecycle_proptest.rs`.
+Both use a small deterministic PRNG (xorshift64\*) seeded explicitly, not
+`rand` — so a failure is reproducible from its printed seed alone. This has
+found two real bugs (a stream stuck `Depleted` with `paused_at` still set
+after being paused post-maturity, and `top_up` rounding driving `vested`
+backwards) that no hand-written case caught.
 
-## Documentation Requirements
+A per-PR `cargo test --workspace` run only uses each test's small default
+budget. The nightly cron in `ci.yml` (`0 3 * * *`, in the `fuzz` job) raises
+it via environment variables:
 
-When contributing, update:
+```bash
+# What CI runs nightly — deeper than any local run should default to
+FLUXORA_FUZZ_SEEDS=200 FLUXORA_FUZZ_STEPS=300 PROPTEST_CASES=5000 cargo test --release
+```
 
-- Code comments for complex logic
-- Function documentation for public APIs
-- `docs/` files for behavior changes
-- `README.md` for user-facing changes
-- Snapshot test documentation if test patterns change
+`FLUXORA_FUZZ_SEEDS` / `FLUXORA_FUZZ_STEPS` control `invariants.rs`;
+`PROPTEST_CASES` controls `lifecycle_proptest.rs`. Run this before a release,
+or after touching `accrual.rs`.
 
-## Found a Bug or Have a Feature Request?
+**If the nightly run finds a failing seed:** the assertion message prints the
+seed and the step, e.g. `seed 11400714819323198485, step 37: liability
+conservation violated`. Reproduce it directly — no need to re-run the whole
+sweep:
 
-If you find a bug or have a suggestion, please open an issue first. Be sure to check out our [Issue Templates](.github/ISSUE_TEMPLATE) (if available) to provide all the necessary context.
+1. Open `lifecycle_proptest.rs`, find `regression_specific_seeds()`.
+2. Add a line calling `run_lifecycle_sequence(<seed>, <steps>)` with the
+   exact seed and step count from the failure (there's a commented example
+   in that function already).
+3. Run just that test: `cargo test regression_specific_seeds -- --nocapture`.
+4. This replays the exact operation sequence deterministically — fix the bug,
+   then leave the regression test in place so this seed never silently
+   breaks again.
 
-## Resources
+The equivalent function in `invariants.rs` is `run_sequence(seed, steps)` if
+the failure came from that file instead — check which file's test name is in
+the failure output.
 
-- [Snapshot Test Documentation](docs/snapshot-tests.md)
-- [Snapshot Test Authoring Guide](docs/snapshot-test-authoring-guide.md)
-- [Snapshot Workflow Quick Reference](docs/snapshot-workflow-quick-reference.md)
-- [Coverage Matrix](docs/snapshot-test-coverage-matrix.md)
-- [Audit Documentation](docs/audit.md)
+## 5. A few things that will surprise you
+
+- **`cargo test --workspace` covers the probe but not factory/governance.**
+  See §1 — those two crates aren't in the workspace at all.
+- **The `coverage` job is allowed to fail** (`continue-on-error: true`) — it
+  hits a `rand_core` version skew via `cargo-tarpaulin` + `testutils`. Don't
+  be alarmed if it's red; it isn't a merge blocker the way `lint` and `fuzz`
+  are.
+- **Some Python-side CI tooling tests currently fail against a fresh clone**
+  (`tests/test_check_snapshot_diff.py`, `tests/test_rust_toolchain_pin.py`,
+  parts of `tests/test_check_discriminant_collisions.py`) because they
+  exercise functions or fixture files (`docs/error.md`, a `rustc` install)
+  that aren't present in every environment. If you're touching
+  `script/check_snapshot_diff.py`, `script/verify_rust_version.py`, or
+  `script/check-discriminant-collisions.py`, run the matching test file
+  first and check whether your change is expected to fix a pre-existing
+  failure or you've introduced a new one — don't assume today's `main` is
+  fully green on these.
+- **The test-host's storage runs in recording mode**, so an expired
+  persistent entry is silently auto-restored during `cargo test`. This means
+  `test::ttl` proves the rent arithmetic but *not* the real-network recovery
+  flow — that's what `script/archival-canary.sh` and the archival probe are
+  for. Read `docs/KNOWN-LIMITATIONS.md` §1 before claiming TTL is "solved" by
+  a green suite.
+
+## Before opening a PR
+
+- [ ] `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings` are clean
+- [ ] `cargo test --workspace --all-features` passes
+- [ ] `script/release.sh` succeeds and produces only `fluxora_stream.wasm`
+- [ ] If you touched the ABI, `docs/audit.md` is updated in the same PR
+- [ ] If you touched accrual/withdraw/cancel/pause/top-up, new tests call
+      `assert_invariants()` and cover the adversarial boundaries in §3
+- [ ] Link your PR to the issue it closes (see the Stellar Wave Program note
+      on your assigned issue — points are only awarded when the issue is
+      marked complete by a maintainer)

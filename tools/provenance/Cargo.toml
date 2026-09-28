@@ -1,0 +1,27 @@
+# Host-only build tool — a workspace member so it resolves through the root
+# Cargo.lock and is covered by the normal `cargo build --workspace` /
+# `cargo test --workspace` checks.
+#
+# The product crates build for wasm32v1-none (a no_std target) while this tool
+# needs std and the host target, so wasm-target workspace builds exclude it
+# explicitly:
+#   cargo build --workspace --exclude fluxora-provenance --target wasm32v1-none --release
+# script/provenance.sh does the same and runs the resulting host binary.
+[package]
+name = "fluxora-provenance"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+description = "Generate and verify wasm provenance manifests for Fluxora contract releases"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+sha2 = "0.10"
+hex = "0.4"
+
+[dev-dependencies]
+tempfile = "3"

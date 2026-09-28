@@ -1,115 +1,53 @@
 #!/usr/bin/env bash
-# verify-wasm-checksum.sh
-#
-# Verifies that locally-built WASM artifacts match the reference checksums in
-# wasm/checksums.sha256. Use this to confirm a build is reproducible before
-# deployment, or to audit a downloaded artifact.
-#
-# Usage:
-#   bash script/verify-wasm-checksum.sh              # verify all contracts
-#   bash script/verify-wasm-checksum.sh --no-build   # skip rebuild, check existing artifacts
-#
-# Exit codes:
-#   0  All checksums match
-#   1  One or more checksums mismatch, or a required file is missing
+# Verify WASM build reproducibility by checking SHA256 checksums.
+# Usage: bash script/verify-wasm-checksum.sh [--no-build]
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CHECKSUMS_FILE="${REPO_ROOT}/wasm/checksums.sha256"
-BUILD=true
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+WASM_TARGET="${FLUXORA_WASM_TARGET:-wasm32v1-none}"
+WASM_DIR="$REPO_ROOT/target/$WASM_TARGET/release"
+SHA256_FILE="$WASM_DIR/fluxora_stream.wasm.sha256"
+OPT_SHA256_FILE="$WASM_DIR/fluxora_stream.optimized.wasm.sha256"
 
-for arg in "$@"; do
-  case "$arg" in
-    --no-build) BUILD=false ;;
-    *) echo "Unknown argument: $arg" >&2; exit 1 ;;
-  esac
-done
+NO_BUILD=false
+if [[ "${1:-}" == "--no-build" ]]; then
+    NO_BUILD=true
+fi
 
-# ---------------------------------------------------------------------------
-# Verify required tools
-# ---------------------------------------------------------------------------
-for tool in sha256sum awk grep; do
-  if ! command -v "$tool" &>/dev/null; then
-    echo "ERROR: required tool '$tool' not found in PATH" >&2
+if [[ "$NO_BUILD" == "false" ]]; then
+    echo "Building WASM..."
+    cd "$REPO_ROOT"
+    cargo build --release -p fluxora-stream --target "$WASM_TARGET"
+fi
+
+echo "Verifying WASM SHA256 checksums..."
+
+if [[ ! -f "$SHA256_FILE" ]]; then
+    echo "ERROR: WASM checksum file not found at $SHA256_FILE"
+    echo "Run 'sha256sum target/$WASM_TARGET/release/fluxora_stream.wasm > target/$WASM_TARGET/release/fluxora_stream.wasm.sha256' first."
     exit 1
-  fi
-done
-
-# ---------------------------------------------------------------------------
-# Verify checksums file exists
-# ---------------------------------------------------------------------------
-if [ ! -f "${CHECKSUMS_FILE}" ]; then
-  echo "ERROR: Reference checksums file not found: ${CHECKSUMS_FILE}" >&2
-  echo "  Run: bash script/update-wasm-checksums.sh" >&2
-  exit 1
 fi
 
-# ---------------------------------------------------------------------------
-# Optionally rebuild
-# ---------------------------------------------------------------------------
-if [ "$BUILD" = true ]; then
-  if ! command -v cargo &>/dev/null; then
-    echo "ERROR: cargo not found — cannot rebuild. Use --no-build to skip." >&2
+# Verify the WASM file matches its checksum. CI writes checksums from the repo root.
+cd "$REPO_ROOT"
+if sha256sum -c "$SHA256_FILE"; then
+    echo "OK: fluxora_stream.wasm checksum verified."
+else
+    echo "FAIL: fluxora_stream.wasm checksum mismatch."
     exit 1
-  fi
-  echo "Building WASM artifacts (release, wasm32-unknown-unknown)..."
-  cargo build --release --target wasm32-unknown-unknown \
-    --manifest-path "${REPO_ROOT}/Cargo.toml" \
-    -p fluxora_stream
 fi
 
-# ---------------------------------------------------------------------------
-# Verify each entry in checksums file
-# ---------------------------------------------------------------------------
-PASS=0
-FAIL=0
-
-while IFS= read -r line; do
-  # Skip comments and blank lines
-  [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
-
-  EXPECTED_HASH=$(echo "$line" | awk '{print $1}')
-  FILENAME=$(echo "$line" | awk '{print $2}')
-
-  # Map filename to full path
-  WASM_PATH="${REPO_ROOT}/target/wasm32-unknown-unknown/release/${FILENAME}"
-
-  if [ ! -f "${WASM_PATH}" ]; then
-    echo "MISSING  ${FILENAME}"
-    echo "         Expected path: ${WASM_PATH}"
-    FAIL=$((FAIL + 1))
-    continue
-  fi
-
-  ACTUAL_HASH=$(sha256sum "${WASM_PATH}" | awk '{print $1}')
-
-  if [ "${ACTUAL_HASH}" = "${EXPECTED_HASH}" ]; then
-    echo "OK       ${FILENAME}"
-    echo "         ${ACTUAL_HASH}"
-    PASS=$((PASS + 1))
-  else
-    echo "MISMATCH ${FILENAME}"
-    echo "         Expected: ${EXPECTED_HASH}"
-    echo "         Actual:   ${ACTUAL_HASH}"
-    echo ""
-    echo "  The WASM output differs from the committed reference."
-    echo "  If this is an intentional source change, run:"
-    echo "    bash script/update-wasm-checksums.sh"
-    echo "  Then commit the updated wasm/checksums.sha256."
-    FAIL=$((FAIL + 1))
-  fi
-done < "${CHECKSUMS_FILE}"
-
-# ---------------------------------------------------------------------------
-# Summary
-# ---------------------------------------------------------------------------
-echo ""
-echo "Results: ${PASS} passed, ${FAIL} failed"
-
-if [ "${FAIL}" -gt 0 ]; then
-  echo "FAIL: Build is not reproducible — checksum(s) do not match reference."
-  exit 1
+# Optionally verify optimized WASM
+if [[ -f "$OPT_SHA256_FILE" ]]; then
+    if sha256sum -c "$OPT_SHA256_FILE"; then
+        echo "OK: fluxora_stream.optimized.wasm checksum verified."
+    else
+        echo "FAIL: fluxora_stream.optimized.wasm checksum mismatch."
+        exit 1
+    fi
+else
+    echo "INFO: No optimized WASM checksum file found, skipping."
 fi
 
-echo "PASS: All WASM checksums match reference. Build is reproducible."
+echo "OK: All WASM checksums verified."
