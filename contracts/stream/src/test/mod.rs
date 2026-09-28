@@ -82,3 +82,6 @@ mod read_ttl_matrix;
 // guards #1675 (no inert governance crate). Previously unregistered, so
 // that CI step matched zero tests.
 mod packaging;
+
+// Issue #1842 — treat `paused_total` as an accumulator — including the events that carry it and the `u64` bound it grows against
+mod paused_total_cycles;
