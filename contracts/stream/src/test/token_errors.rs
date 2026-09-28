@@ -66,7 +66,9 @@
 
 use soroban_sdk::testutils::{Address as _, Events as _, IssuerFlags};
 use soroban_sdk::token::{StellarAssetClient, TokenClient};
-use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Event as _, MuxedAddress, String};
+use soroban_sdk::{
+    contract, contractimpl, symbol_short, Address, Env, Event as _, MuxedAddress, String,
+};
 
 use super::common::*;
 use crate::events::{StreamCreated, Withdrawn};
