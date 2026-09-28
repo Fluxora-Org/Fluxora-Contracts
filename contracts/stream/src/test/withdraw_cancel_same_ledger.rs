@@ -69,13 +69,16 @@ fn test_cancel_then_withdraw_at(offset: u64) {
 
     let expected_vested = h.get(id).deposited * (offset.min(duration) as i128) / (duration as i128);
 
-    // Order 2: cancel, then withdraw
+    // Order 2: cancel, then withdraw. `cancel` terminates the stream first, so
+    // this withdraw reads a terminal stream. With nothing vested that is
+    // `StreamTerminated`, not the live-stream `NothingToWithdraw`. See
+    // docs/same-ledger-ordering.md (pair 4, cancel -> withdraw).
     h.client.cancel(&id);
 
     if expected_vested == 0 {
         assert_eq!(
             h.client.try_withdraw(&id, &None).unwrap_err().unwrap(),
-            Error::NothingToWithdraw
+            Error::StreamTerminated
         );
     } else {
         h.client.withdraw(&id, &None);

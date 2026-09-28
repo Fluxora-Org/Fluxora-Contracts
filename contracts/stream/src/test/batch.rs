@@ -954,11 +954,16 @@ fn batch_withdraw_same_recipient_settles_payroll_with_single_authorisation() {
     let expected_total: i128 = expected_per_stream.iter().sum();
 
     let total = h.client.batch_withdraw(&h.recipient, &h.ids(&ids));
-    assert_eq!(total, expected_total);
-    assert_eq!(h.balance(&h.recipient), expected_total);
 
-    // Assert events are emitted per stream, not per batch (in exact batch order).
-    assert_eq!(withdrawn_event_ids(&h), ids);
+    // Capture the event log right away: any later contract call (the token
+    // balance read below, `h.get`) starts a fresh invocation and the batch's
+    // events are no longer observable from it. Same discipline as the sibling
+    // `a_successful_batch_emits_withdrawn_events_in_batch_order`.
+    let events = withdrawn_event_ids(&h);
+
+    assert_eq!(total, expected_total);
+    assert_eq!(events, ids, "events emitted per stream, in exact batch order");
+    assert_eq!(h.balance(&h.recipient), expected_total);
 
     for (i, id) in ids.iter().enumerate() {
         assert_eq!(h.get(*id).withdrawn, expected_per_stream[i]);

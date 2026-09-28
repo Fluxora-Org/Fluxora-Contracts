@@ -94,8 +94,8 @@ between recipient and sender; the difference is only *when* each amount moves.
 
 | Ordering within the ledger | Outcome |
 |---|---|
-| `withdraw` → `cancel` | Recipient is paid the vested amount; `cancel` then refunds the remainder to the sender. Terminal status is `Cancelled` (or `Depleted` if fully vested). |
-| `cancel` → `withdraw` | `cancel` settles at the vested amount first; the `withdraw` that follows pays that accrued amount to the recipient. The stream is `Cancelled`. |
+| `withdraw` → `cancel` | If something has vested, the recipient is paid it and `cancel` then refunds the remainder to the sender. If nothing has vested the stream is still live, so the `withdraw` is rejected with `Error::NothingToWithdraw` and `cancel` refunds the whole deposit. Terminal status is `Cancelled` (or `Depleted` if fully vested). |
+| `cancel` → `withdraw` | `cancel` settles first and marks the stream `Cancelled`. The `withdraw` that follows pays the accrued amount. If **nothing** accrued, it is rejected with `Error::StreamTerminated` — the stream is already terminal when the withdraw runs, and a terminal stream with zero available is `StreamTerminated`, not the live-stream `NothingToWithdraw`. The rejection is a pure precondition failure and leaves the settled stream unchanged. |
 
 Other pairs (for example `pause`/`resume`) are order-insensitive for
 authorization purposes and are not listed: whichever runs first, the guard is
