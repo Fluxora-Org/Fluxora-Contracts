@@ -82,3 +82,6 @@ mod read_ttl_matrix;
 // guards #1675 (no inert governance crate). Previously unregistered, so
 // that CI step matched zero tests.
 mod packaging;
+
+// Issue #1841 — a one-second schedule is the smallest non-degenerate stream, and the only duration where the vesting curve is two points and the dust-rate floor is unreachable
+mod one_second_stream;
