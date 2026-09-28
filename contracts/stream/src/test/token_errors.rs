@@ -133,6 +133,71 @@ fn register_panic_token(h: &Harness) -> Address {
     h.env.register(PanicToken, ())
 }
 
+// ─── false-returning token ─────────────────────────────────────────────────
+
+/// A token whose `transfer` returns `false` without reverting. The stream
+/// contract must treat that as a failed transfer, not a successful deposit.
+#[contract]
+pub struct FalseToken;
+
+#[contractimpl]
+impl FalseToken {
+    pub fn mint(env: Env, to: Address, amount: i128) {
+        let bal = Self::balance_of(&env, &to);
+        env.storage().instance().set(&to, &(bal + amount));
+    }
+
+    fn balance_of(env: &Env, id: &Address) -> i128 {
+        env.storage().instance().get(id).unwrap_or(0)
+    }
+
+    pub fn transfer(_env: Env, _from: Address, _to: MuxedAddress, _amount: i128) -> bool {
+        false
+    }
+
+    pub fn balance(env: Env, id: Address) -> i128 {
+        Self::balance_of(&env, &id)
+    }
+
+    pub fn allowance(_env: Env, _from: Address, _spender: Address) -> i128 {
+        0
+    }
+    pub fn approve(
+        _env: Env,
+        _from: Address,
+        _spender: Address,
+        _amount: i128,
+        _live_until_ledger: u32,
+    ) {
+    }
+    pub fn transfer_from(
+        _env: Env,
+        _spender: Address,
+        _from: Address,
+        _to: Address,
+        _amount: i128,
+    ) {
+    }
+    pub fn burn(_env: Env, _from: Address, _amount: i128) {}
+    pub fn burn_from(_env: Env, _spender: Address, _from: Address, _amount: i128) {}
+    pub fn decimals(_env: Env) -> u32 {
+        7
+    }
+    pub fn name(env: Env) -> String {
+        String::from_str(&env, "FalseToken")
+    }
+    pub fn symbol(env: Env) -> String {
+        String::from_str(&env, "FALSE")
+    }
+}
+
+fn register_false_token<'a>(h: &'a Harness<'a>) -> (Address, FalseTokenClient<'a>) {
+    let token = h.env.register(FalseToken, ());
+    let client = FalseTokenClient::new(&h.env, &token);
+    client.mint(&h.sender, &(10_000 * ONE));
+    (token, client)
+}
+
 // ─── clawback-enabled SAC ────────────────────────────────────────────────────
 
 /// Create a fresh Stellar Asset Contract with `ClawbackEnabledFlag` set.
@@ -186,6 +251,51 @@ fn create_stream_with_panicking_token_returns_a_token_error() {
     assert!(
         matches!(err, Error::TokenTransferFailed | Error::TokenMissing),
         "expected a token error, got {err:?}"
+    );
+}
+
+/// An otherwise non-reverting token that returns `false` from `transfer` is a
+/// failed transfer in Fluxora's ABI, not a successful deposit. The stream must
+/// fail closed and leave the pool and stream counter unchanged.
+#[test]
+fn create_stream_with_false_returning_token_is_rejected() {
+    let h = Harness::new();
+    let (token, false_token) = register_false_token(&h);
+
+    let start = h.now();
+    let err = h
+        .client
+        .try_create_stream(
+            &h.sender,
+            &h.recipient,
+            &token,
+            &(1_000 * ONE),
+            &start,
+            &(start + 100 * DAY),
+            &start,
+            &true,
+            &true,
+            &true,
+        )
+        .unwrap_err()
+        .unwrap();
+
+    assert_eq!(err, Error::TokenTransferFailed);
+    assert_eq!(h.client.stream_count(), 0, "id counter must not advance");
+    assert!(!h.client.stream_exists(&0), "no phantom entry at id 0");
+    assert_eq!(
+        false_token.balance(&h.sender),
+        10_000 * ONE,
+        "failed transfer must not debit or credit the sender"
+    );
+    assert_eq!(
+        false_token.balance(&h.contract_id),
+        0,
+        "failed transfer must not grow the contract's pool"
+    );
+    assert!(
+        h.env.events().all().events().is_empty(),
+        "reverted transfer must emit no success event"
     );
 }
 

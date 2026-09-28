@@ -232,7 +232,7 @@ Discriminants are ABI and are never renumbered; new variants are appended.
 
 `TokenTransferFailed` (25) and `TokenMissing` (26) are **stable stream-level categories** for token sub-invocation failures. The token contract's internal error discriminant is intentionally discarded — forwarding it would produce a value clients decode against Fluxora's error table, yielding a silent misinterpretation. The raw diagnostic is visible in the failed transaction's `diagnosticEvents`.
 
-* `TokenTransferFailed` — the token contract returned a typed contract error: insufficient sender balance, pool underfunded on a payout, or the token's own authorization rules refused the call.
+* `TokenTransferFailed` — the token contract returned a typed contract error: insufficient sender balance, pool underfunded on a payout, the token's own authorization rules refused the call, or the token returned a non-success value such as `false` rather than reverting. Fluxora treats all of those as a failed transfer, not a successful deposit.
 * `TokenMissing` — the token address resolves to nothing (Abort / host trap); the stream references a non-deployed contract.
 * `TokenAmountMismatch` (32) — a deposit pull (`create_stream`, `top_up`, `delegate_top_up`) changed the pool's balance by something other than the requested amount. See "Token assumptions" below.
 
