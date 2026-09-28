@@ -51,6 +51,9 @@ mod withdraw_cancel_same_ledger;
 
 // Stage 3
 mod accounting_identity;
+// Issue #1856 — the `withdrawable + refundable == deposited - withdrawn`
+// identity as a generated property over randomized operation sequences.
+mod accounting_property;
 mod accrual_overflow;
 mod batch;
 mod entrypoint_costs;
