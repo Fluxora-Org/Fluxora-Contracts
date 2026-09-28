@@ -3,175 +3,123 @@
 What a green test suite here does **not** prove. Read this before treating any
 part of Fluxora as production-ready.
 
+§1 is **closed**: the behaviour it described as untested was measured against
+live testnet on 2026-09-28 and turned out not to be a failure mode at all. It
+stays in this file as the record of that result and of the reasoning it
+replaced.
+
 ---
 
-## 1. The TTL suite does not prove the archival recovery flow
+## 1. Archival is not a failure mode for persistent entries
 
-**Status: open. Closing it is the acceptance criterion for stage 4.**
+**Status: closed 2026-09-28.** The result is **Outcome B** of the decision table
+that was written into this section on 2026-08-12, before the outcome was known.
 
 **Pinned by:**
-`contracts/stream/src/test/read_methods_no_side_effects.rs::get_stream_does_not_extend_ttl_on_archived_stream`
-and `contracts/stream/src/test/ttl.rs::an_archived_stream_restores_with_its_accounting_intact`.
-The first pins the test host's automatic restore behavior; the second pins the
-accounting-preservation endpoint. Neither can pass if the host stops restoring
-expired persistent entries with intact data, while neither claims to cover the
-real-network failed-transaction and `RestoreFootprint` resubmission step.
+`contracts/archival-probe/src/test.rs::an_archived_entry_is_restored_by_the_read_itself`,
+`contracts/archival-probe/src/test.rs::presence_stays_true_across_archival`,
+`contracts/archival-probe/src/test.rs::auto_restoration_is_metered_as_writes_and_rent_bumps`,
+`contracts/stream/src/test/read_methods_no_side_effects.rs::get_stream_does_not_extend_ttl_on_archived_stream`,
+and `tests/test_validator.py::TestKnownLimitations::test_archival_result_is_recorded`.
 
-### The claim you might read off a green suite
+### What this section used to claim
 
-`test::ttl` passes. It contains
-`a_year_long_stream_survives_on_keeper_sweeps_alone` and
-`an_archived_stream_restores_with_its_accounting_intact`. It is tempting to
-conclude "TTL is solved". **It is not.** Roughly half the problem is untested.
+That the TTL suite proves only the *endpoints* of archival recovery — a live
+entry before, intact accounting after — because the Soroban test host runs
+storage in recording mode, where `handle_maybe_expired_entry` silently restores
+an expired persistent entry in place instead of failing. The stated worry was
+that a live network would behave differently: the read would fail, and the
+caller would have to resubmit with a `RestoreFootprint` operation.
 
-### Why
+The recording-mode description was accurate. The conclusion drawn from it was
+not: protocol 23 and later do the same thing the recording host does, and do it
+in the ledger rather than in the host.
 
-The Soroban SDK's test host runs storage in *recording* mode. In that mode,
-reading an expired persistent entry does not fail. The host calls
-`handle_maybe_expired_entry`, which silently restores the entry in place with
-its data intact and its TTL reset to `min_persistent_entry_ttl`:
+### What the live canary actually showed
 
-```rust
-// soroban-env-host-27.0.1/src/host/storage.rs
-if live_until < li.sequence_number {
-    match durability {
-        ContractDataDurability::Temporary  => { /* entry dropped */ }
-        ContractDataDurability::Persistent => {
-            // recorded as a ReadWrite access, live_until reset to the minimum
-        }
-    }
-}
-```
-
-On a real network the sequence is different, and there is a failure in the
-middle of it:
-
-| | test host | live network |
-|---|---|---|
-| read an archived entry | silently restored, invocation proceeds | **transaction fails** |
-| recovery | n/a — never failed | caller must resubmit with a `RestoreFootprint` operation |
-| after recovery | entry live at minimum TTL | entry live at minimum TTL |
-
-So the tests exercise the *endpoints* of the journey — a live entry before, a
-live entry with intact accounting after — and skip the failure in between.
-
-### What the tests therefore do and do not establish
-
-**Do establish:**
-
-- Rent arithmetic is correct: creation funds a stream for its full remaining
-  life plus a 30-day buffer, clamped to `max_entry_ttl`.
-- Every mutating call re-extends the entry, so an active stream never decays.
-- A year-long stream whose rent cannot be bought in one go survives on
-  permissionless keeper sweeps, and pays out in full afterwards.
-- Crossing the archive/restore boundary preserves every field of the accounting
-  — deposit, withdrawals, schedule, status — with the pool still fully backing
-  it, and the pooled tokens are never affected by TTL at all.
-
-**Do not establish:**
-
-- That a client hitting an archived stream gets a recoverable, diagnosable
-  failure rather than an opaque one.
-- That the `RestoreFootprint` footprint we would build is correct and
-  sufficient.
-- What the restore actually costs.
-- That `stream_exists() == false` while `stream_id < stream_count()` is a
-  reliable "needs restoring" signal against a real RPC, as the SDK is intended
-  to use it.
-
-### Closing it — in progress, canary planted 2026-08-12
-
-Genuine archival cannot be observed quickly on *any* network. Measured
-2026-08-12, testnet and local quickstart carry identical settings:
-
-| setting | ledgers | at 5s/ledger |
-|---|---|---|
-| `min_persistent_ttl` | 120,960 | **7 days** |
-| `max_entry_ttl` | 3,110,400 | 180 days |
-| Fluxora's own floor (`MIN_STREAM_TTL_LEDGERS`) | 518,400 | 30 days |
-
-The 7-day figure is a *network* floor applied at entry creation — no contract
-can undercut it. Fluxora's 30-day floor sits on top, so a real stream entry
-cannot archive for a month. That floor is deliberate and stays: a settled stream
-must remain readable for the recipient's unclaimed tail and the indexer's final
-state.
-
-Two things are therefore running in parallel.
-
-**1. Testnet canary — clock started 2026-08-12.** `contracts/archival-probe` is a
-throwaway contract that writes one persistent entry and *deliberately never
-extends its TTL*, so it receives exactly `min_persistent_ttl` and archives as
-early as the network allows. The restore mechanism is a property of the ledger,
-not of the contract, so proving it there proves it for `DataKey::Stream(id)`.
+`contracts/archival-probe` was planted on testnet at ledger 4,097,334 and
+deliberately never extended its TTL, so it received exactly the network's
+`min_persistent_ttl` (120,960 ledgers, ~7 days) and was free to archive. It was
+then left alone for seven weeks. Measured on 2026-09-28:
 
 | | |
 |---|---|
-| probe contract | `CB4XJYNXQ62TCXI3GKCVBWADTSTFWYL3ZLYS3MKYPWRANOSADRZG4A7N` |
-| canary planted | ledger 4,097,334 |
-| archives after | ledger 4,218,293 |
-| expected | ~2026-08-19 09:39 UTC |
+| canary planted at ledger | 4,097,334 |
+| canary live until ledger | 4,218,293 |
+| observed at ledger | 4,922,344 — **704,051 ledgers (~40.7 days) past live-until** |
+| `getLedgerEntries` for the canary and the contract instance | returned both, with `liveUntilLedgerSeq: 0` — the TTL entries are gone, i.e. both were archived, and both values were still served |
+| a single `InvokeHostFunction` of `read` | **succeeded**, returned `canary` |
+| its `SorobanTransactionData` | carried `archived_soroban_entries: [0, 1, 2]` — the canary entry, the contract instance and the contract code, all restored automatically by that same invocation |
+| transaction fee | 5,912,922 stroops, of which 5,912,822 stroops was resource fee |
+| both entries after the call | `liveUntilLedgerSeq: 5,043,310` = 4,922,351 + `min_persistent_ttl` − 1 |
 
-Run `script/archival-canary.sh` any time for status; after that ledger, run it
-with `--restore` to perform and verify the round trip. It asserts each step:
-the entry stops being readable, invocation *fails* rather than returning stale
-data, `RestoreFootprint` recovers it, and the value comes back intact.
+Restoring transaction: `32e08f32d30db0f1f1a45786dbe7f8d87ca4f83dbd3e3ced0a0d5b54d807651c`
+on testnet, closed in ledger 4,922,351, **one** operation, no
+`RestoreFootprint` transaction anywhere in the sequence.
 
-**2. Config-upgraded local network — not yet built.** A `min_persistent_ttl`
-lowered via a stellar-core config upgrade would make the round trip provable in
-minutes and repeatable in CI, rather than a once-a-week manual check. There is
-no CLI support for applying a `ConfigUpgradeSet`, so this needs the core admin
-endpoint directly. Tracked as the remaining stage 4 work.
+The middle of the journey that this section said was untested does not exist on
+this network. An archived persistent entry is restored by the first invocation
+that touches it; the caller never sees a failure and never resubmits anything.
 
-Until one of those lands, **this section stays open** and nothing should claim
-TTL is solved.
+### What that changes
 
-### What we will say in each outcome — decided in advance
+- **The integrator guidance in this section is withdrawn.** There is no
+  recoverable failure to detect, so there is nothing to detect it with. The
+  previous advice — treat the first call against an archived stream as a failure,
+  detect it with `stream_exists() == false` and `stream_id < stream_count()`, and
+  surface a restore action — described a state a caller cannot reach.
+- **`stream_exists() == false` is not a "needs restoring" signal.** It was only
+  ever going to be one if a read could observe the archived state without
+  restoring it. It cannot: the read *is* the restore. The probe pins this
+  directly — `planted()`, the analogue of `stream_exists`, still answers `true`
+  after the entry has archived and been auto-restored.
+- **The unit suite's caveat is resolved, not merely tolerated.** Recording mode
+  and the network now agree, which is exactly what
+  `contracts/stream/src/test/read_methods_no_side_effects.rs::get_stream_does_not_extend_ttl_on_archived_stream`
+  asserted on the host side. The tests that "skip the failure in between" were
+  skipping a step that does not happen.
+- **Recovery is not free, it is just not a failure.** The restoring invocation
+  pays for the rent of everything it resurrects. A 5.9 XLM fee on a `read` that
+  normally costs almost nothing is the visible cost, and it is the reason a
+  keeper running `batch_extend_ttl` is still worth running: it keeps entries out
+  of the archive so ordinary calls stay cheap.
 
-Written down before the result is known, so the conclusion cannot be quietly
-reshaped to fit whatever happens.
+### What is still not established
 
-**Outcome A — the entry archives and the restore round trip works.**
-This section closes. The claim we then make, and its exact limits:
+- That a **Fluxora stream** archived. The probe is a separate contract; the
+  argument that the result transfers is that restoration is a property of the
+  persistent ledger entry, not of the contract that wrote it, and the archived
+  set here included the contract *code* as well as two data entries. Say that
+  reasoning out loud whenever this result is cited, rather than letting an
+  audience assume a stream was involved.
+- **Mainnet.** The canary ran on testnet, which was on protocol 28. Mainnet runs
+  the same protocol and the same ledger rules, so the same behaviour is
+  expected, but it has not been measured there.
+- **Storage economics.** That an untouched entry stays in the archive rather
+  than being deleted is the whole point of the mechanism, but nothing here
+  measures what archiving saves, and no Fluxora change is proposed on the basis
+  of a saving.
 
-> Fluxora's archival recovery path is verified end to end against live Stellar
-> testnet: an entry was allowed to archive, the subsequent read failed at the
-> network level, a `RestoreFootprint` operation recovered it, and the stored
-> value came back intact.
+### What was decided in advance, and honoured
 
-That is a headline claim and it is a real differentiator — no other Soroban
-streaming implementation has demonstrated it. It still does **not** claim that a
-Fluxora *stream* archived: the probe is a separate contract, and the argument
-that the result transfers is that restore is a property of the ledger entry, not
-of the contract that wrote it. State that reasoning whenever the claim is made
-rather than letting the audience assume a stream was involved.
+This section was written with three pre-committed outcomes on 2026-08-12. The
+observed result is Outcome B, whose wording was fixed then: the honest statement
+becomes "archival is not a failure mode on this network for persistent
+entries", the restore-detection path becomes dead code, and the section is
+rewritten to record that the concern did not materialise. That is what happened
+here; the finding has not been retro-fitted into a success story. In particular,
+this is **not** a claim that Fluxora's `RestoreFootprint` handling was validated
+— there is no such handling, and none is needed.
 
-**Outcome B — the network auto-restores, and reads never fail.**
-Then the recording-mode behaviour the unit suite relies on turns out to match
-the network, and this entire limitation was narrower than we thought. We say so
-publicly, in those words, and we **narrow the claim rather than reframing it**:
-the honest statement becomes "archival is not a failure mode on this network for
-persistent entries", the SDK's restore-detection path becomes dead code and gets
-deleted, and this section is rewritten to record that the concern did not
-materialise. We do not retro-fit the finding into a success story.
+### Retired
 
-**Outcome C — the entry does not archive on schedule.**
-Eviction is a background scan and lags `live_until`, so a delay of hours or days
-is expected and is not an outcome in itself. The canary script distinguishes
-this case explicitly and exits without a verdict. Re-run rather than concluding
-anything. If it is still unarchived a week past `live_until`, that is itself a
-finding worth writing up — it would mean testnet eviction is effectively not
-running, and mainnet behaviour should not be inferred from it.
-
-In all three cases the result is reported, not just the convenient ones.
-
-### If you are integrating before then
-
-Assume archived streams are reachable and that your first call against one will
-fail. Detect it (`stream_exists() == false` with `stream_id < stream_count()`)
-and surface a restore action rather than an error toast. Run a keeper against
-`batch_extend_ttl` so it rarely comes up.
+`script/archival-canary.sh` and `docs/archival-canary.md` are retained as the
+record of how the result was produced and of the assertions that were made. The
+canary itself has been restored and **must not be replanted or redeployed** as a
+routine; a new question needs a new deployment with its own live-until ledger.
 
 ---
+
 
 ## 2. Resource measurements understate a real deployment
 

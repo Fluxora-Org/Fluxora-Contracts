@@ -225,11 +225,12 @@ the failure output.
   failure or you've introduced a new one — don't assume today's `main` is
   fully green on these.
 - **The test-host's storage runs in recording mode**, so an expired
-  persistent entry is silently auto-restored during `cargo test`. This means
-  `test::ttl` proves the rent arithmetic but *not* the real-network recovery
-  flow — that's what `script/archival-canary.sh` and the archival probe are
-  for. Read `docs/KNOWN-LIMITATIONS.md` §1 before claiming TTL is "solved" by
-  a green suite.
+  persistent entry is silently auto-restored during `cargo test`. The live
+  network does the same, which the canary established on testnet on 2026-09-28,
+  so `test::ttl` is representative here — but read `docs/KNOWN-LIMITATIONS.md`
+  §1 before claiming TTL is "solved" by a green suite: what the suite does not
+  measure is what the automatic restoration *costs*, and that is what
+  `script/archival-canary.sh --round-trip` records.
 
 ## Before opening a PR
 
