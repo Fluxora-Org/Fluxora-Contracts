@@ -176,8 +176,8 @@ entitlement is zero by definition.
 
 ## Decisions
 
-The spec left four questions open. All four are settled, and the reasoning is in
-the code where the behaviour lives.
+The spec left four questions open; the acceptance gate settled a fifth. All of
+them are settled, and the reasoning is in the code where the behaviour lives.
 
 ### 1. `top_up` extends the duration; it never raises the rate
 
@@ -253,6 +253,32 @@ Transfer moves the stream's entire remaining claim. Funds already withdrawn
 stay with the old recipient; accrued but unwithdrawn funds and all future
 accrual belong to the new recipient. The transfer itself changes no schedule or
 accounting value, and only the new recipient may withdraw afterward.
+
+### 5. Recipient acceptance is opt-in, and rebases the schedule
+
+`create_stream` makes the recipient a party without their involvement. They can
+be named as the counterparty to a token they cannot or will not hold, and their
+only recourse is to never withdraw. `create_stream_pending` closes that gap: the
+deposit is escrowed, but the stream is `Pending` — no accrual, no payout — until
+the recipient calls `accept_stream` or `decline_stream`.
+
+The one real decision is what acceptance does to the schedule. The answer is
+**rebase, not merely un-gate**: on acceptance the authored duration and cliff
+offset are preserved and the stream starts at `max(start_time, now)`. Un-gating
+would credit the recipient for time that elapsed *before* they were a party —
+free backdated vesting on a stream they had not accepted — while a plain
+"start now" would silently discard a deliberately future-dated start. Rebasing
+keeps the stream the recipient accepts identical in shape to the one the sender
+authored, measured from the moment they said yes. Because a pending stream's
+clock never runs, `vested` is zero on both sides of the call, so acceptance can
+neither create nor destroy value (invariant I3).
+
+The second is what a recipient who never answers costs the sender: nothing.
+`cancel` refunds a pending stream in full even when `cancellable == false`.
+That flag is a promise about a live stream, and an unresponsive recipient must
+not be able to lock a deposit permanently. `decline_stream` is the same refund,
+but only the recipient may call it, and it is recorded as `Declined` rather
+than `Cancelled` so the two are distinguishable.
 
 ---
 
@@ -345,6 +371,11 @@ integrator guidance in [docs/KNOWN-LIMITATIONS.md §1](docs/KNOWN-LIMITATIONS.md
 create_stream(sender, recipient, token, deposit,
               start, end, cliff,
               cancellable, pausable, transferable) -> u64   // sender auth
+create_stream_pending(sender, recipient, token, deposit,
+              start, end, cliff,
+              cancellable, pausable, transferable) -> u64   // sender auth; awaits acceptance
+accept_stream(stream_id)                                    // recipient auth; starts a pending stream
+decline_stream(stream_id)                                   // recipient auth; full refund
 top_up(stream_id, amount)                                   // sender auth
 withdraw(stream_id, amount: Option<i128>) -> i128           // recipient auth; None = max
 batch_withdraw(recipient, stream_ids) -> i128               // recipient auth
@@ -370,7 +401,7 @@ Both classic keypairs and custom `__check_auth` smart accounts work everywhere.
 ### Events
 
 `stream_created`, `withdrawn`, `cancelled`, `paused`, `resumed`, `topped_up`,
-`recipient_transferred`, `ttl_extended`.
+`recipient_transferred`, `stream_accepted`, `stream_declined`, `ttl_extended`.
 
 Declared with `#[contractevent]`, so their schemas are embedded in the deployed
 contract's interface spec — the indexer and TypeScript SDK generate typed

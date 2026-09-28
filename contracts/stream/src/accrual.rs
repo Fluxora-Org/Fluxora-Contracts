@@ -152,7 +152,18 @@ pub fn cliff_reached(stream: &Stream, now: u64) -> bool {
 /// Before the cliff this is zero — the cliff *gates* the payout, it does not
 /// delay accrual, so at the cliff instant the recipient becomes entitled to
 /// everything accrued since `start_time`, not since `cliff_time`.
+///
+/// A `Pending` stream (issue #1817) is also zero, whatever the clock says. The
+/// acceptance gate is expressed *here*, in the single pure function every
+/// accrual figure flows through, rather than in each view and entry point: it
+/// is what makes `vested_of`, `withdrawable_of`, `refundable_of`, `withdraw`,
+/// `cancel` and the pool invariant agree on a pending stream by construction
+/// instead of by convention. Only `accept_stream` clears it.
 pub fn vested(stream: &Stream, now: u64) -> Result<i128, Error> {
+    if stream.status.is_pending() {
+        return Ok(0);
+    }
+
     if !cliff_reached(stream, now) {
         return Ok(0);
     }

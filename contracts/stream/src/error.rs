@@ -183,4 +183,20 @@ pub enum Error {
     /// The guard stays because the invariant it protects is load-bearing.
     /// Classified as reserved in `test::error_reachability`.
     VestedDecreased = 33,
+
+    // --- Acceptance gate (issue #1817) ---
+    /// `accept_stream` or `decline_stream` was called on a stream that is not
+    /// `Pending`. A stream only enters `Pending` through
+    /// `create_stream_pending`; `create_stream` produces an `Active` stream
+    /// that has nothing to accept.
+    StreamNotPending = 34,
+    /// An operation that requires an accruing (or at least accepted) stream was
+    /// called while the stream is still `Pending`.
+    ///
+    /// A pending stream has not started: it accrues nothing, so `withdraw`,
+    /// `top_up`, `pause`, `resume` and `transfer_recipient` are all rejected
+    /// until the recipient accepts it. `cancel` is deliberately *not* in this
+    /// set — the sender must always be able to reclaim a deposit from a stream
+    /// the recipient never accepts.
+    StreamPending = 35,
 }

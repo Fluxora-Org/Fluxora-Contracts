@@ -2,6 +2,13 @@
 
 **Status: FROZEN as of 2026-08-12, ahead of stage 5.**
 
+> The wasm hash and interface-spec hash below describe the deployment currently
+> on testnet. Additions since the freeze — the recipient acceptance gate of
+> issue #1817 (`create_stream_pending`, `accept_stream`, `decline_stream`, the
+> `Pending`/`Declined` statuses and the appended `StreamCreated.status` field) —
+> are additive and ship with the next deployment at a new address, per the
+> upgrade posture below.
+
 This document is the interface contract between `Fluxora-Contracts` and every
 consumer — `Fluxora-Backend`, `Fluxora-Frontend`, `fluxora-sdk`, and third-party
 integrators. Anything not described here is not part of the interface.
@@ -133,10 +140,19 @@ Crosses the ABI as its **discriminant**, not its name.
 | `1` | `Paused` | no | accrual clock frozen; withdrawal still permitted |
 | `2` | `Cancelled` | yes | sender clawed back the unvested remainder |
 | `3` | `Depleted` | yes | ran to term and was fully withdrawn |
+| `4` | `Pending` | no | awaiting recipient acceptance; no accrual, no payout |
+| `5` | `Declined` | yes | recipient refused before accept; sender refunded in full |
 
 `Cancelled` is **sticky**: a cancelled stream later drained to zero stays
 `Cancelled`. It never becomes `Depleted`. This distinction is deliberate and
 load-bearing for reporting — see the resolved schema question below.
+
+`Pending` (4) and `Declined` (5) were appended for the recipient acceptance
+gate (issue #1817). Existing values are unchanged. `Pending` is produced only
+by `create_stream_pending` — `create_stream` still creates an `Active` stream,
+so nothing about the default path changes. `Declined` is terminal, like
+`Cancelled` and `Depleted`, but tells an indexer the recipient refused the
+stream rather than the sender clawing it back.
 
 ### Stream ID allocation
 
@@ -229,6 +245,8 @@ Discriminants are ABI and are never renumbered; new variants are appended.
 | 31 | `InvalidTopUp` | Reserved; non-positive top-ups are rejected as `InvalidAmount` first. | reserved |
 | 32 | `TokenAmountMismatch` | Deposit pull changes pool balance by an unexpected amount. | reachable |
 | 33 | `VestedDecreased` | Reserved; current mutation paths preserve non-decreasing vested value. | reserved |
+| 34 | `StreamNotPending` | `accept_stream` / `decline_stream` on a stream that is not `Pending`. | reachable |
+| 35 | `StreamPending` | An accrual-dependent operation (`withdraw`, `top_up`, `pause`, `resume`, `transfer_recipient`) on a stream still awaiting acceptance. | reachable |
 
 `TokenTransferFailed` (25) and `TokenMissing` (26) are **stable stream-level categories** for token sub-invocation failures. The token contract's internal error discriminant is intentionally discarded — forwarding it would produce a value clients decode against Fluxora's error table, yielding a silent misinterpretation. The raw diagnostic is visible in the failed transaction's `diagnosticEvents`.
 
@@ -334,6 +352,9 @@ accounting.
 | function | auth | returns |
 |---|---|---|
 | `create_stream(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable)` | sender | `u64` stream id |
+| `create_stream_pending(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable)` | sender | `u64` stream id — [details](#create_stream_pending) |
+| `accept_stream(stream_id)` | recipient | — — [details](#accept_stream) |
+| `decline_stream(stream_id)` | recipient | — — [details](#decline_stream) |
 | `top_up(stream_id, amount)` | sender | — |
 | `withdraw(stream_id, amount: Option<i128>)` | recipient | `i128` paid |
 | `batch_withdraw(recipient, stream_ids: Vec<u64>)` | recipient | `i128` total — [details](#batch_withdraw) |
@@ -345,6 +366,68 @@ accounting.
 | `revoke_delegate(stream_id, grantor, delegate)` | sender or recipient | — |
 
 `withdraw` with `amount = None` draws the full available balance.
+
+#### The recipient acceptance gate — `create_stream_pending`, `accept_stream`, `decline_stream`
+
+Added by issue #1817. `create_stream` makes the recipient a party without their
+involvement; the acceptance gate makes that opt-in. The default is unchanged —
+`create_stream` still produces an `Active` stream that accrues immediately.
+
+##### `create_stream_pending(...)` — create without starting
+
+Same arguments, validation and token movement as `create_stream` (the deposit
+is escrowed immediately), but the stream is created `Pending` (4) instead of
+`Active` (0). Nothing accrues and nothing is payable until the recipient
+answers. `vested_of`, `withdrawable_of` and `refundable_of` report `0`, `0` and
+the full `deposited` respectively, whatever the wall clock says.
+
+##### `accept_stream(stream_id)` — start the clock
+
+Recipient auth. The stream must be `Pending`, otherwise `StreamNotPending`
+(34). The schedule is rebased so the authored **duration** and **cliff offset**
+are preserved and the stream starts at `max(start_time, now)`:
+
+```text
+duration     = end_time - start_time            (unchanged)
+cliff_offset = cliff_time - start_time          (unchanged)
+start_time'  = max(start_time, acceptance instant)
+end_time'    = start_time' + duration
+cliff_time'  = start_time' + cliff_offset
+```
+
+A future-dated `start_time` is therefore honoured as a scheduled start; a past
+or present one means "start when accepted". Because the clock never ran while
+pending, `vested` is zero before and after the call: acceptance can neither
+credit nor claw back retroactive value. Emits `stream_accepted` with the
+post-rebase schedule.
+
+##### `decline_stream(stream_id)` — refuse, refund in full
+
+Recipient auth. The stream must be `Pending`, otherwise `StreamNotPending`
+(34). The entire `deposited` amount is returned to the sender, the stream
+becomes `Declined` (5) — terminal, and distinct from `Cancelled` so an indexer
+can tell "the recipient refused" from "the sender clawed back" — and the
+schedule is collapsed onto the decline instant exactly as `cancel` collapses a
+live one. Emits `stream_declined` with `refunded`.
+
+##### Sender escape hatch
+
+A recipient who never answers cannot strand the deposit: `cancel` refunds a
+pending stream **in full regardless of `cancellable`**. That flag is a promise
+about a live, accepted stream; a pending stream is not one, and gating the
+refund on it would let an unresponsive recipient lock the sender's funds
+forever. The same applies to `delegate_cancel`.
+
+##### What a pending stream refuses
+
+`withdraw`, `delegate_withdraw`, `top_up`, `delegate_top_up`, `pause`,
+`delegate_pause`, `resume`, `delegate_resume`, `transfer_recipient` and
+`delegate_transfer_recipient` all return `StreamPending` (35) while the stream
+awaits acceptance, because none of them has a defined meaning before the clock
+starts. `transfer_recipient` is included deliberately: it would let the sender
+swap the counterparty after the fact. `grant_delegate` and `revoke_delegate`
+remain available (they move no funds and change no accrual), and the views and
+permissionless TTL maintenance are unaffected.
 
 #### `pause(stream_id)` — freeze accrual and the cliff gate
 
@@ -1091,7 +1174,9 @@ is the snake_case event name, second is always `stream_id`.
 
 | event | topics after the name | payload |
 |---|---|---|
-| `stream_created` | `stream_id`, `sender`, `recipient` | `token`, `deposited`, `start_time`, `end_time`, `cliff_time`, `cancellable`, `pausable`, `transferable` |
+| `stream_created` | `stream_id`, `sender`, `recipient` | `token`, `deposited`, `start_time`, `end_time`, `cliff_time`, `cancellable`, `pausable`, `transferable`, `status` |
+| `stream_accepted` | `stream_id`, `recipient` | `start_time`, `end_time`, `cliff_time` |
+| `stream_declined` | `stream_id`, `recipient`, `sender` | `refunded` |
 | `withdrawn` | `stream_id`, `recipient` | `amount`, `withdrawn`, `deposited`, `status` |
 | `cancelled` | `stream_id`, `sender`, `recipient` | `refunded`, `vested`, `withdrawn`, `end_time` |
 | `paused` | `stream_id`, `sender` | `paused_at`, `paused_total` |
@@ -1123,11 +1208,11 @@ may emit fewer than 16 events.
 Both were open against `Fluxora-Backend` in [MIGRATION.md](MIGRATION.md) §5
 and are settled here as part of the freeze.
 
-### 1. `streams.status` — mirror the contract's four values verbatim
+### 1. `streams.status` — mirror the contract's values verbatim
 
 The backend's current CHECK constraint is
 `('active','paused','completed','cancelled')`. The contract emits
-`Active | Paused | Cancelled | Depleted`.
+`Active | Paused | Cancelled | Depleted | Pending | Declined`.
 
 **Resolution: rename `completed` to `depleted` and use the contract's four names
 as-is.** Do not map `Depleted` onto `completed`.

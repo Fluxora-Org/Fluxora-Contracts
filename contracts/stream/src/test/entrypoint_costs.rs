@@ -27,12 +27,30 @@ fn fresh() -> (Harness<'static>, u64) {
     (h, id)
 }
 
+fn fresh_pending() -> (Harness<'static>, u64) {
+    let h = wasm_harness();
+    let id = h.create_pending(1_000 * ONE, 100 * DAY);
+    (h, id)
+}
+
 #[test]
 #[ignore = "requires release WASM; run with script/validate_gas.py"]
 fn entrypoint_cost_snapshot() {
     let h = wasm_harness();
     h.create_simple(1_000 * ONE, 100 * DAY);
     record(&h, "create_stream");
+
+    let h = wasm_harness();
+    h.create_pending(1_000 * ONE, 100 * DAY);
+    record(&h, "create_stream_pending");
+
+    let (h, id) = fresh_pending();
+    h.client.accept_stream(&id);
+    record(&h, "accept_stream");
+
+    let (h, id) = fresh_pending();
+    h.client.decline_stream(&id);
+    record(&h, "decline_stream");
 
     let (h, id) = fresh();
     h.client.top_up(&id, &(100 * ONE));

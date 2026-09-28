@@ -350,7 +350,9 @@ class TestScriptBranches:
         mod = _import_script("check-discriminant-collisions.py")
         assert mod is not None
         sections = mod._parse_docs(REPO_ROOT / "docs" / "ABI.md")
-        assert len(sections["ContractError (stream)"]) == 33
+        # 33 frozen variants plus StreamNotPending (34) and StreamPending (35)
+        # added by the recipient acceptance gate (issue #1817).
+        assert len(sections["ContractError (stream)"]) == 35
 
     def test_validate_doc_alignment_with_streaming_md(self):
         """Exercise doc alignment with temp streaming.md."""

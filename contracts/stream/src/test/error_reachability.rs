@@ -76,7 +76,7 @@ enum Account {
 /// Kept as a value so the tests can iterate it. `names_and_discriminants_match_the_abi_fixture`
 /// pins its length to `DISCRIMINANT_FIXTURE`, which is itself pinned to
 /// `LAST_DISCRIMINANT`, so dropping an entry here fails the suite.
-const ALL: [Error; 33] = [
+const ALL: [Error; 35] = [
     Error::StreamNotFound,
     Error::InvalidTimeRange,
     Error::InvalidCliff,
@@ -110,6 +110,8 @@ const ALL: [Error; 33] = [
     Error::InvalidTopUp,
     Error::TokenAmountMismatch,
     Error::VestedDecreased,
+    Error::StreamNotPending,
+    Error::StreamPending,
 ];
 
 /// Frozen allowlist of discriminants that have no reaching test, in ascending
@@ -620,6 +622,28 @@ fn describe(e: Error) -> (&'static str, u32, Account) {
                  so 33 is unreachable. The guard stays because the invariant it \
                  protects is load-bearing.",
             ),
+        ),
+
+        // --- Acceptance gate (issue #1817) ---------------------------------
+        Error::StreamNotPending => (
+            "StreamNotPending",
+            34,
+            Account::Reach(|h| {
+                // A plain `create_stream` produces an Active stream, which has
+                // nothing to accept.
+                let id = h.create_simple(1_000 * ONE, 100 * DAY);
+                h.client.try_accept_stream(&id).unwrap_err().unwrap()
+            }),
+        ),
+        Error::StreamPending => (
+            "StreamPending",
+            35,
+            Account::Reach(|h| {
+                // A pending stream has not started; `withdraw` refuses it with a
+                // dedicated error rather than `NothingToWithdraw`.
+                let id = h.create_pending(1_000 * ONE, 100 * DAY);
+                h.client.try_withdraw(&id, &None).unwrap_err().unwrap()
+            }),
         ),
     }
 }

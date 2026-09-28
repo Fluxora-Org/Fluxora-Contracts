@@ -606,9 +606,11 @@ class TestRealErrorMd:
     def test_stream_section_present(self, real_sections):
         assert "ContractError (stream)" in real_sections
 
-    def test_stream_has_all_33_variants(self, real_sections):
+    def test_stream_has_all_35_variants(self, real_sections):
+        # 33 frozen variants plus StreamNotPending (34) and StreamPending (35)
+        # added by the recipient acceptance gate (issue #1817).
         stream = real_sections["ContractError (stream)"]
-        assert {entry.code for entry in stream} == set(range(1, 34))
+        assert {entry.code for entry in stream} == set(range(1, 36))
 
     def test_stream_has_no_intra_collisions_after_fix(self, real_sections):
         """docs/error.md stream table was fixed: no intra-section collisions remain."""

@@ -8,8 +8,10 @@ from script.validate_gas import compare, entrypoints, main, parse_measurements
 
 def test_entrypoints_match_public_abi_surface():
     names = entrypoints()
-    assert len(names) == 24
+    assert len(names) == 27
     assert {"withdraw", "batch_withdraw", "delegate_withdraw"} <= names
+    # Issue #1817: the recipient acceptance gate adds three entry points.
+    assert {"create_stream_pending", "accept_stream", "decline_stream"} <= names
 
 
 def test_parse_measurements_reads_entrypoint_costs():

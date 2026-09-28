@@ -1,6 +1,14 @@
 {
-  "abi_version": 1,
+  "abi_version": 2,
   "functions": [
+    {
+      "name": "accept_stream",
+      "auth": "recipient",
+      "inputs": [
+        {"name": "stream_id", "type": "u64"}
+      ],
+      "outputs": "Result<(), Error>"
+    },
     {
       "name": "batch_extend_ttl",
       "auth": "none",
@@ -42,6 +50,31 @@
         {"name": "transferable", "type": "bool"}
       ],
       "outputs": "Result<u64, Error>"
+    },
+    {
+      "name": "create_stream_pending",
+      "auth": "sender",
+      "inputs": [
+        {"name": "sender", "type": "Address"},
+        {"name": "recipient", "type": "Address"},
+        {"name": "token", "type": "Address"},
+        {"name": "deposit", "type": "i128"},
+        {"name": "start_time", "type": "u64"},
+        {"name": "end_time", "type": "u64"},
+        {"name": "cliff_time", "type": "u64"},
+        {"name": "cancellable", "type": "bool"},
+        {"name": "pausable", "type": "bool"},
+        {"name": "transferable", "type": "bool"}
+      ],
+      "outputs": "Result<u64, Error>"
+    },
+    {
+      "name": "decline_stream",
+      "auth": "recipient",
+      "inputs": [
+        {"name": "stream_id", "type": "u64"}
+      ],
+      "outputs": "Result<(), Error>"
     },
     {
       "name": "delegate_cancel",
@@ -253,7 +286,9 @@
         {"name": "Active", "discriminant": 0},
         {"name": "Paused", "discriminant": 1},
         {"name": "Cancelled", "discriminant": 2},
-        {"name": "Depleted", "discriminant": 3}
+        {"name": "Depleted", "discriminant": 3},
+        {"name": "Pending", "discriminant": 4},
+        {"name": "Declined", "discriminant": 5}
       ]
     }
   ],
@@ -290,7 +325,9 @@
     {"name": "RepeatedTransfer", "discriminant": 30},
     {"name": "InvalidTopUp", "discriminant": 31},
     {"name": "TokenAmountMismatch", "discriminant": 32},
-    {"name": "VestedDecreased", "discriminant": 33}
+    {"name": "VestedDecreased", "discriminant": 33},
+    {"name": "StreamNotPending", "discriminant": 34},
+    {"name": "StreamPending", "discriminant": 35}
   ],
   "events": [
     {
@@ -340,6 +377,18 @@
       ]
     },
     {
+      "name": "StreamAccepted",
+      "topics": [
+        {"name": "stream_id", "type": "u64"},
+        {"name": "recipient", "type": "Address"}
+      ],
+      "data": [
+        {"name": "start_time", "type": "u64"},
+        {"name": "end_time", "type": "u64"},
+        {"name": "cliff_time", "type": "u64"}
+      ]
+    },
+    {
       "name": "StreamCreated",
       "topics": [
         {"name": "stream_id", "type": "u64"},
@@ -354,7 +403,19 @@
         {"name": "cliff_time", "type": "u64"},
         {"name": "cancellable", "type": "bool"},
         {"name": "pausable", "type": "bool"},
-        {"name": "transferable", "type": "bool"}
+        {"name": "transferable", "type": "bool"},
+        {"name": "status", "type": "StreamStatus"}
+      ]
+    },
+    {
+      "name": "StreamDeclined",
+      "topics": [
+        {"name": "stream_id", "type": "u64"},
+        {"name": "recipient", "type": "Address"},
+        {"name": "sender", "type": "Address"}
+      ],
+      "data": [
+        {"name": "refunded", "type": "i128"}
       ]
     },
     {

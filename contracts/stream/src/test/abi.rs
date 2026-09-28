@@ -33,8 +33,8 @@ use soroban_sdk::xdr::{
 };
 
 use crate::events::{
-    Cancelled, Paused, RecipientTransferred, Resumed, StreamCreated, ToppedUp, TtlExtended,
-    Withdrawn,
+    Cancelled, Paused, RecipientTransferred, Resumed, StreamAccepted, StreamCreated,
+    StreamDeclined, ToppedUp, TtlExtended, Withdrawn,
 };
 use crate::{Error, FluxoraStream, Stream, StreamStatus, ABI_VERSION};
 
@@ -93,6 +93,9 @@ struct EventAbi {
 /// fails the suite.
 const AUTH: &[(&str, &str)] = &[
     ("create_stream", "sender"),
+    ("create_stream_pending", "sender"),
+    ("accept_stream", "recipient"),
+    ("decline_stream", "recipient"),
     ("top_up", "sender"),
     ("cancel", "sender"),
     ("pause", "sender"),
@@ -275,6 +278,9 @@ fn event_from_spec(entry: ScSpecEntry) -> EventAbi {
 fn current_inventory() -> Inventory {
     let mut functions = vec![
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_create_stream())),
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_create_stream_pending())),
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_accept_stream())),
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_decline_stream())),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_top_up())),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_withdraw())),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_batch_withdraw())),
@@ -313,6 +319,8 @@ fn current_inventory() -> Inventory {
 
     let mut events = vec![
         event_from_spec(parse_spec(&StreamCreated::spec_xdr())),
+        event_from_spec(parse_spec(&StreamAccepted::spec_xdr())),
+        event_from_spec(parse_spec(&StreamDeclined::spec_xdr())),
         event_from_spec(parse_spec(&Withdrawn::spec_xdr())),
         event_from_spec(parse_spec(&Cancelled::spec_xdr())),
         event_from_spec(parse_spec(&Paused::spec_xdr())),

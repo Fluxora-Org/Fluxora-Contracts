@@ -246,7 +246,9 @@ class TestParseRenamesTable:
 class TestParseEntrypointCountClaim:
     def test_extracts_v1_count(self, real_doc):
         count = vm.parse_entrypoint_count_claim(real_doc)
-        assert count == 16
+        # 19 core entrypoints: the original 16 plus the three added by the
+        # recipient acceptance gate (issue #1817).
+        assert count == 19
 
     def test_returns_none_when_absent(self):
         assert vm.parse_entrypoint_count_claim("# No counts here") is None

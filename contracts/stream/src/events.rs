@@ -80,6 +80,12 @@ use crate::types::{Stream, StreamStatus};
 
 /// A new stream was created. Carries the complete initial state — this is the
 /// event an indexer builds its sender/recipient mapping from.
+///
+/// `status` (appended by issue #1817) is `Active` for `create_stream` and
+/// `Pending` for `create_stream_pending`. It is the only way an indexer that
+/// sees a creation event can tell the two apart without a follow-up
+/// `get_stream`, and it is additive: consumers that ignore trailing fields keep
+/// working.
 #[contractevent]
 pub struct StreamCreated {
     #[topic]
@@ -96,6 +102,47 @@ pub struct StreamCreated {
     pub cancellable: bool,
     pub pausable: bool,
     pub transferable: bool,
+    /// Lifecycle state the stream was created in: `Active` for
+    /// `create_stream`, `Pending` for `create_stream_pending`.
+    pub status: StreamStatus,
+}
+
+/// A pending stream's recipient accepted it.
+///
+/// Emitted at the acceptance instant, after the schedule has been rebased so
+/// that accrual begins at `start_time`. The event carries the *post-acceptance*
+/// schedule, which is what an indexer must mirror: the times in `stream_created`
+/// describe the pending schedule, and those in `stream_accepted` describe the
+/// schedule that actually runs. A stream is only ever accepted once.
+#[contractevent]
+pub struct StreamAccepted {
+    #[topic]
+    pub stream_id: u64,
+    #[topic]
+    pub recipient: Address,
+    /// Rebased schedule start: `max(pre-accept start_time, acceptance instant)`.
+    pub start_time: u64,
+    /// Rebased schedule end, preserving the authored duration.
+    pub end_time: u64,
+    /// Rebased cliff, preserving the authored `cliff_time - start_time` offset.
+    pub cliff_time: u64,
+}
+
+/// A pending stream's recipient declined it.
+///
+/// The whole deposit is returned to the sender and the stream becomes
+/// `Declined` (terminal). No value ever accrued, so `refunded` is always the
+/// full `deposited` and `withdrawn` is always zero.
+#[contractevent]
+pub struct StreamDeclined {
+    #[topic]
+    pub stream_id: u64,
+    #[topic]
+    pub recipient: Address,
+    #[topic]
+    pub sender: Address,
+    /// Returned to the sender by this call: the entire deposit.
+    pub refunded: i128,
 }
 
 /// The recipient drew down accrued funds. Emitted once per stream, including
@@ -246,6 +293,34 @@ pub fn stream_created(env: &Env, stream_id: u64, stream: &Stream) {
         cancellable: stream.cancellable,
         pausable: stream.pausable,
         transferable: stream.transferable,
+        status: stream.status,
+    }
+    .publish(env);
+}
+
+/// Emit [`StreamAccepted`] for a stream whose schedule has already been rebased
+/// and saved. Reads the schedule off the stream so the event and storage cannot
+/// drift apart.
+pub fn stream_accepted(env: &Env, stream_id: u64, stream: &Stream) {
+    StreamAccepted {
+        stream_id,
+        recipient: stream.recipient.clone(),
+        start_time: stream.start_time,
+        end_time: stream.end_time,
+        cliff_time: stream.cliff_time,
+    }
+    .publish(env);
+}
+
+/// Emit [`StreamDeclined`] for a stream already collapsed and saved as
+/// `Declined`. `refunded` is passed in because it is a token movement, not
+/// stream state.
+pub fn stream_declined(env: &Env, stream_id: u64, stream: &Stream, refunded: i128) {
+    StreamDeclined {
+        stream_id,
+        recipient: stream.recipient.clone(),
+        sender: stream.sender.clone(),
+        refunded,
     }
     .publish(env);
 }

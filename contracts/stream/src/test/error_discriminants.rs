@@ -99,13 +99,16 @@ pub(super) const DISCRIMINANT_FIXTURE: &[(&str, u32)] = &[
     ("TokenAmountMismatch", 32),
     // --- Vesting monotonicity ---
     ("VestedDecreased", 33),
+    // --- Acceptance gate (issue #1817) ---
+    ("StreamNotPending", 34),
+    ("StreamPending", 35),
 ];
 
 /// The highest discriminant value in the fixture above.
 ///
 /// New variants must use `LAST_DISCRIMINANT + 1`. This constant is checked
 /// against the fixture length so a gap is caught immediately.
-const LAST_DISCRIMINANT: u32 = 33;
+const LAST_DISCRIMINANT: u32 = 35;
 
 /// Assert that the fixture has no gaps and ends at `LAST_DISCRIMINANT`.
 ///
@@ -180,6 +183,8 @@ fn discriminant_fixture_matches_source() {
         ("InvalidTopUp", Error::InvalidTopUp as u32),
         ("TokenAmountMismatch", Error::TokenAmountMismatch as u32),
         ("VestedDecreased", Error::VestedDecreased as u32),
+        ("StreamNotPending", Error::StreamNotPending as u32),
+        ("StreamPending", Error::StreamPending as u32),
     ];
 
     assert_eq!(
@@ -1164,5 +1169,51 @@ fn vested_decreased_discriminant_value() {
         Error::VestedDecreased as u32,
         33,
         "VestedDecreased discriminant must be 33",
+    );
+}
+
+// #34 — StreamNotPending ----------------------------------------------------
+
+#[test]
+fn stream_not_pending_accepting_an_active_stream() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let err = h.client.try_accept_stream(&id).unwrap_err().unwrap();
+    assert_eq!(
+        err,
+        Error::StreamNotPending,
+        "discriminant {}",
+        Error::StreamNotPending as u32
+    );
+}
+
+#[test]
+fn stream_not_pending_declining_an_already_accepted_stream() {
+    let h = Harness::new();
+    let id = h.create_pending(1_000 * ONE, 100 * DAY);
+    h.client.accept_stream(&id);
+    let err = h.client.try_decline_stream(&id).unwrap_err().unwrap();
+    assert_eq!(
+        err,
+        Error::StreamNotPending,
+        "discriminant {}",
+        Error::StreamNotPending as u32
+    );
+}
+
+// #35 — StreamPending -------------------------------------------------------
+
+#[test]
+fn stream_pending_withdraw_before_acceptance() {
+    let h = Harness::new();
+    let id = h.create_pending(1_000 * ONE, 100 * DAY);
+    // Advance the clock: a pending stream must still accrue nothing.
+    h.advance(10 * DAY);
+    let err = h.client.try_withdraw(&id, &None).unwrap_err().unwrap();
+    assert_eq!(
+        err,
+        Error::StreamPending,
+        "discriminant {}",
+        Error::StreamPending as u32
     );
 }

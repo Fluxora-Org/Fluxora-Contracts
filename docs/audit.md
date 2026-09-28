@@ -12,6 +12,9 @@ Last verified: 2026-08-29 (PR #1665)
 | Entrypoint | Description |
 |---|---|
 | `create_stream` | Create a new payment stream with deposit, schedule, and capability flags |
+| `create_stream_pending` | Create a stream awaiting recipient acceptance before it accrues |
+| `accept_stream` | Recipient accepts a pending stream; accrual clock starts (recipient auth) |
+| `decline_stream` | Recipient declines a pending stream; sender refunded in full (recipient auth) |
 | `top_up` | Extend stream duration at a fixed rate (sender auth) |
 | `withdraw` | Pull accrued balance; `None` = withdraw max |
 | `batch_withdraw` | Atomic multi-stream withdrawal |
