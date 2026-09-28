@@ -616,6 +616,14 @@ jobs:
         env:
           PROPTEST_CASES: "64"
 
+      - name: Bounded proptest pause/resume pass
+        run: |
+          cargo test -p fluxora-stream --features testutils \
+            pause::zero_elapsed_pause_resume_preserves_stream_state \
+            -- --nocapture
+        env:
+          PROPTEST_CASES: "64"
+
       # Regression guard: explicitly run the depleted-while-paused fixture so
       # a code change that reintroduces the defect fails this job, not just the
       # nightly run.

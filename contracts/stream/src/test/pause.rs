@@ -6,6 +6,7 @@
 
 use super::common::*;
 use crate::{Error, StreamStatus};
+use proptest::prelude::*;
 
 #[test]
 fn pausing_freezes_accrual() {
@@ -138,6 +139,97 @@ fn repeated_pause_cycles_accumulate_correctly() {
     h.warp_to(T0 + 100 * DAY + expected_paused);
     assert_eq!(h.client.vested_of(&id), 1_000 * ONE);
     h.assert_pool_exact();
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::default())]
+
+    /// A pause immediately followed by a resume must be a no-op when the
+    /// ledger timestamp does not advance. Randomized preceding cycles ensure
+    /// the invariant also holds after the stream has already accumulated
+    /// paused time and accrued at different points in its schedule.
+    #[test]
+    fn zero_elapsed_pause_resume_preserves_stream_state(
+        seed in any::<u64>(),
+        operations in prop::collection::vec((0u8..4, 0u64..=3 * DAY), 0..=8),
+    ) {
+        let h = Harness::new();
+        let id = h.create_simple(1_000 * ONE, 365 * DAY);
+
+        for (kind, seconds) in operations {
+            match kind {
+                // Advance while remaining well inside the stream's schedule.
+                0 => h.advance(seconds),
+                // Exercise a normal pause/resume cycle before the zero-time
+                // assertion, so paused_total is not always zero.
+                1 => {
+                    h.client.pause(&id);
+                    h.advance(seconds);
+                    h.client.resume(&id);
+                }
+                // Include zero-time transitions at arbitrary points in the
+                // generated operation sequence as well as at its end.
+                2 => {
+                    let before = h.snapshot();
+                    let timestamp = h.now();
+                    h.client.pause(&id);
+                    h.client.resume(&id);
+                    prop_assert_eq!(
+                        h.now(),
+                        timestamp,
+                        "seed {}: pause/resume changed the ledger timestamp",
+                        seed,
+                    );
+                    prop_assert_eq!(
+                        h.snapshot(),
+                        before,
+                        "seed {}: zero-elapsed pause/resume changed stream state",
+                        seed,
+                    );
+                }
+                // A rejected second pause must preserve its original freeze
+                // point. This keeps the generated sequence sensitive to the
+                // pause-state guard while exercising the same lifecycle.
+                _ => {
+                    h.client.pause(&id);
+                    let freeze_point = h.get(id).paused_at;
+                    h.advance(seconds);
+                    prop_assert_eq!(
+                        h.client.try_pause(&id).unwrap_err().unwrap(),
+                        Error::StreamAlreadyPaused,
+                        "seed {}: a paused stream accepted a second pause",
+                        seed,
+                    );
+                    prop_assert_eq!(
+                        h.get(id).paused_at,
+                        freeze_point,
+                        "seed {}: rejected pause moved the freeze point",
+                        seed,
+                    );
+                    h.client.resume(&id);
+                }
+            }
+        }
+
+        // Force every generated case to exercise the behavior under test even
+        // when the random sequence contains no zero-time transition.
+        let before = h.snapshot();
+        let timestamp = h.now();
+        h.client.pause(&id);
+        h.client.resume(&id);
+        prop_assert_eq!(
+            h.now(),
+            timestamp,
+            "seed {}: pause/resume changed the ledger timestamp",
+            seed,
+        );
+        prop_assert_eq!(
+            h.snapshot(),
+            before,
+            "seed {}: zero-elapsed pause/resume changed stream state",
+            seed,
+        );
+    }
 }
 
 /// A pause that starts before the cliff and ends after it must not let the
