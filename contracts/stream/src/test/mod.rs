@@ -41,6 +41,8 @@ mod amount_domain;
 mod cancel_events;
 mod cliff;
 mod delegation;
+// Issue #1845: delegation surviving a recipient transfer.
+mod delegation_transfer;
 mod pause;
 mod storage_keys;
 mod terminal_operations;
