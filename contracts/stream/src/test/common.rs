@@ -272,6 +272,7 @@ impl<'a> Harness<'a> {
             &true,
             &true,
             &true,
+            &None,
         )
     }
 
@@ -298,6 +299,54 @@ impl<'a> Harness<'a> {
             &cancellable,
             &pausable,
             &transferable,
+            &None,
+        )
+    }
+
+    /// Create with reference support - simple case
+    pub fn create_simple_with_ref(&self, deposit: i128, duration: u64, reference: Option<soroban_sdk::String>) -> u64 {
+        let start = self.now();
+        self.client.create_stream(
+            &self.sender,
+            &self.recipient,
+            &self.token,
+            &deposit,
+            &start,
+            &(start + duration),
+            &start,
+            &true,
+            &true,
+            &true,
+            &reference,
+        )
+    }
+
+    /// Create with reference support - full control
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_with_ref(
+        &self,
+        deposit: i128,
+        start: u64,
+        end: u64,
+        cliff: u64,
+        cancellable: bool,
+        pausable: bool,
+        transferable: bool,
+        reference: Option<soroban_sdk::String>,
+    ) -> u64 {
+        self.client.create_stream(
+            &self.sender,
+            &self.recipient,
+            &self.token,
+            &deposit,
+            &start,
+            &end,
+            &cliff,
+            &cancellable,
+            &pausable,
+            &transferable,
+            &reference,
+        )
         )
     }
 

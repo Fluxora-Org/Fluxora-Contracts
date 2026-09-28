@@ -27,6 +27,7 @@ mod error_reachability;
 // Stage 1
 mod create;
 mod props;
+mod reference;
 mod withdraw;
 // Issue #1583: withdrawal return value matches emitted amounts.
 mod withdraw_events;

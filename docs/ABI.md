@@ -77,6 +77,7 @@ trial calls.
 | constant | value | applies to | notes |
 |---|---|---|---|
 | **`MAX_BATCH_SIZE`** | **16** | `batch_withdraw`, `batch_extend_ttl` | Maximum number of stream ids accepted in a single batch call. Requests with **more than 16 ids** return [`BatchTooLarge` (19)](#error). Chunk larger lists client-side; the SDK does this automatically. |
+| **`MAX_REFERENCE_LENGTH`** | **64** | `create_stream` | Maximum length in characters for the optional reference string. References exceeding this limit return [`InvalidReferenceLength` (34)](#error). |
 | `MIN_RATE_STROOPS_PER_SECOND` | 1 | `create_stream`, `top_up` | Enforced via `DepositRateTooLow` (5). Below 1 token unit per second the per-second rate truncates to zero and the recipient accrues nothing until the last instant. |
 
 ### Derivation of `MAX_BATCH_SIZE = 16`
@@ -115,6 +116,7 @@ struct Stream {
     paused_at: Option<u64>,
     paused_total: u64,     // cumulative paused seconds, excluding any in-progress pause
     status: StreamStatus,
+    reference: Option<String>, // optional reference for stream identification, max 64 characters
 }
 ```
 
@@ -333,7 +335,7 @@ accounting.
 
 | function | auth | returns |
 |---|---|---|
-| `create_stream(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable)` | sender | `u64` stream id |
+| `create_stream(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable, reference)` | sender | `u64` stream id |
 | `top_up(stream_id, amount)` | sender | — |
 | `withdraw(stream_id, amount: Option<i128>)` | recipient | `i128` paid |
 | `batch_withdraw(recipient, stream_ids: Vec<u64>)` | recipient | `i128` total — [details](#batch_withdraw) |
@@ -751,6 +753,7 @@ fn create_stream(
     cancellable: bool,
     pausable: bool,
     transferable: bool,
+    reference: Option<String>,
 ) -> Result<u64, Error>
 ```
 
@@ -770,6 +773,7 @@ fn create_stream(
 | `cancellable` | `bool` | Whether sender may cancel. Immutable after creation. |
 | `pausable` | `bool` | Whether sender may pause accrual. Immutable after creation. |
 | `transferable` | `bool` | Whether recipient may reassign the stream. Immutable after creation. |
+| `reference` | `Option<String>` | Optional identifier for the stream (e.g., "payroll-001", "grant-xyz-q1"). Maximum 64 characters. Immutable after creation, returned by `get_stream` and included in the `StreamCreated` event. |
 
 **Valid Ranges and Constraints:**
 
@@ -788,6 +792,7 @@ All validation errors are checked **before** the token transfer. A rejected crea
 | error | condition |
 |---|---|
 | `SelfStream` (6) | `sender == recipient` |
+| `InvalidReferenceLength` (34) | Reference string exceeds `MAX_REFERENCE_LENGTH` (64 characters) |
 | `InvalidDeposit` (4) | `deposit ≤ 0` |
 | `InvalidTimeRange` (2) | `end_time ≤ start_time` (zero or negative duration) |
 | `InvalidCliff` (3) | `cliff_time < start_time` or `cliff_time > end_time` |
@@ -799,7 +804,7 @@ All validation errors are checked **before** the token transfer. A rejected crea
 
 **Events:**
 
-On success, emits `stream_created` with topics `[stream_id, sender, recipient]` and payload carrying the complete initial state: `token`, `deposited`, `start_time`, `end_time`, `cliff_time`, `cancellable`, `pausable`, `transferable`. This is the canonical event for indexer discovery.
+On success, emits `stream_created` with topics `[stream_id, sender, recipient]` and payload carrying the complete initial state: `token`, `deposited`, `start_time`, `end_time`, `cliff_time`, `cancellable`, `pausable`, `transferable`, `reference`. This is the canonical event for indexer discovery.
 
 **Atomicity:**
 
@@ -1091,7 +1096,7 @@ is the snake_case event name, second is always `stream_id`.
 
 | event | topics after the name | payload |
 |---|---|---|
-| `stream_created` | `stream_id`, `sender`, `recipient` | `token`, `deposited`, `start_time`, `end_time`, `cliff_time`, `cancellable`, `pausable`, `transferable` |
+| `stream_created` | `stream_id`, `sender`, `recipient` | `token`, `deposited`, `start_time`, `end_time`, `cliff_time`, `cancellable`, `pausable`, `transferable`, `reference` |
 | `withdrawn` | `stream_id`, `recipient` | `amount`, `withdrawn`, `deposited`, `status` |
 | `cancelled` | `stream_id`, `sender`, `recipient` | `refunded`, `vested`, `withdrawn`, `end_time` |
 | `paused` | `stream_id`, `sender` | `paused_at`, `paused_total` |

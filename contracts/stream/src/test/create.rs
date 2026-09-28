@@ -604,6 +604,7 @@ fn streams_of_different_tokens_are_accounted_separately() {
         &true,
         &true,
         &true,
+        &None,
     );
 
     assert_eq!(h.pool(), 100 * ONE, "first token pool");

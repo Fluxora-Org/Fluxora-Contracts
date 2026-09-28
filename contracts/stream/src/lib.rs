@@ -69,7 +69,7 @@ pub use accrual::{
 pub use error::Error;
 pub use storage::{MIN_STREAM_TTL_LEDGERS, SECONDS_PER_LEDGER, TTL_BUFFER_SECONDS};
 pub use types::op;
-pub use types::{DataKey, DelegateGrant, Stream, StreamStatus};
+pub use types::{DataKey, DelegateGrant, Stream, StreamStatus, MAX_REFERENCE_LENGTH};
 
 use soroban_sdk::{
     contract, contractimpl, token, Address, Env, InvokeError, MuxedAddress, TryFromVal, Vec,
@@ -291,6 +291,7 @@ impl FluxoraStream {
         cancellable: bool,
         pausable: bool,
         transferable: bool,
+        reference: Option<String>,
     ) -> Result<u64, Error> {
         sender.require_auth();
 
@@ -305,6 +306,13 @@ impl FluxoraStream {
         }
         if cliff_time < start_time || cliff_time > end_time {
             return Err(Error::InvalidCliff);
+        }
+
+        // Validate reference length if provided
+        if let Some(ref r) = reference {
+            if r.len() > MAX_REFERENCE_LENGTH as usize {
+                return Err(Error::InvalidReferenceLength);
+            }
         }
 
         let total_duration = end_time - start_time;
@@ -341,6 +349,7 @@ impl FluxoraStream {
             paused_at: None,
             paused_total: 0,
             status: StreamStatus::Active,
+            reference,
         };
 
         // Pull the deposit before writing the stream entry. If the token

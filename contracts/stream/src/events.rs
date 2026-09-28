@@ -74,7 +74,7 @@
 //! `vested - withdrawn` through the normal withdraw path, which is why that
 //! amount stays pooled in the contract. Every cancellation state is asserted
 //! against storage and token balances in `test::cancel_events`.
-use soroban_sdk::{contractevent, Address, Env};
+use soroban_sdk::{contractevent, Address, Env, String};
 
 use crate::types::{Stream, StreamStatus};
 
@@ -96,6 +96,8 @@ pub struct StreamCreated {
     pub cancellable: bool,
     pub pausable: bool,
     pub transferable: bool,
+    /// Optional reference string for stream identification.
+    pub reference: Option<String>,
 }
 
 /// The recipient drew down accrued funds. Emitted once per stream, including
@@ -246,6 +248,7 @@ pub fn stream_created(env: &Env, stream_id: u64, stream: &Stream) {
         cancellable: stream.cancellable,
         pausable: stream.pausable,
         transferable: stream.transferable,
+        reference: stream.reference.clone(),
     }
     .publish(env);
 }

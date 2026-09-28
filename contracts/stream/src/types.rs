@@ -1,4 +1,10 @@
-use soroban_sdk::{contracttype, Address};
+use soroban_sdk::{contracttype, Address, String};
+
+/// Maximum length for stream reference strings.
+/// 
+/// This limit balances utility with storage costs. References are intended for
+/// short identifiers like "payroll-001" or "grant-xyz-q1-2024".
+pub const MAX_REFERENCE_LENGTH: u32 = 64;
 
 /// Bitmask constants for which operations a delegate is permitted to perform.
 ///
@@ -91,6 +97,13 @@ pub struct Stream {
     /// Cumulative seconds spent paused, excluding any in-progress pause.
     pub paused_total: u64,
     pub status: StreamStatus,
+    /// Optional reference string for stream identification.
+    /// 
+    /// Set at creation and never mutable. Maximum length is
+    /// [`MAX_REFERENCE_LENGTH`] characters. Intended for short identifiers
+    /// like "payroll-001" or "grant-xyz-q1-2024" to help operators distinguish
+    /// between streams on-chain.
+    pub reference: Option<String>,
 }
 
 impl Stream {
