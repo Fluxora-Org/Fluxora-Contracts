@@ -32,8 +32,13 @@ jobs:
     name: Python Tooling Tests and Docs Alignment
     runs-on: ubuntu-latest
     steps:
+      # Full history so tests/test_validator.py can compare
+      # script/doc-alignment-baseline.json against the base branch and fail
+      # if the shrink-only baseline grew.
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # Bumped 3.10 → 3.11: `script/verify_rust_version.py` (and a couple
       # of other helpers) prefer `tomllib` when available; on 3.10 it
@@ -78,8 +83,18 @@ jobs:
           path: coverage/python-tooling.xml
           if-no-files-found: warn
 
-      - name: Validate doc alignment (streaming / events / errors)
-        run: echo "Skip missing python script"
+      # Blocking gate (issue #1865): docs/ABI.md must cover every public
+      # #[contractimpl] entry point in lib.rs (missing-from-docs fails) and
+      # must not document entry points that no longer exist in the contract
+      # (documented-but-nonexistent fails). Known gaps predating the gate are
+      # recorded in script/doc-alignment-baseline.json with a reason; the
+      # baseline is a shrink-only ratchet: unbaselined gaps fail, stale
+      # baseline entries fail, and the file itself is routed to the
+      # maintainers team in .github/CODEOWNERS so it cannot grow silently.
+      # Exit 1 = misalignment, exit 2 = broken inputs (missing files,
+      # unparsable baseline). Both fail the job.
+      - name: Validate doc alignment (docs/ABI.md vs lib.rs entry points)
+        run: python3 script/validate-doc-alignment.py
 
       # Hard gate: diff the #[contractimpl] pub fn surface against
       # docs/audit.md's entrypoint table.  Fails (exit 1) if any ABI
