@@ -154,6 +154,165 @@ fn top_up_is_allowed_while_paused_and_does_not_resume() {
     h.assert_pool_exact();
 }
 
+/// **Regression.** Top-up arithmetic while paused must handle fractional rates
+/// correctly: the frozen clock means `stream_time` is computed against `paused_at`,
+/// not `now`. Division must still round **down** to prevent vested from moving
+/// backwards. Rounding up the duration extension would lower the rate, retroactively
+/// reducing the already-vested amount at the frozen timestamp — letting `withdrawn`
+/// exceed `vested` and breaking funds conservation on subsequent cancel.
+///
+/// This is the paused-stream variant of `a_top_up_never_reduces_what_is_already_vested`.
+/// Randomized testing in `test::invariants` originally found the active-stream case
+/// (seed 11694633084171541224 step 27). The paused variant adds the frozen clock to
+/// that arithmetic and was not previously covered end-to-end.
+#[test]
+fn top_up_while_paused_never_reduces_vested_despite_fractional_rates() {
+    let h = Harness::new();
+    // Deliberately inexact: 1000 stroops over 300 seconds is 3.33/sec.
+    let start = h.now();
+    let id = h.create(1_000, start, start + 300, start, true, true, true);
+
+    h.advance(150);
+    let before_pause = h.client.vested_of(&id);
+    assert!(before_pause > 0, "stream must have accrued before pause");
+
+    // Withdraw to make `withdrawn > 0`, which pins the lower bound for `vested`.
+    h.client.withdraw(&id, &None);
+    assert_eq!(h.get(id).withdrawn, before_pause);
+
+    // Pause the stream, freezing the clock at the current vested amount.
+    h.client.pause(&id);
+    assert_eq!(h.get(id).status, StreamStatus::Paused);
+    let frozen_vested = h.client.vested_of(&id);
+    assert_eq!(frozen_vested, before_pause, "vested must freeze on pause");
+
+    // Wall clock advances, but vested stays frozen because the stream is paused.
+    h.advance(50);
+    assert_eq!(
+        h.client.vested_of(&id),
+        frozen_vested,
+        "no accrual while paused"
+    );
+
+    // Top up while paused, using amounts that produce awkward remainders when
+    // divided by the per-second rate. The implementation must round the duration
+    // extension **down**, never up, to avoid lowering the rate and thereby
+    // retroactively reducing the vested amount at `paused_at`.
+    for amount in [7i128, 13, 101, 17, 23] {
+        let before_top_up = h.client.vested_of(&id);
+        h.client.top_up(&id, &amount);
+        let after_top_up = h.client.vested_of(&id);
+        let s = h.get(id);
+
+        assert_eq!(
+            s.status,
+            StreamStatus::Paused,
+            "top_up must not resume the stream"
+        );
+        assert!(
+            after_top_up >= before_top_up,
+            "vested went backwards across top_up({amount}) while paused: \
+             {before_top_up} -> {after_top_up}",
+        );
+        assert!(
+            s.withdrawn <= after_top_up,
+            "withdrawn {} exceeded vested {after_top_up} after top_up({amount}) while paused",
+            s.withdrawn,
+        );
+
+        // Wall clock advances, but vested must still be frozen.
+        h.advance(1);
+        assert_eq!(
+            h.client.vested_of(&id),
+            after_top_up,
+            "accrual must remain frozen after top_up({amount})"
+        );
+    }
+
+    // Resume and verify the schedule is coherent: no jump on resume, and the
+    // final total matches deposited.
+    let before_resume = h.client.vested_of(&id);
+    h.client.resume(&id);
+    assert_eq!(
+        h.client.vested_of(&id),
+        before_resume,
+        "no jump on resume"
+    );
+
+    // Fast-forward to the stretched end and confirm full delivery.
+    let s = h.get(id);
+    let stretched_end = s.end_time;
+    h.warp_to(stretched_end);
+    assert_eq!(
+        h.client.vested_of(&id),
+        s.deposited,
+        "full deposit vests by stretched end"
+    );
+    assert_eq!(
+        h.client.withdrawable_of(&id),
+        s.deposited - s.withdrawn,
+        "withdrawable balance must track remaining funds"
+    );
+
+    h.assert_pool_exact();
+}
+
+/// Cancelling immediately after top-up while paused must settle at the frozen
+/// vested amount, never below what was already withdrawn. This pins down the
+/// correctness of the duration-extension rounding when combined with cancel.
+#[test]
+fn cancel_after_top_up_while_paused_respects_withdrawn_lower_bound() {
+    let h = Harness::new();
+    let start = h.now();
+    let id = h.create(1_000, start, start + 300, start, true, true, true);
+    let sender_before = h.balance(&h.sender);
+
+    h.advance(150);
+    h.client.withdraw(&id, &None);
+    let withdrawn = h.get(id).withdrawn;
+    assert!(withdrawn > 0, "must have withdrawn before pause");
+
+    h.client.pause(&id);
+    h.advance(50);
+
+    // Top up with amounts that produce fractional remainders.
+    for amount in [7i128, 13, 23] {
+        h.client.top_up(&id, &amount);
+    }
+
+    // Cancel while still paused: settlement uses the frozen vested amount, and
+    // deposited must never fall below withdrawn.
+    h.client.cancel(&id);
+    let s = h.get(id);
+    assert_eq!(s.status, StreamStatus::Cancelled);
+    assert!(
+        s.deposited >= s.withdrawn,
+        "cancel left deposited {} below withdrawn {}",
+        s.deposited,
+        s.withdrawn,
+    );
+    assert_eq!(
+        h.client.withdrawable_of(&id),
+        s.deposited - s.withdrawn,
+        "remaining withdrawable must be deposited - withdrawn"
+    );
+
+    // Sender gets back unvested funds; recipient holds what was withdrawn.
+    let sender_after = h.balance(&h.sender);
+    let refund = sender_after - sender_before;
+    assert!(
+        refund >= 0,
+        "sender refund must be non-negative, got {refund}"
+    );
+    assert_eq!(
+        h.balance(&h.recipient),
+        withdrawn,
+        "recipient holds exactly what was withdrawn"
+    );
+
+    h.assert_pool_exact();
+}
+
 /// **Regression.** The duration extension must round **down**, because rounding
 /// up lowers the rate and therefore retroactively *reduces* already-vested
 /// value — letting `withdrawn` exceed `vested`.
