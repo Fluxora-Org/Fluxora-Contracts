@@ -41,6 +41,8 @@ mod amount_domain;
 mod cancel_events;
 mod cliff;
 mod delegation;
+// Issue #1838 — a delegate acting in the very ledger its grant expires.
+mod delegate_expiry_boundary;
 mod pause;
 mod storage_keys;
 mod terminal_operations;
