@@ -371,7 +371,7 @@ impl FluxoraStream {
         sender: Address,
         requests: Vec<BatchCreateRequest>,
     ) -> Result<Vec<u64>, Error> {
-        if requests.len() == 0 {
+        if requests.is_empty() {
             return Err(Error::EmptyBatch);
         }
         if requests.len() > MAX_BATCH_SIZE {
