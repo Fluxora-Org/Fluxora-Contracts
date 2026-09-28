@@ -45,6 +45,9 @@ mod pause;
 mod storage_keys;
 mod terminal_operations;
 mod token_errors;
+
+// Issue #1883 — withdrawal from a stream whose token contract is gone.
+mod token_destroyed;
 mod top_up;
 mod transfer;
 mod withdraw_cancel_same_ledger;
