@@ -73,9 +73,14 @@ fn test_cancel_then_withdraw_at(offset: u64) {
     h.client.cancel(&id);
 
     if expected_vested == 0 {
+        // The cancel above already made the stream terminal, so a zero-vest
+        // withdraw hits the terminal precondition, not the live-stream one:
+        // `withdraw` reports `StreamTerminated`, never `NothingToWithdraw`,
+        // which is reserved for a still-live stream that has not accrued. Same
+        // precedence as `cancel::cancel_at_the_instant_of_creation_refunds_everything`.
         assert_eq!(
             h.client.try_withdraw(&id, &None).unwrap_err().unwrap(),
-            Error::NothingToWithdraw
+            Error::StreamTerminated
         );
     } else {
         h.client.withdraw(&id, &None);
