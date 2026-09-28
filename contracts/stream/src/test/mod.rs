@@ -82,3 +82,8 @@ mod read_ttl_matrix;
 // guards #1675 (no inert governance crate). Previously unregistered, so
 // that CI step matched zero tests.
 mod packaging;
+
+// Issue #1840 — a stream funded with the maximum representable deposit
+// (`i128::MAX`), driven end to end through the public ABI on a dedicated
+// full-range asset; also pins the creation-guard boundary that rejects it.
+mod max_deposit;

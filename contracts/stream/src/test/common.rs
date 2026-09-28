@@ -404,17 +404,20 @@ impl<'a> Harness<'a> {
     /// Call this after every operation. It is the single most important
     /// assertion in the suite.
     pub fn assert_pool_invariant(&self) {
+        self.assert_pool_invariant_for(&self.token);
+    }
+
+    /// [`assert_pool_invariant`](Self::assert_pool_invariant) against a token
+    /// other than the harness's own.
+    ///
+    /// Tests that need a second asset — a dedicated supply, a different
+    /// issuer, a hostile token — still must assert the pool invariant on it,
+    /// but the harness-shaped check above is hard-wired to [`Harness::token`].
+    /// This is the same check with the token made explicit.
+    pub fn assert_pool_invariant_for(&self, token: &Address) {
         self.assert_invariants();
-        let mut total: i128 = 0;
-        let count = self.client.stream_count();
-        for id in 0..count {
-            let stream = self.client.get_stream(&id);
-            if stream.token != self.token {
-                continue;
-            }
-            total += accrual::liability(&stream).expect("liability must not overflow");
-        }
-        let pool = self.pool();
+        let total = self.outstanding_liability(token);
+        let pool = TokenClient::new(&self.env, token).balance(&self.contract_id);
         assert!(
             pool >= total,
             "pool invariant violated: pooled balance {pool} < outstanding liability {total}",
@@ -428,21 +431,35 @@ impl<'a> Harness<'a> {
     /// true for every test that does not deliberately donate loose tokens to the
     /// contract.
     pub fn assert_pool_exact(&self) {
+        self.assert_pool_exact_for(&self.token);
+    }
+
+    /// [`assert_pool_exact`](Self::assert_pool_exact) against a token other
+    /// than the harness's own. See
+    /// [`assert_pool_invariant_for`](Self::assert_pool_invariant_for).
+    pub fn assert_pool_exact_for(&self, token: &Address) {
         self.assert_invariants();
+        let total = self.outstanding_liability(token);
+        let pool = TokenClient::new(&self.env, token).balance(&self.contract_id);
+        assert_eq!(
+            pool, total,
+            "pooled balance and outstanding liability diverged",
+        );
+    }
+
+    /// Sum of `deposited - withdrawn` across every stream denominated in
+    /// `token` (see [`accrual::liability`]).
+    fn outstanding_liability(&self, token: &Address) -> i128 {
         let mut total: i128 = 0;
         let count = self.client.stream_count();
         for id in 0..count {
             let stream = self.client.get_stream(&id);
-            if stream.token != self.token {
+            if stream.token != *token {
                 continue;
             }
             total += accrual::liability(&stream).expect("liability must not overflow");
         }
-        assert_eq!(
-            self.pool(),
-            total,
-            "pooled balance and outstanding liability diverged",
-        );
+        total
     }
 
     // -----------------------------------------------------------------------
