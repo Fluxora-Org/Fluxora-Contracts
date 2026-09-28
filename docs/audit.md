@@ -12,6 +12,7 @@ Last verified: 2026-08-29 (PR #1665)
 | Entrypoint | Description |
 |---|---|
 | `create_stream` | Create a new payment stream with deposit, schedule, and capability flags |
+| `batch_create` | Atomically create multiple payment streams in one transaction |
 | `top_up` | Extend stream duration at a fixed rate (sender auth) |
 | `withdraw` | Pull accrued balance; `None` = withdraw max |
 | `batch_withdraw` | Atomic multi-stream withdrawal |
