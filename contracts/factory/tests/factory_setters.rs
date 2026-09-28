@@ -10,7 +10,7 @@ use fluxora_factory::{
     load_policy, FactoryError, FactoryPolicy, FluxoraFactory, FluxoraFactoryClient,
 };
 use soroban_sdk::{
-    testutils::{Address as _, MockAuth, MockAuthInvoke},
+    testutils::{Address as _, Ledger as _, MockAuth, MockAuthInvoke},
     Address, Env, IntoVal,
 };
 use std::panic::AssertUnwindSafe;
@@ -24,7 +24,7 @@ use std::panic::AssertUnwindSafe;
 fn test_init_happy_path() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
@@ -43,7 +43,7 @@ fn test_init_happy_path() {
 fn test_init_double_returns_already_initialized() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
@@ -62,7 +62,7 @@ fn test_init_double_returns_already_initialized() {
 fn test_get_factory_config_before_init() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
 
     assert_eq!(
@@ -76,7 +76,7 @@ fn test_get_factory_config_before_init() {
 fn test_setters_before_init_return_not_initialized() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let addr = Address::generate(&env);
 
@@ -111,7 +111,7 @@ fn test_setters_before_init_return_not_initialized() {
 fn test_set_admin_updates_config() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
@@ -127,7 +127,7 @@ fn test_set_admin_updates_config() {
 fn test_set_admin_new_admin_can_call_setters() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
@@ -145,7 +145,7 @@ fn test_set_admin_new_admin_can_call_setters() {
 fn test_set_admin_same_address_noop() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
@@ -164,7 +164,7 @@ fn test_set_admin_same_address_noop() {
 fn test_set_cap_round_trip() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
@@ -183,7 +183,7 @@ fn test_set_cap_round_trip() {
 fn test_set_min_duration_round_trip() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
@@ -202,7 +202,7 @@ fn test_set_min_duration_round_trip() {
 fn test_is_allowlisted_default_false() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
@@ -217,7 +217,7 @@ fn test_is_allowlisted_default_false() {
 fn test_set_allowlist_add() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
@@ -234,7 +234,7 @@ fn test_set_allowlist_add() {
 fn test_set_allowlist_remove() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
@@ -251,7 +251,7 @@ fn test_set_allowlist_remove() {
 fn test_set_allowlist_remove_non_allowlisted_noop() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
@@ -280,7 +280,7 @@ fn assert_auth_fails<F: FnOnce()>(f: F) {
 #[test]
 fn test_set_admin_rejects_non_admin() {
     let env = Env::default();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let non_admin = Address::generate(&env);
@@ -306,7 +306,7 @@ fn test_set_admin_rejects_non_admin() {
 #[test]
 fn test_set_stream_contract_rejects_non_admin() {
     let env = Env::default();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let non_admin = Address::generate(&env);
@@ -332,7 +332,7 @@ fn test_set_stream_contract_rejects_non_admin() {
 #[test]
 fn test_set_cap_rejects_non_admin() {
     let env = Env::default();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let non_admin = Address::generate(&env);
@@ -357,7 +357,7 @@ fn test_set_cap_rejects_non_admin() {
 #[test]
 fn test_set_min_duration_rejects_non_admin() {
     let env = Env::default();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let non_admin = Address::generate(&env);
@@ -382,7 +382,7 @@ fn test_set_min_duration_rejects_non_admin() {
 #[test]
 fn test_set_allowlist_rejects_non_admin() {
     let env = Env::default();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let non_admin = Address::generate(&env);
@@ -417,7 +417,7 @@ fn test_set_allowlist_rejects_non_admin() {
 fn test_init_bumps_instance_ttl() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
@@ -451,7 +451,7 @@ fn test_init_bumps_instance_ttl() {
 fn test_setters_bump_instance_ttl() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
@@ -512,7 +512,7 @@ fn test_setters_bump_instance_ttl() {
 fn test_repeated_setter_calls_prevent_expiration() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
@@ -544,7 +544,7 @@ fn test_repeated_setter_calls_prevent_expiration() {
 fn test_idle_factory_recovers_on_first_setter() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
@@ -577,7 +577,7 @@ fn test_idle_factory_recovers_on_first_setter() {
 fn test_set_rate_bounds_bumps_instance_ttl() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
@@ -604,9 +604,9 @@ fn test_set_rate_bounds_bumps_instance_ttl() {
 fn test_load_policy_before_init_returns_not_initialized() {
     let env = Env::default();
     env.mock_all_auths();
-    let _fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
 
-    let result = load_policy(&env);
+    let result = env.as_contract(&fid, || load_policy(&env));
     assert_eq!(result, Err(FactoryError::NotInitialized));
 }
 
@@ -617,14 +617,16 @@ fn test_load_policy_before_init_returns_not_initialized() {
 fn test_load_policy_reflects_initial_state() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
 
     factory.init(&admin, &sc, &10_000, &100);
 
-    let policy = load_policy(&env).expect("policy should load after init");
+    let policy = env
+        .as_contract(&fid, || load_policy(&env))
+        .expect("policy should load after init");
     assert_eq!(policy.stream_contract, sc);
     assert_eq!(policy.max_deposit, 10_000);
     assert_eq!(policy.min_duration, 100);
@@ -647,7 +649,7 @@ fn test_load_policy_reflects_initial_state() {
 fn test_load_policy_reflects_all_setters() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
@@ -664,7 +666,9 @@ fn test_load_policy_reflects_all_setters() {
     factory.set_factory_paused(&true);
     factory.set_rate_bounds(&Some(50), &Some(1_000));
 
-    let policy: FactoryPolicy = load_policy(&env).expect("policy should load");
+    let policy: FactoryPolicy = env
+        .as_contract(&fid, || load_policy(&env))
+        .expect("policy should load");
 
     assert_eq!(policy.stream_contract, new_sc);
     assert_eq!(policy.max_deposit, 7_500);
@@ -682,20 +686,24 @@ fn test_load_policy_reflects_all_setters() {
 fn test_load_policy_defaults_rate_bounds_to_none() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
 
     factory.init(&admin, &sc, &10_000, &100);
 
-    let policy = load_policy(&env).expect("policy should load");
+    let policy = env
+        .as_contract(&fid, || load_policy(&env))
+        .expect("policy should load");
     assert_eq!(policy.min_rate_per_second, None);
     assert_eq!(policy.max_rate_per_second, None);
 
     // Toggling pause does not implicitly change rate-bound visibility.
     factory.set_factory_paused(&true);
-    let policy = load_policy(&env).expect("policy should load");
+    let policy = env
+        .as_contract(&fid, || load_policy(&env))
+        .expect("policy should load");
     assert_eq!(policy.min_rate_per_second, None);
     assert_eq!(policy.max_rate_per_second, None);
 }
@@ -706,19 +714,31 @@ fn test_load_policy_defaults_rate_bounds_to_none() {
 fn test_load_policy_reflects_batch_cap_toggle() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
 
     factory.init(&admin, &sc, &10_000, &100);
-    assert!(load_policy(&env).unwrap().batch_cap_enforced);
+    assert!(
+        env.as_contract(&fid, || load_policy(&env))
+            .unwrap()
+            .batch_cap_enforced
+    );
 
     factory.set_batch_cap_enforcement(&false);
-    assert!(!load_policy(&env).unwrap().batch_cap_enforced);
+    assert!(
+        !env.as_contract(&fid, || load_policy(&env))
+            .unwrap()
+            .batch_cap_enforced
+    );
 
     factory.set_batch_cap_enforcement(&true);
-    assert!(load_policy(&env).unwrap().batch_cap_enforced);
+    assert!(
+        env.as_contract(&fid, || load_policy(&env))
+            .unwrap()
+            .batch_cap_enforced
+    );
 }
 
 /// `set_factory_paused` flips `creation_paused`, which is the very first
@@ -727,19 +747,31 @@ fn test_load_policy_reflects_batch_cap_toggle() {
 fn test_load_policy_reflects_pause_toggle() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
 
     factory.init(&admin, &sc, &10_000, &100);
-    assert!(!load_policy(&env).unwrap().creation_paused);
+    assert!(
+        !env.as_contract(&fid, || load_policy(&env))
+            .unwrap()
+            .creation_paused
+    );
 
     factory.set_factory_paused(&true);
-    assert!(load_policy(&env).unwrap().creation_paused);
+    assert!(
+        env.as_contract(&fid, || load_policy(&env))
+            .unwrap()
+            .creation_paused
+    );
 
     factory.set_factory_paused(&false);
-    assert!(!load_policy(&env).unwrap().creation_paused);
+    assert!(
+        !env.as_contract(&fid, || load_policy(&env))
+            .unwrap()
+            .creation_paused
+    );
 }
 
 /// `FactoryPolicy` instances returned from `load_policy` comparing equal must
@@ -749,7 +781,7 @@ fn test_load_policy_reflects_pause_toggle() {
 fn test_load_policy_equality_is_struct_equality() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
@@ -757,8 +789,8 @@ fn test_load_policy_equality_is_struct_equality() {
     factory.init(&admin, &sc, &10_000, &100);
     factory.set_rate_bounds(&Some(10), &Some(100));
 
-    let p1 = load_policy(&env).unwrap();
-    let p2 = load_policy(&env).unwrap();
+    let p1 = env.as_contract(&fid, || load_policy(&env)).unwrap();
+    let p2 = env.as_contract(&fid, || load_policy(&env)).unwrap();
     assert_eq!(p1, p2);
 
     let admin_addr = p1.stream_contract.clone();
@@ -782,7 +814,7 @@ fn test_load_policy_equality_is_struct_equality() {
 #[test]
 fn test_set_admin_same_ledger_old_admin_fails() {
     let env = Env::default();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let old_admin = Address::generate(&env);
     let new_admin = Address::generate(&env);
@@ -837,7 +869,7 @@ fn test_set_admin_same_ledger_old_admin_fails() {
 #[test]
 fn test_set_admin_same_ledger_new_admin_succeeds() {
     let env = Env::default();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let old_admin = Address::generate(&env);
     let new_admin = Address::generate(&env);
@@ -891,7 +923,7 @@ fn test_set_admin_same_ledger_new_admin_succeeds() {
 #[test]
 fn test_set_admin_same_ledger_multiple_setters() {
     let env = Env::default();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let old_admin = Address::generate(&env);
     let new_admin = Address::generate(&env);
