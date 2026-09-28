@@ -21,6 +21,11 @@ subscription billing, vesting schedules. The contract is the product.
 > A green suite here does not mean TTL is solved — the archival *recovery* flow
 > is not yet proven against a live network. See §1 there, and the summary below.
 
+> **Security status:** Automated testing includes property tests, a pool
+> invariant checked after every operation, and randomized sequence tests. This
+> testing is not an independent security review; no third-party security audit
+> of the contracts has been performed.
+
 ---
 
 ## Quick start
