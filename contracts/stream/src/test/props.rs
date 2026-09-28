@@ -318,3 +318,11 @@ proptest! {
         );
     }
 }
+
+/// Issue #1861 — delegation grants never widen through any entry point.
+///
+/// Host-driven, so it lives beside the pure accrual properties in this module:
+/// `cargo test props::` (the CI proptest job's filter) runs both, and
+/// `PROPTEST_CASES` sets the case budget for both.
+#[path = "props_delegation.rs"]
+mod delegation;
