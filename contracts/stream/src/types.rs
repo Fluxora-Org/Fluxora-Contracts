@@ -307,9 +307,6 @@ pub struct BatchCreateRequest {
     pub cancellable: bool,
     pub pausable: bool,
     pub transferable: bool,
-    pub paused_at: Option<u64>,
-    pub paused_total: u64,
-    pub status: StreamStatus,
 }
 
 impl StreamRecord {

@@ -36,9 +36,10 @@ use crate::events::{
     Cancelled, ContractHalted, ContractResumed, HaltOperatorSet, Paused, RecipientTransferred,
     Resumed, StreamCreated, ToppedUp, TtlExtended, Withdrawn,
 };
-use crate::{BatchCancelOutcome, Error, FluxoraStream, Stream, StreamStatus, ABI_VERSION};
-use crate::{CliffMode, Error, FluxoraStream, Stream, StreamStatus, ABI_VERSION};
-use crate::{Error, FluxoraStream, ReleaseCurve, Stream, StreamStatus, ABI_VERSION};
+use crate::{
+    BatchCancelOutcome, CliffMode, Error, FluxoraStream, ReleaseCurve, Stream, StreamStatus,
+    ABI_VERSION,
+};
 
 // ---------------------------------------------------------------------------
 // Inventory

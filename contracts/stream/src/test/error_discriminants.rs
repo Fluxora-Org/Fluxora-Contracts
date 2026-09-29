@@ -99,22 +99,30 @@ pub(super) const DISCRIMINANT_FIXTURE: &[(&str, u32)] = &[
     ("TokenAmountMismatch", 32),
     // --- Vesting monotonicity ---
     ("VestedDecreased", 33),
-    // --- Rebase detection ---
-    ("PoolBalanceDrift", 39),
     // --- Contract-level emergency halt (#1818) ---
     ("ContractHalted", 34),
     ("HaltOperatorAlreadySet", 35),
     ("HaltOperatorNotSet", 36),
     ("ContractAlreadyHalted", 37),
     ("ContractNotHalted", 38),
+    // --- Rebase detection ---
+    ("PoolBalanceDrift", 39),
+    // --- Reference validation ---
+    ("InvalidReferenceLength", 40),
+    // --- Factory policy ---
+    ("FactoryPaused", 41),
+    ("DepositExceedsCap", 42),
+    ("DurationBelowMinimum", 43),
+    ("TokenNotAllowlisted", 44),
+    ("RateBelowMin", 45),
+    ("RateAboveMax", 46),
 ];
 
 /// The highest discriminant value in the fixture above.
 ///
 /// New variants must use `LAST_DISCRIMINANT + 1`. This constant is checked
 /// against the fixture length so a gap is caught immediately.
-const LAST_DISCRIMINANT: u32 = 34;
-const LAST_DISCRIMINANT: u32 = 38;
+const LAST_DISCRIMINANT: u32 = 46;
 
 /// Assert that the fixture has no gaps and ends at `LAST_DISCRIMINANT`.
 ///
