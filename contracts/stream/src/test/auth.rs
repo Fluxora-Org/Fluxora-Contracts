@@ -33,6 +33,7 @@
 //! | `cancel`              | `sender` on stream    | `cancellable == true`|
 //! | `withdraw`            | `recipient` on stream | —                    |
 //! | `batch_withdraw`      | `recipient` (once)    | —                    |
+//! | `batch_cancel`        | `sender` (once)       | `cancellable == true`|
 //! | `transfer_recipient`  | `recipient` on stream | `transferable == true`|
 //! | `extend_stream_ttl`   | **permissionless**    | —                    |
 //! | `batch_extend_ttl`    | **permissionless**    | —                    |

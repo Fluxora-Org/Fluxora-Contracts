@@ -35,6 +35,38 @@ pub struct DelegateGrant {
     pub expires_at: Option<u64>,
 }
 
+/// What one `batch_cancel` call did.
+///
+/// A batch is all-or-nothing, so this has exactly two shapes: the whole vector
+/// settled, in which case `refused_index` and `refused_reason` are `None` and
+/// `refunded` is the total handed back to the sender; or nothing was touched,
+/// in which case `refunded` is `0` and the two `refused_*` fields name the
+/// stream that stopped the batch.
+///
+/// The refusal travels in the return value rather than in a typed `Error`
+/// because a Soroban contract error crosses the wire as a bare `u32`
+/// discriminant (`Error(Contract, #N)`) with no room for a position. The
+/// caller learns which element to drop, and why, without re-reading the whole
+/// batch.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BatchCancelOutcome {
+    /// Total refunded to the sender by this call, in the smallest unit of each
+    /// stream's own token. Always `0` when `refused_index` is `Some`, because a
+    /// refused batch changes nothing.
+    pub refunded: i128,
+
+    /// Zero-based position in the submitted vector of the first stream that
+    /// could not be cancelled. `None` when the batch settled.
+    pub refused_index: Option<u32>,
+
+    /// Discriminant of the [`crate::Error`] that stopped that stream:
+    /// `NotCancellable` (8) for a stream created with `cancellable == false`,
+    /// `StreamTerminated` (14) for one already `Cancelled` or `Depleted`.
+    /// `None` when the batch settled.
+    pub refused_reason: Option<u32>,
+}
+
 /// Lifecycle state of a stream.
 ///
 /// `Cancelled` and `Depleted` are both terminal and both imply
@@ -57,6 +89,101 @@ impl StreamStatus {
     pub fn is_terminal(&self) -> bool {
         matches!(self, StreamStatus::Cancelled | StreamStatus::Depleted)
     }
+}
+
+/// The shape of the release schedule between the cliff and maturity.
+///
+/// Selected once, at creation, and never mutable — like the capability flags,
+/// this is a trust feature: a recipient who accepts a front-loaded stream has
+/// verified on chain that the shape cannot be flattened afterwards.
+///
+/// Every curve shares three properties, and those properties are what the
+/// contract's invariants ([`crate::accrual`] I2 and I4) rely on:
+///
+/// 1. **Monotone non-decreasing** on the stream clock: `f(u + 1) >= f(u)`.
+///    Accrual can never go backwards in time.
+/// 2. **`f(0) == 0`** — nothing vests before the start instant.
+/// 3. **`f(duration) == deposited`** — the schedule settles exactly at
+///    maturity, so the recipient's total entitlement is `deposited` whichever
+///    curve they are offered and the contract can never be short.
+///
+/// The variants differ only in *when* the deposit is delivered, never in how
+/// much. [`ReleaseCurve::Linear`] is the default and reproduces the original
+/// `floor(deposited * elapsed / duration)` arithmetic exactly, so a stream
+/// created by [`crate::FluxoraStream::create_stream`] behaves identically to
+/// one created before curves existed.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReleaseCurve {
+    /// Straight line above the cliff: `floor(deposited * elapsed / duration)`.
+    /// The default, and the arithmetic every pre-existing stream uses.
+    Linear = 0,
+    /// Four equal tranches, each opening once a quarter of the schedule has
+    /// been consumed — a milestone schedule where the "milestones" are
+    /// quarter-boundaries. Nothing accrues inside a tranche; the recipient's
+    /// claim jumps by a quarter of the deposit at each boundary.
+    Step = 1,
+    /// `f(u) = 2u - u²` on `u = elapsed / duration`: accelerates early and
+    /// decelerates into maturity, so the recipient is always at or ahead of
+    /// the linear schedule and the sender's exposure is front-loaded.
+    FrontLoaded = 2,
+/// Which clock the cliff gate is measured against.
+///
+/// The cliff *gates* the payout; it does not delay accrual, and both modes
+/// agree on that. They differ only in **which timeline the gate is read
+/// against**, which matters exactly once: what pausing does to it.
+///
+/// `pause` is sender-only and unbounded, so on a [`CliffMode::Schedule`] stream
+/// a sender can defer the recipient's first withdrawal arbitrarily far by
+/// pausing before the cliff and holding it there. A recipient who agreed to a
+/// cliff *date* has no way to defend against that, because the stored
+/// `cliff_time` never moves — only the effective instant does, by
+/// `paused_total`. See `docs/KNOWN-LIMITATIONS.md` §7.
+///
+/// [`CliffMode::WallClock`] is the opt-out: the gate opens at `cliff_time` on
+/// the ledger clock, whatever pausing does. It changes *when the gate opens*,
+/// never *how much accrues* — a paused wall-clock stream still accrues nothing,
+/// so the recipient gains access to what they had already earned by the pause
+/// instant, and no more.
+///
+/// # Why both are safe
+///
+/// The two modes are branches inside a single pure predicate over one immutable
+/// field and the current timestamp, so neither can be reached with a partially
+/// applied state. More importantly, in `WallClock` the gate reduces to
+/// `now >= cliff_time`: it reads no `paused_at`, no `paused_total`, and nothing
+/// any entry point mutates. It is therefore monotone in time and *invariant
+/// across calls*, which is exactly what invariant I3 demands — the strongest
+/// guarantee available for a cliff gate, and the reason the wall-clock path
+/// needs no monotonicity guard of its own.
+///
+/// Fixed at creation and never mutable, like `cancellable` / `pausable` /
+/// `transferable`: a recipient accepting a stream must be able to verify the
+/// terms will not change underneath them.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CliffMode {
+    /// The cliff is a point on the **stream clock**, which stops while paused.
+    ///
+    /// The gate opens at `stream_time(now) >= cliff_time`, i.e. in wall-clock
+    /// terms at `cliff_time + paused_total`. This is the original behaviour and
+    /// the default for [`crate::FluxoraStream::create_stream`].
+    Schedule = 0,
+    /// The cliff is an absolute **date**, unaffected by pausing.
+    ///
+    /// The gate opens at `now >= cliff_time`. A pause still freezes accrual, so
+    /// a stream paused before its cliff opens the gate on schedule but pays out
+    /// only what had accrued when it was paused.
+    WallClock = 1,
+}
+
+impl CliffMode {
+    /// The mode used when a stream is created without naming one.
+    ///
+    /// `Schedule`, so that every stream created through the original
+    /// [`crate::FluxoraStream::create_stream`] entry point behaves exactly as
+    /// it did before `WallClock` existed.
+    pub const DEFAULT: CliffMode = CliffMode::Schedule;
 }
 
 /// A single payment stream.
@@ -85,7 +212,13 @@ pub struct Stream {
     pub end_time: u64,
     /// Unix seconds in `[start_time, end_time]`. Equals `start_time` when there
     /// is no cliff. Gates withdrawal; does not delay accrual.
+    ///
+    /// Which clock this is read against is decided by [`CliffMode`]; the field
+    /// itself means the same thing in both modes.
     pub cliff_time: u64,
+    /// Which clock the cliff gate is read against. Fixed at creation, never
+    /// mutable. Defaults to [`CliffMode::Schedule`].
+    pub cliff_mode: CliffMode,
     /// Fixed at creation, never mutable. See `lib.rs` module docs.
     pub cancellable: bool,
     /// Fixed at creation, never mutable.
@@ -97,6 +230,46 @@ pub struct Stream {
     /// Cumulative seconds spent paused, excluding any in-progress pause.
     pub paused_total: u64,
     pub status: StreamStatus,
+    /// Release schedule shape, fixed at creation. A stream created before
+    /// curves existed reads back as [`ReleaseCurve::Linear`], which is exactly
+    /// the arithmetic it was created with.
+    ///
+    /// **This field is not part of the stored encoding.** It is kept in a
+    /// side-car entry ([`DataKey::StreamCurve`]) precisely so that the stored
+    /// [`StreamRecord`] layout stays frozen at v1 and every stream written by
+    /// an earlier deployment keeps decoding — see [`StreamRecord`] for why
+    /// appending a field to the stored value is not an option.
+    pub curve: ReleaseCurve,
+}
+
+/// The **stored** form of a stream: the frozen v1 layout, without `curve`.
+///
+/// # Why the storage layout is frozen while [`Stream`] grew a field
+///
+/// Soroban decodes a `#[contracttype]` struct from an `ScMap` whose key *set*
+/// must match the struct's fields exactly — the host unpacks the map into a
+/// positional slice. Appending a field therefore makes every value written by
+/// an earlier deployment undecodable, and the failure is a host trap inside
+/// the decode, not a catchable error.
+///
+/// `test::storage_keys::current_reader_decodes_old_v1_fixture` pins exactly
+/// that: a hex fixture captured from the v1 encoding must stay readable. It is
+/// the guard that stops a field from being appended to the stored value
+/// casually, and it is why this type exists.
+///
+/// So the stored value did **not** change: [`crate::storage`] reads and writes
+/// this record, and the curve rides alongside it in
+/// [`DataKey::StreamCurve`]. A v1 entry has no curve side-car, which reads as
+/// [`ReleaseCurve::Linear`] — the schedule it was actually created with.
+/// Nothing has to be migrated for a live deployment to keep working.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamRecord {
+    pub sender: Address,
+    pub recipient: Address,
+    pub token: Address,
+    pub deposited: i128,
+    pub withdrawn: i128,
     /// Optional reference string for stream identification.
     /// 
     /// Set at creation and never mutable. Maximum length is
@@ -104,6 +277,67 @@ pub struct Stream {
     /// like "payroll-001" or "grant-xyz-q1-2024" to help operators distinguish
     /// between streams on-chain.
     pub reference: Option<String>,
+}
+
+/// One element in an atomic payroll-style stream creation batch.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchCreateRequest {
+    pub recipient: Address,
+    pub token: Address,
+    pub deposit: i128,
+    pub start_time: u64,
+    pub end_time: u64,
+    pub cliff_time: u64,
+    pub cancellable: bool,
+    pub pausable: bool,
+    pub transferable: bool,
+    pub paused_at: Option<u64>,
+    pub paused_total: u64,
+    pub status: StreamStatus,
+}
+
+impl StreamRecord {
+    /// Freeze a [`Stream`] into the v1 stored layout.
+    pub fn from_stream(stream: &Stream) -> Self {
+        StreamRecord {
+            sender: stream.sender.clone(),
+            recipient: stream.recipient.clone(),
+            token: stream.token.clone(),
+            deposited: stream.deposited,
+            withdrawn: stream.withdrawn,
+            start_time: stream.start_time,
+            end_time: stream.end_time,
+            cliff_time: stream.cliff_time,
+            cancellable: stream.cancellable,
+            pausable: stream.pausable,
+            transferable: stream.transferable,
+            paused_at: stream.paused_at,
+            paused_total: stream.paused_total,
+            status: stream.status,
+        }
+    }
+
+    /// Rebuild a [`Stream`], attaching the curve stored beside the record.
+    pub fn into_stream(self, curve: ReleaseCurve) -> Stream {
+        Stream {
+            sender: self.sender,
+            recipient: self.recipient,
+            token: self.token,
+            deposited: self.deposited,
+            withdrawn: self.withdrawn,
+            start_time: self.start_time,
+            end_time: self.end_time,
+            cliff_time: self.cliff_time,
+            cancellable: self.cancellable,
+            pausable: self.pausable,
+            transferable: self.transferable,
+            paused_at: self.paused_at,
+            paused_total: self.paused_total,
+            status: self.status,
+            curve,
+        }
+    }
 }
 
 impl Stream {
@@ -131,8 +365,12 @@ impl Stream {
 /// `Delegate(stream_id, delegate)` entries live in persistent storage, scoped
 /// to the stream they were issued for.
 ///
-/// There is no `Config` key: with no admin, no fees and no upgradeability
-/// (all explicit non-goals), the contract has nothing to configure.
+/// `HaltOperator` and `HaltedAt` are the one deliberate exception to "no
+/// admin, nothing to configure" (issue #1818): the emergency halt is opt-in,
+/// one-shot and contract-wide, and both keys live in instance storage because
+/// they must never archive independently of the code that reads them. A
+/// deployment that never calls the one-shot setter has neither key and behaves
+/// exactly as it did before the halt existed.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
@@ -147,4 +385,17 @@ pub enum DataKey {
     Stream(u64),
     /// Persistent storage. One entry per (stream_id, delegate) pair.
     Delegate(u64, Address),
+    /// Persistent storage. The [`ReleaseCurve`] of one stream.
+    ///
+    /// Written only when the curve is **not** [`ReleaseCurve::Linear`], so a
+    /// linear stream — every stream a v1 deployment created, and every stream
+    /// `create_stream` still creates — has no entry here at all and pays no
+    /// rent for one. A missing entry means linear.
+    StreamCurve(u64),
+    /// Instance storage. The address allowed to halt and resume the contract.
+    /// Absent until [`crate::FluxoraStream::set_halt_operator`] runs once.
+    HaltOperator,
+    /// Instance storage. Unix seconds at which the halt was engaged; present
+    /// if and only if the contract is halted.
+    HaltedAt,
 }

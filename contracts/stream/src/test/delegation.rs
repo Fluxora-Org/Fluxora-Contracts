@@ -629,11 +629,11 @@ fn grantor_for<'a>(h: &'a Harness<'_>, op: u32) -> &'a Address {
     }
 }
 
-/// Create a stream and give `agent` a grant covering exactly `op`.
+/// Create a stream on which `op` would succeed if `agent` held the grant.
 ///
-/// The stream and the agent are left in a state where the op would succeed if
-/// the grant were still live, so a later rejection can only be the revocation.
-fn stream_with_grant(h: &Harness, agent: &Address, op_bit: u32) -> u64 {
+/// The stream is funded, advanced past the cliff, and paused if `op` is
+/// `RESUME`. No grant is issued; callers that want one use [`stream_with_grant`].
+fn stream_ready_for(h: &Harness, agent: &Address, op_bit: u32) -> u64 {
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     h.token_admin.mint(agent, &(1_000 * ONE));
     h.advance(10 * DAY);
@@ -642,7 +642,15 @@ fn stream_with_grant(h: &Harness, agent: &Address, op_bit: u32) -> u64 {
     if op_bit == op::RESUME {
         h.client.pause(&id);
     }
+    id
+}
 
+/// Create a stream and give `agent` a grant covering exactly `op`.
+///
+/// The stream and the agent are left in a state where the op would succeed if
+/// the grant were still live, so a later rejection can only be the revocation.
+fn stream_with_grant(h: &Harness, agent: &Address, op_bit: u32) -> u64 {
+    let id = stream_ready_for(h, agent, op_bit);
     h.client
         .grant_delegate(&id, grantor_for(h, op_bit), agent, &op_bit, &None);
     id
@@ -753,6 +761,41 @@ fn delegate_call_ordered_before_revocation_in_the_same_ledger_is_honoured() {
             Error::DelegateNotPermitted,
             "op bit {op_bit}: call after revocation must be rejected",
         );
+    }
+}
+
+/// A delegate call ordered **before** a same-ledger grant is not authorised
+/// retroactively.
+///
+/// The grant only authorises calls ordered after it. The rejected call runs
+/// with no grant present, so it also leaves the stream unchanged; the call
+/// issued after the grant then succeeds in the same ledger. Together with
+/// [`delegate_call_ordered_before_revocation_in_the_same_ledger_is_honoured`]
+/// this pins both orderings of the `grant_delegate` / `delegate_*` pair.
+#[test]
+fn delegate_call_ordered_before_a_same_ledger_grant_is_rejected() {
+    for op_bit in ALL_OPS {
+        let h = Harness::new();
+        let agent = Address::generate(&h.env);
+        let id = stream_ready_for(&h, &agent, op_bit);
+
+        // No grant yet: a call ordered before the grant is rejected.
+        let before = h.client.get_stream(&id);
+        assert_eq!(
+            delegate_call_error(&h, id, &agent, op_bit),
+            Error::DelegateNotPermitted,
+            "op bit {op_bit}: call ordered before the grant must be rejected",
+        );
+        assert_eq!(
+            h.client.get_stream(&id),
+            before,
+            "op bit {op_bit}: rejected call must not touch the stream",
+        );
+
+        // Grant, then call again — both in the same ledger, no `advance`.
+        h.client
+            .grant_delegate(&id, grantor_for(&h, op_bit), &agent, &op_bit, &None);
+        delegate_call(&h, id, &agent, op_bit);
     }
 }
 

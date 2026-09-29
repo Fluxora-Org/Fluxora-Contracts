@@ -209,6 +209,37 @@ fn an_already_withdrawn_stream_is_skipped_without_failing_the_batch() {
     h.assert_pool_exact();
 }
 
+/// Covers the terminal case where a stream is Cancelled and fully drawn (or never drawn).
+/// A single `withdraw` would return `StreamTerminated(14)`, but `batch_withdraw` skips it
+/// without failing the batch.
+#[test]
+fn a_cancelled_terminal_stream_is_skipped_without_failing_the_batch() {
+    let h = Harness::new();
+    let terminal = h.create_simple(100 * ONE, 100 * DAY);
+    let pending = h.create_simple(100 * ONE, 100 * DAY);
+
+    // Cancel the first stream immediately. It is now terminal (Cancelled) with 0 withdrawable.
+    h.client.cancel(&terminal);
+
+    h.advance(10 * DAY);
+
+    let total = h
+        .client
+        .batch_withdraw(&h.recipient, &h.ids(&[terminal, pending]));
+    let events = withdrawn_event_ids(&h);
+
+    assert_eq!(total, 10 * ONE, "only the active stream pays");
+    assert_eq!(
+        events,
+        std::vec![pending],
+        "emits only for the active stream"
+    );
+    assert_eq!(h.get(terminal).status, crate::StreamStatus::Cancelled);
+    assert_eq!(h.get(terminal).withdrawn, 0);
+    assert_eq!(h.get(pending).withdrawn, 10 * ONE);
+    h.assert_pool_exact();
+}
+
 /// Covers the "over-withdrawn" case of the missing/unauthorized/over-withdrawn
 /// triad the reviewer asked for: a stream whose `withdrawn` has somehow moved
 /// past `deposited` (the only way this can arise is direct storage
@@ -1065,6 +1096,40 @@ fn batch_withdraw_same_recipient_settles_payroll_with_single_authorisation() {
     let expected_total: i128 = expected_per_stream.iter().sum();
 
     let total = h.client.batch_withdraw(&h.recipient, &h.ids(&ids));
+
+    // Capture the event log right away: any later contract call (the token
+    // balance read below, `h.get`) starts a fresh invocation and the batch's
+    // events are no longer observable from it. Same discipline as the sibling
+    // `a_successful_batch_emits_withdrawn_events_in_batch_order`.
+    let events = withdrawn_event_ids(&h);
+
+    assert_eq!(total, expected_total);
+    assert_eq!(
+        events, ids,
+        "events emitted per stream, in exact batch order"
+    );
+    assert_eq!(h.balance(&h.recipient), expected_total);
+
+    // Capture the batch's events before any other client call: `Events::all()`
+    // only retains the most recent invocation, so a balance read between the
+    // batch and this helper wipes the stream's own events (as it did when this
+    // read sat above the event assertion).
+    let event_ids = withdrawn_event_ids(&h);
+
+    assert_eq!(total, expected_total);
+
+    // Harvest the events here, before the `balance` read below: `Events::all()`
+    // reports only the most recent contract invocation, so querying the token
+    // contract in between would discard what the batch emitted.
+    let event_ids = withdrawn_event_ids(&h);
+    assert_eq!(h.balance(&h.recipient), expected_total);
+
+    // Assert events are emitted per stream, not per batch (in exact batch order).
+
+    // Assert events are emitted per stream, not per batch (in exact batch order).
+    // Capture events right away, before any other client calls clear the event list.
+    let events = withdrawn_event_ids(&h);
+
     assert_eq!(total, expected_total);
 
     // Capture contract events before any further cross-contract call: in the
@@ -1075,6 +1140,7 @@ fn batch_withdraw_same_recipient_settles_payroll_with_single_authorisation() {
 
     assert_eq!(h.balance(&h.recipient), expected_total);
 
+    assert_eq!(events, ids);
     // Assert events are emitted per stream, not per batch (in exact batch order).
     assert_eq!(event_ids, ids);
 

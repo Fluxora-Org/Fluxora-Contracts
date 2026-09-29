@@ -635,10 +635,22 @@ fn test_cancel_then_withdraw_at(offset: u64) {
 
     let expected_vested = h.get(id).deposited * (offset.min(duration) as i128) / (duration as i128);
 
-    // Order 2: cancel, then withdraw
+    // Order 2: cancel, then withdraw. `cancel` terminates the stream first, so
+    // this withdraw reads a terminal stream. With nothing vested that is
+    // `StreamTerminated`, not the live-stream `NothingToWithdraw`. See
+    // docs/same-ledger-ordering.md (pair 4, cancel -> withdraw).
     h.client.cancel(&id);
 
     if expected_vested == 0 {
+        // The cancel above already made the stream terminal, so a zero-vest
+        // withdraw hits the terminal precondition, not the live-stream one:
+        // `withdraw` reports `StreamTerminated`, never `NothingToWithdraw`,
+        // which is reserved for a still-live stream that has not accrued. Same
+        // precedence as `cancel::cancel_at_the_instant_of_creation_refunds_everything`.
+        // The cancel has already run, so the stream is terminal with nothing
+        // left. `withdraw` distinguishes that from a live stream that simply
+        // has not accrued: terminal + empty is `StreamTerminated`, not
+        // `NothingToWithdraw` (docs/ABI.md, "withdraw" errors).
         // Cancelled is terminal, so draining an empty tail is
         // StreamTerminated — not the live-stream NothingToWithdraw path.
         // Pinned by `cancel::cancel_at_the_instant_of_creation_refunds_everything`.

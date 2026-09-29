@@ -390,6 +390,295 @@ fn seconds_to_ledgers_rounds_up() {
     assert_eq!(storage::seconds_to_ledgers(u64::MAX), u32::MAX);
 }
 
+// --- Terminal stream TTL rejection (issue #1697) ---------------------------
+//
+// Extending the TTL of a Cancelled or Depleted stream must be rejected with
+// StreamTerminated. Both `extend_stream_ttl` and `batch_extend_ttl` enforce
+// the same rule. Neither the TTL nor any storage state changes on rejection.
+
+use crate::Error;
+
+// -- extend_stream_ttl: Cancelled -------------------------------------------
+
+/// Cancelling a stream and then attempting to extend its TTL must fail.
+#[test]
+fn extend_stream_ttl_rejects_cancelled_stream() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * super::common::ONE, 100 * super::common::DAY);
+
+    h.advance(30 * super::common::DAY);
+    h.client.cancel(&id);
+
+    let ttl_before = ttl_of(&h, id);
+
+    let err = h.client.try_extend_stream_ttl(&id).unwrap_err().unwrap();
+    assert_eq!(err, Error::StreamTerminated);
+
+    // TTL must not have changed.
+    assert_eq!(
+        ttl_of(&h, id),
+        ttl_before,
+        "TTL must not change on rejection"
+    );
+}
+
+/// extend_stream_ttl is rejected even when the cancelled stream still has an
+/// unwithdrawn vested tail.
+#[test]
+fn extend_stream_ttl_rejects_cancelled_stream_with_unwithdrawn_tail() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * super::common::ONE, 100 * super::common::DAY);
+
+    h.advance(50 * super::common::DAY); // 500 vested
+    h.client.cancel(&id);
+
+    // There is still a withdrawable tail, but the stream is terminal.
+    assert_eq!(
+        h.client.withdrawable_of(&id),
+        500 * super::common::ONE,
+        "sanity: tail is withdrawable"
+    );
+
+    let ttl_before = ttl_of(&h, id);
+    let err = h.client.try_extend_stream_ttl(&id).unwrap_err().unwrap();
+    assert_eq!(err, Error::StreamTerminated);
+    assert_eq!(ttl_of(&h, id), ttl_before, "TTL unchanged on rejection");
+}
+
+// -- extend_stream_ttl: Depleted --------------------------------------------
+
+/// A fully-drained stream (Depleted) must be rejected by extend_stream_ttl.
+#[test]
+fn extend_stream_ttl_rejects_depleted_stream() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * super::common::ONE, 100 * super::common::DAY);
+
+    h.warp_to(super::common::T0 + 100 * super::common::DAY);
+    h.client.withdraw(&id, &None);
+
+    assert_eq!(
+        h.client.get_stream(&id).status,
+        crate::StreamStatus::Depleted
+    );
+
+    let ttl_before = ttl_of(&h, id);
+    let err = h.client.try_extend_stream_ttl(&id).unwrap_err().unwrap();
+    assert_eq!(err, Error::StreamTerminated);
+    assert_eq!(ttl_of(&h, id), ttl_before, "TTL unchanged on rejection");
+}
+
+/// A stream that becomes Depleted mid-schedule (paused past its end, then
+/// drained) is still correctly rejected.
+#[test]
+fn extend_stream_ttl_rejects_depleted_stream_after_pause_and_drain() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * super::common::ONE, 100 * super::common::DAY);
+
+    // Advance past end, pause, then drain.
+    h.warp_to(super::common::T0 + 150 * super::common::DAY);
+    h.client.pause(&id);
+    h.client.withdraw(&id, &None);
+
+    assert_eq!(
+        h.client.get_stream(&id).status,
+        crate::StreamStatus::Depleted
+    );
+
+    let ttl_before = ttl_of(&h, id);
+    let err = h.client.try_extend_stream_ttl(&id).unwrap_err().unwrap();
+    assert_eq!(err, Error::StreamTerminated);
+    assert_eq!(ttl_of(&h, id), ttl_before);
+}
+
+// -- batch_extend_ttl: Cancelled --------------------------------------------
+
+/// A batch that contains a cancelled stream must be rejected in full.
+#[test]
+fn batch_extend_ttl_rejects_batch_containing_cancelled_stream() {
+    let h = Harness::new();
+    h.env.ledger().set_max_entry_ttl(500_000);
+
+    let active = h.create_simple(100 * super::common::ONE, super::common::YEAR);
+    let cancelled = h.create_simple(100 * super::common::ONE, 100 * super::common::DAY);
+
+    h.advance(30 * super::common::DAY);
+    h.client.cancel(&cancelled);
+
+    // Age both entries so an extension would be meaningful.
+    age_ledgers(&h, 400_000);
+
+    let ttl_active_before = ttl_of(&h, active);
+    let ttl_cancelled_before = ttl_of(&h, cancelled);
+
+    let err = h
+        .client
+        .try_batch_extend_ttl(&h.ids(&[active, cancelled]))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::StreamTerminated);
+
+    // Neither stream's TTL should have changed.
+    assert_eq!(
+        ttl_of(&h, active),
+        ttl_active_before,
+        "active stream TTL must not change on batch rejection"
+    );
+    assert_eq!(
+        ttl_of(&h, cancelled),
+        ttl_cancelled_before,
+        "cancelled stream TTL must not change on batch rejection"
+    );
+}
+
+/// A batch consisting solely of a cancelled stream is rejected.
+#[test]
+fn batch_extend_ttl_rejects_batch_with_only_cancelled_stream() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * super::common::ONE, 100 * super::common::DAY);
+
+    h.advance(30 * super::common::DAY);
+    h.client.cancel(&id);
+
+    let ttl_before = ttl_of(&h, id);
+    let err = h
+        .client
+        .try_batch_extend_ttl(&h.ids(&[id]))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::StreamTerminated);
+    assert_eq!(ttl_of(&h, id), ttl_before);
+}
+
+// -- batch_extend_ttl: Depleted ---------------------------------------------
+
+/// A batch that contains a depleted stream must be rejected in full.
+#[test]
+fn batch_extend_ttl_rejects_batch_containing_depleted_stream() {
+    let h = Harness::new();
+    h.env.ledger().set_max_entry_ttl(500_000);
+
+    let active = h.create_simple(100 * super::common::ONE, super::common::YEAR);
+    let depleted = h.create_simple(100 * super::common::ONE, 100 * super::common::DAY);
+
+    h.warp_to(super::common::T0 + 100 * super::common::DAY);
+    h.client.withdraw(&depleted, &None);
+    assert_eq!(
+        h.client.get_stream(&depleted).status,
+        crate::StreamStatus::Depleted
+    );
+
+    age_ledgers(&h, 400_000);
+
+    let ttl_active_before = ttl_of(&h, active);
+    let ttl_depleted_before = ttl_of(&h, depleted);
+
+    let err = h
+        .client
+        .try_batch_extend_ttl(&h.ids(&[active, depleted]))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::StreamTerminated);
+
+    assert_eq!(
+        ttl_of(&h, active),
+        ttl_active_before,
+        "active stream TTL must not change on batch rejection"
+    );
+    assert_eq!(
+        ttl_of(&h, depleted),
+        ttl_depleted_before,
+        "depleted stream TTL must not change on batch rejection"
+    );
+}
+
+/// A batch consisting solely of a depleted stream is rejected.
+#[test]
+fn batch_extend_ttl_rejects_batch_with_only_depleted_stream() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * super::common::ONE, 100 * super::common::DAY);
+
+    h.warp_to(super::common::T0 + 100 * super::common::DAY);
+    h.client.withdraw(&id, &None);
+    assert_eq!(
+        h.client.get_stream(&id).status,
+        crate::StreamStatus::Depleted
+    );
+
+    let ttl_before = ttl_of(&h, id);
+    let err = h
+        .client
+        .try_batch_extend_ttl(&h.ids(&[id]))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::StreamTerminated);
+    assert_eq!(ttl_of(&h, id), ttl_before);
+}
+
+// -- batch_extend_ttl: unknown ids still skipped, but terminal ids rejected --
+
+/// Unknown (missing/archived) ids are still skipped, but a terminal id in the
+/// same batch causes the whole call to fail. This ensures that removing a
+/// terminal id from the batch is the correct fix, not restoring it.
+#[test]
+fn batch_extend_ttl_rejects_when_terminal_id_is_mixed_with_unknown_id() {
+    let h = Harness::new();
+    h.env.ledger().set_max_entry_ttl(500_000);
+
+    let cancelled = h.create_simple(100 * super::common::ONE, 100 * super::common::DAY);
+    h.advance(30 * super::common::DAY);
+    h.client.cancel(&cancelled);
+
+    age_ledgers(&h, 400_000);
+    let ttl_before = ttl_of(&h, cancelled);
+
+    // 9999 is an unknown id; cancelled is terminal. The whole batch must fail.
+    let err = h
+        .client
+        .try_batch_extend_ttl(&h.ids(&[9999, cancelled]))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::StreamTerminated);
+    assert_eq!(ttl_of(&h, cancelled), ttl_before);
+}
+
+// -- Active streams are still accepted after the rule is in place -----------
+
+/// A normal active stream can still be extended.  This guards against a
+/// regression where the new terminal check incorrectly fires on non-terminal
+/// streams.
+#[test]
+fn extend_stream_ttl_still_works_for_active_stream() {
+    let h = Harness::new();
+    h.env.ledger().set_max_entry_ttl(500_000);
+    let id = h.create_simple(1_000 * super::common::ONE, super::common::YEAR);
+
+    age_ledgers(&h, 400_000);
+    let ttl_before = ttl_of(&h, id);
+
+    let result = h.client.try_extend_stream_ttl(&id);
+    assert!(result.is_ok(), "active stream must still be extendable");
+    assert!(
+        ttl_of(&h, id) > ttl_before,
+        "TTL must increase after extension"
+    );
+}
+
+/// A normal active batch can still be extended.
+#[test]
+fn batch_extend_ttl_still_works_for_active_streams() {
+    let h = Harness::new();
+    h.env.ledger().set_max_entry_ttl(500_000);
+    let a = h.create_simple(100 * super::common::ONE, super::common::YEAR);
+    let b = h.create_simple(100 * super::common::ONE, super::common::YEAR);
+
+    age_ledgers(&h, 400_000);
+
+    let result = h.client.try_batch_extend_ttl(&h.ids(&[a, b]));
+    assert!(
+        result.is_ok(),
+        "batch of active streams must still be extendable"
+    );
+    assert_eq!(result.unwrap().unwrap(), 2);
 /// The pinned assumed close time and where it comes from.
 ///
 /// #1806: this constant is measured, not assumed. The value is the observed

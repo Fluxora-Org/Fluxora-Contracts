@@ -116,6 +116,32 @@ class TestKnownLimitations:
         assert "## 4. Not audited" in content
         assert "No third-party security audit has been performed." in content
 
+    def test_archival_result_is_recorded(self):
+        """§1 carries the recorded live testnet result, not the open placeholder.
+
+        The section used to be an open question with a decision table for the
+        outcomes that had not happened yet. It was answered on 2026-09-28; this
+        guard keeps the answer, and the evidence a reader can check it against,
+        in the file.
+        """
+        limitations = REPO_ROOT / "docs" / "KNOWN-LIMITATIONS.md"
+        content = limitations.read_text(encoding="utf-8")
+        section_one = content.split("## 2.", maxsplit=1)[0]
+
+        assert "Status: open." not in content
+        assert "closed 2026-09-28" in section_one
+        # The transaction that produced the result, so the claim is checkable.
+        assert (
+            "32e08f32d30db0f1f1a45786dbe7f8d87ca4f83dbd3e3ced0a0d5b54d807651c"
+            in section_one
+        )
+        # The ledger-set field is the evidence that the invocation restored the
+        # entries rather than a client having resubmitted a RestoreFootprint.
+        assert "archived_soroban_entries" in section_one
+        # The withdrawn integrator advice must be marked as withdrawn, not left
+        # standing as the recommended integration path.
+        assert "integrator guidance in this section is withdrawn" in section_one
+
 
 class TestScriptFunctions:
     """Exercise actual script functions for coverage."""
@@ -359,7 +385,7 @@ class TestScriptBranches:
         mod = _import_script("check-discriminant-collisions.py")
         assert mod is not None
         sections = mod._parse_docs(REPO_ROOT / "docs" / "ABI.md")
-        assert len(sections["ContractError (stream)"]) == 33
+        assert len(sections["ContractError (stream)"]) == 38
 
     def test_validate_doc_alignment_with_streaming_md(self):
         """Exercise doc alignment with temp streaming.md."""

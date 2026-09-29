@@ -3,34 +3,44 @@
 What a green test suite here does **not** prove. Read this before treating any
 part of Fluxora as production-ready.
 
+§1 is **closed**: the behaviour it described as untested was measured against
+live testnet on 2026-09-28 and turned out not to be a failure mode at all. It
+stays in this file as the record of that result and of the reasoning it
+replaced.
+
 ---
 
-## 1. The TTL suite does not prove the archival recovery flow
+## 1. Archival is not a failure mode for persistent entries
 
-**Status: open. Closing it is the acceptance criterion for stage 4.**
+**Status: closed 2026-09-28.** The result is **Outcome B** of the decision table
+that was written into this section on 2026-08-12, before the outcome was known.
 
 **Pinned by:**
-`contracts/stream/src/test/read_methods_no_side_effects.rs::get_stream_does_not_extend_ttl_on_archived_stream`
-and `contracts/stream/src/test/ttl.rs::an_archived_stream_restores_with_its_accounting_intact`.
-The first pins the test host's automatic restore behavior; the second pins the
-accounting-preservation endpoint. Neither can pass if the host stops restoring
-expired persistent entries with intact data, while neither claims to cover the
-real-network failed-transaction and `RestoreFootprint` resubmission step.
+`contracts/archival-probe/src/test.rs::an_archived_entry_is_restored_by_the_read_itself`,
+`contracts/archival-probe/src/test.rs::presence_stays_true_across_archival`,
+`contracts/archival-probe/src/test.rs::auto_restoration_is_metered_as_writes_and_rent_bumps`,
+`contracts/stream/src/test/read_methods_no_side_effects.rs::get_stream_does_not_extend_ttl_on_archived_stream`,
+and `tests/test_validator.py::TestKnownLimitations::test_archival_result_is_recorded`.
 
-### The claim you might read off a green suite
+### What this section used to claim
 
-`test::ttl` passes. It contains
-`a_year_long_stream_survives_on_keeper_sweeps_alone` and
-`an_archived_stream_restores_with_its_accounting_intact`. It is tempting to
-conclude "TTL is solved". **It is not.** Roughly half the problem is untested.
+That the TTL suite proves only the *endpoints* of archival recovery — a live
+entry before, intact accounting after — because the Soroban test host runs
+storage in recording mode, where `handle_maybe_expired_entry` silently restores
+an expired persistent entry in place instead of failing. The stated worry was
+that a live network would behave differently: the read would fail, and the
+caller would have to resubmit with a `RestoreFootprint` operation.
 
-### Why
+The recording-mode description was accurate. The conclusion drawn from it was
+not: protocol 23 and later do the same thing the recording host does, and do it
+in the ledger rather than in the host.
 
-The Soroban SDK's test host runs storage in *recording* mode. In that mode,
-reading an expired persistent entry does not fail. The host calls
-`handle_maybe_expired_entry`, which silently restores the entry in place with
-its data intact and its TTL reset to `min_persistent_entry_ttl`:
+### What the live canary actually showed
 
+`contracts/archival-probe` was planted on testnet at ledger 4,097,334 and
+deliberately never extended its TTL, so it received exactly the network's
+`min_persistent_ttl` (120,960 ledgers, ~7 days) and was free to archive. It was
+then left alone for seven weeks. Measured on 2026-09-28:
 ```rust
 // soroban-env-host-27.0.1/src/host/storage.rs
 if live_until < li.sequence_number {
@@ -109,72 +119,82 @@ not of the contract, so proving it there proves it for `DataKey::Stream(id)`.
 
 | | |
 |---|---|
-| probe contract | `CB4XJYNXQ62TCXI3GKCVBWADTSTFWYL3ZLYS3MKYPWRANOSADRZG4A7N` |
-| canary planted | ledger 4,097,334 |
-| archives after | ledger 4,218,293 |
-| expected | ~2026-08-19 09:39 UTC |
+| canary planted at ledger | 4,097,334 |
+| canary live until ledger | 4,218,293 |
+| observed at ledger | 4,922,344 — **704,051 ledgers (~40.7 days) past live-until** |
+| `getLedgerEntries` for the canary and the contract instance | returned both, with `liveUntilLedgerSeq: 0` — the TTL entries are gone, i.e. both were archived, and both values were still served |
+| a single `InvokeHostFunction` of `read` | **succeeded**, returned `canary` |
+| its `SorobanTransactionData` | carried `archived_soroban_entries: [0, 1, 2]` — the canary entry, the contract instance and the contract code, all restored automatically by that same invocation |
+| transaction fee | 5,912,922 stroops, of which 5,912,822 stroops was resource fee |
+| both entries after the call | `liveUntilLedgerSeq: 5,043,310` = 4,922,351 + `min_persistent_ttl` − 1 |
 
-Run `script/archival-canary.sh` any time for status; after that ledger, run it
-with `--restore` to perform and verify the round trip. It asserts each step:
-the entry stops being readable, invocation *fails* rather than returning stale
-data, `RestoreFootprint` recovers it, and the value comes back intact.
+Restoring transaction: `32e08f32d30db0f1f1a45786dbe7f8d87ca4f83dbd3e3ced0a0d5b54d807651c`
+on testnet, closed in ledger 4,922,351, **one** operation, no
+`RestoreFootprint` transaction anywhere in the sequence.
 
-**2. Config-upgraded local network — not yet built.** A `min_persistent_ttl`
-lowered via a stellar-core config upgrade would make the round trip provable in
-minutes and repeatable in CI, rather than a once-a-week manual check. There is
-no CLI support for applying a `ConfigUpgradeSet`, so this needs the core admin
-endpoint directly. Tracked as the remaining stage 4 work.
+The middle of the journey that this section said was untested does not exist on
+this network. An archived persistent entry is restored by the first invocation
+that touches it; the caller never sees a failure and never resubmits anything.
 
-Until one of those lands, **this section stays open** and nothing should claim
-TTL is solved.
+### What that changes
 
-### What we will say in each outcome — decided in advance
+- **The integrator guidance in this section is withdrawn.** There is no
+  recoverable failure to detect, so there is nothing to detect it with. The
+  previous advice — treat the first call against an archived stream as a failure,
+  detect it with `stream_exists() == false` and `stream_id < stream_count()`, and
+  surface a restore action — described a state a caller cannot reach.
+- **`stream_exists() == false` is not a "needs restoring" signal.** It was only
+  ever going to be one if a read could observe the archived state without
+  restoring it. It cannot: the read *is* the restore. The probe pins this
+  directly — `planted()`, the analogue of `stream_exists`, still answers `true`
+  after the entry has archived and been auto-restored.
+- **The unit suite's caveat is resolved, not merely tolerated.** Recording mode
+  and the network now agree, which is exactly what
+  `contracts/stream/src/test/read_methods_no_side_effects.rs::get_stream_does_not_extend_ttl_on_archived_stream`
+  asserted on the host side. The tests that "skip the failure in between" were
+  skipping a step that does not happen.
+- **Recovery is not free, it is just not a failure.** The restoring invocation
+  pays for the rent of everything it resurrects. A 5.9 XLM fee on a `read` that
+  normally costs almost nothing is the visible cost, and it is the reason a
+  keeper running `batch_extend_ttl` is still worth running: it keeps entries out
+  of the archive so ordinary calls stay cheap.
 
-Written down before the result is known, so the conclusion cannot be quietly
-reshaped to fit whatever happens.
+### What is still not established
 
-**Outcome A — the entry archives and the restore round trip works.**
-This section closes. The claim we then make, and its exact limits:
+- That a **Fluxora stream** archived. The probe is a separate contract; the
+  argument that the result transfers is that restoration is a property of the
+  persistent ledger entry, not of the contract that wrote it, and the archived
+  set here included the contract *code* as well as two data entries. Say that
+  reasoning out loud whenever this result is cited, rather than letting an
+  audience assume a stream was involved.
+- **Mainnet.** The canary ran on testnet, which was on protocol 28. Mainnet runs
+  the same protocol and the same ledger rules, so the same behaviour is
+  expected, but it has not been measured there.
+- **Storage economics.** That an untouched entry stays in the archive rather
+  than being deleted is the whole point of the mechanism, but nothing here
+  measures what archiving saves, and no Fluxora change is proposed on the basis
+  of a saving.
 
-> Fluxora's archival recovery path is verified end to end against live Stellar
-> testnet: an entry was allowed to archive, the subsequent read failed at the
-> network level, a `RestoreFootprint` operation recovered it, and the stored
-> value came back intact.
+### What was decided in advance, and honoured
 
-That is a headline claim and it is a real differentiator — no other Soroban
-streaming implementation has demonstrated it. It still does **not** claim that a
-Fluxora *stream* archived: the probe is a separate contract, and the argument
-that the result transfers is that restore is a property of the ledger entry, not
-of the contract that wrote it. State that reasoning whenever the claim is made
-rather than letting the audience assume a stream was involved.
+This section was written with three pre-committed outcomes on 2026-08-12. The
+observed result is Outcome B, whose wording was fixed then: the honest statement
+becomes "archival is not a failure mode on this network for persistent
+entries", the restore-detection path becomes dead code, and the section is
+rewritten to record that the concern did not materialise. That is what happened
+here; the finding has not been retro-fitted into a success story. In particular,
+this is **not** a claim that Fluxora's `RestoreFootprint` handling was validated
+— there is no such handling, and none is needed.
 
-**Outcome B — the network auto-restores, and reads never fail.**
-Then the recording-mode behaviour the unit suite relies on turns out to match
-the network, and this entire limitation was narrower than we thought. We say so
-publicly, in those words, and we **narrow the claim rather than reframing it**:
-the honest statement becomes "archival is not a failure mode on this network for
-persistent entries", the SDK's restore-detection path becomes dead code and gets
-deleted, and this section is rewritten to record that the concern did not
-materialise. We do not retro-fit the finding into a success story.
+### Retired
 
-**Outcome C — the entry does not archive on schedule.**
-Eviction is a background scan and lags `live_until`, so a delay of hours or days
-is expected and is not an outcome in itself. The canary script distinguishes
-this case explicitly and exits without a verdict. Re-run rather than concluding
-anything. If it is still unarchived a week past `live_until`, that is itself a
-finding worth writing up — it would mean testnet eviction is effectively not
-running, and mainnet behaviour should not be inferred from it.
-
-In all three cases the result is reported, not just the convenient ones.
-
-### If you are integrating before then
-
-Assume archived streams are reachable and that your first call against one will
-fail. Detect it (`stream_exists() == false` with `stream_id < stream_count()`)
-and surface a restore action rather than an error toast. Run a keeper against
-`batch_extend_ttl` so it rarely comes up.
+`script/archival-canary.sh` and `docs/archival-canary.md` are retained as the
+record of how the result was produced and of the assertions that were made. The
+canary itself has been restored and **must not be replanted or redeployed** as a
+routine; a new question needs a new deployment with its own live-until ledger.
 
 ---
+
 
 ## 2. Resource measurements understate a real deployment
 
@@ -302,22 +322,55 @@ any baseline change.
 
 ---
 
-## 3. `MAX_BATCH_SIZE` is calibrated against one token
+## 3. `MAX_BATCH_SIZE` is calibrated across token costs, not proven for every token
 
 **Pinned by:**
-`contracts/stream/src/test/resource_limits.rs::the_event_budget_is_not_the_binding_constraint_at_the_cap`.
-It measures the event cost at `MAX_BATCH_SIZE` using the Stellar Asset
-Contract, so a change to the event payload or SAC cost that makes the event
-budget binding fails the test and requires this limitation to be revisited.
+`contracts/stream/src/test/token_batch_calibration.rs`, which derives the
+implied ceiling for four token implementations of deliberately different
+per-transfer event cost, and
+`contracts/stream/src/test/resource_limits.rs::the_event_budget_is_not_the_binding_constraint_at_the_cap`,
+which measures the event cost at `MAX_BATCH_SIZE` against the Stellar Asset
+Contract.
 
-The cap is bounded by the **contract event budget**, and roughly half of the
-per-stream event cost is the *token's* `transfer` event, not Fluxora's
-`withdrawn` event. Measured against the Stellar Asset Contract. A SEP-41 token
-with a heavier event payload shifts the ceiling down.
+The cap is bounded by the **contract event budget** (16,384 bytes per
+transaction), and roughly half of the per-stream event cost is the *token's*
+`transfer` event rather than Fluxora's `withdrawn` event. The ceiling is
+therefore a function of the token. Measured at the cap of 16, counting the
+event budget alone:
 
-The 2x safety factor exists for this reason, but it is a margin, not a proof. An
-integrator standardising on an unusual token should re-run
-`cargo test resource_limits -- --nocapture` against it.
+| token profile | per-transfer event bytes | per-stream event bytes | events at 16 | implied ceiling |
+| --- | --- | --- | --- | --- |
+| no transfer event | 0 | 276 | 4,416 / 16,384 | 59 |
+| Stellar Asset Contract (baseline) | 236 | 512 | 8,192 / 16,384 | 32 |
+| ~256-byte transfer event | 412 | 688 | 11,008 / 16,384 | 23 |
+| ~2 KB transfer event | 2,204 | 2,480 | 39,680 / 16,384 | 6 |
+
+`MAX_BATCH_SIZE = 16` is safe for the first three. The Stellar Asset Contract
+keeps the documented 2x margin exactly (32 = 2 x 16), and even a ~256-byte
+transfer event still admits 23. The 2x factor remains a margin rather than a
+proof, but it now has a measured floor under it.
+
+It is **not** safe for the ~2 KB profile, whose implied ceiling of 6 is below
+the cap. A 16-element batch against such a token cannot fit in the event budget,
+and no contract-side check can detect that, because the cost lives inside the
+token's own event rather than Fluxora's. What the contract can do is refuse
+before the token is touched, and it does: more than 16 ids is rejected with
+`BatchTooLarge` (19) for every profile. The remaining limitation is
+client-side — an integrator standardising on a token with an unusually heavy
+transfer event must chunk below that token's implied ceiling, which for the
+~2 KB profile means chunks of 6.
+
+Re-run the calibration against your own token to get its number; the module
+prints the table above for the profiles it carries:
+
+```
+cargo test -p fluxora-stream --lib test::token_batch_calibration -- --nocapture
+```
+The margin left for a heavier token is 6,400 bytes of the event budget (a
+16-stream batch measures 9,984 of 16,384 since issue #1868 appended the sender
+and pause bookkeeping to `withdrawn`). It was the full 2x factor until then,
+and it is a margin, not a proof. An integrator standardising on an unusual token
+should re-run `cargo test resource_limits -- --nocapture` against it.
 
 ---
 
@@ -402,39 +455,62 @@ confirming it does not rebase.
 
 ---
 
-## 7. Pausing moves the cliff in wall-clock terms
+## 7. Pausing moves the cliff in wall-clock terms — on `Schedule` streams
 
-**Status: by design — documented, not fixed.**
+**Status: fixed by an opt-in, not by a change of default.**
 
-`cliff_reached` is evaluated against the stream clock, and `stream_time`
-subtracts the cumulative `paused_total`. Pausing a stream therefore freezes the
-cliff gate along with accrual, and resuming pushes the wall-clock instant the
-gate opens forward by the total time spent paused: the gate opens at
+Every stream carries a `cliff_mode`, set at creation and immutable thereafter.
+It selects how `cliff_reached` is evaluated:
+
+| `cliff_mode` | Gate opens when | Affected by `pause`? |
+| --- | --- | --- |
+| `CliffMode::Schedule` (0, **default**) | `stream_time(now) >= cliff_time` | Yes |
+| `CliffMode::WallClock` (1) | `now >= cliff_time` | No |
+
+On a `Schedule` stream, `cliff_reached` is evaluated against the stream clock,
+and `stream_time` subtracts the cumulative `paused_total`. Pausing therefore
+freezes the cliff gate along with accrual, and resuming pushes the wall-clock
+instant the gate opens forward by the total time spent paused: the gate opens at
 `cliff_time + paused_total`, not at the stored `cliff_time`.
 
 The stored `cliff_time` is never rewritten — `get_stream().cliff_time` still
-reports the original instant — so the two values an integrator might read (the
-schedule field and the effective instant) disagree by exactly `paused_total`. A
-recipient who computes an unlock date from `cliff_time` alone will expect funds
-to unlock earlier than they do.
+reports the original instant — so on a `Schedule` stream the two values an
+integrator might read (the schedule field and the effective instant) disagree by
+exactly `paused_total`. A recipient who computes an unlock date from
+`cliff_time` alone will expect funds to unlock earlier than they do.
 
-This is a limitation because `pause` is **sender-only** and unbounded. A sender
-who wants to defer the recipient's first withdrawal can pause a pausable stream
+This matters because `pause` is **sender-only** and unbounded. A sender who
+wants to defer the recipient's first withdrawal can pause a pausable stream
 before its cliff and hold it paused, moving the unlock instant arbitrarily far
 into the future. The recipient can still withdraw anything already vested, but
 before the cliff nothing has vested, so there is nothing to withdraw. The
 `pausable` capability is fixed at creation, so this exposure exists exactly when
 the stream was created with `pausable == true`.
 
-**What is documented instead of fixed.** `docs/ABI.md` states the rule and gives
-the recomputation (`cliff_time + paused_total`); the `resumed` event publishes
-the post-resume `paused_total` so an indexer can derive the new instant without
-replaying individual intervals; and
-`test::cliff::pause_across_cliff_delays_the_wall_clock_cliff` together with
-`test::pause::pausing_across_the_cliff_defers_the_cliff_too` assert it.
+`CliffMode::WallClock` removes that exposure. The gate is compared against the
+ledger timestamp, so a `pause` can no longer move it, however long the stream
+stays paused. Accrual still stops while paused, so a wall-clock stream paused
+across its cliff releases the whole pre-pause backlog at once on resume — the
+cliff stops being a lever, and it is still a gate rather than a
+payout-per-interval switch.
 
-**If you are integrating a pausable stream:** treat `cliff_time` as a lower
-bound, not the unlock date. Read the stream's current `paused_total` — from
-`get_stream`, or from the latest `resumed` event — and display
-`cliff_time + paused_total`. Do not cache the unlock instant while a stream is
-pausable.
+`create_stream` keeps its signature and creates `CliffMode::Schedule` streams, so
+no existing stream, call, or stored value changes meaning; only the ABI
+version moved, to 2. Opt in by calling
+`create_stream_with_cliff_mode(..., cliff_mode: CliffMode::WallClock, ...)`.
+
+**What is documented.** `docs/ABI.md` states both rules, gives the `Schedule`
+recomputation (`cliff_time + paused_total`), and the `resumed` event publishes
+the post-resume `paused_total` so an indexer can derive the new instant without
+replaying individual intervals. `test::cliff::pause_across_cliff_delays_the_wall_clock_cliff`
+with `test::pause::pausing_across_the_cliff_defers_the_cliff_too` assert the
+`Schedule` rule, and `test::cliff_mode::pausing_across_the_cliff_moves_a_schedule_cliff_but_not_a_wall_clock_one`
+asserts both rules on the same timeline.
+
+**If you are integrating a pausable stream:** read `cliff_mode` first. On
+`Schedule`, treat `cliff_time` as a lower bound rather than the unlock date —
+read the stream's current `paused_total` from `get_stream`, or the latest
+`resumed` event, and display `cliff_time + paused_total`, without caching the
+instant while the stream is pausable. On `WallClock`, display `cliff_time`
+directly; it is the actual instant, and `paused_total` is irrelevant to the
+gate.

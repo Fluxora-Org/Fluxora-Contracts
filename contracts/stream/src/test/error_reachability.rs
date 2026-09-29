@@ -76,7 +76,7 @@ enum Account {
 /// Kept as a value so the tests can iterate it. `names_and_discriminants_match_the_abi_fixture`
 /// pins its length to `DISCRIMINANT_FIXTURE`, which is itself pinned to
 /// `LAST_DISCRIMINANT`, so dropping an entry here fails the suite.
-const ALL: [Error; 33] = [
+const ALL: [Error; 38] = [
     Error::StreamNotFound,
     Error::InvalidTimeRange,
     Error::InvalidCliff,
@@ -110,6 +110,11 @@ const ALL: [Error; 33] = [
     Error::InvalidTopUp,
     Error::TokenAmountMismatch,
     Error::VestedDecreased,
+    Error::ContractHalted,
+    Error::HaltOperatorAlreadySet,
+    Error::HaltOperatorNotSet,
+    Error::ContractAlreadyHalted,
+    Error::ContractNotHalted,
 ];
 
 /// Frozen allowlist of discriminants that have no reaching test, in ascending
@@ -622,6 +627,65 @@ fn describe(e: Error) -> (&'static str, u32, Account) {
                  near-maximum streams and confirms no trigger. The guard stays \
                  because the invariant it protects is load-bearing.",
             ),
+        ),
+
+        // --- Contract-level emergency halt (#1818) -------------------------------
+        Error::ContractHalted => (
+            "ContractHalted",
+            34,
+            Account::Reach(|h| {
+                h.client.set_halt_operator(&h.sender);
+                h.client.halt();
+                let now = h.now();
+                h.client
+                    .try_create_stream(
+                        &h.sender,
+                        &h.recipient,
+                        &h.token,
+                        &(1_000 * ONE),
+                        &now,
+                        &(now + 10 * DAY),
+                        &now,
+                        &true,
+                        &true,
+                        &true,
+                    )
+                    .unwrap_err()
+                    .unwrap()
+            }),
+        ),
+        Error::HaltOperatorAlreadySet => (
+            "HaltOperatorAlreadySet",
+            35,
+            Account::Reach(|h| {
+                h.client.set_halt_operator(&h.sender);
+                h.client
+                    .try_set_halt_operator(&h.sender)
+                    .unwrap_err()
+                    .unwrap()
+            }),
+        ),
+        Error::HaltOperatorNotSet => (
+            "HaltOperatorNotSet",
+            36,
+            Account::Reach(|h| h.client.try_halt().unwrap_err().unwrap()),
+        ),
+        Error::ContractAlreadyHalted => (
+            "ContractAlreadyHalted",
+            37,
+            Account::Reach(|h| {
+                h.client.set_halt_operator(&h.sender);
+                h.client.halt();
+                h.client.try_halt().unwrap_err().unwrap()
+            }),
+        ),
+        Error::ContractNotHalted => (
+            "ContractNotHalted",
+            38,
+            Account::Reach(|h| {
+                h.client.set_halt_operator(&h.sender);
+                h.client.try_resume_contract().unwrap_err().unwrap()
+            }),
         ),
     }
 }

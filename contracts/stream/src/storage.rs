@@ -20,6 +20,29 @@
 //!    recipient, or any passer-by — can keep a claim readable without the
 //!    sender's cooperation.
 //!
+//! # Terminal streams and the TTL extension rule
+//!
+//! **Extending the TTL of a `Cancelled` or `Depleted` stream is rejected with
+//! `Error::StreamTerminated` from both `extend_stream_ttl` and
+//! `batch_extend_ttl`.** The reasons are:
+//!
+//! * **No future state change is possible.** Terminal streams have settled all
+//!   accounting. Allowing indefinite TTL extensions would charge callers rent
+//!   for a record they cannot modify or interact with in any meaningful way.
+//! * **The floor TTL covers the withdrawal tail.** At the instant a stream
+//!   enters a terminal state, the contract applies the floor TTL
+//!   (`MIN_STREAM_TTL_LEDGERS` ≈ 30 days). A `Cancelled` stream that still
+//!   has an unwithdrawn vested tail remains readable for that window, giving
+//!   the recipient ample time to withdraw.
+//! * **Restoration is the right answer after archival.** If a terminal entry
+//!   does archive (e.g. because no one withdrew the tail before the floor
+//!   expired), the caller must submit a `RestoreFootprint` operation rather
+//!   than extending an already-live entry. Locking callers out of `extend`
+//!   makes this distinction explicit.
+//!
+//! A keeper sweeping streams should filter terminal ids out of its batch before
+//! calling `batch_extend_ttl`. The indexer's `status` field is the signal.
+//!
 //! # Instance vs persistent TTL policy
 //!
 //! The contract uses two Soroban storage lifetimes, and they are *not* managed
@@ -66,7 +89,7 @@
 use soroban_sdk::{Address, Env};
 
 use crate::error::Error;
-use crate::types::{DataKey, DelegateGrant, Stream};
+use crate::types::{DataKey, DelegateGrant, ReleaseCurve, Stream, StreamRecord};
 
 /// Nominal Stellar ledger close time, in seconds.
 ///
@@ -253,11 +276,7 @@ pub fn extend_stream(env: &Env, stream_id: u64, stream: &Stream) {
 /// `test::read_ttl_matrix`). Switching a view to this function is a
 /// behaviour change callers can observe, and that test fails on it.
 pub fn load_stream(env: &Env, stream_id: u64) -> Result<Stream, Error> {
-    let stream: Stream = env
-        .storage()
-        .persistent()
-        .get(&DataKey::Stream(stream_id))
-        .ok_or(Error::StreamNotFound)?;
+    let stream = read_stream(env, stream_id)?;
     extend_stream(env, stream_id, &stream);
     Ok(stream)
 }
@@ -267,10 +286,29 @@ pub fn load_stream(env: &Env, stream_id: u64) -> Result<Stream, Error> {
 /// Used by the read-only view functions, which run in simulation and should not
 /// pretend to write. Also used by `extend_stream_ttl`, which does its own bump.
 pub fn peek_stream(env: &Env, stream_id: u64) -> Result<Stream, Error> {
-    env.storage()
+    read_stream(env, stream_id)
+}
+
+/// Decode a stream, stitching the frozen v1 [`StreamRecord`] back together with
+/// its [`ReleaseCurve`] side-car.
+///
+/// The stored value is the v1 layout ([`StreamRecord`]) — appending a field to
+/// it would make every stream written before curves existed undecodable; see
+/// the type docs. The curve lives under [`DataKey::StreamCurve`] and is written
+/// only for non-linear streams, so a missing entry means
+/// [`ReleaseCurve::Linear`] and decodes exactly as a v1 stream always did.
+fn read_stream(env: &Env, stream_id: u64) -> Result<Stream, Error> {
+    let record: StreamRecord = env
+        .storage()
         .persistent()
         .get(&DataKey::Stream(stream_id))
-        .ok_or(Error::StreamNotFound)
+        .ok_or(Error::StreamNotFound)?;
+    let curve: ReleaseCurve = env
+        .storage()
+        .persistent()
+        .get(&DataKey::StreamCurve(stream_id))
+        .unwrap_or(ReleaseCurve::Linear);
+    Ok(record.into_stream(curve))
 }
 
 /// Write a stream back and bump its TTL.
@@ -280,9 +318,23 @@ pub fn peek_stream(env: &Env, stream_id: u64) -> Result<Stream, Error> {
 /// creation: if the caller fails before `save_stream`, the counter never increments.
 pub fn save_stream(env: &Env, stream_id: u64, stream: &Stream) {
     let is_new = !env.storage().persistent().has(&DataKey::Stream(stream_id));
-    env.storage()
-        .persistent()
-        .set(&DataKey::Stream(stream_id), stream);
+    // Store the frozen v1 layout; the curve rides alongside it. See
+    // [`StreamRecord`] for why a field is not appended to the stored value.
+    env.storage().persistent().set(
+        &DataKey::Stream(stream_id),
+        &StreamRecord::from_stream(stream),
+    );
+    if stream.curve == ReleaseCurve::Linear {
+        // No entry for linear, so a linear stream pays no rent for a side-car
+        // that would only restate the default.
+        env.storage()
+            .persistent()
+            .remove(&DataKey::StreamCurve(stream_id));
+    } else {
+        env.storage()
+            .persistent()
+            .set(&DataKey::StreamCurve(stream_id), &stream.curve);
+    }
     if is_new {
         let current: u64 = env
             .storage()
@@ -304,6 +356,13 @@ pub fn save_stream(env: &Env, stream_id: u64, stream: &Stream) {
         extend_instance(env);
     }
     extend_stream(env, stream_id, stream);
+    if stream.curve != ReleaseCurve::Linear {
+        // Give the side-car the same lifetime as the record it annotates.
+        let target = ttl_target_ledgers(env, stream);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::StreamCurve(stream_id), target, target);
+    }
 }
 
 /// Return the next stream id without advancing the counter.
@@ -415,4 +474,55 @@ pub fn load_delegate(env: &Env, stream_id: u64, delegate: &Address) -> Option<De
     env.storage()
         .persistent()
         .get(&DataKey::Delegate(stream_id, delegate.clone()))
+}
+
+// ---------------------------------------------------------------------------
+// Emergency halt (issue #1818)
+// ---------------------------------------------------------------------------
+//
+// Both entries live in instance storage. They share the contract's own TTL, so
+// they are covered by the same "always pinned to `max_ttl()`" policy as
+// `NextStreamId`, and they can never archive out from under the guard that
+// reads them on every mutating call (see the module docs on lifetimes).
+//
+// `HaltedAt` doubles as the halt flag: its presence *is* the halt. Using the
+// timestamp rather than a separate boolean means the `ContractHalted`
+// diagnostic event can report when the stop began, and the resume event can
+// report how long settlement was frozen, without a second key to keep in sync.
+
+/// The address allowed to halt and resume the contract, if one was installed.
+pub fn halt_operator(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKey::HaltOperator)
+}
+
+/// Install the halt operator. Callers must reject a second install.
+pub fn set_halt_operator(env: &Env, operator: &Address) {
+    env.storage()
+        .instance()
+        .set(&DataKey::HaltOperator, operator);
+    extend_instance(env);
+}
+
+/// Whether the contract-level halt is engaged.
+pub fn is_halted(env: &Env) -> bool {
+    env.storage().instance().has(&DataKey::HaltedAt)
+}
+
+/// Unix seconds at which the halt was engaged, if it is engaged.
+pub fn halt_started_at(env: &Env) -> Option<u64> {
+    env.storage().instance().get(&DataKey::HaltedAt)
+}
+
+/// Engage the halt, recording the current ledger timestamp.
+pub fn set_halt(env: &Env) {
+    env.storage()
+        .instance()
+        .set(&DataKey::HaltedAt, &env.ledger().timestamp());
+    extend_instance(env);
+}
+
+/// Lift the halt and forget when it started.
+pub fn clear_halt(env: &Env) {
+    env.storage().instance().remove(&DataKey::HaltedAt);
+    extend_instance(env);
 }
