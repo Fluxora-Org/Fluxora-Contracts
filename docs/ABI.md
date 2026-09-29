@@ -85,6 +85,29 @@ discriminant and event is generated from that same spec XDR and committed at
 without bumping [`ABI_VERSION`](../contracts/stream/src/lib.rs). Additive
 changes update the snapshot only.
 
+**Regenerating the committed ABI file.** After adding or removing an entry
+point, regenerate `contracts/stream/abi/fluxora_stream.json` and update this
+document:
+
+```bash
+# Full regeneration from the built WASM (authoritative — includes full types):
+stellar contract info interface \
+  --wasm target/wasm32v1-none/release/fluxora_stream.wasm \
+  --output json > contracts/stream/abi/fluxora_stream.json
+
+# Quick structural sync from lib.rs (updates the function-name list only;
+# use when the WASM is not yet built or for a fast sanity check):
+python3 script/check-abi-drift.py --regenerate
+
+# Verify the committed file is in sync (run by CI on every push):
+python3 script/check-abi-drift.py
+```
+
+CI runs `python3 script/check-abi-drift.py` on every push and pull request
+(the `ABI drift check` step in the `docs-alignment-check` job). A difference
+between the committed JSON and the entry-point surface of `lib.rs`, or a
+function in the JSON that is not mentioned in this document, fails the build.
+
 ### ABI versions
 
 | version | scope |
@@ -550,6 +573,7 @@ the tolerated-surplus boundary.
 | `batch_withdraw(recipient, stream_ids: Vec<u64>)` | recipient | `i128` total |
 | `cancel(stream_id)` | sender | — |
 | `batch_cancel(sender, stream_ids: Vec<u64>)` | sender | `BatchCancelOutcome` — [details](#batch_cancelsender-stream_ids-vecu64) |
+| `batch_create(sender, requests: Vec<BatchCreateRequest>)` | sender | `Vec<u64>` stream ids — creates up to `MAX_BATCH_SIZE` streams in one call |
 | `pause(stream_id)` / `resume(stream_id)` | sender | — |
 | `transfer_recipient(stream_id, new_recipient)` | recipient | — |
 | `revoke_delegate(stream_id, grantor, delegate)` | sender or recipient | — |

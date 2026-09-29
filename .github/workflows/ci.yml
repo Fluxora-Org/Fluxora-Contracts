@@ -140,6 +140,14 @@ jobs:
           print("OK: docs/audit.md entrypoint table is complete.")
           EOF
 
+      # Hard gate (issue #1692): contracts/stream/abi/fluxora_stream.json must
+      # list every public #[contractimpl] entry point in lib.rs, and every
+      # function in the JSON must be documented in docs/ABI.md.
+      # Exit 1 = drift detected (fail the build); exit 2 = bad inputs.
+      # To regenerate the committed file: python3 script/check-abi-drift.py --regenerate
+      - name: ABI drift check (JSON vs lib.rs vs docs/ABI.md)
+        run: python3 script/check-abi-drift.py
+
       - name: Migration path validation (docs/MIGRATION.md vs ABI)
         run: python3 script/validate_migration.py
 

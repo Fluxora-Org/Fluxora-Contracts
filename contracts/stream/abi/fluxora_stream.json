@@ -4,6 +4,36 @@
   "upgrade_posture": "Immutable. This contract exposes no upgrade entry point and cannot be replaced in place. New functionality requires deploying a new contract and migrating state explicitly.",
   "functions": [
     {
+      "name": "batch_cancel",
+      "auth": "sender",
+      "inputs": [
+        {
+          "name": "sender",
+          "type": "Address"
+        },
+        {
+          "name": "stream_ids",
+          "type": "Vec<u64>"
+        }
+      ],
+      "outputs": "Result<BatchCancelOutcome, Error>"
+    },
+    {
+      "name": "batch_create",
+      "auth": "sender",
+      "inputs": [
+        {
+          "name": "sender",
+          "type": "Address"
+        },
+        {
+          "name": "requests",
+          "type": "Vec<BatchCreateRequest>"
+        }
+      ],
+      "outputs": "Result<Vec<u64>, Error>"
+    },
+    {
       "name": "batch_extend_ttl",
       "auth": "none",
       "inputs": [
@@ -373,21 +403,6 @@
         }
       ],
       "outputs": "Result<i128, Error>"
-    },
-    {
-      "name": "batch_cancel",
-      "auth": "sender",
-      "inputs": [
-        {
-          "name": "sender",
-          "type": "Address"
-        },
-        {
-          "name": "stream_ids",
-          "type": "Vec<u64>"
-        }
-      ],
-      "outputs": "Result<BatchCancelOutcome, Error>"
     },
     {
       "name": "create_stream_with_curve",
