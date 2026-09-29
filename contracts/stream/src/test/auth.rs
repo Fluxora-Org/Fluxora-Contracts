@@ -33,6 +33,7 @@
 //! | `cancel`              | `sender` on stream    | `cancellable == true`|
 //! | `withdraw`            | `recipient` on stream | —                    |
 //! | `batch_withdraw`      | `recipient` (once)    | —                    |
+//! | `batch_cancel`        | `sender` (once)       | `cancellable == true`|
 //! | `transfer_recipient`  | `recipient` on stream | `transferable == true`|
 //! | `extend_stream_ttl`   | **permissionless**    | —                    |
 //! | `batch_extend_ttl`    | **permissionless**    | —                    |
@@ -332,6 +333,65 @@ fn rejected_cancel_leaves_stream_byte_identical_and_issues_no_refund() {
         "no refund issued"
     );
     assert_eq!(h.pool(), pool_before, "pool unchanged");
+    h.assert_pool_exact();
+}
+
+// ---------------------------------------------------------------------------
+// 5a. delegate_cancel — delegate authority
+// ---------------------------------------------------------------------------
+
+/// Positive: `delegate_cancel` demands the granted delegate's authorization,
+/// not the sender's. This guards the additional auth check on the delegated
+/// path independently of the permissive auth mock used by most tests.
+#[test]
+fn delegate_cancel_requires_the_delegate() {
+    use crate::op;
+
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let delegate = Address::generate(&h.env);
+    h.client
+        .grant_delegate(&id, &h.sender, &delegate, &op::CANCEL, &None);
+    h.advance(10 * DAY);
+
+    h.client.delegate_cancel(&id, &delegate);
+
+    assert_eq!(required_auth(&h.env), delegate, "delegate_cancel");
+    assert_eq!(h.get(id).status, crate::StreamStatus::Cancelled);
+    h.assert_pool_exact();
+}
+
+/// Negative: a live CANCEL grant does not bypass the delegate's own
+/// `require_auth`; rejection must leave the stream and refund balances intact.
+#[test]
+fn delegate_cancel_fails_without_delegate_authorization() {
+    use crate::op;
+
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let delegate = Address::generate(&h.env);
+    h.client
+        .grant_delegate(&id, &h.sender, &delegate, &op::CANCEL, &None);
+    h.advance(30 * DAY);
+
+    let stream_before = h.get(id);
+    let sender_balance_before = h.balance(&h.sender);
+    let pool_before = h.pool();
+
+    revoke_all_auths(&h.env);
+    assert!(
+        h.client.try_delegate_cancel(&id, &delegate).is_err(),
+        "delegate_cancel must reject when the delegate has not authorized it",
+    );
+    h.env.mock_all_auths();
+
+    assert_eq!(h.get(id), stream_before, "stream must remain unchanged");
+    assert_eq!(
+        h.balance(&h.sender),
+        sender_balance_before,
+        "no refund issued"
+    );
+    assert_eq!(h.pool(), pool_before, "pool must remain unchanged");
     h.assert_pool_exact();
 }
 
