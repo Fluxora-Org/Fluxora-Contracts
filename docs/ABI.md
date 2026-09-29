@@ -354,11 +354,21 @@ accounting.
 | `withdraw(stream_id, amount: Option<i128>)` | recipient | `i128` paid — [details](#withdraw) |
 | `batch_withdraw(recipient, stream_ids: Vec<u64>)` | recipient | `i128` total |
 | `cancel(stream_id)` | sender | — |
+| `reclaim_dust(stream_id)` | sender | `i128` recovered |
 | `pause(stream_id)` / `resume(stream_id)` | sender | — |
 | `transfer_recipient(stream_id, new_recipient)` | recipient | — |
 | `revoke_delegate(stream_id, grantor, delegate)` | sender or recipient | — |
 
 `withdraw` with `amount = None` draws the full available balance.
+
+The sender owns any integer-token rounding residue left after settlement.
+`reclaim_dust` is sender-authorized and only transfers the refundable part of
+the outstanding liability; any amount still withdrawable by the recipient is
+reserved for them. It returns zero before a stream is terminal or when
+settlement leaves no sender residue. With the current proportional accrual
+formula, maturity vests the full deposit, so uneven deposit/duration pairs
+settle with zero residue; cancellation returns the unvested remainder at
+cancellation time.
 
 #### `pause(stream_id)` — freeze accrual and the cliff gate
 

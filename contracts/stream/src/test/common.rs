@@ -353,7 +353,6 @@ impl<'a> Harness<'a> {
             &transferable,
             &reference,
         )
-        )
     }
 
     pub fn get(&self, stream_id: u64) -> Stream {

@@ -39,6 +39,7 @@ mod withdraw_events;
 // where `withdrawable` reaches zero and the follow-up error changes from
 // `NothingToWithdraw` to `StreamTerminated`.
 mod withdraw_exact_balance;
+mod settled_dust;
 
 // Stage 2
 mod auth;

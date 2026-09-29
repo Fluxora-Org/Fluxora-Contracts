@@ -95,6 +95,7 @@ const AUTH: &[(&str, &str)] = &[
     ("create_stream", "sender"),
     ("top_up", "sender"),
     ("cancel", "sender"),
+    ("reclaim_dust", "sender"),
     ("pause", "sender"),
     ("resume", "sender"),
     ("withdraw", "recipient"),
@@ -443,6 +444,12 @@ fn frozen_v1() -> Inventory {
         fn_abi(
             "refundable_of",
             "none",
+            vec![param("stream_id", "u64")],
+            "Result<i128, Error>",
+        ),
+        fn_abi(
+            "reclaim_dust",
+            "sender",
             vec![param("stream_id", "u64")],
             "Result<i128, Error>",
         ),

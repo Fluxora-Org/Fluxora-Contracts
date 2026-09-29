@@ -145,6 +145,14 @@
       "outputs": "Result<i128, Error>"
     },
     {
+      "name": "reclaim_dust",
+      "auth": "sender",
+      "inputs": [
+        {"name": "stream_id", "type": "u64"}
+      ],
+      "outputs": "Result<i128, Error>"
+    },
+    {
       "name": "resume",
       "auth": "sender",
       "inputs": [

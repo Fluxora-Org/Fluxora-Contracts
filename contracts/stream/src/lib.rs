@@ -58,18 +58,12 @@ compile_error!("Fluxora production WASM must not enable the testutils feature.")
 extern crate std;
 
 mod accrual;
-<<<<<<< HEAD
-#[cfg(test)]
-mod checksum;
-#[cfg(test)]
-mod protocol_limits;
-mod token_check;
-=======
 mod error;
 mod events;
 mod storage;
 mod types;
->>>>>>> upstream/main
+#[cfg(test)]
+mod protocol_limits;
 
 pub use accrual::{
     cliff_reached, duration, elapsed, liability, refundable, stream_time, vested, withdrawable,
@@ -82,7 +76,7 @@ pub use types::op;
 pub use types::{DataKey, DelegateGrant, Stream, StreamStatus, MAX_REFERENCE_LENGTH};
 
 use soroban_sdk::{
-    contract, contractimpl, token, Address, Env, InvokeError, MuxedAddress, TryFromVal, Vec,
+    contract, contractimpl, token, Address, Env, InvokeError, MuxedAddress, String, TryFromVal, Vec,
 };
 
 /// Maximum number of streams one batch call may touch.
@@ -320,7 +314,7 @@ impl FluxoraStream {
 
         // Validate reference length if provided
         if let Some(ref r) = reference {
-            if r.len() > MAX_REFERENCE_LENGTH as usize {
+            if r.len() > MAX_REFERENCE_LENGTH {
                 return Err(Error::InvalidReferenceLength);
             }
         }
@@ -719,6 +713,42 @@ impl FluxoraStream {
         debug_assert_eq!(stream.deposited, vested_now);
         events::cancelled(&env, stream_id, &stream, refund);
         Ok(())
+    }
+
+    /// Recover sender-owned rounding dust after the recipient's claim is settled.
+    ///
+    /// The sender owns any integer-token residue left by rounding. Recovery is
+    /// available after a stream becomes terminal and transfers only the
+    /// refundable portion of its outstanding liability. Any amount still
+    /// withdrawable by the recipient remains reserved for them.
+    pub fn reclaim_dust(env: Env, stream_id: u64) -> Result<i128, Error> {
+        let mut stream = storage::load_stream(&env, stream_id)?;
+        stream.sender.require_auth();
+        if !stream.status.is_terminal() {
+            return Ok(0);
+        }
+
+        let now = env.ledger().timestamp();
+        let liability = accrual::liability(&stream)?;
+        let recipient_claim = accrual::withdrawable(&stream, now)?;
+        let amount = liability
+            .checked_sub(recipient_claim)
+            .ok_or(Error::Overflow)?;
+        if amount > 0 {
+            stream.deposited = stream
+                .deposited
+                .checked_sub(amount)
+                .ok_or(Error::Overflow)?;
+            storage::save_stream(&env, stream_id, &stream);
+            token_transfer(
+                &env,
+                &stream.token,
+                &env.current_contract_address(),
+                MuxedAddress::from(stream.sender.clone()),
+                &amount,
+            )?;
+        }
+        Ok(amount)
     }
 
     /// Pause accrual. Only the sender, and only if `pausable`.
