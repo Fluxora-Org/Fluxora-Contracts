@@ -4,11 +4,16 @@ from script import validate_gas
 from script.validate_gas import compare, entrypoints, parse_measurements
 
 
-def test_inventory_is_all_24_abi_entries():
+def test_inventory_is_all_33_abi_entries():
     names = entrypoints()
-    assert len(names) == 24
-    assert {"withdraw", "batch_withdraw", "delegate_withdraw"} <= names
-
+    assert len(names) == 33
+    assert {
+        "withdraw",
+        "batch_withdraw",
+        "batch_cancel",
+        "delegate_withdraw",
+        "create_stream_with_cliff_mode",
+    } <= names
 
 def test_parse_rejects_duplicate_measurement():
     with pytest.raises(ValueError, match="duplicate"):
