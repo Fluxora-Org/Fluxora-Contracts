@@ -78,6 +78,9 @@ fn assert_withdrawn_event(
         withdrawn: stream.withdrawn,
         deposited: stream.deposited,
         status: stream.status,
+        sender: stream.sender.clone(),
+        paused_at: stream.paused_at,
+        paused_total: stream.paused_total,
     };
 
     assert_eq!(
@@ -363,6 +366,9 @@ fn batch_withdraw_per_stream_event_amounts() {
         withdrawn: stream_a.withdrawn,
         deposited: stream_a.deposited,
         status: stream_a.status,
+        sender: stream_a.sender.clone(),
+        paused_at: stream_a.paused_at,
+        paused_total: stream_a.paused_total,
     };
     let expected_b_event = Withdrawn {
         stream_id: b,
@@ -371,6 +377,9 @@ fn batch_withdraw_per_stream_event_amounts() {
         withdrawn: stream_b.withdrawn,
         deposited: stream_b.deposited,
         status: stream_b.status,
+        sender: stream_b.sender.clone(),
+        paused_at: stream_b.paused_at,
+        paused_total: stream_b.paused_total,
     };
     let expected_c_event = Withdrawn {
         stream_id: c,
@@ -379,6 +388,9 @@ fn batch_withdraw_per_stream_event_amounts() {
         withdrawn: stream_c.withdrawn,
         deposited: stream_c.deposited,
         status: stream_c.status,
+        sender: stream_c.sender.clone(),
+        paused_at: stream_c.paused_at,
+        paused_total: stream_c.paused_total,
     };
 
     let expected_xdr: std::vec::Vec<_> = [expected_a_event, expected_b_event, expected_c_event]
@@ -424,6 +436,9 @@ fn batch_withdraw_zero_stream_skipped_no_event() {
         withdrawn: h.get(live).withdrawn,
         deposited: h.get(live).deposited,
         status: h.get(live).status,
+        sender: h.get(live).sender,
+        paused_at: h.get(live).paused_at,
+        paused_total: h.get(live).paused_total,
     };
     assert_eq!(
         published,
