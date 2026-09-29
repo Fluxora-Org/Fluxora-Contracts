@@ -32,8 +32,13 @@ jobs:
     name: Python Tooling Tests and Docs Alignment
     runs-on: ubuntu-latest
     steps:
+      # Full history so tests/test_validator.py can compare
+      # script/doc-alignment-baseline.json against the base branch and fail
+      # if the shrink-only baseline grew.
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # Bumped 3.10 → 3.11: `script/verify_rust_version.py` (and a couple
       # of other helpers) prefer `tomllib` when available; on 3.10 it
@@ -78,8 +83,18 @@ jobs:
           path: coverage/python-tooling.xml
           if-no-files-found: warn
 
-      - name: Validate doc alignment (streaming / events / errors)
-        run: echo "Skip missing python script"
+      # Blocking gate (issue #1865): docs/ABI.md must cover every public
+      # #[contractimpl] entry point in lib.rs (missing-from-docs fails) and
+      # must not document entry points that no longer exist in the contract
+      # (documented-but-nonexistent fails). Known gaps predating the gate are
+      # recorded in script/doc-alignment-baseline.json with a reason; the
+      # baseline is a shrink-only ratchet: unbaselined gaps fail, stale
+      # baseline entries fail, and the file itself is routed to the
+      # maintainers team in .github/CODEOWNERS so it cannot grow silently.
+      # Exit 1 = misalignment, exit 2 = broken inputs (missing files,
+      # unparsable baseline). Both fail the job.
+      - name: Validate doc alignment (docs/ABI.md vs lib.rs entry points)
+        run: python3 script/validate-doc-alignment.py
 
       # Hard gate: diff the #[contractimpl] pub fn surface against
       # docs/audit.md's entrypoint table.  Fails (exit 1) if any ABI
@@ -421,6 +436,9 @@ jobs:
           echo "provenance:"
           cat target/wasm32v1-none/release/provenance.json
 
+      # The release inventory contains only fluxora_stream.wasm. Build that
+      # deployable artifact twice into isolated target directories and compare
+      # both the raw and optimizer-produced bytes before deployment packaging.
       - name: Install Stellar CLI (pinned)
         run: |
           set -euo pipefail
@@ -434,9 +452,16 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           stellar --version
 
+      - name: Verify deployable WASM reproducibility
+        env:
+          FLUXORA_REQUIRE_OPTIMIZED: "true"
+        run: bash script/verify-wasm-checksum.sh --reproducible
+
       - name: Optimize WASM
         run: |
           stellar contract optimize --wasm target/wasm32v1-none/release/fluxora_stream.wasm
+          test -s target/wasm32v1-none/release/fluxora_factory.wasm
+          stellar contract optimize --wasm target/wasm32v1-none/release/fluxora_factory.wasm
 
       - name: Compute WASM SHA256 hash
         run: |
@@ -462,6 +487,14 @@ jobs:
 
       - name: Check WASM size budget
         run: bash script/check-stream-wasm-size.sh
+
+      - name: Check factory WASM size budget
+        run: |
+          FACTORY_WASM="target/wasm32v1-none/release/fluxora_factory.wasm"
+          test -s "$FACTORY_WASM"
+          SIZE=$(stat --printf='%s' "$FACTORY_WASM" 2>/dev/null || stat -f%z "$FACTORY_WASM")
+          echo "fluxora_factory.wasm: ${SIZE} bytes"
+          test "$SIZE" -le 300000
 
       - name: Upload WASM hash artifact
         uses: actions/upload-artifact@v4
@@ -533,6 +566,20 @@ jobs:
       # --nocapture surfaces the confirmation lines for each invariant.
       - name: Check package and artifact names (test suite)
         run: "cargo test --all-features packaging:: -- --nocapture --test-threads=1"
+
+      - name: Check factory package and artifact
+        run: |
+          meta=$(cargo metadata --format-version 1 --no-deps)
+          echo "$meta" | python3 -c '
+          import json, sys
+          packages = json.load(sys.stdin)["packages"]
+          factory = next((p for p in packages if p["name"] == "fluxora-factory"), None)
+          if factory is None:
+              raise SystemExit("fluxora-factory is missing from the workspace")
+          if not any("cdylib" in target["kind"] for target in factory["targets"]):
+              raise SystemExit("fluxora-factory has no cdylib target")
+          print("fluxora-factory package and cdylib target verified")
+          '
 
   fuzz-feature-matrix:
     name: feature matrix check
@@ -612,6 +659,14 @@ jobs:
         run: |
           cargo test -p fluxora-stream --features testutils \
             props:: \
+            -- --nocapture
+        env:
+          PROPTEST_CASES: "64"
+
+      - name: Bounded proptest pause/resume pass
+        run: |
+          cargo test -p fluxora-stream --features testutils \
+            pause::zero_elapsed_pause_resume_preserves_stream_state \
             -- --nocapture
         env:
           PROPTEST_CASES: "64"
@@ -734,7 +789,7 @@ jobs:
       # silent discriminant drift. See contracts/factory/tests/factory_error_discriminants.rs.
       - name: Factory discriminant-stability tests
         if: ${{ hashFiles('contracts/factory/Cargo.toml') != '' }}
-        run: cargo test -p fluxora_factory
+        run: cargo test -p fluxora-factory
 
       # Hard gate: cross-file collision audit. Parses all three discriminant
       # tables in docs/error.md and fails (exit 1) on any intra-section
@@ -879,6 +934,24 @@ jobs:
             --skip-clean \
             --timeout 300 \
             -p fluxora-stream
+
+      - name: Generate factory coverage report
+        run: |
+          cargo tarpaulin \
+            --features testutils \
+            --out Xml \
+            --output-dir coverage/factory \
+            --ignore-tests \
+            --skip-clean \
+            --timeout 300 \
+            -p fluxora-factory
+
+      - name: Enforce committed factory coverage floor
+        run: |
+          python3 script/check_stream_coverage.py \
+            --xml coverage/factory/cobertura.xml \
+            --floor contracts/factory/coverage-floor.txt \
+            --summary "$GITHUB_STEP_SUMMARY"
 
       - name: Enforce committed coverage floor
         run: |

@@ -1,6 +1,6 @@
 [package]
-name = "fluxora-factory"
-description = "Factory contract for Fluxora stream deployment"
+name = "fluxora_factory"
+description = "Admin policy wrapper and stream factory for Fluxora on Soroban"
 version = { workspace = true }
 edition = { workspace = true }
 license = { workspace = true }
@@ -19,7 +19,3 @@ soroban-sdk = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
-
-# Integration tests in tests/ need the crate itself compiled with testutils so
-# FluxoraFactoryClient and load_policy are visible.
-fluxora-factory = { path = ".", features = ["testutils"] }
