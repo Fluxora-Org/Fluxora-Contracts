@@ -1,5 +1,6 @@
 //! Issue #1856 — the accounting identity as a generated property over
-//! randomized operation sequences, asserted at every terminal state.
+//! Issue #1856 — the accounting identity as a generated property over
+//! randomized operation sequences.
 //!
 //! ```text
 //! withdrawable(t) + refundable(t) == deposited - withdrawn        for every t
@@ -133,6 +134,59 @@ fn assert_identity(h: &Harness, seed: u64, step: u32, context: &str) {
     }
 }
 
+/// Drive a stream into a terminal state and assert the identity there.
+///
+/// Terminal states are where `cancel` rewrites `end_time` to `settle_at`, so
+/// the identity is most likely to break. This helper covers cancellation at
+/// every point in the schedule, maturity with and without a final withdrawal,
+/// and cancellation while paused.
+fn assert_identity_at_terminal(h: &Harness, seed: u64, context: &str) {
+    let now = h.now();
+    for id in 0..h.client.stream_count() {
+        let s = h.client.get_stream(&id);
+        let withdrawable = h.client.withdrawable_of(&id);
+        let refundable = h.client.refundable_of(&id);
+        let unwithdrawn = s.deposited - s.withdrawn;
+
+        assert_eq!(
+            withdrawable + refundable,
+            unwithdrawn,
+            "seed {seed} ({context}), stream {id}: withdrawable_of {withdrawable} + \
+             refundable_of {refundable} != deposited {} - withdrawn {} ({unwithdrawn})",
+            s.deposited,
+            s.withdrawn,
+        );
+        assert_eq!(
+            accrual::withdrawable(&s, now).expect("withdrawable must not overflow"),
+            withdrawable,
+            "seed {seed} ({context}), stream {id}: accrual::withdrawable disagrees with \
+             withdrawable_of",
+        );
+        assert_eq!(
+            accrual::refundable(&s, now).expect("refundable must not overflow"),
+            refundable,
+            "seed {seed} ({context}), stream {id}: accrual::refundable disagrees with \
+             refundable_of",
+        );
+        assert_eq!(
+            accrual::liability(&s).expect("liability must not overflow"),
+            unwithdrawn,
+            "seed {seed} ({context}), stream {id}: accrual::liability disagrees with \
+             deposited - withdrawn",
+        );
+        assert_eq!(
+            accrual::vested(&s, now).expect("vested must not overflow") + refundable,
+            s.deposited,
+            "seed {seed} ({context}), stream {id}: vested + refundable != deposited",
+        );
+        assert!(
+            withdrawable >= 0 && refundable >= 0,
+            "seed {seed} ({context}), stream {id}: a view went negative \
+             (withdrawable {withdrawable}, refundable {refundable})",
+        );
+    }
+}
+
 /// Create one more stream at the current ledger time, with a rate of two
 /// stroops per second so every schedule satisfies the contract's rate floor.
 fn create_one(h: &Harness, rng: &mut Rng) -> u64 {
@@ -226,6 +280,10 @@ fn run_sequence(seed: u64, steps: u32) {
         assert_identity(&h, seed, step, "after operation and advance");
     }
 
+    // Terminal states: cancellation mid-schedule, maturity with and without a
+    // final withdrawal, and cancellation while paused.
+    assert_terminal_states(seed);
+
     // The identity must survive the terminal state the sequence settled into.
     let now = h.now();
     for id in 0..h.client.stream_count() {
@@ -236,6 +294,64 @@ fn run_sequence(seed: u64, steps: u32) {
             s.deposited - s.withdrawn,
             "seed {seed}: identity broken in the settled state, stream {id}",
         );
+    }
+}
+
+/// Drive fresh streams into each terminal state and assert the identity.
+///
+/// Covers the acceptance criteria directly: cancellation at every point in the
+/// schedule, maturity with and without a final withdrawal, and cancellation
+/// while paused.
+fn assert_terminal_states(seed: u64) {
+    // Cancellation at every point in the schedule: before start, at start,
+    // mid-schedule, at the cliff, and after end.
+    for frac in [0u64, 1, 2, 3, 4] {
+        let h = Harness::new();
+        let start = h.now();
+        let duration = 10 * DAY;
+        let deposit = (duration as i128) * 2;
+        let id = h.create(deposit, start, start + duration, start, true, true, true);
+        let offset = duration * frac / 4;
+        h.advance(offset);
+        let _ = h.client.try_cancel(&id);
+        assert_identity_at_terminal(&h, seed, "after cancel at schedule fraction");
+    }
+
+    // Maturity without a final withdrawal.
+    {
+        let h = Harness::new();
+        let start = h.now();
+        let duration = 10 * DAY;
+        let deposit = (duration as i128) * 2;
+        let id = h.create(deposit, start, start + duration, start, true, true, true);
+        h.advance(duration + DAY);
+        assert_identity_at_terminal(&h, seed, "after maturity without withdrawal");
+        let _ = id;
+    }
+
+    // Maturity with a final withdrawal.
+    {
+        let h = Harness::new();
+        let start = h.now();
+        let duration = 10 * DAY;
+        let deposit = (duration as i128) * 2;
+        let id = h.create(deposit, start, start + duration, start, true, true, true);
+        h.advance(duration + DAY);
+        let _ = h.client.try_withdraw(&id, &None);
+        assert_identity_at_terminal(&h, seed, "after maturity with final withdrawal");
+    }
+
+    // Cancellation while paused.
+    {
+        let h = Harness::new();
+        let start = h.now();
+        let duration = 10 * DAY;
+        let deposit = (duration as i128) * 2;
+        let id = h.create(deposit, start, start + duration, start, true, true, true);
+        h.advance(duration / 2);
+        let _ = h.client.try_pause(&id);
+        let _ = h.client.try_cancel(&id);
+        assert_identity_at_terminal(&h, seed, "after cancel while paused");
     }
 }
 
