@@ -78,6 +78,10 @@ mod stream_count_consistency;
 mod read_methods_no_side_effects;
 mod read_ttl_matrix;
 
+// Issue #1850 — an id at or beyond `stream_count()` was never issued, and is
+// distinguishable from an archived one.
+mod stream_exists_bounds;
+
 // Package / artifact naming gates, run by CI's `packaging::` step. Also
 // guards #1675 (no inert governance crate). Previously unregistered, so
 // that CI step matched zero tests.
