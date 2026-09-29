@@ -144,6 +144,10 @@ mod delegate_withdraw;
 mod token_batch_calibration;
 // Issue #1835 — a recipient transfer in the same ledger as a withdrawal.
 mod transfer_withdraw_same_ledger;
+// Issue — top_up changes deposited/end_time; withdraw reads vested from the
+// same storage. Both orderings in the same ledger are covered and shown to
+// be conservation-equivalent (rate-preserving property of top_up).
+mod top_up_withdraw_same_ledger;
 // Issue #1857 — the contract's token balance always covers the summed live
 // stream liability, asserted over randomized operation sequences.
 mod pool_liability_proptest;

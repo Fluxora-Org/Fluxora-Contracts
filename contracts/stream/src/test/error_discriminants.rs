@@ -100,7 +100,7 @@ pub(super) const DISCRIMINANT_FIXTURE: &[(&str, u32)] = &[
     // --- Vesting monotonicity ---
     ("VestedDecreased", 33),
     // --- Rebase detection ---
-    ("PoolBalanceDrift", 34),
+    ("PoolBalanceDrift", 39),
     // --- Contract-level emergency halt (#1818) ---
     ("ContractHalted", 34),
     ("HaltOperatorAlreadySet", 35),
@@ -1185,7 +1185,7 @@ fn vested_decreased_discriminant_value() {
     );
 }
 
-// #34 — PoolBalanceDrift ----------------------------------------------------
+// #39 — PoolBalanceDrift ----------------------------------------------------
 //
 // Issue #1805. Driven end-to-end (a rebasing token desynchronising the pool,
 // detected on the next `withdraw`, `top_up` or `cancel`) in `test::rebase_drift`,
@@ -1197,7 +1197,10 @@ fn pool_balance_drift_discriminant_value() {
     assert_eq!(
         Error::PoolBalanceDrift as u32,
         34,
-        "PoolBalanceDrift discriminant must be 34",
+        "PoolBalanceDrift discriminant must be 39",
+    );
+}
+
 // #34–#38 — contract-level emergency halt (#1818) ---------------------------
 //
 // Driven end-to-end from the public ABI in `test::halt`, which halts a live

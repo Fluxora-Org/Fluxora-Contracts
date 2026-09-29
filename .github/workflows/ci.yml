@@ -68,6 +68,9 @@ jobs:
       - name: Clear Python bytecode cache
         run: find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 
+      - name: Verify Soroban SDK version records
+        run: python3 script/verify_soroban_version.py
+
       - name: Run test suite with coverage
         run: >-
           pytest tests/ --cov=script/ --cov-fail-under=50
@@ -474,6 +477,8 @@ jobs:
       - name: Optimize WASM
         run: |
           stellar contract optimize --wasm target/wasm32v1-none/release/fluxora_stream.wasm
+          test -s target/wasm32v1-none/release/fluxora_factory.wasm
+          stellar contract optimize --wasm target/wasm32v1-none/release/fluxora_factory.wasm
 
       - name: Compute WASM SHA256 hash
         run: |
@@ -499,6 +504,14 @@ jobs:
 
       - name: Check WASM size budget
         run: bash script/check-stream-wasm-size.sh
+
+      - name: Check factory WASM size budget
+        run: |
+          FACTORY_WASM="target/wasm32v1-none/release/fluxora_factory.wasm"
+          test -s "$FACTORY_WASM"
+          SIZE=$(stat --printf='%s' "$FACTORY_WASM" 2>/dev/null || stat -f%z "$FACTORY_WASM")
+          echo "fluxora_factory.wasm: ${SIZE} bytes"
+          test "$SIZE" -le 300000
 
       - name: Upload WASM hash artifact
         uses: actions/upload-artifact@v4
@@ -570,6 +583,20 @@ jobs:
       # --nocapture surfaces the confirmation lines for each invariant.
       - name: Check package and artifact names (test suite)
         run: "cargo test --all-features packaging:: -- --nocapture --test-threads=1"
+
+      - name: Check factory package and artifact
+        run: |
+          meta=$(cargo metadata --format-version 1 --no-deps)
+          echo "$meta" | python3 -c '
+          import json, sys
+          packages = json.load(sys.stdin)["packages"]
+          factory = next((p for p in packages if p["name"] == "fluxora-factory"), None)
+          if factory is None:
+              raise SystemExit("fluxora-factory is missing from the workspace")
+          if not any("cdylib" in target["kind"] for target in factory["targets"]):
+              raise SystemExit("fluxora-factory has no cdylib target")
+          print("fluxora-factory package and cdylib target verified")
+          '
 
   fuzz-feature-matrix:
     name: feature matrix check
@@ -779,7 +806,7 @@ jobs:
       # silent discriminant drift. See contracts/factory/tests/factory_error_discriminants.rs.
       - name: Factory discriminant-stability tests
         if: ${{ hashFiles('contracts/factory/Cargo.toml') != '' }}
-        run: cargo test -p fluxora_factory
+        run: cargo test -p fluxora-factory
 
       # Hard gate: cross-file collision audit. Parses all three discriminant
       # tables in docs/error.md and fails (exit 1) on any intra-section
@@ -924,6 +951,24 @@ jobs:
             --skip-clean \
             --timeout 300 \
             -p fluxora-stream
+
+      - name: Generate factory coverage report
+        run: |
+          cargo tarpaulin \
+            --features testutils \
+            --out Xml \
+            --output-dir coverage/factory \
+            --ignore-tests \
+            --skip-clean \
+            --timeout 300 \
+            -p fluxora-factory
+
+      - name: Enforce committed factory coverage floor
+        run: |
+          python3 script/check_stream_coverage.py \
+            --xml coverage/factory/cobertura.xml \
+            --floor contracts/factory/coverage-floor.txt \
+            --summary "$GITHUB_STEP_SUMMARY"
 
       - name: Enforce committed coverage floor
         run: |

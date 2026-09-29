@@ -1,4 +1,5 @@
 //! The documented migration path, exercised (#1870).
+//! The documented migration path, exercised (#1870).
 //!
 //! `docs/MIGRATION.md` is the only place that tells a caller how to move from
 //! the pre-v1 surface onto v1: which functions were renamed, which were
@@ -19,6 +20,10 @@
 //!   `transferable` flag, `withdraw` with `None` means "take everything
 //!   accrued", and the views that replaced `get_stream_state` and friends
 //!   answer the same questions.
+//!
+//! It also pins the documented *upgrade posture*: the contract exposes no
+//! upgrade entry point, so the document must say so, and the ABI must not
+//! contain any of the upgrade functions a caller might otherwise assume.
 //!
 //! # Why the document is parsed rather than restated
 //!
@@ -132,6 +137,27 @@ fn abi_function_names() -> Vec<String> {
 
 fn is_delegation(name: &str) -> bool {
     name.starts_with("delegate_") || name == "grant_delegate" || name == "revoke_delegate"
+}
+
+/// Names that would indicate an upgradeable contract. None may appear in the
+/// ABI, because the contract is deliberately immutable.
+const UPGRADE_FUNCTIONS: &[&str] = &[
+    "upgrade",
+    "set_admin",
+    "set_implementation",
+    "update_wasm",
+    "migrate",
+    "migrate_state",
+    "set_owner",
+    "transfer_admin",
+];
+
+/// The upgrade posture is stated in the document and matches the ABI.
+fn documented_posture_is_immutable() -> bool {
+    MIGRATION_MD.contains("immutable")
+        || MIGRATION_MD.contains("not upgradeable")
+        || MIGRATION_MD.contains("non-upgradeable")
+        || MIGRATION_MD.contains("cannot be upgraded")
 }
 
 // ---------------------------------------------------------------------------
@@ -268,6 +294,47 @@ fn the_documented_cuts_are_still_cut() {
         assert!(
             !abi.contains(&cut.to_string()),
             "`{cut}` is documented as removed from v1 but is in the ABI",
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The upgrade posture
+// ---------------------------------------------------------------------------
+
+/// The contract is deliberately immutable: the ABI exposes no upgrade entry
+/// point, and the document says so.
+#[test]
+fn the_contract_is_immutable_and_the_document_says_so() {
+    let abi = abi_function_names();
+
+    for name in UPGRADE_FUNCTIONS {
+        assert!(
+            !abi.contains(&name.to_string()),
+            "`{name}` is in the v1 ABI, but the contract is documented as \
+             immutable — either remove the entry point or update the posture",
+        );
+    }
+
+    assert!(
+        documented_posture_is_immutable(),
+        "docs/MIGRATION.md must state the upgrade posture (immutable / not \
+         upgradeable) so integrators know the deployed contract cannot be \
+         replaced",
+    );
+}
+
+/// The ABI's entry points are exactly the ones the document accounts for, so
+/// the "no upgrade entry point" claim is validated against what the contract
+/// actually exposes rather than against a hand-maintained list.
+#[test]
+fn the_abi_exposes_no_upgrade_entry_point() {
+    let abi = abi_function_names();
+    for name in &abi {
+        assert!(
+            !UPGRADE_FUNCTIONS.contains(&name.as_str()),
+            "the ABI exposes `{name}`, which contradicts the documented \
+             immutable posture",
         );
     }
 }

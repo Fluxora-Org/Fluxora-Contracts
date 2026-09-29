@@ -76,8 +76,7 @@ enum Account {
 /// Kept as a value so the tests can iterate it. `names_and_discriminants_match_the_abi_fixture`
 /// pins its length to `DISCRIMINANT_FIXTURE`, which is itself pinned to
 /// `LAST_DISCRIMINANT`, so dropping an entry here fails the suite.
-const ALL: [Error; 34] = [
-const ALL: [Error; 38] = [
+const ALL: [Error; 39] = [
     Error::StreamNotFound,
     Error::InvalidTimeRange,
     Error::InvalidCliff,
@@ -634,8 +633,10 @@ fn describe(e: Error) -> (&'static str, u32, Account) {
         // --- Rebase detection -------------------------------------------------------------------
         Error::PoolBalanceDrift => (
             "PoolBalanceDrift",
-            34,
+            39,
             Account::Reach(super::rebase_drift::drift_error),
+        ),
+
         // --- Contract-level emergency halt (#1818) -------------------------------
         Error::ContractHalted => (
             "ContractHalted",

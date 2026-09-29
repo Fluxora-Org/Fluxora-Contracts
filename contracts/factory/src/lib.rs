@@ -99,6 +99,11 @@ pub enum FactoryError {
     InvalidMinDuration = 5,
     /// `set_rate_bounds` received a negative bound, or `min > max`.
     InvalidRateBounds = 6,
+
+    /// The factory-level creation pause is on, so a factory-mediated creation
+    /// was refused. Returned by
+    /// [`FluxoraFactory::assert_creation_allowed`].
+    FactoryPaused = 7,
 }
 
 /// Storage keys.
@@ -610,6 +615,32 @@ impl FluxoraFactory {
         bump_instance(&env);
 
         FactoryPauseUpdated { paused }.publish(&env);
+        Ok(())
+    }
+
+    /// Refuse a factory-mediated creation while the pause is on.
+    ///
+    /// This is the pause chokepoint: it loads the full policy through
+    /// [`load_policy`] and reports the pause as a **named** error,
+    /// [`FactoryError::FactoryPaused`], so an integrator can branch on the
+    /// reason instead of parsing an opaque trap. Reading the policy rather than
+    /// the single `CreationPaused` key is deliberate — it keeps the pause on the
+    /// same, complete policy set every other constraint comes from, and it
+    /// fails with [`FactoryError::NotInitialized`] if the factory was never
+    /// initialised.
+    ///
+    /// Callers are creation paths; the function moves no funds and writes
+    /// nothing.
+    ///
+    /// # Errors
+    ///
+    /// * [`FactoryError::NotInitialized`] — before `init`.
+    /// * [`FactoryError::FactoryPaused`] — the admin has paused creation.
+    pub fn assert_creation_allowed(env: Env) -> Result<(), FactoryError> {
+        let policy = load_policy(&env)?;
+        if policy.creation_paused {
+            return Err(FactoryError::FactoryPaused);
+        }
         Ok(())
     }
 

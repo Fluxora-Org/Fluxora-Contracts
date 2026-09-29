@@ -36,7 +36,7 @@ pub enum Error {
     /// Sender and recipient are the same address.
     SelfStream = 6,
     /// Reference string exceeds maximum allowed length.
-    InvalidReferenceLength = 34,
+    InvalidReferenceLength = 40,
 
     // --- Authorization / capability ---
     /// Caller is not the party allowed to perform this action.
@@ -205,7 +205,7 @@ pub enum Error {
     /// third party freeze every withdrawal by dusting the contract with a
     /// single unit. See `docs/ABI.md` "Token assumptions" and
     /// `test::rebase_drift`.
-    PoolBalanceDrift = 34,
+    PoolBalanceDrift = 39,
     // --- Contract-level emergency halt (#1818) ---
     /// A state-changing entry point was called while the contract-level halt
     /// is engaged.
