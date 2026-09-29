@@ -172,6 +172,17 @@ script/release-dry-run.sh --network mainnet   --contract-id <C...> --wasm target
 Both must print `DRY-RUN SUCCESSFUL — NO NETWORK MUTATION PERFORMED` and exit 0.
 Nothing has been written yet.
 
+Re-check the ledger close time the TTL conversion assumes against the target
+network before deploying (`docs/KNOWN-LIMITATIONS.md` §5):
+
+```bash
+RPC_URL=<mainnet RPC URL> script/measure-ledger-close.sh --verify
+```
+
+A `COVERED` verdict means the margin still absorbs the observed close time; an
+`EXPOSED` one means the pinned constants must be re-measured and re-pinned
+(`docs/ledger-close-time.md` has the procedure) before this release ships.
+
 ### E. Deploy to testnet and exercise it
 
 Preferred (CI): merge to `main`. The push triggers the pipeline; when `lint`

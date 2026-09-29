@@ -1,4 +1,10 @@
-use soroban_sdk::{contracttype, Address};
+use soroban_sdk::{contracttype, Address, String};
+
+/// Maximum length for stream reference strings.
+/// 
+/// This limit balances utility with storage costs. References are intended for
+/// short identifiers like "payroll-001" or "grant-xyz-q1-2024".
+pub const MAX_REFERENCE_LENGTH: u32 = 64;
 
 /// Bitmask constants for which operations a delegate is permitted to perform.
 ///
@@ -29,6 +35,38 @@ pub struct DelegateGrant {
     pub expires_at: Option<u64>,
 }
 
+/// What one `batch_cancel` call did.
+///
+/// A batch is all-or-nothing, so this has exactly two shapes: the whole vector
+/// settled, in which case `refused_index` and `refused_reason` are `None` and
+/// `refunded` is the total handed back to the sender; or nothing was touched,
+/// in which case `refunded` is `0` and the two `refused_*` fields name the
+/// stream that stopped the batch.
+///
+/// The refusal travels in the return value rather than in a typed `Error`
+/// because a Soroban contract error crosses the wire as a bare `u32`
+/// discriminant (`Error(Contract, #N)`) with no room for a position. The
+/// caller learns which element to drop, and why, without re-reading the whole
+/// batch.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BatchCancelOutcome {
+    /// Total refunded to the sender by this call, in the smallest unit of each
+    /// stream's own token. Always `0` when `refused_index` is `Some`, because a
+    /// refused batch changes nothing.
+    pub refunded: i128,
+
+    /// Zero-based position in the submitted vector of the first stream that
+    /// could not be cancelled. `None` when the batch settled.
+    pub refused_index: Option<u32>,
+
+    /// Discriminant of the [`crate::Error`] that stopped that stream:
+    /// `NotCancellable` (8) for a stream created with `cancellable == false`,
+    /// `StreamTerminated` (14) for one already `Cancelled` or `Depleted`.
+    /// `None` when the batch settled.
+    pub refused_reason: Option<u32>,
+}
+
 /// Lifecycle state of a stream.
 ///
 /// `Cancelled` and `Depleted` are both terminal and both imply
@@ -51,6 +89,65 @@ impl StreamStatus {
     pub fn is_terminal(&self) -> bool {
         matches!(self, StreamStatus::Cancelled | StreamStatus::Depleted)
     }
+}
+
+/// Which clock the cliff gate is measured against.
+///
+/// The cliff *gates* the payout; it does not delay accrual, and both modes
+/// agree on that. They differ only in **which timeline the gate is read
+/// against**, which matters exactly once: what pausing does to it.
+///
+/// `pause` is sender-only and unbounded, so on a [`CliffMode::Schedule`] stream
+/// a sender can defer the recipient's first withdrawal arbitrarily far by
+/// pausing before the cliff and holding it there. A recipient who agreed to a
+/// cliff *date* has no way to defend against that, because the stored
+/// `cliff_time` never moves — only the effective instant does, by
+/// `paused_total`. See `docs/KNOWN-LIMITATIONS.md` §7.
+///
+/// [`CliffMode::WallClock`] is the opt-out: the gate opens at `cliff_time` on
+/// the ledger clock, whatever pausing does. It changes *when the gate opens*,
+/// never *how much accrues* — a paused wall-clock stream still accrues nothing,
+/// so the recipient gains access to what they had already earned by the pause
+/// instant, and no more.
+///
+/// # Why both are safe
+///
+/// The two modes are branches inside a single pure predicate over one immutable
+/// field and the current timestamp, so neither can be reached with a partially
+/// applied state. More importantly, in `WallClock` the gate reduces to
+/// `now >= cliff_time`: it reads no `paused_at`, no `paused_total`, and nothing
+/// any entry point mutates. It is therefore monotone in time and *invariant
+/// across calls*, which is exactly what invariant I3 demands — the strongest
+/// guarantee available for a cliff gate, and the reason the wall-clock path
+/// needs no monotonicity guard of its own.
+///
+/// Fixed at creation and never mutable, like `cancellable` / `pausable` /
+/// `transferable`: a recipient accepting a stream must be able to verify the
+/// terms will not change underneath them.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CliffMode {
+    /// The cliff is a point on the **stream clock**, which stops while paused.
+    ///
+    /// The gate opens at `stream_time(now) >= cliff_time`, i.e. in wall-clock
+    /// terms at `cliff_time + paused_total`. This is the original behaviour and
+    /// the default for [`crate::FluxoraStream::create_stream`].
+    Schedule = 0,
+    /// The cliff is an absolute **date**, unaffected by pausing.
+    ///
+    /// The gate opens at `now >= cliff_time`. A pause still freezes accrual, so
+    /// a stream paused before its cliff opens the gate on schedule but pays out
+    /// only what had accrued when it was paused.
+    WallClock = 1,
+}
+
+impl CliffMode {
+    /// The mode used when a stream is created without naming one.
+    ///
+    /// `Schedule`, so that every stream created through the original
+    /// [`crate::FluxoraStream::create_stream`] entry point behaves exactly as
+    /// it did before `WallClock` existed.
+    pub const DEFAULT: CliffMode = CliffMode::Schedule;
 }
 
 /// A single payment stream.
@@ -79,7 +176,13 @@ pub struct Stream {
     pub end_time: u64,
     /// Unix seconds in `[start_time, end_time]`. Equals `start_time` when there
     /// is no cliff. Gates withdrawal; does not delay accrual.
+    ///
+    /// Which clock this is read against is decided by [`CliffMode`]; the field
+    /// itself means the same thing in both modes.
     pub cliff_time: u64,
+    /// Which clock the cliff gate is read against. Fixed at creation, never
+    /// mutable. Defaults to [`CliffMode::Schedule`].
+    pub cliff_mode: CliffMode,
     /// Fixed at creation, never mutable. See `lib.rs` module docs.
     pub cancellable: bool,
     /// Fixed at creation, never mutable.
@@ -91,6 +194,13 @@ pub struct Stream {
     /// Cumulative seconds spent paused, excluding any in-progress pause.
     pub paused_total: u64,
     pub status: StreamStatus,
+    /// Optional reference string for stream identification.
+    /// 
+    /// Set at creation and never mutable. Maximum length is
+    /// [`MAX_REFERENCE_LENGTH`] characters. Intended for short identifiers
+    /// like "payroll-001" or "grant-xyz-q1-2024" to help operators distinguish
+    /// between streams on-chain.
+    pub reference: Option<String>,
 }
 
 /// One element in an atomic payroll-style stream creation batch.

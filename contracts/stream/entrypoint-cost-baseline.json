@@ -1,9 +1,11 @@
 {
   "batch_create": 1098946,
+  "batch_cancel": 1071120,
   "batch_extend_ttl": 629648,
   "batch_withdraw": 1013122,
   "cancel": 953024,
   "create_stream": 1044686,
+  "create_stream_with_cliff_mode": 1055350,
   "delegate_cancel": 1003364,
   "delegate_pause": 774099,
   "delegate_resume": 774317,
