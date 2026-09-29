@@ -146,7 +146,12 @@ jobs:
       # parsed payload shape. A new event shipped without a fixture, or an
       # event whose payload fields changed without regenerating its fixture,
       # fails here. See docs/event-snapshots.md.
+      #
+      # `if: always()` keeps the verdict visible: an earlier step in this job
+      # can fail for reasons that have nothing to do with event fixtures, and
+      # without it this gate would be skipped rather than reported.
       - name: Event snapshot coverage gate
+        if: always()
         run: python3 script/check_event_snapshots.py
 
   # ---------------------------------------------------------------------------

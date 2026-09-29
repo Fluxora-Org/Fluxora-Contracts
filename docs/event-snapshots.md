@@ -71,6 +71,11 @@ job, and `tests/test_check_event_snapshots.py` additionally runs it against the
 repository as committed — so adding a new event type without a fixture fails CI
 through both paths.
 
+The step is declared `if: always()`. The job also runs the Python suite and the
+doc-alignment gates, which can fail for reasons unrelated to events; without it
+the runner would skip this gate on those runs and the event verdict would go
+unreported.
+
 Because every event is a `#[contractevent]` struct, this gate covers the emitted
 set without executing the contract. The Rust-side `test::events` module remains
 the runtime check for topic-name uniqueness and arity.
