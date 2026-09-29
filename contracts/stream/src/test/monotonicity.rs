@@ -39,6 +39,7 @@ enum Op {
     ExtendTtl,
     BatchWithdraw,
     BatchExtendTtl,
+    BatchCancel,
 }
 
 impl Op {
@@ -53,6 +54,7 @@ impl Op {
             Op::ExtendTtl => "extend_stream_ttl",
             Op::BatchWithdraw => "batch_withdraw",
             Op::BatchExtendTtl => "batch_extend_ttl",
+            Op::BatchCancel => "batch_cancel",
         }
     }
 
@@ -89,11 +91,14 @@ impl Op {
             Op::BatchExtendTtl => {
                 let _ = h.client.try_batch_extend_ttl(&ids);
             }
+            Op::BatchCancel => {
+                let _ = h.client.try_batch_cancel(&h.sender, &ids);
+            }
         }
     }
 }
 
-const ALL_OPS: [Op; 9] = [
+const ALL_OPS: [Op; 10] = [
     Op::Withdraw,
     Op::TopUp,
     Op::Pause,
@@ -103,6 +108,7 @@ const ALL_OPS: [Op; 9] = [
     Op::ExtendTtl,
     Op::BatchWithdraw,
     Op::BatchExtendTtl,
+    Op::BatchCancel,
 ];
 
 /// Run one operation with the clock held still, and assert I3 plus the
