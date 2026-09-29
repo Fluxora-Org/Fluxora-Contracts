@@ -129,6 +129,27 @@
       "outputs": "Result<(), Error>"
     },
     {
+      "name": "halt",
+      "auth": "operator",
+      "inputs": [
+      ],
+      "outputs": "Result<(), Error>"
+    },
+    {
+      "name": "halt_operator",
+      "auth": "none",
+      "inputs": [
+      ],
+      "outputs": "Option<Address>"
+    },
+    {
+      "name": "halted",
+      "auth": "none",
+      "inputs": [
+      ],
+      "outputs": "bool"
+    },
+    {
       "name": "pause",
       "auth": "sender",
       "inputs": [
@@ -153,12 +174,27 @@
       "outputs": "Result<(), Error>"
     },
     {
+      "name": "resume_contract",
+      "auth": "operator",
+      "inputs": [
+      ],
+      "outputs": "Result<(), Error>"
+    },
+    {
       "name": "revoke_delegate",
       "auth": "grantor",
       "inputs": [
         {"name": "stream_id", "type": "u64"},
         {"name": "grantor", "type": "Address"},
         {"name": "delegate", "type": "Address"}
+      ],
+      "outputs": "Result<(), Error>"
+    },
+    {
+      "name": "set_halt_operator",
+      "auth": "operator",
+      "inputs": [
+        {"name": "operator", "type": "Address"}
       ],
       "outputs": "Result<(), Error>"
     },
@@ -290,7 +326,12 @@
     {"name": "RepeatedTransfer", "discriminant": 30},
     {"name": "InvalidTopUp", "discriminant": 31},
     {"name": "TokenAmountMismatch", "discriminant": 32},
-    {"name": "VestedDecreased", "discriminant": 33}
+    {"name": "VestedDecreased", "discriminant": 33},
+    {"name": "ContractHalted", "discriminant": 34},
+    {"name": "HaltOperatorAlreadySet", "discriminant": 35},
+    {"name": "HaltOperatorNotSet", "discriminant": 36},
+    {"name": "ContractAlreadyHalted", "discriminant": 37},
+    {"name": "ContractNotHalted", "discriminant": 38}
   ],
   "events": [
     {
@@ -305,6 +346,33 @@
         {"name": "vested", "type": "i128"},
         {"name": "withdrawn", "type": "i128"},
         {"name": "end_time", "type": "u64"}
+      ]
+    },
+    {
+      "name": "ContractHalted",
+      "topics": [
+        {"name": "operator", "type": "Address"}
+      ],
+      "data": [
+        {"name": "halted_at", "type": "u64"}
+      ]
+    },
+    {
+      "name": "ContractResumed",
+      "topics": [
+        {"name": "operator", "type": "Address"}
+      ],
+      "data": [
+        {"name": "resumed_at", "type": "u64"},
+        {"name": "halted_for", "type": "u64"}
+      ]
+    },
+    {
+      "name": "HaltOperatorSet",
+      "topics": [
+        {"name": "operator", "type": "Address"}
+      ],
+      "data": [
       ]
     },
     {

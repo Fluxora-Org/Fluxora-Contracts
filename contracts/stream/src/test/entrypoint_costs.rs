@@ -156,4 +156,30 @@ fn entrypoint_cost_snapshot() {
     let (h, id) = fresh();
     h.client.batch_extend_ttl(&h.ids(&[id]));
     record(&h, "batch_extend_ttl");
+
+    let (h, _) = fresh();
+    h.client.set_halt_operator(&h.sender);
+    record(&h, "set_halt_operator");
+
+    let (h, _) = fresh();
+    h.client.set_halt_operator(&h.sender);
+    h.client.halt();
+    record(&h, "halt");
+
+    let (h, _) = fresh();
+    h.client.set_halt_operator(&h.sender);
+    h.client.halt();
+    h.client.resume_contract();
+    record(&h, "resume_contract");
+
+    let (h, _) = fresh();
+    h.client.set_halt_operator(&h.sender);
+    h.client.halt();
+    h.client.halted();
+    record(&h, "halted");
+
+    let (h, _) = fresh();
+    h.client.set_halt_operator(&h.sender);
+    h.client.halt_operator();
+    record(&h, "halt_operator");
 }

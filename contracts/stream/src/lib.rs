@@ -39,9 +39,36 @@
 //! reassign it. A stream that could *become* cancellable later would be
 //! worthless as a guarantee.
 //!
-//! For the same reason the contract has no admin key, no upgrade path, no fee
-//! switch and no global pause. Immutability is what lets another protocol depend
-//! on this one.
+//! For the same reason the contract has no upgrade path, no fee switch, no
+//! admin rotation and nothing user-configurable in storage. Immutability is
+//! what lets another protocol depend on this one.
+//!
+//! ## The single operator: an opt-in emergency halt (#1818)
+//!
+//! The one exception is the contract-level emergency stop. An operator can be
+//! installed exactly once, by [`set_halt_operator`](FluxoraStream::set_halt_operator);
+//! that operator may then stop *settlement* across every stream
+//! ([`halt`](FluxoraStream::halt)) and start it again
+//! ([`resume_contract`](FluxoraStream::resume_contract)). The design keeps the
+//! guarantees above intact:
+//!
+//! * **Opt-in.** A deployment that never installs an operator has none, cannot
+//!   be halted, and behaves exactly as it did before the halt existed. The
+//!   operator is unset by default, which is why no existing behaviour changed.
+//! * **One-shot.** There is no rotation entry point. A second
+//!   `set_halt_operator` is rejected, so the operator cannot be swapped mid
+//!   incident — replacing one means deploying a new contract.
+//! * **No reach into funds or schedules.** The operator cannot withdraw,
+//!   cancel, pause, top up, transfer, or change any stream. It can only refuse
+//!   new mutations contract-wide.
+//! * **Reads keep answering.** Every view stays live while halted, so an
+//!   integrator can still see balances and streams during an incident.
+//! * **Explicit resume.** There is no timeout: settlement restarts when the
+//!   operator says so, and both transitions emit an event.
+//!
+//! `test::halt` is the acceptance test: it halts the contract and drives every
+//! mutating entry point to [`Error::ContractHalted`] while asserting each read
+//! still answers.
 
 #[cfg(all(target_family = "wasm", not(target_os = "none")))]
 compile_error!(
@@ -292,6 +319,8 @@ impl FluxoraStream {
         pausable: bool,
         transferable: bool,
     ) -> Result<u64, Error> {
+        // Emergency halt (#1818): refuse state changes before anything else.
+        Self::require_not_halted(&env)?;
         sender.require_auth();
 
         if sender == recipient {
@@ -405,6 +434,8 @@ impl FluxoraStream {
     ///   amount than `amount` (a fee-on-transfer or rebasing token). See
     ///   `docs/ABI.md` "Token assumptions".
     pub fn top_up(env: Env, stream_id: u64, amount: i128) -> Result<(), Error> {
+        // Emergency halt (#1818): refuse state changes before anything else.
+        Self::require_not_halted(&env)?;
         let mut stream = storage::load_stream(&env, stream_id)?;
         stream.sender.require_auth();
 
@@ -502,6 +533,8 @@ impl FluxoraStream {
     /// * [`Error::InsufficientWithdrawable`] — explicit amount exceeds the
     ///   withdrawable balance.
     pub fn withdraw(env: Env, stream_id: u64, amount: Option<i128>) -> Result<i128, Error> {
+        // Emergency halt (#1818): refuse state changes before anything else.
+        Self::require_not_halted(&env)?;
         let mut stream = storage::load_stream(&env, stream_id)?;
         stream.recipient.require_auth();
 
@@ -568,6 +601,8 @@ impl FluxoraStream {
         recipient: Address,
         stream_ids: Vec<u64>,
     ) -> Result<i128, Error> {
+        // Emergency halt (#1818): refuse state changes before anything else.
+        Self::require_not_halted(&env)?;
         let stream_ids = Self::validate_batch_ids(&env, &stream_ids)?;
         Self::reject_duplicate_ids(&stream_ids)?;
         recipient.require_auth();
@@ -634,6 +669,8 @@ impl FluxoraStream {
     /// * [`Error::NotCancellable`] — created with `cancellable == false`.
     /// * [`Error::StreamTerminated`] — already cancelled or depleted.
     pub fn cancel(env: Env, stream_id: u64) -> Result<(), Error> {
+        // Emergency halt (#1818): refuse state changes before anything else.
+        Self::require_not_halted(&env)?;
         let mut stream = storage::load_stream(&env, stream_id)?;
         stream.sender.require_auth();
 
@@ -709,6 +746,8 @@ impl FluxoraStream {
     /// schedule simply stretches. The recipient can still withdraw what they
     /// already earned.
     pub fn pause(env: Env, stream_id: u64) -> Result<(), Error> {
+        // Emergency halt (#1818): refuse state changes before anything else.
+        Self::require_not_halted(&env)?;
         let mut stream = storage::load_stream(&env, stream_id)?;
         stream.sender.require_auth();
 
@@ -741,6 +780,8 @@ impl FluxoraStream {
     /// Resume a paused stream, absorbing the paused interval into
     /// `paused_total` so the clock picks up exactly where it stopped.
     pub fn resume(env: Env, stream_id: u64) -> Result<(), Error> {
+        // Emergency halt (#1818): refuse state changes before anything else.
+        Self::require_not_halted(&env)?;
         let mut stream = storage::load_stream(&env, stream_id)?;
         stream.sender.require_auth();
 
@@ -810,6 +851,8 @@ impl FluxoraStream {
         stream_id: u64,
         new_recipient: Address,
     ) -> Result<(), Error> {
+        // Emergency halt (#1818): refuse state changes before anything else.
+        Self::require_not_halted(&env)?;
         let mut stream = storage::load_stream(&env, stream_id)?;
         // #1637 hardens recipient-transfer authorization to the sender: the
         // party who funded the stream keeps control over who is paid out.
@@ -882,6 +925,8 @@ impl FluxoraStream {
         ops: u32,
         expires_at: Option<u64>,
     ) -> Result<(), Error> {
+        // Emergency halt (#1818): refuse state changes before anything else.
+        Self::require_not_halted(&env)?;
         let stream = storage::load_stream(&env, stream_id)?;
         if stream.status.is_terminal() {
             return Err(Error::StreamTerminated);
@@ -966,6 +1011,8 @@ impl FluxoraStream {
         grantor: Address,
         delegate: Address,
     ) -> Result<(), Error> {
+        // Emergency halt (#1818): refuse state changes before anything else.
+        Self::require_not_halted(&env)?;
         let stream = storage::load_stream(&env, stream_id)?;
 
         if grantor != stream.sender && grantor != stream.recipient {
@@ -986,6 +1033,8 @@ impl FluxoraStream {
         delegate: Address,
         amount: Option<i128>,
     ) -> Result<i128, Error> {
+        // Emergency halt (#1818): refuse state changes before anything else.
+        Self::require_not_halted(&env)?;
         Self::check_delegate(&env, stream_id, &delegate, op::WITHDRAW)?;
         let mut stream = storage::load_stream(&env, stream_id)?;
 
@@ -1017,6 +1066,8 @@ impl FluxoraStream {
 
     /// Cancel as a delegate. Requires [`op::CANCEL`] grant.
     pub fn delegate_cancel(env: Env, stream_id: u64, delegate: Address) -> Result<(), Error> {
+        // Emergency halt (#1818): refuse state changes before anything else.
+        Self::require_not_halted(&env)?;
         Self::check_delegate(&env, stream_id, &delegate, op::CANCEL)?;
         let mut stream = storage::load_stream(&env, stream_id)?;
 
@@ -1059,6 +1110,8 @@ impl FluxoraStream {
 
     /// Pause as a delegate. Requires [`op::PAUSE`] grant.
     pub fn delegate_pause(env: Env, stream_id: u64, delegate: Address) -> Result<(), Error> {
+        // Emergency halt (#1818): refuse state changes before anything else.
+        Self::require_not_halted(&env)?;
         Self::check_delegate(&env, stream_id, &delegate, op::PAUSE)?;
         let mut stream = storage::load_stream(&env, stream_id)?;
 
@@ -1083,6 +1136,8 @@ impl FluxoraStream {
 
     /// Resume as a delegate. Requires [`op::RESUME`] grant.
     pub fn delegate_resume(env: Env, stream_id: u64, delegate: Address) -> Result<(), Error> {
+        // Emergency halt (#1818): refuse state changes before anything else.
+        Self::require_not_halted(&env)?;
         Self::check_delegate(&env, stream_id, &delegate, op::RESUME)?;
         let mut stream = storage::load_stream(&env, stream_id)?;
 
@@ -1118,6 +1173,8 @@ impl FluxoraStream {
         delegate: Address,
         amount: i128,
     ) -> Result<(), Error> {
+        // Emergency halt (#1818): refuse state changes before anything else.
+        Self::require_not_halted(&env)?;
         Self::check_delegate(&env, stream_id, &delegate, op::TOP_UP)?;
         let mut stream = storage::load_stream(&env, stream_id)?;
 
@@ -1194,6 +1251,8 @@ impl FluxoraStream {
         delegate: Address,
         new_recipient: Address,
     ) -> Result<(), Error> {
+        // Emergency halt (#1818): refuse state changes before anything else.
+        Self::require_not_halted(&env)?;
         Self::check_delegate(&env, stream_id, &delegate, op::TRANSFER_RECIPIENT)?;
         let mut stream = storage::load_stream(&env, stream_id)?;
 
@@ -1296,6 +1355,8 @@ impl FluxoraStream {
     /// contract extends at creation, because no entry may exceed the network's
     /// `max_entry_ttl`.
     pub fn extend_stream_ttl(env: Env, stream_id: u64) -> Result<u32, Error> {
+        // Emergency halt (#1818): refuse state changes before anything else.
+        Self::require_not_halted(&env)?;
         // Authorization: permissionless by design — see doc comment. Any caller
         // may pay rent for any stream. The caller has no address parameter and
         // no `require_auth` is invoked.
@@ -1320,6 +1381,8 @@ impl FluxoraStream {
     /// Empty, oversized, and malformed vectors are rejected before the sweep
     /// starts. Returns how many entries were actually extended.
     pub fn batch_extend_ttl(env: Env, stream_ids: Vec<u64>) -> Result<u32, Error> {
+        // Emergency halt (#1818): refuse state changes before anything else.
+        Self::require_not_halted(&env)?;
         // Authorization: permissionless — same policy as `extend_stream_ttl`.
         let stream_ids = Self::validate_batch_ids(&env, &stream_ids)?;
         Self::reject_duplicate_ids(&stream_ids)?;
@@ -1338,8 +1401,115 @@ impl FluxoraStream {
     }
 
     // ---------------------------------------------------------------------
+    // Emergency halt (issue #1818)
+    // ---------------------------------------------------------------------
+
+    /// Install the contract-level halt operator. **One-shot: there is no
+    /// rotation.**
+    ///
+    /// This is the only authorization the stream contract has, and it is
+    /// opt-in: a deployment that never calls this has no operator and cannot
+    /// be halted at all, which is where every deployment starts. A second call
+    /// returns [`Error::HaltOperatorAlreadySet`] rather than replacing the
+    /// first, so the operator cannot be swapped under an incident — replacing
+    /// one means deploying a new contract.
+    ///
+    /// `operator` must authorize the call. The operator's only powers are
+    /// [`halt`](Self::halt) and [`resume_contract`](Self::resume_contract): it
+    /// cannot move funds, cancel a stream, change a schedule, or withdraw. It
+    /// also cannot be removed.
+    pub fn set_halt_operator(env: Env, operator: Address) -> Result<(), Error> {
+        operator.require_auth();
+        if storage::halt_operator(&env).is_some() {
+            return Err(Error::HaltOperatorAlreadySet);
+        }
+        storage::set_halt_operator(&env, &operator);
+        events::halt_operator_set(&env, &operator);
+        Ok(())
+    }
+
+    /// Halt the whole contract. Operator only.
+    ///
+    /// Every state-changing entry point then refuses with
+    /// [`Error::ContractHalted`] until [`resume_contract`](Self::resume_contract)
+    /// is called. Every read method (`get_stream`, `withdrawable_of`,
+    /// `vested_of`, `refundable_of`, `stream_count`, `stream_exists`,
+    /// [`halted`](Self::halted), [`halt_operator`](Self::halt_operator)) keeps
+    /// answering normally, so integrators can still observe on-chain state
+    /// while the incident is handled.
+    ///
+    /// The halt is a **circuit breaker, not a settlement**: it moves no funds
+    /// and rewrites no stream. Accrual is a pure function of ledger time, so a
+    /// stream continues to vest while halted and `withdrawable_of` keeps
+    /// climbing; what stops is settlement. Lifting the halt resumes from
+    /// exactly the state that was halted.
+    ///
+    /// There is no timeout — the halt ends only when the operator resumes it.
+    /// Returns [`Error::HaltOperatorNotSet`] when no operator was ever
+    /// installed and [`Error::ContractAlreadyHalted`] when already halted.
+    pub fn halt(env: Env) -> Result<(), Error> {
+        let operator = storage::halt_operator(&env).ok_or(Error::HaltOperatorNotSet)?;
+        operator.require_auth();
+        if storage::is_halted(&env) {
+            return Err(Error::ContractAlreadyHalted);
+        }
+        storage::set_halt(&env);
+        events::contract_halted(&env, &operator, env.ledger().timestamp());
+        Ok(())
+    }
+
+    /// Lift the contract-level halt. Operator only.
+    ///
+    /// Settlement is restored for every stream with the state it had when the
+    /// halt was engaged. Emits the matching event. Returns
+    /// [`Error::HaltOperatorNotSet`] when no operator was ever installed and
+    /// [`Error::ContractNotHalted`] when the contract is not halted.
+    pub fn resume_contract(env: Env) -> Result<(), Error> {
+        let operator = storage::halt_operator(&env).ok_or(Error::HaltOperatorNotSet)?;
+        operator.require_auth();
+        let halted_at = storage::halt_started_at(&env).ok_or(Error::ContractNotHalted)?;
+        storage::clear_halt(&env);
+        let now = env.ledger().timestamp();
+        events::contract_resumed(&env, &operator, now, now.saturating_sub(halted_at));
+        Ok(())
+    }
+
+    /// Whether the contract-level halt is engaged.
+    ///
+    /// `false` until an operator is installed and calls
+    /// [`halt`](Self::halt). Reads are unaffected by the halt, so this view
+    /// always answers.
+    pub fn halted(env: Env) -> bool {
+        storage::is_halted(&env)
+    }
+
+    /// The installed halt operator, or `None` when the contract has opted out
+    /// of the emergency stop entirely.
+    pub fn halt_operator(env: Env) -> Option<Address> {
+        storage::halt_operator(&env)
+    }
+
+    // ---------------------------------------------------------------------
     // Internal
     // ---------------------------------------------------------------------
+
+    /// Refuse a state-changing call while the contract-level halt is engaged.
+    ///
+    /// Called first, before authorization and before any other precondition,
+    /// in every mutating entry point. That ordering is deliberate: while the
+    /// contract is halted the caller learns the contract is stopped (34)
+    /// rather than whether their call would otherwise have been valid — and
+    /// the contract does no work it is going to throw away.
+    ///
+    /// The check is one instance-storage lookup, and it is the same lookup in
+    /// every entry point, which is what keeps "every mutating entry point is
+    /// refused" a property of one function instead of eighteen.
+    fn require_not_halted(env: &Env) -> Result<(), Error> {
+        if storage::is_halted(env) {
+            return Err(Error::ContractHalted);
+        }
+        Ok(())
+    }
 
     /// Verify that `caller` holds a valid, unexpired delegate grant for `op`
     /// on `stream_id`, then call `caller.require_auth()`.

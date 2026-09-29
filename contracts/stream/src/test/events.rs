@@ -164,6 +164,16 @@ fn test_all_event_topic_names_are_unique() {
     h.client.revoke_delegate(&id2, &h.sender, delegate);
     capture();
 
+    // 11–13. contract-level halt events (#1818)
+    h.client.set_halt_operator(&h.sender);
+    capture();
+
+    h.client.halt();
+    capture();
+
+    h.client.resume_contract();
+    capture();
+
     let events = all_events;
 
     // Collect the topic[0] symbol of every event as a String.
@@ -196,8 +206,11 @@ fn test_all_event_topic_names_are_unique() {
     let expected: std::vec::Vec<String> = {
         let mut v: std::vec::Vec<String> = std::vec![
             "cancelled".into(),
+            "contract_halted".into(),
+            "contract_resumed".into(),
             "delegate_granted".into(),
             "delegate_revoked".into(),
+            "halt_operator_set".into(),
             "paused".into(),
             "recipient_transferred".into(),
             "resumed".into(),

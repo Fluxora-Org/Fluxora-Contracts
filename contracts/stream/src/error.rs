@@ -183,4 +183,33 @@ pub enum Error {
     /// The guard stays because the invariant it protects is load-bearing.
     /// Classified as reserved in `test::error_reachability`.
     VestedDecreased = 33,
+
+    // --- Contract-level emergency halt (#1818) ---
+    /// A state-changing entry point was called while the contract-level halt
+    /// is engaged.
+    ///
+    /// Only mutations are refused: every read method (`get_stream`,
+    /// `vested_of`, `withdrawable_of`, `refundable_of`, `stream_count`,
+    /// `stream_exists`, `halted`, `halt_operator`) keeps answering normally so
+    /// integrators can still observe the chain during an incident.
+    ContractHalted = 34,
+    /// `set_halt_operator` was called after an operator was already installed.
+    ///
+    /// The setter is deliberately one-shot: there is no rotation entry point,
+    /// so a compromised operator cannot be replaced — it can only be halted by
+    /// deploying a new contract.
+    HaltOperatorAlreadySet = 35,
+    /// `halt` or `resume_contract` was called on a contract that has never had
+    /// a halt operator installed.
+    ///
+    /// The halt is opt-in: a deployment that never calls `set_halt_operator`
+    /// has no operator and no way to engage it.
+    HaltOperatorNotSet = 36,
+    /// `halt` was called while the contract was already halted.
+    ContractAlreadyHalted = 37,
+    /// `resume_contract` was called while the contract was not halted.
+    ///
+    /// There is no timeout on the halt, so this is the only way a resume can
+    /// be a no-op.
+    ContractNotHalted = 38,
 }

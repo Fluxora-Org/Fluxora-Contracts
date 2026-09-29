@@ -33,8 +33,8 @@ use soroban_sdk::xdr::{
 };
 
 use crate::events::{
-    Cancelled, Paused, RecipientTransferred, Resumed, StreamCreated, ToppedUp, TtlExtended,
-    Withdrawn,
+    Cancelled, ContractHalted, ContractResumed, HaltOperatorSet, Paused, RecipientTransferred,
+    Resumed, StreamCreated, ToppedUp, TtlExtended, Withdrawn,
 };
 use crate::{Error, FluxoraStream, Stream, StreamStatus, ABI_VERSION};
 
@@ -116,6 +116,14 @@ const AUTH: &[(&str, &str)] = &[
     ("stream_exists", "none"),
     ("extend_stream_ttl", "none"),
     ("batch_extend_ttl", "none"),
+    // Contract-level emergency halt (#1818). The three mutating calls are
+    // gated on the one-shot operator installed by `set_halt_operator`; the two
+    // views are permissionless like every other view.
+    ("set_halt_operator", "operator"),
+    ("halt", "operator"),
+    ("resume_contract", "operator"),
+    ("halted", "none"),
+    ("halt_operator", "none"),
 ];
 
 fn auth_of(name: &str) -> &'static str {
@@ -300,6 +308,12 @@ fn current_inventory() -> Inventory {
         function_from_spec(parse_spec(
             &FluxoraStream::spec_xdr_delegate_transfer_recipient(),
         )),
+        // Contract-level emergency halt (#1818).
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_set_halt_operator())),
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_halt())),
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_resume_contract())),
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_halted())),
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_halt_operator())),
     ];
     functions.sort_by(|a, b| a.name.cmp(&b.name));
 
@@ -320,6 +334,10 @@ fn current_inventory() -> Inventory {
         event_from_spec(parse_spec(&ToppedUp::spec_xdr())),
         event_from_spec(parse_spec(&RecipientTransferred::spec_xdr())),
         event_from_spec(parse_spec(&TtlExtended::spec_xdr())),
+        // Contract-level emergency halt (#1818).
+        event_from_spec(parse_spec(&HaltOperatorSet::spec_xdr())),
+        event_from_spec(parse_spec(&ContractHalted::spec_xdr())),
+        event_from_spec(parse_spec(&ContractResumed::spec_xdr())),
     ];
     events.sort_by(|a, b| a.name.cmp(&b.name));
 
@@ -1105,7 +1123,7 @@ fn auth_table_covers_every_public_method() {
         assert!(
             matches!(
                 f.auth,
-                "sender" | "recipient" | "grantor" | "delegate" | "none"
+                "sender" | "recipient" | "grantor" | "delegate" | "operator" | "none"
             ),
             "method {} has unknown auth {}",
             f.name,
@@ -1282,6 +1300,8 @@ fn permissionless_methods_are_exactly_the_none_auth_set() {
             "stream_exists",
             "extend_stream_ttl",
             "batch_extend_ttl",
+            "halted",
+            "halt_operator",
         ]
     );
 }

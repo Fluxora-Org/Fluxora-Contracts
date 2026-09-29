@@ -229,6 +229,42 @@ pub struct TtlExtended {
     pub extended_to_ledgers: u32,
 }
 
+/// The one-shot halt operator was installed (issue #1818).
+///
+/// Emitted exactly once per deployment: the setter has no rotation path, so
+/// there is no "operator changed" event to define.
+#[contractevent]
+pub struct HaltOperatorSet {
+    #[topic]
+    pub operator: Address,
+}
+
+/// The contract-level halt was engaged (issue #1818).
+///
+/// From this event until the matching [`ContractResumed`], every
+/// state-changing entry point returns `ContractHalted` (34). Read methods are
+/// unaffected, and nothing is settled, cancelled or paused by the halt itself:
+/// the event is the indexer's signal that the *contract* stopped accepting
+/// mutations, not that any particular stream changed state.
+#[contractevent]
+pub struct ContractHalted {
+    #[topic]
+    pub operator: Address,
+    /// Ledger timestamp at which the halt was engaged.
+    pub halted_at: u64,
+}
+
+/// The contract-level halt was lifted (issue #1818).
+#[contractevent]
+pub struct ContractResumed {
+    #[topic]
+    pub operator: Address,
+    /// Ledger timestamp at which settlement was restored.
+    pub resumed_at: u64,
+    /// Wall-clock seconds the contract spent halted.
+    pub halted_for: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Emission helpers
 // ---------------------------------------------------------------------------
@@ -374,6 +410,33 @@ pub fn delegate_revoked(env: &Env, stream_id: u64, grantor: &Address, delegate: 
         stream_id,
         grantor: grantor.clone(),
         delegate: delegate.clone(),
+    }
+    .publish(env);
+}
+
+/// Emit [`HaltOperatorSet`] once, when the one-shot setter succeeds.
+pub fn halt_operator_set(env: &Env, operator: &Address) {
+    HaltOperatorSet {
+        operator: operator.clone(),
+    }
+    .publish(env);
+}
+
+/// Emit [`ContractHalted`] when the operator engages the halt.
+pub fn contract_halted(env: &Env, operator: &Address, halted_at: u64) {
+    ContractHalted {
+        operator: operator.clone(),
+        halted_at,
+    }
+    .publish(env);
+}
+
+/// Emit [`ContractResumed`] when the operator lifts the halt.
+pub fn contract_resumed(env: &Env, operator: &Address, resumed_at: u64, halted_for: u64) {
+    ContractResumed {
+        operator: operator.clone(),
+        resumed_at,
+        halted_for,
     }
     .publish(env);
 }

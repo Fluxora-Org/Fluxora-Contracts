@@ -1,7 +1,7 @@
 # Stream entry point CPU budget
 
 `contracts/stream/entrypoint-cost-baseline.json` records the instruction cost of
-one successful call to each of the 24 public stream functions. The fixtures in
+one successful call to each of the 29 public stream functions. The fixtures in
 `contracts/stream/src/test/entrypoint_costs.rs` use the release
 `wasm32v1-none` artifact, with setup calls outside the recorded invocation.
 The batch fixtures use one stream. The measurements are local Soroban SDK

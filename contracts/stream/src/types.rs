@@ -118,8 +118,12 @@ impl Stream {
 /// `Delegate(stream_id, delegate)` entries live in persistent storage, scoped
 /// to the stream they were issued for.
 ///
-/// There is no `Config` key: with no admin, no fees and no upgradeability
-/// (all explicit non-goals), the contract has nothing to configure.
+/// `HaltOperator` and `HaltedAt` are the one deliberate exception to "no
+/// admin, nothing to configure" (issue #1818): the emergency halt is opt-in,
+/// one-shot and contract-wide, and both keys live in instance storage because
+/// they must never archive independently of the code that reads them. A
+/// deployment that never calls the one-shot setter has neither key and behaves
+/// exactly as it did before the halt existed.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
@@ -134,4 +138,10 @@ pub enum DataKey {
     Stream(u64),
     /// Persistent storage. One entry per (stream_id, delegate) pair.
     Delegate(u64, Address),
+    /// Instance storage. The address allowed to halt and resume the contract.
+    /// Absent until [`crate::FluxoraStream::set_halt_operator`] runs once.
+    HaltOperator,
+    /// Instance storage. Unix seconds at which the halt was engaged; present
+    /// if and only if the contract is halted.
+    HaltedAt,
 }

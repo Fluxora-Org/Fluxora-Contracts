@@ -169,6 +169,48 @@ fn stream_max_id_key_encoding_is_stable() {
     );
 }
 
+/// `HaltOperator` — unit variant encoding the symbol name "HaltOperator".
+///
+/// Appended without touching any existing variant: the encoding is derived
+/// from the variant *name*, so appending cannot renumber or re-encode the
+/// keys already written by deployed contracts.
+#[test]
+fn halt_operator_key_encoding_is_stable() {
+    let env = Env::default();
+    assert_eq!(
+        key_hex(&env, DataKey::HaltOperator),
+        "0000001000000001000000010000000f0000000c48616c744f70657261746f72",
+        "HaltOperator key encoding changed"
+    );
+}
+
+/// `HaltedAt` — unit variant encoding the symbol name "HaltedAt".
+#[test]
+fn halted_at_key_encoding_is_stable() {
+    let env = Env::default();
+    assert_eq!(
+        key_hex(&env, DataKey::HaltedAt),
+        "0000001000000001000000010000000f0000000848616c7465644174",
+        "HaltedAt key encoding changed"
+    );
+}
+
+/// The two halt keys are distinct from each other and from every stream key.
+#[test]
+fn halt_keys_never_collide_with_stream_keys() {
+    let env = Env::default();
+    let operator = key_hex(&env, DataKey::HaltOperator);
+    let halted_at = key_hex(&env, DataKey::HaltedAt);
+    assert_ne!(operator, halted_at);
+    assert_ne!(operator, key_hex(&env, DataKey::NextStreamId));
+    assert_ne!(halted_at, key_hex(&env, DataKey::NextStreamId));
+    for id in [0u64, 1, u64::MAX] {
+        let stream_key = key_hex(&env, DataKey::Stream(id));
+        assert_ne!(operator, stream_key);
+        assert_ne!(halted_at, stream_key);
+    }
+}
+
 // ─── collision tests ─────────────────────────────────────────────────────────
 
 /// `NextStreamId` and `Stream(n)` must never encode to the same bytes,
@@ -280,6 +322,9 @@ fn every_data_key_variant_has_a_known_encoding() {
         "0000001000000001000000020000000f0000000653747265616d0000000000050000000000000000",
         "0000001000000001000000020000000f0000000653747265616d0000000000050000000000000001",
         "0000001000000001000000020000000f0000000653747265616d000000000005ffffffffffffffff",
+        // HaltOperator / HaltedAt (#1818)
+        "0000001000000001000000010000000f0000000c48616c744f70657261746f72",
+        "0000001000000001000000010000000f0000000848616c7465644174",
     ];
 
     let all_variants_encoded = &[
@@ -287,6 +332,8 @@ fn every_data_key_variant_has_a_known_encoding() {
         key_hex(&env, DataKey::Stream(0)),
         key_hex(&env, DataKey::Stream(1)),
         key_hex(&env, DataKey::Stream(u64::MAX)),
+        key_hex(&env, DataKey::HaltOperator),
+        key_hex(&env, DataKey::HaltedAt),
     ];
     for enc in all_variants_encoded {
         assert!(

@@ -43,6 +43,8 @@ Last verified: 2026-08-29 (PR #1665)
 | `refundable_of` | Return refundable amount |
 | `stream_count` | Return total stream count |
 | `stream_exists` | Check if a stream ID exists |
+| `halted` | Whether the contract-level emergency halt is engaged |
+| `halt_operator` | The installed halt operator, or `None` when the contract is not haltable |
 
 ### Maintenance (permissionless)
 
@@ -50,3 +52,11 @@ Last verified: 2026-08-29 (PR #1665)
 |---|---|
 | `extend_stream_ttl` | Extend a single stream's storage TTL |
 | `batch_extend_ttl` | Extend multiple streams' storage TTLs |
+
+### Emergency halt (#1818)
+
+| Entrypoint | Description |
+|---|---|
+| `set_halt_operator` | Install the one-shot halt operator (named operator auth; no rotation) |
+| `halt` | Refuse every state-changing entry point contract-wide (operator auth) |
+| `resume_contract` | Lift the halt and restore settlement (operator auth) |

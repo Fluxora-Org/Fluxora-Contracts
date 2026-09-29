@@ -24,6 +24,11 @@ mod error_discriminants;
 // listed in the frozen reserved allowlist.
 mod error_reachability;
 
+// Issue #1818 — contract-level emergency halt: one-shot operator install,
+// halt/resume, and the "every mutating entry point is refused while reads
+// still answer" acceptance test.
+mod halt;
+
 // Stage 1
 mod create;
 mod props;

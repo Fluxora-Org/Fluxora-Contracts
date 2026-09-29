@@ -24,6 +24,13 @@ There is therefore no upgrade authorization or in-place migration process.
 The ABI inventory below is the deployed surface and contains no upgrade or
 admin-rotation method.
 
+The single exception to "no operator" is the **emergency halt** (issue #1818):
+an operator address can be installed once, has no rotation path, and can only
+stop and restart settlement contract-wide — it holds no key over funds, no
+upgrade authority, and no power over any individual stream. See
+[Emergency halt](#emergency-halt). A deployment that never installs an operator
+is exactly as admin-free as before.
+
 The deployed contract's interface has been verified byte-identical to the local
 build:
 
@@ -229,6 +236,11 @@ Discriminants are ABI and are never renumbered; new variants are appended.
 | 31 | `InvalidTopUp` | Reserved; non-positive top-ups are rejected as `InvalidAmount` first. | reserved |
 | 32 | `TokenAmountMismatch` | Deposit pull changes pool balance by an unexpected amount. | reachable |
 | 33 | `VestedDecreased` | Reserved; current mutation paths preserve non-decreasing vested value. | reserved |
+| 34 | `ContractHalted` | A state-changing entry point was called while the contract-level halt is engaged. | reachable |
+| 35 | `HaltOperatorAlreadySet` | `set_halt_operator` was called after an operator was already installed. | reachable |
+| 36 | `HaltOperatorNotSet` | `halt`/`resume_contract` was called on a contract with no operator installed. | reachable |
+| 37 | `ContractAlreadyHalted` | `halt` was called while the contract was already halted. | reachable |
+| 38 | `ContractNotHalted` | `resume_contract` was called while the contract was not halted. | reachable |
 
 `TokenTransferFailed` (25) and `TokenMissing` (26) are **stable stream-level categories** for token sub-invocation failures. The token contract's internal error discriminant is intentionally discarded — forwarding it would produce a value clients decode against Fluxora's error table, yielding a silent misinterpretation. The raw diagnostic is visible in the failed transaction's `diagnosticEvents`.
 
@@ -853,6 +865,8 @@ produced.
 | `refundable_of(stream_id)` | `i128` | no | no |
 | `stream_count()` | `u64` — ids run `0..stream_count()` | no | no |
 | `stream_exists(stream_id)` | `bool` | no | no |
+| `halted()` | `bool` | no | no |
+| `halt_operator()` | `Option<Address>` | no | no |
 
 > **⚠ RPC read-skew caveat — all view functions**
 >
@@ -1082,12 +1096,95 @@ On success — that is, whenever a non-empty `ops` mask is stored — emits
 `delegate_granted` with topics `stream_id`, `grantor`, `delegate` and payload
 `ops`, `expires_at`. `ops == 0` stores nothing and emits nothing.
 
+### Emergency halt
+
+The stream contract has no admin and no upgrade path. The **emergency halt** is
+the single, deliberately narrow exception (issue #1818): an operator can stop
+*settlement* across every stream while an exploit or a stuck integration is
+handled, without gaining any power over funds.
+
+| function | auth | returns |
+|---|---|---|
+| `set_halt_operator(operator)` | the named `operator` | — |
+| `halt()` | the installed operator | — |
+| `resume_contract()` | the installed operator | — |
+| `halted()` | none | `bool` |
+| `halt_operator()` | none | `Option<Address>` |
+
+**Scope — what the halt does and does not do.**
+
+* It refuses **every state-changing entry point** with `ContractHalted` (34):
+  `create_stream`, `top_up`, `withdraw`, `batch_withdraw`, `cancel`, `pause`,
+  `resume`, `transfer_recipient`, `grant_delegate`, `revoke_delegate`, all six
+  `delegate_*` variants, `extend_stream_ttl` and `batch_extend_ttl`. `set_halt_operator`,
+  `halt` and `resume_contract` are the only mutations that still run, which is
+  what makes the stop reversible.
+* **Reads are unaffected.** `get_stream`, `withdrawable_of`, `vested_of`,
+  `refundable_of`, `stream_count`, `stream_exists`, `halted` and
+  `halt_operator` answer normally for the whole duration. Integrators can keep
+  observing balances and stream state during an incident.
+* It **settles nothing**. No funds move, no stream is cancelled or paused, and
+  no schedule changes. Accrual is a pure function of ledger time, so streams
+  keep vesting while halted — `withdrawable_of` continues to climb; what stops
+  is the ability to act on it. Lifting the halt resumes from exactly the state
+  that was halted.
+* It is **contract-wide**, not per-stream: `pause` remains the per-stream,
+  sender-authorised tool that also freezes accrual.
+
+**Operator lifecycle.**
+
+`set_halt_operator` may be called **exactly once per deployment**. There is no
+rotation entry point — a second call returns `HaltOperatorAlreadySet` (35), so
+an operator cannot be replaced mid-incident, and a leaked operator key cannot
+be handed off; recovering means deploying a new contract (the contract is not
+upgradeable, so that is true of every change). The setter is opt-in: a
+deployment that never calls it has no operator, cannot be halted, and behaves
+exactly as it did before this entry point existed.
+
+The operator's powers are exactly `halt()` and `resume_contract()`. It cannot
+withdraw, cancel, pause, top up, transfer a recipient, grant a delegation, or
+change a stream. It is not consulted by any read method.
+
+**There is no timeout.** The halt ends only when the operator calls
+`resume_contract`, which is deliberately explicit: an automatic expiry would
+reopen settlement while the incident may still be live.
+
+**Errors.**
+
+| # | error | condition |
+|---|---|---|
+| 34 | `ContractHalted` | Any state-changing entry point while halted. Checked before authorization and every other precondition. |
+| 35 | `HaltOperatorAlreadySet` | `set_halt_operator` after the operator was installed. |
+| 36 | `HaltOperatorNotSet` | `halt`/`resume_contract` with no operator installed. |
+| 37 | `ContractAlreadyHalted` | `halt` while already halted. |
+| 38 | `ContractNotHalted` | `resume_contract` while not halted. |
+
+A failed `require_auth()` on `set_halt_operator`, `halt` or `resume_contract`
+is a host authorisation trap rather than a typed contract error, so it is not
+listed above.
+
+**Events.**
+
+| event | topics after the name | payload |
+|---|---|---|
+| `halt_operator_set` | `operator` | — |
+| `contract_halted` | `operator` | `halted_at` |
+| `contract_resumed` | `operator` | `resumed_at`, `halted_for` |
+
+Each transition emits exactly one event, so an indexer can reconstruct the
+halted window from the event stream alone. `test::halt` drives the whole
+matrix: unconfigured contract, one-shot install, the operator-only gate on
+both transitions, every mutating entry point refused with 34, every read still
+answering, and resumption restoring settlement.
+
 ---
 
 ## Events
 
 Declared with `#[contractevent]`; schemas are in the deployed spec. First topic
-is the snake_case event name, second is always `stream_id`.
+is the snake_case event name; second is the routing key — always `stream_id`
+for stream-scoped events, and `operator` for the contract-level halt events,
+which are not about any one stream.
 
 | event | topics after the name | payload |
 |---|---|---|
@@ -1102,6 +1199,9 @@ is the snake_case event name, second is always `stream_id`.
 | `ttl_extended` | `stream_id` | `extended_to_ledgers` |
 | `delegate_granted` | `stream_id`, `grantor`, `delegate` | `ops`, `expires_at` |
 | `delegate_revoked` | `stream_id`, `grantor`, `delegate` | — |
+| `halt_operator_set` | `operator` | — |
+| `contract_halted` | `operator` | `halted_at` |
+| `contract_resumed` | `operator` | `resumed_at`, `halted_for` |
 
 Every payload carries enough state to reconstruct the stream without replaying
 from genesis. Field order and topic placement are ABI.

@@ -334,3 +334,54 @@ pub fn load_delegate(env: &Env, stream_id: u64, delegate: &Address) -> Option<De
         .persistent()
         .get(&DataKey::Delegate(stream_id, delegate.clone()))
 }
+
+// ---------------------------------------------------------------------------
+// Emergency halt (issue #1818)
+// ---------------------------------------------------------------------------
+//
+// Both entries live in instance storage. They share the contract's own TTL, so
+// they are covered by the same "always pinned to `max_ttl()`" policy as
+// `NextStreamId`, and they can never archive out from under the guard that
+// reads them on every mutating call (see the module docs on lifetimes).
+//
+// `HaltedAt` doubles as the halt flag: its presence *is* the halt. Using the
+// timestamp rather than a separate boolean means the `ContractHalted`
+// diagnostic event can report when the stop began, and the resume event can
+// report how long settlement was frozen, without a second key to keep in sync.
+
+/// The address allowed to halt and resume the contract, if one was installed.
+pub fn halt_operator(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKey::HaltOperator)
+}
+
+/// Install the halt operator. Callers must reject a second install.
+pub fn set_halt_operator(env: &Env, operator: &Address) {
+    env.storage()
+        .instance()
+        .set(&DataKey::HaltOperator, operator);
+    extend_instance(env);
+}
+
+/// Whether the contract-level halt is engaged.
+pub fn is_halted(env: &Env) -> bool {
+    env.storage().instance().has(&DataKey::HaltedAt)
+}
+
+/// Unix seconds at which the halt was engaged, if it is engaged.
+pub fn halt_started_at(env: &Env) -> Option<u64> {
+    env.storage().instance().get(&DataKey::HaltedAt)
+}
+
+/// Engage the halt, recording the current ledger timestamp.
+pub fn set_halt(env: &Env) {
+    env.storage()
+        .instance()
+        .set(&DataKey::HaltedAt, &env.ledger().timestamp());
+    extend_instance(env);
+}
+
+/// Lift the halt and forget when it started.
+pub fn clear_halt(env: &Env) {
+    env.storage().instance().remove(&DataKey::HaltedAt);
+    extend_instance(env);
+}
