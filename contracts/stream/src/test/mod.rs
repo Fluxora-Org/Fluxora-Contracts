@@ -78,6 +78,9 @@ mod stream_count_consistency;
 mod read_methods_no_side_effects;
 mod read_ttl_matrix;
 
+// Issue #1828 — `delegate_withdraw` coverage at parity with the direct path.
+mod delegate_withdraw;
+
 // Package / artifact naming gates, run by CI's `packaging::` step. Also
 // guards #1675 (no inert governance crate). Previously unregistered, so
 // that CI step matched zero tests.
