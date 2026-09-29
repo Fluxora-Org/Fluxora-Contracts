@@ -1017,28 +1017,354 @@ fn delegate_top_up_guards_terminal_invalid_matured_and_sub_second() {
     h.assert_pool_exact();
 }
 
+// ---------------------------------------------------------------------------
+// `delegate_transfer_recipient` — parity with the direct `transfer_recipient`
+// (Issue #1827)
+//
+// The delegated path carries an authorisation check the direct path does not,
+// so it is the more dangerous of the two and must be tested at the same depth.
+// `transfer_recipient`'s rejection paths are pinned in `test::transfer`,
+// `test::capabilities` and `test::terminal_operations`; each test below mirrors
+// one of them on the delegate path. Two are deliberately *not* duplicated here
+// because they already exist and would only be re-stated:
+//
+//   * `NotTransferable` — `capabilities::not_transferable_rejects_delegate_transfer_recipient`
+//   * `SelfStream` — `delegate_cannot_transfer_recipient_to_the_sender`
+//
+// The shared stream-level guards are exercised against a *valid* grant so a
+// rejection can only come from the stream state, not from missing authority.
+// The grant-specific rejections (no grant, wrong bit, expired, revoked) follow
+// afterwards; they fail inside `check_delegate`, before any stream state is
+// read, which is why each asserts a byte-for-byte unchanged stream.
+// ---------------------------------------------------------------------------
+
+/// Rejection parity for the stream-lookup case. `transfer_recipient` answers an
+/// unknown id with `StreamNotFound`, but a grant can only be issued against an
+/// existing stream — so on the delegated path `check_delegate` rejects first and
+/// there is no `StreamNotFound` equivalent to pin. This test documents that
+/// ordering so the asymmetry is intentional and visible, not an accident.
 #[test]
-fn delegate_transfer_recipient_guards_repeat_and_settled_streams() {
+fn delegate_transfer_recipient_rejects_an_unknown_stream_as_a_missing_grant() {
     let h = Harness::new();
-    let id = h.create_simple(1_000 * ONE, 10 * DAY);
     let agent = Address::generate(&h.env);
-    h.client
-        .grant_delegate(&id, &h.recipient, &agent, &op::TRANSFER_RECIPIENT, &None);
+    let new_recip = Address::generate(&h.env);
 
-    // Reassigning to the current recipient is a deliberate no-op.
-    h.client
-        .delegate_transfer_recipient(&id, &agent, &h.recipient);
+    let err = h
+        .client
+        .try_delegate_transfer_recipient(&999, &agent, &new_recip)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(
+        err,
+        Error::DelegateNotPermitted,
+        "authorisation is checked before the stream lookup"
+    );
+}
+
+/// No grant at all: rejected with `DelegateNotPermitted` and the stream is left
+/// untouched. `transfer_recipient` has no equivalent — its gate is the sender's
+/// signature — so this is the delegate-only half of the parity.
+#[test]
+fn delegate_transfer_recipient_requires_a_grant() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let agent = Address::generate(&h.env);
+    let new_recip = Address::generate(&h.env);
+
+    let before = h.get(id);
+    let err = h
+        .client
+        .try_delegate_transfer_recipient(&id, &agent, &new_recip)
+        .unwrap_err()
+        .unwrap();
+
+    assert_eq!(err, Error::DelegateNotPermitted);
+    assert_eq!(h.get(id), before, "rejected call must not touch the stream");
     assert_eq!(h.get(id).recipient, h.recipient);
+    h.assert_pool_exact();
+}
 
-    // A fully withdrawn stream has no claim to reassign.
+/// A grant that authorises another recipient-side op (`WITHDRAW`) but not
+/// `TRANSFER_RECIPIENT` cannot reassign: permissions are orthogonal, so the
+/// rejection is `DelegateNotPermitted` and the grant stays usable for the op it
+/// does cover.
+#[test]
+fn delegate_transfer_recipient_requires_the_transfer_recipient_bit() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let agent = Address::generate(&h.env);
+    let new_recip = Address::generate(&h.env);
+
+    // Correct grantor (the recipient owns `TRANSFER_RECIPIENT`) but the wrong bit.
+    h.client
+        .grant_delegate(&id, &h.recipient, &agent, &op::WITHDRAW, &None);
+
+    let before = h.get(id);
+    let err = h
+        .client
+        .try_delegate_transfer_recipient(&id, &agent, &new_recip)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::DelegateNotPermitted);
+    assert_eq!(h.get(id), before);
+
+    // The grant is not consumed by the rejection: its own op still works.
     h.advance(10 * DAY);
-    h.client.withdraw(&id, &None);
+    assert_eq!(h.client.delegate_withdraw(&id, &agent, &None), 100 * ONE);
+    h.assert_pool_exact();
+}
+
+/// A grant whose `expires_at` has passed is rejected with `DelegateExpired` on
+/// the transfer path — not only on withdraw. Mirrors `expired_grant_is_rejected`.
+#[test]
+fn delegate_transfer_recipient_rejects_an_expired_grant() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let agent = Address::generate(&h.env);
+
+    let expires = h.now() + 5 * DAY;
+    h.client.grant_delegate(
+        &id,
+        &h.recipient,
+        &agent,
+        &op::TRANSFER_RECIPIENT,
+        &Some(expires),
+    );
+
+    // Live just before expiry: the delegated transfer works.
+    h.advance(4 * DAY);
+    let first = Address::generate(&h.env);
+    h.client.delegate_transfer_recipient(&id, &agent, &first);
+    assert_eq!(h.get(id).recipient, first);
+
+    // Past expiry: rejected, and the stream is not moved a second time.
+    h.advance(2 * DAY);
+    let before = h.get(id);
     let err = h
         .client
         .try_delegate_transfer_recipient(&id, &agent, &h.other)
         .unwrap_err()
         .unwrap();
+    assert_eq!(err, Error::DelegateExpired);
+    assert_eq!(h.get(id), before);
+    h.assert_pool_exact();
+}
+
+/// A grant revoked earlier in the **same ledger** is rejected, with no ledger
+/// advance between the revocation and the call. The `ALL_OPS` loop in
+/// `revoked_delegate_cannot_act_later_in_the_same_ledger` already covers this
+/// bit; naming the transfer case here keeps the issue-to-test mapping explicit.
+#[test]
+fn delegate_transfer_recipient_rejects_a_grant_revoked_in_the_same_ledger() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let agent = Address::generate(&h.env);
+    let new_recip = Address::generate(&h.env);
+
+    h.client
+        .grant_delegate(&id, &h.recipient, &agent, &op::TRANSFER_RECIPIENT, &None);
+    h.client.revoke_delegate(&id, &h.recipient, &agent);
+
+    let before = h.get(id);
+    let err = h
+        .client
+        .try_delegate_transfer_recipient(&id, &agent, &new_recip)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::DelegateNotPermitted);
+    assert_eq!(
+        h.get(id).recipient,
+        h.recipient,
+        "revocation must leave the recipient in place"
+    );
+    assert_eq!(h.get(id), before);
+    h.assert_pool_exact();
+}
+
+/// Parity with `transferring_to_the_current_recipient_is_an_error` and
+/// `new_recipient_replay_fails_due_to_repeated_transfer`: the delegated path
+/// reports `RepeatedTransfer` for a no-op reassignment instead of returning a
+/// silent success. This is the guard #1827 added to close the drift left by
+/// #1637, which introduced the error on the direct path only.
+#[test]
+fn delegate_transfer_recipient_rejects_a_repeated_transfer() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let agent = Address::generate(&h.env);
+
+    h.client
+        .grant_delegate(&id, &h.recipient, &agent, &op::TRANSFER_RECIPIENT, &None);
+
+    // (1) Targeting the address that already holds the recipient slot.
+    let before = h.get(id);
+    let err = h
+        .client
+        .try_delegate_transfer_recipient(&id, &agent, &h.recipient)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::RepeatedTransfer);
+    assert_eq!(
+        h.get(id),
+        before,
+        "no-op transfer must not change the stream"
+    );
+
+    // (2) Replaying a transfer that already landed: the same `new_recipient` is
+    // now the current recipient, so the replay is rejected too.
+    let moved = Address::generate(&h.env);
+    h.client.delegate_transfer_recipient(&id, &agent, &moved);
+    assert_eq!(h.get(id).recipient, moved);
+
+    let after_move = h.get(id);
+    let err = h
+        .client
+        .try_delegate_transfer_recipient(&id, &agent, &moved)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::RepeatedTransfer);
+    assert_eq!(h.get(id), after_move, "replay must not change the stream");
+    h.assert_pool_exact();
+}
+
+/// A fully withdrawn stream has no claim left to reassign. Parity with
+/// `depleted_stream_rejects_transfer_recipient_when_fully_drained` and
+/// `transfer_after_depletion_is_rejected_and_retry_is_stable`.
+#[test]
+fn delegate_transfer_recipient_rejects_a_depleted_stream() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 10 * DAY);
+    let agent = Address::generate(&h.env);
+    let new_recip = Address::generate(&h.env);
+
+    h.client
+        .grant_delegate(&id, &h.recipient, &agent, &op::TRANSFER_RECIPIENT, &None);
+
+    h.advance(10 * DAY);
+    h.client.withdraw(&id, &None);
+    assert_eq!(h.get(id).status, crate::StreamStatus::Depleted);
+
+    let before = h.get(id);
+    for _ in 0..2 {
+        let err = h
+            .client
+            .try_delegate_transfer_recipient(&id, &agent, &new_recip)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, Error::StreamTerminated);
+    }
+    assert_eq!(h.get(id), before);
+    h.assert_pool_exact();
+}
+
+/// A cancelled stream whose tail has been fully drawn is settled, so it is not
+/// reassignable. Parity with
+/// `cancelled_stream_with_settled_claim_rejects_transfer_recipient`. The grant
+/// must be issued before the cancel, because `grant_delegate` refuses terminal
+/// streams.
+#[test]
+fn delegate_transfer_recipient_rejects_a_cancelled_stream_with_a_settled_claim() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let agent = Address::generate(&h.env);
+    let new_recip = Address::generate(&h.env);
+
+    h.client
+        .grant_delegate(&id, &h.recipient, &agent, &op::TRANSFER_RECIPIENT, &None);
+
+    h.advance(30 * DAY);
+    h.client.cancel(&id);
+    h.client.withdraw(&id, &None); // draw the cancelled tail: claim settled
+    let before = h.get(id);
+    assert_eq!(
+        before.withdrawn, before.deposited,
+        "sanity: claim is settled"
+    );
+    assert_eq!(before.status, crate::StreamStatus::Cancelled);
+
+    let err = h
+        .client
+        .try_delegate_transfer_recipient(&id, &agent, &new_recip)
+        .unwrap_err()
+        .unwrap();
     assert_eq!(err, Error::StreamTerminated);
+    assert_eq!(h.get(id), before);
+    h.assert_pool_exact();
+}
+
+/// Semantic parity with `transfer_before_accrual_moves_the_entire_claim`: the
+/// delegated transfer re-points the whole outstanding claim, the new recipient
+/// is the only one who can withdraw it, and the old recipient receives nothing.
+#[test]
+fn delegate_transfer_recipient_moves_the_entire_claim_to_the_new_recipient() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let agent = Address::generate(&h.env);
+    let new_recip = Address::generate(&h.env);
+    let old_recipient_balance = h.balance(&h.recipient);
+
+    h.client
+        .grant_delegate(&id, &h.recipient, &agent, &op::TRANSFER_RECIPIENT, &None);
+
+    let before = h.get(id);
+    h.client
+        .delegate_transfer_recipient(&id, &agent, &new_recip);
+
+    // Exactly the recipient field moved; nothing else did.
+    let mut expected = before.clone();
+    expected.recipient = new_recip.clone();
+    assert_eq!(h.get(id), expected);
+    h.assert_pool_exact();
+
+    // Accrual continues to the new recipient only.
+    h.advance(100 * DAY);
+    assert_eq!(h.client.withdraw(&id, &None), 1_000 * ONE);
+    assert_eq!(h.balance(&new_recip), 1_000 * ONE);
+    assert_eq!(
+        h.balance(&h.recipient),
+        old_recipient_balance,
+        "the old recipient must receive nothing"
+    );
+    h.assert_pool_exact();
+}
+
+/// A delegated transfer while paused must preserve the frozen claim, exactly
+/// like `transfer_while_paused_preserves_the_frozen_claim`: the pause survives
+/// the transfer and still gates accrual.
+#[test]
+fn delegate_transfer_recipient_while_paused_preserves_the_frozen_claim() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let agent = Address::generate(&h.env);
+    let new_recip = Address::generate(&h.env);
+
+    h.client
+        .grant_delegate(&id, &h.recipient, &agent, &op::TRANSFER_RECIPIENT, &None);
+
+    h.advance(30 * DAY);
+    h.client.pause(&id);
+    let paused_at = h.now();
+    h.advance(50 * DAY);
+
+    let before = h.get(id);
+    h.client
+        .delegate_transfer_recipient(&id, &agent, &new_recip);
+    let after = h.get(id);
+
+    let mut expected = before.clone();
+    expected.recipient = new_recip.clone();
+    assert_eq!(after, expected);
+    assert_eq!(after.status, crate::StreamStatus::Paused);
+    assert_eq!(after.paused_at, Some(paused_at));
+
+    // The pause still freezes accrual after the transfer.
+    assert_eq!(h.client.withdrawable_of(&id), 300 * ONE);
+    assert_eq!(h.client.withdraw(&id, &None), 300 * ONE);
+    h.advance(20 * DAY);
+    assert_eq!(
+        h.client.withdrawable_of(&id),
+        0,
+        "pause still freezes accrual"
+    );
     h.assert_pool_exact();
 }
 
