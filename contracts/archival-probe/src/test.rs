@@ -193,7 +193,6 @@ fn archived_canary() -> (Env, soroban_sdk::Address) {
 /// the network does, and the value comes back intact.
 #[test]
 fn an_archived_entry_is_restored_by_the_read_itself() {
-
     let (env, id) = archived_canary();
     let client = ArchivalProbeClient::new(&env, &id);
 

@@ -1174,8 +1174,7 @@ fn resume_exactly_at_end_time_conservation_and_final_state() {
     );
     assert_eq!(s_final.withdrawn, deposit, "withdrawn must equal deposited");
     assert_eq!(
-        s_final.paused_at,
-        None,
+        s_final.paused_at, None,
         "no open pause on a terminal stream"
     );
 

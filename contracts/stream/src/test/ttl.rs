@@ -679,6 +679,8 @@ fn batch_extend_ttl_still_works_for_active_streams() {
         "batch of active streams must still be extendable"
     );
     assert_eq!(result.unwrap().unwrap(), 2);
+}
+
 /// The pinned assumed close time and where it comes from.
 ///
 /// #1806: this constant is measured, not assumed. The value is the observed
@@ -695,7 +697,8 @@ fn seconds_per_ledger_matches_the_measured_close_time() {
     // MARKER: observed_mean_seconds
     let observed_mean_rounded_up: u64 = 5; // docs/ledger-close-time.md: 5.000 s
     assert_eq!(
-        storage::SECONDS_PER_LEDGER, observed_mean_rounded_up,
+        storage::SECONDS_PER_LEDGER,
+        observed_mean_rounded_up,
         "SECONDS_PER_LEDGER drifted from the measured value in \
          docs/ledger-close-time.md"
     );
@@ -719,9 +722,7 @@ fn safety_margin_absorbs_drift_between_measurements() {
     // load-bearing point, the retention floor: its 622,080 ledgers span 30
     // days at exactly that boundary close time.
     assert!(
-        storage::MIN_STREAM_TTL_LEDGERS as u64
-            * storage::SECONDS_PER_LEDGER
-            * 100
+        storage::MIN_STREAM_TTL_LEDGERS as u64 * storage::SECONDS_PER_LEDGER * 100
             >= TTL_BUFFER_SECONDS * (100 + storage::TTL_SAFETY_MARGIN_PERCENT),
         "the retention floor no longer covers 30 days at the margin's \
          boundary close time"
@@ -750,8 +751,7 @@ fn conversion_covers_close_time_faster_than_observed() {
 
     // 30 days of rent must span 30 days even at the nominal close time.
     assert!(
-        storage::seconds_to_ledgers(TTL_BUFFER_SECONDS) as u64 * nominal
-            >= TTL_BUFFER_SECONDS,
+        storage::seconds_to_ledgers(TTL_BUFFER_SECONDS) as u64 * nominal >= TTL_BUFFER_SECONDS,
         "the funded window is shorter than intended at nominal close time"
     );
 }

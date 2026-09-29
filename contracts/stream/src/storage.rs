@@ -167,8 +167,7 @@ pub const TTL_BUFFER_SECONDS: u64 = 30 * 24 * 60 * 60;
 /// A settled stream still has to stay readable: the recipient may not have
 /// withdrawn their tail yet, and the indexer needs to see the final state.
 pub const MIN_STREAM_TTL_LEDGERS: u32 =
-    (TTL_BUFFER_SECONDS * (100 + TTL_SAFETY_MARGIN_PERCENT)
-        / (SECONDS_PER_LEDGER * 100)) as u32;
+    (TTL_BUFFER_SECONDS * (100 + TTL_SAFETY_MARGIN_PERCENT) / (SECONDS_PER_LEDGER * 100)) as u32;
 
 /// Convert a wall-clock duration into a ledger count, rounding up.
 ///

@@ -90,10 +90,10 @@ compile_error!("Fluxora production WASM must not enable the testutils feature.")
 extern crate std;
 
 mod accrual;
-#[cfg(test)]
-mod protocol_limits;
 mod error;
 mod events;
+#[cfg(test)]
+mod protocol_limits;
 mod storage;
 mod types;
 
@@ -105,14 +105,13 @@ pub use storage::{
     MIN_STREAM_TTL_LEDGERS, SECONDS_PER_LEDGER, TTL_BUFFER_SECONDS, TTL_SAFETY_MARGIN_PERCENT,
 };
 pub use types::op;
-pub use types::{DataKey, DelegateGrant, ReleaseCurve, Stream, StreamStatus};
-pub use types::{BatchCreateRequest, DataKey, DelegateGrant, Stream, StreamStatus};
-pub use types::{BatchCancelOutcome, DataKey, DelegateGrant, Stream, StreamStatus};
-pub use types::{CliffMode, DataKey, DelegateGrant, Stream, StreamStatus};
-pub use types::{DataKey, DelegateGrant, Stream, StreamStatus, MAX_REFERENCE_LENGTH};
+pub use types::{
+    BatchCancelOutcome, BatchCreateRequest, CliffMode, DataKey, DelegateGrant, ReleaseCurve,
+    Stream, StreamStatus, MAX_REFERENCE_LENGTH,
+};
 
 use soroban_sdk::{
-    contract, contractimpl, token, Address, Env, InvokeError, MuxedAddress, TryFromVal, Vec,
+    contract, contractimpl, token, Address, Env, InvokeError, MuxedAddress, String, TryFromVal, Vec,
 };
 
 /// Maximum number of streams one batch call may touch.
@@ -395,6 +394,7 @@ impl FluxoraStream {
         cancellable: bool,
         pausable: bool,
         transferable: bool,
+        reference: Option<String>,
     ) -> Result<u64, Error> {
         Self::create_stream_with_cliff_mode(
             env,
@@ -409,6 +409,7 @@ impl FluxoraStream {
             cancellable,
             pausable,
             transferable,
+            reference,
         )
     }
 
@@ -529,9 +530,11 @@ impl FluxoraStream {
             start_time,
             end_time,
             cliff_time,
+            cliff_mode,
             cancellable,
             pausable,
             transferable,
+            reference,
         )
     }
 
@@ -545,9 +548,11 @@ impl FluxoraStream {
         start_time: u64,
         end_time: u64,
         cliff_time: u64,
+        cliff_mode: CliffMode,
         cancellable: bool,
         pausable: bool,
         transferable: bool,
+        reference: Option<String>,
     ) -> Result<u64, Error> {
         Self::create_stream_inner(
             env,
@@ -558,9 +563,11 @@ impl FluxoraStream {
             start_time,
             end_time,
             cliff_time,
+            cliff_mode,
             cancellable,
             pausable,
             transferable,
+            reference,
             ReleaseCurve::Linear,
         )
     }
@@ -629,9 +636,11 @@ impl FluxoraStream {
             start_time,
             end_time,
             cliff_time,
+            CliffMode::DEFAULT,
             cancellable,
             pausable,
             transferable,
+            None,
             curve,
         )
     }
@@ -653,9 +662,11 @@ impl FluxoraStream {
         start_time: u64,
         end_time: u64,
         cliff_time: u64,
+        cliff_mode: CliffMode,
         cancellable: bool,
         pausable: bool,
         transferable: bool,
+        reference: Option<String>,
         curve: ReleaseCurve,
     ) -> Result<u64, Error> {
         // Emergency halt (#1818): refuse state changes before anything else.
@@ -677,7 +688,7 @@ impl FluxoraStream {
 
         // Validate reference length if provided
         if let Some(ref r) = reference {
-            if r.len() > MAX_REFERENCE_LENGTH as usize {
+            if r.len() > MAX_REFERENCE_LENGTH {
                 return Err(Error::InvalidReferenceLength);
             }
         }
@@ -790,9 +801,11 @@ impl FluxoraStream {
                 request.start_time,
                 request.end_time,
                 request.cliff_time,
+                CliffMode::DEFAULT,
                 request.cancellable,
                 request.pausable,
                 request.transferable,
+                None,
             )?);
         }
         Ok(ids)

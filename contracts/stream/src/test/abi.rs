@@ -36,9 +36,9 @@ use crate::events::{
     Cancelled, ContractHalted, ContractResumed, HaltOperatorSet, Paused, RecipientTransferred,
     Resumed, StreamCreated, ToppedUp, TtlExtended, Withdrawn,
 };
-use crate::{Error, FluxoraStream, ReleaseCurve, Stream, StreamStatus, ABI_VERSION};
 use crate::{BatchCancelOutcome, Error, FluxoraStream, Stream, StreamStatus, ABI_VERSION};
 use crate::{CliffMode, Error, FluxoraStream, Stream, StreamStatus, ABI_VERSION};
+use crate::{Error, FluxoraStream, ReleaseCurve, Stream, StreamStatus, ABI_VERSION};
 
 // ---------------------------------------------------------------------------
 // Inventory
@@ -1427,7 +1427,6 @@ fn missing_stream_failure_is_stream_not_found_discriminant_one() {
 
 #[test]
 fn oversized_batch_failure_is_batch_too_large_discriminant_nineteen() {
-
     let h = Harness::new();
     let ids: std::vec::Vec<u64> = (0..17).collect();
     let err = h

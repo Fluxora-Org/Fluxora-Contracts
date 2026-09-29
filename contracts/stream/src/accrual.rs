@@ -102,8 +102,7 @@
 //! advancing-clock half over random schedules.
 
 use crate::error::Error;
-use crate::types::{ReleaseCurve, Stream};
-use crate::types::{CliffMode, Stream};
+use crate::types::{CliffMode, ReleaseCurve, Stream};
 
 /// The stream's own clock, in the same units and origin as `start_time` and
 /// `end_time`. Stops while the stream is paused.

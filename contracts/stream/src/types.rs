@@ -1,7 +1,7 @@
 use soroban_sdk::{contracttype, Address, String};
 
 /// Maximum length for stream reference strings.
-/// 
+///
 /// This limit balances utility with storage costs. References are intended for
 /// short identifiers like "payroll-001" or "grant-xyz-q1-2024".
 pub const MAX_REFERENCE_LENGTH: u32 = 64;
@@ -242,6 +242,17 @@ pub struct Stream {
     /// an earlier deployment keeps decoding — see [`StreamRecord`] for why
     /// appending a field to the stored value is not an option.
     pub curve: ReleaseCurve,
+    /// Optional reference string for stream identification.
+    ///
+    /// Set at creation and never mutable. Maximum length is
+    /// [`MAX_REFERENCE_LENGTH`] characters. Intended for short identifiers
+    /// like "payroll-001" or "grant-xyz-q1-2024" to help operators distinguish
+    /// between streams on-chain.
+    ///
+    /// Like `curve`, this is **not** part of the frozen v1 stored encoding:
+    /// the record below carries the v1 field set, so a stream read back from an
+    /// entry written before references existed has none.
+    pub reference: Option<String>,
 }
 
 /// The **stored** form of a stream: the frozen v1 layout, without `curve`.
@@ -272,13 +283,15 @@ pub struct StreamRecord {
     pub token: Address,
     pub deposited: i128,
     pub withdrawn: i128,
-    /// Optional reference string for stream identification.
-    /// 
-    /// Set at creation and never mutable. Maximum length is
-    /// [`MAX_REFERENCE_LENGTH`] characters. Intended for short identifiers
-    /// like "payroll-001" or "grant-xyz-q1-2024" to help operators distinguish
-    /// between streams on-chain.
-    pub reference: Option<String>,
+    pub start_time: u64,
+    pub end_time: u64,
+    pub cliff_time: u64,
+    pub cancellable: bool,
+    pub pausable: bool,
+    pub transferable: bool,
+    pub paused_at: Option<u64>,
+    pub paused_total: u64,
+    pub status: StreamStatus,
 }
 
 /// One element in an atomic payroll-style stream creation batch.
@@ -337,7 +350,11 @@ impl StreamRecord {
             paused_at: self.paused_at,
             paused_total: self.paused_total,
             status: self.status,
+            // Neither of these is part of the frozen v1 record, so a stream
+            // decoded from storage takes the pre-feature defaults.
+            cliff_mode: CliffMode::DEFAULT,
             curve,
+            reference: None,
         }
     }
 }

@@ -35,8 +35,7 @@ use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{Address, Env};
 
 use super::common::*;
-use crate::types::{ReleaseCurve, Stream, StreamStatus};
-use crate::types::{CliffMode, Stream, StreamStatus};
+use crate::types::{CliffMode, ReleaseCurve, Stream, StreamStatus};
 use crate::Error;
 use crate::{accrual, storage};
 

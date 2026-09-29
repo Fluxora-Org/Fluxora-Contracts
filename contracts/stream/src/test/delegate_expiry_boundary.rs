@@ -79,7 +79,11 @@ fn delegate_withdraw_in_the_expiry_ledger_pays_and_conserves_funds() {
     // Move time to the expiry instant itself — the ledger the grant expires in.
     // Nothing else changes, so the boundary is the only variable under test.
     h.warp_to(expires);
-    assert_eq!(h.now(), expires, "pre-condition: we are on the expiry ledger");
+    assert_eq!(
+        h.now(),
+        expires,
+        "pre-condition: we are on the expiry ledger"
+    );
 
     // Conservation bookkeeping, captured before the delegate acts.
     let sender_before = h.balance(&h.sender);
@@ -115,7 +119,11 @@ fn delegate_withdraw_in_the_expiry_ledger_pays_and_conserves_funds() {
 
     assert_eq!(h.balance(&h.recipient), recipient_before + paid);
     assert_eq!(h.pool(), pool_before - paid);
-    assert_eq!(h.balance(&h.sender), sender_before, "the sender is untouched");
+    assert_eq!(
+        h.balance(&h.sender),
+        sender_before,
+        "the sender is untouched"
+    );
 
     // Stream accounting: only `withdrawn` moves at the boundary.
     assert_eq!(after.withdrawn, expected_payout);

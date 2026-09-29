@@ -233,11 +233,7 @@ fn top_up_while_paused_never_reduces_vested_despite_fractional_rates() {
     // final total matches deposited.
     let before_resume = h.client.vested_of(&id);
     h.client.resume(&id);
-    assert_eq!(
-        h.client.vested_of(&id),
-        before_resume,
-        "no jump on resume"
-    );
+    assert_eq!(h.client.vested_of(&id), before_resume, "no jump on resume");
 
     // Fast-forward to the stretched end and confirm full delivery.
     let s = h.get(id);
@@ -646,7 +642,11 @@ fn top_up_on_paused_stream_extends_end_time_while_preserving_rate() {
 
     let s = h.get(id);
     assert_eq!(s.deposited, 1_100 * ONE);
-    assert_eq!(s.end_time, T0 + 110 * DAY, "rate is 10/day, so 100 new = 10 days");
+    assert_eq!(
+        s.end_time,
+        T0 + 110 * DAY,
+        "rate is 10/day, so 100 new = 10 days"
+    );
 
     // Vested must not have moved while paused.
     let vested_after = h.client.vested_of(&id);

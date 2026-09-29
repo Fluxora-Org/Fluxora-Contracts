@@ -49,14 +49,14 @@
 //!  contract-error sub-contract — both surface as `TokenTransferFailed`.
 //!  `TokenMissing` is only reachable via WASM execution on a real network.
 //!  The variant's discriminant (26) is verified by `token_error_discriminants_match_the_abi_table`.
+use super::common::*;
+use crate::{Error, StreamStatus};
 use soroban_sdk::testutils::{Address as _, Events as _, IssuerFlags};
 use soroban_sdk::token::{StellarAssetClient, TokenClient};
 use soroban_sdk::xdr::ContractEventBody;
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, Address, Env, MuxedAddress, String,
 };
-use super::common::*;
-use crate::{Error, StreamStatus};
 
 // ─── panic token ─────────────────────────────────────────────────────────────
 
@@ -1173,7 +1173,10 @@ fn fewer_token_decimals_do_not_rescale_deposit_or_withdrawal() {
     let created = h.client.get_stream(&stream_id);
     assert_eq!(created.deposited, deposit);
     assert_eq!(created.withdrawn, 0);
-    assert_eq!(low_decimal_token.balance(&h.sender), sender_before - deposit);
+    assert_eq!(
+        low_decimal_token.balance(&h.sender),
+        sender_before - deposit
+    );
     assert_eq!(low_decimal_token.balance(&h.contract_id), deposit);
 
     h.advance(100);
@@ -1204,7 +1207,10 @@ fn fewer_token_decimals_do_not_rescale_deposit_or_withdrawal() {
     assert_eq!(final_stream.deposited, deposit);
     assert_eq!(final_stream.withdrawn, deposit);
     assert_eq!(final_stream.status, StreamStatus::Depleted);
-    assert_eq!(low_decimal_token.balance(&h.sender), sender_before - deposit);
+    assert_eq!(
+        low_decimal_token.balance(&h.sender),
+        sender_before - deposit
+    );
     assert_eq!(low_decimal_token.balance(&h.recipient), deposit);
     assert_eq!(low_decimal_token.balance(&h.contract_id), 0);
     assert_eq!(

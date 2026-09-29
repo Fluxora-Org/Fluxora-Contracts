@@ -117,7 +117,10 @@ fn exact_withdrawable_midstream_clears_to_zero_and_stays_active() {
     for amount in [None, Some(1i128), Some(available)] {
         let err = h.client.try_withdraw(&id, &amount).unwrap_err().unwrap();
         assert_eq!(err, Error::NothingToWithdraw, "amount {amount:?}");
-        assert!(stream_events(&h).is_empty(), "a rejected draw emits no event");
+        assert!(
+            stream_events(&h).is_empty(),
+            "a rejected draw emits no event"
+        );
     }
 
     assert_eq!(h.get(id).withdrawn, available, "rejections changed nothing");
@@ -156,7 +159,11 @@ fn exact_remaining_balance_at_end_time_flips_to_depleted() {
 
     assert_eq!(returned, remaining);
     assert_eq!(h.balance(&h.recipient) - recipient_before, remaining);
-    assert_eq!(h.balance(&h.recipient), 1_000 * ONE, "full deposit paid out");
+    assert_eq!(
+        h.balance(&h.recipient),
+        1_000 * ONE,
+        "full deposit paid out"
+    );
 
     let stream = h.get(id);
     assert_eq!(stream.withdrawn, 1_000 * ONE);
@@ -186,9 +193,16 @@ fn exact_remaining_balance_at_end_time_flips_to_depleted() {
     for amount in [None, Some(1i128)] {
         let err = h.client.try_withdraw(&id, &amount).unwrap_err().unwrap();
         assert_eq!(err, Error::StreamTerminated, "amount {amount:?}");
-        assert!(stream_events(&h).is_empty(), "a rejected draw emits no event");
+        assert!(
+            stream_events(&h).is_empty(),
+            "a rejected draw emits no event"
+        );
     }
-    assert_eq!(h.get(id).withdrawn, 1_000 * ONE, "rejections changed nothing");
+    assert_eq!(
+        h.get(id).withdrawn,
+        1_000 * ONE,
+        "rejections changed nothing"
+    );
 
     h.assert_pool_invariant();
     h.assert_pool_exact();
@@ -268,12 +282,19 @@ fn one_stroop_over_the_exact_withdrawable_is_rejected_without_side_effects() {
         .unwrap_err()
         .unwrap();
     assert_eq!(err, Error::InsufficientWithdrawable);
-    assert!(stream_events(&h).is_empty(), "a rejected draw emits no event");
+    assert!(
+        stream_events(&h).is_empty(),
+        "a rejected draw emits no event"
+    );
 
     let stream = h.get(id);
     assert_eq!(stream.withdrawn, 0);
     assert_eq!(h.balance(&h.recipient), 0);
-    assert_eq!(h.client.withdrawable_of(&id), available, "balance unchanged");
+    assert_eq!(
+        h.client.withdrawable_of(&id),
+        available,
+        "balance unchanged"
+    );
 
     // Exactly at the boundary succeeds, and only now does the balance read 0.
     assert_eq!(h.client.withdraw(&id, &Some(available)), available);
@@ -326,7 +347,10 @@ fn exact_withdrawable_of_a_truncating_schedule_leaves_the_residue_pooled() {
 
     // The floored residue is still the sender's and still backs the pool.
     assert_eq!(h.client.refundable_of(&id), refundable);
-    assert_eq!(h.client.vested_of(&id) + h.client.refundable_of(&id), deposit);
+    assert_eq!(
+        h.client.vested_of(&id) + h.client.refundable_of(&id),
+        deposit
+    );
     assert_eq!(h.pool(), refundable, "residue stays pooled for the sender");
 
     // Draining the balance did not make the boundary terminal.

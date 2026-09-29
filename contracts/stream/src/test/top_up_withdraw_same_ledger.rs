@@ -246,14 +246,17 @@ fn same_ledger_top_up_then_withdraw(offset: u64, top_up_amount: i128) {
     assert_eq!(s_final.deposited, new_deposited);
     assert_eq!(s_final.withdrawn, payout);
     assert!(
-        s_final.status == StreamStatus::Active
-            || s_final.status == StreamStatus::Depleted,
+        s_final.status == StreamStatus::Active || s_final.status == StreamStatus::Depleted,
         "offset={offset}: unexpected stream status {:?}",
         s_final.status,
     );
     // If depleted, the pool must be empty.
     if s_final.status == StreamStatus::Depleted {
-        assert_eq!(h.pool(), 0, "offset={offset}: depleted stream must leave pool empty");
+        assert_eq!(
+            h.pool(),
+            0,
+            "offset={offset}: depleted stream must leave pool empty"
+        );
     }
 }
 
@@ -341,8 +344,7 @@ fn same_ledger_withdraw_then_top_up(offset: u64, top_up_amount: i128) {
     // The stream may not be Depleted here even at offset == duration,
     // because top_up extended end_time after the withdraw.
     assert!(
-        s_final.status == StreamStatus::Active
-            || s_final.status == StreamStatus::Depleted,
+        s_final.status == StreamStatus::Active || s_final.status == StreamStatus::Depleted,
         "offset={offset}: unexpected stream status {:?}",
         s_final.status,
     );
@@ -545,7 +547,7 @@ fn prior_withdrawal_does_not_affect_same_ledger_conservation() {
     h.advance(20 * DAY); // now at 50 days total
     let top_up_amount = 200 * ONE;
 
-    let vested_at_50 = deposit * 50 / 100;   // 500 * ONE
+    let vested_at_50 = deposit * 50 / 100; // 500 * ONE
     let already_withdrawn = h.get(id).withdrawn; // 300 * ONE
     let expected_second_payout = vested_at_50 - already_withdrawn; // 200 * ONE
 
@@ -663,7 +665,7 @@ fn full_lifecycle_with_same_ledger_top_up_and_withdraw() {
     assert_topped_up_event(&h, id, top_up_amount);
 
     let s_after_topup = h.get(id);
-    let new_deposited = s_after_topup.deposited;  // 1_500 * ONE
+    let new_deposited = s_after_topup.deposited; // 1_500 * ONE
     let new_end = s_after_topup.end_time;
 
     let recipient_before = h.balance(&h.recipient);

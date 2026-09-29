@@ -25,8 +25,7 @@ use soroban_sdk::{Address, Env};
 
 use super::common::*;
 use crate::accrual;
-use crate::types::{ReleaseCurve, Stream, StreamStatus};
-use crate::types::{CliffMode, Stream, StreamStatus};
+use crate::types::{CliffMode, ReleaseCurve, Stream, StreamStatus};
 
 /// Build a stream directly so a property case costs no host invocations.
 fn stream_of(
