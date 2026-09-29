@@ -1,0 +1,31 @@
+{
+  "event": "DelegateGranted",
+  "topic": "delegate_granted",
+  "fields": [
+    {
+      "name": "stream_id",
+      "type": "u64",
+      "topic": true
+    },
+    {
+      "name": "grantor",
+      "type": "Address",
+      "topic": true
+    },
+    {
+      "name": "delegate",
+      "type": "Address",
+      "topic": true
+    },
+    {
+      "name": "ops",
+      "type": "u32",
+      "topic": false
+    },
+    {
+      "name": "expires_at",
+      "type": "Option<u64>",
+      "topic": false
+    }
+  ]
+}

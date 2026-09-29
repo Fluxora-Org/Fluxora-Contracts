@@ -1042,6 +1042,7 @@ fn delegate_top_up_rejects_a_fee_on_transfer_token() {
         &true,
         &true,
         &true,
+        &None,
     );
     let agent = Address::generate(&h.env);
     h.client

@@ -14,6 +14,11 @@ integrators. Anything not described here is not part of the interface.
 | Wasm hash | `d47c96a344a79c614ab0dcf0eac62cc9384f6dc7f1d45c3f5109fb09658b035e` |
 | Interface spec sha256 | `acdfd259c7f9a854d42c5da4cda43138fb71b757b604a21c6dac8a8a5a3a86d1` |
 
+> **Security status:** Automated testing includes property tests, a pool
+> invariant checked after every operation, and randomized sequence tests. This
+> testing is not an independent security review; no third-party security audit
+> of the contracts has been performed.
+
 ## Upgrade posture
 
 The deployed stream contract is **not upgradeable in place**. This is a
@@ -23,6 +28,21 @@ streams remain on the original deployment and are not migrated automatically.
 There is therefore no upgrade authorization or in-place migration process.
 The ABI inventory below is the deployed surface and contains no upgrade or
 admin-rotation method.
+
+This is confirmed against the entry points the contract actually exposes: the
+complete public surface is the 24 methods enumerated in [Entry points](#entry-points)
+— lifecycle, views, maintenance, delegation and the emergency halt — and none of
+them replaces code, rotates an admin, or writes a new implementation hash. There
+is no `upgrade`, `set_admin`, `migrate` or equivalent entry point in the ABI
+inventory or in `contracts/stream/src/lib.rs`. The posture is therefore a
+property of the deployed surface, not merely a policy statement.
+
+The single exception to "no operator" is the **emergency halt** (issue #1818):
+an operator address can be installed once, has no rotation path, and can only
+stop and restart settlement contract-wide — it holds no key over funds, no
+upgrade authority, and no power over any individual stream. See
+[Emergency halt](#emergency-halt). A deployment that never installs an operator
+is exactly as admin-free as before.
 
 The deployed contract's interface has been verified byte-identical to the local
 build:
@@ -35,7 +55,7 @@ stellar contract info interface --id CBCGTSCJ… --network testnet
 ## What "frozen" means
 
 The core contract is **immutable** — no admin key, no upgrade path (see the
-non-goals). The interface therefore cannot change on the deployed contract at
+[Upgrade posture](#upgrade-posture) above). The interface therefore cannot change on the deployed contract at
 all; a change means a *new deployment at a new address*.
 
 So the freeze is a commitment about how we manage that:
@@ -65,6 +85,54 @@ discriminant and event is generated from that same spec XDR and committed at
 without bumping [`ABI_VERSION`](../contracts/stream/src/lib.rs). Additive
 changes update the snapshot only.
 
+### ABI versions
+
+| version | scope |
+|---|---|
+| `1` | The frozen interface above, as deployed at `CBCGTSCJ…`. |
+| `2` | **Release curves (#1815).** `Stream` gained a `curve` field, `StreamCreated` gained a `curve` payload field, and the new `create_stream_with_curve` entry point was added. |
+
+Version 2 is a *new deployment*, not an in-place upgrade (see Upgrade posture).
+The version 1 surface is unchanged in meaning and still callable on the version 1
+deployment: `create_stream` keeps its exact signature and its exact linear
+arithmetic. What makes the change **breaking**, and therefore what requires the
+bump, is that `get_stream` returns a `Stream` with one more field and
+`stream_created` carries one more payload field — a typed client generated
+against version 1 cannot decode either. The new entry point and the appended
+event field are individually additive; the struct field is not.
+
+On-chain storage did **not** change: version 1 entries stay readable and are read
+back as linear streams. See [Storage compatibility](#storage-compatibility).
+`ABI_VERSION` is currently **2**. Version 1 is the interface this repository
+froze; version 2 adds `create_stream_with_cliff_mode` and the `CliffMode` type,
+and adds one field to the `Stream` UDT and one to the `stream_created` payload.
+Every version-1 method keeps its version-1 signature and meaning — `create_stream`
+in particular still creates `CliffMode::Schedule` streams — so version 1 is a
+prefix of version 2 apart from those two additions. The version-1 record is
+preserved as the `frozen_v1()` inventory in
+`contracts/stream/src/test/abi.rs` and asserted against by
+`test::abi::current_spec_is_compatible_with_frozen_v1`.
+
+**What adding a `Stream` field does to stored data.** `cliff_mode` changes the
+`Stream` struct's XDR layout, so a v2 reader cannot decode a v1 entry — the field
+count no longer matches and the host rejects the unpack. This is safe for the
+same reason every other breaking change here is safe: the contract is not
+upgradeable in place, so a v2 build is deployed at a **new address** and v1
+entries stay under the v1 contract id, never opened by v2 code. There is no
+in-place migration to write, and none is provided — one would be unreachable
+code that grows the deployable WASM. Both halves are asserted in
+`contracts/stream/src/test/storage_keys.rs`:
+`v1_layout_is_no_longer_decodable_and_that_is_deliberate` (the refusal, with the
+upgrade-posture argument) and `v2_layout_round_trips` (that the new layout still
+reads its own entries).
+
+A consequence worth stating plainly: the mode is a **creation-time** choice that
+cannot be changed later, and there is no way to move an existing deployment's
+streams onto the new mode other than creating new streams under the new
+contract. That is the same trade-off the capability flags already carry, and it
+is deliberate — an immutable choice is what makes `cliff_mode` trustworthy to a
+recipient reading `get_stream`.
+
 ---
 
 ## Constants
@@ -77,16 +145,42 @@ trial calls.
 | constant | value | applies to | notes |
 |---|---|---|---|
 | **`MAX_BATCH_SIZE`** | **16** | `batch_withdraw`, `batch_extend_ttl` | Maximum number of stream ids accepted in a single batch call. Requests with **more than 16 ids** return [`BatchTooLarge` (19)](#error). Chunk larger lists client-side; the SDK does this automatically. |
+| **`MAX_REFERENCE_LENGTH`** | **64** | `create_stream` | Maximum length in characters for the optional reference string. References exceeding this limit return [`InvalidReferenceLength` (34)](#error). |
 | `MIN_RATE_STROOPS_PER_SECOND` | 1 | `create_stream`, `top_up` | Enforced via `DepositRateTooLow` (5). Below 1 token unit per second the per-second rate truncates to zero and the recipient accrues nothing until the last instant. |
 
 ### Derivation of `MAX_BATCH_SIZE = 16`
 
 The binding mainnet constraint is the **contract event budget** (16,384 bytes per
 transaction), not entry or instruction counts. Each stream in a batch emits a
-`withdrawn` event plus the token's `transfer` event — roughly 512 bytes per
-stream between them. With a heavier token event payload, 32 streams would risk
-exhausting the budget. **Sixteen is the measured ceiling with a 2x safety
-factor.** The measurement suite lives in `test::resource_limits` and runs in
+`withdrawn` event plus the token's `transfer` event. Against the Stellar Asset
+Contract that is 512 bytes per stream, so a full batch of 16 spends 8,192 of the
+16,384-byte budget — a 2x margin. The other half of that cost belongs to the
+*token*, so a heavier transfer event moves the ceiling, which is why the number
+is re-derived by measurement rather than assumed.
+
+`test::token_batch_calibration` derives the implied ceiling for four token
+profiles of deliberately different cost:
+
+| token profile | per-transfer event bytes | events at 16 | implied ceiling |
+| --- | --- | --- | --- |
+| no transfer event | 0 | 4,416 / 16,384 | 59 |
+| Stellar Asset Contract (baseline) | 236 | 8,192 / 16,384 | 32 |
+| ~256-byte transfer event | 412 | 11,008 / 16,384 | 23 |
+| ~2 KB transfer event | 2,204 | 39,680 / 16,384 | 6 |
+
+**Sixteen is the measured ceiling for the Stellar Asset Contract and every
+lighter token, with the documented 2x safety factor.** A token with a heavier
+transfer event shifts the ceiling down — the ~2 KB profile admits 6, not 16 —
+and the contract cannot detect that, because the cost lives inside the token's
+own event. What it does enforce is the cap itself: more than 16 ids is rejected
+with [`BatchTooLarge` (19)](#error) before the token is touched, whatever the
+token is. `test::resource_limits` pins the event cost at the cap for the
+baseline token; `docs/KNOWN-LIMITATIONS.md` §3 records the per-token ceilings.
+`withdrawn` event plus the token's `transfer` event — 624 bytes per stream
+between them since issue #1868 appended the sender and the pause bookkeeping to
+`withdrawn`. With a heavier token event payload, 26 streams would risk
+exhausting the budget. **Sixteen is the measured ceiling leaving 6,400 bytes
+spare.** The measurement suite lives in `test::resource_limits` and runs in
 every CI build under the `Resource report` step.
 
 Client-side chunking is transparent to integrators: each chunk is a separate,
@@ -109,14 +203,31 @@ struct Stream {
     start_time: u64,       // unix seconds
     end_time: u64,         // unix seconds
     cliff_time: u64,       // in [start_time, end_time]; == start_time for none
+    cliff_mode: CliffMode, // immutable after creation. How cliff_time is compared.
     cancellable: bool,     // immutable after creation
     pausable: bool,        // immutable after creation
     transferable: bool,    // immutable after creation
     paused_at: Option<u64>,
     paused_total: u64,     // cumulative paused seconds, excluding any in-progress pause
     status: StreamStatus,
+    curve: ReleaseCurve,   // release shape above the cliff; immutable after creation
+    reference: Option<String>, // optional reference for stream identification, max 64 characters
 }
 ```
+
+### `CliffMode`
+
+```rust
+enum CliffMode {
+    Schedule,   // 0, default. Gate opens when the stream clock reaches cliff_time.
+    WallClock,  // 1.         Gate opens when ledger time reaches cliff_time.
+}
+```
+
+A `u32`-backed enum, carried on the wire as a bare `u32`. Any other value is
+refused by the host while arguments are decoded, as a conversion error, so no
+`Error` discriminant is needed for it. The two discriminants are part of the ABI
+and will only ever be appended, matching the rule for error codes.
 
 All amounts are `i128` in the token's smallest unit. **USDC on Stellar has 7
 decimals** — not 6, not 18. Amounts cross the JSON-RPC boundary as *strings*
@@ -138,6 +249,57 @@ Crosses the ABI as its **discriminant**, not its name.
 `Cancelled`. It never becomes `Depleted`. This distinction is deliberate and
 load-bearing for reporting — see the resolved schema question below.
 
+### `ReleaseCurve`
+
+The shape of the release schedule **above the cliff**. Crosses the ABI as its
+**discriminant**, not its name. Selected once, at creation, and never mutable —
+like the capability flags, this is a trust feature: a recipient who accepts a
+front-loaded stream has verified on chain that the shape cannot be flattened
+afterwards. Defaults to `Linear` when a stream is created with `create_stream`.
+
+| value | name | schedule between `start_time` and `end_time` |
+|---|---|---|
+| `0` | `Linear` | `floor(deposited × elapsed / duration)`. The original formula, unchanged. |
+| `1` | `Step` | Four equal tranches. Tranche *k* (for *k* in `1..=3`) opens once `ceil(k × duration / 4)` seconds have been consumed; the fourth is delivered at maturity. The recipient's claim jumps by a quarter of the deposit at each 25 / 50 / 75 / 100 % boundary and does not move in between. |
+| `2` | `FrontLoaded` | `f(u) = 2u − u²` on `u = elapsed / duration`, evaluated on a 1/1000 grid: accelerates early, decelerates into maturity. Ahead of or equal to `Linear` at every grid point while inside the schedule. |
+
+All curves share three properties, and those are what the contract's invariants
+rely on:
+
+1. **Monotone non-decreasing** on the stream clock — `vested_of` can never go
+   backwards in time, for any curve.
+2. **`f(0) == 0`** — nothing vests before the start instant.
+3. **`f(duration) == deposited`** — the schedule settles at exactly the deposit,
+   so `vested_of + refundable_of == deposited` holds at every instant whichever
+   curve is selected.
+
+The variants differ only in *when* the deposit is delivered, never in how much.
+A `Step` tranche threshold uses `ceil`, not `floor`, so a schedule shorter than
+four seconds does not release a tranche at `start_time`. `Linear` uses the
+original `floor` and is byte-for-byte identical to the pre-#1815 arithmetic — a
+linear stream created through either entry point vests identically.
+
+### Storage compatibility
+
+Adding a field to the **stored** value of a `#[contracttype]` struct would make
+every entry written by an earlier deployment undecodable (the host unpacks the
+stored map positionally against the struct's field set, and reports
+`Error(Object, UnexpectedSize)` on a mismatch). Release curves therefore do **not**
+change the stored layout:
+
+* `DataKey::Stream(id)` still holds the frozen version 1 record — the version 1
+  field set, no `curve`.
+* A non-linear stream's curve is written to a side-car key,
+  `DataKey::StreamCurve(id)`, which is kept alive with the same TTL as the record
+  it annotates.
+* A **missing** side-car means `Linear`. Version 1 streams have no side-car, so
+  they read back as exactly the stream they were created as, and a linear stream
+  created today writes none either — it pays no rent for a key that would merely
+  restate the default. No migration is required for a live deployment.
+
+`get_stream` stitches the two together, so the `Stream` a caller sees always
+carries the effective curve.
+
 ### Stream ID allocation
 
 Stream IDs are a zero-based, monotonic sequence scoped to one contract
@@ -158,7 +320,8 @@ Three `bool` fields on `Stream` describe operations that are **not available**
 for a given stream. They are supplied by the sender to `create_stream` and are
 **fixed for the lifetime of the stream** — no entry point can change them after
 creation. `get_stream` returns the live `Stream` struct, which includes all
-three fields.
+three fields. `cliff_mode` is fixed the same way, but is not a capability: it
+selects a rule rather than denying an operation.
 
 | field | error when `false` | discriminant |
 |---|---|---|
@@ -229,12 +392,20 @@ Discriminants are ABI and are never renumbered; new variants are appended.
 | 31 | `InvalidTopUp` | Reserved; non-positive top-ups are rejected as `InvalidAmount` first. | reserved |
 | 32 | `TokenAmountMismatch` | Deposit pull changes pool balance by an unexpected amount. | reachable |
 | 33 | `VestedDecreased` | Reserved; current mutation paths preserve non-decreasing vested value. | reserved |
+| 34 | `PoolBalanceDrift` | A funds-moving operation found the pool's real token balance below the total Fluxora accounts for. | reachable |
+| 34 | `ContractHalted` | A state-changing entry point was called while the contract-level halt is engaged. | reachable |
+| 35 | `HaltOperatorAlreadySet` | `set_halt_operator` was called after an operator was already installed. | reachable |
+| 36 | `HaltOperatorNotSet` | `halt`/`resume_contract` was called on a contract with no operator installed. | reachable |
+| 37 | `ContractAlreadyHalted` | `halt` was called while the contract was already halted. | reachable |
+| 38 | `ContractNotHalted` | `resume_contract` was called while the contract was not halted. | reachable |
+| 33 | `VestedDecreased` | Reserved; defensive invariant — the randomized operation-sequence search in `test::vested_decreased` finds no path that lowers vested. | reserved |
 
 `TokenTransferFailed` (25) and `TokenMissing` (26) are **stable stream-level categories** for token sub-invocation failures. The token contract's internal error discriminant is intentionally discarded — forwarding it would produce a value clients decode against Fluxora's error table, yielding a silent misinterpretation. The raw diagnostic is visible in the failed transaction's `diagnosticEvents`.
 
-* `TokenTransferFailed` — the token contract returned a typed contract error: insufficient sender balance, pool underfunded on a payout, or the token's own authorization rules refused the call.
+* `TokenTransferFailed` — the token contract returned a typed contract error: insufficient sender balance, pool underfunded on a payout, the token's own authorization rules refused the call, or the token returned a non-success value such as `false` rather than reverting. Fluxora treats all of those as a failed transfer, not a successful deposit.
 * `TokenMissing` — the token address resolves to nothing (Abort / host trap); the stream references a non-deployed contract.
 * `TokenAmountMismatch` (32) — a deposit pull (`create_stream`, `top_up`, `delegate_top_up`) changed the pool's balance by something other than the requested amount. See "Token assumptions" below.
+* `PoolBalanceDrift` (34) — the pool's real token balance fell below the balance Fluxora accounts for. Raised by the reconciliation at the end of every operation that moves pool funds: `withdraw`, `delegate_withdraw`, `batch_withdraw`, `cancel`, `delegate_cancel`, `top_up` and `delegate_top_up`. A shortfall means the token changed balances outside a transfer Fluxora was party to — an elastic-supply rebase — and the whole invocation reverts rather than paying one recipient out of another's claim. A *surplus* is tolerated, never reported; see "Token assumptions" below.
 
 The CLI and RPC render these as `Error(Contract, #N)`.
 
@@ -245,6 +416,13 @@ The CLI and RPC render these as `Error(Contract, #N)`.
 each is documented in the table above and in `test::error_reachability`, and
 none of them has a reachable path through a public entry point. Do not
 renumber or remove them.
+
+`VestedDecreased` (33) is the one *defensive invariant* in that list rather than
+a superseded error: `test::vested_decreased` searches randomized operation
+sequences against paused, cliffed and near-maximum streams, observes the
+contract error each call returns, and confirms the guard never fires. It is kept
+because the invariant it protects is load-bearing, not because an integrator is
+expected to handle it.
 
 `withdraw` distinguishes empty balances: a live stream with nothing accrued
 yet returns `NothingToWithdraw` (17); a `Cancelled` or `Depleted` stream with
@@ -274,6 +452,13 @@ reflection.** The pool's real token balance is what actually backs every
 recipient's claim; `deposited` assumes a `create_stream` or `top_up` pull
 grows that balance by precisely the amount passed in.
 
+Fluxora treats amounts as raw integer token units and does not call the token's
+`decimals()` method or rescale amounts. The caller must scale each amount using
+the token's actual precision. For example, passing `1_000 * 10^7` to a
+two-decimal token transfers and records that many smallest units (100,000,000
+whole tokens), not 1,000 tokens. Because the requested transfer and received
+balance delta still match, a decimal-assumption mismatch is not rejected.
+
 > **Enforced.** `create_stream`, `top_up` and `delegate_top_up` read the
 > contract's own balance immediately before and after the pull and require
 > the delta to equal the requested amount exactly ([`pull_deposit`](../contracts/stream/src/lib.rs)).
@@ -289,21 +474,38 @@ grows that balance by precisely the amount passed in.
 > not the pool's — the pool still drops by exactly the amount the contract
 > sent, so Fluxora's internal accounting stays in sync either way.
 
-**2. The token does not rebase.** Fluxora never re-reads the pool's balance
-except immediately around a transfer it initiated itself. An elastic-supply
-token that changes the pool's balance out from under the contract — up or
-down, on some schedule the contract is not party to — desynchronizes the real
-balance from the sum of every stream's `deposited - withdrawn`.
+**2. The token does not rebase.** An elastic-supply token changes the pool's
+balance out from under the contract — up or down, on a schedule the contract
+is not party to — desynchronizing the real balance from the sum of every
+stream's `deposited - withdrawn`.
 
-> **Not detectable, not enforced.** There is no transfer to instrument; a
-> rebase does not happen inside a Fluxora invocation. If the pool balance
-> ever falls short of outstanding liabilities, the failure mode is a
-> legitimate `withdraw` or `cancel` refund returning
-> [`Error::TokenTransferFailed`](#error) once the shortfall is reached —
-> Fluxora fails closed rather than overpaying one recipient at another's
-> expense, but it does not compensate for the missing balance. Only fund a
-> stream with a token whose balance changes exclusively through transfers
-> Fluxora itself is a party to.
+> **Shortfalls are enforced, surpluses tolerated.** There is no transfer to
+> instrument, so a rebase cannot be caught as it happens. Instead Fluxora
+> keeps a running per-token total of the balance it expects to hold
+> (`DataKey::PooledBalance`) — every verified pull credits it, every payout
+> and refund debits it — and reconciles that total against the token's own
+> `balance` at the end of **every** operation that moves pool funds:
+> `withdraw`, `delegate_withdraw`, `batch_withdraw`, `cancel`,
+> `delegate_cancel`, `top_up` and `delegate_top_up`. A rebase between two
+> operations is therefore caught by the next one, which reverts in full with
+> [`Error::PoolBalanceDrift`](#error) (34).
+>
+> The test is `actual < expected`, not `actual != expected`. A **surplus** —
+> a positive rebase, a donation, dust — is accepted, because it cannot cause
+> an underpayment: every payout is sized by stream accounting and never by
+> the pool balance, so the excess simply sits there unclaimed. Demanding
+> equality would let anyone freeze the protocol by transferring a single unit
+> into the contract, and a solvency check anyone can trip is worse than the
+> risk it guards.
+>
+> Three gaps remain, and all are inherent. A rebase is only detected once an
+> operation touches that token — nothing runs while the contract is idle. A
+> positive rebase and a negative one on the same token that cancel out before
+> the next operation are invisible, because the total is only ever compared
+> against the token's own balance. And the expected total is built from
+> deposits the contract itself verified, so a pool that already held a balance
+> before this change reads as a surplus rather than being reconciled
+> retroactively. See `docs/KNOWN-LIMITATIONS.md` §6.
 
 **3. Zero-value transfers are never issued — so whether the token treats one
 as a no-op or a revert is immaterial.** Every entry point that could reach the
@@ -321,9 +523,12 @@ token with a non-positive amount is rejected first, before any token call:
 mock is rejected on both `create_stream` and `top_up`; a token that panics on
 any zero-value `transfer` call is proven never to be invoked with one, across
 `cancel`, `withdraw` and `batch_withdraw`; and an out-of-band balance loss on
-the pool (standing in for a negative rebase) is shown to fail closed with
-`Error::TokenTransferFailed` rather than corrupting an unrelated stream's
-accounting.
+the pool (standing in for a negative rebase) is rejected with
+`Error::PoolBalanceDrift` rather than corrupting an unrelated stream's
+accounting. `test::rebase_drift` builds the dedicated fixture: a token whose
+balance can be overwritten with no transfer at all, a rebase between deposit
+and withdrawal / top-up / cancel / batch withdrawal, per-token isolation, and
+the tolerated-surplus boundary.
 
 ---
 
@@ -334,12 +539,17 @@ accounting.
 | function | auth | returns |
 |---|---|---|
 | `create_stream(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable)` | sender | `u64` stream id |
+| `create_stream_with_curve(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable, curve)` | sender | `u64` stream id — [details](#create_stream_with_curve--detailed-reference) |
+| `create_stream(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable)` | sender | `u64` stream id — [details](#create_stream) |
+| `create_stream_with_cliff_mode(sender, recipient, token, deposit, start_time, end_time, cliff_time, cliff_mode, cancellable, pausable, transferable)` | sender | `u64` stream id — [details](#create_stream_with_cliff_mode) |
+| `create_stream(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable, reference)` | sender | `u64` stream id |
 | `top_up(stream_id, amount)` | sender | — |
 | `withdraw(stream_id, amount: Option<i128>)` | recipient | `i128` paid |
 | `batch_withdraw(recipient, stream_ids: Vec<u64>)` | recipient | `i128` total — [details](#batch_withdraw) |
 | `withdraw(stream_id, amount: Option<i128>)` | recipient | `i128` paid — [details](#withdraw) |
 | `batch_withdraw(recipient, stream_ids: Vec<u64>)` | recipient | `i128` total |
 | `cancel(stream_id)` | sender | — |
+| `batch_cancel(sender, stream_ids: Vec<u64>)` | sender | `BatchCancelOutcome` — [details](#batch_cancelsender-stream_ids-vecu64) |
 | `pause(stream_id)` / `resume(stream_id)` | sender | — |
 | `transfer_recipient(stream_id, new_recipient)` | recipient | — |
 | `revoke_delegate(stream_id, grantor, delegate)` | sender or recipient | — |
@@ -359,7 +569,12 @@ The stream must have been created with `pausable = true`, must not be
 stream becomes `Paused` and its accrual clock freezes at the ledger timestamp
 of the call. Wall-clock time that passes while paused does not increase
 `vested_of` or the withdrawable balance, and does not allow a cliff to pass.
-The recipient can still withdraw value accrued before the pause. When
+The recipient can still withdraw value accrued before the pause — including
+value accrued at the pause instant itself: a stream paused exactly at its
+cliff instant satisfies `stream_time == cliff_time` while frozen, the gate is
+open, and the whole cliff amount is withdrawable
+(`test::cliff::paused_exactly_at_the_cliff_instant_leaves_the_gate_open` pins
+the boundary). When
 `resume` is later called, the paused interval is added to `paused_total` and
 the schedule continues from the same stream time, stretching the effective end
 date by the paused duration.
@@ -392,8 +607,8 @@ shifts the effective end of the stream forward by exactly the time it spent
 paused, so the clock picks up where it stopped and the total value delivered
 over the stream's life is unchanged.
 
-**Pausing also moves the cliff, in wall-clock terms.** `cliff_reached` is
-evaluated against the same stream clock,
+**On a `Schedule` stream, pausing also moves the cliff, in wall-clock terms.**
+`cliff_reached` is evaluated against the same stream clock,
 `stream_time(now) = (paused_at ?? now) - paused_total`, so a pause freezes the
 cliff gate along with accrual: while the clock is frozen below `cliff_time` the
 gate stays shut no matter how far the wall clock advances. After a resume,
@@ -404,11 +619,21 @@ instant its recipient can first withdraw — pushed `P` seconds later, exactly a
 its `end_time` is. The stored `cliff_time` field is never rewritten; only the
 mapping from wall clock to stream clock changes.
 
+**On a `WallClock` stream, none of that applies.** `cliff_reached` compares
+`now` against `cliff_time` directly, so `paused_total` is not consulted and no
+pause can move the gate. Accrual is still frozen while paused, so such a stream
+that is paused across its cliff opens the gate on schedule and pays out its whole
+pre-pause backlog at once when it resumes.
+`test::cliff_mode::pausing_across_the_cliff_moves_a_schedule_cliff_but_not_a_wall_clock_one`
+asserts both rules on the same timeline.
+
 The `resumed` event publishes the post-resume `paused_total`, which is enough for
 an integrator to recompute the moved instant as `cliff_time + paused_total` from
 the `stream_created` schedule (or `get_stream`) alone, without replaying
-individual pause intervals. `test::cliff::pause_across_cliff_delays_the_wall_clock_cliff`
-and `test::pause::pausing_across_the_cliff_defers_the_cliff_too` assert this.
+individual pause intervals. That recomputation is only needed on a `Schedule`
+stream. `test::cliff::pause_across_cliff_delays_the_wall_clock_cliff` and
+`test::pause::pausing_across_the_cliff_defers_the_cliff_too` assert the
+`Schedule` rule.
 
 No value moves: `resume` performs no token sub-invocation and does not change
 `deposited`, `withdrawn`, or any balance. It is a pure clock operation.
@@ -432,6 +657,18 @@ The duration extension always rounds **down**. Rounding up would lower the rate
 and reduce already-vested amounts; rounding down guarantees `vested` never
 decreases across a top-up (residual at most one second of schedule, in the
 recipient's favour).
+
+**Non-linear curves (#1815).** The rate-preserving extension above is the
+`Linear` rule. A `Step` or `FrontLoaded` stream has no constant per-second rate
+to preserve — varying the rate is the point of the curve — so `top_up` takes the
+other safe option for those: it **keeps `end_time` where it is** and lets the
+added deposit ride the same curve, scaled proportionally. `Step`'s tranches and
+`FrontLoaded`'s shape are unchanged; only their amounts grow by the same
+proportion as the deposit. `vested` is monotone in `deposited` for a fixed
+curve, so this can only raise the recipient's claim, and `top_up` still
+re-checks the no-regression guard before committing. The `topped_up` event
+reports the (unchanged) `end_time` and the new `deposited`, so an indexer sees
+which of the two rules applied without a second call.
 
 Paused streams may be topped up: `Paused` is not terminal. Matured streams
 (accrual clock already at `end_time`) and terminal streams (`Cancelled` /
@@ -527,10 +764,11 @@ from this function).
 | `StreamNotPaused` | 12 | The stream is not currently paused — `paused_at` is `None`, or `status` is `Active` (never paused, or already resumed). |
 | `StreamTerminated` | 14 | The stream is `Cancelled` or `Depleted`. Checked before the paused-state test, so a terminal stream that still carries a `paused_at` reports `StreamTerminated`, not `StreamNotPaused`. |
 | `Overflow` | 22 | Defensive only: `paused_total + paused_duration` does not fit in `u64`. Unreachable for any stream created through the contract. Listed only so an integrator is never surprised by it. |
+| `VestedDecreased` | 33 | Defensive only: the post-resume accrual-sanity check observed a lower vested amount. Unreachable for any stream created through the contract; `test::vested_decreased` searches for a trigger and finds none. |
 
 `NotPausable` (9) is a `pause`-only failure and is never returned by `resume`.
 This list was cross-checked against `FluxoraStream::resume` in
-[`contracts/stream/src/lib.rs`](../contracts/stream/src/lib.rs); the four
+[`contracts/stream/src/lib.rs`](../contracts/stream/src/lib.rs); the five
 variants above are the complete set it can return.
 
 **Events.** Exactly one `resumed` event on success: topics `stream_id` and
@@ -642,6 +880,7 @@ it calls (`validate_batch_ids`, `reject_duplicate_ids`, `accrual::withdrawable`,
 | `TokenTransferFailed` | 25 | A payout's token transfer was rejected by the token contract (pool underfunded, or the token's own authorisation rules refused the call). The raw token discriminant is discarded — see the `Error` table above. |
 | `TokenMissing` | 26 | A payout's token address does not resolve to a deployed contract (host `Abort`). No funds moved. |
 | `MalformedStreamId` | 29 | A serialized element of `stream_ids` does not decode as a `u64`. |
+| `PoolBalanceDrift` | 34 | After every payout landed, one of the batch's tokens held less than the balance Fluxora accounts for — the token changed balances outside a transfer Fluxora was party to. Checked once per distinct token, and the batch reverts in full. |
 
 `StreamNotActive` (11) is reserved and is not returned here.
 | `StreamNotFound` | 1 | No readable entry for `stream_id`: the id was never issued, or its entry has been archived. Raised by `load_stream` before any other check. |
@@ -653,10 +892,11 @@ it calls (`validate_batch_ids`, `reject_duplicate_ids`, `accrual::withdrawable`,
 | `TopUpTooSmall` | 23 | `floor(amount * duration / deposited) == 0` — the top-up cannot buy even one second of schedule, so absorbing it would require raising the rate. |
 | `TokenTransferFailed` | 25 | The token contract returned a typed error on the deposit transfer (insufficient sender balance, trustline, or token auth rules). |
 | `TokenMissing` | 26 | The stream's token address has no deployed code (host Abort / trap). |
+| `PoolBalanceDrift` | 34 | After the pull landed, the token's pool balance was still short of the total Fluxora accounts for — a rebase since the last operation on this token. The top-up reverts in full. |
 
 This list was cross-checked against `FluxoraStream::top_up` in
 [`contracts/stream/src/lib.rs`](../contracts/stream/src/lib.rs) and the shared
-`token_transfer` helper; the nine variants above are the complete set it can
+`token_transfer` helper; the ten variants above are the complete set it can
 return. `Unauthorized` (7) is **not** reachable here — auth failures abort in
 the host before a typed error is produced.
 
@@ -664,6 +904,115 @@ the host before a typed error is produced.
 `sender`; payload `amount` (this top-up), `deposited` (total after the call),
 and `end_time` (extended schedule end). The token contract also emits its own
 `transfer` event for the deposit.
+#### `batch_cancel(sender, stream_ids: Vec<u64>)`
+
+```rust
+fn batch_cancel(env: Env, sender: Address, stream_ids: Vec<u64>) -> Result<BatchCancelOutcome, Error>
+```
+
+Winds down several cancellable streams in one call, refunding each stream's
+unvested remainder to `sender`. The batch counterpart of `cancel`, and the mirror
+of `batch_withdraw`: one shared party, one authorization for the whole vector,
+and the same all-or-nothing failure model.
+
+The return value is a struct, not a bare `i128`:
+
+```rust
+pub struct BatchCancelOutcome {
+    pub refunded: i128,          // total refunded across the batch
+    pub refused_index: Option<u32>,  // position in `stream_ids` that refused
+    pub refused_reason: Option<u32>,  // an `Error` discriminant
+}
+```
+
+A settled batch has `refused_index == None` and reports the total `refunded`. A
+refused batch has `refunded == 0` and names the element that stopped it.
+
+##### Parameters
+
+| parameter | type | valid range / constraints |
+|---|---|---|
+| `sender` | `Address` | The account that authorises the call and receives every refund. It is compared **by value** against each `Stream.sender`; the batch is rejected with `Unauthorized` (7) unless all of them match. A failed signature surfaces as a host authentication failure, not a typed `Error`. |
+| `stream_ids` | `Vec<u64>` | **1 to `MAX_BATCH_SIZE` (16) elements**, inclusive — the same ceiling and the same derivation as `batch_withdraw`: the binding constraint is the contract event budget, not entry or instruction counts. A cap-sized `batch_cancel` settles in 8 832 of 16 384 event bytes (~552 bytes per element, one `cancelled` event plus one token `transfer`), so the event budget alone would allow ~29 streams in a batch; the 16 cap leaves room but not the same 2x margin `batch_withdraw` has on that dimension (`test::resource_limits`). Every element must decode as a `u64` (`MalformedStreamId` otherwise) and name a distinct existing stream in `0..stream_count()` (`StreamNotFound` otherwise). Empty → `EmptyBatch`; more than 16 → `BatchTooLarge`; a repeated id → `DuplicateStreamId`. |
+
+##### Authorisation
+
+`sender.require_auth()` — the sender authorises **once** for the whole batch,
+after the structural checks and before any storage write. The recipient cannot
+call it, and neither can any other party.
+
+##### Per-element behaviour
+
+1. The batch is *resolved and validated in full* before any storage write or
+   token call: existence, then ownership, then a price per element.
+2. Every refund is priced against a **single ledger timestamp**, read once at the
+   top of the call, and each stream is priced exactly once. Members with
+   different deposits, durations, cliffs and pause histories therefore settle
+   against one consistent "now" rather than drifting across the vector.
+3. Streams need not share a token; each refund uses its own stream's token. The
+   returned `refunded` is therefore a sum of amounts in different tokens — read
+   per-stream figures from the `cancelled` events, not from the total.
+4. An element with **nothing unvested** (already fully vested) still settles: it
+   becomes `Cancelled`, and **no token transfer is issued** for it.
+
+##### Refusals are reported by index
+
+A stream that exists, belongs to `sender`, but cannot be cancelled — created with
+`cancellable = false`, or already `Cancelled` or `Depleted` — does **not** raise
+a typed `Error`. It refuses the batch and reports its own position:
+
+| field | value on a refusal |
+|---|---|
+| `refused_index` | zero-based offset in `stream_ids` of the **first** element that refused |
+| `refused_reason` | `NotCancellable` (8) or `StreamTerminated` (14) — which of the two conditions stopped that element |
+| `refunded` | `0` — a refused batch changes nothing |
+
+Elements are checked in batch order, so the report is deterministic for a given
+vector: with two pinned streams in the batch, the earlier position is always the
+one named. Dropping that element and resubmitting settles the rest.
+
+**Why the index is not in the error.** A Soroban contract error crosses the wire
+as a bare `u32` discriminant — `Error(Contract, #N)` — and `#[contracterror]`
+enums can only carry unit variants, so no typed error can transport a position
+alongside a discriminant. Reporting only the condition would leave a caller
+holding a 16-id vector with no way to learn *which* element to drop, and a second
+round-trip over the whole vector to find out. The index is data, so it travels
+in the data.
+
+##### Atomicity
+
+All-or-nothing, and stricter than `batch_withdraw` in one respect: there are no
+skips. Either every element is settled — each schedule collapsed, each refund
+paid, each `cancelled` event emitted — or none is. A refused or failed batch
+writes no storage, moves no tokens, extends no TTL, and emits no event, including
+for elements that had already been processed by the time the refusal was found.
+
+##### Events
+
+* One `cancelled` event **per stream**, in batch order, with topics `stream_id`,
+  `sender`, `recipient` and payload `refunded`, `vested`, `deposited`, `status`
+  — the same payload a single `cancel` publishes.
+* There is no aggregate or batch-level event; the return value is the only total.
+* Each non-zero refund also triggers the token contract's own `transfer` event.
+
+##### Failure modes
+
+| error | # | condition |
+|---|---|---|
+| `StreamNotFound` | 1 | An id in `stream_ids` does not exist, or has been archived out of the live ledger. As with `batch_withdraw`, unknown ids fail the batch rather than being skipped. |
+| `Unauthorized` | 7 | A resolved stream's `sender` differs from the `sender` argument. |
+| `BatchTooLarge` | 19 | `stream_ids.len() > MAX_BATCH_SIZE` (16). |
+| `EmptyBatch` | 20 | `stream_ids` contains no elements. |
+| `DuplicateStreamId` | 21 | The same id appears more than once in the batch. |
+| `Overflow` | 22 | Checked arithmetic overflows while accruing a stream's figures or summing the batch total. |
+| `TokenTransferFailed` | 25 | A refund's token transfer was rejected by the token contract. The raw token discriminant is discarded — see the `Error` table above. |
+| `TokenMissing` | 26 | A refund's token address does not resolve to a deployed contract (host `Abort`). No funds moved. |
+| `MalformedStreamId` | 29 | A serialized element of `stream_ids` does not decode as a `u64`. |
+
+`NotCancellable` (8) and `StreamTerminated` (14) are reachable only as
+`BatchCancelOutcome::refused_reason`, never as a returned `Error`: a caller sees
+them as data, with the index attached, rather than as a failure of the call.
+
 #### `cancel(stream_id)`
 
 Stops accrual and refunds the unvested remainder to the sender. The recipient keeps everything vested up to the current ledger timestamp.
@@ -680,6 +1029,7 @@ Stops accrual and refunds the unvested remainder to the sender. The recipient ke
 * `Overflow` (22): Integer overflow occurred during the unvested remainder computation.
 * `TokenTransferFailed` (25): The token contract refused the refund transfer.
 * `TokenMissing` (26): The token contract does not exist.
+* `PoolBalanceDrift` (34): After the refund (if any) left the pool, the token held less than the balance Fluxora accounts for — a rebase since this token's last operation. Checked even when the refund is zero, and the cancel reverts in full.
 
 **Events:**
 * `cancelled` — Emitted on success.
@@ -705,12 +1055,13 @@ or wrong signature surfaces as a host authentication failure, not a typed
 | `Overflow` | 22 | Checked arithmetic overflow while computing vested/withdrawable amounts, or while updating `withdrawn` / `paused_total` in the shared withdrawal tail. Unreachable for any stream created through the contract under normal schedules. |
 | `TokenTransferFailed` | 25 | The token contract returned a typed error on the payout transfer (insufficient pooled balance, deauthorized recipient trustline, or token auth rules). |
 | `TokenMissing` | 26 | The stream's token address has no deployed code (host Abort / trap). |
+| `PoolBalanceDrift` | 34 | After the payout left the pool, the token held less than the balance Fluxora accounts for — a rebase since this token's last operation. The withdrawal reverts in full, so a pool that is merely *short* can never pay a recipient out of another stream's claim. |
 
 This list was cross-checked against `FluxoraStream::withdraw` and
 `FluxoraStream::apply_withdrawal` in
 [`contracts/stream/src/lib.rs`](../contracts/stream/src/lib.rs), plus
 `accrual::withdrawable` / `accrual::vested` and the shared `token_transfer`
-helper; the eight variants above are the complete set the entry point can
+helper; the nine variants above are the complete set the entry point can
 return. `Unauthorized` (7) is **not** reachable here — auth failures abort in
 the host before a typed error is produced.
 
@@ -733,6 +1084,66 @@ variants above are the complete set it can return.
 
 **Events.** Exactly one `delegate_revoked` event on success, including the
 idempotent no-op case: topics `stream_id`, `grantor`, `delegate`; no payload.
+#### `create_stream_with_curve` — detailed reference
+
+Identical to [`create_stream`](#create_stream--detailed-reference) in every
+respect — same authorization, same validation, same deposit pull, the same
+`stream_created` event — except that the release shape above the cliff is chosen
+by the trailing `curve` parameter instead of defaulting to `Linear`.
+
+**Signature:**
+```rust
+fn create_stream_with_curve(
+    env: Env,
+    sender: Address,
+    recipient: Address,
+    token: Address,
+    deposit: i128,
+    start_time: u64,
+    end_time: u64,
+    cliff_time: u64,
+    cancellable: bool,
+    pausable: bool,
+    transferable: bool,
+    curve: ReleaseCurve,
+) -> Result<u64, Error>
+```
+
+**Authorization:** `sender.require_auth()`, exactly as `create_stream`.
+
+**Parameters:** every parameter has the same meaning, valid range and error
+behaviour as in `create_stream`; the only addition is:
+
+| parameter | type | description |
+|---|---|---|
+| `curve` | `ReleaseCurve` | The release shape above the cliff. `0` `Linear`, `1` `Step`, `2` `FrontLoaded` — see [`ReleaseCurve`](#releasecurve). Always one of those three variants; the parameter is never rejected. Immutable after creation and reported by `get_stream` and `stream_created`. |
+
+**Errors:** the error set is exactly `create_stream`'s. `curve` adds no failure
+mode: every variant is supported, and the schedule guards (`InvalidDeposit`,
+`InvalidTimeRange`, `InvalidCliff`, `DepositRateTooLow`, `Overflow`, …) are
+enforced identically. In particular the creation-time guard that
+`deposited × duration` fits in `i128` bounds every curve's accrual arithmetic
+too, because each curve's release fraction never exceeds 1.
+
+**Events:** one `stream_created`, with the same topics and the same payload as
+`create_stream`, plus the `curve` field carrying the value passed here.
+
+**Example.** The same 100-day, 1,000 USDC stream as above, on each curve:
+
+| offset | `Linear` (`0`) | `Step` (`1`) | `FrontLoaded` (`2`) |
+|---|---|---|---|
+| day 24 | 240 USDC | 0 USDC | 423 USDC |
+| day 25 | 250 USDC | 250 USDC | 438 USDC |
+| day 50 | 500 USDC | 500 USDC | 750 USDC |
+| day 75 | 750 USDC | 750 USDC | 938 USDC |
+| day 100 | 1,000 USDC | 1,000 USDC | 1,000 USDC |
+
+`Step` releases nothing until each quarter boundary and then jumps; `FrontLoaded`
+leads `Linear` all the way to maturity; all three settle at exactly the deposit.
+(`FrontLoaded` is evaluated on a 1/1000 grid, so its interior figures are the
+grid values above — 438 rather than 437.5 — and its final instant is the full
+deposit via the terminal settlement branch.)
+
 #### `create_stream` — detailed reference
 
 Create a payment stream and transfer `deposit` tokens from `sender` into the contract's pooled balance. Returns the new stream id (monotonic, never reused).
@@ -751,6 +1162,7 @@ fn create_stream(
     cancellable: bool,
     pausable: bool,
     transferable: bool,
+    reference: Option<String>,
 ) -> Result<u64, Error>
 ```
 
@@ -763,13 +1175,14 @@ fn create_stream(
 | `sender` | `Address` | Funding party. Must authorize the call. |
 | `recipient` | `Address` | Receiving party. Must differ from `sender`. |
 | `token` | `Address` | Token contract address (SEP-41). Per-stream, not contract-wide. |
-| `deposit` | `i128` | Initial amount to lock, in the token's smallest unit. Must be positive and satisfy rate constraints. |
+| `deposit` | `i128` | Initial amount to lock, in the token's smallest unit. The caller must scale for the token's actual `decimals()`; Fluxora does not query or normalize precision. Must be positive and satisfy rate constraints. |
 | `start_time` | `u64` | Accrual begins (unix seconds). May be past (backdated vesting), present, or future (scheduled stream). |
 | `end_time` | `u64` | Accrual ends (unix seconds). Must be strictly greater than `start_time`. |
-| `cliff_time` | `u64` | Payout gate (unix seconds). Must be in `[start_time, end_time]`. Set equal to `start_time` for no cliff. **Gates payout, does not delay accrual** — at the cliff instant the recipient becomes entitled to everything accrued since `start_time`. On a `pausable` stream this stored instant is a lower bound, not the wall-clock instant the gate opens: pausing pushes the opening instant forward by the accumulated `paused_total`. See the `resume` entry point. |
+| `cliff_time` | `u64` | Payout gate (unix seconds). Must be in `[start_time, end_time]`. Set equal to `start_time` for no cliff. **Gates payout, does not delay accrual** — at the cliff instant the recipient becomes entitled to everything accrued since `start_time`. How it is compared to the current time depends on `cliff_mode`, which `create_stream` fixes to `CliffMode::Schedule`: on a `pausable` stream this stored instant is then a lower bound, not the wall-clock instant the gate opens, because pausing pushes the opening instant forward by the accumulated `paused_total`. See the `resume` entry point and [`create_stream_with_cliff_mode`](#create_stream_with_cliff_mode). |
 | `cancellable` | `bool` | Whether sender may cancel. Immutable after creation. |
 | `pausable` | `bool` | Whether sender may pause accrual. Immutable after creation. |
 | `transferable` | `bool` | Whether recipient may reassign the stream. Immutable after creation. |
+| `reference` | `Option<String>` | Optional identifier for the stream (e.g., "payroll-001", "grant-xyz-q1"). Maximum 64 characters. Immutable after creation, returned by `get_stream` and included in the `StreamCreated` event. |
 
 **Valid Ranges and Constraints:**
 
@@ -788,6 +1201,7 @@ All validation errors are checked **before** the token transfer. A rejected crea
 | error | condition |
 |---|---|
 | `SelfStream` (6) | `sender == recipient` |
+| `InvalidReferenceLength` (34) | Reference string exceeds `MAX_REFERENCE_LENGTH` (64 characters) |
 | `InvalidDeposit` (4) | `deposit ≤ 0` |
 | `InvalidTimeRange` (2) | `end_time ≤ start_time` (zero or negative duration) |
 | `InvalidCliff` (3) | `cliff_time < start_time` or `cliff_time > end_time` |
@@ -799,7 +1213,9 @@ All validation errors are checked **before** the token transfer. A rejected crea
 
 **Events:**
 
-On success, emits `stream_created` with topics `[stream_id, sender, recipient]` and payload carrying the complete initial state: `token`, `deposited`, `start_time`, `end_time`, `cliff_time`, `cancellable`, `pausable`, `transferable`. This is the canonical event for indexer discovery.
+On success, emits `stream_created` with topics `[stream_id, sender, recipient]` and payload carrying the complete initial state: `token`, `deposited`, `start_time`, `end_time`, `cliff_time`, `cancellable`, `pausable`, `transferable`, `curve`. This is the canonical event for indexer discovery. `create_stream` always reports `curve = 0` (`Linear`).
+On success, emits `stream_created` with topics `[stream_id, sender, recipient]` and payload carrying the complete initial state: `token`, `deposited`, `start_time`, `end_time`, `cliff_time`, `cliff_mode`, `cancellable`, `pausable`, `transferable`. This is the canonical event for indexer discovery. `cliff_mode` was appended last, so a decoder that stops after `transferable` still works against a v1 payload.
+On success, emits `stream_created` with topics `[stream_id, sender, recipient]` and payload carrying the complete initial state: `token`, `deposited`, `start_time`, `end_time`, `cliff_time`, `cancellable`, `pausable`, `transferable`, `reference`. This is the canonical event for indexer discovery.
 
 **Atomicity:**
 
@@ -812,7 +1228,7 @@ Creation is transactional. The stream-id counter and count are advanced only aft
 * **Fully Elapsed Schedule** (`end_time ≤ now`): Accepted. Reads as fully vested immediately. The entry receives the minimum retention TTL floor.
 * **No Cliff** (`cliff_time == start_time`): Standard continuous vesting with no payout gate.
 * **Cliff at Maturity** (`cliff_time == end_time`): Single lump-sum payout when the stream completes.
-* **Pause Moves the Cliff** (`pausable == true`): the stored `cliff_time` is never rewritten, but pausing shifts the wall-clock instant at which the gate opens by the accumulated paused time. A recipient's first withdrawal becomes available at `cliff_time + paused_total`, not at `cliff_time` — see the `resume` entry point. An integrator rendering "funds unlock at &lt;time&gt;" must add the stream's current `paused_total` rather than displaying `cliff_time` directly.
+* **Pause Moves the Cliff** (`pausable == true`): the stored `cliff_time` is never rewritten, but pausing shifts the wall-clock instant at which the gate opens by the accumulated paused time. A recipient's first withdrawal becomes available at `cliff_time + paused_total`, not at `cliff_time` — see the `resume` entry point. An integrator rendering "funds unlock at &lt;time&gt;" must add the stream's current `paused_total` rather than displaying `cliff_time` directly. Call `create_stream_with_cliff_mode` with `CliffMode::WallClock` to get a cliff that pausing cannot move.
 
 **Example:** A 100-day stream of 1,000 USDC (7 decimals = 10,000,000 stroops per USDC) created with a 10-day cliff:
 
@@ -828,6 +1244,66 @@ cliff_time:  1610323200 (2021-01-11 00:00:00 UTC)
 At day 9: vested = 900 USDC, but withdrawable = 0 (pre-cliff).  
 At day 11: vested = 1,100 USDC, withdrawable = 1,100 USDC (cliff passed, all accrued funds unlocked).  
 At day 100: vested = 10,000 USDC, withdrawable = 10,000 USDC (fully matured).
+
+With `cliff_mode = WallClock` the day-11 unlock instant above is exact even if the stream was paused; with the default `Schedule` mode and 3 days of accumulated pause, the first withdrawal lands on day 14 instead.
+
+#### `create_stream_with_cliff_mode` — detailed reference
+
+Identical to [`create_stream`](#create_stream) except that it takes one extra
+parameter, `cliff_mode`, inserted directly after `cliff_time`. It is the only way
+to create a stream whose cliff a `pause` cannot move.
+
+**Signature:**
+```rust
+fn create_stream_with_cliff_mode(
+    env: Env,
+    sender: Address,
+    recipient: Address,
+    token: Address,
+    deposit: i128,
+    start_time: u64,
+    end_time: u64,
+    cliff_time: u64,
+    cliff_mode: CliffMode,
+    cancellable: bool,
+    pausable: bool,
+    transferable: bool,
+) -> Result<u64, Error>
+```
+
+**Authorization:** Requires `sender.require_auth()`, exactly as `create_stream`.
+
+**Parameters:** All of `create_stream`'s, with the same meanings, constraints and
+errors, plus:
+
+| parameter | type | description |
+|---|---|---|
+| `cliff_mode` | `CliffMode` | How `cliff_time` is compared to the current time. Immutable after creation. `Schedule` (0) gates on the stream clock, so `paused_total` pushes the opening instant forward by exactly the accumulated paused time. `WallClock` (1) gates on the ledger timestamp, so the opening instant is `cliff_time` no matter how much the stream is paused. |
+
+**Errors:** Exactly `create_stream`'s — the mode is not a source of new
+outcomes, so there is deliberately no `InvalidCliffMode` discriminant. A value
+that is neither 0 nor 1 fails while the host is still decoding the arguments, as
+a conversion error that aborts the invocation; it is never a contract-level
+`Error`, and because the decode precedes all contract code it consumes no id,
+transfers nothing, and leaves no state. `cliff_time` range validation is
+unchanged and still applies in both modes: a mode changes *when* the gate is
+judged, not *which* `cliff_time` values are legal.
+
+**Relationship to `create_stream`:** `create_stream` is a thin wrapper that
+passes `CliffMode::Schedule`. It is not deprecated, and the two are byte-for-byte
+equivalent for `Schedule`; `create_stream` exists so a v1 caller and a v2 caller
+can create the same stream.
+
+**What the mode does not change.** The cliff remains a gate on *payout*, never on
+*accrual*, in both modes: before the gate opens, `withdrawable_of` is `0` even
+though `vested_of` has been rising since `start_time`. And a `pause` still stops
+accrual in both modes. Choosing `WallClock` therefore removes the sender's
+ability to move the unlock instant; it does not let funds accrue while paused, so
+a wall-clock stream paused across its cliff releases its whole pre-pause backlog
+in one withdrawal on resume.
+
+**Events:** identical to `create_stream`, including `stream_created` carrying the
+`cliff_mode` that was actually used.
 | `StreamNotFound` | 1 | No readable entry for `stream_id`: the id was never issued, or its entry has been archived. Raised by `load_stream` before any other check. |
 | `NotTransferable` | 10 | The stream was created with `transferable == false`. |
 | `StreamTerminated` | 14 | The stream is `Depleted`, or `withdrawn >= deposited` (covers a sticky `Cancelled` stream whose residual has already been fully drawn). |
@@ -853,6 +1329,8 @@ produced.
 | `refundable_of(stream_id)` | `i128` | no | no |
 | `stream_count()` | `u64` — ids run `0..stream_count()` | no | no |
 | `stream_exists(stream_id)` | `bool` | no | no |
+| `halted()` | `bool` | no | no |
+| `halt_operator()` | `Option<Address>` | no | no |
 
 > **⚠ RPC read-skew caveat — all view functions**
 >
@@ -917,15 +1395,25 @@ assumed:
   short. A client must not round up, and must not assume `deposited /
   duration` times `elapsed` is exact.
 
+  The formula above is the `Linear` curve. On a `Step` or `FrontLoaded` stream
+  the released fraction is the curve's, but the *direction* is the same: every
+  curve floors, so the residue still stays in the pool and returns to the sender
+  at settlement. The residue can be up to a full grid step on `FrontLoaded`
+  rather than one stroop, which is why a curve-aware client must read `curve`
+  from `get_stream` rather than assuming the linear formula. See
+  [`ReleaseCurve`](#releasecurve).
+
 * **Pre-cliff it is zero.** The cliff *gates* the payout, it does not delay
   accrual: before `cliff_time` the result is exactly `0`, and at the cliff
   instant the recipient becomes entitled to everything accrued since
   `start_time` — not merely what accrues after the cliff. There is no partial
-  vesting beforehand. "Before `cliff_time`" is measured **on the stream clock**,
-  so on a stream that has been paused the wall-clock instant the gate opens is
-  `cliff_time + paused_total`: a recipient whose stream was paused across its
-  cliff waits the total paused duration longer before anything is vestable. See
-  the `resume` entry point.
+  vesting beforehand. On a `Schedule` stream (the default) "before `cliff_time`"
+  is measured **on the stream clock**, so on a stream that has been paused the
+  wall-clock instant the gate opens is `cliff_time + paused_total`: a recipient
+  whose stream was paused across its cliff waits the total paused duration
+  longer before anything is vestable. On a `WallClock` stream the comparison is
+  against the ledger timestamp and `paused_total` is not consulted, so no pause
+  can delay the gate. See the `resume` entry point.
 
 The cliff gate is evaluated **first**: while the stream clock is below
 `cliff_time` the result is `0`, even for a schedule that has collapsed. Only
@@ -991,9 +1479,10 @@ The call cannot move funds or change stream state; the caller only ever *pays*.
 
 **Returns** the `u32` number of ledgers the entry is now funded for.
 The target is the stream's remaining effective lifetime (now to `end_time`,
-plus accumulated and in-progress pause time) plus a 30-day buffer, converted at
-5 seconds per ledger rounding up, floored at `MIN_STREAM_TTL_LEDGERS` (518,400
-ledgers, ~30 days) and clamped to the network's `max_entry_ttl`.
+plus accumulated and in-progress pause time) plus a 30-day buffer, inflated by a 20% close-time safety margin, converted
+at 5 seconds per ledger (the measured mean — §5 of KNOWN-LIMITATIONS.md)
+rounding up, floored at `MIN_STREAM_TTL_LEDGERS` (622,080 ledgers, a 30-day
+floor plus the margin) and clamped to the network's `max_entry_ttl`.
 Multi-year streams therefore need periodic re-extension no matter how
 generously creation funds them.
 The contract instance entry is extended to the network maximum in the same
@@ -1029,6 +1518,17 @@ A grant is stored under `(stream_id, delegate)` and covers one stream only. The
 delegate entry points verify it before acting: a missing grant or one that does
 not cover the requested operation returns `DelegateNotPermitted` (27), and a
 grant whose `expires_at` has passed returns `DelegateExpired` (28).
+
+`delegate_transfer_recipient` is the authorisation-gated twin of
+`transfer_recipient`. Once the grant is verified it repeats the direct path's
+four stream-level guards — `NotTransferable` (10), `StreamTerminated` (14),
+`SelfStream` (6) and `RepeatedTransfer` (30) — in the same order, so both entry
+points reject the same stream states with the same discriminants. The only
+variants it can add are the two grant checks above and the host-level
+authorisation trap when the delegate does not sign. Because the grant check runs
+before the stream is read, an id that was never issued — and therefore has no
+grant — is rejected as `DelegateNotPermitted` (27) rather than
+`StreamNotFound` (1).
 
 #### `grant_delegate`
 
@@ -1082,16 +1582,101 @@ On success — that is, whenever a non-empty `ops` mask is stored — emits
 `delegate_granted` with topics `stream_id`, `grantor`, `delegate` and payload
 `ops`, `expires_at`. `ops == 0` stores nothing and emits nothing.
 
+### Emergency halt
+
+The stream contract has no admin and no upgrade path. The **emergency halt** is
+the single, deliberately narrow exception (issue #1818): an operator can stop
+*settlement* across every stream while an exploit or a stuck integration is
+handled, without gaining any power over funds.
+
+| function | auth | returns |
+|---|---|---|
+| `set_halt_operator(operator)` | the named `operator` | — |
+| `halt()` | the installed operator | — |
+| `resume_contract()` | the installed operator | — |
+| `halted()` | none | `bool` |
+| `halt_operator()` | none | `Option<Address>` |
+
+**Scope — what the halt does and does not do.**
+
+* It refuses **every state-changing entry point** with `ContractHalted` (34):
+  `create_stream`, `top_up`, `withdraw`, `batch_withdraw`, `cancel`, `pause`,
+  `resume`, `transfer_recipient`, `grant_delegate`, `revoke_delegate`, all six
+  `delegate_*` variants, `extend_stream_ttl` and `batch_extend_ttl`. `set_halt_operator`,
+  `halt` and `resume_contract` are the only mutations that still run, which is
+  what makes the stop reversible.
+* **Reads are unaffected.** `get_stream`, `withdrawable_of`, `vested_of`,
+  `refundable_of`, `stream_count`, `stream_exists`, `halted` and
+  `halt_operator` answer normally for the whole duration. Integrators can keep
+  observing balances and stream state during an incident.
+* It **settles nothing**. No funds move, no stream is cancelled or paused, and
+  no schedule changes. Accrual is a pure function of ledger time, so streams
+  keep vesting while halted — `withdrawable_of` continues to climb; what stops
+  is the ability to act on it. Lifting the halt resumes from exactly the state
+  that was halted.
+* It is **contract-wide**, not per-stream: `pause` remains the per-stream,
+  sender-authorised tool that also freezes accrual.
+
+**Operator lifecycle.**
+
+`set_halt_operator` may be called **exactly once per deployment**. There is no
+rotation entry point — a second call returns `HaltOperatorAlreadySet` (35), so
+an operator cannot be replaced mid-incident, and a leaked operator key cannot
+be handed off; recovering means deploying a new contract (the contract is not
+upgradeable, so that is true of every change). The setter is opt-in: a
+deployment that never calls it has no operator, cannot be halted, and behaves
+exactly as it did before this entry point existed.
+
+The operator's powers are exactly `halt()` and `resume_contract()`. It cannot
+withdraw, cancel, pause, top up, transfer a recipient, grant a delegation, or
+change a stream. It is not consulted by any read method.
+
+**There is no timeout.** The halt ends only when the operator calls
+`resume_contract`, which is deliberately explicit: an automatic expiry would
+reopen settlement while the incident may still be live.
+
+**Errors.**
+
+| # | error | condition |
+|---|---|---|
+| 34 | `ContractHalted` | Any state-changing entry point while halted. Checked before authorization and every other precondition. |
+| 35 | `HaltOperatorAlreadySet` | `set_halt_operator` after the operator was installed. |
+| 36 | `HaltOperatorNotSet` | `halt`/`resume_contract` with no operator installed. |
+| 37 | `ContractAlreadyHalted` | `halt` while already halted. |
+| 38 | `ContractNotHalted` | `resume_contract` while not halted. |
+
+A failed `require_auth()` on `set_halt_operator`, `halt` or `resume_contract`
+is a host authorisation trap rather than a typed contract error, so it is not
+listed above.
+
+**Events.**
+
+| event | topics after the name | payload |
+|---|---|---|
+| `halt_operator_set` | `operator` | — |
+| `contract_halted` | `operator` | `halted_at` |
+| `contract_resumed` | `operator` | `resumed_at`, `halted_for` |
+
+Each transition emits exactly one event, so an indexer can reconstruct the
+halted window from the event stream alone. `test::halt` drives the whole
+matrix: unconfigured contract, one-shot install, the operator-only gate on
+both transitions, every mutating entry point refused with 34, every read still
+answering, and resumption restoring settlement.
+
 ---
 
 ## Events
 
 Declared with `#[contractevent]`; schemas are in the deployed spec. First topic
-is the snake_case event name, second is always `stream_id`.
+is the snake_case event name; second is the routing key — always `stream_id`
+for stream-scoped events, and `operator` for the contract-level halt events,
+which are not about any one stream.
 
 | event | topics after the name | payload |
 |---|---|---|
-| `stream_created` | `stream_id`, `sender`, `recipient` | `token`, `deposited`, `start_time`, `end_time`, `cliff_time`, `cancellable`, `pausable`, `transferable` |
+| `stream_created` | `stream_id`, `sender`, `recipient` | `token`, `deposited`, `start_time`, `end_time`, `cliff_time`, `cancellable`, `pausable`, `transferable`, `curve` |
+| `stream_created` | `stream_id`, `sender`, `recipient` | `token`, `deposited`, `start_time`, `end_time`, `cliff_time`, `cliff_mode`, `cancellable`, `pausable`, `transferable` |
+| `stream_created` | `stream_id`, `sender`, `recipient` | `token`, `deposited`, `start_time`, `end_time`, `cliff_time`, `cancellable`, `pausable`, `transferable`, `reference` |
 | `withdrawn` | `stream_id`, `recipient` | `amount`, `withdrawn`, `deposited`, `status` |
 | `cancelled` | `stream_id`, `sender`, `recipient` | `refunded`, `vested`, `withdrawn`, `end_time` |
 | `paused` | `stream_id`, `sender` | `paused_at`, `paused_total` |
@@ -1102,15 +1687,20 @@ is the snake_case event name, second is always `stream_id`.
 | `ttl_extended` | `stream_id` | `extended_to_ledgers` |
 | `delegate_granted` | `stream_id`, `grantor`, `delegate` | `ops`, `expires_at` |
 | `delegate_revoked` | `stream_id`, `grantor`, `delegate` | — |
+| `halt_operator_set` | `operator` | — |
+| `contract_halted` | `operator` | `halted_at` |
+| `contract_resumed` | `operator` | `resumed_at`, `halted_for` |
 
 Every payload carries enough state to reconstruct the stream without replaying
 from genesis. Field order and topic placement are ABI.
 
 `resumed` deserves one note: its `paused_total` is the post-resume cumulative
-figure, and it is enough to recompute the stream's moved cliff instant,
-`cliff_time + paused_total`, given the `cliff_time` carried by `stream_created`
-(or read back from `get_stream`). The event deliberately does not republish
-`cliff_time`, which never changes; see the `resume` entry point.
+figure, and on a `Schedule` stream it is enough to recompute the moved cliff
+instant, `cliff_time + paused_total`, given the `cliff_time` carried by
+`stream_created` (or read back from `get_stream`). The event deliberately does
+not republish `cliff_time`, which never changes; see the `resume` entry point. A
+`WallClock` stream needs no such recomputation — `stream_created` already
+carries both the `cliff_time` and the `cliff_mode` that say which rule applies.
 
 Note that `batch_withdraw` emits one `withdrawn` event **per stream drawn from**,
 not one per call, and skips streams with nothing available — so a batch of 16

@@ -155,7 +155,7 @@ fn rejected_pre_flight_leaves_zero_residue_for_retry() {
             &true,
             &true,
             &true,
-        )
+            &None,)
         .unwrap_err()
         .unwrap();
     assert_eq!(err, Error::InvalidDeposit);

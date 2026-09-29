@@ -1,0 +1,4 @@
+{
+  "_comment": "Shrink-only ratchet for script/validate-doc-alignment.py (issue #1865). Entries are documentation gaps that predate the blocking gate. Each must be removed as soon as it is fixed; the validator fails on stale entries, so this list can only shrink. Adding an entry requires a real gap in the same PR and maintainer review (see .github/CODEOWNERS).",
+  "gaps": []
+}

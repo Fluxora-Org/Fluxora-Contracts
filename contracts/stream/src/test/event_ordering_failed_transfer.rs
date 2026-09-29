@@ -161,6 +161,7 @@ fn withdraw_token_failure_emits_no_withdrawn_event() {
         &true,
         &true,
         &true,
+        &None,
     );
     h.advance(30 * DAY);
 
@@ -229,6 +230,7 @@ fn batch_withdraw_token_failure_emits_no_withdrawn_event() {
         &true,
         &true,
         &true,
+        &None,
     );
     let b = h.client.create_stream(
         &h.sender,
@@ -241,6 +243,7 @@ fn batch_withdraw_token_failure_emits_no_withdrawn_event() {
         &true,
         &true,
         &true,
+        &None,
     );
     h.advance(50 * DAY);
 
@@ -328,6 +331,7 @@ fn cancel_token_failure_emits_no_cancelled_event() {
         &true,
         &true,
         &true,
+        &None,
     );
     h.advance(30 * DAY);
 
@@ -457,6 +461,7 @@ fn cancel_while_paused_token_failure_emits_no_event() {
         &true,
         &true,
         &true,
+        &None,
     );
     h.advance(30 * DAY);
     h.client.pause(&id);
@@ -527,6 +532,7 @@ fn top_up_token_failure_emits_no_topped_up_event() {
         &true,
         &true,
         &true,
+        &None,
     );
     h.advance(10 * DAY);
 
@@ -582,6 +588,7 @@ fn top_up_while_paused_token_failure_emits_no_event() {
         &true,
         &true,
         &true,
+        &None,
     );
     h.advance(25 * DAY);
     h.client.pause(&id);
@@ -642,6 +649,7 @@ fn delegate_withdraw_token_failure_emits_no_withdrawn_event() {
         &true,
         &true,
         &true,
+        &None,
     );
 
     // Grant WITHDRAW permission to `other`.
@@ -706,6 +714,7 @@ fn delegate_cancel_token_failure_emits_no_cancelled_event() {
         &true,
         &true,
         &true,
+        &None,
     );
 
     // Grant CANCEL to `other`.
@@ -766,6 +775,7 @@ fn delegate_top_up_token_failure_emits_no_topped_up_event() {
         &true,
         &true,
         &true,
+        &None,
     );
 
     // Grant TOP_UP to `other`.
