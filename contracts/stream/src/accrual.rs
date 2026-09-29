@@ -102,8 +102,8 @@
 //! advancing-clock half over random schedules.
 
 use crate::error::Error;
-use crate::types::{ReleaseCurve, Stream};
-use crate::types::{CliffMode, Stream};
+use crate::types::{CliffMode, ReleaseCurve, Stream};
+use crate::types::{ShareEntry, TOTAL_BPS};
 
 /// The stream's own clock, in the same units and origin as `start_time` and
 /// `end_time`. Stops while the stream is paused.
@@ -302,4 +302,65 @@ pub fn liability(stream: &Stream) -> Result<i128, Error> {
         .deposited
         .checked_sub(stream.withdrawn)
         .ok_or(Error::Overflow)
+}
+
+// ---------------------------------------------------------------------------
+// Split-stream per-share accrual helpers
+// ---------------------------------------------------------------------------
+
+/// Total tokens one share entry has earned so far, given the stream's total
+/// vested amount.
+///
+/// The formula is `floor(total_vested * bps / TOTAL_BPS)`, rounding down in
+/// the recipient's disfavour — the same bias as the main vesting formula, for
+/// the same reason (residue stays in the pool rather than ever making the
+/// contract short). The handful of stroops lost to rounding across all shares
+/// except the first are recovered by [`share_vested_first`], which is the
+/// mechanism that gives the first share (index 0 in [`crate::types::StreamShares`])
+/// any remainder.
+///
+/// Callers are responsible for checking the cliff and forwarding the correct
+/// `total_vested` (which is already zero before the cliff, by [`vested`]).
+pub fn share_vested(total_vested: i128, entry: &ShareEntry) -> Result<i128, crate::error::Error> {
+    total_vested
+        .checked_mul(entry.bps as i128)
+        .ok_or(crate::error::Error::Overflow)?
+        .checked_div(TOTAL_BPS as i128)
+        .ok_or(crate::error::Error::Overflow)
+}
+
+/// Total tokens the **first** share entry has earned, absorbing all rounding
+/// dust from the other shares.
+///
+/// `share_vested_first = total_vested - sum(share_vested for every other share)`
+///
+/// This guarantees conservation: the sum of all per-share vested amounts equals
+/// `total_vested` exactly, with no stranded stroops. The first share is the
+/// documented dust recipient (see [`crate::types::StreamShares`]).
+///
+/// `others_sum` must be the sum of `share_vested(total_vested, entry)` for
+/// every entry *after* index 0. The caller computes that sum before calling
+/// here, which keeps this function pure and easy to test.
+pub fn share_vested_first(
+    total_vested: i128,
+    others_sum: i128,
+) -> Result<i128, crate::error::Error> {
+    total_vested
+        .checked_sub(others_sum)
+        .ok_or(crate::error::Error::Overflow)
+}
+
+/// How much the holder of `entry` can withdraw right now.
+///
+/// `vested_for_share` is the result of [`share_vested`] (or
+/// [`share_vested_first`] for the first entry). The function saturates at zero:
+/// a share recipient who has already withdrawn exactly their earned allocation
+/// receives zero rather than panicking or returning a negative value.
+pub fn share_withdrawable(vested_for_share: i128, entry: &ShareEntry) -> i128 {
+    let available = vested_for_share.saturating_sub(entry.withdrawn);
+    if available < 0 {
+        0
+    } else {
+        available
+    }
 }

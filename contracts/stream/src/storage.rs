@@ -89,7 +89,7 @@
 use soroban_sdk::{Address, Env};
 
 use crate::error::Error;
-use crate::types::{DataKey, DelegateGrant, ReleaseCurve, Stream, StreamRecord};
+use crate::types::{DataKey, DelegateGrant, ReleaseCurve, Stream, StreamRecord, StreamShares};
 
 /// Nominal Stellar ledger close time, in seconds.
 ///
@@ -530,6 +530,50 @@ pub fn load_delegate(env: &Env, stream_id: u64, delegate: &Address) -> Option<De
     env.storage()
         .persistent()
         .get(&DataKey::Delegate(stream_id, delegate.clone()))
+}
+
+// ---------------------------------------------------------------------------
+// Split-stream share allocations
+// ---------------------------------------------------------------------------
+
+/// Persist [`StreamShares`] alongside the parent stream and give it the same
+/// TTL target.
+///
+/// Must be called at the same time as [`save_stream`] for a new split stream
+/// so the two entries have the same initial TTL. `save_stream` bumps the parent
+/// entry; this helper mirrors that bump for the shares entry.
+pub fn save_shares(env: &Env, stream_id: u64, stream: &Stream, shares: &StreamShares) {
+    let key = DataKey::StreamShares(stream_id);
+    env.storage().persistent().set(&key, shares);
+    let target = ttl_target_ledgers(env, stream);
+    env.storage().persistent().extend_ttl(&key, target, target);
+}
+
+/// Read [`StreamShares`] and bump the entry's TTL alongside the parent stream.
+///
+/// Used by mutating paths (`withdraw_share`) that need to update per-share
+/// `withdrawn` counters. Returns `None` if the stream has no shares entry —
+/// i.e. it is a plain single-recipient stream.
+pub fn load_shares(env: &Env, stream_id: u64, stream: &Stream) -> Option<StreamShares> {
+    let key = DataKey::StreamShares(stream_id);
+    let shares: Option<StreamShares> = env.storage().persistent().get(&key);
+    if shares.is_some() {
+        let target = ttl_target_ledgers(env, stream);
+        env.storage().persistent().extend_ttl(&key, target, target);
+    }
+    shares
+}
+
+/// Read [`StreamShares`] without touching its TTL.
+///
+/// Used by the read-only `get_stream_shares` view and by `cancel`, where we
+/// need to inspect the shares without disturbing them (cancel does not modify
+/// shares at all; each recipient's per-share `withdrawn` is unaffected by the
+/// sender reclaiming the unvested remainder). Returns `None` for plain streams.
+pub fn peek_shares(env: &Env, stream_id: u64) -> Option<StreamShares> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::StreamShares(stream_id))
 }
 
 // ---------------------------------------------------------------------------

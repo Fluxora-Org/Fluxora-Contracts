@@ -234,4 +234,30 @@ pub enum Error {
     /// There is no timeout on the halt, so this is the only way a resume can
     /// be a no-op.
     ContractNotHalted = 38,
+
+    // --- Split streams ---
+    /// The supplied share list is invalid.
+    ///
+    /// Possible causes:
+    ///
+    /// * Empty list or a single-entry list (use `create_stream` for one
+    ///   recipient).
+    /// * More than [`crate::types::MAX_SPLIT_RECIPIENTS`] entries.
+    /// * Basis-point values do not sum to [`crate::types::TOTAL_BPS`] (10 000).
+    /// * A `bps` entry is zero.
+    /// * The same recipient address appears more than once.
+    /// * A share recipient equals the sender (`SelfStream` is still raised for
+    ///   the first entry that is a self-stream rather than this variant).
+    InvalidShares = 41,
+    /// `withdraw_share` was called on a stream that was not created with
+    /// `create_stream_split`, or `get_stream_shares` was called on a plain
+    /// stream. Both cases are unambiguously wrong, not a matter of timing.
+    StreamNotSplit = 42,
+    /// `withdraw_share` caller is not in the stream's share list.
+    ///
+    /// The recipient supplied as the argument is not one of the addresses in
+    /// [`crate::types::StreamShares`]. Returned instead of
+    /// [`Self::Unauthorized`] so integrators can tell "wrong stream" from
+    /// "wrong caller" without an extra `get_stream_shares` round-trip.
+    RecipientNotInShares = 43,
 }

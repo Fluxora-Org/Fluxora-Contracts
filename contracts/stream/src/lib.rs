@@ -93,18 +93,19 @@ mod storage;
 mod types;
 
 pub use accrual::{
-    cliff_reached, duration, elapsed, liability, refundable, stream_time, vested, withdrawable,
+    cliff_reached, duration, elapsed, liability, refundable, share_vested, share_vested_first,
+    share_withdrawable, stream_time, vested, withdrawable,
 };
 pub use error::Error;
 pub use storage::{
     MIN_STREAM_TTL_LEDGERS, SECONDS_PER_LEDGER, TTL_BUFFER_SECONDS, TTL_SAFETY_MARGIN_PERCENT,
 };
 pub use types::op;
-pub use types::{DataKey, DelegateGrant, ReleaseCurve, Stream, StreamStatus};
-pub use types::{BatchCreateRequest, DataKey, DelegateGrant, Stream, StreamStatus};
-pub use types::{BatchCancelOutcome, DataKey, DelegateGrant, Stream, StreamStatus};
-pub use types::{CliffMode, DataKey, DelegateGrant, Stream, StreamStatus};
-pub use types::{DataKey, DelegateGrant, Stream, StreamStatus, MAX_REFERENCE_LENGTH};
+pub use types::{
+    BatchCancelOutcome, BatchCreateRequest, CliffMode, DataKey, DelegateGrant, ReleaseCurve,
+    ShareEntry, Stream, StreamShares, StreamStatus, MAX_REFERENCE_LENGTH,
+    MAX_SPLIT_RECIPIENTS, TOTAL_BPS,
+};
 
 use soroban_sdk::{
     contract, contractimpl, token, Address, Env, InvokeError, MuxedAddress, TryFromVal, Vec,
@@ -1378,6 +1379,249 @@ impl FluxoraStream {
         debug_assert_eq!(stream.deposited, vested_now);
         events::cancelled(env, stream_id, stream, refund);
         Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // Split streams
+    // -------------------------------------------------------------------------
+
+    /// Create a stream whose accrual is divided among several recipients in
+    /// fixed proportions.
+    ///
+    /// Shares are expressed in **basis points** (1 bp = 0.01 %). The supplied
+    /// `shares` vector must:
+    ///
+    /// * Contain between 2 and [`MAX_SPLIT_RECIPIENTS`] entries.
+    /// * Have no entry with `bps == 0`.
+    /// * Have all `bps` values summing exactly to [`TOTAL_BPS`] (10 000).
+    /// * Not repeat any recipient address.
+    /// * Not include `sender` as a recipient.
+    ///
+    /// The `Stream` entry's `recipient` field is set to the **first** share
+    /// holder. That is purely a naming convenience for the cancel path and does
+    /// **not** change where tokens go — `withdraw_share` is the only entry
+    /// point that pays out on a split stream.
+    ///
+    /// Rounding policy: integer-division dust (a handful of stroops lost when
+    /// `vested * bps / TOTAL_BPS` does not divide evenly) is credited to the
+    /// first share holder in the list. The rest get `floor`. This policy is
+    /// deterministic, auditable at creation time, and documented in
+    /// [`StreamShares`].
+    ///
+    /// All other parameters — schedule, cliff, capabilities — are identical to
+    /// [`create_stream`](Self::create_stream).
+    ///
+    /// # Errors
+    ///
+    /// All errors from [`create_stream`](Self::create_stream) plus:
+    ///
+    /// * [`Error::InvalidShares`] — any of the share validation rules above.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_stream_split(
+        env: Env,
+        sender: Address,
+        shares: Vec<(Address, u32)>,
+        token: Address,
+        deposit: i128,
+        start_time: u64,
+        end_time: u64,
+        cliff_time: u64,
+        cancellable: bool,
+        pausable: bool,
+        transferable: bool,
+    ) -> Result<u64, Error> {
+        Self::require_not_halted(&env)?;
+        sender.require_auth();
+
+        // --- Validate shares ---
+        let n = shares.len();
+        if n < 2 || n > MAX_SPLIT_RECIPIENTS {
+            return Err(Error::InvalidShares);
+        }
+
+        let mut bps_sum: u32 = 0;
+        for i in 0..n {
+            let (ref addr, bps) = shares.get_unchecked(i);
+            if bps == 0 {
+                return Err(Error::InvalidShares);
+            }
+            if *addr == sender {
+                return Err(Error::SelfStream);
+            }
+            // Duplicate check: O(n²) but n ≤ MAX_SPLIT_RECIPIENTS (8).
+            for j in 0..i {
+                let (ref other, _) = shares.get_unchecked(j);
+                if other == addr {
+                    return Err(Error::InvalidShares);
+                }
+            }
+            bps_sum = bps_sum.checked_add(bps).ok_or(Error::Overflow)?;
+        }
+        if bps_sum != TOTAL_BPS {
+            return Err(Error::InvalidShares);
+        }
+
+        // The primary recipient stored on the Stream is the first share holder.
+        let (first_recipient, _) = shares.get_unchecked(0);
+
+        // Delegate to the standard inner creator (does auth, validation, deposit
+        // pull, save, event). We pass the first recipient as the stream's
+        // `recipient` field — used only for cancel refund routing and display.
+        let stream_id = Self::create_stream_inner(
+            env.clone(),
+            sender.clone(),
+            first_recipient.clone(),
+            token.clone(),
+            deposit,
+            start_time,
+            end_time,
+            cliff_time,
+            cancellable,
+            pausable,
+            transferable,
+            ReleaseCurve::Linear,
+        )?;
+
+        // Build and persist the shares record.
+        let mut share_entries = Vec::new(&env);
+        for i in 0..n {
+            let (addr, bps) = shares.get_unchecked(i);
+            share_entries.push_back(ShareEntry {
+                recipient: addr.clone(),
+                bps,
+                withdrawn: 0,
+            });
+        }
+        let shares_record = StreamShares { shares: share_entries };
+
+        // Reload the stream to get the proper TTL target (create_inner saved it).
+        let stream = storage::peek_stream(&env, stream_id)?;
+        storage::save_shares(&env, stream_id, &stream, &shares_record);
+
+        Ok(stream_id)
+    }
+
+    /// Withdraw a single recipient's accrued share from a split stream.
+    ///
+    /// `recipient` must be one of the addresses in the stream's
+    /// [`StreamShares`] record. Each recipient's withdrawal tracks
+    /// independently: one calling `withdraw_share` does not affect what another
+    /// can later draw.
+    ///
+    /// `amount == None` withdraws the full balance available to this recipient.
+    /// Returns the amount transferred.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::StreamNotFound`] — no stream with this id.
+    /// * [`Error::StreamNotSplit`] — stream was not created with
+    ///   `create_stream_split`.
+    /// * [`Error::RecipientNotInShares`] — caller is not a share holder.
+    /// * [`Error::StreamTerminated`] — stream is `Cancelled` or `Depleted` (all
+    ///   shares exhausted).
+    /// * [`Error::NothingToWithdraw`] — this recipient's slice is zero (pre-cliff
+    ///   or already drawn for now).
+    /// * [`Error::InsufficientWithdrawable`] — explicit `amount` exceeds the
+    ///   available slice.
+    pub fn withdraw_share(
+        env: Env,
+        stream_id: u64,
+        recipient: Address,
+        amount: Option<i128>,
+    ) -> Result<i128, Error> {
+        Self::require_not_halted(&env)?;
+        recipient.require_auth();
+
+        let mut stream = storage::load_stream(&env, stream_id)?;
+
+        // Shares must exist.
+        let mut shares_record = storage::load_shares(&env, stream_id, &stream)
+            .ok_or(Error::StreamNotSplit)?;
+
+        // Find the caller's share entry.
+        let n = shares_record.shares.len();
+        let mut share_idx: Option<u32> = None;
+        for i in 0..n {
+            if shares_record.shares.get_unchecked(i).recipient == recipient {
+                share_idx = Some(i);
+                break;
+            }
+        }
+        let idx = share_idx.ok_or(Error::RecipientNotInShares)?;
+
+        let now = env.ledger().timestamp();
+
+        // Compute total vested at this instant.
+        let total_vested = accrual::vested(&stream, now)?;
+
+        // Compute this recipient's slice of the total vested.
+        let vested_for_share = if idx == 0 {
+            // First share absorbs dust: vested_first = total_vested - sum(others)
+            let mut others_sum: i128 = 0;
+            for i in 1..n {
+                let entry = shares_record.shares.get_unchecked(i);
+                others_sum = others_sum
+                    .checked_add(accrual::share_vested(total_vested, &entry)?)
+                    .ok_or(Error::Overflow)?;
+            }
+            accrual::share_vested_first(total_vested, others_sum)?
+        } else {
+            let entry = shares_record.shares.get_unchecked(idx);
+            accrual::share_vested(total_vested, &entry)?
+        };
+
+        let entry = shares_record.shares.get_unchecked(idx);
+        let available = accrual::share_withdrawable(vested_for_share, &entry);
+
+        if available == 0 {
+            if stream.status.is_terminal() {
+                return Err(Error::StreamTerminated);
+            }
+            return Err(Error::NothingToWithdraw);
+        }
+
+        let payout = match amount {
+            None => available,
+            Some(requested) => {
+                if requested <= 0 {
+                    return Err(Error::InvalidAmount);
+                }
+                if requested > available {
+                    return Err(Error::InsufficientWithdrawable);
+                }
+                requested
+            }
+        };
+
+        // Update the per-share withdrawn counter.
+        let mut entry = shares_record.shares.get_unchecked(idx);
+        entry.withdrawn = entry
+            .withdrawn
+            .checked_add(payout)
+            .ok_or(Error::Overflow)?;
+        shares_record.shares.set(idx, entry);
+
+        // Update the stream-level withdrawn counter and depletion status.
+        // We route through apply_withdrawal so stream accounting, pool debiting,
+        // token transfer, and the `withdrawn` event are all consistent with the
+        // single-recipient path.
+        Self::apply_withdrawal(&env, stream_id, &mut stream, payout)?;
+
+        // Persist the updated shares (after apply_withdrawal saved the stream).
+        storage::save_shares(&env, stream_id, &stream, &shares_record);
+
+        verify_pool_balance(&env, &stream.token)?;
+        Ok(payout)
+    }
+
+    /// Return the share allocations for a split stream.
+    ///
+    /// Returns `Err(StreamNotSplit)` if the stream was not created with
+    /// `create_stream_split`. This is a view — it does not bump any TTL.
+    pub fn get_stream_shares(env: Env, stream_id: u64) -> Result<StreamShares, Error> {
+        // Peek (no TTL bump) because this is a read-only view.
+        storage::peek_stream(&env, stream_id)?; // assert stream exists
+        storage::peek_shares(&env, stream_id).ok_or(Error::StreamNotSplit)
     }
 
     /// Pause accrual. Only the sender, and only if `pausable`.
