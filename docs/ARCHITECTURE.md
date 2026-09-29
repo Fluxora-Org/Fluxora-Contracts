@@ -44,7 +44,7 @@ Four properties shape everything below:
 | Archival probe | `contracts/archival-probe` | no | A throwaway canary whose only job is to archive on the network's schedule, so the live archival/restore round trip can be observed. Never released, never deployed to mainnet. |
 | Provenance tool | `tools/provenance` | no | A host-only binary (`fluxora-provenance`) that hashes released wasm and verifies it against the recorded `provenance.json` and `SHASUMS`. A workspace member so it resolves through the root lockfile and is covered by the normal workspace checks, but excluded from wasm-target builds because it needs `std`. |
 | Release tooling | `script/release.sh` | no | The only command that produces release artifacts. Builds the product package alone and fails if a probe wasm appears among its outputs. |
-| CI and validation | `script/`, `.github/workflows/ci.yml` | no | Wasm size budget, coverage gate, migration/ABI consistency, doc alignment, gas validation, snapshot drift. |
+| CI and validation | `script/`, `.github/workflows/ci.yml` | no | Wasm size budget, per-crate coverage floors, migration/ABI consistency, doc alignment, gas validation, snapshot drift. |
 | Generated bindings | `contracts/stream/abi/fluxora_stream.json` | **product** | The ABI inventory generated from the contract spec; CI fails when it is stale. This is what downstream code generators consume. |
 | Client SDK | `fluxora-sdk` (separate repo) | **product** | Transaction construction, stream decoding, archival detection. The contract has no intent of its own about this layer. |
 | Backend and frontend | separate repos | **product** | Index the `streams` projection from events and render it. The contract does not know they exist. |

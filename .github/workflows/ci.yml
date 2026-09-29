@@ -937,44 +937,13 @@ jobs:
         if: steps.cache-tarpaulin.outputs.cache-hit != 'true'
         run: cargo install cargo-tarpaulin --version "^0.31" --locked
 
-      - name: Generate coverage report
-        run: |
-          # Default tarpaulin per-test timeout is 60s. Instrumented proptest
-          # suites in test_withdrawable_props exceed that and abort the job with
-          # "Timed out waiting for test response" (seen on PR coverage runs).
-          cargo tarpaulin \
-            --features testutils \
-            --out Xml \
-            --out Html \
-            --output-dir coverage \
-            --ignore-tests \
-            --skip-clean \
-            --timeout 300 \
-            -p fluxora-stream
+      - name: Measure coverage for every workspace crate
+        run: script/measure-coverage.sh coverage
 
-      - name: Generate factory coverage report
+      - name: Enforce committed per-crate coverage floors
         run: |
-          cargo tarpaulin \
-            --features testutils \
-            --out Xml \
-            --output-dir coverage/factory \
-            --ignore-tests \
-            --skip-clean \
-            --timeout 300 \
-            -p fluxora-factory
-
-      - name: Enforce committed factory coverage floor
-        run: |
-          python3 script/check_stream_coverage.py \
-            --xml coverage/factory/cobertura.xml \
-            --floor contracts/factory/coverage-floor.txt \
-            --summary "$GITHUB_STEP_SUMMARY"
-
-      - name: Enforce committed coverage floor
-        run: |
-          python3 script/check_stream_coverage.py \
-            --xml coverage/cobertura.xml \
-            --floor contracts/stream/coverage-floor.txt \
+          python3 script/check_coverage_floors.py \
+            --reports-dir coverage \
             --summary "$GITHUB_STEP_SUMMARY" \
             --github-output "$GITHUB_OUTPUT"
         id: coverage_gate
@@ -983,7 +952,7 @@ jobs:
         if: always()
         uses: codecov/codecov-action@v4
         with:
-          files: coverage/cobertura.xml
+          files: coverage/*/cobertura.xml
           fail_ci_if_error: false
           verbose: true
 
