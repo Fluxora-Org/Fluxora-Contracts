@@ -1183,11 +1183,25 @@ impl FluxoraStream {
 
     /// Transfer recipient as a delegate. Requires [`op::TRANSFER_RECIPIENT`] grant.
     ///
-    /// Follows the same semantics as [`transfer_recipient`](Self::transfer_recipient),
-    /// including its stance on delegate grants: nothing is cleared by the
-    /// transfer, so the grant that authorised this call — and every other grant
-    /// on the stream — survives it. A delegate acting for the old recipient
-    /// therefore keeps its rights until the new recipient revokes them.
+    /// This is the authorisation-gated twin of
+    /// [`transfer_recipient`](Self::transfer_recipient). Once the grant is
+    /// verified it repeats the direct path's four stream-level guards —
+    /// `NotTransferable`, `StreamTerminated`, `SelfStream` and
+    /// `RepeatedTransfer`, in that order — so the two entry points reject the
+    /// same stream states with the same discriminants and a client does not
+    /// have to special-case which one it called.
+    ///
+    /// A reassignment to the *current* recipient is rejected with
+    /// [`Error::RepeatedTransfer`] rather than silently accepted. The error is
+    /// the caller's signal that the stream was not re-pointed, and it is what
+    /// makes a replay (or a stale `new_recipient`) distinguishable from a
+    /// first transfer that landed — the same replay guarantee the direct path
+    /// has carried since #1637.
+    ///
+    /// Nothing is cleared by the transfer, so the grant that authorised this
+    /// call — and every other grant on the stream — survives it. A delegate
+    /// acting for the old recipient therefore keeps its rights until the new
+    /// recipient revokes them.
     pub fn delegate_transfer_recipient(
         env: Env,
         stream_id: u64,
@@ -1211,7 +1225,13 @@ impl FluxoraStream {
 
         let old_recipient = stream.recipient.clone();
         if old_recipient == new_recipient {
-            return Ok(());
+            // Parity with `transfer_recipient` (#1637): a no-op reassignment is
+            // an error, not a silent success, so a caller can tell a replay or
+            // a stale `new_recipient` from a transfer that actually moved the
+            // stream. Before #1827 this path returned `Ok(())`, which made the
+            // delegated variant the one place a repeated transfer did not
+            // surface `RepeatedTransfer`.
+            return Err(Error::RepeatedTransfer);
         }
 
         stream.recipient = new_recipient.clone();
