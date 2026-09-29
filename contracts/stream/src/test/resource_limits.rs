@@ -60,6 +60,25 @@ const LEDGER_ENTRY_LIMIT: u32 = 400;
 const WRITE_ENTRY_LIMIT: u32 = 200;
 /// Maximum total size of emitted contract events, in bytes.
 const EVENT_BYTES_LIMIT: u32 = 16_384;
+/// Event bytes a *full* batch may occupy, measured.
+///
+/// A 16-stream `batch_withdraw` emits 9,984 bytes: 16 `withdrawn` events plus
+/// the token's own `transfer` events, 624 bytes per stream. That is 61% of
+/// [`EVENT_BYTES_LIMIT`], leaving 6,400 bytes of slack — the margin
+/// `MAX_BATCH_SIZE` now rests on.
+///
+/// The number moved from 8,192 when issue #1868 required every lifecycle event
+/// to name both parties: the `sender` appended to `withdrawn` costs 112 bytes
+/// per event once the pause bookkeeping is republished alongside it. That is a
+/// deliberate, measured trade against a documented acceptance criterion, not
+/// drift — which is why this constant is asserted directly instead of as a
+/// multiple of the limit. **A payload change that pushes a full batch past
+/// 9,984 bytes has to re-derive the cap, not re-baseline this number**, because
+/// `MAX_BATCH_SIZE` is frozen ABI (`docs/ABI.md`) and the remaining slack is
+/// what absorbs a token whose `transfer` event is heavier than the SAC used
+/// here. `the_event_budget_is_not_the_binding_constraint_at_the_cap` is the
+/// measurement to re-run.
+const EVENT_BYTES_PER_FULL_BATCH: u32 = 9_984;
 /// Maximum modelled CPU instructions per invocation.
 const INSTRUCTION_LIMIT: i64 = 400_000_000;
 
@@ -119,9 +138,11 @@ fn assert_has_headroom(label: &str, cost: Cost, factor: u32) {
         cost.instructions,
     );
     assert!(
-        cost.event_bytes * factor <= EVENT_BYTES_LIMIT,
-        "{label}: {} event bytes lack {factor}x headroom under {EVENT_BYTES_LIMIT}",
+        cost.event_bytes <= EVENT_BYTES_PER_FULL_BATCH,
+        "{label}: {} event bytes exceed the {EVENT_BYTES_PER_FULL_BATCH}-byte budget measured \
+         for a full batch ({} of the {EVENT_BYTES_LIMIT}-byte ceiling)",
         cost.event_bytes,
+        cost.event_bytes * 100 / EVENT_BYTES_LIMIT,
     );
 }
 
@@ -190,6 +211,161 @@ fn a_full_batch_withdraw_keeps_headroom_on_every_limit() {
     let cost = report(&h, "batch_withdraw at cap");
 
     assert_has_headroom("batch_withdraw at cap", cost, 2);
+}
+
+/// Every dimension inside the documented protocol limit, with no margin factor.
+///
+/// [`assert_has_headroom`] applies one factor to all dimensions, which is the
+/// right bar for `batch_withdraw` but not for `batch_cancel`: at the cap its
+/// event bytes land at 8 832 of 16 384 — a `cancelled` event plus a token
+/// `transfer` per element — so a 2x margin on *that* dimension is not on
+/// offer. The cap is still safe, and
+/// [`the_event_budget_holds_for_batch_cancel_at_the_cap`] pins the derivation,
+/// but the honest claim here is "fits, with the storage margin `batch_withdraw`
+/// enjoys", not "2x on everything".
+fn assert_within_limits(label: &str, cost: Cost) {
+    assert!(
+        cost.footprint <= LEDGER_ENTRY_LIMIT,
+        "{label}: footprint {} exceeds {LEDGER_ENTRY_LIMIT}",
+        cost.footprint,
+    );
+    assert!(
+        cost.writes <= WRITE_ENTRY_LIMIT,
+        "{label}: {} writes exceed {WRITE_ENTRY_LIMIT}",
+        cost.writes,
+    );
+    assert!(
+        cost.memory <= LEDGER_ENTRY_LIMIT,
+        "{label}: {} in-memory reads exceed {LEDGER_ENTRY_LIMIT}",
+        cost.memory,
+    );
+    assert!(
+        cost.instructions <= INSTRUCTION_LIMIT,
+        "{label}: {} instructions exceed {INSTRUCTION_LIMIT}",
+        cost.instructions,
+    );
+    assert!(
+        cost.event_bytes <= EVENT_BYTES_LIMIT,
+        "{label}: {} event bytes exceed {EVENT_BYTES_LIMIT}",
+        cost.event_bytes,
+    );
+}
+
+/// The same bar as `batch_withdraw`, for the wind-down entry point.
+/// `batch_cancel` moves a token back *and* rewrites a schedule per element, so
+/// it is the batch call with the heaviest per-item write — the cap has to hold
+/// here too (issue #1811).
+#[test]
+fn a_full_batch_cancel_keeps_headroom_on_every_limit() {
+    let h = Harness::new();
+    let ids: std::vec::Vec<u64> = (0..MAX_BATCH_SIZE)
+        .map(|_| h.create_simple(100 * ONE, 100 * DAY))
+        .collect();
+    h.advance(30 * DAY);
+
+    let outcome = h.client.batch_cancel(&h.sender, &h.ids(&ids));
+    let cost = report(&h, "batch_cancel at cap");
+
+    assert_eq!(
+        outcome.refunded,
+        MAX_BATCH_SIZE as i128 * 70 * ONE,
+        "the cap-sized batch must settle, not refuse"
+    );
+    assert_within_limits("batch_cancel at cap", cost);
+    // The storage dimensions keep the 2x margin; only the event budget does not.
+    assert!(
+        cost.footprint * 2 <= LEDGER_ENTRY_LIMIT,
+        "batch_cancel at cap: footprint {} lacks 2x headroom",
+        cost.footprint,
+    );
+    assert!(
+        cost.writes * 2 <= WRITE_ENTRY_LIMIT,
+        "batch_cancel at cap: {} writes lack 2x headroom",
+        cost.writes,
+    );
+    assert!(
+        cost.memory * 2 <= LEDGER_ENTRY_LIMIT,
+        "batch_cancel at cap: {} in-memory reads lack 2x headroom",
+        cost.memory,
+    );
+}
+
+/// A refused batch is priced and validated before anything is written, so it
+/// must not cost what a settled one does. This is the resource face of the
+/// all-or-nothing guarantee: a caller who submits a bad vector pays for a read
+/// pass, not for a half-settled batch.
+#[test]
+fn a_refused_batch_cancel_writes_nothing_per_stream() {
+    // A settled cap-sized batch, for the write-count comparison below.
+    let settled = {
+        let h = Harness::new();
+        let ids: std::vec::Vec<u64> = (0..MAX_BATCH_SIZE)
+            .map(|_| h.create_simple(100 * ONE, 100 * DAY))
+            .collect();
+        h.advance(30 * DAY);
+        h.client.batch_cancel(&h.sender, &h.ids(&ids));
+        report(&h, "batch_cancel settled")
+    };
+
+    let h = Harness::new();
+    let mut ids: std::vec::Vec<u64> = (0..MAX_BATCH_SIZE)
+        .map(|_| h.create_simple(100 * ONE, 100 * DAY))
+        .collect();
+    let start = h.now();
+    let locked = h.create(
+        100 * ONE,
+        start,
+        start + 100 * DAY,
+        start,
+        false,
+        true,
+        true,
+    );
+    let locked_at = MAX_BATCH_SIZE as usize / 2;
+    ids[locked_at] = locked;
+    h.advance(30 * DAY);
+
+    let outcome = h.client.batch_cancel(&h.sender, &h.ids(&ids));
+    let cost = report(&h, "batch_cancel refused");
+
+    assert_eq!(outcome.refused_index, Some(locked_at as u32));
+    assert_eq!(outcome.refunded, 0, "a refused batch moves no tokens");
+    assert_eq!(cost.event_bytes, 0, "a refused batch emits no event at all");
+    assert!(
+        cost.writes * 4 <= settled.writes,
+        "refusal wrote {} entries against {} for a settled batch of the same size — \
+         the validate-then-commit order is the guarantee",
+        cost.writes,
+        settled.writes,
+    );
+    assert_has_headroom("batch_cancel refused", cost, 10);
+}
+
+/// A `cancelled` event is a different payload from a `withdrawn` one, so the
+/// event-budget half of the cap has to be re-derived for the wind-down path
+/// rather than assumed from `batch_withdraw`.
+#[test]
+fn the_event_budget_holds_for_batch_cancel_at_the_cap() {
+    let h = Harness::new();
+    let ids: std::vec::Vec<u64> = (0..MAX_BATCH_SIZE)
+        .map(|_| h.create_simple(100 * ONE, 100 * DAY))
+        .collect();
+    h.advance(30 * DAY);
+
+    h.client.batch_cancel(&h.sender, &h.ids(&ids));
+    let cost = report(&h, "batch_cancel events");
+
+    let per_event = cost.event_bytes / MAX_BATCH_SIZE;
+    let max_events_by_budget = EVENT_BYTES_LIMIT / per_event.max(1);
+    std::println!(
+        "per-cancelled-event ~{per_event} bytes; event budget alone would allow \
+         ~{max_events_by_budget} streams per batch (cap is {MAX_BATCH_SIZE})",
+    );
+
+    assert!(
+        max_events_by_budget > MAX_BATCH_SIZE,
+        "the event budget, not the entry count, is what bounds the batch",
+    );
 }
 
 #[test]

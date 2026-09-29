@@ -49,29 +49,13 @@
 //!  contract-error sub-contract — both surface as `TokenTransferFailed`.
 //!  `TokenMissing` is only reachable via WASM execution on a real network.
 //!  The variant's discriminant (26) is verified by `token_error_discriminants_match_the_abi_table`.
-//!
-//! ## Token assumptions — see `docs/ABI.md` "Token assumptions"
-//!
-//! The rest of this module covers the three assumptions Fluxora states about
-//! its token: no fee-on-transfer, no rebasing, and no zero-value transfers.
-//!
-//! | assumption | site | scenario | expected outcome |
-//! |---|---|---|---|
-//! | no fee-on-transfer | `create_stream` | deposit pull delivers 90% of `deposit` | `TokenAmountMismatch`, no entry |
-//! | no fee-on-transfer | `top_up` | pull delivers 90% of `amount` | `TokenAmountMismatch`, stream unchanged |
-//! | no rebasing | `withdraw` | pool balance reduced out-of-band (clawback, standing in for a negative rebase) | `TokenTransferFailed` — fails closed, other streams' accounting untouched |
-//! | zero transfers never issued | `cancel` | refund is exactly zero at maturity | succeeds; a token that panics on a zero-value transfer proves none was called |
-//! | zero transfers never issued | `withdraw` | nothing vested yet | `NothingToWithdraw`, no token call |
-//! | zero transfers never issued | `batch_withdraw` | one stream in the batch has nothing available | batch succeeds; skipped stream's `withdrawn` stays 0 |
-
 use soroban_sdk::testutils::{Address as _, Events as _, IssuerFlags};
 use soroban_sdk::token::{StellarAssetClient, TokenClient};
+use soroban_sdk::xdr::ContractEventBody;
 use soroban_sdk::{
-    contract, contractimpl, symbol_short, Address, Env, Event as _, MuxedAddress, String,
+    contract, contractimpl, contracttype, symbol_short, Address, Env, MuxedAddress, String,
 };
-
 use super::common::*;
-use crate::events::{StreamCreated, Withdrawn};
 use crate::{Error, StreamStatus};
 
 // ─── panic token ─────────────────────────────────────────────────────────────
@@ -134,6 +118,100 @@ impl PanicToken {
 
 fn register_panic_token(h: &Harness) -> Address {
     h.env.register(PanicToken, ())
+}
+
+#[contract]
+pub struct RejectZeroToken;
+
+#[contracttype]
+enum RejectZeroDataKey {
+    Underlying,
+}
+
+#[contractimpl]
+impl RejectZeroToken {
+    pub fn init(env: Env, underlying: Address) {
+        env.storage()
+            .instance()
+            .set(&RejectZeroDataKey::Underlying, &underlying);
+    }
+
+    pub fn transfer(env: Env, from: Address, to: MuxedAddress, amount: i128) {
+        if amount == 0 {
+            panic!("RejectZeroToken: zero transfer");
+        }
+        TokenClient::new(&env, &Self::underlying(&env)).transfer(&from, &to, &amount);
+    }
+
+    pub fn balance(env: Env, id: Address) -> i128 {
+        TokenClient::new(&env, &Self::underlying(&env)).balance(&id)
+    }
+
+    fn underlying(env: &Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&RejectZeroDataKey::Underlying)
+            .unwrap()
+    }
+}
+
+fn register_reject_zero_token<'a>(h: &'a Harness<'a>) -> (Address, Address) {
+    let admin = Address::generate(&h.env);
+    let asset = h.env.register_stellar_asset_contract_v2(admin);
+    let underlying = asset.address();
+    let token = h.env.register(RejectZeroToken, ());
+    RejectZeroTokenClient::new(&h.env, &token).init(&underlying);
+    (token, underlying)
+}
+
+#[test]
+fn cancellation_with_zero_refund_skips_a_rejecting_token_transfer() {
+    let h = Harness::new();
+    let (token, underlying) = register_reject_zero_token(&h);
+    let admin = StellarAssetClient::new(&h.env, &underlying);
+    let token_client = RejectZeroTokenClient::new(&h.env, &token);
+    let deposit = 1_000 * ONE;
+    admin.mint(&h.sender, &deposit);
+    let start = h.now();
+    let id = h.client.create_stream(
+        &h.sender,
+        &h.recipient,
+        &token,
+        &deposit,
+        &start,
+        &(start + 100 * DAY),
+        &start,
+        &true,
+        &true,
+        &true,
+    );
+
+    h.warp_to(start + 100 * DAY);
+    h.client.cancel(&id);
+
+    let filtered_events = h.env.events().all().filter_by_contract(&h.contract_id);
+    let events = filtered_events.events();
+    let event = events.iter().last().expect("cancelled event");
+    let ContractEventBody::V0(v0) = &event.body;
+    let [soroban_sdk::xdr::ScVal::Symbol(name), soroban_sdk::xdr::ScVal::U64(event_id), ..] =
+        v0.topics.as_slice()
+    else {
+        panic!("unexpected cancelled event topics");
+    };
+    assert_eq!(name.0.as_slice(), b"cancelled");
+    assert_eq!(*event_id, id);
+
+    let stream = h.client.get_stream(&id);
+    assert_eq!(stream.status, StreamStatus::Cancelled);
+    assert_eq!(stream.deposited, deposit);
+    assert_eq!(stream.withdrawn, 0);
+    assert_eq!(h.client.refundable_of(&id), 0);
+    assert_eq!(token_client.balance(&h.contract_id), deposit);
+    assert_eq!(
+        token_client.balance(&h.contract_id),
+        stream.deposited - stream.withdrawn,
+        "pool must equal the stream liability"
+    );
 }
 
 // ─── clawback-enabled SAC ────────────────────────────────────────────────────
@@ -579,12 +657,6 @@ impl FeeOnTransferToken {
             .set(&symbol_short!("fee_bps"), &bps);
     }
 
-    pub fn set_decimals(env: Env, decimals: u32) {
-        env.storage()
-            .instance()
-            .set(&symbol_short!("decimals"), &decimals);
-    }
-
     fn fee_bps(env: &Env) -> u32 {
         env.storage()
             .instance()
@@ -637,11 +709,8 @@ impl FeeOnTransferToken {
     }
     pub fn burn(_env: Env, _from: Address, _amount: i128) {}
     pub fn burn_from(_env: Env, _spender: Address, _from: Address, _amount: i128) {}
-    pub fn decimals(env: Env) -> u32 {
-        env.storage()
-            .instance()
-            .get(&symbol_short!("decimals"))
-            .unwrap_or(7)
+    pub fn decimals(_env: Env) -> u32 {
+        7
     }
     pub fn name(env: Env) -> String {
         String::from_str(&env, "FeeOnTransferToken")
@@ -741,106 +810,6 @@ fn top_up_with_fee_on_transfer_token_is_rejected() {
     assert_eq!(
         after.end_time, before.end_time,
         "rejected top-up must not extend the schedule"
-    );
-}
-
-/// Token decimals are not used to normalize the public `deposit` amount. A
-/// caller that scales for seven decimals while the token reports two locks and
-/// later receives that exact raw integer amount, which is 100,000,000 whole
-/// tokens at two decimals in this scenario.
-#[test]
-fn fewer_token_decimals_do_not_rescale_deposit_or_withdrawal() {
-    let h = Harness::new();
-    let (token, low_decimal_token) = register_fee_on_transfer_token(&h);
-    low_decimal_token.set_decimals(&2);
-    assert_eq!(low_decimal_token.decimals(), 2);
-
-    let deposit = 1_000 * ONE;
-    let start = h.now();
-    let end = start + 100;
-    let sender_before = low_decimal_token.balance(&h.sender);
-    let stream_id = h.client.create_stream(
-        &h.sender,
-        &h.recipient,
-        &token,
-        &deposit,
-        &start,
-        &end,
-        &start,
-        &true,
-        &true,
-        &true,
-    );
-
-    let create_events = h
-        .env
-        .events()
-        .all()
-        .filter_by_contract(&h.contract_id)
-        .events()
-        .to_vec();
-    assert_eq!(
-        create_events,
-        std::vec![StreamCreated {
-            stream_id,
-            sender: h.sender.clone(),
-            recipient: h.recipient.clone(),
-            token: token.clone(),
-            deposited: deposit,
-            start_time: start,
-            end_time: end,
-            cliff_time: start,
-            cancellable: true,
-            pausable: true,
-            transferable: true,
-        }
-        .to_xdr(&h.env, &h.contract_id)],
-        "create event must report the unscaled raw deposit"
-    );
-
-    let created = h.client.get_stream(&stream_id);
-    assert_eq!(created.deposited, deposit);
-    assert_eq!(created.withdrawn, 0);
-    assert_eq!(low_decimal_token.balance(&h.sender), sender_before - deposit);
-    assert_eq!(low_decimal_token.balance(&h.contract_id), deposit);
-
-    h.advance(100);
-    assert_eq!(h.client.withdraw(&stream_id, &None), deposit);
-
-    let withdrawn_events = h
-        .env
-        .events()
-        .all()
-        .filter_by_contract(&h.contract_id)
-        .events()
-        .to_vec();
-    assert_eq!(
-        withdrawn_events,
-        std::vec![Withdrawn {
-            stream_id,
-            recipient: h.recipient.clone(),
-            amount: deposit,
-            withdrawn: deposit,
-            deposited: deposit,
-            status: StreamStatus::Depleted,
-        }
-        .to_xdr(&h.env, &h.contract_id)],
-        "withdrawal event must report the same unscaled raw amount"
-    );
-
-    let final_stream = h.client.get_stream(&stream_id);
-    assert_eq!(final_stream.deposited, deposit);
-    assert_eq!(final_stream.withdrawn, deposit);
-    assert_eq!(final_stream.status, StreamStatus::Depleted);
-    assert_eq!(low_decimal_token.balance(&h.sender), sender_before - deposit);
-    assert_eq!(low_decimal_token.balance(&h.recipient), deposit);
-    assert_eq!(low_decimal_token.balance(&h.contract_id), 0);
-    assert_eq!(
-        low_decimal_token.balance(&h.sender)
-            + low_decimal_token.balance(&h.recipient)
-            + low_decimal_token.balance(&h.contract_id),
-        sender_before,
-        "sender + recipient + pool must conserve the initial token balance"
     );
 }
 
@@ -1107,4 +1076,142 @@ fn token_error_discriminants_match_the_abi_table() {
 #[test]
 fn token_amount_mismatch_discriminant_matches_the_abi_table() {
     assert_eq!(Error::TokenAmountMismatch as u32, 32);
+}
+
+#[test]
+fn create_stream_with_false_returning_token_is_rejected() {
+    let h = Harness::new();
+    let (token, false_token) = register_false_token(&h);
+
+    let start = h.now();
+    let err = h
+        .client
+        .try_create_stream(
+            &h.sender,
+            &h.recipient,
+            &token,
+            &(1_000 * ONE),
+            &start,
+            &(start + 100 * DAY),
+            &start,
+            &true,
+            &true,
+            &true,
+        )
+        .unwrap_err()
+        .unwrap();
+
+    assert_eq!(err, Error::TokenTransferFailed);
+    assert_eq!(h.client.stream_count(), 0, "id counter must not advance");
+    assert!(!h.client.stream_exists(&0), "no phantom entry at id 0");
+    assert_eq!(
+        false_token.balance(&h.sender),
+        10_000 * ONE,
+        "failed transfer must not debit or credit the sender"
+    );
+    assert_eq!(
+        false_token.balance(&h.contract_id),
+        0,
+        "failed transfer must not grow the contract's pool"
+    );
+    assert!(
+        h.env.events().all().events().is_empty(),
+        "reverted transfer must emit no success event"
+    );
+}
+
+#[test]
+fn fewer_token_decimals_do_not_rescale_deposit_or_withdrawal() {
+    let h = Harness::new();
+    let (token, low_decimal_token) = register_fee_on_transfer_token(&h);
+    low_decimal_token.set_decimals(&2);
+    assert_eq!(low_decimal_token.decimals(), 2);
+
+    let deposit = 1_000 * ONE;
+    let start = h.now();
+    let end = start + 100;
+    let sender_before = low_decimal_token.balance(&h.sender);
+    let stream_id = h.client.create_stream(
+        &h.sender,
+        &h.recipient,
+        &token,
+        &deposit,
+        &start,
+        &end,
+        &start,
+        &true,
+        &true,
+        &true,
+    );
+
+    let create_events = h
+        .env
+        .events()
+        .all()
+        .filter_by_contract(&h.contract_id)
+        .events()
+        .to_vec();
+    assert_eq!(
+        create_events,
+        std::vec![StreamCreated {
+            stream_id,
+            sender: h.sender.clone(),
+            recipient: h.recipient.clone(),
+            token: token.clone(),
+            deposited: deposit,
+            start_time: start,
+            end_time: end,
+            cliff_time: start,
+            cancellable: true,
+            pausable: true,
+            transferable: true,
+        }
+        .to_xdr(&h.env, &h.contract_id)],
+        "create event must report the unscaled raw deposit"
+    );
+
+    let created = h.client.get_stream(&stream_id);
+    assert_eq!(created.deposited, deposit);
+    assert_eq!(created.withdrawn, 0);
+    assert_eq!(low_decimal_token.balance(&h.sender), sender_before - deposit);
+    assert_eq!(low_decimal_token.balance(&h.contract_id), deposit);
+
+    h.advance(100);
+    assert_eq!(h.client.withdraw(&stream_id, &None), deposit);
+
+    let withdrawn_events = h
+        .env
+        .events()
+        .all()
+        .filter_by_contract(&h.contract_id)
+        .events()
+        .to_vec();
+    assert_eq!(
+        withdrawn_events,
+        std::vec![Withdrawn {
+            stream_id,
+            recipient: h.recipient.clone(),
+            amount: deposit,
+            withdrawn: deposit,
+            deposited: deposit,
+            status: StreamStatus::Depleted,
+        }
+        .to_xdr(&h.env, &h.contract_id)],
+        "withdrawal event must report the same unscaled raw amount"
+    );
+
+    let final_stream = h.client.get_stream(&stream_id);
+    assert_eq!(final_stream.deposited, deposit);
+    assert_eq!(final_stream.withdrawn, deposit);
+    assert_eq!(final_stream.status, StreamStatus::Depleted);
+    assert_eq!(low_decimal_token.balance(&h.sender), sender_before - deposit);
+    assert_eq!(low_decimal_token.balance(&h.recipient), deposit);
+    assert_eq!(low_decimal_token.balance(&h.contract_id), 0);
+    assert_eq!(
+        low_decimal_token.balance(&h.sender)
+            + low_decimal_token.balance(&h.recipient)
+            + low_decimal_token.balance(&h.contract_id),
+        sender_before,
+        "sender + recipient + pool must conserve the initial token balance"
+    );
 }

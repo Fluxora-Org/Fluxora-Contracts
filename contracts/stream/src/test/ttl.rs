@@ -28,7 +28,7 @@ use soroban_sdk::testutils::storage::Persistent as _;
 use soroban_sdk::testutils::Ledger as _;
 
 use super::common::*;
-use crate::{storage, DataKey, TTL_BUFFER_SECONDS};
+use crate::{storage, DataKey, TTL_BUFFER_SECONDS, TTL_SAFETY_MARGIN_PERCENT};
 
 #[test]
 fn persisted_stream_fixture_survives_read_mutate_and_ttl_extension() {
@@ -169,9 +169,12 @@ fn every_mutating_call_re_extends_the_ttl() {
 
     h.advance(10 * DAY);
     h.client.withdraw(&id, &None);
-    assert!(
-        ttl_of(&h, id) > full - 200_000,
-        "withdraw did not re-extend"
+    // Back to exactly the margined target (90 days remaining + 30-day
+    // buffer): every touch re-funds the window in full.
+    assert_eq!(
+        ttl_of(&h, id),
+        storage::seconds_to_ledgers(90 * DAY + TTL_BUFFER_SECONDS),
+        "withdraw did not re-extend to the full target"
     );
 
     age_ledgers(&h, ttl_of(&h, id) - 1_000);
@@ -206,6 +209,11 @@ fn a_year_long_stream_survives_on_keeper_sweeps_alone() {
 
     // Nobody touches the stream all year except the keeper, sweeping at 60% of
     // the rent window — the cadence the backend keeper would actually use.
+    // Sweeps advance wall-clock time at the nominal close cadence, the same
+    // rate the TTL conversion assumes, while the funding carries the margin —
+    // so the rent is always funded for more wall-clock time than the decay
+    // between sweeps actually burns. The test cannot flatter itself by
+    // underestimating close time.
     let sweep_every = MAX_TTL * 6 / 10;
     let mut sweeps = 0;
     let mut lowest_seen = MAX_TTL;
@@ -382,7 +390,383 @@ fn seconds_to_ledgers_rounds_up() {
     assert_eq!(storage::seconds_to_ledgers(u64::MAX), u32::MAX);
 }
 
+// --- Terminal stream TTL rejection (issue #1697) ---------------------------
+//
+// Extending the TTL of a Cancelled or Depleted stream must be rejected with
+// StreamTerminated. Both `extend_stream_ttl` and `batch_extend_ttl` enforce
+// the same rule. Neither the TTL nor any storage state changes on rejection.
+
+use crate::Error;
+
+// -- extend_stream_ttl: Cancelled -------------------------------------------
+
+/// Cancelling a stream and then attempting to extend its TTL must fail.
 #[test]
-fn nominal_ledger_close_time_is_five_seconds() {
-    assert_eq!(storage::SECONDS_PER_LEDGER, 5);
+fn extend_stream_ttl_rejects_cancelled_stream() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * super::common::ONE, 100 * super::common::DAY);
+
+    h.advance(30 * super::common::DAY);
+    h.client.cancel(&id);
+
+    let ttl_before = ttl_of(&h, id);
+
+    let err = h.client.try_extend_stream_ttl(&id).unwrap_err().unwrap();
+    assert_eq!(err, Error::StreamTerminated);
+
+    // TTL must not have changed.
+    assert_eq!(
+        ttl_of(&h, id),
+        ttl_before,
+        "TTL must not change on rejection"
+    );
+}
+
+/// extend_stream_ttl is rejected even when the cancelled stream still has an
+/// unwithdrawn vested tail.
+#[test]
+fn extend_stream_ttl_rejects_cancelled_stream_with_unwithdrawn_tail() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * super::common::ONE, 100 * super::common::DAY);
+
+    h.advance(50 * super::common::DAY); // 500 vested
+    h.client.cancel(&id);
+
+    // There is still a withdrawable tail, but the stream is terminal.
+    assert_eq!(
+        h.client.withdrawable_of(&id),
+        500 * super::common::ONE,
+        "sanity: tail is withdrawable"
+    );
+
+    let ttl_before = ttl_of(&h, id);
+    let err = h.client.try_extend_stream_ttl(&id).unwrap_err().unwrap();
+    assert_eq!(err, Error::StreamTerminated);
+    assert_eq!(ttl_of(&h, id), ttl_before, "TTL unchanged on rejection");
+}
+
+// -- extend_stream_ttl: Depleted --------------------------------------------
+
+/// A fully-drained stream (Depleted) must be rejected by extend_stream_ttl.
+#[test]
+fn extend_stream_ttl_rejects_depleted_stream() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * super::common::ONE, 100 * super::common::DAY);
+
+    h.warp_to(super::common::T0 + 100 * super::common::DAY);
+    h.client.withdraw(&id, &None);
+
+    assert_eq!(
+        h.client.get_stream(&id).status,
+        crate::StreamStatus::Depleted
+    );
+
+    let ttl_before = ttl_of(&h, id);
+    let err = h.client.try_extend_stream_ttl(&id).unwrap_err().unwrap();
+    assert_eq!(err, Error::StreamTerminated);
+    assert_eq!(ttl_of(&h, id), ttl_before, "TTL unchanged on rejection");
+}
+
+/// A stream that becomes Depleted mid-schedule (paused past its end, then
+/// drained) is still correctly rejected.
+#[test]
+fn extend_stream_ttl_rejects_depleted_stream_after_pause_and_drain() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * super::common::ONE, 100 * super::common::DAY);
+
+    // Advance past end, pause, then drain.
+    h.warp_to(super::common::T0 + 150 * super::common::DAY);
+    h.client.pause(&id);
+    h.client.withdraw(&id, &None);
+
+    assert_eq!(
+        h.client.get_stream(&id).status,
+        crate::StreamStatus::Depleted
+    );
+
+    let ttl_before = ttl_of(&h, id);
+    let err = h.client.try_extend_stream_ttl(&id).unwrap_err().unwrap();
+    assert_eq!(err, Error::StreamTerminated);
+    assert_eq!(ttl_of(&h, id), ttl_before);
+}
+
+// -- batch_extend_ttl: Cancelled --------------------------------------------
+
+/// A batch that contains a cancelled stream must be rejected in full.
+#[test]
+fn batch_extend_ttl_rejects_batch_containing_cancelled_stream() {
+    let h = Harness::new();
+    h.env.ledger().set_max_entry_ttl(500_000);
+
+    let active = h.create_simple(100 * super::common::ONE, super::common::YEAR);
+    let cancelled = h.create_simple(100 * super::common::ONE, 100 * super::common::DAY);
+
+    h.advance(30 * super::common::DAY);
+    h.client.cancel(&cancelled);
+
+    // Age both entries so an extension would be meaningful.
+    age_ledgers(&h, 400_000);
+
+    let ttl_active_before = ttl_of(&h, active);
+    let ttl_cancelled_before = ttl_of(&h, cancelled);
+
+    let err = h
+        .client
+        .try_batch_extend_ttl(&h.ids(&[active, cancelled]))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::StreamTerminated);
+
+    // Neither stream's TTL should have changed.
+    assert_eq!(
+        ttl_of(&h, active),
+        ttl_active_before,
+        "active stream TTL must not change on batch rejection"
+    );
+    assert_eq!(
+        ttl_of(&h, cancelled),
+        ttl_cancelled_before,
+        "cancelled stream TTL must not change on batch rejection"
+    );
+}
+
+/// A batch consisting solely of a cancelled stream is rejected.
+#[test]
+fn batch_extend_ttl_rejects_batch_with_only_cancelled_stream() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * super::common::ONE, 100 * super::common::DAY);
+
+    h.advance(30 * super::common::DAY);
+    h.client.cancel(&id);
+
+    let ttl_before = ttl_of(&h, id);
+    let err = h
+        .client
+        .try_batch_extend_ttl(&h.ids(&[id]))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::StreamTerminated);
+    assert_eq!(ttl_of(&h, id), ttl_before);
+}
+
+// -- batch_extend_ttl: Depleted ---------------------------------------------
+
+/// A batch that contains a depleted stream must be rejected in full.
+#[test]
+fn batch_extend_ttl_rejects_batch_containing_depleted_stream() {
+    let h = Harness::new();
+    h.env.ledger().set_max_entry_ttl(500_000);
+
+    let active = h.create_simple(100 * super::common::ONE, super::common::YEAR);
+    let depleted = h.create_simple(100 * super::common::ONE, 100 * super::common::DAY);
+
+    h.warp_to(super::common::T0 + 100 * super::common::DAY);
+    h.client.withdraw(&depleted, &None);
+    assert_eq!(
+        h.client.get_stream(&depleted).status,
+        crate::StreamStatus::Depleted
+    );
+
+    age_ledgers(&h, 400_000);
+
+    let ttl_active_before = ttl_of(&h, active);
+    let ttl_depleted_before = ttl_of(&h, depleted);
+
+    let err = h
+        .client
+        .try_batch_extend_ttl(&h.ids(&[active, depleted]))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::StreamTerminated);
+
+    assert_eq!(
+        ttl_of(&h, active),
+        ttl_active_before,
+        "active stream TTL must not change on batch rejection"
+    );
+    assert_eq!(
+        ttl_of(&h, depleted),
+        ttl_depleted_before,
+        "depleted stream TTL must not change on batch rejection"
+    );
+}
+
+/// A batch consisting solely of a depleted stream is rejected.
+#[test]
+fn batch_extend_ttl_rejects_batch_with_only_depleted_stream() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * super::common::ONE, 100 * super::common::DAY);
+
+    h.warp_to(super::common::T0 + 100 * super::common::DAY);
+    h.client.withdraw(&id, &None);
+    assert_eq!(
+        h.client.get_stream(&id).status,
+        crate::StreamStatus::Depleted
+    );
+
+    let ttl_before = ttl_of(&h, id);
+    let err = h
+        .client
+        .try_batch_extend_ttl(&h.ids(&[id]))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::StreamTerminated);
+    assert_eq!(ttl_of(&h, id), ttl_before);
+}
+
+// -- batch_extend_ttl: unknown ids still skipped, but terminal ids rejected --
+
+/// Unknown (missing/archived) ids are still skipped, but a terminal id in the
+/// same batch causes the whole call to fail. This ensures that removing a
+/// terminal id from the batch is the correct fix, not restoring it.
+#[test]
+fn batch_extend_ttl_rejects_when_terminal_id_is_mixed_with_unknown_id() {
+    let h = Harness::new();
+    h.env.ledger().set_max_entry_ttl(500_000);
+
+    let cancelled = h.create_simple(100 * super::common::ONE, 100 * super::common::DAY);
+    h.advance(30 * super::common::DAY);
+    h.client.cancel(&cancelled);
+
+    age_ledgers(&h, 400_000);
+    let ttl_before = ttl_of(&h, cancelled);
+
+    // 9999 is an unknown id; cancelled is terminal. The whole batch must fail.
+    let err = h
+        .client
+        .try_batch_extend_ttl(&h.ids(&[9999, cancelled]))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::StreamTerminated);
+    assert_eq!(ttl_of(&h, cancelled), ttl_before);
+}
+
+// -- Active streams are still accepted after the rule is in place -----------
+
+/// A normal active stream can still be extended.  This guards against a
+/// regression where the new terminal check incorrectly fires on non-terminal
+/// streams.
+#[test]
+fn extend_stream_ttl_still_works_for_active_stream() {
+    let h = Harness::new();
+    h.env.ledger().set_max_entry_ttl(500_000);
+    let id = h.create_simple(1_000 * super::common::ONE, super::common::YEAR);
+
+    age_ledgers(&h, 400_000);
+    let ttl_before = ttl_of(&h, id);
+
+    let result = h.client.try_extend_stream_ttl(&id);
+    assert!(result.is_ok(), "active stream must still be extendable");
+    assert!(
+        ttl_of(&h, id) > ttl_before,
+        "TTL must increase after extension"
+    );
+}
+
+/// A normal active batch can still be extended.
+#[test]
+fn batch_extend_ttl_still_works_for_active_streams() {
+    let h = Harness::new();
+    h.env.ledger().set_max_entry_ttl(500_000);
+    let a = h.create_simple(100 * super::common::ONE, super::common::YEAR);
+    let b = h.create_simple(100 * super::common::ONE, super::common::YEAR);
+
+    age_ledgers(&h, 400_000);
+
+    let result = h.client.try_batch_extend_ttl(&h.ids(&[a, b]));
+    assert!(
+        result.is_ok(),
+        "batch of active streams must still be extendable"
+    );
+    assert_eq!(result.unwrap().unwrap(), 2);
+/// The pinned assumed close time and where it comes from.
+///
+/// #1806: this constant is measured, not assumed. The value is the observed
+/// mean close time rounded up to a whole second; the raw statistics, the
+/// window and the method live in docs/ledger-close-time.md, and
+/// `script/measure-ledger-close.sh --verify` re-checks the live network
+/// against it. A sustained change in close time in either direction — beyond
+/// what the safety margin covers — must land here as a code review with a
+/// fresh measurement, not silently erode every TTL.
+#[test]
+fn seconds_per_ledger_matches_the_measured_close_time() {
+    // The docs and the constant must stay in lockstep. If this fails after a
+    // re-measurement, one of the two was updated without the other.
+    // MARKER: observed_mean_seconds
+    let observed_mean_rounded_up: u64 = 5; // docs/ledger-close-time.md: 5.000 s
+    assert_eq!(
+        storage::SECONDS_PER_LEDGER, observed_mean_rounded_up,
+        "SECONDS_PER_LEDGER drifted from the measured value in \
+         docs/ledger-close-time.md"
+    );
+}
+
+/// The margin exists to absorb drift between re-measurements: close time can
+/// slide without anyone noticing until the next sustained window is measured.
+///
+/// Direction note: a funded TTL of N ledgers spans N × real_close seconds, so
+/// a network that runs *faster* than the conversion assumes shrinks every
+/// window — that is the side the margin guards. A slower network only
+/// over-funds (wasteful rent, never unsafe).
+#[test]
+fn safety_margin_absorbs_drift_between_measurements() {
+    assert_eq!(storage::TTL_SAFETY_MARGIN_PERCENT, 20);
+
+    // The coverage guarantee, in exact integer arithmetic: for any real mean
+    // close time c with c × (100 + margin) ≥ SECONDS_PER_LEDGER × 100 —
+    // c ≥ 5 × 100/120 ≈ 4.17 s, a network up to ~17% faster than observed —
+    // a window funded for s seconds spans at least s seconds. Checked at the
+    // load-bearing point, the retention floor: its 622,080 ledgers span 30
+    // days at exactly that boundary close time.
+    assert!(
+        storage::MIN_STREAM_TTL_LEDGERS as u64
+            * storage::SECONDS_PER_LEDGER
+            * 100
+            >= TTL_BUFFER_SECONDS * (100 + storage::TTL_SAFETY_MARGIN_PERCENT),
+        "the retention floor no longer covers 30 days at the margin's \
+         boundary close time"
+    );
+}
+
+/// The drift detector: the funded window must cover the stream even if close
+/// time drifts to the protocol's *nominal* 5 s while the conversion is
+/// inflated on top of it — and, by the margin's guarantee, for any real mean
+/// at or above ~4.17 s. This is the test that fails if the network's real
+/// close time changes by more than the margin absorbs (see
+/// docs/KNOWN-LIMITATIONS.md §5).
+#[test]
+fn conversion_covers_close_time_faster_than_observed() {
+    let nominal: u64 = 5; // Stellar target close time
+
+    // Coverage floor of the band, truncated down: the smallest whole-second
+    // close time the margin provably covers. Must stay at or below the
+    // nominal, or a move back to nominal alone would break coverage.
+    let coverage_floor =
+        storage::SECONDS_PER_LEDGER * 100 / (100 + storage::TTL_SAFETY_MARGIN_PERCENT);
+    assert!(
+        coverage_floor <= nominal,
+        "margin no longer covers the nominal close time"
+    );
+
+    // 30 days of rent must span 30 days even at the nominal close time.
+    assert!(
+        storage::seconds_to_ledgers(TTL_BUFFER_SECONDS) as u64 * nominal
+            >= TTL_BUFFER_SECONDS,
+        "the funded window is shorter than intended at nominal close time"
+    );
+}
+
+#[test]
+fn seconds_to_ledgers_round_trip_never_undershoots() {
+    // Converting back at the assumed close time must never return less than
+    // was asked — including after the margin inflates the request. Checked at
+    // one-second granularity, the sizes the contract actually funds at, and
+    // the u64 boundary.
+    for s in [1u64, 10, 86_400, 30 * 86_400, 365 * 86_400] {
+        let ledgers = storage::seconds_to_ledgers(s);
+        assert!(
+            ledgers as u64 * storage::SECONDS_PER_LEDGER >= s,
+            "conversion undershoots at {s} s"
+        );
+    }
 }
