@@ -28,11 +28,31 @@ use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{Address, Env};
 
 use crate::accrual;
-use crate::types::{Stream, StreamStatus};
+use crate::types::{ReleaseCurve, Stream, StreamStatus};
 
 /// Build a stream directly, bypassing the contract, so a property case costs
 /// no host invocations.
 fn stream_of(deposited: i128, start: u64, duration: u64, cliff_offset: u64) -> Stream {
+    stream_of_curve(
+        deposited,
+        start,
+        duration,
+        cliff_offset,
+        ReleaseCurve::Linear,
+    )
+}
+
+/// As [`stream_of`], with an explicit release curve. Every strategy below is
+/// expressed against `stream_of`, so the linear cases stay exactly as they were;
+/// `every_curve_is_bounded_conserving_and_monotonic` is the one property that
+/// sweeps all three curves.
+fn stream_of_curve(
+    deposited: i128,
+    start: u64,
+    duration: u64,
+    cliff_offset: u64,
+    curve: ReleaseCurve,
+) -> Stream {
     let env = Env::default();
     Stream {
         sender: Address::generate(&env),
@@ -49,7 +69,22 @@ fn stream_of(deposited: i128, start: u64, duration: u64, cliff_offset: u64) -> S
         paused_at: None,
         paused_total: 0,
         status: StreamStatus::Active,
+        curve,
     }
+}
+
+/// One of every supported [`ReleaseCurve`], uniformly.
+///
+/// Kept in a helper so the property that uses it covers each variant
+/// automatically: adding a fourth curve to the enum means adding it here, and
+/// the property then fails loudly if the new curve breaks an invariant rather
+/// than silently going untested.
+fn curve_strategy() -> impl Strategy<Value = ReleaseCurve> {
+    prop_oneof![
+        Just(ReleaseCurve::Linear),
+        Just(ReleaseCurve::Step),
+        Just(ReleaseCurve::FrontLoaded),
+    ]
 }
 
 /// Longest schedule generated. Bounded so that `deposited * duration` cannot
@@ -142,6 +177,65 @@ proptest! {
         let earlier = accrual::vested(&s, start + t).unwrap();
         let later = accrual::vested(&s, start + t + step).unwrap();
         prop_assert!(later >= earlier, "vesting went backwards: {} -> {}", earlier, later);
+    }
+
+    /// **The three invariants above, for every curve at once.** Bounds,
+    /// conservation, and monotonicity are properties of *each*
+    /// [`ReleaseCurve`], not of linear alone — that is the whole point of the
+    /// curve abstraction, and it is what keeps the pool solvent whichever
+    /// schedule a sender picks. A fourth curve that broke any of them fails
+    /// here the moment it is added to `curve_strategy`, rather than shipping
+    /// as an unnoticed gap.
+    #[test]
+    fn every_curve_is_bounded_conserving_and_monotonic(
+        deposited in 1i128..i128::MAX / (1 << 40),
+        duration in 1u64..MAX_DURATION,
+        cliff_frac in 0u64..=100,
+        earlier_raw in 0u64..MAX_DURATION,
+        step in 0u64..MAX_DURATION,
+        curve in curve_strategy(),
+    ) {
+        let cliff_offset = duration * cliff_frac / 100;
+        let deposited = deposit_for(deposited, duration);
+
+        let start = 1_700_000_000u64;
+        let s = stream_of_curve(deposited, start, duration, cliff_offset, curve);
+
+        // `within(.., duration + 1)` spans `[0, duration]` inclusive, so the
+        // sample covers the terminal instant as well as every interior one.
+        let earlier = start + within(earlier_raw, duration.saturating_add(1));
+        let later = earlier.saturating_add(step);
+
+        let v_earlier = accrual::vested(&s, earlier).unwrap();
+        let v_later = accrual::vested(&s, later).unwrap();
+        let r_later = accrual::refundable(&s, later).unwrap();
+
+        prop_assert!(v_earlier >= 0, "{curve:?}: vested went negative");
+        prop_assert!(
+            v_later <= deposited,
+            "{curve:?}: vested {} exceeded deposit {}",
+            v_later,
+            deposited
+        );
+        prop_assert!(
+            v_later >= v_earlier,
+            "{curve:?}: vesting went backwards: {} -> {}",
+            v_earlier,
+            v_later
+        );
+        prop_assert_eq!(
+            v_later + r_later,
+            deposited,
+            "conservation failed for {:?}",
+            curve
+        );
+        // Whatever the shape, the schedule settles at exactly the deposit.
+        prop_assert_eq!(
+            accrual::vested(&s, start + duration).unwrap(),
+            deposited,
+            "full schedule must vest the whole deposit for {:?}",
+            curve
+        );
     }
 
     /// Rounding is **down**, and tight to within one stroop.

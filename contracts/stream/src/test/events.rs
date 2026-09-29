@@ -380,6 +380,7 @@ fn test_golden_events() {
         &env,
         Symbol::new(env, "cancellable"),
         Symbol::new(env, "cliff_time"),
+        Symbol::new(env, "curve"),
         Symbol::new(env, "deposited"),
         Symbol::new(env, "end_time"),
         Symbol::new(env, "pausable"),

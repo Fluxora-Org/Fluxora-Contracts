@@ -27,12 +27,52 @@ fn fresh() -> (Harness<'static>, u64) {
     (h, id)
 }
 
+/// Issue #1815 — the same setup as [`fresh`], but on a non-linear release
+/// curve, so the curve-dispatching accrual path is measured rather than the
+/// linear fast path alone.
+fn fresh_curved(curve: crate::ReleaseCurve) -> (Harness<'static>, u64) {
+    let h = wasm_harness();
+    let start = h.now();
+    let id = h.client.create_stream_with_curve(
+        &h.sender,
+        &h.recipient,
+        &h.token,
+        &(1_000 * ONE),
+        &start,
+        &(start + 100 * DAY),
+        &start,
+        &true,
+        &true,
+        &true,
+        &curve,
+    );
+    (h, id)
+}
+
 #[test]
 #[ignore = "requires release WASM; run with script/validate_gas.py"]
 fn entrypoint_cost_snapshot() {
     let h = wasm_harness();
     h.create_simple(1_000 * ONE, 100 * DAY);
     record(&h, "create_stream");
+
+    // Issue #1815 — the curve-carrying creation path.
+    let h = wasm_harness();
+    let start = h.now();
+    h.client.create_stream_with_curve(
+        &h.sender,
+        &h.recipient,
+        &h.token,
+        &(1_000 * ONE),
+        &start,
+        &(start + 100 * DAY),
+        &start,
+        &true,
+        &true,
+        &true,
+        &crate::ReleaseCurve::FrontLoaded,
+    );
+    record(&h, "create_stream_with_curve");
 
     let (h, id) = fresh();
     h.client.top_up(&id, &(100 * ONE));
@@ -133,7 +173,12 @@ fn entrypoint_cost_snapshot() {
     h.client.withdrawable_of(&id);
     record(&h, "withdrawable_of");
 
-    let (h, id) = fresh();
+    // Issue #1815 — `vested` now dispatches on the stream's release curve, so
+    // the pinned figure for this entry point is taken on a non-linear stream:
+    // that is the curve-dispatching path, and it is never cheaper than the
+    // linear arm the same entry point can also take. The gas gate pins exactly
+    // one row per public entry point, so the two arms share this one.
+    let (h, id) = fresh_curved(crate::ReleaseCurve::FrontLoaded);
     h.client.vested_of(&id);
     record(&h, "vested_of");
 

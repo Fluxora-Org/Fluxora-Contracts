@@ -1,5 +1,5 @@
 {
-  "abi_version": 1,
+  "abi_version": 2,
   "functions": [
     {
       "name": "batch_extend_ttl",
@@ -40,6 +40,24 @@
         {"name": "cancellable", "type": "bool"},
         {"name": "pausable", "type": "bool"},
         {"name": "transferable", "type": "bool"}
+      ],
+      "outputs": "Result<u64, Error>"
+    },
+    {
+      "name": "create_stream_with_curve",
+      "auth": "sender",
+      "inputs": [
+        {"name": "sender", "type": "Address"},
+        {"name": "recipient", "type": "Address"},
+        {"name": "token", "type": "Address"},
+        {"name": "deposit", "type": "i128"},
+        {"name": "start_time", "type": "u64"},
+        {"name": "end_time", "type": "u64"},
+        {"name": "cliff_time", "type": "u64"},
+        {"name": "cancellable", "type": "bool"},
+        {"name": "pausable", "type": "bool"},
+        {"name": "transferable", "type": "bool"},
+        {"name": "curve", "type": "ReleaseCurve"}
       ],
       "outputs": "Result<u64, Error>"
     },
@@ -223,11 +241,23 @@
   ],
   "types": [
     {
+      "name": "ReleaseCurve",
+      "kind": "enum",
+      "fields": [
+      ],
+      "cases": [
+        {"name": "Linear", "discriminant": 0},
+        {"name": "Step", "discriminant": 1},
+        {"name": "FrontLoaded", "discriminant": 2}
+      ]
+    },
+    {
       "name": "Stream",
       "kind": "struct",
       "fields": [
         {"name": "cancellable", "type": "bool"},
         {"name": "cliff_time", "type": "u64"},
+        {"name": "curve", "type": "ReleaseCurve"},
         {"name": "deposited", "type": "i128"},
         {"name": "end_time", "type": "u64"},
         {"name": "pausable", "type": "bool"},
@@ -354,7 +384,8 @@
         {"name": "cliff_time", "type": "u64"},
         {"name": "cancellable", "type": "bool"},
         {"name": "pausable", "type": "bool"},
-        {"name": "transferable", "type": "bool"}
+        {"name": "transferable", "type": "bool"},
+        {"name": "curve", "type": "ReleaseCurve"}
       ]
     },
     {

@@ -28,8 +28,8 @@
 //!
 //! Discovery is an off-chain concern: [`create_stream`](FluxoraStream::create_stream)
 //! returns the new id and emits an event carrying sender, recipient and every
-//! schedule field, so an indexer can answer "show me my streams" without the
-//! contract paying rent to remember.
+//! schedule field — including the [`ReleaseCurve`] — so an indexer can answer
+//! "show me my streams" without the contract paying rent to remember.
 //!
 //! ## Immutable guarantees
 //!
@@ -69,7 +69,7 @@ pub use accrual::{
 pub use error::Error;
 pub use storage::{MIN_STREAM_TTL_LEDGERS, SECONDS_PER_LEDGER, TTL_BUFFER_SECONDS};
 pub use types::op;
-pub use types::{DataKey, DelegateGrant, Stream, StreamStatus};
+pub use types::{DataKey, DelegateGrant, ReleaseCurve, Stream, StreamStatus};
 
 use soroban_sdk::{
     contract, contractimpl, token, Address, Env, InvokeError, MuxedAddress, TryFromVal, Vec,
@@ -118,7 +118,14 @@ pub const MAX_BATCH_SIZE: u32 = 16;
 ///
 /// The on-chain contract is immutable, so a bump is a *new deployment*, not an
 /// in-place upgrade. See `docs/ABI.md` and `test::abi`.
-pub const ABI_VERSION: u32 = 1;
+///
+/// **2** — [`ReleaseCurve`] support. `get_stream`'s `Stream` return type grew a
+/// `curve` field and `StreamCreated` grew a `curve` payload, so a typed client
+/// built against version 1 cannot decode either. The new
+/// [`FluxoraStream::create_stream_with_curve`] entry point is additive, and
+/// [`FluxoraStream::create_stream`] keeps its exact signature and its linear
+/// arithmetic; the stored layout is unchanged (see [`crate::types::StreamRecord`]).
+pub const ABI_VERSION: u32 = 2;
 
 /// Call `token.transfer(from, to, amount)` and map any failure to a stable
 /// stream-level error.
@@ -231,7 +238,12 @@ impl FluxoraStream {
     ///
     /// # Schedule
     ///
-    /// Tokens accrue linearly from `start_time` to `end_time`. `start_time` may
+    /// Tokens accrue linearly from `start_time` to `end_time` — the
+    /// [`ReleaseCurve::Linear`] default. Use
+    /// [`create_stream_with_curve`](FluxoraStream::create_stream_with_curve) to
+    /// select a different release shape; this entry point is kept signature- and
+    /// arithmetic-identical so an existing integrator sees no change at all.
+    /// `start_time` may
     /// be in the past — backdated vesting from a hire date or grant award date
     /// is a legitimate use — in which case the backdated portion is immediately
     /// withdrawable. It may equally be in the future — a scheduled stream — in
@@ -292,6 +304,115 @@ impl FluxoraStream {
         pausable: bool,
         transferable: bool,
     ) -> Result<u64, Error> {
+        Self::create_stream_inner(
+            env,
+            sender,
+            recipient,
+            token,
+            deposit,
+            start_time,
+            end_time,
+            cliff_time,
+            cancellable,
+            pausable,
+            transferable,
+            ReleaseCurve::Linear,
+        )
+    }
+
+    /// Create a stream with an explicit [`ReleaseCurve`].
+    ///
+    /// Identical to [`create_stream`](FluxoraStream::create_stream) in every
+    /// respect — same authorization, same validation, same deposit pull, same
+    /// event — except that the shape of the release schedule above the cliff is
+    /// chosen by `curve` instead of defaulting to [`ReleaseCurve::Linear`].
+    ///
+    /// # Curve semantics
+    ///
+    /// All curves are interchangeable in *total*: each is monotone
+    /// non-decreasing on the stream clock and each delivers exactly `deposited`
+    /// by `end_time`. That common contract is what keeps the pool solvent —
+    /// `vested + refundable == deposited` holds at every instant, for every
+    /// curve — so the choice is purely about *when* the recipient's claim
+    /// grows, never about how much they eventually receive.
+    ///
+    /// * [`ReleaseCurve::Linear`] — `floor(deposited * elapsed / duration)`,
+    ///   byte-identical to [`create_stream`](FluxoraStream::create_stream).
+    /// * [`ReleaseCurve::Step`] — four equal tranches, opening at 25%, 50%,
+    ///   75% and 100% of the schedule.
+    /// * [`ReleaseCurve::FrontLoaded`] — `f(u) = 2u - u²`, ahead of linear for
+    ///   the whole schedule and settling at the same endpoint.
+    ///
+    /// The curve is fixed at creation and can never change, exactly like
+    /// `cancellable`, `pausable` and `transferable`. It is returned by
+    /// [`get_stream`](FluxoraStream::get_stream) and carried on the
+    /// `StreamCreated` event so an off-chain indexer can see it without a
+    /// second call.
+    ///
+    /// The same `deposit` / `duration` sanity guards apply as for
+    /// [`create_stream`](FluxoraStream::create_stream), including
+    /// [`Error::DepositRateTooLow`]; the front-loaded overflow guard it
+    /// establishes bounds `deposited * duration` (with the curve reading
+    /// `<= duration`), so no curve can overflow the accrual arithmetic later.
+    ///
+    /// # Errors
+    ///
+    /// The error set is identical to
+    /// [`create_stream`](FluxoraStream::create_stream); `curve` is always one
+    /// of the three variants above and is never rejected.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_stream_with_curve(
+        env: Env,
+        sender: Address,
+        recipient: Address,
+        token: Address,
+        deposit: i128,
+        start_time: u64,
+        end_time: u64,
+        cliff_time: u64,
+        cancellable: bool,
+        pausable: bool,
+        transferable: bool,
+        curve: ReleaseCurve,
+    ) -> Result<u64, Error> {
+        Self::create_stream_inner(
+            env,
+            sender,
+            recipient,
+            token,
+            deposit,
+            start_time,
+            end_time,
+            cliff_time,
+            cancellable,
+            pausable,
+            transferable,
+            curve,
+        )
+    }
+
+    /// The body shared by [`create_stream`](FluxoraStream::create_stream) and
+    /// [`create_stream_with_curve`](FluxoraStream::create_stream_with_curve).
+    ///
+    /// Kept private (and therefore not exported as an ABI entry point) so the
+    /// two public entry points are the single, documented surface and neither
+    /// can drift from the other: the linear path *is* the curve path with
+    /// [`ReleaseCurve::Linear`] selected.
+    #[allow(clippy::too_many_arguments)]
+    fn create_stream_inner(
+        env: Env,
+        sender: Address,
+        recipient: Address,
+        token: Address,
+        deposit: i128,
+        start_time: u64,
+        end_time: u64,
+        cliff_time: u64,
+        cancellable: bool,
+        pausable: bool,
+        transferable: bool,
+        curve: ReleaseCurve,
+    ) -> Result<u64, Error> {
         sender.require_auth();
 
         if sender == recipient {
@@ -341,6 +462,7 @@ impl FluxoraStream {
             paused_at: None,
             paused_total: 0,
             status: StreamStatus::Active,
+            curve,
         };
 
         // Pull the deposit before writing the stream entry. If the token
@@ -394,6 +516,17 @@ impl FluxoraStream {
     /// Rounding down guarantees `vested` never decreases across a top-up. The
     /// residual is at most one second of schedule, in the recipient's favour.
     ///
+    /// # Release curve
+    ///
+    /// The rate-preserving extension above is the [`ReleaseCurve::Linear`] rule.
+    /// A [`ReleaseCurve::Step`] or [`ReleaseCurve::FrontLoaded`] stream has no
+    /// constant per-second rate to preserve — that is the point of the curve —
+    /// so `top_up` takes the other safe option for those: it keeps `end_time`
+    /// and lets the added deposit ride the same curve, scaled proportionally.
+    /// See `top_up_duration_delta`. Either way the property that matters is
+    /// unchanged: `vested` never decreases across a top-up, and `top_up` still
+    /// re-checks it before committing (`Error::VestedDecreased`).
+    ///
     /// # Errors
     ///
     /// * [`Error::StreamMatured`] — the accrual clock has already reached
@@ -422,25 +555,10 @@ impl FluxoraStream {
 
         let current_duration = accrual::duration(&stream) as i128;
 
-        // delta = floor(amount * duration / deposited), preserving the rate.
-        // Floor, never ceiling — see the rounding note above.
-        let scaled = amount
-            .checked_mul(current_duration)
-            .ok_or(Error::Overflow)?;
-        let delta = scaled
-            .checked_div(stream.deposited)
-            .ok_or(Error::Overflow)?;
-        if delta < 0 || delta > u64::MAX as i128 {
-            return Err(Error::Overflow);
-        }
-
-        // A top-up too small to buy even one second cannot extend the schedule,
-        // so the only way to absorb it would be to raise the rate — which
-        // re-vests elapsed time retroactively, the exact thing this function
-        // exists to avoid. Reject instead.
-        if delta == 0 {
-            return Err(Error::TopUpTooSmall);
-        }
+        // How many seconds the schedule must grow by so the top-up is absorbed
+        // without retroactively re-vesting elapsed time. Curve-specific; see
+        // `top_up_duration_delta`.
+        let delta = Self::top_up_duration_delta(&stream, amount, current_duration)?;
 
         let new_deposited = stream
             .deposited
@@ -478,6 +596,50 @@ impl FluxoraStream {
 
         events::topped_up(&env, stream_id, &stream, amount);
         Ok(())
+    }
+
+    /// Seconds by which a top-up extends the schedule, for the stream's curve.
+    ///
+    /// [`ReleaseCurve::Linear`] is the original rule: `floor(amount * duration /
+    /// deposited)`, keeping the per-second rate fixed — see the rounding note on
+    /// [`FluxoraStream::top_up`] for why it floors and why a zero delta is
+    /// rejected rather than absorbed.
+    ///
+    /// [`ReleaseCurve::Step`] and [`ReleaseCurve::FrontLoaded`] have no constant
+    /// per-second rate to hold fixed, so `end_time` is left alone and the added
+    /// deposit rides the same curve. `vested` is monotone in `deposited` for a
+    /// fixed curve, so this can only raise the recipient's claim, which
+    /// [`FluxoraStream::top_up`] re-checks before committing.
+    fn top_up_duration_delta(
+        stream: &Stream,
+        amount: i128,
+        current_duration: i128,
+    ) -> Result<i128, Error> {
+        match stream.curve {
+            ReleaseCurve::Linear => {
+                // delta = floor(amount * duration / deposited), preserving the
+                // rate. Floor, never ceiling — see the rounding note above.
+                let scaled = amount
+                    .checked_mul(current_duration)
+                    .ok_or(Error::Overflow)?;
+                let delta = scaled
+                    .checked_div(stream.deposited)
+                    .ok_or(Error::Overflow)?;
+                if delta < 0 || delta > u64::MAX as i128 {
+                    return Err(Error::Overflow);
+                }
+                // A top-up too small to buy even one second cannot extend the
+                // schedule, so the only way to absorb it would be to raise the
+                // rate — which re-vests elapsed time retroactively, the exact
+                // thing this function exists to avoid. Reject instead.
+                if delta == 0 {
+                    return Err(Error::TopUpTooSmall);
+                }
+                Ok(delta)
+            }
+            // No rate to preserve: hold the schedule, scale the deposit in place.
+            ReleaseCurve::Step | ReleaseCurve::FrontLoaded => Ok(0),
+        }
     }
 
     /// Withdraw accrued tokens to the recipient.

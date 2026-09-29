@@ -76,10 +76,12 @@
 //! against storage and token balances in `test::cancel_events`.
 use soroban_sdk::{contractevent, Address, Env};
 
-use crate::types::{Stream, StreamStatus};
+use crate::types::{ReleaseCurve, Stream, StreamStatus};
 
 /// A new stream was created. Carries the complete initial state — this is the
-/// event an indexer builds its sender/recipient mapping from.
+/// event an indexer builds its sender/recipient mapping from — including the
+/// [`ReleaseCurve`], so the schedule shape is visible without a follow-up
+/// `get_stream` call.
 #[contractevent]
 pub struct StreamCreated {
     #[topic]
@@ -96,6 +98,9 @@ pub struct StreamCreated {
     pub cancellable: bool,
     pub pausable: bool,
     pub transferable: bool,
+    /// Shape of the release schedule. [`ReleaseCurve::Linear`] for a stream
+    /// created through `create_stream`.
+    pub curve: ReleaseCurve,
 }
 
 /// The recipient drew down accrued funds. Emitted once per stream, including
@@ -246,6 +251,7 @@ pub fn stream_created(env: &Env, stream_id: u64, stream: &Stream) {
         cancellable: stream.cancellable,
         pausable: stream.pausable,
         transferable: stream.transferable,
+        curve: stream.curve,
     }
     .publish(env);
 }

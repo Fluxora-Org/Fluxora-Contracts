@@ -99,7 +99,7 @@
 //! advancing-clock half over random schedules.
 
 use crate::error::Error;
-use crate::types::Stream;
+use crate::types::{ReleaseCurve, Stream};
 
 /// The stream's own clock, in the same units and origin as `start_time` and
 /// `end_time`. Stops while the stream is paused.
@@ -152,6 +152,13 @@ pub fn cliff_reached(stream: &Stream, now: u64) -> bool {
 /// Before the cliff this is zero — the cliff *gates* the payout, it does not
 /// delay accrual, so at the cliff instant the recipient becomes entitled to
 /// everything accrued since `start_time`, not since `cliff_time`.
+///
+/// The *shape* of the accrual above the cliff is selected by
+/// [`Stream::curve`]. Every supported curve is monotone non-decreasing on the
+/// stream clock and settles at exactly `deposited` once the schedule is
+/// complete; `Linear` reproduces the original
+/// `floor(deposited * elapsed / duration)` arithmetic byte for byte, so a
+/// stream created before curves existed vests exactly as it always did.
 pub fn vested(stream: &Stream, now: u64) -> Result<i128, Error> {
     if !cliff_reached(stream, now) {
         return Ok(0);
@@ -173,8 +180,24 @@ pub fn vested(stream: &Stream, now: u64) -> Result<i128, Error> {
         return Ok(stream.deposited);
     }
 
-    let numerator = stream
-        .deposited
+    match stream.curve {
+        ReleaseCurve::Linear => vested_linear(stream.deposited, consumed, total_duration),
+        ReleaseCurve::Step => Ok(vested_step(stream.deposited, consumed, total_duration)),
+        ReleaseCurve::FrontLoaded => Ok(vested_front_loaded(
+            stream.deposited,
+            consumed,
+            total_duration,
+        )),
+    }
+}
+
+/// `floor(deposited * consumed / duration)` — the original linear formula.
+///
+/// `consumed` is strictly less than `duration` in every caller, which is what
+/// makes the creation-time `deposited * duration` guard sufficient: the
+/// multiplication below can never exceed it.
+fn vested_linear(deposited: i128, consumed: u64, total_duration: u64) -> Result<i128, Error> {
+    let numerator = deposited
         .checked_mul(consumed as i128)
         .ok_or(Error::Overflow)?;
     let raw = numerator
@@ -184,11 +207,48 @@ pub fn vested(stream: &Stream, now: u64) -> Result<i128, Error> {
     // Clamp explicitly rather than trusting the arithmetic. `consumed` is
     // already capped at `total_duration`, so this should be unreachable, but
     // the invariant is load-bearing enough to assert rather than assume.
-    Ok(if raw > stream.deposited {
-        stream.deposited
-    } else {
-        raw
-    })
+    Ok(if raw > deposited { deposited } else { raw })
+}
+
+/// Four equal tranches: tranche `k` (for `k` in `1..=3`) opens once at least
+/// `ceil(k * duration / 4)` seconds have been consumed, and the fourth is
+/// delivered by the terminal full-vest branch in [`vested`]. The tranches
+/// therefore partition `deposited` exactly, with no rounding dust left behind.
+///
+/// `ceil`, not `floor`, so a schedule shorter than four seconds does not
+/// release a tranche at `start_time`.
+///
+/// Monotone by construction: `consumed` only grows, and the released count only
+/// grows with it.
+fn vested_step(deposited: i128, consumed: u64, total_duration: u64) -> i128 {
+    let mut tranches: i128 = 0;
+    for k in 1..=3u64 {
+        // `total_duration` is a `u64`, so `* 3` cannot overflow `u128`.
+        let threshold = ((total_duration as u128) * (k as u128)).div_ceil(4);
+        if (consumed as u128) >= threshold {
+            tranches += 1;
+        }
+    }
+    // `floor(deposited * tranches / 4)`, decomposed so the product stays in
+    // range even for a deposit close to `i128::MAX`.
+    let whole = deposited / 4;
+    let rem = deposited % 4;
+    whole * tranches + rem * tranches / 4
+}
+
+/// `f(u) = 2u - u²`, evaluated on a thousandth grid.
+///
+/// `u` and `curve` are integers in `[0, 1000]`, so `u * u` and every other
+/// intermediate stay far inside `i128`. The grid step never makes the result
+/// decrease: `curve(u + 1) - curve(u)` is `2` minus a `floor` difference of at
+/// most `2`, so it is always `>= 0`. The final `floor(deposited * curve /
+/// 1000)` is split so the multiplication cannot overflow.
+fn vested_front_loaded(deposited: i128, consumed: u64, total_duration: u64) -> i128 {
+    let u = ((consumed as u128) * 1000 / (total_duration as u128)) as i128;
+    let curve = 2 * u - (u * u) / 1000;
+    let whole = deposited / 1000;
+    let rem = deposited % 1000;
+    whole * curve + rem * curve / 1000
 }
 
 /// Amount the recipient can withdraw right now: vested minus already withdrawn.

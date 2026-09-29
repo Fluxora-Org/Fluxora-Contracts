@@ -65,6 +65,25 @@ discriminant and event is generated from that same spec XDR and committed at
 without bumping [`ABI_VERSION`](../contracts/stream/src/lib.rs). Additive
 changes update the snapshot only.
 
+### ABI versions
+
+| version | scope |
+|---|---|
+| `1` | The frozen interface above, as deployed at `CBCGTSCJ…`. |
+| `2` | **Release curves (#1815).** `Stream` gained a `curve` field, `StreamCreated` gained a `curve` payload field, and the new `create_stream_with_curve` entry point was added. |
+
+Version 2 is a *new deployment*, not an in-place upgrade (see Upgrade posture).
+The version 1 surface is unchanged in meaning and still callable on the version 1
+deployment: `create_stream` keeps its exact signature and its exact linear
+arithmetic. What makes the change **breaking**, and therefore what requires the
+bump, is that `get_stream` returns a `Stream` with one more field and
+`stream_created` carries one more payload field — a typed client generated
+against version 1 cannot decode either. The new entry point and the appended
+event field are individually additive; the struct field is not.
+
+On-chain storage did **not** change: version 1 entries stay readable and are read
+back as linear streams. See [Storage compatibility](#storage-compatibility).
+
 ---
 
 ## Constants
@@ -115,6 +134,7 @@ struct Stream {
     paused_at: Option<u64>,
     paused_total: u64,     // cumulative paused seconds, excluding any in-progress pause
     status: StreamStatus,
+    curve: ReleaseCurve,   // release shape above the cliff; immutable after creation
 }
 ```
 
@@ -137,6 +157,57 @@ Crosses the ABI as its **discriminant**, not its name.
 `Cancelled` is **sticky**: a cancelled stream later drained to zero stays
 `Cancelled`. It never becomes `Depleted`. This distinction is deliberate and
 load-bearing for reporting — see the resolved schema question below.
+
+### `ReleaseCurve`
+
+The shape of the release schedule **above the cliff**. Crosses the ABI as its
+**discriminant**, not its name. Selected once, at creation, and never mutable —
+like the capability flags, this is a trust feature: a recipient who accepts a
+front-loaded stream has verified on chain that the shape cannot be flattened
+afterwards. Defaults to `Linear` when a stream is created with `create_stream`.
+
+| value | name | schedule between `start_time` and `end_time` |
+|---|---|---|
+| `0` | `Linear` | `floor(deposited × elapsed / duration)`. The original formula, unchanged. |
+| `1` | `Step` | Four equal tranches. Tranche *k* (for *k* in `1..=3`) opens once `ceil(k × duration / 4)` seconds have been consumed; the fourth is delivered at maturity. The recipient's claim jumps by a quarter of the deposit at each 25 / 50 / 75 / 100 % boundary and does not move in between. |
+| `2` | `FrontLoaded` | `f(u) = 2u − u²` on `u = elapsed / duration`, evaluated on a 1/1000 grid: accelerates early, decelerates into maturity. Ahead of or equal to `Linear` at every grid point while inside the schedule. |
+
+All curves share three properties, and those are what the contract's invariants
+rely on:
+
+1. **Monotone non-decreasing** on the stream clock — `vested_of` can never go
+   backwards in time, for any curve.
+2. **`f(0) == 0`** — nothing vests before the start instant.
+3. **`f(duration) == deposited`** — the schedule settles at exactly the deposit,
+   so `vested_of + refundable_of == deposited` holds at every instant whichever
+   curve is selected.
+
+The variants differ only in *when* the deposit is delivered, never in how much.
+A `Step` tranche threshold uses `ceil`, not `floor`, so a schedule shorter than
+four seconds does not release a tranche at `start_time`. `Linear` uses the
+original `floor` and is byte-for-byte identical to the pre-#1815 arithmetic — a
+linear stream created through either entry point vests identically.
+
+### Storage compatibility
+
+Adding a field to the **stored** value of a `#[contracttype]` struct would make
+every entry written by an earlier deployment undecodable (the host unpacks the
+stored map positionally against the struct's field set, and reports
+`Error(Object, UnexpectedSize)` on a mismatch). Release curves therefore do **not**
+change the stored layout:
+
+* `DataKey::Stream(id)` still holds the frozen version 1 record — the version 1
+  field set, no `curve`.
+* A non-linear stream's curve is written to a side-car key,
+  `DataKey::StreamCurve(id)`, which is kept alive with the same TTL as the record
+  it annotates.
+* A **missing** side-car means `Linear`. Version 1 streams have no side-car, so
+  they read back as exactly the stream they were created as, and a linear stream
+  created today writes none either — it pays no rent for a key that would merely
+  restate the default. No migration is required for a live deployment.
+
+`get_stream` stitches the two together, so the `Stream` a caller sees always
+carries the effective curve.
 
 ### Stream ID allocation
 
@@ -334,6 +405,7 @@ accounting.
 | function | auth | returns |
 |---|---|---|
 | `create_stream(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable)` | sender | `u64` stream id |
+| `create_stream_with_curve(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable, curve)` | sender | `u64` stream id — [details](#create_stream_with_curve--detailed-reference) |
 | `top_up(stream_id, amount)` | sender | — |
 | `withdraw(stream_id, amount: Option<i128>)` | recipient | `i128` paid |
 | `batch_withdraw(recipient, stream_ids: Vec<u64>)` | recipient | `i128` total — [details](#batch_withdraw) |
@@ -432,6 +504,18 @@ The duration extension always rounds **down**. Rounding up would lower the rate
 and reduce already-vested amounts; rounding down guarantees `vested` never
 decreases across a top-up (residual at most one second of schedule, in the
 recipient's favour).
+
+**Non-linear curves (#1815).** The rate-preserving extension above is the
+`Linear` rule. A `Step` or `FrontLoaded` stream has no constant per-second rate
+to preserve — varying the rate is the point of the curve — so `top_up` takes the
+other safe option for those: it **keeps `end_time` where it is** and lets the
+added deposit ride the same curve, scaled proportionally. `Step`'s tranches and
+`FrontLoaded`'s shape are unchanged; only their amounts grow by the same
+proportion as the deposit. `vested` is monotone in `deposited` for a fixed
+curve, so this can only raise the recipient's claim, and `top_up` still
+re-checks the no-regression guard before committing. The `topped_up` event
+reports the (unchanged) `end_time` and the new `deposited`, so an indexer sees
+which of the two rules applied without a second call.
 
 Paused streams may be topped up: `Paused` is not terminal. Matured streams
 (accrual clock already at `end_time`) and terminal streams (`Cancelled` /
@@ -733,6 +817,66 @@ variants above are the complete set it can return.
 
 **Events.** Exactly one `delegate_revoked` event on success, including the
 idempotent no-op case: topics `stream_id`, `grantor`, `delegate`; no payload.
+#### `create_stream_with_curve` — detailed reference
+
+Identical to [`create_stream`](#create_stream--detailed-reference) in every
+respect — same authorization, same validation, same deposit pull, the same
+`stream_created` event — except that the release shape above the cliff is chosen
+by the trailing `curve` parameter instead of defaulting to `Linear`.
+
+**Signature:**
+```rust
+fn create_stream_with_curve(
+    env: Env,
+    sender: Address,
+    recipient: Address,
+    token: Address,
+    deposit: i128,
+    start_time: u64,
+    end_time: u64,
+    cliff_time: u64,
+    cancellable: bool,
+    pausable: bool,
+    transferable: bool,
+    curve: ReleaseCurve,
+) -> Result<u64, Error>
+```
+
+**Authorization:** `sender.require_auth()`, exactly as `create_stream`.
+
+**Parameters:** every parameter has the same meaning, valid range and error
+behaviour as in `create_stream`; the only addition is:
+
+| parameter | type | description |
+|---|---|---|
+| `curve` | `ReleaseCurve` | The release shape above the cliff. `0` `Linear`, `1` `Step`, `2` `FrontLoaded` — see [`ReleaseCurve`](#releasecurve). Always one of those three variants; the parameter is never rejected. Immutable after creation and reported by `get_stream` and `stream_created`. |
+
+**Errors:** the error set is exactly `create_stream`'s. `curve` adds no failure
+mode: every variant is supported, and the schedule guards (`InvalidDeposit`,
+`InvalidTimeRange`, `InvalidCliff`, `DepositRateTooLow`, `Overflow`, …) are
+enforced identically. In particular the creation-time guard that
+`deposited × duration` fits in `i128` bounds every curve's accrual arithmetic
+too, because each curve's release fraction never exceeds 1.
+
+**Events:** one `stream_created`, with the same topics and the same payload as
+`create_stream`, plus the `curve` field carrying the value passed here.
+
+**Example.** The same 100-day, 1,000 USDC stream as above, on each curve:
+
+| offset | `Linear` (`0`) | `Step` (`1`) | `FrontLoaded` (`2`) |
+|---|---|---|---|
+| day 24 | 240 USDC | 0 USDC | 423 USDC |
+| day 25 | 250 USDC | 250 USDC | 438 USDC |
+| day 50 | 500 USDC | 500 USDC | 750 USDC |
+| day 75 | 750 USDC | 750 USDC | 938 USDC |
+| day 100 | 1,000 USDC | 1,000 USDC | 1,000 USDC |
+
+`Step` releases nothing until each quarter boundary and then jumps; `FrontLoaded`
+leads `Linear` all the way to maturity; all three settle at exactly the deposit.
+(`FrontLoaded` is evaluated on a 1/1000 grid, so its interior figures are the
+grid values above — 438 rather than 437.5 — and its final instant is the full
+deposit via the terminal settlement branch.)
+
 #### `create_stream` — detailed reference
 
 Create a payment stream and transfer `deposit` tokens from `sender` into the contract's pooled balance. Returns the new stream id (monotonic, never reused).
@@ -799,7 +943,7 @@ All validation errors are checked **before** the token transfer. A rejected crea
 
 **Events:**
 
-On success, emits `stream_created` with topics `[stream_id, sender, recipient]` and payload carrying the complete initial state: `token`, `deposited`, `start_time`, `end_time`, `cliff_time`, `cancellable`, `pausable`, `transferable`. This is the canonical event for indexer discovery.
+On success, emits `stream_created` with topics `[stream_id, sender, recipient]` and payload carrying the complete initial state: `token`, `deposited`, `start_time`, `end_time`, `cliff_time`, `cancellable`, `pausable`, `transferable`, `curve`. This is the canonical event for indexer discovery. `create_stream` always reports `curve = 0` (`Linear`).
 
 **Atomicity:**
 
@@ -916,6 +1060,14 @@ assumed:
   and returns to the sender when the stream settles, so the pool can never be
   short. A client must not round up, and must not assume `deposited /
   duration` times `elapsed` is exact.
+
+  The formula above is the `Linear` curve. On a `Step` or `FrontLoaded` stream
+  the released fraction is the curve's, but the *direction* is the same: every
+  curve floors, so the residue still stays in the pool and returns to the sender
+  at settlement. The residue can be up to a full grid step on `FrontLoaded`
+  rather than one stroop, which is why a curve-aware client must read `curve`
+  from `get_stream` rather than assuming the linear formula. See
+  [`ReleaseCurve`](#releasecurve).
 
 * **Pre-cliff it is zero.** The cliff *gates* the payout, it does not delay
   accrual: before `cliff_time` the result is exactly `0`, and at the cliff
@@ -1091,7 +1243,7 @@ is the snake_case event name, second is always `stream_id`.
 
 | event | topics after the name | payload |
 |---|---|---|
-| `stream_created` | `stream_id`, `sender`, `recipient` | `token`, `deposited`, `start_time`, `end_time`, `cliff_time`, `cancellable`, `pausable`, `transferable` |
+| `stream_created` | `stream_id`, `sender`, `recipient` | `token`, `deposited`, `start_time`, `end_time`, `cliff_time`, `cancellable`, `pausable`, `transferable`, `curve` |
 | `withdrawn` | `stream_id`, `recipient` | `amount`, `withdrawn`, `deposited`, `status` |
 | `cancelled` | `stream_id`, `sender`, `recipient` | `refunded`, `vested`, `withdrawn`, `end_time` |
 | `paused` | `stream_id`, `sender` | `paused_at`, `paused_total` |

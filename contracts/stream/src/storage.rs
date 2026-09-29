@@ -66,7 +66,7 @@
 use soroban_sdk::{Address, Env};
 
 use crate::error::Error;
-use crate::types::{DataKey, DelegateGrant, Stream};
+use crate::types::{DataKey, DelegateGrant, ReleaseCurve, Stream, StreamRecord};
 
 /// Nominal Stellar ledger close time, in seconds.
 ///
@@ -182,11 +182,7 @@ pub fn extend_stream(env: &Env, stream_id: u64, stream: &Stream) {
 /// `test::read_ttl_matrix`). Switching a view to this function is a
 /// behaviour change callers can observe, and that test fails on it.
 pub fn load_stream(env: &Env, stream_id: u64) -> Result<Stream, Error> {
-    let stream: Stream = env
-        .storage()
-        .persistent()
-        .get(&DataKey::Stream(stream_id))
-        .ok_or(Error::StreamNotFound)?;
+    let stream = read_stream(env, stream_id)?;
     extend_stream(env, stream_id, &stream);
     Ok(stream)
 }
@@ -196,10 +192,29 @@ pub fn load_stream(env: &Env, stream_id: u64) -> Result<Stream, Error> {
 /// Used by the read-only view functions, which run in simulation and should not
 /// pretend to write. Also used by `extend_stream_ttl`, which does its own bump.
 pub fn peek_stream(env: &Env, stream_id: u64) -> Result<Stream, Error> {
-    env.storage()
+    read_stream(env, stream_id)
+}
+
+/// Decode a stream, stitching the frozen v1 [`StreamRecord`] back together with
+/// its [`ReleaseCurve`] side-car.
+///
+/// The stored value is the v1 layout ([`StreamRecord`]) — appending a field to
+/// it would make every stream written before curves existed undecodable; see
+/// the type docs. The curve lives under [`DataKey::StreamCurve`] and is written
+/// only for non-linear streams, so a missing entry means
+/// [`ReleaseCurve::Linear`] and decodes exactly as a v1 stream always did.
+fn read_stream(env: &Env, stream_id: u64) -> Result<Stream, Error> {
+    let record: StreamRecord = env
+        .storage()
         .persistent()
         .get(&DataKey::Stream(stream_id))
-        .ok_or(Error::StreamNotFound)
+        .ok_or(Error::StreamNotFound)?;
+    let curve: ReleaseCurve = env
+        .storage()
+        .persistent()
+        .get(&DataKey::StreamCurve(stream_id))
+        .unwrap_or(ReleaseCurve::Linear);
+    Ok(record.into_stream(curve))
 }
 
 /// Write a stream back and bump its TTL.
@@ -209,9 +224,23 @@ pub fn peek_stream(env: &Env, stream_id: u64) -> Result<Stream, Error> {
 /// creation: if the caller fails before `save_stream`, the counter never increments.
 pub fn save_stream(env: &Env, stream_id: u64, stream: &Stream) {
     let is_new = !env.storage().persistent().has(&DataKey::Stream(stream_id));
-    env.storage()
-        .persistent()
-        .set(&DataKey::Stream(stream_id), stream);
+    // Store the frozen v1 layout; the curve rides alongside it. See
+    // [`StreamRecord`] for why a field is not appended to the stored value.
+    env.storage().persistent().set(
+        &DataKey::Stream(stream_id),
+        &StreamRecord::from_stream(stream),
+    );
+    if stream.curve == ReleaseCurve::Linear {
+        // No entry for linear, so a linear stream pays no rent for a side-car
+        // that would only restate the default.
+        env.storage()
+            .persistent()
+            .remove(&DataKey::StreamCurve(stream_id));
+    } else {
+        env.storage()
+            .persistent()
+            .set(&DataKey::StreamCurve(stream_id), &stream.curve);
+    }
     if is_new {
         let current: u64 = env
             .storage()
@@ -223,6 +252,13 @@ pub fn save_stream(env: &Env, stream_id: u64, stream: &Stream) {
         extend_instance(env);
     }
     extend_stream(env, stream_id, stream);
+    if stream.curve != ReleaseCurve::Linear {
+        // Give the side-car the same lifetime as the record it annotates.
+        let target = ttl_target_ledgers(env, stream);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::StreamCurve(stream_id), target, target);
+    }
 }
 
 /// Return the next stream id without advancing the counter.

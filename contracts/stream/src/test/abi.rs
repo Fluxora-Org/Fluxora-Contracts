@@ -36,7 +36,7 @@ use crate::events::{
     Cancelled, Paused, RecipientTransferred, Resumed, StreamCreated, ToppedUp, TtlExtended,
     Withdrawn,
 };
-use crate::{Error, FluxoraStream, Stream, StreamStatus, ABI_VERSION};
+use crate::{Error, FluxoraStream, ReleaseCurve, Stream, StreamStatus, ABI_VERSION};
 
 // ---------------------------------------------------------------------------
 // Inventory
@@ -93,6 +93,7 @@ struct EventAbi {
 /// fails the suite.
 const AUTH: &[(&str, &str)] = &[
     ("create_stream", "sender"),
+    ("create_stream_with_curve", "sender"),
     ("top_up", "sender"),
     ("cancel", "sender"),
     ("pause", "sender"),
@@ -275,6 +276,9 @@ fn event_from_spec(entry: ScSpecEntry) -> EventAbi {
 fn current_inventory() -> Inventory {
     let mut functions = vec![
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_create_stream())),
+        function_from_spec(parse_spec(
+            &FluxoraStream::spec_xdr_create_stream_with_curve(),
+        )),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_top_up())),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_withdraw())),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_batch_withdraw())),
@@ -306,6 +310,7 @@ fn current_inventory() -> Inventory {
     let mut types = vec![
         type_from_spec(parse_spec(&Stream::spec_xdr())),
         type_from_spec(parse_spec(&StreamStatus::spec_xdr())),
+        type_from_spec(parse_spec(&ReleaseCurve::spec_xdr())),
     ];
     types.sort_by(|a, b| a.name.cmp(&b.name));
 
@@ -1311,4 +1316,101 @@ fn oversized_batch_failure_is_batch_too_large_discriminant_nineteen() {
         .unwrap();
     assert_eq!(err, Error::BatchTooLarge);
     assert_eq!(err as u32, 19);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #1815 — release curves
+// ---------------------------------------------------------------------------
+
+/// The `ReleaseCurve` addition is exactly what the ABI_VERSION bump to 2
+/// documents: `Stream` gained a field, which is a **breaking** change for any
+/// typed client decoding `get_stream`, while the new entry point and the
+/// appended `StreamCreated` payload field are additive. At version 1 the same
+/// inventory must be rejected.
+#[test]
+fn release_curve_changes_require_the_abi_version_bump() {
+    let old = frozen_v1();
+
+    let mut at_v1 = current_inventory();
+    at_v1.abi_version = 1;
+    let err = check_compatibility(&old, &at_v1).unwrap_err();
+    assert!(err.contains("type-changed UDT `Stream`"), "{err}");
+    assert!(err.contains("ABI_VERSION"), "{err}");
+
+    // At the real version the diff is accepted.
+    check_compatibility(&old, &current_inventory()).unwrap();
+}
+
+/// The curve is wired end to end in the generated spec: a new sender-authorized
+/// entry point taking a trailing `ReleaseCurve`, an untouched `create_stream`,
+/// a `Stream` carrying the field, and a `StreamCreated` whose payload ends with
+/// it (an append, so indexers that tolerate trailing fields keep working).
+#[test]
+fn release_curve_is_visible_across_the_generated_spec() {
+    let inv = current_inventory();
+
+    let create_with_curve = inv
+        .functions
+        .iter()
+        .find(|f| f.name == "create_stream_with_curve")
+        .expect("create_stream_with_curve must be in the ABI inventory");
+    assert_eq!(create_with_curve.auth, "sender");
+    assert_eq!(create_with_curve.outputs, "Result<u64, Error>");
+    assert_eq!(
+        create_with_curve.inputs.last().unwrap(),
+        &param("curve", "ReleaseCurve"),
+        "the curve must be the trailing parameter"
+    );
+    // `create_stream` is untouched: same inputs, still ending in `bool`.
+    let plain = inv
+        .functions
+        .iter()
+        .find(|f| f.name == "create_stream")
+        .unwrap();
+    assert_eq!(plain.inputs.len(), create_with_curve.inputs.len() - 1);
+    assert_eq!(plain.inputs.last().unwrap(), &param("transferable", "bool"));
+
+    let stream = inv.types.iter().find(|t| t.name == "Stream").unwrap();
+    assert!(
+        stream
+            .fields
+            .iter()
+            .any(|f| f.name == "curve" && f.type_name == "ReleaseCurve"),
+        "Stream must carry the curve"
+    );
+
+    let curve = inv
+        .types
+        .iter()
+        .find(|t| t.name == "ReleaseCurve")
+        .expect("ReleaseCurve must be a spec type");
+    assert_eq!(curve.kind, "enum");
+    assert_eq!(
+        curve.cases,
+        vec![
+            ErrorCase {
+                name: "Linear".into(),
+                discriminant: 0,
+            },
+            ErrorCase {
+                name: "Step".into(),
+                discriminant: 1,
+            },
+            ErrorCase {
+                name: "FrontLoaded".into(),
+                discriminant: 2,
+            },
+        ]
+    );
+
+    let created = inv
+        .events
+        .iter()
+        .find(|e| e.name == "StreamCreated")
+        .unwrap();
+    assert_eq!(
+        created.data.last().unwrap(),
+        &param("curve", "ReleaseCurve"),
+        "the curve must be appended to the StreamCreated payload"
+    );
 }

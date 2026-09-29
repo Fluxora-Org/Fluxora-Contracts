@@ -37,6 +37,7 @@
 //! |---|---|---|
 //! | `NextStreamId` | 32 | `ScVec(1)[ Symbol("NextStreamId") ]` |
 //! | `Stream(id)` | 40 | `ScVec(2)[ Symbol("Stream"), U64(id) ]` |
+//! | `StreamCurve(id)` | 44 | `ScVec(2)[ Symbol("StreamCurve"), U64(id) ]` |
 //!
 //! `NextStreamId` is 32 bytes; `Stream(id)` is always 40 bytes.  The two
 //! variants therefore cannot collide regardless of `id`.  Two `Stream(n)` and
@@ -60,7 +61,7 @@ use soroban_sdk::testutils::Address as _;
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::Env;
 
-use crate::types::{DataKey, Stream, StreamStatus};
+use crate::types::{DataKey, ReleaseCurve, Stream, StreamRecord, StreamStatus};
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -167,6 +168,86 @@ fn stream_max_id_key_encoding_is_stable() {
         "0000001000000001000000020000000f0000000653747265616d000000000005ffffffffffffffff",
         "Stream(u64::MAX) key encoding changed"
     );
+}
+
+/// `StreamCurve(0)` encodes to exactly 44 bytes:
+/// `ScVec(2) [ Symbol("StreamCurve"), U64(0) ]`
+///
+/// The symbol "StreamCurve" is 11 characters; XDR-padded to 12 bytes. This is
+/// the side-car key added by #1815 that carries a non-linear
+/// [`ReleaseCurve`], and it is a *different symbol* from `Stream`, so a curve
+/// entry can never alias a stream record however the ids line up.
+#[test]
+fn stream_curve_0_key_encoding_is_stable() {
+    let env = Env::default();
+    assert_eq!(
+        key_hex(&env, DataKey::StreamCurve(0)),
+        "0000001000000001000000020000000f0000000b53747265616d437572766500000000050000000000000000",
+        "StreamCurve(0) key encoding changed"
+    );
+}
+
+/// `StreamCurve(1)` differs from `StreamCurve(0)` only in the final byte.
+#[test]
+fn stream_curve_1_key_encoding_is_stable() {
+    let env = Env::default();
+    assert_eq!(
+        key_hex(&env, DataKey::StreamCurve(1)),
+        "0000001000000001000000020000000f0000000b53747265616d437572766500000000050000000000000001",
+        "StreamCurve(1) key encoding changed"
+    );
+}
+
+/// `StreamCurve(u64::MAX)` — the largest side-car id, big-endian U64 suffix.
+#[test]
+fn stream_curve_max_id_key_encoding_is_stable() {
+    let env = Env::default();
+    assert_eq!(
+        key_hex(&env, DataKey::StreamCurve(u64::MAX)),
+        "0000001000000001000000020000000f0000000b53747265616d43757276650000000005ffffffffffffffff",
+        "StreamCurve(u64::MAX) key encoding changed"
+    );
+}
+
+/// `StreamCurve(n)` never collides with `Stream(n)`, with `NextStreamId`, or
+/// with another `StreamCurve(m)`.
+///
+/// The structural argument is the same one the `Stream` tests make, applied to
+/// the #1815 side-car: a distinct symbol discriminant separates it from
+/// `Stream`, the U64 id is the whole of the suffix so the encoding is injective
+/// over the id space, and the length differs from the 32-byte id counter.
+#[test]
+fn stream_curve_keys_are_distinct_and_injective() {
+    let env = Env::default();
+
+    let ids = [0u64, 1, 255, 256, u64::MAX / 2, u64::MAX];
+    // 44 bytes = 88 hex chars; everything except the final 8-byte U64 id.
+    let prefix_len = 88 - 16;
+    let reference = key_hex(&env, DataKey::StreamCurve(0));
+    let counter_key = key_hex(&env, DataKey::NextStreamId);
+
+    for (i, &a) in ids.iter().enumerate() {
+        let ka = key_hex(&env, DataKey::StreamCurve(a));
+        assert_eq!(
+            &ka[..prefix_len],
+            &reference[..prefix_len],
+            "StreamCurve({a}) prefix differs — the side-car key layout changed"
+        );
+        assert_ne!(
+            ka,
+            key_hex(&env, DataKey::Stream(a)),
+            "StreamCurve({a}) aliases Stream({a}) — a curve entry and a stream \
+             record would share one ledger entry"
+        );
+        assert_ne!(ka, counter_key, "StreamCurve({a}) aliases NextStreamId");
+        for &b in &ids[i + 1..] {
+            assert_ne!(
+                ka,
+                key_hex(&env, DataKey::StreamCurve(b)),
+                "StreamCurve({a}) and StreamCurve({b}) produced identical keys"
+            );
+        }
+    }
 }
 
 // ─── collision tests ─────────────────────────────────────────────────────────
@@ -280,6 +361,10 @@ fn every_data_key_variant_has_a_known_encoding() {
         "0000001000000001000000020000000f0000000653747265616d0000000000050000000000000000",
         "0000001000000001000000020000000f0000000653747265616d0000000000050000000000000001",
         "0000001000000001000000020000000f0000000653747265616d000000000005ffffffffffffffff",
+        // StreamCurve — the #1815 curve side-car; same representative samples.
+        "0000001000000001000000020000000f0000000b53747265616d437572766500000000050000000000000000",
+        "0000001000000001000000020000000f0000000b53747265616d437572766500000000050000000000000001",
+        "0000001000000001000000020000000f0000000b53747265616d43757276650000000005ffffffffffffffff",
     ];
 
     let all_variants_encoded = &[
@@ -287,6 +372,9 @@ fn every_data_key_variant_has_a_known_encoding() {
         key_hex(&env, DataKey::Stream(0)),
         key_hex(&env, DataKey::Stream(1)),
         key_hex(&env, DataKey::Stream(u64::MAX)),
+        key_hex(&env, DataKey::StreamCurve(0)),
+        key_hex(&env, DataKey::StreamCurve(1)),
+        key_hex(&env, DataKey::StreamCurve(u64::MAX)),
     ];
     for enc in all_variants_encoded {
         assert!(
@@ -326,6 +414,7 @@ fn deterministic_stream(env: &Env) -> Stream {
         paused_at: None,
         paused_total: 0,
         status: StreamStatus::Active,
+        curve: ReleaseCurve::Linear,
     }
 }
 
@@ -434,10 +523,15 @@ fn stream_status_encoding_is_stable() {
 ///    asserts every field matches expected values.
 /// 3. The old fixture must NOT be updated — it is frozen in time.
 ///
-/// This file currently has no live migration fixtures because the [`Stream`]
-/// struct has not been migrated yet.  The tests below verify that the
-/// *current* round-trip is sound, which is the baseline a future migration
-/// test builds on.
+/// This file carries one live migration fixture. Issue #1815 added a `curve`
+/// field to the in-memory [`Stream`] but deliberately left the *stored* layout
+/// ([`StreamRecord`]) frozen at the v1 field set, so
+/// `current_reader_decodes_old_v1_fixture` decodes a pre-#1815 encoding and
+/// checks it still reads as a linear stream — and
+/// `old_v1_fixture_has_no_curve_field_but_a_curve_carrying_stream_does` pins
+/// the reason the stored layout could not simply grow a field. The remaining
+/// tests verify that the *current* round-trip is sound, which is the baseline a
+/// future migration test builds on.
 /// A [`Stream`] with every field set to a well-known, non-default value must
 /// survive encode → decode with all fields preserved.
 #[test]
@@ -615,10 +709,19 @@ fn stream_cancelled_with_paused_total_round_trips() {
 const OLD_V1_STREAM_FIXTURE_HEX: &str = "00000011000000010000000e0000000f0000000b63616e63656c6c61626c650000000000000000010000000f0000000a636c6966665f74696d6500000000000500000000657b7e000000000f000000096465706f73697465640000000000000a0000000000000000000000e8d4a510000000000f00000008656e645f74696d650000000500000000673524800000000f000000087061757361626c6500000000000000000000000f000000097061757365645f6174000000000000010000000f0000000c7061757365645f746f74616c0000000500000000000000000000000f00000009726563697069656e7400000000000012000000000000000000000000000000000000000000000000000000000000000000000000000000000000000f0000000673656e646572000000000012000000000000000000000000000000000000000000000000000000000000000000000000000000000000000f0000000a73746172745f74696d65000000000005000000006553f1000000000f00000006737461747573000000000003000000000000000f00000005746f6b656e00000000000012000000000000000000000000000000000000000000000000000000000000000000000000000000000000000f0000000c7472616e7366657261626c6500000000000000010000000f0000000977697468647261776e0000000000000a00000000000000000000000000000000";
 
 /// Verify that the current reader can decode a fixture produced by the
-/// previous version of the contract.
+/// previous version of the contract, **and** that such an entry still reads as
+/// a linear stream.
 ///
-/// If this test fails after a [`Stream`] struct change, the change is
-/// **not backwards-compatible** and must either be reverted or accompanied
+/// Issue #1815 added `Stream::curve`. That field is deliberately *not* in the
+/// stored layout: storage holds [`StreamRecord`], whose field set is frozen at
+/// the v1 shape encoded below, and the curve rides in a `DataKey::StreamCurve`
+/// side-car. A v1 entry has no side-car, which reads as
+/// [`ReleaseCurve::Linear`] — the schedule it was actually created with. So
+/// this fixture must still decode, decode as the *record*, and rebuild as a
+/// linear stream.
+///
+/// If this test fails after a [`Stream`] or [`StreamRecord`] change, the change
+/// is **not backwards-compatible** and must either be reverted or accompanied
 /// by a migration that converts old entries to the new format.
 #[test]
 fn current_reader_decodes_old_v1_fixture() {
@@ -638,7 +741,7 @@ fn current_reader_decodes_old_v1_fixture() {
     let bytes = soroban_sdk::Bytes::from_slice(&env, &raw_bytes);
 
     let decoded =
-        Stream::from_xdr(&env, &bytes).expect("current reader must decode the old fixture");
+        StreamRecord::from_xdr(&env, &bytes).expect("current reader must decode the old fixture");
 
     assert_eq!(decoded.deposited, 1_000_000_000_000);
     assert_eq!(decoded.withdrawn, 0);
@@ -651,4 +754,78 @@ fn current_reader_decodes_old_v1_fixture() {
     assert_eq!(decoded.paused_at, None);
     assert_eq!(decoded.paused_total, 0);
     assert_eq!(decoded.status, StreamStatus::Active);
+
+    // No side-car in a v1 entry, so the stream is linear and vests exactly as
+    // it always did.
+    let stream = decoded.into_stream(ReleaseCurve::Linear);
+    assert_eq!(stream.curve, ReleaseCurve::Linear);
+    assert_eq!(stream.deposited, 1_000_000_000_000);
+    assert_eq!(stream.end_time, 1_731_536_000);
+}
+
+/// **The negative half of the fixture guard.** `Stream` grew a `curve` field in
+/// #1815, which is exactly why the stored value is [`StreamRecord`] and not
+/// [`Stream`]: a stored `#[contracttype]` value decodes by matching its field
+/// set against the struct, so appending a field makes every existing entry
+/// undecodable — as a host trap inside the decode, not a catchable error.
+///
+/// This pins what "appending a field" actually means at the encoding level. The
+/// pre-#1815 fixture carries no `curve` symbol, while a curve-carrying `Stream`
+/// does — so the fixture is not a value the current `Stream` type can decode.
+#[test]
+fn old_v1_fixture_has_no_curve_field_but_a_curve_carrying_stream_does() {
+    let env = Env::default();
+    // The XDR symbol "curve" — it appears verbatim in the encoding of any value
+    // that carries the field.
+    const CURVE_SYMBOL_HEX: &str = "6375727665";
+
+    assert!(
+        !OLD_V1_STREAM_FIXTURE_HEX.contains(CURVE_SYMBOL_HEX),
+        "the v1 fixture must not carry a curve field"
+    );
+
+    let mut curved = deterministic_stream(&env);
+    curved.curve = ReleaseCurve::Step;
+    assert!(
+        stream_value_hex(&env, &curved).contains(CURVE_SYMBOL_HEX),
+        "a Stream value must encode its curve field, or the field is not real"
+    );
+
+    // The *stored* form has no such field however curved the stream is — which
+    // is why it is the stored form.
+    let record_hex: std::string::String = StreamRecord::from_stream(&curved)
+        .to_xdr(&env)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert!(
+        !record_hex.contains(CURVE_SYMBOL_HEX),
+        "the frozen StreamRecord layout must not carry the curve"
+    );
+}
+
+/// A stored [`StreamRecord`] round-trips, and a [`Stream`] with a non-linear
+/// curve round-trips through XDR too, so the new field really is in the value
+/// encoding a `get_stream` caller sees.
+#[test]
+fn record_and_curve_carrying_stream_round_trip() {
+    use soroban_sdk::xdr::FromXdr;
+    let env = Env::default();
+
+    let stream = deterministic_stream(&env);
+    let record = StreamRecord::from_stream(&stream);
+    let decoded = StreamRecord::from_xdr(&env, &record.clone().to_xdr(&env))
+        .expect("StreamRecord must round-trip");
+    assert_eq!(decoded, record);
+    assert_eq!(
+        decoded.into_stream(ReleaseCurve::FrontLoaded).curve,
+        ReleaseCurve::FrontLoaded
+    );
+
+    let mut curved = deterministic_stream(&env);
+    curved.curve = ReleaseCurve::Step;
+    let curved_decoded = Stream::from_xdr(&env, &curved.clone().to_xdr(&env))
+        .expect("curve-carrying Stream must round-trip");
+    assert_eq!(curved_decoded, curved);
+    assert_eq!(curved_decoded.curve, ReleaseCurve::Step);
 }
