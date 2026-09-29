@@ -220,18 +220,24 @@ a contract touching live state. Measured against protocol 27's real limits:
 |---|---|---|
 | total footprint (entries) | 43 | 400 |
 | write entries | 20 | 200 |
-| instructions | ~4.6M | 400M |
-| **contract event bytes** | **8,192** | **16,384** |
+| instructions | ~4.9M | 400M |
+| **contract event bytes** | **9,984** | **16,384** |
 
 Entry counts would allow well over a hundred streams per call. The **event
 budget** is what binds: each stream emits a `withdrawn` event plus the token
-contract's own `transfer` event, roughly 512 bytes between them, so the hard
-ceiling is about 32.
+contract's own `transfer` event, roughly 624 bytes between them, so the hard
+ceiling is about 26.
 
-Sixteen is that ceiling with a 2x safety factor. The margin matters because the
-per-stream event cost depends on the *token's* event payload — a token heavier
-than the Stellar Asset Contract used in tests would inflate it, and a cap that
-merely fits today would fail on somebody else's token.
+Sixteen is that ceiling with 6,400 bytes of event budget to spare. The margin
+matters because the per-stream event cost depends on the *token's* event
+payload — a token heavier than the Stellar Asset Contract used in tests would
+inflate it, and a cap that merely fits today would fail on somebody else's
+token. It was a 2x factor (8,192 bytes) until issue #1868 required every
+lifecycle event to name both parties; the `sender` appended to `withdrawn`,
+plus the pause bookkeeping that event now republishes, costs 112 bytes per
+stream — and `batch_withdraw` emits one `withdrawn` per stream while
+`MAX_BATCH_SIZE` is frozen ABI. Re-derive these numbers from
+`test::resource_limits` rather than adjusting them by feel.
 
 Oversized batches are rejected with `BatchTooLarge` rather than failing opaquely
 at the network level. The SDK chunks client-side.
