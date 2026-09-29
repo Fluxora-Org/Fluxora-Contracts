@@ -224,6 +224,53 @@ fn identity_holds_after_top_up() {
     assert_contract_identity(&h, id, "after top-up accrual");
 }
 
+/// Terminal state: cancelled mid-schedule. `cancel` rewrites `end_time` to
+/// `settle_at`, so the identity must hold at every point in the schedule.
+#[test]
+fn identity_holds_after_cancellation_at_every_point() {
+    for frac in [0u64, 1, 25, 50, 75, 99, 100] {
+        let h = Harness::new();
+        let start = h.now();
+        let duration = 100 * DAY;
+        let id = h.create_simple(1_000 * ONE, duration);
+
+        h.advance(duration * frac / 100);
+        assert_contract_identity(&h, id, &std::format!("before cancel at {frac}%"));
+        h.client.cancel(&id);
+        assert_contract_identity(&h, id, &std::format!("after cancel at {frac}%"));
+    }
+}
+
+/// Terminal state: matured, with and without a final withdrawal.
+#[test]
+fn identity_holds_after_maturity_with_and_without_final_withdrawal() {
+    let h = Harness::new();
+    let start = h.now();
+    let duration = 100 * DAY;
+    let id = h.create_simple(1_000 * ONE, duration);
+
+    h.warp_to(start + duration + DAY);
+    assert_contract_identity(&h, id, "matured, no withdrawal");
+
+    let vested = h.client.vested_of(&id);
+    h.client.withdraw(&id, &Some(vested));
+    assert_contract_identity(&h, id, "matured, after final withdrawal");
+}
+
+/// Terminal state: cancelled while paused.
+#[test]
+fn identity_holds_when_cancelled_while_paused() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+
+    h.advance(30 * DAY);
+    h.client.pause(&id);
+    h.advance(20 * DAY);
+    assert_contract_identity(&h, id, "paused before cancel");
+    h.client.cancel(&id);
+    assert_contract_identity(&h, id, "cancelled while paused");
+}
+
 /// Randomized operation sequences re-check the contract views after every step
 /// so unforeseen pause / top-up / withdraw interactions cannot silently break
 /// the identity.

@@ -1,5 +1,5 @@
 //! Issue #1856 — the accounting identity as a generated property over
-//! randomized operation sequences.
+//! randomized operation sequences, asserted at every terminal state.
 //!
 //! ```text
 //! withdrawable(t) + refundable(t) == deposited - withdrawn        for every t
