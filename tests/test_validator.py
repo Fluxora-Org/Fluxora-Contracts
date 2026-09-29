@@ -5,9 +5,12 @@ well-formed, ensuring the CI infrastructure itself is healthy.
 """
 
 import importlib.util
+import json
 import os
 import sys
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -23,6 +26,11 @@ def _import_script(name: str):
     mod.__name__ = spec.name
     spec.loader.exec_module(mod)
     return mod
+
+
+# Fingerprint of the committed baseline; used by the drift tests to restore
+# the real file after temporarily overwriting it.
+_BASELINE_PATH = REPO_ROOT / "script" / "doc-alignment-baseline.json"
 
 
 class TestRepoStructure:
@@ -107,6 +115,32 @@ class TestKnownLimitations:
         content = limitations.read_text(encoding="utf-8")
         assert "## 4. Not audited" in content
         assert "No third-party security audit has been performed." in content
+
+    def test_archival_result_is_recorded(self):
+        """§1 carries the recorded live testnet result, not the open placeholder.
+
+        The section used to be an open question with a decision table for the
+        outcomes that had not happened yet. It was answered on 2026-09-28; this
+        guard keeps the answer, and the evidence a reader can check it against,
+        in the file.
+        """
+        limitations = REPO_ROOT / "docs" / "KNOWN-LIMITATIONS.md"
+        content = limitations.read_text(encoding="utf-8")
+        section_one = content.split("## 2.", maxsplit=1)[0]
+
+        assert "Status: open." not in content
+        assert "closed 2026-09-28" in section_one
+        # The transaction that produced the result, so the claim is checkable.
+        assert (
+            "32e08f32d30db0f1f1a45786dbe7f8d87ca4f83dbd3e3ced0a0d5b54d807651c"
+            in section_one
+        )
+        # The ledger-set field is the evidence that the invocation restored the
+        # entries rather than a client having resubmitted a RestoreFootprint.
+        assert "archived_soroban_entries" in section_one
+        # The withdrawn integrator advice must be marked as withdrawn, not left
+        # standing as the recommended integration path.
+        assert "integrator guidance in this section is withdrawn" in section_one
 
 
 class TestScriptFunctions:
@@ -237,11 +271,12 @@ fn not_a_test() {}
         assert mod.main() == 0
 
     def test_validate_doc_alignment_check_streaming(self):
-        """Exercise check_streaming_entrypoints with real source if available."""
+        """Real repo: docs/ABI.md covers every lib.rs entry point (no gaps)."""
         mod = _import_script("validate-doc-alignment.py")
         assert mod is not None
-        # This checks docs/streaming.md vs lib.rs — skips if docs missing
-        assert mod.check_streaming_entrypoints() is True
+        # Replaced by the blocking gate: the legacy streaming.md check was
+        # removed because docs/streaming.md never existed in this repo.
+        assert mod.main() == 0
 
     def test_validate_doc_alignment_check_error(self):
         """Exercise check_error_alignment with real source if available."""
@@ -496,3 +531,344 @@ fn test_normal() {}
             tests = mod.count_tests_in_file(Path(f.name))
         os.unlink(f.name)
         assert len(tests) == 2
+
+
+# ---------------------------------------------------------------------------
+# Issue #1865: blocking doc-alignment gate (both directions + baseline)
+# ---------------------------------------------------------------------------
+
+
+_LIB_RS_TEMPLATE = '''
+#[contractimpl]
+impl DocGateContract {
+    pub fn create_stream() {}
+    pub fn withdraw() {}
+    fn internal_helper() {}
+}
+
+pub fn not_an_entrypoint() {}
+'''
+
+_ABI_MD_ALIGNED = '''# ABI
+
+## Entry points
+
+### Lifecycle
+
+| function | auth | returns |
+|---|---|---|
+| `create_stream()` | sender | `u64` stream id |
+| `withdraw()` | recipient | `i128` paid |
+
+#### `withdraw()` — withdraw from a stream; prose mentions `paused_total`
+
+| param | type | desc |
+|---|---|---|
+| `amount` | i128 | how much to take |
+| `paused_total` | u64 | prose-looking row must not count |
+
+## Error
+
+| variant | # | condition |
+|---|---|---|
+| `StreamNotFound` | 1 | not found |
+| `paused_total` | 2 | prose |
+'''
+
+_ABI_MD_MISSING_WITHDRAW = '''# ABI
+
+## Entry points
+
+### Lifecycle
+
+| function | auth | returns |
+|---|---|---|
+| `create_stream()` | sender | `u64` stream id |
+'''
+
+_ABI_MD_GHOST = '''# ABI
+
+## Entry points
+
+### Lifecycle
+
+| function | auth | returns |
+|---|---|---|
+| `create_stream()` | sender | `u64` stream id |
+| `withdraw()` | recipient | `i128` paid |
+| `emergency_stop()` | admin | — |
+'''
+
+
+class TestDocAlignmentGate:
+    """Blocking doc-alignment gate: exit codes and the shrink-only baseline."""
+
+    @staticmethod
+    def _import():
+        mod = _import_script("validate-doc-alignment.py")
+        assert mod is not None
+        return mod
+
+    def _sandbox(self, monkeypatch, tmp_path, lib_rs_text, abi_md_text, baseline_text=None):
+        """Point the module's path constants at temp files and return the module."""
+        mod = self._import()
+        lib_rs = tmp_path / "lib.rs"
+        lib_rs.write_text(lib_rs_text, encoding="utf-8")
+        abi_md = tmp_path / "ABI.md"
+        abi_md.write_text(abi_md_text, encoding="utf-8")
+        baseline = tmp_path / "doc-alignment-baseline.json"
+        if baseline_text is not None:
+            baseline.write_text(baseline_text, encoding="utf-8")
+        monkeypatch.setattr(mod, "LIB_RS", lib_rs)
+        monkeypatch.setattr(mod, "ABI_MD", abi_md)
+        monkeypatch.setattr(mod, "BASELINE_PATH", baseline)
+        return mod
+
+    # -- exit code: missing-from-docs --------------------------------------
+
+    def test_exit_one_on_missing_from_docs(self, monkeypatch, tmp_path):
+        """An entry point absent from the docs must exit 1."""
+        mod = self._sandbox(
+            monkeypatch, tmp_path, _LIB_RS_TEMPLATE, _ABI_MD_MISSING_WITHDRAW
+        )
+        assert mod.main() == 1
+
+    def test_missing_from_docs_reported(self, monkeypatch, tmp_path, capsys):
+        """The missing-from-docs gap is named in the output."""
+        mod = self._sandbox(
+            monkeypatch, tmp_path, _LIB_RS_TEMPLATE, _ABI_MD_MISSING_WITHDRAW
+        )
+        mod.main()
+        out = capsys.readouterr().out
+        assert "MISSING-FROM-DOCS: withdraw" in out
+        assert "missing-doc:withdraw" in out
+
+    # -- exit code: documented-but-nonexistent ------------------------------
+
+    def test_exit_one_on_documented_but_nonexistent(self, monkeypatch, tmp_path):
+        """A documented entry point that no longer exists must exit 1."""
+        mod = self._sandbox(monkeypatch, tmp_path, _LIB_RS_TEMPLATE, _ABI_MD_GHOST)
+        assert mod.main() == 1
+
+    def test_documented_but_nonexistent_reported(self, monkeypatch, tmp_path, capsys):
+        """The documented-but-nonexistent gap is named in the output."""
+        mod = self._sandbox(
+            monkeypatch, tmp_path, _LIB_RS_TEMPLATE, _ABI_MD_GHOST
+        )
+        mod.main()
+        out = capsys.readouterr().out
+        assert "DOCUMENTED-BUT-NONEXISTENT: emergency_stop" in out
+        assert "ghost-doc:emergency_stop" in out
+
+    # -- exit code: aligned --------------------------------------------------
+
+    def test_exit_zero_when_aligned(self, monkeypatch, tmp_path):
+        """Both directions aligned (and no baseline) must exit 0."""
+        mod = self._sandbox(monkeypatch, tmp_path, _LIB_RS_TEMPLATE, _ABI_MD_ALIGNED)
+        assert mod.main() == 0
+
+    def test_aligned_run_ignores_prose_mentions(self, monkeypatch, tmp_path):
+        """Prose mentions of fields/functions must not count as documentation."""
+        mod = self._sandbox(monkeypatch, tmp_path, _LIB_RS_TEMPLATE, _ABI_MD_ALIGNED)
+        documented = mod.parse_documented_entry_points(_ABI_MD_ALIGNED)
+        assert documented == {"create_stream", "withdraw"}
+
+    # -- baselined gap passes -------------------------------------------------
+
+    def test_baselined_gap_passes(self, monkeypatch, tmp_path):
+        """A gap present in the baseline must not fail the run."""
+        baseline = json.dumps(
+            {"gaps": [{"id": "missing-doc:withdraw", "reason": "docs rewrite scheduled"}]}
+        )
+        mod = self._sandbox(
+            monkeypatch,
+            tmp_path,
+            _LIB_RS_TEMPLATE,
+            _ABI_MD_MISSING_WITHDRAW,
+            baseline_text=baseline,
+        )
+        assert mod.main() == 0
+
+    def test_baselined_gap_counted_in_output(self, monkeypatch, tmp_path, capsys):
+        """The passing run reports how many gaps are baselined."""
+        baseline = json.dumps(
+            {"gaps": [{"id": "missing-doc:withdraw", "reason": "docs rewrite scheduled"}]}
+        )
+        mod = self._sandbox(
+            monkeypatch,
+            tmp_path,
+            _LIB_RS_TEMPLATE,
+            _ABI_MD_MISSING_WITHDRAW,
+            baseline_text=baseline,
+        )
+        assert mod.main() == 0
+        out = capsys.readouterr().out
+        assert "1 baselined gap(s)" in out
+
+    # -- new non-baselined gap fails -------------------------------------------
+
+    def test_new_gap_without_baseline_entry_fails(self, monkeypatch, tmp_path):
+        """A gap not covered by the baseline must fail even with a baseline file."""
+        baseline = json.dumps(
+            {"gaps": [{"id": "missing-doc:withdraw", "reason": "docs rewrite scheduled"}]}
+        )
+        ghost_docs = _ABI_MD_MISSING_WITHDRAW + "| `emergency_stop()` | admin | — |\n"
+        mod = self._sandbox(
+            monkeypatch,
+            tmp_path,
+            _LIB_RS_TEMPLATE,
+            ghost_docs,
+            baseline_text=baseline,
+        )
+        # withdraw is baselined, emergency_stop is not.
+        assert mod.main() == 1
+
+    # -- stale baseline entry fails ---------------------------------------------
+
+    def test_stale_baseline_entry_fails(self, monkeypatch, tmp_path):
+        """A baseline entry whose gap no longer exists must fail the run."""
+        baseline = json.dumps(
+            {"gaps": [{"id": "missing-doc:withdraw", "reason": "docs rewrite scheduled"}]}
+        )
+        # Aligned docs: the baselined gap no longer exists.
+        mod = self._sandbox(
+            monkeypatch, tmp_path, _LIB_RS_TEMPLATE, _ABI_MD_ALIGNED, baseline_text=baseline
+        )
+        assert mod.main() == 1
+
+    def test_stale_baseline_reported(self, monkeypatch, tmp_path, capsys):
+        """The stale entry is named in the output."""
+        baseline = json.dumps(
+            {"gaps": [{"id": "missing-doc:withdraw", "reason": "docs rewrite scheduled"}]}
+        )
+        mod = self._sandbox(
+            monkeypatch, tmp_path, _LIB_RS_TEMPLATE, _ABI_MD_ALIGNED, baseline_text=baseline
+        )
+        mod.main()
+        out = capsys.readouterr().out
+        assert "STALE-BASELINE: missing-doc:withdraw" in out
+
+    # -- baseline robustness ------------------------------------------------------
+
+    def test_missing_baseline_file_treated_as_empty(self, monkeypatch, tmp_path):
+        """No baseline file means no exclusions, not an error."""
+        mod = self._sandbox(monkeypatch, tmp_path, _LIB_RS_TEMPLATE, _ABI_MD_ALIGNED)
+        assert mod.load_baseline(tmp_path / "nope.json") == {}
+        assert mod.main() == 0
+
+    def test_malformed_baseline_fails_loudly(self, monkeypatch, tmp_path):
+        """Corrupt baseline JSON must exit 2, never silently skip the baseline."""
+        mod = self._sandbox(
+            monkeypatch, tmp_path, _LIB_RS_TEMPLATE, _ABI_MD_ALIGNED, baseline_text="{not json"
+        )
+        assert mod.main() == 2
+
+    def test_baseline_with_wrong_shape_fails_loudly(self, monkeypatch, tmp_path):
+        """A baseline missing the 'gaps' array must exit 2."""
+        mod = self._sandbox(
+            monkeypatch, tmp_path, _LIB_RS_TEMPLATE, _ABI_MD_ALIGNED, baseline_text='{"a": 1}'
+        )
+        assert mod.main() == 2
+
+    def test_baseline_entry_missing_reason_fails_loudly(self, monkeypatch, tmp_path):
+        """Each baseline entry needs a non-empty reason string."""
+        baseline = json.dumps({"gaps": [{"id": "missing-doc:withdraw"}]})
+        mod = self._sandbox(
+            monkeypatch, tmp_path, _LIB_RS_TEMPLATE, _ABI_MD_ALIGNED, baseline_text=baseline
+        )
+        assert mod.main() == 2
+
+    def test_baseline_duplicate_ids_fail_loudly(self, monkeypatch, tmp_path):
+        """Duplicate gap ids in the baseline must exit 2."""
+        baseline = json.dumps(
+            {
+                "gaps": [
+                    {"id": "missing-doc:withdraw", "reason": "a"},
+                    {"id": "missing-doc:withdraw", "reason": "b"},
+                ]
+            }
+        )
+        mod = self._sandbox(
+            monkeypatch, tmp_path, _LIB_RS_TEMPLATE, _ABI_MD_ALIGNED, baseline_text=baseline
+        )
+        assert mod.main() == 2
+
+    # -- broken inputs -------------------------------------------------------------
+
+    def test_missing_lib_rs_exits_two(self, monkeypatch, tmp_path):
+        """A missing lib.rs cannot be treated as "no gaps"."""
+        mod = self._sandbox(monkeypatch, tmp_path, _LIB_RS_TEMPLATE, _ABI_MD_ALIGNED)
+        monkeypatch.setattr(mod, "LIB_RS", tmp_path / "nope.rs")
+        assert mod.main() == 2
+
+    def test_missing_abi_md_exits_two(self, monkeypatch, tmp_path):
+        """A missing docs/ABI.md cannot be treated as "no gaps"."""
+        mod = self._sandbox(
+            monkeypatch, tmp_path, _LIB_RS_TEMPLATE, _ABI_MD_ALIGNED
+        )
+        monkeypatch.setattr(mod, "ABI_MD", tmp_path / "nope.md")
+        assert mod.main() == 2
+
+    def test_empty_surface_exits_two(self, monkeypatch, tmp_path):
+        """No entry points extracted means the parser or source is broken."""
+        mod = self._sandbox(
+            monkeypatch, tmp_path, "pub fn orphan() {}\n", _ABI_MD_ALIGNED
+        )
+        assert mod.main() == 2
+
+    # -- real repository state -------------------------------------------------------
+
+    def test_real_repo_aligned(self):
+        """The committed docs/ABI.md and lib.rs must pass the gate as-is."""
+        mod = self._import()
+        assert mod.main() == 0
+
+    def test_committed_baseline_is_well_formed(self):
+        """The committed baseline must parse and all reasons must be non-empty."""
+        mod = self._import()
+        baseline = mod.load_baseline(_BASELINE_PATH)
+        assert isinstance(baseline, dict)
+        assert all(reason.strip() for reason in baseline.values())
+
+    def test_committed_baseline_entries_reference_real_gaps(self):
+        """Every committed baseline entry must correspond to a live gap (no fiction)."""
+        mod = self._import()
+        baseline = mod.load_baseline(_BASELINE_PATH)
+        entrypoints = mod.filter_entrypoints(
+            mod.extract_contractimpl_pub_fns(
+                (REPO_ROOT / "contracts" / "stream" / "src" / "lib.rs").read_text(encoding="utf-8")
+            )
+        )
+        documented = mod.parse_documented_entry_points(
+            (REPO_ROOT / "docs" / "ABI.md").read_text(encoding="utf-8")
+        )
+        missing, ghosts = mod.collect_gaps(entrypoints, documented)
+        live = {f"{mod.MISSING_DOC_PREFIX}{n}" for n in missing}
+        live |= {f"{mod.GHOST_DOC_PREFIX}{n}" for n in ghosts}
+        stale = set(baseline) - live
+        assert not stale, f"Stale baseline entries must be removed: {sorted(stale)}"
+
+    def test_baseline_only_shrinks_vs_base_branch(self):
+        """The PR must not grow the baseline relative to the merge base."""
+        import subprocess
+
+        mod = self._import()
+        base_ref = os.environ.get("BASELINE_BASE_REF", "origin/main")
+        try:
+            result = subprocess.run(
+                ["git", "show", f"{base_ref}:script/doc-alignment-baseline.json"],
+                capture_output=True,
+                text=True,
+                cwd=REPO_ROOT,
+                timeout=30,
+            )
+        except (subprocess.SubprocessError, OSError):
+            pytest.skip("git history unavailable for baseline-shrink check")
+        if result.returncode != 0 or not result.stdout.strip():
+            pytest.skip("baseline did not exist on the base branch")
+        base_gaps = set(mod.load_baseline_from_text(result.stdout))
+        current_gaps = set(mod.load_baseline(_BASELINE_PATH))
+        assert current_gaps <= base_gaps, (
+            "baseline grew; new entries must be justified in review and "
+            "documented with a reason"
+        )

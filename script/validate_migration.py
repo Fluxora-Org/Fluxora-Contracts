@@ -43,6 +43,11 @@ MIGRATION_PATH = REPO_ROOT / "docs" / "MIGRATION.md"
 DELEGATION_PREFIXES = ("delegate_", "grant_delegate", "revoke_delegate")
 
 CORE_ENTRYPOINT_COUNT = 21
+# v1 core (non-delegation) entrypoints — the 17 the migration document counts.
+# Everything else is a delegation variant.
+DELEGATION_PREFIXES = ("delegate_", "grant_delegate", "revoke_delegate")
+
+CORE_ENTRYPOINT_COUNT = 17
 
 # --- Removed entrypoints extracted from MIGRATION.md §3 ---------------------
 # Every name that appears in §3 as "deliberately removed" must NOT exist in v1.

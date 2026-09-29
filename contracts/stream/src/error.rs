@@ -35,6 +35,8 @@ pub enum Error {
     DepositRateTooLow = 5,
     /// Sender and recipient are the same address.
     SelfStream = 6,
+    /// Reference string exceeds maximum allowed length.
+    InvalidReferenceLength = 34,
 
     // --- Authorization / capability ---
     /// Caller is not the party allowed to perform this action.

@@ -2,7 +2,7 @@
 //! Each printed value covers the last invocation only; setup is excluded.
 
 use super::common::*;
-use crate::op;
+use crate::{op, BatchCreateRequest};
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::Address;
 
@@ -34,6 +34,39 @@ fn entrypoint_cost_snapshot() {
     h.create_simple(1_000 * ONE, 100 * DAY);
     record(&h, "create_stream");
 
+    let h = wasm_harness();
+    let start = h.now();
+    let mut requests = soroban_sdk::Vec::new(&h.env);
+    for _ in 0..1 {
+        requests.push_back(BatchCreateRequest {
+            recipient: Address::generate(&h.env),
+            token: h.token.clone(),
+            deposit: 1_000 * ONE,
+            start_time: start,
+            end_time: start + 100 * DAY,
+            cliff_time: start,
+            cancellable: true,
+            pausable: true,
+            transferable: true,
+        });
+    }
+    h.client.batch_create(&h.sender, &requests);
+    record(&h, "batch_create");
+    // Same call through the mode-taking entry point, so the baseline records the
+    // extra argument decode and the stored enum rather than assuming it is free.
+    let h = wasm_harness();
+    h.create_with_cliff_mode(
+        1_000 * ONE,
+        h.env.ledger().timestamp(),
+        h.env.ledger().timestamp() + 100 * DAY,
+        h.env.ledger().timestamp() + 10 * DAY,
+        crate::CliffMode::WallClock,
+        true,
+        true,
+        true,
+    );
+    record(&h, "create_stream_with_cliff_mode");
+
     let (h, id) = fresh();
     h.client.top_up(&id, &(100 * ONE));
     record(&h, "top_up");
@@ -52,6 +85,11 @@ fn entrypoint_cost_snapshot() {
     h.advance(10 * DAY);
     h.client.cancel(&id);
     record(&h, "cancel");
+
+    let (h, id) = fresh();
+    h.advance(10 * DAY);
+    h.client.batch_cancel(&h.sender, &h.ids(&[id]));
+    record(&h, "batch_cancel");
 
     let (h, id) = fresh();
     h.client.pause(&id);
