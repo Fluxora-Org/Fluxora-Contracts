@@ -74,7 +74,7 @@
 //! `vested - withdrawn` through the normal withdraw path, which is why that
 //! amount stays pooled in the contract. Every cancellation state is asserted
 //! against storage and token balances in `test::cancel_events`.
-use soroban_sdk::{contractevent, Address, Env};
+use soroban_sdk::{contractevent, Address, Env, String};
 
 use crate::types::{CliffMode, Stream, StreamStatus};
 
@@ -101,6 +101,8 @@ pub struct StreamCreated {
     /// `cliff_mode` as `CliffMode::Schedule`, which is what the entry point that
     /// omitted it produced.
     pub cliff_mode: CliffMode,
+    /// Optional reference string for stream identification.
+    pub reference: Option<String>,
 }
 
 /// The recipient drew down accrued funds. Emitted once per stream, including
@@ -252,6 +254,7 @@ pub fn stream_created(env: &Env, stream_id: u64, stream: &Stream) {
         pausable: stream.pausable,
         transferable: stream.transferable,
         cliff_mode: stream.cliff_mode,
+        reference: stream.reference.clone(),
     }
     .publish(env);
 }

@@ -15,11 +15,17 @@ subscription billing, vesting schedules. The contract is the product.
 | Rust | 1.97.1, target `wasm32v1-none` |
 | Token interface | SEP-41 (USDC on Stellar has **7 decimals**); see [token assumptions](docs/ABI.md#token-assumptions) — no fee-on-transfer, no rebasing |
 | Contract size | 75,159 bytes; enforced by `contracts/stream/wasm-size-budget.env` (42.7% under the 128 KiB Soroban cap) |
+| Contract size | ~69 KiB baseline; enforced by `contracts/stream/wasm-size-budget.env` |
 | Tests | 146, including property tests and a pool invariant checked after every operation |
 
 > **Read [docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md) before relying on this.**
 > A green suite here does not mean TTL is solved — the archival *recovery* flow
 > is not yet proven against a live network. See §1 there, and the summary below.
+
+> **Security status:** Automated testing includes property tests, a pool
+> invariant checked after every operation, and randomized sequence tests. This
+> testing is not an independent security review; no third-party security audit
+> of the contracts has been performed.
 
 ---
 
@@ -296,6 +302,13 @@ Three mechanisms:
    the caller only ever *pays* rent, and TTL extension cannot move funds or
    change stream state.
 
+   **Exception: terminal streams (`Cancelled` and `Depleted`) are rejected.**
+   Both entry points return `Error::StreamTerminated` when called against a
+   settled stream. The floor TTL applied at the time of cancellation/depletion
+   covers any remaining withdrawal tail; after that, callers should use
+   `RestoreFootprint` rather than extending. Keepers should filter terminal ids
+   out of their sweep batches.
+
 Views deliberately do **not** extend TTL. They are called through simulation,
 where a footprint write is at best noise. Keeping a stream alive is the explicit
 job of `extend_stream_ttl`.
@@ -303,8 +316,11 @@ job of `extend_stream_ttl`.
 ### Retention policy by state
 
 Every touch tops the entry back up to one target — the stream's remaining
-effective life plus the 30-day buffer, floored at `MIN_STREAM_TTL_LEDGERS`
-(~30 days) and clamped to the network's `max_entry_ttl`. The threshold equals
+effective life plus the 30-day buffer, inflated by a 20% close-time safety
+margin, floored at `MIN_STREAM_TTL_LEDGERS` (~30 days plus the margin) and
+clamped to the network's `max_entry_ttl`. The close time the conversion
+assumes is measured, not assumed, with the margin covering drift
+([`KNOWN-LIMITATIONS.md` §5](docs/KNOWN-LIMITATIONS.md)). The threshold equals
 the extend-to, so an entry below its target is topped back up to it in full —
 and one already funded past the target keeps its higher balance: rent is never
 clawed back, so a stream entering a terminal state decays toward its floor
@@ -328,7 +344,9 @@ this way mutates nothing — both halves of that contract-side story are pinned
 by deterministic assertions in `test::ttl`. Batch calls differ by design:
 `batch_withdraw` fails the whole batch with `StreamNotFound`, while
 `batch_extend_ttl` skips unknown ids so a keeper's sweep survives a stale
-index. `stream_exists(id) == false` while `id < stream_count()` is the
+index, but fails the whole batch with `StreamTerminated` if any id belongs to
+a terminal (`Cancelled` or `Depleted`) stream. `stream_exists(id) == false`
+while `id < stream_count()` is the
 integrator's signal for "archived, not nonexistent"; whether that signal holds
 against a real RPC is exactly the stage-4 territory
 [KNOWN-LIMITATIONS.md §1](KNOWN-LIMITATIONS.md) tracks.

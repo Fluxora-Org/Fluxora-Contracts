@@ -58,6 +58,11 @@ compile_error!("Fluxora production WASM must not enable the testutils feature.")
 extern crate std;
 
 mod accrual;
+#[cfg(test)]
+mod checksum;
+#[cfg(test)]
+mod protocol_limits;
+mod token_check;
 mod error;
 mod events;
 mod storage;
@@ -67,9 +72,12 @@ pub use accrual::{
     cliff_reached, duration, elapsed, liability, refundable, stream_time, vested, withdrawable,
 };
 pub use error::Error;
-pub use storage::{MIN_STREAM_TTL_LEDGERS, SECONDS_PER_LEDGER, TTL_BUFFER_SECONDS};
+pub use storage::{
+    MIN_STREAM_TTL_LEDGERS, SECONDS_PER_LEDGER, TTL_BUFFER_SECONDS, TTL_SAFETY_MARGIN_PERCENT,
+};
 pub use types::op;
 pub use types::{CliffMode, DataKey, DelegateGrant, Stream, StreamStatus};
+pub use types::{DataKey, DelegateGrant, Stream, StreamStatus, MAX_REFERENCE_LENGTH};
 
 use soroban_sdk::{
     contract, contractimpl, token, Address, Env, InvokeError, MuxedAddress, TryFromVal, Vec,
@@ -379,6 +387,7 @@ impl FluxoraStream {
         cancellable: bool,
         pausable: bool,
         transferable: bool,
+        reference: Option<String>,
     ) -> Result<u64, Error> {
         sender.require_auth();
 
@@ -393,6 +402,13 @@ impl FluxoraStream {
         }
         if cliff_time < start_time || cliff_time > end_time {
             return Err(Error::InvalidCliff);
+        }
+
+        // Validate reference length if provided
+        if let Some(ref r) = reference {
+            if r.len() > MAX_REFERENCE_LENGTH as usize {
+                return Err(Error::InvalidReferenceLength);
+            }
         }
 
         let total_duration = end_time - start_time;
@@ -430,6 +446,7 @@ impl FluxoraStream {
             paused_at: None,
             paused_total: 0,
             status: StreamStatus::Active,
+            reference,
         };
 
         // Pull the deposit before writing the stream entry. If the token
@@ -1384,11 +1401,40 @@ impl FluxoraStream {
     /// Multi-year streams need this periodically no matter how generously the
     /// contract extends at creation, because no entry may exceed the network's
     /// `max_entry_ttl`.
+    ///
+    /// # Terminal streams
+    ///
+    /// **Extending the TTL of a `Cancelled` or `Depleted` stream is rejected
+    /// with [`Error::StreamTerminated`].** Terminal streams have settled all
+    /// accounting and no future state change is possible. Their entries decay
+    /// from the floor set at cancellation/depletion to zero under normal Soroban
+    /// rent rules; the caller should not pay indefinitely for a record that will
+    /// never change. Keeping terminal records accessible is only necessary while
+    /// a recipient still has an unwithdrawn tail (which is the `Cancelled` but
+    /// not-yet-drained case) — that window is covered by the floor TTL the
+    /// contract applies at the time of cancellation/depletion. If the entry has
+    /// since archived, it must be restored via a `RestoreFootprint` operation
+    /// rather than extended.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::StreamNotFound`] — no stream with this id.
+    /// * [`Error::StreamTerminated`] — stream is `Cancelled` or `Depleted`.
     pub fn extend_stream_ttl(env: Env, stream_id: u64) -> Result<u32, Error> {
         // Authorization: permissionless by design — see doc comment. Any caller
         // may pay rent for any stream. The caller has no address parameter and
         // no `require_auth` is invoked.
         let stream = storage::peek_stream(&env, stream_id)?;
+
+        // Terminal streams (Cancelled, Depleted) have settled all accounting.
+        // Reject the extension so callers are not silently charged indefinite
+        // rent for a record that can no longer change. The floor TTL applied at
+        // the time of cancellation/depletion covers the withdrawal tail; after
+        // that the entry may archive and must be restored via RestoreFootprint.
+        if stream.status.is_terminal() {
+            return Err(Error::StreamTerminated);
+        }
+
         let target = storage::ttl_target_ledgers(&env, &stream);
         storage::extend_stream(&env, stream_id, &stream);
         storage::extend_instance(&env);
@@ -1408,6 +1454,26 @@ impl FluxoraStream {
     /// [`Error::DuplicateStreamId`] rather than attempting to extend it twice.
     /// Empty, oversized, and malformed vectors are rejected before the sweep
     /// starts. Returns how many entries were actually extended.
+    ///
+    /// # Terminal streams
+    ///
+    /// **Any `Cancelled` or `Depleted` stream in the batch causes the entire
+    /// call to fail with [`Error::StreamTerminated`].** This mirrors the single
+    /// entry-point policy in [`extend_stream_ttl`](Self::extend_stream_ttl) and
+    /// ensures both paths enforce the same rule: callers may not extend the TTL
+    /// of a settled stream. A keeper sweep should filter out terminal stream ids
+    /// before submitting a batch; the indexer's `status` field is the signal.
+    ///
+    /// Unknown ids continue to be skipped — a stale index entry for a stream
+    /// that does not exist (or has archived) does not abort the sweep.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::EmptyBatch`] — no ids provided.
+    /// * [`Error::BatchTooLarge`] — more than [`MAX_BATCH_SIZE`] ids.
+    /// * [`Error::MalformedStreamId`] — an element is not a valid `u64`.
+    /// * [`Error::DuplicateStreamId`] — the same id appears more than once.
+    /// * [`Error::StreamTerminated`] — at least one id is `Cancelled` or `Depleted`.
     pub fn batch_extend_ttl(env: Env, stream_ids: Vec<u64>) -> Result<u32, Error> {
         // Authorization: permissionless — same policy as `extend_stream_ttl`.
         let stream_ids = Self::validate_batch_ids(&env, &stream_ids)?;
@@ -1416,6 +1482,14 @@ impl FluxoraStream {
         let mut extended = 0u32;
         for stream_id in stream_ids.iter() {
             if let Ok(stream) = storage::peek_stream(&env, stream_id) {
+                // Reject the entire batch if any stream is terminal. This
+                // matches the single-stream policy and prevents a caller from
+                // inadvertently paying rent for settled records. Unknown ids
+                // are still skipped (keeper resilience), but a known-terminal
+                // id is an explicit error.
+                if stream.status.is_terminal() {
+                    return Err(Error::StreamTerminated);
+                }
                 let target = storage::ttl_target_ledgers(&env, &stream);
                 storage::extend_stream(&env, stream_id, &stream);
                 events::ttl_extended(&env, stream_id, target);

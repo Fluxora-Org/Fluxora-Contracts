@@ -371,3 +371,27 @@ incentive is both narrow and adversarially shaped.
 The problem it solves is also not real in v1: an unwithdrawn stream costs the
 contract nothing, TTL is handled by the permissionless rent path, and the
 recipient's claim never expires.
+
+---
+
+## 8. How this document is tested
+
+The path above is walked, not just described. `contracts/stream/src/test/migration.rs`
+parses the §4 table out of this file and checks it against the code:
+
+* every name §4 sends a caller to is present in the committed ABI inventory
+  (`contracts/stream/abi/fluxora_stream.json`), and every name §4 says was left
+  behind is absent from it — so a rename that updates this file without updating
+  the contract, or the reverse, fails a named test;
+* the §3 counts are asserted against the ABI (16 core entry points plus 8
+  delegation entry points, and the old `100 + 16 + 29 = 145` breakdown), and the
+  §7 rulings are asserted as absences;
+* the migration is then performed end to end, using only the v1 spellings this
+  document lists, with the documented semantics asserted for each: `top_up`
+  extends duration and never the rate, `transfer_recipient` is one step gated by
+  the immutable `transferable` flag, `withdraw(id, None)` takes everything
+  accrued, and `pause`/`resume`/`cancel` read the sender from the stream. State
+  is re-checked as intact after every step.
+
+Edit this file and the code together; the test exists to make sure you do.
+

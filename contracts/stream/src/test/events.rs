@@ -146,8 +146,11 @@ fn test_all_event_topic_names_are_unique() {
     h.client.cancel(&id);
     capture();
 
-    // 8. ttl_extended
-    h.client.extend_stream_ttl(&id);
+    // 8. ttl_extended — use a fresh active stream since `id` is now terminal
+    let now = h.now();
+    let id_for_ttl = h.create(100 * ONE, now, now + 10 * DAY, now, true, true, true);
+    capture(); // capture the stream_created event for id_for_ttl
+    h.client.extend_stream_ttl(&id_for_ttl);
     capture();
 
     // 9–10. delegate events — need a live, non-terminal stream
@@ -289,8 +292,11 @@ fn test_golden_events() {
     harness.client.cancel(&stream_id);
     push_events();
 
-    // 8. TTL Extended
-    harness.client.extend_stream_ttl(&stream_id);
+    // 8. TTL Extended — create a fresh active stream since `stream_id` is terminal
+    let now = harness.now();
+    let stream_id_for_ttl = harness.create(100 * ONE, now, now + 10 * DAY, now, true, true, true);
+    push_events(); // capture stream_created for stream_id_for_ttl
+    harness.client.extend_stream_ttl(&stream_id_for_ttl);
     push_events();
     let mut events = std::vec::Vec::new();
     for event in raw_events {
@@ -303,11 +309,12 @@ fn test_golden_events() {
         events.push((topics, data));
     }
 
-    // We expect exactly 8 events
+    // We expect exactly 9 events: the original 8 + stream_created for the
+    // fresh stream used to emit ttl_extended (terminal streams cannot be extended).
     assert_eq!(
         events.len(),
-        8,
-        "Expected exactly 8 events for the golden path"
+        9,
+        "Expected exactly 9 events for the golden path"
     );
 
     // Helper to check standard event structure
@@ -324,7 +331,9 @@ fn test_golden_events() {
     assert_event_topic(events.get(4).unwrap(), "recipient_transferred");
     assert_event_topic(events.get(5).unwrap(), "withdrawn");
     assert_event_topic(events.get(6).unwrap(), "cancelled");
-    assert_event_topic(events.get(7).unwrap(), "ttl_extended");
+    // event[7] is the stream_created for the fresh TTL-extension stream
+    assert_event_topic(events.get(7).unwrap(), "stream_created");
+    assert_event_topic(events.get(8).unwrap(), "ttl_extended");
 
     // Topic arity assertions (topic[0] + #[topic] fields)
     assert_eq!(
@@ -363,7 +372,7 @@ fn test_golden_events() {
         "Cancelled: topic[0] + stream_id + sender + recipient = 4"
     );
     assert_eq!(
-        events.get(7).unwrap().0.len(),
+        events.get(8).unwrap().0.len(),
         2,
         "TtlExtended: topic[0] + stream_id = 2"
     );
@@ -431,7 +440,7 @@ fn test_golden_events() {
     assert!(cancelled_payload.contains_key(Symbol::new(env, "withdrawn")));
 
     let ttl_extended_payload: soroban_sdk::Map<Symbol, Val> =
-        events.get(7).unwrap().1.try_into_val(env).unwrap();
+        events.get(8).unwrap().1.try_into_val(env).unwrap();
     assert!(ttl_extended_payload.contains_key(Symbol::new(env, "extended_to_ledgers")));
 }
 

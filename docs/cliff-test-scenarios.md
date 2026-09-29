@@ -256,6 +256,51 @@ Result: vested = 1000 * ONE
 
 ---
 
+### 11c. Pause Lands Exactly on the Cliff Instant
+
+**Test:** `paused_exactly_at_the_cliff_instant_leaves_the_gate_open`
+
+```
+Time: cliff
+Action: pause()            // paused_at == cliff_time, paused_total == 0
+
+Result (while paused):
+  vested = 1000 * ONE      // stream clock = cliff - 0 >= cliff_time: gate open
+  withdrawable = 1000 * ONE
+  refundable = 9000 * ONE
+
+Action: withdraw(None) while frozen
+  → paid = 1000 * ONE      // pausing freezes accrual, never access
+  withdrawn = 1000 * ONE, status stays Paused
+  withdrawn event matches post-call storage exactly
+
+Time: cliff + 500 (wall-clock, while paused)
+  vested still = 1000 * ONE; withdraw(again) → NothingToWithdraw
+
+Action: resume()           // paused_total = 500, stream clock = cliff again
+  vested = 1000 * ONE      // gate must not flicker shut across the boundary
+  resumed event carries paused_duration = paused_total = 500
+
+Action: advance(1)
+  vested = 1001 * ONE      // accrual continues on the stream clock
+
+Conservation:
+  vested + refundable == deposited (exact)
+  pool == deposited - withdrawn (exact)
+```
+
+**Verifies:**
+- `cliff_reached` is inclusive: `stream_time >= cliff_time` opens the gate at
+  the exact equality `paused_at == cliff_time` with `paused_total == 0`
+- An off-by-one (`<` or `>`) either strands the payout forever — the frozen
+  clock can never rise past `cliff_time` while paused — or overpays one
+  second early on an un-paused stream
+- The gate stays open across a resume that lands the stream clock back on
+  `cliff_time` exactly
+- Emitted `paused`, `withdrawn` and `resumed` events match docs/ABI.md
+
+---
+
 ### 12. Multiple Partial Withdrawals at Cliff
 
 **Test:** `multiple_partial_withdrawals_at_cliff_are_exact`
@@ -297,6 +342,7 @@ Every test calls `h.assert_pool_exact()` which verifies:
 - ✓ cliff == start (no gate)
 - ✓ cliff == end (lump sum)
 - ✓ Pause across cliff boundary
+- ✓ Pause landing exactly on the cliff instant
 - ✓ Multiple partial withdrawals
 - ✓ Batch operations with mixed states
 - ✓ Cancellation at all three boundaries
@@ -326,7 +372,7 @@ cargo test -p fluxora-stream test::cliff:: -- --nocapture
 ## Expected Output
 
 ```
-running 20 tests
+running 21 tests
 test cliff::nothing_is_withdrawable_one_second_before_the_cliff ... ok
 test cliff::cliff_releases_all_accrual_since_start_not_since_the_cliff ... ok
 test cliff::the_cliff_step_lands_on_the_exact_second ... ok
@@ -346,15 +392,16 @@ test cliff::withdrawal_before_cliff_fails_with_correct_error ... ok
 test cliff::batch_reads_handle_cliff_boundaries_correctly ... ok
 test cliff::pause_across_cliff_preserves_cliff_gate ... ok
 test cliff::pause_across_cliff_delays_the_wall_clock_cliff ... ok
+test cliff::paused_exactly_at_the_cliff_instant_leaves_the_gate_open ... ok
 test cliff::multiple_partial_withdrawals_at_cliff_are_exact ... ok
 
-test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 127 filtered out
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 127 filtered out
 ```
 
 ---
 
 **Quick verification checklist:**
-- [ ] 20 tests pass (7 existing + 13 new)
+- [ ] 21 tests pass (7 existing + 14 new)
 - [ ] No panics or overflows
 - [ ] Pool invariant holds after every operation
 - [ ] Conservation law exact (no dust)
