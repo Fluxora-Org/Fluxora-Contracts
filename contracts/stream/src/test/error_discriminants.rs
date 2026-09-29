@@ -99,13 +99,19 @@ pub(super) const DISCRIMINANT_FIXTURE: &[(&str, u32)] = &[
     ("TokenAmountMismatch", 32),
     // --- Vesting monotonicity ---
     ("VestedDecreased", 33),
+    // --- Contract-level emergency halt (#1818) ---
+    ("ContractHalted", 34),
+    ("HaltOperatorAlreadySet", 35),
+    ("HaltOperatorNotSet", 36),
+    ("ContractAlreadyHalted", 37),
+    ("ContractNotHalted", 38),
 ];
 
 /// The highest discriminant value in the fixture above.
 ///
 /// New variants must use `LAST_DISCRIMINANT + 1`. This constant is checked
 /// against the fixture length so a gap is caught immediately.
-const LAST_DISCRIMINANT: u32 = 33;
+const LAST_DISCRIMINANT: u32 = 38;
 
 /// Assert that the fixture has no gaps and ends at `LAST_DISCRIMINANT`.
 ///
@@ -180,6 +186,14 @@ fn discriminant_fixture_matches_source() {
         ("InvalidTopUp", Error::InvalidTopUp as u32),
         ("TokenAmountMismatch", Error::TokenAmountMismatch as u32),
         ("VestedDecreased", Error::VestedDecreased as u32),
+        ("ContractHalted", Error::ContractHalted as u32),
+        (
+            "HaltOperatorAlreadySet",
+            Error::HaltOperatorAlreadySet as u32,
+        ),
+        ("HaltOperatorNotSet", Error::HaltOperatorNotSet as u32),
+        ("ContractAlreadyHalted", Error::ContractAlreadyHalted as u32),
+        ("ContractNotHalted", Error::ContractNotHalted as u32),
     ];
 
     assert_eq!(
@@ -1164,5 +1178,56 @@ fn vested_decreased_discriminant_value() {
         Error::VestedDecreased as u32,
         33,
         "VestedDecreased discriminant must be 33",
+    );
+}
+
+// #34–#38 — contract-level emergency halt (#1818) ---------------------------
+//
+// Driven end-to-end from the public ABI in `test::halt`, which halts a live
+// contract and asserts every mutating entry point is refused. Discriminants
+// confirmed here.
+
+#[test]
+fn contract_halted_discriminant_value() {
+    assert_eq!(
+        Error::ContractHalted as u32,
+        34,
+        "ContractHalted discriminant must be 34",
+    );
+}
+
+#[test]
+fn halt_operator_already_set_discriminant_value() {
+    assert_eq!(
+        Error::HaltOperatorAlreadySet as u32,
+        35,
+        "HaltOperatorAlreadySet discriminant must be 35",
+    );
+}
+
+#[test]
+fn halt_operator_not_set_discriminant_value() {
+    assert_eq!(
+        Error::HaltOperatorNotSet as u32,
+        36,
+        "HaltOperatorNotSet discriminant must be 36",
+    );
+}
+
+#[test]
+fn contract_already_halted_discriminant_value() {
+    assert_eq!(
+        Error::ContractAlreadyHalted as u32,
+        37,
+        "ContractAlreadyHalted discriminant must be 37",
+    );
+}
+
+#[test]
+fn contract_not_halted_discriminant_value() {
+    assert_eq!(
+        Error::ContractNotHalted as u32,
+        38,
+        "ContractNotHalted discriminant must be 38",
     );
 }

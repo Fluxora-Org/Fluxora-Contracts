@@ -107,9 +107,9 @@
 //! `vested - withdrawn` through the normal withdraw path, which is why that
 //! amount stays pooled in the contract. Every cancellation state is asserted
 //! against storage and token balances in `test::cancel_events`.
-use soroban_sdk::{contractevent, Address, Env};
+use soroban_sdk::{contractevent, Address, Env, String};
 
-use crate::types::{Stream, StreamStatus};
+use crate::types::{CliffMode, Stream, StreamStatus};
 
 /// A new stream was created. Carries the complete initial state — this is the
 /// event an indexer builds its sender/recipient mapping from.
@@ -129,6 +129,13 @@ pub struct StreamCreated {
     pub cancellable: bool,
     pub pausable: bool,
     pub transferable: bool,
+    /// Which clock the cliff gate is read against. Appended in ABI v2 — see
+    /// `test::abi`. An indexer that predates the field should treat a missing
+    /// `cliff_mode` as `CliffMode::Schedule`, which is what the entry point that
+    /// omitted it produced.
+    pub cliff_mode: CliffMode,
+    /// Optional reference string for stream identification.
+    pub reference: Option<String>,
 }
 
 /// The recipient drew down accrued funds. Emitted once per stream, including
@@ -288,6 +295,42 @@ pub struct TtlExtended {
     pub extended_to_ledgers: u32,
 }
 
+/// The one-shot halt operator was installed (issue #1818).
+///
+/// Emitted exactly once per deployment: the setter has no rotation path, so
+/// there is no "operator changed" event to define.
+#[contractevent]
+pub struct HaltOperatorSet {
+    #[topic]
+    pub operator: Address,
+}
+
+/// The contract-level halt was engaged (issue #1818).
+///
+/// From this event until the matching [`ContractResumed`], every
+/// state-changing entry point returns `ContractHalted` (34). Read methods are
+/// unaffected, and nothing is settled, cancelled or paused by the halt itself:
+/// the event is the indexer's signal that the *contract* stopped accepting
+/// mutations, not that any particular stream changed state.
+#[contractevent]
+pub struct ContractHalted {
+    #[topic]
+    pub operator: Address,
+    /// Ledger timestamp at which the halt was engaged.
+    pub halted_at: u64,
+}
+
+/// The contract-level halt was lifted (issue #1818).
+#[contractevent]
+pub struct ContractResumed {
+    #[topic]
+    pub operator: Address,
+    /// Ledger timestamp at which settlement was restored.
+    pub resumed_at: u64,
+    /// Wall-clock seconds the contract spent halted.
+    pub halted_for: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Emission helpers
 // ---------------------------------------------------------------------------
@@ -305,6 +348,8 @@ pub fn stream_created(env: &Env, stream_id: u64, stream: &Stream) {
         cancellable: stream.cancellable,
         pausable: stream.pausable,
         transferable: stream.transferable,
+        cliff_mode: stream.cliff_mode,
+        reference: stream.reference.clone(),
     }
     .publish(env);
 }
@@ -443,6 +488,33 @@ pub fn delegate_revoked(env: &Env, stream_id: u64, grantor: &Address, delegate: 
         stream_id,
         grantor: grantor.clone(),
         delegate: delegate.clone(),
+    }
+    .publish(env);
+}
+
+/// Emit [`HaltOperatorSet`] once, when the one-shot setter succeeds.
+pub fn halt_operator_set(env: &Env, operator: &Address) {
+    HaltOperatorSet {
+        operator: operator.clone(),
+    }
+    .publish(env);
+}
+
+/// Emit [`ContractHalted`] when the operator engages the halt.
+pub fn contract_halted(env: &Env, operator: &Address, halted_at: u64) {
+    ContractHalted {
+        operator: operator.clone(),
+        halted_at,
+    }
+    .publish(env);
+}
+
+/// Emit [`ContractResumed`] when the operator lifts the halt.
+pub fn contract_resumed(env: &Env, operator: &Address, resumed_at: u64, halted_for: u64) {
+    ContractResumed {
+        operator: operator.clone(),
+        resumed_at,
+        halted_for,
     }
     .publish(env);
 }

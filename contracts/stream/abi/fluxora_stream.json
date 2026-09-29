@@ -1,6 +1,15 @@
 {
-  "abi_version": 1,
+  "abi_version": 2,
   "functions": [
+    {
+      "name": "batch_cancel",
+      "auth": "sender",
+      "inputs": [
+        {"name": "sender", "type": "Address"},
+        {"name": "stream_ids", "type": "Vec<u64>"}
+      ],
+      "outputs": "Result<BatchCancelOutcome, Error>"
+    },
     {
       "name": "batch_extend_ttl",
       "auth": "none",
@@ -37,6 +46,24 @@
         {"name": "start_time", "type": "u64"},
         {"name": "end_time", "type": "u64"},
         {"name": "cliff_time", "type": "u64"},
+        {"name": "cancellable", "type": "bool"},
+        {"name": "pausable", "type": "bool"},
+        {"name": "transferable", "type": "bool"}
+      ],
+      "outputs": "Result<u64, Error>"
+    },
+    {
+      "name": "create_stream_with_cliff_mode",
+      "auth": "sender",
+      "inputs": [
+        {"name": "sender", "type": "Address"},
+        {"name": "recipient", "type": "Address"},
+        {"name": "token", "type": "Address"},
+        {"name": "deposit", "type": "i128"},
+        {"name": "start_time", "type": "u64"},
+        {"name": "end_time", "type": "u64"},
+        {"name": "cliff_time", "type": "u64"},
+        {"name": "cliff_mode", "type": "CliffMode"},
         {"name": "cancellable", "type": "bool"},
         {"name": "pausable", "type": "bool"},
         {"name": "transferable", "type": "bool"}
@@ -129,6 +156,27 @@
       "outputs": "Result<(), Error>"
     },
     {
+      "name": "halt",
+      "auth": "operator",
+      "inputs": [
+      ],
+      "outputs": "Result<(), Error>"
+    },
+    {
+      "name": "halt_operator",
+      "auth": "none",
+      "inputs": [
+      ],
+      "outputs": "Option<Address>"
+    },
+    {
+      "name": "halted",
+      "auth": "none",
+      "inputs": [
+      ],
+      "outputs": "bool"
+    },
+    {
       "name": "pause",
       "auth": "sender",
       "inputs": [
@@ -153,12 +201,27 @@
       "outputs": "Result<(), Error>"
     },
     {
+      "name": "resume_contract",
+      "auth": "operator",
+      "inputs": [
+      ],
+      "outputs": "Result<(), Error>"
+    },
+    {
       "name": "revoke_delegate",
       "auth": "grantor",
       "inputs": [
         {"name": "stream_id", "type": "u64"},
         {"name": "grantor", "type": "Address"},
         {"name": "delegate", "type": "Address"}
+      ],
+      "outputs": "Result<(), Error>"
+    },
+    {
+      "name": "set_halt_operator",
+      "auth": "operator",
+      "inputs": [
+        {"name": "operator", "type": "Address"}
       ],
       "outputs": "Result<(), Error>"
     },
@@ -223,10 +286,29 @@
   ],
   "types": [
     {
+      "name": "BatchCancelOutcome",
+      "kind": "struct",
+      "fields": [
+        {"name": "refunded", "type": "i128"},
+        {"name": "refused_index", "type": "Option<u32>"},
+        {"name": "refused_reason", "type": "Option<u32>"}
+      ],
+      "cases": [
+      "name": "CliffMode",
+      "kind": "enum",
+      "fields": [
+      ],
+      "cases": [
+        {"name": "Schedule", "discriminant": 0},
+        {"name": "WallClock", "discriminant": 1}
+      ]
+    },
+    {
       "name": "Stream",
       "kind": "struct",
       "fields": [
         {"name": "cancellable", "type": "bool"},
+        {"name": "cliff_mode", "type": "CliffMode"},
         {"name": "cliff_time", "type": "u64"},
         {"name": "deposited", "type": "i128"},
         {"name": "end_time", "type": "u64"},
@@ -290,7 +372,12 @@
     {"name": "RepeatedTransfer", "discriminant": 30},
     {"name": "InvalidTopUp", "discriminant": 31},
     {"name": "TokenAmountMismatch", "discriminant": 32},
-    {"name": "VestedDecreased", "discriminant": 33}
+    {"name": "VestedDecreased", "discriminant": 33},
+    {"name": "ContractHalted", "discriminant": 34},
+    {"name": "HaltOperatorAlreadySet", "discriminant": 35},
+    {"name": "HaltOperatorNotSet", "discriminant": 36},
+    {"name": "ContractAlreadyHalted", "discriminant": 37},
+    {"name": "ContractNotHalted", "discriminant": 38}
   ],
   "events": [
     {
@@ -307,6 +394,33 @@
         {"name": "end_time", "type": "u64"},
         {"name": "paused_at", "type": "Option<u64>"},
         {"name": "paused_total", "type": "u64"}
+      ]
+    },
+    {
+      "name": "ContractHalted",
+      "topics": [
+        {"name": "operator", "type": "Address"}
+      ],
+      "data": [
+        {"name": "halted_at", "type": "u64"}
+      ]
+    },
+    {
+      "name": "ContractResumed",
+      "topics": [
+        {"name": "operator", "type": "Address"}
+      ],
+      "data": [
+        {"name": "resumed_at", "type": "u64"},
+        {"name": "halted_for", "type": "u64"}
+      ]
+    },
+    {
+      "name": "HaltOperatorSet",
+      "topics": [
+        {"name": "operator", "type": "Address"}
+      ],
+      "data": [
       ]
     },
     {
@@ -359,7 +473,8 @@
         {"name": "cliff_time", "type": "u64"},
         {"name": "cancellable", "type": "bool"},
         {"name": "pausable", "type": "bool"},
-        {"name": "transferable", "type": "bool"}
+        {"name": "transferable", "type": "bool"},
+        {"name": "cliff_mode", "type": "CliffMode"}
       ]
     },
     {
