@@ -1030,6 +1030,17 @@ delegate entry points verify it before acting: a missing grant or one that does
 not cover the requested operation returns `DelegateNotPermitted` (27), and a
 grant whose `expires_at` has passed returns `DelegateExpired` (28).
 
+`delegate_transfer_recipient` is the authorisation-gated twin of
+`transfer_recipient`. Once the grant is verified it repeats the direct path's
+four stream-level guards — `NotTransferable` (10), `StreamTerminated` (14),
+`SelfStream` (6) and `RepeatedTransfer` (30) — in the same order, so both entry
+points reject the same stream states with the same discriminants. The only
+variants it can add are the two grant checks above and the host-level
+authorisation trap when the delegate does not sign. Because the grant check runs
+before the stream is read, an id that was never issued — and therefore has no
+grant — is rejected as `DelegateNotPermitted` (27) rather than
+`StreamNotFound` (1).
+
 #### `grant_delegate`
 
 Grant a delegate permission to call a scoped set of operations on one stream.

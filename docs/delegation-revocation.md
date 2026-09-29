@@ -139,3 +139,12 @@ again by looping over `ALL_OPS`:
 - `the_old_recipient_cannot_revoke_after_a_transfer` — the previous recipient
   is rejected with `Error::Unauthorized`, and the delegate remains authorised,
   so the rejection did not silently clear anything.
+
+Issue #1827 brings `delegate_transfer_recipient` itself up to the depth of
+`transfer_recipient`. The same module's guard-parity section pins the two entry
+points against each other: no grant, a wrong-bit grant, an expired grant and a
+same-ledger revocation are each rejected with `DelegateNotPermitted` or
+`DelegateExpired`, the direct path's stream-level guards (`NotTransferable`,
+`StreamTerminated`, `SelfStream`, `RepeatedTransfer`) are repeated on the
+delegated path, and a transfer that succeeds moves the entire outstanding claim
+to the new recipient — the old recipient receives nothing.
