@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from script import validate_gas
@@ -43,3 +45,14 @@ def test_gate_fails_and_publishes_report_for_withdraw_regression(tmp_path, monke
 
     assert validate_gas.main(["--measurements", str(measurements)]) == 1
     assert "| `withdraw` | 1000 | 1101 | 1100 | FAIL |" in report.read_text(encoding="utf-8")
+
+
+def test_committed_baseline_covers_every_entrypoint():
+    baseline = json.loads(validate_gas.BASELINE.read_text(encoding="utf-8"))
+    assert set(baseline) == entrypoints()
+    assert all(isinstance(value, int) and value > 0 for value in baseline.values())
+
+
+def test_baseline_is_codeowner_protected():
+    owners = (validate_gas.ROOT / ".github/CODEOWNERS").read_text(encoding="utf-8")
+    assert "/contracts/stream/entrypoint-cost-baseline.json" in owners

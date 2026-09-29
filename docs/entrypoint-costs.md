@@ -1,8 +1,7 @@
 # Stream entry point CPU budget
 
 `contracts/stream/entrypoint-cost-baseline.json` records the instruction cost of
-one successful call to each of the 29 public stream functions. The fixtures in
-one successful call to each of the 25 public stream functions. The fixtures in
+one successful call to each of the 33 public stream functions. The fixtures in
 `contracts/stream/src/test/entrypoint_costs.rs` use the release
 `wasm32v1-none` artifact, with setup calls outside the recorded invocation.
 The batch fixtures use one stream. The measurements are local Soroban SDK
@@ -21,4 +20,6 @@ python3 script/validate_gas.py --record-baseline
 ```
 
 Review the baseline diff and report before committing it. Re-record only when
-the behavior or pinned Soroban SDK/toolchain changes intentionally.
+the behavior or pinned Soroban SDK/toolchain changes intentionally. The baseline
+file is listed in `.github/CODEOWNERS`, so a change to a recorded figure cannot
+merge without maintainer review.

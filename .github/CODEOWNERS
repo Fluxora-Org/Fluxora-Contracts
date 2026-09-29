@@ -4,3 +4,8 @@
 # The doc-alignment baseline is a shrink-only ratchet: adding an entry lets a
 # documentation gap persist, so baseline edits require maintainer review.
 /script/doc-alignment-baseline.json @Johnsource-hub/maintainers
+
+# The entry-point cost baseline is the record the gas gate enforces against, so
+# raising a figure must be a deliberate, maintainer-reviewed edit rather than a
+# silent reset of the regression limit (see docs/entrypoint-costs.md).
+/contracts/stream/entrypoint-cost-baseline.json @Johnsource-hub/maintainers

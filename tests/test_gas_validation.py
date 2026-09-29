@@ -8,11 +8,14 @@ from script.validate_gas import compare, entrypoints, main, parse_measurements
 
 def test_entrypoints_match_public_abi_surface():
     names = entrypoints()
-    assert len(names) == 25
-    assert len(names) == 29
-    assert len(names) == 25
-    assert {"withdraw", "batch_withdraw", "batch_cancel", "delegate_withdraw"} <= names
-    assert {"withdraw", "batch_withdraw", "delegate_withdraw"} <= names
+    assert len(names) == 33
+    assert {
+        "withdraw",
+        "batch_withdraw",
+        "batch_cancel",
+        "delegate_withdraw",
+        "create_stream_with_cliff_mode",
+    } <= names
 
 
 def test_parse_measurements_reads_entrypoint_costs():
