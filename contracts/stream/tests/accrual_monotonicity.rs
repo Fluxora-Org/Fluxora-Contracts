@@ -30,12 +30,25 @@
 //! cargo test -p fluxora-stream accrual_monotonicity -- --nocapture
 //! PROPTEST_CASES=10000 cargo test -p fluxora-stream accrual_monotonicity
 //! ```
+//!
+//! # Issue #1815 — other release curves
+//!
+//! `vested` is no longer unconditionally linear: a stream carries a
+//! [`ReleaseCurve`] and the shape above the cliff follows it. The properties in
+//! this file are therefore asserted for **every** curve, not just the linear
+//! default — monotonicity (`prop_vested_monotonic_over_time_for_every_curve`),
+//! conservation (`prop_conservation_for_every_curve`), and an exhaustive
+//! second-by-second sweep of the whole schedule for each curve
+//! (`regression_every_curve_monotonic_and_conserving_second_by_second`). The
+//! original linear properties are unchanged, so a regression in the default
+//! behaviour still fails here.
 
 extern crate std;
 
 use fluxora_stream::{
-    cliff_reached, duration, elapsed, refundable, stream_time, vested, withdrawable, Stream,
-    StreamStatus,
+    cliff_reached, duration, elapsed, refundable, stream_time, vested, withdrawable, ReleaseCurve,
+    cliff_reached, duration, elapsed, refundable, stream_time, vested, withdrawable, CliffMode,
+    Stream, StreamStatus,
 };
 use proptest::prelude::*;
 use soroban_sdk::testutils::Address as _;
@@ -46,6 +59,19 @@ use soroban_sdk::{Address, Env};
 // ---------------------------------------------------------------------------
 
 fn dummy_stream(env: &Env, deposited: i128, start: u64, end: u64, cliff: u64) -> Stream {
+    dummy_stream_with_curve(env, deposited, start, end, cliff, ReleaseCurve::Linear)
+}
+
+/// As [`dummy_stream`], with an explicit #1815 release curve, so the properties
+/// below can be asserted for every supported curve rather than linear alone.
+fn dummy_stream_with_curve(
+    env: &Env,
+    deposited: i128,
+    start: u64,
+    end: u64,
+    cliff: u64,
+    curve: ReleaseCurve,
+) -> Stream {
     Stream {
         sender: Address::generate(env),
         recipient: Address::generate(env),
@@ -55,13 +81,26 @@ fn dummy_stream(env: &Env, deposited: i128, start: u64, end: u64, cliff: u64) ->
         start_time: start,
         end_time: end,
         cliff_time: cliff,
+        cliff_mode: CliffMode::Schedule,
         cancellable: true,
         pausable: true,
         transferable: true,
         paused_at: None,
         paused_total: 0,
         status: StreamStatus::Active,
+        curve,
     }
+}
+
+/// Every supported [`ReleaseCurve`]. A fourth variant added to the enum must be
+/// added here, at which point the properties below immediately hold it to the
+/// same monotonicity and conservation contract.
+fn curve_strategy() -> impl Strategy<Value = ReleaseCurve> {
+    prop_oneof![
+        Just(ReleaseCurve::Linear),
+        Just(ReleaseCurve::Step),
+        Just(ReleaseCurve::FrontLoaded),
+    ]
 }
 
 fn stream_params() -> impl Strategy<Value = (i128, u64, u64, u64)> {
@@ -421,4 +460,130 @@ fn regression_zero_deposited() {
     for t in [0u64, 500, 1000, 1500] {
         assert_eq!(vested(&s, t).unwrap(), 0);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Issue #1815 — every curve is monotone and conserves the deposit
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// The same monotonicity property `prop_vested_monotonic_over_time` asserts
+    /// for linear, asserted for every supported curve: `vested` never decreases
+    /// as time advances, whatever the release shape, and the schedule still
+    /// settles at exactly the deposit.
+    #[test]
+    fn prop_vested_monotonic_over_time_for_every_curve(
+        (deposited, start, end, cliff) in stream_params(),
+        times in proptest::collection::vec(0u64..1000u64, 2..=8),
+        curve in curve_strategy(),
+    ) {
+        let env = Env::default();
+        let s = dummy_stream_with_curve(&env, deposited, start, end, cliff, curve);
+        let mut sorted = times;
+        sorted.sort();
+        let mut prev = vested(&s, sorted[0]).unwrap();
+        for &t in sorted.iter().skip(1) {
+            let cur = vested(&s, t).unwrap();
+            prop_assert!(cur >= prev, "{curve:?} not monotonic: vested({t})={cur} < {prev}");
+            prev = cur;
+        }
+        prop_assert_eq!(vested(&s, end).unwrap(), deposited, "did not settle for {:?}", curve);
+        prop_assert_eq!(vested(&s, end + 1000).unwrap(), deposited, "unsettled past end for {:?}", curve);
+    }
+
+    /// Total conservation for every curve, at every instant: what the recipient
+    /// has earned plus what the sender would get back is exactly the deposit.
+    #[test]
+    fn prop_conservation_for_every_curve(
+        (deposited, start, end, cliff) in stream_params(),
+        t in 0u64..2000u64,
+        curve in curve_strategy(),
+    ) {
+        let env = Env::default();
+        let s = dummy_stream_with_curve(&env, deposited, start, end, cliff, curve);
+        let v = vested(&s, t).unwrap();
+        let r = refundable(&s, t).unwrap();
+        prop_assert_eq!(v + r, deposited, "conservation failed for {:?}", curve);
+    }
+}
+
+/// Second-by-second sweep of the *whole* schedule, for every curve: the
+/// exhaustive companion to the randomized properties above. A full sweep is
+/// cheap here and leaves no instant unchecked, which is what "across the full
+/// schedule" means for a discrete release curve like `Step`.
+#[test]
+fn regression_every_curve_monotonic_and_conserving_second_by_second() {
+    let env = Env::default();
+    let deposited = 10_000i128;
+    let duration = 1_000u64;
+
+    for curve in [
+        ReleaseCurve::Linear,
+        ReleaseCurve::Step,
+        ReleaseCurve::FrontLoaded,
+    ] {
+        let s = dummy_stream_with_curve(&env, deposited, 0, duration, 0, curve);
+        let mut prev = -1i128;
+        assert_eq!(
+            vested(&s, 0).unwrap(),
+            0,
+            "{curve:?}: nothing vests at start"
+        );
+        for t in 0..=(duration + 100) {
+            let v = vested(&s, t).unwrap();
+            assert!(
+                v >= prev,
+                "{curve:?}: vested went backwards at t={t}: {v} < {prev}"
+            );
+            assert!(
+                (0..=deposited).contains(&v),
+                "{curve:?}: vested {v} out of bounds at t={t}"
+            );
+            assert_eq!(
+                v + refundable(&s, t).unwrap(),
+                deposited,
+                "{curve:?}: conservation failed at t={t}"
+            );
+            prev = v;
+        }
+        assert_eq!(
+            vested(&s, duration).unwrap(),
+            deposited,
+            "{curve:?}: full schedule must vest the whole deposit"
+        );
+    }
+}
+
+/// The shapes are genuinely different from linear, otherwise "supports other
+/// curves" would be an empty claim. `FrontLoaded` leads linear from the first
+/// notionally-accruing instant, and `Step` stays at zero until its first
+/// quarter boundary and then jumps.
+#[test]
+fn regression_curves_are_actually_different_shapes() {
+    let env = Env::default();
+    let (deposited, duration) = (10_000i128, 1_000u64);
+    let linear = dummy_stream_with_curve(&env, deposited, 0, duration, 0, ReleaseCurve::Linear);
+    let step = dummy_stream_with_curve(&env, deposited, 0, duration, 0, ReleaseCurve::Step);
+    let front = dummy_stream_with_curve(&env, deposited, 0, duration, 0, ReleaseCurve::FrontLoaded);
+
+    let t = duration / 4;
+    let l = vested(&linear, t).unwrap();
+    let s = vested(&step, t).unwrap();
+    let f = vested(&front, t).unwrap();
+    assert!(
+        f > l,
+        "FrontLoaded must lead linear at the first quarter: {f} <= {l}"
+    );
+    assert!(l > 0, "linear must have accrued by the first quarter");
+    assert_eq!(
+        s,
+        deposited / 4,
+        "Step must release exactly one quarter at t=d/4"
+    );
+    assert!(
+        s > vested(&step, t - 1).unwrap(),
+        "Step must jump at the quarter boundary, not accrue smoothly"
+    );
 }

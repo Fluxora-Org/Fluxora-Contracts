@@ -1,6 +1,6 @@
 [package]
-name = "fluxora-factory"
-description = "Admin policy layer for factory-mediated Fluxora stream creation"
+name = "fluxora_factory"
+description = "Admin policy wrapper and stream factory for Fluxora on Soroban"
 version = { workspace = true }
 edition = { workspace = true }
 license = { workspace = true }
@@ -19,21 +19,3 @@ soroban-sdk = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
-
-# The 973-line specification in `tests/factory_setters.rs` is a frozen artefact
-# (issue #1785 creates the crate so it compiles, it does not rewrite it). Two of
-# its forms are lint findings rather than defects:
-#
-# * `Env::register_contract` was renamed to `Env::register` in soroban-sdk 27, so
-#   its 33 call sites are deprecation warnings. `cargo clippy -- -D warnings`
-#   would fail the build on a rename that changes no behaviour.
-# * two `assert_eq!(_, false)` comparisons that clippy prefers as `assert!`.
-#
-# Both are allowed at the package level so CI's `-D warnings` gate stays exact
-# for every new line while the specification stays byte-stable, and so the two
-# lints go on failing anything written from here on.
-[lints.rust]
-deprecated = "allow"
-
-[lints.clippy]
-bool_assert_comparison = "allow"
