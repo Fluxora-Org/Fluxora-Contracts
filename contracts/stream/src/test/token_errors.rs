@@ -56,7 +56,8 @@ use soroban_sdk::testutils::{Address as _, Events as _, IssuerFlags};
 use soroban_sdk::token::{StellarAssetClient, TokenClient};
 use soroban_sdk::xdr::ContractEventBody;
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, Env, MuxedAddress, String,
+    contract, contractimpl, contracttype, symbol_short, Address, Env, Event as _, MuxedAddress,
+    String,
 };
 
 // ─── panic token ─────────────────────────────────────────────────────────────
@@ -127,7 +128,7 @@ pub struct FalseToken;
 #[contractimpl]
 impl FalseToken {
     pub fn mint(env: Env, to: Address, amount: i128) {
-        let balance = Self::balance(&env, to.clone());
+        let balance = Self::balance_of(&env, &to);
         env.storage().instance().set(&to, &(balance + amount));
     }
 
@@ -136,7 +137,11 @@ impl FalseToken {
     }
 
     pub fn balance(env: Env, id: Address) -> i128 {
-        env.storage().instance().get(&id).unwrap_or(0)
+        Self::balance_of(&env, &id)
+    }
+
+    fn balance_of(env: &Env, id: &Address) -> i128 {
+        env.storage().instance().get(id).unwrap_or(0)
     }
 }
 
