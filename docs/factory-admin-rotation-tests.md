@@ -1,5 +1,9 @@
 # Same-Ledger Admin Rotation Tests
 
+> **Ordering model:** the guarantee these tests assert is pair 1 of
+> [`docs/same-ledger-ordering.md`](same-ledger-ordering.md), which states the
+> model once for every ordering-sensitive entry point.
+
 > **Provenance:** moved from the repository root into `docs/` in the point-in-time
 > documentation cleanup for [#1681](https://github.com/Fluxora-Org/Fluxora-Contracts/issues/1681). Update this document alongside the
 > tests it covers.
@@ -7,6 +11,12 @@
 ## Summary
 
 Added three comprehensive tests to `contracts/factory/tests/factory_setters.rs` to verify that admin rotation properly invalidates authorization within the same simulated ledger/transaction.
+
+A fourth test, `test_set_admin_same_ledger_setter_before_rotation_is_honoured`,
+was later added to cover the opposite ordering of the same pair: a setter call
+**before** `set_admin` is honoured by the old admin, and the rotation that
+follows does not unwind it. Together the four pin both directions of the pair;
+see `docs/same-ledger-ordering.md`.
 
 ## Tests Added
 

@@ -35,6 +35,8 @@ pub enum Error {
     DepositRateTooLow = 5,
     /// Sender and recipient are the same address.
     SelfStream = 6,
+    /// Reference string exceeds maximum allowed length.
+    InvalidReferenceLength = 34,
 
     // --- Authorization / capability ---
     /// Caller is not the party allowed to perform this action.
@@ -183,4 +185,53 @@ pub enum Error {
     /// The guard stays because the invariant it protects is load-bearing.
     /// Classified as reserved in `test::error_reachability`.
     VestedDecreased = 33,
+
+    // --- Rebase detection ---
+    /// The pool's real token balance is short of the balance Fluxora has
+    /// accounted for.
+    ///
+    /// Fluxora keeps a per-token running total of the balance it expects to
+    /// hold ([`DataKey::PooledBalance`]) — every pull credits it, every
+    /// payout and refund debits it — and reconciles that total against the
+    /// token's own `balance` at the end of every operation that moves pool
+    /// funds. A shortfall means the token changed balances outside a
+    /// transfer Fluxora was a party to: an elastic-supply rebase, the exact
+    /// case `docs/KNOWN-LIMITATIONS.md` §6 recorded as undetectable. The
+    /// invocation reverts instead of letting one recipient be paid out of
+    /// another's claim.
+    ///
+    /// A **surplus** is deliberately tolerated, never reported: a positive
+    /// rebase cannot cause an underpayment, and rejecting one would let any
+    /// third party freeze every withdrawal by dusting the contract with a
+    /// single unit. See `docs/ABI.md` "Token assumptions" and
+    /// `test::rebase_drift`.
+    PoolBalanceDrift = 34,
+    // --- Contract-level emergency halt (#1818) ---
+    /// A state-changing entry point was called while the contract-level halt
+    /// is engaged.
+    ///
+    /// Only mutations are refused: every read method (`get_stream`,
+    /// `vested_of`, `withdrawable_of`, `refundable_of`, `stream_count`,
+    /// `stream_exists`, `halted`, `halt_operator`) keeps answering normally so
+    /// integrators can still observe the chain during an incident.
+    ContractHalted = 34,
+    /// `set_halt_operator` was called after an operator was already installed.
+    ///
+    /// The setter is deliberately one-shot: there is no rotation entry point,
+    /// so a compromised operator cannot be replaced — it can only be halted by
+    /// deploying a new contract.
+    HaltOperatorAlreadySet = 35,
+    /// `halt` or `resume_contract` was called on a contract that has never had
+    /// a halt operator installed.
+    ///
+    /// The halt is opt-in: a deployment that never calls `set_halt_operator`
+    /// has no operator and no way to engage it.
+    HaltOperatorNotSet = 36,
+    /// `halt` was called while the contract was already halted.
+    ContractAlreadyHalted = 37,
+    /// `resume_contract` was called while the contract was not halted.
+    ///
+    /// There is no timeout on the halt, so this is the only way a resume can
+    /// be a no-op.
+    ContractNotHalted = 38,
 }
