@@ -78,6 +78,10 @@ mod stream_count_consistency;
 mod read_methods_no_side_effects;
 mod read_ttl_matrix;
 
+// Issue #1857 — the contract's token balance always covers the summed live
+// stream liability, asserted over randomized operation sequences.
+mod pool_liability_proptest;
+
 // Package / artifact naming gates, run by CI's `packaging::` step. Also
 // guards #1675 (no inert governance crate). Previously unregistered, so
 // that CI step matched zero tests.
