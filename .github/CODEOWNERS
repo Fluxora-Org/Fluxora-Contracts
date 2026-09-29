@@ -1,2 +1,6 @@
 # Workflow changes must be reviewed by the workflow maintainer before merge.
 .github/workflows/ @Johnsource-hub/maintainers
+
+# The doc-alignment baseline is a shrink-only ratchet: adding an entry lets a
+# documentation gap persist, so baseline edits require maintainer review.
+/script/doc-alignment-baseline.json @Johnsource-hub/maintainers
