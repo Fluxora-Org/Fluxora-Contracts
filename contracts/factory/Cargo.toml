@@ -1,6 +1,6 @@
 [package]
 name = "fluxora_factory"
-description = "Admin policy layer for Fluxora: the allowlist, deposit cap, duration floor, rate bounds and creation pause that the stream primitive deliberately does not carry."
+description = "Admin policy wrapper and stream factory for Fluxora on Soroban"
 version = { workspace = true }
 edition = { workspace = true }
 license = { workspace = true }
@@ -19,28 +19,3 @@ soroban-sdk = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
-
-# Package-wide lint policy.
-#
-# `contracts/factory/tests/factory_setters.rs` is a 973-line specification that
-# was committed before the crate existed, so it was never linted. Promoting the
-# crate into the workspace (which is what makes CI compile the spec at all)
-# exposes two things in that frozen text:
-#
-# * `Env::register_contract` was renamed to `Env::register` in soroban-sdk 27;
-#   the spec still uses the old name, which is a deprecation warning and would
-#   fail CI's `-D warnings`.
-# * two `assert_eq!(_, bool_literal)` comparisons, which clippy's
-#   `bool_assert_comparison` prefers as `assert!` / `assert!(!_)`.
-#
-# Allowancing them here keeps the specification byte-identical — rewriting the
-# spec to satisfy a linter would change the artefact the issue calls "the
-# specification these tests pin" — and scopes the allowance to this package
-# instead of relaxing the workspace-wide lint policy. New code in this crate
-# should not need either allowance; the dedicated acceptance tests for the
-# entry points are clippy-clean without them.
-[lints.rust]
-deprecated = "allow"
-
-[lints.clippy]
-bool_assert_comparison = "allow"
