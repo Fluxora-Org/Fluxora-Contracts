@@ -1,5 +1,10 @@
 # Delegate revocation: same-ledger ordering guarantee
 
+> The general model — what *any* two entry points guarantee when they share a
+> ledger, and the other ordering-sensitive pairs — is stated once in
+> [`docs/same-ledger-ordering.md`](same-ledger-ordering.md). This note is the
+> delegate-revocation-specific detail behind pair 2 of that model.
+
 `revoke_delegate` removes a delegate grant from persistent storage. This note
 states exactly when that removal takes effect, and what a recipient transfer
 does to grants that have not been revoked, so integrators can rely on both
