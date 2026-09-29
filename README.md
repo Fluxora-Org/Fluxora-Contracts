@@ -14,12 +14,19 @@ subscription billing, vesting schedules. The contract is the product.
 | SDK | `soroban-sdk` 27.0.5 |
 | Rust | 1.97.1, target `wasm32v1-none` |
 | Token interface | SEP-41 (USDC on Stellar has **7 decimals**); see [token assumptions](docs/ABI.md#token-assumptions) — no fee-on-transfer, no rebasing |
-| Contract size | ~47 KiB baseline; enforced by `contracts/stream/wasm-size-budget.env` |
+| Contract size | ~74 KiB baseline; enforced by `contracts/stream/wasm-size-budget.env` |
+| Contract size | 75,159 bytes; enforced by `contracts/stream/wasm-size-budget.env` (42.7% under the 128 KiB Soroban cap) |
+| Contract size | ~69 KiB baseline; enforced by `contracts/stream/wasm-size-budget.env` |
 | Tests | 146, including property tests and a pool invariant checked after every operation |
 
 > **Read [docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md) before relying on this.**
 > A green suite here does not mean TTL is solved — the archival *recovery* flow
 > is not yet proven against a live network. See §1 there, and the summary below.
+
+> **Security status:** Automated testing includes property tests, a pool
+> invariant checked after every operation, and randomized sequence tests. This
+> testing is not an independent security review; no third-party security audit
+> of the contracts has been performed.
 
 ---
 
@@ -138,6 +145,23 @@ contract can never owe more than it holds.
 entitled to everything accrued *since `start_time`* — not merely what accrues
 after the cliff. This is standard vesting semantics and it surprises people.
 
+**Which clock the cliff is judged on is a per-stream choice.** A stream carries
+a `cliff_mode`, fixed at creation:
+
+```
+cliff_mode = Schedule  (default)   gate opens when stream_time >= cliff_time
+cliff_mode = WallClock             gate opens when now        >= cliff_time
+```
+
+On the default `Schedule` mode a pause slides the cliff along with the schedule,
+so the gate opens at `cliff_time + paused_total`. That is the historical
+behaviour and it is what `create_stream` produces. `WallClock` judges the gate
+against the ledger timestamp instead, so a sender pausing the stream can no
+longer move the recipient's unlock instant — while accrual still stops while
+paused, so the pre-cliff backlog is released in one go on resume. Create one
+with `create_stream_with_cliff_mode(..., CliffMode::WallClock, ...)`; the mode is
+returned by `get_stream` and published in the `stream_created` event.
+
 **Conservation is exact.** For all `t`:
 
 ```
@@ -159,7 +183,7 @@ recipient can still withdraw while paused — pausing stops *accrual*, not acces
 Freezing earned funds would make pausable streams unacceptable to any serious
 recipient.
 
-A stream paused across its cliff does not silently pass the cliff while frozen.
+A stream paused across its cliff does not silently pass the cliff while frozen — on a `Schedule` stream the gate is pushed back by the paused time, and on a `WallClock` stream it is not, which is the whole point of the mode.
 
 ### Cancel
 
@@ -233,6 +257,14 @@ per-stream event cost depends on the *token's* event payload — a token heavier
 than the Stellar Asset Contract used in tests would inflate it, and a cap that
 merely fits today would fail on somebody else's token.
 
+`batch_cancel` is the one batch call that does not clear 2x on the event budget:
+it measures 8 832 bytes at the cap (~552 per element) against the same 16 384
+ceiling, so its margin there is ~1.85x — enough for a heavier token, and the
+event budget alone would allow ~29 streams. Every other dimension (42 entries of
+footprint, 20 writes, ~4.9M instructions) keeps the full 2x margin. The cap is
+one number for all three batch calls, so the tightest one sets it; both
+measurements are pinned in `test::resource_limits`.
+
 Oversized batches are rejected with `BatchTooLarge` rather than failing opaquely
 at the network level. The SDK chunks client-side.
 
@@ -279,6 +311,13 @@ Three mechanisms:
    the caller only ever *pays* rent, and TTL extension cannot move funds or
    change stream state.
 
+   **Exception: terminal streams (`Cancelled` and `Depleted`) are rejected.**
+   Both entry points return `Error::StreamTerminated` when called against a
+   settled stream. The floor TTL applied at the time of cancellation/depletion
+   covers any remaining withdrawal tail; after that, callers should use
+   `RestoreFootprint` rather than extending. Keepers should filter terminal ids
+   out of their sweep batches.
+
 Views deliberately do **not** extend TTL. They are called through simulation,
 where a footprint write is at best noise. Keeping a stream alive is the explicit
 job of `extend_stream_ttl`.
@@ -286,8 +325,11 @@ job of `extend_stream_ttl`.
 ### Retention policy by state
 
 Every touch tops the entry back up to one target — the stream's remaining
-effective life plus the 30-day buffer, floored at `MIN_STREAM_TTL_LEDGERS`
-(~30 days) and clamped to the network's `max_entry_ttl`. The threshold equals
+effective life plus the 30-day buffer, inflated by a 20% close-time safety
+margin, floored at `MIN_STREAM_TTL_LEDGERS` (~30 days plus the margin) and
+clamped to the network's `max_entry_ttl`. The close time the conversion
+assumes is measured, not assumed, with the margin covering drift
+([`KNOWN-LIMITATIONS.md` §5](docs/KNOWN-LIMITATIONS.md)). The threshold equals
 the extend-to, so an entry below its target is topped back up to it in full —
 and one already funded past the target keeps its higher balance: rent is never
 clawed back, so a stream entering a terminal state decays toward its floor
@@ -311,7 +353,9 @@ this way mutates nothing — both halves of that contract-side story are pinned
 by deterministic assertions in `test::ttl`. Batch calls differ by design:
 `batch_withdraw` fails the whole batch with `StreamNotFound`, while
 `batch_extend_ttl` skips unknown ids so a keeper's sweep survives a stale
-index. `stream_exists(id) == false` while `id < stream_count()` is the
+index, but fails the whole batch with `StreamTerminated` if any id belongs to
+a terminal (`Cancelled` or `Depleted`) stream. `stream_exists(id) == false`
+while `id < stream_count()` is the
 integrator's signal for "archived, not nonexistent"; whether that signal holds
 against a real RPC is exactly the stage-4 territory
 [KNOWN-LIMITATIONS.md §1](KNOWN-LIMITATIONS.md) tracks.
@@ -344,11 +388,15 @@ integrator guidance in [docs/KNOWN-LIMITATIONS.md §1](docs/KNOWN-LIMITATIONS.md
 // Lifecycle
 create_stream(sender, recipient, token, deposit,
               start, end, cliff,
+              cancellable, pausable, transferable) -> u64   // sender auth; cliff_mode = Schedule
+create_stream_with_cliff_mode(sender, recipient, token, deposit,
+              start, end, cliff, cliff_mode,
               cancellable, pausable, transferable) -> u64   // sender auth
 top_up(stream_id, amount)                                   // sender auth
 withdraw(stream_id, amount: Option<i128>) -> i128           // recipient auth; None = max
 batch_withdraw(recipient, stream_ids) -> i128               // recipient auth
 cancel(stream_id)                                           // sender auth
+batch_cancel(sender, stream_ids) -> BatchCancelOutcome      // sender auth
 pause(stream_id) / resume(stream_id)                        // sender auth
 transfer_recipient(stream_id, new_recipient)                // recipient auth
 

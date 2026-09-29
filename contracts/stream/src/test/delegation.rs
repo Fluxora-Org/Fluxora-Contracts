@@ -76,6 +76,78 @@ fn delegate_can_pause_and_resume() {
 }
 
 #[test]
+fn delegate_pause_requires_a_grant() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let agent = Address::generate(&h.env);
+
+    let err = h
+        .client
+        .try_delegate_pause(&id, &agent)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::DelegateNotPermitted);
+    assert_eq!(h.client.get_stream(&id).status, crate::StreamStatus::Active);
+}
+
+#[test]
+fn delegate_pause_rejects_a_grant_without_the_pause_bit() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let agent = Address::generate(&h.env);
+
+    h.client
+        .grant_delegate(&id, &h.sender, &agent, &op::RESUME, &None);
+
+    let err = h
+        .client
+        .try_delegate_pause(&id, &agent)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::DelegateNotPermitted);
+    assert_eq!(h.client.get_stream(&id).status, crate::StreamStatus::Active);
+}
+
+#[test]
+fn delegate_pause_rejects_an_expired_grant() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let agent = Address::generate(&h.env);
+    let expires = h.now() + DAY;
+
+    h.client
+        .grant_delegate(&id, &h.sender, &agent, &op::PAUSE, &Some(expires));
+    h.advance(2 * DAY);
+
+    let err = h
+        .client
+        .try_delegate_pause(&id, &agent)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::DelegateExpired);
+    assert_eq!(h.client.get_stream(&id).status, crate::StreamStatus::Active);
+}
+
+#[test]
+fn delegate_pause_rejects_a_grant_revoked_in_the_same_ledger() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let agent = Address::generate(&h.env);
+
+    h.client
+        .grant_delegate(&id, &h.sender, &agent, &op::PAUSE, &None);
+    h.client.revoke_delegate(&id, &h.sender, &agent);
+
+    let err = h
+        .client
+        .try_delegate_pause(&id, &agent)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::DelegateNotPermitted);
+    assert_eq!(h.client.get_stream(&id).status, crate::StreamStatus::Active);
+}
+
+#[test]
 fn delegate_can_top_up() {
     let h = Harness::new();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
