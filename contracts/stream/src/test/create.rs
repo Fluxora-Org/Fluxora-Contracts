@@ -264,7 +264,7 @@ fn maximum_duration_creation_stays_within_one_stroop_of_exact_accrual() {
     assert_eq!(actual, numerator / duration as i128);
     assert_eq!(actual, duration as i128 - 1);
     assert!(
-        numerator - actual * duration as i128 < duration as i128,
+        numerator - actual * (duration as i128) < duration as i128,
         "linear accrual must be less than one stroop below exact"
     );
 }

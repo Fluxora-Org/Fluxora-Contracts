@@ -173,6 +173,9 @@ fn withdraw_then_transfer_in_the_same_ledger_splits_exactly_once() {
         withdrawn: after_withdraw.withdrawn,
         deposited: after_withdraw.deposited,
         status: after_withdraw.status,
+        sender: after_withdraw.sender.clone(),
+        paused_at: after_withdraw.paused_at,
+        paused_total: after_withdraw.paused_total,
     };
     assert_eq!(
         withdraw_events,
@@ -186,6 +189,7 @@ fn withdraw_then_transfer_in_the_same_ledger_splits_exactly_once() {
             stream_id: id,
             old_recipient: h.recipient.clone(),
             new_recipient: h.other.clone(),
+            sender: h.sender.clone(),
         },
         "withdraw then transfer",
     );
@@ -256,6 +260,7 @@ fn transfer_then_withdraw_in_the_same_ledger_pays_only_the_new_recipient() {
             stream_id: id,
             old_recipient: h.recipient.clone(),
             new_recipient: h.other.clone(),
+            sender: h.sender.clone(),
         },
         "transfer then withdraw: transfer event",
     );
@@ -281,6 +286,9 @@ fn transfer_then_withdraw_in_the_same_ledger_pays_only_the_new_recipient() {
         withdrawn: settled.withdrawn,
         deposited: settled.deposited,
         status: settled.status,
+        sender: settled.sender.clone(),
+        paused_at: settled.paused_at,
+        paused_total: settled.paused_total,
     };
     assert_eq!(
         withdraw_events,

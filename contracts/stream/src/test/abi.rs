@@ -36,9 +36,11 @@ use crate::events::{
     Cancelled, ContractHalted, ContractResumed, HaltOperatorSet, Paused, RecipientTransferred,
     Resumed, StreamCreated, ToppedUp, TtlExtended, Withdrawn,
 };
-use crate::{BatchCancelOutcome, Error, FluxoraStream, Stream, StreamStatus, ABI_VERSION};
-use crate::{CliffMode, Error, FluxoraStream, Stream, StreamStatus, ABI_VERSION};
-use crate::{Error, FluxoraStream, ReleaseCurve, Stream, StreamStatus, ABI_VERSION};
+use crate::test::common::Harness;
+use crate::{
+    BatchCancelOutcome, CliffMode, Error, FluxoraStream, ReleaseCurve, Stream, StreamStatus,
+    ABI_VERSION,
+};
 
 // ---------------------------------------------------------------------------
 // Inventory
@@ -290,6 +292,8 @@ fn current_inventory() -> Inventory {
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_create_stream())),
         function_from_spec(parse_spec(
             &FluxoraStream::spec_xdr_create_stream_with_curve(),
+        )),
+        function_from_spec(parse_spec(
             &FluxoraStream::spec_xdr_create_stream_with_cliff_mode(),
         )),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_top_up())),

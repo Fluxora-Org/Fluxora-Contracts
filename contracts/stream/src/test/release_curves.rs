@@ -96,6 +96,8 @@ fn expected_created(h: &Harness, id: u64, curve: ReleaseCurve) -> xdr::ContractE
         pausable: s.pausable,
         transferable: s.transferable,
         curve,
+        cliff_mode: s.cliff_mode,
+        reference: s.reference,
     }
     .to_xdr(&h.env, &h.contract_id)
 }

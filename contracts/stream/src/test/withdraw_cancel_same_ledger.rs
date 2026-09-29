@@ -89,6 +89,9 @@ fn assert_withdrawn_event(h: &Harness, id: u64, recipient_before: i128) -> i128 
         withdrawn: stream.withdrawn,
         deposited: stream.deposited,
         status: stream.status,
+        sender: stream.sender.clone(),
+        paused_at: stream.paused_at,
+        paused_total: stream.paused_total,
     };
     assert_eq!(
         published,
@@ -136,6 +139,8 @@ fn assert_cancelled_event(
         vested: stream.deposited,
         withdrawn: stream.withdrawn,
         end_time: stream.end_time,
+        paused_at: stream.paused_at,
+        paused_total: stream.paused_total,
     };
     assert_eq!(
         published,

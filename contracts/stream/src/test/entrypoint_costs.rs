@@ -87,6 +87,9 @@ fn entrypoint_cost_snapshot() {
             cancellable: true,
             pausable: true,
             transferable: true,
+            paused_at: None,
+            paused_total: 0,
+            status: crate::StreamStatus::Active,
         });
     }
     h.client.batch_create(&h.sender, &requests);

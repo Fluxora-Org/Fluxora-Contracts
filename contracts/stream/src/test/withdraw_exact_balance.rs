@@ -100,6 +100,9 @@ fn exact_withdrawable_midstream_clears_to_zero_and_stays_active() {
             withdrawn: available,
             deposited: 1_000 * ONE,
             status: StreamStatus::Active,
+            sender: stream.sender.clone(),
+            paused_at: stream.paused_at,
+            paused_total: stream.paused_total,
         }
         .to_xdr(&h.env, &h.contract_id)],
         "the Withdrawn event must be the only stream event and match storage",
@@ -181,6 +184,9 @@ fn exact_remaining_balance_at_end_time_flips_to_depleted() {
             withdrawn: 1_000 * ONE,
             deposited: 1_000 * ONE,
             status: StreamStatus::Depleted,
+            sender: stream.sender.clone(),
+            paused_at: stream.paused_at,
+            paused_total: stream.paused_total,
         }
         .to_xdr(&h.env, &h.contract_id)],
     );
@@ -239,6 +245,9 @@ fn exact_withdrawable_equal_to_the_full_deposit_depletes_in_one_call() {
             withdrawn: available,
             deposited: available,
             status: StreamStatus::Depleted,
+            sender: stream.sender.clone(),
+            paused_at: stream.paused_at,
+            paused_total: stream.paused_total,
         }
         .to_xdr(&h.env, &h.contract_id)],
     );

@@ -16,6 +16,9 @@ fn request(h: &Harness, recipient: Address) -> BatchCreateRequest {
         cancellable: true,
         pausable: true,
         transferable: true,
+        paused_at: None,
+        paused_total: 0,
+        status: crate::StreamStatus::Active,
     }
 }
 

@@ -131,6 +131,9 @@ fn the_boundary_tracks_the_population_as_it_grows() {
             cancellable: true,
             pausable: true,
             transferable: true,
+            curve: crate::ReleaseCurve::Linear,
+            cliff_mode: crate::CliffMode::Schedule,
+            reference: None,
         };
         assert_eq!(
             events,
@@ -469,6 +472,9 @@ fn the_boundary_scenario_conserves_funds_end_to_end() {
         withdrawn: paid,
         deposited: 1_000 * ONE,
         status: StreamStatus::Active,
+        sender: h.sender.clone(),
+        paused_at: None,
+        paused_total: 0,
     };
     assert_eq!(
         events,
@@ -505,6 +511,8 @@ fn the_boundary_scenario_conserves_funds_end_to_end() {
         vested: 300 * ONE,
         withdrawn: 0,
         end_time: T0 + 30 * DAY,
+        paused_at: None,
+        paused_total: settled.paused_total,
     };
     assert_eq!(
         events,
