@@ -68,6 +68,9 @@ jobs:
       - name: Clear Python bytecode cache
         run: find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 
+      - name: Verify Soroban SDK version records
+        run: python3 script/verify_soroban_version.py
+
       - name: Run test suite with coverage
         run: >-
           pytest tests/ --cov=script/ --cov-fail-under=50
