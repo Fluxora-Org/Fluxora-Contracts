@@ -246,7 +246,8 @@ class TestParseRenamesTable:
 class TestParseEntrypointCountClaim:
     def test_extracts_v1_count(self, real_doc):
         count = vm.parse_entrypoint_count_claim(real_doc)
-        assert count == 16
+        assert count == 21
+        assert count == 17
 
     def test_returns_none_when_absent(self):
         assert vm.parse_entrypoint_count_claim("# No counts here") is None

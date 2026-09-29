@@ -15,6 +15,10 @@ pub(super) fn seed_counter(h: &Harness, value: u64) {
             .storage()
             .instance()
             .set(&DataKey::NextStreamId, &value);
+        h.env
+            .storage()
+            .instance()
+            .set(&DataKey::StreamCount, &value);
     });
 }
 
@@ -604,6 +608,7 @@ fn streams_of_different_tokens_are_accounted_separately() {
         &true,
         &true,
         &true,
+        &None,
     );
 
     assert_eq!(h.pool(), 100 * ONE, "first token pool");
