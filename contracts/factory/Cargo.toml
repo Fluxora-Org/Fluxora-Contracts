@@ -1,0 +1,25 @@
+[package]
+name = "fluxora-factory"
+description = "Factory contract for Fluxora stream deployment"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+publish = false
+
+[lib]
+crate-type = ["lib", "cdylib"]
+doctest = false
+
+[features]
+testutils = ["soroban-sdk/testutils"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+
+# Integration tests in tests/ need the crate itself compiled with testutils so
+# FluxoraFactoryClient and load_policy are visible.
+fluxora-factory = { path = ".", features = ["testutils"] }
