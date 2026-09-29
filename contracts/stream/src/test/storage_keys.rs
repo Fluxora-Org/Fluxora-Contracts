@@ -277,6 +277,18 @@ fn halted_at_key_encoding_is_stable() {
     );
 }
 
+/// `DelegateCount(0)` — the appended persistent side-car that tracks a
+/// stream's number of delegate entries without changing existing key encodings.
+#[test]
+fn delegate_count_key_encoding_is_stable() {
+    let env = Env::default();
+    assert_eq!(
+        key_hex(&env, DataKey::DelegateCount(0)),
+        "0000001000000001000000020000000f0000000d44656c6567617465436f756e74000000000000050000000000000000",
+        "DelegateCount(0) key encoding changed"
+    );
+}
+
 /// The two halt keys are distinct from each other and from every stream key.
 #[test]
 fn halt_keys_never_collide_with_stream_keys() {
@@ -411,6 +423,8 @@ fn every_data_key_variant_has_a_known_encoding() {
         // HaltOperator / HaltedAt (#1818)
         "0000001000000001000000010000000f0000000c48616c744f70657261746f72",
         "0000001000000001000000010000000f0000000848616c7465644174",
+        // DelegateCount — appended for issue #1729.
+        "0000001000000001000000020000000f0000000d44656c6567617465436f756e74000000000000050000000000000000",
     ];
 
     let all_variants_encoded = &[
@@ -423,6 +437,7 @@ fn every_data_key_variant_has_a_known_encoding() {
         key_hex(&env, DataKey::StreamCurve(u64::MAX)),
         key_hex(&env, DataKey::HaltOperator),
         key_hex(&env, DataKey::HaltedAt),
+        key_hex(&env, DataKey::DelegateCount(0)),
     ];
     for enc in all_variants_encoded {
         assert!(

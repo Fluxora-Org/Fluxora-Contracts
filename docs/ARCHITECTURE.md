@@ -4,7 +4,7 @@ One place to read how Fluxora fits together: what the components are, who is
 trusted to do what, and how a payment actually moves from a sender's token
 account to a recipient's.
 
-The document is *checked*. `contracts/stream/src/test/architecture.rs` parses
+The document is _checked_. `contracts/stream/src/test/architecture.rs` parses
 this file and asserts its claims against the workspace manifest, the committed
 ABI inventory (`contracts/stream/abi/fluxora_stream.json`), the `DataKey` enum
 in `contracts/stream/src/types.rs`, and the authoritative entry point table in
@@ -22,16 +22,16 @@ can be withdrawn. The contract is a payment primitive, not a platform.
 
 Four properties shape everything below:
 
-* **No admin and no upgrade path.** There is no `init`, no owner, no settable
+- **No admin and no upgrade path.** There is no `init`, no owner, no settable
   parameter and no migration entry point. The deployed WASM is frozen, so the
   only authority a stream answers to is the parties named in it.
-* **No funds are ever held by discretion.** At every instant, the pool a stream
+- **No funds are ever held by discretion.** At every instant, the pool a stream
   is backed by equals the sum of what is still owed — nothing is parked, and
   there is no fee, no sweep and no treasury.
-* **A schedule is immutable except by `top_up`.** Only `top_up` may change a
+- **A schedule is immutable except by `top_up`.** Only `top_up` may change a
   stream, and only by extending its duration at the existing rate. Nothing can
   accelerate, dilute or retime a stream the recipient already relies on.
-* **The ABI is frozen.** `ABI_VERSION` gates additive-only changes; see
+- **The ABI is frozen.** `ABI_VERSION` gates additive-only changes; see
   [`ABI.md`](ABI.md) for the compatibility rules the inventory test enforces.
 
 ---
@@ -51,10 +51,10 @@ Four properties shape everything below:
 
 Two structural consequences:
 
-* the probe is a workspace member precisely so `cargo test --workspace`,
+- the probe is a workspace member precisely so `cargo test --workspace`,
   `cargo fmt --all` and `cargo clippy --all-targets` keep covering its smoke
   test, while `script/release.sh` builds `-p fluxora-stream` and nothing else;
-* the ABI inventory is a first-class artifact, because a frozen contract with no
+- the ABI inventory is a first-class artifact, because a frozen contract with no
   upgrade path has no second chance to fix a binding.
 
 ---
@@ -64,13 +64,13 @@ Two structural consequences:
 Nothing in the system holds a key that can act on a stream it is not a party to.
 There are five addresses that matter, and no sixth:
 
-| Party | Authority | Enforced by |
-|---|---|---|
-| **Sender** | `top_up`, `pause`, `resume`, `cancel` on its own streams; granting and revoking sender-side delegation | `require_auth` on `Stream.sender`, plus the `pausable` / `cancellable` capability flags fixed at creation |
-| **Recipient** | `withdraw` and `batch_withdraw`; `transfer_recipient` where `transferable`; granting and revoking recipient-side delegation | `require_auth` on the calling recipient and on the stream's current recipient |
-| **Delegate** | Exactly the operations in a live, unexpired `(stream_id, delegate)` grant — no more, never the grant itself | Grant check, then `require_auth` on the delegate; a delegate can neither grant to itself nor use a bit it does not hold |
-| **Token contract** | Moving the funds a stream pulls or pays out. Trusted by *interface* (SEP-41) and assumed non-rebasing, non-fee-on-transfer | Every deposit is asserted to deliver exactly the requested amount; a failing token fails the whole call closed |
-| **Anyone** | Reading every view, extending any stream's TTL, and planting the archival canary | No auth on views and TTL maintenance: they cannot move value, so they cannot be abused by being permissionless |
+| Party              | Authority                                                                                                                   | Enforced by                                                                                                             |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| **Sender**         | `top_up`, `pause`, `resume`, `cancel` on its own streams; granting and revoking sender-side delegation                      | `require_auth` on `Stream.sender`, plus the `pausable` / `cancellable` capability flags fixed at creation               |
+| **Recipient**      | `withdraw` and `batch_withdraw`; `transfer_recipient` where `transferable`; granting and revoking recipient-side delegation | `require_auth` on the calling recipient and on the stream's current recipient                                           |
+| **Delegate**       | Exactly the operations in a live, unexpired `(stream_id, delegate)` grant — no more, never the grant itself                 | Grant check, then `require_auth` on the delegate; a delegate can neither grant to itself nor use a bit it does not hold |
+| **Token contract** | Moving the funds a stream pulls or pays out. Trusted by _interface_ (SEP-41) and assumed non-rebasing, non-fee-on-transfer  | Every deposit is asserted to deliver exactly the requested amount; a failing token fails the whole call closed          |
+| **Anyone**         | Reading every view, extending any stream's TTL, and planting the archival canary                                            | No auth on views and TTL maintenance: they cannot move value, so they cannot be abused by being permissionless          |
 
 There is deliberately no registration, no allowlist, no pause-the-protocol
 switch and no operator: a stream's parties are the whole trust model.
@@ -129,20 +129,21 @@ would re-vest elapsed time retroactively.
 
 ### Archival and TTL
 
-Every persistent entry — `DataKey::Stream(id)` and `DataKey::Delegate(id, addr)`
-alike — is written with a TTL floor of **30 days**, refreshed on write and
+Every persistent entry — `DataKey::Stream(id)`, `DataKey::Delegate(id, addr)`
+and `DataKey::DelegateCount(id)` alike — is written with a TTL floor of
+**30 days**, refreshed on write and
 opportunistically on read. The network's own minimum (`min_persistent_ttl`,
 ~7 days) is far below that, so a live Fluxora stream never archives.
 
 The consequence is handled explicitly rather than assumed away:
 
-* if an entry does archive anyway, invoking fails at the network level before the
+- if an entry does archive anyway, invoking fails at the network level before the
   contract body runs —
   the caller resubmits with `RestoreFootprint` and reads the same data back;
-* `stream_exists` is the predicate that tells *never existed* from *archived,
-  needs restoring*, so a client can offer a restore instead of surfacing a raw
+- `stream_exists` is the predicate that tells _never existed_ from _archived,
+  needs restoring_, so a client can offer a restore instead of surfacing a raw
   error;
-* the archival probe exists because that failure mode cannot be reproduced
+- the archival probe exists because that failure mode cannot be reproduced
   in-process: the SDK test host auto-restores an expired entry on read. See
   [`KNOWN-LIMITATIONS.md`](KNOWN-LIMITATIONS.md) §1 and
   [`archival-canary.md`](archival-canary.md).
@@ -151,26 +152,38 @@ The consequence is handled explicitly rather than assumed away:
 
 ## 5. Storage model
 
-Four keys, and no others:
+Every storage key declared by `DataKey`:
 
-| Key | Storage | Contents |
-|---|---|---|
-| `DataKey::NextStreamId` | instance | Monotonic counter; incremented only on successful creation |
-| `DataKey::StreamCount` | instance | Streams successfully created; incremented in the same transaction as `NextStreamId` and the new entry |
-| `DataKey::Stream(u64)` | persistent | The stream record: parties, token, deposit, schedule, flags, status, `withdrawn` |
-| `DataKey::Delegate(u64, Address)` | persistent | A delegation grant: operation bitmask and optional expiry |
+| Key                               | Storage    | Contents                                                                                              |
+| --------------------------------- | ---------- | ----------------------------------------------------------------------------------------------------- |
+| `DataKey::NextStreamId`           | instance   | Monotonic counter; incremented only on successful creation                                            |
+| `DataKey::StreamCount`            | instance   | Streams successfully created; incremented in the same transaction as `NextStreamId` and the new entry |
+| `DataKey::PooledBalance(Address)` | instance   | Expected aggregate balance for one token                                                               |
+| `DataKey::Stream(u64)`            | persistent | The stream record: parties, token, deposit, schedule, flags, status, `withdrawn`                      |
+| `DataKey::StreamCurve(u64)`       | persistent | Non-linear release curve; absent means `Linear`                                                        |
+| `DataKey::Delegate(u64, Address)` | persistent | A delegation grant: operation bitmask and optional expiry                                             |
+| `DataKey::HaltOperator`           | instance   | Optional one-time emergency halt operator                                                              |
+| `DataKey::HaltedAt`               | instance   | Halt start timestamp; absent while the contract is not halted                                          |
+| `DataKey::DelegateCount(u64)`     | persistent | Number of stored delegate grants on the stream; bounded at 16 and kept alive with the stream          |
 
 Two properties follow from this layout, and both are load-bearing:
 
-* **There is no per-user index.** Nothing groups streams by sender or recipient.
+- **There is no per-user index.** Nothing groups streams by sender or recipient.
   Cost is therefore independent of how many streams exist, which is the guarantee
   `test::resource_limits` pins and the reason v1 has no `get_recipient_streams`
   or equivalent.
-* **Grants are per `(stream_id, delegate)`.** Two delegates are two entries; the
+- **Grants are per `(stream_id, delegate)`.** Two delegates are two entries; the
   permission bits are not a shared budget, so granting one delegate a bit tells
   you nothing about any other. Renaming or reordering a variant silently moves
   every on-chain entry's address, which is why
   `test::storage_keys` snapshots them.
+- **Delegate storage is bounded.** `MAX_DELEGATES_PER_STREAM` is 16. The
+  side-car count is updated on first grant and revocation; replacing a grant
+  does not consume a slot, and expired grants count until their entries are
+  removed. Existing immutable deployments are unaffected. A future migration
+  importing more than 16 grants must grandfather those entries and initialize
+  the exact count; new delegates are blocked until revocation brings the count
+  below the cap.
 
 ---
 
@@ -179,12 +192,12 @@ Two properties follow from this layout, and both are load-bearing:
 **16 core entry points plus 8 delegation entry points**, as `MIGRATION.md` §3
 states. Grouped by what they touch:
 
-| Group | Entry points |
-|---|---|
-| Lifecycle | `create_stream`, `top_up`, `withdraw`, `batch_withdraw`, `cancel`, `pause`, `resume`, `transfer_recipient` |
-| Delegation | `grant_delegate`, `revoke_delegate`, `delegate_withdraw`, `delegate_cancel`, `delegate_pause`, `delegate_resume`, `delegate_top_up`, `delegate_transfer_recipient` |
-| Views | `get_stream`, `stream_count`, `stream_exists`, `withdrawable_of`, `vested_of`, `refundable_of` |
-| TTL maintenance | `extend_stream_ttl`, `batch_extend_ttl` |
+| Group           | Entry points                                                                                                                                                       |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Lifecycle       | `create_stream`, `top_up`, `withdraw`, `batch_withdraw`, `cancel`, `pause`, `resume`, `transfer_recipient`                                                         |
+| Delegation      | `grant_delegate`, `revoke_delegate`, `delegate_withdraw`, `delegate_cancel`, `delegate_pause`, `delegate_resume`, `delegate_top_up`, `delegate_transfer_recipient` |
+| Views           | `get_stream`, `stream_count`, `stream_exists`, `withdrawable_of`, `vested_of`, `refundable_of`                                                                     |
+| TTL maintenance | `extend_stream_ttl`, `batch_extend_ttl`                                                                                                                            |
 
 A batch is capped at `MAX_BATCH_SIZE` (16) ids on every batch entry point, and
 the ceiling is checked before ids are resolved and before authorization.
@@ -198,15 +211,15 @@ subscription and no callback. Each one names the `stream_id` so an indexer can
 project a single stream's history without a global order, and none of them
 carries a party's full record.
 
-| Event | Emitted when |
-|---|---|
-| `created` | A stream is created |
-| `withdrawn` | A payout is made, including from `batch_withdraw` |
-| `topped_up` | Duration is extended at the existing rate |
-| `cancelled` | A stream settles and the remainder is refunded |
-| `paused` / `resumed` | Accrual is frozen or unfrozen |
-| `recipient_transferred` | The recipient changes |
-| `ttl_extended` | An entry's TTL is refreshed |
+| Event                   | Emitted when                                      |
+| ----------------------- | ------------------------------------------------- |
+| `created`               | A stream is created                               |
+| `withdrawn`             | A payout is made, including from `batch_withdraw` |
+| `topped_up`             | Duration is extended at the existing rate         |
+| `cancelled`             | A stream settles and the remainder is refunded    |
+| `paused` / `resumed`    | Accrual is frozen or unfrozen                     |
+| `recipient_transferred` | The recipient changes                             |
+| `ttl_extended`          | An entry's TTL is refreshed                       |
 
 A failed payout emits nothing at all: the event is written after the token call
 returns, so a reverted transfer takes the event with it.
@@ -218,13 +231,13 @@ returns, so a reverted transfer takes the event with it.
 Recorded here because their absence is an architectural decision, not an
 oversight — each is argued at length in [`MIGRATION.md`](MIGRATION.md) §3 and §7:
 
-* an admin key, an upgrade path, protocol fees, or any global pause;
-* on-chain stream discovery and per-user indexes;
-* scheduled or keeper-driven withdrawal (the delegated surface covers the
+- an admin key, an upgrade path, protocol fees, or any global pause;
+- on-chain stream discovery and per-user indexes;
+- scheduled or keeper-driven withdrawal (the delegated surface covers the
   keeper case without a second scheduler);
-* withdrawal rate limiting, which would give a stream a way to reject a
+- withdrawal rate limiting, which would give a stream a way to reject a
   recipient who is genuinely owed money;
-* delegated withdrawal as a *signed message* (`delegated_withdraw`), which is
+- delegated withdrawal as a _signed message_ (`delegated_withdraw`), which is
   scoped to v1.1 with its own threat model — a smart-account recipient covers the
   same ground today through `__check_auth`.
 
@@ -234,14 +247,14 @@ oversight — each is argued at length in [`MIGRATION.md`](MIGRATION.md) §3 and
 
 `contracts/stream/src/test/architecture.rs` asserts:
 
-* the component table matches the workspace members declared in `Cargo.toml`, and
+- the component table matches the workspace members declared in `Cargo.toml`, and
   the release path builds the product package only;
-* the storage table names every `DataKey` variant and no others;
-* the entry point groups are exactly the committed ABI's function names, each
+- the storage table names every `DataKey` variant and no others;
+- the entry point groups are exactly the committed ABI's function names, each
   listed once, split into the documented 16 core and 8 delegation;
-* the trust boundary claims match the per-entry point authority labels in
+- the trust boundary claims match the per-entry point authority labels in
   [`audit.md`](audit.md); and
-* every "not here" entry is genuinely absent from the ABI.
+- every "not here" entry is genuinely absent from the ABI.
 
 If a change makes one of those claims false, the test names the claim. Update
 this file in the same change.

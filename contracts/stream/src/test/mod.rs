@@ -61,6 +61,8 @@ mod cliff_mode;
 // Issue #1824: `delegate_top_up` held to the rejection depth of `top_up`.
 mod delegate_top_up;
 mod delegation;
+// Issue #1729 — bound the number of distinct delegate grants per stream.
+mod delegate_cap;
 // Issue #1845: delegation surviving a recipient transfer.
 mod delegation_transfer;
 

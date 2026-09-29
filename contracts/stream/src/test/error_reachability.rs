@@ -44,13 +44,13 @@
 //! precondition is arranged directly.
 
 use soroban_sdk::testutils::Address as _;
-use soroban_sdk::Address;
+use soroban_sdk::{Address, String};
 
 use super::common::*;
 use super::create::seed_counter;
 use super::error_discriminants::DISCRIMINANT_FIXTURE;
 use super::token_errors::register_fee_on_transfer_token;
-use crate::{op, Error};
+use crate::{op, Error, MAX_DELEGATES_PER_STREAM, MAX_REFERENCE_LENGTH};
 
 // ---------------------------------------------------------------------------
 // Classification
@@ -624,6 +624,52 @@ fn describe(e: Error) -> (&'static str, u32, Account) {
                         &true,
                         &None,
                     )
+                    .unwrap_err()
+                    .unwrap()
+            }),
+        ),
+
+        Error::InvalidReferenceLength => (
+            "InvalidReferenceLength",
+            40,
+            Account::Reach(|h| {
+                let start = h.now();
+                let end = start + 100 * DAY;
+                let reference = String::from_str(
+                    &h.env,
+                    &"a".repeat(MAX_REFERENCE_LENGTH as usize + 1),
+                );
+                h.client
+                    .try_create_stream(
+                        &h.sender,
+                        &h.recipient,
+                        &h.token,
+                        &(1_000 * ONE),
+                        &start,
+                        &end,
+                        &start,
+                        &true,
+                        &true,
+                        &true,
+                        &Some(reference),
+                    )
+                    .unwrap_err()
+                    .unwrap()
+            }),
+        ),
+        Error::TooManyDelegates => (
+            "TooManyDelegates",
+            41,
+            Account::Reach(|h| {
+                let id = h.create_simple(1_000 * ONE, 100 * DAY);
+                for _ in 0..MAX_DELEGATES_PER_STREAM {
+                    let delegate = Address::generate(&h.env);
+                    h.client
+                        .grant_delegate(&id, &h.recipient, &delegate, &op::WITHDRAW, &None);
+                }
+                let extra = Address::generate(&h.env);
+                h.client
+                    .try_grant_delegate(&id, &h.recipient, &extra, &op::WITHDRAW, &None)
                     .unwrap_err()
                     .unwrap()
             }),
