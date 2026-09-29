@@ -201,6 +201,7 @@ fn run_sequence(seed: u64, steps: u32) {
                     &true,
                     &true,
                     &true,
+                    &None,
                 );
             }
             1..=3 => {

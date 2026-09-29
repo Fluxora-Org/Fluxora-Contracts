@@ -397,6 +397,7 @@ fn contract_handles_maximum_deployable_timestamps_without_a_trap() {
         &true,
         &true,
         &true,
+        &None,
     );
     h.assert_pool_exact();
 
@@ -441,6 +442,7 @@ fn contract_rejects_deposit_that_would_overflow_at_maximum_duration() {
             &true,
             &true,
             &true,
+            &None,
         )
         .unwrap_err()
         .unwrap();
@@ -472,6 +474,7 @@ fn top_up_overflowing_the_duration_is_a_typed_error() {
         &true,
         &true,
         &true,
+        &None,
     );
 
     // The vast amount overflows `amount * duration` in the very first guarded
@@ -511,6 +514,7 @@ fn lifecycle_stays_typed_at_maximum_deployable_timestamps() {
         &true,
         &true,
         &true,
+        &None,
     );
 
     h.warp_to(start + 4 * DAY);

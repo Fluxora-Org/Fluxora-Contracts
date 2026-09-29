@@ -764,6 +764,7 @@ fn failed_transfer_reverts_state_and_ttl_changes() {
         &true,
         &true,
         &true,
+        &None,
     );
 
     let before = h.get(id);

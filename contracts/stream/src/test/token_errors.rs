@@ -184,6 +184,7 @@ fn cancellation_with_zero_refund_skips_a_rejecting_token_transfer() {
         &true,
         &true,
         &true,
+        &None,
     );
 
     h.warp_to(start + 100 * DAY);
@@ -258,6 +259,7 @@ fn create_stream_with_panicking_token_returns_a_token_error() {
             &true,
             &true,
             &true,
+            &None,
         )
         .unwrap_err()
         .unwrap();
@@ -291,6 +293,7 @@ fn create_stream_token_failure_leaves_no_phantom_entry() {
         &true,
         &true,
         &true,
+        &None,
     );
 
     // Soroban rolls back the entire invocation on error, so the id counter and
@@ -332,6 +335,7 @@ fn create_stream_with_sender_insufficient_balance_returns_token_transfer_failed(
             &true,
             &true,
             &true,
+            &None,
         )
         .unwrap_err()
         .unwrap();
@@ -368,6 +372,7 @@ fn top_up_returns_token_transfer_failed_when_sender_has_no_balance() {
         &true,
         &true,
         &true,
+        &None,
     );
     h.advance(10 * DAY);
 
@@ -437,6 +442,7 @@ fn cancel_returns_token_transfer_failed_when_pool_is_underfunded() {
         &true,
         &true,
         &true,
+        &None,
     );
     h.advance(10 * DAY);
 
@@ -501,6 +507,7 @@ fn withdraw_returns_token_transfer_failed_when_pool_is_underfunded() {
         &true,
         &true,
         &true,
+        &None,
     );
     h.advance(50 * DAY);
 
@@ -552,6 +559,7 @@ fn batch_withdraw_returns_token_transfer_failed_when_pool_is_underfunded() {
         &true,
         &true,
         &true,
+        &None,
     );
     let b = h.client.create_stream(
         &h.sender,
@@ -564,6 +572,7 @@ fn batch_withdraw_returns_token_transfer_failed_when_pool_is_underfunded() {
         &true,
         &true,
         &true,
+        &None,
     );
     h.advance(50 * DAY);
 
@@ -605,6 +614,7 @@ fn withdraw_is_retryable_once_pool_is_replenished() {
         &true,
         &true,
         &true,
+        &None,
     );
     h.advance(50 * DAY);
 
@@ -755,6 +765,7 @@ fn create_stream_with_fee_on_transfer_token_is_rejected() {
             &true,
             &true,
             &true,
+            &None,
         )
         .unwrap_err()
         .unwrap();
@@ -794,6 +805,7 @@ fn top_up_with_fee_on_transfer_token_is_rejected() {
         &true,
         &true,
         &true,
+        &None,
     );
     h.advance(10 * DAY);
     let before = h.client.get_stream(&id);
@@ -842,6 +854,7 @@ fn rebase_style_balance_loss_fails_closed_and_does_not_corrupt_other_streams() {
         &true,
         &true,
         &true,
+        &None,
     );
     let b = h.client.create_stream(
         &h.sender,
@@ -854,6 +867,7 @@ fn rebase_style_balance_loss_fails_closed_and_does_not_corrupt_other_streams() {
         &true,
         &true,
         &true,
+        &None,
     );
     h.advance(50 * DAY);
 
@@ -975,6 +989,7 @@ fn cancel_with_zero_refund_never_calls_transfer() {
         &true,
         &true,
         &true,
+        &None,
     );
     // Fully matured: everything is vested, nothing is left to refund.
     h.advance(100 * DAY);
@@ -1006,6 +1021,7 @@ fn withdraw_with_nothing_vested_never_calls_transfer() {
         &true,
         &true,
         &true,
+        &None,
     );
     // No time has passed: nothing is vested yet.
     let err = h.client.try_withdraw(&id, &None).unwrap_err().unwrap();
@@ -1036,6 +1052,7 @@ fn batch_withdraw_skips_zero_available_stream_without_calling_transfer() {
         &true,
         &true,
         &true,
+        &None,
     );
     let ready = h.client.create_stream(
         &h.sender,
@@ -1048,6 +1065,7 @@ fn batch_withdraw_skips_zero_available_stream_without_calling_transfer() {
         &true,
         &true,
         &true,
+        &None,
     );
     h.advance(10 * DAY);
     assert_eq!(h.client.withdrawable_of(&behind), 0);
@@ -1097,6 +1115,7 @@ fn create_stream_with_false_returning_token_is_rejected() {
             &true,
             &true,
             &true,
+            &None,
         )
         .unwrap_err()
         .unwrap();
@@ -1142,6 +1161,7 @@ fn fewer_token_decimals_do_not_rescale_deposit_or_withdrawal() {
         &true,
         &true,
         &true,
+        &None,
     );
 
     let create_events = h
@@ -1241,6 +1261,7 @@ fn rebase_style_balance_loss_is_detected_and_does_not_corrupt_other_streams() {
         &true,
         &true,
         &true,
+        &None,
     );
     let b = h.client.create_stream(
         &h.sender,
@@ -1253,6 +1274,7 @@ fn rebase_style_balance_loss_is_detected_and_does_not_corrupt_other_streams() {
         &true,
         &true,
         &true,
+        &None,
     );
     h.advance(50 * DAY);
 

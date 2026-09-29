@@ -420,6 +420,7 @@ fn invalid_time_range_end_equals_start() {
             &true,
             &true,
             &true,
+            &None,
         )
         .unwrap_err()
         .unwrap();
@@ -450,6 +451,7 @@ fn invalid_cliff_before_start() {
             &true,
             &true,
             &true,
+            &None,
         )
         .unwrap_err()
         .unwrap();
@@ -480,6 +482,7 @@ fn invalid_deposit_zero() {
             &true,
             &true,
             &true,
+            &None,
         )
         .unwrap_err()
         .unwrap();
@@ -511,6 +514,7 @@ fn deposit_rate_too_low_below_floor() {
             &true,
             &true,
             &true,
+            &None,
         )
         .unwrap_err()
         .unwrap();
@@ -541,6 +545,7 @@ fn self_stream_same_sender_and_recipient() {
             &true,
             &true,
             &true,
+            &None,
         )
         .unwrap_err()
         .unwrap();
@@ -959,6 +964,7 @@ fn overflow_deposit_times_duration_overflows_i128() {
             &true,
             &true,
             &true,
+            &None,
         )
         .unwrap_err()
         .unwrap();

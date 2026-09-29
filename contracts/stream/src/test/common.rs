@@ -391,6 +391,7 @@ impl<'a> Harness<'a> {
             &cancellable,
             &pausable,
             &transferable,
+            &None,
         )
     }
 

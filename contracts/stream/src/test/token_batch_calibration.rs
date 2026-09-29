@@ -370,6 +370,7 @@ fn create_streams(h: &Harness, token: &Address, count: u32) -> std::vec::Vec<u64
                 &true,
                 &true,
                 &true,
+                &None,
             )
         })
         .collect()

@@ -158,6 +158,7 @@ fn a_mixed_batch_with_an_unauthorized_item_rolls_back_everything() {
         &true,
         &true,
         &true,
+        &None,
     );
     let second_valid = h.create_simple(100 * ONE, 100 * DAY);
     h.advance(10 * DAY);
@@ -323,6 +324,7 @@ fn a_batch_can_span_multiple_tokens() {
         &true,
         &true,
         &true,
+        &None,
     );
 
     h.advance(50 * DAY);
@@ -595,6 +597,7 @@ fn an_unauthorized_stream_anywhere_reverts_the_whole_batch() {
             &true,
             &true,
             &true,
+            &None,
         );
         h.advance(30 * DAY);
 

@@ -365,6 +365,7 @@ fn the_documented_migration_path_runs_end_to_end() {
         &true,
         &true,
         &true,
+        &None,
     );
     assert_eq!(
         h.get(id).token,

@@ -159,6 +159,7 @@ fn the_dust_rate_floor_is_unreachable_at_a_one_second_duration() {
                 &true,
                 &true,
                 &true,
+                &None,
             )
             .unwrap_err()
             .unwrap();
