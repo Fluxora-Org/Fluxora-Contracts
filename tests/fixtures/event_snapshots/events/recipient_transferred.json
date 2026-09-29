@@ -1,0 +1,26 @@
+{
+  "event": "RecipientTransferred",
+  "topic": "recipient_transferred",
+  "fields": [
+    {
+      "name": "stream_id",
+      "type": "u64",
+      "topic": true
+    },
+    {
+      "name": "old_recipient",
+      "type": "Address",
+      "topic": true
+    },
+    {
+      "name": "new_recipient",
+      "type": "Address",
+      "topic": true
+    },
+    {
+      "name": "sender",
+      "type": "Address",
+      "topic": false
+    }
+  ]
+}

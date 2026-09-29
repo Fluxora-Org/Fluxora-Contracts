@@ -140,6 +140,15 @@ jobs:
       - name: Migration path validation (docs/MIGRATION.md vs ABI)
         run: python3 script/validate_migration.py
 
+      # Hard gate (issue #1701): every #[contractevent] struct in
+      # contracts/stream/src/events.rs must have a schema fixture under
+      # tests/fixtures/event_snapshots/events/, and each fixture must match the
+      # parsed payload shape. A new event shipped without a fixture, or an
+      # event whose payload fields changed without regenerating its fixture,
+      # fails here. See docs/event-snapshots.md.
+      - name: Event snapshot coverage gate
+        run: python3 script/check_event_snapshots.py
+
   # ---------------------------------------------------------------------------
   # Fast changed-files lint (PRs only).  Mirrors what developers run locally
   # via `pnpm lint:ci`.  This is the "cheap" gate; the full workspace lint

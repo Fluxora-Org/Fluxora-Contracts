@@ -1,0 +1,31 @@
+{
+  "event": "Paused",
+  "topic": "paused",
+  "fields": [
+    {
+      "name": "stream_id",
+      "type": "u64",
+      "topic": true
+    },
+    {
+      "name": "sender",
+      "type": "Address",
+      "topic": true
+    },
+    {
+      "name": "paused_at",
+      "type": "u64",
+      "topic": false
+    },
+    {
+      "name": "paused_total",
+      "type": "u64",
+      "topic": false
+    },
+    {
+      "name": "recipient",
+      "type": "Address",
+      "topic": false
+    }
+  ]
+}
