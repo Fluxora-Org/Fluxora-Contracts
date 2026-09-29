@@ -94,9 +94,13 @@ least as well in v1, or dropped for a reason traceable to a v1 non-goal.
 ## 3. Behaviour deliberately removed
 
 The old contract set exposed **145 entrypoints** (100 stream, 16 factory, 29
-governance). v1 exposes **16** core entrypoints plus **8 delegation entrypoints**
+governance). v1 exposes **17** core entrypoints plus **8 delegation entrypoints**
 (`grant_delegate`, `revoke_delegate`, and the six `delegate_*` variants) for a
-total of **24**. The delegates are gated on per-operation grants
+total of **25**. `batch_cancel` joined the core surface after this document was
+written: a programme is wound down in one call, with a member that cannot be
+cancelled reported by its index in the submitted vector. The delegates are gated
+on per-operation grants
+total of **25**. The delegates are gated on per-operation grants
 (`docs/delegation-revocation.md`) and do not change the core surface the
 renames table below maps. Grouped by why:
 
@@ -210,6 +214,26 @@ Two structural changes behind those signatures:
   entry; every stream names its own SEP-41 token. Callers must supply it.
 * **Amounts are `i128`, not `u64`.** The SEP-41 interface uses `i128`; the
   frontend currently encodes amounts with `encodeU64`.
+
+Nothing in the table above changed. `create_stream` keeps its signature and its
+meaning: the cliff it stores is still judged on the stream clock, so a pause
+still pushes the gate out by `paused_total`. If you want a cliff that pausing
+cannot move, call the additive
+`create_stream_with_cliff_mode(sender, recipient, token, deposit, start, end, cliff, cliff_mode, cancellable, pausable, transferable)`
+and pass `CliffMode::WallClock`; `CliffMode::Schedule` is exactly what
+`create_stream` does internally. Decoders must be taught the new `cliff_mode`
+field on the `Stream` struct and on the `stream_created` payload — it was
+appended last in both, so a decoder that stops early keeps working.
+
+**Stored data is not carried across.** `cliff_mode` changes the `Stream` XDR
+layout, so a v2 reader cannot decode a v1 entry. This needs no migration path
+because v2 is a **new deployment at a new address** (see `docs/ABI.md`,
+"Upgrade posture"): v1 streams stay under the v1 contract id and keep working
+exactly as they always did, and the mode cannot be set on them retroactively.
+Migrating an existing stream onto the new contract means creating it again on
+the new address; there is no in-place conversion, by design. Asserted by
+`test::storage_keys::v1_layout_is_no_longer_decodable_and_that_is_deliberate`
+and `test::storage_keys::v2_layout_round_trips`.
 
 ---
 
@@ -351,3 +375,27 @@ incentive is both narrow and adversarially shaped.
 The problem it solves is also not real in v1: an unwithdrawn stream costs the
 contract nothing, TTL is handled by the permissionless rent path, and the
 recipient's claim never expires.
+
+---
+
+## 8. How this document is tested
+
+The path above is walked, not just described. `contracts/stream/src/test/migration.rs`
+parses the §4 table out of this file and checks it against the code:
+
+* every name §4 sends a caller to is present in the committed ABI inventory
+  (`contracts/stream/abi/fluxora_stream.json`), and every name §4 says was left
+  behind is absent from it — so a rename that updates this file without updating
+  the contract, or the reverse, fails a named test;
+* the §3 counts are asserted against the ABI (16 core entry points plus 8
+  delegation entry points, and the old `100 + 16 + 29 = 145` breakdown), and the
+  §7 rulings are asserted as absences;
+* the migration is then performed end to end, using only the v1 spellings this
+  document lists, with the documented semantics asserted for each: `top_up`
+  extends duration and never the rate, `transfer_recipient` is one step gated by
+  the immutable `transferable` flag, `withdraw(id, None)` takes everything
+  accrued, and `pause`/`resume`/`cancel` read the sender from the stream. State
+  is re-checked as intact after every step.
+
+Edit this file and the code together; the test exists to make sure you do.
+
