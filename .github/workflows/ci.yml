@@ -401,6 +401,14 @@ jobs:
       - name: Build release artifacts (product only)
         run: script/release.sh
 
+      # Issue #1871: keep the real release and dry-run paths in lockstep on
+      # every pull request. These checks are local-only and need no secrets.
+      - name: Validate release dry-run parity and regression suite
+        run: bash script/test-release-dry-run.sh
+
+      - name: Run release dry-run (local validation)
+        run: script/release-dry-run.sh --local-only --wasm target/wasm32v1-none/release/fluxora_stream.wasm
+
       - name: Verify Rust toolchain version
         if: ${{ hashFiles('script/verify_rust_version.py') != '' }}
         run: python3 script/verify_rust_version.py
