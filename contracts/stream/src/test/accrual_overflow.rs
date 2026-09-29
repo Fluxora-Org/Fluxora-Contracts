@@ -36,6 +36,7 @@ use soroban_sdk::{Address, Env};
 
 use super::common::*;
 use crate::types::{ReleaseCurve, Stream, StreamStatus};
+use crate::types::{CliffMode, Stream, StreamStatus};
 use crate::Error;
 use crate::{accrual, storage};
 
@@ -77,6 +78,7 @@ fn stream_of(
         start_time: start,
         end_time: end,
         cliff_time: cliff,
+        cliff_mode: CliffMode::Schedule,
         cancellable: true,
         pausable: true,
         transferable: true,

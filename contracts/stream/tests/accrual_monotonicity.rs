@@ -47,6 +47,7 @@ extern crate std;
 
 use fluxora_stream::{
     cliff_reached, duration, elapsed, refundable, stream_time, vested, withdrawable, ReleaseCurve,
+    cliff_reached, duration, elapsed, refundable, stream_time, vested, withdrawable, CliffMode,
     Stream, StreamStatus,
 };
 use proptest::prelude::*;
@@ -80,6 +81,7 @@ fn dummy_stream_with_curve(
         start_time: start,
         end_time: end,
         cliff_time: cliff,
+        cliff_mode: CliffMode::Schedule,
         cancellable: true,
         pausable: true,
         transferable: true,

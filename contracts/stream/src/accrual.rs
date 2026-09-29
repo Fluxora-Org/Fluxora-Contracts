@@ -16,10 +16,13 @@
 //!
 //! While paused, the numerator is frozen at the instant of the pause, so the
 //! clock does not advance. After a resume, `paused_total` has absorbed the
-//! paused interval, so the clock resumes exactly where it stopped. Every other
-//! quantity — elapsed time, the cliff gate, vesting — is expressed against this
-//! clock, which is why pausing stretches the schedule without ever changing the
-//! total value delivered.
+//! paused interval, so the clock resumes exactly where it stopped. Elapsed time
+//! and vesting are always expressed against this clock, which is why pausing
+//! stretches the schedule without ever changing the total value delivered.
+//!
+//! The cliff gate is the one quantity that can opt out: [`CliffMode::WallClock`]
+//! reads it against the ledger clock instead, so pausing does not move it. See
+//! [`cliff_reached`].
 //!
 //! Note that this differs from the naive formulation
 //! `effective_now = min(now, end_time + paused_total)`, which is correct only
@@ -100,6 +103,7 @@
 
 use crate::error::Error;
 use crate::types::{ReleaseCurve, Stream};
+use crate::types::{CliffMode, Stream};
 
 /// The stream's own clock, in the same units and origin as `start_time` and
 /// `end_time`. Stops while the stream is paused.
@@ -137,10 +141,26 @@ pub fn elapsed(stream: &Stream, now: u64) -> u64 {
 
 /// Whether the cliff gate has opened.
 ///
-/// The gate is evaluated against the stream clock, so a stream paused across
-/// its cliff does not silently pass the cliff while frozen.
+/// The gate is evaluated against one of two clocks, chosen once at creation and
+/// recorded in [`Stream::cliff_mode`]:
+///
+/// * [`CliffMode::Schedule`] — the stream clock, so a stream paused across its
+///   cliff does not silently pass the cliff while frozen. In wall-clock terms
+///   the gate opens at `cliff_time + paused_total`. This is the original
+///   behaviour and the default.
+/// * [`CliffMode::WallClock`] — the ledger clock, so pausing does not move the
+///   cliff at all and a contractual date holds.
+///
+/// Only the *gate* differs between the modes. `elapsed`, `duration` and the
+/// rate are always measured on the stream clock, so pausing stops accrual
+/// identically either way — a wall-clock stream paused before its cliff opens
+/// the gate on schedule but pays out nothing beyond what had already accrued
+/// when it was paused.
 pub fn cliff_reached(stream: &Stream, now: u64) -> bool {
-    stream_time(stream, now) >= stream.cliff_time
+    match stream.cliff_mode {
+        CliffMode::Schedule => stream_time(stream, now) >= stream.cliff_time,
+        CliffMode::WallClock => now >= stream.cliff_time,
+    }
 }
 
 /// Amount vested at `now`: what the recipient has earned in total, ever.

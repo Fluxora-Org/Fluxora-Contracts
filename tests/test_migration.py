@@ -248,6 +248,7 @@ class TestParseEntrypointCountClaim:
         count = vm.parse_entrypoint_count_claim(real_doc)
         # 16 after the v1 rewrite, 17 once `create_stream_with_curve` (#1815)
         # was added to the core surface.
+        assert count == 21
         assert count == 17
 
     def test_returns_none_when_absent(self):

@@ -27,8 +27,10 @@ use proptest::prelude::*;
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{Address, Env};
 
+use super::common::*;
 use crate::accrual;
 use crate::types::{ReleaseCurve, Stream, StreamStatus};
+use crate::types::{CliffMode, Stream, StreamStatus};
 
 /// Build a stream directly, bypassing the contract, so a property case costs
 /// no host invocations.
@@ -63,6 +65,7 @@ fn stream_of_curve(
         start_time: start,
         end_time: start + duration,
         cliff_time: start + cliff_offset,
+        cliff_mode: CliffMode::Schedule,
         cancellable: true,
         pausable: true,
         transferable: true,
@@ -411,4 +414,358 @@ proptest! {
             before, after, deposited, duration, elapsed, amount,
         );
     }
+
+    /// Issue #1859: Assert, as a generated property, that every reachable
+    /// stream state is one the documented state machine admits.
+    #[test]
+    fn every_reachable_stream_state_is_admitted_by_documented_state_machine(
+        deposit_raw in 100i128..5_000,
+        duration_days in 10u64..100,
+        cliff_pct in 0u64..=100,
+        cancellable in any::<bool>(),
+        pausable in any::<bool>(),
+        transferable in any::<bool>(),
+        ops in prop::collection::vec(lifecycle_op_strategy(), 1..=30),
+    ) {
+        let h = Harness::new();
+        let deposit = deposit_raw * ONE;
+        let duration = duration_days * DAY;
+        let start = h.now();
+        let end = start + duration;
+        let cliff = start + (duration * cliff_pct / 100);
+
+        let id = h.create(deposit, start, end, cliff, cancellable, pausable, transferable);
+
+        // Verify initial state admission
+        let s = h.get(id);
+        let now = h.now();
+        let initial_state = classify_admitted_stream_state(&s, now)
+            .map_err(|e| TestCaseError::fail(std::format!("initial state unadmitted: {}", e)))?;
+        prop_assert!(
+            initial_state == DocumentedStreamState::ActivePreStart
+                || initial_state == DocumentedStreamState::ActiveInCliff
+                || initial_state == DocumentedStreamState::ActiveVesting,
+            "unexpected initial state: {:?}",
+            initial_state
+        );
+
+        // Drive the generated lifecycle sequence and assert state admission at every step
+        for (step, op) in ops.iter().enumerate() {
+            op.apply(&h, id);
+
+            let s = h.get(id);
+            let now = h.now();
+            match classify_admitted_stream_state(&s, now) {
+                Ok(_admitted) => {},
+                Err(err) => {
+                    return Err(TestCaseError::fail(std::format!(
+                        "step {}: op {:?} produced unadmitted stream state: {} (stream: {:?}, now: {})",
+                        step, op, err, s, now
+                    )));
+                }
+            }
+        }
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Issue #1859: Documented state machine classification & validation
+// ---------------------------------------------------------------------------
+
+/// The 11 canonical lifecycle stream states admitted by the documented state machine.
+///
+/// Across all combinations of `StreamStatus`, `paused_at`, and time relative to
+/// `start_time`, `cliff_time`, and `end_time`, only these states are admitted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DocumentedStreamState {
+    /// Active stream before start_time (nothing accrued, nothing withdrawable).
+    ActivePreStart,
+    /// Active stream in cliff window (accruing but withdrawal gated).
+    ActiveInCliff,
+    /// Active stream during linear vesting curve.
+    ActiveVesting,
+    /// Active stream past end_time with unwithdrawn balance remaining.
+    ActiveMatured,
+    /// Paused stream frozen before start_time.
+    PausedPreStart,
+    /// Paused stream frozen during cliff window.
+    PausedInCliff,
+    /// Paused stream frozen during linear vesting curve.
+    PausedVesting,
+    /// Paused stream frozen past end_time with unwithdrawn balance remaining.
+    PausedMatured,
+    /// Cancelled stream with unwithdrawn residual balance (withdrawn < deposited).
+    CancelledResidual,
+    /// Cancelled stream fully drained (withdrawn == deposited, sticky Cancelled).
+    CancelledSettled,
+    /// Depleted stream: ran to completion and fully withdrawn (withdrawn == deposited).
+    Depleted,
+}
+
+/// Asserts that a stream record in persistent storage conforms to one of the
+/// admitted states in the documented state machine.
+pub fn classify_admitted_stream_state(
+    s: &Stream,
+    now: u64,
+) -> Result<DocumentedStreamState, std::string::String> {
+    if s.end_time < s.start_time {
+        return Err(std::format!(
+            "inverted schedule: end_time {} < start_time {}",
+            s.end_time,
+            s.start_time
+        ));
+    }
+    if s.cliff_time < s.start_time {
+        return Err(std::format!(
+            "cliff_time {} before start_time {}",
+            s.cliff_time,
+            s.start_time
+        ));
+    }
+    if !s.status.is_terminal() && s.cliff_time > s.end_time {
+        return Err(std::format!(
+            "live stream cliff_time {} exceeds end_time {}",
+            s.cliff_time,
+            s.end_time
+        ));
+    }
+    if s.withdrawn < 0 || s.deposited < 0 {
+        return Err(std::format!(
+            "negative accounting: withdrawn {}, deposited {}",
+            s.withdrawn,
+            s.deposited
+        ));
+    }
+    if s.withdrawn > s.deposited {
+        return Err(std::format!(
+            "overdrawn: withdrawn {} > deposited {}",
+            s.withdrawn,
+            s.deposited
+        ));
+    }
+
+    let vested = accrual::vested(s, now).map_err(|e| std::format!("vested error: {:?}", e))?;
+    if s.withdrawn > vested {
+        return Err(std::format!(
+            "withdrawn {} > vested {}",
+            s.withdrawn,
+            vested
+        ));
+    }
+
+    let stream_t = accrual::stream_time(s, now);
+
+    match s.status {
+        StreamStatus::Active => {
+            if s.paused_at.is_some() {
+                return Err(std::format!(
+                    "Active stream has paused_at set: {:?}",
+                    s.paused_at
+                ));
+            }
+            if s.withdrawn >= s.deposited {
+                return Err(std::format!(
+                    "Active stream has withdrawn >= deposited ({}/{}); must be Depleted",
+                    s.withdrawn,
+                    s.deposited
+                ));
+            }
+            if stream_t < s.start_time {
+                Ok(DocumentedStreamState::ActivePreStart)
+            } else if stream_t < s.cliff_time {
+                Ok(DocumentedStreamState::ActiveInCliff)
+            } else if stream_t < s.end_time {
+                Ok(DocumentedStreamState::ActiveVesting)
+            } else {
+                Ok(DocumentedStreamState::ActiveMatured)
+            }
+        }
+        StreamStatus::Paused => {
+            let paused_at = match s.paused_at {
+                Some(t) => t,
+                None => return Err("Paused stream has paused_at == None".into()),
+            };
+            if paused_at > now {
+                return Err(std::format!(
+                    "paused_at {} is in the future relative to now {}",
+                    paused_at,
+                    now
+                ));
+            }
+            let frozen_stream_t = accrual::stream_time(s, paused_at);
+            if stream_t != frozen_stream_t {
+                return Err(std::format!(
+                    "accrual advanced while paused: stream_time {} != frozen {}",
+                    stream_t,
+                    frozen_stream_t
+                ));
+            }
+            if s.withdrawn >= s.deposited {
+                return Err(std::format!(
+                    "Paused stream has withdrawn >= deposited ({}/{}); must be Depleted and closed out",
+                    s.withdrawn, s.deposited
+                ));
+            }
+            if frozen_stream_t < s.start_time {
+                Ok(DocumentedStreamState::PausedPreStart)
+            } else if frozen_stream_t < s.cliff_time {
+                Ok(DocumentedStreamState::PausedInCliff)
+            } else if frozen_stream_t < s.end_time {
+                Ok(DocumentedStreamState::PausedVesting)
+            } else {
+                Ok(DocumentedStreamState::PausedMatured)
+            }
+        }
+        StreamStatus::Cancelled => {
+            if s.paused_at.is_some() {
+                return Err(std::format!(
+                    "Cancelled stream has paused_at set: {:?}",
+                    s.paused_at
+                ));
+            }
+            if s.withdrawn == s.deposited {
+                Ok(DocumentedStreamState::CancelledSettled)
+            } else {
+                Ok(DocumentedStreamState::CancelledResidual)
+            }
+        }
+        StreamStatus::Depleted => {
+            if s.paused_at.is_some() {
+                return Err(std::format!(
+                    "Depleted stream has paused_at set: {:?}",
+                    s.paused_at
+                ));
+            }
+            if s.withdrawn != s.deposited {
+                return Err(std::format!(
+                    "Depleted stream not fully paid: withdrawn {} != deposited {}",
+                    s.withdrawn,
+                    s.deposited
+                ));
+            }
+            Ok(DocumentedStreamState::Depleted)
+        }
+    }
+}
+
+/// Operations that mutate stream lifecycle or advance the ledger clock.
+#[derive(Clone, Debug)]
+pub enum LifecycleOp {
+    WithdrawAll,
+    WithdrawPartial(i128),
+    Pause,
+    Resume,
+    Cancel,
+    TopUp(i128),
+    TransferRecipient,
+    AdvanceTime(u64),
+}
+
+impl LifecycleOp {
+    pub fn apply(&self, h: &Harness, id: u64) {
+        match self {
+            LifecycleOp::WithdrawAll => {
+                let _ = h.client.try_withdraw(&id, &None);
+            }
+            LifecycleOp::WithdrawPartial(amount) => {
+                let _ = h.client.try_withdraw(&id, &Some(*amount));
+            }
+            LifecycleOp::Pause => {
+                let _ = h.client.try_pause(&id);
+            }
+            LifecycleOp::Resume => {
+                let _ = h.client.try_resume(&id);
+            }
+            LifecycleOp::Cancel => {
+                let _ = h.client.try_cancel(&id);
+            }
+            LifecycleOp::TopUp(amount) => {
+                let _ = h.client.try_top_up(&id, amount);
+            }
+            LifecycleOp::TransferRecipient => {
+                let current_recip = h.get(id).recipient;
+                let target = if current_recip == h.recipient {
+                    &h.other
+                } else {
+                    &h.recipient
+                };
+                let _ = h.client.try_transfer_recipient(&id, target);
+            }
+            LifecycleOp::AdvanceTime(secs) => {
+                h.advance(*secs);
+            }
+        }
+    }
+}
+
+fn lifecycle_op_strategy() -> impl Strategy<Value = LifecycleOp> {
+    prop_oneof![
+        Just(LifecycleOp::WithdrawAll),
+        (1u32..50).prop_map(|f| LifecycleOp::WithdrawPartial(f as i128 * ONE)),
+        Just(LifecycleOp::Pause),
+        Just(LifecycleOp::Resume),
+        Just(LifecycleOp::Cancel),
+        (1u32..20).prop_map(|f| LifecycleOp::TopUp(f as i128 * 10 * ONE)),
+        Just(LifecycleOp::TransferRecipient),
+        (1u64..30).prop_map(|days| LifecycleOp::AdvanceTime(days * DAY)),
+    ]
+}
+
+/// Deterministic validation with a fixed sequence to verify that
+/// removing any guard the property depends on immediately fails.
+#[test]
+fn validation_reachable_states_guard_dependency_fixed_sequence() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+
+    // 1. Initial state: ActiveVesting
+    let s = h.get(id);
+    let state = classify_admitted_stream_state(&s, h.now()).unwrap();
+    assert_eq!(state, DocumentedStreamState::ActiveVesting);
+
+    // 2. Advance past maturity: ActiveMatured
+    h.advance(150 * DAY);
+    let s = h.get(id);
+    let state = classify_admitted_stream_state(&s, h.now()).unwrap();
+    assert_eq!(state, DocumentedStreamState::ActiveMatured);
+
+    // 3. Pause while matured: PausedMatured
+    h.client.pause(&id);
+    let s = h.get(id);
+    let state = classify_admitted_stream_state(&s, h.now()).unwrap();
+    assert_eq!(state, DocumentedStreamState::PausedMatured);
+
+    // 4. Drain while paused to completion: MUST close out pause and become Depleted
+    // Depends on the guard in `apply_withdrawal` (lib.rs:1455-1462)
+    h.advance(10 * DAY);
+    h.client.withdraw(&id, &None);
+    let s = h.get(id);
+    let state = classify_admitted_stream_state(&s, h.now()).unwrap();
+    assert_eq!(state, DocumentedStreamState::Depleted);
+    assert_eq!(s.paused_at, None);
+
+    // 5. Test another stream: Pause then Cancel -> MUST clear pause and become Cancelled
+    // Depends on the guard in `cancel` (lib.rs:680)
+    let id2 = h.create_simple(1_000 * ONE, 100 * DAY);
+    h.advance(20 * DAY);
+    h.client.pause(&id2);
+    let s2 = h.get(id2);
+    assert_eq!(
+        classify_admitted_stream_state(&s2, h.now()).unwrap(),
+        DocumentedStreamState::PausedVesting
+    );
+
+    h.client.cancel(&id2);
+    let s2 = h.get(id2);
+    let state2 = classify_admitted_stream_state(&s2, h.now()).unwrap();
+    assert_eq!(state2, DocumentedStreamState::CancelledResidual);
+    assert_eq!(s2.paused_at, None);
+}
+
+/// Issue #1861 — delegation grants never widen through any entry point.
+///
+/// Host-driven, so it lives beside the pure accrual properties in this module:
+/// `cargo test props::` (the CI proptest job's filter) runs both, and
+/// `PROPTEST_CASES` sets the case budget for both.
+#[path = "props_delegation.rs"]
+mod delegation;
