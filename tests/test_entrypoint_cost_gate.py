@@ -4,10 +4,20 @@ from script import validate_gas
 from script.validate_gas import compare, entrypoints, parse_measurements
 
 
-def test_inventory_is_all_24_abi_entries():
+def test_inventory_is_all_29_abi_entries():
     names = entrypoints()
-    assert len(names) == 24
+    assert len(names) == 29
+def test_inventory_is_all_25_abi_entries():
+    names = entrypoints()
+    assert len(names) == 25
     assert {"withdraw", "batch_withdraw", "delegate_withdraw"} <= names
+    assert {"withdraw", "batch_withdraw", "batch_cancel", "delegate_withdraw"} <= names
+    assert {
+        "withdraw",
+        "batch_withdraw",
+        "delegate_withdraw",
+        "create_stream_with_cliff_mode",
+    } <= names
 
 
 def test_parse_rejects_duplicate_measurement():
